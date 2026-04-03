@@ -1,0 +1,18 @@
+{
+  "name": "Tofu",
+  "short_name": "Tofu",
+  "description": "看似简单，实则百搭",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0c",
+  "theme_color": "#F5F3ED",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><defs><linearGradient id='t' x1='0' y1='0' x2='.5' y2='1'><stop offset='0%25' stop-color='%23fef8ec'/><stop offset='100%25' stop-color='%23fdf2d7'/></linearGradient><linearGradient id='f' x1='0' y1='0' x2='.2' y2='1'><stop offset='0%25' stop-color='%23fdf4dc'/><stop offset='100%25' stop-color='%23f5e8c8'/></linearGradient><linearGradient id='r' x1='0' y1='0' x2='1' y2='.7'><stop offset='0%25' stop-color='%23ecdcc0'/><stop offset='100%25' stop-color='%23dcc8a4'/></linearGradient></defs><path d='M245 74 L102 154 L260 257 L419 168Z' fill='url(%23t)'/><path d='M102 154 L98 338 L276 436 L260 257Z' fill='url(%23f)'/><path d='M260 257 L276 436 L414 356 L419 168Z' fill='url(%23r)'/><path d='M245 74 L102 154 L98 338 L276 436 L414 356 L419 168Z' stroke='%231a1520' stroke-width='9' stroke-linejoin='round' fill='none'/><path d='M150 108 L210 88 L228 96 L168 116Z' fill='white' opacity='.5'/><rect x='125' y='227' width='42' height='53' rx='2.5' fill='%231a1520'/><rect x='148' y='231' width='15' height='19' rx='2' fill='white' opacity='.92'/><rect x='129' y='256' width='9' height='12' rx='1.5' fill='white' opacity='.45'/><rect x='209' y='264' width='42' height='60' rx='2.5' fill='%231a1520'/><rect x='232' y='269' width='15' height='21' rx='2' fill='white' opacity='.92'/><rect x='213' y='297' width='9' height='13' rx='1.5' fill='white' opacity='.45'/><path d='M162 322 Q192 345 222 322' stroke='%231a1520' stroke-width='4' fill='none' stroke-linecap='round' opacity='.45'/><ellipse cx='128' cy='295' rx='16' ry='11' fill='%23ffaaa2' opacity='.5'/><ellipse cx='240' cy='341' rx='17' ry='12' fill='%23feaca5' opacity='.5'/></svg>",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

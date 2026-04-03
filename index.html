@@ -1,0 +1,1104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Tofu</title>
+<!-- PWA: Add to Home Screen support -->
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Tofu">
+<meta name="theme-color" content="#F5F3ED">
+<link rel="manifest" href="static/manifest.json">
+<link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'><defs><linearGradient id='t' x1='0' y1='0' x2='.5' y2='1'><stop offset='0%25' stop-color='%23fef8ec'/><stop offset='100%25' stop-color='%23fdf2d7'/></linearGradient><linearGradient id='f' x1='0' y1='0' x2='.2' y2='1'><stop offset='0%25' stop-color='%23fdf4dc'/><stop offset='100%25' stop-color='%23f5e8c8'/></linearGradient><linearGradient id='r' x1='0' y1='0' x2='1' y2='.7'><stop offset='0%25' stop-color='%23ecdcc0'/><stop offset='100%25' stop-color='%23dcc8a4'/></linearGradient></defs><path d='M86 26 L36 54 L91 90 L147 59Z' fill='url(%23t)'/><path d='M36 54 L34 119 L97 153 L91 90Z' fill='url(%23f)'/><path d='M91 90 L97 153 L145 125 L147 59Z' fill='url(%23r)'/><path d='M86 26 L36 54 L34 119 L97 153 L145 125 L147 59Z' stroke='%231a1520' stroke-width='3.2' stroke-linejoin='round' fill='none'/><path d='M53 38 L74 31 L80 34 L59 41Z' fill='white' opacity='.5'/><rect x='44' y='80' width='15' height='19' rx='1' fill='%231a1520'/><rect x='52' y='81' width='5' height='7' rx='1' fill='white' opacity='.92'/><rect x='45' y='89' width='3' height='4' rx='.5' fill='white' opacity='.45'/><rect x='73' y='93' width='15' height='21' rx='1' fill='%231a1520'/><rect x='81' y='94' width='5' height='7' rx='1' fill='white' opacity='.92'/><rect x='74' y='104' width='3' height='5' rx='.5' fill='white' opacity='.45'/><path d='M57 113 Q68 121 78 113' stroke='%231a1520' stroke-width='1.5' fill='none' stroke-linecap='round' opacity='.45'/><ellipse cx='45' cy='103' rx='5.5' ry='4' fill='%23ffaaa2' opacity='.5'/><ellipse cx='84' cy='120' rx='6' ry='4' fill='%23feaca5' opacity='.5'/></svg>">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='t' x1='0' y1='0' x2='.5' y2='1'><stop offset='0%25' stop-color='%23fef8ec'/><stop offset='100%25' stop-color='%23fdf2d7'/></linearGradient><linearGradient id='f' x1='0' y1='0' x2='.2' y2='1'><stop offset='0%25' stop-color='%23fdf4dc'/><stop offset='100%25' stop-color='%23f5e8c8'/></linearGradient><linearGradient id='r' x1='0' y1='0' x2='1' y2='.7'><stop offset='0%25' stop-color='%23ecdcc0'/><stop offset='100%25' stop-color='%23dcc8a4'/></linearGradient></defs><path d='M15.3 4.6 L6.4 9.6 L16.3 16 L26.2 10.5Z' fill='url(%23t)'/><path d='M6.4 9.6 L6.1 21.1 L17.2 27.2 L16.3 16Z' fill='url(%23f)'/><path d='M16.3 16 L17.2 27.2 L25.9 22.3 L26.2 10.5Z' fill='url(%23r)'/><path d='M15.3 4.6 L6.4 9.6 L6.1 21.1 L17.2 27.2 L25.9 22.3 L26.2 10.5Z' stroke='%231a1520' stroke-width='.6' stroke-linejoin='round' fill='none'/><rect x='7.8' y='14.2' width='2.6' height='3.3' rx='.3' fill='%231a1520'/><rect x='9.2' y='14.5' width='.9' height='1.2' rx='.2' fill='white' opacity='.9'/><rect x='13.1' y='16.5' width='2.6' height='3.8' rx='.3' fill='%231a1520'/><rect x='14.5' y='16.9' width='.9' height='1.3' rx='.2' fill='white' opacity='.9'/><path d='M10.1 20.1 Q12 21.6 13.9 20.1' stroke='%231a1520' stroke-width='.5' fill='none' stroke-linecap='round' opacity='.45'/><ellipse cx='8' cy='18.4' rx='1' ry='.7' fill='%23ffaaa2' opacity='.5'/><ellipse cx='15' cy='21.3' rx='1.1' ry='.7' fill='%23feaca5' opacity='.5'/></svg>">
+<link rel="stylesheet" href="static/vendor/google-fonts-local.css">
+<link rel="stylesheet" href="static/vendor/github-dark.min.css">
+<link rel="stylesheet" href="static/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="static/styles.css?v=0.5.0">
+<script>
+  // Prevent flash of wrong theme — apply before render (default: tofu)
+  (function(){var t=localStorage.getItem('claude_ui_theme')||'tofu';document.documentElement.setAttribute('data-theme',t);})();
+</script>
+<script>
+  // ── Loading guard — stub functions for inline handlers ──
+  // Prevents ReferenceError spam when defer scripts are still downloading
+  // (common on slow networks or macOS MIME-type misconfigurations).
+  // Real implementations in main.js / core.js replace these on load.
+  (function() {
+    var _loaded = false, _warned = false;
+    function _notReady() {
+      if (_loaded) return false; // scripts loaded, shouldn't happen
+      if (!_warned) {
+        _warned = true;
+        console.warn('[LoadGuard] Scripts still loading — please wait…');
+      }
+      return true;
+    }
+    // Stub critical handlers that users can trigger immediately
+    var stubs = ['handleKeyDown','sendMessage','newChat','togglePresetDropdown',
+      'cycleTheme','toggleDebug','toggleSidebar','openSettings','toggleCodeExec',
+      'toggleBrowser','toggleSkills','toggleSwarm','toggleAutoTranslate',
+      'toggleAutoApply','selectThinkingDepth','cycleSearchMode','enterImageGenMode'];
+    for (var i = 0; i < stubs.length; i++) {
+      (function(name) {
+        window[name] = function() { _notReady(); };
+      })(stubs[i]);
+    }
+    // Mark as loaded once main.js executes (it re-defines these functions)
+    window._markScriptsLoaded = function() { _loaded = true; window._scriptsReady = true; };
+  })();
+  // ── Script load error tracker (defined early so onerror handlers can find it) ──
+  var _scriptLoadErrors = [];
+  function _onScriptError(e) {
+    var src = (e.target && e.target.src) || 'unknown';
+    _scriptLoadErrors.push(src);
+    console.error('[LoadGuard] ❌ Failed to load script:', src);
+  }
+</script>
+<script defer src="static/vendor/highlight.min.js" onerror="_onScriptError(event)"></script>
+<script defer src="static/vendor/marked.min.js" onerror="_onScriptError(event)"></script>
+<script defer src="static/vendor/purify.min.js" onerror="_onScriptError(event)"></script>
+<!-- katex.min.js lazy-loaded on first math render to avoid DevTools freeze -->
+<!-- pdf.min.js lazy-loaded on first PDF upload to avoid DevTools freeze -->
+</head>
+<body>
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <h1><svg class="sidebar-tofu-icon" width="22" height="22" viewBox="0 0 32 32" fill="none"><defs><linearGradient id="sTop" x1="0" y1="0" x2=".5" y2="1"><stop offset="0%" stop-color="#fef8ec"/><stop offset="100%" stop-color="#fdf2d7"/></linearGradient><linearGradient id="sFront" x1="0" y1="0" x2=".2" y2="1"><stop offset="0%" stop-color="#fdf4dc"/><stop offset="100%" stop-color="#f5e8c8"/></linearGradient><linearGradient id="sSide" x1="0" y1="0" x2="1" y2=".7"><stop offset="0%" stop-color="#ecdcc0"/><stop offset="100%" stop-color="#dcc8a4"/></linearGradient></defs><path d="M15.3 4.6 L6.4 9.6 L16.3 16 L26.2 10.5Z" fill="url(#sTop)"/><path d="M6.4 9.6 L6.1 21.1 L17.2 27.2 L16.3 16Z" fill="url(#sFront)"/><path d="M16.3 16 L17.2 27.2 L25.9 22.3 L26.2 10.5Z" fill="url(#sSide)"/><path d="M15.3 4.6 L6.4 9.6 L6.1 21.1 L17.2 27.2 L25.9 22.3 L26.2 10.5Z" stroke="#1a1520" stroke-width=".6" stroke-linejoin="round" fill="none"/><rect x="7.8" y="14.2" width="2.6" height="3.3" rx=".3" fill="#1a1520"/><rect x="9.2" y="14.5" width=".9" height="1.2" rx=".2" fill="white" opacity=".9"/><rect x="13.1" y="16.5" width="2.6" height="3.8" rx=".3" fill="#1a1520"/><rect x="14.5" y="16.9" width=".9" height="1.3" rx=".2" fill="white" opacity=".9"/><path d="M10.1 20.1 Q12 21.6 13.9 20.1" stroke="#1a1520" stroke-width=".5" fill="none" stroke-linecap="round" opacity=".45"/><ellipse cx="8" cy="18.4" rx="1" ry=".7" fill="#ffaaa2" opacity=".5"/><ellipse cx="15" cy="21.3" rx="1.1" ry=".7" fill="#feaca5" opacity=".5"/></svg><span class="sidebar-brand"><span class="sidebar-brand-t">T</span><span class="sidebar-brand-o">o</span><span class="sidebar-brand-f">f</span><span class="sidebar-brand-u">u</span></span></h1>
+    <div style="display:flex;gap:4px;align-items:center;">
+      <button class="action-btn" onclick="openDailyReport()" title="My Day">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+      </button>
+      <a class="action-btn" href="trading.html" target="_blank" title="Trading Advisor" id="tradingAdvisorBtn" style="text-decoration:none;display:none;align-items:center;justify-content:center;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      </a>
+      <button class="action-btn" onclick="openSettings()" title="设置">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+    </div>
+  </div>
+  <button class="new-chat-btn" onclick="newChat()">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    New Chat
+  </button>
+  <div class="sidebar-search-wrapper">
+    <div class="sidebar-search-box">
+      <span class="sidebar-search-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg></span>
+      <input type="text" class="sidebar-search-input" id="sidebarSearchInput" placeholder="Search conversations..." autocomplete="off" spellcheck="false">
+      <button class="sidebar-search-clear" id="sidebarSearchClear" onclick="clearSidebarSearch()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="sidebar-search-stats" id="sidebarSearchStats"></div>
+  </div>
+  <div class="conv-pinned-zone" id="convPinnedZone"></div>
+  <div class="conv-freeze-border" id="convFreezeBorder"><span class="conv-freeze-border-dot"></span></div>
+  <div class="conversations-list" id="convList"></div>
+</aside>
+<main class="main">
+  <div class="topbar">
+    <button class="toggle-sidebar-btn" onclick="toggleSidebar()">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <span class="topbar-title" id="topbarTitle">New Chat</span>
+    <span class="search-badge" id="searchBadge" data-mode="single"><span class="sb-dot"></span>1× SEARCH</span>
+    <!-- fetch always on — badge removed -->
+    <span class="project-badge" id="projectBadge"><span class="pb-dot"></span>PROJECT</span>
+    <span class="code-exec-badge" id="codeExecBadge"><span class="cb-dot"></span>CODE EXEC</span>
+    <span class="browser-badge" id="browserBadge"><span class="bb-dot"></span>BROWSER</span>
+    <span class="skills-badge" id="skillsBadge"><span class="sk-dot"></span>SKILLS</span>
+    <span class="scheduler-badge" id="schedulerBadge" onclick="toggleSchedulerPanel(event)"><span class="sc-dot"></span>SCHEDULER<span class="proactive-count" id="proactiveCount" style="display:none">0</span>
+      <div class="scheduler-panel" id="schedulerPanel">
+        <div class="scheduler-panel-title">Proactive Agents</div>
+        <div id="schedulerPanelContent"><div class="scheduler-panel-empty">No proactive tasks. Enable Scheduler and ask the AI to create one.</div></div>
+      </div>
+    </span>
+    <span class="timer-badge" id="timerBadge" onclick="toggleTimerPanel(event)" style="display:none"><span class="tm-dot"></span>TIMER<span class="timer-count" id="timerCount" style="display:none">0</span>
+      <div class="timer-panel" id="timerPanel">
+        <div class="timer-panel-title">⏱️ Timer Watchers</div>
+        <div id="timerPanelContent"><div class="timer-panel-empty">No timers. The AI can create one with timer_create during a task.</div></div>
+      </div>
+    </span>
+
+    <span class="model-badge" id="modelBadge">aws.claude-opus-4.6</span>
+    <button class="action-btn theme-cycle-btn" id="themeCycleBtn" onclick="cycleTheme()" title="Switch theme"><span>🌙</span></button>
+    <button class="action-btn" id="debugToggle" onclick="toggleDebug()" title="Debug" style="width:28px;height:28px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12V19"/><path d="M18.4 6.6a9 9 0 0 0-12.8 0"/><circle cx="12" cy="8" r="2"/><path d="M20 15.5a9 9 0 0 1-18 0"/><path d="m2 12 2 .5M22 12l-2 .5M7 20l1-1.5M17 20l-1-1.5"/></svg></button>
+  </div>
+  <div class="chat-wrapper">
+    <div class="chat-container" id="chatContainer">
+      <div class="chat-inner" id="chatInner">
+        <div class="welcome" id="welcome">
+          <div class="welcome-icon"><img src="static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
+          <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
+          <p>看似简单，实则百搭 — search, code, browse, trade, and more.</p>
+          <div class="feature-pills"><span class="feature-pill">Extended Thinking</span><span class="feature-pill">Search</span><span class="feature-pill">URL Fetch</span><span class="feature-pill">Image Input</span><span class="feature-pill">Co-Pilot</span><span class="feature-pill">Browser</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="turn-nav" id="turnNav"></div>
+    <div class="debug-panel" id="debugPanel">
+      <div class="debug-header">
+        <span id="debugTitle">Messages</span>
+        <div style="display:flex;gap:4px;align-items:center;">
+          <button class="debug-clear" id="debugCopyBtn" onclick="copyDebugContent()" title="复制全部">Copy</button>
+          <button class="debug-clear" onclick="clearDebug()">✕</button>
+        </div>
+      </div>
+      <div id="debugContent"></div>
+    </div>
+    <div class="input-area">
+      <div class="input-inner">
+        <div class="project-bar" id="projectBar" style="display:none">
+          <span class="project-bar-icon" onclick="openProjectModal()" style="cursor:pointer" title="Manage folders"></span>
+          <span class="project-bar-folders" id="projectBarFolders" onclick="openProjectModal()" style="cursor:pointer" title="Click to manage folders"></span>
+          <span class="project-bar-stats" id="projectBarStats"></span>
+          <button class="project-autoapply-toggle" id="autoApplyToggle" onclick="toggleAutoApply()" title="Writes need confirmation (click for auto)">
+            <span class="autoapply-dot"></span>
+            <span class="autoapply-label">Manual</span>
+          </button>
+          <button class="project-bar-close" onclick="clearProject()">✕</button>
+        </div>
+        <div class="image-previews" id="imagePreviews"></div>
+        <div class="pdf-progress" id="pdfProgress" style="display:none">
+          <div class="pulse"></div>
+          <span id="pdfProgressText">Processing PDF...</span>
+          <div class="pdf-progress-bar"><div class="pdf-progress-fill" id="pdfProgressFill" style="width:0%"></div></div>
+        </div>
+        <!-- Log Noise Clean Banner -->
+        <div class="log-clean-banner" id="logCleanBanner" style="display:none">
+          <div class="log-clean-banner-icon"></div>
+          <div class="log-clean-banner-body">
+            <div class="log-clean-banner-info" id="logCleanInfo"></div>
+            <div class="log-clean-banner-details" id="logCleanDetails"></div>
+          </div>
+          <div class="log-clean-banner-actions">
+            <button class="log-clean-btn preview" onclick="previewLogClean()" title="对比预览">预览</button>
+            <button class="log-clean-btn apply" onclick="applyLogClean()" title="应用规则清理">清理</button>
+            <button class="log-clean-btn ai-compress" id="aiCompressBtn" onclick="aiCompressLog()" title="用 AI 智能压缩，去除冗余保留关键信息">AI压缩</button>
+            <button class="log-clean-btn dismiss" onclick="hideLogCleanBanner()" title="保持原文">✕</button>
+          </div>
+        </div>
+        <div id="pendingQueueContainer"></div>
+        <input type="file" id="fileInput" accept="image/*,.pdf,application/pdf,.docx,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation,.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,.ppt,application/vnd.ms-powerpoint,.txt,.md,.csv,.json,.xml,.html,.yaml,.yml,.toml,.py,.js,.ts,.java,.c,.cpp,.go,.rs,.rb,.sh,.sql,.tex,.log,.rst,.ini,.cfg" multiple onchange="handleFileUpload(event)" style="display:none">
+        <div class="input-box">
+          <div class="input-row">
+            <textarea id="userInput" placeholder="Type your message..." rows="1" onkeydown="handleKeyDown(event)"></textarea>
+          </div>
+          <div class="input-actions">
+            <div class="input-actions-scroll">
+            <!-- ── Primary: Model & Depth ── -->
+            <div class="input-group" id="modelGroup">
+              <div class="preset-toggle-wrapper" id="presetWrapper">
+                <div class="preset-toggle" id="presetToggle" data-model="" onclick="togglePresetDropdown(event)" title="Select model">
+                  <span class="ps-icon"></span>
+                  <span class="ps-label">Model</span>
+                  <span class="ps-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
+                </div>
+                <div class="preset-dropdown" id="presetDropdown">
+                  <!-- ★ Populated dynamically by _populateModelDropdown() from /api/server-config -->
+                  <div class="ps-dd-loading">正在加载模型…</div>
+                </div>
+              </div>
+              <div class="thinking-depth-bar" id="thinkingDepthSection" style="display:none">
+                <button class="depth-btn" data-depth="off" onclick="selectThinkingDepth('off')">Off</button>
+                <button class="depth-btn active" data-depth="medium" onclick="selectThinkingDepth('medium')">Med</button>
+                <button class="depth-btn" data-depth="high" onclick="selectThinkingDepth('high')">High</button>
+                <button class="depth-btn" data-depth="max" onclick="selectThinkingDepth('max')">Max</button>
+              </div>
+            </div>
+            </div><!-- /input-actions-scroll -->
+            <!-- ── Secondary: Sub-menu Toggles ── -->
+            <div class="input-group">
+              <!-- ★ AI Enhance sub-menu -->
+              <div class="toolbar-submenu" id="submenuAI">
+                <button class="submenu-trigger" onclick="toggleSubmenu('submenuAI')" title="AI 增强">
+                  <span class="submenu-label">增强</span>
+                  <span class="submenu-count" id="submenuAICount"></span>
+                  <span class="submenu-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
+                </button>
+                <div class="submenu-dropdown">
+                  <div class="submenu-item" id="codeExecToggle" onclick="toggleCodeExec();updateSubmenuCounts()" title="Allow AI to execute code">
+                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name">代码执行</span><span class="submenu-item-desc">允许 AI 运行代码</span></span>
+                    <span class="submenu-item-check">✓</span>
+                  </div>
+                  <div class="submenu-item" id="skillsToggle" onclick="toggleSkills();updateSubmenuCounts()" title="Skills — accumulated experience">
+                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name">技能经验</span><span class="submenu-item-desc">注入积累的经验</span></span>
+                    <span class="submenu-item-check">✓</span>
+                  </div>
+                  <div class="submenu-item" id="translateToggle" onclick="toggleAutoTranslate();updateSubmenuCounts()" title="Auto-translate: Chinese↔English (Ctrl+Shift+K to exclude selected text from translation)">
+                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2v3"/><path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/></svg></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name">自动翻译</span><span class="submenu-item-desc">中英互译 · ⌘⇧K 跳过选中</span></span>
+                    <span class="submenu-item-check">✓</span>
+                  </div>
+                  <!-- Hidden badges for JS compatibility -->
+                  <span class="tool-badge" id="translateBadge" style="display:none">译</span>
+                </div>
+              </div>
+              <!-- ★ Tools sub-menu -->
+              <div class="toolbar-submenu" id="submenuTools">
+                <button class="submenu-trigger" onclick="toggleSubmenu('submenuTools')" title="外部工具">
+                  <span class="submenu-label">工具</span>
+                  <span class="submenu-count" id="submenuToolsCount"></span>
+                  <span class="submenu-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
+                </button>
+                <div class="submenu-dropdown">
+                  <div class="submenu-item" id="browserToggle" onclick="toggleBrowser();updateSubmenuCounts()" title="Browser Bridge">
+                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name">浏览器桥接</span><span class="submenu-item-desc">控制浏览器标签页</span></span>
+                    <span class="submenu-item-check">✓</span>
+                  </div>
+                  <div class="submenu-item" id="desktopToggle" onclick="toggleDesktop();updateSubmenuCounts()" title="Desktop Agent">
+                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name">桌面控制</span><span class="submenu-item-desc">操作本地应用与文件</span></span>
+                    <span class="submenu-item-check">✓</span>
+                    <span class="tool-badge" id="desktopBadge" style="display:none"></span>
+                  </div>
+                  <div class="submenu-item" id="schedulerToggle" onclick="toggleScheduler();updateSubmenuCounts()" title="Scheduler">
+                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name">定时任务</span><span class="submenu-item-desc">计划任务与 Cron</span></span>
+                    <span class="submenu-item-check">✓</span>
+                  </div>
+                  <div class="submenu-item" id="imageGenToggle" onclick="toggleImageGenTool();updateSubmenuCounts()" title="AI Image Generation">
+                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name">AI 绘图</span><span class="submenu-item-desc">对话中生成图片</span></span>
+                    <span class="submenu-item-check">✓</span>
+                  </div>
+                  <div class="submenu-item" id="humanGuidanceToggle" onclick="toggleHumanGuidance();updateSubmenuCounts()" title="Human Guidance">
+                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name">人机协作</span><span class="submenu-item-desc">AI 可向你提问寻求指导</span></span>
+                    <span class="submenu-item-check">✓</span>
+                  </div>
+
+                </div>
+              </div>
+              <!-- ★ Mode sub-menu -->
+              <div class="toolbar-submenu" id="submenuMode">
+                <button class="submenu-trigger" onclick="toggleSubmenu('submenuMode')" title="执行模式">
+                  <span class="submenu-label">模式</span>
+                  <span class="submenu-count" id="submenuModeCount"></span>
+                  <span class="submenu-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
+                </button>
+                <div class="submenu-dropdown">
+                  <div class="submenu-item" id="swarmToggle" onclick="toggleSwarm();updateSubmenuCounts()" title="Agent Swarm">
+                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="3"/><circle cx="5" cy="17" r="3"/><circle cx="19" cy="17" r="3"/><line x1="12" y1="10" x2="5" y2="14"/><line x1="12" y1="10" x2="19" y2="14"/></svg></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name">蜂群代理</span><span class="submenu-item-desc">并行子代理分解任务</span></span>
+                    <span class="submenu-item-check">✓</span>
+                    <span class="tool-badge" id="swarmBadge" style="display:none"></span>
+                  </div>
+                  <div class="submenu-item" id="endpointToggle" onclick="toggleEndpoint();updateSubmenuCounts()" title="Endpoint Mode">
+                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="4"/></svg></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name">自主模式</span><span class="submenu-item-desc">自主执行+自我审查循环</span></span>
+                    <span class="submenu-item-check">✓</span>
+                    <span class="tool-badge" id="endpointBadge" style="display:none"></span>
+                  </div>
+                </div>
+              </div>
+              <!-- ★ Standalone buttons -->
+              <button class="action-btn" id="imageGenModeBtn" onclick="enterImageGenMode()" title="Image Generation Mode">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+              </button>
+              <button class="action-btn" id="projectToggle" onclick="openProjectModal()" title="Project Co-Pilot">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              </button>
+            </div>
+            <div class="input-actions-right">
+            <div class="search-mode-toggle" id="searchModeToggle" data-mode="off" onclick="cycleSearchMode()" title="Click to cycle: Off → Single → Multi → Off">
+              <span class="sm-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg></span>
+              <span class="sm-label">Search</span>
+              <span class="sm-mode-pill">OFF</span>
+            </div>
+            <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Send (Ctrl+Enter)">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            </button>
+            </div><!-- /input-actions-right -->
+          </div>
+          <!-- ═══ Image Generation Mode Toolbar — single-row canvas bar ═══ -->
+          <div class="ig-toolbar" id="igModeToolbar">
+            <button class="ig-exit" onclick="exitImageGenMode()" title="退出创作模式 (Esc)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+            <!-- Model picker — reuses preset-toggle-wrapper pattern -->
+            <div class="preset-toggle-wrapper ig-model-wrapper" id="igModelPicker">
+              <div class="preset-toggle ig-preset" data-brand="generic" onclick="toggleIgModelDropdown(event)" title="Select image model">
+                <span class="ps-icon" id="igModelIcon"></span>
+                <span class="ps-label" id="igModelLabel">Gemini 3.1 Flash</span>
+                <span class="ps-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
+              </div>
+              <!-- Populated dynamically by _loadIgModels() -->
+              <div class="preset-dropdown ig-preset-dropdown" id="igModelDropdown"></div>
+            </div>
+            <span class="ig-sep"></span>
+            <!-- Aspect ratio — inline pill bar (like thinking-depth-bar) -->
+            <div class="ig-seg" id="igAspectBar">
+              <button class="ig-pill active" data-ar="1:1" onclick="selectIgAspect(this)" title="1:1 正方形">1:1</button>
+              <button class="ig-pill" data-ar="16:9" onclick="selectIgAspect(this)" title="16:9 横屏宽幅">16:9</button>
+              <button class="ig-pill" data-ar="9:16" onclick="selectIgAspect(this)" title="9:16 竖屏">9:16</button>
+              <button class="ig-pill" data-ar="4:3" onclick="selectIgAspect(this)" title="4:3 经典">4:3</button>
+              <button class="ig-pill" data-ar="3:4" onclick="selectIgAspect(this)" title="3:4 竖版">3:4</button>
+            </div>
+            <span class="ig-sep"></span>
+            <!-- Resolution — inline pill bar -->
+            <div class="ig-seg" id="igResolutionBar">
+              <button class="ig-pill ig-pill-q active" data-res="1K" onclick="selectIgResolution(this)" title="1024px · 标准分辨率">1K</button>
+              <button class="ig-pill ig-pill-q" data-res="2K" onclick="selectIgResolution(this)" title="2048px · 高清分辨率">2K</button>
+            </div>
+            <span class="ig-sep"></span>
+            <!-- Gacha batch count — inline pill bar -->
+            <div class="ig-seg" id="igCountBar">
+              <button class="ig-pill ig-pill-n active" data-count="1" onclick="selectIgCount(this)" title="生成单张图片">单抽</button>
+              <button class="ig-pill ig-pill-n" data-count="2" onclick="selectIgCount(this)" title="同时生成 2 张，多个选择">2连</button>
+              <button class="ig-pill ig-pill-n" data-count="4" onclick="selectIgCount(this)" title="同时生成 4 张，大量出图！">4连</button>
+            </div>
+            <span class="ig-flex"></span>
+            <!-- Generate button -->
+            <button class="ig-generate-btn" id="igGenerateBtn" onclick="generateImageDirect()" title="生成 (Ctrl+Enter)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              <span class="ig-gen-text">生成</span>
+            </button>
+          </div>
+        </div>
+        <div class="input-footer"><span class="input-hint" id="inputHint">Ctrl+Enter send · Drop files anywhere</span></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- Settings Modal — Tabbed Panel -->
+<div class="modal-overlay" id="settingsModal" onclick="if(event.target===this)closeSettings()">
+  <div class="modal settings-panel">
+    <!-- Header -->
+    <div class="settings-header">
+      <h3>设置</h3>
+      <button class="settings-close-btn" onclick="closeSettings()" title="关闭">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+
+    <div class="settings-body">
+      <!-- Tab Navigation (left sidebar) -->
+      <nav class="settings-tabs">
+        <button class="settings-tab active" data-tab="general" onclick="switchSettingsTab('general')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+          <span>通用</span>
+        </button>
+        <button class="settings-tab" data-tab="api" onclick="switchSettingsTab('api')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
+          <span>服务商</span>
+        </button>
+        <button class="settings-tab" data-tab="preset" onclick="switchSettingsTab('preset')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+          <span>显示</span>
+        </button>
+        <button class="settings-tab" data-tab="search" onclick="switchSettingsTab('search')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <span>搜索</span>
+        </button>
+        <button class="settings-tab" data-tab="network" onclick="switchSettingsTab('network')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+          <span>网络</span>
+        </button>
+        <button class="settings-tab" data-tab="feishu" onclick="switchSettingsTab('feishu')">
+          <svg width="15" height="15" viewBox="62.16 94.5 407.87 324.19"><path d="M274.18 264.785q.515-.517 1.03-1.027c.685-.688 1.372-1.258 2.056-1.945l1.37-1.372 4.118-4.113 5.598-5.601 4.8-4.797 4.575-4.457 4.796-4.688 4.344-4.344 6.059-6.054c1.14-1.145 2.285-2.29 3.543-3.317 2.168-2.054 4.457-4 6.855-5.828 2.172-1.715 4.344-3.312 6.516-4.914 3.082-2.172 6.398-4.344 9.71-6.285 3.204-1.941 6.63-3.656 10.06-5.371 3.199-1.602 6.515-2.973 9.827-4.23 1.829-.684 3.774-1.372 5.602-2.055.914-.344 1.941-.688 2.856-.914-8.57-33.715-24.227-64.575-45.258-90.86-4.114-5.14-10.399-8.113-17.028-8.113H130.754c-3.203 0-4.457 4-1.945 5.941 59.543 43.66 109.144 99.887 145.03 164.801 0-.226.227-.34.34-.457" fill="#00d6b9"/><path d="M204.79 418.691c90.288 0 169.03-49.828 210.058-123.543 1.488-2.628 2.859-5.257 4.23-7.882q-3.087 6-6.86 11.312l-2.741 3.77c-1.141 1.488-2.399 2.972-3.657 4.457-1.03 1.144-2.058 2.285-3.086 3.316-2.058 2.172-4.343 4.227-6.629 6.172a53 53 0 0 1-3.886 3.2c-1.598 1.144-3.086 2.284-4.684 3.429-1.031.683-2.058 1.371-3.086 1.941-1.144.684-2.172 1.258-3.316 1.942a131 131 0 0 1-6.969 3.543c-2.059.918-4.117 1.828-6.289 2.515-2.285.801-4.57 1.602-6.969 2.285-3.543.914-7.086 1.715-10.742 2.286-2.629.457-5.258.687-8 .914-2.86.23-5.601.23-8.457.23-3.086 0-6.289-.23-9.488-.57a83 83 0 0 1-7.086-1.031c-2.055-.34-4.113-.801-6.168-1.258-1.031-.227-2.176-.57-3.203-.797-2.973-.8-6.055-1.602-9.028-2.516-1.488-.457-2.972-.914-4.457-1.258-2.172-.683-4.457-1.37-6.629-2.058-1.828-.57-3.656-1.14-5.37-1.711q-2.573-.86-5.145-1.715c-1.14-.344-2.285-.8-3.543-1.144-1.371-.457-2.856-1.028-4.227-1.485-1.027-.344-2.058-.687-2.972-1.027-1.942-.688-4-1.488-5.942-2.172-1.144-.457-2.285-.914-3.43-1.258-1.484-.57-3.085-1.144-4.57-1.828-1.601-.687-3.203-1.258-4.8-1.945-1.028-.457-2.06-.797-3.087-1.258-1.257-.57-2.628-1.027-3.886-1.598-1.028-.457-1.942-.8-2.969-1.258l-3.086-1.37c-.914-.344-1.832-.801-2.746-1.145a44 44 0 0 1-2.512-1.14c-.8-.345-1.715-.802-2.515-1.145-.914-.344-1.715-.801-2.512-1.141-1.031-.457-2.172-1.031-3.203-1.484-1.14-.575-2.285-1.032-3.426-1.602-1.258-.574-2.402-1.144-3.66-1.715-1.027-.457-2.055-1.027-3.082-1.484-54.172-26.973-102.172-63.086-143.09-106.746-2.055-2.172-5.71-.684-5.71 2.289l.112 154.398v12.57c0 7.317 3.543 14.06 9.598 18.172 38.172 24.801 83.773 39.543 132.914 39.543" fill="#3370ff"/><path d="M414.84 295.188c0 .113-.113.113-.113.226l.8-1.489c-.343.457-.574 1.028-.8 1.488m3.793-7.05.226-.457.114-.23q-.17.513-.34.687" fill="#133c9a"/><path d="M470.035 201.121c-18.285-9.031-38.86-14.059-60.687-14.059-12.914 0-25.485 1.829-37.371 5.141-1.372.344-2.743.8-4.114 1.258-.914.344-1.941.574-2.855.914-1.945.688-3.774 1.375-5.602 2.059-3.316 1.257-6.629 2.742-9.828 4.23-3.43 1.598-6.742 3.426-10.058 5.371a128 128 0 0 0-9.715 6.285c-2.285 1.602-4.457 3.2-6.512 4.914a154 154 0 0 0-6.86 5.828c-1.14 1.141-2.398 2.172-3.542 3.313l-6.055 6.059-4.344 4.343-4.8 4.684-4.57 4.46-4.802 4.798-11.086 11.086c-.687.687-1.37 1.37-2.058 1.945l-1.028 1.027c-.457.457-1.027 1.028-1.601 1.485-.57.57-1.14 1.031-1.711 1.601a244.4 244.4 0 0 1-49.828 35.313c1.027.457 2.168 1.027 3.199 1.488.8.34 1.715.797 2.512 1.14.8.344 1.715.801 2.515 1.145.801.344 1.602.684 2.516 1.14.914.345 1.828.802 2.742 1.145l3.086 1.371c1.027.457 1.942.801 2.969 1.258 1.258.57 2.629 1.028 3.887 1.598 1.03.46 2.058.8 3.086 1.258 1.601.687 3.199 1.258 4.8 1.945 1.485.57 3.086 1.14 4.57 1.828 1.145.457 2.286.914 3.43 1.258 1.946.684 4 1.484 5.946 2.172a81 81 0 0 1 2.968 1.027c1.371.457 2.856 1.028 4.23 1.485 1.141.343 2.286.8 3.544 1.14q2.567.86 5.14 1.719c1.829.57 3.657 1.14 5.372 1.71 2.171.688 4.457 1.376 6.628 2.06 1.489.457 2.973.914 4.457 1.257 2.973.914 5.942 1.715 9.032 2.512 1.027.344 2.168.574 3.199.8 2.055.458 4.113.915 6.172 1.259 2.398.457 4.683.8 7.082 1.03 3.203.34 6.402.571 9.488.571 2.856 0 5.715 0 8.457-.23 2.63-.227 5.371-.457 8-.914 3.656-.57 7.2-1.371 10.742-2.286 2.399-.683 4.688-1.37 6.973-2.285 2.172-.8 4.227-1.601 6.285-2.515 2.399-1.028 4.684-2.285 6.973-3.543 1.14-.57 2.168-1.258 3.312-1.942 1.028-.687 2.059-1.257 3.086-1.945 1.602-1.027 3.2-2.168 4.684-3.426a52 52 0 0 0 3.887-3.203c2.289-1.941 4.457-4 6.628-6.168 1.032-1.031 2.06-2.172 3.086-3.316 1.258-1.485 2.516-2.969 3.657-4.457.918-1.258 1.828-2.512 2.742-3.77 2.515-3.543 4.8-7.316 6.86-11.199l2.284-4.688 21.145-42.171v.113c6.742-14.742 16.226-28.113 27.656-39.426" fill="#133c9a"/></svg>
+          <span>飞书</span>
+        </button>
+        <button class="settings-tab" data-tab="advanced" onclick="switchSettingsTab('advanced')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+          <span>高级</span>
+        </button>
+      </nav>
+
+      <!-- Tab Content Panels -->
+      <div class="settings-content">
+
+        <!-- ═══ General Tab ═══ -->
+        <div class="settings-tab-panel active" id="settingsTab_general">
+          <div class="settings-section-title">主题</div>
+          <div class="theme-picker" id="themePicker">
+            <div class="theme-option active" data-theme="dark" onclick="selectTheme('dark')">
+              <div class="theme-preview dark-preview"></div>
+              <span>🌙 暗色</span>
+            </div>
+            <div class="theme-option" data-theme="light" onclick="selectTheme('light')">
+              <div class="theme-preview light-preview"></div>
+              <span>☀️ 亮色</span>
+            </div>
+
+            <div class="theme-option" data-theme="tofu" onclick="selectTheme('tofu')">
+              <div class="theme-preview tofu-preview"></div>
+              <span>🍮 豆腐</span>
+            </div>
+
+          </div>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title">模型参数</div>
+          <div class="settings-group">
+            <div class="settings-row">
+              <div class="settings-field">
+                <label>温度 (Temperature)</label>
+                <div class="range-row"><input type="range" id="settingTemp" min="0" max="1" step="0.05" value="0.7" oninput="document.getElementById('tempVal').textContent=this.value"><span class="range-value" id="tempVal">0.7</span></div>
+              </div>
+            </div>
+            <div class="settings-row two-col">
+              <div class="settings-field">
+                <label>最大 Token 数</label>
+                <input type="number" id="settingMaxTokens" value="128000">
+              </div>
+              <div class="settings-field">
+                <label>图片最大宽度</label>
+                <input type="number" id="settingImageMaxWidth" value="1024" placeholder="0=不压缩">
+              </div>
+            </div>
+            <div class="settings-row two-col">
+              <div class="settings-field">
+                <label>默认思维深度 (Thinking Depth)</label>
+                <select id="settingDefaultThinkingDepth" style="max-width:200px">
+                  <option value="off" selected>Off — 关闭</option>
+                  <option value="medium">Medium — 中等</option>
+                  <option value="high">High — 深度</option>
+                  <option value="max">Max — 最大</option>
+                </select>
+                <div class="settings-toggle-desc">新对话的默认思维深度级别</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title">系统提示词</div>
+          <textarea id="settingSystem" class="settings-textarea settings-mono" placeholder="输入自定义系统提示词..."></textarea>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title">功能模块</div>
+          <div class="settings-group">
+            <div class="settings-toggle-row">
+              <div>
+                <span class="settings-toggle-label">交易 / 基金模块</span>
+                <div class="settings-toggle-desc">交易顾问、基金筛选、自动驾驶、资讯爬虫</div>
+              </div>
+              <label class="stg-toggle">
+                <input type="checkbox" id="settingTradingEnabled">
+                <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
+              </label>
+            </div>
+            <div id="tradingRestartHint" class="settings-hint-banner" style="display:none;">需要重启服务器才能生效</div>
+          </div>
+
+
+        </div>
+
+        <!-- ═══ Providers Tab — providers with nested models ═══ -->
+        <div class="settings-tab-panel" id="settingsTab_api">
+          <div class="stg-section-head">
+            <div class="settings-section-title">API 服务商 & 模型</div>
+            <div class="stg-section-actions">
+              <button class="stg-btn-add stg-refresh-btn" onclick="_showAutoSetupModal()">🚀 自动配置</button>
+              <button class="stg-btn-add stg-refresh-btn" onclick="_showTemplateMenu(this)">⚡ 从模板添加</button>
+              <button class="stg-btn-add stg-refresh-btn" onclick="addProvider()">+ 自定义服务商</button>
+            </div>
+          </div>
+          <p class="settings-desc">使用「🚀 自动配置」只需填写 API 地址和密钥，系统自动发现模型、检测余额接口和定价。也可从模板添加或手动创建。</p>
+          <div id="stgProviderList">
+            <!-- JS renders provider cards with nested model lists -->
+          </div>
+        </div>
+
+        <!-- ═══ Preset Tab — image gen + model dropdown visibility ═══ -->
+        <div class="settings-tab-panel" id="settingsTab_preset">
+          <div class="stg-section-head">
+            <div class="settings-section-title">图片生成</div>
+            <div class="stg-section-actions">
+              <button class="stg-btn-secondary btn-xs" onclick="_toggleAllIgModels(true)">全部显示</button>
+              <button class="stg-btn-secondary btn-xs" onclick="_toggleAllIgModels(false)">全部隐藏</button>
+            </div>
+          </div>
+          <p class="settings-desc">选择在图片生成选择器中显示哪些模型。隐藏的模型仍然可用，只是不会出现在选择器中。</p>
+          <div id="stgIgVisibility" class="stg-dropdown-visibility">
+            <!-- JS renders image gen model toggles -->
+          </div>
+
+          <div class="settings-divider"></div>
+          <div class="stg-section-head">
+            <div class="settings-section-title">模型下拉列表</div>
+            <div class="stg-section-actions">
+              <button class="stg-btn-secondary btn-xs" onclick="_toggleAllDropdownModels(true)">全部显示</button>
+              <button class="stg-btn-secondary btn-xs" onclick="_toggleAllDropdownModels(false)">全部隐藏</button>
+            </div>
+          </div>
+          <p class="settings-desc">选择在模型切换下拉列表中显示哪些模型。隐藏的模型仍然可用，只是不会出现在下拉列表中。</p>
+          <div id="stgDropdownVisibility" class="stg-dropdown-visibility">
+            <!-- JS renders model toggles -->
+          </div>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title">模型默认</div>
+          <p class="settings-desc">
+            配置自动回退模型和预设的默认模型。当主模型请求失败时，系统将自动切换到回退模型继续生成。
+            预设默认模型用于快捷切换时的模型选择。留空表示禁用或使用系统默认。
+          </p>
+          <div class="settings-group">
+            <div class="settings-row two-col">
+              <div class="settings-field">
+                <label>回退模型 <span style="color:var(--text-tertiary);font-weight:normal">（主模型失败时自动切换）</span></label>
+                <select id="settingFallbackModel" class="settings-select">
+                  <option value="">（禁用自动回退）</option>
+                  <!-- JS populates from available models -->
+                </select>
+              </div>
+              <div class="settings-field">
+                <label>默认模型 <span style="color:var(--text-tertiary);font-weight:normal">（LLM_MODEL）</span></label>
+                <select id="settingDefaultModel" class="settings-select">
+                  <option value="">（使用环境变量）</option>
+                  <!-- JS populates from available models -->
+                </select>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- ═══ Search & Fetch Tab ═══ -->
+        <div class="settings-tab-panel" id="settingsTab_search">
+          <div class="settings-section-title">搜索与抓取</div>
+          <div class="settings-divider"></div>
+          <div class="settings-toggle-row">
+            <div>
+              <span class="settings-toggle-label">LLM 内容过滤</span>
+              <div class="settings-toggle-desc">抓取网页后用模型过滤无关内容（导航栏、广告等）。关闭可显著提升抓取速度并节省 token，但搜索质量会下降</div>
+            </div>
+            <label class="stg-toggle">
+              <input type="checkbox" id="settingLlmContentFilter" checked>
+              <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
+            </label>
+          </div>
+          <div class="settings-divider"></div>
+          <div class="settings-section-title">搜索与抓取参数</div>
+          <div class="settings-group">
+            <div class="settings-row two-col">
+              <div class="settings-field">
+                <label>抓取前 N 条 <span style="color:var(--text-tertiary);font-weight:normal">（搜索后自动抓取排名靠前的网页）</span></label>
+                <input type="number" id="settingFetchTopN" value="6" min="1" max="20">
+              </div>
+              <div class="settings-field">
+                <label>抓取超时 <span style="color:var(--text-tertiary);font-weight:normal">（秒）</span></label>
+                <input type="number" id="settingFetchTimeout" value="15" min="5" max="60">
+              </div>
+            </div>
+            <div class="settings-row two-col">
+              <div class="settings-field">
+                <label>最大字符数 <span style="color:var(--text-tertiary);font-weight:normal">（搜索结果页面）</span></label>
+                <input type="number" id="settingMaxCharsSearch" value="60000">
+              </div>
+              <div class="settings-field">
+                <label>最大字符数 <span style="color:var(--text-tertiary);font-weight:normal">（直接抓取 URL）</span></label>
+                <input type="number" id="settingMaxCharsDirect" value="200000">
+              </div>
+            </div>
+            <div class="settings-row two-col">
+              <div class="settings-field">
+                <label>最大字符数 <span style="color:var(--text-tertiary);font-weight:normal">（PDF 文件，0=不限制）</span></label>
+                <input type="number" id="settingMaxCharsPdf" value="0" placeholder="0=不限制">
+              </div>
+              <div class="settings-field">
+                <label>最大下载大小 <span style="color:var(--text-tertiary);font-weight:normal">（字节，默认 20MB）</span></label>
+                <input type="number" id="settingMaxBytes" value="20971520">
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title">屏蔽域名</div>
+          <p class="settings-desc">抓取器不会访问的域名，每行一个。</p>
+          <textarea id="settingSkipDomains" class="settings-textarea settings-mono" rows="4" placeholder="youtube.com&#10;twitter.com&#10;facebook.com"></textarea>
+        </div>
+
+        <!-- ═══ Network Tab ═══ -->
+        <div class="settings-tab-panel" id="settingsTab_network">
+          <div class="settings-section-title">HTTP 代理</div>
+          <p class="settings-desc">
+            配置用于所有出站请求（LLM API、网页搜索、页面抓取）的 HTTP/HTTPS 代理。
+            留空则使用系统环境变量（<code>http_proxy</code> / <code>https_proxy</code>）。
+            修改立即生效，无需重启。
+          </p>
+          <div id="proxyEnvBanner" class="settings-hint-banner" style="display:none;margin-top:0;margin-bottom:12px">
+            ℹ️ <span id="proxyEnvBannerText"></span>
+          </div>
+          <div class="settings-group">
+            <div class="settings-row two-col">
+              <div class="settings-field">
+                <label>HTTP 代理</label>
+                <input type="text" id="settingHttpProxy" class="settings-mono" placeholder="http://proxy.example.com:8080" spellcheck="false">
+              </div>
+              <div class="settings-field">
+                <label>HTTPS 代理</label>
+                <input type="text" id="settingHttpsProxy" class="settings-mono" placeholder="http://proxy.example.com:8080" spellcheck="false">
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title">不代理域名</div>
+          <p class="settings-desc">
+            在此添加不需要走代理的域名后缀或主机名（每行一个，后缀匹配）。
+            匹配的请求会<strong>完全绕过 HTTP 代理</strong>。
+          </p>
+          <p class="settings-desc" style="margin-top:4px">
+            <strong>💡 提示：</strong>内网地址和 LLM API 域名都应加在这里。
+            企业/VPN 代理会静默断开长连接（SSE 流），导致 <code>BrokenPipeError</code>，
+            添加对应域名即可解决。
+            也可通过环境变量 <code>PROXY_BYPASS_DOMAINS</code>（逗号分隔）配置，两处合并生效。
+          </p>
+          <div class="settings-group">
+            <div class="settings-field">
+              <label>绕过域名 <span style="color:var(--text-tertiary);font-weight:normal">（每行一个，后缀匹配 — 例如 <code>.your-corp.com</code>）</span></label>
+              <textarea id="settingProxyBypass" class="settings-textarea settings-mono" rows="4" placeholder=".internal.example.com&#10;api.openai.com&#10;.anthropic.com"></textarea>
+            </div>
+          </div>
+          <div id="proxyEnvHint" class="settings-hint-banner" style="display:none;margin-top:8px">
+            ℹ️ <span id="proxyEnvHintText"></span>
+          </div>
+        </div>
+
+        <!-- ═══ Feishu Tab ═══ -->
+        <div class="settings-tab-panel" id="settingsTab_feishu">
+          <div class="settings-section-title"><svg width="20" height="16" viewBox="62.16 94.5 407.87 324.19" style="vertical-align:-2px;margin-right:6px"><path d="M274.18 264.785q.515-.517 1.03-1.027c.685-.688 1.372-1.258 2.056-1.945l1.37-1.372 4.118-4.113 5.598-5.601 4.8-4.797 4.575-4.457 4.796-4.688 4.344-4.344 6.059-6.054c1.14-1.145 2.285-2.29 3.543-3.317 2.168-2.054 4.457-4 6.855-5.828 2.172-1.715 4.344-3.312 6.516-4.914 3.082-2.172 6.398-4.344 9.71-6.285 3.204-1.941 6.63-3.656 10.06-5.371 3.199-1.602 6.515-2.973 9.827-4.23 1.829-.684 3.774-1.372 5.602-2.055.914-.344 1.941-.688 2.856-.914-8.57-33.715-24.227-64.575-45.258-90.86-4.114-5.14-10.399-8.113-17.028-8.113H130.754c-3.203 0-4.457 4-1.945 5.941 59.543 43.66 109.144 99.887 145.03 164.801 0-.226.227-.34.34-.457" fill="#00d6b9"/><path d="M204.79 418.691c90.288 0 169.03-49.828 210.058-123.543 1.488-2.628 2.859-5.257 4.23-7.882q-3.087 6-6.86 11.312l-2.741 3.77c-1.141 1.488-2.399 2.972-3.657 4.457-1.03 1.144-2.058 2.285-3.086 3.316-2.058 2.172-4.343 4.227-6.629 6.172a53 53 0 0 1-3.886 3.2c-1.598 1.144-3.086 2.284-4.684 3.429-1.031.683-2.058 1.371-3.086 1.941-1.144.684-2.172 1.258-3.316 1.942a131 131 0 0 1-6.969 3.543c-2.059.918-4.117 1.828-6.289 2.515-2.285.801-4.57 1.602-6.969 2.285-3.543.914-7.086 1.715-10.742 2.286-2.629.457-5.258.687-8 .914-2.86.23-5.601.23-8.457.23-3.086 0-6.289-.23-9.488-.57a83 83 0 0 1-7.086-1.031c-2.055-.34-4.113-.801-6.168-1.258-1.031-.227-2.176-.57-3.203-.797-2.973-.8-6.055-1.602-9.028-2.516-1.488-.457-2.972-.914-4.457-1.258-2.172-.683-4.457-1.37-6.629-2.058-1.828-.57-3.656-1.14-5.37-1.711q-2.573-.86-5.145-1.715c-1.14-.344-2.285-.8-3.543-1.144-1.371-.457-2.856-1.028-4.227-1.485-1.027-.344-2.058-.687-2.972-1.027-1.942-.688-4-1.488-5.942-2.172-1.144-.457-2.285-.914-3.43-1.258-1.484-.57-3.085-1.144-4.57-1.828-1.601-.687-3.203-1.258-4.8-1.945-1.028-.457-2.06-.797-3.087-1.258-1.257-.57-2.628-1.027-3.886-1.598-1.028-.457-1.942-.8-2.969-1.258l-3.086-1.37c-.914-.344-1.832-.801-2.746-1.145a44 44 0 0 1-2.512-1.14c-.8-.345-1.715-.802-2.515-1.145-.914-.344-1.715-.801-2.512-1.141-1.031-.457-2.172-1.031-3.203-1.484-1.14-.575-2.285-1.032-3.426-1.602-1.258-.574-2.402-1.144-3.66-1.715-1.027-.457-2.055-1.027-3.082-1.484-54.172-26.973-102.172-63.086-143.09-106.746-2.055-2.172-5.71-.684-5.71 2.289l.112 154.398v12.57c0 7.317 3.543 14.06 9.598 18.172 38.172 24.801 83.773 39.543 132.914 39.543" fill="#3370ff"/><path d="M470.035 201.121c-18.285-9.031-38.86-14.059-60.687-14.059-12.914 0-25.485 1.829-37.371 5.141-1.372.344-2.743.8-4.114 1.258-.914.344-1.941.574-2.855.914-1.945.688-3.774 1.375-5.602 2.059-3.316 1.257-6.629 2.742-9.828 4.23-3.43 1.598-6.742 3.426-10.058 5.371a128 128 0 0 0-9.715 6.285c-2.285 1.602-4.457 3.2-6.512 4.914a154 154 0 0 0-6.86 5.828c-1.14 1.141-2.398 2.172-3.542 3.313l-6.055 6.059-4.344 4.343-4.8 4.684-4.57 4.46-4.802 4.798-11.086 11.086c-.687.687-1.37 1.37-2.058 1.945l-1.028 1.027c-.457.457-1.027 1.028-1.601 1.485-.57.57-1.14 1.031-1.711 1.601a244.4 244.4 0 0 1-49.828 35.313c1.027.457 2.168 1.027 3.199 1.488.8.34 1.715.797 2.512 1.14.8.344 1.715.801 2.515 1.145.801.344 1.602.684 2.516 1.14.914.345 1.828.802 2.742 1.145l3.086 1.371c1.027.457 1.942.801 2.969 1.258 1.258.57 2.629 1.028 3.887 1.598 1.03.46 2.058.8 3.086 1.258 1.601.687 3.199 1.258 4.8 1.945 1.485.57 3.086 1.14 4.57 1.828 1.145.457 2.286.914 3.43 1.258 1.946.684 4 1.484 5.946 2.172a81 81 0 0 1 2.968 1.027c1.371.457 2.856 1.028 4.23 1.485 1.141.343 2.286.8 3.544 1.14q2.567.86 5.14 1.719c1.829.57 3.657 1.14 5.372 1.71 2.171.688 4.457 1.376 6.628 2.06 1.489.457 2.973.914 4.457 1.257 2.973.914 5.942 1.715 9.032 2.512 1.027.344 2.168.574 3.199.8 2.055.458 4.113.915 6.172 1.259 2.398.457 4.683.8 7.082 1.03 3.203.34 6.402.571 9.488.571 2.856 0 5.715 0 8.457-.23 2.63-.227 5.371-.457 8-.914 3.656-.57 7.2-1.371 10.742-2.286 2.399-.683 4.688-1.37 6.973-2.285 2.172-.8 4.227-1.601 6.285-2.515 2.399-1.028 4.684-2.285 6.973-3.543 1.14-.57 2.168-1.258 3.312-1.942 1.028-.687 2.059-1.257 3.086-1.945 1.602-1.027 3.2-2.168 4.684-3.426a52 52 0 0 0 3.887-3.203c2.289-1.941 4.457-4 6.628-6.168 1.032-1.031 2.06-2.172 3.086-3.316 1.258-1.485 2.516-2.969 3.657-4.457.918-1.258 1.828-2.512 2.742-3.77 2.515-3.543 4.8-7.316 6.86-11.199l2.284-4.688 21.145-42.171v.113c6.742-14.742 16.226-28.113 27.656-39.426" fill="#133c9a"/></svg>飞书 (Lark) 机器人</div>
+          <div class="settings-group">
+            <!-- Status indicator -->
+            <div class="settings-toggle-row">
+              <div>
+                <span class="settings-toggle-label" id="feishuStatusLabel">连接状态</span>
+                <div class="settings-toggle-desc" id="feishuStatusDesc">加载状态中…</div>
+              </div>
+              <span class="feishu-status-dot" id="feishuStatusDot" title="连接状态"></span>
+            </div>
+          </div>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title">凭证</div>
+          <div class="settings-group">
+            <div class="settings-row two-col">
+              <div class="settings-field">
+                <label>App ID</label>
+                <input type="text" id="settingFeishuAppId" placeholder="cli_xxxx（从 open.feishu.cn 获取）">
+              </div>
+              <div class="settings-field">
+                <label>App Secret</label>
+                <input type="password" id="settingFeishuAppSecret" placeholder="留空则保持不变">
+              </div>
+            </div>
+            <div id="feishuRestartHint" class="settings-hint-banner" style="display:none;">凭证修改需要重启服务器才能生效</div>
+          </div>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title">工作空间</div>
+          <div class="settings-group">
+            <div class="settings-row two-col">
+              <div class="settings-field">
+                <label>默认项目路径</label>
+                <input type="text" id="settingFeishuDefaultProject" placeholder="~/Projects/chatui">
+              </div>
+              <div class="settings-field">
+                <label>工作空间根目录</label>
+                <input type="text" id="settingFeishuWorkspaceRoot" placeholder="~/Projects">
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title">访问控制</div>
+          <div class="settings-group">
+            <div class="settings-field">
+              <label>允许的用户 <span style="color:var(--text-tertiary);font-weight:normal">（飞书 open_id，每行一个 — 留空表示允许所有人）</span></label>
+              <textarea id="settingFeishuAllowedUsers" class="settings-textarea settings-mono" rows="3" placeholder="ou_xxxx&#10;ou_yyyy"></textarea>
+            </div>
+          </div>
+
+          <div class="settings-divider"></div>
+          <p class="settings-desc">
+            在 <a href="https://open.feishu.cn/app" target="_blank" style="color:var(--accent-color)">open.feishu.cn</a> 创建飞书应用
+            → 启用机器人能力 → 在上方填写 <strong>App ID</strong> 和 <strong>App Secret</strong>。
+            凭证修改需要重启服务器才能生效。
+          </p>
+        </div>
+
+        <!-- ═══ Advanced Tab ═══ -->
+        <div class="settings-tab-panel" id="settingsTab_advanced">
+          <div class="settings-section-title">导入 / 导出</div>
+          <p class="settings-desc">将所有服务器端配置导出为 JSON，或从文件导入。</p>
+          <div class="settings-row" style="gap:10px;">
+            <button class="btn btn-secondary btn-sm" onclick="exportServerConfig()">⬇ 导出 JSON</button>
+            <button class="btn btn-secondary btn-sm" onclick="document.getElementById('settingsImportFile').click()">⬆ 导入 JSON</button>
+            <input type="file" id="settingsImportFile" accept=".json" style="display:none" onchange="importServerConfig(event)">
+          </div>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title">价格覆盖</div>
+          <p class="settings-desc">模型定价（美元 / 每百万 Token）。编辑以下 JSON 进行自定义。</p>
+          <textarea id="settingPricing" class="settings-textarea settings-mono" rows="8" placeholder="正在加载价格数据..."></textarea>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title">本地缓存</div>
+          <p class="settings-desc">对话缓存在 IndexedDB 中以实现即时加载。服务器始终是数据的唯一来源。</p>
+          <div class="settings-row" style="gap:10px; align-items:center;">
+            <span class="settings-info-value" id="settingsCacheStats" style="font-size:13px;opacity:0.7;">—</span>
+            <button class="btn btn-secondary btn-sm" id="settingsClearCacheBtn" onclick="_clearConvCacheFromSettings()">清除缓存</button>
+          </div>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title">服务器信息</div>
+          <div class="settings-server-info" id="settingsServerInfo">
+            <div class="settings-info-row"><span class="settings-info-label">状态</span><span class="settings-info-value" id="settingsSrvStatus">—</span></div>
+          </div>
+        </div>
+
+      </div><!-- /settings-content -->
+    </div><!-- /settings-body -->
+
+    <!-- Footer -->
+    <div class="settings-footer">
+      <div class="settings-footer-hint" id="settingsStatusHint"></div>
+      <div class="settings-footer-actions">
+        <span class="settings-version" id="settingsVersion"></span>
+        <button class="btn btn-secondary" onclick="closeSettings()">取消</button>
+        <button class="btn btn-primary" onclick="saveSettings()">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ★ My Day — Neo-Brutalist Tofu Block -->
+<div class="modal-overlay" id="dailyReportModal" onclick="if(event.target===this)closeDailyReport()">
+  <div class="modal myday-modal">
+    <!-- ── Left: Main task list ── -->
+    <div class="myday-main">
+      <div class="myday-header">
+        <div class="myday-header-top">
+          <div class="myday-title-area">
+            <div class="myday-tofu-face">
+              <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+                <!-- Neo-brutalist tofu: sharp square, thick border, hard shadow face -->
+                <rect x="2" y="2" width="24" height="24" fill="currentColor" opacity="0.1" stroke="currentColor" stroke-width="2"/>
+                <rect x="8" y="10" width="3" height="3" fill="currentColor"/>
+                <rect x="17" y="10" width="3" height="3" fill="currentColor"/>
+                <line x1="10" y1="19" x2="18" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="square"/>
+              </svg>
+            </div>
+            <div>
+              <h2 class="myday-title" id="mydayTitle">我的一天</h2>
+              <p class="myday-subtitle" id="mydaySubtitle"></p>
+            </div>
+          </div>
+          <div class="myday-header-actions">
+            <button class="myday-refresh-btn" id="mydayRefreshBtn" onclick="_mydayTriggerGenerate()" title="生成/刷新报告">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            </button>
+            <button class="myday-close" onclick="closeDailyReport()" title="关闭">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+        </div>
+        <!-- Progress bar -->
+        <div class="myday-progress" id="mydayProgress"></div>
+      </div>
+
+      <!-- Task list (scrollable) -->
+      <div class="myday-tasks-scroll" id="mydayTasksScroll">
+        <div class="myday-tasks" id="mydayTasks"></div>
+      </div>
+
+      <!-- Stats footer -->
+      <div class="myday-stats-bar" id="mydayStatsBar"></div>
+    </div>
+
+    <!-- ── Right: Mini calendar sidebar ── -->
+    <div class="myday-sidebar">
+      <div class="myday-cal-header" id="mydayCalHeader"></div>
+      <div class="myday-cal-grid" id="mydayCalGrid"></div>
+      <div class="myday-cal-legend">
+        <span class="cal-legend-item"><span class="cal-dot done"></span>完成</span>
+        <span class="cal-legend-item"><span class="cal-dot open"></span>未完成</span>
+      </div>
+      <!-- Day cost summary in sidebar -->
+      <div class="myday-cal-info" id="mydayCalInfo"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Preview Modal -->
+<div class="modal-overlay" id="previewModal" onclick="if(event.target===this)closePreview()">
+
+  <div class="preview-body" id="previewBody"></div>
+</div>
+
+<!-- Project Modal (★ Simplified multi-path design) -->
+<div class="modal-overlay" id="projectModal" onclick="if(event.target===this)closeProjectModal()">
+  <div class="modal project-modal">
+    <h3>Project Co-Pilot</h3>
+
+    <!-- ★ Unified multi-path input -->
+    <label style="margin-bottom:8px;display:block">Project Folders</label>
+    <div class="mp-folder-tags" id="mpFolderTags">
+      <!-- folder pills rendered here by JS -->
+    </div>
+    <div class="mp-add-row">
+      <input type="text" id="mpPathInput" class="mp-path-input" placeholder="/home/user/myproject" onkeydown="if(event.key==='Enter'){event.preventDefault();mpAddFolder();}">
+      <button class="btn-icon" onclick="toggleFolderBrowser()" title="Browse folders" id="browseFolderBtn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+      </button>
+      <button class="btn btn-sm btn-primary" onclick="mpAddFolder()">Add</button>
+    </div>
+    <p style="font-size:11px;color:var(--text-tertiary);margin:6px 0 4px">Add one or more server folders. The first folder is the primary project root.</p>
+
+    <!-- ★ Recent Project Paths -->
+    <div id="recentProjectPaths" class="recent-paths" style="display:none">
+      <div class="recent-paths-header">
+        <span class="recent-paths-title">Recent Projects</span>
+        <button class="recent-paths-clear" onclick="clearRecentProjects()" title="Clear all">✕</button>
+      </div>
+      <div class="recent-paths-list" id="recentPathsList"></div>
+    </div>
+
+    <!-- ★ Folder Browser Panel -->
+    <div id="folderBrowser" class="folder-browser" style="display:none">
+      <div class="folder-browser-header">
+        <button class="folder-nav-btn" onclick="browseParent()" id="browseBackBtn" title="Go up" disabled>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+          Up
+        </button>
+        <span class="folder-current-path" id="browsePath">~</span>
+        <button class="folder-nav-btn" onclick="toggleHiddenDirs()" id="browseHiddenBtn" title="Show hidden dirs">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
+      <div class="folder-browser-list" id="browseList">
+        <div style="color:var(--text-tertiary);padding:20px;text-align:center;font-size:12px">Browse server directories</div>
+      </div>
+      <div class="folder-browser-footer">
+        <button class="btn btn-sm btn-secondary" onclick="document.getElementById('folderBrowser').style.display='none'">Close</button>
+        <button class="btn btn-sm btn-primary" onclick="selectBrowsedFolder()">Use This Path</button>
+      </div>
+    </div>
+
+    <div id="projectModalStatus"></div>
+
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeProjectModal()">Cancel</button>
+      <button class="btn btn-secondary" onclick="clearProject()">Clear</button>
+      <button class="btn btn-primary" onclick="mpApplyFolders()">Set &amp; Scan</button>
+    </div>
+  </div>
+</div>
+
+<!-- ★ Browser Bridge Modal -->
+<div class="modal-overlay" id="browserModal" onclick="if(event.target===this)closeBrowserModal()">
+  <div class="modal browser-modal">
+    <h3>浏览器桥接</h3>
+    <p class="modal-desc">通过 Chrome 扩展让 AI 读取和交互你的浏览器标签页。</p>
+
+    <div class="browser-status-box" id="browserStatusBox">
+      <div class="browser-status-indicator" id="browserStatusIndicator">
+        <span class="browser-status-dot disconnected"></span>
+        <span class="browser-status-text">正在检查...</span>
+      </div>
+    </div>
+
+    <div class="browser-setup-steps">
+      <div class="setup-step">
+        <span class="step-num">1</span>
+        <div class="step-content">
+          <strong>下载扩展程序</strong>
+          <p>点击下方按钮下载 ZIP 文件，然后解压。</p>
+          <button class="btn btn-primary btn-sm" onclick="downloadBrowserExtension()">下载扩展 ZIP</button>
+        </div>
+      </div>
+      <div class="setup-step">
+        <span class="step-num">2</span>
+        <div class="step-content">
+          <strong>在 Chrome 中安装</strong>
+          <p>打开 <code class="copyable-url" onclick="navigator.clipboard.writeText('chrome://extensions/').then(()=>{this.classList.add('copied');this.setAttribute('data-tooltip','已复制!');setTimeout(()=>{this.classList.remove('copied');this.setAttribute('data-tooltip','点击复制')},1500)})" data-tooltip="点击复制" style="cursor:pointer;position:relative;border-bottom:1px dashed var(--accent-color)">chrome://extensions/</code> → 启用 <strong>开发者模式</strong> → 点击 <strong>加载已解压的扩展程序</strong> → 选择解压后的 <code>browser_extension</code> 文件夹。</p>
+        </div>
+      </div>
+      <div class="setup-step">
+        <span class="step-num">3</span>
+        <div class="step-content">
+          <strong>验证连接</strong>
+          <p>点击工具栏中的扩展图标，应显示 <strong>已连接</strong>。然后在此处开启浏览器功能。</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="browser-capabilities">
+      <h4>浏览器桥接的 AI 功能</h4>
+      <ul>
+        <li><strong>browser_list_tabs</strong> — 列出所有打开的标签页（标题、URL）</li>
+        <li><strong>browser_read_tab</strong> — 读取任意标签页的文本内容，或使用 CSS 选择器</li>
+        <li><strong>browser_execute_js</strong> — 在任意标签页中执行 JavaScript（点击、填充表单、提取数据）</li>
+      </ul>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeBrowserModal()">关闭</button>
+      <button class="btn btn-primary" id="browserModalToggleBtn" onclick="toggleBrowserFromModal()">启用浏览器桥接</button>
+    </div>
+  </div>
+</div>
+
+<!-- ★ Skills Management Modal — v5 Refined -->
+<div class="modal-overlay" id="skillsModal" onclick="if(event.target===this)closeSkillsModal()">
+  <div class="modal skills-modal">
+    <!-- Header -->
+    <div class="skills-modal-header">
+      <h3 class="skills-modal-title">Skills</h3>
+      <div class="skills-modal-subtitle">经验积累 · AI 自动学习并应用的知识库</div>
+      <button class="skills-modal-close" onclick="closeSkillsModal()" title="关闭">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+
+    <!-- Stats chips -->
+    <div class="skills-stats" id="skillsStats"></div>
+
+    <!-- Toolbar: tabs + search -->
+    <div class="skills-toolbar">
+      <div class="skills-tabs">
+        <button class="skills-tab active" data-scope="all" onclick="switchSkillsTab('all')">全部</button>
+        <button class="skills-tab" data-scope="project" onclick="switchSkillsTab('project')">项目</button>
+        <button class="skills-tab" data-scope="global" onclick="switchSkillsTab('global')">全局</button>
+      </div>
+      <div class="skills-search-box">
+        <svg class="skills-search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="skillsSearchInput" placeholder="搜索技能…" class="skills-search-input" oninput="filterSkillsList(this.value)">
+      </div>
+    </div>
+
+    <!-- Skills list -->
+    <div class="skills-list" id="skillsList">
+      <div class="skills-empty">
+        <span class="skills-empty-icon"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.4"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3 4 4.5 4.5 0 0 1-3-4"/><path d="M12 18v4"/><path d="M8 18l-2 2"/><path d="M16 18l2 2"/></svg></span>
+        <div class="skills-empty-title">还没有积累任何技能</div>
+        <div class="skills-empty-hint">AI 在对话中发现有用模式时会自动保存技能<br>你也可以点击下方「+ 新建」手动添加</div>
+      </div>
+    </div>
+
+    <!-- Add section -->
+    <div class="skills-add-section" id="skillsAddSection" style="display:none">
+      <div class="skills-add-header">创建新技能</div>
+      <input type="text" id="skillNewName" placeholder="技能名称 (短横线命名, e.g. react-hooks-convention)" class="skills-input">
+      <input type="text" id="skillNewDesc" placeholder="简短描述 — 什么时候该使用这个技能？" class="skills-input">
+      <textarea id="skillNewBody" placeholder="技能内容（支持 Markdown）…" class="skills-textarea" rows="5"></textarea>
+      <div class="skills-add-row">
+        <select id="skillNewScope" class="skills-select">
+          <option value="project">项目级</option>
+          <option value="global">全局</option>
+        </select>
+        <input type="text" id="skillNewTags" placeholder="标签（逗号分隔）" class="skills-input" style="flex:1;margin-bottom:0">
+        <button class="skills-action-btn skills-btn-on" onclick="createSkillFromModal()">创建</button>
+      </div>
+    </div>
+    <div id="skillsModalStatus" class="skills-modal-status"></div>
+
+    <!-- Bottom action bar -->
+    <div class="skills-modal-footer">
+      <button class="skills-action-btn skills-btn-add" onclick="toggleSkillsAddForm()">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        新建
+      </button>
+      <div style="flex:1"></div>
+      <button class="skills-action-btn skills-btn-on" id="skillsModalToggleBtn" onclick="toggleSkillsFromModal()">启用 Skills</button>
+    </div>
+  </div>
+</div>
+
+<!-- ★ Apply Code Modal (NEW) -->
+<div class="modal-overlay" id="applyModal" onclick="if(event.target===this)closeApplyModal()">
+  <div class="modal apply-modal">
+    <h3>Apply Code to File</h3>
+    <label>Target File Path (relative to project root)</label>
+    <input type="text" id="applyFilePath" placeholder="src/main.py" value="">
+    <div class="apply-preview" id="applyPreview"></div>
+    <div id="applyStatus"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeApplyModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="confirmApplyCode()" id="applyConfirmBtn">Write File</button>
+    </div>
+  </div>
+</div>
+
+<!-- Sidebar backdrop for mobile -->
+<div class="sidebar-backdrop" id="sidebarBackdrop" onclick="toggleSidebar()"></div>
+
+<!-- Full-page drop overlay -->
+<div class="drop-overlay" id="dropOverlay">
+  <div class="drop-overlay-inner">
+    <div class="drop-icon"></div>
+    <div class="drop-text">Drop files here</div>
+    <div class="drop-hint">Images · PDF · Word · Excel · PPT · Text files</div>
+  </div>
+</div>
+
+<!-- html2canvas: lazy-loaded on first Export click (199KB, avoids DevTools freeze) -->
+<script defer src="static/js/idb-cache.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/export-images.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/branch.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<!-- Feature modules (extracted from main.js) -->
+<script defer src="static/js/log-clean.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/translation.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/upload.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/image-gen.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/project.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/skills.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/scheduler.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/timer.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/myday.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script>
+// Feature flags — show/hide optional modules
+var _featureFlags = {};
+(async function loadFeatureFlags() {
+  try {
+    const resp = await fetch('api/features');
+    if (!resp.ok) return;
+    const flags = await resp.json();
+    _featureFlags = flags;
+    if (flags.trading_enabled) {
+      const btn = document.getElementById('tradingAdvisorBtn');
+      if (btn) btn.style.display = 'flex';
+    }
+  } catch(e) { /* silent — hide trading by default */ }
+})();
+// ── Script load failure detection ──
+setTimeout(function() {
+  // Check 1: Did any script tags fail to load?
+  if (_scriptLoadErrors.length > 0) {
+    console.error('[LoadGuard] ⚠️ ' + _scriptLoadErrors.length + ' script(s) failed to load:', _scriptLoadErrors);
+    _showLoadBanner('⚠️ Failed to load: ' + _scriptLoadErrors.map(function(s) { return s.split('/').pop(); }).join(', ') + '. <a href="javascript:location.reload()" style="color:#fef08a;text-decoration:underline">Reload</a>');
+    return;
+  }
+  // Check 2: Scripts loaded but _markScriptsLoaded was never called
+  if (typeof _markScriptsLoaded === 'function' && !window._scriptsReady) {
+    // If DB warning banner is already showing, don't double-up with LoadGuard error
+    if (document.getElementById('db-warning-banner')) {
+      console.warn('[LoadGuard] Scripts not yet ready, but DB warning already visible — suppressing duplicate banner.');
+      return;
+    }
+    console.error('[LoadGuard] ⚠️ Scripts loaded but init failed. Check console for errors.');
+    _showLoadBanner('⚠️ App initialization failed. Check browser console (F12) for details, then <a href="javascript:location.reload()" style="color:#fef08a;text-decoration:underline">reload</a>.');
+    return;
+  }
+}, 8000);
+function _showLoadBanner(html) {
+  if (document.getElementById('load-fail-banner')) return;
+  var banner = document.createElement('div');
+  banner.id = 'load-fail-banner';
+  banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#dc2626;color:#fff;padding:12px 20px;text-align:center;font-size:14px;font-family:system-ui,sans-serif;';
+  banner.innerHTML = html;
+  document.body.prepend(banner);
+}
+</script>
+<div id="toastContainer" class="toast-container"></div>
+</body>
+</html>

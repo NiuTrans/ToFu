@@ -1,0 +1,90 @@
+# ═══════════════════════════════════════════════════════════════
+#  Tofu (豆腐) — Tool configuration
+# ═══════════════════════════════════════════════════════════════
+#
+#  This is NOT a pip-installable package. This file only holds
+#  tool configuration for pytest, ruff, and other dev tools.
+#
+# ═══════════════════════════════════════════════════════════════
+
+# ── pytest (migrated from pytest.ini) ──────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "unit: Pure unit tests (no server, no browser)",
+    "api: API integration tests (Flask test client, no real LLM)",
+    "visual: Playwright visual E2E tests (needs browser + mock server)",
+    "slow: Tests that take >10s",
+]
+addopts = "-v --tb=short -x --strict-markers --strict-config"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+# ── ruff ───────────────────────────────────────────────────────
+# ── coverage ────────────────────────────────────────────────
+[tool.coverage.run]
+source = ["lib", "routes"]
+omit = [
+    "*/tests/*",
+    "*/debug/*",
+    "*/trading*",          # optional module, tested separately
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+# ── ruff ───────────────────────────────────────────────────
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort (import sorting)
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+]
+ignore = [
+    "E501",  # line too long — enforced at 120 but many existing lines exceed it
+    "E402",  # module level import not at top — we use conditional imports extensively
+    "E701",  # multiple statements on one line (colon) — existing style, clean up incrementally
+    "E702",  # multiple statements on one line (semicolon) — existing style
+    "E731",  # lambda assignment — rare, harmless
+    "E741",  # ambiguous variable name (l, O, I) — existing code, clean up incrementally
+    "F401",  # imported but unused — façade __init__.py files re-export intentionally
+    "F811",  # redefinition of unused name — common in test fixtures
+    "F841",  # local variable assigned but unused — clean up incrementally
+    "B005",  # strip with multi-characters — rare, intentional
+    "B007",  # unused loop control variable — clean up incrementally
+    "B023",  # function uses loop variable — existing patterns, clean up incrementally
+    "B904",  # raise without from inside except — clean up incrementally
+    "B905",  # zip without strict= — not needed for Python 3.10 compat
+    "UP031", # printf-string-formatting — existing style, clean up incrementally
+    "UP038", # non-pep604 isinstance — existing style, clean up incrementally
+]
+
+[tool.ruff.lint.per-file-ignores]
+"lib/__init__.py" = ["F401", "E401"]
+"lib/*/__init__.py" = ["F401", "E401"]
+"tests/*.py" = ["F401", "F811", "E711", "B018"]
+"debug/*.py" = ["E", "F", "W", "I", "UP", "B"]   # debug scripts: no linting
+"healthcheck.py" = ["E401"]  # multiple imports on one line (ast, os, sys, ...)
+"export.py" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["lib", "routes"]

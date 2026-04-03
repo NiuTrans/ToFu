@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "ChatUI Browser Bridge",
+  "version": "4.1.0",
+  "description": "Bridge between ChatUI server and your browser — lets the AI read tabs, extract content, execute JS, manage cookies, capture screenshots, and more.",
+
+  "permissions": [
+    "tabs",
+    "scripting",
+    "activeTab",
+    "storage",
+    "cookies",
+    "webNavigation",
+    "downloads",
+    "clipboardRead",
+    "clipboardWrite",
+    "notifications",
+    "bookmarks",
+    "history",
+    "debugger",
+    "declarativeNetRequest",
+    "management",
+    "alarms",
+    "offscreen"
+  ],
+
+  "host_permissions": [
+    "<all_urls>"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "ChatUI Browser Bridge"
+  },
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Questions & Discussion
+    url: https://github.com/nicoboss/chatui/discussions
+    about: Ask questions, share tips, or discuss ideas — use Discussions instead of opening an issue.
+  - name: 📖 Documentation
+    url: https://github.com/nicoboss/chatui/blob/main/CONTRIBUTING.md
+    about: Check the contributing guide for setup instructions and coding conventions.

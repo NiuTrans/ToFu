@@ -1,0 +1,55 @@
+# ═══════════════════════════════════════════════════════════════
+#  Tofu (豆腐) — Python 3.12+ Dependencies
+# ═══════════════════════════════════════════════════════════════
+#
+#  pip install -r requirements.txt
+#  playwright install chromium       # ← required after pip install
+#
+# ═══════════════════════════════════════════════════════════════
+
+# ── Web framework ──
+Flask>=3.0
+Flask-Compress>=1.15
+
+# ── HTTP / networking ──
+requests>=2.31
+urllib3>=2.0
+
+# ── Database ──
+# PostgreSQL 18+ server required (not a pip package — install via conda):
+#   conda install -c conda-forge postgresql>=18
+# The server auto-bootstraps a fresh PG instance on first run.
+psycopg2-binary>=2.9
+
+# ── HTML / web content extraction ──
+beautifulsoup4>=4.12
+lxml>=5.0
+trafilatura>=2.0
+python-dateutil>=2.9
+
+# ── Browser automation (run `playwright install chromium` after pip) ──
+playwright>=1.40
+
+# ── PDF extraction ──
+PyMuPDF>=1.24
+pymupdf4llm>=0.0.17
+
+# ── Document extraction (Word, Excel, PPT) ──
+python-docx>=1.1
+openpyxl>=3.1
+python-pptx>=1.0
+xlrd>=2.0
+olefile>=0.47
+
+# ── Image processing ──
+Pillow>=10.0
+
+# ── System monitoring ──
+psutil>=5.9
+
+# ── Optional: Trading module (enable with TRADING_ENABLED=1) ──
+# akshare>=1.14
+
+# ── Optional: Desktop agent (runs on local machine, not server) ──
+# pyautogui>=0.9
+# pyperclip>=1.8

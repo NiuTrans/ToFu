@@ -1,0 +1,47 @@
+# ── Secrets & Environment ──
+.env
+.env.*
+
+# ── Migration backups ──
+.migrate_backup/
+load_env.py
+
+# ── Python ──
+__pycache__/
+*.pyc
+*.pyo
+
+# ── Database ──
+*.db
+
+# ── Internal analysis (not part of the app) ──
+analysis_scripts/
+
+# ── Debug artifacts (developer-only, may contain API endpoints/keys) ──
+debug/benchmark_results.json
+debug/benchmark_speed_results.json
+debug/prompt_output.txt
+debug/ask.txt
+
+# ── Logs ──
+logs/
+
+# ── Linting ──
+.ruff_cache/
+
+# ── IDE ──
+.vscode/
+.idea/
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── Sessions & caches (auto-generated, may contain sensitive context) ──
+**/.project_sessions/
+**/.project_indexes/
+.chatui/
+
+# ── Uploads ──
+uploads/images/*
+!uploads/images/.gitkeep

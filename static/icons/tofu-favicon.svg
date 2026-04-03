@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="t" x1="0" y1="0" x2=".5" y2="1">
+      <stop offset="0%" stop-color="#fef8ec"/>
+      <stop offset="100%" stop-color="#fdf2d7"/>
+    </linearGradient>
+    <linearGradient id="f" x1="0" y1="0" x2=".2" y2="1">
+      <stop offset="0%" stop-color="#fdf4dc"/>
+      <stop offset="100%" stop-color="#f5e8c8"/>
+    </linearGradient>
+    <linearGradient id="r" x1="0" y1="0" x2="1" y2=".7">
+      <stop offset="0%" stop-color="#ecdcc0"/>
+      <stop offset="100%" stop-color="#dcc8a4"/>
+    </linearGradient>
+  </defs>
+  <!-- Cube faces -->
+  <path d="M15.3 4.6 L6.4 9.6 L16.3 16 L26.2 10.5Z" fill="url(#t)"/>
+  <path d="M6.4 9.6 L6.1 21.1 L17.2 27.2 L16.3 16Z" fill="url(#f)"/>
+  <path d="M16.3 16 L17.2 27.2 L25.9 22.3 L26.2 10.5Z" fill="url(#r)"/>
+  <!-- Outline -->
+  <path d="M15.3 4.6 L6.4 9.6 L6.1 21.1 L17.2 27.2 L25.9 22.3 L26.2 10.5Z"
+        stroke="#1a1520" stroke-width=".6" stroke-linejoin="round" fill="none"/>
+  <!-- Left eye -->
+  <rect x="7.8" y="14.2" width="2.6" height="3.3" rx=".3" fill="#1a1520"/>
+  <rect x="9.2" y="14.5" width=".9" height="1.2" rx=".2" fill="white" opacity=".9"/>
+  <!-- Right eye -->
+  <rect x="13.1" y="16.5" width="2.6" height="3.8" rx=".3" fill="#1a1520"/>
+  <rect x="14.5" y="16.9" width=".9" height="1.3" rx=".2" fill="white" opacity=".9"/>
+  <!-- Smile -->
+  <path d="M10.1 20.1 Q12 21.6 13.9 20.1" stroke="#1a1520" stroke-width=".5" fill="none" stroke-linecap="round" opacity=".45"/>
+  <!-- Blush -->
+  <ellipse cx="8" cy="18.4" rx="1" ry=".7" fill="#ffaaa2" opacity=".5"/>
+  <ellipse cx="15" cy="21.3" rx="1.1" ry=".7" fill="#feaca5" opacity=".5"/>
+</svg>

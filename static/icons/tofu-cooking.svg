@@ -1,0 +1,202 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160">
+  <!--
+    Tofu Cooking — Pixel Art Loading Scene
+    A cozy kitchen scene: tofu in a hot pot with steam,
+    fire underneath, and soy sauce bottle companion.
+    Perfect for loading/processing states.
+  -->
+  <defs>
+    <linearGradient id="pot" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#8B8B8B"/>
+      <stop offset="100%" stop-color="#6B6B6B"/>
+    </linearGradient>
+    <linearGradient id="ct" x1="0" y1="0" x2=".4" y2="1">
+      <stop offset="0%" stop-color="#FEF9EE"/>
+      <stop offset="100%" stop-color="#F8EDD6"/>
+    </linearGradient>
+    <linearGradient id="broth" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#E8C880"/>
+      <stop offset="50%" stop-color="#D8B060"/>
+      <stop offset="100%" stop-color="#C8A040"/>
+    </linearGradient>
+    <linearGradient id="fire1" x1="0.5" y1="1" x2="0.5" y2="0">
+      <stop offset="0%" stop-color="#F08030"/>
+      <stop offset="60%" stop-color="#F0C030"/>
+      <stop offset="100%" stop-color="#F8E880"/>
+    </linearGradient>
+  </defs>
+
+  <style>
+    /* Tofu bobbing in broth */
+    .tofu-bob {
+      animation: tBob 2s ease-in-out infinite;
+      transform-origin: 80px 75px;
+    }
+    @keyframes tBob {
+      0%, 100% { transform: translateY(0) rotate(0deg); }
+      30% { transform: translateY(-3px) rotate(-2deg); }
+      70% { transform: translateY(-1px) rotate(1deg); }
+    }
+
+    /* Steam columns */
+    .cook-steam {
+      animation: tCookSteam 2.5s ease-out infinite;
+      transform-origin: center bottom;
+    }
+    .cs-1 { animation-delay: 0s; }
+    .cs-2 { animation-delay: 0.5s; }
+    .cs-3 { animation-delay: 1s; }
+    .cs-4 { animation-delay: 1.5s; }
+    .cs-5 { animation-delay: 2s; }
+    @keyframes tCookSteam {
+      0% { opacity: 0; transform: translateY(0) scaleX(0.6); }
+      20% { opacity: 0.6; }
+      100% { opacity: 0; transform: translateY(-35px) scaleX(2); }
+    }
+
+    /* Fire flicker */
+    .flame {
+      animation: tFlame 0.4s ease-in-out infinite alternate;
+      transform-origin: center bottom;
+    }
+    .flame-1 { animation-delay: 0s; }
+    .flame-2 { animation-delay: 0.15s; }
+    .flame-3 { animation-delay: 0.08s; }
+    @keyframes tFlame {
+      0% { transform: scaleY(0.85) scaleX(1.05); }
+      100% { transform: scaleY(1.1) scaleX(0.9); }
+    }
+
+    /* Broth bubble */
+    .broth-bubble {
+      animation: tBubble 1.5s ease-out infinite;
+    }
+    .bb-1 { animation-delay: 0s; }
+    .bb-2 { animation-delay: 0.5s; }
+    .bb-3 { animation-delay: 1s; }
+    @keyframes tBubble {
+      0% { opacity: 0; r: 1; }
+      50% { opacity: 0.6; r: 2.5; }
+      100% { opacity: 0; r: 1; transform: translateY(-5px); }
+    }
+
+    /* Soy sauce bottle slight wobble */
+    .soy-wobble {
+      animation: tSoyWobble 3s ease-in-out infinite;
+      transform-origin: 130px 120px;
+    }
+    @keyframes tSoyWobble {
+      0%, 100% { transform: rotate(0deg); }
+      50% { transform: rotate(3deg); }
+    }
+
+    /* Blink */
+    .cook-eye {
+      animation: tBlink 4.5s ease-in-out infinite;
+      transform-origin: center;
+    }
+    @keyframes tBlink {
+      0%, 88%, 100% { transform: scaleY(1); }
+      92% { transform: scaleY(0.08); }
+    }
+  </style>
+
+  <!-- ═══ Floor / counter ═══ -->
+  <rect x="10" y="132" width="140" height="18" rx="0" fill="#E8DCC8" stroke="#C8B8A0" stroke-width="1"/>
+  <line x1="10" y1="140" x2="150" y2="140" stroke="#D8CDB8" stroke-width="0.5"/>
+
+  <!-- ═══ Fire under pot ═══ -->
+  <g transform="translate(0, -2)">
+    <ellipse class="flame flame-1" cx="68" cy="134" rx="6" ry="10" fill="url(#fire1)" opacity="0.8"/>
+    <ellipse class="flame flame-2" cx="80" cy="134" rx="7" ry="12" fill="url(#fire1)" opacity="0.9"/>
+    <ellipse class="flame flame-3" cx="92" cy="134" rx="6" ry="10" fill="url(#fire1)" opacity="0.8"/>
+    <!-- Inner bright core -->
+    <ellipse class="flame flame-2" cx="80" cy="134" rx="3" ry="6" fill="#F8E880" opacity="0.6"/>
+  </g>
+
+  <!-- ═══ Pot ═══ -->
+  <!-- Pot body -->
+  <path d="M48 90 L48 125 Q48 132 56 132 L104 132 Q112 132 112 125 L112 90Z"
+        fill="url(#pot)" stroke="#4A4A4A" stroke-width="1.5"/>
+  <!-- Pot rim -->
+  <ellipse cx="80" cy="90" rx="32" ry="8" fill="#9B9B9B" stroke="#4A4A4A" stroke-width="1.5"/>
+  <!-- Pot handles -->
+  <rect x="40" y="104" width="10" height="6" rx="2" fill="#7B7B7B" stroke="#4A4A4A" stroke-width="1"/>
+  <rect x="110" y="104" width="10" height="6" rx="2" fill="#7B7B7B" stroke="#4A4A4A" stroke-width="1"/>
+
+  <!-- ═══ Broth ═══ -->
+  <ellipse cx="80" cy="90" rx="30" ry="7" fill="url(#broth)" opacity="0.9"/>
+
+  <!-- Broth bubbles -->
+  <circle class="broth-bubble bb-1" cx="70" cy="88" r="1.5" fill="#F0D870" opacity="0"/>
+  <circle class="broth-bubble bb-2" cx="85" cy="89" r="1.5" fill="#F0D870" opacity="0"/>
+  <circle class="broth-bubble bb-3" cx="76" cy="87" r="1.5" fill="#F0D870" opacity="0"/>
+
+  <!-- ═══ Tofu in pot ═══ -->
+  <g class="tofu-bob">
+    <!-- Tofu body peeking out of broth -->
+    <rect x="68" y="72" width="24" height="20" rx="2"
+          fill="url(#ct)" stroke="#2A1F30" stroke-width="1.2"/>
+    <!-- Shine -->
+    <rect x="70" y="74" width="4" height="2" fill="white" opacity="0.4" rx="0.5"/>
+
+    <!-- Eyes -->
+    <g class="cook-eye">
+      <rect x="72" y="78" width="3" height="4" rx="0.5" fill="#2A1F30"/>
+      <rect x="73" y="78" width="1.5" height="1.5" rx="0.3" fill="white" opacity="0.85"/>
+    </g>
+    <g class="cook-eye" style="animation-delay: 0.15s">
+      <rect x="81" y="78" width="3" height="4" rx="0.5" fill="#2A1F30"/>
+      <rect x="82" y="78" width="1.5" height="1.5" rx="0.3" fill="white" opacity="0.85"/>
+    </g>
+
+    <!-- Happy closed smile -->
+    <path d="M75 85 Q78 88 81 85"
+          stroke="#2A1F30" stroke-width="1.2" fill="none"
+          stroke-linecap="round" opacity="0.45"/>
+
+    <!-- Blush -->
+    <ellipse cx="72" cy="84" rx="2.5" ry="1.2" fill="#F8A4A0" opacity="0.45"/>
+    <ellipse cx="85" cy="84" rx="2.5" ry="1.2" fill="#F8A4A0" opacity="0.45"/>
+
+    <!-- Tiny arms on pot rim -->
+    <rect x="64" y="86" width="6" height="3" rx="1" fill="#F0E0C8" stroke="#2A1F30" stroke-width="0.8"/>
+    <rect x="90" y="86" width="6" height="3" rx="1" fill="#F0E0C8" stroke="#2A1F30" stroke-width="0.8"/>
+  </g>
+
+  <!-- ═══ Steam ═══ -->
+  <text class="cook-steam cs-1" x="65" y="68" font-size="12" fill="#B8B0A0" opacity="0">~</text>
+  <text class="cook-steam cs-2" x="75" y="64" font-size="14" fill="#B8B0A0" opacity="0">~</text>
+  <text class="cook-steam cs-3" x="85" y="66" font-size="11" fill="#B8B0A0" opacity="0">~</text>
+  <text class="cook-steam cs-4" x="70" y="62" font-size="10" fill="#B8B0A0" opacity="0">~</text>
+  <text class="cook-steam cs-5" x="90" y="68" font-size="12" fill="#B8B0A0" opacity="0">~</text>
+
+  <!-- ═══ Soy sauce bottle companion ═══ -->
+  <g class="soy-wobble">
+    <!-- Bottle body -->
+    <rect x="124" y="106" width="14" height="24" rx="2"
+          fill="#4A3020" stroke="#2A1F12" stroke-width="1"/>
+    <!-- Bottle neck -->
+    <rect x="127" y="100" width="8" height="8" rx="1"
+          fill="#5A4030" stroke="#2A1F12" stroke-width="1"/>
+    <!-- Bottle cap -->
+    <rect x="128" y="97" width="6" height="4" rx="1"
+          fill="#C83030" stroke="#8A2020" stroke-width="0.8"/>
+    <!-- Label -->
+    <rect x="126" y="112" width="10" height="8" rx="0.5" fill="#F0E0C0"/>
+    <text x="131" y="118" font-size="4" fill="#4A3020" text-anchor="middle"
+          font-weight="bold">醤油</text>
+
+    <!-- Soy sauce face! -->
+    <rect x="128" y="108" width="1.5" height="2" fill="#F0D870" rx="0.3"/>
+    <rect x="132" y="108" width="1.5" height="2" fill="#F0D870" rx="0.3"/>
+    <path d="M129 111 Q131 112.5 133 111" stroke="#F0D870" stroke-width="0.8"
+          fill="none" stroke-linecap="round" opacity="0.7"/>
+  </g>
+
+  <!-- ═══ Small garnish details ═══ -->
+  <!-- Green onion slices floating in broth -->
+  <circle cx="62" cy="89" r="2" fill="#88B860" stroke="#608840" stroke-width="0.5" opacity="0.7"/>
+  <circle cx="96" cy="88" r="1.5" fill="#88B860" stroke="#608840" stroke-width="0.5" opacity="0.6"/>
+  <circle cx="74" cy="91" r="1.2" fill="#88B860" stroke="#608840" stroke-width="0.5" opacity="0.5"/>
+</svg>

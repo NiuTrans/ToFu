@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 帮你赚钱 — 智能投资助手</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%236390FF'/><stop offset='1' stop-color='%2300D4E5'/></linearGradient></defs><rect width='32' height='32' rx='8' fill='%230a0d14'/><rect x='1.5' y='1.5' width='29' height='29' rx='7' fill='none' stroke='url(%23g)' stroke-width='1.5'/><text x='16' y='22' font-size='14' text-anchor='middle' fill='url(%23g)' font-weight='bold' font-family='Inter,sans-serif'>AI</text></svg>">
+<link rel="stylesheet" href="static/vendor/google-fonts-local.css">
+<link rel="stylesheet" href="static/trading.css">
+<script defer src="static/vendor/marked.min.js"></script>
+</head>
+<body>
+
+<!-- ═══ Top Nav Bar ═══ -->
+<header class="top-bar">
+  <div class="top-bar-left">
+    <div class="logo">
+      <span class="logo-mark">AI</span>
+      <span class="logo-text">智投<span class="logo-accent">助手</span></span>
+      <span style="font-size:9px;color:var(--t4);font-weight:600;letter-spacing:.1em;margin-left:2px;opacity:.6">Beta</span>
+    </div>
+    <nav class="nav-tabs" id="mainNav">
+      <button class="nav-tab active" data-page="overview" onclick="TradingApp.navigate('overview')">
+        首页
+      </button>
+      <button class="nav-tab" data-page="simulator" onclick="TradingApp.navigate('simulator')">
+        模拟验证
+      </button>
+      <button class="nav-tab autopilot-tab" data-page="brain" onclick="TradingApp.navigate('brain')">
+        <span class="autopilot-badge">AI</span> 帮我选
+      </button>
+      <button class="nav-tab" data-page="dashboard" onclick="TradingApp.navigate('dashboard')">
+        我的持仓
+      </button>
+    </nav>
+  </div>
+  <div class="top-bar-right">
+    <div class="status-cluster">
+      <div class="status-dot" id="intelStatusDot" title="AI 状态"></div>
+      <span class="status-text" id="intelStatusText">就绪</span>
+    </div>
+
+    <button class="icon-btn" onclick="TradingApp.showCashModal()" title="设置投资金额"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg></button>
+    <a id="homeLink" href="/" class="icon-btn" title="返回 AI 助手主页"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></a>
+  </div>
+</header>
+
+<!-- ═══ Main Content Area ═══ -->
+<main class="main-content">
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- ── Page: Overview (首页) — NEW primary landing page ── -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <section class="page active" id="page-overview">
+
+    <!-- Hero Section -->
+    <div class="ov-hero">
+      <div class="ov-hero-glow"></div>
+      <div class="ov-hero-content">
+        <h1 class="ov-hero-title">让 AI 帮你赚钱</h1>
+        <p class="ov-hero-desc">
+          不懂股票基金？没关系！<b>AI 自动分析市场、挑选基金和股票、帮你买卖</b>。<br>
+          先用<b>虚拟资金</b>免费模拟试试，看看 AI 能帮你赚多少钱。
+        </p>
+        <div class="ov-hero-actions">
+          <button class="btn ov-btn-cta" onclick="TradingApp.navigate('simulator')">
+            免费模拟试试
+          </button>
+          <button class="btn ov-btn-secondary" onclick="TradingApp.navigate('brain')">
+让 AI 帮我选
+          </button>
+        </div>
+        <div class="ov-hero-trust">
+          <span>全程虚拟资金</span>
+          <span>使用真实历史数据</span>
+          <span>不花一分钱</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- How It Works -->
+    <div class="ov-howto">
+      <h2 class="ov-section-title">怎么用？超简单</h2>
+      <div class="ov-howto-steps">
+        <div class="ov-howto-step">
+          <div class="ov-howto-num">1</div>
+          <div class="ov-howto-icon">1</div>
+          <div class="ov-howto-title">先模拟试试</div>
+          <div class="ov-howto-desc">AI 用过去真实行情模拟操盘<br>看看能帮你赚多少钱</div>
+        </div>
+        <div class="ov-howto-arrow">→</div>
+        <div class="ov-howto-step">
+          <div class="ov-howto-num">2</div>
+          <div class="ov-howto-icon">2</div>
+          <div class="ov-howto-title">AI 帮你选</div>
+          <div class="ov-howto-desc">AI 自动分析市场新闻<br>推荐适合你的基金和股票</div>
+        </div>
+        <div class="ov-howto-arrow">→</div>
+        <div class="ov-howto-step">
+          <div class="ov-howto-num">3</div>
+          <div class="ov-howto-icon">3</div>
+          <div class="ov-howto-title">跟着操作</div>
+          <div class="ov-howto-desc">AI 告诉你买什么、买多少<br>你只需要点「确认」</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI Track Record -->
+    <div class="ov-section">
+      <h2 class="ov-section-title">AI 的模拟成绩单</h2>
+      <p class="ov-section-desc">以下是 AI 在过去真实行情上的模拟表现，不是虚构的数字</p>
+      <div id="ovTrackRecord" class="ov-track-record">
+        <div class="ov-empty-track">
+          <div class="ov-empty-icon"></div>
+          <p>还没有模拟记录</p>
+          <p class="ov-empty-sub">点击「免费模拟试试」，看看 AI 用过去真实行情能帮你赚多少钱</p>
+          <button class="btn ov-btn-cta-sm" onclick="TradingApp.navigate('simulator')">开始第一次模拟</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI Current View -->
+    <div class="ov-section">
+      <h2 class="ov-section-title">AI 现在怎么看市场</h2>
+      <div id="ovAiView" class="ov-ai-card">
+        <div class="ov-ai-empty">
+          <p>AI 还没有分析过市场</p>
+          <button class="btn btn-outline btn-sm" onclick="TradingApp.navigate('brain')">让 AI 分析一下 →</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Portfolio Peek -->
+    <div class="ov-section" id="ovPortfolioSection" style="display:none">
+      <h2 class="ov-section-title">我的资产概览</h2>
+      <div id="ovPortfolioPeek" class="ov-portfolio"></div>
+      <div style="text-align:center;margin-top:12px">
+        <button class="btn btn-outline btn-sm" onclick="TradingApp.navigate('dashboard')">查看持仓详情 →</button>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ── Page: Dashboard (我的持仓) ── -->
+  <section class="page" id="page-dashboard">
+    <!-- KPI Strip -->
+    <div class="kpi-strip" id="kpiStrip">
+      <div class="kpi-card primary">
+        <div class="kpi-label">我的总资产 ✦</div>
+        <div class="kpi-value" id="kpiTotal">--</div>
+        <div class="kpi-sub" id="kpiTotalSub"></div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">投资金额</div>
+        <div class="kpi-value" id="kpiHolding">--</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">剩余金额</div>
+        <div class="kpi-value" id="kpiCash">--</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">赚/亏多少</div>
+        <div class="kpi-value" id="kpiPnl">--</div>
+        <div class="kpi-sub" id="kpiPnlPct"></div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">今天变化</div>
+        <div class="kpi-value" id="kpiEstChange">--</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">持有数量</div>
+        <div class="kpi-value" id="kpiCount">--</div>
+      </div>
+    </div>
+
+    <!-- Holdings Table -->
+    <div class="panel">
+      <div class="panel-header">
+<h3>我的投资</h3>
+        <div class="panel-actions">
+          <button class="btn btn-sm btn-danger" onclick="TradingApp.deleteAllHoldings()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+            清空持仓
+          </button>
+          <button class="btn btn-sm btn-primary" onclick="TradingApp.showAddHolding()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            添加持仓
+          </button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="table-wrap">
+          <table class="data-table" id="holdingsTable">
+            <thead>
+              <tr>
+                <th>代码</th>
+                <th>名称</th>
+                <th class="num">数量</th>
+                <th class="num">花了多少钱</th>
+                <th class="num">现在值多少</th>
+                <th class="num">今天估算</th>
+                <th class="num">总价值</th>
+                <th class="num">赚了/亏了</th>
+                <th class="num">赚了百分比</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="holdingsBody"></tbody>
+          </table>
+        </div>
+        <div class="empty-state" id="holdingsEmpty" style="display:none">
+          <p>还没有持仓，让 <a href="#" onclick="TradingApp.navigate('brain');return false" style="color:var(--accent)">AI 帮你选几只</a> 吧！</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Trade History (merged from legacy History page) -->
+    <div class="panel" style="margin-top:16px">
+      <div class="panel-header">
+<h3>买卖记录</h3>
+        <div class="panel-actions">
+          <button class="btn btn-sm btn-outline" onclick="TradingApp.exportCSV()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            导出CSV
+          </button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="table-wrap" style="max-height:320px;overflow-y:auto">
+          <table class="data-table" id="dashTradeHistory">
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>名称</th>
+                <th>买/卖</th>
+                <th class="num">数量</th>
+                <th class="num">价格</th>
+                <th class="num">金额</th>
+                <th>备注</th>
+              </tr>
+            </thead>
+            <tbody id="dashTradeHistoryBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- ── Page: Brain (AI操盘) — NEW unified tab ── -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <section class="page" id="page-brain">
+    <div class="brain-header">
+      <h2>AI 帮你选 <small id="brainCycleInfo" style="color:var(--muted);font-weight:400"></small></h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <label class="toggle-label" title="自动定时分析">
+          <input type="checkbox" id="brainAutoToggle" onchange="TradingApp.toggleBrainAuto(this.checked)">
+          <span class="toggle-slider"></span>
+          <span style="margin-left:4px;font-size:12px">自动</span>
+        </label>
+        <button class="btn btn-sm btn-primary" id="brainAnalyzeBtn" onclick="TradingApp.runBrainAnalysis()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3 4 4.5 4.5 0 0 1-3-4"/><path d="M12 18v4"/><path d="M8 18l-2 2"/><path d="M16 18l2 2"/></svg> 开始分析
+        </button>
+      </div>
+    </div>
+
+    <!-- Brain Status Cards -->
+    <div class="brain-status-row">
+      <div class="brain-stat-card">
+        <div class="brain-stat-label">AI 看法</div>
+        <div class="brain-stat-value" id="brainOutlook">--</div>
+      </div>
+      <div class="brain-stat-card">
+        <div class="brain-stat-label">AI 多有把握</div>
+        <div class="brain-stat-value" id="brainConfidence">--</div>
+      </div>
+      <div class="brain-stat-card">
+        <div class="brain-stat-label">等你确认</div>
+        <div class="brain-stat-value" id="brainPendingTrades">0</div>
+      </div>
+      <div class="brain-stat-card">
+        <div class="brain-stat-label">以前猜对了多少</div>
+        <div class="brain-stat-value" id="brainWinRate">--</div>
+      </div>
+    </div>
+
+    <!-- Morning Orders (if any pending) -->
+    <div id="brainMorningOrders" class="brain-morning-section" style="display:none">
+      <h3>AI 的操作建议</h3>
+      <div id="brainOrdersList"></div>
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <button class="btn btn-sm btn-primary" onclick="TradingApp.executeAllPending()">全部确认执行</button>
+        <button class="btn btn-sm btn-outline" onclick="TradingApp.dismissAllPending()">暂不操作</button>
+      </div>
+    </div>
+
+    <!-- Candidates section removed: screening is AI-internal, users never see selection criteria -->
+
+    <!-- Analysis Output -->
+    <div class="brain-analysis-section">
+      <h3>AI 的分析报告</h3>
+      <div id="brainThinking" class="thinking-block" style="display:none"></div>
+      <div id="brainContent" class="analysis-content">
+        <div class="brain-empty-state">
+
+          <p>点击 <strong>「开始分析」</strong>，AI 就会自动帮你看市场</p>
+          <p style="color:var(--t3);font-size:12px;max-width:420px;margin:8px auto 0">AI 会自动查看市场新闻、分析走势、筛选基金和股票，然后告诉你应该买什么、卖什么、买多少。</p>
+        </div>
+      </div>
+      <!-- ★ Structured result panels rendered by renderBrainStructuredResult() -->
+      <div id="brainStructuredResult" style="display:none"></div>
+    </div>
+
+    <!-- Trade History -->
+    <div class="brain-history-section" style="margin-top:16px">
+<h3>AI 以前的分析</h3>
+      <div id="brainCyclesList"></div>
+    </div>
+  </section>
+
+
+
+
+
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- ── Page: Simulator (LLM 历史模拟) ── -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <section class="page" id="page-simulator">
+
+    <!-- ── Step Indicator ── -->
+    <div class="sim-steps">
+      <div class="sim-step sim-step-active" id="simStep1">
+        <div class="sim-step-num">1</div>
+        <div class="sim-step-info">
+          <div class="sim-step-title">设置</div>
+          <div class="sim-step-desc">时间和风险偏好</div>
+        </div>
+      </div>
+      <div class="sim-step-line"></div>
+      <div class="sim-step" id="simStep2">
+        <div class="sim-step-num">2</div>
+        <div class="sim-step-info">
+          <div class="sim-step-title">抓数据</div>
+          <div class="sim-step-desc">下载历史行情</div>
+        </div>
+      </div>
+      <div class="sim-step-line"></div>
+      <div class="sim-step" id="simStep3">
+        <div class="sim-step-num">3</div>
+        <div class="sim-step-info">
+          <div class="sim-step-title">AI操盘</div>
+          <div class="sim-step-desc">模拟买卖决策</div>
+        </div>
+      </div>
+      <div class="sim-step-line"></div>
+      <div class="sim-step" id="simStep4">
+        <div class="sim-step-num">4</div>
+        <div class="sim-step-info">
+          <div class="sim-step-title">看结果</div>
+          <div class="sim-step-desc">赚了还是亏了</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!--  Phase 1: Setup                                       -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="simSetupPhase">
+
+      <!-- Hero -->
+      <div class="sim-hero">
+        <div class="sim-hero-glow"></div>
+        <div class="sim-hero-icon"></div>
+        <h2 class="sim-hero-title">让 AI 回到过去帮你赚钱</h2>
+        <p class="sim-hero-desc">选一段过去的时间，AI 会用那段时间的<b>真实行情和新闻</b>来模拟买卖。<br>全程用虚拟资金，<b>不花一分钱真钱</b>。如果 AI 能在过去赚钱，就值得信任它！</p>
+      </div>
+
+      <!-- Main Config Card -->
+      <div class="sim-config-card">
+
+        <!-- ① Time Period -->
+        <div class="sim-section-label">选一段时间让 AI 回到过去操盘</div>
+        <div class="sim-date-row">
+          <div class="sim-date-field">
+            <label>从这天开始</label>
+            <input type="date" id="simStartDate" class="sim-input">
+          </div>
+          <div class="sim-date-sep">→</div>
+          <div class="sim-date-field">
+            <label>到这天结束</label>
+            <input type="date" id="simEndDate" class="sim-input">
+          </div>
+        </div>
+        <div class="sim-quick-periods">
+          <button class="sim-period-btn" onclick="TradingApp.setSimPeriod(90, this)">近3个月</button>
+          <button class="sim-period-btn active" onclick="TradingApp.setSimPeriod(180, this)">近半年</button>
+          <button class="sim-period-btn" onclick="TradingApp.setSimPeriod(365, this)">近1年</button>
+        </div>
+
+        <!-- ② Strategy Lab — AI picks from learned strategies -->
+        <div class="sim-section-label" style="margin-top:28px">
+          策略实验室
+          <button class="btn btn-xs btn-outline" onclick="TradingApp.refreshStrategyLab()" style="margin-left:12px;font-size:11px">刷新</button>
+        </div>
+        <p class="sim-section-explain">AI 会<b>自主选择和组合</b>下列策略来决策。每次模拟后，策略的胜率会自动更新 — 越用越准。</p>
+
+        <div id="simStrategyLab" class="sim-strategy-lab">
+          <!-- JS dynamically loads Strategy Lab from DB -->
+          <div class="sim-slab-loading"><div class="sim-slab-spinner"></div> 正在加载策略数据...</div>
+        </div>
+
+        <!-- ③ Build Your Portfolio -->
+        <div class="sim-section-label" style="margin-top:28px">
+          构建你的投资组合
+          <span id="simSymbolCount" class="sim-symbol-count">0 只标的</span>
+        </div>
+        <p class="sim-section-explain">自由选择任意 <b>股票、ETF、基金</b> 组成投资池。AI 只在你选的标的范围内操作。</p>
+
+        <!-- Quick-add groups -->
+        <div class="sim-quick-groups">
+          <div class="sim-quick-group-label">快捷添加：</div>
+          <button class="sim-quick-btn" onclick="TradingApp.addQuickGroup('broad_index')">宽基指数</button>
+          <button class="sim-quick-btn" onclick="TradingApp.addQuickGroup('sector')">行业ETF</button>
+          <button class="sim-quick-btn" onclick="TradingApp.addQuickGroup('bond')">债券</button>
+          <button class="sim-quick-btn" onclick="TradingApp.addQuickGroup('cross_border')">跨境</button>
+          <button class="sim-quick-btn" onclick="TradingApp.addQuickGroup('blue_chip')">大白马</button>
+        </div>
+
+        <!-- Symbol search -->
+        <div class="sim-symbol-search-wrap">
+          <input type="text" id="simSymbolSearch" class="sim-input sim-symbol-search-input"
+                 placeholder="搜索：代码、名称或拼音（如 600519、贵州茅台、gzmt）"
+                 oninput="TradingApp.onSymbolSearchInput(this)"
+                 autocomplete="off">
+          <div id="simSearchResults" class="sim-search-results"></div>
+        </div>
+
+        <div id="simSelectedSymbols" class="sim-selected-symbols">
+          <div class="sim-symbols-empty">请通过上方搜索或快捷按钮添加投资标的</div>
+        </div>
+        <div class="sim-symbol-actions">
+          <button class="btn btn-sm btn-outline" onclick="TradingApp.clearAllSymbols()">清空全部</button>
+        </div>
+
+        <!-- ③ Capital — simplified to just one big input -->
+        <div class="sim-section-label" style="margin-top:28px">投多少虚拟资金？</div>
+        <p class="sim-section-explain">这不是真钱！只是模拟用的虚拟金额，用来计算收益率。</p>
+
+        <div class="sim-capital-row">
+          <div class="sim-capital-input-wrap">
+            <span class="sim-capital-prefix">¥</span>
+            <input type="number" id="simCapital" class="sim-input sim-capital-input" value="100000" min="1000" step="10000">
+          </div>
+          <div class="sim-capital-shortcuts">
+            <button class="sim-cap-btn" onclick="TradingApp.setCapital(50000)">5万</button>
+            <button class="sim-cap-btn active" onclick="TradingApp.setCapital(100000)">10万</button>
+            <button class="sim-cap-btn" onclick="TradingApp.setCapital(500000)">50万</button>
+            <button class="sim-cap-btn" onclick="TradingApp.setCapital(1000000)">100万</button>
+          </div>
+        </div>
+
+        <!-- ③½ Benchmark Index (visible, not hidden in advanced) -->
+        <div class="sim-section-label" style="margin-top:28px">和谁比？（基准指数）</div>
+        <p class="sim-section-explain">模拟结束后，AI 的收益会和「什么都不做直接买大盘」做对比。你可以选择用哪个指数当基准。</p>
+        <div class="sim-bench-picker">
+          <select id="simBenchmarkIndex" class="sim-input sim-bench-select" onchange="TradingApp.selectBenchmark(this.value)">
+            <option value="1.000300" selected>沪深300 — 最常用，代表大盘整体</option>
+            <option value="1.000001">上证指数 — 上海交易所大盘</option>
+            <option value="0.399001">深证成指 — 深圳交易所大盘</option>
+            <option value="0.399006">创业板指 — 成长型公司为主</option>
+            <option value="1.000905">中证500 — 中等市值公司</option>
+            <option value="1.000852">中证1000 — 小市值公司</option>
+          </select>
+        </div>
+
+        <!-- ④ Advanced Settings (collapsed by default) -->
+        <details class="sim-advanced-toggle">
+          <summary class="sim-advanced-summary">高级设置（新手可以忽略，默认值就很好）</summary>
+          <div class="sim-advanced-body">
+            <div class="sim-params-grid">
+              <div class="sim-param">
+                <label>AI 多久看一次盘 <span class="sim-help-icon" title="比如设成5，AI就每5个交易日看一次市场并决定买卖。\n数字越小决策越频繁，手续费也越多。">?</span></label>
+                <input type="number" id="simStepDays" class="sim-input" value="5" min="1" max="20">
+                <span class="sim-param-unit">个交易日</span>
+              </div>
+              <div class="sim-param">
+                <label>亏多少自动卖掉 <span class="sim-help-icon" title="当某只标的亏损超过这个比例时，AI会自动卖出止损。\n比如设成5%，买了100元的跌到95元就卖掉。">?</span></label>
+                <input type="number" id="simStopLoss" class="sim-input" value="5" min="1" max="30">
+                <span class="sim-param-unit">%</span>
+              </div>
+              <div class="sim-param">
+                <label>赚多少自动卖掉 <span class="sim-help-icon" title="当某只标的盈利超过这个比例时，AI会自动卖出获利。\n比如设成15%，买了100元涨到115元就卖掉，落袋为安。">?</span></label>
+                <input type="number" id="simTakeProfit" class="sim-input" value="15" min="3" max="50">
+                <span class="sim-param-unit">%</span>
+              </div>
+              <div class="sim-param">
+                <label>单只标的上限 <span class="sim-help-icon" title="同一只最多占总资金的百分比。\n比如设成30%，10万本金最多花3万买同一只，避免把鸡蛋放一个篮子里。">?</span></label>
+                <input type="number" id="simMaxPos" class="sim-input" value="30" min="10" max="80">
+                <span class="sim-param-unit">%</span>
+              </div>
+              <div class="sim-param">
+                <label>AI 最低把握度 <span class="sim-help-icon" title="AI只在有足够把握时才下单。\n比如设成50%，只有当AI觉得超过50%的可能性会涨才会买入。">?</span></label>
+                <input type="number" id="simMinConf" class="sim-input" value="50" min="0" max="100">
+                <span class="sim-param-unit">%</span>
+              </div>
+            </div>
+            <div class="sim-option-row">
+              <label class="sim-checkbox-label">
+                <input type="checkbox" id="simSkipIntel">
+                <span>跳过新闻抓取（速度更快，但 AI 看不到新闻，只能看价格走势）</span>
+              </label>
+            </div>
+          </div>
+        </details>
+
+        <!-- ⑤ Big Action Button -->
+        <div class="sim-action-row">
+          <button class="btn btn-lg sim-btn-primary sim-btn-go" onclick="TradingApp.startFetchData()">
+            开始模拟
+          </button>
+        </div>
+        <div class="sim-action-hint">AI 会自动抓取历史数据 → 分析行情 → 模拟买卖 → 生成报告</div>
+
+      </div>
+
+      <!-- History Sessions -->
+      <div class="sim-history-section">
+<h3>AI 以前的模拟成绩</h3>
+        <div id="simSessionList" class="sim-session-list">
+          <div class="sim-empty">还没做过模拟，快点上方的按钮试试吧！</div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!--  Phase 2: Data Fetching                               -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="simFetchPhase" style="display:none">
+
+      <div class="sim-fetch-header">
+        <h2>正在抓取历史数据</h2>
+        <span id="simFetchElapsed" class="sim-fetch-elapsed"></span>
+        <button class="btn btn-sm btn-outline" onclick="TradingApp.goBackToSetup()">← 返回配置</button>
+      </div>
+
+      <!-- Overall Progress -->
+      <div class="sim-overall-bar">
+        <div class="sim-overall-fill" id="simFetchOverall">0%</div>
+      </div>
+
+      <!-- Per-phase Progress Cards -->
+      <div class="sim-fetch-grid">
+        <div class="sim-fetch-card">
+          <div class="sim-fetch-card-icon"></div>
+          <div class="sim-fetch-card-title">价格数据</div>
+          <div class="sim-fetch-card-bar"><div class="sim-fetch-fill" id="simProg_prices"></div></div>
+          <div class="sim-fetch-card-text" id="simProgText_prices">等待中...</div>
+        </div>
+        <div class="sim-fetch-card">
+          <div class="sim-fetch-card-icon"></div>
+          <div class="sim-fetch-card-title">大盘指数</div>
+          <div class="sim-fetch-card-bar"><div class="sim-fetch-fill" id="simProg_indices"></div></div>
+          <div class="sim-fetch-card-text" id="simProgText_indices">等待中...</div>
+        </div>
+        <div class="sim-fetch-card">
+          <div class="sim-fetch-card-icon"></div>
+          <div class="sim-fetch-card-title">宏观数据</div>
+          <div class="sim-fetch-card-bar"><div class="sim-fetch-fill" id="simProg_macro"></div></div>
+          <div class="sim-fetch-card-text" id="simProgText_macro">等待中...</div>
+        </div>
+        <div class="sim-fetch-card">
+          <div class="sim-fetch-card-icon"></div>
+          <div class="sim-fetch-card-title">新闻情报</div>
+          <div class="sim-fetch-card-bar"><div class="sim-fetch-fill" id="simProg_intel"></div></div>
+          <div class="sim-fetch-card-text" id="simProgText_intel">等待中...</div>
+        </div>
+      </div>
+
+      <!-- Log Output -->
+      <div class="sim-fetch-log-section">
+        <h4>抓取日志</h4>
+        <div id="simFetchLog" class="sim-fetch-log"></div>
+      </div>
+
+      <!-- Proceed Button (hidden initially) -->
+      <div style="text-align:center;margin-top:20px">
+        <button class="btn btn-lg sim-btn-primary" id="simProceedToRun" style="display:none" onclick="TradingApp.proceedToRun()">
+          数据就绪，开始模拟 →
+        </button>
+      </div>
+
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!--  Phase 3: Running Simulation                          -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="simRunPhase" style="display:none">
+
+      <div class="sim-run-header">
+        <div>
+          <h2><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;opacity:0.7"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3 4 4.5 4.5 0 0 1-3-4"/><path d="M12 18v4"/><path d="M8 18l-2 2"/><path d="M16 18l2 2"/></svg> AI 正在模拟操盘</h2>
+          <p class="sim-run-subtitle">AI 正在用历史数据一步步模拟操盘，每一步都会思考后再决定买还是卖。</p>
+        </div>
+        <div class="sim-run-actions">
+          <button class="btn btn-sm btn-outline" onclick="TradingApp.goBackToSetup()">← 改设置</button>
+        </div>
+      </div>
+
+      <!-- What's happening now -->
+      <div class="sim-pipeline">
+        <div class="sim-pipe-stage" id="simPipe1">
+          <div class="sim-pipe-num">1</div>
+          <div><div class="sim-pipe-text">看持仓</div><div class="sim-pipe-desc">更新价格</div></div>
+        </div>
+        <div class="sim-pipe-arrow">›</div>
+        <div class="sim-pipe-stage" id="simPipe2">
+          <div class="sim-pipe-num">2</div>
+          <div><div class="sim-pipe-text">算走势</div><div class="sim-pipe-desc">分析涨跌规律</div></div>
+        </div>
+        <div class="sim-pipe-arrow">›</div>
+        <div class="sim-pipe-stage" id="simPipe3">
+          <div class="sim-pipe-num">3</div>
+          <div><div class="sim-pipe-text">AI 思考</div><div class="sim-pipe-desc">综合分析决策</div></div>
+        </div>
+        <div class="sim-pipe-arrow">›</div>
+        <div class="sim-pipe-stage" id="simPipe4">
+          <div class="sim-pipe-num">4</div>
+          <div><div class="sim-pipe-text">下单</div><div class="sim-pipe-desc">虚拟买卖</div></div>
+        </div>
+        <div class="sim-pipe-arrow">›</div>
+        <div class="sim-pipe-stage" id="simPipe5">
+          <div class="sim-pipe-num">5</div>
+          <div><div class="sim-pipe-text">记账</div><div class="sim-pipe-desc">算盈亏</div></div>
+        </div>
+      </div>
+
+      <!-- Running Indicator + progress text -->
+      <div class="sim-running-indicator" id="simRunningIndicator" style="display:none">
+        <div class="sim-spinner-ring"></div>
+        <span id="simRunProgress">模拟运行中...</span>
+      </div>
+
+      <!-- AI Analysis Panel (shows what AI is reviewing at each step) -->
+      <div id="simAnalysisPanel" class="sim-analysis-panel" style="display:none"></div>
+
+      <!-- Mini Equity Chart -->
+      <div class="sim-equity-mini" id="simEquityMini">
+        <div class="sim-equity-placeholder">资产曲线将在模拟开始后显示</div>
+      </div>
+
+      <!-- Start Button -->
+      <div style="text-align:center;margin:20px 0">
+        <button class="btn btn-lg sim-btn-primary" id="simRunBtn" onclick="TradingApp.startSimulation()">
+          开始模拟
+        </button>
+      </div>
+
+      <!-- Timeline -->
+      <div class="sim-timeline-section">
+        <h3>AI 每一步的操作</h3>
+        <div id="simTimeline" class="sim-timeline"></div>
+      </div>
+
+      <!-- AI Reasoning -->
+      <div id="simReasoning" class="sim-reasoning" style="display:none"></div>
+
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!--  Phase 4: Results                                     -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div id="simResultsPhase" style="display:none">
+
+      <div class="sim-results-header">
+        <h2>结果出来了！看看 AI 表现如何</h2>
+        <div>
+          <button class="btn btn-sm btn-outline" onclick="TradingApp.goBackToRun()">← 看操盘过程</button>
+          <button class="btn btn-sm btn-primary" onclick="TradingApp.goBackToSetup()">再来一次</button>
+        </div>
+      </div>
+
+      <!-- Big Hero Result -->
+      <div class="sim-res-hero">
+        <div class="sim-res-hero-label" id="simResHeroLabel">模拟结果</div>
+        <div class="sim-res-hero-value" id="simResHero">--</div>
+      </div>
+
+      <!-- KPI Grid — with explanations -->
+      <div class="sim-res-kpi-grid">
+        <div class="sim-res-kpi-card sim-res-primary">
+          <div class="sim-res-label">总收益</div>
+          <div class="sim-res-value" id="simResReturn">--</div>
+          <div class="sim-res-explain">正数=赚了 负数=亏了</div>
+        </div>
+        <div class="sim-res-kpi-card">
+          <div class="sim-res-label">最大回撤</div>
+          <div class="sim-res-value" id="simResDrawdown">--</div>
+          <div class="sim-res-explain">中间最多亏过多少，<b>越小越稳</b></div>
+        </div>
+        <div class="sim-res-kpi-card">
+          <div class="sim-res-label">性价比</div>
+          <div class="sim-res-value" id="simResSharpe">--</div>
+          <div class="sim-res-explain" id="simResSharpeHint">&gt;1 = 值得冒险</div>
+        </div>
+        <div class="sim-res-kpi-card">
+          <div class="sim-res-label">买卖赢率</div>
+          <div class="sim-res-value" id="simResWinRate">--</div>
+          <div class="sim-res-explain">每次买卖赚钱的比例</div>
+        </div>
+        <div class="sim-res-kpi-card">
+          <div class="sim-res-label">买卖次数</div>
+          <div class="sim-res-value" id="simResTrades">--</div>
+          <div class="sim-res-explain">AI 总共操作了多少次</div>
+        </div>
+        <div class="sim-res-kpi-card">
+          <div class="sim-res-label">手续费</div>
+          <div class="sim-res-value" id="simResFees">--</div>
+          <div class="sim-res-explain">每次买卖都要付的成本</div>
+        </div>
+      </div>
+
+      <!-- Benchmark Comparison -->
+      <div class="sim-bench-card" id="simResBenchmark">
+        <div class="sim-empty">加载中...</div>
+      </div>
+
+      <!-- Decision Journal -->
+      <div class="sim-journal-section">
+        <h3>AI 每次操作的理由</h3>
+        <p class="sim-journal-hint">点击「看看 AI 当时怎么想的」可以了解 AI 买卖的原因</p>
+        <div id="simResJournal" class="sim-res-journal">
+          <div class="sim-empty">加载中...</div>
+        </div>
+      </div>
+
+      <!-- Trust-building CTA after results -->
+      <div id="simResCTA" class="sim-cta-container"></div>
+
+    </div>
+
+  </section>
+
+
+
+</main>
+
+<!-- ═══ Modals ═══ -->
+
+<!-- Add Holding Modal -->
+<div class="modal-overlay" id="addHoldingModal" style="display:none">
+  <div class="modal">
+    <div class="modal-header">
+<h3>添加持仓</h3>
+      <button class="modal-close" onclick="document.getElementById('addHoldingModal').style.display='none'">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label>搜索基金或股票</label>
+        <input type="text" id="searchFundInput" class="form-input" placeholder="输入基金/股票名称或代码搜索..." oninput="TradingApp._searchFund(this.value)">
+        <div class="search-results" id="searchFundResults"></div>
+      </div>
+      <div class="form-group">
+        <label>代码</label>
+        <input type="text" id="addFundCode" class="form-input" placeholder="如 110011 或 600519">
+      </div>
+      <div class="form-group">
+        <label>买了多少(份/股)</label>
+        <input type="number" id="addShares" class="form-input" placeholder="填写买入的数量">
+      </div>
+      <div class="form-group">
+        <label>买的时候多少钱一份/股</label>
+        <input type="number" id="addBuyPrice" class="form-input" step="0.0001" placeholder="买入时的单价">
+      </div>
+      <div class="form-group">
+        <label>买入日期</label>
+        <input type="date" id="addBuyDate" class="form-input">
+      </div>
+      <div class="form-group">
+        <label>备注</label>
+        <input type="text" id="addNote" class="form-input" placeholder="可选">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="document.getElementById('addHoldingModal').style.display='none'">取消</button>
+      <button class="btn btn-primary" onclick="TradingApp.addHolding()">确认添加</button>
+    </div>
+  </div>
+</div>
+
+<!-- Cash Modal -->
+<div class="modal-overlay" id="cashModal" style="display:none">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+<h3>设置投资金额</h3>
+      <button class="modal-close" onclick="document.getElementById('cashModal').style.display='none'">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label>可用金额(元)</label>
+        <input type="number" id="cashInput" class="form-input" placeholder="输入你的可用金额">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="document.getElementById('cashModal').style.display='none'">取消</button>
+      <button class="btn btn-primary" onclick="TradingApp.saveCash()">保存</button>
+    </div>
+  </div>
+</div>
+
+
+
+<!-- Toast Container -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- Fund modules (order matters: state first, then features, init last) -->
+<script defer src="static/js/trading/state.js"></script>
+<script defer src="static/js/trading/dashboard.js"></script>
+<script defer src="static/js/trading/simulator.js"></script>
+<script defer src="static/js/trading/tasks.js"></script>
+<script defer src="static/js/trading/overview.js"></script>
+<script defer src="static/js/trading/brain.js"></script>
+<script defer src="static/js/trading/init.js"></script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+<svg viewBox="0 0 100 106" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Kawaii Onigiri (Rice Ball) — User avatar for Tofu chat app -->
+  <!-- Companion mascot to the isometric Tofu cube (Agent avatar) -->
+  <defs>
+    <linearGradient id="rice" x1=".2" y1="0" x2=".8" y2="1">
+      <stop offset="0%" stop-color="#fefcf8"/>
+      <stop offset="100%" stop-color="#f5eed8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rice body — rounded triangle -->
+  <path d="M50 8 L16 62 Q11 76 20 87 Q29 97 50 97 Q71 97 80 87 Q89 76 84 62Z"
+        fill="url(#rice)" stroke="#1a1520" stroke-width="4" stroke-linejoin="round"/>
+
+  <!-- Nori (seaweed) wrap — dark green band at bottom -->
+  <path d="M23 72 Q23 87 29 92 Q36 97 50 97 Q64 97 71 92 Q77 87 77 72Z"
+        fill="#2d3a2e" stroke="#1a1520" stroke-width="3.5" stroke-linejoin="round"/>
+  <!-- Nori texture lines -->
+  <line x1="37" y1="75" x2="37" y2="93" stroke="#3d4a3e" stroke-width="1" opacity=".25"/>
+  <line x1="50" y1="74" x2="50" y2="96" stroke="#3d4a3e" stroke-width="1" opacity=".25"/>
+  <line x1="63" y1="75" x2="63" y2="93" stroke="#3d4a3e" stroke-width="1" opacity=".25"/>
+
+  <!-- Eyes — pixel rectangles with catchlight -->
+  <rect x="33" y="46" width="10" height="13" rx="1.5" fill="#1a1520"/>
+  <rect x="57" y="46" width="10" height="13" rx="1.5" fill="#1a1520"/>
+  <!-- Catchlight (top-right) -->
+  <rect x="38" y="48" width="4" height="5" rx="1" fill="white" opacity=".9"/>
+  <rect x="62" y="48" width="4" height="5" rx="1" fill="white" opacity=".9"/>
+  <!-- Secondary catchlight (bottom-left, subtle) -->
+  <rect x="34" y="53" width="3" height="4" rx=".5" fill="white" opacity=".4"/>
+  <rect x="58" y="53" width="3" height="4" rx=".5" fill="white" opacity=".4"/>
+
+  <!-- Smile -->
+  <path d="M42 65 Q50 73 58 65" stroke="#1a1520" stroke-width="2.5"
+        fill="none" stroke-linecap="round"/>
+
+  <!-- Blush marks -->
+  <ellipse cx="28" cy="62" rx="7" ry="4.5" fill="#ffaaa2" opacity=".45"/>
+  <ellipse cx="72" cy="62" rx="7" ry="4.5" fill="#feaca5" opacity=".45"/>
+
+  <!-- Rice grain highlights -->
+  <circle cx="32" cy="30" r="1.5" fill="white" opacity=".5"/>
+  <circle cx="45" cy="22" r="1" fill="white" opacity=".4"/>
+  <circle cx="62" cy="35" r="1.2" fill="white" opacity=".45"/>
+  <circle cx="55" cy="16" r=".8" fill="white" opacity=".35"/>
+</svg>

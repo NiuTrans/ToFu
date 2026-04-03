@@ -1,0 +1,9 @@
+[
+  {
+    "mode": "builtin_wordlist",
+    "model": "gemini-3.1-flash-lite-preview",
+    "timestamp": "2026-03-29 14:16:21",
+    "total_tested": 185,
+    "all_triggers": []
+  }
+]

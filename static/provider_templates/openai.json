@@ -1,0 +1,45 @@
+{
+  "key": "openai",
+  "brand": "openai",
+  "name": "OpenAI",
+  "base_url": "https://api.openai.com/v1",
+  "models": [
+    {
+      "model_id": "gpt-4.1",
+      "capabilities": [
+        "text",
+        "vision",
+        "thinking"
+      ],
+      "rpm": 30,
+      "cost": 0.008
+    },
+    {
+      "model_id": "gpt-4.1-mini",
+      "capabilities": [
+        "text",
+        "vision",
+        "cheap"
+      ],
+      "rpm": 100,
+      "cost": 0.002
+    },
+    {
+      "model_id": "gpt-4.1-nano",
+      "capabilities": [
+        "text",
+        "cheap"
+      ],
+      "rpm": 200,
+      "cost": 0.001
+    },
+    {
+      "model_id": "gpt-image-1.5",
+      "capabilities": [
+        "image_gen"
+      ],
+      "rpm": 10,
+      "cost": 0.043
+    }
+  ]
+}

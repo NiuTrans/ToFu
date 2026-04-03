@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" shape-rendering="crispEdges">
+  <!--
+    Tofu Pixel Favicon — True 32x32 Pixel Grid
+    Every shape snaps to the pixel grid for maximum crispness.
+    No antialiasing — pure retro pixel art aesthetic.
+  -->
+  <style>
+    svg { image-rendering: pixelated; }
+  </style>
+
+  <!-- ═══ Isometric Tofu Cube — pixel-snapped ═══ -->
+
+  <!-- Top face (brightest) -->
+  <polygon points="15,4 6,9 15,14 24,9" fill="#FEF5E0"/>
+  <!-- Top face pixel highlight -->
+  <rect x="10" y="7" width="2" height="1" fill="#FFFDF8"/>
+  <rect x="12" y="6" width="1" height="1" fill="#FFFDF8"/>
+
+  <!-- Left face (mid tone) -->
+  <polygon points="6,9 6,21 15,26 15,14" fill="#F0E0C4"/>
+
+  <!-- Right face (darkest) -->
+  <polygon points="15,14 15,26 24,21 24,9" fill="#DCCAA2"/>
+
+  <!-- Outline (1px dark border) -->
+  <polygon points="15,4 6,9 6,21 15,26 24,21 24,9"
+           fill="none" stroke="#1E1428" stroke-width="0.8"
+           stroke-linejoin="round"/>
+
+  <!-- Inner edge lines -->
+  <line x1="15" y1="14" x2="15" y2="26" stroke="#1E1428" stroke-width="0.5" opacity="0.4"/>
+  <line x1="6" y1="9" x2="15" y2="14" stroke="#1E1428" stroke-width="0.3" opacity="0.3"/>
+  <line x1="15" y1="14" x2="24" y2="9" stroke="#1E1428" stroke-width="0.3" opacity="0.3"/>
+
+  <!-- ═══ Face on left face ═══ -->
+
+  <!-- Left eye (2x3 pixel block) -->
+  <rect x="8" y="14" width="2" height="3" fill="#1E1428"/>
+  <!-- Eye shine (1px) -->
+  <rect x="9" y="14" width="1" height="1" fill="white" opacity="0.85"/>
+
+  <!-- Right eye (2x3 pixel block) -->
+  <rect x="12" y="16" width="2" height="3" fill="#1E1428"/>
+  <!-- Eye shine (1px) -->
+  <rect x="13" y="16" width="1" height="1" fill="white" opacity="0.85"/>
+
+  <!-- Smile (pixel curve: 4 pixels stepping) -->
+  <rect x="9" y="20" width="1" height="1" fill="#1E1428" opacity="0.45"/>
+  <rect x="10" y="21" width="1" height="1" fill="#1E1428" opacity="0.45"/>
+  <rect x="11" y="21" width="1" height="1" fill="#1E1428" opacity="0.45"/>
+  <rect x="12" y="20" width="1" height="1" fill="#1E1428" opacity="0.45"/>
+
+  <!-- Blush marks (2x1 pixel blocks) -->
+  <rect x="7" y="18" width="2" height="1" fill="#F8A0A0" opacity="0.5"/>
+  <rect x="13" y="20" width="2" height="1" fill="#F8A0A0" opacity="0.5"/>
+
+  <!-- ═══ Sparkle (4px star) ═══ -->
+  <rect x="26" y="5" width="1" height="1" fill="white" opacity="0.7"/>
+  <rect x="25" y="6" width="1" height="1" fill="white" opacity="0.7"/>
+  <rect x="27" y="6" width="1" height="1" fill="white" opacity="0.7"/>
+  <rect x="26" y="7" width="1" height="1" fill="white" opacity="0.7"/>
+
+  <!-- Small sparkle -->
+  <rect x="3" y="12" width="1" height="1" fill="white" opacity="0.4"/>
+  <rect x="28" y="16" width="1" height="1" fill="white" opacity="0.35"/>
+</svg>
