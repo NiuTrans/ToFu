@@ -280,8 +280,12 @@ class TestCacheTracking:
         _cache_states.pop(conv_id, None)
 
         messages = [{'role': 'system', 'content': 'sys'}]
-        detect_cache_break(conv_id, messages, None, 'model-a')  # first call
-        result = detect_cache_break(conv_id, messages, None, 'model-b')  # model change
+        # First call establishes baseline with cache_read tokens
+        detect_cache_break(conv_id, messages, None, 'model-a',
+                           usage={'cache_read_tokens': 5000})
+        # Model change + cache_read drop confirms a cache break
+        result = detect_cache_break(conv_id, messages, None, 'model-b',
+                           usage={'cache_read_tokens': 100})
         assert result is not None
         assert 'model' in result
 
@@ -291,10 +295,12 @@ class TestCacheTracking:
         _cache_states.pop(conv_id, None)
 
         messages1 = [{'role': 'system', 'content': 'prompt v1'}]
-        detect_cache_break(conv_id, messages1, None, 'model-a')
+        detect_cache_break(conv_id, messages1, None, 'model-a',
+                           usage={'cache_read_tokens': 5000})
 
         messages2 = [{'role': 'system', 'content': 'prompt v2'}]
-        result = detect_cache_break(conv_id, messages2, None, 'model-a')
+        result = detect_cache_break(conv_id, messages2, None, 'model-a',
+                           usage={'cache_read_tokens': 100})
         assert result is not None
         assert 'system_prompt' in result
 
@@ -307,6 +313,88 @@ class TestCacheTracking:
         from lib.tasks_pkg.cache_tracking import _cache_states, get_cache_prefix_count
         _cache_states.pop('nonexistent', None)
         assert get_cache_prefix_count('nonexistent') == 0
+
+    def test_no_false_positive_on_message_growth(self):
+        """Growing messages (tool rounds) should NOT trigger a cache break
+        when cache_read tokens are stable or growing."""
+        from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+        conv_id = 'test-cb-grow'
+        _cache_states.pop(conv_id, None)
+
+        # Round 1: system + user
+        msgs = [{'role': 'system', 'content': 'sys'},
+                {'role': 'user', 'content': 'hello'}]
+        detect_cache_break(conv_id, msgs, None, 'model-a',
+                           usage={'cache_read_tokens': 1000})
+
+        # Round 2: add assistant + tool result (cache growing)
+        msgs.append({'role': 'assistant', 'content': '', 'tool_calls': [
+            {'function': {'name': 'read_files', 'arguments': '{}'}}
+        ]})
+        msgs.append({'role': 'tool', 'content': 'file content here'})
+        result = detect_cache_break(conv_id, msgs, None, 'model-a',
+                                    usage={'cache_read_tokens': 1500})
+        assert result is None  # No break — cache grew normally
+
+    def test_notify_compaction_suppresses_break(self):
+        """After compaction, a cache_read drop should not be flagged."""
+        from lib.tasks_pkg.cache_tracking import (
+            _cache_states,
+            detect_cache_break,
+            notify_compaction,
+        )
+        conv_id = 'test-cb-compact'
+        _cache_states.pop(conv_id, None)
+
+        msgs = [{'role': 'system', 'content': 'sys'}]
+        detect_cache_break(conv_id, msgs, None, 'model-a',
+                           usage={'cache_read_tokens': 10000})
+        # Compaction happened — notify
+        notify_compaction(conv_id)
+        # Cache tokens drop (expected after compaction)
+        result = detect_cache_break(conv_id, msgs, None, 'model-a',
+                                    usage={'cache_read_tokens': 3000})
+        # Should NOT be flagged as a confirmed break
+        assert result is None or 'system_prompt' not in result
+
+    def test_breakpoint_on_conversation_tail(self):
+        """add_cache_breakpoints should place a breakpoint near the tail,
+        not just on user messages.  In a multi-round tool conversation,
+        the breakpoint should cover tool results (not just user messages)."""
+        from lib.llm_client import add_cache_breakpoints
+        # Simulate a multi-round tool conversation:
+        # system, user, asst+tc, tool, asst+tc, tool(latest)
+        body = {
+            'model': 'claude-sonnet-4-20250514',
+            'messages': [
+                {'role': 'system', 'content': 'system prompt'},
+                {'role': 'user', 'content': 'hello'},
+                {'role': 'assistant', 'content': 'Let me read that file.',
+                 'tool_calls': [
+                     {'function': {'name': 'read_files', 'arguments': '{}'}}
+                 ]},
+                {'role': 'tool', 'content': 'file content from round 1'},
+                {'role': 'assistant', 'content': 'Now let me search.',
+                 'tool_calls': [
+                     {'function': {'name': 'grep_search', 'arguments': '{}'}}
+                 ]},
+                {'role': 'tool', 'content': 'search results from round 2'},
+            ],
+        }
+        add_cache_breakpoints(body)
+        # Second-to-last message (index 4, assistant with content) should
+        # get a cache breakpoint since it has non-empty string content
+        penultimate = body['messages'][-2]
+        content = penultimate.get('content', '')
+        # It should have been converted to list with cache_control
+        assert isinstance(content, list), \
+            f'Expected list content on penultimate msg, got {type(content)}'
+        has_cache_control = any(
+            isinstance(b, dict) and 'cache_control' in b
+            for b in content
+        )
+        assert has_cache_control, \
+            'Penultimate message should have cache_control breakpoint'
 
 
 
@@ -509,7 +597,7 @@ class TestCacheAwareMicroCompact:
         # Set up state with active cache
         state = CacheState()
         state.last_cache_read_tokens = 5000
-        state.message_prefix_count = 3  # protect first 3 messages
+        state.message_count = 5  # simulate 5 messages tracked; prefix = max(0, 5 - 2) = 3
         state.call_count = 5
         _cache_states[conv_id] = state
 

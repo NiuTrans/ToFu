@@ -93,12 +93,19 @@ from flask_compress import Compress
 # incomplete on some platforms (e.g., macOS without /etc/mime.types).
 # Explicitly register critical types to ensure Flask serves static
 # assets with correct Content-Type headers.
+# IMPORTANT: call init() FIRST so the system DB is loaded, THEN add_type()
+# to override with our known-good values.  Without init(), add_type() sets
+# inited=True which prevents the system DB from ever loading — causing
+# other extensions (e.g. .woff2, .ttf) to return None on macOS.
 import mimetypes
-mimetypes.add_type('application/javascript', '.js')
-mimetypes.add_type('text/javascript', '.js')  # legacy alias, some browsers prefer
+mimetypes.init()
+mimetypes.add_type('text/javascript', '.js')
 mimetypes.add_type('text/css', '.css')
 mimetypes.add_type('application/json', '.json')
 mimetypes.add_type('image/svg+xml', '.svg')
+mimetypes.add_type('font/woff2', '.woff2')
+mimetypes.add_type('font/ttf', '.ttf')
+mimetypes.add_type('application/wasm', '.wasm')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -549,6 +556,14 @@ def _handle_500(exc):
 @app.after_request
 def add_cache_headers(response):
     if request.path.startswith('/static/'):
+        # ── MIME type enforcement (macOS / cross-platform safety net) ──
+        # Even with mimetypes.init() + add_type(), some macOS Python builds
+        # serve .js as text/plain.  Browsers with strict MIME checking silently
+        # refuse to execute such scripts, causing "init failed" errors.
+        if request.path.endswith('.js'):
+            response.content_type = 'text/javascript; charset=utf-8'
+        elif request.path.endswith('.css'):
+            response.content_type = 'text/css; charset=utf-8'
         # ★ Vendor files (highlight.js, marked, katex, fonts) essentially never change
         if '/vendor/' in request.path:
             response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'  # 1 year

@@ -16,7 +16,7 @@
 <link rel="stylesheet" href="static/vendor/google-fonts-local.css">
 <link rel="stylesheet" href="static/vendor/github-dark.min.css">
 <link rel="stylesheet" href="static/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="static/styles.css?v=0.5.0">
+<link rel="stylesheet" href="static/styles.css?v=0.5.1">
 <script>
   // Prevent flash of wrong theme — apply before render (default: tofu)
   (function(){var t=localStorage.getItem('claude_ui_theme')||'tofu';document.documentElement.setAttribute('data-theme',t);})();
@@ -51,15 +51,30 @@
   })();
   // ── Script load error tracker (defined early so onerror handlers can find it) ──
   var _scriptLoadErrors = [];
+  var _scriptLoadCount = 0;   // incremented by onload handlers
+  var _scriptTotal = 0;       // set after DOM parse (count of defer scripts)
   function _onScriptError(e) {
     var src = (e.target && e.target.src) || 'unknown';
     _scriptLoadErrors.push(src);
     console.error('[LoadGuard] ❌ Failed to load script:', src);
   }
+  function _onScriptLoad() { _scriptLoadCount++; }
+  // ── Catch script runtime errors (SyntaxError, ReferenceError, etc.) ──
+  // These are NOT caught by onerror on <script> tags (which only fires on network errors).
+  // A runtime error in core.js prevents all subsequent scripts from working properly.
+  var _scriptRuntimeErrors = [];
+  window.addEventListener('error', function(e) {
+    if (window._scriptsReady) return; // only capture pre-init errors
+    if (e.filename && e.filename.indexOf('/static/') !== -1) {
+      var file = e.filename.split('/').pop().split('?')[0];
+      _scriptRuntimeErrors.push(file + ':' + e.lineno + ' ' + e.message);
+      console.error('[LoadGuard] ❌ Script runtime error in ' + file + ':', e.message);
+    }
+  });
 </script>
-<script defer src="static/vendor/highlight.min.js" onerror="_onScriptError(event)"></script>
-<script defer src="static/vendor/marked.min.js" onerror="_onScriptError(event)"></script>
-<script defer src="static/vendor/purify.min.js" onerror="_onScriptError(event)"></script>
+<script defer src="static/vendor/highlight.min.js" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/vendor/marked.min.js" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/vendor/purify.min.js" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- katex.min.js lazy-loaded on first math render to avoid DevTools freeze -->
 <!-- pdf.min.js lazy-loaded on first PDF upload to avoid DevTools freeze -->
 </head>
@@ -1038,23 +1053,23 @@
 </div>
 
 <!-- html2canvas: lazy-loaded on first Export click (199KB, avoids DevTools freeze) -->
-<script defer src="static/js/idb-cache.js?v=0.5.0" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core.js?v=0.5.0" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/export-images.js?v=0.5.0" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/branch.js?v=0.5.0" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/idb-cache.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/export-images.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/branch.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- Feature modules (extracted from main.js) -->
-<script defer src="static/js/log-clean.js?v=0.5.0" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/translation.js?v=0.5.0" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/upload.js?v=0.5.0" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/image-gen.js?v=0.5.0" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/project.js?v=0.5.0" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/skills.js?v=0.5.0" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/scheduler.js?v=0.5.0" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/timer.js?v=0.5.0" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/myday.js?v=0.5.0" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings.js?v=0.5.0" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/main.js?v=0.5.0" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/log-clean.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/translation.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/upload.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/image-gen.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/project.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/skills.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/scheduler.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/timer.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/myday.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main.js?v=0.5.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script>
 // Feature flags — show/hide optional modules
 var _featureFlags = {};
@@ -1071,25 +1086,53 @@ var _featureFlags = {};
   } catch(e) { /* silent — hide trading by default */ }
 })();
 // ── Script load failure detection ──
-setTimeout(function() {
+// Count total deferred script tags so we can tell "still loading" from "loaded but crashed"
+_scriptTotal = document.querySelectorAll('script[defer][src]').length;
+var _loadGuardChecks = 0;
+function _loadGuardCheck() {
+  _loadGuardChecks++;
+  // Already initialized — nothing to do
+  if (window._scriptsReady) return;
   // Check 1: Did any script tags fail to load?
   if (_scriptLoadErrors.length > 0) {
     console.error('[LoadGuard] ⚠️ ' + _scriptLoadErrors.length + ' script(s) failed to load:', _scriptLoadErrors);
-    _showLoadBanner('⚠️ Failed to load: ' + _scriptLoadErrors.map(function(s) { return s.split('/').pop(); }).join(', ') + '. <a href="javascript:location.reload()" style="color:#fef08a;text-decoration:underline">Reload</a>');
+    _showLoadBanner('⚠️ Failed to load: ' + _scriptLoadErrors.map(function(s) { return s.split('/').pop(); }).join(', ') + '. <a href="javascript:location.reload()" style="color:#fef08a;text-decoration:underline">Reload</a>.');
     return;
   }
-  // Check 2: Scripts loaded but _markScriptsLoaded was never called
+  // Check 2: Are scripts still downloading? (loaded+errored < total)
+  var completed = _scriptLoadCount + _scriptLoadErrors.length;
+  if (completed < _scriptTotal) {
+    // Scripts still downloading — not a crash, just slow network
+    if (_loadGuardChecks < 4) {
+      // Retry in 5s (total budget: 8s + 5s + 5s + 5s = 23s)
+      console.warn('[LoadGuard] Scripts still downloading (' + completed + '/' + _scriptTotal + '), retrying in 5s…');
+      setTimeout(_loadGuardCheck, 5000);
+    } else {
+      console.error('[LoadGuard] ⚠️ Scripts still not loaded after ' + (8 + (_loadGuardChecks - 1) * 5) + 's (' + completed + '/' + _scriptTotal + ')');
+      _showLoadBanner('⚠️ Scripts taking too long to load. Check your network connection, then <a href="javascript:location.reload()" style="color:#fef08a;text-decoration:underline">reload</a>.');
+    }
+    return;
+  }
+  // Check 3: All scripts loaded/executed but _markScriptsLoaded was never called
+  // This means a JS runtime error in one of the scripts prevented main.js init from completing
   if (typeof _markScriptsLoaded === 'function' && !window._scriptsReady) {
     // If DB warning banner is already showing, don't double-up with LoadGuard error
     if (document.getElementById('db-warning-banner')) {
       console.warn('[LoadGuard] Scripts not yet ready, but DB warning already visible — suppressing duplicate banner.');
       return;
     }
-    console.error('[LoadGuard] ⚠️ Scripts loaded but init failed. Check console for errors.');
-    _showLoadBanner('⚠️ App initialization failed. Check browser console (F12) for details, then <a href="javascript:location.reload()" style="color:#fef08a;text-decoration:underline">reload</a>.');
+    var detail = '';
+    if (_scriptRuntimeErrors.length > 0) {
+      detail = ' Error: ' + _scriptRuntimeErrors[0];
+      console.error('[LoadGuard] ⚠️ Scripts loaded but init failed. Runtime errors:', _scriptRuntimeErrors);
+    } else {
+      console.error('[LoadGuard] ⚠️ Scripts loaded but init failed. Check console for errors.');
+    }
+    _showLoadBanner('⚠️ App initialization failed.' + (detail ? ' (' + detail + ')' : ' Check browser console (F12) for details.') + ' <a href="javascript:location.reload()" style="color:#fef08a;text-decoration:underline">Reload</a>.');
     return;
   }
-}, 8000);
+}
+setTimeout(_loadGuardCheck, 8000);
 function _showLoadBanner(html) {
   if (document.getElementById('load-fail-banner')) return;
   var banner = document.createElement('div');

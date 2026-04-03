@@ -2062,7 +2062,9 @@ function renderMarkdown(text) {
     mathStore.push({ tex: t.trim(), display: true });
     return "\x02MATH" + (mathStore.length - 1) + "\x03";
   });
-  p = p.replace(/(?<!\$)\$(?!\$)((?:[^$\\]|\\.)+?)\$(?!\$)/g, (_, t) => {
+  // ★ No lookbehind (Safari <16.4 compat) — safe because $$ blocks
+  //   are already extracted above, so no $$ sequences remain.
+  p = p.replace(/\$(?!\$)((?:[^$\\]|\\.)+?)\$(?!\$)/g, (_, t) => {
     mathStore.push({ tex: t.trim(), display: false });
     return "\x02MATH" + (mathStore.length - 1) + "\x03";
   });

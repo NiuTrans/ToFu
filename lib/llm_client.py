@@ -578,17 +578,23 @@ def add_cache_breakpoints(body, log_prefix=''):
     """Add Anthropic-style ephemeral cache breakpoints.
 
     Annotates up to 4 content blocks with cache_control for:
-      1. System messages
+      1. System messages (1-2 breakpoints for static/dynamic blocks)
       2. Last tool definition
-      3. Second-to-last user message
+      3. Second-to-last message (any role) — the conversation tail
 
-    Only applied to Claude/Anthropic models.  LongCat & Qwen use
+    The tail breakpoint advances each round as new messages are appended,
+    ensuring the entire growing prefix is covered by the cache.  This is
+    critical for multi-round tool conversations: previously, the breakpoint
+    was on the "second-to-last user message" which in tool-heavy convos
+    was always the original user message (index ~1), so the growing
+    assistant/tool prefix was never cached.
+
+    Only applied to Claude/Anthropic models.  OpenAI & Qwen use
     automatic server-side prefix caching — no client annotation needed.
 
     IMPORTANT: This function is called every round in a multi-round
-    orchestrator loop with the same body/messages references.  As the
-    conversation grows, the "second-to-last user" index shifts, so we
-    must first STRIP all previous cache_control annotations to avoid
+    orchestrator loop with the same body/messages references.  We
+    first STRIP all previous cache_control annotations to avoid
     exceeding Anthropic's 4-block limit (which causes HTTP 400).
     """
     model = body.get('model', '')
@@ -650,10 +656,22 @@ def add_cache_breakpoints(body, log_prefix=''):
                          'function': {**fn, 'cache_control': {'type': 'ephemeral'}}}
             bp += 1
 
-    # ── Cache second-to-last user message ──
-    user_indices = [i for i, m in enumerate(messages) if m.get('role') == 'user']
-    if len(user_indices) >= 2 and bp < 4:
-        idx = user_indices[-2]
+    # ── Cache conversation tail: second-to-last message ──
+    # In multi-round tool conversations, the conversation grows as:
+    #   [system, user, asst+tc, tool, asst+tc, tool, ...]
+    # The original code cached the "second-to-last user message", but in
+    # tool-heavy conversations there's usually only ONE user message, so
+    # this breakpoint never moved — the growing assistant/tool prefix was
+    # never covered by a cache breakpoint.
+    #
+    # Fix: cache the second-to-last message (any role), which advances as
+    # the conversation grows.  This ensures the entire prefix up to the
+    # penultimate message is cached, and only the final message (new content)
+    # is uncached.  This matches Claude Code's approach of placing a
+    # breakpoint near the tail of the conversation to maximize cache hits.
+    if len(messages) >= 3 and bp < 4:
+        # Second-to-last message — the breakpoint advances each round
+        idx = len(messages) - 2
         msg = messages[idx]
         content = msg.get('content', '')
         if isinstance(content, str) and content:

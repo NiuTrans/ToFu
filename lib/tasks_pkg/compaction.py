@@ -1418,3 +1418,12 @@ def run_compaction_pipeline(messages: list, current_round: int,
     # Post-compact: re-inject system contexts if compaction dropped them
     if compacted:
         _reinject_system_contexts_after_compact(messages, task=task)
+
+    # Notify cache tracker that compaction occurred so the expected
+    # cache_read token drop isn't flagged as a cache break.
+    if (saved > 0 or compacted) and conv_id:
+        try:
+            from lib.tasks_pkg.cache_tracking import notify_compaction
+            notify_compaction(conv_id)
+        except Exception as e:
+            logger.debug('[Pipeline] notify_compaction failed: %s', e)
