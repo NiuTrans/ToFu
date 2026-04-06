@@ -332,62 +332,56 @@
   // ══════════════════════════════════════════
 
   function _resumeDecisionPolling(taskId) {
-    var content = $('decisionContent') || $('recommendContent');
-    var thinking = $('thinkingContent') || $('recommendThinking');
-    var thinkBlock = $('thinkingBlock');
-    var btn = $('btnGenDecision');
-    var actions = $('decisionActions');
+    var content = $('brainContent');
+    var thinking = $('brainThinking');
+    var btn = $('brainAnalyzeBtn');
 
     if (content) content.innerHTML = '<div style="text-align:center;padding:20px"><span class="spinner spinner-lg"></span><p style="margin-top:8px;color:var(--t3)">后台任务运行中，正在恢复进度...</p></div>';
-    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> 后台运行中...'; }
-    if (thinkBlock) thinkBlock.style.display = 'none';
+    if (btn) { btn.disabled = true; btn.textContent = '🔄 后台运行中...'; }
+    if (thinking) { thinking.style.display = 'none'; thinking.innerHTML = ''; }
 
     pollTask(taskId, {
       onThinking: function (delta, full) {
-        if (thinkBlock) thinkBlock.style.display = 'block';
-        if (thinking) thinking.textContent = full;
+        if (thinking) { thinking.style.display = 'block'; thinking.textContent = full; }
       },
       onContent: function (delta, full) {
         if (content) content.innerHTML = F.renderMarkdown(full);
       },
       onDone: function (result) {
-        if (btn) { btn.disabled = false; btn.innerHTML = 'AI 分析与建议'; }
-        if (actions) actions.style.display = 'flex';
+        if (btn) { btn.disabled = false; btn.textContent = '开始分析'; }
         toast('AI分析完成', 'success');
-        // Reload trade queue
-        if (typeof F.renderTradeQueue === 'function') F.renderTradeQueue();
         if (typeof F.loadHistory === 'function') F.loadHistory();
+        if (typeof F.loadBrainState === 'function') F.loadBrainState();
       },
       onError: function (err) {
         if (content) content.innerHTML = '<div class="error-msg">❌ ' + F.escHtml(err) + '</div>';
-        if (btn) { btn.disabled = false; btn.innerHTML = 'AI 分析与建议'; }
+        if (btn) { btn.disabled = false; btn.textContent = '开始分析'; }
       }
     });
   }
 
   function _renderDecisionResult(data) {
-    var content = $('decisionContent') || $('recommendContent');
-    var thinking = $('thinkingContent') || $('recommendThinking');
-    var thinkBlock = $('thinkingBlock');
-    var actions = $('decisionActions');
+    var content = $('brainContent');
+    var thinking = $('brainThinking');
 
-    if (data.thinking && thinkBlock && thinking) {
-      thinkBlock.style.display = 'block';
+    if (data.thinking && thinking) {
+      thinking.style.display = 'block';
       thinking.textContent = data.thinking;
     }
     if (data.result && content) {
       content.innerHTML = F.renderMarkdown(data.result);
     }
-    if (actions) actions.style.display = 'flex';
   }
 
   function _resumeAutopilotPolling(taskId) {
-    var streamPanel = $('apStreamOutput');
-    var statusEl = $('apStreamStatus');
+    var contentEl = $('brainContent');
+    var thinkingEl = $('brainThinking');
+    var btn = $('brainAnalyzeBtn');
     var fullThinking = '';
 
-    if (statusEl) { statusEl.textContent = '后台运行中'; statusEl.className = 'ap-stream-status running'; }
-    if (streamPanel) streamPanel.innerHTML = '<div class="ap-stream-init"><div class="ap-loader"></div><p>后台任务运行中，正在恢复进度...</p></div>';
+    if (btn) { btn.disabled = true; btn.textContent = '🔄 后台运行中...'; }
+    if (contentEl) contentEl.innerHTML = '<div style="text-align:center;padding:20px"><span class="spinner spinner-lg"></span><p style="margin-top:8px;color:var(--t3)">后台任务运行中，正在恢复进度...</p></div>';
+    if (thinkingEl) { thinkingEl.style.display = 'none'; thinkingEl.innerHTML = ''; }
 
     // Helper to strip <autopilot_result> JSON from rendered markdown
     function _stripApResult(text) {
@@ -397,37 +391,30 @@
     pollTask(taskId, {
       onThinking: function (delta, full) {
         fullThinking = full;
-        if (streamPanel) streamPanel.innerHTML = '<pre class="ap-thinking">' + F.escHtml(full) + '</pre>';
+        if (thinkingEl) { thinkingEl.style.display = 'block'; thinkingEl.textContent = full; }
       },
       onContent: function (delta, full) {
-        if (streamPanel) {
-          streamPanel.innerHTML =
-            (fullThinking
-              ? '<details class="ap-think-block"><summary class="ap-think-header">AI推理过程 (点击展开)</summary>' +
-                '<div class="ap-think-body">' + F.escHtml(fullThinking).replace(/\n/g, '<br>') + '</div></details>'
-              : '') +
-            '<div class="ap-analysis-content">' + F.renderMarkdown(_stripApResult(full)) + '</div>';
-        }
+        if (contentEl) contentEl.innerHTML = F.renderMarkdown(_stripApResult(full));
       },
       onProgress: function (phase) {
-        if (statusEl) statusEl.textContent = phase;
+        toast(phase, 'info');
       },
       onStructured: function (data) {
-        if (typeof F.renderStructuredResult === 'function') F.renderStructuredResult(data);
+        if (typeof F.renderBrainStructuredResult === 'function') F.renderBrainStructuredResult(data);
       },
       onDone: function (result) {
-        if (statusEl) { statusEl.textContent = '完成'; statusEl.className = 'ap-stream-status done'; }
+        if (btn) { btn.disabled = false; btn.textContent = '开始分析'; }
         // Fallback: try client-side extraction if structured panels still empty
         if (result && result.content) {
-          var recoEl = $('apRecommendations');
-          var alreadyRendered = recoEl && recoEl.querySelector('.ap-reco-card');
+          var structuredEl = $('brainStructuredResult');
+          var alreadyRendered = structuredEl && structuredEl.innerHTML.trim().length > 0;
           if (!alreadyRendered) {
             var match = result.content.match(/<autopilot_result>\s*([\s\S]*?)\s*<\/autopilot_result>/);
             if (match) {
               try {
                 var parsed = JSON.parse(match[1]);
-                if (typeof F.renderStructuredResult === 'function') {
-                  F.renderStructuredResult({
+                if (typeof F.renderBrainStructuredResult === 'function') {
+                  F.renderBrainStructuredResult({
                     recommendations: parsed.position_recommendations || parsed.recommendations || [],
                     risk_factors: parsed.risk_factors || [],
                     strategy_updates: parsed.strategy_updates || [],
@@ -441,29 +428,27 @@
           }
         }
         toast('自我进化周期完成', 'success');
-        // Refresh cycle history
-        if (typeof F.loadAutopilotState === 'function') F.loadAutopilotState();
+        if (typeof F.loadBrainState === 'function') F.loadBrainState();
       },
       onError: function (err) {
-        if (statusEl) { statusEl.textContent = '失败'; statusEl.className = 'ap-stream-status error'; }
-        if (streamPanel) streamPanel.innerHTML = '<div class="error-msg">❌ ' + F.escHtml(err) + '</div>';
+        if (btn) { btn.disabled = false; btn.textContent = '开始分析'; }
+        if (contentEl) contentEl.innerHTML = '<div class="error-msg">❌ ' + F.escHtml(err) + '</div>';
       }
     });
   }
 
   function _renderAutopilotResult(data) {
-    var streamPanel = $('apStreamOutput');
-    var statusEl = $('apStreamStatus');
-    if (data.result && streamPanel) {
+    var contentEl = $('brainContent');
+    if (data.result && contentEl) {
       var cleaned = (data.result || '').replace(/<autopilot_result>[\s\S]*?<\/autopilot_result>/g, '').trim();
-      streamPanel.innerHTML = '<div class="ap-analysis-content">' + F.renderMarkdown(cleaned) + '</div>';
+      contentEl.innerHTML = F.renderMarkdown(cleaned);
       // Try to render structured data from the result
       var match = data.result.match(/<autopilot_result>\s*([\s\S]*?)\s*<\/autopilot_result>/);
       if (match) {
         try {
           var parsed = JSON.parse(match[1]);
-          if (typeof F.renderStructuredResult === 'function') {
-            F.renderStructuredResult({
+          if (typeof F.renderBrainStructuredResult === 'function') {
+            F.renderBrainStructuredResult({
               recommendations: parsed.position_recommendations || parsed.recommendations || [],
               risk_factors: parsed.risk_factors || [],
               strategy_updates: parsed.strategy_updates || [],
@@ -475,7 +460,6 @@
         } catch (e) { console.warn('[renderAutopilotResult] structured extraction failed:', e.message); }
       }
     }
-    if (statusEl) { statusEl.textContent = '完成（后台）'; statusEl.className = 'ap-stream-status done'; }
   }
 
   function _resumeIntelBacktestPolling(taskId) {

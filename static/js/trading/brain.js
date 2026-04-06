@@ -5,7 +5,6 @@
   "use strict";
   const { api, toast, fmtNum, fmtPct, pnlClass, escHtml, _$: $, _state: S } = F;
 
-  let _brainAbort = null;
   let _lastResult = null;  // latest structured result for status row persistence
 
   /* ────────────────── Outlook helpers ────────────────── */
@@ -51,12 +50,7 @@
       // Morning orders
       loadMorningOrders();
     } catch (e) {
-      // Fallback to autopilot state
-      try {
-        if (F.loadAutopilotState) F.loadAutopilotState();
-      } catch (e2) {
-        toast("加载Brain状态失败: " + e.message, "error");
-      }
+      toast("加载Brain状态失败: " + e.message, "error");
     }
   }
 
@@ -201,12 +195,12 @@
 
   async function loadMorningOrders() {
     try {
-      const data = await api("/portfolio/morning");
+      const data = await api("/trades?status=pending");
       const container = $("brainMorningOrders");
       const list = $("brainOrdersList");
       if (!container || !list) return;
 
-      const orders = data.orders?.orders || [];
+      const orders = data.trades || [];
       if (orders.length === 0) {
         container.style.display = "none";
         return;
@@ -216,18 +210,18 @@
       list.innerHTML = orders
         .map(
           (o) => `
-        <div class="order-item ${o.action === "buy" ? "order-buy" : "order-sell"}">
+        <div class="order-item ${o.action === "buy" || o.action === "add" ? "order-buy" : "order-sell"}">
           <div class="order-meta">
-            <span class="order-action">${o.action === "buy" ? "🟢 买入" : "🔴 卖出"}</span>
-            <span class="order-symbol">${o.symbol} ${escHtml(o.asset_name || "")}</span>
-            <span class="order-amount">¥${fmtNum(o.amount)}</span>
+            <span class="order-action">${o.action === "buy" || o.action === "add" ? "🟢 买入" : "🔴 卖出"}</span>
+            <span class="order-symbol">${o.symbol || ""} ${escHtml(o.asset_name || "")}</span>
+            <span class="order-amount">¥${fmtNum(o.amount || 0)}</span>
           </div>
           ${o.reason ? `<div class="order-reason">${escHtml(o.reason)}</div>` : ""}
         </div>`,
         )
         .join("");
     } catch (e) {
-      // Non-critical
+      console.warn("[Brain] Failed to load pending trades:", e.message);
     }
   }
 

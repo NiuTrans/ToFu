@@ -13,8 +13,7 @@ Decision analysis endpoints have been consolidated into ``routes/trading_brain.p
   - GET  /api/trading/autopilot/recommendations — list recommendations
   - POST /api/trading/autopilot/recommendations/<id>/accept — accept rec
   - POST /api/trading/autopilot/recommendations/<id>/reject — reject rec
-  - POST /api/trading/autopilot/evaluate    — evaluate outcomes
-  - POST /api/trading/autopilot/track       — track outcomes
+  - POST /api/trading/autopilot/evaluate    — evaluate outcomes (alias: /track)
   - POST /api/trading/autopilot/kpi         — KPI evaluation
   - POST /api/trading/autopilot/strategy-evolution — strategy evolution
 """
@@ -141,17 +140,9 @@ def autopilot_reject_recommendation(rid):
 # ═══════════════════════════════════════════════════════════
 
 @trading_autopilot_bp.route('/api/trading/autopilot/evaluate', methods=['POST'])
-def autopilot_evaluate_outcomes():
-    from lib.trading_autopilot import track_recommendation_outcomes
-    db = get_db(DOMAIN_TRADING)
-    data = request.get_json(silent=True) or {}
-    days = data.get('days_after', 7)
-    outcomes = track_recommendation_outcomes(db, days_after=days)
-    return jsonify({'ok': True, 'outcomes': outcomes, 'count': len(outcomes)})
-
-
 @trading_autopilot_bp.route('/api/trading/autopilot/track', methods=['POST'])
-def autopilot_track_outcomes():
+def autopilot_evaluate_outcomes():
+    """Evaluate/track recommendation outcomes. Both paths do the same thing."""
     from lib.trading_autopilot import track_recommendation_outcomes
     db = get_db(DOMAIN_TRADING)
     data = request.get_json(silent=True) or {}

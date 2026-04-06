@@ -21,21 +21,8 @@ window.TradingApp = window.TradingApp || {};
   F._state = {
     holdings: [],
     cash: 0,
-    strategies: [],
-    strategyGroups: [],
-    intel: [],
     currentPage: "dashboard",
-    currentIntelCat: "all",
-    currentStratType: "all",
-    currentBtMode: "portfolio",
-    lastBtResult: null,
-    lastBatchId: null,
-    pendingTrades: [],
     refreshTimer: null,
-    intelPollTimer: null,
-    btTradeFilter: "all",
-    intelSort: "time",
-    intelSentimentFilter: "",
   };
 
   // ── API helper ──

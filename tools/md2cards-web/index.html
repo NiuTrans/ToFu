@@ -40,9 +40,6 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 
-<!-- Analytics placeholder (replace with your tracking code) -->
-<!-- <script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXX"></script> -->
-
 <style>
 /* ======= APP SHELL ======= */
 :root {
@@ -379,23 +376,38 @@ body {
 .toast.show { transform: translateX(-50%) translateY(0); }
 
 /* ======= CARD THEMES ======= */
-/* Each theme scopes styles under .theme-{name} */
 
 /* --- Shared Card Base --- */
 .xhs-card {
   width: 1080px;
-  min-height: 1440px;
   position: relative;
   overflow: hidden;
   font-family: 'Noto Sans SC', -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
-.xhs-card .card-body {
+.xhs-card .card-inner {
   padding: 72px 72px 100px;
-  min-height: 1440px;
   display: flex;
   flex-direction: column;
+}
+
+/* Bottom decorative stripe — fills remaining vertical space with a themed accent */
+.xhs-card .card-bottom-fill {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.xhs-card .card-bottom-fill::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 72px;
+  right: 72px;
+  height: 4px;
+  border-radius: 2px;
+  opacity: 0.15;
 }
 
 .xhs-card .card-footer {
@@ -437,7 +449,7 @@ body {
   line-height: 1.3;
 }
 
-/* Content typography — MOBILE-FIRST: sized for 1080px card viewed on ~375px phone screen (2.88x downscale) */
+/* Content typography — MOBILE-FIRST */
 .xhs-card .content h3 {
   font-size: 28px;
   font-weight: 700;
@@ -527,7 +539,7 @@ body {
 }
 
 /* Cover card */
-.xhs-card.cover-card .card-body {
+.xhs-card.cover-card .card-inner {
   justify-content: center;
   align-items: center;
   text-align: center;
@@ -577,6 +589,7 @@ body {
 .theme-violet .content blockquote p { color: #5D4037; }
 .theme-violet .content hr { background: linear-gradient(90deg, transparent, #A29BFE, transparent); }
 .theme-violet .card-footer { color: #B0AEC6; }
+.theme-violet .card-bottom-fill::after { background: linear-gradient(90deg, transparent, #A29BFE, transparent); }
 
 .theme-violet .cover-card { background: linear-gradient(135deg, #667eea, #764ba2); color: white; }
 .theme-violet .cover-card .cover-tag { background: rgba(255,255,255,0.18); color: white; }
@@ -596,6 +609,7 @@ body {
 .theme-ocean .content blockquote p { color: #004D40; }
 .theme-ocean .content hr { background: linear-gradient(90deg, transparent, #48CAE4, transparent); }
 .theme-ocean .card-footer { color: #90B4CE; }
+.theme-ocean .card-bottom-fill::after { background: linear-gradient(90deg, transparent, #48CAE4, transparent); }
 
 .theme-ocean .cover-card { background: linear-gradient(135deg, #0077B6, #00B4D8); color: white; }
 .theme-ocean .cover-card .cover-tag { background: rgba(255,255,255,0.2); color: white; }
@@ -615,6 +629,7 @@ body {
 .theme-rose .content blockquote p { color: #880E4F; }
 .theme-rose .content hr { background: linear-gradient(90deg, transparent, #F48FB1, transparent); }
 .theme-rose .card-footer { color: #C9A0B0; }
+.theme-rose .card-bottom-fill::after { background: linear-gradient(90deg, transparent, #F48FB1, transparent); }
 
 .theme-rose .cover-card { background: linear-gradient(135deg, #E84393, #FD79A8); color: white; }
 .theme-rose .cover-card .cover-tag { background: rgba(255,255,255,0.2); color: white; }
@@ -634,6 +649,7 @@ body {
 .theme-forest .content blockquote p { color: #1B5E20; }
 .theme-forest .content hr { background: linear-gradient(90deg, transparent, #81C784, transparent); }
 .theme-forest .card-footer { color: #8FAD8F; }
+.theme-forest .card-bottom-fill::after { background: linear-gradient(90deg, transparent, #81C784, transparent); }
 
 .theme-forest .cover-card { background: linear-gradient(135deg, #2D6A4F, #52B788); color: white; }
 .theme-forest .cover-card .cover-tag { background: rgba(255,255,255,0.2); color: white; }
@@ -653,6 +669,7 @@ body {
 .theme-ember .content blockquote p { color: #E65100; }
 .theme-ember .content hr { background: linear-gradient(90deg, transparent, #FF8A65, transparent); }
 .theme-ember .card-footer { color: #C4A882; }
+.theme-ember .card-bottom-fill::after { background: linear-gradient(90deg, transparent, #FF8A65, transparent); }
 
 .theme-ember .cover-card { background: linear-gradient(135deg, #E65100, #FF6D00); color: white; }
 .theme-ember .cover-card .cover-tag { background: rgba(255,255,255,0.2); color: white; }
@@ -672,6 +689,7 @@ body {
 .theme-midnight .content blockquote p { color: #C0C0D0; }
 .theme-midnight .content hr { background: linear-gradient(90deg, transparent, #4A4A70, transparent); }
 .theme-midnight .card-footer { color: #5A5A70; }
+.theme-midnight .card-bottom-fill::after { background: linear-gradient(90deg, transparent, #4A4A70, transparent); }
 
 .theme-midnight .cover-card { background: linear-gradient(135deg, #16213e, #0f3460); color: white; }
 .theme-midnight .cover-card .cover-tag { background: rgba(162,155,254,0.25); color: #A29BFE; }
@@ -717,6 +735,24 @@ body {
   border: 3px dashed var(--app-accent) !important;
   background: rgba(108,92,231,0.05) !important;
 }
+
+/* ======= Live indicator ======= */
+.live-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #44bb66;
+  margin-right: 6px;
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+.live-dot.idle { background: var(--app-text-dim); animation: none; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
 </style>
 </head>
 <body>
@@ -728,14 +764,11 @@ body {
     <span>CardCraft</span>
   </div>
   <div class="actions">
-    <a class="btn btn-ghost" href="https://github.com/your-username/cardcraft" target="_blank" style="text-decoration:none;">
+    <a class="btn btn-ghost" href="https://github.com/rangehow/cardcraft" target="_blank" style="text-decoration:none;">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
       GitHub
     </a>
-    <button class="btn btn-ghost" onclick="loadDemo()">📄 演示文稿</button>
-    <button class="btn btn-secondary" id="btn-generate" onclick="generateCards()" disabled>
-      ⚡ 生成卡片
-    </button>
+    <button class="btn btn-ghost" onclick="loadDemo()">📄 演示</button>
     <button class="btn btn-primary" id="btn-download" onclick="downloadAll()" disabled>
       ⬇ 下载全部
     </button>
@@ -778,9 +811,9 @@ body {
       <div class="setting-group">
         <span class="setting-label">密度</span>
         <select id="sel-density">
-          <option value="compact">紧凑（更少卡片）</option>
-          <option value="comfortable" selected>舒适（推荐）</option>
-          <option value="spacious">宽松（大字体）</option>
+          <option value="compact">紧凑</option>
+          <option value="comfortable" selected>舒适</option>
+          <option value="spacious">宽松</option>
         </select>
       </div>
 
@@ -791,22 +824,22 @@ body {
     </div>
 
     <div class="editor-area" id="editor-area">
-      <textarea id="md-input" placeholder="在这里粘贴你的 Markdown 文章 …
+      <textarea id="md-input" placeholder="在这里粘贴 Markdown，卡片自动生成 ✨
 
 支持：
-  # 标题 → 自动拆分为卡片
-  ## 章节 → 每章一张卡片
+  # 标题 → 封面卡片
+  ## 章节 → 内容卡片
   **加粗**  *斜体*  `代码`
   ```代码块``` → 语法高亮
   | 表格 | → 精美样式
   > 引用 → 醒目提示
   - 列表 → 自动编号
 
-也可以直接拖拽 .md 文件到这里！"></textarea>
+也可以拖拽 .md 文件到这里！"></textarea>
     </div>
 
     <div class="status-bar">
-      <span id="status-text">就绪</span>
+      <span id="status-text"><span class="live-dot idle" id="live-dot"></span>粘贴 Markdown 即可自动生成</span>
       <span id="card-count"></span>
     </div>
   </div>
@@ -821,8 +854,8 @@ body {
     <div class="preview-scroll" id="preview-scroll">
       <div class="empty-state" id="empty-state">
         <div class="empty-icon">✦</div>
-        <h3>粘贴 Markdown，点击生成</h3>
-        <p>支持任意 Markdown 文章，自动按章节拆分为精美卡片图片，一键下载发小红书</p>
+        <h3>粘贴 Markdown，实时预览</h3>
+        <p>输入或粘贴 Markdown 内容后自动生成卡片，无需点击任何按钮</p>
       </div>
     </div>
   </div>
@@ -850,9 +883,16 @@ body {
 let currentTheme = 'violet';
 let currentCards = [];     // Array of rendered card image blobs
 let currentSections = [];  // Parsed sections
+let generateTimer = null;  // Debounce timer for auto-generation
+let isGenerating = false;  // Lock to prevent concurrent generation
+let generationVersion = 0; // Monotonic counter to cancel stale generation
 
 const CARD_W = 1080;
 const RATIOS = { '3:4': 1440, '2:3': 1620, '9:16': 1920, '1:1': 1080 };
+
+// Minimum fill ratio — cards with less content than this fraction of height
+// will try to borrow content from next card or merge
+const MIN_FILL_RATIO = 0.55;
 
 function getCardH() { return RATIOS[document.getElementById('sel-ratio').value] || 1440; }
 
@@ -875,24 +915,27 @@ document.getElementById('theme-picker').addEventListener('click', e => {
   document.querySelectorAll('.theme-dot').forEach(d => d.classList.remove('active'));
   dot.classList.add('active');
   currentTheme = dot.dataset.theme;
-  // Re-render preview if cards exist
-  if (currentSections.length) generateCards();
+  triggerGenerate();
 });
 
-// --- Ratio change ---
-document.getElementById('sel-ratio').addEventListener('change', () => {
-  if (currentSections.length) generateCards();
-});
+// --- Ratio / Density / Brand change → regenerate ---
+document.getElementById('sel-ratio').addEventListener('change', triggerGenerate);
+document.getElementById('sel-density').addEventListener('change', triggerGenerate);
+document.getElementById('inp-brand').addEventListener('input', triggerGenerate);
 
-// --- Density change ---
-document.getElementById('sel-density').addEventListener('change', () => {
-  if (currentSections.length) generateCards();
-});
-
-// --- Char count ---
+// --- Input: char count + auto-generate ---
 document.getElementById('md-input').addEventListener('input', function() {
   document.getElementById('char-count').textContent = this.value.length + ' 字符';
-  document.getElementById('btn-generate').disabled = !this.value.trim();
+  triggerGenerate();
+});
+
+// --- Also trigger on paste (catches cmd+v, right-click paste, etc.) ---
+document.getElementById('md-input').addEventListener('paste', function() {
+  // Use setTimeout so the pasted content is already in the textarea
+  setTimeout(() => {
+    document.getElementById('char-count').textContent = this.value.length + ' 字符';
+    triggerGenerate();
+  }, 50);
 });
 
 // --- Drag & Drop .md files ---
@@ -915,6 +958,38 @@ editorArea.addEventListener('drop', e => {
     toast('⚠️ 请拖入 .md 或 .txt 文件');
   }
 });
+
+
+// =========================================================================
+// AUTO-GENERATE — Debounced, cancellable
+// =========================================================================
+
+function triggerGenerate() {
+  if (generateTimer) clearTimeout(generateTimer);
+
+  const md = document.getElementById('md-input').value.trim();
+  if (!md) {
+    // Clear preview
+    const preview = document.getElementById('preview-scroll');
+    preview.innerHTML = '<div class="empty-state" id="empty-state"><div class="empty-icon">✦</div><h3>粘贴 Markdown，实时预览</h3><p>输入或粘贴 Markdown 内容后自动生成卡片</p></div>';
+    document.getElementById('btn-download').disabled = true;
+    document.getElementById('card-count').textContent = '';
+    document.getElementById('preview-info').textContent = '';
+    setStatus('<span class="live-dot idle"></span>粘贴 Markdown 即可自动生成');
+    setProgress(0);
+    currentCards = [];
+    currentSections = [];
+    return;
+  }
+
+  // Show "waiting" indicator
+  setStatus('<span class="live-dot"></span>等待输入停止 …');
+
+  // Debounce: wait 600ms after last keystroke
+  generateTimer = setTimeout(() => {
+    generateCards();
+  }, 600);
+}
 
 
 // =========================================================================
@@ -947,7 +1022,7 @@ function parseSections(md) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
-    // Track code fences — don't parse headings inside code blocks
+    // Track code fences
     if (line.trim().startsWith('```')) {
       inCodeBlock = !inCodeBlock;
       buf.push(line);
@@ -968,7 +1043,6 @@ function parseSections(md) {
       currentTitle = line.replace(/^# /, '').trim();
       currentNum = '';
       isCover = true;
-      // Collect subsequent blockquote as abstract
       continue;
     }
 
@@ -996,7 +1070,7 @@ function parseSections(md) {
 
 
 // =========================================================================
-// BUILD CARD HTML — Section → styled HTML card
+// BUILD CARD HTML
 // =========================================================================
 
 function getDensity() { return document.getElementById('sel-density').value || 'comfortable'; }
@@ -1005,7 +1079,7 @@ function getDensityCSS() {
   const d = getDensity();
   if (d === 'compact') {
     return `
-      .xhs-card .card-body { padding: 52px 56px 72px; }
+      .xhs-card .card-inner { padding: 52px 56px 72px; }
       .xhs-card .card-footer { bottom: 24px; left: 56px; right: 56px; font-size: 16px; }
       .xhs-card .sec-header { gap: 14px; margin-bottom: 24px; }
       .xhs-card .sec-num { font-size: 18px; width: 42px; height: 42px; border-radius: 12px; }
@@ -1026,7 +1100,7 @@ function getDensityCSS() {
   }
   if (d === 'spacious') {
     return `
-      .xhs-card .card-body { padding: 80px 80px 110px; }
+      .xhs-card .card-inner { padding: 80px 80px 110px; }
       .xhs-card .card-footer { bottom: 36px; left: 80px; right: 80px; font-size: 24px; }
       .xhs-card .sec-header { gap: 22px; margin-bottom: 40px; }
       .xhs-card .sec-num { font-size: 30px; width: 64px; height: 64px; border-radius: 18px; }
@@ -1045,7 +1119,6 @@ function getDensityCSS() {
       .xhs-card .content hr { margin: 40px 0; }
     `;
   }
-  // comfortable (default) — uses the base CSS
   return '';
 }
 
@@ -1055,7 +1128,6 @@ function buildCardHTML(section, pageNum, totalPages, theme) {
   const densityCSS = getDensityCSS();
 
   if (section.type === 'cover') {
-    // Parse abstract from md (first blockquote)
     let abstract = '';
     const bqMatch = section.md.match(/^>\s*(.+)/m);
     if (bqMatch) {
@@ -1065,7 +1137,6 @@ function buildCardHTML(section, pageNum, totalPages, theme) {
         .join(' ');
     }
 
-    // Try to extract a hero emoji from the title
     const emojiMatch = section.title.match(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u);
     const heroText = emojiMatch ? emojiMatch[0] : '✦';
 
@@ -1073,7 +1144,7 @@ function buildCardHTML(section, pageNum, totalPages, theme) {
       <div class="theme-${theme}">
         <style>${densityCSS}</style>
         <div class="xhs-card cover-card" style="width:${CARD_W}px;height:${CARD_H}px;">
-          <div class="card-body">
+          <div class="card-inner">
             <div class="cover-emoji">${heroText}</div>
             <h1>${escapeHTML(section.title.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '').trim())}</h1>
             <div class="cover-sub">${escapeHTML(abstract)}</div>
@@ -1087,7 +1158,7 @@ function buildCardHTML(section, pageNum, totalPages, theme) {
       </div>`;
   }
 
-  // Regular section — render MD content
+  // Regular section
   const contentHTML = marked.parse(section.md);
 
   let headerHTML = '';
@@ -1104,11 +1175,12 @@ function buildCardHTML(section, pageNum, totalPages, theme) {
   return `
     <div class="theme-${theme}">
       <style>${densityCSS}</style>
-      <div class="xhs-card" style="width:${CARD_W}px;min-height:${CARD_H}px;">
-        <div class="card-body">
+      <div class="xhs-card" style="width:${CARD_W}px;height:${CARD_H}px;display:flex;flex-direction:column;">
+        <div class="card-inner" style="flex-shrink:0;">
           ${headerHTML}
           <div class="content">${contentHTML}</div>
         </div>
+        <div class="card-bottom-fill"></div>
         <div class="card-footer">
           <span>${escapeHTML(brandName)}</span>
           <span>${pageNum}/${totalPages}</span>
@@ -1123,80 +1195,104 @@ function escapeHTML(str) {
 
 
 // =========================================================================
-// PRE-MERGE — Combine adjacent small sections before adaptive split
+// MEASURE CARD — Returns the actual content height of a section
+// =========================================================================
+
+async function measureSection(sec, theme) {
+  const CARD_H = getCardH();
+  const stage = document.getElementById('render-stage');
+  // Build with auto height to get natural content height
+  const brandName = document.getElementById('inp-brand').value || 'CardCraft';
+  const densityCSS = getDensityCSS();
+  const contentHTML = marked.parse(sec.md);
+
+  let headerHTML = '';
+  if (sec.num) {
+    headerHTML = `<div class="sec-header"><div class="sec-num">${escapeHTML(sec.num)}</div><div class="sec-title">${escapeHTML(sec.title)}</div></div>`;
+  } else if (sec.title) {
+    headerHTML = `<div class="sec-header"><div class="sec-title">${escapeHTML(sec.title)}</div></div>`;
+  }
+
+  const html = `
+    <div class="theme-${theme}">
+      <style>${densityCSS}</style>
+      <div class="xhs-card" style="width:${CARD_W}px;">
+        <div class="card-inner">
+          ${headerHTML}
+          <div class="content">${contentHTML}</div>
+        </div>
+      </div>
+    </div>`;
+
+  stage.innerHTML = html;
+  await sleep(30);
+  const card = stage.querySelector('.xhs-card');
+  const h = card ? card.scrollHeight : 0;
+  stage.innerHTML = '';
+  return h;
+}
+
+
+// =========================================================================
+// PRE-MERGE — Combine adjacent small sections
 // =========================================================================
 
 async function preMergeSections(sections, theme) {
   const CARD_H = getCardH();
-  const stage = document.getElementById('render-stage');
   const result = [sections[0]];
 
   for (let i = 1; i < sections.length; i++) {
     const cur = sections[i];
     const prev = result[result.length - 1];
 
-    // Never merge cover cards
     if (cur.type === 'cover' || prev.type === 'cover') {
       result.push(cur);
       continue;
     }
 
-    // Build merged content with section header
     const sectionHeader = cur.num
       ? `\n\n---\n\n### ${cur.num}、${cur.title}\n\n`
       : `\n\n---\n\n### ${cur.title}\n\n`;
     const mergedMd = prev.md + sectionHeader + cur.md;
 
-    // Measure if merged content fits
     const testSec = { ...prev, md: mergedMd };
-    const testHTML = buildCardHTML(testSec, 1, 1, theme);
-    stage.innerHTML = testHTML;
-    await sleep(30);
-    const testCard = stage.querySelector('.xhs-card');
-    const testH = testCard ? testCard.scrollHeight : 0;
+    const testH = await measureSection(testSec, theme);
 
     if (testH <= CARD_H) {
-      // Fits! Merge into previous
       prev.md = mergedMd;
     } else {
-      // Doesn't fit, keep as separate section
       result.push(cur);
     }
   }
 
-  stage.innerHTML = '';
   return result;
 }
 
 
 // =========================================================================
-// ADAPTIVE SPLITTING — Measure real height, split if oversized
+// ADAPTIVE SPLITTING — Split oversized, merge underfilled
 // =========================================================================
 
-async function adaptiveSplit(sections, theme) {
+async function adaptiveSplit(sections, theme, version) {
   const CARD_H = getCardH();
-  const stage = document.getElementById('render-stage');
   let result = [];
 
   for (const sec of sections) {
+    if (version !== generationVersion) return [];
+
     if (sec.type === 'cover') {
       result.push(sec);
       continue;
     }
 
-    // Measure height
-    const html = buildCardHTML(sec, 1, 1, theme);
-    stage.innerHTML = html;
-    await sleep(50);
-    const card = stage.querySelector('.xhs-card');
-    const h = card ? card.scrollHeight : 0;
+    const h = await measureSection(sec, theme);
 
     if (h <= CARD_H + 20) {
       result.push(sec);
       continue;
     }
 
-    // Need to split — split by paragraphs/blocks
+    // Split by blocks
     const mdLines = sec.md.split('\n');
     const blocks = splitMdIntoBlocks(mdLines);
 
@@ -1205,17 +1301,10 @@ async function adaptiveSplit(sections, theme) {
 
     for (let bi = 0; bi < blocks.length; bi++) {
       const candidate = currentMd + (currentMd ? '\n\n' : '') + blocks[bi];
-
-      // Measure candidate
       const testSec = { ...sec, md: candidate };
-      const testHTML = buildCardHTML(testSec, 1, 1, theme);
-      stage.innerHTML = testHTML;
-      await sleep(30);
-      const testCard = stage.querySelector('.xhs-card');
-      const testH = testCard ? testCard.scrollHeight : 0;
+      const testH = await measureSection(testSec, theme);
 
       if (testH > CARD_H && currentMd.trim()) {
-        // Emit current
         partNum++;
         result.push({
           type: 'section',
@@ -1240,9 +1329,10 @@ async function adaptiveSplit(sections, theme) {
     }
   }
 
-  // Post-pass 1: forward merge — combine adjacent small sections if they fit
+  // === POST-PASS 1: Forward merge small cards ===
   let merged = [result[0]];
   for (let i = 1; i < result.length; i++) {
+    if (version !== generationVersion) return [];
     const cur = result[i];
     const prev = merged[merged.length - 1];
 
@@ -1251,15 +1341,10 @@ async function adaptiveSplit(sections, theme) {
       continue;
     }
 
-    // Try merging current into previous
     const divider = cur.num ? `\n\n---\n\n## ${cur.num ? cur.num + '、' : ''}${cur.title}\n\n` : '\n\n---\n\n';
     const mergedMd = prev.md + divider + cur.md;
     const testSec = { ...prev, md: mergedMd };
-    const testHTML = buildCardHTML(testSec, 1, 1, theme);
-    stage.innerHTML = testHTML;
-    await sleep(30);
-    const testCard = stage.querySelector('.xhs-card');
-    const testH = testCard ? testCard.scrollHeight : 0;
+    const testH = await measureSection(testSec, theme);
 
     if (testH <= CARD_H) {
       prev.md = mergedMd;
@@ -1269,7 +1354,7 @@ async function adaptiveSplit(sections, theme) {
   }
   result = merged;
 
-  // Post-pass 2: merge trailing short card with previous
+  // === POST-PASS 2: Merge trailing short card ===
   while (result.length >= 2) {
     const last = result[result.length - 1];
     const prev = result[result.length - 2];
@@ -1277,11 +1362,7 @@ async function adaptiveSplit(sections, theme) {
 
     const mergedMd = prev.md + '\n\n---\n\n' + last.md;
     const testSec = { ...prev, md: mergedMd };
-    const testHTML = buildCardHTML(testSec, 1, 1, theme);
-    stage.innerHTML = testHTML;
-    await sleep(30);
-    const testCard = stage.querySelector('.xhs-card');
-    const testH = testCard ? testCard.scrollHeight : 0;
+    const testH = await measureSection(testSec, theme);
 
     if (testH <= CARD_H) {
       prev.md = mergedMd;
@@ -1291,11 +1372,48 @@ async function adaptiveSplit(sections, theme) {
     }
   }
 
-  stage.innerHTML = '';
+  // === POST-PASS 3: Fill underfilled cards by stealing from next card ===
+  for (let i = 0; i < result.length - 1; i++) {
+    if (version !== generationVersion) return [];
+    const sec = result[i];
+    const next = result[i + 1];
+    if (sec.type === 'cover' || next.type === 'cover') continue;
+
+    const h = await measureSection(sec, theme);
+    const fillRatio = h / CARD_H;
+
+    if (fillRatio >= MIN_FILL_RATIO) continue;
+
+    // This card is underfilled — try stealing blocks from the next card
+    const nextBlocks = splitMdIntoBlocks(next.md.split('\n'));
+    let stolen = 0;
+
+    for (let b = 0; b < nextBlocks.length; b++) {
+      const candidate = sec.md + '\n\n' + nextBlocks.slice(0, b + 1).join('\n\n');
+      const testSec = { ...sec, md: candidate };
+      const testH = await measureSection(testSec, theme);
+
+      if (testH > CARD_H) break;
+      stolen = b + 1;
+    }
+
+    if (stolen > 0) {
+      sec.md = sec.md + '\n\n' + nextBlocks.slice(0, stolen).join('\n\n');
+      const remainingBlocks = nextBlocks.slice(stolen);
+      if (remainingBlocks.length === 0) {
+        // Next card fully consumed — remove it
+        result.splice(i + 1, 1);
+        i--; // Re-check this card
+      } else {
+        next.md = remainingBlocks.join('\n\n');
+      }
+    }
+  }
+
   return result;
 }
 
-// Split markdown text into logical blocks (paragraphs, code blocks, tables, lists, etc.)
+// Split markdown text into logical blocks
 function splitMdIntoBlocks(lines) {
   const blocks = [];
   let buf = [];
@@ -1318,10 +1436,7 @@ function splitMdIntoBlocks(lines) {
       continue;
     }
 
-    if (inCode) {
-      buf.push(line);
-      continue;
-    }
+    if (inCode) { buf.push(line); continue; }
 
     // Table block
     if (line.includes('|') && i + 1 < lines.length && lines[i + 1].includes('---')) {
@@ -1330,19 +1445,17 @@ function splitMdIntoBlocks(lines) {
         buf.push(lines[i]);
         i++;
       }
-      i--; // back one since for loop will increment
+      i--;
       blocks.push(buf.join('\n'));
       buf = [];
       continue;
     }
 
-    // Empty line = block boundary
     if (line.trim() === '') {
       if (buf.length) { blocks.push(buf.join('\n')); buf = []; }
       continue;
     }
 
-    // Heading → start new block
     if (/^#{1,6}\s/.test(line)) {
       if (buf.length) { blocks.push(buf.join('\n')); buf = []; }
       blocks.push(line);
@@ -1358,117 +1471,136 @@ function splitMdIntoBlocks(lines) {
 
 
 // =========================================================================
-// GENERATE — Main pipeline
+// GENERATE — Main pipeline (auto-triggered, cancellable)
 // =========================================================================
 
 async function generateCards() {
   const md = document.getElementById('md-input').value.trim();
-  if (!md) return toast('⚠️ 请先输入 Markdown 内容');
+  if (!md) return;
 
-  const btnGen = document.getElementById('btn-generate');
-  const btnDown = document.getElementById('btn-download');
-  btnGen.disabled = true;
-  btnDown.disabled = true;
+  // Cancel any in-progress generation
+  const thisVersion = ++generationVersion;
 
-  setStatus('解析 Markdown …');
-  setProgress(5);
-
-  // 1. Parse sections
-  let sections = parseSections(md);
-  setStatus(`解析到 ${sections.length} 个章节，正在智能排版 …`);
-  setProgress(15);
-
-  // 2. Pre-merge small sections (before adaptive split)
-  sections = await preMergeSections(sections, currentTheme);
-  setProgress(20);
-
-  // 3. Adaptive split (measures real pixel height)
-  sections = await adaptiveSplit(sections, currentTheme);
-  currentSections = sections;
-  const total = sections.length;
-  setStatus(`共 ${total} 张卡片，正在渲染 …`);
-  setProgress(25);
-
-  // 3. Render to images
-  const preview = document.getElementById('preview-scroll');
-  const emptyState = document.getElementById('empty-state');
-  if (emptyState) emptyState.remove();
-  preview.innerHTML = '';
-
-  currentCards = [];
-
-  const CARD_H = getCardH();
-  const scale = Math.min(1, (preview.clientWidth - 48) / CARD_W);
-
-  for (let i = 0; i < total; i++) {
-    setStatus(`渲染卡片 ${i + 1}/${total} …`);
-    setProgress(25 + (i / total) * 65);
-
-    const html = buildCardHTML(sections[i], i + 1, total, currentTheme);
-
-    // Create off-screen render container
-    const stage = document.getElementById('render-stage');
-    stage.innerHTML = html;
-    await sleep(80);
-
-    const cardEl = stage.querySelector('.xhs-card');
-    if (!cardEl) continue;
-
-    // Force exact height for non-cover cards
-    cardEl.style.height = CARD_H + 'px';
-    cardEl.style.overflow = 'hidden';
-
-    await sleep(50);
-
-    // Capture with html2canvas
-    try {
-      const canvas = await html2canvas(cardEl, {
-        width: CARD_W,
-        height: CARD_H,
-        scale: 1,
-        useCORS: true,
-        backgroundColor: null,
-        logging: false,
-      });
-
-      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
-      currentCards.push(blob);
-
-      // Add to preview
-      const frame = document.createElement('div');
-      frame.className = 'card-frame';
-      frame.style.width = (CARD_W * scale) + 'px';
-      frame.style.height = (CARD_H * scale) + 'px';
-
-      const badge = document.createElement('div');
-      badge.className = 'card-badge';
-      badge.textContent = `${i + 1}/${total}`;
-
-      const img = document.createElement('img');
-      img.src = URL.createObjectURL(blob);
-      img.style.width = '100%';
-      img.style.height = '100%';
-      img.style.objectFit = 'cover';
-
-      frame.appendChild(badge);
-      frame.appendChild(img);
-      preview.appendChild(frame);
-
-    } catch (err) {
-      console.error('html2canvas error:', err);
-    }
-
-    stage.innerHTML = '';
+  if (isGenerating) {
+    // Previous generation will notice version changed and bail
+    // Wait a moment for it to stop
+    await sleep(100);
   }
 
-  setProgress(100);
-  setStatus(`✅ 完成！共 ${total} 张卡片`);
-  document.getElementById('preview-info').textContent = `${CARD_W}×${CARD_H}  ·  ${total} 张`;
-  document.getElementById('card-count').textContent = `${total} 张卡片`;
-  btnGen.disabled = false;
-  btnDown.disabled = false;
+  isGenerating = true;
+  const btnDown = document.getElementById('btn-download');
+  btnDown.disabled = true;
 
-  toast(`✅ ${total} 张卡片生成完毕！`);
+  setStatus('<span class="live-dot"></span>解析中 …');
+  setProgress(5);
+
+  try {
+    // 1. Parse
+    let sections = parseSections(md);
+    if (thisVersion !== generationVersion) return;
+
+    setStatus(`<span class="live-dot"></span>智能排版 ${sections.length} 个章节 …`);
+    setProgress(15);
+
+    // 2. Pre-merge
+    sections = await preMergeSections(sections, currentTheme);
+    if (thisVersion !== generationVersion) return;
+    setProgress(20);
+
+    // 3. Adaptive split + fill
+    sections = await adaptiveSplit(sections, currentTheme, thisVersion);
+    if (thisVersion !== generationVersion || sections.length === 0) return;
+
+    currentSections = sections;
+    const total = sections.length;
+    setStatus(`<span class="live-dot"></span>渲染 ${total} 张卡片 …`);
+    setProgress(25);
+
+    // 4. Render to images
+    const preview = document.getElementById('preview-scroll');
+    const emptyState = document.getElementById('empty-state');
+    if (emptyState) emptyState.remove();
+    preview.innerHTML = '';
+
+    currentCards = [];
+    const CARD_H = getCardH();
+    const scale = Math.min(1, (preview.clientWidth - 48) / CARD_W);
+
+    for (let i = 0; i < total; i++) {
+      if (thisVersion !== generationVersion) return;
+
+      setStatus(`<span class="live-dot"></span>渲染 ${i + 1}/${total} …`);
+      setProgress(25 + (i / total) * 65);
+
+      const html = buildCardHTML(sections[i], i + 1, total, currentTheme);
+      const stage = document.getElementById('render-stage');
+      stage.innerHTML = html;
+      await sleep(80);
+
+      const cardEl = stage.querySelector('.xhs-card');
+      if (!cardEl) continue;
+
+      // Force exact card height — content fills top, bottom-fill takes remainder
+      cardEl.style.height = CARD_H + 'px';
+      cardEl.style.overflow = 'hidden';
+
+      await sleep(50);
+
+      try {
+        const canvas = await html2canvas(cardEl, {
+          width: CARD_W,
+          height: CARD_H,
+          scale: 1,
+          useCORS: true,
+          backgroundColor: null,
+          logging: false,
+        });
+
+        if (thisVersion !== generationVersion) return;
+
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+        currentCards.push(blob);
+
+        // Add to preview
+        const frame = document.createElement('div');
+        frame.className = 'card-frame';
+        frame.style.width = (CARD_W * scale) + 'px';
+        frame.style.height = (CARD_H * scale) + 'px';
+
+        const badge = document.createElement('div');
+        badge.className = 'card-badge';
+        badge.textContent = `${i + 1}/${total}`;
+
+        const img = document.createElement('img');
+        img.src = URL.createObjectURL(blob);
+        img.style.width = '100%';
+        img.style.height = '100%';
+        img.style.objectFit = 'cover';
+
+        frame.appendChild(badge);
+        frame.appendChild(img);
+        preview.appendChild(frame);
+
+      } catch (err) {
+        console.error('html2canvas error:', err);
+      }
+
+      stage.innerHTML = '';
+    }
+
+    if (thisVersion !== generationVersion) return;
+
+    setProgress(100);
+    setStatus(`<span class="live-dot idle"></span>✅ ${total} 张卡片`);
+    document.getElementById('preview-info').textContent = `${CARD_W}×${CARD_H}  ·  ${total} 张`;
+    document.getElementById('card-count').textContent = `${total} 张`;
+    btnDown.disabled = false;
+
+  } finally {
+    if (thisVersion === generationVersion) {
+      isGenerating = false;
+    }
+  }
 }
 
 
@@ -1494,7 +1626,6 @@ async function downloadAll() {
         `正在打包 … ${Math.round(meta.percent)}%`;
     });
 
-    // Download
     const a = document.createElement('a');
     a.href = URL.createObjectURL(zipBlob);
     a.download = `xiaohongshu-cards-${Date.now()}.zip`;
@@ -1670,8 +1801,8 @@ async def fetch_all(urls):
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function setStatus(text) {
-  document.getElementById('status-text').textContent = text;
+function setStatus(html) {
+  document.getElementById('status-text').innerHTML = html;
 }
 
 function setProgress(pct) {

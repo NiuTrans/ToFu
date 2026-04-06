@@ -171,7 +171,8 @@
                   `<div class="search-result-item" onclick="TradingApp._selectFund('${escHtml(f.code)}','${escHtml(f.name)}')">${f.code} — ${escHtml(f.name)}</div>`,
               )
               .join("") || '<div class="search-empty">未找到标的</div>';
-      } catch {
+      } catch (e) {
+        console.warn("[Dashboard] Fund search failed:", e.message);
         const r = $("searchFundResults");
         if (r) r.innerHTML = "";
       }
@@ -332,7 +333,7 @@
         </tr>`;
       }).join('');
     } catch (e) {
-      // Non-critical - just show empty
+      console.warn("[Dashboard] Failed to load trade history:", e.message);
     }
   }
 
@@ -371,7 +372,9 @@
           S.holdings = data.holdings || [];
           renderKPIs();
           renderHoldings();
-        } catch {}
+        } catch (e) {
+          console.warn("[Dashboard] Auto-refresh failed:", e.message);
+        }
       }
     }, 60000);
   }
