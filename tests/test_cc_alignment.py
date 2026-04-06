@@ -19,6 +19,17 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import lib as _lib
+
+
+@pytest.fixture(autouse=True)
+def _disable_extended_ttl():
+    """Disable extended TTL to keep cache_control assertions stable."""
+    original = getattr(_lib, 'CACHE_EXTENDED_TTL', False)
+    _lib.CACHE_EXTENDED_TTL = False
+    yield
+    _lib.CACHE_EXTENDED_TTL = original
+
 
 # ═══════════════════════════════════════════════════════════
 #  1. System Prompt Sections

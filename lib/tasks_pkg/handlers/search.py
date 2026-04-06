@@ -93,6 +93,29 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
                        description='Fetch and extract content from a URL')
 def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
     target_url = fn_args.get('url', '')
+
+    # ── Guard: reject non-HTTP schemes (file://, ftp://, etc.) ──
+    scheme = urlparse(target_url).scheme.lower()
+    if scheme and scheme not in ('http', 'https', ''):
+        # Strip file:// prefix to extract the local path for the error message
+        local_path = target_url
+        if scheme == 'file':
+            local_path = target_url.split('file://', 1)[-1]
+        logger.warning('[Fetch] Rejected non-HTTP URL scheme=%r: %s', scheme, target_url[:120])
+        tool_content = (
+            f'fetch_url only supports http:// and https:// URLs (got {scheme}://). '
+            f'For local files, use read_local_file with path="{local_path}" '
+            f'or read_files for project-relative text files.'
+        )
+        dr = {
+            'title': f'Rejected: {scheme}:// scheme',
+            'snippet': 'Use read_local_file for local paths',
+            'url': target_url, 'source': 'N/A',
+            'fetched': False, 'fetchedChars': 0,
+        }
+        _finalize_tool_round(task, rn, round_entry, [dr], query_override=f'📄 {target_url}')
+        return tc_id, tool_content, False
+
     try:
         page_content = fetch_page_content(target_url, max_chars=_lib.FETCH_MAX_CHARS_DIRECT, pdf_max_chars=_lib.FETCH_MAX_CHARS_PDF)
     except Exception as e:

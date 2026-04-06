@@ -81,6 +81,10 @@ def read_local_file(path: str) -> dict | str:
         FileNotFoundError: If the file doesn't exist.
         ValueError: If the file is too large or unsupported.
     """
+    # Strip file:// URI prefix if present (e.g. file:///home/user/doc.pdf → /home/user/doc.pdf)
+    if path.startswith('file://'):
+        path = path[7:]  # len('file://') == 7
+        logger.debug('[FileReader] Stripped file:// prefix → %s', path)
     # Expand ~ and resolve
     path = os.path.expanduser(path)
     path = os.path.abspath(path)

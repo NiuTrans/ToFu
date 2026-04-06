@@ -352,7 +352,7 @@ def ensure_postgresql(py: str, install_dir: str):
     if conda:
         info(f"Installing PostgreSQL via {os.path.basename(conda)}...")
         result = run(
-            [conda, "install", "-c", "conda-forge", "-y", "postgresql>=16"],
+            [conda, "install", "-c", "conda-forge", "-y", "postgresql>=18"],
             check=False, cwd=install_dir,
         )
         if result.returncode == 0 and _find_pg_binary("initdb"):
@@ -362,7 +362,7 @@ def ensure_postgresql(py: str, install_dir: str):
     # Strategy 2: Homebrew (macOS)
     if not installed and IS_MACOS and which("brew"):
         info("Installing PostgreSQL via Homebrew...")
-        result = run(["brew", "install", "postgresql@16"], check=False)
+        result = run(["brew", "install", "postgresql@18"], check=False)
         if result.returncode == 0 and _find_pg_binary("initdb"):
             ok("PostgreSQL installed via Homebrew")
             installed = True
@@ -373,7 +373,7 @@ def ensure_postgresql(py: str, install_dir: str):
         print()
         if IS_MACOS:
             info("Install manually with one of:")
-            print("     brew install postgresql@16")
+            print("     brew install postgresql@18")
             print("     conda install -c conda-forge postgresql")
             print("     # Or download Postgres.app: https://postgresapp.com")
         elif IS_LINUX:
@@ -396,7 +396,90 @@ def ensure_postgresql(py: str, install_dir: str):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Step 6: Install Playwright (optional)
+#  Step 6: Install ripgrep (optional — fast code search)
+# ═══════════════════════════════════════════════════════════════
+
+def install_ripgrep(install_dir: str):
+    """Install ripgrep for fast code search (optional, non-fatal).
+
+    ripgrep is ~5x faster than GNU grep on our codebase. The grep_search
+    tool falls back to GNU grep → pure Python if rg is unavailable.
+    """
+    step("Checking ripgrep (fast code search)")
+
+    if which("rg"):
+        # Get version
+        try:
+            result = subprocess.run(
+                ["rg", "--version"], capture_output=True, text=True, timeout=5
+            )
+            ver = result.stdout.strip().split("\n")[0] if result.returncode == 0 else "?"
+        except Exception:
+            ver = "?"
+        ok(f"ripgrep already installed ({ver})")
+        return
+
+    info("ripgrep not found. Attempting auto-install...")
+
+    installed = False
+
+    # Strategy 1: conda (if available — works cross-platform)
+    conda = which("conda") or which("mamba")
+    if conda:
+        info(f"Installing ripgrep via {os.path.basename(conda)}...")
+        result = run(
+            [conda, "install", "-c", "conda-forge", "-y", "ripgrep"],
+            check=False, capture=True, cwd=install_dir,
+        )
+        if result.returncode == 0 and which("rg"):
+            ok("ripgrep installed via conda")
+            installed = True
+
+    # Strategy 2: Homebrew (macOS)
+    if not installed and IS_MACOS and which("brew"):
+        info("Installing ripgrep via Homebrew...")
+        result = run(["brew", "install", "ripgrep"], check=False, capture=True)
+        if result.returncode == 0 and which("rg"):
+            ok("ripgrep installed via Homebrew")
+            installed = True
+
+    # Strategy 3: apt (Linux, if sudo available)
+    if not installed and IS_LINUX and which("sudo") and which("apt-get"):
+        info("Installing ripgrep via apt...")
+        result = run(
+            ["sudo", "apt-get", "install", "-y", "ripgrep"],
+            check=False, capture=True,
+        )
+        if result.returncode == 0 and which("rg"):
+            ok("ripgrep installed via apt")
+            installed = True
+
+    # Strategy 4: cargo (Rust — works everywhere)
+    if not installed and which("cargo"):
+        info("Installing ripgrep via cargo (this may take a minute)...")
+        result = run(["cargo", "install", "ripgrep"], check=False, capture=True)
+        if result.returncode == 0 and which("rg"):
+            ok("ripgrep installed via cargo")
+            installed = True
+
+    if not installed:
+        warn("Could not auto-install ripgrep (non-critical).")
+        info("Code search will use GNU grep instead (~5x slower).")
+        print()
+        if IS_MACOS:
+            info("Install manually: brew install ripgrep")
+        elif IS_LINUX:
+            info("Install manually: sudo apt install ripgrep")
+            info("  or: conda install -c conda-forge ripgrep")
+        elif IS_WINDOWS:
+            info("Install manually: winget install BurntSushi.ripgrep.MSVC")
+            info("  or: choco install ripgrep")
+            info("  or: conda install -c conda-forge ripgrep")
+        print()
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Step 7: Install Playwright (optional — browser automation)
 # ═══════════════════════════════════════════════════════════════
 
 def install_playwright(py: str, install_dir: str):
@@ -422,7 +505,7 @@ def install_playwright(py: str, install_dir: str):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Step 7: Configure .env
+#  Step 8: Configure .env
 # ═══════════════════════════════════════════════════════════════
 
 def configure_env(install_dir: str, port: int, api_key: str | None):
@@ -478,7 +561,7 @@ def _update_env_var(env_file: str, key: str, value: str):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Step 8: Docker path
+#  Step 9: Docker path
 # ═══════════════════════════════════════════════════════════════
 
 def docker_install(install_dir: str, port: int, api_key: str | None):
@@ -514,7 +597,7 @@ def docker_install(install_dir: str, port: int, api_key: str | None):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Step 9: Launch server
+#  Step 10: Launch server
 # ═══════════════════════════════════════════════════════════════
 
 def launch(py: str, install_dir: str, port: int):
@@ -625,6 +708,8 @@ def main():
     py = setup_venv(install_dir)
     install_deps(py, install_dir)
     ensure_postgresql(py, install_dir)
+
+    install_ripgrep(install_dir)
 
     if not args.skip_playwright:
         install_playwright(py, install_dir)

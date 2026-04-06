@@ -166,7 +166,7 @@ docker run -d -p 15000:15000 -v tofu-data:/app/data --name tofu ghcr.io/rangehow
 <details>
 <summary>逐步操作，完全控制</summary>
 
-**前提条件：** Python 3.10+，PostgreSQL 16+
+**前提条件：** Python 3.10+，PostgreSQL 18+，ripgrep（推荐）
 
 ```bash
 git clone https://github.com/rangehow/ToFu.git
@@ -177,10 +177,16 @@ python -m venv .venv && source .venv/bin/activate   # 标准 venv
 # 或者: conda create -n tofu python=3.12 -y && conda activate tofu
 
 # 安装 PostgreSQL（如尚未安装）
-# macOS:   brew install postgresql@16
+# macOS:   brew install postgresql@18
 # Ubuntu:  sudo apt install postgresql
 # Windows: https://www.postgresql.org/download/windows/
-# conda:   conda install -c conda-forge postgresql>=16
+# conda:   conda install -c conda-forge postgresql>=18
+
+# 安装 ripgrep（推荐 — 代码搜索速度提升 5 倍）
+# macOS:   brew install ripgrep
+# Ubuntu:  sudo apt install ripgrep
+# Windows: winget install BurntSushi.ripgrep.MSVC
+# conda:   conda install -c conda-forge ripgrep
 
 # 安装 Python 依赖
 pip install -r requirements.txt

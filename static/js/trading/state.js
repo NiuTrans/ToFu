@@ -92,7 +92,8 @@ window.TradingApp = window.TradingApp || {};
       const diffD = Math.floor(diffH / 24);
       if (diffD < 7) return `${diffD}天前`;
       return d.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
-    } catch {
+    } catch (e) {
+      console.debug("[Trading] timeAgo parse error:", e.message);
       return isoStr ? isoStr.slice(0, 10) : "--";
     }
   };
@@ -117,7 +118,9 @@ window.TradingApp = window.TradingApp || {};
     if (typeof marked !== "undefined") {
       try {
         return marked.parse(text);
-      } catch (e) {}
+      } catch (e) {
+        console.warn("[Trading] marked.parse failed:", e.message);
+      }
     }
     return text.replace(/\n/g, "<br>");
   };

@@ -15,7 +15,12 @@ __pycache__/
 *.db
 
 # ── Internal analysis (not part of the app) ──
-analysis_scripts/
+/analysis_scripts/
+/sundries/
+/tools/
+
+# ── Test coverage ──
+.coverage
 
 # ── Debug artifacts (developer-only, may contain API endpoints/keys) ──
 debug/benchmark_results.json
@@ -44,6 +49,10 @@ Thumbs.db
 **/.project_sessions/
 **/.project_indexes/
 .chatui/
+
+# ── Sensitive reports (moved to docs/ but should not be published) ──
+docs/SECURITY_AUDIT_REPORT.md
+docs/RATE_LIMITING_DOS_AUDIT_REPORT.md
 
 # ── Uploads ──
 uploads/images/*

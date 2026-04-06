@@ -873,3 +873,185 @@ class TestMicroCompactPersistenceMarkers:
                 # Should be preserved as-is (not replaced with compacted marker)
                 assert 'Persisted to:' in content
                 assert 'compacted' not in content
+
+
+# ═══════════════════════════════════════════════════════════
+#  8. Phase D: Assistant Content Compaction
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestAssistantContentCompaction:
+    """Tests for Phase D: compacting cold assistant message content."""
+
+    def _build_conversation(self, num_rounds=10, content_len=1200):
+        """Build a conversation with N rounds of user/assistant/tool messages."""
+        messages = [{'role': 'system', 'content': 'You are helpful.'}]
+        for i in range(num_rounds):
+            messages.append({'role': 'user', 'content': f'Question {i}'})
+            messages.append({
+                'role': 'assistant',
+                'content': f'Answer {i}: ' + 'x' * content_len,
+                'tool_calls': [{'id': f'tc_{i}', 'type': 'function',
+                                'function': {'name': 'read_files',
+                                             'arguments': '{}'}}],
+            })
+            messages.append({
+                'role': 'tool',
+                'tool_call_id': f'tc_{i}',
+                'name': 'read_files',
+                'content': f'File contents {i}',
+            })
+        return messages
+
+    def test_phase_d_disabled_by_default(self):
+        """Phase D should NOT compact when enable_assistant_compact is not set."""
+        from lib.tasks_pkg.compaction import micro_compact
+        messages = self._build_conversation(num_rounds=12, content_len=1500)
+        micro_compact(messages)
+        # No assistant messages should be compacted (Phase D disabled by default)
+        compacted = [
+            m for m in messages
+            if m.get('role') == 'assistant'
+            and isinstance(m.get('content'), str)
+            and m['content'].startswith('[Assistant response compacted')
+        ]
+        assert len(compacted) == 0, (
+            'Phase D should be disabled by default to preserve cache stability')
+
+    def test_cold_assistant_messages_compacted_when_enabled(self):
+        """Assistant messages outside hot tail should be compacted when opted in."""
+        from lib.tasks_pkg.compaction import micro_compact
+        messages = self._build_conversation(num_rounds=12, content_len=1500)
+        tokens_saved = micro_compact(messages, enable_assistant_compact=True)
+        # Should have compacted some assistant messages
+        assert tokens_saved > 0
+        compacted = [
+            m for m in messages
+            if m.get('role') == 'assistant'
+            and isinstance(m.get('content'), str)
+            and m['content'].startswith('[Assistant response compacted')
+        ]
+        assert len(compacted) > 0
+
+    def test_hot_tail_assistant_messages_preserved(self):
+        """The 6 most recent assistant messages should NOT be compacted."""
+        from lib.tasks_pkg.compaction import micro_compact
+        messages = self._build_conversation(num_rounds=12, content_len=1500)
+        micro_compact(messages, enable_assistant_compact=True)
+        # Get the last 6 assistant messages
+        asst_msgs = [m for m in messages if m.get('role') == 'assistant']
+        hot_tail = asst_msgs[-6:]
+        for m in hot_tail:
+            content = m.get('content', '')
+            if isinstance(content, str) and content:
+                assert not content.startswith('[Assistant response compacted'), \
+                    f'Hot tail assistant message was wrongly compacted: {content[:80]}'
+
+    def test_short_assistant_content_not_compacted(self):
+        """Assistant content under threshold (800 chars) should be preserved."""
+        from lib.tasks_pkg.compaction import micro_compact
+        messages = self._build_conversation(num_rounds=12, content_len=200)
+        tokens_saved = micro_compact(messages, enable_assistant_compact=True)
+        # No assistant messages should be compacted (all < 800 chars)
+        compacted = [
+            m for m in messages
+            if m.get('role') == 'assistant'
+            and isinstance(m.get('content'), str)
+            and m['content'].startswith('[Assistant response compacted')
+        ]
+        assert len(compacted) == 0
+
+    def test_empty_content_assistant_skipped(self):
+        """Assistant messages with empty/None content (tool_calls only) should be skipped."""
+        from lib.tasks_pkg.compaction import micro_compact
+        messages = [{'role': 'system', 'content': 'test'}]
+        for i in range(12):
+            messages.append({'role': 'user', 'content': f'Q{i}'})
+            messages.append({
+                'role': 'assistant',
+                'content': '',  # empty — tool_calls only
+                'tool_calls': [{'id': f'tc_{i}', 'type': 'function',
+                                'function': {'name': 'run', 'arguments': '{}'}}],
+            })
+            messages.append({
+                'role': 'tool', 'tool_call_id': f'tc_{i}',
+                'content': 'ok',
+            })
+        tokens_saved = micro_compact(messages, enable_assistant_compact=True)
+        # No assistant compaction should happen (all empty content)
+        compacted = [
+            m for m in messages
+            if m.get('role') == 'assistant'
+            and isinstance(m.get('content'), str)
+            and m['content'].startswith('[Assistant response compacted')
+        ]
+        assert len(compacted) == 0
+
+    def test_already_compacted_not_double_compacted(self):
+        """Assistant messages already compacted should not be re-compacted."""
+        from lib.tasks_pkg.compaction import micro_compact
+        messages = self._build_conversation(num_rounds=12, content_len=1500)
+        micro_compact(messages, enable_assistant_compact=True)
+        # Run again
+        tokens_saved_2 = micro_compact(messages, enable_assistant_compact=True)
+        # Second run should save 0 tokens from assistant compaction
+        # (all cold assistants already compacted)
+        compacted = [
+            m for m in messages
+            if m.get('role') == 'assistant'
+            and isinstance(m.get('content'), str)
+            and m['content'].startswith('[Assistant response compacted')
+        ]
+        # Count should be same as first run
+        assert len(compacted) > 0
+        # Each compacted message should appear exactly once with the marker
+        for m in compacted:
+            assert m['content'].count('[Assistant response compacted') == 1
+
+    def test_preview_preserved_in_compacted(self):
+        """Compacted assistant messages should preserve a 200-char preview."""
+        from lib.tasks_pkg.compaction import micro_compact
+        messages = self._build_conversation(num_rounds=12, content_len=2000)
+        micro_compact(messages, enable_assistant_compact=True)
+        compacted = [
+            m for m in messages
+            if m.get('role') == 'assistant'
+            and isinstance(m.get('content'), str)
+            and m['content'].startswith('[Assistant response compacted')
+        ]
+        for m in compacted:
+            content = m['content']
+            assert 'was' in content  # size info
+            assert 'chars]' in content
+            # Preview should be ~200 chars + the header
+            assert len(content) < 400  # much shorter than original 2000+
+
+    def test_list_content_compacted(self):
+        """Assistant messages with list content blocks should be compacted."""
+        from lib.tasks_pkg.compaction import micro_compact
+        messages = [{'role': 'system', 'content': 'test'}]
+        for i in range(12):
+            messages.append({'role': 'user', 'content': f'Q{i}'})
+            messages.append({
+                'role': 'assistant',
+                'content': [
+                    {'type': 'text', 'text': f'Answer {i}: ' + 'x' * 1500},
+                ],
+            })
+        micro_compact(messages, enable_assistant_compact=True)
+        compacted = [
+            m for m in messages
+            if m.get('role') == 'assistant'
+            and isinstance(m.get('content'), str)
+            and m['content'].startswith('[Assistant response compacted')
+        ]
+        assert len(compacted) > 0
+
+    def test_token_savings_reported(self):
+        """micro_compact should report token savings from assistant compaction."""
+        from lib.tasks_pkg.compaction import micro_compact
+        messages = self._build_conversation(num_rounds=12, content_len=2000)
+        tokens_saved = micro_compact(messages, enable_assistant_compact=True)
+        # Each compacted message saves ~(2000 - 250) / 4 ≈ 437 tokens
+        # With 6 cold assistants (12 - 6 hot tail), expect ~2600+ tokens
+        assert tokens_saved > 1000

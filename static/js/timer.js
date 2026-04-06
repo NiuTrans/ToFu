@@ -29,11 +29,9 @@ async function _refreshTimerPanel() {
     const badge = document.getElementById("timerBadge");
     const countEl = document.getElementById("timerCount");
 
-    // Update badge visibility & count
+    // Update badge visibility & count (only when scheduler is enabled)
     if (badge) {
-      if (timers.length > 0) {
-        badge.style.display = "inline-flex";
-      }
+      badge.style.display = (schedulerEnabled && timers.length > 0) ? "inline-flex" : "none";
     }
     if (countEl) {
       if (activeCount > 0) {
@@ -155,6 +153,12 @@ function _startTimerPolling() {
 }
 
 async function _refreshTimerBadge() {
+  // Don't show timer badge or poll API when scheduler is disabled
+  if (!schedulerEnabled) {
+    const badge = document.getElementById("timerBadge");
+    if (badge) badge.style.display = "none";
+    return;
+  }
   try {
     const resp = await fetch(apiUrl("/api/timer/list"));
     if (!resp.ok) return;

@@ -1435,14 +1435,17 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
             bp, search_path = _resolve_base(base_path, search_path)
         return tool_grep(bp, fn_args.get('pattern', ''),
                          search_path, fn_args.get('include'),
-                         fn_args.get('context_lines'))
+                         fn_args.get('context_lines'),
+                         max_results=fn_args.get('max_results'),
+                         count_only=bool(fn_args.get('count_only', False)))
     elif fn_name == 'find_files':
         search_path = fn_args.get('path')
         bp = base_path
         if search_path:
             bp, search_path = _resolve_base(base_path, search_path)
         return tool_find_files(bp, fn_args.get('pattern', ''),
-                               search_path)
+                               search_path,
+                               max_results=fn_args.get('max_results'))
     # ★ Write tools — pass conv_id + task_id for per-round undo
     elif fn_name == 'write_file':
         bp, rp = _resolve_base(base_path, fn_args.get('path', ''))

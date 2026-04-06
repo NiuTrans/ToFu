@@ -231,22 +231,47 @@
     }
   }
 
-  async function editHolding(id) {
+  function editHolding(id) {
     const h = S.holdings.find((x) => x.id === id);
     if (!h) return;
-    const newShares = prompt("修改份额:", h.shares);
-    if (newShares === null) return;
-    const newPrice = prompt("修改成本价:", h.buy_price);
-    if (newPrice === null) return;
+    const modal = $("editHoldingModal");
+    if (!modal) return;
+    // Populate modal fields
+    const label = $("editHoldingLabel");
+    if (label) label.textContent = `${h.symbol} ${h.asset_name || ""}`;
+    const idEl = $("editHoldingId");
+    if (idEl) idEl.value = id;
+    const sharesEl = $("editShares");
+    if (sharesEl) sharesEl.value = h.shares;
+    const priceEl = $("editBuyPrice");
+    if (priceEl) priceEl.value = h.buy_price;
+    modal.style.display = "flex";
+    if (sharesEl) sharesEl.focus();
+  }
+
+  async function saveEditHolding() {
+    const id = parseInt($("editHoldingId")?.value);
+    const newShares = parseFloat($("editShares")?.value);
+    const newPrice = parseFloat($("editBuyPrice")?.value);
+    if (!id || isNaN(newShares) || isNaN(newPrice)) {
+      toast("请输入有效的数字", "error");
+      return;
+    }
+    if (newShares <= 0 || newPrice <= 0) {
+      toast("份额和价格必须大于0", "error");
+      return;
+    }
     try {
       await api(`/holdings/${id}`, {
         method: "PUT",
         body: JSON.stringify({
-          shares: parseFloat(newShares),
-          buy_price: parseFloat(newPrice),
+          shares: newShares,
+          buy_price: newPrice,
         }),
       });
       toast("更新成功", "success");
+      const modal = $("editHoldingModal");
+      if (modal) modal.style.display = "none";
       loadHoldings();
     } catch (e) {
       toast("更新失败: " + e.message, "error");
@@ -392,6 +417,7 @@
     showAddHolding,
     addHolding,
     editHolding,
+    saveEditHolding,
     deleteHolding,
     deleteAllHoldings,
     showCashModal,

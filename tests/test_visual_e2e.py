@@ -176,6 +176,11 @@ class TestNormalChat:
         """Send a message and verify the response renders correctly."""
         _wait_for_app_ready(page)
 
+        # ★ Always start a fresh conversation so test messages don't pollute
+        #   whatever conversation was open from a previous session.
+        page.evaluate("newChat()")
+        time.sleep(0.3)
+
         _send_message(page, "Hello, this is a test message!", wait_done=True, timeout=60000)
 
         path = _screenshot(page, screenshot_dir, "03_normal_chat_reply")
@@ -191,6 +196,11 @@ class TestNormalChat:
     def test_message_has_user_and_assistant(self, page, screenshot_dir):
         """After sending, both user and assistant messages should appear."""
         _wait_for_app_ready(page)
+
+        # ★ Fresh conversation to avoid appending to an existing one
+        page.evaluate("newChat()")
+        time.sleep(0.3)
+
         _send_message(page, "What is 2+2?", wait_done=True, timeout=60000)
 
         # Check DOM for message elements
@@ -201,6 +211,10 @@ class TestNormalChat:
     def test_empty_send_blocked(self, page, screenshot_dir):
         """Clicking send with empty input should do nothing."""
         _wait_for_app_ready(page)
+
+        # ★ Fresh conversation for isolation
+        page.evaluate("newChat()")
+        time.sleep(0.3)
 
         # Get current message count
         initial_count = page.locator(".message").count()
@@ -215,6 +229,11 @@ class TestNormalChat:
     def test_conversation_appears_in_sidebar(self, page, screenshot_dir):
         """After sending a message, a conversation should appear in sidebar."""
         _wait_for_app_ready(page)
+
+        # ★ Fresh conversation so the test creates a new sidebar entry
+        page.evaluate("newChat()")
+        time.sleep(0.3)
+
         _send_message(page, "Test sidebar entry", wait_done=True, timeout=60000)
 
         # Check sidebar has at least one conversation
@@ -357,6 +376,10 @@ class TestEndpointModeChat:
         """Send message in endpoint mode — should show worker+critic flow."""
         _wait_for_app_ready(page)
 
+        # ★ Fresh conversation to avoid polluting existing conversations
+        page.evaluate("newChat()")
+        time.sleep(0.3)
+
         # Enable endpoint mode
         page.evaluate("_applyEndpointUI(true)")
         time.sleep(0.3)
@@ -422,6 +445,10 @@ class TestNewChat:
         """Clicking new chat should reset to welcome screen."""
         _wait_for_app_ready(page)
 
+        # ★ Start fresh so we don't pollute an existing conversation
+        page.evaluate("newChat()")
+        time.sleep(0.3)
+
         # Send a message first to have a conversation
         _send_message(page, "First message", wait_done=True, timeout=60000)
 
@@ -441,6 +468,10 @@ class TestNewChat:
     def test_switch_between_conversations(self, page, screenshot_dir):
         """Create two convs and switch between them."""
         _wait_for_app_ready(page)
+
+        # ★ Start fresh so we don't pollute an existing conversation
+        page.evaluate("newChat()")
+        time.sleep(0.3)
 
         # Create first conversation
         _send_message(page, "Conversation One Message", wait_done=True, timeout=60000)
@@ -519,6 +550,10 @@ class TestMultiTurn:
         """Three exchanges should render as alternating user/assistant messages."""
         _wait_for_app_ready(page)
 
+        # ★ Fresh conversation for clean multi-turn test
+        page.evaluate("newChat()")
+        time.sleep(0.3)
+
         _send_message(page, "First question", wait_done=True, timeout=60000)
         _send_message(page, "Second question", wait_done=True, timeout=60000)
         _send_message(page, "Third question", wait_done=True, timeout=60000)
@@ -545,6 +580,10 @@ class TestKeyboardShortcuts:
     def test_ctrl_enter_sends(self, page, screenshot_dir):
         """Ctrl+Enter should send the message."""
         _wait_for_app_ready(page)
+
+        # ★ Fresh conversation for isolation
+        page.evaluate("newChat()")
+        time.sleep(0.3)
 
         textarea = page.locator("#userInput")
         textarea.fill("Sent via keyboard shortcut")
@@ -583,6 +622,10 @@ class TestStreamingUI:
     def test_streaming_indicator_appears(self, page, screenshot_dir):
         """While processing, a streaming indicator should be visible."""
         _wait_for_app_ready(page)
+
+        # ★ Fresh conversation for isolation
+        page.evaluate("newChat()")
+        time.sleep(0.3)
 
         textarea = page.locator("#userInput")
         textarea.fill("Tell me something interesting")

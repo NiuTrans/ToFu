@@ -13,7 +13,7 @@ FROM python:3.12-slim AS base
 
 # ── System dependencies ─────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        # PostgreSQL 16 (Debian bookworm default — fully compatible)
+        # PostgreSQL (Debian bookworm ships v16 — compatible with PG 18+ protocol)
         postgresql-16 \
         postgresql-client-16 \
         # Build tools for compiled Python packages
@@ -23,6 +23,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
         libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 \
         libcairo2 libasound2 libxshmfence1 \
+        # Fast code search (ripgrep — 5x faster grep for project tools)
+        ripgrep \
         # General utilities
         curl ca-certificates git \
     && rm -rf /var/lib/apt/lists/*

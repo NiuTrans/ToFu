@@ -928,13 +928,27 @@ def add_cache_breakpoints(body, log_prefix=''):
     orchestrator loop with the same body/messages references.  We
     first STRIP all previous cache_control annotations to avoid
     exceeding Anthropic's 4-block limit (which causes HTTP 400).
+
+    Args:
+        body: The request body dict (mutated in place). May contain
+              ``_task_id`` for session-stable TTL latch support.
+        log_prefix: Prefix for log messages.
     """
     model = body.get('model', '')
     if not is_claude(model):
         return
 
-    import lib as _lib
-    use_extended_ttl = getattr(_lib, 'CACHE_EXTENDED_TTL', False)
+    # ★ Session-stable TTL latch: once a task starts with extended TTL on/off,
+    #   it stays that way for the entire session.  This prevents mid-session
+    #   settings changes from shifting the beta header, which would change
+    #   the cache key and evict everything.
+    _task_id = body.pop('_task_id', '')
+    if _task_id:
+        from lib.tasks_pkg.cache_tracking import latch_extended_ttl
+        use_extended_ttl = latch_extended_ttl(_task_id)
+    else:
+        import lib as _lib
+        use_extended_ttl = getattr(_lib, 'CACHE_EXTENDED_TTL', False)
 
     # cache_control dicts for stable prefix (BP1-BP3) and tail (BP4)
     if use_extended_ttl:
@@ -1361,15 +1375,26 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             which starts executing read-only tools while the model is still
             generating subsequent tool calls.
     """
+    # ★ Read _task_id for beta header latch below. add_cache_breakpoints will
+    #   pop it from body for Claude models; for non-Claude, we pop it here.
+    _task_id_for_latch = body.get('_task_id', '')
     add_cache_breakpoints(body, log_prefix)
+    # Clean up _task_id if add_cache_breakpoints didn't pop it (non-Claude)
+    body.pop('_task_id', None)
 
     # ── Auto-inject extended cache TTL beta header for Anthropic ──
     # When CACHE_EXTENDED_TTL is enabled and model is Claude, add the
     # anthropic-beta header so the server accepts ttl:"1h" in cache_control.
     # This header is safe to add even if the proxy doesn't need it.
+    # ★ Uses the same TTL latch as add_cache_breakpoints for consistency.
     if is_claude(body.get('model', '')):
-        import lib as _lib
-        if getattr(_lib, 'CACHE_EXTENDED_TTL', False):
+        if _task_id_for_latch:
+            from lib.tasks_pkg.cache_tracking import latch_extended_ttl
+            _use_ext_ttl = latch_extended_ttl(_task_id_for_latch)
+        else:
+            import lib as _lib
+            _use_ext_ttl = getattr(_lib, 'CACHE_EXTENDED_TTL', False)
+        if _use_ext_ttl:
             if extra_headers is None:
                 extra_headers = {}
             # Append to existing anthropic-beta if present, don't overwrite

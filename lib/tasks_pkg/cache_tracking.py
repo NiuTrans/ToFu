@@ -3,7 +3,7 @@
 
 Inspired by Claude Code's ``promptCacheBreakDetection.ts`` (727 lines).
 
-Two features:
+Features:
   1. **Cache break detection**: two-phase approach (like Claude Code):
      - Phase 1 (pre-call): hash system prompt, tools, and message count
        to detect what WOULD cause a cache break.
@@ -14,6 +14,14 @@ Two features:
   2. **Cache-aware microcompact**: when editing messages, skip those in the
      "cache prefix" (messages that were part of the last cache hit) to
      maintain byte-identical content for prompt cache stability.
+  3. **Concurrent conversation tracking**: detects when multiple active
+     conversations share the same model, which can cause mutual cache
+     eviction on the server side.
+  4. **Session-stable TTL latch**: latches the CACHE_EXTENDED_TTL decision
+     once per task to prevent mid-session cache key changes from shifting
+     the beta header.
+  5. **Cache-aware tool result ordering**: sorts tool results by tool_call_id
+     to ensure deterministic prefix for automatic prefix caching providers.
 
 Key insight (from investigating "cache_read_tokens stays unchanged"):
   The old code hashed message PREFIX content, which changed every round due
@@ -34,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 from typing import Any
 
 from lib.log import get_logger
@@ -143,7 +152,6 @@ def detect_cache_break(
     if not conv_id:
         return None
 
-    import time
     now = time.time()
 
     with _cache_lock:
@@ -176,8 +184,16 @@ def detect_cache_break(
             cache_read = (usage.get('cache_read_tokens')
                           or usage.get('cache_read_input_tokens')
                           or 0)
+            (usage.get('cache_write_tokens')
+                           or usage.get('cache_creation_input_tokens')
+                           or 0)
 
         prev_cache_read = prev.last_cache_read_tokens
+
+        # ★ FIX: compute elapsed BEFORE updating state so TTL detection works.
+        # Previously, elapsed was computed AFTER setting last_update_time = now,
+        # which meant it was always 0, making the >5min TTL check dead code.
+        elapsed = now - prev.last_update_time if prev.last_update_time else 0
 
         # Handle compaction: if compaction happened, a drop in cache_read
         # is expected — don't flag it as a break.
@@ -199,7 +215,7 @@ def detect_cache_break(
                 and not prev.compaction_pending):
             api_break = True
 
-        # ── Update state ──
+        # ── Update state (AFTER elapsed computation) ──
         prev.system_hash = sys_hash
         prev.tools_hash = tools_hash
         prev.model = model
@@ -215,24 +231,30 @@ def detect_cache_break(
             # Confirmed cache break with known cause
             logger.warning(
                 '[CacheBreak] conv=%s call=%d CONFIRMED cache break: %s. '
-                'cache_read: %d → %d tokens',
+                'cache_read: %d → %d tokens (gap=%.1fs)',
                 conv_id[:8], prev.call_count,
                 ', '.join(f'{k}={v}' for k, v in client_changes.items()),
-                prev_cache_read, cache_read,
+                prev_cache_read, cache_read, elapsed,
             )
             return client_changes
         elif api_break and not client_changes:
             # Cache tokens dropped but we can't explain why — likely
             # server-side TTL expiry or routing change
-            elapsed = now - prev.last_update_time if prev.last_update_time else 0
             if elapsed > 300:  # >5min gap
                 reason = 'possible TTL expiry (>5min gap, prompt unchanged)'
             else:
-                reason = 'likely server-side (prompt unchanged, <5min gap)'
+                # Check for concurrent conversations that might cause eviction
+                _concurrent = _count_active_on_model(model, exclude_conv=conv_id)
+                if _concurrent > 0:
+                    reason = (f'likely cache contention ({_concurrent} other '
+                              f'active conv(s) on {model}, <5min gap)')
+                else:
+                    reason = 'likely server-side (prompt unchanged, <5min gap)'
             logger.info(
-                '[CacheTrack] conv=%s call=%d cache_read dropped: %d → %d (%s)',
+                '[CacheTrack] conv=%s call=%d cache_read dropped: %d → %d '
+                '(gap=%.1fs, %s)',
                 conv_id[:8], prev.call_count,
-                prev_cache_read, cache_read, reason,
+                prev_cache_read, cache_read, elapsed, reason,
             )
             return {'server_side': reason}
         elif client_changes and not api_break:
@@ -267,6 +289,179 @@ def notify_compaction(conv_id: str) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Concurrent conversation tracking
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _count_active_on_model(model: str, exclude_conv: str = '') -> int:
+    """Count conversations active on the same model within the last 60s.
+
+    When multiple conversations hit the same model simultaneously,
+    their different prefixes can compete for server-side cache capacity,
+    causing mutual evictions.  This is most relevant for Anthropic where
+    cache is keyed on the exact prefix bytes.
+
+    Args:
+        model: Model name to check.
+        exclude_conv: Conv ID to exclude (the current conversation).
+
+    Returns:
+        Number of other active conversations on the same model.
+    """
+    cutoff = time.time() - 60  # consider "active" if called within last 60s
+    count = 0
+    for cid, state in _cache_states.items():
+        if cid == exclude_conv:
+            continue
+        if (state.model == model
+                and state.last_update_time > cutoff
+                and state.call_count > 0):
+            count += 1
+    return count
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Per-round cache stats logging
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def log_round_cache_stats(
+    conv_id: str,
+    round_num: int,
+    usage: dict | None,
+    model: str,
+    tid: str = '',
+) -> None:
+    """Log per-round cache stats at INFO level for visibility.
+
+    Previously cache stats were only logged at DEBUG in stream_chat.
+    This gives us production-visible per-round data for diagnosing
+    cache behavior without enabling DEBUG logging.
+
+    Args:
+        conv_id: Conversation ID.
+        round_num: Current round number (0-based).
+        usage: API usage dict from the LLM response.
+        model: Model name.
+        tid: Task ID for log correlation.
+    """
+    if not usage:
+        return
+
+    cache_write = (usage.get('cache_write_tokens')
+                   or usage.get('cache_creation_input_tokens')
+                   or 0)
+    cache_read = (usage.get('cache_read_tokens')
+                  or usage.get('cache_read_input_tokens')
+                  or 0)
+    prompt_tokens = (usage.get('prompt_tokens')
+                     or usage.get('input_tokens')
+                     or 0)
+
+    # Only log if there's meaningful cache activity
+    if not cache_write and not cache_read:
+        return
+
+    total_input = prompt_tokens + cache_write + cache_read
+    hit_pct = round(cache_read / max(total_input, 1) * 100)
+
+    logger.info(
+        '[CacheStats] %s conv=%s R%d model=%s '
+        'input=%d cache_w=%d cache_r=%d hit=%d%%',
+        tid[:8] if tid else '???',
+        conv_id[:8] if conv_id else '???',
+        round_num + 1, model,
+        prompt_tokens, cache_write, cache_read, hit_pct,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Session-stable TTL latch
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_ttl_latch: dict[str, bool] = {}
+"""Per-task_id TTL latch. Once set, the TTL decision is fixed for the task."""
+
+_ttl_latch_lock = threading.Lock()
+
+
+def latch_extended_ttl(task_id: str) -> bool:
+    """Latch the CACHE_EXTENDED_TTL decision for a task's lifetime.
+
+    Inspired by Claude Code's session-stable TTL decision: once a task
+    starts with extended TTL on/off, it stays that way for the entire
+    session.  This prevents mid-session settings changes from shifting
+    the beta header, which would change the cache key and evict everything.
+
+    Args:
+        task_id: The task ID to latch for.
+
+    Returns:
+        The latched TTL decision (True = use 1h for stable prefix).
+    """
+    with _ttl_latch_lock:
+        if task_id in _ttl_latch:
+            return _ttl_latch[task_id]
+
+        import lib as _lib
+        decision = getattr(_lib, 'CACHE_EXTENDED_TTL', False)
+        _ttl_latch[task_id] = decision
+        return decision
+
+
+def release_ttl_latch(task_id: str) -> None:
+    """Release the TTL latch when a task completes.
+
+    Call from orchestrator._finalize_and_emit_done to prevent memory leak.
+    """
+    with _ttl_latch_lock:
+        _ttl_latch.pop(task_id, None)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Cache-aware tool result ordering
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def sort_tool_results(messages: list) -> None:
+    """Sort consecutive tool-result messages by tool_call_id for cache stability.
+
+    When multiple tool results come back from parallel tool execution, their
+    order in the messages array may vary between rounds if tools complete in
+    different orders.  This causes the prefix to differ even though the
+    content is identical, breaking automatic prefix caching (OpenAI/Qwen).
+
+    For Anthropic explicit breakpoints, this is less critical since the
+    breakpoints mark exact positions.  But it doesn't hurt and improves
+    determinism.
+
+    This function finds consecutive runs of tool-role messages and sorts
+    them by tool_call_id.  It's called before build_body to ensure
+    deterministic ordering.
+
+    Args:
+        messages: The messages list (mutated in place).
+    """
+    if not messages or len(messages) < 2:
+        return
+
+    i = 0
+    n = len(messages)
+    while i < n:
+        # Find start of a tool-result run
+        if messages[i].get('role') == 'tool':
+            run_start = i
+            while i < n and messages[i].get('role') == 'tool':
+                i += 1
+            run_end = i
+            # Only sort if there are 2+ consecutive tool results
+            if run_end - run_start >= 2:
+                # Sort by tool_call_id for deterministic ordering
+                tool_run = messages[run_start:run_end]
+                tool_run.sort(key=lambda m: m.get('tool_call_id', ''))
+                messages[run_start:run_end] = tool_run
+        else:
+            i += 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Cache-aware microcompact
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -288,3 +483,13 @@ def get_cache_prefix_count(conv_id: str) -> int:
             # Use message_count - 2 (keep last 2 messages editable)
             return max(0, state.message_count - 2)
     return 0
+
+
+def cleanup_cache_state(conv_id: str) -> None:
+    """Remove cache state for a conversation that's no longer active.
+
+    Call when a conversation is explicitly deleted or after extended
+    inactivity to prevent unbounded memory growth.
+    """
+    with _cache_lock:
+        _cache_states.pop(conv_id, None)

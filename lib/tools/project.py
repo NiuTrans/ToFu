@@ -22,7 +22,9 @@ PROJECT_TOOL_GREP = {
         "description": (
             "Search for a pattern across project files. Returns matching lines with file paths and line numbers. "
             "Very useful for finding function definitions, imports, usages, etc.\n"
-            "Search is case-insensitive. Use simple, short patterns for best results — "
+            "Search is case-insensitive. Uses ripgrep internally (5x faster than grep).\n"
+            "Supports max_results to limit output (like head -n) and count_only for fast counting (like grep -c).\n"
+            "Use simple, short patterns for best results — "
             "e.g. 'handleRequest' instead of 'def handle_.*request'. "
             "If unsure of naming, search for a core keyword substring."
         ),
@@ -32,7 +34,9 @@ PROJECT_TOOL_GREP = {
                 "pattern": {"type": "string", "description": "Search pattern — prefer short literal substrings (e.g. 'handleRequest', 'TODO', 'import foo'). Regex also supported."},
                 "path": {"type": "string", "description": "Relative path to search in (optional, defaults to project root)"},
                 "include": {"type": "string", "description": "File glob filter, e.g. '*.py' or '*.js' (optional)"},
-                "context_lines": {"type": "integer", "description": "Number of context lines before and after each match (like grep -C). Default 0, max 10. Use 3-5 to see surrounding code without a separate read_files call."}
+                "context_lines": {"type": "integer", "description": "Number of context lines before and after each match (like grep -C). Default 0, max 10. Use 3-5 to see surrounding code without a separate read_files call."},
+                "max_results": {"type": "integer", "description": "Maximum number of matching lines to return (like head -n). Default 50. Use a small value (5-20) when you only need a few examples or to check existence."},
+                "count_only": {"type": "boolean", "description": "If true, return only the count of matching lines (like grep -c or wc -l), not the actual lines. Much faster for large result sets."}
             },
             "required": ["pattern"]
         }
@@ -48,7 +52,8 @@ PROJECT_TOOL_FIND = {
             "type": "object",
             "properties": {
                 "pattern": {"type": "string", "description": "File name glob pattern, e.g. '*.test.py', 'Dockerfile', '*.config.*'"},
-                "path": {"type": "string", "description": "Relative path to search in (optional)"}
+                "path": {"type": "string", "description": "Relative path to search in (optional)"},
+                "max_results": {"type": "integer", "description": "Maximum number of files to return. Default 100. Use a small value (5-20) when you only need a quick sample."}
             },
             "required": ["pattern"]
         }
@@ -146,11 +151,12 @@ PROJECT_TOOL_RUN_COMMAND = {
             "Commands run without a timeout by default — long-running processes are OK. "
             "Avoid interactive commands that require stdin input.\n\n"
             "WHEN TO USE run_command vs other tools:\n"
-            "• Prefer run_command for: counting/statistics (wc, sort, uniq), building/testing (npm, pytest), "
+            "• Prefer run_command for: building/testing (npm, pytest), "
             "installing packages, git operations, and any task where a Unix pipeline is natural.\n"
-            "• Prefer grep_search for: finding code patterns (built-in fuzzy hints, context lines, case-insensitive).\n"
-            "• Prefer read_files for: understanding code (returns with line numbers, supports batch reads of 20 files).\n"
-            "• Prefer find_files for: locating files by name/glob (respects .gitignore-like filters)."
+            "• ALWAYS use grep_search instead of 'run_command grep/rg': it uses ripgrep internally (5x faster), "
+            "auto-skips ignored dirs, and supports max_results (like head -n) and count_only (like wc -l).\n"
+            "• ALWAYS use find_files instead of 'run_command find': it supports max_results and auto-filters ignored dirs.\n"
+            "• Prefer read_files for: understanding code (returns with line numbers, supports batch reads of 20 files)."
         ),
         "parameters": {
             "type": "object",
@@ -219,7 +225,8 @@ PROJECT_TOOL_READ_LOCAL_FILE = {
             "• **Office docs** (.docx, .doc, .xlsx, .xls, .pptx, .ppt): Extracts text and tables as Markdown.\n"
             "• **Text files** (.txt, .md, .csv, .json, .xml, .py, etc.): Reads with auto encoding detection.\n\n"
             "Use this when the user provides a file path outside the project, or when you need to "
-            "read binary formats (images, PDFs, Office docs) that read_files cannot handle."
+            "read binary formats (images, PDFs, Office docs) that read_files cannot handle.\n"
+            "Also use this for file:// URIs — strip the file:// prefix and pass just the path."
         ),
         "parameters": {
             "type": "object",
@@ -228,7 +235,7 @@ PROJECT_TOOL_READ_LOCAL_FILE = {
                     "type": "string",
                     "description": (
                         "Absolute file path (e.g. '/home/user/report.pdf', '~/Documents/photo.png'). "
-                        "Supports ~ expansion."
+                        "Supports ~ expansion. If given a file:// URI, strip the prefix first."
                     )
                 }
             },

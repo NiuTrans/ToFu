@@ -170,7 +170,7 @@ Open **http://localhost:15000** — done. All data persists in Docker volumes.
 <details>
 <summary>Step-by-step for full control</summary>
 
-**Prerequisites:** Python 3.10+, PostgreSQL 16+
+**Prerequisites:** Python 3.10+, PostgreSQL 18+, ripgrep (recommended)
 
 ```bash
 git clone https://github.com/rangehow/ToFu.git
@@ -181,10 +181,16 @@ python -m venv .venv && source .venv/bin/activate   # Standard venv
 # OR: conda create -n tofu python=3.12 -y && conda activate tofu
 
 # Install PostgreSQL (if not already installed)
-# macOS:   brew install postgresql@16
+# macOS:   brew install postgresql@18
 # Ubuntu:  sudo apt install postgresql
 # Windows: https://www.postgresql.org/download/windows/
-# conda:   conda install -c conda-forge postgresql>=16
+# conda:   conda install -c conda-forge postgresql>=18
+
+# Install ripgrep (recommended — 5x faster code search)
+# macOS:   brew install ripgrep
+# Ubuntu:  sudo apt install ripgrep
+# Windows: winget install BurntSushi.ripgrep.MSVC
+# conda:   conda install -c conda-forge ripgrep
 
 # Install Python dependencies
 pip install -r requirements.txt

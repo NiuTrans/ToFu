@@ -529,7 +529,7 @@ def mark_empty_result(tool_name: str, content: str) -> str:
 _THINKING_HOT_TAIL = 4
 
 
-def micro_compact(messages: list, conv_id: str = '') -> int:
+def micro_compact(messages: list, conv_id: str = '', **kwargs) -> int:
     """Compress cold tool results AND strip old thinking blocks.
 
     Extended beyond the original tool-result-only compaction:
@@ -545,6 +545,13 @@ def micro_compact(messages: list, conv_id: str = '') -> int:
     Args:
         messages: The live messages list.  Mutated in place.
         conv_id:  Conversation ID for logging.
+
+    Keyword Args:
+        enable_assistant_compact: If True, also compact cold assistant
+            message content (Phase D).  Disabled by default because
+            A/B testing proved it invalidates prompt cache — only
+            enable when cache rebuild is already expected (e.g.,
+            during force_compact).
 
     Returns:
         Estimated number of tokens saved.
@@ -762,6 +769,102 @@ def micro_compact(messages: list, conv_id: str = '') -> int:
                     conv_id[:8] if conv_id else '?',
                     images_stripped, image_tokens_saved,
                     _human_size(image_tokens_saved * 4))
+
+    # ── Phase D: Compact cold assistant message content ───────────────
+    # In long agentic conversations, assistant messages from 20+ rounds ago
+    # contain verbose explanations that are no longer critical.  Compacting
+    # these saves tokens at the cost of invalidating prompt cache.
+    #
+    # ★ CRITICAL: A/B testing (2026-04-06) proved that compacting messages
+    #   within the cached prefix DESTROYS cache stability.  Even though
+    #   get_cache_prefix_count() returns a value, Anthropic actually caches
+    #   everything up to BP4 (the conversation tail).  Mutating ANY message
+    #   in that range changes the prefix bytes → full cache miss → expensive
+    #   re-cache at 1.25-2.0x.  In testing, Phase D increased total cost
+    #   by 57% due to cache invalidation (3 full re-caches in 4 rounds).
+    #
+    # Therefore, Phase D is DISABLED during normal micro_compact runs.
+    # It is ONLY enabled when called from force_compact (Layer 2) where
+    # the cache is about to be rebuilt anyway, so the invalidation cost
+    # is already paid.  This way we still get the token savings when it
+    # matters most (approaching context limit) without hurting cache
+    # during normal operation.
+    #
+    # To enable: pass `enable_assistant_compact=True` explicitly.
+    if kwargs.get('enable_assistant_compact', False):
+        _ASSISTANT_HOT_TAIL = 6   # keep 6 most recent assistant msgs untouched
+        _ASSISTANT_COMPACT_THRESHOLD = 800  # only compact if content > 800 chars
+
+        all_assistant_indices = [
+            i for i, m in enumerate(messages)
+            if m.get('role') == 'assistant'
+        ]
+
+        assistant_compacted = 0
+        assistant_tokens_saved = 0
+
+        if len(all_assistant_indices) > _ASSISTANT_HOT_TAIL:
+            cold_assistant = all_assistant_indices[:-_ASSISTANT_HOT_TAIL]
+            for idx in cold_assistant:
+                msg = messages[idx]
+                content = msg.get('content', '')
+
+                # Skip messages that are tool_calls-only (content is empty/None)
+                if not content:
+                    continue
+
+                # Handle string content
+                if isinstance(content, str):
+                    if len(content) <= _ASSISTANT_COMPACT_THRESHOLD:
+                        continue
+                    # Already compacted?
+                    if content.startswith('[Assistant response compacted'):
+                        continue
+                    old_len = len(content)
+                    preview = content[:200].rstrip()
+                    if not preview.endswith('…') and len(content) > 200:
+                        preview += '…'
+                    msg['content'] = (
+                        f'[Assistant response compacted — was {old_len:,} chars]\n'
+                        f'{preview}'
+                    )
+                    saved = (old_len - len(msg['content'])) // 4
+                    assistant_tokens_saved += saved
+                    assistant_compacted += 1
+
+                # Handle list content (multi-block)
+                elif isinstance(content, list):
+                    total_text_len = 0
+                    for blk in content:
+                        if isinstance(blk, dict) and blk.get('type') == 'text':
+                            total_text_len += len(blk.get('text', ''))
+                    if total_text_len <= _ASSISTANT_COMPACT_THRESHOLD:
+                        continue
+                    # Collect text and compact
+                    text_parts = []
+                    for blk in content:
+                        if isinstance(blk, dict) and blk.get('type') == 'text':
+                            text_parts.append(blk.get('text', ''))
+                    full_text = '\n'.join(text_parts)
+                    if full_text.startswith('[Assistant response compacted'):
+                        continue
+                    preview = full_text[:200].rstrip()
+                    if not preview.endswith('…') and len(full_text) > 200:
+                        preview += '…'
+                    msg['content'] = (
+                        f'[Assistant response compacted — was {total_text_len:,} chars]\n'
+                        f'{preview}'
+                    )
+                    saved = (total_text_len - len(msg['content'])) // 4
+                    assistant_tokens_saved += saved
+                    assistant_compacted += 1
+
+        if assistant_compacted > 0:
+            tokens_saved += assistant_tokens_saved
+            logger.info('[L1-asst] conv=%s  compacted %d cold assistant messages '
+                        '(~%d tokens saved)',
+                        conv_id[:8] if conv_id else '?',
+                        assistant_compacted, assistant_tokens_saved)
 
     return tokens_saved
 
@@ -1354,8 +1457,8 @@ def reactive_compact(messages: list, task: dict | None = None) -> bool:
                    '(API rejected request as too long)',
                    pfx, conv_id[:8] if conv_id else '?')
 
-    # Phase 1: Aggressive micro-compact
-    micro_compact(messages, conv_id=conv_id)
+    # Phase 1: Aggressive micro-compact (with Phase D since cache is being rebuilt)
+    micro_compact(messages, conv_id=conv_id, enable_assistant_compact=True)
 
     # Phase 2: Force-reset the cooldown so compaction can fire
     with _cooldown_lock:

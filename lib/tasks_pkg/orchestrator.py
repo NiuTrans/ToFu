@@ -24,7 +24,12 @@ from lib.llm_client import build_body as _build_body_impl
 build_body: BodyBuilder = _build_body_impl  # type: explicit protocol binding
 from lib.llm_client import AbortedError
 from lib.tasks_pkg.attachments import compute_turn_attachments, inject_attachments
-from lib.tasks_pkg.cache_tracking import detect_cache_break
+from lib.tasks_pkg.cache_tracking import (
+    detect_cache_break,
+    log_round_cache_stats,
+    release_ttl_latch,
+    sort_tool_results,
+)
 from lib.tasks_pkg.compaction import run_compaction_pipeline
 from lib.tasks_pkg.executor import (
     _generate_tool_summary,
@@ -220,6 +225,9 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     # ── Cleanup reactive compact tracking (prevent memory leak) ──
     from lib.tasks_pkg.llm_fallback import cleanup_reactive_compact_state
     cleanup_reactive_compact_state(task.get('id', ''))
+
+    # ── Release session-stable TTL latch (prevent memory leak) ──
+    release_ttl_latch(task.get('id', ''))
 
     # ── Diagnostic: log completion stats ──
     _content_len = len(task.get('content') or '')
@@ -589,6 +597,11 @@ def run_task(task: dict[str, Any]) -> None:
 
             _tools_this_round = tool_list if (tool_list and round_num < max_tool_rounds) else None
 
+            # ★ Cache-aware tool result ordering: sort consecutive tool results
+            #   by tool_call_id so the prefix is deterministic across rounds
+            #   (important for automatic prefix caching on OpenAI/Qwen).
+            sort_tool_results(messages)
+
             body = build_body(
                 model, messages,
                 max_tokens=max_tokens,
@@ -599,6 +612,9 @@ def run_task(task: dict[str, Any]) -> None:
                 tools=_tools_this_round,
                 stream=True,
             )
+            # ★ Attach task_id for session-stable TTL latch in
+            #   add_cache_breakpoints (prevents mid-session cache key shift).
+            body['_task_id'] = task['id']
 
             # ★ Streaming tool execution: pre-execute read-only tools while
             #   the model is still generating subsequent tool calls.
@@ -646,6 +662,11 @@ def run_task(task: dict[str, Any]) -> None:
                     task['convId'], messages,
                     tools=_tools_this_round, model=model,
                     usage=last_usage,
+                )
+                # ★ Per-round cache stats at INFO level for production visibility
+                log_round_cache_stats(
+                    task['convId'], round_num, last_usage,
+                    model=model, tid=task['id'],
                 )
 
             # ★ Read back updated search_round_num from streaming accumulator

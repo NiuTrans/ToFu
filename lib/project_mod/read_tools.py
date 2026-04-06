@@ -6,6 +6,7 @@ Extracted from tools.py for modularity. Re-exported via tools.py for backward co
 import fnmatch
 import os
 import re
+import shutil
 import subprocess
 import time
 
@@ -31,6 +32,13 @@ from lib.project_mod.scanner import (
 )
 
 logger = get_logger(__name__)
+
+# Detect ripgrep at module load time (5x faster than GNU grep on our codebase)
+_HAS_RG = shutil.which('rg') is not None
+if _HAS_RG:
+    logger.info('[Tools] ripgrep detected — using rg as primary grep engine')
+else:
+    logger.info('[Tools] ripgrep not found — using GNU grep')
 
 
 # ═══════════════════════════════════════════════════════
@@ -295,76 +303,175 @@ def tool_read_files(base, reads):
 #  grep / find_files
 # ═══════════════════════════════════════════════════════
 
-def tool_grep(base, pattern, rel_path=None, include=None, context_lines=None):
+def tool_grep(base, pattern, rel_path=None, include=None, context_lines=None,
+              max_results=None, count_only=False):
+    """Search for a pattern across project files using ripgrep (preferred) or grep.
+
+    Falls back through: rg → grep → pure-Python grep.
+
+    Args:
+        max_results: Cap on matching lines returned (like head -n). Default MAX_GREP_RESULTS.
+        count_only: If True, return only the match count (like grep -c), not the lines.
+    """
     try:
         target = _safe_path(base, rel_path or '.')
     except ValueError as e:
         logger.debug('[Tools] grep safe_path rejected %s: %s', rel_path, e, exc_info=True)
         return str(e)
-    cmd = ['grep', '-rni', '--color=never', '-I']
+    ctx_n = max(0, min(10, int(context_lines))) if context_lines else 0
+    cap = max(1, min(int(max_results), 500)) if max_results else MAX_GREP_RESULTS
+
+    if _HAS_RG:
+        result = _run_rg(base, target, pattern, include, ctx_n, cap, count_only)
+        if result is not None:
+            return result
+        # rg binary vanished or failed — fall through to grep
+        logger.warning('[Tools] ripgrep failed, falling back to grep')
+
+    result = _run_gnu_grep(base, target, pattern, include, ctx_n, cap, count_only)
+    if result is not None:
+        return result
+
+    # Both binaries failed
+    logger.info('[Tools] grep binary not found, falling back to Python grep')
+    return _python_grep(base, target, pattern, include, cap, count_only)
+
+
+def _build_rg_cmd(target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
+    """Build ripgrep command with equivalent behavior to our grep usage."""
+    if count_only:
+        cmd = ['rg', '-ci', '--color=never', '--no-heading']
+    else:
+        cmd = ['rg', '-ni', '--color=never', '--no-heading']
+    # Skip our standard ignore dirs (rg also auto-respects .gitignore)
+    for d in list(IGNORE_DIRS)[:20]:
+        cmd.extend(['-g', f'!{d}/'])
+    if include:
+        cmd.extend(['-g', include])
+    if ctx_n > 0 and not count_only:
+        cmd.extend(['-C', str(ctx_n)])
+    if not count_only:
+        cmd.extend(['-m', str(cap)])
+    cmd.extend(['--', pattern, target])
+    return cmd
+
+
+def _build_grep_cmd(target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
+    """Build GNU grep command."""
+    if count_only:
+        cmd = ['grep', '-rci', '--color=never', '-I']
+    else:
+        cmd = ['grep', '-rni', '--color=never', '-I']
     for d in list(IGNORE_DIRS)[:20]:
         cmd.extend(['--exclude-dir', d])
     if include:
         cmd.extend(['--include', include])
-    ctx_n = max(0, min(10, int(context_lines))) if context_lines else 0
-    if ctx_n > 0:
+    if ctx_n > 0 and not count_only:
         cmd.extend(['-C', str(ctx_n)])
-    cmd.extend(['-m', '15', '--', pattern, target])
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                                timeout=30, cwd=base, errors='replace')
-        output = result.stdout.strip()
-        if not output:
-            hint = f'No matches found for: {pattern}'
-            if include:
-                hint += f' in {include}'
-            if '\\' in pattern or '.*' in pattern or '|' in pattern:
-                hint += '\nHint: pattern looks like complex regex. Try a simpler literal substring instead.'
-            else:
-                hint += '\nHint: try a shorter/broader substring, or check spelling. Search is case-insensitive.'
-            return hint
-        lines = output.split('\n')
-        rel_lines = []
-        truncated = False
-        total_chars = 0
-        max_line_len = 300
-        max_total_chars = 20000 if ctx_n > 0 else 12000
-        bp = base + '/'
-        for line in lines[:MAX_GREP_RESULTS]:
-            if line.startswith(bp):
-                line = line[len(bp):]
-            if len(line) > max_line_len:
-                line = line[:max_line_len] + '  …(truncated)'
-            total_chars += len(line) + 1
-            if total_chars > max_total_chars:
-                truncated = True
-                break
-            rel_lines.append(line)
-        match_count = len(rel_lines)
-        if truncated:
-            rel_lines.append(f'… (output truncated at {max_total_chars} chars, {len(lines)} total matches)')
+    if not count_only:
+        cmd.extend(['-m', str(cap)])
+    cmd.extend(['--', pattern, target])
+    return cmd
+
+
+def _format_grep_output(base, raw_output, pattern, include, ctx_n,
+                        cap=MAX_GREP_RESULTS, count_only=False):
+    """Format grep/rg output into user-facing result string."""
+    output = raw_output.strip()
+    if not output:
+        hint = f'No matches found for: {pattern}'
+        if include:
+            hint += f' in {include}'
+        if '\\' in pattern or '.*' in pattern or '|' in pattern:
+            hint += '\nHint: pattern looks like complex regex. Try a simpler literal substring instead.'
+        else:
+            hint += '\nHint: try a shorter/broader substring, or check spelling. Search is case-insensitive.'
+        return hint
+
+    # count_only mode: sum per-file counts from grep -c / rg -c output
+    if count_only:
+        total = 0
+        for line in output.split('\n'):
+            # rg -c / grep -c output: "file:count" or just "count"
+            parts = line.rsplit(':', 1)
+            try:
+                total += int(parts[-1])
+            except (ValueError, IndexError):
+                continue
         hdr = f'grep "{pattern}"'
         if include:
             hdr += f' ({include})'
-        hdr += f' — {match_count} matches:\n\n'
-        return hdr + '\n'.join(rel_lines)
+        return f'{hdr} \u2014 {total} matches (count only)'
+
+    lines = output.split('\n')
+    rel_lines = []
+    truncated = False
+    total_chars = 0
+    max_line_len = 300
+    max_total_chars = 20000 if ctx_n > 0 else 12000
+    bp = base + '/'
+    for line in lines[:cap]:
+        if line.startswith(bp):
+            line = line[len(bp):]
+        if len(line) > max_line_len:
+            line = line[:max_line_len] + '  \u2026(truncated)'
+        total_chars += len(line) + 1
+        if total_chars > max_total_chars:
+            truncated = True
+            break
+        rel_lines.append(line)
+    match_count = len(rel_lines)
+    if truncated:
+        rel_lines.append(f'\u2026 (output truncated at {max_total_chars} chars, {len(lines)} total matches)')
+    hdr = f'grep "{pattern}"'
+    if include:
+        hdr += f' ({include})'
+    hdr += f' \u2014 {match_count} matches:\n\n'
+    return hdr + '\n'.join(rel_lines)
+
+
+def _run_rg(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
+    """Run ripgrep. Returns formatted string on success, None on binary-not-found."""
+    cmd = _build_rg_cmd(target, pattern, include, ctx_n, cap, count_only)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=30, cwd=base, errors='replace')
+        return _format_grep_output(base, result.stdout, pattern, include, ctx_n, cap, count_only)
     except subprocess.TimeoutExpired:
-        logger.warning('[Tools] grep timed out: pattern=%s target=%s', pattern[:40], target, exc_info=True)
+        logger.warning('[Tools] rg timed out: pattern=%s target=%s', pattern[:40], target)
         return 'Grep timed out. Try a more specific pattern or path.'
     except FileNotFoundError:
-        logger.info('[Tools] grep binary not found, falling back to Python grep')
-        return _python_grep(base, target, pattern, include)
+        logger.warning('[Tools] rg binary not found despite detection at startup')
+        return None
+    except Exception as e:
+        logger.warning('[Tools] rg failed: pattern=%s target=%s: %s', pattern[:40], target, e, exc_info=True)
+        return None
+
+
+def _run_gnu_grep(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
+    """Run GNU grep. Returns formatted string on success, None on binary-not-found."""
+    cmd = _build_grep_cmd(target, pattern, include, ctx_n, cap, count_only)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=30, cwd=base, errors='replace')
+        return _format_grep_output(base, result.stdout, pattern, include, ctx_n, cap, count_only)
+    except subprocess.TimeoutExpired:
+        logger.warning('[Tools] grep timed out: pattern=%s target=%s', pattern[:40], target)
+        return 'Grep timed out. Try a more specific pattern or path.'
+    except FileNotFoundError:
+        return None
     except Exception as e:
         logger.warning('[Tools] grep failed for pattern=%s target=%s: %s', pattern[:40], target, e, exc_info=True)
         return f'Grep error: {e}'
 
 
-def _python_grep(base, target, pattern, include=None):
+def _python_grep(base, target, pattern, include=None, cap=MAX_GREP_RESULTS, count_only=False):
     try:
         regex = re.compile(pattern, re.IGNORECASE)
     except re.error as e:
         logger.debug('[Tools] python_grep invalid regex pattern: %s', e, exc_info=True)
         return f'Invalid pattern: {e}'
+    match_count = 0
     matches = []
     deadline = time.time() + 20
     for root, dirs, files in os.walk(target):
@@ -381,20 +488,30 @@ def _python_grep(base, target, pattern, include=None):
                 with open(fp, errors='replace') as f:
                     for i, line in enumerate(f, 1):
                         if regex.search(line):
-                            rel = os.path.relpath(fp, base)
-                            matches.append(f'{rel}:{i}:{line.rstrip()}')
-                            if len(matches) >= MAX_GREP_RESULTS:
+                            match_count += 1
+                            if not count_only:
+                                rel = os.path.relpath(fp, base)
+                                matches.append(f'{rel}:{i}:{line.rstrip()}')
+                            if not count_only and len(matches) >= cap:
                                 break
             except Exception as e:
                 logger.debug('[Tools] grep file read failed for %s: %s', fp, e, exc_info=True)
                 continue
-            if len(matches) >= MAX_GREP_RESULTS:
+            if not count_only and len(matches) >= cap:
                 break
-        if len(matches) >= MAX_GREP_RESULTS:
+        if not count_only and len(matches) >= cap:
             break
         if time.time() > deadline:
-            matches.append('⏰ (grep timed out — try a more specific path or pattern)')
+            if not count_only:
+                matches.append('\u23f0 (grep timed out \u2014 try a more specific path or pattern)')
             break
+
+    if count_only:
+        hdr = f'grep "{pattern}"'
+        if include:
+            hdr += f' ({include})'
+        return f'{hdr} \u2014 {match_count} matches (count only)'
+
     if not matches:
         return f'No matches found for: {pattern}'
     max_line_len = 300
@@ -403,21 +520,27 @@ def _python_grep(base, target, pattern, include=None):
     total = 0
     for m in matches:
         if len(m) > max_line_len:
-            m = m[:max_line_len] + '  …(truncated)'
+            m = m[:max_line_len] + '  \u2026(truncated)'
         total += len(m) + 1
         if total > max_total_chars:
-            truncated.append(f'… (output truncated at {max_total_chars} chars)')
+            truncated.append(f'\u2026 (output truncated at {max_total_chars} chars)')
             break
         truncated.append(m)
     return f'grep results ({len(matches)} matches):\n\n' + '\n'.join(truncated)
 
 
-def tool_find_files(base, pattern, rel_path=None):
+def tool_find_files(base, pattern, rel_path=None, max_results=None):
+    """Find files by name glob pattern.
+
+    Args:
+        max_results: Cap on number of files returned. Default 100.
+    """
     try:
         target = _safe_path(base, rel_path or '.')
     except ValueError as e:
         logger.debug('[Tools] find_files safe_path rejected %s: %s', rel_path, e, exc_info=True)
         return str(e)
+    cap = max(1, min(int(max_results), 500)) if max_results else 100
     matches = []
     deadline = time.time() + 15
     for root, dirs, files in os.walk(target):
@@ -432,12 +555,12 @@ def tool_find_files(base, pattern, rel_path=None):
                     logger.debug('[Tools] getsize failed for %s: %s', fname, e, exc_info=True)
                     sz = 0
                 matches.append(f'  {rel} ({_fmt_size(sz)})')
-                if len(matches) >= 100:
+                if len(matches) >= cap:
                     break
-        if len(matches) >= 100:
+        if len(matches) >= cap:
             break
         if time.time() > deadline:
-            matches.append('  ⏰ (search timed out after 15s — try a more specific path)')
+            matches.append('  \u23f0 (search timed out after 15s \u2014 try a more specific path)')
             break
     if not matches:
         return f'No files matching: {pattern}'

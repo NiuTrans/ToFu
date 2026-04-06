@@ -799,6 +799,34 @@
   </div>
 </div>
 
+<!-- Edit Holding Modal -->
+<div class="modal-overlay" id="editHoldingModal" style="display:none">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+<h3>编辑持仓</h3>
+      <button class="modal-close" onclick="document.getElementById('editHoldingModal').style.display='none'">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label id="editHoldingLabel" style="font-weight:600;color:var(--t1);margin-bottom:8px">--</label>
+      </div>
+      <input type="hidden" id="editHoldingId">
+      <div class="form-group">
+        <label>份额/股数</label>
+        <input type="number" id="editShares" class="form-input" step="0.01" placeholder="修改份额">
+      </div>
+      <div class="form-group">
+        <label>成本价(元)</label>
+        <input type="number" id="editBuyPrice" class="form-input" step="0.0001" placeholder="修改成本价">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="document.getElementById('editHoldingModal').style.display='none'">取消</button>
+      <button class="btn btn-primary" onclick="TradingApp.saveEditHolding()">保存修改</button>
+    </div>
+  </div>
+</div>
+
 <!-- Cash Modal -->
 <div class="modal-overlay" id="cashModal" style="display:none">
   <div class="modal modal-sm">

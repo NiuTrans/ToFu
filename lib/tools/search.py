@@ -55,19 +55,21 @@ FETCH_URL_TOOL = {
     "function": {
         "name": "fetch_url",
         "description": (
-            "Fetch and read the full content of a specific URL (HTML, PDF, plain text). "
-            "Use this when the user pastes or mentions a URL they want you to read, "
+            "Fetch and read the full content of a remote URL (HTML, PDF, plain text) via HTTP/HTTPS. "
+            "Use this when the user pastes or mentions a web URL they want you to read, "
             "or to deeply read pages you found promising from search results. "
             "You can call this multiple times for different URLs. "
             "When a page contains links to sub-pages (shown in '--- Page Links ---' section), "
-            "you SHOULD use fetch_url to follow the most relevant links and explore deeper."
+            "you SHOULD use fetch_url to follow the most relevant links and explore deeper.\n"
+            "IMPORTANT: This tool is for REMOTE web URLs only (http:// or https://). "
+            "Do NOT use for local file paths or file:// URIs — use read_local_file instead."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "Complete URL starting with https://"
+                    "description": "Complete remote URL starting with http:// or https://"
                 }
             },
             "required": ["url"]

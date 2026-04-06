@@ -95,7 +95,7 @@ function _brandSvg(brand, size) {
 // Generate new icons: python3 scripts/gen_tofu_icons.py
 // Convert PNG→SVG:    python3 scripts/png_to_svg.py
 
-const _ICON_V = '0.6.0';  // cache-bust version — bump when icons change
+const _ICON_V = '0.6.1';  // cache-bust version — bump when icons change
 const _ICON_BASE = (typeof BASE_PATH!=='undefined'?BASE_PATH:'') + '/static/icons';
 
 const _TOFU_PLANNER_SVG = `<img src="${_ICON_BASE}/tofu-planner.svg?v=${_ICON_V}" alt="Planner" style="width:100%;height:100%;display:block">`;

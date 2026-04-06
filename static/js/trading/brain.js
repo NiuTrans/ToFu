@@ -298,7 +298,7 @@
               toast("分析出错: " + evt.error, "error");
             }
           } catch (parseErr) {
-            // Skip malformed SSE events
+            console.debug("[Brain] Skipping malformed SSE event:", parseErr.message);
           }
         }
       }
