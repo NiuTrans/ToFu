@@ -112,7 +112,8 @@ def _hash_tools(tools: list | None) -> str:
         return ''
     try:
         return _md5(json.dumps(tools, sort_keys=True, ensure_ascii=False))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug('[CacheTracking] Tool definitions not JSON-serializable, using str: %s', e)
         return _md5(str(tools))
 
 

@@ -4,7 +4,6 @@ Registry pattern: COMMAND_DISPATCH maps command prefixes to handler functions.
 Each handler takes (user_id, text_stripped) and returns a response string.
 """
 
-import logging
 import os
 
 from lib.feishu._state import WORKSPACE_ROOT
@@ -23,7 +22,9 @@ from lib.feishu.conversation import (
 )
 from lib.feishu.pipeline import exec_project_tool
 
-logger = logging.getLogger(__name__)
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = ['COMMAND_DISPATCH', 'dispatch_command', 'MENU_MAP']
 

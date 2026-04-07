@@ -174,6 +174,32 @@ def _build_read_local_file(meta, fn_name, fn_args, tool_content, path):
         meta['badge'] = f'{chars:,} chars'
 
 
+def _build_insert_content(meta, fn_name, fn_args, tool_content, path):
+    edits = fn_args.get('edits')
+    if edits and isinstance(edits, list):
+        paths = list(dict.fromkeys(e.get('path', '?') for e in edits if isinstance(e, dict)))
+        m = re.search(r'Inserted (\d+)/(\d+)', tool_content[:200])
+        ok_n = m.group(1) if m else '?'
+        total_n = m.group(2) if m else str(len(edits))
+        desc = fn_args.get('description', '')
+        if len(paths) == 1:
+            label = f'{paths[0]} ({ok_n}/{total_n} insertions)'
+        elif len(paths) <= 3:
+            label = f'{", ".join(paths)} ({ok_n}/{total_n} insertions)'
+        else:
+            label = f'{len(paths)} files ({ok_n}/{total_n} insertions)'
+        meta['snippet'] = label + (f'  {desc}' if desc else '')
+        meta['badge'] = f'{ok_n}/{total_n} inserted'
+        meta['writeOk'] = ok_n == total_n
+    else:
+        desc = fn_args.get('description', '')
+        ok = '✅' in tool_content
+        position = fn_args.get('position', 'after')
+        meta['snippet'] = f'{path} ({position})' + (f'  {desc}' if desc else '')
+        meta['badge'] = 'inserted' if ok else 'failed'
+        meta['writeOk'] = ok
+
+
 def _build_default(meta, fn_name, fn_args, tool_content, path):
     meta['snippet'] = tool_content[:120].replace('\n', ' ')
     meta['badge'] = ''
@@ -190,6 +216,7 @@ _META_BUILDERS = {
     'apply_diff':   _build_apply_diff,
     'run_command':  _build_run_command,
     'read_local_file': _build_read_local_file,
+    'insert_content': _build_insert_content,
 }
 
 

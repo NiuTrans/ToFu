@@ -453,8 +453,8 @@ def logout_oauth(provider: str) -> dict:
     if old:
         try:
             old.server_close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug('[OAuth] Error closing relay server for %s: %s', provider, e)
 
     audit_log('oauth_logout', provider=provider)
     logger.info('[OAuth] Logged out from %s', provider)

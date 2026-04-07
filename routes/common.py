@@ -287,7 +287,7 @@ FAVICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
 
 
 # ── Cached bundled index.html (avoids re-reading + regex on every page load) ──
-_bundled_index_cache = {'tag': None, 'html': None}
+_bundled_index_cache = {'tag': None, 'html': None, 'mtime': 0}
 
 # Regex: match contiguous block of app script tags + interleaved HTML comments
 _APP_SCRIPTS_RE = re.compile(
@@ -302,19 +302,25 @@ def index_page():
     if not bundle_tag:
         # Bundling failed — serve original index.html with individual scripts
         resp = send_from_directory(BASE_DIR, 'index.html')
-        resp.headers['Cache-Control'] = 'private, max-age=60'
+        resp.headers['Cache-Control'] = 'private, no-cache'
         return resp
 
-    # Use cached version if bundle tag hasn't changed
-    if _bundled_index_cache['tag'] == bundle_tag and _bundled_index_cache['html']:
+    # Use cached version if bundle tag AND index.html mtime haven't changed
+    html_path = os.path.join(BASE_DIR, 'index.html')
+    try:
+        html_mtime = os.path.getmtime(html_path)
+    except OSError:
+        html_mtime = 0
+    if (_bundled_index_cache['tag'] == bundle_tag
+            and _bundled_index_cache['mtime'] == html_mtime
+            and _bundled_index_cache['html']):
         resp = make_response(_bundled_index_cache['html'])
         resp.content_type = 'text/html; charset=utf-8'
-        resp.headers['Cache-Control'] = 'private, max-age=60'
+        resp.headers['Cache-Control'] = 'private, no-cache'
         return resp
 
     # Read index.html and replace 16 individual script tags with 1 bundle tag
     try:
-        html_path = os.path.join(BASE_DIR, 'index.html')
         with open(html_path, 'r', encoding='utf-8') as f:
             html = f.read()
 
@@ -322,6 +328,7 @@ def index_page():
 
         _bundled_index_cache['tag'] = bundle_tag
         _bundled_index_cache['html'] = html
+        _bundled_index_cache['mtime'] = html_mtime
 
         resp = make_response(html)
         resp.content_type = 'text/html; charset=utf-8'
@@ -329,7 +336,7 @@ def index_page():
         logger.warning('[Index] Bundle injection failed, serving original: %s', e)
         resp = send_from_directory(BASE_DIR, 'index.html')
 
-    resp.headers['Cache-Control'] = 'private, max-age=60'
+    resp.headers['Cache-Control'] = 'private, no-cache'
     return resp
 
 @common_bp.route('/trading.html')
@@ -419,7 +426,15 @@ def client_error():
 def health_check():
     from lib.database import pg_available
     from lib.version import __version__
-    return jsonify({'ok': True, 'ts': int(time.time() * 1000), 'db_ok': pg_available, 'version': __version__})
+    result = {'ok': True, 'ts': int(time.time() * 1000), 'db_ok': pg_available, 'version': __version__}
+    try:
+        from lib.cross_dc import get_status
+        cross_dc = get_status()
+        if cross_dc.get('clusters'):
+            result['cross_dc'] = cross_dc
+    except Exception as e:
+        logger.debug('[Health] cross_dc status unavailable: %s', e)
+    return jsonify(result)
 
 @common_bp.route('/favicon.ico')
 @common_bp.route('/favicon.svg')

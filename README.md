@@ -105,8 +105,6 @@ Switch between **Tofu's built-in agent**, **Claude Code**, or **OpenAI Codex** a
 - **Session persistence** — multi-turn conversations are maintained across page refreshes via backend session ID mapping
 - **One-click switching** — click the backend selector in the top bar to switch between agents; each conversation remembers its backend
 
-> 🧪 **Try it now** on the [`cli_switch`](https://github.com/rangehow/ToFu/tree/cli_switch) branch!
-
 ### More
 
 - **Skills system** — persistent reusable knowledge (Markdown files) — the assistant learns project conventions, bug patterns, and workflows across sessions
@@ -115,6 +113,7 @@ Switch between **Tofu's built-in agent**, **Claude Code**, or **OpenAI Codex** a
 - **Error tracking** — universal project error tracker with fingerprinting, resolution tracking, and digest reports
 - **Dark theme UI** with responsive layout, syntax highlighting, LaTeX rendering, and image previews
 - **Cross-platform** — runs on Linux, macOS, and Windows (see [Platform Support](#platform-support) below)
+- **Mobile-friendly** — responsive layout with compact topbar, swipe-open sidebar, and bottom-sheet tool toggles for touch screens
 - **Auto-dependency repair** — `bootstrap.py` auto-installs missing pip packages via LLM diagnosis
 
 ---
@@ -170,7 +169,7 @@ Open **http://localhost:15000** — done. All data persists in Docker volumes.
 <details>
 <summary>Step-by-step for full control</summary>
 
-**Prerequisites:** Python 3.10+, PostgreSQL 18+, ripgrep (recommended)
+**Prerequisites:** Python 3.10+, PostgreSQL 18+, ripgrep & fd-find (recommended)
 
 ```bash
 git clone https://github.com/rangehow/ToFu.git
@@ -186,11 +185,11 @@ python -m venv .venv && source .venv/bin/activate   # Standard venv
 # Windows: https://www.postgresql.org/download/windows/
 # conda:   conda install -c conda-forge postgresql>=18
 
-# Install ripgrep (recommended — 5x faster code search)
-# macOS:   brew install ripgrep
-# Ubuntu:  sudo apt install ripgrep
-# Windows: winget install BurntSushi.ripgrep.MSVC
-# conda:   conda install -c conda-forge ripgrep
+# Install ripgrep & fd-find (recommended — faster code search & file finding)
+# macOS:   brew install ripgrep fd
+# Ubuntu:  sudo apt install ripgrep fd-find
+# Windows: winget install BurntSushi.ripgrep.MSVC sharkdp.fd
+# conda:   conda install -c conda-forge ripgrep fd-find
 
 # Install Python dependencies
 pip install -r requirements.txt

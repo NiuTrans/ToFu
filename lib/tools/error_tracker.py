@@ -13,9 +13,9 @@ Resolution state is stored as `.chatui/error_resolutions.json` inside each
 project — portable, no external DB dependency, can be committed or gitignored.
 """
 
-import logging
+from lib.log import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 CHECK_ERROR_LOGS_TOOL = {
     "type": "function",

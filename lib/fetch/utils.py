@@ -287,6 +287,9 @@ def _is_bot_protection(html_text):
         'ray id:', 'performance &amp; security by',
         'performance & security by cloudflare',
         'checking if the site connection is secure',
+        # Chinese variants
+        '正在进行安全验证', '验证您不是自动程序', '安全服务防护',
+        '人机验证', '正在检查您的浏览器',
     )
     matched = sum(1 for s in indicators if s in lower)
     if matched >= 1:
@@ -319,6 +322,10 @@ _BOT_TEXT_PATTERNS = (
     'attention required', 'ddos protection by',
     'just a moment', 'access denied',
     'cf-browser-verification',
+    # ── Chinese variants (Cloudflare / bot-protection localized) ──
+    '正在进行安全验证', '安全验证', '验证您不是自动程序',
+    '安全检查', '请完成安全验证', '请稍候', '正在检查您的浏览器',
+    '安全服务防护', 'ddos防护', '人机验证',
 )
 
 
@@ -516,6 +523,13 @@ def _normalize_code_hosting_url(url):
 def _should_fetch(url):
     try:
         p = urlparse(url)
+        # Reject local file paths that were mistakenly treated as URLs
+        if not p.scheme or p.scheme not in ('http', 'https'):
+            logger.debug('[Fetch] Skipping non-HTTP URL (scheme=%s): %.80s', p.scheme or 'none', url)
+            return False
+        if not p.netloc:
+            logger.debug('[Fetch] Skipping URL with no netloc: %.80s', url)
+            return False
         if any(s in p.netloc.lower() for s in _lib.SKIP_DOMAINS): return False
         if any(p.path.lower().endswith(e) for e in
                ('.jpg','.jpeg','.png','.gif','.svg','.mp4','.mp3','.zip','.tar','.gz','.exe')):

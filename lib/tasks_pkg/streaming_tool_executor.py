@@ -42,6 +42,24 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
+
+class _ContentWithDisplayResults(str):
+    """String subclass that carries display_results metadata.
+
+    Used by ``_execute_one`` for web_search to pass both the formatted
+    LLM content (as a string) and the display results for the frontend,
+    through the existing cache pipeline that expects string content.
+
+    Attributes:
+        display_results: List of result dicts for frontend rendering.
+        search_diag: Optional diagnostic dict when search returns 0 results.
+    """
+    def __new__(cls, content: str, display_results: list):
+        instance = super().__new__(cls, content)
+        instance.display_results = display_results
+        instance.search_diag = None
+        return instance
+
 # ── Read-only tools safe to pre-execute during streaming ──
 # These must have NO side effects (idempotent) and be concurrency-safe.
 _STREAMABLE_TOOLS = frozenset({
@@ -243,7 +261,23 @@ class StreamingToolAccumulator:
                 user_question = self._task.get('lastUserQuery', '')
                 results = perform_web_search(query,
                                              user_question=user_question)
-                return format_search_for_tool_response(results)
+                search_diag = getattr(results, '_search_diag', None)
+                formatted = format_search_for_tool_response(results,
+                                                            search_diag=search_diag)
+                # Build display results for the frontend (same as search handler)
+                display_results = []
+                for r in results:
+                    dr = {k: v for k, v in r.items() if k != 'full_content'}
+                    if r.get('full_content'):
+                        dr['fetched'] = True
+                        dr['fetchedChars'] = len(r['full_content'])
+                    display_results.append(dr)
+                # Attach display_results + searchDiag as attributes so
+                # inject_into_cache stores them alongside the content
+                formatted = _ContentWithDisplayResults(formatted, display_results)
+                if not display_results and search_diag:
+                    formatted.search_diag = search_diag
+                return formatted
 
             elif fn_name == 'fetch_url':
                 from lib.fetch import fetch_page_content
@@ -308,11 +342,14 @@ class StreamingToolAccumulator:
                     elapsed = time.time() - t0
                     is_search = fn_name in ('web_search',)
                     cache_key = _make_cache_key(fn_name, fn_args)
-                    cache[cache_key] = (content, is_search, 'prefetch')
+                    # Extract display_results if available (web_search)
+                    _disp = getattr(content, 'display_results', None)
+                    cache[cache_key] = (str(content), is_search, 'prefetch', _disp)
                     injected += 1
                     logger.info('[%s] StreamingToolExec: injected %s into '
-                                'dedup cache (%.1fs, %d chars)',
-                                self._tid, fn_name, elapsed, len(content))
+                                'dedup cache (%.1fs, %d chars%s)',
+                                self._tid, fn_name, elapsed, len(content),
+                                ', %d display_results' % len(_disp) if _disp else '')
                 except Exception as e:
                     logger.debug('[%s] StreamingToolExec: %s pre-exec failed, '
                                  'deferring to normal pipeline: %s',
@@ -350,11 +387,14 @@ class StreamingToolAccumulator:
                     elapsed = time.time() - t0
                     is_search = fn_name in ('web_search',)
                     cache_key = _make_cache_key(fn_name, fn_args)
-                    cache[cache_key] = (content, is_search, 'prefetch')
+                    # Extract display_results if available (web_search)
+                    _disp = getattr(content, 'display_results', None)
+                    cache[cache_key] = (str(content), is_search, 'prefetch', _disp)
                     injected += 1
                     logger.info('[%s] StreamingToolExec: waited and injected '
-                                '%s into dedup cache (%.1fs, %d chars)',
-                                self._tid, fn_name, elapsed, len(content))
+                                '%s into dedup cache (%.1fs, %d chars%s)',
+                                self._tid, fn_name, elapsed, len(content),
+                                ', %d display_results' % len(_disp) if _disp else '')
                 except TimeoutError:
                     logger.warning('[%s] StreamingToolExec: %s timed out after '
                                    '60s, deferring to normal pipeline',

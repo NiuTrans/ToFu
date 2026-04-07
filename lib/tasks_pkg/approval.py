@@ -1,9 +1,10 @@
 """Write approval system — thread-safe user confirmation for file writes."""
 
-import logging
 import threading
 
-logger = logging.getLogger(__name__)
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 _write_approvals = {}
 _write_approvals_lock = threading.Lock()

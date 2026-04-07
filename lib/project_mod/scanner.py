@@ -81,6 +81,16 @@ def set_project(path_str):
     logger.info('[Project] set_project: %s → %s (cleared roots: %s)',
                 old_path, abs_path, old_roots)
 
+    # ★ Cross-DC latency check — warn if project is on a remote DolphinFS cluster
+    try:
+        from lib.cross_dc import cross_dc_warning, get_latency_class
+        lat_class = get_latency_class(abs_path)
+        if lat_class in ('slow', 'very_slow'):
+            warning = cross_dc_warning(abs_path)
+            logger.warning('[Project] %s', warning)
+    except Exception as e:
+        logger.debug('[Project] Cross-DC check skipped: %s', e)
+
     return get_state()
 
 

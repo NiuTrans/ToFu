@@ -268,10 +268,27 @@ def _sync_result_to_conversation(task, meta):
                 logger.error(
                     '%s conv=%s ⛔ MESSAGE COUNT ANOMALY with consecutive same-role: '
                     'DB has %d messages but task started with %d — %d extra. '
-                    'Extra msgs: %s',
+                    'Extra msgs: %s — auto-deduplicating',
                     pfx, conv_id, len(messages), expected_msg_count,
                     len(extra_msgs), extra_summary
                 )
+                # Auto-fix: remove consecutive duplicate-role messages
+                # Keep the message with more content when two same-role msgs are adjacent
+                deduped = [messages[0]]
+                for m in messages[1:]:
+                    if m.get('role') == deduped[-1].get('role'):
+                        # Keep the one with more content
+                        existing_len = len(deduped[-1].get('content') or '')
+                        new_len = len(m.get('content') or '')
+                        if new_len > existing_len:
+                            deduped[-1] = m
+                        logger.info('%s conv=%s Removed duplicate %s message (kept %d chars, dropped %d chars)',
+                                   pfx, conv_id, m.get('role'), max(existing_len, new_len), min(existing_len, new_len))
+                    else:
+                        deduped.append(m)
+                messages = deduped
+                logger.info('%s conv=%s After dedup: %d messages (was %d)',
+                           pfx, conv_id, len(messages), expected_msg_count + len(extra_msgs))
             else:
                 logger.debug(
                     '%s conv=%s Message count drift (DB=%d, task_start=%d, delta=%d) — '

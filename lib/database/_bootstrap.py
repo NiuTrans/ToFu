@@ -80,7 +80,8 @@ def _get_username(fallback='postgres'):
     """Get OS username cross-platform (Linux USER, Windows USERNAME)."""
     try:
         return getpass.getuser()
-    except Exception:
+    except Exception as e:
+        logger.debug('[DB] getuser() failed, using fallback %s: %s', fallback, e)
         return fallback
 
 
@@ -166,7 +167,7 @@ def _pg_already_running_on_another_machine(pgdata, pg_port):
         reachable = False
         try:
             result = subprocess.run(
-                [_find_pg_binary('pg_isready'), '-h', owner_host, '-p', str(pg_port)],
+                [_find_pg_binary('pg_isready'), '-h', owner_host, '-p', str(pg_port), '-d', 'template1'],
                 capture_output=True, text=True, timeout=5
             )
             reachable = (result.returncode == 0)
@@ -208,7 +209,8 @@ def _find_free_port(start=15432, end=15500):
             s.close()
             if result != 0:
                 return port
-        except Exception:
+        except Exception as e:
+            logger.debug('[DB] Port %d probe error (assuming free): %s', port, e)
             return port
     logger.warning('[DB] No free port found in %d–%d, falling back to %d', start, end, start)
     return start
@@ -340,7 +342,7 @@ def _scan_for_our_pg(host, port_range, pgdata, pg_user):
     for port in port_range:
         try:
             result = subprocess.run(
-                [_find_pg_binary('pg_isready'), '-h', host, '-p', str(port)],
+                [_find_pg_binary('pg_isready'), '-h', host, '-p', str(port), '-d', 'template1'],
                 capture_output=True, text=True, timeout=2
             )
             if result.returncode != 0:
@@ -348,7 +350,8 @@ def _scan_for_our_pg(host, port_range, pgdata, pg_user):
             if _verify_pg_data_directory(host, port, pgdata, pg_user):
                 logger.info('[DB] Found our PG on %s:%d (port scan recovery)', host, port)
                 return port
-        except Exception:
+        except Exception as e:
+            logger.debug('[DB] Port scan probe %d failed: %s', port, e)
             continue
     return None
 
@@ -581,7 +584,7 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
             # network configs (iPhone tethering, VPN, etc.)
             _local = '127.0.0.1'
             result = subprocess.run(
-                [_find_pg_binary('pg_isready'), '-h', _local, '-p', str(pg_port)],
+                [_find_pg_binary('pg_isready'), '-h', _local, '-p', str(pg_port), '-d', 'template1'],
                 capture_output=True, text=True, timeout=5
             )
             if result.returncode == 0:
@@ -617,7 +620,7 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
     for _try_port in _scan_range:
         try:
             _chk = subprocess.run(
-                [_find_pg_binary('pg_isready'), '-h', _local, '-p', str(_try_port)],
+                [_find_pg_binary('pg_isready'), '-h', _local, '-p', str(_try_port), '-d', 'template1'],
                 capture_output=True, text=True, timeout=2
             )
             if _chk.returncode != 0:
@@ -627,7 +630,8 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
                            '(port scan fallback)', pg_dbname, _local, _try_port)
                 return {'PG_HOST': _local, 'PG_PORT': _try_port,
                         'PG_DSN': _build_dsn(_local, _try_port)}
-        except Exception:
+        except Exception as e:
+            logger.debug('[DB] Port scan fallback %d failed: %s', _try_port, e)
             continue
 
     # ── Step 3: Check if another machine owns the pgdata ──
@@ -636,7 +640,7 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
         remote_ok = False
         try:
             _check = subprocess.run(
-                [_find_pg_binary('pg_isready'), '-h', remote_host, '-p', str(pg_port)],
+                [_find_pg_binary('pg_isready'), '-h', remote_host, '-p', str(pg_port), '-d', 'template1'],
                 capture_output=True, text=True, timeout=5
             )
             remote_ok = (_check.returncode == 0)
@@ -693,7 +697,7 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
     conf_port = _read_our_pg_port(pgdata) or pg_port
     try:
         check = subprocess.run(
-            [_find_pg_binary('pg_isready'), '-h', '127.0.0.1', '-p', str(conf_port)],
+            [_find_pg_binary('pg_isready'), '-h', '127.0.0.1', '-p', str(conf_port), '-d', 'template1'],
             capture_output=True, text=True, timeout=3
         )
         if check.returncode == 0:

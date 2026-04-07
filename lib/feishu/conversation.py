@@ -4,7 +4,6 @@ Manages per-user chat history in memory and syncs to the web UI database
 so that Feishu conversations appear alongside web conversations.
 """
 
-import logging
 import uuid
 
 from lib.feishu._state import (
@@ -24,7 +23,9 @@ from lib.feishu._state import (
 )
 from lib.utils import safe_json
 
-logger = logging.getLogger(__name__)
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = ['get_history', 'append_message', 'clear_history', 'new_conv_id', 'get_conv_id', 'append_web_message', 'get_web_messages', 'clear_web_messages', 'sync_to_db', 'get_model', 'set_model', 'get_mode', 'set_mode', 'get_project', 'set_project', 'get_pending', 'set_pending', 'clear_pending']
 

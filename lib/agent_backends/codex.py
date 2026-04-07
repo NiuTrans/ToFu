@@ -202,8 +202,8 @@ class CodexBackend(AgentBackend):
                 stderr_out = proc.stderr.read().decode('utf-8', errors='replace').strip()
                 if stderr_out:
                     logger.debug('[Codex] stderr: %.500s', stderr_out)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug('[Codex] Failed to read stderr: %s', e)
 
             proc.wait()
             exit_code = proc.returncode

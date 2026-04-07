@@ -15,7 +15,8 @@ from lib.pdf_parser.images import render_pdf_pages
 
 logger = get_logger(__name__)
 
-__all__ = ['vlm_parse_pdf', 'start_vlm_task', 'get_vlm_task']
+__all__ = ['vlm_parse_pdf', 'start_vlm_task', 'get_vlm_task',
+           'find_vlm_tasks_by_filename']
 
 
 _VLM_SYSTEM_PROMPT = """\
@@ -206,6 +207,28 @@ def get_vlm_task(task_id: str) -> dict | None:
     with _vlm_lock:
         t = _vlm_tasks.get(task_id)
         return dict(t) if t else None
+
+
+def find_vlm_tasks_by_filename(filename: str) -> list[dict]:
+    """Find all active VLM tasks matching *filename*.
+
+    Returns a list of ``{taskId, status, progress, filename, created}``
+    dicts, most-recent first.  Useful for reconnecting after a page
+    refresh when the frontend lost the task_id.
+    """
+    with _vlm_lock:
+        matches = []
+        for tid, t in _vlm_tasks.items():
+            if t['filename'] == filename:
+                matches.append({
+                    'taskId': tid,
+                    'status': t['status'],
+                    'progress': t['progress'],
+                    'filename': t['filename'],
+                    'created': t['created'],
+                })
+        matches.sort(key=lambda x: x['created'], reverse=True)
+        return matches
 
 
 def _cleanup_old_tasks():

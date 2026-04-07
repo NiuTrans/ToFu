@@ -54,8 +54,8 @@ def _source_max_mtime():
             mt = os.path.getmtime(path)
             if mt > max_mt:
                 max_mt = mt
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug('[Bundle] Cannot stat %s: %s', name, e)
     return max_mt
 
 
@@ -66,8 +66,8 @@ def _clean_old_bundles(keep_filename):
             if f.startswith('bundle-') and f.endswith('.js') and f != keep_filename:
                 try:
                     os.remove(os.path.join(JS_DIR, f))
-                except OSError:
-                    pass
+                except OSError as e:
+                    logger.debug('[Bundle] Failed to remove old bundle %s: %s', f, e)
     except OSError as e:
         logger.debug('Failed to clean old bundles: %s', e)
 

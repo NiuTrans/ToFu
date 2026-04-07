@@ -18,13 +18,13 @@ Includes Claude Code-inspired prompt sections:
 """
 
 import hashlib
+from datetime import datetime, timezone
 
 from lib.log import get_logger
 
 logger = get_logger(__name__)
 
 from lib.tasks_pkg.compaction import MICRO_HOT_TAIL
-from lib.tasks_pkg.model_config import _build_search_addendum
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Claude Code-inspired system prompt sections
@@ -112,42 +112,39 @@ def _get_cached_or_compute(conv_id: str, category: str,
 _TIMESTAMP_PREFIX = 'Current date and time: '
 
 
-def inject_search_addendum_to_user(messages: list, search_enabled: bool):
-    """Inject a minimal timestamp into the last user message.
+def inject_search_addendum_to_user(messages: list, search_enabled: bool,
+                                    round_num: int = 0):
+    """Legacy no-op — timestamp moved to system prompt as date-only.
 
-    Moved OUT of the system message to avoid breaking the prompt cache every
-    minute.  Only the timestamp is injected — static search guidance lives in
-    _TOOL_USAGE_GUIDANCE (system prompt, cached).
+    Previously injected "Current date and time: ..." into the last user
+    message.  A/B testing showed this killed cache (Arm A: 77.9% cache,
+    $0.49 vs Arm C date-only in system: 85.7%, $0.36).
 
-    Dedup: strips any previous timestamp from the same message before
-    injecting, so it doesn't accumulate across rounds.
+    The date is now injected in _inject_system_contexts() step 4.5 as
+    date-only format (changes once per UTC day → cache-stable).
+
+    This function is kept for backward compatibility but does nothing.
+    It still strips old timestamps from user messages to clean up
+    conversations that had them injected previously.
+
+    Args:
+        messages: The messages list (may be cleaned in-place).
+        search_enabled: Ignored (was: whether search/tools are enabled).
+        round_num: Ignored (was: current round within the task).
     """
-    if not search_enabled:
-        return
-    addendum = _build_search_addendum()
-    if not addendum:
-        return
-    # Find last user message and append (with dedup)
+    # Strip old timestamps from user messages for clean cache prefix
     for i in range(len(messages) - 1, -1, -1):
         if messages[i].get('role') == 'user':
             content = messages[i].get('content', '')
-            if isinstance(content, str):
-                # Strip any previously injected timestamp
-                content = _strip_old_timestamp(content)
-                messages[i]['content'] = content + '\n\n' + addendum
+            if isinstance(content, str) and _TIMESTAMP_PREFIX in content:
+                messages[i]['content'] = _strip_old_timestamp(content)
             elif isinstance(content, list):
-                # Remove old timestamp text blocks
-                messages[i]['content'] = [
-                    b for b in messages[i]['content']
-                    if not (isinstance(b, dict) and b.get('type') == 'text'
-                            and b.get('text', '').strip().startswith(_TIMESTAMP_PREFIX))
-                ]
-                messages[i]['content'].append({
-                    'type': 'text',
-                    'text': '\n\n' + addendum,
-                })
-            return
-    logger.debug('[SearchAddendum] No user message found to inject into')
+                _new = [b for b in content
+                        if not (isinstance(b, dict) and b.get('type') == 'text'
+                                and b.get('text', '').strip().startswith(_TIMESTAMP_PREFIX))]
+                if len(_new) != len(content):
+                    messages[i]['content'] = _new
+            break  # only check the last user message
 
 
 def _strip_old_timestamp(text: str) -> str:
@@ -352,9 +349,16 @@ Use `depends_on: [0]` only when a task truly needs another's output (rare — pr
 """
         _append_to_system_message(messages, _wrap_system_reminder(swarm_prompt))
 
-    # ★ Search addendum: timestamp + guidance now injected into the LAST
-    #   user message (not system) to avoid cache-breaking every minute.
-    #   See inject_search_addendum_to_user() called from orchestrator.
+    # ★ 4.5. Current date (date-only, changes once per UTC day → cache-stable)
+    #   A/B tested: date-only in system prompt (Arm C) was the clear winner:
+    #     - 85.7% avg cache hit, $0.36 total
+    #     - vs full datetime in user msg every round (Arm A): 77.9%, $0.49
+    #     - vs full datetime in system prompt (Arm D): 12.4%, $1.55 (CATASTROPHIC)
+    #   Date-only changes once per day so BP1-BP2 (1h TTL) stay perfectly stable.
+    #   Decoupled from search_enabled — model always knows today's date.
+    _date_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    _append_to_system_message(
+        messages, f'Current date: {_date_str}')
 
     # ★ 5. Session memory injection (most dynamic — injected LAST in system msg)
     #   Persistent session notes extracted by background thread (session_memory.py).
@@ -417,7 +421,8 @@ def inject_skills_to_user(messages: list, project_path: str = None,
                            skills_enabled: bool = False,
                            has_real_tools: bool = False,
                            conv_id: str = '',
-                           task: dict = None):
+                           task: dict = None,
+                           round_num: int = 0):
     """Inject the skills listing into the last user message.
 
     Called AFTER all other user message modifications (planner replacement,
@@ -427,8 +432,10 @@ def inject_skills_to_user(messages: list, project_path: str = None,
     Uses BM25 relevance filtering: extracts the user message text as a query,
     scores skills against it, and includes only the top-K most relevant ones.
 
-    Dedup: strips any previously injected skills listing before re-injecting
-    to prevent accumulation across tool rounds.
+    ★ CACHE OPTIMIZATION: Only inject on round 0.  On subsequent rounds,
+    the skills listing was already injected in R0 and is part of the cached
+    prefix.  Re-injecting (strip+replace) risks changing the prefix bytes
+    and causing a full cache miss.  Skills don't change within a task.
 
     Args:
         messages: The messages list (mutated in-place).
@@ -438,9 +445,12 @@ def inject_skills_to_user(messages: list, project_path: str = None,
         has_real_tools: Whether the task has real tools (skills CRUD needs tools).
         conv_id: Conversation ID for cache scoping.
         task: Task dict (may contain prefetch futures).
+        round_num: Current round within the task (0-based).
     """
     if not skills_enabled and not has_real_tools:
         return
+    if round_num > 0:
+        return  # ★ Preserve cached prefix — skills already injected in R0
 
     _pp = project_path if project_enabled else None
 

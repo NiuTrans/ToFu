@@ -4,7 +4,6 @@ Uses the SAME task pipeline as the web UI so tool calls, usage/cost,
 thinking blocks, and tool summaries appear identically on both channels.
 """
 
-import logging
 import time
 import uuid
 
@@ -19,7 +18,9 @@ from lib.feishu.conversation import (
     sync_to_db,
 )
 
-logger = logging.getLogger(__name__)
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = ['exec_project_tool', 'run_task_pipeline']
 

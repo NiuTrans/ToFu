@@ -88,6 +88,21 @@ Strategy:
     ctx = (f"[PROJECT CO-PILOT MODE]\n"
            f"Project: {path}\n\n")
 
+    # ★ Cross-DC warning — let the LLM know about latency constraints
+    try:
+        from lib.cross_dc import get_latency_class, get_timeout_multiplier
+        lat_class = get_latency_class(path)
+        if lat_class in ('slow', 'very_slow'):
+            multiplier = get_timeout_multiplier(path)
+            ctx += (
+                f"⚠️ CROSS-DATACENTER PROJECT — This project is on a remote DolphinFS cluster.\n"
+                f"File I/O latency is {lat_class.replace('_', ' ')} (~{multiplier:.0f}x normal).\n"
+                f"Timeouts are auto-adjusted but operations may still be slow.\n"
+                f"Optimize by: batching reads, using targeted grep paths, avoiding deep tree walks.\n\n"
+            )
+    except Exception as e:
+        logger.debug('[Indexer] cross_dc info unavailable: %s', e)
+
     # ═══════════════════════════════════════════════════════
     #  Multi-Root: append extra workspace roots
     # ═══════════════════════════════════════════════════════

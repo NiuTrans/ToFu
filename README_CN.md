@@ -101,8 +101,6 @@ Tofu 是一个完全自托管的 AI 助手，采用 **Flask 后端** + **原生 
 - **会话持久化** — 通过后端会话 ID 映射，多轮对话在页面刷新后保持连贯
 - **一键切换** — 点击顶部栏的后端选择器即可切换；每个对话记忆其使用的后端
 
-> 🧪 **立即体验**：切换到 [`cli_switch`](https://github.com/rangehow/ToFu/tree/cli_switch) 分支！
-
 ### 更多特性
 
 - **技能系统** — 持久化的可复用知识（Markdown 文件）—— 助手跨会话学习项目规范、Bug 模式和工作流
@@ -111,6 +109,7 @@ Tofu 是一个完全自托管的 AI 助手，采用 **Flask 后端** + **原生 
 - **错误追踪** — 通用项目错误追踪器，支持指纹识别、解决状态追踪和摘要报告
 - **暗色主题 UI**，响应式布局，语法高亮，LaTeX 渲染，图片预览
 - **跨平台** — 支持 Linux、macOS 和 Windows（详见[平台支持](#平台支持)）
+- **移动端适配** — 响应式布局，精简顶栏，侧滑菜单，底部弹出工具面板，触屏友好
 - **自动依赖修复** — `bootstrap.py` 通过 LLM 诊断自动安装缺失的 pip 包
 
 ---
@@ -166,7 +165,7 @@ docker run -d -p 15000:15000 -v tofu-data:/app/data --name tofu ghcr.io/rangehow
 <details>
 <summary>逐步操作，完全控制</summary>
 
-**前提条件：** Python 3.10+，PostgreSQL 18+，ripgrep（推荐）
+**前提条件：** Python 3.10+，PostgreSQL 18+，ripgrep 和 fd-find（推荐）
 
 ```bash
 git clone https://github.com/rangehow/ToFu.git
@@ -182,11 +181,11 @@ python -m venv .venv && source .venv/bin/activate   # 标准 venv
 # Windows: https://www.postgresql.org/download/windows/
 # conda:   conda install -c conda-forge postgresql>=18
 
-# 安装 ripgrep（推荐 — 代码搜索速度提升 5 倍）
-# macOS:   brew install ripgrep
-# Ubuntu:  sudo apt install ripgrep
-# Windows: winget install BurntSushi.ripgrep.MSVC
-# conda:   conda install -c conda-forge ripgrep
+# 安装 ripgrep 和 fd-find（推荐 — 代码搜索和文件查找加速）
+# macOS:   brew install ripgrep fd
+# Ubuntu:  sudo apt install ripgrep fd-find
+# Windows: winget install BurntSushi.ripgrep.MSVC sharkdp.fd
+# conda:   conda install -c conda-forge ripgrep fd-find
 
 # 安装 Python 依赖
 pip install -r requirements.txt

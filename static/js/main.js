@@ -284,7 +284,7 @@ function _applyModelUI(modelId) {
    * This is the common case when switching between conversations that use
    * the same model (e.g. the default model). Saves:
    *   - querySelectorAll(".preset-dropdown-item").forEach (N items)
-   *   - _scheduleReflow → _reflowToolbar (2–3 forced layout recalculations)
+   *   - _scheduleReflow → _reflowToolbar (toolbar width recalc)
    *   - depth bar show/hide DOM manipulation
    * Still update config.model / config.thinkingDepth above so state is correct. */
   const thinkingChanged = _lastAppliedIsThinking !== isThinking;
@@ -350,8 +350,7 @@ function _applyModelUI(modelId) {
     /* ★ PERF FIX: Suppress the depth bar's CSS opacity transition during
      * programmatic show/hide (conv switches, model changes).  The .2s fade
      * causes the bar to animate sluggishly ("stuck with glue") instead of
-     * snapping instantly.  Worse, _reflowToolbar measures toolbar width via
-     * rAF while the bar is mid-transition, getting incorrect measurements.
+     * snapping instantly.
      * Fix: disable transition → apply state → flush layout → restore. */
     depthBar.style.transition = 'none';
     if (isThinking) {
@@ -387,115 +386,60 @@ function _scheduleReflow() {
   });
 }
 
-/* ★ _reflowToolbar: measure the toolbar's natural content width and size
- * .input-inner so the input box fits the content — no truncation, no empty gaps.
- * Called after every model/depth change or ig-mode toggle.
+/* ★ _reflowToolbar: measure the toolbar's natural (unwrapped) width, then set
+ * --toolbar-w on .input-inner so the textarea + toolbar share a cohesive width,
+ * so the textarea + toolbar share a cohesive width.
  *
- * Two independent CSS variables:
- *   --toolbar-w → .input-inner max-width (follows whichever toolbar is active)
- *   --chat-w    → .chat-inner max-width  (set only from .input-actions, never
- *                 changes when toggling ig-mode — prevents chat text reflow)
- *
- * Layout budget:
- *   toolbar natural width = sum of all flex children at their intrinsic sizes
- *   + .input-actions padding (12+8=20) + .input-box border (3)
- *   + safety margin (16)
- *
- * Clamped to [480, available_width] where available_width is the viewport
- * minus sidebar minus .input-area horizontal padding.
+ * How it works:
+ *   1. Temporarily set --toolbar-w to 9999px so the toolbar can lay out at its
+ *      natural (unwrapped) width without being constrained.
+ *   2. Measure all direct children of .input-actions to get the true content width.
+ *   3. Set --toolbar-w to that measured value (clamped to viewport - padding).
+ *   4. (Removed) --chat-w is no longer synced — chat area is decoupled.
  */
 function _reflowToolbar() {
-  /* ★ BUG FIX: When image gen mode is active, .input-actions is display:none
-   * and .ig-toolbar is the visible toolbar. Measuring .input-actions in that
-   * state returns 0 scrollWidth → dialog shrinks to 480px minimum.
-   * Now we measure whichever toolbar is actually visible. */
   const inputBox = document.querySelector('.input-box');
   const isIgMode = inputBox && inputBox.classList.contains('ig-active');
-  const bar = isIgMode
-    ? document.querySelector('.ig-toolbar')
-    : document.querySelector('.input-actions');
+  const bar = document.querySelector(isIgMode ? '.ig-toolbar' : '.input-actions');
   if (!bar) return;
-  const root = document.documentElement;
   const inputInner = document.querySelector('.input-inner');
-  /* Suppress transition during measurement to prevent visual flash */
-  if (inputInner) inputInner.style.transition = 'none';
-  /* Temporarily expand container so children aren't clamped during measurement.
-   * Without this, scrollWidth of flex children with overflow:hidden returns
-   * the current allocated width, not the content's natural width. */
-  root.style.setProperty('--toolbar-w', '9999px');
-  /* Force layout ONCE so flex children expand to their natural sizes.
-   * All subsequent reads (scrollWidth, getComputedStyle) will be fast
-   * because layout is already computed and hasn't been invalidated. */
-  bar.offsetWidth; /* trigger single reflow */
-  /* ★ PERF: Read gap from bar once — getComputedStyle after an offsetWidth
-   * read is free (layout already computed, no style invalidation between). */
-  const gap = parseFloat(getComputedStyle(bar).gap) || 6;
-  /* Sum intrinsic widths of all direct children.
-   * ★ PERF: Use offsetWidth (fast integer, layout already done) instead of
-   * scrollWidth for children without overflow.  For the spacer check, use
-   * a class-based test (.ig-flex) which avoids getComputedStyle entirely
-   * for the common non-spacer children.  Only fall back to getComputedStyle
-   * when a child is potentially hidden or a flex-grow spacer. */
-  let natural = 0;
-  let visibleCount = 0;
-  const children = bar.children;
-  for (let i = 0, len = children.length; i < len; i++) {
-    const child = children[i];
-    if (child.nodeType !== 1) continue;
-    /* Fast path: skip display:none children.  offsetWidth === 0 is a proxy
-     * for display:none (also true for zero-width children, but those add 0
-     * to the sum anyway, so it's harmless). */
-    const ow = child.offsetWidth;
-    if (ow === 0) continue;
-    visibleCount++;
-    /* ★ BUG FIX: Skip flex-grow spacers (e.g. .ig-flex) during measurement.
-     * When the container is temporarily 9999px wide, spacers with flex-grow > 0
-     * expand to fill all remaining space, inflating scrollWidth to ~8500px+.
-     * Use class-based detection first (no style lookup), fall back to
-     * getComputedStyle only for ambiguous cases. */
-    if (child.classList.contains('ig-flex') || (!child.textContent.trim() && parseFloat(getComputedStyle(child).flexGrow) > 0)) {
-      natural += parseFloat(getComputedStyle(child).minWidth) || 0;
-      continue;
-    }
-    natural += child.scrollWidth;
+  if (!inputInner) return;
+
+  /* 1. Blow out max-width so toolbar lays out naturally */
+  inputInner.style.transition = 'none';
+  inputInner.style.setProperty('--toolbar-w', '9999px');
+
+  /* 2. Measure children's natural width */
+  let w = 0;
+  for (const ch of bar.children) {
+    w += ch.offsetWidth;
   }
-  natural += Math.max(0, visibleCount - 1) * gap;
-  /* Add padding + .input-box border + safety + breathing room */
-  const chrome = 26 + 3 + 48;
-  let want = Math.ceil(natural + chrome);
-  /* Clamp: min 480, max = available viewport width */
-  const sidebar = document.getElementById('sidebar');
-  const sidebarW = sidebar && !sidebar.classList.contains('collapsed') ? sidebar.offsetWidth : 0;
-  const inputAreaPad = 48; /* 24px × 2 */
-  const maxAvail = window.innerWidth - sidebarW - inputAreaPad;
-  want = Math.max(480, Math.min(want, maxAvail));
-  /* ★ DECOUPLED: --toolbar-w only controls .input-inner width.
-   * --chat-w controls .chat-inner width and is set ONLY from the normal
-   * toolbar (.input-actions), never from .ig-toolbar. This prevents
-   * toggling image gen mode from reflowing the entire chat content area.
-   *
-   * When measuring .input-actions (normal mode), update BOTH variables.
-   * When measuring .ig-toolbar (ig mode), only update --toolbar-w.
-   * Edge case: if --chat-w was never set (page loaded straight into ig-mode),
-   * fall back to the default (820px) — it will be set properly on the first
-   * switch out of ig-mode or model change. */
-  if (!isIgMode) {
-    root.style.setProperty('--chat-w', want + 'px');
-  }
-  /* ★ BUG FIX: Set final width and flush layout BEFORE restoring transition.
-   * The old code restored transition before the layout flush, so the browser
-   * saw "max-width changed from 9999px → Xpx with .4s transition" → visible
-   * expand-then-contract flash on every conv switch / model change.
-   *
-   * Correct order:
-   *   1. Write final --toolbar-w (transition still 'none')
-   *   2. Force reflow → browser commits Xpx as the computed value
-   *   3. THEN restore transition → browser sees no pending change to animate */
-  root.style.setProperty('--toolbar-w', want + 'px');
-  if (inputInner) inputInner.offsetWidth; /* flush with transition:none */
-  /* Now safe to restore transition — computed max-width is already final */
-  if (inputInner) inputInner.style.transition = '';
+  const style = getComputedStyle(bar);
+  const gap = parseFloat(style.gap) || parseFloat(style.columnGap) || 0;
+  const padL = parseFloat(style.paddingLeft) || 0;
+  const padR = parseFloat(style.paddingRight) || 0;
+  const visibleKids = Array.from(bar.children).filter(c =>
+    c.offsetWidth > 0 && getComputedStyle(c).display !== 'none'
+  ).length;
+  w += gap * Math.max(0, visibleKids - 1) + padL + padR;
+
+  /* 3. Clamp to viewport and apply */
+  const vw = document.documentElement.clientWidth;
+  const maxW = vw - 48; /* 24px padding each side */
+  w = Math.max(480, Math.min(w, maxW));
+  /* Add border width of .input-box (1.5px each side) */
+  w += 3;
+
+  inputInner.style.setProperty('--toolbar-w', w + 'px');
+
+  /* Re-enable transition after a frame so the initial set is instant */
+  requestAnimationFrame(() => {
+    inputInner.style.transition = '';
+  });
+
 }
+/* --chat-w is NOT synced — chat area uses its own fixed max-width (820px default)
+ * independent of toolbar width, per §4.2 decoupled layout. */
 
 /* Backward-compat alias so old callers still work during transition */
 function _applyPresetUI(presetOrModel) { _applyModelUI(presetOrModel); }
@@ -808,12 +752,7 @@ function _restoreConvToolState(conv) {
     _applyBackendCapabilities();
   }
   if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
-  /* ★ BUG FIX: Always reflow toolbar after restoring conv tool state.
-   * _applyModelUI and _applyImageGenUI have optimization paths that skip
-   * _scheduleReflow when model/igMode haven't changed.  But other toggles
-   * (submenu badges, search mode, depth) may have changed the toolbar's
-   * natural width.  Without this, --toolbar-w stays stale → visible gap
-   * on the right side of the toolbar. */
+  /* ★ Reflow toolbar after restoring conv tool state (toolbar width may differ). */
   _scheduleReflow();
 }
 function _resetToolsToDefaults() {
@@ -847,14 +786,7 @@ function _resetToolsToDefaults() {
   const genText = document.querySelector('.ig-gen-text');
   if (genText) genText.textContent = '生成';
   if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
-  /* ★ BUG FIX: Always reflow toolbar after resetting tools to defaults.
-   * _applyModelUI skips _scheduleReflow when the model hasn't changed
-   * (common case: new chat uses the same default model as the previous conv).
-   * _applyImageGenUI skips when igMode is already false.
-   * But tool toggle changes (submenu badge counts, search mode, depth bar)
-   * alter the toolbar's natural width.  Without this unconditional reflow,
-   * --toolbar-w stays at the previous conv's stale value → visible empty
-   * gap on the right side of the input toolbar after clicking New Chat. */
+  /* ★ Reflow toolbar after resetting tools (toolbar width may differ). */
   _scheduleReflow();
 }
 function newChat() {
@@ -1580,6 +1512,7 @@ async function sendMessage() {
     input.style.height = "auto";
     pendingImages = [];
     pendingPdfTexts = [];
+    if (typeof _vlmClearState === 'function') _vlmClearState();
     renderImagePreviews();
     document.getElementById("pdfProgress").style.display = "none";
     renderPendingQueueUI(conv.id);
@@ -1669,6 +1602,7 @@ async function sendMessage() {
   input.style.height = "auto";
   pendingImages = [];
   pendingPdfTexts = [];
+  if (typeof _vlmClearState === 'function') _vlmClearState();
   renderImagePreviews();
   document.getElementById("pdfProgress").style.display = "none";
   if (activeConvId === convId) {
@@ -1725,7 +1659,7 @@ async function sendMessage() {
  * State transitions visible in sidebar:
  *   "翻译中" (conv._translating=true) → streaming dot (assistant running) → done
  */
-async function _translateThenRespond(conv, convId, userMsg, userMsgIdx, originalText) {
+async function _translateThenRespond(conv, convId, userMsg, userMsgIdx, originalText, { allowTruncate = false } = {}) {
   const _translateCtrl = new AbortController();
   conv._translateAbortCtrl = _translateCtrl;
   let _translateWasAborted = false;
@@ -1741,9 +1675,10 @@ async function _translateThenRespond(conv, convId, userMsg, userMsgIdx, original
         sourceLang: 'Chinese',
       }),
     });
+    const _syncOpts = allowTruncate ? { allowTruncate: true } : {};
     const [translateResp] = await Promise.all([
       _translatePromise,
-      syncConversationToServer(conv),
+      syncConversationToServer(conv, _syncOpts),
     ]);
     if (conv._translateAborted) {
       _translateWasAborted = true;
@@ -2189,7 +2124,7 @@ async function regenerateFromUser(idx) {
       const msgEl = document.getElementById('msg-' + idx);
       if (msgEl) msgEl.classList.add('user-translating');
     }
-    _translateThenRespond(conv, convId, msg, idx, msg.originalContent);
+    _translateThenRespond(conv, convId, msg, idx, msg.originalContent, { allowTruncate: true });
     return;
   }
 
@@ -2596,6 +2531,39 @@ function _loadServerConfigAndPopulate() {
         serverModel = cfgDefault;
       }
       _populateModelDropdown(models);
+
+      /* ★ Validate that config.model actually exists among the available models.
+       * On fresh deploys (e.g. open-source), config.model may be a hardcoded default
+       * (like "aws.claude-opus-4.6") that doesn't exist in the user's provider.
+       * If so, fall back to serverModel (from server config) or the first available
+       * chat model — pick randomly to avoid always landing on the same one. */
+      const chatModels = (models || []).filter(m => {
+        if (_hiddenModels.has(m.model_id)) return false;
+        var caps = m.capabilities || [];
+        for (var i = 0; i < caps.length; i++) {
+          if (caps[i] === 'image_gen' || caps[i] === 'embedding') return false;
+        }
+        return true;
+      });
+      const availableIds = new Set(chatModels.map(m => m.model_id));
+      const currentModel = config.model || serverModel;
+      if (currentModel && !availableIds.has(currentModel)) {
+        /* Current model not available — pick a valid one */
+        let fallback = '';
+        if (serverModel && availableIds.has(serverModel)) {
+          fallback = serverModel;
+        } else if (chatModels.length > 0) {
+          /* Pick a random model so different users don't all land on the same one */
+          fallback = chatModels[Math.floor(Math.random() * chatModels.length)].model_id;
+        }
+        if (fallback) {
+          console.warn('[Config] Model "%s" not available in providers, falling back to "%s"', currentModel, fallback);
+          config.model = fallback;
+          try { localStorage.setItem("claude_client_config", JSON.stringify(config)); }
+          catch (_e) { /* best-effort */ }
+        }
+      }
+
       /* Re-apply model UI now that dropdown is populated */
       _applyModelUI(config.model || serverModel);
 
@@ -2955,6 +2923,83 @@ function toggleSidebar() {
   }
 })();
 
+/* ═══ Mobile "More" Bottom Sheet ═══
+ * Mirrors the state of the desktop toolbar toggles (codeExec, skills,
+ * translate, browser, imageGen, humanGuidance, swarm, endpoint).
+ * Each item reads the live state from the existing toggle elements. */
+
+function toggleMobileSheet() {
+  const sheet = document.getElementById("mobileSheet");
+  const backdrop = document.getElementById("mobileSheetBackdrop");
+  if (!sheet) return;
+  const isOpen = sheet.classList.contains("open");
+  if (isOpen) {
+    closeMobileSheet();
+  } else {
+    updateMobileSheet();
+    sheet.classList.add("open");
+    if (backdrop) backdrop.classList.add("open");
+  }
+}
+
+function closeMobileSheet() {
+  const sheet = document.getElementById("mobileSheet");
+  const backdrop = document.getElementById("mobileSheetBackdrop");
+  if (sheet) sheet.classList.remove("open");
+  if (backdrop) backdrop.classList.remove("open");
+}
+
+function updateMobileSheet() {
+  /* Sync each mobile sheet item's .active class with the desktop toggle state */
+  const map = {
+    mobileCodeExec:    "codeExecToggle",
+    mobileSkills:      "skillsToggle",
+    mobileTranslate:   "translateToggle",
+    mobileBrowser:     "browserToggle",
+    mobileImageGen:    "imageGenToggle",
+    mobileHumanGuidance: "humanGuidanceToggle",
+    mobileSwarm:       "swarmToggle",
+    mobileEndpoint:    "endpointToggle"
+  };
+  let activeCount = 0;
+  for (const [mobileId, desktopId] of Object.entries(map)) {
+    const mobileEl = document.getElementById(mobileId);
+    const desktopEl = document.getElementById(desktopId);
+    if (!mobileEl || !desktopEl) continue;
+    const isActive = desktopEl.classList.contains("active");
+    mobileEl.classList.toggle("active", isActive);
+    if (isActive) activeCount++;
+  }
+  /* Update the "more" button to show if any toggles are active */
+  const moreBtn = document.getElementById("mobileMoreBtn");
+  if (moreBtn) moreBtn.classList.toggle("has-active", activeCount > 0);
+  /* Also update desktop submenu counts (they still exist in DOM) */
+  if (typeof updateSubmenuCounts === "function") updateSubmenuCounts();
+  /* Sync mobile depth section visibility + active state */
+  updateMobileDepth();
+}
+
+/**
+ * Sync the mobile bottom sheet depth bar with the desktop depth bar.
+ * Shows/hides the section based on whether the model supports thinking depth.
+ */
+function updateMobileDepth() {
+  const desktopBar = document.getElementById("thinkingDepthSection");
+  const mobileSection = document.getElementById("mobileDepthSection");
+  if (!mobileSection) return;
+  /* Show mobile depth section when desktop depth bar has display set to 'flex' by JS
+   * (on mobile, CSS hides it with display:none!important, but JS still sets .style.display) */
+  const isVisible = desktopBar && (desktopBar.style.display === "flex" || desktopBar.style.display === "");
+  mobileSection.style.display = isVisible ? "" : "none";
+  if (!isVisible) return;
+  /* Sync active button state */
+  const activeDesktop = desktopBar.querySelector(".depth-btn.active");
+  const activeDepth = activeDesktop ? activeDesktop.dataset.depth : "medium";
+  mobileSection.querySelectorAll(".mobile-depth-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.depth === activeDepth);
+  });
+}
+
 /* ── Reflow toolbar on window resize ── */
 window.addEventListener('resize', (function() {
   let tid;
@@ -3056,6 +3101,38 @@ window.addEventListener('resize', (function() {
         }
       }, 150);
     }
+  });
+})();
+
+/* ── Mobile: handle virtual keyboard resize via visualViewport API ── */
+(function initMobileKeyboardHandler() {
+  if (!window.visualViewport) return;
+  /* On mobile, when the virtual keyboard opens the visual viewport shrinks.
+   * We adjust body height to match, keeping the input area visible. */
+  let lastHeight = 0;
+  function onViewportResize() {
+    if (window.innerWidth > 768) return;
+    const vv = window.visualViewport;
+    const newH = vv.height;
+    if (Math.abs(newH - lastHeight) < 1) return;
+    lastHeight = newH;
+    /* Set explicit height on body to match the visual viewport */
+    document.body.style.height = newH + 'px';
+    /* Scroll textarea into view when keyboard is open (viewport smaller than window) */
+    if (newH < window.innerHeight * 0.85) {
+      const ta = document.getElementById('userInput');
+      if (ta && document.activeElement === ta) {
+        requestAnimationFrame(function() {
+          ta.scrollIntoView({ block: 'end', behavior: 'smooth' });
+        });
+      }
+    }
+  }
+  window.visualViewport.addEventListener('resize', onViewportResize);
+  /* Reset on blur / keyboard dismiss */
+  window.visualViewport.addEventListener('scroll', function() {
+    if (window.innerWidth > 768) return;
+    document.body.style.height = window.visualViewport.height + 'px';
   });
 })();
 
@@ -3804,6 +3881,11 @@ function _ensureNewest() {
   }
   // ── Startup DB health check — show persistent banner if PG is down ──
   _checkDbHealth();
+
+  // ── Restore PDF/VLM state from sessionStorage (survives page refresh) ──
+  if (typeof _vlmRestoreState === 'function') {
+    _vlmRestoreState().catch(e => console.warn('[VLM-Restore] Failed:', e));
+  }
 
   initActiveTasks().then(() => {
     renderConversationList();

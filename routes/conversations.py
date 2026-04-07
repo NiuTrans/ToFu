@@ -1,6 +1,7 @@
 """routes/conversations.py — Conversation CRUD endpoints."""
 
 import json
+import re
 import time
 
 import psycopg2
@@ -32,7 +33,8 @@ def build_search_text(messages):
     if isinstance(messages, str):
         try:
             messages = json.loads(messages)
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.debug('[Conversations] Failed to parse messages JSON: %s', e)
             return ''
     if not isinstance(messages, list):
         return ''
@@ -273,9 +275,12 @@ def search_convs():
     # ── Phase 1: tsvector prefix search (0-5ms via GIN index) ──
     # Sanitize query for to_tsquery: remove special chars, join words with &
     _tsq_words = query.split()
+    # Strip all tsquery special characters: ' \ : ( ) ! & | < >
     _tsq_safe = ' & '.join(
-        w.replace("'", "''").replace('\\', '\\\\').replace(':', '')
-        for w in _tsq_words if w
+        w for w in (
+            re.sub(r"['\\\\ :()!&|<>]", '', w)
+            for w in _tsq_words
+        ) if w
     )
     if _tsq_safe:
         _tsq_safe += ':*'  # prefix matching

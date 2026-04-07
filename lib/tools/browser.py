@@ -1,8 +1,8 @@
 """lib/tools/browser.py — Browser extension tool definitions."""
 
-import logging
+from lib.log import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 BROWSER_TOOL_LIST_TABS = {
     "type": "function",

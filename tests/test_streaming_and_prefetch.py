@@ -411,15 +411,13 @@ class TestMemoryPrefetch:
 
         messages = [{'role': 'system', 'content': 'Base system prompt'}]
 
-        with patch('lib.tasks_pkg.system_context._build_search_addendum',
-                   return_value='Search addendum'):
-            _inject_system_contexts(
-                messages, '/tmp/project', True,  # project_enabled
-                False, True, False,              # skills, search, swarm
-                has_real_tools=True,
-                conv_id='',
-                task=task,
-            )
+        _inject_system_contexts(
+            messages, '/tmp/project', True,  # project_enabled
+            False, True, False,              # skills, search, swarm
+            has_real_tools=True,
+            conv_id='',
+            task=task,
+        )
 
         # Project context should be prepended
         sys_content = messages[0]['content']
@@ -446,9 +444,7 @@ class TestMemoryPrefetch:
 
         # The fallback should be called — mock it
         with patch('lib.project_mod.get_context_for_prompt',
-                   return_value='Fallback project ctx') as mock_fn, \
-             patch('lib.tasks_pkg.system_context._build_search_addendum',
-                   return_value=''):
+                   return_value='Fallback project ctx') as mock_fn:
             _inject_system_contexts(
                 messages, '/tmp/project', True,
                 False, False, False,
@@ -479,9 +475,7 @@ class TestMemoryPrefetch:
         messages = [{'role': 'system', 'content': 'Base prompt'}]
 
         with patch('lib.project_mod.get_context_for_prompt',
-                   return_value='Sync fallback ctx') as mock_fn, \
-             patch('lib.tasks_pkg.system_context._build_search_addendum',
-                   return_value=''):
+                   return_value='Sync fallback ctx') as mock_fn:
             _inject_system_contexts(
                 messages, '/tmp/project', True,
                 False, False, False,
@@ -504,9 +498,7 @@ class TestMemoryPrefetch:
         messages = [{'role': 'system', 'content': 'Base'}]
 
         with patch('lib.project_mod.get_context_for_prompt',
-                   return_value='Normal load') as mock_fn, \
-             patch('lib.tasks_pkg.system_context._build_search_addendum',
-                   return_value=''):
+                   return_value='Normal load') as mock_fn:
             _inject_system_contexts(
                 messages, '/tmp/proj', True,
                 False, False, False,
@@ -539,15 +531,13 @@ class TestMemoryPrefetch:
             {'role': 'user', 'content': 'Help me with flask migration'},
         ]
 
-        with patch('lib.tasks_pkg.system_context._build_search_addendum',
-                   return_value=''):
-            _inject_system_contexts(
-                messages, '/tmp/proj', True,
-                True, False, False,  # skills_enabled=True
-                has_real_tools=True,
-                conv_id='',
-                task=task,
-            )
+        _inject_system_contexts(
+            messages, '/tmp/proj', True,
+            True, False, False,  # skills_enabled=True
+            has_real_tools=True,
+            conv_id='',
+            task=task,
+        )
 
         # System message should have compact skill instructions but NOT
         # the full <available_skills> listing

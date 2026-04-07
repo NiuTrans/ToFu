@@ -1356,7 +1356,7 @@ function renderFinishInfo(msg) {
   const parts = [];
   const _mid = msg.model || msg.preset || msg.effort || "";
   const u = msg.usage || {};
-  const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : n.toString());
+  const fmt = (n) => (n >= 1000000 ? (n / 1000000).toFixed(1) + "m" : n >= 1000 ? (n / 1000).toFixed(1) + "k" : n.toString());
   const thk = u.reasoning_tokens || u.thinking_tokens || 0;
 
   // ★ Model tag — auto-detect brand from model_id
@@ -2892,6 +2892,7 @@ function _restoreInputFromBackup() {
   _editBackupImages = [];
   _editBackupPdfs = [];
   renderImagePreviews();
+  if (typeof _vlmSaveState === 'function') _vlmSaveState();  // ★ Persist restored state
   const mainInput = document.getElementById("userInput");
   if (mainInput) mainInput.value = _editBackupInput;
   _editBackupInput = "";
@@ -3097,7 +3098,7 @@ async function saveEditAndResend(idx) {
       const msgEl = document.getElementById('msg-' + idx);
       if (msgEl) msgEl.classList.add('user-translating');
     }
-    _translateThenRespond(conv, convId, msg, idx, t);
+    _translateThenRespond(conv, convId, msg, idx, t, { allowTruncate: true });
     return;
   }
 
@@ -3785,7 +3786,7 @@ function _buildSwarmPanelHTML(round) {
       if (a.tokens || a.elapsed) {
         const metaParts = [];
         if (a.elapsed) metaParts.push(`${a.elapsed}s`);
-        if (a.tokens) metaParts.push(`${a.tokens > 1000 ? (a.tokens/1000).toFixed(1) + "k" : a.tokens} tok`);
+        if (a.tokens) metaParts.push(`${a.tokens >= 1000000 ? (a.tokens/1000000).toFixed(1) + "m" : a.tokens > 1000 ? (a.tokens/1000).toFixed(1) + "k" : a.tokens} tok`);
         bodyContent += `<div class="sw-a-meta">${metaParts.join(' · ')}</div>`;
       }
 
@@ -3811,7 +3812,7 @@ function _buildSwarmPanelHTML(round) {
   if (total > 0) footerParts.push(`⚡ ${total} parallel task${total > 1 ? "s" : ""}`);
   if (round._swarmStats) {
     const s = round._swarmStats;
-    if (s.totalTokens) footerParts.push(`${s.totalTokens > 1000 ? (s.totalTokens/1000).toFixed(1) + "k" : s.totalTokens} tokens`);
+    if (s.totalTokens) footerParts.push(`${s.totalTokens >= 1000000 ? (s.totalTokens/1000000).toFixed(1) + "m" : s.totalTokens > 1000 ? (s.totalTokens/1000).toFixed(1) + "k" : s.totalTokens} tokens`);
     if (s.totalCostUsd) footerParts.push(`$${s.totalCostUsd.toFixed(4)}`);
   }
   if (elapsed) footerParts.push(`${elapsed}`);

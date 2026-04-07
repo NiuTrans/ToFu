@@ -143,8 +143,205 @@ def _wrap_for_translation(text):
     return f"<translate>\n{text}\n</translate>"
 
 
+def _dedup_repetition_loop(text, max_repeats=3):
+    """Detect and truncate repetition loops in translation output.
+
+    Cheap models sometimes enter degenerate repetition loops in three ways:
+
+    1. **Inline**: a 50-600 char block repeated 3+ times within a single
+       long line (no \\n separators).
+    2. **Single-line consecutive**: the same line repeated ≥ 6 times in a row.
+    3. **Multi-line block**: a block of 2-8 lines (e.g. ABCD) repeated ≥ 4
+       times consecutively (ABCDABCDABCDABCD...).
+
+    All three are detected and truncated.  The approach avoids false positives
+    from table separators or code lines that appear multiple times in
+    *different* parts of the document by requiring **consecutive** repetition.
+
+    Args:
+        text: The translated text to check.
+        max_repeats: Maximum allowed consecutive occurrences of the same
+            block before truncation (default 3).
+
+    Returns:
+        (cleaned_text, was_truncated) tuple.
+    """
+    truncated = False
+
+    # ── Phase 1: Inline (no-newline) substring repetition ──
+    out_lines = []
+    for line in text.split('\n'):
+        if len(line) > 800:
+            cleaned_line, was_cut = _dedup_inline_loop(line, max_repeats=max_repeats)
+            if was_cut:
+                truncated = True
+                line = cleaned_line
+        out_lines.append(line)
+    text = '\n'.join(out_lines)
+
+    # ── Phase 2: Single-line consecutive repetition ──
+    _CONSEC_THRESHOLD = 6
+    lines = text.split('\n')
+    if len(lines) >= _CONSEC_THRESHOLD:
+        kept = []
+        i = 0
+        while i < len(lines):
+            stripped = lines[i].strip()
+            if len(stripped) >= 15:
+                run_len = 1
+                while i + run_len < len(lines) and lines[i + run_len].strip() == stripped:
+                    run_len += 1
+                if run_len >= _CONSEC_THRESHOLD:
+                    for _ in range(min(max_repeats, run_len)):
+                        kept.append(lines[i])
+                    logger.warning('[Translate] Single-line repetition: '
+                                   '"%s" repeated %dx in a row (keeping %d)',
+                                   stripped[:80], run_len, max_repeats)
+                    i += run_len
+                    truncated = True
+                    continue
+            kept.append(lines[i])
+            i += 1
+        if truncated:
+            text = '\n'.join(kept).rstrip()
+            lines = text.split('\n')
+
+    # ── Phase 3: Multi-line block consecutive repetition ──
+    # Detect patterns like ABCDABCDABCD where a block of 2-8 lines repeats.
+    _BLOCK_MIN_REPEATS = 4  # at least 4 consecutive block repeats
+    for block_size in range(2, 9):  # try block sizes 2..8
+        if len(lines) < block_size * _BLOCK_MIN_REPEATS:
+            continue
+        # Check total chars of a candidate block — skip trivial blocks
+        # (e.g. all empty/short lines)
+        i = 0
+        found_loop = False
+        new_lines = []
+        while i < len(lines):
+            if i + block_size * _BLOCK_MIN_REPEATS <= len(lines):
+                block = lines[i:i + block_size]
+                block_chars = sum(len(l.strip()) for l in block)
+                if block_chars >= 30:  # non-trivial block
+                    # Count how many times this block repeats consecutively
+                    repeats = 1
+                    pos = i + block_size
+                    while pos + block_size <= len(lines):
+                        if lines[pos:pos + block_size] == block:
+                            repeats += 1
+                            pos += block_size
+                        else:
+                            break
+                    if repeats >= _BLOCK_MIN_REPEATS:
+                        # Keep max_repeats blocks
+                        for r in range(min(max_repeats, repeats)):
+                            new_lines.extend(lines[i + r * block_size:
+                                                    i + (r + 1) * block_size])
+                        block_preview = ' | '.join(
+                            l.strip()[:40] for l in block[:3])
+                        logger.warning('[Translate] Block repetition: '
+                                       '%d-line block repeated %dx '
+                                       '(keeping %d). Block: %s',
+                                       block_size, repeats, max_repeats,
+                                       block_preview[:120])
+                        i += block_size * repeats
+                        found_loop = True
+                        truncated = True
+                        continue
+            new_lines.append(lines[i])
+            i += 1
+        if found_loop:
+            lines = new_lines
+            text = '\n'.join(lines).rstrip()
+            break  # re-check with smaller block sizes if needed
+
+    return text, truncated
+
+
+def _dedup_inline_loop(line, max_repeats=3, min_unit=50, max_unit=600,
+                       sample_step=10):
+    """Detect and truncate a repeating substring block within a single line.
+
+    The model sometimes produces a 100-500 char block repeated 100+ times
+    with no newlines.  We detect this by sampling fixed-length windows and
+    counting how many times each window appears.
+
+    Args:
+        line: A single (long) line of text.
+        max_repeats: Keep at most this many occurrences.
+        min_unit: Minimum repeating unit length to detect.
+        max_unit: Maximum repeating unit length to detect.
+        sample_step: Step size for sliding window sampling.
+
+    Returns:
+        (cleaned_line, was_truncated) tuple.
+    """
+    length = len(line)
+    if length < min_unit * (max_repeats + 1):
+        return line, False
+
+    # Try a few candidate unit lengths (50, 100, 150, 200, 300, 500)
+    for unit_len in [50, 100, 150, 200, 250, 300, 400, 500]:
+        if unit_len > max_unit or unit_len * (max_repeats + 1) > length:
+            continue
+        # Sample windows at this unit_len, find the most-repeated one
+        from collections import Counter
+        window_counts = Counter()
+        for i in range(0, length - unit_len, sample_step):
+            window_counts[line[i:i + unit_len]] += 1
+
+        # The most common window
+        if not window_counts:
+            continue
+        best_window, best_count = window_counts.most_common(1)[0]
+        # Expected count if no repetition: ~(length / sample_step) unique windows
+        # If repeated N times: each window appears ~N times
+        length / sample_step
+        if best_count < max_repeats + 1:
+            continue
+
+        # Found a frequently-repeated window.  Now find the actual repeating
+        # unit by locating consecutive occurrences.
+        first_pos = line.index(best_window)
+        # Find the second occurrence to determine exact unit length
+        second_pos = line.index(best_window, first_pos + 1)
+        actual_unit_len = second_pos - first_pos
+        if actual_unit_len < min_unit or actual_unit_len > max_unit * 2:
+            continue
+
+        unit = line[first_pos:first_pos + actual_unit_len]
+        # Count consecutive repeats from first_pos
+        count = 0
+        pos = first_pos
+        while pos + actual_unit_len <= length and line[pos:pos + actual_unit_len] == unit:
+            count += 1
+            pos += actual_unit_len
+
+        if count <= max_repeats:
+            continue
+
+        # Truncate: keep content before the loop + max_repeats occurrences
+        keep_end = first_pos + actual_unit_len * max_repeats
+        # Also keep any trailing content after the loop
+        loop_end = first_pos + actual_unit_len * count
+        trailing = line[loop_end:]
+        cleaned = line[:keep_end] + trailing
+
+        logger.warning('[Translate] Inline repetition: %d-char block repeated %dx '
+                       '(keeping %d), line %d→%d chars. Block: %.80s',
+                       actual_unit_len, count, max_repeats,
+                       length, len(cleaned), unit)
+        return cleaned, True
+
+    return line, False
+
+
 def _translate_one_chunk(chunk, system_prompt, chunk_label=''):
-    """Translate a single chunk of text."""
+    """Translate a single chunk of text.
+
+    Includes truncation detection: if the model produces suspiciously short
+    output (< 30% of input) or hits max_tokens (finish_reason='length'),
+    the translation is retried with a fresh dispatch (likely a different model).
+    """
     from lib.llm_dispatch import smart_chat
 
     clen = len(chunk)
@@ -154,23 +351,71 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label=''):
         _mt, _timeout, _retries = 12000, 60, 6
     else:
         _mt, _timeout, _retries = 8000, 30, 5
-    c, u = smart_chat(
-        messages=[{'role': 'system', 'content': system_prompt},
-                  {'role': 'user', 'content': _wrap_for_translation(chunk)}],
-        max_tokens=_mt,
-        temperature=0.3,
-        capability='cheap',
-        log_prefix=f'[Translate{chunk_label}]',
-        timeout=_timeout,
-        max_retries=_retries,
-    )
-    if c and '<think>' in c:
-        c = re.sub(r'<think>[\s\S]*?</think>\s*', '', c).strip()
-        if '<think>' in c:
-            c = c[:c.index('<think>')].strip()
-    c = re.sub(r'</?translate>', '', c).strip()
-    if not c or not c.strip():
-        raise ValueError(f'Empty translation result for chunk{chunk_label} (len={len(chunk)})')
+
+    _MAX_TRUNCATION_RETRIES = 2  # retry up to 2 times on truncated output
+    _last_err = None
+
+    for _attempt in range(1 + _MAX_TRUNCATION_RETRIES):
+        c, u = smart_chat(
+            messages=[{'role': 'system', 'content': system_prompt},
+                      {'role': 'user', 'content': _wrap_for_translation(chunk)}],
+            max_tokens=_mt,
+            temperature=1,
+            capability='cheap',
+            log_prefix=f'[Translate{chunk_label}]',
+            timeout=_timeout,
+            max_retries=_retries,
+        )
+        if c and '<think>' in c:
+            c = re.sub(r'<think>[\s\S]*?</think>\s*', '', c).strip()
+            if '<think>' in c:
+                c = c[:c.index('<think>')].strip()
+        c = re.sub(r'</?translate>', '', c).strip()
+        if not c or not c.strip():
+            raise ValueError(f'Empty translation result for chunk{chunk_label} (len={len(chunk)})')
+
+        # ── Detect truncated translations ──
+        _finish = (u or {}).get('finish_reason', '')
+        _model = ''
+        if isinstance(u, dict):
+            _disp = u.get('_dispatch', {})
+            _model = _disp.get('model', u.get('model', ''))
+
+        _is_truncated = False
+        _reason = ''
+
+        if _finish == 'length':
+            _is_truncated = True
+            _reason = f'finish_reason=length, model={_model}'
+        elif clen > 500 and len(c) < clen * 0.20:
+            # Very short output (< 20% of input) — model likely broke down.
+            # Normal EN→ZH translation is ~40-60% char ratio, so 20% is
+            # a clear failure signal.
+            _is_truncated = True
+            _reason = (f'output too short ({len(c)}/{clen} = {len(c)/clen*100:.0f}%), '
+                       f'model={_model}')
+
+        if _is_truncated:
+            if _attempt < _MAX_TRUNCATION_RETRIES:
+                logger.warning('[Translate%s] Truncated translation (attempt %d/%d): %s '
+                               '— retrying with different model',
+                               chunk_label, _attempt + 1, 1 + _MAX_TRUNCATION_RETRIES,
+                               _reason)
+                _last_err = _reason
+                continue  # retry — dispatch will likely pick a different model
+            else:
+                # All retries exhausted — log warning but accept the best result
+                logger.warning('[Translate%s] Translation still truncated after %d attempts: %s '
+                               '— accepting partial result (%d chars)',
+                               chunk_label, 1 + _MAX_TRUNCATION_RETRIES, _reason, len(c))
+        break  # success or accepted after max retries
+
+    # ── Post-processing: detect and truncate repetition loops ──
+    c, was_truncated = _dedup_repetition_loop(c)
+    if was_truncated:
+        logger.info('[Translate%s] Repetition loop cleaned: %d chars after dedup',
+                     chunk_label, len(c))
+
     return c.strip(), u
 
 

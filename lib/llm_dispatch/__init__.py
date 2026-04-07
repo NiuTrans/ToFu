@@ -12,11 +12,10 @@ All public names are re-exported here so that existing imports continue to work:
     from lib.llm_dispatch import dispatch_chat, smart_chat, get_dispatcher
 """
 
-import logging
-
 from lib._pkg_utils import build_facade
+from lib.log import get_logger
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 __all__: list[str] = []
 

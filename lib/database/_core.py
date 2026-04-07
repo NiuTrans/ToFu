@@ -211,8 +211,8 @@ def _pool_get():
                 return conn
             try:
                 conn.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug('[DB] Error closing dead pooled connection: %s', e)
     return _new_pg_connection()
 
 
@@ -223,11 +223,12 @@ def _pool_put(conn):
     try:
         conn._conn.rollback()
         conn._dirty = False
-    except Exception:
+    except Exception as e:
+        logger.debug('[DB] Rollback failed on pool return: %s', e)
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as e2:
+            logger.debug('[DB] Error closing connection after rollback failure: %s', e2)
         return
     with _conn_pool_lock:
         if len(_conn_pool) < _CONN_POOL_MAX:
@@ -235,8 +236,8 @@ def _pool_put(conn):
             return
     try:
         conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug('[DB] Error closing excess pooled connection: %s', e)
 
 
 # ═══════════════════════════════════════════════════════════════════════

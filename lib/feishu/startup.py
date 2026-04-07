@@ -4,13 +4,14 @@ Manages the Lark SDK WebSocket long-connection with automatic reconnection
 and patched ping settings for stability.
 """
 
-import logging
 import threading
 import time
 
 from lib.feishu._state import APP_ID, APP_SECRET, ENABLED
 
-logger = logging.getLogger(__name__)
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = ['start_bot']
 

@@ -465,8 +465,12 @@ def execute_tool_pipeline(
             cache_key = _make_cache_key(fn_name, fn_args)
             cached = _cache.get(cache_key)
             if cached is not None:
-                # Cache entries are (content, is_search) or (content, is_search, source)
-                if len(cached) == 3:
+                # Cache entries: (content, is_search, source, display_results?)
+                # Legacy formats: (content, is_search) or (content, is_search, source)
+                cached_display = None
+                if len(cached) == 4:
+                    cached_content, cached_is_search, cached_source, cached_display = cached
+                elif len(cached) == 3:
                     cached_content, cached_is_search, cached_source = cached
                 else:
                     cached_content, cached_is_search = cached
@@ -484,17 +488,24 @@ def execute_tool_pipeline(
                 dedup_content = cached_content if isinstance(cached_content, str) else str(cached_content)
                 # Update round_entry to show cached/prefetched status
                 if round_entry:
-                    _meta = _build_cache_hit_meta(
-                        fn_name, fn_args, cached_content, is_prefetch,
-                    )
-                    _finalize_tool_round(
-                        task, rn, round_entry, [_meta],
-                        query_override=round_entry.get('query', fn_name),
-                    )
+                    # Use stored display_results for web_search if available
+                    if cached_display and fn_name == 'web_search':
+                        _finalize_tool_round(
+                            task, rn, round_entry, cached_display,
+                            query_override=round_entry.get('query', fn_name),
+                        )
+                    else:
+                        _meta = _build_cache_hit_meta(
+                            fn_name, fn_args, cached_content, is_prefetch,
+                        )
+                        _finalize_tool_round(
+                            task, rn, round_entry, [_meta],
+                            query_override=round_entry.get('query', fn_name),
+                        )
                 tool_results[tc_id] = (dedup_content, cached_is_search)
                 continue
 
-        is_write_op = fn_name in ('write_file', 'apply_diff')
+        is_write_op = fn_name in ('write_file', 'apply_diff', 'insert_content')
         needs_approval = (
             is_write_op and fn_name in PROJECT_TOOL_NAMES
             and not auto_apply and not task['aborted']
@@ -658,7 +669,14 @@ def execute_tool_pipeline(
                             for _pi in parallel_items:
                                 if _pi[2] == ret_tc_id:  # tc_id match
                                     _pi_cache_key = _make_cache_key(fut_fn_name, _pi[3])
-                                    _cache[_pi_cache_key] = (tool_content, is_search, 'dedup')
+                                    # For web_search, also cache display_results
+                                    # from the round_entry for later cache hits
+                                    _pi_display = None
+                                    if fut_fn_name == 'web_search':
+                                        _pi_re = _pi[5]  # round_entry
+                                        if _pi_re and _pi_re.get('results'):
+                                            _pi_display = _pi_re['results']
+                                    _cache[_pi_cache_key] = (tool_content, is_search, 'dedup', _pi_display)
                                     break
                         # ── Invalidate project cache after write/exec ops ──
                         elif fut_fn_name in ('write_file', 'apply_diff', 'code_exec',

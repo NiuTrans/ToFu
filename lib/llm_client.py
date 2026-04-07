@@ -1242,6 +1242,11 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
     content = msg.get('content', '')
     usage = data.get('usage', {})
 
+    # ★ Inject finish_reason into usage so callers can detect truncation
+    _finish_reason = choices[0].get('finish_reason', '')
+    if _finish_reason:
+        usage['finish_reason'] = _finish_reason
+
     # ★ Strip MiniMax-style <think>...</think> tags from non-streaming responses
     # MiniMax M2.5 embeds reasoning in <think> tags inside content;
     # the streaming path has a state-machine for this, but non-streaming
@@ -1542,7 +1547,8 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                         break
                     try:
                         t_chunk = json.loads(t_str)
-                    except Exception:
+                    except Exception as e:
+                        logger.debug('[LLM] Codex SSE chunk parse failed: %s', e)
                         continue
                     # Process translated chunk through the normal path
                     choices = t_chunk.get('choices', [])

@@ -5,11 +5,12 @@ can import from one place rather than relying on globals scattered
 across a monolith.
 """
 
-import logging
 import os
 import threading
 
-logger = logging.getLogger(__name__)
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = [
     'APP_ID',

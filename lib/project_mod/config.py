@@ -178,6 +178,19 @@ def get_state():
                               'fileCount': rs['fileCount'],
                               'scanning': rs['scanning']})
         s['extraRoots'] = extra
+        # ★ Cross-DC latency indicator
+        try:
+            from lib.cross_dc import get_cluster_for_path, get_latency_class, get_latency_s
+            if primary:
+                lat_class = get_latency_class(primary)
+                if lat_class != 'unknown':
+                    s['crossDC'] = {
+                        'latencyClass': lat_class,
+                        'cluster': get_cluster_for_path(primary),
+                        'latencyMs': round(get_latency_s(primary) * 1000, 1) if get_latency_s(primary) else None,
+                    }
+        except Exception as e:
+            logger.debug('[Config] cross_dc info unavailable: %s', e)
         return s
 
 

@@ -102,9 +102,10 @@ def _check_suspicious_completion(task, last_finish_reason, _loop_exit_reason,
 
     if suspicion_reasons:
         logger.warning(
-            f'[Orchestrator] Task {tid} conv={task.get("convId", "")} ⚠️ SUSPICIOUS COMPLETION detected! '
-            f'Reasons: {", ".join(suspicion_reasons)}. '
-            f'This task may have stopped prematurely but appears as "completed" to the user.'
+            '[Orchestrator] Task %s conv=%s ⚠️ SUSPICIOUS COMPLETION detected! '
+            'Reasons: %s. '
+            'This task may have stopped prematurely but appears as "completed" to the user.',
+            tid, task.get('convId', ''), ', '.join(suspicion_reasons)
         )
 
     return suspicion_reasons
@@ -564,15 +565,19 @@ def run_task(task: dict[str, Any]) -> None:
                 if _attachments:
                     inject_attachments(messages, _attachments)
 
-            # ★ Search addendum: inject timestamp + guidance into the last
-            #   user message (NOT system) to avoid cache-breaking every minute.
-            inject_search_addendum_to_user(messages, search_enabled)
+            # ★ Legacy cleanup: strip old "Current date and time:" from user
+            #   messages.  Date is now injected in the system prompt (step 4.5)
+            #   as date-only format.  This just ensures conversations with
+            #   old-format timestamps get cleaned up for proper cache prefix.
+            inject_search_addendum_to_user(messages, search_enabled,
+                                           round_num=round_num)
 
             # ★ Skills listing: inject into the last user message (NOT system)
             #   to avoid cache-breaking on skill CRUD. Uses BM25 relevance
             #   filtering to show only ~30 most relevant skills per turn.
             #   MUST be the LAST user-message injection — after attachments,
             #   after search addendum, after any planner/critic replacements.
+            #   Only on round 0 — subsequent rounds skip to preserve cache.
             inject_skills_to_user(
                 messages,
                 project_path=project_path,
@@ -581,6 +586,7 @@ def run_task(task: dict[str, Any]) -> None:
                 has_real_tools=has_real_tools,
                 conv_id=task.get('convId', ''),
                 task=task,
+                round_num=round_num,
             )
 
             # ★ Emit messages snapshot for debug panel (before LLM call)

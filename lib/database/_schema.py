@@ -95,7 +95,8 @@ def _backfill_search_text(conn):
     for row_id, messages_raw in rows:
         try:
             messages = json.loads(messages_raw) if isinstance(messages_raw, str) else messages_raw
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.debug('[DB] Failed to parse messages for conv %s: %s', row_id, e)
             continue
         st = build_search_text(messages)
         if st:

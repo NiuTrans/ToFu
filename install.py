@@ -479,7 +479,90 @@ def install_ripgrep(install_dir: str):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Step 7: Install Playwright (optional — browser automation)
+#  Step 7: Install fd-find (optional — fast file search)
+# ═══════════════════════════════════════════════════════════════
+
+def install_fd(install_dir: str):
+    """Install fd-find for fast file search (optional, non-fatal).
+
+    fd is ~3-4x faster than GNU find / Python os.walk on large dirs.
+    The find_files tool falls back to Python os.walk if fd is unavailable.
+    """
+    step("Checking fd-find (fast file search)")
+
+    if which("fd") or which("fdfind"):
+        bin_name = which("fd") or which("fdfind")
+        try:
+            result = subprocess.run(
+                [bin_name, "--version"], capture_output=True, text=True, timeout=5
+            )
+            ver = result.stdout.strip().split("\n")[0] if result.returncode == 0 else "?"
+        except Exception:
+            ver = "?"
+        ok(f"fd-find already installed ({ver})")
+        return
+
+    info("fd-find not found. Attempting auto-install...")
+
+    installed = False
+
+    # Strategy 1: conda (if available — works cross-platform)
+    conda = which("conda") or which("mamba")
+    if conda:
+        info(f"Installing fd-find via {os.path.basename(conda)}...")
+        result = run(
+            [conda, "install", "-c", "conda-forge", "-y", "fd-find"],
+            check=False, capture=True, cwd=install_dir,
+        )
+        if result.returncode == 0 and (which("fd") or which("fdfind")):
+            ok("fd-find installed via conda")
+            installed = True
+
+    # Strategy 2: Homebrew (macOS)
+    if not installed and IS_MACOS and which("brew"):
+        info("Installing fd-find via Homebrew...")
+        result = run(["brew", "install", "fd"], check=False, capture=True)
+        if result.returncode == 0 and which("fd"):
+            ok("fd-find installed via Homebrew")
+            installed = True
+
+    # Strategy 3: apt (Linux, if sudo available)
+    if not installed and IS_LINUX and which("sudo") and which("apt-get"):
+        info("Installing fd-find via apt...")
+        result = run(
+            ["sudo", "apt-get", "install", "-y", "fd-find"],
+            check=False, capture=True,
+        )
+        if result.returncode == 0 and (which("fd") or which("fdfind")):
+            ok("fd-find installed via apt")
+            installed = True
+
+    # Strategy 4: cargo (Rust — works everywhere)
+    if not installed and which("cargo"):
+        info("Installing fd-find via cargo (this may take a minute)...")
+        result = run(["cargo", "install", "fd-find"], check=False, capture=True)
+        if result.returncode == 0 and which("fd"):
+            ok("fd-find installed via cargo")
+            installed = True
+
+    if not installed:
+        warn("Could not auto-install fd-find (non-critical).")
+        info("File search will use Python os.walk instead (~3x slower).")
+        print()
+        if IS_MACOS:
+            info("Install manually: brew install fd")
+        elif IS_LINUX:
+            info("Install manually: sudo apt install fd-find")
+            info("  or: conda install -c conda-forge fd-find")
+        elif IS_WINDOWS:
+            info("Install manually: winget install sharkdp.fd")
+            info("  or: choco install fd")
+            info("  or: conda install -c conda-forge fd-find")
+        print()
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Step 8: Install Playwright (optional — browser automation)
 # ═══════════════════════════════════════════════════════════════
 
 def install_playwright(py: str, install_dir: str):
@@ -505,7 +588,7 @@ def install_playwright(py: str, install_dir: str):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Step 8: Configure .env
+#  Step 9: Configure .env
 # ═══════════════════════════════════════════════════════════════
 
 def configure_env(install_dir: str, port: int, api_key: str | None):
@@ -561,7 +644,7 @@ def _update_env_var(env_file: str, key: str, value: str):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Step 9: Docker path
+#  Step 10: Docker path
 # ═══════════════════════════════════════════════════════════════
 
 def docker_install(install_dir: str, port: int, api_key: str | None):
@@ -597,7 +680,7 @@ def docker_install(install_dir: str, port: int, api_key: str | None):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Step 10: Launch server
+#  Step 11: Launch server
 # ═══════════════════════════════════════════════════════════════
 
 def launch(py: str, install_dir: str, port: int):
@@ -710,6 +793,7 @@ def main():
     ensure_postgresql(py, install_dir)
 
     install_ripgrep(install_dir)
+    install_fd(install_dir)
 
     if not args.skip_playwright:
         install_playwright(py, install_dir)

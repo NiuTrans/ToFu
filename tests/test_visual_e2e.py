@@ -259,20 +259,30 @@ class TestSearchMode:
     """Test search mode cycling and UI state."""
 
     def test_search_mode_cycles(self, page, screenshot_dir):
-        """Clicking search toggle should cycle: off → single → multi → off."""
+        """Clicking search toggle should cycle: multi (default) → off → single → multi."""
         _wait_for_app_ready(page)
+
+        # Start a fresh conversation to ensure clean initial state
+        page.evaluate("newChat()")
+        time.sleep(0.5)
 
         toggle = page.locator("#searchModeToggle")
 
-        # Initial: off
+        # Initial: multi (the project default for new conversations)
         initial_mode = toggle.get_attribute("data-mode")
-        assert initial_mode == "off", f"Initial search mode should be 'off', got '{initial_mode}'"
+        assert initial_mode == "multi", f"Initial search mode should be 'multi', got '{initial_mode}'"
 
-        # Click 1: single
+        # Click 1: off (cycle: off → single → multi → off, wraps from multi → off)
         toggle.click()
         time.sleep(0.3)
         mode1 = toggle.get_attribute("data-mode")
-        assert mode1 == "single", f"After 1 click, mode should be 'single', got '{mode1}'"
+        assert mode1 == "off", f"After 1 click, mode should be 'off', got '{mode1}'"
+
+        # Click 2: single
+        toggle.click()
+        time.sleep(0.3)
+        mode2 = toggle.get_attribute("data-mode")
+        assert mode2 == "single", f"After 2 clicks, mode should be 'single', got '{mode2}'"
 
         path = _screenshot(page, screenshot_dir, "05_search_single")
         _check(path, "Search mode set to 'single' — toggle should show active state", [
@@ -280,17 +290,11 @@ class TestSearchMode:
             "search mode label showing 'single' or similar",
         ])
 
-        # Click 2: multi
-        toggle.click()
-        time.sleep(0.3)
-        mode2 = toggle.get_attribute("data-mode")
-        assert mode2 == "multi", f"After 2 clicks, mode should be 'multi', got '{mode2}'"
-
-        # Click 3: back to off
+        # Click 3: back to multi
         toggle.click()
         time.sleep(0.3)
         mode3 = toggle.get_attribute("data-mode")
-        assert mode3 == "off", f"After 3 clicks, mode should be 'off', got '{mode3}'"
+        assert mode3 == "multi", f"After 3 clicks, mode should be 'multi', got '{mode3}'"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -406,10 +410,10 @@ class TestEndpointModeChat:
 
 @pytest.mark.visual
 class TestTheme:
-    """Verify dark theme renders correctly."""
+    """Verify the default theme renders correctly."""
 
-    def test_dark_theme_no_white_flash(self, page, screenshot_dir):
-        """Page should use dark background, no white flash areas."""
+    def test_default_theme_renders(self, page, screenshot_dir):
+        """Page should use the default theme background (tofu/light)."""
         _wait_for_app_ready(page)
 
         # Get background color of body
@@ -418,18 +422,23 @@ class TestTheme:
         """)
         print(f"  Body background: {bg_color}")
 
-        # Dark theme: RGB values should be low (< 50)
+        # The default theme is 'tofu' (warm ivory, #F5F3ED ≈ rgb(245,243,237)).
+        # Verify it's not pure white (255,255,255) — which would indicate
+        # CSS variables failed to load — and not transparent/unset.
         rgb_match = re.search(r"rgb\((\d+),\s*(\d+),\s*(\d+)\)", bg_color)
-        if rgb_match:
-            r, g, b = int(rgb_match.group(1)), int(rgb_match.group(2)), int(rgb_match.group(3))
-            assert r < 80 and g < 80 and b < 80, \
-                f"Expected dark background, got rgb({r},{g},{b})"
+        assert rgb_match, f"Expected rgb() background, got: {bg_color}"
+        r, g, b = int(rgb_match.group(1)), int(rgb_match.group(2)), int(rgb_match.group(3))
+        # Should NOT be pure white (CSS failed) or pure black (wrong theme loaded)
+        assert not (r == 255 and g == 255 and b == 255), \
+            "Background is pure white — CSS variables may have failed to load"
+        assert not (r == 0 and g == 0 and b == 0), \
+            "Background is pure black — unexpected"
 
-        path = _screenshot(page, screenshot_dir, "10_dark_theme")
-        _check(path, "Dark theme verification — no white flash, consistent dark colors", [
-            "dark background throughout",
-            "readable text on dark background",
-            "no bright white areas",
+        path = _screenshot(page, screenshot_dir, "10_default_theme")
+        _check(path, "Default theme verification — consistent theming, no broken CSS", [
+            "consistent background color throughout",
+            "readable text on background",
+            "no pure-white flash areas",
         ])
 
 
@@ -577,8 +586,8 @@ class TestMultiTurn:
 class TestKeyboardShortcuts:
     """Test keyboard interaction."""
 
-    def test_ctrl_enter_sends(self, page, screenshot_dir):
-        """Ctrl+Enter should send the message."""
+    def test_enter_sends(self, page, screenshot_dir):
+        """Plain Enter (no modifier) should send the message."""
         _wait_for_app_ready(page)
 
         # ★ Fresh conversation for isolation
@@ -587,28 +596,28 @@ class TestKeyboardShortcuts:
 
         textarea = page.locator("#userInput")
         textarea.fill("Sent via keyboard shortcut")
-        textarea.press("Control+Enter")
+        textarea.press("Enter")
 
         # Wait for streaming to complete
         time.sleep(2)
 
         # Should have messages now
         messages = page.locator(".message")
-        assert messages.count() >= 1, "Ctrl+Enter should have sent the message"
+        assert messages.count() >= 1, "Enter should have sent the message"
 
-    def test_enter_inserts_newline(self, page, screenshot_dir):
-        """Plain Enter should insert a newline (not send)."""
+    def test_ctrl_enter_inserts_newline(self, page, screenshot_dir):
+        """Ctrl+Enter should insert a newline (not send)."""
         _wait_for_app_ready(page)
 
         textarea = page.locator("#userInput")
         textarea.fill("Line 1")
-        textarea.press("Enter")
+        textarea.press("Control+Enter")
 
         # Message should NOT have been sent
         time.sleep(0.5)
-        # The textarea should still have content (or a newline was added)
+        # The textarea should still have content (with a newline added)
         value = textarea.input_value()
-        assert len(value) > 0, "Enter should not clear the input (should add newline)"
+        assert len(value) > 0, "Ctrl+Enter should not clear the input (should add newline)"
 
 
 # ═══════════════════════════════════════════════════════════

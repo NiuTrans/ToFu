@@ -16,7 +16,7 @@
 <link rel="stylesheet" href="static/vendor/google-fonts-local.css">
 <link rel="stylesheet" href="static/vendor/github-dark.min.css">
 <link rel="stylesheet" href="static/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="static/styles.css?v=0.6.1">
+<link rel="stylesheet" href="static/styles.css?v=0.7.0">
 <script>
   // Prevent flash of wrong theme — apply before render (default: tofu)
   (function(){var t=localStorage.getItem('claude_ui_theme')||'tofu';document.documentElement.setAttribute('data-theme',t);})();
@@ -353,6 +353,8 @@
               </button>
             </div>
             <div class="input-actions-right">
+            <!-- Mobile-only "more" button — opens bottom sheet with all toggles -->
+            <button class="mobile-more-btn" id="mobileMoreBtn" onclick="toggleMobileSheet()" title="更多选项"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button>
             <div class="search-mode-toggle" id="searchModeToggle" data-mode="off" onclick="cycleSearchMode()" title="Click to cycle: Off → Single → Multi → Off">
               <span class="sm-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg></span>
               <span class="sm-label">Search</span>
@@ -1153,6 +1155,104 @@
 <!-- Sidebar backdrop for mobile -->
 <div class="sidebar-backdrop" id="sidebarBackdrop" onclick="toggleSidebar()"></div>
 
+<!-- Mobile "more" bottom sheet — all toolbar toggles accessible here -->
+<div class="mobile-bottom-sheet-backdrop" id="mobileSheetBackdrop" onclick="closeMobileSheet()"></div>
+<div class="mobile-bottom-sheet" id="mobileSheet">
+  <div class="mobile-sheet-header">选项</div>
+  <!-- Thinking Depth section — only visible when model supports it -->
+  <div class="mobile-sheet-section" id="mobileDepthSection" style="display:none">
+    <div class="mobile-sheet-section-title">思考深度</div>
+    <div class="mobile-depth-bar">
+      <button class="mobile-depth-btn" data-depth="off" onclick="selectThinkingDepth('off');updateMobileDepth()">关闭</button>
+      <button class="mobile-depth-btn active" data-depth="medium" onclick="selectThinkingDepth('medium');updateMobileDepth()">中</button>
+      <button class="mobile-depth-btn" data-depth="high" onclick="selectThinkingDepth('high');updateMobileDepth()">高</button>
+      <button class="mobile-depth-btn" data-depth="max" onclick="selectThinkingDepth('max');updateMobileDepth()">最大</button>
+    </div>
+  </div>
+  <!-- AI Enhance section -->
+  <div class="mobile-sheet-section">
+    <div class="mobile-sheet-section-title">AI 增强</div>
+    <div class="mobile-sheet-item" id="mobileCodeExec" onclick="toggleCodeExec();updateMobileSheet()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name">代码执行</span>
+        <span class="mobile-sheet-item-desc">允许 AI 运行代码</span>
+      </span>
+      <span class="mobile-sheet-item-check">✓</span>
+    </div>
+    <div class="mobile-sheet-item" id="mobileSkills" onclick="toggleSkills();updateMobileSheet()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name">技能注入</span>
+        <span class="mobile-sheet-item-desc">注入累积经验</span>
+      </span>
+      <span class="mobile-sheet-item-check">✓</span>
+    </div>
+    <div class="mobile-sheet-item" id="mobileTranslate" onclick="toggleAutoTranslate();updateMobileSheet()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2v3"/><path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name">自动翻译</span>
+        <span class="mobile-sheet-item-desc">中英互译</span>
+      </span>
+      <span class="mobile-sheet-item-check">✓</span>
+    </div>
+  </div>
+  <!-- Tools section -->
+  <div class="mobile-sheet-section">
+    <div class="mobile-sheet-section-title">工具</div>
+    <div class="mobile-sheet-item" id="mobileBrowser" onclick="toggleBrowser();updateMobileSheet()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name">浏览器桥接</span>
+      </span>
+      <span class="mobile-sheet-item-check">✓</span>
+    </div>
+    <div class="mobile-sheet-item" id="mobileImageGen" onclick="toggleImageGenTool();updateMobileSheet()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name">AI 绘图</span>
+      </span>
+      <span class="mobile-sheet-item-check">✓</span>
+    </div>
+    <div class="mobile-sheet-item" id="mobileHumanGuidance" onclick="toggleHumanGuidance();updateMobileSheet()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name">人机协作</span>
+        <span class="mobile-sheet-item-desc">AI 可向你提问</span>
+      </span>
+      <span class="mobile-sheet-item-check">✓</span>
+    </div>
+    <div class="mobile-sheet-item" id="mobileProject" onclick="closeMobileSheet();openProjectModal()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name">项目助手</span>
+        <span class="mobile-sheet-item-desc">打开项目面板</span>
+      </span>
+      <span class="mobile-sheet-item-check" style="opacity:0">✓</span>
+    </div>
+  </div>
+  <!-- Mode section -->
+  <div class="mobile-sheet-section">
+    <div class="mobile-sheet-section-title">模式</div>
+    <div class="mobile-sheet-item" id="mobileSwarm" onclick="toggleSwarm();updateMobileSheet()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="7" r="3"/><circle cx="5" cy="17" r="3"/><circle cx="19" cy="17" r="3"/><line x1="12" y1="10" x2="5" y2="14"/><line x1="12" y1="10" x2="19" y2="14"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name">蜂群代理</span>
+        <span class="mobile-sheet-item-desc">并行子代理</span>
+      </span>
+      <span class="mobile-sheet-item-check">✓</span>
+    </div>
+    <div class="mobile-sheet-item" id="mobileEndpoint" onclick="toggleEndpoint();updateMobileSheet()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name">自主模式</span>
+        <span class="mobile-sheet-item-desc">自主执行循环</span>
+      </span>
+      <span class="mobile-sheet-item-check">✓</span>
+    </div>
+  </div>
+</div>
+
 <!-- Full-page drop overlay -->
 <div class="drop-overlay" id="dropOverlay">
   <div class="drop-overlay-inner">
@@ -1163,23 +1263,23 @@
 </div>
 
 <!-- html2canvas: lazy-loaded on first Export click (199KB, avoids DevTools freeze) -->
-<script defer src="static/js/idb-cache.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/export-images.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/branch.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/idb-cache.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/export-images.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/branch.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- Feature modules (extracted from main.js) -->
-<script defer src="static/js/log-clean.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/translation.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/upload.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/image-gen.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/project.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/skills.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/scheduler.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/timer.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/myday.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/main.js?v=0.6.1" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/log-clean.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/translation.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/upload.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/image-gen.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/project.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/skills.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/scheduler.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/timer.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/myday.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main.js?v=0.7.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script>
 // Feature flags — show/hide optional modules
 var _featureFlags = {};

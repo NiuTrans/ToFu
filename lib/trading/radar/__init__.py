@@ -15,11 +15,10 @@ Architecture note (2026-04):
   ``from lib.trading.radar import X`` as a unified data-layer import path.
 """
 
-import logging
-
 from lib._pkg_utils import build_facade
+from lib.log import get_logger
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 __all__: list[str] = []
 

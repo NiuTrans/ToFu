@@ -113,8 +113,15 @@ def do_request(url, timeout, verify=True, legacy_ssl=False):
 def try_playwright_fallback(url, max_chars, timeout):
     """尝试用 Playwright 渲染页面获取内容 (SPA / 反爬 fallback)。"""
     from lib.fetch.playwright_pool import _pw_pool
+    from lib.fetch.utils import _is_bot_extracted_text
     pw_text = _pw_pool.fetch(url, timeout=max(timeout, 15), max_chars=max_chars)
     if pw_text and len(pw_text) > 50:
+        # ── Guard: Playwright may also return bot-protection content ──
+        # (headless browser still triggers Cloudflare/DDoS-Guard challenges)
+        if _is_bot_extracted_text(pw_text):
+            logger.debug('🛡️ Playwright returned bot-protection text (%d chars), discarding — %s',
+                         len(pw_text), url[:80])
+            return None
         _fetch_cache.put(url, pw_text)
         if max_chars and len(pw_text) > max_chars:
             return pw_text[:max_chars] + '\n[…truncated]'
@@ -169,6 +176,14 @@ def try_browser_fetch(url, max_chars, reason='unknown'):
                     attempt_num, reason, url[:100])
         text = fetch_url_via_browser(url, max_chars=max_chars, timeout=25)
         if text:
+            # ── Guard: browser extension may also return bot-protection pages ──
+            from lib.fetch.utils import _is_bot_extracted_text
+            if _is_bot_extracted_text(text):
+                logger.debug('🛡️ Browser fallback returned bot-protection text (%d chars), '
+                             'discarding — %s', len(text), url[:80])
+                with _browser_fallback_lock:
+                    _browser_fallback_stats['fail'] += 1
+                return None
             with _browser_fallback_lock:
                 _browser_fallback_stats['success'] += 1
             _fetch_cache.put(url, text)

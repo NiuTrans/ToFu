@@ -43,6 +43,7 @@ def get_tab_title(tab_id):
     try:
         key = int(tab_id)
     except (ValueError, TypeError):
+        logger.debug('[Display] Non-numeric tab_id: %s', tab_id)
         return None
     with _tab_titles_lock:
         return _tab_titles.get(key)
@@ -56,6 +57,7 @@ def _tab_label(tab_id):
     try:
         int(tab_id)
     except (ValueError, TypeError):
+        logger.debug('[Display] Non-numeric tab_id for label: %s', tab_id)
         return str(tab_id)
     title = get_tab_title(tab_id)
     if title:

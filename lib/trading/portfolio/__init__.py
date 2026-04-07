@@ -5,9 +5,9 @@ Manages holdings, cash, trade execution, T+1 queue, and transaction history.
 Re-exports key functions from existing modules for backward compatibility.
 """
 
-import logging
+from lib.log import get_logger
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 __all__: list[str] = []
 

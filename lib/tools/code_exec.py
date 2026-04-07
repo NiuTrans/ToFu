@@ -1,8 +1,8 @@
 """lib/tools/code_exec.py — Standalone code execution tool definition."""
 
-import logging
+from lib.log import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 CODE_EXEC_TOOL = {
     "type": "function",

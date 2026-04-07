@@ -721,7 +721,8 @@ def _find_free_web_port(start=15000, end=15100):
             s.close()
             if result != 0:          # connection refused → port is free
                 return p
-        except Exception:
+        except Exception as e:
+            _server_log.debug('[Server] Port %d probe error (assuming free): %s', p, e)
             return p                 # any error → assume free
     return start
 
@@ -771,6 +772,13 @@ if __name__ == '__main__':
         start_fs_keepalive()
     except Exception as e:
         _server_log.warning('Failed to start FS keepalive: %s', e, exc_info=True)
+
+    # ── Cross-datacenter DolphinFS detection ──
+    try:
+        from lib.cross_dc import init_cross_dc_detection
+        init_cross_dc_detection()
+    except Exception as e:
+        _server_log.warning('Failed to start cross-DC detection: %s', e, exc_info=True)
 
     # ── Feishu Bot (optional, needs FEISHU_APP_ID + FEISHU_APP_SECRET) ──
     feishu_ok = False

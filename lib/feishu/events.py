@@ -5,7 +5,6 @@ dispatcher, routing them to the appropriate command or pipeline handler.
 """
 
 import json
-import logging
 import threading
 import time
 
@@ -15,7 +14,9 @@ from lib.feishu.conversation import clear_pending, get_pending
 from lib.feishu.messaging import send_text
 from lib.feishu.pipeline import run_task_pipeline
 
-logger = logging.getLogger(__name__)
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = ['handle_message_event', 'handle_menu_event']
 

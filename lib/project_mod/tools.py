@@ -51,9 +51,12 @@ from lib.project_mod.read_tools import (  # noqa: E402,F401
 from lib.project_mod.write_tools import (  # noqa: E402,F401
     _apply_one_diff,
     _find_closest_match,
+    _insert_one,
     _touch_for_vscode,
     tool_apply_diff,
     tool_apply_diffs,
+    tool_insert_content,
+    tool_insert_contents,
     tool_write_file,
 )
 
@@ -345,9 +348,8 @@ def _clean_command_output(output):
 # ── Read & write tools are now in read_tools.py / write_tools.py ──
 # All functions re-exported at the top of this file.
 
-def _dummy_read_write_tools_removed():
-    """Marker: tool_list_dir through tool_apply_diffs moved to submodules."""
-    pass
+
+
 
 
 
@@ -388,7 +390,7 @@ _READONLY_COMMANDS = frozenset({
     # ── List / stat ──
     'ls', 'dir', 'tree', 'stat', 'file', 'du', 'df',
     # ── Find / locate ──
-    'find', 'fd', 'locate', 'which', 'whereis', 'type',
+    'find', 'fd', 'fdfind', 'locate', 'which', 'whereis', 'type',
     # ── Text processing (pure filters — no in-place flag) ──
     # Note: sed is here because plain sed is a stdout filter; sed -i is
     # caught separately by _SED_INPLACE before the whitelist check.
@@ -808,8 +810,8 @@ def _snapshot_project_files(base_path):
                 try:
                     st = os.stat(fp)
                     snapshot[rel] = st.st_mtime
-                except OSError:
-                    pass
+                except OSError as e:
+                    logger.debug('[Snapshot] stat failed for %s: %s', rel, e)
                 count += 1
             if count >= _SNAPSHOT_MAX_FILES:
                 break
@@ -953,6 +955,18 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None):
     if _DANGEROUS_RE.search(command):
         return '❌ Command blocked for safety: matches dangerous pattern.'
 
+    # ★ Cross-DC timeout adjustment — multiply timeout for remote DolphinFS clusters
+    try:
+        from lib.cross_dc import get_timeout_multiplier
+        multiplier = get_timeout_multiplier(base)
+        if multiplier > 1.0 and timeout is not None:
+            original_timeout = timeout
+            timeout = int(timeout * multiplier)
+            logger.info('[run_command] Cross-DC timeout adjustment: %ds → %ds (×%.0f) for %s',
+                        original_timeout, timeout, multiplier, base)
+    except Exception as e:
+        logger.debug('[run_command] Cross-DC check skipped: %s', e)
+
     shell_prefix = SHELL_PREFIX
     full_command = f'{shell_prefix} {command}' if shell_prefix else command
 
@@ -1014,7 +1028,8 @@ def _is_any_child_reading_stdin(parent_pid, stdin_pipe_ino):
         return None  # stdin detection unavailable on this platform
     try:
         pids_to_check = _collect_descendants(parent_pid)
-    except OSError:
+    except OSError as e:
+        logger.debug('[StdinDetect] _collect_descendants failed: %s', e)
         return None
 
     for pid in pids_to_check:
@@ -1069,7 +1084,7 @@ def _collect_descendants(parent_pid):
             ppid = int(stat_line.split(')')[-1].split()[1])
             children_map.setdefault(ppid, []).append(pid)
         except (OSError, ValueError, IndexError):
-            pass
+            pass  # Expected: process may exit between readdir and stat
 
     # BFS from parent_pid
     result = [parent_pid]
@@ -1480,6 +1495,26 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
             return msg
         else:
             return f"❌ Diff failed: {result['error']}"
+    elif fn_name == 'insert_content':
+        # ★ Batch mode: if 'edits' array is present, apply all insertions in sequence
+        edits = fn_args.get('edits')
+        if edits and isinstance(edits, list):
+            return tool_insert_contents(base_path, edits, conv_id=conv_id, task_id=task_id)
+        # ★ Single insertion mode
+        bp, rp = _resolve_base(base_path, fn_args.get('path', ''))
+        result = tool_insert_content(bp, rp,
+                                     fn_args.get('anchor', ''),
+                                     fn_args.get('content', ''),
+                                     fn_args.get('position', 'after'),
+                                     fn_args.get('description', ''),
+                                     conv_id=conv_id, task_id=task_id)
+        if result['ok']:
+            return (f"✅ Inserted {result['linesInserted']} lines "
+                    f"{result['position']} anchor at L{result['anchorLine']} "
+                    f"in {result['path']} "
+                    f"({result['oldLines']}L → {result['newLines']}L)")
+        else:
+            return f"❌ Insert failed: {result['error']}"
     elif fn_name == 'read_local_file':
         from lib.file_reader import read_local_file as _read_local
         file_path = fn_args.get('path', '')
@@ -1527,8 +1562,8 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
                         raw = f.read(_MAX_FILE_SAVE)
                     _saved_contents[rel] = raw
                     _total_saved += len(raw)
-                except OSError:
-                    pass
+                except OSError as e:
+                    logger.debug('[run_command] Snapshot read failed for %s: %s', rel, e)
             logger.debug('[run_command] Snapshot taken (%d files), write_targets=%s: %.200s',
                          len(snap_before), write_targets, command_str)
         elif destructive:
@@ -1663,6 +1698,23 @@ def project_tool_display(fn_name, fn_args):
         p = fn_args.get('path', '?')
         desc = fn_args.get('description', '')
         return f'Patch {p}' + (f' — {desc}' if desc else '')
+    elif fn_name == 'insert_content':
+        edits = fn_args.get('edits')
+        if edits and isinstance(edits, list):
+            paths = list(dict.fromkeys(e.get('path', '?') for e in edits if isinstance(e, dict)))
+            n = len(edits)
+            desc = fn_args.get('description', '')
+            if len(paths) == 1:
+                label = f'Insert into {paths[0]} ({n} insertions)'
+            elif len(paths) <= 3:
+                label = f'Insert into {", ".join(paths)} ({n} insertions)'
+            else:
+                label = f'Insert into {len(paths)} files ({n} insertions)'
+            return label + (f' — {desc}' if desc else '')
+        p = fn_args.get('path', '?')
+        desc = fn_args.get('description', '')
+        pos = fn_args.get('position', 'after')
+        return f'Insert into {p} ({pos})' + (f' — {desc}' if desc else '')
     elif fn_name == 'run_command':
         cmd = fn_args.get('command', '?')
         return cmd  # Full command without $ prefix — frontend adds it

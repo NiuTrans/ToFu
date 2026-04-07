@@ -90,6 +90,7 @@ class BuiltinBackend(AgentBackend):
             from lib.version import VERSION
             return VERSION
         except ImportError:
+            logger.debug('[Builtin] VERSION not available')
             return None
 
     def start_turn(

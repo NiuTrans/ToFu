@@ -141,7 +141,7 @@ let thinkingEnabled = true,
   debugVisible = false,
   sidebarSearchQuery = "";
 let _browserStatusInterval = null;
-let serverModel = "aws.claude-opus-4.6";
+let serverModel = "gpt-4o";
 let config = JSON.parse(
   localStorage.getItem("claude_client_config") ||
     JSON.stringify({

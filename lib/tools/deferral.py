@@ -150,7 +150,8 @@ def _estimate_tool_tokens(tool_list: list) -> int:
     try:
         total = len(json.dumps(tool_list, ensure_ascii=False))
         return total // 4
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug('[Deferral] JSON serialization of tool list failed, using str fallback: %s', e)
         return len(str(tool_list)) // 4
 
 

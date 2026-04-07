@@ -10,11 +10,10 @@ Sub-modules:
   content_filter  — LLM-based web content noise removal (ads, nav, sidebars)
 """
 
-import logging
-
 from lib._pkg_utils import build_facade
+from lib.log import get_logger
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 __all__: list[str] = []
 

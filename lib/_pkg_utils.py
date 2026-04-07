@@ -44,6 +44,8 @@ import logging
 from collections.abc import Sequence
 from types import ModuleType
 
+from lib.log import get_logger
+
 __all__ = [
     "extend_all",
     "build_facade",
@@ -54,7 +56,7 @@ __all__ = [
     "validate_all",
 ]
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 
 # ── Core helpers ─────────────────────────────────────────
@@ -161,7 +163,7 @@ class _SafeImporter:
         self._pkg = pkg_name
         self._globals = pkg_globals
         self._all = pkg_all
-        self._logger = logging.getLogger(pkg_name)
+        self._logger = get_logger(pkg_name)
 
     def __call__(
         self,

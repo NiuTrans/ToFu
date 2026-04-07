@@ -1,8 +1,8 @@
 """lib/tools/search.py — Web search & fetch tool definitions."""
 
-import logging
+from lib.log import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 SEARCH_TOOL_SINGLE = {
     "type": "function",

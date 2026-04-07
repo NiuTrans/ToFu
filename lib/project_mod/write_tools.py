@@ -73,8 +73,8 @@ def _touch_for_vscode(filepath):
         st = os.stat(filepath)
         new_mtime = st.st_mtime + 0.000001
         os.utime(filepath, (st.st_atime, new_mtime))
-    except OSError:
-        pass
+    except OSError as e:
+        logger.debug('[WriteTools] Failed to bump mtime for VS Code watcher on %s: %s', filepath, e)
 
 
 # ═══════════════════════════════════════════════════════
@@ -324,6 +324,255 @@ def tool_apply_diffs(base_path, edits, conv_id=None, task_id=None):
             results.append(f'[{i}] ❌ {rp}: {result["error"]}')
 
     header = f'Applied {ok_count}/{ok_count + fail_count} edits'
+    if fail_count:
+        header += f' ({fail_count} failed)'
+    return header + '\n' + '\n'.join(results)
+
+
+# ═══════════════════════════════════════════════════════
+#  insert_content
+# ═══════════════════════════════════════════════════════
+
+def _insert_one(base, rel_path, anchor, content, position='after', description='', conv_id=None, task_id=None):
+    """Insert content before or after an anchor string in a file.
+
+    Args:
+        base: Project base path.
+        rel_path: Relative file path.
+        anchor: Literal string to locate the insertion point.
+        content: New content to insert.
+        position: 'before' or 'after' the anchor.
+        description: Optional description.
+        conv_id: Conversation ID for undo tracking.
+        task_id: Task ID for undo tracking.
+
+    Returns:
+        dict with ok, action, path, error (on failure), or ok + line info (on success).
+    """
+    try:
+        target = _safe_path(base, rel_path)
+    except ValueError as e:
+        logger.debug('[Tools] insert_content safe_path rejected %s: %s', rel_path, e, exc_info=True)
+        return {'ok': False, 'error': str(e), 'action': 'insert_content', 'path': rel_path}
+
+    if not os.path.isfile(target):
+        return {'ok': False, 'error': f'File not found: {rel_path}',
+                'action': 'insert_content', 'path': rel_path}
+
+    try:
+        with open(target, errors='replace') as f:
+            file_content = f.read()
+    except Exception as e:
+        logger.warning('[Tools] insert_content read failed for %s: %s', rel_path, e, exc_info=True)
+        return {'ok': False, 'error': f'Cannot read file: {e}',
+                'action': 'insert_content', 'path': rel_path}
+
+    # ── Locate anchor (same normalization strategy as apply_diff) ──
+    norm_content = file_content
+    norm_anchor = anchor
+    _normalized = False
+
+    count = file_content.count(anchor)
+    if count == 0:
+        # Try CRLF → LF normalization
+        norm_content = file_content.replace('\r\n', '\n')
+        norm_anchor = anchor.replace('\r\n', '\n')
+        count = norm_content.count(norm_anchor)
+        if count > 0:
+            _normalized = True
+        else:
+            # Try trailing-whitespace normalization
+            def _rstrip_lines(s):
+                return '\n'.join(l.rstrip() for l in s.split('\n'))
+
+            tw_content = _rstrip_lines(norm_content)
+            tw_anchor = _rstrip_lines(norm_anchor)
+            tw_count = tw_content.count(tw_anchor)
+
+            if tw_count == 0:
+                hint = _find_closest_match(norm_content, norm_anchor)
+                error_msg = (f'Anchor text not found in {rel_path}. '
+                             f'File has {file_content.count(chr(10))+1} lines. '
+                             f'Use read_files to verify the exact content first.')
+                if hint:
+                    error_msg += (f'\n\n💡 Most similar block (line {hint["line"]}, '
+                                  f'{hint["similarity"]:.0%} match):\n```\n{hint["text"]}\n```')
+                return {'ok': False, 'action': 'insert_content', 'path': rel_path,
+                        'error': error_msg, 'anchorLen': len(anchor)}
+
+            if tw_count > 1:
+                return {'ok': False, 'action': 'insert_content', 'path': rel_path,
+                        'error': f'Anchor text matches {tw_count} locations '
+                                 f'(after trailing-whitespace normalization). '
+                                 f'Make it more specific.'}
+
+            # Single match after TW normalization — find the real position
+            # by matching line-by-line in the original content
+            tw_lines = tw_content.split('\n')
+            anchor_lines = tw_anchor.split('\n')
+            n_al = len(anchor_lines)
+            content_lines = norm_content.split('\n')
+
+            match_start = None
+            for i in range(len(tw_lines) - n_al + 1):
+                if tw_lines[i:i + n_al] == anchor_lines:
+                    match_start = i
+                    break
+
+            if match_start is not None:
+                # Reconstruct the original anchor text from the file
+                orig_anchor_lines = content_lines[match_start:match_start + n_al]
+                norm_anchor = '\n'.join(orig_anchor_lines)
+                norm_content = norm_content  # already LF-normalized
+                count = 1
+                _normalized = True
+                logger.debug('insert_content: trailing-WS normalized match in %s', rel_path)
+            else:
+                return {'ok': False, 'action': 'insert_content', 'path': rel_path,
+                        'error': 'Anchor matched after normalization but line mapping failed. '
+                                 'Please use read_files to get the exact content.'}
+
+    if _normalized:
+        file_content = norm_content
+        anchor = norm_anchor
+
+    if count > 1:
+        return {'ok': False, 'action': 'insert_content', 'path': rel_path,
+                'error': f'Anchor text matches {count} locations. '
+                         f'Make it more specific to identify a unique position.'}
+
+    # ── Build new content ──
+    anchor_idx = file_content.index(anchor)
+
+    if position == 'before':
+        # Insert content before the anchor
+        # Ensure proper newline separation
+        insert_text = content
+        if not insert_text.endswith('\n'):
+            insert_text += '\n'
+        new_content = file_content[:anchor_idx] + insert_text + file_content[anchor_idx:]
+    else:  # 'after'
+        # Insert content after the anchor
+        after_idx = anchor_idx + len(anchor)
+        insert_text = content
+        # Ensure a newline between anchor and inserted content
+        if after_idx < len(file_content) and file_content[after_idx] != '\n':
+            insert_text = '\n' + insert_text
+        elif after_idx < len(file_content):
+            # anchor ends, next char is \n — insert after that newline
+            after_idx += 1
+        if not insert_text.endswith('\n'):
+            insert_text += '\n'
+        new_content = file_content[:after_idx] + insert_text + file_content[after_idx:]
+
+    # ── Build reverse patch for undo ──
+    # For undo, we just need to remove the inserted content.
+    # We can do this as an apply_diff-style reverse patch:
+    # search = anchor + inserted content (or inserted content + anchor)
+    # replace = anchor
+    if position == 'before':
+        reverse_patch = {'search': insert_text + anchor, 'replace': anchor}
+    else:
+        chunk_start = anchor_idx
+        chunk_end = anchor_idx + len(anchor) + len(insert_text)
+        # Adjust if we consumed the trailing newline of anchor
+        if file_content[anchor_idx + len(anchor):anchor_idx + len(anchor) + 1] == '\n':
+            chunk_end = anchor_idx + len(anchor) + 1 + len(insert_text)
+        inserted_block = new_content[chunk_start:chunk_end]
+        reverse_patch = {'search': inserted_block, 'replace': file_content[anchor_idx:anchor_idx + len(anchor) + (1 if file_content[anchor_idx + len(anchor):anchor_idx + len(anchor) + 1] == '\n' else 0)]}
+
+    # ── Write ──
+    try:
+        with open(target, 'w', newline='') as f:
+            f.write(new_content)
+            f.flush()
+            os.fsync(f.fileno())
+        _touch_for_vscode(target)
+        old_lines = file_content.count('\n') + 1
+        new_lines = new_content.count('\n') + 1
+        inserted_lines = content.count('\n') + 1
+
+        _record_modification(base, 'apply_diff', rel_path, reverse_patch=reverse_patch,
+                             conv_id=conv_id, task_id=task_id)
+
+        # Calculate which line the insertion happened at
+        anchor_line = file_content[:anchor_idx].count('\n') + 1
+
+        result = {
+            'ok': True, 'action': 'insert_content', 'path': rel_path,
+            'position': position,
+            'anchorLine': anchor_line,
+            'linesInserted': inserted_lines,
+            'oldLines': old_lines, 'newLines': new_lines,
+            'description': description,
+        }
+        logger.info('insert_content: %s (%d lines inserted %s anchor at L%d, %dL → %dL)',
+                     rel_path, inserted_lines, position, anchor_line,
+                     old_lines, new_lines)
+        return result
+    except Exception as e:
+        logger.error('[Tools] insert_content write failed for %s: %s', rel_path, e, exc_info=True)
+        return {'ok': False, 'error': str(e), 'action': 'insert_content', 'path': rel_path}
+
+
+def tool_insert_content(base, rel_path, anchor, content, position='after', description='', conv_id=None, task_id=None):
+    """Insert content before or after an anchor string (single edit entry point)."""
+    return _insert_one(base, rel_path, anchor, content, position, description, conv_id, task_id=task_id)
+
+
+def tool_insert_contents(base_path, edits, conv_id=None, task_id=None):
+    """Apply multiple insert_content edits in one batch."""
+    if not edits:
+        return 'No edits provided.'
+
+    MAX_EDITS = 30
+    if len(edits) > MAX_EDITS:
+        edits = edits[:MAX_EDITS]
+
+    from lib.project_mod.tools import _resolve_base
+
+    results = []
+    ok_count = 0
+    fail_count = 0
+
+    for i, edit in enumerate(edits, 1):
+        if not isinstance(edit, dict):
+            results.append(f'[{i}] ❌ Invalid edit entry')
+            fail_count += 1
+            continue
+
+        rp = edit.get('path', '')
+        anchor = edit.get('anchor', '')
+        content = edit.get('content', '')
+        position = edit.get('position', 'after')
+        desc = edit.get('description', '')
+
+        if not rp or not anchor:
+            results.append(f'[{i}] ❌ Missing required field (path or anchor)')
+            fail_count += 1
+            continue
+
+        if position not in ('before', 'after'):
+            results.append(f'[{i}] ❌ Invalid position: {position} (must be "before" or "after")')
+            fail_count += 1
+            continue
+
+        bp, resolved_rp = _resolve_base(base_path, rp)
+        result = _insert_one(bp, resolved_rp, anchor, content, position, desc, conv_id, task_id=task_id)
+
+        if result['ok']:
+            ok_count += 1
+            results.append(
+                f'[{i}] ✅ {result["path"]}: {result["linesInserted"]} lines inserted '
+                f'{result["position"]} anchor at L{result["anchorLine"]} '
+                f'({result["oldLines"]}L → {result["newLines"]}L)'
+                + (f' — {desc}' if desc else '')
+            )
+        else:
+            fail_count += 1
+            results.append(f'[{i}] ❌ {rp}: {result["error"]}')
+
+    header = f'Inserted {ok_count}/{ok_count + fail_count} edits'
     if fail_count:
         header += f' ({fail_count} failed)'
     return header + '\n' + '\n'.join(results)

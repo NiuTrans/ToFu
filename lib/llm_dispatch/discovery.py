@@ -511,8 +511,8 @@ def _probe_balance_url(base_url: str, api_key: str) -> str:
                         resp.json()
                         logger.info('[BalanceProbe] Found working balance URL: %s', probe_url)
                         return probe_url
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e:
+                        logger.debug('[BalanceProbe] %s returned non-JSON body: %s', probe_url, e)
             logger.debug('[BalanceProbe] %s returned HTTP %d (skipped)', probe_url, resp.status_code)
         except requests.Timeout:
             logger.debug('[BalanceProbe] %s timed out', probe_url)

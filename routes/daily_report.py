@@ -1021,7 +1021,8 @@ def _safe_int_ts(value, fallback=0):
         return fallback
     try:
         return int(value)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[DailyReport] _safe_int_ts conversion failed for %r: %s', value, e)
         return fallback
 
 
@@ -1553,7 +1554,8 @@ def _count_convs_for_date(date_str):
 
     try:
         dt = _dt.date.fromisoformat(date_str)
-    except ValueError:
+    except ValueError as e:
+        logger.debug('[DailyReport] Invalid date_str %r: %s', date_str, e)
         return 0
 
     day_start_ms = int(_dt.datetime.combine(dt, _dt.time.min).timestamp() * 1000)

@@ -28,9 +28,9 @@ Architecture note (2026-04):
   and ``lib/trading/WINRATE_DIAGNOSTIC.md`` for the backtest vs live gap analysis.
 """
 
-import logging
+from lib.log import get_logger
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 __all__: list[str] = []
 

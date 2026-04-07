@@ -454,6 +454,18 @@ def pdf_vlm_status(task_id):
     return jsonify(resp)
 
 
+@upload_bp.route('/api/pdf/vlm-tasks', methods=['GET'])
+def pdf_vlm_find_tasks():
+    """Find active VLM tasks by filename — used to reconnect after page refresh."""
+    from lib.pdf_parser import find_vlm_tasks_by_filename
+
+    filename = request.args.get('filename', '')
+    if not filename:
+        return jsonify({'error': 'filename parameter required'}), 400
+    tasks = find_vlm_tasks_by_filename(filename)
+    return jsonify({'tasks': tasks})
+
+
 # ══════════════════════════════════════════════════════
 #  Document Parsing (Word, Excel, PowerPoint, plain text)
 # ══════════════════════════════════════════════════════

@@ -40,6 +40,13 @@ if _HAS_RG:
 else:
     logger.info('[Tools] ripgrep not found — using GNU grep')
 
+# Detect fd-find at module load time (3-4x faster than GNU find / Python os.walk)
+_FD_BIN = shutil.which('fd') or shutil.which('fdfind')  # Debian names it fdfind
+if _FD_BIN:
+    logger.info('[Tools] fd-find detected at %s — using fd as primary find engine', _FD_BIN)
+else:
+    logger.info('[Tools] fd-find not found — using Python os.walk for find_files')
+
 
 # ═══════════════════════════════════════════════════════
 #  list_dir
@@ -430,12 +437,23 @@ def _format_grep_output(base, raw_output, pattern, include, ctx_n,
     return hdr + '\n'.join(rel_lines)
 
 
+def _get_io_timeout(base, default=30):
+    """Get adjusted I/O timeout for the given base path (cross-DC aware)."""
+    try:
+        from lib.cross_dc import get_timeout_multiplier
+        return int(default * get_timeout_multiplier(base))
+    except Exception as e:
+        logger.debug('[Tools] cross_dc timeout multiplier unavailable: %s', e)
+        return default
+
+
 def _run_rg(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
     """Run ripgrep. Returns formatted string on success, None on binary-not-found."""
     cmd = _build_rg_cmd(target, pattern, include, ctx_n, cap, count_only)
+    io_timeout = _get_io_timeout(base)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True,
-                                timeout=30, cwd=base, errors='replace')
+                                timeout=io_timeout, cwd=base, errors='replace')
         return _format_grep_output(base, result.stdout, pattern, include, ctx_n, cap, count_only)
     except subprocess.TimeoutExpired:
         logger.warning('[Tools] rg timed out: pattern=%s target=%s', pattern[:40], target)
@@ -451,14 +469,16 @@ def _run_rg(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_o
 def _run_gnu_grep(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
     """Run GNU grep. Returns formatted string on success, None on binary-not-found."""
     cmd = _build_grep_cmd(target, pattern, include, ctx_n, cap, count_only)
+    io_timeout = _get_io_timeout(base)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True,
-                                timeout=30, cwd=base, errors='replace')
+                                timeout=io_timeout, cwd=base, errors='replace')
         return _format_grep_output(base, result.stdout, pattern, include, ctx_n, cap, count_only)
     except subprocess.TimeoutExpired:
         logger.warning('[Tools] grep timed out: pattern=%s target=%s', pattern[:40], target)
         return 'Grep timed out. Try a more specific pattern or path.'
     except FileNotFoundError:
+        logger.debug('[Tools] GNU grep binary not found, will try fallback')
         return None
     except Exception as e:
         logger.warning('[Tools] grep failed for pattern=%s target=%s: %s', pattern[:40], target, e, exc_info=True)
@@ -473,7 +493,7 @@ def _python_grep(base, target, pattern, include=None, cap=MAX_GREP_RESULTS, coun
         return f'Invalid pattern: {e}'
     match_count = 0
     matches = []
-    deadline = time.time() + 20
+    deadline = time.time() + _get_io_timeout(base, default=20)
     for root, dirs, files in os.walk(target):
         dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
         for fname in files:
@@ -529,20 +549,49 @@ def _python_grep(base, target, pattern, include=None, cap=MAX_GREP_RESULTS, coun
     return f'grep results ({len(matches)} matches):\n\n' + '\n'.join(truncated)
 
 
-def tool_find_files(base, pattern, rel_path=None, max_results=None):
-    """Find files by name glob pattern.
+def _fd_find(target, base, pattern, cap):
+    """Find files using fd-find (3-4x faster than os.walk on large dirs).
 
-    Args:
-        max_results: Cap on number of files returned. Default 100.
+    Returns list of formatted match strings, or None if fd fails.
     """
+    io_timeout = _get_io_timeout(target, default=15)
+    cmd = [_FD_BIN, '-g', pattern, target,
+           '--type', 'f',
+           '--max-results', str(cap)]
+    # Exclude our standard ignore dirs + hidden dirs
+    for d in IGNORE_DIRS:
+        cmd.extend(['--exclude', d])
     try:
-        target = _safe_path(base, rel_path or '.')
-    except ValueError as e:
-        logger.debug('[Tools] find_files safe_path rejected %s: %s', rel_path, e, exc_info=True)
-        return str(e)
-    cap = max(1, min(int(max_results), 500)) if max_results else 100
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=io_timeout,
+        )
+        if result.returncode not in (0, 1):  # 1 = no matches (normal)
+            logger.debug('[Tools] fd returned code %d: %s', result.returncode, result.stderr[:200])
+            return None
+        lines = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
+        matches = []
+        for line in lines[:cap]:
+            full = line if os.path.isabs(line) else os.path.join(target, line)
+            rel = os.path.relpath(full, base)
+            try:
+                sz = os.path.getsize(full)
+            except Exception as e:
+                logger.debug('[Tools] getsize failed for %s: %s', rel, e, exc_info=True)
+                sz = 0
+            matches.append(f'  {rel} ({_fmt_size(sz)})')
+        return matches
+    except subprocess.TimeoutExpired:
+        logger.warning('[Tools] fd timed out after 15s for pattern=%s', pattern)
+        return None
+    except Exception as e:
+        logger.warning('[Tools] fd failed: %s', e)
+        return None
+
+
+def _python_find(target, base, pattern, cap):
+    """Find files using Python os.walk + fnmatch (fallback)."""
     matches = []
-    deadline = time.time() + 15
+    deadline = time.time() + _get_io_timeout(base, default=15)
     for root, dirs, files in os.walk(target):
         dirs[:] = [d for d in sorted(dirs)
                    if d not in IGNORE_DIRS and not d.startswith('.')]
@@ -556,12 +605,48 @@ def tool_find_files(base, pattern, rel_path=None, max_results=None):
                     sz = 0
                 matches.append(f'  {rel} ({_fmt_size(sz)})')
                 if len(matches) >= cap:
-                    break
+                    return matches
         if len(matches) >= cap:
-            break
+            return matches
         if time.time() > deadline:
             matches.append('  \u23f0 (search timed out after 15s \u2014 try a more specific path)')
-            break
+            return matches
+    return matches
+
+
+def tool_find_files(base, pattern, rel_path=None, max_results=None):
+    """Find files by name glob pattern.
+
+    Uses fd-find when available (3-4x faster on large dirs), falls back to
+    Python os.walk + fnmatch.
+
+    Args:
+        base: Project root directory.
+        pattern: Glob pattern (e.g. '*.py', 'test_*.js').
+        rel_path: Subdirectory to search in (relative to base).
+        max_results: Cap on number of files returned. Default 100.
+    """
+    try:
+        target = _safe_path(base, rel_path or '.')
+    except ValueError as e:
+        logger.debug('[Tools] find_files safe_path rejected %s: %s', rel_path, e, exc_info=True)
+        return str(e)
+    cap = max(1, min(int(max_results), 500)) if max_results else 100
+
+    matches = None
+    if _FD_BIN:
+        t0 = time.perf_counter()
+        matches = _fd_find(target, base, pattern, cap)
+        if matches is not None:
+            elapsed = (time.perf_counter() - t0) * 1000
+            logger.debug('[Tools] fd found %d files in %.1fms', len(matches), elapsed)
+
+    if matches is None:
+        t0 = time.perf_counter()
+        matches = _python_find(target, base, pattern, cap)
+        elapsed = (time.perf_counter() - t0) * 1000
+        logger.debug('[Tools] os.walk found %d files in %.1fms', len(matches), elapsed)
+
     if not matches:
         return f'No files matching: {pattern}'
     hdr = f'Files matching "{pattern}"'

@@ -140,6 +140,59 @@ PROJECT_TOOL_APPLY_DIFF = {
     }
 }
 
+PROJECT_TOOL_INSERT_CONTENT = {
+    "type": "function",
+    "function": {
+        "name": "insert_content",
+        "description": (
+            "Insert new content before or after an anchor string in a file. "
+            "Unlike apply_diff (search-and-replace), this tool ADDS content without removing the anchor.\n"
+            "Use this when you need to add new code (imports, functions, config entries) "
+            "next to existing code without replacing it.\n"
+            "The 'anchor' string must match EXACTLY once in the file (like apply_diff's search). "
+            "If it matches multiple locations, the tool errors — make the anchor more specific.\n"
+            "For a SINGLE insertion, provide path/anchor/content/position at the top level.\n"
+            "For MULTIPLE insertions (same or different files), provide an 'edits' array — "
+            "edits are applied sequentially so later edits see earlier changes."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative file path from project root"},
+                "anchor": {
+                    "type": "string",
+                    "description": "Exact text to locate the insertion point (must match exactly once in the file)"
+                },
+                "content": {"type": "string", "description": "New content to insert"},
+                "position": {
+                    "type": "string",
+                    "enum": ["before", "after"],
+                    "description": "Insert before or after the anchor. Default: 'after'"
+                },
+                "description": {"type": "string", "description": "Brief description of the insertion"},
+                "edits": {
+                    "type": "array",
+                    "description": "Array of insertion operations (for batch mode). Each entry has path, anchor, content, position, and optional description.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Relative file path"},
+                            "anchor": {"type": "string", "description": "Exact text to locate the insertion point"},
+                            "content": {"type": "string", "description": "New content to insert"},
+                            "position": {
+                                "type": "string", "enum": ["before", "after"],
+                                "description": "Insert before or after the anchor. Default: 'after'"
+                            },
+                            "description": {"type": "string", "description": "Brief description of this insertion"}
+                        },
+                        "required": ["path", "anchor", "content"]
+                    }
+                }
+            }
+        }
+    }
+}
+
 PROJECT_TOOL_RUN_COMMAND = {
     "type": "function",
     "function": {
@@ -247,18 +300,19 @@ PROJECT_TOOL_READ_LOCAL_FILE = {
 PROJECT_TOOLS = [
     PROJECT_TOOL_LIST_DIR, PROJECT_TOOL_READ_FILES,
     PROJECT_TOOL_GREP, PROJECT_TOOL_FIND,
-    PROJECT_TOOL_WRITE_FILE, PROJECT_TOOL_APPLY_DIFF, PROJECT_TOOL_RUN_COMMAND,
+    PROJECT_TOOL_WRITE_FILE, PROJECT_TOOL_APPLY_DIFF, PROJECT_TOOL_INSERT_CONTENT,
+    PROJECT_TOOL_RUN_COMMAND,
     PROJECT_TOOL_READ_LOCAL_FILE,
 ]
 PROJECT_TOOL_NAMES = {
     'list_dir', 'read_files', 'grep_search', 'find_files',
-    'write_file', 'apply_diff', 'run_command', 'read_local_file',
+    'write_file', 'apply_diff', 'insert_content', 'run_command', 'read_local_file',
 }
 
 __all__ = [
     'PROJECT_TOOL_LIST_DIR', 'PROJECT_TOOL_READ_FILES',
     'PROJECT_TOOL_GREP', 'PROJECT_TOOL_FIND',
-    'PROJECT_TOOL_WRITE_FILE', 'PROJECT_TOOL_APPLY_DIFF', 'PROJECT_TOOL_RUN_COMMAND',
-    'PROJECT_TOOL_READ_LOCAL_FILE',
+    'PROJECT_TOOL_WRITE_FILE', 'PROJECT_TOOL_APPLY_DIFF', 'PROJECT_TOOL_INSERT_CONTENT',
+    'PROJECT_TOOL_RUN_COMMAND', 'PROJECT_TOOL_READ_LOCAL_FILE',
     'PROJECT_TOOLS', 'PROJECT_TOOL_NAMES',
 ]

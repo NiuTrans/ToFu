@@ -5,7 +5,6 @@ and Lark client singleton initialization.
 """
 
 import json
-import logging
 
 from lib.feishu._state import (
     APP_ID,
@@ -14,7 +13,9 @@ from lib.feishu._state import (
     _lark_client_lock,
 )
 
-logger = logging.getLogger(__name__)
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = ['split_message', 'send_text']
 

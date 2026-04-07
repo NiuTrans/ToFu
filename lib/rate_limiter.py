@@ -4,14 +4,16 @@ Uses a simple in-memory store for tracking request counts.
 No external dependencies needed.
 """
 
-import logging
 import threading
 import time
 from collections import defaultdict
+from functools import wraps
 
 from flask import request
 
-logger = logging.getLogger(__name__)
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 # { endpoint -> { ip -> [timestamp, ...] } }
 request_counts = defaultdict(lambda: defaultdict(list))
@@ -27,6 +29,7 @@ def rate_limit(limit=10, per=60):
         per (int): Time window in seconds.
     """
     def decorator(f):
+        @wraps(f)
         def wrapper(*args, **kwargs):
             ip = request.remote_addr
             endpoint = request.path
@@ -62,7 +65,5 @@ def rate_limit(limit=10, per=60):
                 request_counts[endpoint][ip].append(now)
 
             return f(*args, **kwargs)
-        # Preserve original function name for Flask's url_for
-        wrapper.__name__ = f.__name__
         return wrapper
     return decorator

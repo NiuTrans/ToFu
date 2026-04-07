@@ -187,7 +187,7 @@ function selectIgModel(el) {
 
   // Close dropdown
   document.getElementById('igModelPicker')?.classList.remove('open');
-  /* ★ Reflow: model label width may have changed → recalculate toolbar width */
+  /* ★ Reflow toolbar after model label change */
   if (typeof _scheduleReflow === 'function') _scheduleReflow();
 }
 function selectIgAspect(el) {
@@ -955,10 +955,7 @@ async function _loadIgModels() {
       }
     }
     dropdown.innerHTML = html;
-    /* ★ BUG FIX: Recalculate toolbar width after model label may have changed.
-     * Without this, --toolbar-w stays at the stale value from the initial
-     * measurement (before models loaded), causing the ig-toolbar to overflow
-     * .input-inner on narrow viewports. */
+    /* ★ Reflow toolbar after models loaded (toolbar width may have changed) */
     if (typeof _scheduleReflow === 'function') _scheduleReflow();
   } catch (e) {
     console.warn('[ImageGen] Failed to load models:', e);

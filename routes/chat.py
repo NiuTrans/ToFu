@@ -206,8 +206,8 @@ def _start_external_backend(data, messages, backend_name):
             append_event(task, {'type': 'done', 'error': str(e), 'finishReason': 'error'})
             try:
                 persist_task_result(task)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning('[Chat] persist_task_result failed for task %s: %s', task['id'][:8], e)
 
     try:
         threading.Thread(target=_run_external, daemon=True).start()

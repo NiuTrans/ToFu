@@ -666,6 +666,12 @@ function _applyProjectData(data) {
   if (Array.isArray(data.extraRoots)) {
     projectState.extraRoots = data.extraRoots;
   }
+  // ★ Cross-DC indicator from backend
+  if (data.crossDC) {
+    projectState.crossDC = data.crossDC;
+  } else {
+    projectState.crossDC = null;
+  }
   _updateProjectUI();
 }
 
@@ -723,7 +729,15 @@ function _updateProjectUI() {
 
   // ── Stats line ──
   bar.classList.remove("scanning");
-  statsEl.innerHTML = '';
+  if (projectState.crossDC && projectState.crossDC.latencyClass !== 'local') {
+    const dc = projectState.crossDC;
+    const cls = dc.latencyClass === 'very_slow' ? 'color:#ef4444' : 'color:#f59e0b';
+    const icon = dc.latencyClass === 'very_slow' ? '🐢' : '⚡';
+    const lat = dc.latencyMs ? `${dc.latencyMs}ms` : '?';
+    statsEl.innerHTML = `<span style="${cls};font-size:11px" title="Cross-DC: cluster=${dc.cluster}, latency=${lat}">${icon} ${dc.cluster} (${lat})</span>`;
+  } else {
+    statsEl.innerHTML = '';
+  }
 }
 
 function _updateProjectModalStatus() {

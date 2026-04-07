@@ -3,6 +3,142 @@
    ═══════════════════════════════════════════ */
 var pendingPdfTexts = [];  // shared with main.js — must be var for cross-script access
 
+// ── VLM sessionStorage persistence ──
+// Keys: 'chatui_vlm_pending' → JSON array of {name, text, pages, textLength, isScanned, method, vlmStatus, vlmTaskId, vlmProgress}
+var _VLM_STORAGE_KEY = 'chatui_vlm_pending';
+
+/** Save current pendingPdfTexts + VLM task state to sessionStorage. */
+function _vlmSaveState() {
+  try {
+    var items = pendingPdfTexts.map(function(p) {
+      return {
+        name: p.name, text: p.text, pages: p.pages,
+        textLength: p.textLength, isScanned: p.isScanned,
+        method: p.method, vlmStatus: p.vlmStatus || '',
+        vlmTaskId: p._vlmTaskId || '', vlmProgress: p.vlmProgress || '',
+        _docIcon: p._docIcon || '',
+      };
+    });
+    if (items.length > 0) {
+      sessionStorage.setItem(_VLM_STORAGE_KEY, JSON.stringify(items));
+    } else {
+      sessionStorage.removeItem(_VLM_STORAGE_KEY);
+    }
+  } catch (e) { /* quota exceeded — ignore */ }
+}
+
+/** Clear VLM persistence from sessionStorage. */
+function _vlmClearState() {
+  try { sessionStorage.removeItem(_VLM_STORAGE_KEY); } catch (e) { /* ignore */ }
+}
+
+/**
+ * Restore pendingPdfTexts from sessionStorage after page refresh.
+ * For entries that were VLM-parsing, attempt to reconnect to the server task.
+ * Call this once on page load (before initActiveTasks).
+ */
+async function _vlmRestoreState() {
+  var raw;
+  try { raw = sessionStorage.getItem(_VLM_STORAGE_KEY); } catch (e) { return; }
+  if (!raw) return;
+  _vlmClearState();  // consume once — will re-save as polling progresses
+  var items;
+  try { items = JSON.parse(raw); } catch (e) { return; }
+  if (!Array.isArray(items) || items.length === 0) return;
+
+  console.log('%c[VLM-Restore] Recovering %d PDF(s) from sessionStorage', 'color:#f59e0b;font-weight:bold', items.length);
+
+  for (var i = 0; i < items.length; i++) {
+    var saved = items[i];
+    var pdfObj = {
+      name: saved.name, text: saved.text || '', pages: saved.pages || 0,
+      textLength: saved.textLength || 0, isScanned: !!saved.isScanned,
+      method: saved.method || 'text',
+      vlmStatus: saved.vlmStatus || '', vlmProgress: saved.vlmProgress || '',
+      _vlmAlive: true, _docIcon: saved._docIcon || '',
+    };
+    pendingPdfTexts.push(pdfObj);
+
+    // If VLM was in progress, try to reconnect
+    if (saved.vlmStatus === 'parsing' && saved.vlmTaskId) {
+      pdfObj._vlmTaskId = saved.vlmTaskId;
+      pdfObj.vlmStatus = 'parsing';
+      // Resume polling in background
+      _vlmResumePoll(pdfObj, saved.vlmTaskId);
+    } else if (saved.vlmStatus === 'parsing' && saved.name) {
+      // No taskId saved — try to find by filename on server
+      _vlmReconnectByFilename(pdfObj, saved.name);
+    }
+    // For done/failed/timeout/unavailable entries, just restore as-is
+  }
+  renderImagePreviews();
+}
+
+/** Resume VLM polling for a known taskId (after refresh). */
+function _vlmResumePoll(entry, taskId) {
+  console.log('[VLM-Restore] Resuming poll for task %s (%s)', taskId, entry.name);
+  var onUpdate = function() { renderImagePreviews(); _vlmSaveState(); };
+  var isAlive = function() { return entry._vlmAlive !== false; };
+  // Run the polling part of _vlmParseEntry (no need to re-upload the file)
+  _vlmPollTask(entry, taskId, isAlive, onUpdate);
+}
+
+/** Try to reconnect to a VLM task by filename when taskId was lost. */
+async function _vlmReconnectByFilename(entry, filename) {
+  try {
+    var resp = await fetch(apiUrl('/api/pdf/vlm-tasks?filename=' + encodeURIComponent(filename)));
+    if (!resp.ok) {
+      console.warn('[VLM-Restore] Task lookup failed for %s: %d', filename, resp.status);
+      entry.vlmStatus = 'unavailable';
+      renderImagePreviews();
+      return;
+    }
+    var data = await resp.json();
+    if (!data.tasks || data.tasks.length === 0) {
+      console.warn('[VLM-Restore] No active VLM task found for %s', filename);
+      // Task may have completed and expired — keep text parse result
+      if (entry.text) {
+        entry.vlmStatus = '';  // clear stale parsing status
+      } else {
+        entry.vlmStatus = 'unavailable';
+      }
+      renderImagePreviews();
+      return;
+    }
+    // Use the most recent task
+    var task = data.tasks[0];
+    console.log('[VLM-Restore] Found task %s for %s (status=%s)', task.taskId, filename, task.status);
+    entry._vlmTaskId = task.taskId;
+    if (task.status === 'processing') {
+      entry.vlmStatus = 'parsing';
+      entry.vlmProgress = task.progress;
+      var onUpdate = function() { renderImagePreviews(); _vlmSaveState(); };
+      var isAlive = function() { return entry._vlmAlive !== false; };
+      _vlmPollTask(entry, task.taskId, isAlive, onUpdate);
+    } else if (task.status === 'done') {
+      // Fetch full result
+      var pollResp = await fetch(apiUrl('/api/pdf/vlm-parse/' + task.taskId));
+      if (pollResp.ok) {
+        var taskData = await pollResp.json();
+        if (taskData.result) {
+          entry.text = taskData.result;
+          entry.textLength = taskData.textLength || taskData.result.length;
+          entry.method = 'vlm';
+          entry.vlmStatus = 'done';
+        }
+      }
+    } else if (task.status === 'error') {
+      entry.vlmStatus = 'failed';
+    }
+    renderImagePreviews();
+    _vlmSaveState();
+  } catch (e) {
+    console.warn('[VLM-Restore] Reconnect failed for %s:', filename, e);
+    entry.vlmStatus = 'unavailable';
+    renderImagePreviews();
+  }
+}
+
 
 
 // ── Image/PDF upload ──
@@ -95,6 +231,7 @@ async function parsePdfToServer(file, pdfObj, opts) {
   pdfObj.isScanned = data.isScanned;
   pdfObj.method = data.method;
   if (onUpdate) onUpdate();
+  _vlmSaveState();  // ★ Persist text parse result so it survives refresh
   // Auto-start VLM high-quality parse in background
   if (typeof window._vlmParseEntry === "function" && onUpdate) {
     pdfObj._vlmAlive = true;
@@ -239,6 +376,7 @@ async function handleDocUpload(file) {
     };
     pendingPdfTexts.push(docObj);
     renderImagePreviews();
+    _vlmSaveState();  // ★ Persist doc upload for refresh recovery
 
     pFill.style.width = "100%";
     const sizeStr = data.textLength >= 1024
@@ -324,9 +462,74 @@ function removePdfText(i) {
   if (entry) entry._vlmAlive = false; // ★ Kill VLM polling for this entry
   pendingPdfTexts.splice(i, 1);
   renderImagePreviews();
+  _vlmSaveState();  // ★ Update persistence
 }
 
 // ── VLM PDF async parse (shared core) ────────────────
+
+/**
+ * Shared VLM polling loop — used by both fresh parse and refresh-resume.
+ * @param entry    - pdf entry object to mutate
+ * @param taskId   - server task ID
+ * @param isAlive  - () => boolean
+ * @param onUpdate - () => void
+ */
+async function _vlmPollTask(entry, taskId, isAlive, onUpdate) {
+  for (let i = 0; i < 150; i++) {
+    await new Promise((r) => setTimeout(r, 2000));
+    if (!isAlive()) { _vlmSaveState(); return; }
+    try {
+      const poll = await fetch(apiUrl(`/api/pdf/vlm-parse/${taskId}`));
+      if (!poll.ok) break;
+      const task = await poll.json();
+      if (task.status === "processing") {
+        entry.vlmStatus = "parsing";
+        entry.vlmProgress = task.progress;
+        onUpdate();
+        continue;
+      }
+      if (task.status === "done" && task.result) {
+        // Quality gate: count pipe-tables in old vs new text
+        const countTables = (s) => (s.match(/^\|.+\|$/gm) || []).length;
+        const oldTables = countTables(entry.text || "");
+        const newTables = countTables(task.result);
+        if (oldTables > 2 && newTables === 0) {
+          console.warn(
+            `[VLM] ${entry.name}: VLM result dropped ${oldTables} table rows → keeping original`,
+          );
+          entry.vlmStatus = "done-skipped";
+          onUpdate();
+          debugLog(
+            `[VLM] ${entry.name}: VLM dropped tables (${oldTables}→${newTables}), kept original`,
+            "warn",
+          );
+          return;
+        }
+        entry.text = task.result;
+        entry.textLength = task.textLength || task.result.length;
+        entry.method = "vlm";
+        entry.vlmStatus = "done";
+        onUpdate();
+        debugLog(
+          `[VLM] ${entry.name}: upgraded to VLM parse, ${entry.textLength} chars`,
+        );
+        return;
+      }
+      if (task.status === "error") {
+        console.warn("[VLM] parse error:", task.error);
+        entry.vlmStatus = "failed";
+        onUpdate();
+        return;
+      }
+    } catch (pollErr) {
+      console.warn("[VLM] poll error:", pollErr);
+    }
+  }
+  // timeout
+  entry.vlmStatus = "timeout";
+  onUpdate();
+}
+
 // Generic VLM parse: works for both main input and edit mode.
 // @param file      - File object
 // @param entry     - pdf entry object to mutate (vlmStatus, text, etc.)
@@ -336,6 +539,7 @@ window._vlmParseEntry = async function(file, entry, isAlive, onUpdate) {
   if (!entry) return;
   entry.vlmStatus = "parsing";
   onUpdate();
+  _vlmSaveState();
   try {
     const fd = new FormData();
     fd.append("file", file);
@@ -347,75 +551,28 @@ window._vlmParseEntry = async function(file, entry, isAlive, onUpdate) {
       console.warn("[VLM] start failed:", startResp.status);
       entry.vlmStatus = "unavailable";
       onUpdate();
+      _vlmSaveState();
       return;
     }
     const { taskId } = await startResp.json();
     if (!taskId) {
       entry.vlmStatus = "unavailable";
       onUpdate();
+      _vlmSaveState();
       return;
     }
-    // Poll for result
-    for (let i = 0; i < 150; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      // entry may have been removed
-      if (!isAlive()) return;
-      try {
-        const poll = await fetch(apiUrl(`/api/pdf/vlm-parse/${taskId}`));
-        if (!poll.ok) break;
-        const task = await poll.json();
-        if (task.status === "processing") {
-          entry.vlmStatus = "parsing";
-          entry.vlmProgress = task.progress;
-          onUpdate();
-          continue;
-        }
-        if (task.status === "done" && task.result) {
-          // Quality gate: count pipe-tables in old vs new text
-          const countTables = (s) => (s.match(/^\|.+\|$/gm) || []).length;
-          const oldTables = countTables(entry.text || "");
-          const newTables = countTables(task.result);
-          if (oldTables > 2 && newTables === 0) {
-            // VLM lost all tables — keep the regular parse
-            console.warn(
-              `[VLM] ${entry.name}: VLM result dropped ${oldTables} table rows → keeping original`,
-            );
-            entry.vlmStatus = "done-skipped";
-            onUpdate();
-            debugLog(
-              `[VLM] ${entry.name}: VLM dropped tables (${oldTables}→${newTables}), kept original`,
-              "warn",
-            );
-            return;
-          }
-          entry.text = task.result;
-          entry.textLength = task.textLength || task.result.length;
-          entry.method = "vlm";
-          entry.vlmStatus = "done";
-          onUpdate();
-          debugLog(
-            `[VLM] ${entry.name}: upgraded to VLM parse, ${entry.textLength} chars`,
-          );
-          return;
-        }
-        if (task.status === "error") {
-          console.warn("[VLM] parse error:", task.error);
-          entry.vlmStatus = "failed";
-          onUpdate();
-          return;
-        }
-      } catch (pollErr) {
-        console.warn("[VLM] poll error:", pollErr);
-      }
-    }
-    // timeout
-    entry.vlmStatus = "timeout";
-    onUpdate();
+    // ★ Persist taskId so we can reconnect after page refresh
+    entry._vlmTaskId = taskId;
+    _vlmSaveState();
+    // Poll for result using shared loop
+    await _vlmPollTask(entry, taskId, isAlive, onUpdate);
+    _vlmSaveState();
   } catch (err) {
     console.warn("[VLM] error:", err);
     if (isAlive()) {
       entry.vlmStatus = "unavailable";
       onUpdate();
+      _vlmSaveState();
     }
   }
 };

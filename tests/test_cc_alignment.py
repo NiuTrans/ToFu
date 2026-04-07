@@ -599,9 +599,7 @@ class TestSystemReminderAndBlocks:
         from lib.tasks_pkg.system_context import _inject_system_contexts
         messages = [{'role': 'system', 'content': 'Base'}]
         with patch('lib.project_mod.get_context_for_prompt',
-                   return_value='Project files: a.py, b.py'), \
-             patch('lib.tasks_pkg.system_context._build_search_addendum',
-                   return_value=''):
+                   return_value='Project files: a.py, b.py'):
             _inject_system_contexts(
                 messages, '/tmp', True, False, False, False,
                 has_real_tools=True,
@@ -627,12 +625,10 @@ class TestSystemReminderAndBlocks:
             {'role': 'system', 'content': 'Base'},
             {'role': 'user', 'content': 'Hello world'},
         ]
-        with patch('lib.tasks_pkg.system_context._build_search_addendum',
-                   return_value=''):
-            _inject_system_contexts(
-                messages, '/tmp', False, True, False, False,
-                has_real_tools=False,
-            )
+        _inject_system_contexts(
+            messages, '/tmp', False, True, False, False,
+            has_real_tools=False,
+        )
         # System message should NOT contain skills listing
         content = messages[0]['content']
         if isinstance(content, list):
@@ -659,12 +655,10 @@ class TestSystemReminderAndBlocks:
         """Static guidance sections are injected as a separate text block."""
         from lib.tasks_pkg.system_context import _inject_system_contexts
         messages = [{'role': 'system', 'content': 'User prompt'}]
-        with patch('lib.tasks_pkg.system_context._build_search_addendum',
-                   return_value=''):
-            _inject_system_contexts(
-                messages, '/tmp', False, False, False, False,
-                has_real_tools=True,
-            )
+        _inject_system_contexts(
+            messages, '/tmp', False, False, False, False,
+            has_real_tools=True,
+        )
         content = messages[0]['content']
         # Should be a list of blocks: [dynamic, static_guidance]
         assert isinstance(content, list), f"Expected list, got {type(content)}"

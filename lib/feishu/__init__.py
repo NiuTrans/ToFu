@@ -12,11 +12,10 @@ Decomposed from the monolithic lib/feishu_bot.py (1150 lines) into focused sub-m
 Public API (backward-compatible with ``from lib.feishu_bot import ...``):
 """
 
-import logging
-
 from lib._pkg_utils import build_facade
+from lib.log import get_logger
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 # ── Aggregated __all__ ───────────────────────────────────
 __all__: list[str] = []
