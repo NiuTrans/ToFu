@@ -77,38 +77,57 @@ function _swapActiveConvItem(newActiveId) {
 
 /* ── Folder tab bar ── */
 let _lastFolderTabsHash = '';
-function renderFolderTabs(folders, activeFolderId) {
+function renderFolderTabs(folders, activeFolderId, allConvs) {
   const tabsEl = document.getElementById('folderTabs');
   if (!tabsEl) return;
 
   // Always show tabs — even with 0 folders, show just the "+" button for discoverability
   tabsEl.style.display = '';
 
-  // Hash to avoid unnecessary re-renders
   const safeFolders = folders || [];
-  const hash = `${activeFolderId||''}|${safeFolders.map(f=>`${f.id}|${f.name}|${f.color||''}|${f.order||0}`).join(',')}`;
+  const safeConvs = allConvs || [];
+
+  // Compute counts per folder + uncategorized
+  const folderIds = new Set(safeFolders.map(f => f.id));
+  const countMap = {};
+  let uncategorizedCount = 0;
+  for (const c of safeConvs) {
+    if (c.folderId && folderIds.has(c.folderId)) {
+      countMap[c.folderId] = (countMap[c.folderId] || 0) + 1;
+    } else {
+      uncategorizedCount++;
+    }
+  }
+
+  // Hash to avoid unnecessary re-renders (includes counts)
+  const hash = `${activeFolderId||''}|U${uncategorizedCount}|${safeFolders.map(f=>`${f.id}|${f.name}|${f.color||''}|${f.order||0}|${countMap[f.id]||0}`).join(',')}`;
   if (hash === _lastFolderTabsHash) return;
   _lastFolderTabsHash = hash;
 
   const sortedFolders = [...safeFolders].sort((a, b) => (a.order || 0) - (b.order || 0));
 
   let html = '<div class="folder-tabs-scroll">';
-  // Only show "All" tab when there are folders (otherwise it's redundant)
+  // "未分类" tab — shows conversations not in any folder (only when folders exist)
   if (sortedFolders.length > 0) {
-    html += `<button class="folder-tab${!activeFolderId ? ' active' : ''}" data-folder-id="">All</button>`;
+    const ucBadge = uncategorizedCount > 0 ? `<span class="folder-tab-count">${uncategorizedCount}</span>` : '';
+    html += `<button class="folder-tab${!activeFolderId ? ' active' : ''}" data-folder-id="">`;
+    html += `<svg class="folder-tab-inbox-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>`;
+    html += `<span class="folder-tab-name">${t('sidebar.uncategorized')}</span>${ucBadge}</button>`;
   }
   // Folder tabs
   for (const f of sortedFolders) {
     const fcolor = f.color ? escapeHtml(f.color) : 'var(--accent)';
     const fname = escapeHtml(f.name);
     const isActive = activeFolderId === f.id;
+    const cnt = countMap[f.id] || 0;
+    const badge = cnt > 0 ? `<span class="folder-tab-count">${cnt}</span>` : '';
     html += `<button class="folder-tab${isActive ? ' active' : ''}" data-folder-id="${escapeHtml(f.id)}" title="${fname}">`;
     html += `<span class="folder-tab-dot" style="background:${fcolor}"></span>`;
-    html += `<span class="folder-tab-name">${fname}</span>`;
+    html += `<span class="folder-tab-name">${fname}</span>${badge}`;
     html += `</button>`;
   }
   // "+" add tab — always visible
-  html += `<button class="folder-tab folder-tab-add" title="新建文件夹">`;
+  html += `<button class="folder-tab folder-tab-add" title="${t('sidebar.newFolder')}">`;
   html += `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
   html += `</button>`;
   html += '</div>';
@@ -125,6 +144,7 @@ function renderConversationList() {
 
     const folders = typeof getFolders === 'function' ? getFolders() : [];
     const _activeFolderId = typeof getActiveFolderId === 'function' ? getActiveFolderId() : null;
+    const foldersReady = typeof areFoldersLoaded === 'function' ? areFoldersLoaded() : true;
 
     /* ── Lightweight hash ── */
     const _quickHash = (arr) => arr.map(c =>
@@ -132,34 +152,51 @@ function renderConversationList() {
     ).join("\n");
     const folderHash = folders.map(f => `${f.id}|${f.name}|${f.order}|${f.color||''}`).join(",");
     /* ── Render folder tabs (always, regardless of hash — tab visibility may change) ── */
-    renderFolderTabs(folders, _activeFolderId);
+    renderFolderTabs(folders, _activeFolderId, all);
 
-    const hash = `AF${_activeFolderId||''}|${_quickHash(all)}|||F${folderHash}`;
+    const hash = `AF${_activeFolderId||''}|FL${foldersReady?1:0}|${_quickHash(all)}|||F${folderHash}`;
     if (hash === _lastConvListHash) return;
     _lastConvListHash = hash;
 
     /* ── Filter by active folder tab ── */
     let filtered = all;
     if (_activeFolderId) {
+      // Specific folder selected — show only its conversations
       const activeFolder = folders.find(f => f.id === _activeFolderId);
       if (!activeFolder) { // folder was deleted while viewing it
         if (typeof setActiveFolderId === 'function') setActiveFolderId(null);
         return;
       }
       filtered = all.filter(c => c.folderId === _activeFolderId);
+    } else if (folders.length > 0) {
+      // Default "未分类" view — show only conversations NOT in any folder
+      const folderIds = new Set(folders.map(f => f.id));
+      filtered = all.filter(c => !c.folderId || !folderIds.has(c.folderId));
+    } else if (!foldersReady) {
+      // Folders not yet loaded — filter out conversations that have a folderId
+      // from server settings to avoid flashing them in uncategorized view
+      filtered = all.filter(c => !c.folderId);
     }
+    // else: folders loaded and empty — show everything (no folders exist)
 
     let listHtml = "";
     filtered.forEach((c) => {
       listHtml += _buildConvItemHTML(c, escapeHtml(stripNoTranslateTags(c.title)), "");
     });
 
-    /* ── Empty folder state ── */
-    if (_activeFolderId && filtered.length === 0) {
-      listHtml = `<div class="folder-view-empty">` +
-        `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;margin-bottom:8px"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>` +
-        `<div style="font-size:12px;color:var(--text-tertiary)">文件夹是空的</div>` +
-        `<div style="font-size:11px;color:var(--text-tertiary);opacity:0.6;margin-top:4px">点击 New Chat 创建对话，或拖拽对话到此标签</div>` +
+    /* ── Empty state ── */
+    if (filtered.length === 0 && (_activeFolderId || folders.length > 0)) {
+      const isUncategorized = !_activeFolderId;
+      const emptyIcon = isUncategorized
+        ? `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;margin-bottom:8px"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>`
+        : `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;margin-bottom:8px"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
+      const emptyText = isUncategorized ? t('sidebar.allCategorized') : t('sidebar.folderEmpty');
+      const emptyHint = isUncategorized
+        ? t('sidebar.newChatAppear')
+        : t('sidebar.clickNewChat');
+      listHtml = `<div class="folder-view-empty">${emptyIcon}` +
+        `<div style="font-size:12px;color:var(--text-tertiary)">${emptyText}</div>` +
+        `<div style="font-size:11px;color:var(--text-tertiary);opacity:0.6;margin-top:4px">${emptyHint}</div>` +
         `</div>`;
     }
 
@@ -264,30 +301,30 @@ function _buildConvItemHTML(c, titleHtml, snippetHtml) {
   const eid = escapeHtml(c.id);
   const isActive = c.id === activeConvId ? " active" : "";
   const delSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>`;
-  const feishuBadge = c.source === 'feishu' ? '<span class="conv-feishu-badge" title="飞书对话">Feishu</span>' : '';
+  const feishuBadge = c.source === 'feishu' ? `<span class="conv-feishu-badge" title="${t('sidebar.feishuConv')}">Feishu</span>` : '';
   const cpSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
   // ★ Sidebar dot: amber blinking for awaiting-human, teal pulsing for translating, blue for streaming
   let dotHtml = '';
   if (awaitingHuman) {
-    dotHtml = '<div class="conv-awaiting-human-dot" title="等待你的输入"></div>';
+    dotHtml = `<div class="conv-awaiting-human-dot" title="${t('sidebar.awaitingInput')}"></div>`;
   } else if (translating) {
-    dotHtml = '<div class="conv-translating-dot" title="翻译中…"></div>';
+    dotHtml = `<div class="conv-translating-dot" title="${t('sidebar.translating')}"></div>`;
   } else if (streaming) {
     dotHtml = '<div class="conv-streaming-dot"></div>';
   }
   // ★ Status tag next to date: "翻译中" / "回答中" for visual clarity
   let statusTag = '';
   if (translating) {
-    statusTag = '<span class="conv-status-tag conv-status-translating">翻译中</span>';
+    statusTag = `<span class="conv-status-tag conv-status-translating">${t('sidebar.translatingTag')}</span>`;
   } else if (streaming) {
-    statusTag = '<span class="conv-status-tag conv-status-streaming">回答中</span>';
+    statusTag = `<span class="conv-status-tag conv-status-streaming">${t('sidebar.answering')}</span>`;
   }
   const dupSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="14" height="14" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>`;
   const folderSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
   const _isDebug = typeof _featureFlags !== 'undefined' && _featureFlags.debug_mode;
-  const copyIdBtn = _isDebug ? `<button class="conv-action-btn conv-copy-id" data-conv-id="${eid}" title="复制会话ID">${cpSvg}</button>` : '';
+  const copyIdBtn = _isDebug ? `<button class="conv-action-btn conv-copy-id" data-conv-id="${eid}" title="${t('sidebar.copyConvId')}">${cpSvg}</button>` : '';
   const folderClass = c.folderId ? ' in-folder' : '';
-  return `<div class="conv-item${isActive}${folderClass}" data-conv-id="${eid}" draggable="true" title="ID: ${eid}">${dotHtml}<div class="conv-text"><div class="conv-title">${feishuBadge}${titleHtml}</div>${snippetHtml || ""}<div class="conv-date">${formatConvTime(c.updatedAt || c.createdAt)}${statusTag}</div></div><div class="conv-actions">${copyIdBtn}<button class="conv-action-btn conv-ref" data-conv-id="${eid}" data-conv-title="${escapeHtml(c.title || 'Untitled')}" title="引用此对话">@</button><button class="conv-action-btn conv-folder-assign" data-conv-id="${eid}" title="移入文件夹">${folderSvg}</button><button class="conv-action-btn conv-dup" data-conv-id="${eid}" title="复制为新对话">${dupSvg}</button><button class="conv-action-btn conv-delete" data-conv-id="${eid}" title="删除对话">${delSvg}</button></div></div>`;
+  return `<div class="conv-item${isActive}${folderClass}" data-conv-id="${eid}" draggable="true" title="ID: ${eid}">${dotHtml}<div class="conv-text"><div class="conv-title">${feishuBadge}${titleHtml}</div>${snippetHtml || ""}<div class="conv-date">${formatConvTime(c.updatedAt || c.createdAt)}${statusTag}</div></div><div class="conv-actions">${copyIdBtn}<button class="conv-action-btn conv-ref" data-conv-id="${eid}" data-conv-title="${escapeHtml(c.title || 'Untitled')}" title="${t('sidebar.refConv')}">@</button><button class="conv-action-btn conv-folder-assign" data-conv-id="${eid}" title="${t('sidebar.moveToFolder')}">${folderSvg}</button><button class="conv-action-btn conv-dup" data-conv-id="${eid}" title="${t('sidebar.duplicate')}">${dupSvg}</button><button class="conv-action-btn conv-delete" data-conv-id="${eid}" title="${t('sidebar.deleteConv')}">${delSvg}</button></div></div>`;
 }
 
 function highlightMatch(text, query) {
@@ -664,7 +701,7 @@ function renderChat(conv, forceScroll) {
       /* ── Loading skeleton: conv has server messages but they haven't arrived yet ── */
       inner.innerHTML = `<div class="welcome" id="welcome" style="opacity:0.5"><div class="welcome-icon" style="animation:pulse 1.5s infinite"></div><h2>Loading conversation…</h2><p>Fetching ${conv._serverMsgCount || ''} messages from server</p></div>`;
     } else {
-      inner.innerHTML = `<div class="welcome" id="welcome"><div class="welcome-icon"><img src="${BASE_PATH}/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2><p>嫩，但能打 — search, code, browse, trade, and more.</p><div class="feature-pills"><span class="feature-pill">Extended Thinking</span><span class="feature-pill">Search</span><span class="feature-pill">URL Fetch</span><span class="feature-pill">Image Input</span><span class="feature-pill">Co-Pilot</span><span class="feature-pill">Browser</span></div></div>`;
+      inner.innerHTML = `<div class="welcome" id="welcome"><div class="welcome-icon"><img src="${BASE_PATH}/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2><p>${t('welcome.subtitle')}</p><div class="feature-pills"><span class="feature-pill">Extended Thinking</span><span class="feature-pill">Search</span><span class="feature-pill">URL Fetch</span><span class="feature-pill">Image Input</span><span class="feature-pill">Co-Pilot</span><span class="feature-pill">Browser</span></div></div>`;
     }
     _lastRenderedFingerprint = fp;
     buildTurnNav(conv);
@@ -716,13 +753,13 @@ function _fmtRelativeTime(ts) {
   const diffMs = now - d;
   if (diffMs < 0 || diffMs < 30000) return ''; // future or <30s — skip
   const s = Math.floor(diffMs / 1000);
-  if (s < 60) return `${s}s前`;
+  if (s < 60) return `${s}${t('time.secondsAgo')}`;
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m前`;
+  if (m < 60) return `${m}${t('time.minutesAgo')}`;
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h前`;
+  if (h < 24) return `${h}${t('time.hoursAgo')}`;
   const days = Math.floor(h / 24);
-  if (days < 30) return `${days}d前`;
+  if (days < 30) return `${days}${t('time.daysAgo')}`;
   return '';
 }
 function renderMessage(msg, idx) {
@@ -1002,9 +1039,9 @@ function renderMessage(msg, idx) {
   if (!isUser && !msg.translatedContent && msg._translateDone === false) {
     const errText = msg._translateError;
     if (errText) {
-      body += `<div class="translate-loading" id="translate-loading-${idx}" style="color:#f59e0b;cursor:pointer" onclick="translateMessage(${idx})">翻译失败，点击重试</div>`;
+      body += `<div class="translate-loading" id="translate-loading-${idx}" style="color:#f59e0b;cursor:pointer" onclick="translateMessage(${idx})">${t('translate.failed')}</div>`;
     } else {
-      body += `<div class="translate-loading" id="translate-loading-${idx}"><span class="translate-spinner"></span> 正在翻译为中文…</div>`;
+      body += `<div class="translate-loading" id="translate-loading-${idx}"><span class="translate-spinner"></span> ${t('translate.translatingToCN')}</div>`;
     }
   }
   if (msg.error)
@@ -1092,8 +1129,8 @@ function _initSelectionPopup() {
   _selectionPopup.className = "selection-popup";
   _selectionPopup.style.display = "none";
   _selectionPopup.innerHTML = `
-    <button class="selection-popup-btn" data-action="branch">分支</button>
-    <button class="selection-popup-btn" data-action="reply">引用</button>`;
+    <button class="selection-popup-btn" data-action="branch">${t('conv.branch')}</button>
+    <button class="selection-popup-btn" data-action="reply">${t('conv.reply')}</button>`;
   document.body.appendChild(_selectionPopup);
 
   _selectionPopup.addEventListener("click", (e) => {
@@ -1210,11 +1247,11 @@ function addConvRef(convId, convTitle) {
   // Don't add duplicates or self-references
   const activeConv = getActiveConv();
   if (activeConv && activeConv.id === convId) {
-    showToast?.("无法引用当前对话", "warning");
+    showToast?.(t('convRef.cannotRef'), "warning");
     return;
   }
   if (_pendingConvRefs.some(r => r.id === convId)) {
-    showToast?.("该对话已在引用列表中", "info");
+    showToast?.(t('convRef.alreadyRef'), "info");
     return;
   }
   _pendingConvRefs.push({ id: convId, title: convTitle || "Untitled" });
@@ -1302,11 +1339,11 @@ function openConvRefPicker() {
 
   picker.innerHTML = `
     <div class="conv-ref-picker-header">
-      <span class="conv-ref-picker-title">@ 引用对话</span>
+      <span class="conv-ref-picker-title">${t('convRef.title')}</span>
       <button class="conv-ref-picker-close" title="关闭">&times;</button>
     </div>
     <div class="conv-ref-picker-search">
-      <input type="text" id="convRefSearchInput" placeholder="搜索对话标题…" autocomplete="off" spellcheck="false" />
+      <input type="text" id="convRefSearchInput" placeholder="${t('convRef.searchPh')}" autocomplete="off" spellcheck="false" />
     </div>
     <div class="conv-ref-picker-list" id="convRefPickerList"></div>
   `;
@@ -1364,7 +1401,7 @@ function _renderConvRefPickerList(convs, query) {
   if (!listEl) return;
 
   if (convs.length === 0) {
-    listEl.innerHTML = `<div class="conv-ref-picker-empty">${query ? "没有匹配的对话" : "暂无其他对话"}</div>`;
+    listEl.innerHTML = `<div class="conv-ref-picker-empty">${query ? t('convRef.noMatch') : t('convRef.noOther')}</div>`;
     return;
   }
 
@@ -1413,12 +1450,12 @@ function _renderConvRefPickerList(convs, query) {
 function _formatRelativeTime(ts) {
   const diff = Date.now() - ts;
   const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "刚刚";
-  if (mins < 60) return `${mins}分钟前`;
+  if (mins < 1) return t('time.justNow');
+  if (mins < 60) return `${mins}${t('time.minutesAgoFull')}`;
   const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}小时前`;
+  if (hrs < 24) return `${hrs}${t('time.hoursAgoFull')}`;
   const days = Math.floor(hrs / 24);
-  if (days < 30) return `${days}天前`;
+  if (days < 30) return `${days}${t('time.daysAgoFull')}`;
   return new Date(ts).toLocaleDateString();
 }
 
@@ -1471,17 +1508,25 @@ function renderFinishInfo(msg) {
     } else if (msg.finishReason === "interrupted") {
       parts.push(`<span class="finish-tag warn"><span title="Server crashed during generation. Content recovered from last checkpoint — may be incomplete.">Interrupted</span></span>`);
     } else if (msg.finishReason === "server_offline") {
-      parts.push(`<span class="finish-tag err"><span title="Server went offline during generation (e.g. killed by shell command). Partial response saved.">Server Offline</span></span>`);
+      parts.push(
+        `<span class="finish-tag err"><span title="Server went offline during generation (e.g. VSCode disconnect, network drop). Partial response saved.">Server Offline</span></span>` +
+        ` <button class="finish-reconnect-btn" onclick="_recoverOfflineConversations('manual_button')" ` +
+        `title="Check server for completed result" style="` +
+        `font-size:11px;padding:1px 8px;margin-left:4px;cursor:pointer;` +
+        `background:var(--accent);color:#fff;border:none;border-radius:4px;` +
+        `vertical-align:middle;opacity:0.9` +
+        `">🔄 Reconnect</button>`
+      );
     } else {
       const labels = {
         length: "Truncated",
         tool_use: "Tool",
         tool_calls: "Tool",
-        content_filter: "<span title='内容违反安全政策，已被模型安全系统拦截'>Filtered</span>",
+        content_filter: "<span title='" + t('msg.contentFiltered') + "'>Filtered</span>",
         tool_rounds_exhausted: "Tool limit",
         max_tokens: "Truncated",
-        premature_close: "<span title='API网关超时，模型深度思考中被中断。内容可能不完整。'>网关中断</span>",
-        abnormal_stop: "<span title='API流异常终止（连接被代理/网关中断，缺失finish标记）。回复内容可能不完整。'>异常中断</span>",
+        premature_close: "<span title='" + t('msg.prematureClose') + "'>" + t('msg.gatewayInterrupt') + "</span>",
+        abnormal_stop: "<span title='" + t('msg.abnormalStop') + "'>" + t('msg.abnormalInterrupt') + "</span>",
       };
       const label = labels[msg.finishReason] || msg.finishReason;
       const cls = warnReasons.includes(msg.finishReason) ? "warn" : "";
@@ -1504,9 +1549,9 @@ function renderFinishInfo(msg) {
     if (_displayInp > 0 || out > 0) {
       let tokText = `${fmt(_displayInp)} → ${fmt(out)}`;
       if (thk > 0)
-        tokText += ` <span style="color:#a78bfa;opacity:0.8">(${fmt(thk)}思)</span>`;
+        tokText += ` <span style="color:#a78bfa;opacity:0.8">(${fmt(thk)}${t('msg.thinking')})</span>`;
       if (numRounds > 1)
-        tokText += ` <span style="opacity:0.7">[${numRounds}轮]</span>`;
+        tokText += ` <span style="opacity:0.7">[${numRounds}${t('msg.rounds')}]</span>`;
       parts.push(`<span class="token-tag">${tokText}</span>`);
     }
     const cw = u.cache_write_tokens || u.cache_creation_input_tokens || 0;
@@ -6246,25 +6291,63 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
       debugLog(`Poll error (${_consecutiveErrors}/${_MAX_CONSECUTIVE_ERRORS}): ${e.message}`, "warn");
       if (typeof _reportClientError === 'function') _reportClientError(`[poll] ${e.message}`);
 
-      // ★ Circuit breaker: after N consecutive failures, check server health
+      // ★ Circuit breaker: after N consecutive failures, check server health.
+      //   For VSCode port forwarding drops, the outage may last 10-60s while
+      //   the tunnel re-establishes. We enter a "network recovery wait" mode
+      //   that waits up to 2 minutes before truly giving up.
       if (_consecutiveErrors >= _MAX_CONSECUTIVE_ERRORS) {
         console.error(`[_pollFallback] ⚠️ CIRCUIT BREAKER — ${_consecutiveErrors} consecutive poll failures for conv=${convId.slice(0,8)}`);
         const alive = await _checkServerHealth();
         if (!alive) {
-          console.error(`[_pollFallback] 💀 SERVER CONFIRMED DEAD — force-finishing stream for conv=${convId.slice(0,8)} ` +
-            `content=${assistantMsg.content?.length||0}chars thinking=${assistantMsg.thinking?.length||0}chars`);
-          assistantMsg.finishReason = 'server_offline';
-          assistantMsg.error = 'Server offline — response may be incomplete. Refresh page after server restarts.';
-          saveConversations(convId);
-          twStop(convId);
-          finishStream(convId);
-          showToast('', 'Server Offline',
-            'Backend server is not responding. Your partial response has been saved. Refresh after server restarts.',
-            10000);
-          return;
+          // ★ Network Recovery Wait: instead of immediately giving up, wait
+          //   up to 2 minutes for the server to come back (VSCode reconnect).
+          //   During this wait, check health every 5 seconds.
+          const _RECOVERY_WAIT_MS = 120000; // 2 minutes
+          const _RECOVERY_POLL_MS = 5000;   // check every 5s
+          const _recoveryStart = Date.now();
+          let _recovered = false;
+          console.warn(`[_pollFallback] 🔄 Entering network recovery wait (up to ${_RECOVERY_WAIT_MS/1000}s) for conv=${convId.slice(0,8)}`);
+          showToast('🔄', 'Connection Lost',
+            'Server unreachable — waiting for reconnection… Task is still running on the server.', 8000);
+          while (Date.now() - _recoveryStart < _RECOVERY_WAIT_MS) {
+            if (stream.controller.signal.aborted) {
+              twStop(convId);
+              finishStream(convId);
+              return;
+            }
+            await new Promise(r => setTimeout(r, _RECOVERY_POLL_MS));
+            // Force a fresh health check (bypass cache)
+            _lastHealthCheck = 0;
+            const nowAlive = await _checkServerHealth();
+            if (nowAlive) {
+              console.warn(`[_pollFallback] ✅ Server is BACK after ${Math.round((Date.now() - _recoveryStart)/1000)}s — resuming poll for conv=${convId.slice(0,8)}`);
+              _recovered = true;
+              _consecutiveErrors = 0;
+              showToast('✅', 'Reconnected', 'Server connection restored — resuming…', 4000);
+              break;
+            }
+            console.debug(`[_pollFallback] Still waiting for server… ${Math.round((Date.now() - _recoveryStart)/1000)}s elapsed`);
+          }
+          if (!_recovered) {
+            console.error(`[_pollFallback] 💀 SERVER STILL DEAD after ${_RECOVERY_WAIT_MS/1000}s recovery wait — force-finishing for conv=${convId.slice(0,8)} ` +
+              `content=${assistantMsg.content?.length||0}chars thinking=${assistantMsg.thinking?.length||0}chars`);
+            assistantMsg.finishReason = 'server_offline';
+            assistantMsg.error = '⚠️ Server offline — response may be incomplete. This notice will clear automatically when the server comes back.';
+            saveConversations(convId);
+            twStop(convId);
+            finishStream(convId);
+            showToast('⚠️', 'Server Offline',
+              'Backend server did not reconnect within 2 minutes. Your partial response has been saved. It will recover automatically when the server comes back.',
+              12000);
+            // ★ Start periodic recovery polling so the result is auto-recovered later
+            _startOfflineRecoveryPolling();
+            return;
+          }
+          // If recovered, fall through and continue the poll loop
+        } else {
+          // Server is alive but poll failed (maybe task was cleaned up) — continue trying a bit more
+          _consecutiveErrors = Math.floor(_MAX_CONSECUTIVE_ERRORS / 2); // partial reset
         }
-        // Server is alive but poll failed (maybe task was cleaned up) — continue trying a bit more
-        _consecutiveErrors = Math.floor(_MAX_CONSECUTIVE_ERRORS / 2); // partial reset
       }
     }
     // ★ Item 8: Measure RTT for adaptive delay

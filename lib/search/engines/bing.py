@@ -6,6 +6,7 @@ real URLs in the 'u' parameter.
 
 import base64
 import re
+import time
 from html import unescape
 from urllib.parse import parse_qs, urlparse
 
@@ -46,6 +47,7 @@ def _bing_decode_url(raw_url):
 def search_bing(query, max_results=6):
     """Scrape Bing HTML search results."""
     results = []
+    t0 = time.time()
     try:
         resp = requests.get(
             'https://www.bing.com/search',
@@ -91,4 +93,6 @@ def search_bing(query, max_results=6):
         logger.warning('[Search] Bing timeout for query: %s', query[:80])
     except Exception as e:
         logger.error('[Search] Bing error: %s', e, exc_info=True)
+    elapsed = time.time() - t0
+    logger.info('[Search] Bing: %d results in %.1fs  query=%r', len(results), elapsed, query[:60])
     return results

@@ -5,16 +5,7 @@
 </p>
 
 <p align="center">
-  多模型对话 · 自主智能体 · 项目协作 · 多智能体集群<br/>
-  每日报告与待办 · 浏览器插件 · 桌面代理 · 飞书机器人<br/>
-  <strong>🔀 CLI 后端切换 — 支持 Claude Code 或 Codex 作为智能体引擎</strong>
-</p>
-
-<p align="center">
-  <a href="README.md">🇬🇧 English</a>
-</p>
-
-<p align="center">
+  <a href="https://github.com/rangehow/ToFu/actions/workflows/ci.yml"><img src="https://github.com/rangehow/ToFu/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776ab?logo=python&logoColor=white" alt="Python" />
   <img src="https://img.shields.io/badge/PostgreSQL-18+-336791?logo=postgresql&logoColor=white" alt="PostgreSQL" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
@@ -22,115 +13,26 @@
 </p>
 
 <p align="center">
+  <a href="README.md">🇬🇧 English</a>
+</p>
+
+<p align="center">
   <img src="propaganda/mainpage.jpg" width="800" alt="主界面" />
-</p>
-
-<p align="center">
-  <img src="propaganda/chatinner.jpg" width="800" alt="对话界面" />
-</p>
-
-<p align="center">
-  <img src="propaganda/providersetting.jpg" width="800" alt="模型服务商设置" />
 </p>
 
 ---
 
 ## Tofu 是什么？
 
-Tofu 是一个完全自托管的 AI 助手，采用 **Flask 后端** + **原生 JS 前端**。它可以连接任何 OpenAI 兼容的 LLM API，提供自主工具调用智能体、代码项目协作、多智能体集群编排、浏览器插件和桌面代理 —— 只需一条命令 `python server.py` 即可启动。
+Tofu 是一个**完全自托管的 AI 助手**，一条命令即可启动。它可以连接任何 OpenAI 兼容的大模型 API，为你提供一个完整的 AI 工作空间 —— 从简单的问答，到能自主搜索网页、编辑代码、操控浏览器、多智能体协作的全能智能体。
 
----
-
-## 功能特性
-
-### 多模型对话
-
-- **20+ 大语言模型** — OpenAI、Anthropic、Google Gemini、Qwen、DeepSeek、MiniMax、Doubao、GLM、Mistral、Grok、百度千帆 (ERNIE)，以及任何 OpenAI 兼容 API
-- **智能调度** — 多密钥、多服务商路由，支持实时延迟评分、错误率追踪和按密钥限速冷却
-- **流式响应**，支持按模型计费跟踪（输入/输出/缓存 token × 阶梯定价）
-- **多模型对比** — 同一提示词同时发送给多个模型，并排对比输出
-- **自动翻译** — 按对话设置中英文双向自动翻译
-
-### 工具调用与智能体模式
-
-- **内置工具** — 网页搜索（多引擎并行：DDG、Brave、Bing、SearXNG）、网页抓取、PDF 解析（文本 + VLM）、图片上传与生成、Shell 命令、Python 执行
-- **项目协作** — 将任意代码库设为工作区，支持文件浏览、grep 搜索、代码编辑、Git 操作和 AI 驱动的文件索引
-- **自主任务执行** — 多步骤工具链，自动重试，3 层上下文压缩，可配置模型回退链
-- **终端模式** — Planner → Worker → Critic 审查循环，适用于长时间运行的任务
-- **定时任务** — 类 cron 定时或一次性任务（Shell、Python、LLM 提示词）
-- **图片生成** — 多模型调度（Gemini + GPT 图片模型），自动 429 重试轮转
-
-### 多智能体集群
-
-- **集群编排** — MasterOrchestrator 制定计划并分发给多个并行运行的 SubAgent
-- **流式调度** — 响应式任务调度，无波次屏障，支持智能体间的产出物共享
-- **审查与综合** — 自动审查智能体输出并综合为连贯的最终结果
-
-### 浏览器插件
-
-- Chrome 插件连接助手与你的浏览器，实现实时网页阅读和交互
-- 按客户端路由 — 多个浏览器可同时连接并拥有独立的命令队列
-- 支持导航、截图、点击、输入、提取内容
-
-### 桌面代理
-
-- 运行在你的本地机器上，连接回服务器
-- 文件系统操作、剪贴板、截图、GUI 自动化（pyautogui）、系统信息
-- 安全保障：需要显式启用 `--allow-write` / `--allow-exec` 标志
-
-### 飞书机器人
-
-- 通过 WebSocket 完整集成飞书机器人 — 在团队聊天中直接进行多轮 LLM 对话，支持工具调用
-- 支持斜杠命令、模型/模式切换、对话管理
-
-### 每日报告与待办事项
-
-点击侧边栏顶部的 ☑️ **My Day** 按钮打开每日看板 — 一个由 LLM 驱动的个人工作日志。
-
-- **自动生成工作流** — LLM 阅读当天所有对话，将它们聚类为 5–15 个连贯的工作流（如"修复图片回显"、"项目部署调试"），并标记为*已完成*、*进行中*或*被阻塞*
-- **日历视图** — 月度总览日历，显示每天的对话数量和费用热力图；点击任意日期查看或生成报告
-- **明日计划** — LLM 从未完成的工作中综合出 3–8 个可执行的待办事项，每个都带有详细提示词和推荐的工具配置
-- **一键启动** — 点击待办事项旁的 ▶ 按钮，立即打开一个预填任务提示词并开启相应工具的新对话（搜索、代码、浏览器、项目等）
-- **待办自动继承** — 未完成的待办事项会自动顺延到第二天作为"今日待办"；LLM 会追踪哪些已完成并自动标记
-- **手动添加待办** — 通过底部的 ＋ 输入框添加自定义待办事项；可标记完成/未完成、删除或启动为新对话
-- **费用追踪** — 按天和按对话的费用明细（人民币），根据 token 用量和模型定价计算
-- **自动回填** — 后台调度器在服务器启动时和每天午夜自动生成昨天的报告（如缺失）
-- **每日小语** — 每份报告顶部随机显示一句励志小语（"人生苦短，我用 AI" 🧈）
-
-### 定时任务
-
-- **主动代理调度器** — 通过对话或调度器面板创建类 cron 定时或一次性任务（Shell、Python、LLM 提示词）
-- **SCHEDULER 徽章** — 显示在顶部状态栏；点击可查看所有活跃的主动代理及其最近运行日志
-- 通过工具子菜单中的 🕐 **定时任务** 开关启用
-
-### 🔀 CLI 后端切换（新功能）
-
-在 **Tofu 内置智能体**、**Claude Code** 和 **OpenAI Codex** 之间自由切换编码智能体后端 — 直接在 UI 中操作。
-
-- **纯前端模式** — 使用 Claude Code 或 Codex 时，Tofu 仅作为 Web UI；外部 CLI 使用自己的认证处理所有 LLM 调用、工具执行和上下文管理
-- **零配置** — 安装 CLI，在终端登录一次，Tofu 自动检测
-- **能力驱动的 UI** — 界面自动适配：使用外部后端时，模型选择器、思维深度、Tofu 专属功能（图片生成、浏览器、集群…）自动隐藏
-- **会话持久化** — 通过后端会话 ID 映射，多轮对话在页面刷新后保持连贯
-- **一键切换** — 点击顶部栏的后端选择器即可切换；每个对话记忆其使用的后端
-
-### 更多特性
-
-- **技能系统** — 持久化的可复用知识（Markdown 文件）—— 助手跨会话学习项目规范、Bug 模式和工作流
-- **3 层上下文压缩** — 微压缩 → 结构化截断 → LLM 摘要，适用于超长对话
-- **IndexedDB 缓存** — 读穿式对话缓存，LRU 淘汰策略，页面加载更快
-- **错误追踪** — 通用项目错误追踪器，支持指纹识别、解决状态追踪和摘要报告
-- **暗色主题 UI**，响应式布局，语法高亮，LaTeX 渲染，图片预览
-- **跨平台** — 支持 Linux、macOS 和 Windows（详见[平台支持](#平台支持)）
-- **移动端适配** — 响应式布局，精简顶栏，侧滑菜单，底部弹出工具面板，触屏友好
-- **自动依赖修复** — `bootstrap.py` 通过 LLM 诊断自动安装缺失的 pip 包
+一切都运行在你自己的机器上，数据不会离开你的基础设施。`python server.py`，开箱即用。
 
 ---
 
 ## 快速开始
 
-### 方式 A：一键安装（推荐）
-
-支持 **Linux**、**macOS** 和 **Windows**。只需 Python 3.10+ 和 Git — 无需 conda，无需管理员权限。
+### 一键安装（推荐）
 
 **Linux / macOS：**
 ```bash
@@ -142,67 +44,58 @@ curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh | bas
 irm https://raw.githubusercontent.com/rangehow/ToFu/main/install.ps1 | iex
 ```
 
-**或直接运行跨平台安装器**（任何安装了 Python 3.10+ 的系统）：
+**或直接用 Python**（任何装有 Python 3.10+ 的系统）：
 ```bash
 git clone https://github.com/rangehow/ToFu.git && cd ToFu
 python install.py
 ```
 
-自动完成：创建虚拟环境、安装所有依赖、定位/安装 PostgreSQL、启动服务器。就绪后打开 **http://localhost:15000**。
+安装脚本会自动创建虚拟环境、安装依赖、初始化 PostgreSQL 并启动服务器。就绪后打开 **http://localhost:15000**。
 
-**带参数：**
 ```bash
-python install.py --api-key sk-xxx --port 8080   # 预配置 API Key
-python install.py --no-launch                     # 仅安装不启动
-python install.py --docker                        # 使用 Docker
-python install.py --skip-playwright               # 跳过浏览器自动化
+# 预配置 API 密钥和端口
+python install.py --api-key sk-xxx --port 8080
+
+# 仅安装，不启动
+python install.py --no-launch
+
+# 用 Docker 安装
+python install.py --docker
 ```
 
-### 方式 B：Docker（零依赖）
+### Docker（零依赖）
 
 ```bash
 git clone https://github.com/rangehow/ToFu.git && cd ToFu
 docker compose up -d
 ```
 
-或直接拉取镜像（镜像发布后）：
-```bash
-docker run -d -p 15000:15000 -v tofu-data:/app/data --name tofu ghcr.io/rangehow/tofu:latest
-```
-
-打开 **http://localhost:15000** — 搞定。所有数据通过 Docker volume 持久化。
-
-### 方式 C：手动安装
+打开 **http://localhost:15000** —— 搞定。所有数据通过 Docker volume 持久化。
 
 <details>
-<summary>逐步操作，完全控制</summary>
+<summary><strong>手动安装</strong>（完全控制）</summary>
 
-**前提条件：** Python 3.10+，PostgreSQL 18+，ripgrep 和 fd-find（推荐）
+**前提条件：** Python 3.10+，PostgreSQL 18+，ripgrep & fd-find（推荐）
 
 ```bash
-git clone https://github.com/rangehow/ToFu.git
-cd ToFu
+git clone https://github.com/rangehow/ToFu.git && cd ToFu
 
-# 创建环境（任选其一）
-python -m venv .venv && source .venv/bin/activate   # 标准 venv
-# 或者: conda create -n tofu python=3.12 -y && conda activate tofu
+# 创建环境
+python -m venv .venv && source .venv/bin/activate
 
 # 安装 PostgreSQL（如尚未安装）
 # macOS:   brew install postgresql@18
 # Ubuntu:  sudo apt install postgresql
-# Windows: https://www.postgresql.org/download/windows/
 # conda:   conda install -c conda-forge postgresql>=18
 
-# 安装 ripgrep 和 fd-find（推荐 — 代码搜索和文件查找加速）
+# 安装 ripgrep & fd-find（推荐 — 代码搜索更快）
 # macOS:   brew install ripgrep fd
 # Ubuntu:  sudo apt install ripgrep fd-find
-# Windows: winget install BurntSushi.ripgrep.MSVC sharkdp.fd
-# conda:   conda install -c conda-forge ripgrep fd-find
 
-# 安装 Python 依赖
+# 安装依赖
 pip install -r requirements.txt
 
-# 可选：浏览器自动化（高级网页抓取）
+# 可选：浏览器自动化
 pip install playwright && playwright install chromium
 
 # 启动
@@ -211,104 +104,347 @@ python server.py
 
 </details>
 
-在浏览器中打开 **http://localhost:15000** — 就这么简单！所有配置都可以在设置界面中完成。
+> **PostgreSQL** 以本地用户态进程运行 —— 无需 `sudo`，无需系统服务。首次启动时数据库自动初始化（initdb、建表、端口选择）。
 
-> **PostgreSQL** 以本地用户态进程运行 — 无需 `sudo`，无需系统服务。
-> 首次运行 `python server.py` 时，数据库会自动初始化（`initdb`、建表、端口选择）。
-
-#### 自动依赖修复
-
-如果缺少任何 Python 包，`server.py` 会自动委托给 `bootstrap.py` 处理：
-
-1. 检测到 `ImportError`，移交给 `bootstrap.py`
-2. 在相同端口打开一个实时状态页面
-3. LLM API 诊断错误堆栈，确定需要安装哪些包
-4. 自动执行 `pip install`，最多重试 10 轮
-5. 所有依赖解决后，正式服务器启动
-
-此过程仅使用 Python 标准库 — 即使*所有* pip 包都缺失也能正常工作。
+> **缺少依赖？** 如果有任何 pip 包缺失，`server.py` 会自动委托给 `bootstrap.py`，通过 LLM 诊断错误并自动 `pip install` 所需的包 —— 即使*所有*依赖都缺失也能工作。
 
 ---
 
-## 配置
+## 连接你的大模型
 
-**所有配置都通过设置界面完成** — 点击聊天界面右上角的 ⚙️ 齿轮图标即可打开。更改会即时保存到服务器，无需重启（除非特别说明）。
+<p align="center">
+  <img src="propaganda/providersetting.jpg" width="700" alt="服务商设置" />
+</p>
 
-设置面板包含 **7 个选项卡**，每个在左侧边栏都有专属图标：
+点击 **⚙️ 设置 → 🔗 服务商**，添加你的 API 密钥。Tofu 支持任何 OpenAI 兼容的 API：
 
-### ⚙️ 通用
+| 服务商 | 配置方式 |
+|---|---|
+| OpenAI、Anthropic、Google Gemini、DeepSeek、Qwen、MiniMax、GLM、Doubao、Mistral、Grok、百度千帆、OpenRouter | 点击 **⚡ 从模板添加** —— 一键完成 |
+| Ollama、vLLM 或任何本地模型服务 | 添加为自定义服务商，填入你的本地端点 |
+| Azure OpenAI | 模板可用，填入部署专属的 Base URL |
 
-核心模型参数和全局偏好设置。
+**同一服务商多个密钥** —— 添加多个 API 密钥，当某个密钥触发限速时自动轮换到下一个。跨服务商的智能调度器会根据实时延迟评分和错误率追踪来路由请求。
 
-- **主题** — 暗色、亮色或豆腐（Tofu）主题
-- **温度 (Temperature)** — 控制回复随机性（0 = 确定性，1 = 创意性）
-- **最大 Token 数** — 输出 token 上限
-- **图片最大宽度** — 自动压缩上传的图片（0 = 不压缩）
-- **PDF 最大页数** — 解析 PDF 时的页数限制
-- **思维深度** — 新对话的默认思维预算（关闭 / 中等 / 深度 / 最大）
-- **系统提示词** — 自定义指令，会添加在每次对话之前
-
-### 🔗 服务商
-
-多服务商 API 管理 — 在此添加你的 LLM API 密钥。
-
-- **⚡ 从模板添加** — 一键配置 OpenAI、Anthropic、Google Gemini、DeepSeek、Qwen、MiniMax、GLM、Doubao、Mistral、Grok、百度千帆、OpenRouter、Azure、Ollama 等
-- **自定义服务商** — 添加任何 OpenAI 兼容的端点和自定义 Base URL
-- **按服务商配置** — 每个服务商有独立的 API 密钥、Base URL 和模型列表
-- **自动发现模型** — 从服务商的 `/v1/models` 端点自动获取可用模型
-- **多密钥轮转** — 每个服务商可添加多个 API 密钥，自动进行限速轮转
-
-### 📦 显示
-
-控制模型选择器和图片生成选择器中显示的内容。
-
-- **图片生成模型** — 在图片生成选择器中显示/隐藏特定模型
-- **模型下拉列表** — 在主聊天模型切换器中显示/隐藏模型
-- **回退模型** — 主模型请求失败时自动切换到此模型
-- **默认模型** — 覆盖新对话的默认模型
-
-### 🔍 搜索与抓取
-
-网页搜索和内容抓取行为。
-
-- **LLM 内容过滤** — 使用模型过滤抓取页面中的导航栏/广告（关闭可加速抓取）
-- **抓取前 N 条** — 搜索后自动抓取排名靠前的网页数量（默认：6）
-- **抓取超时** — 每页超时秒数（默认：15）
-- **最大字符数** — 分别设置搜索结果、直接抓取 URL 和 PDF 文件的字符限制
-- **最大下载大小** — 抓取内容的字节上限（默认：20 MB）
-- **屏蔽域名** — 抓取器永远不会访问的域名（每行一个）
-
-### 🌐 网络
-
-所有出站请求的代理配置。
-
-- **HTTP / HTTPS 代理** — 用于 LLM API 调用、搜索和网页抓取的代理 URL
-- **不代理域名** — 完全绕过代理的域名后缀（每行一个，后缀匹配）
-- 💡 **提示**：如果你的企业/VPN 代理会静默断开 SSE 长连接导致 `BrokenPipeError`，请在此添加你的 LLM API 域名
-
-### 🐦 飞书 (Lark)
-
-飞书机器人集成设置。
-
-- **连接状态** — 实时显示机器人连接状态的指示灯
-- **App ID / App Secret** — 从 [open.feishu.cn](https://open.feishu.cn/app) 获取的凭证（修改后需重启服务器）
-- **默认项目路径** — 飞书对话中项目协作的根目录
-- **工作空间根目录** — 用于项目切换的基础目录
-- **允许的用户** — 限制特定飞书用户 ID 使用机器人（留空 = 允许所有人）
-
-### `</>` 高级
-
-定价和缓存管理。
-
-- **价格覆盖** — 以 JSON 格式自定义按模型定价（美元/每百万 token）
-- **本地缓存** — 查看 IndexedDB 缓存统计并清除缓存的对话
-- **服务器信息** — 服务器状态和版本信息
+或者通过环境变量配置（适用于无界面/Docker 部署）：
+```bash
+export LLM_API_KEY=sk-xxx
+export LLM_BASE_URL=https://api.openai.com/v1
+export LLM_MODEL=gpt-4o
+```
 
 ---
 
-### 环境变量（备用方式）
+## 功能详解
 
-在首次安装、无界面服务器或 Docker 部署时，你也可以通过环境变量进行配置。**设置界面始终优先** — 环境变量仅作为初始备用值。
+### 💬 与任何模型对话
+
+<p align="center">
+  <img src="propaganda/chatinner.jpg" width="700" alt="对话界面" />
+</p>
+
+核心体验：从下拉菜单选择模型，输入消息，获得流式回复。但 Tofu 远不止一个基础对话框。
+
+**想用不同模型试同一个问题？** 随时在对话中切换模型。每条消息都记住了生成它的模型，方便你自然地对比输出。你还可以对任意助手回复进行分支，用不同模型或参数探索替代答案，所有分支都在同一个对话线程中。
+
+**用中文提问但需要英文资料？** 开启按对话的自动翻译。你的中文问题会被翻译成英文发给模型，英文回复再翻译回中文。原文始终保留，点击即可切换查看。
+
+**对话太长，上下文快爆了？** Tofu 的 3 层上下文压缩流水线自动处理：
+1. **微压缩**（零成本）：旧的工具调用结果被替换为摘要，只保留最近的"热尾巴"
+2. **结构化截断**：思考过程块、过大的参数、冗余截图被裁剪
+3. **LLM 摘要**（强制触发）：当上下文压力过高时，一个廉价模型评估每轮对话的相关性并据此压缩
+
+**想整理你的对话？** 在侧边栏创建文件夹来分组相关对话。可以在文件夹之间拖拽，也可以不归类。
+
+---
+
+### 🔍 网页搜索与内容抓取
+
+当助手需要实时信息 —— 今天的新闻、文档更新、API 参考 —— 它可以搜索网页并阅读页面。
+
+**工作原理：** 在工具栏启用 🔍 开关。助手会并行搜索多个引擎（DuckDuckGo、Brave、Bing、SearXNG），去重后抓取最相关的页面。可选的 LLM 内容过滤器会自动去除导航栏、广告和模板代码。
+
+**直接粘贴 URL？** 助手直接抓取，支持 HTML、PDF 和纯文本。如果页面需要登录认证，使用浏览器插件代替（见下文）。
+
+**配置** —— 在 **设置 → 🔍 搜索与抓取** 中：
+- 自动抓取的结果数量（默认：6）
+- 每页超时和最大字符数
+- 屏蔽域名列表
+- 是否启用 LLM 内容过滤（关闭可加速）
+
+---
+
+### 🛠️ 工具调用与自主智能体
+
+这是 Tofu 超越普通聊天机器人的地方。启用工具后，助手可以自主执行多步操作 —— 搜索网页、运行代码、编辑文件、生成图片 —— 将这些串联起来解决复杂任务。
+
+**内置工具：**
+| 工具 | 功能 |
+|---|---|
+| `web_search` | 搜索网页（多引擎并行） |
+| `fetch_url` | 读取任意 URL（HTML、PDF、纯文本） |
+| `run_command` | 执行 Shell 命令 |
+| `generate_image` | 创建或编辑图片（Gemini、GPT-image） |
+| `ask_human` | 任务中途暂停并向你提问 |
+| `list_conversations` / `get_conversation` | 引用过往对话 |
+| `create_memory` / `update_memory` / `delete_memory` | 保存知识供未来使用 |
+| `check_error_logs` / `resolve_error` | 检查和解决项目日志中的错误 |
+| 浏览器工具 | 操控你的浏览器（通过插件） |
+| 桌面工具 | 操控你的本地机器（通过代理） |
+| 项目工具 | 浏览、搜索、编辑任意代码库 |
+| 定时任务工具 | 创建周期性自动化任务 |
+| Swarm 工具 | 启动并行子智能体 |
+
+**需要基于实时数据的快速回答？** —— "英伟达今天的股价是多少？"助手搜索、抓取相关页面并回答。
+
+**需要多步骤工作流？** —— "调研排名前 5 的 React 状态管理库，做个对比，写一份推荐文档。"助手会规划步骤、执行搜索、阅读文档并综合结果 —— 全程自主完成。
+
+**任务太复杂，一次搞不定？** —— 启用 **终端模式**（Planner → Worker → Critic）。规划者将你的需求改写为结构化简报并附上验收标准，执行者执行，审查者对照清单审查。如果结果不通过，审查者提反馈让执行者迭代 —— 最多 10 轮。
+
+**出错了怎么办？** —— 助手会以指数退避策略自动重试。如果主模型完全失败，它会自动切换到配置的备选模型继续执行。
+
+---
+
+### 💻 项目协作（Co-Pilot）
+
+将 Tofu 指向任意代码库，它就变成了一个能读取、搜索、编辑和执行命令的编程助手。
+
+**开始使用：** 点击侧边栏的 **Project**，输入代码库路径（例如 `/home/you/myproject`）。助手将获得以下工具：
+
+| 工具 | 功能 |
+|---|---|
+| `list_dir` | 浏览目录结构，含文件大小和行数 |
+| `read_files` | 读取文件（支持图片、PDF、Office 文档、代码 —— 带行号） |
+| `grep_search` | 使用 ripgrep 跨文件搜索（正则、上下文行、计数模式） |
+| `find_files` | 按通配符模式查找文件 |
+| `write_file` | 创建或覆盖文件 |
+| `apply_diff` | 精确的搜索替换编辑（支持批量多文件编辑） |
+| `insert_content` | 在锚点前后添加代码，不替换原内容 |
+| `run_command` | 在项目目录中执行 Shell 命令 |
+
+**想快速了解一个新代码库？** —— "给我概述一下这个项目的架构。"助手会浏览目录树、阅读关键文件，梳理出整体结构。
+
+**需要修 Bug？** —— "登录页提交后白屏了。"助手会 grep 相关代码、阅读组件、定位问题，然后用 `apply_diff` 修复。
+
+**想安全地实验？** —— 每次文件修改都按对话跟踪，支持完整撤销。点击撤销按钮即可回滚助手做的任何改动。
+
+**多项目根目录** —— 可添加多个目录作为根（例如前端 + 后端仓库）。助手通过命名空间在所有根目录之间解析路径。
+
+**智能 Token 管理** —— `content_ref` 机制让助手可以将之前的工具结果直接写入文件而无需重新生成，`emit_to_user` 让助手指向已有的工具输出而非重复它。这在处理大文件时能节省大量 Token。
+
+---
+
+### 🤖 多智能体集群（Swarm）
+
+有些任务大到单个智能体难以胜任。Swarm 系统让一个主编排器规划子任务，并将它们分派给并行运行的专家智能体。
+
+**什么时候用：** "把这个微服务拆分成 3 个独立服务，更新 API 文档，写迁移脚本。"与其让一个智能体按顺序做完所有事，主编排器会为每个子任务启动并行智能体。
+
+**工作原理：**
+1. 主 LLM 规划子任务并分配角色（编码者、研究者、写作者、审查者……）
+2. **流式 DAG 调度器**在依赖完成后立即启动智能体 —— 不等待整波完成
+3. 智能体通过**产出物仓库**（所有智能体可见的键值对）共享数据
+4. 智能体完成后，主编排器审查结果并可启动后续智能体
+5. 最终结果被综合为连贯的输出
+
+**智能体角色** —— 每个智能体获得角色专属的系统提示词、模型层级和限定的工具访问权限。"研究者"有搜索工具；"编码者"有项目工具；"审查者"只有只读权限。
+
+**限速** —— 共享信号量防止智能体用并发请求压垮 LLM API。遇到 429 错误时自动指数退避。
+
+---
+
+### 🔀 CLI 后端切换
+
+已经在用 **Claude Code** 或 **OpenAI Codex**？Tofu 可以作为它们的纯 Web 前端 —— 你获得 Tofu 的 UI、对话管理和持久化，而外部 CLI 用自己的认证处理所有 LLM 调用和工具执行。
+
+**安装：**
+```bash
+# 安装 Claude Code
+npm install -g @anthropic-ai/claude-code && claude auth login
+
+# 或安装 Codex
+npm install -g @openai/codex && codex auth login
+```
+
+点击顶栏的**后端选择器**（🤖）即可切换。UI 会自动适配 —— 使用外部后端时，模型选择器和 Tofu 专属功能自动隐藏。
+
+| 功能 | 内置 (Tofu) | Claude Code | Codex |
+|------|:-:|:-:|:-:|
+| 对话与流式输出 | ✅ | ✅ | ✅ |
+| 网页搜索 | ✅ | ✅ (CC 自带) | ✅ (Codex 自带) |
+| 文件操作 | ✅ | ✅ (CC 自带) | ✅ (Codex 自带) |
+| 代码执行 | ✅ | ✅ (Bash) | ✅ (exec) |
+| 模型选择 | ✅ | — | — |
+| 图片生成 | ✅ | ❌ | ❌ |
+| 浏览器插件 | ✅ | ❌ | ❌ |
+| 多智能体集群 | ✅ | ❌ | ❌ |
+
+> CLI 必须安装在与 Tofu 服务器同一台机器上。每个对话会记住它使用的后端。
+
+---
+
+### 🌐 浏览器插件
+
+当你需要助手阅读登录后才能看的页面 —— 内部仪表盘、JIRA 工单、需要认证的管理后台 —— 浏览器插件可以桥接你真实的浏览器会话到 Tofu。
+
+**安装：**
+1. 打开 `chrome://extensions` → 启用开发者模式
+2. 加载已解压的扩展程序 → 选择 `browser_extension/` 目录
+3. 点击插件图标 → 输入你的 Tofu 服务器地址
+
+**可以做什么：**
+
+| 工具 | 用途 |
+|---|---|
+| `browser_list_tabs` | 查看你所有打开的标签页 |
+| `browser_read_tab` | 提取文本内容（可选 CSS 选择器） |
+| `browser_screenshot` | 截取页面截图 |
+| `browser_navigate` | 打开一个 URL |
+| `browser_click` | 通过选择器或文本点击元素 |
+| `browser_type` | 在输入框中输入文字 |
+| `browser_execute_js` | 运行自定义 JavaScript 提取数据 |
+| `browser_get_interactive_elements` | 发现可点击/可输入的元素 |
+| `browser_get_app_state` | 访问 Vue/React 内部状态 |
+
+**页面使用 Canvas/SVG 渲染（图表、DAG 图等）？** DOM 文本提取会返回空内容。用 `browser_screenshot` 做视觉分析，`browser_get_app_state` 获取数据，或 `browser_execute_js` 自定义提取。
+
+**多个浏览器**可以同时连接，拥有独立的命令队列 —— 适合你有工作和个人不同浏览器配置文件的场景。
+
+---
+
+### 🖥️ 桌面代理
+
+当你需要助手超越浏览器与本地机器交互 —— 全屏截图、读写本地文件、自动化 GUI 点击、管理剪贴板。
+
+**安装：**
+```bash
+pip install pyautogui pillow psutil
+python lib/desktop_agent.py --server http://your-server:15000 --allow-write --allow-exec
+```
+
+代理连接到你的 Tofu 服务器，提供文件操作、剪贴板、截图、GUI 自动化（pyautogui）和系统信息等工具。所有危险操作需要显式启用 `--allow-write` / `--allow-exec` 标志。
+
+---
+
+### 🖼️ 图片生成
+
+当你需要视觉内容 —— 插图、图表、Logo、修图 —— 助手可以在对话中直接生成图片。
+
+**使用方法：** 在工具栏启用 🖼️ 开关，然后描述你想要的内容。助手会调用 `generate_image` 并附上详细提示词。
+
+- **从零创建** —— "画一个极简风格的山与日出 Logo"
+- **编辑已有图片** —— 上传一张图片并说"把背景换成海滩日落"
+- **保存到项目** —— 指定 `output_path` 直接保存到代码库中
+- **SVG 转换** —— 添加 `svg: true` 自动将生成的 PNG 转换为可缩放矢量图
+
+多模型调度在 Gemini 和 GPT 图片模型之间轮转，遇到限速自动重试。
+
+---
+
+### 🔗 MCP（模型上下文协议）
+
+当你想连接外部工具服务器 —— GitHub、数据库、自定义 API —— MCP 可以把它们桥接到 Tofu 的工具系统中。
+
+**工作原理：** MCP 服务器作为子进程运行，通过 stdio/SSE（JSON-RPC 2.0）通信。Tofu 将它们的工具翻译成 OpenAI function-calling 格式，让 LLM 可以像使用原生工具一样发现和调用它们。
+
+**配置：** 在 **设置** 中或编辑 `data/config/mcp_servers.json`：
+```json
+{
+  "github": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-github"],
+    "env": { "GITHUB_TOKEN": "ghp_xxx" }
+  }
+}
+```
+
+之后助手就可以调用 `mcp__github__create_issue`、`mcp__github__search_code` 等工具 —— 任何 MCP 兼容的服务器都能接入。
+
+---
+
+### ☑️ 每日报告与 My Day
+
+点击侧边栏的 **☑️ My Day** 按钮，打开你的个人工作日志 —— 一个由 LLM 驱动的每日看板。
+
+**想看看今天完成了什么？** —— LLM 阅读当天所有对话，将它们聚类为 5–15 个连贯的工作流（如"修复图片渲染 Bug"、"部署测试环境"），标记为*已完成*、*进行中*或*被阻塞*。
+
+**需要明天的计划？** —— LLM 从未完成的工作中综合出 3–8 个可执行的待办事项，每个都附有详细提示词和推荐的工具配置。点击 ▶ 即可将任何待办启动为新对话，预填好内容、开好工具，直接干活。
+
+**日历视图** —— 月度总览，显示每天的对话数量和费用热力图。点击任意日期查看或生成当天报告。
+
+**待办管理** —— 未完成的待办自动顺延到第二天。可手动添加待办、切换完成状态，或启动为新对话。费用追踪显示每天和每个对话的花费（人民币）。
+
+**自动回填** —— 后台调度器在服务器启动时和每天午夜自动生成昨天的报告（如缺失）。
+
+---
+
+### 🕐 定时任务
+
+当你需要自动执行的任务 —— 每日数据拉取、周期性健康检查、定期报告 —— 创建一个按计划运行的主动代理。
+
+**使用方法：** 启用 🕐 定时任务开关，然后说："每 6 小时对我的 API 做一次健康检查"或"每天早上 9 点总结一下昨晚的 GitHub issues。"助手会创建一个类 cron 的定时任务。
+
+**任务类型：** Shell 命令、Python 脚本或 LLM 提示词 —— 都可以使用完整的工具集。
+
+**管理任务：** 点击顶部状态栏的 **SCHEDULER** 徽章，查看所有活跃的主动代理和最近的运行日志。
+
+---
+
+### 🐦 飞书（Lark）机器人
+
+当你的团队在飞书中沟通，希望直接在群聊里使用 AI 助手 —— Tofu 通过 WebSocket 连接为飞书机器人。
+
+**配置：**
+1. 在 [open.feishu.cn](https://open.feishu.cn/app) 创建应用，启用机器人能力
+2. 打开 **设置 → 🐦 飞书** → 输入 App ID 和 App Secret
+3. 重启服务器后机器人自动连接
+
+**功能：** 支持完整工具调用（搜索、代码、项目）的多轮对话，斜杠命令切换模型/模式，对话管理 —— 全部在飞书原生聊天界面中完成。
+
+---
+
+### 🧠 记忆系统
+
+当助手发现了有用的东西 —— 一个 Bug 模式、一个项目规范、你偏好的编码风格 —— 它可以把这些知识保存为**记忆**，供未来的会话使用。
+
+**工作原理：** 记忆以 Markdown 文件形式存储在 `.chatui/skills/`（项目级）或 `.chatui/skills/global/`（全局）。助手会主动创建记忆，你也可以要求它创建。在之后的对话中，相关的记忆会自动加载到上下文中。
+
+**工具：** `create_memory`、`update_memory`、`delete_memory`、`merge_memories` —— 助手跨会话管理自己的知识库。
+
+**使用场景：** "记住我们的 API 总是返回 snake_case。" —— 助手保存这个规范，并在以后为这个项目生成代码时自动应用。
+
+---
+
+### 🔀 对话分支
+
+当你想探索不同方向又不想丢失当前的对话线索 —— 对任意助手回复进行分支。
+
+**工作原理：** 点击任意助手消息上的分支图标。一个新分支在行内打开，从该节点开始拥有独立的历史记录。多个分支可以同时流式输出。每个分支可以使用不同的模型或参数。
+
+**使用场景：**
+- 对比不同模型对同一问题的回答
+- 尝试另一种方案又不丢失当前进度
+- 让一个分支做调研，另一个分支做实现
+
+---
+
+## 设置参考
+
+所有配置通过 **⚙️ 设置** 面板完成（右上角齿轮图标）。更改即时保存，无需重启。
+
+| 选项卡 | 配置内容 |
+|---|---|
+| **⚙️ 通用** | 主题（暗色/亮色/豆腐）、温度、最大 Token 数、思维深度、系统提示词 |
+| **🔗 服务商** | API 密钥、端点、模型列表、多密钥轮换、自动发现 |
+| **📦 显示** | 下拉列表中显示哪些模型、默认模型、备选模型 |
+| **🔍 搜索与抓取** | 结果数量、超时、字符限制、屏蔽域名、内容过滤 |
+| **🌐 网络** | HTTP/HTTPS 代理、代理绕过域名 |
+| **🐦 飞书** | 应用凭证、默认项目路径、允许的用户 |
+| **`</>` 高级** | 价格覆盖、缓存管理、服务器信息 |
+
+### 环境变量（备用）
+
+对于无界面/Docker 部署，可通过环境变量配置。设置界面始终优先。
 
 ```bash
 cp .env.example .env
@@ -316,17 +452,11 @@ cp .env.example .env
 
 | 变量 | 说明 | 示例 |
 |---|---|---|
-| `LLM_API_KEY` | LLM 服务商 API 密钥（备用） | `sk-abc123...` |
-| `LLM_BASE_URL` | Chat Completions 端点（备用） | `https://api.openai.com/v1` |
+| `LLM_API_KEY` | API 密钥（备用） | `sk-abc123...` |
+| `LLM_BASE_URL` | 端点（备用） | `https://api.openai.com/v1` |
 | `LLM_MODEL` | 默认模型（备用） | `gpt-4o` |
 | `PORT` | 服务器端口 | `15000` |
 | `BIND_HOST` | 绑定地址 | `0.0.0.0` |
-| `PROXY_BYPASS_DOMAINS` | 逗号分隔的代理绕过域名 | `.corp.net,.internal.com` |
-| `FEISHU_APP_ID` | 飞书机器人 App ID | `cli_xxxx` |
-| `FEISHU_APP_SECRET` | 飞书机器人 App Secret | |
-
-> 💡 **首次启动后，我们建议通过设置界面完成所有配置。**
-> 它更直观、更改立即生效，并且支持服务商模板和模型自动发现等环境变量无法提供的功能。
 
 ---
 
@@ -336,153 +466,52 @@ cp .env.example .env
 ├── server.py                  Flask 应用入口，中间件，日志
 ├── bootstrap.py               自动依赖修复（LLM 引导）
 ├── index.html                 主聊天 UI（单页应用）
-├── .env.example               环境变量模板
 │
 ├── lib/                       核心库
-│   ├── agent_backends/        多后端智能体切换（内置/CC/Codex）
+│   ├── agent_backends/        CLI 后端切换（内置/Claude Code/Codex）
 │   ├── llm_client.py          LLM API 客户端（流式，重试）
-│   ├── llm_dispatch/          多密钥多模型调度器
-│   ├── database.py            PostgreSQL（自动初始化）
-│   ├── tasks_pkg/             任务编排与压缩
+│   ├── llm_dispatch/          多密钥多模型智能调度器
+│   ├── database/              PostgreSQL（自动初始化，迁移）
+│   ├── tasks_pkg/             任务编排与上下文压缩
 │   │   ├── orchestrator.py    LLM ↔ 工具主循环
 │   │   ├── executor.py        工具执行引擎
 │   │   ├── endpoint.py        Planner → Worker → Critic 循环
 │   │   └── compaction.py      3 层上下文压缩
-│   ├── tools/                 工具定义与 schema
+│   ├── tools/                 工具定义与 Schema
 │   ├── swarm/                 多智能体编排
 │   ├── fetch/                 内容抓取与提取
 │   ├── search/                多引擎网页搜索
 │   ├── browser/               浏览器插件桥接
 │   ├── project_mod/           项目协作（扫描、编辑、撤销）
-│   ├── skills/                技能积累系统
+│   ├── memory/                记忆积累系统
+│   ├── mcp/                   模型上下文协议桥接
 │   ├── feishu/                飞书机器人集成
+│   ├── scheduler/             任务调度（cron、主动代理）
+│   ├── image_gen.py           图片生成（多模型调度）
+│   ├── desktop_agent.py       桌面自动化代理
 │   └── ...
 │
-├── routes/                    Flask 蓝图（21 个模块）
+├── routes/                    Flask 蓝图（21 个 API 模块）
 ├── static/                    CSS、JS、图标
-├── browser_extension/         Chrome 插件（MV3）
+├── browser_extension/         Chrome 插件（Manifest V3）
 ├── tests/                     测试套件（单元、API、E2E）
 └── data/                      运行时数据（已加入 .gitignore）
 ```
 
 ---
 
-## 高级用法
-
-### CLI 后端切换 — Claude Code / Codex
-
-Tofu 可以作为外部编码智能体的纯 Web 前端。无需使用 Tofu 内置的编排器，你可以委托给 **Claude Code** 或 **OpenAI Codex** — 它们使用自己的认证处理 LLM 调用、工具执行和上下文管理。
-
-#### 安装 Claude Code
-
-```bash
-# 通过 npm 安装
-npm install -g @anthropic-ai/claude-code
-
-# 登录（仅需一次）
-claude auth login
-# 按浏览器提示用你的 Claude 账号认证
-
-# 验证
-claude --version
-```
-
-#### 安装 Codex
-
-```bash
-# 通过 npm 安装
-npm install -g @openai/codex
-
-# 登录（仅需一次）— 需要 OpenAI API key 或 ChatGPT Plus 订阅
-codex auth login
-
-# 验证
-codex --version
-```
-
-#### 在 Tofu 中使用
-
-1. 启动 Tofu：`python server.py`
-2. 点击顶部栏的**后端选择器**（🤖）
-3. 可用的后端显示 ✅ 标志，不可用的显示 ❌
-4. 选择 **Claude Code** 或 **Codex** — UI 自动适配：
-   - 模型选择器、思维深度、搜索开关自动隐藏（CLI 自行处理）
-   - Tofu 专属功能（图片生成、浏览器插件、集群、定时任务）置灰
-5. 发送消息 — Tofu 启动 CLI 子进程，流式输出并渲染在聊天界面中
-
-#### 各后端功能对比
-
-| 功能 | 内置 (Tofu) | Claude Code | Codex |
-|------|:-:|:-:|:-:|
-| 对话与流式输出 | ✅ | ✅ | ✅ |
-| 网页搜索 | ✅ | ✅ (CC 自带) | ✅ (Codex 自带) |
-| 文件操作 | ✅ | ✅ (CC 自带) | ✅ (Codex 自带) |
-| 代码执行 | ✅ | ✅ (Bash) | ✅ (exec) |
-| 模型选择 | ✅ | — (CC 决定) | — (Codex 决定) |
-| 图片生成 | ✅ | ❌ | ❌ |
-| 浏览器插件 | ✅ | ❌ | ❌ |
-| 多智能体集群 | ✅ | ❌ | ❌ |
-| 桌面代理 | ✅ | ❌ | ❌ |
-
-> **注意**：CLI 必须安装在与 Tofu 服务器**同一台机器**上。Tofu 通过子进程启动智能体。
-
-### 项目协作
-
-点击侧边栏中的 **Project**，输入任意代码库的路径。助手可以浏览文件、搜索代码、编辑文件、执行命令，并支持按轮次撤销修改。
-
-### 多智能体集群
-
-面对复杂任务时，助手会自动规划子任务并分发给多个并行运行的专家智能体。结果会经过审查并综合为连贯的最终输出。
-
-### 浏览器插件
-
-1. 打开 `chrome://extensions` → 启用开发者模式
-2. 加载已解压的扩展程序 → 选择 `browser_extension/` 目录
-3. 点击插件图标 → 输入你的服务器 URL
-4. 助手现在可以阅读和操作你的浏览器标签页了
-
-### 桌面代理
-
-```bash
-pip install pyautogui pillow psutil
-python lib/desktop_agent.py --server http://your-server:15000 --allow-write --allow-exec
-```
-
-### 飞书机器人
-
-1. 在 [open.feishu.cn](https://open.feishu.cn/app) 创建应用，启用机器人能力
-2. 打开设置 → 🐦 飞书选项卡 → 输入 **App ID** 和 **App Secret**
-3. 重启服务器后机器人自动连接
-
-### 定时任务
-
-告诉助手"创建一个定时任务"或"设置一个每日 cron 作业"— 它会创建一个按指定时间表运行的主动代理。可以通过状态栏的 SCHEDULER 徽章管理所有任务。
-
-### 健康检查
-
-```bash
-python healthcheck.py
-```
-
----
-
 ## 平台支持
-
-Tofu 支持 **Linux**、**macOS** 和 **Windows** 运行。所有平台特定代码都隔离在 `lib/compat.py` 中。
 
 | 功能 | Linux | macOS | Windows |
 |---|:---:|:---:|:---:|
 | 核心对话与工具 | ✅ | ✅ | ✅ |
-| PostgreSQL 自动初始化 | ✅ | ✅ | ✅（PG bin/ 需在 PATH 中） |
-| 项目协作（文件工具） | ✅ | ✅ | ✅ |
-| `run_command`（基础） | ✅ | ✅ | ✅（使用 `cmd.exe`） |
-| `run_command` 交互式标准输入 | ✅（通过 `/proc`） | ❌（非交互式） | ❌（非交互式） |
-| FUSE 保活守护进程 | ✅（DolphinFS） | —（不需要） | —（不需要） |
+| PostgreSQL 自动初始化 | ✅ | ✅ | ✅ |
+| 项目协作 | ✅ | ✅ | ✅ |
+| Shell 命令 | ✅ | ✅ | ✅ (`cmd.exe`) |
 | 桌面代理 | ✅ | ✅ | ✅ |
 | 浏览器插件 | ✅ | ✅ | ✅ |
-| 危险命令拦截 | ✅（Unix + Windows 模式） | ✅ | ✅ |
 
-**烟雾测试**：`python debug/test_cross_platform.py` 可在任何平台验证兼容层。
+烟雾测试：`python debug/test_cross_platform.py`
 
 ---
 
@@ -496,17 +525,16 @@ python tests/run_all.py
 python -m pytest tests/test_backend_unit.py
 python -m pytest tests/test_api_integration.py
 python -m pytest tests/test_visual_e2e.py
-python -m pytest tests/test_db_bug_regressions.py
 ```
 
 ---
 
 ## 安全
 
-- **源码中无密钥** — 所有凭证从环境变量或设置界面加载
-- **单用户模式** — 无多租户认证；请在 VPN 或反向代理后面部署
-- **工具执行** — 助手可以运行 Shell 命令和编辑文件，请谨慎使用
-- **桌面代理** — 需要显式启用 `--allow-write` / `--allow-exec` 标志
+- **源码中无密钥** —— 所有凭证从环境变量或设置界面加载
+- **单用户模式** —— 无多租户认证；请在 VPN 或反向代理后面部署
+- **工具执行** —— 助手可以运行 Shell 命令和编辑文件；危险模式会被拦截，但请谨慎使用
+- **桌面代理** —— 需要显式启用 `--allow-write` / `--allow-exec` 标志
 
 ---
 

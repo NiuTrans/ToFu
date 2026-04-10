@@ -238,27 +238,77 @@ _CACHE_EXTRACT_LIMIT = max(_lib.FETCH_MAX_CHARS_DIRECT, _lib.FETCH_MAX_CHARS_SEA
 
 
 class _FetchCache:
-    def __init__(self, ttl=600, max_size=200):
+    """TTL-based URL content cache with LRU eviction.
+
+    Tracks hits, misses, TTL expirations, and capacity evictions for
+    diagnostic visibility. Stats accessible via ``stats`` property.
+    """
+    def __init__(self, ttl=600, max_size=200, name='fetch'):
         self._data, self._lock = {}, threading.Lock()
         self._ttl, self._max = ttl, max_size
+        self._name = name
+        # Diagnostic counters
+        self._hits = 0
+        self._misses = 0
+        self._ttl_expirations = 0
+        self._capacity_evictions = 0
+        self._puts = 0
+
     def get(self, url):
         with self._lock:
             e = self._data.get(url)
-            if e and e[1] > time.time(): return e[0]
-            self._data.pop(url, None); return None
+            if e and e[1] > time.time():
+                self._hits += 1
+                return e[0]
+            if e:
+                # Entry exists but TTL expired
+                self._ttl_expirations += 1
+                self._data.pop(url, None)
+                logger.debug('[%sCache] TTL expired for %.80s (ttl=%ds, size=%d)',
+                             self._name, url, self._ttl, len(self._data))
+            self._misses += 1
+            return None
+
     def put(self, url, content):
-        if not content: return
+        if not content:
+            return
         with self._lock:
+            self._puts += 1
             if len(self._data) >= self._max:
-                del self._data[min(self._data, key=lambda k: self._data[k][1])]
+                evicted_url = min(self._data, key=lambda k: self._data[k][1])
+                del self._data[evicted_url]
+                self._capacity_evictions += 1
+                logger.debug('[%sCache] Capacity eviction (%d/%d): %.80s',
+                             self._name, len(self._data), self._max,
+                             evicted_url)
             self._data[url] = (content, time.time() + self._ttl)
+
     @property
     def size(self):
-        with self._lock: return len(self._data)
+        with self._lock:
+            return len(self._data)
 
-_fetch_cache = _FetchCache(ttl=600, max_size=200)
+    @property
+    def stats(self):
+        """Return diagnostic stats dict."""
+        with self._lock:
+            total = self._hits + self._misses
+            return {
+                'name': self._name,
+                'size': len(self._data),
+                'max_size': self._max,
+                'ttl': self._ttl,
+                'hits': self._hits,
+                'misses': self._misses,
+                'hit_rate_pct': round(self._hits / max(total, 1) * 100),
+                'ttl_expirations': self._ttl_expirations,
+                'capacity_evictions': self._capacity_evictions,
+                'puts': self._puts,
+            }
+
+_fetch_cache = _FetchCache(ttl=600, max_size=200, name='Fetch')
 # Light cache: store raw HTML head (first 20KB) for publish-date extraction
-_html_head_cache = _FetchCache(ttl=600, max_size=300)
+_html_head_cache = _FetchCache(ttl=600, max_size=300, name='HtmlHead')
 
 
 # ═══════════════════════════════════════════════════════

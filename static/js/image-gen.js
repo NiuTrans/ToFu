@@ -123,6 +123,8 @@ function _igToast(message, type) {
 
 function enterImageGenMode() {
   if (imageGenMode) { exitImageGenMode(); return; }
+  // Exit paper mode if active (mutually exclusive)
+  if (typeof paperMode !== 'undefined' && paperMode && typeof exitPaperMode === 'function') exitPaperMode();
   _applyImageGenUI(true);
   _saveConvToolState();
   if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();

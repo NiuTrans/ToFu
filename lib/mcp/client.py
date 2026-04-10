@@ -406,7 +406,6 @@ class MCPBridge:
             handle = self._servers.get(server_name)
             if handle is None:
                 raise ValueError(f'MCP server not connected: {server_name}')
-            self._tool_index.get(namespaced_name)
 
         timeout = handle.config.get('timeout', MCP_CALL_TIMEOUT)
         logger.info('[MCP:Call] %s.%s(args=%s) timeout=%ds',

@@ -61,12 +61,26 @@ class CacheState:
     detect what changed between turns.  Does NOT hash message content
     because micro-compact legitimately mutates older messages — hashing
     content would produce false positives on every round.
+
+    Extended in v2:
+      - per_tool_hashes: per-tool hash for diffing which tool changed
+      - prefix_content_hash: hash of messages in the cache prefix
+        (only used for mutation detection, NOT for break detection)
+      - session-level aggregate stats (total reads/writes/breaks)
     """
     __slots__ = (
         'system_hash', 'tools_hash', 'model',
         'message_count', 'last_cache_read_tokens',
+        'last_cache_write_tokens',
         'last_update_time', 'call_count',
         'compaction_pending',
+        # v2: detailed diagnostics
+        'per_tool_hashes',
+        'prefix_content_hash',
+        'prefix_content_count',
+        'total_cache_read', 'total_cache_write',
+        'total_breaks', 'total_input_tokens',
+        'first_call_time',
     )
 
     def __init__(self):
@@ -75,9 +89,19 @@ class CacheState:
         self.model: str = ''
         self.message_count: int = 0
         self.last_cache_read_tokens: int = 0
+        self.last_cache_write_tokens: int = 0
         self.last_update_time: float = 0.0
         self.call_count: int = 0
         self.compaction_pending: bool = False
+        # v2 fields
+        self.per_tool_hashes: dict[str, str] = {}  # tool_name → hash
+        self.prefix_content_hash: str = ''
+        self.prefix_content_count: int = 0
+        self.total_cache_read: int = 0
+        self.total_cache_write: int = 0
+        self.total_breaks: int = 0
+        self.total_input_tokens: int = 0
+        self.first_call_time: float = 0.0
 
 
 _cache_states: dict[str, CacheState] = {}
@@ -107,7 +131,7 @@ def _hash_system_prompt(messages: list) -> str:
 
 
 def _hash_tools(tools: list | None) -> str:
-    """Hash the tool definitions."""
+    """Hash the tool definitions (aggregate)."""
     if not tools:
         return ''
     try:
@@ -115,6 +139,69 @@ def _hash_tools(tools: list | None) -> str:
     except (TypeError, ValueError) as e:
         logger.debug('[CacheTracking] Tool definitions not JSON-serializable, using str: %s', e)
         return _md5(str(tools))
+
+
+def _hash_tools_per_tool(tools: list | None) -> dict[str, str]:
+    """Hash each tool individually for per-tool diff reporting.
+
+    Returns dict of {tool_name: hash} so we can report WHICH tool(s)
+    changed when a tools hash mismatch is detected.
+    """
+    if not tools:
+        return {}
+    result = {}
+    for tool in tools:
+        fn = tool.get('function', {})
+        name = fn.get('name', 'unknown')
+        try:
+            h = _md5(json.dumps(tool, sort_keys=True, ensure_ascii=False))
+        except (TypeError, ValueError):
+            h = _md5(str(tool))
+        result[name] = h
+    return result
+
+
+def _diff_tool_hashes(
+    old_hashes: dict[str, str],
+    new_hashes: dict[str, str],
+) -> list[str]:
+    """Return list of tool names that changed, were added, or removed."""
+    changes = []
+    all_names = set(old_hashes) | set(new_hashes)
+    for name in sorted(all_names):
+        old_h = old_hashes.get(name)
+        new_h = new_hashes.get(name)
+        if old_h is None:
+            changes.append(f'+{name}')
+        elif new_h is None:
+            changes.append(f'-{name}')
+        elif old_h != new_h:
+            changes.append(f'~{name}')
+    return changes
+
+
+def _hash_prefix_content(messages: list, prefix_count: int) -> str:
+    """Hash the content of messages in the cache prefix.
+
+    This is NOT used for cache break detection (to avoid false positives
+    from micro-compact). It's used for diagnostic mutation detection:
+    if this hash changes between rounds without a compaction event,
+    something is silently mutating messages in the cached prefix.
+    """
+    if prefix_count <= 0 or not messages:
+        return ''
+    parts = []
+    for msg in messages[:prefix_count]:
+        content = msg.get('content', '')
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    parts.append(block.get('text', ''))
+        elif isinstance(content, str):
+            parts.append(content)
+        # Also include role for structural changes
+        parts.append(msg.get('role', ''))
+    return _md5(''.join(parts))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -166,12 +253,35 @@ def detect_cache_break(
         tools_hash = _hash_tools(tools)
         msg_count = len(messages)
 
+        # Per-tool hash diffing for detailed diagnostics
+        per_tool_hashes = _hash_tools_per_tool(tools)
+
+        # Prefix content mutation detection (diagnostic only)
+        # ★ FIX: Use the PREVIOUS call's prefix count for mutation comparison,
+        #   then compute a NEW prefix hash for saving.
+        #   Bug was: _prefix_count grew each round (prev.message_count - 2),
+        #   so the hash covered MORE messages than prev.prefix_content_hash,
+        #   causing false positives every round (942 in one log window!).
+        #   Fix: compare hash(messages[0:prev_prefix]) against saved hash,
+        #   then save hash(messages[0:new_prefix]) for next round.
+        _prev_prefix_count = prev.prefix_content_count if prev.call_count > 0 else 0
+        _new_prefix_count = max(0, msg_count - 2)
+        _prev_prefix_hash = _hash_prefix_content(messages, _prev_prefix_count)
+        prefix_hash = _hash_prefix_content(messages, _new_prefix_count)
+
         client_changes = {}
         if prev.call_count > 0:
             if sys_hash != prev.system_hash:
                 client_changes['system_prompt'] = 'changed'
             if tools_hash != prev.tools_hash:
-                client_changes['tools'] = 'changed'
+                # Identify exactly which tools changed
+                tool_diffs = _diff_tool_hashes(
+                    prev.per_tool_hashes, per_tool_hashes)
+                if tool_diffs:
+                    client_changes['tools'] = (
+                        f'changed: [{", ".join(tool_diffs)}]')
+                else:
+                    client_changes['tools'] = 'changed (ordering or meta)'
             if model != prev.model:
                 client_changes['model'] = f'{prev.model} → {model}'
             # Message count going DOWN indicates compaction/truncation
@@ -179,13 +289,28 @@ def detect_cache_break(
                 client_changes['message_count'] = (
                     f'{prev.message_count} → {msg_count} (compacted)')
 
+            # ★ Diagnostic: prefix content mutation detection
+            # Compare hash of the SAME range (prev prefix count) to detect
+            # if existing messages were silently mutated in-place.
+            if (_prev_prefix_hash
+                    and prev.prefix_content_hash
+                    and _prev_prefix_hash != prev.prefix_content_hash
+                    and not prev.compaction_pending):
+                logger.warning(
+                    '[CacheTrack] conv=%s call=%d ⚠ PREFIX MUTATION DETECTED: '
+                    'messages[0:%d] content hash changed without compaction. '
+                    'This will cause a cache miss. prev_hash=%s new_hash=%s',
+                    conv_id[:8], prev.call_count + 1, _prev_prefix_count,
+                    prev.prefix_content_hash[:8], _prev_prefix_hash[:8])
+
         # ── Phase 2: Check API-reported cache stats ──
         cache_read = 0
+        cache_write = 0
         if usage:
             cache_read = (usage.get('cache_read_tokens')
                           or usage.get('cache_read_input_tokens')
                           or 0)
-            (usage.get('cache_write_tokens')
+            cache_write = (usage.get('cache_write_tokens')
                            or usage.get('cache_creation_input_tokens')
                            or 0)
 
@@ -219,11 +344,26 @@ def detect_cache_break(
         # ── Update state (AFTER elapsed computation) ──
         prev.system_hash = sys_hash
         prev.tools_hash = tools_hash
+        prev.per_tool_hashes = per_tool_hashes
+        prev.prefix_content_hash = prefix_hash
         prev.model = model
         prev.message_count = msg_count
         prev.last_cache_read_tokens = cache_read
+        prev.last_cache_write_tokens = cache_write
         prev.last_update_time = now
         prev.call_count += 1
+        if not prev.first_call_time:
+            prev.first_call_time = now
+        # Accumulate session-level stats
+        prev.total_cache_read += cache_read
+        prev.total_cache_write += cache_write
+        prompt_tokens = 0
+        if usage:
+            prompt_tokens = (usage.get('prompt_tokens')
+                             or usage.get('input_tokens') or 0)
+        prev.total_input_tokens += prompt_tokens + cache_write + cache_read
+        if api_break:
+            prev.total_breaks += 1
 
         # ── Report ──
         # Only warn when the API confirms a cache break (token drop) OR
@@ -270,6 +410,36 @@ def detect_cache_break(
             )
 
     return None
+
+
+def get_session_cache_stats(conv_id: str) -> dict[str, Any] | None:
+    """Get aggregate session-level cache stats for a conversation.
+
+    Returns a dict with cumulative cache read/write tokens, break count,
+    overall hit percentage, and session duration. Returns None if no
+    state exists for this conversation.
+
+    Use this for end-of-task diagnostics to understand overall cache
+    effectiveness across the entire conversation session.
+    """
+    with _cache_lock:
+        state = _cache_states.get(conv_id)
+        if not state or state.call_count == 0:
+            return None
+        total_input = state.total_input_tokens
+        return {
+            'calls': state.call_count,
+            'total_cache_read': state.total_cache_read,
+            'total_cache_write': state.total_cache_write,
+            'total_input_tokens': total_input,
+            'overall_hit_pct': round(
+                state.total_cache_read / max(total_input, 1) * 100),
+            'total_breaks': state.total_breaks,
+            'session_duration_s': round(
+                state.last_update_time - state.first_call_time, 1)
+                if state.first_call_time else 0,
+            'model': state.model,
+        }
 
 
 def notify_compaction(conv_id: str) -> None:
@@ -493,4 +663,79 @@ def cleanup_cache_state(conv_id: str) -> None:
     inactivity to prevent unbounded memory growth.
     """
     with _cache_lock:
-        _cache_states.pop(conv_id, None)
+        removed = _cache_states.pop(conv_id, None)
+        if removed:
+            logger.debug('[CacheTrack] Cleaned up state for conv=%s '
+                         '(calls=%d, total_breaks=%d)',
+                         conv_id[:8], removed.call_count,
+                         removed.total_breaks)
+
+
+def cleanup_stale_cache_states(max_age_s: float = 3600) -> int:
+    """Remove cache states for conversations inactive longer than max_age_s.
+
+    Call periodically (e.g., every 10 minutes) to prevent unbounded
+    memory growth from long-lived server processes.
+
+    Args:
+        max_age_s: Max seconds since last update before eviction.
+                   Default 3600 (1 hour).
+
+    Returns:
+        Number of stale entries removed.
+    """
+    cutoff = time.time() - max_age_s
+    removed = 0
+    with _cache_lock:
+        stale_ids = [
+            cid for cid, state in _cache_states.items()
+            if state.last_update_time < cutoff
+        ]
+        for cid in stale_ids:
+            del _cache_states[cid]
+            removed += 1
+    if removed:
+        logger.info('[CacheTrack] Cleaned up %d stale cache states '
+                    '(older than %ds, %d remaining)',
+                    removed, int(max_age_s), len(_cache_states))
+    return removed
+
+
+def get_cache_diagnostics() -> dict[str, Any]:
+    """Return a diagnostic snapshot of all active cache states.
+
+    Useful for admin endpoints, debugging, or periodic health checks.
+
+    Returns:
+        Dict with overall stats and per-conversation summaries.
+    """
+    now = time.time()
+    with _cache_lock:
+        convs = []
+        total_breaks = 0
+        total_reads = 0
+        total_writes = 0
+        for cid, state in _cache_states.items():
+            age = now - state.last_update_time if state.last_update_time else 0
+            convs.append({
+                'conv_id': cid[:8],
+                'model': state.model,
+                'calls': state.call_count,
+                'last_cache_read': state.last_cache_read_tokens,
+                'last_cache_write': state.last_cache_write_tokens,
+                'total_breaks': state.total_breaks,
+                'age_s': round(age, 1),
+                'compaction_pending': state.compaction_pending,
+            })
+            total_breaks += state.total_breaks
+            total_reads += state.total_cache_read
+            total_writes += state.total_cache_write
+        return {
+            'active_conversations': len(convs),
+            'total_breaks': total_breaks,
+            'total_cache_read_tokens': total_reads,
+            'total_cache_write_tokens': total_writes,
+            'ttl_latches_active': len(_ttl_latch),
+            'conversations': sorted(
+                convs, key=lambda c: c['age_s']),
+        }

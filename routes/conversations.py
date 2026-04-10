@@ -202,6 +202,46 @@ def save_conv(conv_id):
                         'serverMsgCount': existing_count,
                         'clientMsgCount': msg_count}), 409
 
+    # ── Guard: prevent stale streaming checkpoint from overwriting completed result ──
+    # Root cause: VS Code port forwarding can reload the page at the exact moment
+    # the backend _sync_result_to_conversation writes complete data (finishReason,
+    # usage, full content).  The frontend's IDB cache has a stale streaming snapshot
+    # and PUTs it back, erasing the completed result.
+    # Fix: if server has a completed assistant message (finishReason set) but client
+    # is sending one without finishReason AND with less content, block the overwrite.
+    if msg_count > 0 and msg_count == existing_count and not allow_truncate:
+        incoming_last = raw_messages[-1] if raw_messages else {}
+        if incoming_last.get('role') == 'assistant' and not incoming_last.get('finishReason'):
+            try:
+                existing_msgs_row = db.execute(
+                    'SELECT messages FROM conversations WHERE id=? AND user_id=?',
+                    (conv_id, DEFAULT_USER_ID)
+                ).fetchone()
+                if existing_msgs_row:
+                    existing_msgs = json.loads(existing_msgs_row[0] or '[]')
+                    if existing_msgs:
+                        existing_last = existing_msgs[-1]
+                        existing_fr = existing_last.get('finishReason')
+                        if (existing_last.get('role') == 'assistant'
+                                and existing_fr
+                                and existing_fr not in ('', 'interrupted')
+                                and len(existing_last.get('content') or '') > len(incoming_last.get('content') or '')):
+                            logger.warning(
+                                '[save_conv] ⚠️ BLOCKED stale-checkpoint overwrite of conv %s — '
+                                'server has completed assistant msg (finishReason=%s, content=%d chars) '
+                                'but client sent incomplete snapshot (no finishReason, content=%d chars). '
+                                'This is likely a stale IDB cache sync after page reload.',
+                                conv_id[:12], existing_fr,
+                                len(existing_last.get('content') or ''),
+                                len(incoming_last.get('content') or ''))
+                            return jsonify({
+                                'ok': False,
+                                'error': 'blocked_stale_checkpoint',
+                                'serverMsgCount': existing_count,
+                            }), 409
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug('[save_conv] Content regression check parse error: %s', e)
+
     if msg_count == 0:
         logger.info('[save_conv] Conv %s — saving with 0 messages (new/empty conv)',
                     conv_id[:12])
@@ -219,6 +259,44 @@ def save_conv(conv_id):
         (conv_id, DEFAULT_USER_ID, title, messages, created, updated, settings, msg_count, search_text, search_text)
     )
     _invalidate_meta_cache()
+    return jsonify({'ok': True})
+
+
+
+@conversations_bp.route('/api/conversations/<conv_id>/settings', methods=['PATCH'])
+@_db_safe
+def patch_conv_settings(conv_id):
+    """Lightweight endpoint to merge new keys into a conversation's settings JSON.
+
+    Unlike PUT (which requires full messages), this only touches the settings
+    column — safe to call for shell conversations that haven't loaded messages.
+
+    Body: { folderId?: str|null, pinned?: bool, ... }
+    All keys in the body are merged into the existing settings dict.
+    """
+    data = request.get_json(silent=True) or {}
+    if not data:
+        return jsonify({'error': 'No settings provided'}), 400
+
+    db = get_db(DOMAIN_CHAT)
+    row = db.execute(
+        'SELECT settings FROM conversations WHERE id=? AND user_id=?',
+        (conv_id, DEFAULT_USER_ID)
+    ).fetchone()
+    if not row:
+        return jsonify({'error': 'Not found'}), 404
+
+    settings = _safe_json(row['settings'], default={}, label='patch_settings')
+    settings.update(data)
+    settings_json = json.dumps(settings, ensure_ascii=False)
+
+    db_execute_with_retry(
+        db,
+        'UPDATE conversations SET settings=? WHERE id=? AND user_id=?',
+        (settings_json, conv_id, DEFAULT_USER_ID)
+    )
+    _invalidate_meta_cache()
+    logger.info('[patch_settings] Conv %s — patched keys: %s', conv_id[:12], list(data.keys()))
     return jsonify({'ok': True})
 
 

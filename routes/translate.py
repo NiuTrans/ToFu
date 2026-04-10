@@ -293,9 +293,6 @@ def _dedup_inline_loop(line, max_repeats=3, min_unit=50, max_unit=600,
         if not window_counts:
             continue
         best_window, best_count = window_counts.most_common(1)[0]
-        # Expected count if no repetition: ~(length / sample_step) unique windows
-        # If repeated N times: each window appears ~N times
-        length / sample_step
         if best_count < max_repeats + 1:
             continue
 
@@ -335,13 +332,42 @@ def _dedup_inline_loop(line, max_repeats=3, min_unit=50, max_unit=600,
     return line, False
 
 
-def _translate_one_chunk(chunk, system_prompt, chunk_label=''):
+def _translate_one_chunk(chunk, system_prompt, chunk_label='',
+                        source='', target=''):
     """Translate a single chunk of text.
+
+    If a machine translation provider is configured (Settings → 机器翻译),
+    uses that directly — no LLM prompt needed, faster and cheaper.
+    Falls back to LLM cheap model if MT is not configured or fails.
 
     Includes truncation detection: if the model produces suspiciously short
     output (< 30% of input) or hits max_tokens (finish_reason='length'),
     the translation is retried with a fresh dispatch (likely a different model).
+
+    Args:
+        chunk: Text to translate.
+        system_prompt: LLM system prompt (used only for LLM fallback).
+        chunk_label: Label for logging (e.g. ':chunk1/3').
+        source: Source language name/code (for MT provider).
+        target: Target language name/code (for MT provider).
     """
+    # ── Try dedicated MT provider first (if configured) ──
+    from lib.mt_provider import is_mt_configured, mt_translate_chunked
+    if is_mt_configured():
+        try:
+            t0 = time.time()
+            # mt_translate_chunked handles NiuTrans 5000-char limit internally
+            result = mt_translate_chunked(chunk, source=source, target=target)
+            elapsed = time.time() - t0
+            logger.info('[Translate%s] MT provider: %d→%d chars in %.1fs',
+                        chunk_label, len(chunk), len(result), elapsed)
+            # Return with a synthetic usage dict for compatibility
+            return result, {'model': 'mt:niutrans', '_dispatch': {'model': 'mt:niutrans'}}
+        except Exception as e:
+            logger.warning('[Translate%s] MT provider failed, falling back to LLM: %s',
+                           chunk_label, e)
+            # Fall through to LLM translation below
+
     from lib.llm_dispatch import smart_chat
 
     clen = len(chunk)
@@ -464,7 +490,8 @@ def _do_translate(task_id, text, target, source, conv_id, msg_idx, field):
 
             def _translate_indexed(idx, chunk):
                 label = f':chunk{idx+1}/{n_chunks}'
-                c, u = _translate_one_chunk(chunk, system_prompt, label)
+                c, u = _translate_one_chunk(chunk, system_prompt, label,
+                                            source=source, target=target)
                 return idx, c, u
 
             max_workers = min(n_chunks, 4)
@@ -482,7 +509,8 @@ def _do_translate(task_id, text, target, source, conv_id, msg_idx, field):
                         task['progress'] = f'{_done_count[0]}/{n_chunks}'
             content = '\n\n'.join(translated_chunks)
         else:
-            content, _usage = _translate_one_chunk(text, system_prompt)
+            content, _usage = _translate_one_chunk(text, system_prompt,
+                                                     source=source, target=target)
             _model = 'unknown'
             if isinstance(_usage, dict):
                 _disp = _usage.get('_dispatch', {})
@@ -573,6 +601,44 @@ def _commit_translation_to_db(conv_id, msg_idx, field, translated_text, original
 # ══════════════════════════════════════════════════════
 #  Endpoints
 # ══════════════════════════════════════════════════════
+
+
+@translate_bp.route('/api/translate/mt-test', methods=['POST'])
+def mt_test():
+    """Test a machine translation provider configuration.
+
+    Accepts the MT config inline (not yet saved) and runs a test translation.
+    """
+    data = request.get_json(silent=True) or {}
+    mt_config = data.get('mt_config', {})
+    text = data.get('text', 'Hello, this is a test.')
+    source = data.get('source', 'en')
+    target = data.get('target', 'zh')
+
+    if not mt_config.get('api_key'):
+        return jsonify({'ok': False, 'error': 'API Key 未填写'})
+
+    api_key = mt_config.get('api_key', '')
+    app_id = mt_config.get('app_id', '')
+    api_url = mt_config.get('api_url', '')
+
+    try:
+        from lib.mt_provider import _niutrans_v1, _niutrans_v2, _normalize_lang
+        src_lang = _normalize_lang(source)
+        tgt_lang = _normalize_lang(target)
+
+        if app_id:
+            result = _niutrans_v2(text, src_lang, tgt_lang, api_key, app_id, api_url)
+        else:
+            result = _niutrans_v1(text, src_lang, tgt_lang, api_key, api_url)
+
+        logger.info('[MT-Test] Success: "%s" → "%s" (%s→%s)',
+                    text[:50], result[:50], source, target)
+        return jsonify({'ok': True, 'translated': result})
+    except Exception as e:
+        logger.warning('[MT-Test] Failed: %s', e)
+        return jsonify({'ok': False, 'error': str(e)})
+
 
 @translate_bp.route('/api/translate/start', methods=['POST'])
 def translate_start():
@@ -690,7 +756,8 @@ def translate_text():
 
             def _sync_indexed(idx, chunk):
                 label = f':chunk{idx+1}/{n_chunks}'
-                c, u = _translate_one_chunk(chunk, system_prompt, label)
+                c, u = _translate_one_chunk(chunk, system_prompt, label,
+                                            source=source, target=target)
                 return idx, c, u
 
             max_workers = min(n_chunks, 4)
@@ -702,7 +769,8 @@ def translate_text():
                     _usage = u
             content = '\n\n'.join(translated_parts)
         else:
-            content, _usage = _translate_one_chunk(text, system_prompt)
+            content, _usage = _translate_one_chunk(text, system_prompt,
+                                                     source=source, target=target)
 
         if not content or not content.strip():
             logger.error('[Translate] Empty result for %d-char input (target=%s)', input_len, target)

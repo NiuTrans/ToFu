@@ -174,7 +174,9 @@ def try_browser_fetch(url, max_chars, reason='unknown'):
             attempt_num = _browser_fallback_stats['attempts']
         logger.info('[Fetch] Browser fallback ATTEMPT #%d reason=%s — %s',
                     attempt_num, reason, url[:100])
+        bf_t0 = time.time()
         text = fetch_url_via_browser(url, max_chars=max_chars, timeout=25)
+        bf_elapsed = time.time() - bf_t0
         if text:
             # ── Guard: browser extension may also return bot-protection pages ──
             from lib.fetch.utils import _is_bot_extracted_text
@@ -187,12 +189,15 @@ def try_browser_fetch(url, max_chars, reason='unknown'):
             with _browser_fallback_lock:
                 _browser_fallback_stats['success'] += 1
             _fetch_cache.put(url, text)
+            logger.info('[Fetch] Browser fallback OK in %.1fs — %s (%d chars)',
+                        bf_elapsed, url[:80], len(text))
             if max_chars and len(text) > max_chars:
                 return text[:max_chars] + '\n[…truncated]'
             return text
         with _browser_fallback_lock:
             _browser_fallback_stats['fail'] += 1
-        logger.info('[Fetch] Browser fallback returned empty — %s', url[:80])
+        logger.info('[Fetch] Browser fallback returned empty in %.1fs — %s',
+                    bf_elapsed, url[:80])
         _log_browser_fallback_stats()
         return None
     except Exception as e:

@@ -41,7 +41,7 @@
       'cycleTheme','toggleDebug','toggleSidebar','openSettings','toggleCodeExec',
       'toggleBrowser','toggleMemory','toggleSwarm','toggleAutoTranslate',
       'toggleAutoApply','selectThinkingDepth','cycleSearchMode','enterImageGenMode',
-      'toggleSidebarSearch','closeSidebarSearch'];
+      'toggleSidebarSearch','closeSidebarSearch','togglePaperMode'];
     for (var i = 0; i < stubs.length; i++) {
       (function(name) {
         window[name] = function() { _notReady(); };
@@ -50,6 +50,11 @@
     // Mark as loaded once main.js executes (it re-defines these functions)
     window._markScriptsLoaded = function() { _loaded = true; window._scriptsReady = true; };
   })();
+  // ── i18n fallback: stub t() so the app works even if i18n.js fails to load ──
+  // i18n.js will overwrite this with the real implementation on successful load.
+  if (typeof t !== 'function') {
+    window.t = function(key) { return key; };
+  }
   // ── Script load error tracker (defined early so onerror handlers can find it) ──
   var _scriptLoadErrors = [];
   var _scriptLoadCount = 0;   // incremented by onload handlers
@@ -84,7 +89,7 @@
   <div class="sidebar-header">
     <h1><svg class="sidebar-tofu-icon" width="22" height="22" viewBox="0 0 32 32" fill="none"><defs><linearGradient id="sTop" x1="0" y1="0" x2=".5" y2="1"><stop offset="0%" stop-color="#fef8ec"/><stop offset="100%" stop-color="#fdf2d7"/></linearGradient><linearGradient id="sFront" x1="0" y1="0" x2=".2" y2="1"><stop offset="0%" stop-color="#fdf4dc"/><stop offset="100%" stop-color="#f5e8c8"/></linearGradient><linearGradient id="sSide" x1="0" y1="0" x2="1" y2=".7"><stop offset="0%" stop-color="#ecdcc0"/><stop offset="100%" stop-color="#dcc8a4"/></linearGradient></defs><path d="M15.3 4.6 L6.4 9.6 L16.3 16 L26.2 10.5Z" fill="url(#sTop)"/><path d="M6.4 9.6 L6.1 21.1 L17.2 27.2 L16.3 16Z" fill="url(#sFront)"/><path d="M16.3 16 L17.2 27.2 L25.9 22.3 L26.2 10.5Z" fill="url(#sSide)"/><path d="M15.3 4.6 L6.4 9.6 L6.1 21.1 L17.2 27.2 L25.9 22.3 L26.2 10.5Z" stroke="#1a1520" stroke-width=".6" stroke-linejoin="round" fill="none"/><rect x="7.8" y="14.2" width="2.6" height="3.3" rx=".3" fill="#1a1520"/><rect x="9.2" y="14.5" width=".9" height="1.2" rx=".2" fill="white" opacity=".9"/><rect x="13.1" y="16.5" width="2.6" height="3.8" rx=".3" fill="#1a1520"/><rect x="14.5" y="16.9" width=".9" height="1.3" rx=".2" fill="white" opacity=".9"/><path d="M10.1 20.1 Q12 21.6 13.9 20.1" stroke="#1a1520" stroke-width=".5" fill="none" stroke-linecap="round" opacity=".45"/><ellipse cx="8" cy="18.4" rx="1" ry=".7" fill="#ffaaa2" opacity=".5"/><ellipse cx="15" cy="21.3" rx="1.1" ry=".7" fill="#feaca5" opacity=".5"/></svg><span class="sidebar-brand"><span class="sidebar-brand-t">T</span><span class="sidebar-brand-o">o</span><span class="sidebar-brand-f">f</span><span class="sidebar-brand-u">u</span></span></h1>
     <div style="display:flex;gap:4px;align-items:center;">
-      <button class="action-btn" id="sidebarSearchToggle" onclick="toggleSidebarSearch()" title="搜索对话">
+      <button class="action-btn" id="sidebarSearchToggle" onclick="toggleSidebarSearch()" title="搜索对话" data-i18n-title="sidebar.search">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
       </button>
       <button class="action-btn" onclick="openDailyReport()" title="My Day">
@@ -93,7 +98,7 @@
       <a class="action-btn" href="trading.html" target="_blank" title="Trading Advisor" id="tradingAdvisorBtn" style="text-decoration:none;display:none;align-items:center;justify-content:center;">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
       </a>
-      <button class="action-btn" onclick="openSettings()" title="设置">
+      <button class="action-btn" onclick="openSettings()" title="设置" data-i18n-title="sidebar.settings">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
     </div>
@@ -178,13 +183,114 @@
     <button class="action-btn theme-cycle-btn" id="themeCycleBtn" onclick="cycleTheme()" title="Switch theme"><span>🌙</span></button>
     <button class="action-btn" id="debugToggle" onclick="toggleDebug()" title="Debug" style="width:28px;height:28px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12V19"/><path d="M18.4 6.6a9 9 0 0 0-12.8 0"/><circle cx="12" cy="8" r="2"/><path d="M20 15.5a9 9 0 0 1-18 0"/><path d="m2 12 2 .5M22 12l-2 .5M7 20l1-1.5M17 20l-1-1.5"/></svg></button>
   </div>
+  <!-- ═══ Paper Reading Mode — Full-page overlay ═══ -->
+  <div class="paper-mode-container" id="paperModeContainer" style="display:none">
+    <!-- Top toolbar -->
+    <div class="paper-topbar">
+      <div class="paper-topbar-left">
+        <span class="paper-topbar-icon">📄</span>
+        <span class="paper-topbar-title" id="paperTitle" title="">Paper Reading Mode</span>
+      </div>
+      <div class="paper-topbar-center paper-mobile-tabs">
+        <button class="paper-mobile-tab active" onclick="_paperToggleMobilePanel('pdf')">PDF</button>
+        <button class="paper-mobile-tab" onclick="_paperToggleMobilePanel('right')">Panel</button>
+      </div>
+      <div class="paper-topbar-right">
+        <button class="paper-topbar-btn" onclick="_showPaperLanding()" title="Open another paper">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        </button>
+        <button class="paper-topbar-btn paper-exit-btn" onclick="exitPaperMode()" title="Exit paper mode (Esc)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+    </div>
+    <!-- Main split view -->
+    <div class="paper-body">
+      <!-- Left: PDF viewer -->
+      <div class="paper-left">
+        <div class="paper-pdf-container" id="paperPdfViewer">
+          <!-- PDF pages rendered here -->
+        </div>
+        <div class="paper-page-nav" id="paperPageNav"></div>
+        <!-- Floating quote button -->
+        <button class="paper-quote-btn" id="paperQuoteBtn" style="display:none" onclick="_quotePaperSelection()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V21z"/><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/></svg>
+          Quote
+        </button>
+      </div>
+      <!-- Resize handle -->
+      <div class="paper-divider" id="paperDivider"></div>
+      <!-- Right: Q&A / Report / Translate -->
+      <div class="paper-right">
+        <div class="paper-tabs">
+          <button class="paper-tab-btn active" data-tab="qa" onclick="_switchPaperTab('qa')">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            Q&A
+          </button>
+          <button class="paper-tab-btn" data-tab="report" onclick="_switchPaperTab('report')">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            Report
+          </button>
+          <button class="paper-tab-btn" data-tab="translate" onclick="_switchPaperTab('translate')">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2v3"/><path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/></svg>
+            Translate
+          </button>
+        </div>
+        <!-- QA Panel -->
+        <div class="paper-tab-panel" data-tab="qa">
+          <div class="paper-qa-messages" id="paperQAMessages">
+            <div class="paper-qa-empty">
+              <div class="paper-qa-empty-icon">💬</div>
+              <p>Ask questions about this paper</p>
+              <p class="paper-qa-hint">Select text in the PDF to quote it, or type a question below</p>
+            </div>
+          </div>
+          <div class="paper-qa-input-area">
+            <textarea id="paperQAInput" placeholder="Ask a question about this paper…" rows="2"></textarea>
+            <button class="paper-qa-send-btn" onclick="_sendPaperQuestion()" title="Send (Enter)">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            </button>
+          </div>
+        </div>
+        <!-- Report Panel -->
+        <div class="paper-tab-panel" data-tab="report" style="display:none">
+          <div class="paper-report-toolbar">
+            <button class="paper-report-btn" onclick="_regeneratePaperReport()" title="Regenerate">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              Regenerate
+            </button>
+            <button class="paper-report-btn" onclick="_copyPaperReport()" title="Copy">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              Copy
+            </button>
+            <button class="paper-report-btn" onclick="_exportPaperReport()" title="Export Markdown">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Export
+            </button>
+          </div>
+          <div class="paper-report-content" id="paperReportContent">
+            <div class="paper-report-empty">
+              <p>Switch to this tab to auto-generate an analysis report</p>
+            </div>
+          </div>
+        </div>
+        <!-- Translate Panel -->
+        <div class="paper-tab-panel" data-tab="translate" style="display:none">
+          <div class="paper-translate-content" id="paperTranslateContent">
+            <!-- Populated by _initPaperTranslateTab() -->
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="chat-wrapper">
     <div class="chat-container" id="chatContainer">
       <div class="chat-inner" id="chatInner">
         <div class="welcome" id="welcome">
           <div class="welcome-icon"><img src="static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
           <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
-          <p>嫩，但能打 — search, code, browse, trade, and more.</p>
+          <p data-i18n="welcome.subtitle">嫩，但能打 — search, code, browse, trade, and more.</p>
           <div class="feature-pills"><span class="feature-pill">Extended Thinking</span><span class="feature-pill">Search</span><span class="feature-pill">URL Fetch</span><span class="feature-pill">Image Input</span><span class="feature-pill">Co-Pilot</span><span class="feature-pill">Browser</span></div>
         </div>
       </div>
@@ -226,10 +332,10 @@
             <div class="log-clean-banner-details" id="logCleanDetails"></div>
           </div>
           <div class="log-clean-banner-actions">
-            <button class="log-clean-btn preview" onclick="previewLogClean()" title="对比预览">预览</button>
-            <button class="log-clean-btn apply" onclick="applyLogClean()" title="应用规则清理">清理</button>
-            <button class="log-clean-btn ai-compress" id="aiCompressBtn" onclick="aiCompressLog()" title="用 AI 智能压缩，去除冗余保留关键信息">AI压缩</button>
-            <button class="log-clean-btn dismiss" onclick="hideLogCleanBanner()" title="保持原文">✕</button>
+            <button class="log-clean-btn preview" onclick="previewLogClean()" title="对比预览" data-i18n-title="debug.previewCompare" data-i18n="debug.preview">预览</button>
+            <button class="log-clean-btn apply" onclick="applyLogClean()" title="应用规则清理" data-i18n-title="debug.cleanApply" data-i18n="debug.clean">清理</button>
+            <button class="log-clean-btn ai-compress" id="aiCompressBtn" onclick="aiCompressLog()" title="用 AI 智能压缩，去除冗余保留关键信息" data-i18n-title="debug.aiCompressDesc" data-i18n="debug.aiCompress">AI压缩</button>
+            <button class="log-clean-btn dismiss" onclick="hideLogCleanBanner()" title="保持原文" data-i18n-title="debug.keepOriginal">✕</button>
           </div>
         </div>
         <div id="pendingQueueContainer"></div>
@@ -253,7 +359,7 @@
                 </div>
                 <div class="preset-dropdown" id="presetDropdown">
                   <!-- ★ Populated dynamically by _populateModelDropdown() from /api/server-config -->
-                  <div class="ps-dd-loading">正在加载模型…</div>
+                  <div class="ps-dd-loading" data-i18n="toolbar.loadingModels">正在加载模型…</div>
                 </div>
               </div>
               <div class="thinking-depth-bar" id="thinkingDepthSection" style="display:none">
@@ -269,24 +375,24 @@
               <!-- ★ AI Enhance sub-menu -->
               <div class="toolbar-submenu" id="submenuAI">
                 <button class="submenu-trigger" onclick="toggleSubmenu('submenuAI')" title="AI 增强">
-                  <span class="submenu-label">增强</span>
+                  <span class="submenu-label" data-i18n="toolbar.enhance">增强</span>
                   <span class="submenu-count" id="submenuAICount"></span>
                   <span class="submenu-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
                 </button>
                 <div class="submenu-dropdown">
                   <div class="submenu-item" id="codeExecToggle" onclick="toggleCodeExec();updateSubmenuCounts()" title="Allow AI to execute code">
                     <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
-                    <span class="submenu-item-text"><span class="submenu-item-name">代码执行</span><span class="submenu-item-desc">允许 AI 运行代码</span></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.codeExec">代码执行</span><span class="submenu-item-desc" data-i18n="toolbar.codeExecDesc">允许 AI 运行代码</span></span>
                     <span class="submenu-item-check">✓</span>
                   </div>
                   <div class="submenu-item" id="memoryToggle" onclick="toggleMemory();updateSubmenuCounts()" title="Memory — accumulated experience">
                     <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></span>
-                    <span class="submenu-item-text"><span class="submenu-item-name">记忆经验</span><span class="submenu-item-desc">注入积累的经验</span></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.memory">记忆经验</span><span class="submenu-item-desc" data-i18n="toolbar.memoryDesc">注入积累的经验</span></span>
                     <span class="submenu-item-check">✓</span>
                   </div>
                   <div class="submenu-item" id="translateToggle" onclick="toggleAutoTranslate();updateSubmenuCounts()" title="Auto-translate: Chinese↔English (Ctrl+Shift+K to exclude selected text from translation)">
                     <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2v3"/><path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/></svg></span>
-                    <span class="submenu-item-text"><span class="submenu-item-name">自动翻译</span><span class="submenu-item-desc">中英互译 · ⌘⇧K 跳过选中</span></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.autoTranslate">自动翻译</span><span class="submenu-item-desc" data-i18n="toolbar.autoTranslateDesc">中英互译 · ⌘⇧K 跳过选中</span></span>
                     <span class="submenu-item-check">✓</span>
                   </div>
                   <!-- Hidden badges for JS compatibility -->
@@ -296,35 +402,35 @@
               <!-- ★ Tools sub-menu -->
               <div class="toolbar-submenu" id="submenuTools">
                 <button class="submenu-trigger" onclick="toggleSubmenu('submenuTools')" title="外部工具">
-                  <span class="submenu-label">工具</span>
+                  <span class="submenu-label" data-i18n="toolbar.tools">工具</span>
                   <span class="submenu-count" id="submenuToolsCount"></span>
                   <span class="submenu-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
                 </button>
                 <div class="submenu-dropdown">
                   <div class="submenu-item" id="browserToggle" onclick="toggleBrowser();updateSubmenuCounts()" title="Browser Bridge">
                     <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
-                    <span class="submenu-item-text"><span class="submenu-item-name">浏览器桥接</span><span class="submenu-item-desc">控制浏览器标签页</span></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.browserBridge">浏览器桥接</span><span class="submenu-item-desc" data-i18n="toolbar.browserBridgeDesc">控制浏览器标签页</span></span>
                     <span class="submenu-item-check">✓</span>
                   </div>
                   <div class="submenu-item" id="desktopToggle" onclick="toggleDesktop();updateSubmenuCounts()" title="Desktop Agent">
                     <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></span>
-                    <span class="submenu-item-text"><span class="submenu-item-name">桌面控制</span><span class="submenu-item-desc">操作本地应用与文件</span></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.desktopControl">桌面控制</span><span class="submenu-item-desc" data-i18n="toolbar.desktopControlDesc">操作本地应用与文件</span></span>
                     <span class="submenu-item-check">✓</span>
                     <span class="tool-badge" id="desktopBadge" style="display:none"></span>
                   </div>
                   <div class="submenu-item" id="schedulerToggle" onclick="toggleScheduler();updateSubmenuCounts()" title="Scheduler">
                     <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
-                    <span class="submenu-item-text"><span class="submenu-item-name">定时任务</span><span class="submenu-item-desc">计划任务与 Cron</span></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.scheduledTasks">定时任务</span><span class="submenu-item-desc" data-i18n="toolbar.scheduledTasksDesc">计划任务与 Cron</span></span>
                     <span class="submenu-item-check">✓</span>
                   </div>
                   <div class="submenu-item" id="imageGenToggle" onclick="toggleImageGenTool();updateSubmenuCounts()" title="AI Image Generation">
                     <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></span>
-                    <span class="submenu-item-text"><span class="submenu-item-name">AI 绘图</span><span class="submenu-item-desc">对话中生成图片</span></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.aiDrawing">AI 绘图</span><span class="submenu-item-desc" data-i18n="toolbar.aiDrawingDesc">对话中生成图片</span></span>
                     <span class="submenu-item-check">✓</span>
                   </div>
                   <div class="submenu-item" id="humanGuidanceToggle" onclick="toggleHumanGuidance();updateSubmenuCounts()" title="Human Guidance">
                     <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
-                    <span class="submenu-item-text"><span class="submenu-item-name">人机协作</span><span class="submenu-item-desc">AI 可向你提问寻求指导</span></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.humanAICollab">人机协作</span><span class="submenu-item-desc" data-i18n="toolbar.humanAICollabDesc">AI 可向你提问寻求指导</span></span>
                     <span class="submenu-item-check">✓</span>
                   </div>
 
@@ -333,20 +439,20 @@
               <!-- ★ Mode sub-menu -->
               <div class="toolbar-submenu" id="submenuMode">
                 <button class="submenu-trigger" onclick="toggleSubmenu('submenuMode')" title="执行模式">
-                  <span class="submenu-label">模式</span>
+                  <span class="submenu-label" data-i18n="toolbar.mode">模式</span>
                   <span class="submenu-count" id="submenuModeCount"></span>
                   <span class="submenu-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
                 </button>
                 <div class="submenu-dropdown">
                   <div class="submenu-item" id="swarmToggle" onclick="toggleSwarm();updateSubmenuCounts()" title="Agent Swarm">
                     <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="3"/><circle cx="5" cy="17" r="3"/><circle cx="19" cy="17" r="3"/><line x1="12" y1="10" x2="5" y2="14"/><line x1="12" y1="10" x2="19" y2="14"/></svg></span>
-                    <span class="submenu-item-text"><span class="submenu-item-name">蜂群代理</span><span class="submenu-item-desc">并行子代理分解任务</span></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.swarmAgents">蜂群代理</span><span class="submenu-item-desc" data-i18n="toolbar.swarmAgentsDesc">并行子代理分解任务</span></span>
                     <span class="submenu-item-check">✓</span>
                     <span class="tool-badge" id="swarmBadge" style="display:none"></span>
                   </div>
                   <div class="submenu-item" id="endpointToggle" onclick="toggleEndpoint();updateSubmenuCounts()" title="Endpoint Mode">
                     <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="4"/></svg></span>
-                    <span class="submenu-item-text"><span class="submenu-item-name">自主模式</span><span class="submenu-item-desc">自主执行+自我审查循环</span></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.autonomousMode">自主模式</span><span class="submenu-item-desc" data-i18n="toolbar.autonomousModeDesc">自主执行+自我审查循环</span></span>
                     <span class="submenu-item-check">✓</span>
                     <span class="tool-badge" id="endpointBadge" style="display:none"></span>
                   </div>
@@ -355,6 +461,9 @@
               <!-- ★ Standalone buttons -->
               <button class="action-btn" id="imageGenModeBtn" onclick="enterImageGenMode()" title="Image Generation Mode">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+              </button>
+              <button class="action-btn" id="paperModeBtn" onclick="togglePaperMode()" title="Paper Reading Mode">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
               </button>
               <button class="action-btn" id="projectToggle" onclick="openProjectModal()" title="Project Co-Pilot">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
@@ -392,11 +501,11 @@
             <span class="ig-sep"></span>
             <!-- Aspect ratio — inline pill bar (like thinking-depth-bar) -->
             <div class="ig-seg" id="igAspectBar">
-              <button class="ig-pill active" data-ar="1:1" onclick="selectIgAspect(this)" title="1:1 正方形">1:1</button>
-              <button class="ig-pill" data-ar="16:9" onclick="selectIgAspect(this)" title="16:9 横屏宽幅">16:9</button>
-              <button class="ig-pill" data-ar="9:16" onclick="selectIgAspect(this)" title="9:16 竖屏">9:16</button>
-              <button class="ig-pill" data-ar="4:3" onclick="selectIgAspect(this)" title="4:3 经典">4:3</button>
-              <button class="ig-pill" data-ar="3:4" onclick="selectIgAspect(this)" title="3:4 竖版">3:4</button>
+              <button class="ig-pill active" data-ar="1:1" onclick="selectIgAspect(this)" title="1:1 正方形" data-i18n-title="ig.square">1:1</button>
+              <button class="ig-pill" data-ar="16:9" onclick="selectIgAspect(this)" title="16:9 横屏宽幅" data-i18n-title="ig.landscape">16:9</button>
+              <button class="ig-pill" data-ar="9:16" onclick="selectIgAspect(this)" title="9:16 竖屏" data-i18n-title="ig.portrait">9:16</button>
+              <button class="ig-pill" data-ar="4:3" onclick="selectIgAspect(this)" title="4:3 经典" data-i18n-title="ig.classic">4:3</button>
+              <button class="ig-pill" data-ar="3:4" onclick="selectIgAspect(this)" title="3:4 竖版" data-i18n-title="ig.tallPortrait">3:4</button>
             </div>
             <span class="ig-sep"></span>
             <!-- Resolution — inline pill bar -->
@@ -407,15 +516,15 @@
             <span class="ig-sep"></span>
             <!-- Gacha batch count — inline pill bar -->
             <div class="ig-seg" id="igCountBar">
-              <button class="ig-pill ig-pill-n active" data-count="1" onclick="selectIgCount(this)" title="生成单张图片">单抽</button>
-              <button class="ig-pill ig-pill-n" data-count="2" onclick="selectIgCount(this)" title="同时生成 2 张，多个选择">2连</button>
-              <button class="ig-pill ig-pill-n" data-count="4" onclick="selectIgCount(this)" title="同时生成 4 张，大量出图！">4连</button>
+              <button class="ig-pill ig-pill-n active" data-count="1" onclick="selectIgCount(this)" title="生成单张图片" data-i18n-title="ig.singleDesc" data-i18n="ig.single">单抽</button>
+              <button class="ig-pill ig-pill-n" data-count="2" onclick="selectIgCount(this)" title="同时生成 2 张，多个选择" data-i18n-title="ig.doubleDesc" data-i18n="ig.double">2连</button>
+              <button class="ig-pill ig-pill-n" data-count="4" onclick="selectIgCount(this)" title="同时生成 4 张，大量出图！" data-i18n-title="ig.quadDesc" data-i18n="ig.quad">4连</button>
             </div>
             <span class="ig-flex"></span>
             <!-- Generate button -->
             <button class="ig-generate-btn" id="igGenerateBtn" onclick="generateImageDirect()" title="生成 (Enter)">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-              <span class="ig-gen-text">生成</span>
+              <span class="ig-gen-text" data-i18n="toolbar.generate">生成</span>
             </button>
           </div>
         </div>
@@ -430,8 +539,8 @@
   <div class="modal settings-panel">
     <!-- Header -->
     <div class="settings-header">
-      <h3>设置</h3>
-      <button class="settings-close-btn" onclick="closeSettings()" title="关闭">
+      <h3 data-i18n="settings.title">设置</h3>
+      <button class="settings-close-btn" onclick="closeSettings()" title="关闭" data-i18n-title="settings.close">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
@@ -441,31 +550,35 @@
       <nav class="settings-tabs">
         <button class="settings-tab active" data-tab="general" onclick="switchSettingsTab('general')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
-          <span>通用</span>
+          <span data-i18n="settings.tabGeneral">通用</span>
         </button>
         <button class="settings-tab" data-tab="api" onclick="switchSettingsTab('api')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
-          <span>服务商</span>
+          <span data-i18n="settings.tabProviders">服务商</span>
         </button>
         <button class="settings-tab" data-tab="preset" onclick="switchSettingsTab('preset')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
-          <span>显示</span>
+          <span data-i18n="settings.tabDisplay">显示</span>
         </button>
         <button class="settings-tab" data-tab="search" onclick="switchSettingsTab('search')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <span>搜索</span>
+          <span data-i18n="settings.tabSearch">搜索</span>
+        </button>
+        <button class="settings-tab" data-tab="translate" onclick="switchSettingsTab('translate')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2v3"/><path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/></svg>
+          <span>翻译</span>
         </button>
         <button class="settings-tab" data-tab="network" onclick="switchSettingsTab('network')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
-          <span>网络</span>
+          <span data-i18n="settings.tabNetwork">网络</span>
         </button>
         <button class="settings-tab" data-tab="feishu" onclick="switchSettingsTab('feishu')">
           <svg width="15" height="15" viewBox="62.16 94.5 407.87 324.19"><path d="M274.18 264.785q.515-.517 1.03-1.027c.685-.688 1.372-1.258 2.056-1.945l1.37-1.372 4.118-4.113 5.598-5.601 4.8-4.797 4.575-4.457 4.796-4.688 4.344-4.344 6.059-6.054c1.14-1.145 2.285-2.29 3.543-3.317 2.168-2.054 4.457-4 6.855-5.828 2.172-1.715 4.344-3.312 6.516-4.914 3.082-2.172 6.398-4.344 9.71-6.285 3.204-1.941 6.63-3.656 10.06-5.371 3.199-1.602 6.515-2.973 9.827-4.23 1.829-.684 3.774-1.372 5.602-2.055.914-.344 1.941-.688 2.856-.914-8.57-33.715-24.227-64.575-45.258-90.86-4.114-5.14-10.399-8.113-17.028-8.113H130.754c-3.203 0-4.457 4-1.945 5.941 59.543 43.66 109.144 99.887 145.03 164.801 0-.226.227-.34.34-.457" fill="#00d6b9"/><path d="M204.79 418.691c90.288 0 169.03-49.828 210.058-123.543 1.488-2.628 2.859-5.257 4.23-7.882q-3.087 6-6.86 11.312l-2.741 3.77c-1.141 1.488-2.399 2.972-3.657 4.457-1.03 1.144-2.058 2.285-3.086 3.316-2.058 2.172-4.343 4.227-6.629 6.172a53 53 0 0 1-3.886 3.2c-1.598 1.144-3.086 2.284-4.684 3.429-1.031.683-2.058 1.371-3.086 1.941-1.144.684-2.172 1.258-3.316 1.942a131 131 0 0 1-6.969 3.543c-2.059.918-4.117 1.828-6.289 2.515-2.285.801-4.57 1.602-6.969 2.285-3.543.914-7.086 1.715-10.742 2.286-2.629.457-5.258.687-8 .914-2.86.23-5.601.23-8.457.23-3.086 0-6.289-.23-9.488-.57a83 83 0 0 1-7.086-1.031c-2.055-.34-4.113-.801-6.168-1.258-1.031-.227-2.176-.57-3.203-.797-2.973-.8-6.055-1.602-9.028-2.516-1.488-.457-2.972-.914-4.457-1.258-2.172-.683-4.457-1.37-6.629-2.058-1.828-.57-3.656-1.14-5.37-1.711q-2.573-.86-5.145-1.715c-1.14-.344-2.285-.8-3.543-1.144-1.371-.457-2.856-1.028-4.227-1.485-1.027-.344-2.058-.687-2.972-1.027-1.942-.688-4-1.488-5.942-2.172-1.144-.457-2.285-.914-3.43-1.258-1.484-.57-3.085-1.144-4.57-1.828-1.601-.687-3.203-1.258-4.8-1.945-1.028-.457-2.06-.797-3.087-1.258-1.257-.57-2.628-1.027-3.886-1.598-1.028-.457-1.942-.8-2.969-1.258l-3.086-1.37c-.914-.344-1.832-.801-2.746-1.145a44 44 0 0 1-2.512-1.14c-.8-.345-1.715-.802-2.515-1.145-.914-.344-1.715-.801-2.512-1.141-1.031-.457-2.172-1.031-3.203-1.484-1.14-.575-2.285-1.032-3.426-1.602-1.258-.574-2.402-1.144-3.66-1.715-1.027-.457-2.055-1.027-3.082-1.484-54.172-26.973-102.172-63.086-143.09-106.746-2.055-2.172-5.71-.684-5.71 2.289l.112 154.398v12.57c0 7.317 3.543 14.06 9.598 18.172 38.172 24.801 83.773 39.543 132.914 39.543" fill="#3370ff"/><path d="M414.84 295.188c0 .113-.113.113-.113.226l.8-1.489c-.343.457-.574 1.028-.8 1.488m3.793-7.05.226-.457.114-.23q-.17.513-.34.687" fill="#133c9a"/><path d="M470.035 201.121c-18.285-9.031-38.86-14.059-60.687-14.059-12.914 0-25.485 1.829-37.371 5.141-1.372.344-2.743.8-4.114 1.258-.914.344-1.941.574-2.855.914-1.945.688-3.774 1.375-5.602 2.059-3.316 1.257-6.629 2.742-9.828 4.23-3.43 1.598-6.742 3.426-10.058 5.371a128 128 0 0 0-9.715 6.285c-2.285 1.602-4.457 3.2-6.512 4.914a154 154 0 0 0-6.86 5.828c-1.14 1.141-2.398 2.172-3.542 3.313l-6.055 6.059-4.344 4.343-4.8 4.684-4.57 4.46-4.802 4.798-11.086 11.086c-.687.687-1.37 1.37-2.058 1.945l-1.028 1.027c-.457.457-1.027 1.028-1.601 1.485-.57.57-1.14 1.031-1.711 1.601a244.4 244.4 0 0 1-49.828 35.313c1.027.457 2.168 1.027 3.199 1.488.8.34 1.715.797 2.512 1.14.8.344 1.715.801 2.515 1.145.801.344 1.602.684 2.516 1.14.914.345 1.828.802 2.742 1.145l3.086 1.371c1.027.457 1.942.801 2.969 1.258 1.258.57 2.629 1.028 3.887 1.598 1.03.46 2.058.8 3.086 1.258 1.601.687 3.199 1.258 4.8 1.945 1.485.57 3.086 1.14 4.57 1.828 1.145.457 2.286.914 3.43 1.258 1.946.684 4 1.484 5.946 2.172a81 81 0 0 1 2.968 1.027c1.371.457 2.856 1.028 4.23 1.485 1.141.343 2.286.8 3.544 1.14q2.567.86 5.14 1.719c1.829.57 3.657 1.14 5.372 1.71 2.171.688 4.457 1.376 6.628 2.06 1.489.457 2.973.914 4.457 1.257 2.973.914 5.942 1.715 9.032 2.512 1.027.344 2.168.574 3.199.8 2.055.458 4.113.915 6.172 1.259 2.398.457 4.683.8 7.082 1.03 3.203.34 6.402.571 9.488.571 2.856 0 5.715 0 8.457-.23 2.63-.227 5.371-.457 8-.914 3.656-.57 7.2-1.371 10.742-2.286 2.399-.683 4.688-1.37 6.973-2.285 2.172-.8 4.227-1.601 6.285-2.515 2.399-1.028 4.684-2.285 6.973-3.543 1.14-.57 2.168-1.258 3.312-1.942 1.028-.687 2.059-1.257 3.086-1.945 1.602-1.027 3.2-2.168 4.684-3.426a52 52 0 0 0 3.887-3.203c2.289-1.941 4.457-4 6.628-6.168 1.032-1.031 2.06-2.172 3.086-3.316 1.258-1.485 2.516-2.969 3.657-4.457.918-1.258 1.828-2.512 2.742-3.77 2.515-3.543 4.8-7.316 6.86-11.199l2.284-4.688 21.145-42.171v.113c6.742-14.742 16.226-28.113 27.656-39.426" fill="#133c9a"/></svg>
-          <span>飞书</span>
+          <span data-i18n="settings.tabFeishu">飞书</span>
         </button>
         <button class="settings-tab" data-tab="oauth" onclick="switchSettingsTab('oauth')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
-          <span>订阅登录</span>
+          <span data-i18n="settings.tabOAuth">订阅登录</span>
         </button>
 
         <button class="settings-tab" data-tab="mcp" onclick="switchSettingsTab('mcp')">
@@ -474,7 +587,7 @@
         </button>
         <button class="settings-tab" data-tab="advanced" onclick="switchSettingsTab('advanced')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-          <span>高级</span>
+          <span data-i18n="settings.tabAdvanced">高级</span>
         </button>
       </nav>
 
@@ -483,82 +596,102 @@
 
         <!-- ═══ General Tab ═══ -->
         <div class="settings-tab-panel active" id="settingsTab_general">
-          <div class="settings-section-title">主题</div>
-          <div class="theme-picker" id="themePicker">
-            <div class="theme-option active" data-theme="dark" onclick="selectTheme('dark')">
-              <div class="theme-preview dark-preview"></div>
-              <span>🌙 暗色</span>
+          <div class="settings-row two-col">
+            <div class="settings-field">
+              <div class="settings-section-title" data-i18n="settings.theme" style="margin-bottom:8px">主题</div>
+              <div class="theme-picker" id="themePicker">
+                <div class="theme-option active" data-theme="dark" onclick="selectTheme('dark')">
+                  <div class="theme-preview dark-preview"></div>
+                  <span data-i18n="settings.themeDark">🌙 暗色</span>
+                </div>
+                <div class="theme-option" data-theme="light" onclick="selectTheme('light')">
+                  <div class="theme-preview light-preview"></div>
+                  <span data-i18n="settings.themeLight">☀️ 亮色</span>
+                </div>
+                <div class="theme-option" data-theme="tofu" onclick="selectTheme('tofu')">
+                  <div class="theme-preview tofu-preview"></div>
+                  <span data-i18n="settings.themeTofu">🍮 豆腐</span>
+                </div>
+              </div>
             </div>
-            <div class="theme-option" data-theme="light" onclick="selectTheme('light')">
-              <div class="theme-preview light-preview"></div>
-              <span>☀️ 亮色</span>
+            <div class="settings-field">
+              <div class="settings-section-title" data-i18n="settings.language" style="margin-bottom:8px">界面语言</div>
+              <div class="lang-picker" id="langPicker">
+                <div class="lang-option active" data-lang="zh" onclick="_onLanguageChange('zh')">
+                  <span class="lang-flag">🇨🇳</span>
+                  <span class="lang-label">中文</span>
+                </div>
+                <div class="lang-option" data-lang="en" onclick="_onLanguageChange('en')">
+                  <span class="lang-flag">🇺🇸</span>
+                  <span class="lang-label">English</span>
+                </div>
+              </div>
+              <!-- hidden select kept for JS compat -->
+              <select id="settingLanguage" style="display:none" onchange="_onLanguageChange(this.value)">
+                <option value="zh">中文</option>
+                <option value="en">English</option>
+              </select>
             </div>
-
-            <div class="theme-option" data-theme="tofu" onclick="selectTheme('tofu')">
-              <div class="theme-preview tofu-preview"></div>
-              <span>🍮 豆腐</span>
-            </div>
-
           </div>
 
           <div class="settings-divider"></div>
-          <div class="settings-section-title">模型参数</div>
+          <div class="settings-section-title" data-i18n="settings.modelParams">模型参数</div>
           <div class="settings-group">
             <div class="settings-row">
               <div class="settings-field">
-                <label>温度 (Temperature)</label>
+                <label data-i18n="settings.temperature">温度 (Temperature)</label>
                 <div class="range-row"><input type="range" id="settingTemp" min="0" max="1" step="0.05" value="0.7" oninput="document.getElementById('tempVal').textContent=this.value"><span class="range-value" id="tempVal">0.7</span></div>
               </div>
             </div>
             <div class="settings-row two-col">
               <div class="settings-field">
-                <label>最大 Token 数</label>
+                <label data-i18n="settings.maxTokens">最大 Token 数</label>
                 <input type="number" id="settingMaxTokens" value="128000">
               </div>
               <div class="settings-field">
-                <label>图片最大宽度</label>
-                <input type="number" id="settingImageMaxWidth" value="1024" placeholder="0=不压缩">
+                <label data-i18n="settings.imageMaxWidth">图片最大宽度</label>
+                <input type="number" id="settingImageMaxWidth" value="1024" placeholder="0=不压缩" data-i18n-placeholder="settings.imageMaxWidthPh">
               </div>
             </div>
             <div class="settings-row two-col">
               <div class="settings-field">
-                <label>默认思维深度 (Thinking Depth)</label>
+                <label data-i18n="settings.defaultThinkingDepth">默认思维深度 (Thinking Depth)</label>
                 <select id="settingDefaultThinkingDepth" style="max-width:200px">
-                  <option value="off" selected>Off — 关闭</option>
-                  <option value="medium">Medium — 中等</option>
-                  <option value="high">High — 深度</option>
-                  <option value="max">Max — 最大</option>
+                  <option value="off" data-i18n="settings.thinkingOff">Off — 关闭</option>
+                  <option value="medium" selected data-i18n="settings.thinkingMedium">Medium — 中等</option>
+                  <option value="high" data-i18n="settings.thinkingHigh">High — 深度</option>
+                  <option value="max" data-i18n="settings.thinkingMax">Max — 最大</option>
                 </select>
-                <div class="settings-toggle-desc">新对话的默认思维深度级别</div>
+                <div class="settings-toggle-desc" data-i18n="settings.defaultThinkingDesc">新对话的默认思维深度级别</div>
               </div>
             </div>
           </div>
 
           <div class="settings-divider"></div>
-          <div class="settings-section-title">系统提示词</div>
-          <textarea id="settingSystem" class="settings-textarea settings-mono" placeholder="输入自定义系统提示词..."></textarea>
+          <div class="settings-section-title" data-i18n="settings.systemPrompt">系统提示词</div>
+          <textarea id="settingSystem" class="settings-textarea settings-mono" placeholder="输入自定义系统提示词..." data-i18n-placeholder="settings.systemPromptPh"></textarea>
 
           <div class="settings-divider"></div>
-          <div class="settings-section-title">功能模块</div>
+          <div class="settings-section-title" data-i18n="settings.featureModules">功能模块</div>
           <div class="settings-group">
             <div class="settings-toggle-row">
               <div>
-                <span class="settings-toggle-label">交易 / 基金模块</span>
-                <div class="settings-toggle-desc">交易顾问、基金筛选、自动驾驶、资讯爬虫</div>
+                <span class="settings-toggle-label" data-i18n="settings.tradingModule">交易 / 基金模块</span>
+                <div class="settings-toggle-desc" data-i18n="settings.tradingModuleDesc">交易顾问、基金筛选、自动驾驶、资讯爬虫</div>
               </div>
               <label class="stg-toggle">
                 <input type="checkbox" id="settingTradingEnabled">
                 <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
               </label>
             </div>
-            <div id="tradingRestartHint" class="settings-hint-banner" style="display:none;">需要重启服务器才能生效</div>
+            <div id="tradingRestartHint" class="settings-hint-banner" style="display:none;" data-i18n="settings.tradingRestart">需要重启服务器才能生效</div>
           </div>
 
           <div class="settings-group">
             <div class="settings-toggle-row">
               <div>
-                <span class="settings-toggle-label">调试模式</span>
-                <div class="settings-toggle-desc">显示 trace_id、复制会话 ID 按钮等开发调试信息</div>
+                <span class="settings-toggle-label" data-i18n="settings.debugMode">调试模式</span>
+                <div class="settings-toggle-desc" data-i18n="settings.debugModeDesc">显示 trace_id、复制会话 ID 按钮等开发调试信息</div>
               </div>
               <label class="stg-toggle">
                 <input type="checkbox" id="settingDebugMode">
@@ -573,14 +706,14 @@
         <!-- ═══ Providers Tab — providers with nested models ═══ -->
         <div class="settings-tab-panel" id="settingsTab_api">
           <div class="stg-section-head">
-            <div class="settings-section-title">API 服务商 & 模型</div>
+            <div class="settings-section-title" data-i18n="settings.providersTitle">API 服务商 & 模型</div>
             <div class="stg-section-actions">
-              <button class="stg-btn-add stg-refresh-btn" onclick="_showAutoSetupModal()">🚀 自动配置</button>
-              <button class="stg-btn-add stg-refresh-btn" onclick="_showTemplateMenu(this)">⚡ 从模板添加</button>
-              <button class="stg-btn-add stg-refresh-btn" onclick="addProvider()">+ 自定义服务商</button>
+              <button class="stg-btn-add stg-refresh-btn" onclick="_showAutoSetupModal()" data-i18n="settings.autoSetup">🚀 自动配置</button>
+              <button class="stg-btn-add stg-refresh-btn" onclick="_showTemplateMenu(this)" data-i18n="settings.fromTemplate">⚡ 从模板添加</button>
+              <button class="stg-btn-add stg-refresh-btn" onclick="addProvider()" data-i18n="settings.customProvider">+ 自定义服务商</button>
             </div>
           </div>
-          <p class="settings-desc">使用「🚀 自动配置」只需填写 API 地址和密钥，系统自动发现模型、检测余额接口和定价。也可从模板添加或手动创建。</p>
+          <p class="settings-desc" data-i18n="settings.providersDesc">使用「🚀 自动配置」只需填写 API 地址和密钥，系统自动发现模型、检测余额接口和定价。也可从模板添加或手动创建。</p>
           <div id="stgProviderList">
             <!-- JS renders provider cards with nested model lists -->
           </div>
@@ -589,49 +722,49 @@
         <!-- ═══ Preset Tab — image gen + model dropdown visibility ═══ -->
         <div class="settings-tab-panel" id="settingsTab_preset">
           <div class="stg-section-head">
-            <div class="settings-section-title">图片生成</div>
+            <div class="settings-section-title" data-i18n="settings.imageGen">图片生成</div>
             <div class="stg-section-actions">
-              <button class="stg-btn-secondary btn-xs" onclick="_toggleAllIgModels(true)">全部显示</button>
-              <button class="stg-btn-secondary btn-xs" onclick="_toggleAllIgModels(false)">全部隐藏</button>
+              <button class="stg-btn-secondary btn-xs" onclick="_toggleAllIgModels(true)" data-i18n="settings.showAll">全部显示</button>
+              <button class="stg-btn-secondary btn-xs" onclick="_toggleAllIgModels(false)" data-i18n="settings.hideAll">全部隐藏</button>
             </div>
           </div>
-          <p class="settings-desc">选择在图片生成选择器中显示哪些模型。隐藏的模型仍然可用，只是不会出现在选择器中。</p>
+          <p class="settings-desc" data-i18n="settings.igDesc">选择在图片生成选择器中显示哪些模型。隐藏的模型仍然可用，只是不会出现在选择器中。</p>
           <div id="stgIgVisibility" class="stg-dropdown-visibility">
             <!-- JS renders image gen model toggles -->
           </div>
 
           <div class="settings-divider"></div>
           <div class="stg-section-head">
-            <div class="settings-section-title">模型下拉列表</div>
+            <div class="settings-section-title" data-i18n="settings.modelDropdown">模型下拉列表</div>
             <div class="stg-section-actions">
-              <button class="stg-btn-secondary btn-xs" onclick="_toggleAllDropdownModels(true)">全部显示</button>
-              <button class="stg-btn-secondary btn-xs" onclick="_toggleAllDropdownModels(false)">全部隐藏</button>
+              <button class="stg-btn-secondary btn-xs" onclick="_toggleAllDropdownModels(true)" data-i18n="settings.showAll">全部显示</button>
+              <button class="stg-btn-secondary btn-xs" onclick="_toggleAllDropdownModels(false)" data-i18n="settings.hideAll">全部隐藏</button>
             </div>
           </div>
-          <p class="settings-desc">选择在模型切换下拉列表中显示哪些模型。隐藏的模型仍然可用，只是不会出现在下拉列表中。</p>
+          <p class="settings-desc" data-i18n="settings.modelDropdownDesc">选择在模型切换下拉列表中显示哪些模型。隐藏的模型仍然可用，只是不会出现在下拉列表中。</p>
           <div id="stgDropdownVisibility" class="stg-dropdown-visibility">
             <!-- JS renders model toggles -->
           </div>
 
           <div class="settings-divider"></div>
-          <div class="settings-section-title">模型默认</div>
-          <p class="settings-desc">
+          <div class="settings-section-title" data-i18n="settings.modelDefaults">模型默认</div>
+          <p class="settings-desc" data-i18n="settings.modelDefaultsDesc">
             配置自动回退模型和预设的默认模型。当主模型请求失败时，系统将自动切换到回退模型继续生成。
             预设默认模型用于快捷切换时的模型选择。留空表示禁用或使用系统默认。
           </p>
           <div class="settings-group">
             <div class="settings-row two-col">
               <div class="settings-field">
-                <label>回退模型 <span style="color:var(--text-tertiary);font-weight:normal">（主模型失败时自动切换）</span></label>
+                <label data-i18n-html="settings.fallbackModel">回退模型 <span style="color:var(--text-tertiary);font-weight:normal">（主模型失败时自动切换）</span></label>
                 <select id="settingFallbackModel" class="settings-select">
-                  <option value="">（禁用自动回退）</option>
+                  <option value="" data-i18n="settings.disableFallback">（禁用自动回退）</option>
                   <!-- JS populates from available models -->
                 </select>
               </div>
               <div class="settings-field">
-                <label>默认模型 <span style="color:var(--text-tertiary);font-weight:normal">（LLM_MODEL）</span></label>
+                <label data-i18n-html="settings.defaultModel">默认模型 <span style="color:var(--text-tertiary);font-weight:normal">（LLM_MODEL）</span></label>
                 <select id="settingDefaultModel" class="settings-select">
-                  <option value="">（使用环境变量）</option>
+                  <option value="" data-i18n="settings.useEnvVar">（使用环境变量）</option>
                   <!-- JS populates from available models -->
                 </select>
               </div>
@@ -642,12 +775,12 @@
 
         <!-- ═══ Search & Fetch Tab ═══ -->
         <div class="settings-tab-panel" id="settingsTab_search">
-          <div class="settings-section-title">搜索与抓取</div>
+          <div class="settings-section-title" data-i18n="settings.searchFetch">搜索与抓取</div>
           <div class="settings-divider"></div>
           <div class="settings-toggle-row">
             <div>
-              <span class="settings-toggle-label">LLM 内容过滤</span>
-              <div class="settings-toggle-desc">抓取网页后用模型过滤无关内容（导航栏、广告等）。关闭可显著提升抓取速度并节省 token，但搜索质量会下降</div>
+              <span class="settings-toggle-label" data-i18n="settings.llmContentFilter">LLM 内容过滤</span>
+              <div class="settings-toggle-desc" data-i18n="settings.llmContentFilterDesc">抓取网页后用模型过滤无关内容（导航栏、广告等）。关闭可显著提升抓取速度并节省 token，但搜索质量会下降</div>
             </div>
             <label class="stg-toggle">
               <input type="checkbox" id="settingLlmContentFilter" checked>
@@ -655,7 +788,7 @@
             </label>
           </div>
           <div class="settings-divider"></div>
-          <div class="settings-section-title">搜索与抓取参数</div>
+          <div class="settings-section-title" data-i18n="settings.searchFetchParams">搜索与抓取参数</div>
           <div class="settings-group">
             <div class="settings-row two-col">
               <div class="settings-field">
@@ -690,15 +823,144 @@
           </div>
 
           <div class="settings-divider"></div>
-          <div class="settings-section-title">屏蔽域名</div>
-          <p class="settings-desc">抓取器不会访问的域名，每行一个。</p>
+          <div class="settings-section-title" data-i18n="settings.blockedDomains">屏蔽域名</div>
+          <p class="settings-desc" data-i18n="settings.blockedDomainsDesc">抓取器不会访问的域名，每行一个。</p>
           <textarea id="settingSkipDomains" class="settings-textarea settings-mono" rows="4" placeholder="youtube.com&#10;twitter.com&#10;facebook.com"></textarea>
+        </div>
+
+        <!-- ═══ Translation Tab ═══ -->
+        <div class="settings-tab-panel" id="settingsTab_translate">
+          <div class="settings-section-title">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px;opacity:.65"><path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2v3"/><path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/></svg>
+            机器翻译服务
+          </div>
+          <p class="settings-desc">配置专用机器翻译 API，比 LLM 翻译更快、更便宜。<br>未配置或关闭时，翻译将自动使用 LLM cheap 模型。</p>
+
+          <div class="settings-group">
+            <div class="settings-toggle-row">
+              <div>
+                <span class="settings-toggle-label">启用机器翻译</span>
+                <div class="settings-toggle-desc">开启后，翻译将优先使用机器翻译 API，失败时自动回退到 LLM</div>
+              </div>
+              <label class="stg-toggle">
+                <input type="checkbox" id="settingMtEnabled">
+                <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
+              </label>
+            </div>
+          </div>
+
+          <div id="mtProviderFields" style="display:none">
+            <div class="settings-divider"></div>
+
+            <!-- Provider selector -->
+            <div class="settings-section-title" style="display:flex;align-items:center;gap:8px">
+              翻译服务商
+              <select id="settingMtProvider" class="mt-provider-select" onchange="_switchMtProvider(this.value)">
+                <option value="niutrans">小牛翻译 NiuTrans</option>
+                <option value="custom">自定义 Custom</option>
+              </select>
+            </div>
+
+            <!-- ── NiuTrans provider card ── -->
+            <div class="mt-provider-card" id="mtCardNiutrans">
+              <div class="mt-provider-card-header">
+                <div class="mt-provider-logo" style="background:linear-gradient(135deg,rgba(85,137,252,.12),rgba(85,137,252,.04));border-color:rgba(85,137,252,.25)">
+                  <img src="static/icons/niutrans.svg" width="22" height="22" alt="NiuTrans">
+                </div>
+                <div class="mt-provider-info">
+                  <div class="mt-provider-name">
+                    小牛翻译 <span style="color:var(--text-tertiary);font-weight:400">NiuTrans</span>
+                  </div>
+                  <div class="mt-provider-desc">支持 400+ 语种互译 · 中英日韩高质量翻译 · 东北大学 NLP 实验室</div>
+                </div>
+                <a href="https://niutrans.com/cloud/overview" target="_blank" rel="noopener noreferrer" class="mt-apply-link">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                  申请 API Key
+                </a>
+              </div>
+
+              <div class="mt-provider-card-body">
+                <div class="settings-row">
+                  <div class="settings-field">
+                    <label>API Key</label>
+                    <input type="password" id="settingMtApiKey" placeholder="在小牛翻译控制台 → API 管理中获取" spellcheck="false">
+                  </div>
+                </div>
+
+                <div class="settings-row two-col">
+                  <div class="settings-field">
+                    <label>App ID <span style="color:var(--text-tertiary);font-weight:normal">（可选，v2 签名鉴权）</span></label>
+                    <input type="text" id="settingMtAppId" placeholder="留空使用简单 API Key 鉴权 (v1)" spellcheck="false">
+                  </div>
+                  <div class="settings-field">
+                    <label>API 地址 <span style="color:var(--text-tertiary);font-weight:normal">（可选）</span></label>
+                    <input type="text" id="settingMtApiUrl" class="settings-mono" placeholder="留空使用默认地址" spellcheck="false">
+                  </div>
+                </div>
+
+                <div class="settings-row" style="align-items:center;gap:12px;margin-top:4px">
+                  <button class="stg-btn-secondary" onclick="_testMtProvider()" id="mtTestBtn">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                    测试连接
+                  </button>
+                  <span id="mtTestResult" style="font-size:13px"></span>
+                </div>
+              </div>
+            </div>
+            <!-- end NiuTrans card -->
+
+            <!-- ── Custom provider card ── -->
+            <div class="mt-provider-card" id="mtCardCustom" style="display:none">
+              <div class="mt-provider-card-header">
+                <div class="mt-provider-logo" style="background:linear-gradient(135deg,rgba(136,136,136,.10),rgba(136,136,136,.04));border-color:rgba(136,136,136,.2)">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M2 12h20"/>
+                    <path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10A15.3 15.3 0 0112 2z"/>
+                  </svg>
+                </div>
+                <div class="mt-provider-info">
+                  <div class="mt-provider-name">
+                    自定义服务商 <span style="color:var(--text-tertiary);font-weight:400">Custom</span>
+                  </div>
+                  <div class="mt-provider-desc">接入其他兼容 NiuTrans API 格式的翻译服务</div>
+                </div>
+              </div>
+              <div class="mt-provider-card-body">
+                <div class="settings-row">
+                  <div class="settings-field">
+                    <label>API Key</label>
+                    <input type="password" id="settingMtApiKeyCustom" placeholder="翻译服务 API Key" spellcheck="false">
+                  </div>
+                </div>
+                <div class="settings-row two-col">
+                  <div class="settings-field">
+                    <label>App ID <span style="color:var(--text-tertiary);font-weight:normal">（可选）</span></label>
+                    <input type="text" id="settingMtAppIdCustom" placeholder="如需签名鉴权则填写" spellcheck="false">
+                  </div>
+                  <div class="settings-field">
+                    <label>API 地址 <span style="color:var(--text-tertiary);font-weight:normal">（必填）</span></label>
+                    <input type="text" id="settingMtApiUrlCustom" class="settings-mono" placeholder="https://your-mt-api.com/translate" spellcheck="false">
+                  </div>
+                </div>
+                <div class="settings-row" style="align-items:center;gap:12px;margin-top:4px">
+                  <button class="stg-btn-secondary" onclick="_testMtProvider()" id="mtTestBtnCustom">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                    测试连接
+                  </button>
+                  <span id="mtTestResultCustom" style="font-size:13px"></span>
+                </div>
+              </div>
+            </div>
+            <!-- end Custom card -->
+
+          </div>
         </div>
 
         <!-- ═══ Network Tab ═══ -->
         <div class="settings-tab-panel" id="settingsTab_network">
-          <div class="settings-section-title">HTTP 代理</div>
-          <p class="settings-desc">
+          <div class="settings-section-title" data-i18n="settings.httpProxy">HTTP 代理</div>
+          <p class="settings-desc" data-i18n-html="settings.httpProxyDesc">
             配置用于所有出站请求（LLM API、网页搜索、页面抓取）的 HTTP/HTTPS 代理。
             留空则使用系统环境变量（<code>http_proxy</code> / <code>https_proxy</code>）。
             修改立即生效，无需重启。
@@ -709,19 +971,19 @@
           <div class="settings-group">
             <div class="settings-row two-col">
               <div class="settings-field">
-                <label>HTTP 代理</label>
+                <label data-i18n="settings.httpProxy">HTTP 代理</label>
                 <input type="text" id="settingHttpProxy" class="settings-mono" placeholder="http://proxy.example.com:8080" spellcheck="false">
               </div>
               <div class="settings-field">
-                <label>HTTPS 代理</label>
+                <label data-i18n="settings.httpsProxy">HTTPS 代理</label>
                 <input type="text" id="settingHttpsProxy" class="settings-mono" placeholder="http://proxy.example.com:8080" spellcheck="false">
               </div>
             </div>
           </div>
 
           <div class="settings-divider"></div>
-          <div class="settings-section-title">不代理域名</div>
-          <p class="settings-desc">
+          <div class="settings-section-title" data-i18n="settings.proxyBypassTitle">不代理域名</div>
+          <p class="settings-desc" data-i18n-html="settings.proxyBypassDesc">
             在此添加不需要走代理的域名后缀或主机名（每行一个，后缀匹配）。
             匹配的请求会<strong>完全绕过 HTTP 代理</strong>。
           </p>
@@ -749,15 +1011,15 @@
             <!-- Status indicator -->
             <div class="settings-toggle-row">
               <div>
-                <span class="settings-toggle-label" id="feishuStatusLabel">连接状态</span>
-                <div class="settings-toggle-desc" id="feishuStatusDesc">加载状态中…</div>
+                <span class="settings-toggle-label" id="feishuStatusLabel" data-i18n="settings.connectionStatus">连接状态</span>
+                <div class="settings-toggle-desc" id="feishuStatusDesc" data-i18n="settings.loadingStatus">加载状态中…</div>
               </div>
               <span class="feishu-status-dot" id="feishuStatusDot" title="连接状态"></span>
             </div>
           </div>
 
           <div class="settings-divider"></div>
-          <div class="settings-section-title">凭证</div>
+          <div class="settings-section-title" data-i18n="settings.credentials">凭证</div>
           <div class="settings-group">
             <div class="settings-row two-col">
               <div class="settings-field">
@@ -769,26 +1031,26 @@
                 <input type="password" id="settingFeishuAppSecret" placeholder="留空则保持不变">
               </div>
             </div>
-            <div id="feishuRestartHint" class="settings-hint-banner" style="display:none;">凭证修改需要重启服务器才能生效</div>
+            <div id="feishuRestartHint" class="settings-hint-banner" style="display:none;" data-i18n="settings.credModRestart">凭证修改需要重启服务器才能生效</div>
           </div>
 
           <div class="settings-divider"></div>
-          <div class="settings-section-title">工作空间</div>
+          <div class="settings-section-title" data-i18n="settings.workspace">工作空间</div>
           <div class="settings-group">
             <div class="settings-row two-col">
               <div class="settings-field">
-                <label>默认项目路径</label>
+                <label data-i18n="settings.defaultProjectPath">默认项目路径</label>
                 <input type="text" id="settingFeishuDefaultProject" placeholder="~/Projects/chatui">
               </div>
               <div class="settings-field">
-                <label>工作空间根目录</label>
+                <label data-i18n="settings.workspaceRoot">工作空间根目录</label>
                 <input type="text" id="settingFeishuWorkspaceRoot" placeholder="~/Projects">
               </div>
             </div>
           </div>
 
           <div class="settings-divider"></div>
-          <div class="settings-section-title">访问控制</div>
+          <div class="settings-section-title" data-i18n="settings.accessControl">访问控制</div>
           <div class="settings-group">
             <div class="settings-field">
               <label>允许的用户 <span style="color:var(--text-tertiary);font-weight:normal">（飞书 open_id，每行一个 — 留空表示允许所有人）</span></label>
@@ -806,7 +1068,7 @@
 
         <!-- ═══ OAuth Subscription Login Tab ═══ -->
         <div class="settings-tab-panel" id="settingsTab_oauth">
-          <div class="settings-section-title">订阅登录</div>
+          <div class="settings-section-title" data-i18n="settings.oauthTitle">订阅登录</div>
           <p class="settings-desc">使用 ChatGPT Plus / Claude Pro 订阅账号登录，无需 API Key，直接使用订阅额度。<br><span style="color:#f0ad4e;font-size:12px">⚠️ 中国用户需要全程代理（Clash/VPN），授权弹窗和服务器换 token 都需要能访问外网。建议在<strong>本地浏览器无痕窗口</strong>中完成授权。</span></p>
 
           <!-- Claude Pro -->
@@ -814,15 +1076,15 @@
             <div class="oauth-provider-header">
               <img src="static/icons/claude.svg" width="20" height="20" style="vertical-align:-3px;filter:brightness(0) invert(1)" alt="Claude">
               <span class="oauth-provider-name">Claude Pro / Max</span>
-              <span class="oauth-status-badge" id="oauthClaudeStatus">未登录</span>
+              <span class="oauth-status-badge" id="oauthClaudeStatus" data-i18n="settings.notLoggedIn">未登录</span>
             </div>
             <p class="oauth-provider-desc">登录 Claude 订阅，使用 Sonnet / Opus 等模型，无需 API Key。</p>
             <div class="oauth-provider-info" id="oauthClaudeInfo" style="display:none">
               <span class="oauth-email" id="oauthClaudeEmail"></span>
             </div>
             <div class="oauth-provider-actions">
-              <button class="btn-small btn-primary" id="oauthClaudeLoginBtn" onclick="_oauthLogin('claude')">登录 Claude</button>
-              <button class="btn-small btn-danger" id="oauthClaudeLogoutBtn" onclick="_oauthLogout('claude')" style="display:none">退出</button>
+              <button class="btn-small btn-primary" id="oauthClaudeLoginBtn" onclick="_oauthLogin('claude')" data-i18n="settings.loginClaude">登录 Claude</button>
+              <button class="btn-small btn-danger" id="oauthClaudeLogoutBtn" onclick="_oauthLogout('claude')" style="display:none" data-i18n="settings.logout">退出</button>
             </div>
             <div class="oauth-manual-fallback" id="oauthClaudeManual" style="display:none">
               <p class="oauth-manual-hint">如弹窗无法打开，请复制链接到<strong>开了代理的浏览器无痕窗口</strong>中打开：</p>
@@ -843,15 +1105,15 @@
             <div class="oauth-provider-header">
               <img src="static/icons/openai.svg" width="20" height="20" style="vertical-align:-3px;filter:brightness(0) invert(1)" alt="OpenAI">
               <span class="oauth-provider-name">ChatGPT Plus / Pro</span>
-              <span class="oauth-status-badge" id="oauthCodexStatus">未登录</span>
+              <span class="oauth-status-badge" id="oauthCodexStatus" data-i18n="settings.notLoggedIn">未登录</span>
             </div>
             <p class="oauth-provider-desc">登录 ChatGPT 订阅，使用 Codex 模型，请求自动转换为 Responses API 格式。</p>
             <div class="oauth-provider-info" id="oauthCodexInfo" style="display:none">
               <span class="oauth-email" id="oauthCodexEmail"></span>
             </div>
             <div class="oauth-provider-actions">
-              <button class="btn-small btn-primary" id="oauthCodexLoginBtn" onclick="_oauthLogin('codex')">登录 ChatGPT</button>
-              <button class="btn-small btn-danger" id="oauthCodexLogoutBtn" onclick="_oauthLogout('codex')" style="display:none">退出</button>
+              <button class="btn-small btn-primary" id="oauthCodexLoginBtn" onclick="_oauthLogin('codex')" data-i18n="settings.loginChatGPT">登录 ChatGPT</button>
+              <button class="btn-small btn-danger" id="oauthCodexLogoutBtn" onclick="_oauthLogout('codex')" style="display:none" data-i18n="settings.logout">退出</button>
             </div>
             <div class="oauth-manual-fallback" id="oauthCodexManual" style="display:none">
               <p class="oauth-manual-hint">如弹窗无法打开，请复制链接到<strong>开了代理的浏览器无痕窗口</strong>中打开：</p>
@@ -867,7 +1129,7 @@
             </div>
           </div>
 
-          <div class="settings-section-title" style="margin-top:20px">使用说明</div>
+          <div class="settings-section-title" style="margin-top:20px" data-i18n="settings.oauthInstructions">使用说明</div>
           <ul class="oauth-notes">
             <li>点击登录 → 弹窗打开官方授权页 → 用订阅账号登录并授权</li>
             <li>授权后 Claude 显示 <code>code#state</code>、ChatGPT 自动回调，按提示操作即可</li>
@@ -885,7 +1147,7 @@
               <span class="settings-section-title" style="margin:0;">Apps</span>
               <span class="stg-badge" id="mcpToolCount" style="font-size:10px;">0 tools</span>
             </div>
-            <input type="text" class="mcp-search" id="mcpSearch" placeholder="搜索 Apps…"
+            <input type="text" class="mcp-search" id="mcpSearch" placeholder="搜索 Apps…" data-i18n-placeholder="settings.searchApps"
                    oninput="_mcpFilterCatalog(this.value)">
           </div>
 
@@ -894,17 +1156,17 @@
 
           <!-- Catalog grid -->
           <div id="mcpCatalogGrid" class="mcp-catalog-grid">
-            <p class="stg-loading">正在加载…</p>
+            <p class="stg-loading" data-i18n="settings.loading">正在加载…</p>
           </div>
 
           <!-- Installed section -->
           <div id="mcpInstalledSection" style="display:none;">
             <div class="settings-divider"></div>
             <div class="settings-section-title" style="display:flex;align-items:center;gap:8px;">
-              <span>已安装</span>
+              <span data-i18n="settings.installed">已安装</span>
               <span class="stg-badge" id="mcpInstalledCount" style="font-size:10px;">0</span>
               <div style="flex:1"></div>
-              <button class="btn btn-primary btn-xs" id="mcpConnectAllBtn" onclick="_mcpConnectAll()" style="display:none;">全部连接</button>
+              <button class="btn btn-primary btn-xs" id="mcpConnectAllBtn" onclick="_mcpConnectAll()" style="display:none;" data-i18n="settings.connectAll">全部连接</button>
             </div>
             <div id="mcpInstalledList" class="mcp-installed-list"></div>
           </div>
@@ -972,31 +1234,31 @@
 
         <!-- ═══ Advanced Tab ═══ -->
         <div class="settings-tab-panel" id="settingsTab_advanced">
-          <div class="settings-section-title">导入 / 导出</div>
-          <p class="settings-desc">将所有服务器端配置导出为 JSON，或从文件导入。</p>
+          <div class="settings-section-title" data-i18n="settings.importExport">导入 / 导出</div>
+          <p class="settings-desc" data-i18n="settings.importExportDesc">将所有服务器端配置导出为 JSON，或从文件导入。</p>
           <div class="settings-row" style="gap:10px;">
-            <button class="btn btn-secondary btn-sm" onclick="exportServerConfig()">⬇ 导出 JSON</button>
-            <button class="btn btn-secondary btn-sm" onclick="document.getElementById('settingsImportFile').click()">⬆ 导入 JSON</button>
+            <button class="btn btn-secondary btn-sm" onclick="exportServerConfig()" data-i18n="settings.exportJson">⬇ 导出 JSON</button>
+            <button class="btn btn-secondary btn-sm" onclick="document.getElementById('settingsImportFile').click()" data-i18n="settings.importJson">⬆ 导入 JSON</button>
             <input type="file" id="settingsImportFile" accept=".json" style="display:none" onchange="importServerConfig(event)">
           </div>
 
           <div class="settings-divider"></div>
-          <div class="settings-section-title">价格覆盖</div>
-          <p class="settings-desc">模型定价（美元 / 每百万 Token）。编辑以下 JSON 进行自定义。</p>
+          <div class="settings-section-title" data-i18n="settings.pricingOverride">价格覆盖</div>
+          <p class="settings-desc" data-i18n="settings.pricingOverrideDesc">模型定价（美元 / 每百万 Token）。编辑以下 JSON 进行自定义。</p>
           <textarea id="settingPricing" class="settings-textarea settings-mono" rows="8" placeholder="正在加载价格数据..."></textarea>
 
           <div class="settings-divider"></div>
-          <div class="settings-section-title">本地缓存</div>
-          <p class="settings-desc">对话缓存在 IndexedDB 中以实现即时加载。服务器始终是数据的唯一来源。</p>
+          <div class="settings-section-title" data-i18n="settings.localCache">本地缓存</div>
+          <p class="settings-desc" data-i18n="settings.localCacheDesc">对话缓存在 IndexedDB 中以实现即时加载。服务器始终是数据的唯一来源。</p>
           <div class="settings-row" style="gap:10px; align-items:center;">
             <span class="settings-info-value" id="settingsCacheStats" style="font-size:13px;opacity:0.7;">—</span>
-            <button class="btn btn-secondary btn-sm" id="settingsClearCacheBtn" onclick="_clearConvCacheFromSettings()">清除缓存</button>
+            <button class="btn btn-secondary btn-sm" id="settingsClearCacheBtn" onclick="_clearConvCacheFromSettings()" data-i18n="settings.clearCache">清除缓存</button>
           </div>
 
           <div class="settings-divider"></div>
-          <div class="settings-section-title">服务器信息</div>
+          <div class="settings-section-title" data-i18n="settings.serverInfo">服务器信息</div>
           <div class="settings-server-info" id="settingsServerInfo">
-            <div class="settings-info-row"><span class="settings-info-label">状态</span><span class="settings-info-value" id="settingsSrvStatus">—</span></div>
+            <div class="settings-info-row"><span class="settings-info-label" data-i18n="settings.status">状态</span><span class="settings-info-value" id="settingsSrvStatus">—</span></div>
           </div>
         </div>
 
@@ -1008,8 +1270,8 @@
       <div class="settings-footer-hint" id="settingsStatusHint"></div>
       <div class="settings-footer-actions">
         <span class="settings-version" id="settingsVersion"></span>
-        <button class="btn btn-secondary" onclick="closeSettings()">取消</button>
-        <button class="btn btn-primary" onclick="saveSettings()">保存</button>
+        <button class="btn btn-secondary" onclick="closeSettings()" data-i18n="settings.cancel">取消</button>
+        <button class="btn btn-primary" onclick="saveSettings()" data-i18n="settings.save">保存</button>
       </div>
     </div>
   </div>
@@ -1033,7 +1295,7 @@
               </svg>
             </div>
             <div>
-              <h2 class="myday-title" id="mydayTitle">我的一天</h2>
+              <h2 class="myday-title" id="mydayTitle" data-i18n="myday.title">我的一天</h2>
               <p class="myday-subtitle" id="mydaySubtitle"></p>
             </div>
           </div>
@@ -1064,8 +1326,8 @@
       <div class="myday-cal-header" id="mydayCalHeader"></div>
       <div class="myday-cal-grid" id="mydayCalGrid"></div>
       <div class="myday-cal-legend">
-        <span class="cal-legend-item"><span class="cal-dot done"></span>完成</span>
-        <span class="cal-legend-item"><span class="cal-dot open"></span>未完成</span>
+        <span class="cal-legend-item"><span class="cal-dot done"></span><span data-i18n="myday.done">完成</span></span>
+        <span class="cal-legend-item"><span class="cal-dot open"></span><span data-i18n="myday.open">未完成</span></span>
       </div>
       <!-- Day cost summary in sidebar -->
       <div class="myday-cal-info" id="mydayCalInfo"></div>
@@ -1141,8 +1403,8 @@
 <!-- ★ Browser Bridge Modal -->
 <div class="modal-overlay" id="browserModal" onclick="if(event.target===this)closeBrowserModal()">
   <div class="modal browser-modal">
-    <h3>浏览器桥接</h3>
-    <p class="modal-desc">通过 Chrome 扩展让 AI 读取和交互你的浏览器标签页。</p>
+    <h3 data-i18n="browser.title">浏览器桥接</h3>
+    <p class="modal-desc" data-i18n="browser.desc">通过 Chrome 扩展让 AI 读取和交互你的浏览器标签页。</p>
 
     <div class="browser-status-box" id="browserStatusBox">
       <div class="browser-status-indicator" id="browserStatusIndicator">
@@ -1186,8 +1448,8 @@
     </div>
 
     <div class="modal-actions">
-      <button class="btn btn-secondary" onclick="closeBrowserModal()">关闭</button>
-      <button class="btn btn-primary" id="browserModalToggleBtn" onclick="toggleBrowserFromModal()">启用浏览器桥接</button>
+      <button class="btn btn-secondary" onclick="closeBrowserModal()" data-i18n="browser.close">关闭</button>
+      <button class="btn btn-primary" id="browserModalToggleBtn" onclick="toggleBrowserFromModal()" data-i18n="browser.enable">启用浏览器桥接</button>
     </div>
   </div>
 </div>
@@ -1198,8 +1460,8 @@
     <!-- Header — cream band with gold kintsugi -->
     <div class="memory-modal-header">
       <h3 class="memory-modal-title">Memory</h3>
-      <div class="memory-modal-subtitle">记忆积累 · AI 自动学习并应用的知识库</div>
-      <button class="memory-modal-close" onclick="closeMemoryModal()" title="关闭">
+      <div class="memory-modal-subtitle" data-i18n="memory.title">记忆积累 · AI 自动学习并应用的知识库</div>
+      <button class="memory-modal-close" onclick="closeMemoryModal()" title="关闭" data-i18n-title="common.close">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
@@ -1210,13 +1472,13 @@
     <!-- Toolbar: tabs + search -->
     <div class="memory-toolbar">
       <div class="memory-tabs">
-        <button class="memory-tab active" data-scope="all" onclick="switchMemoryTab('all')">全部</button>
-        <button class="memory-tab" data-scope="project" onclick="switchMemoryTab('project')">项目</button>
-        <button class="memory-tab" data-scope="global" onclick="switchMemoryTab('global')">全局</button>
+        <button class="memory-tab active" data-scope="all" onclick="switchMemoryTab('all')" data-i18n="memory.all">全部</button>
+        <button class="memory-tab" data-scope="project" onclick="switchMemoryTab('project')" data-i18n="memory.project">项目</button>
+        <button class="memory-tab" data-scope="global" onclick="switchMemoryTab('global')" data-i18n="memory.global">全局</button>
       </div>
       <div class="memory-search-box">
         <svg class="memory-search-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input type="text" id="memorySearchInput" placeholder="搜索记忆…" class="memory-search-input" oninput="filterMemoryList(this.value)">
+        <input type="text" id="memorySearchInput" placeholder="搜索记忆…" class="memory-search-input" oninput="filterMemoryList(this.value)" data-i18n-placeholder="memory.searchPh">
       </div>
     </div>
 
@@ -1224,24 +1486,24 @@
     <div class="memory-list" id="memoryList">
       <div class="memory-empty">
         <span class="memory-empty-icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3 4 4.5 4.5 0 0 1-3-4"/><path d="M12 18v4"/><path d="M8 18l-2 2"/><path d="M16 18l2 2"/></svg></span>
-        <div class="memory-empty-title">还没有积累任何记忆</div>
-        <div class="memory-empty-hint">AI 在对话中发现有用模式时会自动保存记忆<br>你也可以点击下方「+ 新建」手动添加</div>
+        <div class="memory-empty-title" data-i18n="memory.emptyTitle">还没有积累任何记忆</div>
+        <div class="memory-empty-hint" data-i18n-html="memory.emptyHint">AI 在对话中发现有用模式时会自动保存记忆<br>你也可以点击下方「+ 新建」手动添加</div>
       </div>
     </div>
 
     <!-- Add section -->
     <div class="memory-add-section" id="memoryAddSection" style="display:none">
-      <div class="memory-add-header">创建新记忆</div>
-      <input type="text" id="memoryNewName" placeholder="记忆名称 (短横线命名, e.g. react-hooks-convention)" class="memory-input">
-      <input type="text" id="memoryNewDesc" placeholder="简短描述 — 什么时候该使用这条记忆？" class="memory-input">
-      <textarea id="memoryNewBody" placeholder="记忆内容（支持 Markdown）…" class="memory-textarea" rows="5"></textarea>
+      <div class="memory-add-header" data-i18n="memory.createNew">创建新记忆</div>
+      <input type="text" id="memoryNewName" placeholder="记忆名称 (短横线命名, e.g. react-hooks-convention)" class="memory-input" data-i18n-placeholder="memory.namePh">
+      <input type="text" id="memoryNewDesc" placeholder="简短描述 — 什么时候该使用这条记忆？" class="memory-input" data-i18n-placeholder="memory.descPh">
+      <textarea id="memoryNewBody" placeholder="记忆内容（支持 Markdown）…" class="memory-textarea" rows="5" data-i18n-placeholder="memory.bodyPh"></textarea>
       <div class="memory-add-row">
         <select id="memoryNewScope" class="memory-select">
-          <option value="project">项目级</option>
-          <option value="global">全局</option>
+          <option value="project" data-i18n="memory.projectScope">项目级</option>
+          <option value="global" data-i18n="memory.globalScope">全局</option>
         </select>
-        <input type="text" id="memoryNewTags" placeholder="标签（逗号分隔）" class="memory-input" style="flex:1;margin-bottom:0">
-        <button class="memory-action-btn memory-btn-on" onclick="createMemoryFromModal()">创建</button>
+        <input type="text" id="memoryNewTags" placeholder="标签（逗号分隔）" class="memory-input" style="flex:1;margin-bottom:0" data-i18n-placeholder="memory.tagsPh">
+        <button class="memory-action-btn memory-btn-on" onclick="createMemoryFromModal()" data-i18n="memory.create">创建</button>
       </div>
     </div>
     <div id="memoryModalStatus" class="memory-modal-status"></div>
@@ -1250,10 +1512,10 @@
     <div class="memory-modal-footer">
       <button class="memory-action-btn memory-btn-add" onclick="toggleMemoryAddForm()">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-        新建
+        <span data-i18n="memory.new">新建</span>
       </button>
       <div style="flex:1"></div>
-      <button class="memory-action-btn memory-btn-on" id="memoryModalToggleBtn" onclick="toggleMemoryFromModal()">启用 Memory</button>
+      <button class="memory-action-btn memory-btn-on" id="memoryModalToggleBtn" onclick="toggleMemoryFromModal()" data-i18n="memory.enableMemory">启用 Memory</button>
     </div>
   </div>
 </div>
@@ -1279,87 +1541,87 @@
 <!-- Mobile "more" bottom sheet — all toolbar toggles accessible here -->
 <div class="mobile-bottom-sheet-backdrop" id="mobileSheetBackdrop" onclick="closeMobileSheet()"></div>
 <div class="mobile-bottom-sheet" id="mobileSheet">
-  <div class="mobile-sheet-header">选项</div>
+  <div class="mobile-sheet-header" data-i18n="mobile.options">选项</div>
   <!-- Thinking Depth section — only visible when model supports it -->
   <div class="mobile-sheet-section" id="mobileDepthSection" style="display:none">
-    <div class="mobile-sheet-section-title">思考深度</div>
+    <div class="mobile-sheet-section-title" data-i18n="mobile.thinkingDepth">思考深度</div>
     <div class="mobile-depth-bar">
-      <button class="mobile-depth-btn" data-depth="off" onclick="selectThinkingDepth('off');updateMobileDepth()">关闭</button>
-      <button class="mobile-depth-btn active" data-depth="medium" onclick="selectThinkingDepth('medium');updateMobileDepth()">中</button>
-      <button class="mobile-depth-btn" data-depth="high" onclick="selectThinkingDepth('high');updateMobileDepth()">高</button>
-      <button class="mobile-depth-btn" data-depth="max" onclick="selectThinkingDepth('max');updateMobileDepth()">最大</button>
+      <button class="mobile-depth-btn" data-depth="off" onclick="selectThinkingDepth('off');updateMobileDepth()" data-i18n="mobile.off">关闭</button>
+      <button class="mobile-depth-btn active" data-depth="medium" onclick="selectThinkingDepth('medium');updateMobileDepth()" data-i18n="mobile.medium">中</button>
+      <button class="mobile-depth-btn" data-depth="high" onclick="selectThinkingDepth('high');updateMobileDepth()" data-i18n="mobile.high">高</button>
+      <button class="mobile-depth-btn" data-depth="max" onclick="selectThinkingDepth('max');updateMobileDepth()" data-i18n="mobile.max">最大</button>
     </div>
   </div>
   <!-- AI Enhance section -->
   <div class="mobile-sheet-section">
-    <div class="mobile-sheet-section-title">AI 增强</div>
+    <div class="mobile-sheet-section-title" data-i18n="mobile.aiEnhance">AI 增强</div>
     <div class="mobile-sheet-item" id="mobileCodeExec" onclick="toggleCodeExec();updateMobileSheet()">
       <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
       <span class="mobile-sheet-item-text">
-        <span class="mobile-sheet-item-name">代码执行</span>
-        <span class="mobile-sheet-item-desc">允许 AI 运行代码</span>
+        <span class="mobile-sheet-item-name" data-i18n="toolbar.codeExec">代码执行</span>
+        <span class="mobile-sheet-item-desc" data-i18n="toolbar.codeExecDesc">允许 AI 运行代码</span>
       </span>
       <span class="mobile-sheet-item-check">✓</span>
     </div>
     <div class="mobile-sheet-item" id="mobileMemory" onclick="toggleMemory();updateMobileSheet()">
       <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></span>
       <span class="mobile-sheet-item-text">
-        <span class="mobile-sheet-item-name">记忆注入</span>
-        <span class="mobile-sheet-item-desc">注入累积经验</span>
+        <span class="mobile-sheet-item-name" data-i18n="mobile.memoryInject">记忆注入</span>
+        <span class="mobile-sheet-item-desc" data-i18n="mobile.memoryInjectDesc">注入累积经验</span>
       </span>
       <span class="mobile-sheet-item-check">✓</span>
     </div>
     <div class="mobile-sheet-item" id="mobileTranslate" onclick="toggleAutoTranslate();updateMobileSheet()">
       <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2v3"/><path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/></svg></span>
       <span class="mobile-sheet-item-text">
-        <span class="mobile-sheet-item-name">自动翻译</span>
-        <span class="mobile-sheet-item-desc">中英互译</span>
+        <span class="mobile-sheet-item-name" data-i18n="mobile.autoTranslate">自动翻译</span>
+        <span class="mobile-sheet-item-desc" data-i18n="mobile.autoTranslateDesc">中英互译</span>
       </span>
       <span class="mobile-sheet-item-check">✓</span>
     </div>
   </div>
   <!-- Tools section -->
   <div class="mobile-sheet-section">
-    <div class="mobile-sheet-section-title">工具</div>
+    <div class="mobile-sheet-section-title" data-i18n="mobile.tools">工具</div>
     <div class="mobile-sheet-item" id="mobileBrowser" onclick="toggleBrowser();updateMobileSheet()">
       <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
       <span class="mobile-sheet-item-text">
-        <span class="mobile-sheet-item-name">浏览器桥接</span>
+        <span class="mobile-sheet-item-name" data-i18n="toolbar.browserBridge">浏览器桥接</span>
       </span>
       <span class="mobile-sheet-item-check">✓</span>
     </div>
     <div class="mobile-sheet-item" id="mobileImageGen" onclick="toggleImageGenTool();updateMobileSheet()">
       <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></span>
       <span class="mobile-sheet-item-text">
-        <span class="mobile-sheet-item-name">AI 绘图</span>
+        <span class="mobile-sheet-item-name" data-i18n="toolbar.aiDrawing">AI 绘图</span>
       </span>
       <span class="mobile-sheet-item-check">✓</span>
     </div>
     <div class="mobile-sheet-item" id="mobileHumanGuidance" onclick="toggleHumanGuidance();updateMobileSheet()">
       <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
       <span class="mobile-sheet-item-text">
-        <span class="mobile-sheet-item-name">人机协作</span>
-        <span class="mobile-sheet-item-desc">AI 可向你提问</span>
+        <span class="mobile-sheet-item-name" data-i18n="toolbar.humanAICollab">人机协作</span>
+        <span class="mobile-sheet-item-desc" data-i18n="mobile.aiCanAsk">AI 可向你提问</span>
       </span>
       <span class="mobile-sheet-item-check">✓</span>
     </div>
     <div class="mobile-sheet-item" id="mobileProject" onclick="closeMobileSheet();openProjectModal()">
       <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
       <span class="mobile-sheet-item-text">
-        <span class="mobile-sheet-item-name">项目助手</span>
-        <span class="mobile-sheet-item-desc">打开项目面板</span>
+        <span class="mobile-sheet-item-name" data-i18n="mobile.projectAssistant">项目助手</span>
+        <span class="mobile-sheet-item-desc" data-i18n="mobile.projectAssistantDesc">打开项目面板</span>
       </span>
       <span class="mobile-sheet-item-check" style="opacity:0">✓</span>
     </div>
   </div>
   <!-- Backend section -->
   <div class="mobile-sheet-section" id="mobileBackendSection">
-    <div class="mobile-sheet-section-title">后端</div>
+    <div class="mobile-sheet-section-title" data-i18n="mobile.backend">后端</div>
     <div class="mobile-sheet-item active" id="mobileBackendBuiltin" data-backend="builtin" onclick="switchMobileBackend('builtin')">
       <span class="mobile-sheet-item-icon"><img src="static/icons/tofu-welcome.svg" alt="Tofu" width="18" height="18"></span>
       <span class="mobile-sheet-item-text">
         <span class="mobile-sheet-item-name">Tofu (Built-in)</span>
-        <span class="mobile-sheet-item-desc">全部功能</span>
+        <span class="mobile-sheet-item-desc" data-i18n="mobile.allFeatures">全部功能</span>
       </span>
       <span class="mobile-sheet-item-check">✓</span>
     </div>
@@ -1367,7 +1629,7 @@
       <span class="mobile-sheet-item-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 2L2 7l10 5 10-5-10-5z" fill="currentColor" opacity="0.7"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5" stroke="currentColor" stroke-width="2" fill="none"/></svg></span>
       <span class="mobile-sheet-item-text">
         <span class="mobile-sheet-item-name">Claude Code</span>
-        <span class="mobile-sheet-item-desc ab-desc-status" id="ccStatusMobile">检查中...</span>
+        <span class="mobile-sheet-item-desc ab-desc-status" id="ccStatusMobile" data-i18n="mobile.checkingStatus">检查中...</span>
       </span>
       <span class="mobile-sheet-item-check">✓</span>
     </div>
@@ -1375,29 +1637,37 @@
       <span class="mobile-sheet-item-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="4" fill="currentColor" opacity="0.7"/></svg></span>
       <span class="mobile-sheet-item-text">
         <span class="mobile-sheet-item-name">Codex</span>
-        <span class="mobile-sheet-item-desc ab-desc-status" id="codexStatusMobile">检查中...</span>
+        <span class="mobile-sheet-item-desc ab-desc-status" id="codexStatusMobile" data-i18n="mobile.checkingStatus">检查中...</span>
       </span>
       <span class="mobile-sheet-item-check">✓</span>
     </div>
   </div>
   <!-- Mode section -->
   <div class="mobile-sheet-section">
-    <div class="mobile-sheet-section-title">模式</div>
+    <div class="mobile-sheet-section-title" data-i18n="mobile.modes">模式</div>
     <div class="mobile-sheet-item" id="mobileSwarm" onclick="toggleSwarm();updateMobileSheet()">
       <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="7" r="3"/><circle cx="5" cy="17" r="3"/><circle cx="19" cy="17" r="3"/><line x1="12" y1="10" x2="5" y2="14"/><line x1="12" y1="10" x2="19" y2="14"/></svg></span>
       <span class="mobile-sheet-item-text">
-        <span class="mobile-sheet-item-name">蜂群代理</span>
-        <span class="mobile-sheet-item-desc">并行子代理</span>
+        <span class="mobile-sheet-item-name" data-i18n="toolbar.swarmAgents">蜂群代理</span>
+        <span class="mobile-sheet-item-desc" data-i18n="mobile.parallelAgents">并行子代理</span>
       </span>
       <span class="mobile-sheet-item-check">✓</span>
     </div>
     <div class="mobile-sheet-item" id="mobileEndpoint" onclick="toggleEndpoint();updateMobileSheet()">
       <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/></svg></span>
       <span class="mobile-sheet-item-text">
-        <span class="mobile-sheet-item-name">自主模式</span>
-        <span class="mobile-sheet-item-desc">自主执行循环</span>
+        <span class="mobile-sheet-item-name" data-i18n="toolbar.autonomousMode">自主模式</span>
+        <span class="mobile-sheet-item-desc" data-i18n="mobile.autoExecLoop">自主执行循环</span>
       </span>
       <span class="mobile-sheet-item-check">✓</span>
+    </div>
+    <div class="mobile-sheet-item" id="mobilePaperMode" onclick="closeMobileSheet();togglePaperMode()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name" data-i18n="mobile.paperReader">论文阅读</span>
+        <span class="mobile-sheet-item-desc" data-i18n="mobile.paperReaderDesc">PDF阅读 + 问答 + 报告</span>
+      </span>
+      <span class="mobile-sheet-item-check" style="opacity:0">✓</span>
     </div>
   </div>
 </div>
@@ -1412,6 +1682,7 @@
 </div>
 
 <!-- html2canvas: lazy-loaded on first Export click (199KB, avoids DevTools freeze) -->
+<script defer src="static/js/i18n.js?v=0.7.3" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/idb-cache.js?v=0.7.3" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/core.js?v=0.7.3" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/export-images.js?v=0.7.3" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
@@ -1422,6 +1693,7 @@
 <script defer src="static/js/translation.js?v=0.7.3" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/upload.js?v=0.7.3" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/image-gen.js?v=0.7.3" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/paper-reader.js?v=0.7.3" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/project.js?v=0.7.3" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/memory.js?v=0.7.3" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/scheduler.js?v=0.7.3" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>

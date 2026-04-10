@@ -18,6 +18,7 @@ __all__ = [
     'FETCH_MAX_CHARS_PDF', 'FETCH_MAX_BYTES',
     'SKIP_DOMAINS', 'MODEL_PRICING',
     'QWEN_PRICING_CNY', 'DEFAULT_USD_CNY_RATE',
+    'MT_PROVIDER_CONFIG',
 ]
 
 # ══════════════════════════════════════════════════════════
@@ -137,6 +138,29 @@ EMBEDDING_MODELS = _saved_embed if isinstance(_saved_embed, list) and _saved_emb
     'text-embedding-3-small',     # 1536d — works on OpenAI and most compatible APIs
     'text-embedding-3-large',     # 3072d — highest quality
 ]
+
+
+# ── Machine Translation Provider (optional, for faster/cheaper translation) ──
+# When configured, translation uses a dedicated MT API (e.g. NiuTrans) instead
+# of the cheap LLM model.  Config stored in server_config.json under 'mt_provider'.
+# Priority: server_config.json > default (disabled)
+def _resolve_mt_provider_config():
+    """Resolve MT provider config from server_config.json.
+
+    Returns dict with: provider, api_url, api_key, app_id, enabled
+    """
+    mt = _SAVED_CONFIG.get('mt_provider', {})
+    if not isinstance(mt, dict):
+        return {}
+    return {
+        'provider': mt.get('provider', 'niutrans'),
+        'api_url': mt.get('api_url', ''),
+        'api_key': mt.get('api_key', ''),
+        'app_id': mt.get('app_id', ''),
+        'enabled': bool(mt.get('enabled', False)),
+    }
+
+MT_PROVIDER_CONFIG = _resolve_mt_provider_config()
 
 
 # ── Trading module (default OFF — enable in Settings or with TRADING_ENABLED=1) ──
@@ -561,6 +585,9 @@ def reload_config():
     _mod.TRADING_ENABLED = _resolve_trading_enabled()
     # Debug mode flag
     _mod.DEBUG_MODE = _resolve_debug_mode()
+
+    # Machine translation provider
+    _mod.MT_PROVIDER_CONFIG = _resolve_mt_provider_config()
 
     # Model defaults (from model_defaults section)
     _md = _SAVED_CONFIG.get('model_defaults', {})

@@ -361,6 +361,16 @@ def get_server_config():
         'env_proxy_bypass': os.environ.get('PROXY_BYPASS_DOMAINS', ''),
     }
 
+    # Machine translation provider config
+    mt_provider_cfg = getattr(_lib, 'MT_PROVIDER_CONFIG', {})
+    mt_provider_info = {
+        'provider': mt_provider_cfg.get('provider', 'niutrans'),
+        'api_url': mt_provider_cfg.get('api_url', ''),
+        'api_key': mt_provider_cfg.get('api_key', ''),
+        'app_id': mt_provider_cfg.get('app_id', ''),
+        'enabled': mt_provider_cfg.get('enabled', False),
+    }
+
     return jsonify({
         'providers': providers, 'presets': presets,
         'models': models, 'search': search_info,
@@ -373,6 +383,7 @@ def get_server_config():
         'model_limits': model_limits,
         'model_defaults': model_defaults,
         'network': network_info,
+        'mt_provider': mt_provider_info,
     })
 
 
@@ -890,6 +901,20 @@ def save_server_config():
         changes.append('feishu')
         # Hot-reload Feishu state
         _hot_reload_feishu(data['feishu'])
+
+    if 'mt_provider' in data and isinstance(data['mt_provider'], dict):
+        mt = data['mt_provider']
+        existing['mt_provider'] = {
+            'provider': (mt.get('provider') or 'niutrans').strip(),
+            'api_url': (mt.get('api_url') or '').strip(),
+            'api_key': (mt.get('api_key') or '').strip(),
+            'app_id': (mt.get('app_id') or '').strip(),
+            'enabled': bool(mt.get('enabled', False)),
+        }
+        changes.append('mt_provider')
+        logger.info('[Config] MT provider updated: provider=%s, enabled=%s',
+                    existing['mt_provider']['provider'],
+                    existing['mt_provider']['enabled'])
 
     # ── Persist to disk ──
     if not _write_server_config(existing):

@@ -57,6 +57,8 @@ def _handle_tool_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg,
 @tool_registry.handler('web_search', category='search',
                        description='Perform a web search and return formatted results')
 def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
+    import time as _time
+    handler_t0 = _time.time()
     query = fn_args.get('query', '')
     user_question = task.get('lastUserQuery', '')
     search_diag = None
@@ -91,6 +93,13 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
         event_payload['searchDiag'] = search_diag
     append_event(task, event_payload)
     tool_content = format_search_for_tool_response(results, search_diag=search_diag)
+    handler_elapsed = _time.time() - handler_t0
+    logger.info('[Search] web_search handler TOTAL: %.1fs  query=%r  results=%d  content_chars=%d',
+                handler_elapsed, query[:60], len(display_results),
+                sum(r.get('fetchedChars', 0) for r in display_results))
+    if handler_elapsed > 30:
+        logger.warning('[Search] ⚠ web_search handler SLOW: %.1fs (>30s)  query=%r',
+                       handler_elapsed, query[:60])
     return tc_id, tool_content, True
 
 

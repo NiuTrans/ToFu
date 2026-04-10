@@ -25,7 +25,9 @@ build_body: BodyBuilder = _build_body_impl  # type: explicit protocol binding
 from lib.llm_client import AbortedError
 from lib.tasks_pkg.attachments import compute_turn_attachments, inject_attachments
 from lib.tasks_pkg.cache_tracking import (
+    cleanup_stale_cache_states,
     detect_cache_break,
+    get_session_cache_stats,
     log_round_cache_stats,
     release_ttl_latch,
     sort_tool_results,
@@ -238,6 +240,41 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
 
     # ── Release session-stable TTL latch (prevent memory leak) ──
     release_ttl_latch(task.get('id', ''))
+
+    # ── Log session-level aggregate cache stats ──
+    _conv_id = task.get('convId', '')
+    if _conv_id:
+        _session_stats = get_session_cache_stats(_conv_id)
+        if _session_stats and _session_stats['calls'] > 1:
+            logger.info(
+                '[CacheSession] %s conv=%s END — %d calls, '
+                'total_read=%d total_write=%d overall_hit=%d%% '
+                'breaks=%d duration=%.1fs model=%s',
+                tid, _conv_id[:8],
+                _session_stats['calls'],
+                _session_stats['total_cache_read'],
+                _session_stats['total_cache_write'],
+                _session_stats['overall_hit_pct'],
+                _session_stats['total_breaks'],
+                _session_stats['session_duration_s'],
+                _session_stats['model'],
+            )
+
+    # ── Periodic stale cache state cleanup (every task completion) ──
+    # Lightweight: only scans and removes entries older than 1 hour.
+    try:
+        cleanup_stale_cache_states(max_age_s=3600)
+    except Exception as e:
+        logger.debug('[Orchestrator] stale cache cleanup failed: %s', e)
+
+    # ── Tool dedup cache stats (logged at task completion) ──
+    _dedup_cache = task.get('_tool_result_cache')
+    if _dedup_cache:
+        _dedup_size = len(_dedup_cache)
+        if _dedup_size > 0:
+            logger.info(
+                '[DedupCache] %s conv=%s task END — %d cached entries',
+                tid, _conv_id[:8] if _conv_id else '???', _dedup_size)
 
     # ── Diagnostic: log completion stats ──
     _content_len = len(task.get('content') or '')

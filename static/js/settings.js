@@ -875,6 +875,11 @@ function openSettings() {
   var dtd = document.getElementById('settingDefaultThinkingDepth');
   if (dtd) dtd.value = config.defaultThinkingDepth || 'off';
 
+  // Language selector sync
+  var langSel = document.getElementById('settingLanguage');
+  if (langSel) langSel.value = typeof _i18nLang !== 'undefined' ? _i18nLang : 'zh';
+  if (typeof _syncLangPicker === 'function') _syncLangPicker(typeof _i18nLang !== 'undefined' ? _i18nLang : 'zh');
+
   // Trading module toggle
   var tradingCb = document.getElementById('settingTradingEnabled');
   if (tradingCb) {
@@ -914,15 +919,15 @@ function openSettings() {
 
   // Show loading states
   var provList = document.getElementById('stgProviderList');
-  if (provList) provList.innerHTML = '<p class="stg-loading">正在加载配置…</p>';
+  if (provList) provList.innerHTML = '<p class="stg-loading">' + t('settings.loadingConfig') + '</p>';
   var presetTable = document.getElementById('stgPresetTable');
-  if (presetTable) presetTable.innerHTML = '<p class="stg-loading">正在加载…</p>';
+  if (presetTable) presetTable.innerHTML = '<p class="stg-loading">' + t('settings.loading') + '</p>';
 
   // ── Load server config for other tabs ──
   _loadServerConfig().then(function(cfg) {
     if (!cfg) {
-      document.getElementById('settingsStatusHint').textContent = '⚠️ 无法加载服务器配置';
-      if (provList) provList.innerHTML = '<p class="stg-empty">加载服务器配置失败。请检查服务器是否正在运行。</p>';
+      document.getElementById('settingsStatusHint').textContent = t('settings.serverConfigFailed');
+      if (provList) provList.innerHTML = '<p class="stg-empty">' + t('settings.loadingFailed') + '</p>';
       if (presetTable) presetTable.innerHTML = '<p class="stg-empty">加载模型预设失败。</p>';
       debugLog('[Settings] Config load failed — provider list and preset table set to error state', 'warning');
       return;
@@ -942,6 +947,7 @@ function openSettings() {
     _populateNetworkTab(cfg);
     _populateAdvancedTab(cfg);
     _populateFeishuTab(cfg);
+    _populateMtProviderSection(cfg);
     _populateMcpTab();
   });
 }
@@ -2318,6 +2324,95 @@ function _populateNetworkTab(cfg) {
   }
 }
 
+
+// ══════════════════════════════════════════════════════
+//  Machine Translation Provider (General tab)
+// ══════════════════════════════════════════════════════
+
+function _populateMtProviderSection(cfg) {
+  var mt = cfg.mt_provider || {};
+  var enabledCb = document.getElementById('settingMtEnabled');
+  var fieldsDiv = document.getElementById('mtProviderFields');
+  if (enabledCb) {
+    enabledCb.checked = !!mt.enabled;
+    enabledCb.onchange = function() {
+      if (fieldsDiv) fieldsDiv.style.display = this.checked ? '' : 'none';
+    };
+  }
+  if (fieldsDiv) fieldsDiv.style.display = mt.enabled ? '' : 'none';
+
+  var provider = mt.provider || 'niutrans';
+  _setVal('settingMtProvider', provider);
+
+  // NiuTrans fields (primary)
+  _setVal('settingMtApiKey', provider === 'niutrans' ? (mt.api_key || '') : '');
+  _setVal('settingMtAppId', provider === 'niutrans' ? (mt.app_id || '') : '');
+  _setVal('settingMtApiUrl', provider === 'niutrans' ? (mt.api_url || '') : '');
+
+  // Custom fields
+  _setVal('settingMtApiKeyCustom', provider === 'custom' ? (mt.api_key || '') : '');
+  _setVal('settingMtAppIdCustom', provider === 'custom' ? (mt.app_id || '') : '');
+  _setVal('settingMtApiUrlCustom', provider === 'custom' ? (mt.api_url || '') : '');
+
+  _switchMtProvider(provider);
+}
+
+/** Show/hide provider cards based on selection */
+function _switchMtProvider(provider) {
+  var niuCard = document.getElementById('mtCardNiutrans');
+  var customCard = document.getElementById('mtCardCustom');
+  if (niuCard) niuCard.style.display = provider === 'niutrans' ? '' : 'none';
+  if (customCard) customCard.style.display = provider === 'custom' ? '' : 'none';
+}
+
+function _collectMtProviderConfig() {
+  var enabledCb = document.getElementById('settingMtEnabled');
+  var provider = (document.getElementById('settingMtProvider') || {}).value || 'niutrans';
+  var suffix = provider === 'custom' ? 'Custom' : '';
+  return {
+    enabled: enabledCb ? enabledCb.checked : false,
+    provider: provider,
+    api_key: (document.getElementById('settingMtApiKey' + suffix) || {}).value || '',
+    app_id: (document.getElementById('settingMtAppId' + suffix) || {}).value || '',
+    api_url: (document.getElementById('settingMtApiUrl' + suffix) || {}).value || '',
+  };
+}
+
+function _testMtProvider() {
+  var provider = (document.getElementById('settingMtProvider') || {}).value || 'niutrans';
+  var suffix = provider === 'custom' ? 'Custom' : '';
+  var btn = document.getElementById('mtTestBtn' + suffix);
+  var result = document.getElementById('mtTestResult' + suffix);
+  if (!btn || !result) return;
+  btn.disabled = true;
+  result.textContent = '⏳ 测试中…';
+  result.style.color = 'var(--text-secondary)';
+
+  fetch(apiUrl('/api/translate/mt-test'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      mt_config: _collectMtProviderConfig(),
+      text: 'Hello, this is a test of the machine translation service.',
+      source: 'en',
+      target: 'zh',
+    }),
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    btn.disabled = false;
+    if (data.ok) {
+      result.textContent = '✅ 连接成功：' + (data.translated || '').substring(0, 60);
+      result.style.color = 'var(--accent-green, #4caf50)';
+    } else {
+      result.textContent = '❌ ' + (data.error || '未知错误');
+      result.style.color = 'var(--accent-red, #f44336)';
+    }
+  }).catch(function(e) {
+    btn.disabled = false;
+    result.textContent = '❌ 请求失败: ' + e.message;
+    result.style.color = 'var(--accent-red, #f44336)';
+  });
+}
+
 // ══════════════════════════════════════════════════════
 //  Feishu Bot settings (in General tab → Modules)
 // ══════════════════════════════════════════════════════
@@ -2582,6 +2677,11 @@ async function _saveServerConfig() {
     payload.feishu = _collectFeishuConfig();
   }
 
+  // Machine translation provider config
+  if (typeof _collectMtProviderConfig === 'function') {
+    payload.mt_provider = _collectMtProviderConfig();
+  }
+
   try {
     var r = await fetch(apiUrl('/api/server-config'), {
       method: 'POST',
@@ -2590,12 +2690,12 @@ async function _saveServerConfig() {
     });
     var data = await r.json();
     if (data.ok) {
-      var msg = '服务器配置已保存，设置已实时生效。';
+      var msg = t('settings.configSaved');
       debugLog('[Settings] ' + msg, 'success');
-      document.getElementById('settingsStatusHint').textContent = '✅ 已保存';
+      document.getElementById('settingsStatusHint').textContent = t('settings.saved');
       setTimeout(function() {
         var hint = document.getElementById('settingsStatusHint');
-        if (hint && hint.textContent === '✅ 已保存') hint.textContent = '';
+        if (hint && hint.textContent === t('settings.saved')) hint.textContent = '';
       }, 3000);
       // ★ Re-fetch server config to refresh model dropdown with any new/changed models.
       // Without this, _registeredModels stays stale and newly added providers' models

@@ -421,26 +421,59 @@ function _reflowToolbar() {
   inputInner.style.transition = 'none';
   inputInner.style.setProperty('--toolbar-w', '9999px');
 
-  /* 2. Measure children's natural width */
+  /* 2. Measure children's natural width using getBoundingClientRect for
+   *    sub-pixel accuracy (offsetWidth rounds to integer, losing ~0.5px
+   *    per child — with 10+ children this can undercount by 5-8px,
+   *    causing the model name to be truncated).
+   *    Skip .ig-flex spacer — it has flex:1 so at 9999px it expands
+   *    to fill all available space, inflating the sum enormously.
+   *    Include horizontal margins — they sit outside the border box
+   *    but consume space in flex layout on top of gap.
+   *    IMPORTANT: Skip margin-left/right = 'auto' — getComputedStyle
+   *    resolves auto margins to the USED value (the pixel amount of
+   *    distributed free space). At --toolbar-w: 9999px, an auto margin
+   *    resolves to thousands of px, grossly inflating the measurement. */
   let w = 0;
+  let visibleKids = 0;
   for (const ch of bar.children) {
-    w += ch.offsetWidth;
+    if (ch.classList.contains('ig-flex')) continue;
+    const cs = getComputedStyle(ch);
+    if (cs.display === 'none') continue;
+    const rect = ch.getBoundingClientRect();
+    if (rect.width === 0) continue;
+    /* Only add explicit (non-auto) margins — auto margins distribute
+     * free space and are NOT part of the element's intrinsic size.
+     * getComputedStyle resolves auto to "auto" (string) in some browsers,
+     * or to the used pixel value (huge at 9999px) in others.
+     * Guard both: check for "auto" string AND cap at a sane maximum. */
+    const mlRaw = cs.marginLeft;
+    const mrRaw = cs.marginRight;
+    const ml = (mlRaw === 'auto' || parseFloat(mlRaw) > 50) ? 0 : (parseFloat(mlRaw) || 0);
+    const mr = (mrRaw === 'auto' || parseFloat(mrRaw) > 50) ? 0 : (parseFloat(mrRaw) || 0);
+    w += rect.width + ml + mr;
+    visibleKids++;
   }
   const style = getComputedStyle(bar);
   const gap = parseFloat(style.gap) || parseFloat(style.columnGap) || 0;
   const padL = parseFloat(style.paddingLeft) || 0;
   const padR = parseFloat(style.paddingRight) || 0;
-  const visibleKids = Array.from(bar.children).filter(c =>
-    c.offsetWidth > 0 && getComputedStyle(c).display !== 'none'
-  ).length;
   w += gap * Math.max(0, visibleKids - 1) + padL + padR;
 
-  /* 3. Clamp to viewport and apply */
+  /* 3. Clamp to viewport and apply.
+   *    Round up (ceil) so sub-pixel fractions don't cause compression.
+   *    Add 1px safety margin to absorb any remaining rounding in
+   *    browser's gap/margin computation that getBoundingClientRect
+   *    might not perfectly capture. */
+  w = Math.ceil(w) + 1;
   const vw = document.documentElement.clientWidth;
   const maxW = vw - 48; /* 24px padding each side */
   w = Math.max(480, Math.min(w, maxW));
-  /* Add border width of .input-box (1.5px each side) */
-  w += 3;
+  /* Add border width of .input-box (varies by theme: 1.5px default, 2.5px tofu) */
+  const boxBorder = inputBox
+    ? (parseFloat(getComputedStyle(inputBox).borderLeftWidth) || 0)
+      + (parseFloat(getComputedStyle(inputBox).borderRightWidth) || 0)
+    : 3;
+  w += boxBorder;
 
   inputInner.style.setProperty('--toolbar-w', w + 'px');
 
@@ -449,6 +482,13 @@ function _reflowToolbar() {
     inputInner.style.transition = '';
   });
 
+}
+/* ★ Re-measure toolbar after web fonts finish loading — font-display:swap
+ * means the first _reflowToolbar may measure with fallback font metrics.
+ * Once the real font loads, glyph widths change and the preset label
+ * may need more space. */
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(() => _scheduleReflow());
 }
 /* --chat-w is NOT synced — chat area uses its own fixed max-width (820px default)
  * independent of toolbar width, per §4.2 decoupled layout. */
@@ -614,11 +654,11 @@ function _applyImageGenUI(enabled) {
   // Update placeholder and hint
   const textarea = document.getElementById('userInput');
   if (textarea) textarea.placeholder = imageGenMode
-    ? '描述你想生成的图片 / 粘贴图片后描述修改内容…'
+    ? t('ig.placeholder')
     : 'Type your message...';
   const hint = document.getElementById('inputHint');
   if (hint) hint.textContent = imageGenMode
-    ? 'Enter 生成 · Esc 退出 · 粘贴/拖拽图片可编辑 · 支持中英文'
+    ? t('ig.hint')
     : 'Enter send · Ctrl+Enter newline · 📎 or drop files';
   /* ★ Reflow toolbar only if the mode actually changed — switching between
    * ig-active / normal swaps the visible toolbar so re-measure is needed.
@@ -740,6 +780,8 @@ function _restoreConvToolState(conv) {
   _applyImageGenToolUI(!!conv.imageGenEnabled);
   _applyImageGenUI(!!conv.imageGenMode);
   _applyHumanGuidanceUI(!!conv.humanGuidanceEnabled);
+  /* ★ Restore paper reading mode state */
+  if (typeof _restorePaperState === 'function') _restorePaperState(conv);
   /* ★ Restore the image gen model + batch count + aspect + resolution from conv settings */
   if (conv.imageGenModel) _igSelectedModel = conv.imageGenModel;
   if (conv.imageGenCount) {
@@ -795,6 +837,7 @@ function _resetToolsToDefaults() {
   _applyEndpointUI(false);
   _applyImageGenToolUI(false);
   _applyImageGenUI(false);
+  if (typeof paperMode !== 'undefined' && paperMode && typeof exitPaperMode === 'function') exitPaperMode();
   _applyAutoTranslateUI(true);
   /* ★ Reset image gen creative mode settings to defaults */
   _igSelectedAspect = '1:1';
@@ -807,7 +850,7 @@ function _resetToolsToDefaults() {
   document.querySelectorAll('#igCountBar .ig-pill').forEach(b =>
     b.classList.toggle('active', parseInt(b.dataset.count) === 1));
   const genText = document.querySelector('.ig-gen-text');
-  if (genText) genText.textContent = '生成';
+  if (genText) genText.textContent = t('toolbar.generate');
   if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
   /* ★ Reflow toolbar after resetting tools (toolbar width may differ). */
   _scheduleReflow();
@@ -847,11 +890,23 @@ function newChat() {
   activeConvId = null;
   sessionStorage.removeItem('chatui_activeConvId');
   _lastRenderedFingerprint = "";
-  document.getElementById("topbarTitle").textContent = "New Chat";
+  /* ★ Show folder context in topbar when creating a new chat from folder view */
+  const _newChatFolderId = typeof getActiveFolderId === 'function' ? getActiveFolderId() : null;
+  const _newChatFolder = _newChatFolderId && typeof getFolderById === 'function' ? getFolderById(_newChatFolderId) : null;
+  const topbarEl = document.getElementById("topbarTitle");
+  if (_newChatFolder) {
+    topbarEl.innerHTML = `New Chat <span class="topbar-folder-badge" style="color:${_newChatFolder.color || 'var(--text-tertiary)'}">● ${escapeHtml(_newChatFolder.name)}</span>`;
+  } else {
+    topbarEl.textContent = "New Chat";
+  }
   renderConversationList();
   if (typeof clearDebug === "function") clearDebug();
+  /* ★ Welcome screen: show folder indicator when new chat will be assigned to a folder */
+  const _folderBadgeHtml = _newChatFolder
+    ? `<div class="welcome-folder-badge"><span class="welcome-folder-dot" style="color:${_newChatFolder.color || '#888'}">●</span> ${escapeHtml(_newChatFolder.name)}</div>`
+    : '';
   document.getElementById("chatInner").innerHTML =
-    `<div class="welcome" id="welcome"><div class="welcome-icon"><img src="${BASE_PATH}/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2><p>嫩，但能打 — search, code, browse, trade, and more.</p><div class="feature-pills"><span class="feature-pill">Extended Thinking</span><span class="feature-pill">Search</span><span class="feature-pill">URL Fetch</span><span class="feature-pill">Image Input</span><span class="feature-pill">Co-Pilot</span><span class="feature-pill">Browser</span></div></div>`;
+    `<div class="welcome" id="welcome"><div class="welcome-icon"><img src="${BASE_PATH}/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>${_folderBadgeHtml}<p>${t('welcome.subtitle')}</p><div class="feature-pills"><span class="feature-pill">Extended Thinking</span><span class="feature-pill">Search</span><span class="feature-pill">URL Fetch</span><span class="feature-pill">Image Input</span><span class="feature-pill">Co-Pilot</span><span class="feature-pill">Browser</span></div></div>`;
   buildTurnNav(null);
   renderPendingQueueUI(null);
   updateSendButton();
@@ -1357,7 +1412,7 @@ async function startAssistantResponse(convId) {
   // ★ Show full messages in debug panel for inspection
   showMessagesInDebug(
     apiMessages,
-    `${conv.messages.length}条对话`,
+    `${conv.messages.length} ${t('conv.messages')}`,
     false,
     convId,
   );
@@ -2618,7 +2673,7 @@ function _populateModelDropdown(models) {
     const hint = document.createElement('div');
     hint.className = 'ps-dd-hint';
     hint.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>'
-      + '<span>模型太多？在 <b>设置 → 模型</b> 中隐藏不需要的模型</span>';
+      + '<span>' + t('msg.tooManyModels') + '</span>';
     hint.onclick = function(e) {
       e.stopPropagation();
       document.getElementById("presetWrapper")?.classList.remove("open");
@@ -3045,12 +3100,12 @@ function _showFolderPicker(convId, anchorEl) {
   picker.className = 'folder-picker';
   picker.id = '_folderPicker';
 
-  let html = '<div class="folder-picker-title">移入文件夹</div>';
+  let html = `<div class="folder-picker-title">${t('folder.moveToFolder')}</div>`;
   // "Remove from folder" option if currently in a folder
   if (conv.folderId) {
     html += `<div class="folder-picker-item folder-picker-remove" data-folder-id="">` +
       `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>` +
-      `移出文件夹</div>`;
+      `${t('folder.removeFromFolder')}</div>`;
   }
   // Existing folders
   for (const f of folders) {
@@ -3062,7 +3117,7 @@ function _showFolderPicker(convId, anchorEl) {
   html += `<div class="folder-picker-divider"></div>`;
   html += `<div class="folder-picker-item folder-picker-new">` +
     `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>` +
-    `新建文件夹</div>`;
+    `${t('folder.newFolder')}</div>`;
 
   picker.innerHTML = html;
 
@@ -3088,9 +3143,9 @@ function _showFolderPicker(convId, anchorEl) {
     _closeFolderPicker();
     if (folderId) {
       const f = getFolderById(folderId);
-      if (typeof showToast === 'function') showToast('', '已移入文件夹', f ? f.name : '', 2000);
+      if (typeof showToast === 'function') showToast('', t('folder.movedToFolder'), f ? f.name : '', 2000);
     } else {
-      if (typeof showToast === 'function') showToast('', '已移出文件夹', '', 2000);
+      if (typeof showToast === 'function') showToast('', t('folder.removedFromFolder'), '', 2000);
     }
   });
 
@@ -3119,15 +3174,15 @@ function _promptCreateFolder(assignConvId) {
   overlay.className = 'folder-dialog-overlay';
   overlay.innerHTML = `
     <div class="folder-dialog">
-      <div class="folder-dialog-title">新建文件夹</div>
+      <div class="folder-dialog-title">${t('folder.createTitle')}</div>
       <input type="text" class="folder-dialog-input" id="_folderNameInput"
-             placeholder="文件夹名称" maxlength="50" autocomplete="off" spellcheck="false">
+             placeholder="${t('folder.namePh')}" maxlength="50" autocomplete="off" spellcheck="false">
       <div class="folder-dialog-colors" id="_folderColorPicker">
         ${colors.map(c => `<span class="folder-color-dot${c === selectedColor ? ' selected' : ''}" data-color="${c}" style="background:${c}"></span>`).join('')}
       </div>
       <div class="folder-dialog-actions">
-        <button class="folder-dialog-cancel" id="_folderDialogCancel">取消</button>
-        <button class="folder-dialog-ok" id="_folderDialogOk">创建</button>
+        <button class="folder-dialog-cancel" id="_folderDialogCancel">${t('folder.cancel')}</button>
+        <button class="folder-dialog-ok" id="_folderDialogOk">${t('folder.create')}</button>
       </div>
     </div>
   `;
@@ -3156,18 +3211,18 @@ function _promptCreateFolder(assignConvId) {
     const name = nameInput.value.trim();
     if (!name) { nameInput.focus(); return; }
     okBtn.disabled = true;
-    okBtn.textContent = '创建中…';
+    okBtn.textContent = t('folder.creating');
     const folder = await createFolder(name, selectedColor);
     _closeDialog();
     if (!folder) {
-      if (typeof showToast === 'function') showToast('', '创建失败', '无法创建文件夹', 3000);
+      if (typeof showToast === 'function') showToast('', t('folder.createFailed'), t('folder.cannotCreate'), 3000);
       return;
     }
     if (assignConvId) {
       setConversationFolder(assignConvId, folder.id);
     }
     renderConversationList();
-    if (typeof showToast === 'function') showToast('', '文件夹已创建', folder.name, 2000);
+    if (typeof showToast === 'function') showToast('', t('folder.created'), folder.name, 2000);
   }
 
   okBtn.addEventListener('click', _submit);
@@ -3192,12 +3247,12 @@ function _promptRenameFolder(folderId) {
   overlay.className = 'folder-dialog-overlay';
   overlay.innerHTML = `
     <div class="folder-dialog">
-      <div class="folder-dialog-title">重命名文件夹</div>
+      <div class="folder-dialog-title">${t('folder.renameTitle')}</div>
       <input type="text" class="folder-dialog-input" id="_folderNameInput"
-             placeholder="文件夹名称" maxlength="50" autocomplete="off" spellcheck="false">
+             placeholder="${t('folder.namePh')}" maxlength="50" autocomplete="off" spellcheck="false">
       <div class="folder-dialog-actions">
-        <button class="folder-dialog-cancel" id="_folderDialogCancel">取消</button>
-        <button class="folder-dialog-ok" id="_folderDialogOk">确定</button>
+        <button class="folder-dialog-cancel" id="_folderDialogCancel">${t('folder.cancel')}</button>
+        <button class="folder-dialog-ok" id="_folderDialogOk">${t('folder.ok')}</button>
       </div>
     </div>
   `;
@@ -3238,14 +3293,14 @@ function _confirmDeleteFolder(folderId) {
   overlay.className = 'folder-dialog-overlay';
   overlay.innerHTML = `
     <div class="folder-dialog">
-      <div class="folder-dialog-title">删除文件夹</div>
+      <div class="folder-dialog-title">${t('folder.deleteTitle')}</div>
       <div style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;line-height:1.5">
-        确定删除文件夹 <b style="color:var(--text-primary)">${f.name}</b>？<br>
-        文件夹内的对话不会被删除，只是变为未分类。
+        ${t('folder.deleteConfirm')} <b style="color:var(--text-primary)">${f.name}</b>？<br>
+        ${t('folder.deleteHint')}
       </div>
       <div class="folder-dialog-actions">
-        <button class="folder-dialog-cancel" id="_folderDialogCancel">取消</button>
-        <button class="folder-dialog-ok" id="_folderDialogOk" style="background:#ef4444">删除</button>
+        <button class="folder-dialog-cancel" id="_folderDialogCancel">${t('folder.cancel')}</button>
+        <button class="folder-dialog-ok" id="_folderDialogOk" style="background:#ef4444">${t('common.delete')}</button>
       </div>
     </div>
   `;
@@ -3261,7 +3316,7 @@ function _confirmDeleteFolder(folderId) {
     }
     await deleteFolder(folderId);
     renderConversationList();
-    if (typeof showToast === 'function') showToast('', '文件夹已删除', f.name, 2000);
+    if (typeof showToast === 'function') showToast('', t('folder.deleted'), f.name, 2000);
   });
   document.getElementById('_folderDialogCancel').addEventListener('click', _closeDialog);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) _closeDialog(); });
@@ -3328,7 +3383,7 @@ function _initFolderTabs() {
     if (f) {
       if (typeof showToast === 'function') showToast('', '已移入文件夹', f.name, 2000);
     } else if (!folderId) {
-      if (typeof showToast === 'function') showToast('', '已移出文件夹', '', 2000);
+      if (typeof showToast === 'function') showToast('', t('folder.removedFromFolder'), '', 2000);
     }
   });
 }
@@ -3348,11 +3403,11 @@ function _showFolderTabMenu(folderId, x, y) {
   menu.innerHTML = `
     <div class="folder-tab-menu-item" data-action="rename">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
-      重命名
+      ${t('folder.rename')}
     </div>
     <div class="folder-tab-menu-item folder-tab-menu-delete" data-action="delete">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-      删除文件夹
+      ${t('folder.deleteAction')}
     </div>
   `;
   document.body.appendChild(menu);
@@ -3552,13 +3607,13 @@ async function _updateMobileBackendSection() {
     mobileEl.style.opacity = usable ? '' : '0.45';
     if (statusEl) {
       if (!b.available) {
-        statusEl.textContent = '未安装';
+        statusEl.textContent = t('agent.notInstalled');
         statusEl.style.color = 'var(--text-tertiary)';
       } else if (!b.authenticated) {
-        statusEl.textContent = '未认证';
+        statusEl.textContent = t('agent.notAuthenticated');
         statusEl.style.color = '#f59e0b';
       } else {
-        statusEl.textContent = b.version || '就绪';
+        statusEl.textContent = b.version || t('agent.ready');
         statusEl.style.color = '#22c55e';
       }
     }
@@ -3675,20 +3730,45 @@ window.addEventListener('resize', (function() {
   /* On mobile, when the virtual keyboard opens the visual viewport shrinks.
    * We adjust body height to match, keeping the input area visible. */
   let lastHeight = 0;
+  /* Track whether user was near bottom BEFORE keyboard starts closing.
+   * We sample this on every resize so we know the state at keyboard-open time. */
+  let _wasNearBottom = true;
   function onViewportResize() {
     if (window.innerWidth > 768) return;
     const vv = window.visualViewport;
     const newH = vv.height;
     if (Math.abs(newH - lastHeight) < 1) return;
+    const growing = newH > lastHeight;
     lastHeight = newH;
     /* Set explicit height on body to match the visual viewport */
     document.body.style.height = newH + 'px';
-    /* Scroll textarea into view when keyboard is open (viewport smaller than window) */
-    if (newH < window.innerHeight * 0.85) {
+    if (!growing) {
+      /* Keyboard opening (viewport shrinking) — record scroll state and
+       * scroll textarea into view */
+      _wasNearBottom = isNearBottom(200);
       const ta = document.getElementById('userInput');
       if (ta && document.activeElement === ta) {
         requestAnimationFrame(function() {
           ta.scrollIntoView({ block: 'end', behavior: 'smooth' });
+        });
+      }
+    } else {
+      /* ★ Keyboard closing (viewport growing) — the viewport height increases
+       * but scrollTop stays the same, so chat appears to "jump to the middle".
+       * Re-scroll to bottom if the user was near bottom before, or if there's
+       * an active stream (user just sent a message and is watching the reply).
+       * Force sync reflow first (void scrollHeight) so the layout reflects
+       * the new body height, then scroll immediately + schedule a safety rAF. */
+      if (_wasNearBottom || (typeof activeStreams !== 'undefined' && activeStreams.size > 0)) {
+        var cc = document.getElementById('chatContainer');
+        if (cc) {
+          void cc.scrollHeight; // force reflow after body height change
+          cc.scrollTop = cc.scrollHeight;
+        }
+        /* Safety: keyboard dismiss can fire multiple resize events as it
+         * animates closed — schedule another scroll after layout settles. */
+        requestAnimationFrame(function() {
+          scrollToBottom(true);
         });
       }
     }
@@ -4209,6 +4289,77 @@ async function initActiveTasks() {
       );
     }
 
+    /* ── Case F: Clear stale "server offline" errors now that server is back ── */
+    /* When the frontend detected server offline (health check failure), it stamps
+     * finishReason='server_offline' and error='Server offline — ...' on the last
+     * assistant message and persists it.  On page refresh, this error text persists
+     * even though the server is clearly back online (we just fetched /api/chat/active).
+     *
+     * Recovery: fetch the server's version of the conversation.  If the server has
+     * a completed result (from _sync_result_to_conversation), adopt it.  Otherwise,
+     * just clear the misleading error text — the "Server Offline" finish badge
+     * already conveys the information without the alarming red error block. */
+    {
+      const offlineConvs = [];
+      for (const conv of conversations) {
+        if (conv._needsLoad) continue;
+        const last = conv.messages[conv.messages.length - 1];
+        if (last && last.role === 'assistant' && last.finishReason === 'server_offline') {
+          offlineConvs.push(conv);
+        }
+      }
+      if (offlineConvs.length > 0) {
+        console.warn(`[initActiveTasks CaseF] ★ Clearing ${offlineConvs.length} stale "server_offline" error(s) — server is back online`);
+        await Promise.all(offlineConvs.map(async (conv) => {
+          const am = conv.messages[conv.messages.length - 1];
+          const localContentLen = am.content?.length || 0;
+          try {
+            // Try to get server's version — it may have the completed result
+            const resp = await fetch(apiUrl(`/api/conversations/${conv.id}`));
+            if (resp.ok) {
+              const data = await resp.json();
+              const serverMsgs = data.messages || [];
+              if (serverMsgs.length > 0) {
+                const serverLast = serverMsgs[serverMsgs.length - 1];
+                if (serverLast && serverLast.role === 'assistant') {
+                  const serverContentLen = serverLast.content?.length || 0;
+                  // If server has more content, adopt it (task completed after frontend gave up)
+                  if (serverContentLen > localContentLen) {
+                    console.warn(
+                      `[initActiveTasks CaseF] conv=${conv.id.slice(0,8)}: server has MORE content ` +
+                      `(${serverContentLen} > local ${localContentLen}) — adopting server version`
+                    );
+                    am.content = serverLast.content;
+                    if (serverLast.thinking) am.thinking = serverLast.thinking;
+                    if (serverLast.searchRounds) am.searchRounds = serverLast.searchRounds;
+                    if (serverLast.finishReason && serverLast.finishReason !== 'server_offline') {
+                      am.finishReason = serverLast.finishReason;
+                    }
+                    if (serverLast.usage) am.usage = serverLast.usage;
+                    if (serverLast.model) am.model = serverLast.model;
+                    if (serverLast.modifiedFiles) am.modifiedFiles = serverLast.modifiedFiles;
+                    if (serverLast.modifiedFileList) am.modifiedFileList = serverLast.modifiedFileList;
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            console.debug(`[initActiveTasks CaseF] Server fetch failed for conv=${conv.id.slice(0,8)}: ${e.message}`);
+          }
+          // Always clear the misleading error text — server is online now
+          if (am.error && /server offline/i.test(am.error)) {
+            console.info(
+              `[initActiveTasks CaseF] conv=${conv.id.slice(0,8)}: clearing stale error text ` +
+              `(content=${(am.content?.length||0)}chars, finishReason=${am.finishReason})`
+            );
+            delete am.error;
+            saveConversations(conv.id);
+            syncConversationToServer(conv);
+          }
+        }));
+      }
+    }
+
     renderConversationList();
     /* ★ CROSS-TALK DETECTION: warn when reconnecting multiple tasks simultaneously */
     if (toRecon.length > 1) {
@@ -4387,44 +4538,48 @@ function _ensureNewest() {
       }
     }
   });
-  // ── Full-page drag & drop ──
-  let _dragCounter = 0;
-  const overlay = document.getElementById("dropOverlay");
-  document.addEventListener("dragenter", (e) => {
-    e.preventDefault();
-    if (!e.dataTransfer || !e.dataTransfer.types.includes("Files")) return;
-    _dragCounter++;
-    if (_dragCounter === 1 && overlay) overlay.classList.add("visible");
-  });
-  document.addEventListener("dragover", (e) => {
-    if (e.dataTransfer && e.dataTransfer.types.includes("Files"))
+  // ── Full-page drag & drop (desktop only) ──
+  // Disabled on mobile/touch devices: file uploads use the system file picker,
+  // and drag events from sidebar conversation reordering falsely trigger the overlay.
+  if (!("ontouchstart" in window)) {
+    let _dragCounter = 0;
+    const overlay = document.getElementById("dropOverlay");
+    document.addEventListener("dragenter", (e) => {
       e.preventDefault();
-  });
-  document.addEventListener("dragleave", (e) => {
-    e.preventDefault();
-    if (!e.dataTransfer || !e.dataTransfer.types.includes("Files")) return;
-    _dragCounter--;
-    if (_dragCounter <= 0) {
+      if (!e.dataTransfer || !e.dataTransfer.types.includes("Files")) return;
+      _dragCounter++;
+      if (_dragCounter === 1 && overlay) overlay.classList.add("visible");
+    });
+    document.addEventListener("dragover", (e) => {
+      if (e.dataTransfer && e.dataTransfer.types.includes("Files"))
+        e.preventDefault();
+    });
+    document.addEventListener("dragleave", (e) => {
+      e.preventDefault();
+      if (!e.dataTransfer || !e.dataTransfer.types.includes("Files")) return;
+      _dragCounter--;
+      if (_dragCounter <= 0) {
+        _dragCounter = 0;
+        if (overlay) overlay.classList.remove("visible");
+      }
+    });
+    document.addEventListener("drop", async (e) => {
+      e.preventDefault();
       _dragCounter = 0;
       if (overlay) overlay.classList.remove("visible");
-    }
-  });
-  document.addEventListener("drop", async (e) => {
-    e.preventDefault();
-    _dragCounter = 0;
-    if (overlay) overlay.classList.remove("visible");
-    const files = Array.from(e.dataTransfer?.files || []);
-    // ★ Edit mode uses the shared pendingImages/pendingPdfTexts — no separate handlers needed.
-    // Dropped files go through the same path as the main input (below).
-    for (const f of files) {
-      if (f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf"))
-        await handlePDFUpload(f);
-      else if (f.type.startsWith("image/"))
-        await _handleImageDrop(f);
-      else if (_DOC_EXTS.has(_getFileExt(f.name)))
-        await handleDocUpload(f);
-    }
-  });
+      const files = Array.from(e.dataTransfer?.files || []);
+      // ★ Edit mode uses the shared pendingImages/pendingPdfTexts — no separate handlers needed.
+      // Dropped files go through the same path as the main input (below).
+      for (const f of files) {
+        if (f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf"))
+          await handlePDFUpload(f);
+        else if (f.type.startsWith("image/"))
+          await _handleImageDrop(f);
+        else if (_DOC_EXTS.has(_getFileExt(f.name)))
+          await handleDocUpload(f);
+      }
+    });
+  }
   document.getElementById("settingsModal").addEventListener("click", (e) => {
     if (e.target === document.getElementById("settingsModal")) closeSettings();
   });

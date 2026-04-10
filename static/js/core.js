@@ -51,6 +51,7 @@ try { localStorage.removeItem('claude_conversations'); } catch(_) {} /* clean up
 
 /* ═══ Folder management ═══ */
 let _folders = [];  // Array of {id, name, color, collapsed, order, createdAt}
+let _foldersLoaded = false;  // true after first loadFolders() completes
 
 async function loadFolders() {
   try {
@@ -59,6 +60,7 @@ async function loadFolders() {
   } catch (e) {
     console.warn('[Folders] Failed to load folders:', e.message);
   }
+  _foldersLoaded = true;
   return _folders;
 }
 
@@ -130,11 +132,21 @@ function setConversationFolder(convId, folderId) {
   c.folderId = folderId || null;
   saveConversations(null);  // null = metadata-only, don't bump updatedAt
   renderConversationList();
-  syncConversationToServer(c).catch(() => {});
+  /* ★ FIX: shell convs (0 local messages, _needsLoad=true) are skipped by
+   *   syncConversationToServer's 0-message guard, so folderId never persists.
+   *   Use the lightweight PATCH /settings endpoint instead — it only updates
+   *   the settings JSON column without requiring messages.  This is also more
+   *   efficient for folder assignment since we only need to change one field. */
+  fetch(apiUrl(`/api/conversations/${convId}/settings`), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folderId: c.folderId }),
+  }).catch(e => console.warn('[setConversationFolder] PATCH failed:', e.message));
 }
 
 function getFolders() { return _folders; }
 function getFolderById(id) { return _folders.find(f => f.id === id); }
+function areFoldersLoaded() { return _foldersLoaded; }
 
 /* ── Folder View Mode: when set, sidebar shows only this folder's conversations ── */
 let _activeFolderId = null;
@@ -173,7 +185,13 @@ async function _migratePinnedToFolder() {
     c.folderId = starFolder.id;
     c.pinned = false;
     c.pinnedAt = 0;
-    syncConversationToServer(c).catch(() => {});
+    /* ★ Use PATCH /settings for reliability — syncConversationToServer
+     *   skips shell convs with 0 local messages. */
+    fetch(apiUrl(`/api/conversations/${c.id}/settings`), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folderId: c.folderId, pinned: false, pinnedAt: 0 }),
+    }).catch(e => console.warn('[Folders] Migration PATCH failed:', e.message));
   }
   saveConversations(null);
   renderConversationList();
@@ -1162,8 +1180,180 @@ document.addEventListener("visibilitychange", () => {
     } else if (activeStreams.size === 0 && _editingMsgIdx === null) {
       loadConversationsFromServer();
     }
+    /* ★ Network recovery: when the tab becomes visible (e.g. after VSCode
+     *   reconnects and user switches to the browser), recover any conversations
+     *   that were marked server_offline while the connection was down. */
+    _recoverOfflineConversations('visibilitychange');
   }
 });
+
+/* ★ Network recovery listeners: detect when connectivity is restored
+ *   (e.g. VSCode port forwarding re-established) and recover conversations
+ *   that were marked server_offline during the outage. The 'online' event
+ *   fires when the browser detects network connectivity is back, but for
+ *   tunneled connections (VS Code), we also use a periodic health check. */
+window.addEventListener('online', () => {
+  console.info('[NetworkRecovery] 🌐 Browser "online" event fired — checking for offline conversations to recover');
+  _recoverOfflineConversations('online_event');
+});
+
+/** Debounce guard for _recoverOfflineConversations */
+let _lastOfflineRecoveryAttempt = 0;
+const _OFFLINE_RECOVERY_COOLDOWN = 5000; // ms — don't run more than once per 5s
+
+/**
+ * Recover conversations marked with finishReason='server_offline'.
+ * Runs Case-F-style recovery without requiring a full page reload.
+ * Called from: visibilitychange, online event, periodic health check,
+ * and the manual "Reconnect" button.
+ *
+ * @param {string} trigger - What triggered this recovery (for logging)
+ * @returns {Promise<number>} Number of conversations recovered
+ */
+async function _recoverOfflineConversations(trigger) {
+  const now = Date.now();
+  if (now - _lastOfflineRecoveryAttempt < _OFFLINE_RECOVERY_COOLDOWN) return 0;
+  _lastOfflineRecoveryAttempt = now;
+
+  // Find all conversations with server_offline finishReason
+  const offlineConvs = [];
+  for (const conv of conversations) {
+    if (conv._needsLoad) continue;
+    const last = conv.messages[conv.messages.length - 1];
+    if (last && last.role === 'assistant' && last.finishReason === 'server_offline') {
+      offlineConvs.push(conv);
+    }
+  }
+  if (offlineConvs.length === 0) return 0;
+
+  // First check if server is actually reachable
+  try {
+    const healthResp = await fetch(apiUrl('/api/health'), { signal: AbortSignal.timeout(5000) });
+    if (!healthResp.ok) return 0;
+  } catch {
+    return 0; // Server still unreachable — don't recover yet
+  }
+
+  console.warn(
+    `[NetworkRecovery] ★ Recovering ${offlineConvs.length} server_offline conversation(s) — trigger=${trigger}`
+  );
+
+  let recovered = 0;
+  await Promise.all(offlineConvs.map(async (conv) => {
+    const am = conv.messages[conv.messages.length - 1];
+    const localContentLen = am.content?.length || 0;
+    try {
+      const resp = await fetch(apiUrl(`/api/conversations/${conv.id}`), {
+        signal: AbortSignal.timeout(10000)
+      });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const serverMsgs = data.messages || [];
+      if (serverMsgs.length === 0) return;
+      const serverLast = serverMsgs[serverMsgs.length - 1];
+      if (!serverLast || serverLast.role !== 'assistant') return;
+
+      const serverContentLen = serverLast.content?.length || 0;
+      const serverFinish = serverLast.finishReason || '';
+      let changed = false;
+
+      // Adopt server version if it has more content (task completed after frontend gave up)
+      if (serverContentLen > localContentLen) {
+        console.warn(
+          `[NetworkRecovery] conv=${conv.id.slice(0,8)}: server has MORE content ` +
+          `(${serverContentLen} > local ${localContentLen}) — adopting server version`
+        );
+        am.content = serverLast.content;
+        if (serverLast.thinking) am.thinking = serverLast.thinking;
+        if (serverLast.searchRounds) am.searchRounds = serverLast.searchRounds;
+        if (serverLast.usage) am.usage = serverLast.usage;
+        if (serverLast.model) am.model = serverLast.model;
+        if (serverLast.modifiedFiles) am.modifiedFiles = serverLast.modifiedFiles;
+        if (serverLast.modifiedFileList) am.modifiedFileList = serverLast.modifiedFileList;
+        changed = true;
+      }
+      // ★ Fix: adopt server's finishReason even when content lengths are equal.
+      //   The frontend may have captured all streaming tokens before the disconnect
+      //   but the server has the proper finishReason (e.g. 'stop') while local is
+      //   stuck on 'server_offline'. Without this, recovery never completes and
+      //   the periodic polling runs forever.
+      if (serverFinish && serverFinish !== 'server_offline' && am.finishReason === 'server_offline') {
+        am.finishReason = serverFinish;
+        if (serverLast.usage) am.usage = serverLast.usage;
+        changed = true;
+      }
+      // Clear the misleading error text
+      if (am.error && /server offline/i.test(am.error)) {
+        delete am.error;
+        changed = true;
+      }
+      // ★ Only persist and count as recovered when something actually changed.
+      //   Avoids false toasts and prevents pushing stale server_offline back
+      //   to the server when nothing was updated.
+      if (changed) {
+        saveConversations(conv.id);
+        ConvCache.put(conv);
+        recovered++;
+      }
+    } catch (e) {
+      console.debug(`[NetworkRecovery] Server fetch failed for conv=${conv.id.slice(0,8)}: ${e.message}`);
+    }
+  }));
+
+  if (recovered > 0) {
+    showToast('🔄', 'Connection Restored',
+      `Recovered ${recovered} conversation(s) from server. Results updated.`, 6000);
+    // Re-render active conversation if it was one of the recovered ones
+    if (activeConvId) {
+      const activeConv = conversations.find(c => c.id === activeConvId);
+      if (activeConv && offlineConvs.includes(activeConv)) {
+        renderChat(activeConv);
+      }
+    }
+    renderConversationList();
+  }
+  return recovered;
+}
+
+/* ★ Periodic background recovery: when VSCode tunnel drops, the browser's
+ *   'online' event may not fire (the machine is still online, just the tunnel
+ *   is down). This interval checks every 15s if we have server_offline convs
+ *   and the server is reachable, triggering recovery automatically.
+ *   Only runs when there are offline conversations to recover. */
+let _offlineRecoveryInterval = null;
+function _startOfflineRecoveryPolling() {
+  if (_offlineRecoveryInterval) return; // already running
+  _offlineRecoveryInterval = setInterval(async () => {
+    // Check if there are any offline conversations to recover
+    const hasOffline = conversations.some(c => {
+      if (c._needsLoad) return false;
+      const last = c.messages[c.messages.length - 1];
+      return last && last.role === 'assistant' && last.finishReason === 'server_offline';
+    });
+    if (!hasOffline) {
+      // No more offline conversations — stop polling
+      clearInterval(_offlineRecoveryInterval);
+      _offlineRecoveryInterval = null;
+      console.debug('[NetworkRecovery] No more offline conversations — stopping recovery polling');
+      return;
+    }
+    // Only check when tab is visible (avoid wasting resources in background)
+    if (document.visibilityState !== 'visible') return;
+    const recovered = await _recoverOfflineConversations('periodic_check');
+    if (recovered > 0) {
+      // Check if all offline conversations are now recovered
+      const stillOffline = conversations.some(c => {
+        if (c._needsLoad) return false;
+        const last = c.messages[c.messages.length - 1];
+        return last && last.role === 'assistant' && last.finishReason === 'server_offline';
+      });
+      if (!stillOffline) {
+        clearInterval(_offlineRecoveryInterval);
+        _offlineRecoveryInterval = null;
+      }
+    }
+  }, 15000); // Check every 15 seconds
+}
 
 /* ★ _mergeFromStorage removed — DB is the single source of truth.
  *   Cross-tab sync now goes through BroadcastChannel → loadConversationsFromServer(). */
@@ -1449,6 +1639,32 @@ async function syncConversationToServer(conv, { allowTruncate = false } = {}) {
     } else {
       const errBody = await resp.json().catch(() => ({}));
       debugLog(`[syncToServer] ⚠️ Conv ${conv.id.slice(0,8)} sync rejected: ${resp.status} ${errBody.error || ''}`, 'warn');
+      /* ★ FIX: When server rejects with blocked_stale_checkpoint (409), the local
+       *   data is stale (e.g. IDB cache from interrupted streaming).  Reload from
+       *   server to get the correct completed data with finishReason/usage. */
+      if (resp.status === 409 && errBody.error === 'blocked_stale_checkpoint') {
+        console.warn(`[syncToServer] 🔄 Stale checkpoint detected for conv=${conv.id.slice(0,8)} — reloading from server`);
+        try {
+          const freshResp = await fetch(apiUrl(`/api/conversations/${conv.id}`));
+          if (freshResp.ok) {
+            const freshData = await freshResp.json();
+            const freshMsgs = freshData.messages || [];
+            if (freshMsgs.length > 0) {
+              conv.messages = freshMsgs;
+              conv.title = freshData.title || conv.title;
+              conv._serverMsgCount = freshMsgs.length;
+              ConvCache.put(conv);
+              if (activeConvId === conv.id) {
+                renderChat(conv, false);
+                if (typeof _restoreConvToolState === "function") _restoreConvToolState(conv);
+              }
+              console.info(`[syncToServer] ✅ Recovered ${freshMsgs.length} msgs from server for conv=${conv.id.slice(0,8)}`);
+            }
+          }
+        } catch (recoverErr) {
+          console.error(`[syncToServer] Recovery fetch failed:`, recoverErr.message);
+        }
+      }
     }
   } catch (e) {
     debugLog(`[syncToServer] ❌ Sync failed for ${conv.id.slice(0,8)}: ${e.message}`, "warn");
@@ -1579,12 +1795,17 @@ async function loadConversationsFromServer(prefetchId) {
           if (serverMsgCount > local.messages.length) {
             local._needsLoad = true;
           }
-          /* Preserve local pinned state — pinning is a client-side
-             preference and must not be overwritten by a potentially
+          /* Preserve local pinned/folder state — these are client-side
+             preferences and must not be overwritten by a potentially
              stale server snapshot during periodic refresh.           */
           const keepPinned = local.pinned, keepPinnedAt = local.pinnedAt;
+          const keepFolderId = local.folderId;
           _applySettingsToConv(local, sc.settings);
           local.pinned = keepPinned; local.pinnedAt = keepPinnedAt;
+          /* ★ Only restore local folderId if it was set locally but server
+           *   doesn't have it yet (PATCH in-flight race). If server has a
+           *   folderId, trust the server (it's the source of truth). */
+          if (keepFolderId && !local.folderId) local.folderId = keepFolderId;
           if (sc.id === activeConvId) acChanged = true;
           merged = true;
         }
@@ -1851,6 +2072,23 @@ async function loadConversationMessages(convId) {
 
       /* ★ Update IndexedDB cache with authoritative server data */
       ConvCache.put(conv);
+
+      /* ★ Clear stale "server_offline" errors: if the last assistant message
+       *   has finishReason='server_offline' but we just successfully loaded
+       *   from the server (proving it's online), clear the misleading error text.
+       *   The "Server Offline" finish badge remains as a historical marker. */
+      {
+        const _lastMsg = conv.messages[conv.messages.length - 1];
+        if (_lastMsg && _lastMsg.role === 'assistant' &&
+            _lastMsg.finishReason === 'server_offline' &&
+            _lastMsg.error && /server offline/i.test(_lastMsg.error)) {
+          console.info(`[loadConvMsgs] Clearing stale server_offline error for conv=${convId.slice(0,8)}`);
+          delete _lastMsg.error;
+          // Re-save to IDB and server to persist the cleanup
+          ConvCache.put(conv);
+          syncConversationToServer(conv);
+        }
+      }
 
       debugLog(`[loadConvMsgs] ${convId.slice(0,8)}: server=${serverMsgs.length} msgs, local=${conv.messages.length} msgs, _serverMsgCount=${conv._serverMsgCount}, cacheHit=${cacheHit}`, 'info');
 
@@ -2613,7 +2851,7 @@ function _forceFinishDeadStream(convId) {
     const last = conv.messages[conv.messages.length - 1];
     if (last && last.role === 'assistant' && !last.finishReason) {
       last.finishReason = 'server_offline';
-      last.error = '⚠️ Server offline — response may be incomplete. Refresh page after server restarts.';
+      last.error = '⚠️ Server offline — response may be incomplete. This notice will clear automatically when the server comes back.';
     }
   }
   // Abort the SSE controller so _trySSE / _pollFallback also exit
@@ -2623,7 +2861,11 @@ function _forceFinishDeadStream(convId) {
   }
   twStop(convId);
   finishStream(convId);
-  showToast('⚠️', 'Server Offline', 'Backend server is not responding. Your partial response has been saved.', 8000);
+  showToast('⚠️', 'Server Offline',
+    'Backend server is not responding. Your partial response has been saved. It will recover automatically when connectivity is restored.',
+    10000);
+  // ★ Start periodic recovery polling so the result is auto-recovered when server comes back
+  _startOfflineRecoveryPolling();
 }
 
 async function _updateStreamTimerUI(convId) {

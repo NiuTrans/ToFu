@@ -5,6 +5,7 @@ making it the best diversity complement to DDG.
 """
 
 import re
+import time
 from html import unescape
 
 import requests
@@ -20,6 +21,7 @@ __all__ = ['search_brave']
 def search_brave(query, max_results=6):
     """Scrape Brave Search HTML results."""
     results = []
+    t0 = time.time()
     try:
         resp = requests.get(
             'https://search.brave.com/search',
@@ -79,4 +81,6 @@ def search_brave(query, max_results=6):
         logger.warning('[Search] Brave timeout for query: %s', query[:80])
     except Exception as e:
         logger.error('[Search] Brave error: %s', e, exc_info=True)
+    elapsed = time.time() - t0
+    logger.info('[Search] Brave: %d results in %.1fs  query=%r', len(results), elapsed, query[:60])
     return results

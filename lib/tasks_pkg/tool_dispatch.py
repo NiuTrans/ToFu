@@ -78,17 +78,29 @@ _PROJECT_CACHEABLE_TOOLS = frozenset({
 })
 
 
-def _invalidate_project_cache(cache: dict) -> None:
+def _invalidate_project_cache(cache: dict, trigger: str = 'write_op') -> None:
     """Remove all project-tool cache entries after a write operation.
 
     Called after write_file / apply_diff / code_exec so that subsequent
     read_files / grep_search calls re-read the (now-modified) filesystem.
+
+    Args:
+        cache: The per-task dedup cache dict.
+        trigger: Name of the operation that triggered invalidation
+                 (for logging).
     """
     stale_keys = [k for k in cache if k.split('::', 1)[0] in _PROJECT_CACHEABLE_TOOLS]
     for k in stale_keys:
         del cache[k]
     if stale_keys:
-        logger.debug('[Dedup] Invalidated %d project-tool cache entries after write op', len(stale_keys))
+        # Group by tool name for readable logging
+        tool_counts: dict[str, int] = {}
+        for k in stale_keys:
+            tool_name = k.split('::', 1)[0]
+            tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
+        breakdown = ', '.join(f'{n}={c}' for n, c in sorted(tool_counts.items()))
+        logger.info('[DedupInvalidate] %d entries invalidated by %s: %s',
+                    len(stale_keys), trigger, breakdown)
 
 
 def _build_cache_hit_meta(
@@ -549,7 +561,7 @@ def execute_tool_pipeline(
             # ── Write ops invalidate project-tool caches ──
             # After a write_file/apply_diff, read_files/grep_search/list_dir/find_files
             # results for any path may have changed.
-            _invalidate_project_cache(_cache)
+            _invalidate_project_cache(_cache, trigger=fn_name)
             continue
 
         # ── Abort check: skip remaining tools if user clicked Stop ──
@@ -650,7 +662,7 @@ def execute_tool_pipeline(
             all_tools=tool_list,
         )
         tool_results[tc_id_ret] = (tool_content, is_search)
-        _invalidate_project_cache(_cache)
+        _invalidate_project_cache(_cache, trigger=fn_name)
 
     # ══════════════════════════════════════════
     #  Main phase: Parallel execution (read-only tools)
@@ -715,7 +727,7 @@ def execute_tool_pipeline(
                         # ── Invalidate project cache after write/exec ops ──
                         elif fut_fn_name in ('write_file', 'apply_diff', 'code_exec',
                                              'bash_exec', 'run_command'):
-                            _invalidate_project_cache(_cache)
+                            _invalidate_project_cache(_cache, trigger=fut_fn_name)
                     except Exception as e:
                         logger.error(
                             '[Task %s] conv=%s Tool %s (tc_id=%s) execution failed at round %d model=%s',

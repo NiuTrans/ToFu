@@ -17,6 +17,7 @@ __all__ = ['search_ddg_html', 'search_ddg_api']
 def search_ddg_html(query, max_results=6):
     """Scrape DDG lite HTML. Returns list of {title, snippet, url, source}."""
     results = []
+    t0 = time.time()
     try:
         resp = requests.get('https://html.duckduckgo.com/html/',
                             params={'q': query}, headers=HEADERS, timeout=12)
@@ -63,12 +64,15 @@ def search_ddg_html(query, max_results=6):
                 })
     except Exception as e:
         logger.error('[Search] DDG HTML error: %s', e, exc_info=True)
+    elapsed = time.time() - t0
+    logger.info('[Search] DDG-HTML: %d results in %.1fs  query=%r', len(results), elapsed, query[:60])
     return results
 
 
 def search_ddg_api(query, max_results=4):
     """Query DDG Instant Answer API for definitions/abstracts."""
     results = []
+    t0 = time.time()
     try:
         resp = requests.get('https://api.duckduckgo.com/',
                             params={'q': query, 'format': 'json',
@@ -107,4 +111,6 @@ def search_ddg_api(query, max_results=4):
                     })
     except Exception as e:
         logger.error('[Search] DDG API error: %s', e, exc_info=True)
+    elapsed = time.time() - t0
+    logger.info('[Search] DDG-API: %d results in %.1fs  query=%r', len(results), elapsed, query[:60])
     return results

@@ -69,15 +69,21 @@ def perform_web_search(query, max_results=None, user_question=''):
       Step 6: BM25 rerank — on LLM-cleaned text → top max_results
       Step 7: Format for model (in executor, not here)
     """
+    pipeline_t0 = time.time()
+    step_timings = {}  # step_name → elapsed_seconds
+
     if max_results is None:
         max_results = _lib.FETCH_TOP_N
     all_results = []
     engine_counts = {}      # engines that returned results
+    engine_timings = {}     # engine_name → elapsed_seconds
     engine_errors = {}      # engines that raised exceptions
     engine_empty = []       # engines that returned [] without error
 
     ALL_ENGINE_NAMES = ['DDG-HTML', 'Brave', 'Bing', 'DDG-API', 'SearXNG']
 
+    step1_t0 = time.time()
+    engine_submit_times = {}  # track when each engine was submitted
     with ThreadPoolExecutor(max_workers=5) as pool:
         futs = {
             pool.submit(search_ddg_html, query, 20): 'DDG-HTML',
@@ -86,19 +92,28 @@ def perform_web_search(query, max_results=None, user_question=''):
             pool.submit(search_ddg_api, query, 6):    'DDG-API',
             pool.submit(search_searxng, query, 6):    'SearXNG',
         }
+        for tag in futs.values():
+            engine_submit_times[tag] = step1_t0
         try:
             for fut in as_completed(futs, timeout=20):
                 tag = futs[fut]
+                engine_elapsed = time.time() - step1_t0
                 try:
                     r = fut.result()
                     if r:
                         all_results.extend(r)
                         engine_counts[tag] = len(r)
+                        engine_timings[tag] = engine_elapsed
+                        logger.info('[Search] ✓ %s returned %d results in %.1fs',
+                                    tag, len(r), engine_elapsed)
                     else:
                         engine_empty.append(tag)
+                        engine_timings[tag] = engine_elapsed
+                        logger.info('[Search] ○ %s returned 0 results in %.1fs', tag, engine_elapsed)
                 except Exception as e:
-                    logger.warning('[Search] %s failed: %s', tag, e)
+                    logger.warning('[Search] ✗ %s failed in %.1fs: %s', tag, engine_elapsed, e)
                     engine_errors[tag] = str(e)[:200]
+                    engine_timings[tag] = engine_elapsed
         except TimeoutError:
             # as_completed() raises TimeoutError when the deadline expires
             # while some futures are still pending.  Collect the results
@@ -107,13 +122,16 @@ def perform_web_search(query, max_results=None, user_question=''):
             timed_out = [futs[f] for f in futs if not f.done()]
             for name in timed_out:
                 engine_errors[name] = 'Timed out after 20s'
+                engine_timings[name] = 20.0
             logger.warning('[Search] %d/%d engines timed out (%s), keeping %d results from others. query=%r',
                            len(timed_out), len(futs), ', '.join(timed_out),
                            len(all_results), query[:80])
+    step_timings['step1_engines'] = time.time() - step1_t0
 
     if engine_counts:
-        logger.info('[Search] Engine results: %s (query=%r)',
+        logger.info('[Search] Engine results: %s  timings: %s  (query=%r)',
                     ', '.join(f'{k}={v}' for k, v in engine_counts.items()),
+                    ', '.join(f'{k}={v:.1f}s' for k, v in sorted(engine_timings.items(), key=lambda x: x[1])),
                     query[:60])
 
     # ── Retry: if we got nothing, give DDG another chance ──
@@ -147,6 +165,7 @@ def perform_web_search(query, max_results=None, user_question=''):
         })
 
     # ── Step 2: Deduplicate by normalised URL ──
+    step2_t0 = time.time()
     seen, unique = set(), []
     for r in all_results:
         key = r['url'].lower().rstrip('/').replace('https://', '').replace('http://', '')[:150]
@@ -155,17 +174,22 @@ def perform_web_search(query, max_results=None, user_question=''):
             unique.append(r)
 
     url_dedup_count = len(unique)
+    step_timings['step2_url_dedup'] = time.time() - step2_t0
 
     # ── Step 3: Content dedup — remove near-duplicate title+snippets ──
+    step3_t0 = time.time()
     if len(unique) > max_results:
         unique = dedup_by_content(unique)
     content_dedup_count = len(unique)
+    step_timings['step3_content_dedup'] = time.time() - step3_t0
 
     # ── Step 4: Page fetch — get full content for all candidates ──
     # Fetch ALL deduplicated candidates (not just top-N) so the LLM
     # filter and embedding reranker operate on real page content.
+    step4_t0 = time.time()
     unique = fetch_contents_for_results(unique, max_fetch=len(unique))
     fetch_count = sum(1 for r in unique if r.get('full_content'))
+    step_timings['step4_page_fetch'] = time.time() - step4_t0
 
     # ── Step 5: LLM content filter — relevance + cleaning ──
     # Run in parallel (concurrency = number of documents).  Irrelevant pages
@@ -173,6 +197,7 @@ def perform_web_search(query, max_results=None, user_question=''):
     # so they're excluded from embedding reranking and the final model context.
     # ALL documents go through the filter — including short ones, which may
     # be bot-protection pages, cookie walls, or other junk.
+    step5_t0 = time.time()
     to_filter = [(r['url'], r['full_content']) for r in unique
                  if r.get('full_content')]
     irrelevant_urls: set[str] = set()
@@ -195,6 +220,8 @@ def perform_web_search(query, max_results=None, user_question=''):
             logger.info('[Search] Dropped %d/%d irrelevant pages',
                         len(irrelevant_urls), len(to_filter))
 
+    step_timings['step5_llm_filter'] = time.time() - step5_t0
+
     # Remove fully irrelevant results from candidate set
     relevant = [r for r in unique if r['url'] not in irrelevant_urls]
 
@@ -208,6 +235,7 @@ def perform_web_search(query, max_results=None, user_question=''):
     relevant = has_content + no_content
 
     # ── Step 6: BM25 rerank on cleaned full text → top-N ──
+    step6_t0 = time.time()
     if len(has_content) > max_results:
         # Enough content-bearing results — rerank only those
         relevant = rerank_by_bm25(query, has_content, max_results)
@@ -215,12 +243,39 @@ def perform_web_search(query, max_results=None, user_question=''):
         # Not enough content results — rerank all, content ones are already first
         relevant = rerank_by_bm25(query, relevant, max_results)
     final_count = min(len(relevant), max_results)
+    step_timings['step6_bm25_rerank'] = time.time() - step6_t0
+
+    pipeline_total = time.time() - pipeline_t0
+    step_timings['total'] = pipeline_total
+
+    # Build timing summary: sorted by duration descending to highlight bottlenecks
+    timing_parts = []
+    for step_name in ['step1_engines', 'step2_url_dedup', 'step3_content_dedup',
+                      'step4_page_fetch', 'step5_llm_filter', 'step6_bm25_rerank']:
+        elapsed = step_timings.get(step_name, 0)
+        timing_parts.append(f'{step_name}={elapsed:.1f}s')
+    timing_str = ', '.join(timing_parts)
 
     logger.info('[Search] Pipeline: %d raw → %d url-dedup → %d content-dedup → '
-                '%d fetched → -%d irrelevant → %d relevant → %d reranked  query=%r',
+                '%d fetched → -%d irrelevant → %d relevant → %d reranked  '
+                'TOTAL=%.1fs  [%s]  query=%r',
                 len(all_results), url_dedup_count, content_dedup_count,
                 fetch_count, len(irrelevant_urls), len(relevant),
-                final_count, query[:60])
+                final_count, pipeline_total, timing_str, query[:60])
+
+    # Warn if any step is excessively slow
+    if step_timings.get('step4_page_fetch', 0) > 15:
+        logger.warning('[Search] ⚠ SLOW step4_page_fetch=%.1fs (>15s threshold) — '
+                       'browser fallbacks or slow sites may be blocking the fetch pool. '
+                       'query=%r', step_timings['step4_page_fetch'], query[:60])
+    if step_timings.get('step5_llm_filter', 0) > 20:
+        logger.warning('[Search] ⚠ SLOW step5_llm_filter=%.1fs (>20s threshold) — '
+                       'LLM content filter calls are bottlenecking. query=%r',
+                       step_timings['step5_llm_filter'], query[:60])
+    if pipeline_total > 30:
+        logger.warning('[Search] ⚠ SLOW PIPELINE total=%.1fs (>30s threshold) — '
+                       'breakdown: %s  query=%r',
+                       pipeline_total, timing_str, query[:60])
 
     final_results = SearchResultList(relevant[:max_results])
     final_results._engine_breakdown = engine_breakdown

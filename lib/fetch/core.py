@@ -338,36 +338,65 @@ def fetch_contents_for_results(results, max_fetch=None,
                 len(to_fetch), target_ok, max_chars)
     t0 = time.time()
     ok_count = 0
+    url_timings = []  # list of (url, elapsed, ok, chars, method)
     def _do(r):
-        return r, fetch_page_content(r['url'], max_chars=max_chars,
+        url = r['url']
+        fetch_t0 = time.time()
+        content = fetch_page_content(url, max_chars=max_chars,
                                      pdf_max_chars=_lib.FETCH_MAX_CHARS_PDF)
-    with ThreadPoolExecutor(max_workers=8) as pool:
+        fetch_elapsed = time.time() - fetch_t0
+        return r, content, fetch_elapsed
+    with ThreadPoolExecutor(max_workers=16) as pool:
         futs = {pool.submit(_do, r): r for r in to_fetch}
         pending = set(futs.keys())
+        cancelled_urls = []
         try:
             for fut in as_completed(futs, timeout=90):
                 pending.discard(fut)
                 try:
-                    result, content = fut.result()
-                    if content and len(content) > 50:
+                    result, content, fetch_elapsed = fut.result()
+                    url = result['url']
+                    ok = bool(content and len(content) > 50)
+                    chars = len(content) if content else 0
+                    url_timings.append((url, fetch_elapsed, ok, chars))
+                    if ok:
                         result['full_content'] = content
                         ok_count += 1
+                    # Log individual slow fetches (>5s)
+                    if fetch_elapsed > 5:
+                        logger.info('[Fetch] ⚠ SLOW url=%.80s  %.1fs  ok=%s chars=%d',
+                                    url, fetch_elapsed, ok, chars)
                 except Exception as e:
                     logger.warning('[Fetch] fetch_contents thread error: %s', e, exc_info=True)
                 # Race-to-N: once we have enough content, stop waiting
                 if ok_count >= target_ok and pending:
                     elapsed_so_far = time.time() - t0
+                    cancelled_urls = [futs[p]['url'][:60] for p in pending]
                     logger.info('[Fetch] Race-to-N: got %d/%d pages in %.1fs, '
-                                'cancelling %d slow fetches',
+                                'cancelling %d slow fetches: %s',
                                 ok_count, len(to_fetch), elapsed_so_far,
-                                len(pending))
+                                len(pending),
+                                ', '.join(cancelled_urls[:5]))
                     for p in pending:
                         p.cancel()
                     break
         except TimeoutError:
             logger.warning('[Fetch] fetch_contents: as_completed timeout (90s)', exc_info=True)
     elapsed = time.time() - t0
-    logger.info('[Fetch] fetch_contents done: %d/%d got content in %.1fs', ok_count, len(to_fetch), elapsed)
+
+    # Summarize URL timing breakdown
+    if url_timings:
+        url_timings.sort(key=lambda x: -x[1])  # slowest first
+        slow_summary = '  '.join(
+            f'[{"✓" if ok else "✗"}]{url[:50]}={et:.1f}s'
+            for url, et, ok, _chars in url_timings[:8]
+        )
+        logger.info('[Fetch] fetch_contents done: %d/%d got content in %.1fs  '
+                    'slowest: %s',
+                    ok_count, len(to_fetch), elapsed, slow_summary)
+    else:
+        logger.info('[Fetch] fetch_contents done: %d/%d got content in %.1fs',
+                    ok_count, len(to_fetch), elapsed)
     return results
 
 
@@ -385,7 +414,7 @@ def fetch_urls(urls, max_chars=None,
                                      pdf_max_chars=pdf_max_chars, timeout=timeout)
     # Total deadline = per-request timeout + generous buffer for download + parsing
     deadline = max(timeout * 4, 120)
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         futs = {pool.submit(_do, u): u for u in urls}
         done_count = 0
         try:
@@ -418,3 +447,17 @@ def extract_urls_from_text(text):
         u = u.rstrip('.,;:!?')
         if u not in seen and len(u) > 10: seen.add(u); unique.append(u)
     return unique[:5]
+
+
+
+def get_fetch_cache_stats() -> dict:
+    """Return diagnostic stats for all fetch caches.
+
+    Useful for admin endpoints and periodic health checks.
+    Includes hit rates, eviction counts, and current sizes.
+    """
+    return {
+        'fetch_cache': _fetch_cache.stats,
+        'html_head_cache': _html_head_cache.stats,
+        'circuit_breaker': _circuit.get_status(),
+    }

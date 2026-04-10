@@ -1,7 +1,7 @@
 """JS bundler — concatenate app scripts into a single bundle at startup.
 
 Eliminates the HTTP/1.1 waterfall problem where browsers limit to 6 concurrent
-connections per host, causing 16 JS files to download in 3-4 serial waves.
+connections per host, causing 18 JS files to download in 3-4 serial waves.
 With the bundle, the browser fetches 1 file (gzip ~250KB) in a single request.
 
 The bundle is rebuilt at startup and whenever any source file changes.
@@ -20,6 +20,7 @@ JS_DIR = os.path.join(BASE_DIR, 'static', 'js')
 
 # ── Load order MUST match index.html (dependencies flow top → bottom) ──
 _BUNDLE_FILES = [
+    'i18n.js',         # MUST be first — t() is used by all other modules
     'idb-cache.js',
     'core.js',
     'export-images.js',
@@ -30,6 +31,7 @@ _BUNDLE_FILES = [
     'translation.js',
     'upload.js',
     'image-gen.js',
+    'paper-reader.js',
     'project.js',
     'memory.js',
     'scheduler.js',

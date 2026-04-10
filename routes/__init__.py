@@ -25,6 +25,7 @@ from .upload import upload_bp
 from .agent_backends import agent_backends_bp
 from .folders import folders_bp
 from .mcp import mcp_bp
+from .paper import paper_bp
 
 # ── Core (always-on) blueprints ──
 ALL_BLUEPRINTS = [
@@ -47,6 +48,7 @@ ALL_BLUEPRINTS = [
     agent_backends_bp,
     folders_bp,
     mcp_bp,
+    paper_bp,
 ]
 
 # ── Trading blueprints (conditionally loaded) ──

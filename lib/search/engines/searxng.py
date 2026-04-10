@@ -88,6 +88,8 @@ def search_searxng(query, max_results=6):
     Tries JSON API first (fast, structured), falls back to HTML scraping.
     Rotates across instances to spread load and survive rate-limits.
     """
+    import time as _time
+    t0 = _time.time()
     shuffled = list(_SEARXNG_INSTANCES)
     random.shuffle(shuffled)
     # Try up to 3 instances (short timeout — SearXNG often 429s from datacenter IPs)
@@ -131,5 +133,6 @@ def search_searxng(query, max_results=6):
         except Exception as e:
             logger.warning('[Search] SearXNG %s unexpected error: %s', inst, e, exc_info=True)
 
-    logger.debug('[Search] SearXNG: all instances failed for query: %s', query[:80])
+    elapsed = _time.time() - t0
+    logger.info('[Search] SearXNG: all instances failed in %.1fs  query=%r', elapsed, query[:60])
     return []
