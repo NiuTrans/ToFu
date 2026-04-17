@@ -775,8 +775,30 @@ async function loadProjectStatus() {
     if (!resp.ok) return;
     const data = await resp.json();
     if (data.path && data.path === savedPath) {
-      // Server already has this project active — great
-      _applyProjectData(data);
+      // Server already has this project active — check extras too
+      const allPaths = (Array.isArray(conv.projectPaths) && conv.projectPaths.length)
+        ? conv.projectPaths : [savedPath];
+      const savedExtras = allPaths.slice(1);
+      const currentExtras = (data.extraRoots || []).map(r => typeof r === 'string' ? r : r.path);
+      const extrasMatch = savedExtras.length === currentExtras.length &&
+        savedExtras.every(p => currentExtras.includes(p));
+      if (!extrasMatch && savedExtras.length > 0) {
+        // Primary matches but extras don't — re-apply with all paths
+        debugLog("Restoring extra roots for conversation", "info");
+        try {
+          const fixResp = await fetch(apiUrl("/api/project/set_paths"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ paths: allPaths }),
+          });
+          const fixData = await fixResp.json();
+          if (fixResp.ok) _applyProjectData(fixData);
+        } catch (e2) {
+          debugLog("Extra roots restore failed: " + e2.message, "warn");
+        }
+      } else {
+        _applyProjectData(data);
+      }
       /* ★ FIX: Ensure conv.projectPath is set — same reason as _restoreConvProject fix. */
       if (conv) conv.projectPath = data.path || savedPath;
 
@@ -784,17 +806,23 @@ async function loadProjectStatus() {
       // Server has no project or a different one — restore from conv
       debugLog("Restoring project from conversation: " + savedPath, "info");
       try {
-        const setResp = await fetch(apiUrl("/api/project/set"), {
+        // ★ Use multi-path API when conversation has extra roots
+        const allPaths = (Array.isArray(conv.projectPaths) && conv.projectPaths.length)
+          ? conv.projectPaths : [savedPath];
+        const hasExtras = allPaths.length > 1;
+        const endpoint = hasExtras ? "/api/project/set_paths" : "/api/project/set";
+        const payload = hasExtras ? { paths: allPaths } : { path: savedPath };
+        const setResp = await fetch(apiUrl(endpoint), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: savedPath }),
+          body: JSON.stringify(payload),
         });
         const setData = await setResp.json();
         if (setResp.ok) {
           _applyProjectData(setData);
           /* ★ FIX: Sync conv.projectPath after successful restore. */
           if (conv) conv.projectPath = setData.path || savedPath;
-          debugLog("Project restored: " + savedPath, "success");
+          debugLog("Project restored: " + savedPath + (hasExtras ? ` + ${allPaths.length - 1} extras` : ''), "success");
         } else {
           debugLog("Saved project path no longer valid, clearing", "warn");
           if (conv) {

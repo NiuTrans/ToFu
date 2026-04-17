@@ -1,0 +1,34 @@
+
+\begin{tcolorbox}[
+    enhanced,
+    % title=QUERY,
+    colback=white, % 白色背景
+    colframe=black, % 黑色边框
+    arc=5mm, % 设置圆角半径
+    boxrule=1pt,
+    left=2mm, % 左内边距
+    right=2mm, % 右内边距
+    top=1mm, % 上内边距
+    bottom=1mm % 下内边距
+]
+
+You will be given multiple reference documents, each begins with [Document ID]. \\
+Generate ONE natural-sounding question that:\\
+1. Can be directly answered by ONLY ONE specific document\\
+2. Sounds like a human question (don't mention the document)\\
+3. Starts with the corresponding [Document ID]\\
+ 
+ 
+Format: [Document ID] Your question here\\
+ 
+Here is an example:\\
+ 
+\{SEED\}\\
+ 
+Here is the real user input:
+ 
+**Documents:**\\
+\{DOCUMENTS\}\\
+
+
+\end{tcolorbox}

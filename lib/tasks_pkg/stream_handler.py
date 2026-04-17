@@ -206,10 +206,25 @@ def analyse_stream_result(
         # Normal exit — model returned content without tool calls
         result['action'] = 'break'
         result['loop_exit_reason'] = f'no_tool_calls_round_{round_num}'
+
+        # ★ Fix: API reported finish_reason=tool_calls but all tool calls
+        #   were filtered out (phantom/spurious filter in llm_client), or
+        #   the gateway reported tool_calls but the stream contained none.
+        #   Normalize to 'stop' so the post-loop check in _finalize doesn't
+        #   misinterpret this as "loop ended unexpectedly with pending tools".
+        if last_finish_reason in ('tool_calls', 'tool_use'):
+            logger.warning(
+                '[%s] ⚠ finish_reason=%s but assistant_msg has 0 tool_calls '
+                '(likely all filtered out by phantom/spurious filter). '
+                'Normalizing to stop. model=%s round=%d',
+                tid, last_finish_reason, model, round_num,
+            )
+            result['last_finish_reason'] = 'stop'
+
         logger.debug(
             '[%s] Loop ending normally: model=%s returned text without '
             'tool_calls at round %d. finish_reason=%s content=%dchars',
-            tid, model, round_num, last_finish_reason,
+            tid, model, round_num, result['last_finish_reason'],
             len(task.get('content') or ''),
         )
         return result

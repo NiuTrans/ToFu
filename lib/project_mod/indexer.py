@@ -122,9 +122,14 @@ Strategy:
         ctx += f"⚠️ MULTI-ROOT WORKSPACE — {1 + len(extra_roots)} roots active\n"
         ctx += f"{'='*50}\n"
         ctx += (
-            f"MANDATORY: When this workspace has multiple roots, you MUST use the\n"
-            f"'rootname:path' prefix for ALL file operations targeting non-primary roots.\n"
-            f"Without the prefix, paths resolve under the PRIMARY root ({primary_name}).\n\n"
+            f"MANDATORY: You MUST use 'rootname:path' prefix for ALL file operations\n"
+            f"targeting non-primary roots. This applies to BOTH reading AND writing\n"
+            f"(including creating new files). Without the prefix, paths resolve under\n"
+            f"the PRIMARY root ({primary_name}).\n\n"
+            f"⚠️ CREATING NEW FILES: When creating a new file in a non-primary root,\n"
+            f"you MUST use the rootname prefix. There is no auto-detection for new files\n"
+            f"(the file doesn't exist yet to check). Forgetting the prefix will create\n"
+            f"the file in the wrong project.\n\n"
             f"Root prefix table:\n"
             f"  {primary_name}: → {path} (PRIMARY — default when no prefix)\n"
         )
@@ -132,14 +137,16 @@ Strategy:
             ctx += f"  {rn}: → {rs['path']}\n"
         ctx += (
             f"\nExamples:\n"
-            f"  read_files([{{path: '{primary_name}:src/main.py'}}])   — explicit primary\n"
+            f"  read_files([{{path: '{primary_name}:src/main.py'}}])   — read from primary\n"
         )
         first_extra = next(iter(extra_roots))
         ctx += (
-            f"  read_files([{{path: '{first_extra}:src/main.py'}}])   — explicit extra root\n"
+            f"  read_files([{{path: '{first_extra}:src/main.py'}}])   — read from extra root\n"
             f"  write_file(path='{first_extra}:config.yaml', ...)     — write to extra root\n"
+            f"  write_file(path='{first_extra}:src/new_file.py', ...) — CREATE in extra root\n"
             f"  run_command(command='npm test', working_dir='{first_extra}:')  — run in extra root\n"
             f"  grep_search(pattern='TODO', path='{first_extra}:src') — search in extra root\n"
+            f"  apply_diff(edits=[{{path: '{first_extra}:file.py', ...}}])  — batch edit in extra root\n"
         )
         ctx += "\n"
         for rn, rs in extra_roots.items():

@@ -77,13 +77,25 @@ function _swapActiveConvItem(newActiveId) {
 
 /* ── Folder tab bar ── */
 let _lastFolderTabsHash = '';
+let _lastFolderTabsContentHash = '';
+let _lastFolderTabsStructHash = '';
+let _folderTabsExpanded = false;
 
 
 
 function renderFolderTabs(folders, activeFolderId, allConvs) {
   const tabsEl = document.getElementById('folderTabs');
   if (!tabsEl) return;
+  try {
+    _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs);
+  } catch (e) {
+    console.error('[renderFolderTabs] Error:', e);
+    // On error, ensure tabs aren't left in broken state — render minimal fallback
+    try { tabsEl.innerHTML = '<div class="folder-tabs-scroll"><button class="folder-tab folder-tab-add" title="New folder"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button></div>'; } catch(_) {}
+  }
+}
 
+function _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs) {
   // Always show tabs — even with 0 folders, show just the "+" button for discoverability
   tabsEl.style.display = '';
 
@@ -113,15 +125,51 @@ function renderFolderTabs(folders, activeFolderId, allConvs) {
     }
   }
 
-  // Hash to avoid unnecessary re-renders (includes counts + last active time)
-  const hash = `${activeFolderId||''}|U${uncategorizedCount}|${safeFolders.map(f=>`${f.id}|${f.name}|${f.color||''}|${lastActiveMap[f.id]||0}|${countMap[f.id]||0}`).join(',')}`;
-  if (hash === _lastFolderTabsHash) return;
-  _lastFolderTabsHash = hash;
+  // Detect which folders have actively streaming/generating conversations
+  const streamingFolderIds = new Set();
+  for (const c of safeConvs) {
+    if (!c.folderId || !folderIds.has(c.folderId)) continue;
+    let isStreaming = (typeof activeStreams !== 'undefined' && activeStreams.has(c.id)) || c.activeTaskId || c._translating;
+    if (!isStreaming && typeof activeStreams !== 'undefined') {
+      const prefix = c.id + ':';
+      for (const k of activeStreams.keys()) { if (k.startsWith(prefix)) { isStreaming = true; break; } }
+    }
+    if (isStreaming) streamingFolderIds.add(c.folderId);
+  }
+
+  // Split hash: content hash (folders/counts/names) vs active-tab hash
+  // When only the active tab changes, skip full DOM rebuild and just swap .active class
+  const streamKey = [...streamingFolderIds].sort().join(',');
+  const structHash = `U${uncategorizedCount}|${safeFolders.map(f=>`${f.id}|${f.name}|${f.color||''}|${lastActiveMap[f.id]||0}|${countMap[f.id]||0}`).join(',')}`;
+  const contentHash = `${structHash}|S${streamKey}`;
+  const fullHash = `${activeFolderId||''}|${contentHash}`;
+  if (fullHash === _lastFolderTabsHash) return;
+
+  const contentChanged = contentHash !== _lastFolderTabsContentHash;
+  const structChanged = structHash !== _lastFolderTabsStructHash;
+  _lastFolderTabsHash = fullHash;
+  _lastFolderTabsContentHash = contentHash;
+  _lastFolderTabsStructHash = structHash;
+
+  // Fast path: only active tab and/or streaming state changed — update classes in-place, no DOM rebuild
+  if (!structChanged) {
+    const btns = tabsEl.querySelectorAll('.folder-tab[data-folder-id]');
+    btns.forEach(btn => {
+      const fid = btn.dataset.folderId;
+      btn.classList.toggle('active', fid === (activeFolderId || ''));
+      const dot = btn.querySelector('.folder-tab-dot');
+      if (dot) dot.classList.toggle('streaming', streamingFolderIds.has(fid));
+    });
+    return;
+  }
 
   const sortedFolders = [...safeFolders].sort((a, b) => (lastActiveMap[b.id] || 0) - (lastActiveMap[a.id] || 0) || (a.order || 0) - (b.order || 0));
 
   let html = '';
-  html += '<div class="folder-tabs-scroll">';
+  html += '<div class="folder-tabs-scroll';
+  // Preserve expanded state synchronously to avoid collapse→expand flash
+  if (_folderTabsExpanded) html += ' expanded';
+  html += '">';
   // "未分类" tab — shows conversations not in any folder (only when folders exist)
   if (sortedFolders.length > 0) {
     const ucBadge = uncategorizedCount > 0 ? `<span class="folder-tab-count">${uncategorizedCount}</span>` : '';
@@ -137,7 +185,8 @@ function renderFolderTabs(folders, activeFolderId, allConvs) {
     const cnt = countMap[f.id] || 0;
     const badge = cnt > 0 ? `<span class="folder-tab-count">${cnt}</span>` : '';
     html += `<button class="folder-tab${isActive ? ' active' : ''}" data-folder-id="${escapeHtml(f.id)}" title="${fname}">`;
-    html += `<span class="folder-tab-dot" style="background:${fcolor}"></span>`;
+    const dotStreaming = streamingFolderIds.has(f.id) ? ' streaming' : '';
+    html += `<span class="folder-tab-dot${dotStreaming}" style="background:${fcolor}"></span>`;
     html += `<span class="folder-tab-name">${fname}</span>${badge}`;
     html += `</button>`;
   }
@@ -146,7 +195,38 @@ function renderFolderTabs(folders, activeFolderId, allConvs) {
   html += `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
   html += `</button>`;
   html += '</div>';
+  // Expand/collapse toggle (hidden by default, shown via CSS when overflow detected)
+  html += `<button class="folder-tabs-toggle">`;
+  html += `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+  html += `<span class="folder-tabs-toggle-label"></span>`;
+  html += `</button>`;
   tabsEl.innerHTML = html;
+
+  // Check overflow after render — if content exceeds visible height, show toggle & count hidden
+  requestAnimationFrame(() => {
+    const scrollEl = tabsEl.querySelector('.folder-tabs-scroll');
+    if (!scrollEl) return;
+    const isOverflow = scrollEl.scrollHeight > scrollEl.clientHeight + 2;
+    tabsEl.classList.toggle('has-overflow', isOverflow);
+    // Count how many real folder tabs are hidden (below the fold)
+    if (isOverflow) {
+      const label = tabsEl.querySelector('.folder-tabs-toggle-label');
+      if (label) {
+        if (_folderTabsExpanded) {
+          label.textContent = t('sidebar.lessFolders');
+        } else {
+          const collapsedMax = 94; // matches CSS max-height (3 rows)
+          // Only count real folder tabs, exclude the "+" add button
+          const tabs = scrollEl.querySelectorAll('.folder-tab:not(.folder-tab-add)');
+          let hiddenCount = 0;
+          tabs.forEach(tab => {
+            if (tab.offsetTop + tab.offsetHeight > collapsedMax) hiddenCount++;
+          });
+          label.textContent = hiddenCount > 0 ? `+${hiddenCount}` : '';
+        }
+      }
+    }
+  });
 }
 
 function renderConversationList() {
@@ -437,6 +517,78 @@ function _localContentSearch(query) {
     }
   }
   return results;
+}
+
+// ── Shared helpers: streaming bubble & surgical DOM truncation ──
+
+/**
+ * Build the HTML string for a streaming bubble (#streaming-msg).
+ * @param {'worker'|'planner'|'critic'} role  — which phase / avatar
+ * @param {string} [status]   — status text shown inside the pulse
+ * @param {string} [timeStr]  — formatted time string (defaults to now)
+ * @returns {string} HTML string
+ */
+function _streamingBubbleHTML(role, status, timeStr) {
+  const _cfg = {
+    worker:  { avatar: (typeof _TOFU_WORKER_SVG  !== 'undefined') ? _TOFU_WORKER_SVG  : '✦', label: 'Agent',   cls: 'ep-worker-msg',  defaultStatus: 'Preparing...' },
+    planner: { avatar: (typeof _TOFU_PLANNER_SVG !== 'undefined') ? _TOFU_PLANNER_SVG : '✦', label: 'Planner', cls: 'ep-planner-msg', defaultStatus: 'Planning…' },
+    critic:  { avatar: (typeof _TOFU_CRITIC_SVG  !== 'undefined') ? _TOFU_CRITIC_SVG  : '✦', label: 'Critic',  cls: 'ep-critic-msg',  defaultStatus: 'Reviewing…' },
+  };
+  const c = _cfg[role] || _cfg.worker;
+  const st = status || c.defaultStatus;
+  const tm = timeStr || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const extraCls = role === 'critic' ? ' user-msg' : '';
+  return `<div class="message${extraCls} ${c.cls}" id="streaming-msg">` +
+    `<div class="message-avatar">${c.avatar}</div>` +
+    `<div class="message-content">` +
+      `<div class="message-header">` +
+        `<span class="message-role">${c.label}</span>` +
+        `<span class="message-time">${tm}</span>` +
+        `<span id="stream-elapsed-timer" class="stream-elapsed-timer"></span>` +
+      `</div>` +
+      `<div class="message-body" id="streaming-body">` +
+        `<div class="stream-status"><div class="pulse"></div> ${st}</div>` +
+      `</div>` +
+    `</div></div>`;
+}
+
+/**
+ * Determine streaming bubble role from config / conversation state.
+ * @param {Object} conv
+ * @param {Object} [cfg] — sendConfig / regenConfig with endpointMode flag
+ * @returns {'worker'|'planner'}
+ */
+function _streamingBubbleRole(conv, cfg) {
+  if (cfg && cfg.endpointMode) return 'planner';
+  if (conv && conv.endpointEnabled && !conv.messages.some(m => m._epIteration)) return 'planner';
+  return 'worker';
+}
+
+/**
+ * Surgically remove DOM elements for messages with index > cutoffIdx,
+ * plus any leftover #streaming-msg. Updates fingerprint and turn nav.
+ * @param {Object} conv
+ * @param {number} cutoffIdx — keep messages 0..cutoffIdx, remove cutoffIdx+1..
+ * @returns {boolean} true if surgical path was used
+ */
+function _surgicalTruncateDOM(conv, cutoffIdx) {
+  if (activeConvId !== conv.id) return false;
+  const inner = document.getElementById("chatInner");
+  if (!inner) return false;
+  const toRemove = [];
+  inner.querySelectorAll('.message[id^="msg-"]').forEach(el => {
+    const m = el.id.match(/^msg-(\d+)$/);
+    if (m && parseInt(m[1], 10) > cutoffIdx) toRemove.push(el);
+  });
+  const oldStreaming = document.getElementById("streaming-msg");
+  if (oldStreaming) toRemove.push(oldStreaming);
+  if (toRemove.length > 0 || inner.querySelector('.message[id^="msg-"]')) {
+    for (const el of toRemove) el.remove();
+    _lastRenderedFingerprint = _convRenderFingerprint(conv);
+    buildTurnNav(conv);
+    return true;
+  }
+  return false;
 }
 
 // ── Chat rendering ──
@@ -1100,7 +1252,11 @@ function renderMessage(msg, idx) {
     const exportImgH = !isUser
       ? `<button class="msg-action-btn msg-export-img-btn" onclick="event.stopPropagation();ExportImages.exportMessageWithPreview(${idx})" title="Export as phone-screen images"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg> Export</button>`
       : "";
-    actionBtns = `<div class="message-actions">${copyH}${editH}${regenH}${continueH}${translateH}${exportImgH}</div>`;
+    const canDelete = conv_ && !activeStreams.has(conv_.id) && !conv_.activeTaskId;
+    const deleteH = canDelete
+      ? `<button class="msg-action-btn msg-delete-btn" onclick="event.stopPropagation();deleteTurn(${idx})" title="${isUser ? 'Delete this turn' : 'Delete this message'}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>`
+      : "";
+    actionBtns = `<div class="message-actions">${copyH}${editH}${regenH}${continueH}${translateH}${exportImgH}${deleteH}</div>`;
   }
   // ★ Tofu mascot avatars: Worker gets worker tofu, Planner gets planner tofu
   let avatarContent = (typeof _TOFU_WORKER_SVG !== 'undefined') ? _TOFU_WORKER_SVG : "✦",
@@ -2741,6 +2897,128 @@ function copyBilingualOriginal(btn, role, idx) {
   }).catch(() => {});
 }
 
+// ── Delete turn / message ──
+// Keeps a small inline confirmation popup so the user doesn't accidentally delete.
+let _deletePopup = null;
+let _deletePopupTimeout = null;
+
+function _hideDeletePopup() {
+  if (_deletePopup) { _deletePopup.remove(); _deletePopup = null; }
+  if (_deletePopupTimeout) { clearTimeout(_deletePopupTimeout); _deletePopupTimeout = null; }
+}
+
+function deleteTurn(idx) {
+  const conv = getActiveConv();
+  if (!conv) return;
+  if (activeStreams.has(conv.id) || conv.activeTaskId) return;
+  const msg = conv.messages[idx];
+  if (!msg) return;
+
+  // If there's already a popup, remove it first
+  _hideDeletePopup();
+
+  const isUser = msg.role === 'user';
+  // Check if a turn delete is possible (user msg followed by assistant msg)
+  const hasAssistantAfter = isUser && idx + 1 < conv.messages.length
+    && conv.messages[idx + 1].role === 'assistant';
+
+  // Build confirmation popup
+  _deletePopup = document.createElement('div');
+  _deletePopup.className = 'delete-turn-popup';
+
+  if (isUser && hasAssistantAfter) {
+    // User message with a following assistant response — offer both options
+    _deletePopup.innerHTML = `
+      <div class="delete-popup-title">Delete message?</div>
+      <button class="delete-popup-btn delete-popup-turn" onclick="_execDeleteTurn(${idx},'turn')">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        Delete turn
+      </button>
+      <button class="delete-popup-btn delete-popup-single" onclick="_execDeleteTurn(${idx},'single')">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        This only
+      </button>
+      <button class="delete-popup-btn delete-popup-cancel" onclick="_hideDeletePopup()">Cancel</button>`;
+  } else {
+    // Assistant message or last user message — single delete only
+    _deletePopup.innerHTML = `
+      <div class="delete-popup-title">Delete this message?</div>
+      <button class="delete-popup-btn delete-popup-single" onclick="_execDeleteTurn(${idx},'single')">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        Delete
+      </button>
+      <button class="delete-popup-btn delete-popup-cancel" onclick="_hideDeletePopup()">Cancel</button>`;
+  }
+
+  // Position the popup near the delete button
+  const msgEl = document.getElementById(`msg-${idx}`);
+  if (msgEl) {
+    msgEl.querySelector('.message-content').appendChild(_deletePopup);
+  }
+
+  // Auto-dismiss after 5 seconds
+  _deletePopupTimeout = setTimeout(_hideDeletePopup, 5000);
+
+  // Dismiss on click outside
+  setTimeout(() => {
+    document.addEventListener('click', _deletePopupOutsideClick, { once: true, capture: true });
+  }, 0);
+}
+
+function _deletePopupOutsideClick(e) {
+  if (_deletePopup && !_deletePopup.contains(e.target) && !e.target.closest('.msg-delete-btn')) {
+    _hideDeletePopup();
+  }
+}
+
+async function _execDeleteTurn(idx, mode) {
+  _hideDeletePopup();
+  const conv = getActiveConv();
+  if (!conv) return;
+  if (activeStreams.has(conv.id) || conv.activeTaskId) return;
+
+  const convId = conv.id;
+  try {
+    const resp = await fetch(apiUrl(`/api/conversations/${convId}/messages/${idx}?mode=${mode}`), {
+      method: 'DELETE',
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+      console.error('[deleteTurn] Server error:', err);
+      if (typeof showToast === 'function') showToast('Delete failed', 'error');
+      return;
+    }
+    const result = await resp.json();
+    const deletedIndices = result.deletedIndices || [idx];
+
+    // Update local state: remove messages at deleted indices (reverse order)
+    for (const i of [...deletedIndices].sort((a, b) => b - a)) {
+      if (i >= 0 && i < conv.messages.length) {
+        conv.messages.splice(i, 1);
+      }
+    }
+    conv._serverMsgCount = conv.messages.length;
+    conv._needsLoad = false;
+
+    // Update IndexedDB cache
+    if (typeof ConvCache !== 'undefined') ConvCache.put(conv);
+
+    // Re-render
+    if (activeConvId === convId) {
+      renderChat(conv, false);
+      buildTurnNav(conv);
+    }
+    renderConversationList();
+
+    if (typeof showToast === 'function') {
+      showToast(deletedIndices.length > 1 ? 'Turn deleted' : 'Message deleted', 'success');
+    }
+  } catch (e) {
+    console.error('[deleteTurn] Failed:', e);
+    if (typeof showToast === 'function') showToast('Delete failed', 'error');
+  }
+}
+
 // ── Translate message ──
 async function translateMessage(idx) {
   const conv = getActiveConv();
@@ -3140,33 +3418,29 @@ async function saveEditAndResend(idx) {
     document.getElementById("topbarTitle").textContent = conv.title;
   }
 
-  /* ── Surgical DOM truncation ── */
-  let usedSurgical = false;
+  /* ── Surgical DOM truncation (re-render edited msg + remove later ones) ── */
   if (activeConvId === convId) {
-    const inner = document.getElementById("chatInner");
-    if (inner) {
-      const toRemove = [];
-      inner.querySelectorAll('.message[id^="msg-"]').forEach(el => {
-        const m = el.id.match(/^msg-(\d+)$/);
-        if (m && parseInt(m[1], 10) > idx) toRemove.push(el);
-      });
-      const oldStreaming = document.getElementById("streaming-msg");
-      if (oldStreaming) toRemove.push(oldStreaming);
-      const editedEl = document.getElementById("msg-" + idx);
-      if (editedEl) editedEl.outerHTML = renderMessage(msg, idx);
-      if (toRemove.length > 0 || inner.querySelector('.message[id^="msg-"]')) {
-        for (const el of toRemove) el.remove();
-        usedSurgical = true;
-        _lastRenderedFingerprint = _convRenderFingerprint(conv);
-        buildTurnNav(conv);
-      }
-    }
+    const editedEl = document.getElementById("msg-" + idx);
+    if (editedEl) editedEl.outerHTML = renderMessage(msg, idx);
   }
-  if (!usedSurgical) renderChat(conv);
+  if (!_surgicalTruncateDOM(conv, idx)) renderChat(conv);
   renderConversationList();
 
   // ── Atomic backend call: truncate + edit + translate + task start ──
   const _regenConfig = _buildConvConfig(conv);
+
+  // ★ If autoTranslate is on and edited text has Chinese, show stop button immediately
+  const _editAbortCtrl = new AbortController();
+  const _editTimeout = setTimeout(() => _editAbortCtrl.abort(), 60000); // 60s safety timeout
+  const _editWillTranslate = _regenConfig.autoTranslate && /[\u4e00-\u9fff\u3400-\u4dbf]/.test(t);
+  if (_editWillTranslate) {
+    conv._translating = true;
+    conv._translateAborted = false;
+    conv._translateAbortCtrl = _editAbortCtrl;
+    updateSendButton();
+    renderConversationList();
+    if (activeConvId === convId) _renderTranslatingBubble();
+  }
 
   try {
     const resp = await fetch(apiUrl('/api/chat/regenerate'), {
@@ -3181,8 +3455,7 @@ async function saveEditAndResend(idx) {
         config: _regenConfig,
         settings: _buildConvSettings(conv),
       }),
-      signal: typeof AbortSignal.timeout === 'function'
-        ? AbortSignal.timeout(60000) : undefined,
+      signal: _editAbortCtrl.signal,
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
@@ -3214,16 +3487,38 @@ async function saveEditAndResend(idx) {
     conv.activeTaskId = taskId;
     saveConversations(convId);
 
+    _removeTranslatingBubble();
     if (activeConvId === convId) _renderStreamingBubble(conv, _regenConfig);
     buildTurnNav(conv);
     connectToTask(convId, taskId);
 
   } catch (e) {
-    debugLog("Edit+resend failed: " + e.message, "error");
-    console.error('[saveEditAndResend] /api/chat/regenerate failed:', e);
-    saveConversations(convId);
-    syncConversationToServer(conv, { allowTruncate: true });
-    buildTurnNav(conv);
+    if (e.name === 'AbortError' && _editWillTranslate) {
+      console.log('%c[saveEditAndResend] ✗ Aborted during translation by user', 'color:#f59e0b;font-weight:bold');
+      _removeTranslatingBubble();
+      saveConversations(convId);
+      syncConversationToServer(conv, { allowTruncate: true });
+      buildTurnNav(conv);
+      // ★ Abort any server-side task that may have started (server received
+      //   the request before the client abort fired).
+      fetch(apiUrl(`/api/chat/abort-conv/${convId}`), { method: 'POST' }).catch(() => {});
+    } else {
+      debugLog("Edit+resend failed: " + e.message, "error");
+      console.error('[saveEditAndResend] /api/chat/regenerate failed:', e);
+      saveConversations(convId);
+      syncConversationToServer(conv, { allowTruncate: true });
+      buildTurnNav(conv);
+    }
+  } finally {
+    clearTimeout(_editTimeout);
+    if (_editWillTranslate) {
+      _removeTranslatingBubble();
+      conv._translating = false;
+      conv._translateAborted = false;
+      conv._translateAbortCtrl = null;
+      updateSendButton();
+      renderConversationList();
+    }
   }
 }
 
@@ -4080,26 +4375,13 @@ function showStreamingUIForConv(convId) {
   }
 
   const lastMsg = conv.messages[conv.messages.length - 1];
+  const _smTime = new Date(lastMsg?.timestamp || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   if (lastMsg && lastMsg.role === "assistant" && lastMsg._isEndpointPlanner && !lastMsg.done) {
-    /* Endpoint planner phase — show planner streaming bubble */
-    const time = new Date(lastMsg.timestamp || Date.now()).toLocaleTimeString(
-      [],
-      { hour: "2-digit", minute: "2-digit" },
-    );
-    html += `<div class="message ep-planner-msg" id="streaming-msg"><div class="message-avatar">${(typeof _TOFU_PLANNER_SVG !== 'undefined') ? _TOFU_PLANNER_SVG : '✦'}</div><div class="message-content"><div class="message-header"><span class="message-role">Planner</span><span class="message-time">${time}</span><span id="stream-elapsed-timer" class="stream-elapsed-timer"></span></div><div class="message-body" id="streaming-body"><div class="stream-status"><div class="pulse"></div> Planning…</div></div></div></div>`;
+    html += _streamingBubbleHTML('planner', 'Planning…', _smTime);
   } else if (lastMsg && lastMsg.role === "assistant") {
-    const time = new Date(lastMsg.timestamp || Date.now()).toLocaleTimeString(
-      [],
-      { hour: "2-digit", minute: "2-digit" },
-    );
-    html += `<div class="message ep-worker-msg" id="streaming-msg"><div class="message-avatar">${(typeof _TOFU_WORKER_SVG !== 'undefined') ? _TOFU_WORKER_SVG : '✦'}</div><div class="message-content"><div class="message-header"><span class="message-role">Agent</span><span class="message-time">${time}</span><span id="stream-elapsed-timer" class="stream-elapsed-timer"></span></div><div class="message-body" id="streaming-body"><div class="stream-status"><div class="pulse"></div> Streaming…</div></div></div></div>`;
+    html += _streamingBubbleHTML('worker', 'Streaming…', _smTime);
   } else if (lastMsg && lastMsg._isEndpointReview && !lastMsg.done) {
-    /* Endpoint critic phase — show critic streaming bubble */
-    const time = new Date(lastMsg.timestamp || Date.now()).toLocaleTimeString(
-      [],
-      { hour: "2-digit", minute: "2-digit" },
-    );
-    html += `<div class="message user-msg ep-critic-msg" id="streaming-msg"><div class="message-avatar">${(typeof _TOFU_CRITIC_SVG !== 'undefined') ? _TOFU_CRITIC_SVG : '✦'}</div><div class="message-content"><div class="message-header"><span class="message-role">Critic</span><span class="message-time">${time}</span><span id="stream-elapsed-timer" class="stream-elapsed-timer"></span></div><div class="message-body" id="streaming-body"><div class="stream-status"><div class="pulse"></div> Reviewing…</div></div></div></div>`;
+    html += _streamingBubbleHTML('critic', 'Reviewing…', _smTime);
   }
   inner.innerHTML = html;
   if (startIdx > 0) {
@@ -4313,20 +4595,12 @@ function finishStream(convId) {
     }
   }
 
-  // ── ★ Server-side queue: server auto-dispatches next queued message ──
-  // The server's persist_task_result automatically checks the message_queue
-  // table and dispatches the next queued message.  We poll for the new task
-  // so we can connect to its SSE stream.
-  if (pendingMessageQueue.has(convId) || conv?.activeTaskId) {
-    console.log(
-      `%c[Queue] ⏭ Stream ended for conv=${convId.slice(0,8)} — checking server for auto-dispatched task…`,
-      'color:#a78bfa;font-weight:bold'
-    );
-    // Give the server a moment to finish dispatching, then check for new task
-    setTimeout(() => _checkForQueuedTask(convId), 500);
-  } else {
-    console.log(`%c[Queue] ✓ Stream ended for conv=${convId.slice(0,8)}, no queued messages`, 'color:#6b7280');
-  }
+  // ── ★ Server-side queue: always check for auto-dispatched next task ──
+  // The backend's persist_task_result → _dispatch_queued_message checks the
+  // message_queue table and auto-dispatches the next message. We poll for
+  // the new task to connect to its SSE stream. No frontend gate — the
+  // backend is the single source of truth for queue state.
+  setTimeout(() => _checkForQueuedTask(convId), 500);
 }
 
 /**
@@ -4608,25 +4882,16 @@ async function connectToTask(convId, taskId, retries = 0) {
       const existing = document.getElementById(`msg-${lastIdx}`);
       if (existing) existing.remove();
       if (!document.getElementById("streaming-msg")) {
-        const time = new Date(
-          assistantMsg.timestamp || Date.now(),
-        ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-        const el = document.createElement("div");
-        /* ★ FIX: detect endpoint planner phase so reconnection shows "Planner"
+        /* ★ Detect endpoint planner phase so reconnection shows "Planner"
          *   instead of "Agent".  Check: the assistantMsg has _isEndpointPlanner,
          *   or the conv has endpointEnabled and no worker turns yet (iteration 0). */
         const _isEpPlanner = assistantMsg._isEndpointPlanner
           || (conv.endpointEnabled && !conv.messages.some(m => m._epIteration));
-        const _reconAvatar = _isEpPlanner
-          ? ((typeof _TOFU_PLANNER_SVG !== 'undefined') ? _TOFU_PLANNER_SVG : '✦')
-          : ((typeof _TOFU_WORKER_SVG !== 'undefined') ? _TOFU_WORKER_SVG : '✦');
-        const _reconRole = _isEpPlanner ? 'Planner' : 'Agent';
+        const _reconRole = _isEpPlanner ? 'planner' : 'worker';
         const _reconStatus = _isEpPlanner ? 'Planning…' : 'Connecting…';
-        const _reconClass = _isEpPlanner ? 'ep-planner-msg' : 'ep-worker-msg';
-        el.className = `message ${_reconClass}`;
-        el.id = "streaming-msg";
-        el.innerHTML = `<div class="message-avatar">${_reconAvatar}</div><div class="message-content"><div class="message-header"><span class="message-role">${_reconRole}</span><span class="message-time">${time}</span><span id="stream-elapsed-timer" class="stream-elapsed-timer"></span></div><div class="message-body" id="streaming-body"><div class="stream-status"><div class="pulse"></div> ${_reconStatus}</div></div></div>`;
-        inner.appendChild(el);
+        const _reconTime = new Date(assistantMsg.timestamp || Date.now())
+          .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(_reconRole, _reconStatus, _reconTime));
         scrollToBottom();
       }
     }
@@ -4718,7 +4983,7 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
           const conv = conversations.find(c => c.id === convId);
           if (conv) {
             _epCriticPhase = false;
-            let plannerMsg = conv.messages.find(m => m._isEndpointPlanner);
+            let plannerMsg = [...conv.messages].reverse().find(m => m._isEndpointPlanner);
             if (!plannerMsg) {
               // assistantMsg from startAssistantResponse or connectToTask should already be the planner
               if (assistantMsg && assistantMsg.role === 'assistant') {
@@ -4770,7 +5035,7 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
           if (ev.endpointPhase === 'planning') {
             // Planner is in progress — create a planner assistant msg
             _epCriticPhase = false;
-            let plannerMsg = conv.messages.find(m => m._isEndpointPlanner);
+            let plannerMsg = [...conv.messages].reverse().find(m => m._isEndpointPlanner);
             if (!plannerMsg) {
               plannerMsg = {
                 role: "assistant", content: ev.content || "", thinking: ev.thinking || "",
@@ -4851,17 +5116,11 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
 
             // Re-create streaming-msg for the in-progress turn
             const inner = document.getElementById("chatInner");
-            const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-            if (_epCriticPhase) {
-              const criticHtml = `<div class="message user-msg ep-critic-msg" id="streaming-msg"><div class="message-avatar">${(typeof _TOFU_CRITIC_SVG !== 'undefined') ? _TOFU_CRITIC_SVG : '✦'}</div><div class="message-content"><div class="message-header"><span class="message-role">Critic</span><span class="message-time">${time}</span><span id="stream-elapsed-timer" class="stream-elapsed-timer"></span></div><div class="message-body" id="streaming-body"><div class="stream-status"><div class="pulse"></div> Reviewing…</div></div></div></div>`;
-              if (inner) inner.insertAdjacentHTML("beforeend", criticHtml);
-            } else if (ev.endpointPhase === 'planning') {
-              const plannerHtml = `<div class="message ep-planner-msg" id="streaming-msg"><div class="message-avatar">${(typeof _TOFU_PLANNER_SVG !== 'undefined') ? _TOFU_PLANNER_SVG : '✦'}</div><div class="message-content"><div class="message-header"><span class="message-role">Planner</span><span class="message-time">${time}</span><span id="stream-elapsed-timer" class="stream-elapsed-timer"></span></div><div class="message-body" id="streaming-body"><div class="stream-status"><div class="pulse"></div> Planning…</div></div></div></div>`;
-              if (inner) inner.insertAdjacentHTML("beforeend", plannerHtml);
-            } else {
-              const workerHtml = `<div class="message ep-worker-msg" id="streaming-msg"><div class="message-avatar">${(typeof _TOFU_WORKER_SVG !== 'undefined') ? _TOFU_WORKER_SVG : '✦'}</div><div class="message-content"><div class="message-header"><span class="message-role">Agent</span><span class="message-time">${time}</span><span id="stream-elapsed-timer" class="stream-elapsed-timer"></span></div><div class="message-body" id="streaming-body"><div class="stream-status"><div class="pulse"></div> Thinking…</div></div></div></div>`;
-              if (inner) inner.insertAdjacentHTML("beforeend", workerHtml);
-            }
+            const _reconRole = _epCriticPhase ? 'critic'
+              : (ev.endpointPhase === 'planning' ? 'planner' : 'worker');
+            const _reconStatus = _epCriticPhase ? 'Reviewing…'
+              : (ev.endpointPhase === 'planning' ? 'Planning…' : 'Thinking…');
+            if (inner) inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML(_reconRole, _reconStatus));
             buildTurnNav(conv);
           }
         }
@@ -5469,9 +5728,7 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
           // 3. Create a streaming element for the critic (DOM — only if active)
           if (_isActiveConv) {
             const inner = document.getElementById("chatInner");
-            const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-            const criticStreamHtml = `<div class="message user-msg ep-critic-msg" id="streaming-msg"><div class="message-avatar">${(typeof _TOFU_CRITIC_SVG !== 'undefined') ? _TOFU_CRITIC_SVG : '✦'}</div><div class="message-content"><div class="message-header"><span class="message-role">Critic</span><span class="message-time">${time}</span><span id="stream-elapsed-timer" class="stream-elapsed-timer"></span></div><div class="message-body" id="streaming-body"><div class="stream-status"><div class="pulse"></div> Reviewing…</div></div></div></div>`;
-            if (inner) inner.insertAdjacentHTML("beforeend", criticStreamHtml);
+            if (inner) inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('critic'));
           }
 
           // 4. Create a separate stream buffer for the critic
@@ -5508,7 +5765,7 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
           if (existingSm && existingSm.classList.contains('ep-planner-msg')) {
             console.warn(`[endpoint_iteration] ⚠️ Stale planner streaming-msg detected — ` +
               `finalizing planner before starting worker phase (iter=${ev.iteration})`);
-            const plannerMsg = conv.messages.find(m => m._isEndpointPlanner);
+            const plannerMsg = [...conv.messages].reverse().find(m => m._isEndpointPlanner);
             if (plannerMsg && _isActiveConv) {
               plannerMsg.done = true;
               const plannerIdx = conv.messages.indexOf(plannerMsg);
@@ -5550,9 +5807,7 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
             // Create streaming element — only if this conv is active
             if (_isActiveConv) {
               const inner = document.getElementById("chatInner");
-              const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-              const streamHtml = `<div class="message ep-worker-msg" id="streaming-msg"><div class="message-avatar">${(typeof _TOFU_WORKER_SVG !== 'undefined') ? _TOFU_WORKER_SVG : '✦'}</div><div class="message-content"><div class="message-header"><span class="message-role">Agent</span><span class="message-time">${time}</span><span id="stream-elapsed-timer" class="stream-elapsed-timer"></span></div><div class="message-body" id="streaming-body"><div class="stream-status"><div class="pulse"></div> Thinking…</div></div></div></div>`;
-              if (inner) inner.insertAdjacentHTML("beforeend", streamHtml);
+              if (inner) inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('worker', 'Thinking…'));
               buildTurnNav(conv);
               _forceScrollToBottom();
             }
@@ -5603,7 +5858,7 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
              * exists in conv.messages under a different object.  Re-add assistantMsg
              * to conv.messages if missing, or at minimum remove the streaming-msg
              * so the working phase handler creates a fresh assistant message. */
-            const existingPlanner = conv.messages.find(m => m._isEndpointPlanner);
+            const existingPlanner = [...conv.messages].reverse().find(m => m._isEndpointPlanner);
             if (existingPlanner) {
               /* Planner exists from backend sync — just remove the streaming bubble */
               sm.outerHTML = renderMessage(existingPlanner, conv.messages.indexOf(existingPlanner));
@@ -5700,11 +5955,8 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
 
         // DOM operations — only if this conv is currently viewed
         if (activeConvId === convId) {
-          // Create new streaming-msg element — looks like normal assistant reply
           const inner = document.getElementById("chatInner");
-          const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-          const streamHtml = `<div class="message ep-worker-msg" id="streaming-msg"><div class="message-avatar">${(typeof _TOFU_WORKER_SVG !== 'undefined') ? _TOFU_WORKER_SVG : '✦'}</div><div class="message-content"><div class="message-header"><span class="message-role">Agent</span><span class="message-time">${time}</span><span id="stream-elapsed-timer" class="stream-elapsed-timer"></span></div><div class="message-body" id="streaming-body"><div class="stream-status"><div class="pulse"></div> Thinking…</div></div></div></div>`;
-          if (inner) inner.insertAdjacentHTML("beforeend", streamHtml);
+          if (inner) inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('worker', 'Thinking…'));
 
           // Update banner & turn-nav
           const banner = document.getElementById("ep-iter-banner");
@@ -5893,6 +6145,8 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
       /* ★ Clean up continue checkpoint markers */
       delete assistantMsg._continueToolRounds;
       delete assistantMsg._continueContentPrefix;
+      delete assistantMsg._continueApiRounds;
+      delete assistantMsg._continueUsage;
       delete assistantMsg._continueModifiedFiles;
       delete assistantMsg._continueModifiedFileList;
       return true;
@@ -6020,11 +6274,11 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
         stream.controller = new AbortController();
         return false;  // → triggers _pollFallback to retrieve completed result
       }
-      if (!gotData) {
+      if (!gotData && !stream._userAbort) {
         stream.controller = new AbortController();
         return false;
       }
-      throw e;  // re-throw user abort with gotData → connectToTask handles it
+      throw e;  // re-throw user abort → connectToTask handles it
     }
     throw e;
   }
@@ -6172,6 +6426,9 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
         }
       }
       if (data.taskId) assistantMsg._taskId = data.taskId;
+      /* ★ emit_to_user: recover emitContent from poll response */
+      if (data.emitContent) assistantMsg._emitContent = data.emitContent;
+      if (data.emitToolName) assistantMsg._emitToolName = data.emitToolName;
       if (data.apiRounds) {
         const existingApiRounds = assistantMsg._continueApiRounds || [];
         assistantMsg.apiRounds = existingApiRounds.concat(data.apiRounds);
@@ -6199,6 +6456,7 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
         }
         /* ★ Clean up continue checkpoint markers (poll fallback) */
         delete assistantMsg._continueToolRounds;
+        delete assistantMsg._continueContentPrefix;
         delete assistantMsg._continueApiRounds;
         delete assistantMsg._continueUsage;
         delete assistantMsg._continueModifiedFiles;
@@ -6404,12 +6662,21 @@ function updateSendButton() {
             _stopMsg.finishReason = 'aborted';
           }
         }
+        // ★ FIX: Mark as user-initiated abort so _trySSE doesn't fall back
+        //   to polling when gotData=false (indistinguishable from SSE timeout).
+        s._userAbort = true;
         s.controller.abort();
+        // ★ Record aborted task ID so sendMessage can inform the backend
+        //   even if the abort API call hasn't completed yet.
+        if (conv) conv._lastAbortedTaskId = s.taskId;
         fetch(apiUrl(`/api/chat/abort/${s.taskId}`), { method: "POST" }).catch(
           () => {},
         );
       } else if (conv && conv.activeTaskId) {
-        fetch(apiUrl(`/api/chat/abort/${conv.activeTaskId}`), {
+        // ★ Record aborted task ID
+        const _abortingTaskId = conv.activeTaskId;
+        if (conv) conv._lastAbortedTaskId = _abortingTaskId;
+        fetch(apiUrl(`/api/chat/abort/${_abortingTaskId}`), {
           method: "POST",
         }).catch(() => {});
         // ★ Pre-set finishReason for the no-stream abort path too

@@ -15,10 +15,9 @@ What it does:
     1. Verifies Python 3.10+
     2. Creates a virtual environment (.venv)
     3. Installs Python dependencies via pip (or uv if available)
-    4. Locates or installs PostgreSQL per platform
-    5. Optionally installs Playwright (browser automation)
-    6. Creates .env from template
-    7. Launches the server
+    4. Optionally installs Playwright (browser automation)
+    5. Creates .env from template
+    6. Launches the server
 
 The script is idempotent — safe to run multiple times.
 """
@@ -32,10 +31,6 @@ import shutil
 import subprocess
 import sys
 import textwrap
-import urllib.request
-import urllib.error
-import json
-import time
 
 # ═══════════════════════════════════════════════════════════════
 #  Constants
@@ -224,7 +219,7 @@ def setup_venv(install_dir: str) -> str:
     # Check if .venv already exists and is valid
     venv_py = venv_python(venv_dir)
     if os.path.isfile(venv_py):
-        ok(f"Virtual environment already exists: .venv")
+        ok("Virtual environment already exists: .venv")
         return venv_py
 
     # Create venv
@@ -240,7 +235,7 @@ def setup_venv(install_dir: str) -> str:
     if not os.path.isfile(venv_py):
         fail(f"Failed to create virtual environment at {venv_dir}")
 
-    ok(f"Virtual environment created: .venv")
+    ok("Virtual environment created: .venv")
     return venv_py
 
 
@@ -274,125 +269,15 @@ def install_deps(py: str, install_dir: str):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Step 5: Ensure PostgreSQL is available
+#  Step 5: Verify SQLite (built into Python — always available)
 # ═══════════════════════════════════════════════════════════════
 
-def _find_pg_binary(name: str) -> str | None:
-    """Locate a PostgreSQL binary across common install locations."""
-    # 1. Check PATH
-    found = which(name)
-    if found:
-        return found
-
-    # 2. Platform-specific common locations
-    candidates = []
-    if IS_MACOS:
-        # Homebrew (Intel + Apple Silicon)
-        candidates += [
-            f"/opt/homebrew/bin/{name}",
-            f"/usr/local/bin/{name}",
-        ]
-        # Homebrew versioned
-        for ver in range(20, 14, -1):
-            candidates.append(f"/opt/homebrew/opt/postgresql@{ver}/bin/{name}")
-            candidates.append(f"/usr/local/opt/postgresql@{ver}/bin/{name}")
-        # Postgres.app
-        candidates.append(f"/Applications/Postgres.app/Contents/Versions/latest/bin/{name}")
-
-    elif IS_LINUX:
-        # System packages (Debian/Ubuntu, RHEL/Fedora)
-        for ver in range(20, 14, -1):
-            candidates.append(f"/usr/lib/postgresql/{ver}/bin/{name}")
-        candidates += [f"/usr/bin/{name}", f"/usr/local/bin/{name}"]
-
-    elif IS_WINDOWS:
-        # Standard Windows install dirs
-        pg_dirs = [
-            os.path.expandvars(r"%ProgramFiles%\PostgreSQL"),
-            os.path.expandvars(r"%ProgramFiles(x86)%\PostgreSQL"),
-        ]
-        for pg_dir in pg_dirs:
-            if os.path.isdir(pg_dir):
-                for ver_dir in sorted(os.listdir(pg_dir), reverse=True):
-                    candidates.append(os.path.join(pg_dir, ver_dir, "bin", f"{name}.exe"))
-
-    for path in candidates:
-        if os.path.isfile(path) and os.access(path, os.X_OK):
-            return path
-
-    return None
-
-
-def ensure_postgresql(py: str, install_dir: str):
-    """Check for PostgreSQL and suggest installation if missing."""
-    step("Checking PostgreSQL")
-
-    initdb = _find_pg_binary("initdb")
-    pg_ctl = _find_pg_binary("pg_ctl")
-
-    if initdb and pg_ctl:
-        # Get version
-        try:
-            result = subprocess.run(
-                [pg_ctl, "--version"], capture_output=True, text=True, timeout=5
-            )
-            ver = result.stdout.strip().split()[-1] if result.returncode == 0 else "?"
-        except Exception:
-            ver = "?"
-        ok(f"PostgreSQL {ver} found")
-        return
-
-    # PostgreSQL not found — try to install
-    info("PostgreSQL not found in PATH. Attempting auto-install...")
-
-    installed = False
-
-    # Strategy 1: conda (if available)
-    conda = which("conda") or which("mamba")
-    if conda:
-        info(f"Installing PostgreSQL via {os.path.basename(conda)}...")
-        result = run(
-            [conda, "install", "-c", "conda-forge", "-y", "postgresql>=18"],
-            check=False, cwd=install_dir,
-        )
-        if result.returncode == 0 and _find_pg_binary("initdb"):
-            ok("PostgreSQL installed via conda")
-            installed = True
-
-    # Strategy 2: Homebrew (macOS)
-    if not installed and IS_MACOS and which("brew"):
-        info("Installing PostgreSQL via Homebrew...")
-        result = run(["brew", "install", "postgresql@18"], check=False)
-        if result.returncode == 0 and _find_pg_binary("initdb"):
-            ok("PostgreSQL installed via Homebrew")
-            installed = True
-
-    # Strategy 3: Suggest manual install
-    if not installed:
-        warn("Could not auto-install PostgreSQL.")
-        print()
-        if IS_MACOS:
-            info("Install manually with one of:")
-            print("     brew install postgresql@18")
-            print("     conda install -c conda-forge postgresql")
-            print("     # Or download Postgres.app: https://postgresapp.com")
-        elif IS_LINUX:
-            info("Install manually with one of:")
-            print("     sudo apt install postgresql         # Debian/Ubuntu")
-            print("     sudo dnf install postgresql-server  # Fedora/RHEL")
-            print("     conda install -c conda-forge postgresql")
-        elif IS_WINDOWS:
-            info("Install manually:")
-            print("     1. Download from: https://www.postgresql.org/download/windows/")
-            print("     2. Run the installer (use default settings)")
-            print("     3. Ensure the bin/ directory is added to PATH")
-            print("     4. Re-run this installer")
-            print()
-            print("     Or with conda: conda install -c conda-forge postgresql")
-            print("     Or with Chocolatey: choco install postgresql")
-        print()
-        warn("The server will attempt to auto-bootstrap PostgreSQL on first start.")
-        warn("If that fails, install PostgreSQL manually using the commands above.")
+def check_sqlite():
+    """Verify SQLite is available (it's built into Python)."""
+    step("Checking SQLite")
+    import sqlite3
+    ver = sqlite3.sqlite_version
+    ok(f"SQLite {ver} (built into Python — no installation needed)")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -705,11 +590,11 @@ def docker_install(install_dir: str, port: int, api_key: str | None):
     print()
     ok("Tofu is running via Docker!")
     print(f"   Open {_c('1', f'http://localhost:{port}')} in your browser")
-    print(f"   Configure API keys in Settings → Providers")
+    print("   Configure API keys in Settings → Providers")
     print()
-    print(f"   Logs:    docker compose logs -f tofu")
-    print(f"   Stop:    docker compose down")
-    print(f"   Update:  docker compose pull && docker compose up -d")
+    print("   Logs:    docker compose logs -f tofu")
+    print("   Stop:    docker compose down")
+    print("   Update:  docker compose pull && docker compose up -d")
     print()
 
 
@@ -723,10 +608,10 @@ def launch(py: str, install_dir: str, port: int):
     print(f"  {_c('1', '🧈 Tofu is starting on port')} {_c('1', str(port))}...")
     print(f"  Open {_c('1', f'http://localhost:{port}')} in your browser")
     print()
-    print(f"  {_c('36', 'First launch:')}  PostgreSQL will auto-initialize (~10s)")
+    print(f"  {_c('36', 'First launch:')}  Database auto-initializes instantly")
     print(f"  {_c('36', 'Configure:')}     Click ⚙️ Settings → Providers to add your LLM API keys")
     print()
-    print(f"  Press Ctrl+C to stop the server")
+    print("  Press Ctrl+C to stop the server")
     print()
 
     os.chdir(install_dir)
@@ -741,23 +626,23 @@ def print_install_complete(py: str, install_dir: str, port: int):
         # Show Windows-friendly activation commands
         venv_activate = os.path.join(install_dir, ".venv", "Scripts", "activate.bat")
         if os.path.isfile(venv_activate):
-            print(f"  To start Tofu:")
+            print("  To start Tofu:")
             print(f"    cd {install_dir}")
-            print(f"    .venv\\Scripts\\activate")
-            print(f"    python server.py")
+            print("    .venv\\Scripts\\activate")
+            print("    python server.py")
         else:
-            print(f"  To start Tofu:")
+            print("  To start Tofu:")
             print(f"    cd {install_dir}")
             print(f"    {py} server.py")
     else:
         venv_activate = os.path.join(install_dir, ".venv", "bin", "activate")
         if os.path.isfile(venv_activate):
-            print(f"  To start Tofu:")
+            print("  To start Tofu:")
             print(f"    cd {install_dir}")
-            print(f"    source .venv/bin/activate")
-            print(f"    python server.py")
+            print("    source .venv/bin/activate")
+            print("    python server.py")
         else:
-            print(f"  To start Tofu:")
+            print("  To start Tofu:")
             print(f"    cd {install_dir}")
             print(f"    {py} server.py")
     print()
@@ -824,7 +709,7 @@ def main():
     get_source(install_dir)
     py = setup_venv(install_dir)
     install_deps(py, install_dir)
-    ensure_postgresql(py, install_dir)
+    check_sqlite()
 
     install_ripgrep(install_dir)
     install_fd(install_dir)

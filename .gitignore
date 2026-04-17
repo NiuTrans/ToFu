@@ -23,6 +23,9 @@ data/
 /sundries/
 /tools/
 
+# ── SWE-bench workdir (large, causes FUSE timeouts) ──
+swebench_workdir/
+
 # ── Test coverage ──
 .coverage
 
@@ -61,3 +64,4 @@ docs/RATE_LIMITING_DOS_AUDIT_REPORT.md
 # ── Uploads ──
 uploads/images/*
 !uploads/images/.gitkeep
+uploads/pptx/

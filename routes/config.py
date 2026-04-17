@@ -374,7 +374,7 @@ def get_server_config():
     return jsonify({
         'providers': providers, 'presets': presets,
         'models': models, 'search': search_info,
-        'pricing': model_pricing, 'server_info': server_info,
+        'server_info': server_info,
         'feishu': feishu_info,
         'dropdown_models': dropdown_models,
         'hidden_models': hidden_models,

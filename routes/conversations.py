@@ -4,7 +4,7 @@ import json
 import re
 import time
 
-import psycopg2
+import sqlite3
 from flask import Blueprint, Response, jsonify, request
 
 from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_db, json_dumps_pg
@@ -28,7 +28,7 @@ def build_search_text(messages):
         messages: List of message dicts (or raw JSON string / None).
 
     Returns:
-        Flattened plain-text string suitable for ILIKE / trgm search.
+        Flattened plain-text string suitable for full-text search.
     """
     if isinstance(messages, str):
         try:
@@ -127,6 +127,29 @@ def get_conv(conv_id):
     if not r:
         return jsonify({'error': 'Not found'}), 404
     return jsonify(_conv_row_to_dict(r))
+
+
+
+@conversations_bp.route('/api/conversations/<conv_id>/debug-messages', methods=['GET'])
+@_db_safe
+def debug_messages(conv_id):
+    """Return API-ready messages for the debug panel.
+
+    Uses the server-side ``build_api_messages_from_db`` to produce the exact
+    messages that the LLM would see — replacing the deprecated frontend
+    ``buildApiMessages()`` fallback.
+    """
+    from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
+    system_prompt = request.args.get('systemPrompt', '')
+    config = {'systemPrompt': system_prompt}
+    try:
+        messages = build_api_messages_from_db(conv_id, config)
+        if messages is None:
+            return jsonify({'error': 'Not found'}), 404
+        return jsonify({'messages': messages, 'count': len(messages)})
+    except Exception as e:
+        logger.error('[debug_messages] Failed for conv=%s: %s', conv_id[:8], e, exc_info=True)
+        return jsonify({'error': str(e)}), 500
 
 
 @conversations_bp.route('/api/conversations/<conv_id>/export', methods=['GET'])
@@ -251,13 +274,21 @@ def save_conv(conv_id):
     search_text = build_search_text(raw_messages)
     db_execute_with_retry(
         db,
-        '''INSERT INTO conversations (id, user_id, title, messages, created_at, updated_at, settings, msg_count, search_text, search_tsv)
-           VALUES (?,?,?,?,?,?,?,?,?, to_tsvector('simple', left(?, 50000)))
-           ON CONFLICT(id, user_id) DO UPDATE SET title=excluded.title, messages=excluded.messages,
-           updated_at=excluded.updated_at, settings=excluded.settings, msg_count=excluded.msg_count,
-           search_text=excluded.search_text, search_tsv=excluded.search_tsv''',
-        (conv_id, DEFAULT_USER_ID, title, messages, created, updated, settings, msg_count, search_text, search_text)
+        '''INSERT OR REPLACE INTO conversations (id, user_id, title, messages, created_at, updated_at, settings, msg_count, search_text)
+           VALUES (?,?,?,?,?,?,?,?,?)''',
+        (conv_id, DEFAULT_USER_ID, title, messages, created, updated, settings, msg_count, search_text)
     )
+    # Update FTS5 index
+    if search_text:
+        try:
+            db.execute(
+                "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
+                "SELECT rowid, ? FROM conversations WHERE id = ?",
+                (search_text, conv_id)
+            )
+            db.commit()
+        except Exception as e:
+            logger.debug('[save_conv] FTS update failed (non-fatal): %s', e)
     _invalidate_meta_cache()
     return jsonify({'ok': True})
 
@@ -300,6 +331,110 @@ def patch_conv_settings(conv_id):
     return jsonify({'ok': True})
 
 
+@conversations_bp.route('/api/conversations/<conv_id>/messages/<int:msg_idx>', methods=['DELETE'])
+@_db_safe
+def delete_message(conv_id, msg_idx):
+    """Delete a specific message (or a user+assistant turn) from a conversation.
+
+    Query params:
+        mode: 'single' — delete only the message at msg_idx (default)
+              'turn'   — if msg_idx is a user message, also delete the next
+                         assistant message (the full turn)
+
+    Returns:
+        { ok: true, msgCount: int, deletedIndices: [int, ...] }
+    """
+    mode = request.args.get('mode', 'single')
+    if mode not in ('single', 'turn'):
+        return jsonify({'error': 'mode must be "single" or "turn"'}), 400
+
+    db = get_db(DOMAIN_CHAT)
+    row = db.execute(
+        'SELECT messages, title, settings FROM conversations WHERE id=? AND user_id=?',
+        (conv_id, DEFAULT_USER_ID)
+    ).fetchone()
+    if not row:
+        return jsonify({'error': 'Not found'}), 404
+
+    try:
+        messages = json.loads(row['messages'] or '[]')
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning('[delete_message] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
+        return jsonify({'error': 'Failed to parse conversation messages'}), 500
+
+    if msg_idx < 0 or msg_idx >= len(messages):
+        return jsonify({'error': f'Index {msg_idx} out of range (0..{len(messages) - 1})'}), 400
+
+    # Determine which indices to delete
+    deleted_indices = [msg_idx]
+    target_msg = messages[msg_idx]
+
+    if mode == 'turn' and target_msg.get('role') == 'user':
+        # Also delete the following assistant message if it exists
+        if msg_idx + 1 < len(messages) and messages[msg_idx + 1].get('role') == 'assistant':
+            deleted_indices.append(msg_idx + 1)
+
+    # Remove messages in reverse order to preserve indices
+    for i in sorted(deleted_indices, reverse=True):
+        messages.pop(i)
+
+    # Persist
+    title = row['title']
+    now_ms = int(time.time() * 1000)
+    messages_json = json_dumps_pg(messages)
+    search_text = build_search_text(messages)
+
+    # Merge settings — preserve existing, update lastMsg metadata
+    try:
+        settings = json.loads(row['settings'] or '{}')
+    except (json.JSONDecodeError, TypeError):
+        settings = {}
+    if messages:
+        last = messages[-1]
+        settings['lastMsgRole'] = last.get('role')
+        settings['lastMsgTimestamp'] = last.get('timestamp')
+    else:
+        settings.pop('lastMsgRole', None)
+        settings.pop('lastMsgTimestamp', None)
+    settings_json = json.dumps(settings, ensure_ascii=False)
+
+    # Preserve original created_at
+    existing = db.execute(
+        'SELECT created_at FROM conversations WHERE id=? AND user_id=?',
+        (conv_id, DEFAULT_USER_ID)
+    ).fetchone()
+    created_at = existing['created_at'] if existing else now_ms
+
+    db_execute_with_retry(db, '''
+        INSERT OR REPLACE INTO conversations (id, user_id, title, messages, created_at, updated_at,
+                                   settings, msg_count, search_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (conv_id, DEFAULT_USER_ID, title, messages_json, created_at, now_ms,
+          settings_json, len(messages), search_text))
+
+    # Update FTS5 index
+    if search_text:
+        try:
+            db.execute(
+                "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
+                "SELECT rowid, ? FROM conversations WHERE id = ?",
+                (search_text, conv_id)
+            )
+            db.commit()
+        except Exception as e:
+            logger.debug('[delete_message] FTS update failed (non-fatal): %s', e)
+
+    _invalidate_meta_cache()
+    logger.info('[delete_message] conv=%s deleted indices=%s mode=%s remaining=%d',
+                conv_id[:8], deleted_indices, mode, len(messages))
+
+    return jsonify({
+        'ok': True,
+        'msgCount': len(messages),
+        'deletedIndices': deleted_indices,
+    })
+
+
 @conversations_bp.route('/api/conversations/<conv_id>', methods=['DELETE'])
 @_db_safe
 def delete_conv(conv_id):
@@ -310,7 +445,7 @@ def delete_conv(conv_id):
     try:
         db.commit()
     except Exception as exc:
-        _is_db_err = isinstance(exc, psycopg2.OperationalError)
+        _is_db_err = isinstance(exc, sqlite3.OperationalError)
         if not _is_db_err:
             raise
         try:
@@ -332,12 +467,12 @@ def delete_conv(conv_id):
 def search_convs():
     """Server-side full-text search through conversation messages.
 
-    Two-phase approach for speed:
-      Phase 1: tsvector prefix match via GIN index (~0-5ms for most queries).
-      Phase 2: If <50 results, ILIKE fallback on search_text (using pg_trgm
-               GIN index) to catch substring matches that tsvector misses.
+    Two-phase approach:
+      Phase 1: FTS5 MATCH for tokenized word matching (fast via inverted index).
+      Phase 2: If <50 results, LIKE fallback on search_text to catch
+               substring matches that FTS5 tokenization misses.
 
-    Snippets are extracted only for the final result set (max 50 rows).
+    Snippets are extracted in Python from the final result set (max 50 rows).
     """
     query = (request.args.get('q') or '').strip().lower()
     if not query or len(query) < 2:
@@ -348,35 +483,27 @@ def search_convs():
 
     MAX_RESULTS = 50
     SNIPPET_RADIUS = 40
-    SNIPPET_LEN = SNIPPET_RADIUS * 2 + len(query)
 
-    # ── Phase 1: tsvector prefix search (0-5ms via GIN index) ──
-    # Sanitize query for to_tsquery: remove special chars, join words with &
-    _tsq_words = query.split()
-    # Strip all tsquery special characters: ' \ : ( ) ! & | < >
-    _tsq_safe = ' & '.join(
-        w for w in (
-            re.sub(r"['\\\\ :()!&|<>]", '', w)
-            for w in _tsq_words
-        ) if w
-    )
-    if _tsq_safe:
-        _tsq_safe += ':*'  # prefix matching
+    # ── Phase 1: FTS5 MATCH search ──
+    # Sanitize query for FTS5: remove special chars, add * for prefix matching
+    _fts_words = re.sub(r'[^\w\s]', '', query, flags=re.UNICODE).split()
+    _fts_query = ' '.join(f'{w}*' for w in _fts_words if w)
 
     result_ids = []
-    if _tsq_safe:
+    if _fts_query:
         try:
             rows = db.execute(
-                """SELECT id FROM conversations
-                   WHERE user_id=? AND search_tsv @@ to_tsquery('simple', ?)
-                   ORDER BY updated_at DESC LIMIT ?""",
-                (DEFAULT_USER_ID, _tsq_safe, MAX_RESULTS)
+                """SELECT c.id FROM conversations c
+                   JOIN conversations_fts f ON f.rowid = c.rowid
+                   WHERE c.user_id=? AND f.search_text MATCH ?
+                   ORDER BY c.updated_at DESC LIMIT ?""",
+                (DEFAULT_USER_ID, _fts_query, MAX_RESULTS)
             ).fetchall()
             result_ids = [r['id'] for r in rows]
         except Exception as e:
-            logger.debug('[search_convs] tsvector query failed (will fallback): %s', e)
+            logger.debug('[search_convs] FTS5 query failed (will fallback): %s', e)
 
-    # ── Phase 2: ILIKE fallback for substring matches tsvector misses ──
+    # ── Phase 2: LIKE fallback for substring matches FTS5 misses ──
     if len(result_ids) < MAX_RESULTS:
         _like_pattern = '%' + query.replace('%', '\\%').replace('_', '\\_') + '%'
         remaining = MAX_RESULTS - len(result_ids)
@@ -385,7 +512,7 @@ def search_convs():
                 placeholders = ','.join(['?'] * len(result_ids))
                 rows = db.execute(
                     f"""SELECT id FROM conversations
-                        WHERE user_id=? AND search_text ILIKE ?
+                        WHERE user_id=? AND lower(search_text) LIKE ?
                           AND id NOT IN ({placeholders})
                         ORDER BY updated_at DESC LIMIT ?""",
                     (DEFAULT_USER_ID, _like_pattern, *result_ids, remaining)
@@ -393,37 +520,39 @@ def search_convs():
             else:
                 rows = db.execute(
                     """SELECT id FROM conversations
-                       WHERE user_id=? AND search_text ILIKE ?
+                       WHERE user_id=? AND lower(search_text) LIKE ?
                        ORDER BY updated_at DESC LIMIT ?""",
                     (DEFAULT_USER_ID, _like_pattern, remaining)
                 ).fetchall()
             result_ids.extend(r['id'] for r in rows)
         except Exception as e:
-            logger.warning('[search_convs] ILIKE fallback failed: %s', e)
+            logger.warning('[search_convs] LIKE fallback failed: %s', e)
 
     if not result_ids:
         elapsed = time.monotonic() - t0
         logger.debug('[search_convs] query=%r, results=0, elapsed=%.3fs', query, elapsed)
         return jsonify([])
 
-    # ── Extract snippets for matched conversations ──
+    # ── Extract snippets in Python (portable — no PG substring/position) ──
     placeholders = ','.join(['?'] * len(result_ids))
     snippet_rows = db.execute(
-        f"""SELECT id,
-                   substring(search_text
-                             FROM greatest(1, position(? IN lower(search_text)) - ?)
-                             FOR ?) AS snippet
-            FROM conversations
-            WHERE id IN ({placeholders})""",
-        (query, SNIPPET_RADIUS, SNIPPET_LEN, *result_ids)
+        f"SELECT id, search_text FROM conversations WHERE id IN ({placeholders})",
+        tuple(result_ids)
     ).fetchall()
 
     snippet_map = {}
     for r in snippet_rows:
-        snip = (r['snippet'] or '').replace('\n', ' ').strip()
-        if snip:
-            snip = '…' + snip + '…'
-        snippet_map[r['id']] = snip
+        text = r['search_text'] or ''
+        pos = text.lower().find(query)
+        if pos >= 0:
+            start = max(0, pos - SNIPPET_RADIUS)
+            end = min(len(text), pos + len(query) + SNIPPET_RADIUS)
+            snip = text[start:end].replace('\n', ' ').strip()
+            if snip:
+                snip = '…' + snip + '…'
+            snippet_map[r['id']] = snip
+        else:
+            snippet_map[r['id']] = ''
 
     results = [
         {

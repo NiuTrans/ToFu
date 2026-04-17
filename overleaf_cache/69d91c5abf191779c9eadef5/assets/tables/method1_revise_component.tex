@@ -1,0 +1,28 @@
+\begin{table}[t]
+% \begin{wraptable}{r}{0.45\textwidth}
+\centering
+\bicaption{反馈消融实验的BLEU和CCR分数}{BLEU and CCR scores of ablation on supplementary feedback}
+\footnotesize
+\resizebox{0.6\linewidth}{!}{
+    \begin{tabular}{l cc cc}
+        \toprule
+        & \multicolumn{2}{c}{ \textbf{IATE}} & \multicolumn{2}{c}{ \textbf{Wiktionary}} \\
+        \midrule
+         Setting &  BLEU & CCR\% & BLEU & CCR\% \\
+        \midrule
+        base                 & 32.0 & 96.2 & 32.1 & 97.2 \\
+        after revise         & 32.0 & \textbf{98.9} & 32.1 & \textbf{98.9} \\
+        % self term check      & 32 & 96.9 & 32.1 & 97.4  \\
+        \cdashline{1-5}
+        - Uncompleted const.  & 32.0 & 97.4 & 32.1 & 97.9  \\
+        - Original const.    & 32.0 & 97.1 & 32.0 & 97.7  \\
+        - Both               & 32.0 & 96.2 & 32.1 & 97.2 \\
+        + Detected by LLM & 31.9 & 95.8 & 32.0 & 97.2 \\
+        \bottomrule
+    \end{tabular} 
+   }
+    
+    \label{tab:reviser_component}
+% \vspace{-1.1em}
+\end{table}
+% \end{wraptable}

@@ -176,7 +176,22 @@ class PlaywrightPool:
             elapsed = time.time() - t0
 
             # ── 提取文本 ──
-            body_text = page.inner_text('body')
+            # Use locator('body').text_content() instead of page.inner_text('body').
+            # inner_text() performs actionability checks (waits for element to be
+            # visible & stable) which hangs on pages that never finish JS execution
+            # (e.g. Google News redirect stubs). text_content() skips actionability
+            # checks entirely — it reads raw DOM text immediately, which is exactly
+            # what we need for scraping. Falls back to evaluate() if needed.
+            _remaining_ms = max(int((timeout - elapsed) * 1000), 3000)
+            try:
+                body_text = page.locator('body').text_content(timeout=_remaining_ms) or ''
+            except Exception as _tc_err:
+                logger.debug('[Fetch] locator text_content failed, trying evaluate: %s', _tc_err)
+                try:
+                    body_text = page.evaluate('document.body?.innerText || ""')
+                except Exception as _eval_err:
+                    logger.debug('[Fetch] evaluate also failed: %s', _eval_err)
+                    body_text = ''
             body_text = re.sub(r'\n{3,}', '\n\n', body_text).strip()
 
             if body_text and len(body_text) > 50:

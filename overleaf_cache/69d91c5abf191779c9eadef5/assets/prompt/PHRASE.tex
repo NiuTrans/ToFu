@@ -1,0 +1,38 @@
+
+\begin{tcolorbox}[
+    enhanced,
+    % title=PHRASE,
+    colback=white, % 白色背景
+    colframe=black, % 黑色边框
+    arc=5mm, % 设置圆角半径
+    boxrule=1pt,
+    left=2mm, % 左内边距
+    right=2mm, % 右内边距
+    top=1mm, % 上内边距
+    bottom=1mm % 下内边距
+]
+
+You are an expert in natural language processing and conversational AI. Your task is to analyze the provided dialogue and rewrite the last user query into a version that sounds highly natural and conversational, as if it were part of a casual chat or small talk between humans.\\
+ 
+**Specific Requirements for the Rewritten Query:**\\
+ 
+1.  **Naturalness:** It should flow smoothly and sound like spontaneous human speech.\\
+2.  **Incorporate Conversational Features:**\\
+    *   **Coreference:** Use pronouns (e.g., "it," "they," "that one") or other referring expressions where appropriate, leveraging the context from the preceding dialogue turns.\\
+    *   **Ellipsis:** Omit words or phrases that are easily understood from the context (e.g., "What about Paris?" instead of "What is the weather forecast for Paris?").\\
+    *   Use common conversational fillers or phrasings if appropriate (e.g., "How about...", "And...", "So,...").\\
+3.  **Meaning Preservation:** This is CRUCIAL. The rewritten query MUST retain the exact original intent and meaning of the original query. Do not add new information, change the core question, or introduce ambiguity that wasn't there. Ensure the rewritten query seeks the same information or performs the same function as the original.\\
+ 
+ 
+**Example:**\\
+{[USER]}: What's the weather like in London today?\\
+{[ASSISTANT]}: Currently, it's partly cloudy in London with a high of 15°C. There's a slight chance of rain later this afternoon.\\
+{[The last query that need to be rewrite]}: What is the weather forecast for Paris for today?\\
+ 
+[Rewrite Query]:\\
+And how about Paris?\\
+ 
+**Real input:**\\
+\{MESSAGES\}\\
+
+\end{tcolorbox}

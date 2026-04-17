@@ -58,11 +58,12 @@ CAT_PROD    = 'Productivity'
 CAT_DEVOPS  = 'DevOps'
 CAT_FINANCE = 'Finance'
 CAT_DESIGN  = 'Design'
+CAT_RESEARCH = 'Science & Research'
 CAT_OTHER   = 'Other'
 
 CATEGORIES = [
     CAT_DEV, CAT_DATA, CAT_COMMS, CAT_SEARCH,
-    CAT_PROD, CAT_DEVOPS, CAT_FINANCE, CAT_DESIGN, CAT_OTHER,
+    CAT_PROD, CAT_DEVOPS, CAT_FINANCE, CAT_DESIGN, CAT_RESEARCH, CAT_OTHER,
 ]
 
 
@@ -705,6 +706,24 @@ CATALOG: list[CatalogEntry] = [
         ],
         'url': 'https://github.com/anthropics/anthropic-quickstarts',
         'tags': ['database', 'analytics', 'google', 'bigquery'],
+    },
+
+    # ── Science & Research ──────────────────────────────────
+
+    {
+        'id': 'overleaf',
+        'name': 'Overleaf',
+        'description': 'Overleaf LaTeX projects: CRUD, compile, PDF, history, diff. Zero-config — run `overleaf_setup` tool after install.',
+        'icon': '🍃',
+        'category': CAT_RESEARCH,
+        'command': 'overleaf-mcp',
+        'args': [],
+        # No env vars required — user runs the `overleaf_setup` tool for a
+        # guided walkthrough, then `overleaf_save_credentials` to persist them.
+        'env_specs': [],
+        'url': 'https://github.com/TofuLab/overleaf-mcp',
+        'tags': ['latex', 'overleaf', 'paper', 'academic', 'pdf', 'compile', 'research'],
+        'featured': True,
     },
 
     # ── AI & Reasoning ─────────────────────────────────────

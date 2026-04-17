@@ -8,7 +8,7 @@ from flask import Blueprint, Response, jsonify, request
 
 from lib.database import DOMAIN_CHAT, get_db
 from lib.log import get_logger
-from lib.rate_limiter import rate_limit
+
 from lib.tasks_pkg import cleanup_old_tasks, create_task, tasks, tasks_lock
 
 import re
@@ -58,12 +58,14 @@ def _extract_task_meta(task):
 def chat_active():
     cleanup_old_tasks()
     with tasks_lock:
-        result = [{'id': t['id'], 'convId': t['convId'], 'status': t['status']} for t in tasks.values()]
+        result = [{'id': t['id'], 'convId': t['convId'], 'status': t['status'],
+                   'aborted': bool(t.get('aborted'))}
+                  for t in tasks.values()]
     return jsonify(result)
 
 
 @chat_bp.route('/api/chat/start', methods=['POST'])
-@rate_limit(limit=10, per=60)  # 10 requests per minute
+
 def chat_start():
     data = request.get_json(silent=True) or {}
     conv_id = data.get('convId', '')
@@ -86,6 +88,10 @@ def chat_start():
                     len(messages), conv_id[:8])
 
     cleanup_old_tasks()
+
+    # ★ Abort stale running tasks for this conversation before starting a new one
+    from lib.tasks_pkg import abort_running_tasks_for_conv
+    abort_running_tasks_for_conv(conv_id)
 
     # ── Backend dispatch: external backends get their own flow ──
     backend_name = cfg.get('agentBackend', 'builtin')
@@ -115,8 +121,15 @@ def chat_start():
 #  Atomic send: user message creation + task start
 # ══════════════════════════════════════════════════════════
 
+# Max time (seconds) for auto-translate during send — prevents frontend timeout
+_TRANSLATE_SEND_TIMEOUT = 20
+
+
 def _auto_translate_user(text, config):
     """Translate Chinese user text to English if autoTranslate is on.
+
+    Capped at ``_TRANSLATE_SEND_TIMEOUT`` seconds to prevent the synchronous
+    HTTP handler from blocking long enough to trigger the frontend's abort.
 
     Returns:
         (translated_text, original_text_or_None, model_or_None)
@@ -129,13 +142,20 @@ def _auto_translate_user(text, config):
     if not has_chinese:
         return text, None, None
 
-    try:
+    import concurrent.futures
+
+    def _do_translate():
         from routes.translate import _build_translate_prompt, _translate_one_chunk
         system_prompt = _build_translate_prompt('English', 'Chinese')
-        result, _usage = _translate_one_chunk(
+        return _translate_one_chunk(
             text, system_prompt, chunk_label=':send',
             source='Chinese', target='English',
         )
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_do_translate)
+            result, _usage = future.result(timeout=_TRANSLATE_SEND_TIMEOUT)
         if result and result.strip():
             _model = None
             if isinstance(_usage, dict):
@@ -144,10 +164,49 @@ def _auto_translate_user(text, config):
             logger.info('[Send] Auto-translated user message: %d→%d chars model=%s',
                         len(text), len(result.strip()), _model)
             return result.strip(), text, _model
+    except concurrent.futures.TimeoutError:
+        logger.warning('[Send] Auto-translate timed out after %ds, sending original text',
+                       _TRANSLATE_SEND_TIMEOUT)
     except Exception as e:
         logger.warning('[Send] Auto-translate failed: %s', e)
 
     return text, None, None
+
+
+def _resolve_conv_refs(conv_refs):
+    """Resolve a list of conversation references into formatted text.
+
+    Each ref is ``{id, title}``.  Loads the conversation from DB and formats
+    it using ``lib/conv_ref.get_conversation`` (which handles tool details,
+    PDFs, truncation, etc.).
+
+    Args:
+        conv_refs: List of dicts with ``id`` and ``title`` keys.
+
+    Returns:
+        List of ``{id, title, text}`` dicts, one per resolved ref.
+    """
+    if not conv_refs:
+        return []
+    from lib.conv_ref import get_conversation
+    results = []
+    for cr in conv_refs:
+        ref_id = cr.get('id', '')
+        ref_title = cr.get('title', '')
+        if not ref_id:
+            continue
+        try:
+            text = get_conversation(
+                conversation_id=ref_id,
+                include_tool_details=False,
+            )
+            results.append({'id': ref_id, 'title': ref_title, 'text': text})
+        except Exception as e:
+            logger.warning('[Send] Failed to resolve conv ref %s: %s', ref_id[:12], e)
+            results.append({'id': ref_id, 'title': ref_title,
+                            'text': f'[Error loading conversation: {e}]'})
+    logger.info('[Send] Resolved %d conv refs', len(results))
+    return results
 
 
 def _build_user_msg_from_payload(payload, config):
@@ -183,8 +242,12 @@ def _build_user_msg_from_payload(payload, config):
         user_msg['replyQuotes'] = payload['replyQuotes']
     if payload.get('convRefs'):
         user_msg['convRefs'] = payload['convRefs']
-    if payload.get('convRefTexts'):
-        user_msg['convRefTexts'] = payload['convRefTexts']
+    # Resolve convRefTexts server-side from convRefs if not already provided
+    conv_ref_texts = payload.get('convRefTexts')
+    if not conv_ref_texts and payload.get('convRefs'):
+        conv_ref_texts = _resolve_conv_refs(payload['convRefs'])
+    if conv_ref_texts:
+        user_msg['convRefTexts'] = conv_ref_texts
 
     return user_msg
 
@@ -247,9 +310,9 @@ def _persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
         settings_update['lastMsgRole'] = last.get('role')
         settings_update['lastMsgTimestamp'] = last.get('timestamp')
 
-    # Merge with existing settings
+    # Merge with existing settings AND preserve original created_at
     existing = db.execute(
-        'SELECT settings FROM conversations WHERE id=? AND user_id=?',
+        'SELECT settings, created_at FROM conversations WHERE id=? AND user_id=?',
         (conv_id, DEFAULT_USER_ID)
     ).fetchone()
     if existing:
@@ -258,22 +321,33 @@ def _persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
         except (json.JSONDecodeError, TypeError):
             settings = {}
         settings.update(settings_update)
+        # ★ Preserve original created_at — INSERT OR REPLACE would overwrite
+        #   it with now_ms, causing all conversations to lose their real
+        #   creation timestamp on every message send/regenerate/edit.
+        created_at = existing['created_at'] or now_ms
     else:
         settings = settings_update
+        created_at = now_ms
 
     settings_json = json.dumps(settings, ensure_ascii=False)
 
     db_execute_with_retry(db, '''
-        INSERT INTO conversations (id, user_id, title, messages, created_at, updated_at,
-                                   settings, msg_count, search_text, search_tsv)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, to_tsvector('simple', left(?, 50000)))
-        ON CONFLICT(id, user_id) DO UPDATE SET
-            title=excluded.title, messages=excluded.messages,
-            updated_at=excluded.updated_at, settings=excluded.settings,
-            msg_count=excluded.msg_count, search_text=excluded.search_text,
-            search_tsv=excluded.search_tsv
-    ''', (conv_id, DEFAULT_USER_ID, title, messages_json, now_ms, now_ms,
-          settings_json, len(messages), search_text, search_text))
+        INSERT OR REPLACE INTO conversations (id, user_id, title, messages, created_at, updated_at,
+                                   settings, msg_count, search_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (conv_id, DEFAULT_USER_ID, title, messages_json, created_at, now_ms,
+          settings_json, len(messages), search_text))
+    # Update FTS5 index
+    if search_text:
+        try:
+            db.execute(
+                "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
+                "SELECT rowid, ? FROM conversations WHERE id = ?",
+                (search_text, conv_id)
+            )
+            db.commit()
+        except Exception as e:
+            logger.debug('[_persist_conv_messages] FTS update failed (non-fatal): %s', e)
 
 
 def _start_task_for_conv(conv_id, config, data=None):
@@ -282,15 +356,29 @@ def _start_task_for_conv(conv_id, config, data=None):
     Automatically routes to endpoint mode (planner → worker → critic loop)
     when ``config['endpointMode']`` is truthy, so callers (chat_send,
     chat_regenerate, etc.) don't need separate routing logic.
+
+    ★ CRITICAL: Before starting a new task, all existing running tasks for
+    this conversation are auto-aborted. This prevents the "stale task
+    overwrites regeneration" bug where an old task's _sync_result_to_conversation
+    races with the new task and corrupts the conversation DB.
     """
     from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
-    from lib.tasks_pkg import run_task
+    from lib.tasks_pkg import run_task, abort_running_tasks_for_conv
 
     api_messages = build_api_messages_from_db(conv_id, config)
     if api_messages is None:
         return None, (jsonify({'error': 'Conversation not found after save'}), 500)
     if not api_messages:
         return None, (jsonify({'error': 'No messages to process'}), 400)
+
+    # ★ CRITICAL: abort any stale running tasks for this conversation BEFORE
+    #   creating the new one. Without this, the old task's background thread
+    #   may still be running (abort is cooperative) and its persist/sync
+    #   writes will overwrite the new task's content in the DB.
+    _aborted_count = abort_running_tasks_for_conv(conv_id)
+    if _aborted_count:
+        logger.info('[Chat] conv=%s Auto-aborted %d stale task(s) before new task',
+                    conv_id[:8], _aborted_count)
 
     cleanup_old_tasks()
 
@@ -341,9 +429,15 @@ def _start_task_for_conv(conv_id, config, data=None):
 
 
 @chat_bp.route('/api/chat/send', methods=['POST'])
-@rate_limit(limit=10, per=60)
 def chat_send():
     """Atomic send: create user message + auto-translate + persist + start task.
+
+    If a task is already running for this conversation, the message is
+    auto-translated, persisted to the user-visible conversation (so it
+    appears instantly on the frontend), and enqueued to ``message_queue``
+    for automatic dispatch when the current task finishes.  The frontend
+    receives ``{queued: true}`` and renders a queue indicator — it never
+    needs to decide whether to queue or send.
 
     Body: {
         convId: str,
@@ -352,7 +446,10 @@ def chat_send():
         settings?: { per-conv tool state to persist }
     }
 
-    Returns: { taskId, convId, title, userMessage, isNew }
+    Returns on immediate start:
+        { taskId, convId, title, userMessage, isNew, msgCount }
+    Returns on queue:
+        { queued: true, queueId, position, convId, title, userMessage, isNew, msgCount }
     """
     data = request.get_json(silent=True) or {}
     conv_id = data.get('convId', '')
@@ -376,23 +473,86 @@ def chat_send():
         # 2. Build user message (with auto-translate)
         user_msg = _build_user_msg_from_payload(payload, config)
 
-        # 3. Append user message
-        messages.append(user_msg)
-
-        # 4. Update title if first user message
+        # 3. Compute title for first user message
         user_msgs = [m for m in messages if m.get('role') == 'user']
-        if len(user_msgs) == 1 and text:
+        if len(user_msgs) == 0 and text:
             title_text = re.sub(r'</?(?:notranslate|nt)>', '', text, flags=re.IGNORECASE)
             title = title_text[:60] + ('...' if len(title_text) > 60 else '')
-
-        # 5. Persist to DB
-        _persist_conv_messages(db, conv_id, messages, title, settings_patch)
 
         logger.info('[Send] conv=%s msgs=%d title=%.50s isNew=%s translated=%s',
                     conv_id[:8], len(messages), title, is_new,
                     bool(user_msg.get('originalContent')))
 
-        # 6. Start task
+        # ★ 3a. If the frontend reports a recently-aborted task, mark it
+        #   as aborted NOW — this handles the race where the user clicks
+        #   Stop and immediately sends a new message, and the fire-and-
+        #   forget abort fetch hasn't arrived yet.
+        abort_task_id = data.get('abortTaskId')
+        if abort_task_id:
+            with tasks_lock:
+                abort_target = tasks.get(abort_task_id)
+                if (abort_target
+                        and not abort_target.get('aborted')
+                        and abort_target.get('convId') == conv_id):
+                    abort_target['aborted'] = True
+                    abort_target['_abort_timestamp'] = time.time()
+                    abort_target['_abort_reason'] = 'superseded_by_send'
+                    logger.info('[Send] conv=%s ⚠️ Abort-on-send: task %s marked aborted '
+                                '(frontend reported recently stopped task)',
+                                conv_id[:8], abort_task_id[:8])
+
+        # ★ 3b. Check if a task is already running for this conversation.
+        #   If so, enqueue instead of starting — the backend dispatches
+        #   automatically when the current task finishes.
+        #   ★ CRITICAL: exclude aborted tasks — when the user clicks Stop
+        #   and immediately sends a new message, the old task may still
+        #   have status='running' (abort is cooperative) but should NOT
+        #   cause the new message to be enqueued.
+        has_running_task = False
+        with tasks_lock:
+            for t in tasks.values():
+                if (t.get('convId') == conv_id
+                        and t.get('status') == 'running'
+                        and not t.get('aborted')):
+                    has_running_task = True
+                    break
+
+        if has_running_task:
+            from lib.message_queue import enqueue_message
+            # ★ Enqueue for later dispatch.  The user message is NOT
+            # persisted to the conversation DB — it only lives in the
+            # queue.  This prevents it from appearing in chatInner
+            # during streaming or disappearing on refresh.
+            # Store the pre-built user_msg so dispatch_next_queued
+            # can append it without re-translating.
+            queue_payload = dict(payload)
+            queue_payload['_user_msg'] = user_msg
+            queue_result = enqueue_message(conv_id, queue_payload, config)
+            logger.info('[Send] conv=%s ➡ QUEUED (active task running) queueId=%s position=%d',
+                        conv_id[:8], queue_result['queueId'][:8], queue_result['position'])
+
+            # Persist title update for new conversations (but NOT the user message)
+            if is_new:
+                _persist_conv_messages(db, conv_id, messages, title, settings_patch)
+
+            _invalidate_meta_cache()
+
+            return jsonify({
+                'queued': True,
+                'queueId': queue_result['queueId'],
+                'position': queue_result['position'],
+                'convId': conv_id,
+                'title': title,
+                'userMessage': user_msg,
+                'isNew': is_new,
+                'msgCount': len(messages),  # excludes the queued user msg
+            })
+
+        # 4. Append user message and persist (only for immediate start)
+        messages.append(user_msg)
+        _persist_conv_messages(db, conv_id, messages, title, settings_patch)
+
+        # 5. Start task (no active task — send immediately)
         task_id, err_resp = _start_task_for_conv(conv_id, config, data)
         if err_resp is not None:
             # External backend returns a full Response directly
@@ -400,7 +560,7 @@ def chat_send():
                 return err_resp
             return err_resp  # direct Response from _start_external_backend
 
-        # 7. Update activeTaskId in settings
+        # 6. Update activeTaskId in settings
         try:
             _persist_conv_messages(db, conv_id, messages, title,
                                    {'activeTaskId': task_id})
@@ -423,8 +583,79 @@ def chat_send():
         return jsonify({'error': str(e)}), 500
 
 
+
+@chat_bp.route('/api/chat/branch/start', methods=['POST'])
+def chat_branch_start():
+    """Start a branch task with server-side message building.
+
+    The backend loads the conversation from DB, extracts the main chat context
+    up to the branch anchor point, appends the branch's own messages (decorated
+    with topic + selection context), and runs the full message transform pipeline.
+    This eliminates the frontend ``_buildBranchApiMessages`` → ``buildApiMessages``
+    code path that could diverge from the backend builder.
+
+    Body: {
+        convId: str,
+        msgIdx: int,           // index of the parent message the branch is attached to
+        branchIdx: int,        // index of the branch within parent.branches[]
+        config: { model, searchMode, branchKey, ... }
+    }
+
+    Returns: { taskId }
+    """
+    data = request.get_json(silent=True) or {}
+    conv_id = data.get('convId', '')
+    if not conv_id:
+        return jsonify({'error': 'convId required'}), 400
+
+    msg_idx = data.get('msgIdx')
+    branch_idx = data.get('branchIdx')
+    if msg_idx is None or branch_idx is None:
+        return jsonify({'error': 'msgIdx and branchIdx required'}), 400
+
+    cfg = data.get('config', {})
+
+    try:
+        from lib.tasks_pkg.conv_message_builder import build_branch_api_messages
+
+        api_messages = build_branch_api_messages(conv_id, msg_idx, branch_idx, cfg)
+        if api_messages is None:
+            return jsonify({'error': 'Branch not found'}), 404
+        if not api_messages:
+            return jsonify({'error': 'No messages to process'}), 400
+
+        cleanup_old_tasks()
+
+        # External backend support
+        backend_name = cfg.get('agentBackend', 'builtin')
+        if backend_name and backend_name != 'builtin':
+            full_data = {'convId': conv_id, 'config': cfg}
+            return _start_external_backend(full_data, api_messages, backend_name)
+
+        task = create_task(conv_id, api_messages, cfg)
+        task_id = task['id']
+        _cfg_model = cfg.get('model', '?')
+        logger.info('[Branch] Starting task %s for conv %s msg=%d branch=%d model=%s',
+                    task_id[:8], conv_id[:8], msg_idx, branch_idx, _cfg_model)
+
+        from lib.tasks_pkg import run_task
+        try:
+            threading.Thread(target=run_task, args=(task,), daemon=True).start()
+        except Exception:
+            logger.exception('[Branch] Failed to start thread for task %s', task_id[:8])
+            task['status'] = 'error'
+            task['error'] = 'Server failed to start task thread'
+            return jsonify({'error': 'Failed to start task'}), 500
+
+        return jsonify({'taskId': task_id})
+
+    except Exception as e:
+        logger.error('[Branch] Failed for conv=%s msg=%d branch=%d: %s',
+                     conv_id[:8], msg_idx, branch_idx, e, exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
 @chat_bp.route('/api/chat/regenerate', methods=['POST'])
-@rate_limit(limit=10, per=60)
 def chat_regenerate():
     """Atomic regenerate/edit: truncate messages + optional edit + auto-translate + start task.
 
@@ -604,7 +835,12 @@ def chat_tool_state(conv_id):
 
 @chat_bp.route('/api/chat/queue', methods=['POST'])
 def chat_queue_enqueue():
-    """Enqueue a message to be sent after the current task completes."""
+    """Legacy enqueue endpoint — kept for programmatic/API use.
+
+    The primary send path is now ``/api/chat/send`` which auto-detects
+    whether to start immediately or enqueue.  This endpoint is a thin
+    wrapper around ``enqueue_message`` for backward compat.
+    """
     data = request.get_json(silent=True) or {}
     conv_id = data.get('convId', '')
     if not conv_id:
@@ -1077,6 +1313,23 @@ def chat_stream(task_id):
     })
 
 
+@chat_bp.route('/api/chat/abort-conv/<conv_id>', methods=['POST'])
+def chat_abort_conv(conv_id):
+    """Abort all running tasks for a conversation by conv ID.
+
+    Used when the frontend aborts during translation and never received a
+    taskId — the server may have already started a task that needs to be
+    killed.  This is the convId-based counterpart of ``/api/chat/abort/<task_id>``.
+    """
+    from lib.tasks_pkg import abort_running_tasks_for_conv
+    aborted = abort_running_tasks_for_conv(conv_id)
+    if aborted:
+        logger.info('[Chat] Abort-by-conv conv=%s — aborted %d task(s)', conv_id[:8], aborted)
+    else:
+        logger.debug('[Chat] Abort-by-conv conv=%s — no running tasks found', conv_id[:8])
+    return jsonify({'ok': True, 'aborted': aborted})
+
+
 @chat_bp.route('/api/chat/abort/<task_id>', methods=['POST'])
 def chat_abort(task_id):
     with tasks_lock:
@@ -1100,6 +1353,24 @@ def chat_abort(task_id):
         logger.info('[Chat] Task %s ABORT RECEIVED — conv=%s model=%s status=%s '
                     'elapsed=%.1fs content=%dchars thinking=%dchars',
                     task_id, _conv_id, _model, _status, _elapsed, _content_len, _thinking_len)
+    # ── Kill any running subprocess (run_command) ──
+    _sub_pid = task.get('_subprocess_pid')
+    if _sub_pid:
+        try:
+            import os as _os
+            import signal as _signal
+            _pgid = task.get('_subprocess_pgid')
+            if _pgid:
+                _os.killpg(_pgid, _signal.SIGTERM)
+                logger.info('[Chat] Task %s — sent SIGTERM to subprocess process group pgid=%d',
+                            task_id[:8], _pgid)
+            else:
+                _os.kill(_sub_pid, _signal.SIGTERM)
+                logger.info('[Chat] Task %s — sent SIGTERM to subprocess pid=%d',
+                            task_id[:8], _sub_pid)
+        except (OSError, ProcessLookupError) as e:
+            logger.debug('[Chat] Task %s — subprocess kill skipped: %s', task_id[:8], e)
+
     # ── External backend: also signal the subprocess to terminate ──
     _backend_name = task.get('_backend')
     if _backend_name and _backend_name != 'builtin':
@@ -1149,6 +1420,12 @@ def chat_poll(task_id):
             r['fallbackModel'] = task['_fallback_model']
         if task.get('_fallback_from'):
             r['fallbackFrom'] = task['_fallback_from']
+        # ★ emit_to_user: include emitted tool content so poll fallback
+        #   and Case B recovery can display inline emit blocks.
+        if task.get('_emitContent'):
+            r['emitContent'] = task['_emitContent']
+        if task.get('_emitToolName'):
+            r['emitToolName'] = task['_emitToolName']
         # ★ Include endpoint turns for endpoint mode tasks so _pollFallback
         #   can reconstruct the full multi-turn conversation
         if task.get('endpoint_mode') and task.get('_endpoint_turns'):
@@ -1199,12 +1476,18 @@ def chat_poll(task_id):
                 r['toolRounds'] = json.loads(row['tool_rounds'])
             except (json.JSONDecodeError, TypeError) as e:
                 logger.warning('[Chat] Failed to parse tool_rounds in poll for task %s: %s', task_id, e, exc_info=True)
-        for key in ('finishReason', 'usage', 'preset', 'toolSummary'):
+        for key in ('finishReason', 'usage', 'preset', 'toolSummary',
+                     'model', 'thinkingDepth', 'apiRounds',
+                     'modifiedFiles', 'modifiedFileList'):
             if _db_meta.get(key):
                 r[key] = _db_meta[key]
         if _db_meta.get('fallbackModel'):
             r['fallbackModel'] = _db_meta['fallbackModel']
             r['fallbackFrom'] = _db_meta.get('fallbackFrom', '')
+        # ★ emit_to_user data is not stored in task_results metadata —
+        #   it's persisted directly into conversation messages by
+        #   _sync_result_to_conversation. For DB-sourced polls, the
+        #   frontend recovers it from loadConversationMessages on page load.
         return jsonify(r)
 
     logger.warning('[Chat] Poll %s — NOT FOUND in memory or DB! Task may have been cleaned up. '

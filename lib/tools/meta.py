@@ -74,6 +74,18 @@ def _build_read_files(meta, fn_name, fn_args, tool_content, path):
 
 
 def _build_grep_search(meta, fn_name, fn_args, tool_content, path):
+    searches = fn_args.get('searches')
+    if searches and isinstance(searches, list):
+        # Batch mode: count total matches across all searches
+        total_matches = 0
+        for m_obj in re.finditer(r'(\d+) match', tool_content):
+            total_matches += int(m_obj.group(1))
+        n_searches = len(searches)
+        pats = [s.get('pattern', '?')[:20] for s in searches[:3] if isinstance(s, dict)]
+        suffix = f' +{n_searches - 3} more' if n_searches > 3 else ''
+        meta['snippet'] = f'{n_searches} searches: /{"; /".join(pats)}/{suffix} → {total_matches} total matches'
+        meta['badge'] = f'{n_searches} searches'
+        return
     pattern = fn_args.get('pattern', '')
     include = fn_args.get('include', '')
     search_path = fn_args.get('path', '')
@@ -94,6 +106,18 @@ def _build_list_dir(meta, fn_name, fn_args, tool_content, path):
 
 
 def _build_find_files(meta, fn_name, fn_args, tool_content, path):
+    searches = fn_args.get('searches')
+    if searches and isinstance(searches, list):
+        # Batch mode: count total found across all searches
+        total_found = 0
+        for m_obj in re.finditer(r'\((\d+) found\)', tool_content):
+            total_found += int(m_obj.group(1))
+        n_searches = len(searches)
+        pats = [s.get('pattern', '?') for s in searches[:3] if isinstance(s, dict)]
+        suffix = f' +{n_searches - 3} more' if n_searches > 3 else ''
+        meta['snippet'] = f'{n_searches} finds: {", ".join(pats)}{suffix} → {total_found} total found'
+        meta['badge'] = f'{n_searches} finds'
+        return
     pattern = fn_args.get('pattern', '')
     m = re.search(r'\((\d+) found\)', tool_content[:200])
     n = m.group(1) if m else '0'

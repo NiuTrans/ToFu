@@ -1,0 +1,17 @@
+% \usepackage{booktabs} % 放在导言区
+
+\begin{table}[htbp]
+\centering
+\footnotesize
+\bicaption{批判性监督微调数据构成统计}{Composition Statistics of Critical Supervised Fine-Tuning Data}
+\begin{tabular}{lc}
+\toprule
+\textbf{数据组成} & \textbf{数量} \\
+\midrule
+基于错误样本生成的反思数据 & 2500 \\
+基于正确样本生成的反思数据 & 2500 \\
+有监督微调数据（翻译数据） & 10000 \\
+\bottomrule
+\end{tabular}
+\label{tab:method2-cft-data-stats}
+\end{table}

@@ -1,7 +1,6 @@
 """Task lifecycle management — creation, events, persistence, cleanup, streaming."""
 
 import json
-import re
 import threading
 import time
 import uuid
@@ -15,6 +14,12 @@ logger = get_logger(__name__)
 
 tasks = {}
 tasks_lock = threading.Lock()
+
+# ── Conversation → latest task_id mapping for freshness guard ──
+# When a new task starts for a conv, the old task becomes stale and its
+# _sync_result_to_conversation writes should be rejected.
+_conv_latest_task = {}   # conv_id → task_id
+_conv_latest_task_lock = threading.Lock()
 
 def create_task(conv_id, messages, config):
     task_id = str(uuid.uuid4())
@@ -44,8 +49,47 @@ def create_task(conv_id, messages, config):
     }
     with tasks_lock:
         tasks[task_id] = task
+    # ★ Register as the LATEST task for this conversation — freshness guard
+    if conv_id:
+        with _conv_latest_task_lock:
+            _conv_latest_task[conv_id] = task_id
     logger.info('[Task %s] Created for conv=%s lastUserQuery=%r', task_id[:8], conv_id, last_user_query[:80])
     return task
+
+def abort_running_tasks_for_conv(conv_id: str, exclude_task_id: str | None = None) -> int:
+    """Abort all running tasks for a conversation, except the excluded one.
+
+    Called when starting a new task (send/regenerate/edit) to ensure the old
+    task stops writing to the conversation DB. Returns the count of aborted tasks.
+
+    This is the **critical fix** for the stale-task-overwrites-regeneration bug:
+    without this, the old task's _sync_result_to_conversation races with the
+    new task and may overwrite the conversation with stale content.
+    """
+    aborted = 0
+    with tasks_lock:
+        for tid, t in tasks.items():
+            if (t.get('convId') == conv_id
+                    and t['status'] == 'running'
+                    and tid != exclude_task_id
+                    and not t.get('aborted')):
+                t['aborted'] = True
+                t['_abort_timestamp'] = time.time()
+                t['_abort_reason'] = 'superseded_by_new_task'
+                aborted += 1
+                logger.info(
+                    '[Task %s] conv=%s ⚠️ AUTO-ABORTED: superseded by new task %s — '
+                    'content=%dchars elapsed=%.1fs',
+                    tid[:8], conv_id[:8],
+                    (exclude_task_id or '?')[:8],
+                    len(t.get('content') or ''),
+                    time.time() - t.get('created_at', time.time()),
+                )
+    if aborted:
+        logger.info('[Manager] conv=%s Auto-aborted %d stale task(s) before starting new task %s',
+                    conv_id[:8], aborted, (exclude_task_id or '?')[:8])
+    return aborted
+
 
 def _strip_base64_for_snapshot(messages):
     """Strip large base64 data from messages for debug snapshot (keep structure, save bandwidth)."""
@@ -211,17 +255,26 @@ def _dispatch_queued_message(task):
 
     Runs in a fire-and-forget manner — failures are logged but don't affect
     the calling task's persistence.
+
+    When a task is aborted by the user, queued messages are still dispatched —
+    the user explicitly stopped the current generation, so the next queued
+    message should proceed.  Only on errors do we skip dispatch (user may
+    want to fix something before the queued message runs).
     """
     conv_id = task.get('convId', '')
     if not conv_id:
         return
-    # Don't dispatch if the task was aborted or errored (user may want to fix something)
-    if task.get('aborted'):
-        logger.debug('[Queue] Skipping auto-dispatch for conv=%s — task was aborted', conv_id[:8])
-        return
 
     try:
-        from lib.message_queue import dispatch_next_queued
+        from lib.message_queue import dispatch_next_queued, get_queue_depth
+        # Check if there are queued messages before dispatching
+        depth = get_queue_depth(conv_id)
+        if depth == 0:
+            return
+
+        if task.get('aborted'):
+            logger.info('[Queue] Task was aborted for conv=%s — dispatching next queued message (depth=%d)',
+                        conv_id[:8], depth)
         new_task_id = dispatch_next_queued(conv_id)
         if new_task_id:
             logger.info('[Queue] Auto-dispatched queued message → task %s for conv=%s',
@@ -253,6 +306,26 @@ def _sync_result_to_conversation(task, meta):
     if not content and not thinking and not error:
         logger.debug('%s conv=%s Skipping conv sync — no content/thinking/error to write', pfx, conv_id)
         return
+
+    # ── FRESHNESS GUARD: reject writes from stale/superseded tasks ──
+    # When a user stops a task and regenerates, a new task becomes the
+    # "latest" for this conversation. The old task may still be winding
+    # down (abort is cooperative), and its _sync_result_to_conversation
+    # would overwrite the new task's data. This guard prevents that.
+    if conv_id:
+        with _conv_latest_task_lock:
+            latest = _conv_latest_task.get(conv_id)
+        if latest and latest != task['id']:
+            _abort_reason = task.get('_abort_reason', '')
+            logger.warning(
+                '%s conv=%s ⛔ STALE TASK — refusing conv sync. '
+                'This task (%s) was superseded by task %s. '
+                'abort_reason=%s content=%dchars. '
+                'Without this guard, old task data would overwrite the new task\'s content.',
+                pfx, conv_id[:8], task_id_short, latest[:8],
+                _abort_reason, len(content),
+            )
+            return
 
     db = None
     try:
@@ -468,20 +541,29 @@ def _sync_result_to_conversation(task, meta):
             db_execute_with_retry(
                 db,
                 '''UPDATE conversations
-                   SET messages=?, updated_at=?, msg_count=?, settings=?, search_text=?,
-                       search_tsv=to_tsvector('simple', left(?, 50000))
+                   SET messages=?, updated_at=?, msg_count=?, settings=?, search_text=?
                    WHERE id=? AND user_id=1 AND updated_at=?''',
-                (messages_json, now_ms, len(messages), settings_json, search_text, search_text, conv_id, _row_updated_at)
+                (messages_json, now_ms, len(messages), settings_json, search_text, conv_id, _row_updated_at)
             )
         else:
             db_execute_with_retry(
                 db,
                 '''UPDATE conversations
-                   SET messages=?, updated_at=?, msg_count=?, search_text=?,
-                       search_tsv=to_tsvector('simple', left(?, 50000))
+                   SET messages=?, updated_at=?, msg_count=?, search_text=?
                    WHERE id=? AND user_id=1 AND updated_at=?''',
-                (messages_json, now_ms, len(messages), search_text, search_text, conv_id, _row_updated_at)
+                (messages_json, now_ms, len(messages), search_text, conv_id, _row_updated_at)
             )
+        # Update FTS5 index
+        if search_text:
+            try:
+                db.execute(
+                    "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
+                    "SELECT rowid, ? FROM conversations WHERE id = ?",
+                    (search_text, conv_id)
+                )
+                db.commit()
+            except Exception as _fts_err:
+                logger.debug('[Task] FTS update failed (non-fatal): %s', _fts_err)
         # Check if optimistic lock succeeded (row was updated)
         # db_execute_with_retry returns None but the last execute sets rowcount
         _check_row = db.execute(
@@ -522,20 +604,6 @@ def _sync_result_to_conversation(task, meta):
     except Exception as e:
         logger.error('%s conv=%s ❌ Failed to sync result to conversation: %s',
                      pfx, conv_id, e, exc_info=True)
-
-
-def _needs_translation(text):
-    """Heuristic: return True if text is predominantly English and needs Chinese translation.
-
-    Mirrors the frontend logic in finishStream: strip code blocks, count Latin words
-    vs Chinese characters.
-    """
-    # Strip code blocks and inline code
-    plain = re.sub(r'```[\s\S]*?```', '', text)
-    plain = re.sub(r'`[^`]+`', '', plain)
-    chinese_chars = len(re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf]', plain))
-    latin_words = len(re.findall(r'[a-zA-Z]{2,}', plain))
-    return latin_words >= 3 and chinese_chars < latin_words * 2
 
 
 def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db):
@@ -585,13 +653,20 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db):
                     messages[msg_idx].pop('_translateDone', None)
                     messages[msg_idx].pop('_translateTaskId', None)
                     messages[msg_idx].pop('_translatedCache', None)
-                    # Persist the cleared state
+                    # Persist the cleared state (with CAS to avoid clobbering
+                    # concurrent frontend writes)
                     try:
-                        db_execute_with_retry(
-                            db,
-                            'UPDATE conversations SET messages=? WHERE id=? AND user_id=1',
-                            (json_dumps_pg(messages), conv_id)
-                        )
+                        _ua_row = db.execute(
+                            'SELECT updated_at FROM conversations WHERE id=? AND user_id=1',
+                            (conv_id,)
+                        ).fetchone()
+                        if _ua_row:
+                            _now_ms = int(time.time() * 1000)
+                            db_execute_with_retry(
+                                db,
+                                'UPDATE conversations SET messages=?, updated_at=? WHERE id=? AND user_id=1 AND updated_at=?',
+                                (json_dumps_pg(messages), _now_ms, conv_id, _ua_row[0])
+                            )
                     except Exception as ce:
                         logger.warning('%s conv=%s Failed to clear stale translation: %s',
                                        pfx, conv_id[:8], ce)
@@ -600,13 +675,6 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db):
                                  pfx, conv_id[:8], msg_idx, len(existing_tc))
                     return
 
-        # ★ FIX: When autoTranslate is explicitly ON, always translate — don't
-        # rely on the language heuristic which fails for bilingual/mixed responses
-        # (e.g. when the LLM responds with an English intro + Chinese body).
-        # The heuristic is only a fallback when autoTranslate state is unknown.
-        # Since we already checked auto_translate=True above, skip the heuristic.
-        # The _needs_translation() function is kept for external callers but
-        # no longer gates auto-translation when autoTranslate is explicitly on.
         logger.debug('%s conv=%s msg=%d autoTranslate is ON — translating regardless of content language',
                      pfx, conv_id[:8], msg_idx)
 
@@ -737,6 +805,15 @@ def _sync_partial_to_conversation(task):
     if not content and not thinking:
         return
 
+    # ── FRESHNESS GUARD: reject checkpoint writes from stale tasks ──
+    if conv_id:
+        with _conv_latest_task_lock:
+            latest = _conv_latest_task.get(conv_id)
+        if latest and latest != task['id']:
+            logger.debug('[Checkpoint] conv=%s Stale task %s — skipping partial sync (latest=%s)',
+                         conv_id[:8], task['id'][:8], latest[:8])
+            return
+
     db = None
     try:
         db = get_thread_db(DOMAIN_CHAT)
@@ -791,13 +868,37 @@ def _sync_partial_to_conversation(task):
         messages_json = json_dumps_pg(messages)
         search_text = build_search_text(messages)
         now_ms = int(time.time() * 1000)
-        db_execute_with_retry(
+        # ★ FIX: Use optimistic locking (CAS via updated_at) — same as
+        #   _sync_result_to_conversation — to avoid clobbering fresher data
+        #   written by the frontend's syncConversationToServer.
+        cur_row = db.execute(
+            'SELECT updated_at FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)
+        ).fetchone()
+        if not cur_row:
+            return
+        cur_updated_at = cur_row[0]
+        rc = db_execute_with_retry(
             db,
-            '''UPDATE conversations SET messages=?, updated_at=?, msg_count=?, search_text=?,
-                   search_tsv=to_tsvector('simple', left(?, 50000))
-               WHERE id=? AND user_id=1''',
-            (messages_json, now_ms, len(messages), search_text, search_text, conv_id)
+            '''UPDATE conversations SET messages=?, updated_at=?, msg_count=?, search_text=?
+               WHERE id=? AND user_id=1 AND updated_at=?''',
+            (messages_json, now_ms, len(messages), search_text, conv_id, cur_updated_at)
         )
+        # Update FTS5 index
+        if search_text:
+            try:
+                db.execute(
+                    "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
+                    "SELECT rowid, ? FROM conversations WHERE id = ?",
+                    (search_text, conv_id)
+                )
+                db.commit()
+            except Exception as _fts_err:
+                logger.debug('[Checkpoint] FTS update failed (non-fatal): %s', _fts_err)
+        if hasattr(rc, 'rowcount') and rc.rowcount == 0:
+            logger.debug('[Checkpoint] conv=%s CAS conflict — another writer updated first, skipping',
+                         conv_id)
+            return
         logger.debug('[Checkpoint] conv=%s Synced partial to conversation: content=%d→%d thinking=%d→%d',
                      conv_id, existing_content_len, len(content),
                      existing_thinking_len, len(thinking))
@@ -806,11 +907,188 @@ def _sync_partial_to_conversation(task):
                      conv_id, e, exc_info=True)
 
 
+
+def recover_stale_tasks_on_startup():
+    """Clean up stale tasks from a previous server crash at startup time.
+
+    When the server crashes mid-generation:
+    - task_results has entries with status='running' (from checkpoints)
+    - conversations have activeTaskId set in settings (never cleared)
+
+    This function:
+    1. Marks all stale task_results as 'interrupted'
+    2. Clears activeTaskId from all conversation settings
+    3. Syncs interrupted task content into conversation messages
+
+    This ensures the frontend doesn't need to do Case B recovery for every
+    stale conversation on every page load, which dramatically speeds up boot.
+    """
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+
+        # ── Step 1: Mark stale running tasks as interrupted ──
+        stale_rows = db.execute(
+            "SELECT task_id, conv_id, content, thinking FROM task_results WHERE status='running'"
+        ).fetchall()
+
+        if stale_rows:
+            for row in stale_rows:
+                tid = row['task_id']
+                cid = row['conv_id'] or ''
+                clen = len(row['content'] or '')
+                tlen = len(row['thinking'] or '')
+                logger.info('[Startup] Marking stale task %s (conv=%s) as interrupted: '
+                            'content=%dchars thinking=%dchars',
+                            tid[:8], cid[:8], clen, tlen)
+            db.execute("UPDATE task_results SET status='interrupted' WHERE status='running'")
+            db.commit()
+            logger.info('[Startup] Marked %d stale running task(s) as interrupted', len(stale_rows))
+
+        # ── Step 2: Clear activeTaskId from all conversation settings ──
+        # Find conversations that still have activeTaskId set
+        conv_rows = db.execute(
+            "SELECT id, settings, messages FROM conversations WHERE user_id=1 "
+            "AND settings IS NOT NULL AND CAST(settings AS TEXT) LIKE '%activeTaskId%'"
+        ).fetchall()
+
+        cleared = 0
+        for crow in conv_rows:
+            cid = crow['id']
+            try:
+                settings = json.loads(crow['settings'] or '{}')
+            except (json.JSONDecodeError, TypeError):
+                continue
+            atid = settings.get('activeTaskId')
+            if not atid:
+                continue
+            # Clear activeTaskId
+            settings['activeTaskId'] = None
+            settings_json = json.dumps(settings, ensure_ascii=False)
+
+            # ── Step 3: If there's interrupted task data, ensure it's in the
+            #    conversation messages (the checkpoint may have partial content) ──
+            task_row = db.execute(
+                "SELECT content, thinking, tool_rounds, metadata FROM task_results WHERE task_id=?",
+                (atid,)
+            ).fetchone()
+
+            messages_json = None
+            if task_row:
+                task_content = task_row['content'] or ''
+                task_thinking = task_row['thinking'] or ''
+                if task_content or task_thinking:
+                    try:
+                        messages = json.loads(crow['messages'] or '[]')
+                        if messages:
+                            last_msg = messages[-1]
+                            if last_msg.get('role') == 'assistant':
+                                # Only update if task has more content
+                                existing_content = len(last_msg.get('content') or '')
+                                existing_thinking = len(last_msg.get('thinking') or '')
+                                if len(task_content) > existing_content:
+                                    last_msg['content'] = task_content
+                                if len(task_thinking) > existing_thinking:
+                                    last_msg['thinking'] = task_thinking
+                                if not last_msg.get('finishReason'):
+                                    last_msg['finishReason'] = 'interrupted'
+                                # Merge toolRounds from task
+                                if task_row['tool_rounds']:
+                                    try:
+                                        tr = json.loads(task_row['tool_rounds'])
+                                        if tr and len(tr) > len(last_msg.get('toolRounds') or []):
+                                            last_msg['toolRounds'] = tr
+                                    except (json.JSONDecodeError, TypeError):
+                                        pass
+                                # Merge metadata
+                                if task_row['metadata']:
+                                    try:
+                                        meta = json.loads(task_row['metadata'])
+                                        if meta.get('model') and not last_msg.get('model'):
+                                            last_msg['model'] = meta['model']
+                                    except (json.JSONDecodeError, TypeError):
+                                        pass
+                                messages_json = json_dumps_pg(messages)
+                            elif last_msg.get('role') == 'user':
+                                # Task started but no assistant msg was appended yet
+                                new_msg = {
+                                    'role': 'assistant',
+                                    'content': task_content,
+                                    'thinking': task_thinking,
+                                    'finishReason': 'interrupted',
+                                    'timestamp': int(time.time() * 1000),
+                                }
+                                if task_row['tool_rounds']:
+                                    try:
+                                        new_msg['toolRounds'] = json.loads(task_row['tool_rounds'])
+                                    except (json.JSONDecodeError, TypeError):
+                                        pass
+                                if task_row['metadata']:
+                                    try:
+                                        meta = json.loads(task_row['metadata'])
+                                        if meta.get('model'):
+                                            new_msg['model'] = meta['model']
+                                    except (json.JSONDecodeError, TypeError):
+                                        pass
+                                messages.append(new_msg)
+                                messages_json = json_dumps_pg(messages)
+                    except (json.JSONDecodeError, TypeError) as exc:
+                        logger.warning('[Startup] Failed to parse messages for conv=%s: %s',
+                                       cid[:8], exc)
+
+            now_ms = int(time.time() * 1000)
+            if messages_json:
+                from routes.conversations import build_search_text
+                messages_parsed = json.loads(messages_json)
+                search_text = build_search_text(messages_parsed)
+                db.execute(
+                    "UPDATE conversations SET settings=?, messages=?, updated_at=?, "
+                    "msg_count=?, search_text=? WHERE id=? AND user_id=1",
+                    (settings_json, messages_json, now_ms,
+                     len(messages_parsed), search_text, cid)
+                )
+            else:
+                db.execute(
+                    "UPDATE conversations SET settings=?, updated_at=? WHERE id=? AND user_id=1",
+                    (settings_json, now_ms, cid)
+                )
+            cleared += 1
+            logger.info('[Startup] Cleared activeTaskId=%s from conv=%s '
+                        '(messages_updated=%s)',
+                        atid[:8], cid[:8], bool(messages_json))
+
+        if cleared:
+            db.commit()
+            logger.info('[Startup] Cleared activeTaskId from %d conversation(s)', cleared)
+
+        total = len(stale_rows) + cleared
+        if total:
+            logger.info('[Startup] ✅ Stale task recovery complete: %d task(s) interrupted, '
+                        '%d conv(s) cleaned', len(stale_rows), cleared)
+            # Invalidate meta cache so first frontend request gets clean data
+            try:
+                from routes.common import _invalidate_meta_cache
+                _invalidate_meta_cache()
+            except Exception:
+                pass
+        else:
+            logger.debug('[Startup] No stale tasks or activeTaskIds found — clean shutdown')
+
+    except Exception as e:
+        logger.error('[Startup] Stale task recovery failed (non-fatal): %s', e, exc_info=True)
+
+
 def cleanup_old_tasks():
     now = time.time()
     with tasks_lock:
         to_rm = [tid for tid, t in tasks.items() if now - t['created_at'] > 3600 and t['status'] != 'running']
         for tid in to_rm: del tasks[tid]
+    # Also clean up _conv_latest_task entries whose tasks no longer exist
+    if to_rm:
+        _rm_set = set(to_rm)
+        with _conv_latest_task_lock:
+            stale_convs = [cid for cid, tid in _conv_latest_task.items() if tid in _rm_set]
+            for cid in stale_convs:
+                del _conv_latest_task[cid]
 
 # ── Streaming checkpoint interval (seconds) ──
 # During LLM token streaming, we periodically persist partial content to

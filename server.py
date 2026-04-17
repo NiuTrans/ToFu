@@ -13,7 +13,14 @@ This file handles:
   - Werkzeug SSE streaming monkey-patch for tunnel environments
 """
 
-import os, io, sys, json, logging, time, hashlib
+import os
+import io
+import sys
+import json
+import logging
+import time
+import hashlib
+
 
 # ══════════════════════════════════════════
 #  Auto-delegate to bootstrap.py on missing deps
@@ -203,7 +210,7 @@ _vendor_handler.addFilter(_VendorOnly())
 # ── Handler 5: console — business + access, INFO+ ──
 _console_handler = logging.StreamHandler(sys.stderr)
 _console_handler.setFormatter(_formatter)
-_console_handler.setLevel(logging.INFO)
+_console_handler.setLevel(logging.WARNING)
 _console_handler.addFilter(_BizAndAccessFilter())
 
 # ── Root logger: route everything through our handlers ──
@@ -610,10 +617,17 @@ except Exception as _bundle_err:
 
 with app.app_context():
     try:
-        _server_log.info('Initialising database (PostgreSQL)...')
+        _server_log.info('Initialising database (SQLite)...')
         init_db()
         warmup_db()
-        _server_log.info('Database ready (PostgreSQL).')
+        _server_log.info('Database ready (SQLite).')
+        # ── Clean up stale tasks from previous crashes ──
+        # Must run after DB init but before serving requests.
+        try:
+            from lib.tasks_pkg import recover_stale_tasks_on_startup
+            recover_stale_tasks_on_startup()
+        except Exception as _stale_exc:
+            _server_log.warning('Stale task recovery failed (non-fatal): %s', _stale_exc)
     except Exception as exc:
         _server_log.critical('Database init/warmup failed — server will start but DB operations will fail: %s', exc, exc_info=True)
         # Don't raise — let the server start so the UI can load (settings page,
@@ -731,6 +745,95 @@ if __name__ == '__main__':
     host = os.environ.get('BIND_HOST', '0.0.0.0')
     preferred_port = int(os.environ.get('PORT', 15000))
     debug_mode = os.environ.get('FLASK_DEBUG', '0') == '1'
+
+    # ── Instance lock — prevent multiple servers on the same project dir ──
+    # Uses a lock file in data/ that is held for the lifetime of the process.
+    # If another instance is already running from this project directory,
+    # we warn loudly and exit instead of silently sharing the same DB
+    # and causing file lock contention or data races.
+    _lock_dir = os.path.join(BASE_DIR, 'data')
+    os.makedirs(_lock_dir, exist_ok=True)
+    _lock_path = os.path.join(_lock_dir, '.server.lock')
+    _instance_lock_fd = None
+
+    def _acquire_instance_lock():
+        """Acquire an exclusive file lock to prevent multiple instances.
+
+        Returns True if lock acquired, False if another instance holds it.
+        On Windows uses msvcrt; on Unix uses fcntl.
+        """
+        global _instance_lock_fd
+        try:
+            _instance_lock_fd = open(_lock_path, 'w')
+            _instance_lock_fd.write(f'{os.getpid()}\n')
+            _instance_lock_fd.flush()
+        except Exception as e:
+            _server_log.warning('[Lock] Cannot create lock file %s: %s', _lock_path, e)
+            return True  # fail-open: don't block startup on lock-file issues
+
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                msvcrt.locking(_instance_lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(_instance_lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except (IOError, OSError):
+            # Another instance holds the lock
+            _instance_lock_fd.close()
+            _instance_lock_fd = None
+            return False
+
+    if not _acquire_instance_lock():
+        # Try to read the PID of the other instance
+        _other_pid = '?'
+        try:
+            with open(_lock_path) as _f:
+                _other_pid = _f.read().strip()
+        except Exception:
+            pass
+        _server_log.critical(
+            '\n'
+            '  ══════════════════════════════════════════════════════\n'
+            '  ❌ ANOTHER SERVER INSTANCE IS ALREADY RUNNING\n'
+            '  ❌ from this project directory!\n'
+            '  \n'
+            '  Project : %s\n'
+            '  Lock    : %s\n'
+            '  Other PID: %s\n'
+            '  \n'
+            '  Running multiple instances on the same project causes:\n'
+            '    • PostgreSQL connection exhaustion ("too many clients")\n'
+            '    • Database race conditions and data corruption\n'
+            '    • Port conflicts\n'
+            '  \n'
+            '  Solutions:\n'
+            '    1. Stop the other instance first\n'
+            '    2. Use a different PORT env var for a second instance\n'
+            '       (both share the same SQLite DB — WAL mode handles concurrency)\n'
+            '    3. Copy the project to a different directory for full isolation\n'
+            '  ══════════════════════════════════════════════════════',
+            BASE_DIR, _lock_path, _other_pid
+        )
+        sys.exit(1)
+
+    _server_log.info('[Lock] Instance lock acquired (PID=%d, lock=%s)', os.getpid(), _lock_path)
+
+    # ── Graceful SIGTERM handler ──
+    # Python's atexit handlers only run on normal exit or sys.exit(),
+    # NOT on SIGTERM (which is what kill, systemd, Docker send).
+    # Convert SIGTERM into sys.exit() so atexit handlers (shutdown_pool,
+    # etc.) execute properly.
+    import signal
+
+    def _sigterm_handler(signum, frame):
+        _server_log.info('[Server] Received SIGTERM — initiating graceful shutdown...')
+        sys.exit(0)
+
+    from lib.compat import safe_signal
+    safe_signal(signal.SIGTERM, _sigterm_handler)
+    _server_log.info('[Server] SIGTERM handler registered for graceful shutdown')
 
     # ── Auto-detect free port if preferred is occupied ──
     port = _find_free_web_port(start=preferred_port)
@@ -853,6 +956,11 @@ if __name__ == '__main__':
     else:
         _banner_lines.append('  🔓  Tunnel Auth: OFF (set TUNNEL_TOKEN to enable)')
     _banner_lines.append('=' * 52)
-    _server_log.info('Server starting\n%s', '\n'.join(_banner_lines))
+    _banner = '\n'.join(_banner_lines)
+    _server_log.info('Server starting\n%s', _banner)
+    # Always print the startup banner to terminal regardless of console
+    # log level — users need to see the URL to open the app.
+    sys.stderr.write('\n' + _banner + '\n\n')
+    sys.stderr.flush()
 
     app.run(host=host, port=port, debug=debug_mode, threaded=True)

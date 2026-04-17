@@ -15,7 +15,7 @@ import threading
 import time
 from functools import wraps
 
-import psycopg2
+import sqlite3
 from flask import Blueprint, Response, abort, jsonify, make_response, request, send_from_directory
 
 import lib as _lib  # module ref for hot-reload
@@ -33,7 +33,7 @@ logger = get_logger(__name__)
 
 def _db_safe(fn):
     """Decorator that catches DB OperationalError and returns JSON 503."""
-    _db_errors = (psycopg2.OperationalError,)
+    _db_errors = (sqlite3.OperationalError,)
 
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -289,11 +289,11 @@ FAVICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
 # ── Cached bundled index.html (avoids re-reading + regex on every page load) ──
 _bundled_index_cache = {'tag': None, 'html': None, 'mtime': 0}
 
-# Regex: match contiguous block of app script tags + interleaved HTML comments
+# Regex: match contiguous block of app script tags + interleaved HTML comments/blank lines
 _APP_SCRIPTS_RE = re.compile(
-    r'(?:(?:<!-- .*?-->\n)|(?:<script defer src="static/js/(?!bundle-)[\w.-]+\.js[^"]*"[^>]*></script>\n))*'
+    r'(?:(?:<!-- .*?-->\n)|(?:<script defer src="static/js/(?!bundle-)[\w.-]+\.js[^"]*"[^>]*></script>\n)|(?:\s*\n))*'
     r'<script defer src="static/js/(?!bundle-)[\w.-]+\.js[^"]*"[^>]*></script>\n'
-    r'(?:(?:<!-- .*?-->\n)|(?:<script defer src="static/js/(?!bundle-)[\w.-]+\.js[^"]*"[^>]*></script>\n))*'
+    r'(?:(?:<!-- .*?-->\n)|(?:<script defer src="static/js/(?!bundle-)[\w.-]+\.js[^"]*"[^>]*></script>\n)|(?:\s*\n))*'
 )
 
 @common_bp.route('/')
@@ -349,6 +349,7 @@ def trading_page():
 def features():
     return jsonify({
         'trading_enabled': _lib.TRADING_ENABLED,
+        'pptx_translate_enabled': getattr(_lib, 'PPTX_TRANSLATE_ENABLED', False),
         'cache_extended_ttl': getattr(_lib, 'CACHE_EXTENDED_TTL', False),
         'debug_mode': getattr(_lib, 'DEBUG_MODE', False),
     })
@@ -374,6 +375,13 @@ def save_features():
         if old_val != new_val:
             changed.append('trading_enabled')
             logger.info('[Features] trading_enabled: %s → %s', old_val, new_val)
+    if 'pptx_translate_enabled' in data:
+        new_val = bool(data['pptx_translate_enabled'])
+        old_val = existing.get('pptx_translate_enabled', None)
+        existing['pptx_translate_enabled'] = new_val
+        if old_val != new_val:
+            changed.append('pptx_translate_enabled')
+            logger.info('[Features] pptx_translate_enabled: %s → %s', old_val, new_val)
     if 'cache_extended_ttl' in data:
         new_val = bool(data['cache_extended_ttl'])
         old_val = existing.get('cache_extended_ttl', None)
@@ -402,6 +410,10 @@ def save_features():
         logger.info('[Features] Hot-reloaded TRADING_ENABLED → %s '
                     '(note: trading route registration requires restart)',
                     _lib.TRADING_ENABLED)
+    if 'pptx_translate_enabled' in changed:
+        _lib.PPTX_TRANSLATE_ENABLED = existing.get('pptx_translate_enabled', False)
+        logger.info('[Features] Hot-reloaded PPTX_TRANSLATE_ENABLED → %s',
+                    _lib.PPTX_TRANSLATE_ENABLED)
     # Hot-reload CACHE_EXTENDED_TTL — takes effect on next LLM request
     if 'cache_extended_ttl' in changed:
         _lib.CACHE_EXTENDED_TTL = existing.get('cache_extended_ttl', True)
@@ -436,9 +448,26 @@ def client_error():
 
 @common_bp.route('/api/health')
 def health_check():
-    from lib.database import pg_available
+    from lib.database import db_available
     from lib.version import __version__
-    result = {'ok': True, 'ts': int(time.time() * 1000), 'db_ok': pg_available, 'version': __version__}
+    result = {'ok': True, 'ts': int(time.time() * 1000), 'db_ok': db_available, 'version': __version__}
+
+    # SQLite — no connection pool stats needed
+    result['db_engine'] = 'sqlite'
+
+    # Quick DB connectivity check
+    if db_available:
+        try:
+            from lib.database import get_db
+            db = get_db()
+            db.execute('SELECT 1').fetchone()
+            result['db_responsive'] = True
+        except Exception as e:
+            result['db_responsive'] = False
+            result['db_error'] = str(e)[:200]
+            result['ok'] = False
+            logger.warning('[Health] DB connectivity check failed: %s', e)
+
     try:
         from lib.cross_dc import get_status
         cross_dc = get_status()

@@ -74,9 +74,14 @@ def mock_llm_port():
 # ═══════════════════════════════════════════════════════════
 
 @pytest.fixture(scope="session")
-def flask_app(mock_llm_port):
-    """Create ChatUI Flask app configured to use mock LLM & temp DB."""
+def flask_app(mock_llm_port, tmp_path_factory):
+    """Create ChatUI Flask app configured to use mock LLM & temp SQLite DB."""
+    # Use a temp directory for the test database
+    tmp_dir = tmp_path_factory.mktemp("chatui-test")
+    test_db_path = str(tmp_dir / "test.db")
+
     # Override env BEFORE importing server modules
+    os.environ["CHATUI_DB_PATH"] = test_db_path
     os.environ["LLM_BASE_URL"] = f"http://127.0.0.1:{mock_llm_port}/v1"
     os.environ["LLM_API_KEYS"] = "mock-test-key"
     os.environ["LLM_API_KEY"] = "mock-test-key"

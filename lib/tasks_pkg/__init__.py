@@ -14,7 +14,8 @@ __all__ = [
     # manager (eager)
     'tasks', 'tasks_lock',
     'create_task', 'append_event', 'persist_task_result', 'cleanup_old_tasks',
-    'stream_llm_response',
+    'stream_llm_response', 'abort_running_tasks_for_conv',
+    'recover_stale_tasks_on_startup',
     # approval (lazy)
     'request_write_approval', 'resolve_write_approval',
     # human guidance (lazy)
@@ -36,10 +37,12 @@ __all__ = [
 
 # ── Eagerly import only the lightweight manager (used by routes at import time) ──
 from lib.tasks_pkg.manager import (
+    abort_running_tasks_for_conv,
     append_event,
     cleanup_old_tasks,
     create_task,
     persist_task_result,
+    recover_stale_tasks_on_startup,
     stream_llm_response,
     tasks,
     tasks_lock,

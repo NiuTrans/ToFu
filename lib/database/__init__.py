@@ -1,20 +1,24 @@
-"""lib/database — PostgreSQL database layer (package).
+"""lib/database — Dual-backend database layer (PostgreSQL primary, SQLite fallback).
 
-All public symbols are re-exported from sub-modules for backward compatibility.
+All public symbols are re-exported from _core for backward compatibility.
 Existing ``from lib.database import get_db, DOMAIN_CHAT`` still works.
 
 Sub-modules:
-  _core           — Config, connection pool, Flask/thread-local helpers (coordinator)
-  _sql_translate   — SQL compatibility translation (regex, cache)
-  _wrappers        — DictRow, PgCursor, PgConnection, sanitization
-  _schema          — DDL (CREATE TABLE / migration / version cache)
-  _bootstrap       — PG server management (start/stop/discover/bootstrap)
+  _core             — Config, backend detection, connection pool, Flask/thread-local helpers
+  _sql_translate    — SQL compatibility translation for PG (regex, cache)
+  _wrappers         — DictRow, PgCursor, PgConnection, sanitization (PG)
+  _schema_pg        — PostgreSQL DDL (CREATE TABLE / migration / version cache)
+  _schema_sqlite    — SQLite DDL (CREATE TABLE / migration / FTS5)
+  _bootstrap        — PG server management (start/stop/discover/bootstrap)
 """
 
 # ── Re-export everything from _core for backward compatibility ──
-from lib.database._core import (
+from lib.database._core import (  # noqa: F401
+    # Backend info
+    _BACKEND,
     # Config / constants
     BASE_DIR,
+    DB_PATH,
     DOMAIN_CHAT,
     DOMAIN_SYSTEM,
     DOMAIN_TRADING,
@@ -24,34 +28,43 @@ from lib.database._core import (
     PG_PASSWORD,
     PG_PORT,
     PG_USER,
-    # Sanitization / JSON
+    # Row wrapper / connection types
     DictRow,
     PgConnection,
     PgCursor,
+    # Column check
     _column_exists,
-    # Backward-compat helpers
+    # Backward-compat helper
     _tune_connection,
+    # Flask teardown
     close_db,
+    # Write retry
     db_execute_with_retry,
     # Connection management
     get_db,
     get_thread_db,
-    # Schema
+    # Schema init
     init_db,
+    # JSON serialization
     json_dumps_pg,
-    # Bootstrap status
+    # Database availability
+    db_available,
     pg_available,
+    # Sanitization
     strip_null_bytes_deep,
     # SQL translation
     translate_sql,
+    # Warmup
     warmup_db,
+    # Graceful shutdown
+    shutdown_pool,
 )
 
 __all__ = [
-    'BASE_DIR',
+    '_BACKEND',
+    'BASE_DIR', 'DB_PATH',
     'PG_HOST', 'PG_PORT', 'PG_DBNAME', 'PG_USER', 'PG_PASSWORD', 'PG_DSN',
     'DOMAIN_CHAT', 'DOMAIN_TRADING', 'DOMAIN_SYSTEM',
-
     'translate_sql',
     'DictRow', 'PgCursor', 'PgConnection',
     'strip_null_bytes_deep', 'json_dumps_pg',
@@ -60,6 +73,7 @@ __all__ = [
     'warmup_db',
     'init_db',
     '_column_exists',
-    'pg_available',
+    'db_available', 'pg_available',
     '_tune_connection',
+    'shutdown_pool',
 ]

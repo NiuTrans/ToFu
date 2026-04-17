@@ -791,11 +791,11 @@ def _reconnect_if_dead(db, exc):
     Otherwise return ``db`` unchanged.  This prevents a single connection
     drop from cascading into errors for every remaining query in a loop.
     """
-    import psycopg2
-    is_dead = isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError))
+    import sqlite3
+    is_dead = isinstance(exc, sqlite3.OperationalError)
     if not is_dead:
         msg = str(exc).lower()
-        is_dead = 'connection already closed' in msg or 'server closed the connection' in msg
+        is_dead = 'database is locked' in msg or 'disk I/O error' in msg
     if is_dead:
         from lib.database import DOMAIN_TRADING, get_thread_db
         logger.warning('[Intel] PG connection dead (%s), obtaining fresh connection', type(exc).__name__)

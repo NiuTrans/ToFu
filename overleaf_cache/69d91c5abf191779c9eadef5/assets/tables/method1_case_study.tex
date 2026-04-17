@@ -1,0 +1,51 @@
+
+\definecolor{case_red}{RGB}{207, 16, 32}  % 自定义的红色
+\definecolor{case_blue}{RGB}{0, 84, 159}  % 自定义的蓝色
+
+
+\begin{table}[t]
+% \begin{wraptable}{r}{0.4\textwidth}
+  %    \setlength{\tabcolsep}{3pt}
+  \bicaption{TAR的样例分析}{A case study of TAR}
+    \footnotesize
+  \centering
+  \small
+  \scalebox{0.85}{
+
+  \begin{tabular}{l l}
+  \toprule
+  \bf Constraints & {\small $\langle${\color{case_red}WHO,\color{case_blue} 世卫组织}$\rangle$}; {\small $\langle${\color{case_red}COVID-19,\color{case_blue} 新型冠状病毒}$\rangle$}    \\
+  
+  \cmidrule(lr){1-1} \cmidrule(lr){2-2}
+  
+   \multirow{2}{*}{\bf Source} &  On 11 March 2020, {\normalsize \color{case_red}WHO }characterized \\ & {\normalsize \color{case_red} COVID-19} as a pandemic.  \\
+  
+  \cmidrule(lr){1-1} \cmidrule(lr){2-2}
+  
+  \multirow{2}{*}{\bf Reference}  & 
+   2020年3月11日，{\normalsize \color{case_blue}  世卫组织} 将{\normalsize \color{case_blue} 新型冠状}\\ &{\normalsize \color{case_blue} 病毒} 列为大流行病。 \\
+  
+  % \cmidrule(lr){1-1} \cmidrule(lr){2-2}
+  
+  % {\bf NMT} & {含酒精的洗手液应该含有至少60\%的酒精。} \\
+  
+  % \cmidrule(lr){1-1} \cmidrule(lr){2-2}
+  
+  % {\bf + Revise} & {含有至少60\%酒精的消毒洗手液。}  \\
+  \cmidrule(lr){1-1} \cmidrule(lr){2-2}
+
+
+   
+  \multirow{2}{*}{\bf Const. Trans.} &  2020年3月11日，{\normalsize \color{case_blue} 世卫组织} 将新冠确定为\\ &  大流行病。  \\
+  
+  \cmidrule(lr){1-1} \cmidrule(lr){2-2}
+  
+  \multirow{2}{*}{\bf + Revision}  &  2020年3月11日，{\normalsize \color{case_blue} 世卫组织} 将{\normalsize \color{case_blue} 新型冠状}\\ & {\normalsize \color{case_blue} 病毒} 定性 为大流行病。 \\
+  
+  \bottomrule
+  \end{tabular}}
+
+  \label{tab:case_study}
+
+% \end{wraptable}
+\end{table}

@@ -3,7 +3,7 @@
 Inspired by Claude Code's ``StreamingToolExecutor`` (``tools/StreamingToolExecutor.ts``).
 When the model emits multiple tool calls in one response, read-only tools
 (``read_files``, ``grep_search``, ``find_files``, ``list_dir``, ``web_search``,
-``fetch_url``, ``check_error_logs``) begin executing as soon as their arguments
+``fetch_url``) begin executing as soon as their arguments
 finish streaming, rather than waiting for the complete response.
 
 Write tools and approval-gated tools are NOT pre-executed — they are deferred
@@ -67,7 +67,6 @@ class _ContentWithDisplayResults(str):
 _STREAMABLE_TOOLS = frozenset({
     'read_files', 'grep_search', 'find_files', 'list_dir',
     'web_search', 'fetch_url',
-    'check_error_logs',
 })
 
 # ── Internal tool prefixes to skip (proxy artifacts, not real tools) ──
@@ -165,7 +164,7 @@ class StreamingToolAccumulator:
 
         # Note: we do NOT filter empty-args tool calls here.  During streaming
         # we can't tell phantom calls (model started a slot, never sent args)
-        # from legitimate no-arg tools (e.g. check_error_logs).  The post-stream
+        # from legitimate no-arg tools.  The post-stream
         # filter in llm_client.py handles phantom detection using same-name
         # comparison.  A stray tool_start event for a phantom is harmless — it
         # just won't get a matching tool_done.
@@ -259,6 +258,31 @@ class StreamingToolAccumulator:
 
             elif fn_name == 'web_search':
                 from lib.search import format_search_for_tool_response, perform_web_search
+                # ★ Batch mode: run concurrent searches (lightweight, no SSE events)
+                queries = fn_args.get('queries')
+                if queries and isinstance(queries, list):
+                    from concurrent.futures import ThreadPoolExecutor as _TP, as_completed as _ac
+                    user_q = self._task.get('lastUserQuery', '')
+                    query_list = [
+                        (s.get('query') if isinstance(s, dict) else s)
+                        for s in queries[:5]
+                        if (isinstance(s, dict) and s.get('query')) or (isinstance(s, str) and s.strip())
+                    ]
+                    def _do_search(q):
+                        r = perform_web_search(q, user_question=user_q)
+                        sd = getattr(r, '_search_diag', None)
+                        return q, format_search_for_tool_response(r, search_diag=sd)
+                    parts = [None] * len(query_list)
+                    with _TP(max_workers=min(len(query_list), 5)) as pool:
+                        futs = {pool.submit(_do_search, q): i for i, q in enumerate(query_list)}
+                        for f in _ac(futs):
+                            idx = futs[f]
+                            try:
+                                q, fmt = f.result()
+                                parts[idx] = f'=== Search: {q} ===\n{fmt}' if len(query_list) > 1 else fmt
+                            except Exception as e:
+                                parts[idx] = f'Search failed for "{query_list[idx]}": {e}'
+                    return '\n\n'.join(p for p in parts if p)
                 query = fn_args.get('query', '')
                 user_question = self._task.get('lastUserQuery', '')
                 results = perform_web_search(query,
@@ -286,6 +310,34 @@ class StreamingToolAccumulator:
 
             elif fn_name == 'fetch_url':
                 from lib.fetch import fetch_page_content
+                # ★ Batch mode: run concurrent fetches (lightweight, no SSE events)
+                urls = fn_args.get('urls')
+                if urls and isinstance(urls, list):
+                    from concurrent.futures import ThreadPoolExecutor as _TP, as_completed as _ac
+                    import lib as _lib_ref
+                    url_list = [
+                        (s.get('url') if isinstance(s, dict) else s)
+                        for s in urls[:10]
+                        if (isinstance(s, dict) and s.get('url')) or (isinstance(s, str) and s.strip())
+                    ]
+                    def _do_fetch(u):
+                        c = fetch_page_content(
+                            u, max_chars=_lib_ref.FETCH_MAX_CHARS_DIRECT,
+                            pdf_max_chars=_lib_ref.FETCH_MAX_CHARS_PDF,
+                        )
+                        if c:
+                            return f"Content from {u} ({len(c):,} chars):\n\n{c}"
+                        return f"Failed to fetch {u}."
+                    parts = [None] * len(url_list)
+                    with _TP(max_workers=min(len(url_list), 8)) as pool:
+                        futs = {pool.submit(_do_fetch, u): i for i, u in enumerate(url_list)}
+                        for f in _ac(futs):
+                            idx = futs[f]
+                            try:
+                                parts[idx] = f.result()
+                            except Exception as e:
+                                parts[idx] = f"Failed to fetch {url_list[idx]}: {e}"
+                    return '\n\n'.join(p for p in parts if p)
                 url = fn_args.get('url', '')
                 import lib as _lib_ref
                 content = fetch_page_content(
@@ -297,11 +349,6 @@ class StreamingToolAccumulator:
                     return (f"Content from {url} "
                             f"({len(content):,} chars):\n\n{content}")
                 return f"Failed to fetch {url}."
-
-            elif fn_name == 'check_error_logs':
-                from lib.project_error_tracker import scan_project_errors
-                path = self._project_path or '.'
-                return str(scan_project_errors(path))
 
             return ''
 

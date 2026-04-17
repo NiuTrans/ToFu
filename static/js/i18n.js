@@ -20,9 +20,12 @@ var _i18n = {
   // ══════════════════════════════════════
   'sidebar.search': { zh: '搜索对话', en: 'Search conversations' },
   'sidebar.settings': { zh: '设置', en: 'Settings' },
+
   'sidebar.newChat': { zh: '新对话', en: 'New Chat' },
   'sidebar.uncategorized': { zh: '未分类', en: 'Uncategorized' },
   'sidebar.newFolder': { zh: '新建文件夹', en: 'New Folder' },
+  'sidebar.moreFolders': { zh: '展开更多文件夹', en: 'Show more folders' },
+  'sidebar.lessFolders': { zh: '收起', en: 'Collapse' },
   'sidebar.allCategorized': { zh: '所有对话都已归类', en: 'All conversations are categorized' },
   'sidebar.folderEmpty': { zh: '文件夹是空的', en: 'Folder is empty' },
   'sidebar.newChatAppear': { zh: '新对话会出现在这里，或从文件夹中移出对话', en: 'New chats will appear here, or move conversations out of folders' },
@@ -154,6 +157,8 @@ var _i18n = {
   'settings.featureModules': { zh: '功能模块', en: 'Feature Modules' },
   'settings.tradingModule': { zh: '交易 / 基金模块', en: 'Trading / Fund Module' },
   'settings.tradingModuleDesc': { zh: '交易顾问、基金筛选、自动驾驶、资讯爬虫', en: 'Trading advisor, fund screening, autopilot, news crawler' },
+  'settings.pptxTranslateModule': { zh: 'PPT 翻译模块', en: 'PPTX Translation Module' },
+  'settings.pptxTranslateModuleDesc': { zh: '上传 PPTX 文件进行全文翻译，保留原始格式', en: 'Upload PPTX files for full translation with formatting preserved' },
   'settings.tradingRestart': { zh: '需要重启服务器才能生效', en: 'Server restart required to take effect' },
   'settings.debugMode': { zh: '调试模式', en: 'Debug Mode' },
   'settings.debugModeDesc': { zh: '显示 trace_id、复制会话 ID 按钮等开发调试信息', en: 'Show trace_id, copy conv ID buttons, and other debug info' },
@@ -465,7 +470,7 @@ var _i18n = {
   'mobile.parallelAgents': { zh: '并行子代理', en: 'Parallel agents' },
   'mobile.autoExecLoop': { zh: '自主执行循环', en: 'Auto-exec loop' },
   'mobile.paperReader': { zh: '论文阅读', en: 'Paper Reader' },
-  'mobile.paperReaderDesc': { zh: 'PDF阅读 + 问答 + 报告', en: 'PDF reading + Q&A + reports' },
+  'mobile.paperReaderDesc': { zh: 'PDF阅读 + 问答 + 报告 + Babel PDF', en: 'PDF reading + Q&A + reports + Babel PDF' },
 
   // ══════════════════════════════════════
   //  MyDay

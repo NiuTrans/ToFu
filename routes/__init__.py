@@ -14,7 +14,6 @@ from .conversations import conversations_bp
 from .daily_report import daily_report_bp
 from .desktop import desktop_bp
 from .endpoint import endpoint_bp
-from .errors import errors_bp
 from .oauth import oauth_bp
 from .project import project_bp
 from .scheduler import scheduler_bp
@@ -30,7 +29,6 @@ from .paper import paper_bp
 # ── Core (always-on) blueprints ──
 ALL_BLUEPRINTS = [
     common_bp,
-    errors_bp,
     config_bp,
     conversations_bp,
     upload_bp,

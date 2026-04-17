@@ -8,7 +8,6 @@ Sub-modules:
   image_gen    — image generation constants (tool names for display dispatch)
   meta         — build_project_tool_meta (dynamic tool list assembly)
   project      — project-mode file tools (read, write, grep, etc.)
-  error_tracker — error log inspection & resolution tools
   emit         — emit_to_user terminal tool (reference existing tool results)
 """
 
@@ -26,7 +25,6 @@ from . import (  # noqa: E402
     conversation,
     deferral,
     emit,
-    error_tracker,
     human_guidance,
     image_gen,
     meta,
@@ -38,11 +36,10 @@ from .code_exec import *  # noqa: F401,F403
 from .conversation import *  # noqa: F401,F403
 from .deferral import *  # noqa: F401,F403
 from .emit import *  # noqa: F401,F403
-from .error_tracker import *  # noqa: F401,F403
 from .human_guidance import *  # noqa: F401,F403
 from .image_gen import *  # noqa: F401,F403
 from .meta import *  # noqa: F401,F403
 from .project import *  # noqa: F401,F403
 from .search import *  # noqa: F401,F403
 
-build_facade(__all__, search, browser, code_exec, conversation, image_gen, meta, project, error_tracker, human_guidance, emit, deferral)
+build_facade(__all__, search, browser, code_exec, conversation, image_gen, meta, project, human_guidance, emit, deferral)

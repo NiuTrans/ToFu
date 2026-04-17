@@ -19,11 +19,11 @@ def _is_conn_dead(exc: Exception) -> bool:
     Used to break the cascade where a single connection drop causes
     errors for ALL remaining queries in a crawl loop.
     """
-    import psycopg2
-    if isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError)):
+    import sqlite3
+    if isinstance(exc, sqlite3.OperationalError):
         return True
     msg = str(exc).lower()
-    return 'connection already closed' in msg or 'server closed the connection' in msg
+    return 'database is locked' in msg or 'disk I/O error' in msg
 
 
 def _parse_llm_json(raw_content: str) -> dict:

@@ -1,0 +1,44 @@
+
+\begin{tcolorbox}[
+    enhanced,
+    % title=JUDGE QUERY RELATED TO CORRECT DOCUMENT,
+    colback=white, % 白色背景
+    colframe=black, % 黑色边框
+    arc=5mm, % 设置圆角半径
+    boxrule=1pt,
+    left=2mm, % 左内边距
+    right=2mm, % 右内边距
+    top=1mm, % 上内边距
+    bottom=1mm % 下内边距
+]
+
+You are provided with several reference documents and a question. Each document begins with its unique identifier in the format [Document ID]. Your task is to determine which one document is the most probable source for the answer to the question. You must select only one document.\\
+
+**Example Scenario:**\\
+
+**Documents:**\\{}
+[1] The Eiffel Tower, located in Paris, France, was completed in 1889 for the World's Fair. It is one of the most recognizable structures globally and stands 330 meters tall. Gustave Eiffel's company designed and built the tower.\\
+---\\{}
+[2] The Statue of Liberty, a gift from France to the United States, stands on Liberty Island in New York Harbor. It was dedicated on October 28, 1886. It represents Libertas, the Roman goddess of freedom.\\
+---\\{}
+[3] Big Ben is the nickname for the Great Bell of the striking clock at the north end of the Palace of Westminster in London, UK. The tower housing the clock is officially named the Elizabeth Tower. It was completed in 1859.\\
+
+**Question:**\\
+Who designed the Eiffel Tower?\\
+
+**Justification:**\\
+Document [1] is the only document that discusses the Eiffel Tower and explicitly mentions that "Gustave Eiffel's company designed and built the tower". Documents [2] and [3] describe the Statue of Liberty and Big Ben, respectively, and contain no information relevant to the designer of the Eiffel Tower.\\
+**Document ID:**\\{}
+[1]\\
+---\\
+
+**Now, it's your turn to determine which one document is the most probable source:**\\
+
+**Documents:**\\
+\{DOCUMENTS\}\\
+
+**Question:**\\
+\{QUESTION\}\\
+
+
+\end{tcolorbox}

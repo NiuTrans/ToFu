@@ -18,7 +18,6 @@ from lib.tools import (
     BROWSER_TOOLS,
     CODE_EXEC_TOOL,
     EMIT_TO_USER_TOOL,
-    ERROR_TRACKER_TOOLS,
     FETCH_URL_TOOL,
     PROJECT_TOOLS,
     SEARCH_TOOL_MULTI,
@@ -230,11 +229,6 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
         from lib.tools.image_gen import GENERATE_IMAGE_TOOL
         tool_list.append(GENERATE_IMAGE_TOOL)
         logger.debug('[Task %s] 🎨 Image generation tool enabled', tid)
-
-    # ★ Error tracker tools — available when project mode is enabled
-    if project_enabled:
-        tool_list.extend(ERROR_TRACKER_TOOLS)
-        logger.debug('[Task %s] 🔍 Error tracker tools enabled', tid)
 
     # ★ Conversation reference tools — only available when user @-mentions a conversation
     #   Detect by checking if any user message contains [REFERENCED_CONVERSATION

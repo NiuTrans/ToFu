@@ -51,7 +51,10 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         tool_content = execute_tool(fn_name, fn_args, '.', conv_id=task['convId'], task_id=task['id'])
     else:
         _stdin_cb = _make_stdin_callback(task, rn, round_entry, fn_args.get('command', '')) if fn_name == 'run_command' else None
-        tool_content = execute_tool(fn_name, fn_args, project_path, conv_id=task['convId'], task_id=task['id'], stdin_callback=_stdin_cb) if project_path else 'Error: No project path.'
+        _extra_kw = {'stdin_callback': _stdin_cb} if _stdin_cb else {}
+        if fn_name == 'run_command':
+            _extra_kw['task'] = task  # enable cooperative abort of subprocesses
+        tool_content = execute_tool(fn_name, fn_args, project_path, conv_id=task['convId'], task_id=task['id'], **_extra_kw) if project_path else 'Error: No project path.'
 
     # read_files with absolute image paths returns a batch dict with __batch_images__
     is_batch_image = isinstance(tool_content, dict) and tool_content.get('__batch_images__')

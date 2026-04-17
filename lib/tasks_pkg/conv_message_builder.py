@@ -36,6 +36,105 @@ _UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))), 'uploads')
 
 
+def build_branch_api_messages(
+    conv_id: str,
+    msg_idx: int,
+    branch_idx: int,
+    config: dict,
+) -> list[dict] | None:
+    """Build API-ready messages for a branch conversation.
+
+    Loads the main conversation from DB, extracts context up to the branch
+    anchor point, appends the branch's own messages (decorated with topic
+    and selection context), then runs the standard ``_transform_messages``
+    pipeline.
+
+    Parameters
+    ----------
+    conv_id : str
+        Parent conversation ID.
+    msg_idx : int
+        Index of the message in the parent conversation that the branch
+        is attached to.
+    branch_idx : int
+        Index of the branch within ``messages[msg_idx].branches``.
+    config : dict
+        Task config dict (reads ``systemPrompt``).
+
+    Returns
+    -------
+    list[dict] | None
+        API-ready message list, or None if conversation/branch not found.
+    """
+    raw_messages = _load_messages_from_db(conv_id)
+    if raw_messages is None:
+        return None
+
+    # Validate indices
+    if msg_idx < 0 or msg_idx >= len(raw_messages):
+        logger.warning('[MsgBuilder] Branch msg_idx=%d out of range (conv=%s, len=%d)',
+                       msg_idx, conv_id[:8], len(raw_messages))
+        return None
+
+    parent_msg = raw_messages[msg_idx]
+    branches = parent_msg.get('branches') or []
+    if branch_idx < 0 or branch_idx >= len(branches):
+        logger.warning('[MsgBuilder] Branch branch_idx=%d out of range (conv=%s, msg_idx=%d, len=%d)',
+                       branch_idx, conv_id[:8], msg_idx, len(branches))
+        return None
+
+    branch = branches[branch_idx]
+    branch_msgs = branch.get('messages') or []
+
+    # ── Determine context cut-off in the main conversation ──
+    # Context = all completed rounds BEFORE the round being branched.
+    # Branching from assistant at index N: include up to the user message
+    # before N (exclude the user message that triggered the assistant reply).
+    if parent_msg.get('role') == 'assistant' and msg_idx > 0:
+        context_end = msg_idx
+        for j in range(msg_idx - 1, -1, -1):
+            if raw_messages[j].get('role') == 'user':
+                context_end = j
+            else:
+                break
+    else:
+        context_end = msg_idx
+
+    main_context = raw_messages[:context_end]
+
+    # ── Branch messages: exclude the trailing empty assistant placeholder ──
+    trimmed_branch = list(branch_msgs)
+    if trimmed_branch:
+        last = trimmed_branch[-1]
+        if (last.get('role') == 'assistant'
+                and not last.get('content')
+                and not last.get('toolSummary')
+                and not last.get('toolRounds')):
+            trimmed_branch = trimmed_branch[:-1]
+
+    # ── Decorate the first branch user message with topic + selection context ──
+    decorated_branch = []
+    for k, m in enumerate(trimmed_branch):
+        if k == 0 and m.get('role') == 'user':
+            m = dict(m)  # copy to avoid mutating original
+            prefix = f'[分支话题: {branch.get("title", "")}]'
+            parent_selection = branch.get('parentSelection', '')
+            if parent_selection:
+                prefix += (f'\n[选中的上下文]\n'
+                           f'{parent_selection[:2000]}\n[/选中的上下文]')
+            m['content'] = f'{prefix}\n{m.get("content", "")}'
+            decorated_branch.append(m)
+        else:
+            decorated_branch.append(m)
+
+    # ── Combine and transform ──
+    combined = main_context + decorated_branch
+    logger.info('[MsgBuilder] Branch conv=%s msg=%d branch=%d: context=%d + branch=%d msgs',
+                conv_id[:8], msg_idx, branch_idx, len(main_context), len(decorated_branch))
+
+    return _transform_messages(combined, config)
+
+
 def build_api_messages_from_db(
     conv_id: str,
     config: dict,
@@ -120,13 +219,20 @@ def _transform_messages(
                 and not last.get('toolRounds')):
             src = src[:-1]
 
+    # ── Pre-process: collapse historical endpoint sessions ──
+    # Historical (completed) endpoint sessions are replaced with just their
+    # last worker output so follow-up messages have proper context.
+    # The trailing (current/in-progress) session's messages are left as-is
+    # for the skip-filter below.
+    src = _collapse_historical_endpoint_sessions(src)
+
     for msg in src:
         # 2. Skip endpoint-mode display-only messages
+        #    Only the trailing (current in-progress) endpoint session survives
+        #    _collapse_historical_endpoint_sessions — skip all its messages.
         #    _isEndpointReview = critic feedback (role=user)
         #    _isEndpointPlanner = planner output (role=assistant)
         #    _epIteration = worker turn output (role=assistant)
-        #    These are all display-only; the endpoint orchestrator manages its
-        #    own working message list for the LLM (see endpoint.py).
         if msg.get('_isEndpointReview'):
             continue
         if msg.get('_isEndpointPlanner'):
@@ -282,6 +388,65 @@ def _build_assistant_message(msg: dict) -> dict:
     # Never skip assistant messages — use tool summary as placeholder
     content = msg.get('content') or tool_ctx
     return {'role': 'assistant', 'content': content}
+
+
+def _collapse_historical_endpoint_sessions(src: list[dict]) -> list[dict]:
+    """Replace completed endpoint sessions with their last worker output.
+
+    An endpoint session is a contiguous block of messages tagged with
+    ``_isEndpointPlanner``, ``_isEndpointReview``, or ``_epIteration``.
+
+    - **Historical** sessions (followed by non-endpoint messages): the entire
+      block is collapsed to just the last worker output (highest ``_epIteration``),
+      stripped of its endpoint marker so downstream treats it as a normal
+      assistant message.  This preserves conversation context for follow-up
+      questions.
+    - **Trailing** session (at the end, no non-endpoint messages after): left
+      as-is for the main loop to skip (current in-progress session managed by
+      ``endpoint.py``).
+    """
+    if not src:
+        return src
+
+    result = []
+    i = 0
+    while i < len(src):
+        msg = src[i]
+        is_ep = (msg.get('_isEndpointReview')
+                 or msg.get('_isEndpointPlanner')
+                 or msg.get('_epIteration'))
+
+        if not is_ep:
+            result.append(msg)
+            i += 1
+            continue
+
+        # Found an endpoint block — scan to its end
+        block_start = i
+        last_worker = None
+        while i < len(src):
+            m = src[i]
+            if (not m.get('_isEndpointReview')
+                    and not m.get('_isEndpointPlanner')
+                    and not m.get('_epIteration')):
+                break
+            if m.get('_epIteration') and m.get('role') == 'assistant':
+                last_worker = m  # track the final worker output
+            i += 1
+
+        if i < len(src):
+            # Historical block — include the last worker output as normal assistant
+            if last_worker:
+                clean_worker = dict(last_worker)
+                clean_worker.pop('_epIteration', None)
+                result.append(clean_worker)
+            # else: no worker output (e.g. aborted during planning) — skip entire block
+        else:
+            # Trailing block — current session, keep as-is for the skip filter
+            for j in range(block_start, i):
+                result.append(src[j])
+
+    return result
 
 
 def _merge_consecutive_same_role(messages: list) -> None:

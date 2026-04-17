@@ -7,7 +7,8 @@
 <p align="center">
   <a href="https://github.com/rangehow/ToFu/actions/workflows/ci.yml"><img src="https://github.com/rangehow/ToFu/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776ab?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/PostgreSQL-18+-336791?logo=postgresql&logoColor=white" alt="PostgreSQL" />
+  <img src="https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
+  <img src="https://img.shields.io/badge/PostgreSQL-18+ (可选)-336791?logo=postgresql&logoColor=white" alt="PostgreSQL 可选" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
   <img src="https://img.shields.io/badge/platform-Linux%20·%20macOS%20·%20Windows-lightgrey" alt="Platform" />
 </p>
@@ -50,7 +51,9 @@ git clone https://github.com/rangehow/ToFu.git && cd ToFu
 python install.py
 ```
 
-安装脚本会自动创建虚拟环境、安装依赖、初始化 PostgreSQL 并启动服务器。就绪后打开 **http://localhost:15000**。
+安装脚本会自动创建虚拟环境、安装依赖并启动服务器。就绪后打开 **http://localhost:15000**。
+
+> 💾 **数据库：开箱即用、无需配置。** Tofu 默认使用 **SQLite** —— Python 内置，无需安装。如果系统中有 PostgreSQL，Tofu 会自动初始化并升级为 PG 后端（支持 100+ 用户更高并发）。设置 `CHATUI_DB_BACKEND=sqlite` 即可强制使用 SQLite。
 
 ```bash
 # 预配置 API 密钥和端口
@@ -75,15 +78,29 @@ docker compose up -d
 <details>
 <summary><strong>手动安装</strong>（完全控制）</summary>
 
-**前提条件：** Python 3.10+，PostgreSQL 18+，ripgrep & fd-find（推荐）
+**前提条件：** Python 3.10+，ripgrep & fd-find（推荐）。PostgreSQL 18+ 为*可选* —— Tofu 默认使用 SQLite。
+
+> 💡 **强烈推荐：使用 [Miniforge](https://github.com/conda-forge/miniforge) 管理 Python 环境。**
+> 旧版系统自带的 conda/Anaconda 经常导致依赖冲突。安装最新版 Miniforge 可获得干净、最新的 conda-forge 环境：
+> ```bash
+> # 下载并安装 Miniforge（Linux x86_64 示例）
+> wget -O /tmp/Miniforge3.sh "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
+> bash /tmp/Miniforge3.sh -b -p ~/miniforge3
+> ~/miniforge3/bin/conda init bash && source ~/.bashrc
+>
+> # 创建专用环境
+> conda create -n tofu python=3.10 -y
+> conda activate tofu
+> ```
+> 其他平台请参考 [Miniforge 发布页面](https://github.com/conda-forge/miniforge/releases)。
 
 ```bash
 git clone https://github.com/rangehow/ToFu.git && cd ToFu
 
-# 创建环境
+# 创建环境（如果已用 conda/Miniforge 则跳过此步）
 python -m venv .venv && source .venv/bin/activate
 
-# 安装 PostgreSQL（如尚未安装）
+# 可选：安装 PostgreSQL 以获得更高并发（SQLite 开箱即用）
 # macOS:   brew install postgresql@18
 # Ubuntu:  sudo apt install postgresql
 # conda:   conda install -c conda-forge postgresql>=18
@@ -104,7 +121,7 @@ python server.py
 
 </details>
 
-> **PostgreSQL** 以本地用户态进程运行 —— 无需 `sudo`，无需系统服务。首次启动时数据库自动初始化（initdb、建表、端口选择）。
+> **数据库自动检测：**首次启动时，Tofu 优先尝试 PostgreSQL（更好的并发性）；如 PG 不可用则自动回退到 **SQLite** —— 你无需任何操作。PostgreSQL 如存在会以本地用户态进程运行（无需 `sudo`，无需系统服务）。设置 `CHATUI_DB_BACKEND=sqlite` 即可强制使用 SQLite。
 
 > **缺少依赖？** 如果有任何 pip 包缺失，`server.py` 会自动委托给 `bootstrap.py`，通过 LLM 诊断错误并自动 `pip install` 所需的包 —— 即使*所有*依赖都缺失也能工作。
 
@@ -120,7 +137,7 @@ python server.py
 
 | 服务商 | 配置方式 |
 |---|---|
-| OpenAI、Anthropic、Google Gemini、DeepSeek、Qwen、MiniMax、GLM、Doubao、Mistral、Grok、百度千帆、OpenRouter | 点击 **⚡ 从模板添加** —— 一键完成 |
+| OpenAI、Anthropic、Amazon Bedrock、Google Gemini、DeepSeek、Qwen、MiniMax、GLM、Doubao、Mistral、Grok、百度千帆、OpenRouter | 点击 **⚡ 从模板添加** —— 一键完成 |
 | Ollama、vLLM 或任何本地模型服务 | 添加为自定义服务商，填入你的本地端点 |
 | Azure OpenAI | 模板可用，填入部署专属的 Base URL |
 
@@ -348,6 +365,22 @@ python lib/desktop_agent.py --server http://your-server:15000 --allow-write --al
 
 ---
 
+### 📄 论文阅读模式（Beta）
+
+阅读科研论文 —— arXiv PDF、会议论文集、内部白皮书 —— Paper Reader 把 Tofu 变成一个専用的科研阅读伙伴。
+
+**使用方法：** 点击侧边栏的 **📄 Paper** 按钮。页面分屏：**左侧 PDF、右侧对话 + 笔记**。上传 PDF 或粘贴 arXiv 链接（`arxiv.org/abs/XXXX.XXXXX`） —— Tofu 会抓取、解析、索引全文，令助手能基于论文内容精准回答。
+
+**能做什么：**
+- **有据可依的问答** —— “表 3 的消融实验结果是什么？”或“解释 4.2 节”，助手会引用具体段落
+- **论文库** —— 左侧侧边栏展示你读过的所有论文，按时间分组；切换论文不丢失上下文
+- **并排阅读** —— 滚动 PDF 的同时聊天；助手可感知你当前所在页面
+- **笔记面板** —— 在论文旁边记录你自己的笔记，跨会话持久保存
+
+> ⚠️ **Beta：** 论文阅读模式正在持续迭代中，欢迎在 [GitHub Issues](https://github.com/rangehow/ToFu/issues) 反馈。
+
+---
+
 ### 🖼️ 图片生成
 
 当你需要视觉内容 —— 插图、图表、Logo、修图 —— 助手可以在对话中直接生成图片。
@@ -501,7 +534,7 @@ vim .env   # 填入你的值
 │   ├── agent_backends/        CLI 后端切换（内置/Claude Code/Codex）
 │   ├── llm_client.py          LLM API 客户端（流式，重试）
 │   ├── llm_dispatch/          多密钥多模型智能调度器
-│   ├── database/              PostgreSQL（自动初始化，迁移）
+│   ├── database/              双后端—— SQLite 默认，PostgreSQL 自动初始化
 │   ├── tasks_pkg/             任务编排与上下文压缩
 │   │   ├── orchestrator.py    LLM ↔ 工具主循环
 │   │   ├── executor.py        工具执行引擎
@@ -536,7 +569,8 @@ vim .env   # 填入你的值
 | 功能 | Linux | macOS | Windows |
 |---|:---:|:---:|:---:|
 | 核心对话与工具 | ✅ | ✅ | ✅ |
-| PostgreSQL 自动初始化 | ✅ | ✅ | ✅ |
+| SQLite（默认，零配置） | ✅ | ✅ | ✅ |
+| PostgreSQL 自动初始化（可选） | ✅ | ✅ | ✅ |
 | 项目协作 | ✅ | ✅ | ✅ |
 | Shell 命令 | ✅ | ✅ | ✅ (`cmd.exe`) |
 | 桌面代理 | ✅ | ✅ | ✅ |

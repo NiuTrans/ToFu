@@ -9,7 +9,7 @@ time the kernel FUSE connection stales, causing ALL subsequent I/O on
 ``/mnt/your-fs`` to block in uninterruptible sleep (D-state) for
 minutes or even hours — until the network path recovers.
 
-Because PostgreSQL's ``data/pgdata/`` lives on the same FUSE mount,
+Because the application's database and files live on the same FUSE mount,
 the entire application (task checkpoints, DB queries, tool I/O) freezes
 until the mount wakes up.
 
@@ -66,11 +66,9 @@ STAT_WARN_THRESHOLD_S = 5.0
 # If stat() doesn't return within this time, consider the mount stale.
 STAT_TIMEOUT_S = 30.0
 
-# Paths to stat — we touch the project root (data/) and pgdata.
-# If pgdata doesn't exist yet (fresh install), we just stat the project root.
+# Paths to stat — we touch the project data dir and logs dir.
 _PROBE_PATHS = [
     os.path.join(_BASE_DIR, 'data'),
-    os.path.join(_BASE_DIR, 'data', 'pgdata'),
     os.path.join(_BASE_DIR, 'logs'),
 ]
 

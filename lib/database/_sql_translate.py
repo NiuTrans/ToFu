@@ -75,6 +75,8 @@ def _get_pk_columns(table_name):
         'proactive_poll_log':         ['id'],
         # Error tracking
         'error_resolutions':          ['fingerprint'],
+        # Paper reports
+        'paper_reports':              ['paper_hash', 'lang'],
     }
     return _PK_MAP.get(table_name)
 

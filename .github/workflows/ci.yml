@@ -89,28 +89,7 @@ jobs:
     needs: lint
     timeout-minutes: 15
 
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: chatui
-          POSTGRES_PASSWORD: chatui
-          POSTGRES_DB: chatui
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U chatui"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    env:
-      CHATUI_PG_HOST: localhost
-      CHATUI_PG_PORT: "5432"
-      CHATUI_PG_USER: chatui
-      CHATUI_PG_PASSWORD: chatui
-      CHATUI_PG_DBNAME: chatui
-
+    # No service containers needed — SQLite is built into Python
     steps:
       - uses: actions/checkout@v4
 
@@ -150,5 +129,3 @@ jobs:
 
       - name: Run healthcheck
         run: python healthcheck.py
-
-

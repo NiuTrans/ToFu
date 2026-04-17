@@ -41,7 +41,9 @@ from lib.project_mod.read_tools import (  # noqa: E402,F401
     _merge_same_file_ranges,
     _python_grep,
     tool_find_files,
+    tool_find_files_batch,
     tool_grep,
+    tool_grep_batch,
     tool_list_dir,
     tool_read_files,
 )
@@ -367,7 +369,7 @@ _SNAPSHOT_MAX_DEPTH = 6
 # whose internal churn is so extreme that even snapshotting them is wasteful
 # (thousands of small files changing every second).
 _SNAPSHOT_EXTRA_IGNORE = {
-    'pgdata',           # PostgreSQL internal files (WAL, base/, pg_stat, …)
+    'pgdata',           # legacy PostgreSQL data dir (if present from old installs)
 }
 
 # ── Command destructiveness analysis ──────────────────────────────────
@@ -793,7 +795,7 @@ def _snapshot_project_files(base_path):
             if depth > _SNAPSHOT_MAX_DEPTH:
                 dirnames.clear()
                 continue
-            # Prune ignored dirs in-place — exclude IGNORE_DIRS + DB engine dirs
+            # Prune ignored dirs in-place — exclude per-project ignore + DB engine dirs
             # Note: dot-dirs like .chatui/.project_sessions are still walked
             # so that destructive commands targeting them are tracked.
             dirnames[:] = [
@@ -889,7 +891,7 @@ def _record_run_command_changes(base_path, changes, conv_id=None, task_id=None):
 # Checked each iteration of the select() loop (~every 0.2s). No timing heuristics.
 
 
-def _format_run_output(command, stdout, stderr, exit_code, timed_out=False):
+def _format_run_output(command, stdout, stderr, exit_code, timed_out=False, aborted=False):
     """Format command output into the standard result text."""
     output_parts = []
     if stdout.strip():
@@ -913,14 +915,16 @@ def _format_run_output(command, stdout, stderr, exit_code, timed_out=False):
     result_text = f'$ {command}\n'
     if output:
         result_text += f'{output}\n'
-    if timed_out:
+    if aborted:
+        result_text += '\n🛑 Command aborted by user.\n[exit code: -1]'
+    elif timed_out:
         result_text += '\n⏰ Command timed out.\n[exit code: -1]'
     else:
         result_text += f'\n[exit code: {exit_code}]'
     return result_text
 
 
-def tool_run_command(base, command, timeout=None, stdin_callback=None):
+def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None):
     """Execute a shell command with optional interactive stdin support.
 
     Args:
@@ -932,6 +936,8 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None):
             The callback should block until the user provides input (or return
             None to send EOF).  If not provided, stdin is closed immediately
             (original non-interactive behavior).
+        task: Optional task dict — when provided, the subprocess is killed
+            if ``task['aborted']`` becomes True (cooperative abort).
     """
     if not command or not command.strip():
         return '❌ Empty command.'
@@ -975,38 +981,121 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None):
 
     # ── Non-interactive fast path (no stdin_callback) ──
     if not stdin_callback:
-        return _run_command_simple(command, full_command, timeout, base)
+        return _run_command_simple(command, full_command, timeout, base, task=task)
 
     # ── Interactive path: Popen with stdin pipe + stdin detection ──
     return _run_command_interactive(command, full_command, timeout, base, stdin_callback)
 
 
-def _run_command_simple(command, full_command, timeout, base):
-    """Original subprocess.run approach — no stdin interaction."""
+def _run_command_simple(command, full_command, timeout, base, task=None):
+    """Execute command with abort-awareness via Popen + polling.
+
+    When *task* is provided, the subprocess PID is stored on the task dict
+    so the abort handler can kill it directly.  The polling loop checks
+    ``task['aborted']`` every 0.5s and terminates the subprocess if set.
+    """
     from lib.compat import get_shell_args
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             get_shell_args(full_command),
             shell=False,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             text=True,
-            timeout=timeout,
             cwd=base,
             errors='replace',
             env=_get_cmd_env(),
+            start_new_session=True,  # own process group for clean kill
         )
+        # Store PID on task so abort handler can kill it directly
+        if task is not None:
+            task['_subprocess_pid'] = proc.pid
+            task['_subprocess_pgid'] = None
+            try:
+                task['_subprocess_pgid'] = os.getpgid(proc.pid)
+            except OSError:
+                pass
+
+        # Polling loop: wait for completion, checking abort every 0.5s
+        _POLL_INTERVAL = 0.5
+        _start = time.time()
+        _aborted = False
+        while True:
+            try:
+                proc.wait(timeout=_POLL_INTERVAL)
+                break  # process exited
+            except subprocess.TimeoutExpired:
+                pass
+
+            # Check abort flag
+            if task and task.get('aborted'):
+                logger.info('[run_command] Task aborted — killing subprocess PID %d: %s',
+                            proc.pid, command[:80])
+                _kill_process_tree(proc)
+                _aborted = True
+                break
+
+            # Check wall-clock timeout
+            if timeout is not None and (time.time() - _start) >= timeout:
+                logger.warning('run_command timed out after %ss — killing PID %d',
+                               timeout, proc.pid)
+                _kill_process_tree(proc)
+                # Clean up task ref
+                if task is not None:
+                    task.pop('_subprocess_pid', None)
+                    task.pop('_subprocess_pgid', None)
+                return _format_run_output(command, '', '', -1, timed_out=True)
+
+        # Clean up task ref
+        if task is not None:
+            task.pop('_subprocess_pid', None)
+            task.pop('_subprocess_pgid', None)
+
+        if _aborted:
+            stdout = ''
+            stderr = ''
+            try:
+                stdout, stderr = proc.communicate(timeout=2)
+            except Exception:
+                pass
+            return _format_run_output(command, stdout, stderr, -1, timed_out=False,
+                                      aborted=True)
+
+        stdout, stderr = proc.stdout.read(), proc.stderr.read()
+        proc.stdout.close()
+        proc.stderr.close()
         logger.info('run_command done: exit=%d, stdout=%dch, stderr=%dch',
-                     result.returncode, len(result.stdout or ''), len(result.stderr or ''))
-        return _format_run_output(command, result.stdout or '', result.stderr or '',
-                                  result.returncode)
-    except subprocess.TimeoutExpired:
-        logger.warning('run_command timed out after %ss', timeout)
-        return _format_run_output(command, '', '', -1, timed_out=True)
+                     proc.returncode, len(stdout or ''), len(stderr or ''))
+        return _format_run_output(command, stdout or '', stderr or '',
+                                  proc.returncode)
     except Exception as e:
         logger.error('run_command error: %s', e, exc_info=True)
         return (f'$ {command}\n\n'
                 f'❌ Error executing command: {e}\n'
                 f'[exit code: -1]')
+
+
+def _kill_process_tree(proc):
+    """Kill a subprocess and all its children via process group, with fallback."""
+    import signal
+    pid = proc.pid
+    try:
+        pgid = os.getpgid(pid)
+        os.killpg(pgid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            os.killpg(pgid, signal.SIGKILL)
+            proc.wait(timeout=2)
+        logger.info('[run_command] Killed process group pgid=%d (pid=%d)', pgid, pid)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.debug('[run_command] Process group kill failed: %s — trying direct kill', e)
+        try:
+            proc.kill()
+            proc.wait(timeout=2)
+        except Exception as e2:
+            logger.warning('[run_command] Direct kill also failed for pid=%d: %s', pid, e2)
 
 
 # Commands that read stdin as a data source (piped input) rather than for
@@ -1486,6 +1575,31 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
                 continue
         return tool_read_files(base_path, resolved)
     elif fn_name == 'grep_search':
+        # ★ Batch mode: if 'searches' array is present, run all searches
+        searches = fn_args.get('searches')
+        if searches and isinstance(searches, list):
+            # Resolve paths in each search spec for multi-root
+            resolved = []
+            for spec in searches:
+                if not isinstance(spec, dict):
+                    continue
+                sp = spec.get('path')
+                if sp:
+                    bp2, rp2 = _resolve_base(base_path, sp)
+                    spec = dict(spec, path=rp2, _base=bp2)
+                else:
+                    spec = dict(spec, _base=base_path)
+                resolved.append(spec)
+            # Group by base and run batch per base
+            from collections import OrderedDict
+            by_base = OrderedDict()
+            for spec in resolved:
+                bp2 = spec.pop('_base', base_path)
+                by_base.setdefault(bp2, []).append(spec)
+            parts = []
+            for bp2, specs in by_base.items():
+                parts.append(tool_grep_batch(bp2, specs))
+            return '\n\n'.join(parts)
         search_path = fn_args.get('path')
         bp = base_path
         if search_path:
@@ -1496,6 +1610,29 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
                          max_results=fn_args.get('max_results'),
                          count_only=bool(fn_args.get('count_only', False)))
     elif fn_name == 'find_files':
+        # ★ Batch mode: if 'searches' array is present, run all finds
+        searches = fn_args.get('searches')
+        if searches and isinstance(searches, list):
+            resolved = []
+            for spec in searches:
+                if not isinstance(spec, dict):
+                    continue
+                sp = spec.get('path')
+                if sp:
+                    bp2, rp2 = _resolve_base(base_path, sp)
+                    spec = dict(spec, path=rp2, _base=bp2)
+                else:
+                    spec = dict(spec, _base=base_path)
+                resolved.append(spec)
+            from collections import OrderedDict
+            by_base = OrderedDict()
+            for spec in resolved:
+                bp2 = spec.pop('_base', base_path)
+                by_base.setdefault(bp2, []).append(spec)
+            parts = []
+            for bp2, specs in by_base.items():
+                parts.append(tool_find_files_batch(bp2, specs))
+            return '\n\n'.join(parts)
         search_path = fn_args.get('path')
         bp = base_path
         if search_path:
@@ -1613,7 +1750,8 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
         result = tool_run_command(cwd,
                                   command_str,
                                   fn_args.get('timeout', None),
-                                  stdin_callback=kwargs.get('stdin_callback'))
+                                  stdin_callback=kwargs.get('stdin_callback'),
+                                  task=kwargs.get('task'))
 
         # ★ Diff snapshot after command (only if we took one)
         if snap_before is not None:
@@ -1700,6 +1838,16 @@ def project_tool_display(fn_name, fn_args):
         suffix = f' +{n_files - 4} more' if n_files > 4 else ''
         return f'Read {n_files} file{"s" if n_files != 1 else ""}: {"; ".join(parts)}{suffix}'
     elif fn_name == 'grep_search':
+        # ★ Batch mode
+        searches = fn_args.get('searches')
+        if searches and isinstance(searches, list):
+            n = len(searches)
+            pats = []
+            for s in searches[:4]:
+                if isinstance(s, dict):
+                    pats.append(s.get('pattern', '?')[:30])
+            suffix = f' +{n - 4} more' if n > 4 else ''
+            return f'grep {n} patterns: /{"; /".join(pats)}/{suffix}'
         pat = fn_args.get('pattern', '?')[:40]
         inc = fn_args.get('include', '')
         search_path = fn_args.get('path', '')
@@ -1714,6 +1862,16 @@ def project_tool_display(fn_name, fn_args):
     elif fn_name == 'list_dir':
         return f'List {fn_args.get("path", ".")}'
     elif fn_name == 'find_files':
+        # ★ Batch mode
+        searches = fn_args.get('searches')
+        if searches and isinstance(searches, list):
+            n = len(searches)
+            pats = []
+            for s in searches[:4]:
+                if isinstance(s, dict):
+                    pats.append(s.get('pattern', '?'))
+            suffix = f' +{n - 4} more' if n > 4 else ''
+            return f'Find {n} patterns: {", ".join(pats)}{suffix}'
         search_path = fn_args.get('path', '')
         return f'Find {fn_args.get("pattern", "?")}' + (f' in {search_path}' if search_path else '')
     elif fn_name == 'write_file':

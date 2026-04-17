@@ -343,8 +343,16 @@ def estimate_token_overhead(
     messages are compared to the frontend's summary-only messages.
     """
 
+    # Vision-API images cost a fixed number of tokens (NOT base64 length).
+    _IMG_TOKEN_COST = 800  # ~average for detail=high
+
     def _msg_chars(messages):
-        """Total characters across all message content."""
+        """Total characters across all message content.
+
+        Images are counted as fixed token cost (converted to char equivalent)
+        instead of their base64 byte length — the LLM API processes images
+        natively, not as text.
+        """
         total = 0
         for msg in messages:
             content = msg.get('content', '')
@@ -353,8 +361,11 @@ def estimate_token_overhead(
             elif isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict):
-                        total += len(block.get('text', ''))
-                        # Image URLs are huge but get stripped anyway
+                        if block.get('type') == 'text':
+                            total += len(block.get('text', ''))
+                        elif block.get('type') == 'image_url':
+                            # Fixed cost, not base64 length
+                            total += _IMG_TOKEN_COST * 4
             # Count tool_calls arguments
             for tc in msg.get('tool_calls', []):
                 fn = tc.get('function', {})

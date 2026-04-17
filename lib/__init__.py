@@ -12,6 +12,7 @@ __all__ = [
     'DOUBAO_MODEL', 'CLAUDE_SONNET_MODEL',
     'IMAGE_GEN_MODEL', 'EMBEDDING_MODELS',
     'TRADING_ENABLED',
+    'PPTX_TRANSLATE_ENABLED',
     'DEBUG_MODE',
     'FETCH_TOP_N', 'FETCH_TIMEOUT',
     'FETCH_MAX_CHARS_SEARCH', 'FETCH_MAX_CHARS_DIRECT',
@@ -187,6 +188,7 @@ def _resolve_feature_flag(env_key, json_key, default):
     return default
 
 TRADING_ENABLED = _resolve_feature_flag('TRADING_ENABLED', 'trading_enabled', False)
+PPTX_TRANSLATE_ENABLED = _resolve_feature_flag('PPTX_TRANSLATE_ENABLED', 'pptx_translate_enabled', False)
 DEBUG_MODE = _resolve_feature_flag('DEBUG_MODE', 'debug_mode', False)
 # Cache Extended TTL: 1h TTL for stable prefix (system+tools), 5m for tail
 CACHE_EXTENDED_TTL = _resolve_feature_flag('CACHE_EXTENDED_TTL', 'cache_extended_ttl', True)
@@ -306,6 +308,7 @@ def reload_config():
 
     # Feature flags
     _mod.TRADING_ENABLED = _resolve_feature_flag('TRADING_ENABLED', 'trading_enabled', False)
+    _mod.PPTX_TRANSLATE_ENABLED = _resolve_feature_flag('PPTX_TRANSLATE_ENABLED', 'pptx_translate_enabled', False)
     _mod.DEBUG_MODE = _resolve_feature_flag('DEBUG_MODE', 'debug_mode', False)
     _mod.CACHE_EXTENDED_TTL = _resolve_feature_flag('CACHE_EXTENDED_TTL', 'cache_extended_ttl', True)
 

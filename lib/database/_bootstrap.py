@@ -302,13 +302,13 @@ def _verify_pg_data_directory(host, port, pgdata, pg_user):
         else:
             logger.debug('[DB] Could not verify data_directory on %s:%d: %s',
                         host, port, result.stderr.strip()[:200])
-            return True
+            return False  # fail-safe: cannot verify → refuse to match
     except FileNotFoundError:
-        logger.debug('[DB] psql binary not found — skipping data_directory verification')
-        return True
+        logger.debug('[DB] psql binary not found — cannot verify data_directory')
+        return False  # fail-safe: no psql → refuse to match
     except Exception as e:
         logger.debug('[DB] data_directory check failed on %s:%d: %s', host, port, e)
-        return True
+        return False  # fail-safe: error → refuse to match
 
 
 def _pg_has_database(host, port, dbname, pg_user):
@@ -448,7 +448,7 @@ def _bootstrap_pg(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password, pg_d
             f.write(f'port = {free_port}\n')
             f.write("listen_addresses = '*'\n")
             f.write("unix_socket_directories = ''\n")
-            f.write("max_connections = 200\n")
+            f.write("max_connections = 500\n")
             f.write("idle_in_transaction_session_timeout = 300s\n")
         logger.info('[DB] Configured PG port=%d in postgresql.conf', free_port)
     except Exception as e:
@@ -591,50 +591,37 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
             )
             if result.returncode == 0:
                 is_ours = _verify_pg_data_directory(_local, pg_port, pgdata, pg_user)
-                has_our_db = False
                 if is_ours:
                     logger.info('[DB] PostgreSQL already running on %s:%d (verified ours)', _local, pg_port)
-                    has_our_db = True
-                else:
-                    has_our_db = _pg_has_database(_local, pg_port, pg_dbname, pg_user)
-                    if has_our_db:
-                        logger.info('[DB] PG on %s:%d is another project\'s instance, '
-                                   'but it has our database "%s" — reusing it', _local, pg_port, pg_dbname)
-                    else:
-                        logger.warning(
-                            '[DB] PG on %s:%d is NOT ours and lacks database "%s" '
-                            '— scanning nearby ports for our PG', _local, pg_port, pg_dbname)
-                        found_our_port = _scan_for_our_pg(_local, range(15432, 15440), pgdata, pg_user)
-                        if found_our_port:
-                            _ensure_database_exists(_local, found_our_port, pg_dbname, pg_user, pgdata)
-                            return {'PG_HOST': _local, 'PG_PORT': found_our_port,
-                                    'PG_DSN': _build_dsn(_local, found_our_port)}
-                if has_our_db:
                     _ensure_database_exists(_local, pg_port, pg_dbname, pg_user, pgdata)
                     return {'PG_HOST': _local, 'PG_PORT': pg_port,
                             'PG_DSN': _build_dsn(_local, pg_port)}
+                else:
+                    # NOT our PG — NEVER reuse another project's PG just because
+                    # it has a database with the same name. This prevents cross-project
+                    # data leakage and PID-file duel crashes.
+                    logger.warning(
+                        '[DB] PG on %s:%d is NOT ours (data_directory mismatch) '
+                        '— REFUSING to reuse. Scanning nearby ports for our PG.',
+                        _local, pg_port)
+                    found_our_port = _scan_for_our_pg(_local, range(15432, 15440), pgdata, pg_user)
+                    if found_our_port:
+                        _ensure_database_exists(_local, found_our_port, pg_dbname, pg_user, pgdata)
+                        return {'PG_HOST': _local, 'PG_PORT': found_our_port,
+                                'PG_DSN': _build_dsn(_local, found_our_port)}
         except Exception as _e:
             logger.debug('[DB] pg_isready localhost:%d check failed: %s', pg_port, _e)
 
-    # ── Step 2b: Scan nearby ports for our database ──
-    _scan_range = range(15432, 15440)
+    # ── Step 2b: Scan nearby ports for our PG by data_directory ──
+    # Only match by data_directory verification — NEVER by database name alone.
+    # This prevents cross-project data leakage when exported copies share the
+    # same database name but must use independent PG instances.
     _local = '127.0.0.1'
-    for _try_port in _scan_range:
-        try:
-            _chk = subprocess.run(
-                [_find_pg_binary('pg_isready'), '-h', _local, '-p', str(_try_port), '-d', 'template1'],
-                capture_output=True, text=True, timeout=2
-            )
-            if _chk.returncode != 0:
-                continue
-            if _pg_has_database(_local, _try_port, pg_dbname, pg_user):
-                logger.info('[DB] Found accessible PG with database "%s" on %s:%d '
-                           '(port scan fallback)', pg_dbname, _local, _try_port)
-                return {'PG_HOST': _local, 'PG_PORT': _try_port,
-                        'PG_DSN': _build_dsn(_local, _try_port)}
-        except Exception as e:
-            logger.debug('[DB] Port scan fallback %d failed: %s', _try_port, e)
-            continue
+    found_our_port = _scan_for_our_pg(_local, range(15432, 15440), pgdata, pg_user)
+    if found_our_port:
+        _ensure_database_exists(_local, found_our_port, pg_dbname, pg_user, pgdata)
+        return {'PG_HOST': _local, 'PG_PORT': found_our_port,
+                'PG_DSN': _build_dsn(_local, found_our_port)}
 
     # ── Step 3: Check if another machine owns the pgdata ──
     is_remote, remote_host = _pg_already_running_on_another_machine(pgdata, pg_port)

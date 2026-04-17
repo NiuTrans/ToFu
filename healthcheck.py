@@ -16,7 +16,13 @@ Checks:
   8. JS defensive guards  — Core JS libraries have typeof guards
 """
 
-import ast, os, sys, re, json, importlib, logging, py_compile
+import ast
+import importlib
+import logging
+import os
+import py_compile
+import re
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -375,7 +381,7 @@ print(f"\n{C.BOLD}{'═'*60}{C.END}")
 if errors:
     print(f"{C.BOLD}  RESULT: {C.FAIL} {len(errors)} error(s), {len(warnings)} warning(s){C.END}")
     print(f"{C.BOLD}{'═'*60}{C.END}")
-    print(f"\nErrors:")
+    print("\nErrors:")
     for i, e in enumerate(errors, 1):
         print(f"  {i}. {e}")
     sys.exit(1)

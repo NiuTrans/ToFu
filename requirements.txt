@@ -2,8 +2,10 @@ flask>=3.0
 flask-compress>=1.14
 requests>=2.31
 psutil>=5.9
-psycopg2-binary>=2.9
+# sqlite3 is built into Python — no external package needed
 trafilatura>=1.6
 playwright>=1.40
 Pillow>=10.0
+python-pptx>=0.6.21
+lxml>=4.9
 mcp>=1.0

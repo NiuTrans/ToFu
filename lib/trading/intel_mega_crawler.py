@@ -458,7 +458,7 @@ def _crawl_category_batch(
     Returns list of {query, fetched, error?} dicts.
 
     IMPORTANT: Each worker thread gets its own thread-local DB connection
-    via get_thread_db().  psycopg2 connections are NOT thread-safe — sharing
+    via get_thread_db().  DB connections are NOT thread-safe — sharing
     the caller's ``db`` across ThreadPoolExecutor workers causes
     ``InterfaceError: connection already closed``.
     """

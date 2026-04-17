@@ -29,6 +29,7 @@ const _BRAND_ICONS = {
   kimi: '<svg viewBox="0 0 24 24"><path d="M21.846 0a1.923 1.923 0 110 3.846H20.15a.226.226 0 01-.227-.226V1.923C19.923.861 20.784 0 21.846 0z"/><path d="M11.065 11.199l7.257-7.2c.137-.136.06-.41-.116-.41H14.3a.164.164 0 00-.117.051l-7.82 7.756c-.122.12-.302.013-.302-.179V3.82c0-.127-.083-.23-.185-.23H3.186c-.103 0-.186.103-.186.23V19.77c0 .128.083.23.186.23h2.69c.103 0 .186-.102.186-.23v-3.25c0-.069.025-.135.069-.178l2.424-2.406a.158.158 0 01.205-.023l6.484 4.772a7.677 7.677 0 003.453 1.283c.108.012.2-.095.2-.23v-3.06c0-.117-.07-.212-.164-.227a5.028 5.028 0 01-2.027-.807l-5.613-4.064c-.117-.078-.132-.279-.028-.381z"/></svg>',
   shubiaobiao: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".15"/><circle cx="12" cy="12" r="11" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 5a7 7 0 100 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M12 9a3 3 0 110 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="1" fill="currentColor"/></svg>',
   baiducloud: '<svg viewBox="0 0 24 24"><path d="M21.715 5.61l-3.983 2.31a.903.903 0 01-.896 0L12.44 5.384a.903.903 0 00-.897 0L7.156 7.92a.903.903 0 01-.896 0L2.276 5.617 12.002 0l9.713 5.61z"/><path d="M18.641 9.467a.89.89 0 00-.438.77v5.072a.896.896 0 01-.445.77l-4.428 2.51a.884.884 0 00-.445.777v4.607l4.429-2.536 5.31-3.047V7.157l-3.983 2.31z"/><path d="M10.98 18.941a.936.936 0 00-.305-.352l-4.429-2.516a.903.903 0 01-.431-.764v-5.078a.89.89 0 00-.452-.757l-.451-.26L1.38 7.158V18.39l5.311 3.047L11.126 24v-4.608a.881.881 0 00-.146-.45z"/></svg>',
+  bedrock: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="lobe-icons-bedrock-grad" x1="80%" x2="20%" y1="20%" y2="80%"><stop offset="0%" stop-color="#6350FB"/><stop offset="50%" stop-color="#3D8FFF"/><stop offset="100%" stop-color="#9AD8F8"/></linearGradient></defs><path d="M13.05 15.513h3.08c.214 0 .389.177.389.394v1.82a1.704 1.704 0 011.296 1.661c0 .943-.755 1.708-1.685 1.708-.931 0-1.686-.765-1.686-1.708 0-.807.554-1.484 1.297-1.662v-1.425h-2.69v4.663a.395.395 0 01-.188.338l-2.69 1.641a.385.385 0 01-.405-.002l-4.926-3.086a.395.395 0 01-.185-.336V16.3L2.196 14.87A.395.395 0 012 14.555L2 14.528V9.406c0-.14.073-.27.192-.34l2.465-1.462V4.448c0-.129.062-.249.165-.322l.021-.014L9.77 1.058a.385.385 0 01.407 0l2.69 1.675a.395.395 0 01.185.336V7.6h3.856V5.683a1.704 1.704 0 01-1.296-1.662c0-.943.755-1.708 1.685-1.708.931 0 1.685.765 1.685 1.708 0 .807-.553 1.484-1.296 1.662v2.311a.391.391 0 01-.389.394h-4.245v1.806h6.624a1.69 1.69 0 011.64-1.313c.93 0 1.685.764 1.685 1.707 0 .943-.754 1.708-1.685 1.708a1.69 1.69 0 01-1.64-1.314H13.05v1.937h4.953l.915 1.18a1.66 1.66 0 01.84-.227c.931 0 1.685.764 1.685 1.707 0 .943-.754 1.708-1.685 1.708-.93 0-1.685-.765-1.685-1.708 0-.346.102-.668.276-.937l-.724-.935H13.05v1.806zM9.973 1.856L7.93 3.122V6.09h-.778V3.604L5.435 4.669v2.945l2.11 1.36L9.712 7.61V5.334h.778V7.83c0 .136-.07.263-.184.335L7.963 9.638v2.081l1.422 1.009-.446.646-1.406-.998-1.53 1.005-.423-.66 1.605-1.055v-1.99L5.038 8.29l-2.26 1.34v1.676l1.972-1.189.398.677-2.37 1.429V14.3l2.166 1.258 2.27-1.368.397.677-2.176 1.311V19.3l1.876 1.175 2.365-1.426.398.678-2.017 1.216 1.918 1.201 2.298-1.403v-5.78l-4.758 2.893-.4-.675 5.158-3.136V3.289L9.972 1.856zM16.13 18.47a.913.913 0 00-.908.92c0 .507.406.918.908.918a.913.913 0 00.907-.919.913.913 0 00-.907-.92zm3.63-3.81a.913.913 0 00-.908.92c0 .508.406.92.907.92a.913.913 0 00.908-.92.913.913 0 00-.908-.92zm1.555-4.99a.913.913 0 00-.908.92c0 .507.407.918.908.918a.913.913 0 00.907-.919.913.913 0 00-.907-.92zM17.296 3.1a.913.913 0 00-.907.92c0 .508.406.92.907.92a.913.913 0 00.908-.92.913.913 0 00-.908-.92z" fill="url(#lobe-icons-bedrock-grad)" fill-rule="nonzero"/></svg>',
   generic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="9" cy="10" r="1.5" fill="currentColor" stroke="none"/><circle cx="15" cy="10" r="1.5" fill="currentColor" stroke="none"/><path d="M8.5 15.5c1 1.5 6 1.5 7 0" stroke-linecap="round"/></svg>',
 };
 
@@ -38,7 +39,7 @@ const _BRAND_COLORS = {
   doubao: '#3B82F6', minimax: '#ef4444', deepseek: '#4D6BFE', grok: '#aaa',
   mistral: '#F7D046', glm: '#3859FF', meituan: '#FFC300', tsinghua: '#82318E',
   kimi: '#ccc', openrouter: '#6566F1', mimo: '#FF6A00', baiducloud: '#2932E1',
-  shubiaobiao: '#E87A7A', generic: '#888',
+  shubiaobiao: '#E87A7A', bedrock: '#3D8FFF', generic: '#888',
 };
 
 const _BRAND_PATTERNS = [
@@ -50,6 +51,9 @@ const _BRAND_PATTERNS = [
   [/mimo|xiaomi/i,                         'mimo'],
   [/shubiaobiao|数标标/i,                      'shubiaobiao'],
   [/qianfan|ernie|baidu|wenxin|文心/i,       'baiducloud'],
+  // Bedrock must come before claude — Bedrock endpoints host Claude models
+  // but the provider identity is AWS/Bedrock.
+  [/bedrock|bedrock-runtime|amazonaws\.com\/openai|^us\.anthropic\.|^us\.amazon\.|amazon\.titan|amazon\.nova/i, 'bedrock'],
   [/claude|anthropic|opus|sonnet|haiku/i, 'claude'],
   [/gpt|openai|o[134]-|chatgpt|dall/i,   'openai'],
   [/gemini|gemma|palm|bard/i,             'gemini'],
@@ -102,7 +106,7 @@ function _brandSvg(brand, size) {
 // Generate new icons: python3 scripts/gen_tofu_icons.py
 // Convert PNG→SVG:    python3 scripts/png_to_svg.py
 
-const _ICON_V = '0.8.0';  // cache-bust version — bump when icons change
+const _ICON_V = '0.9.0';  // cache-bust version — bump when icons change
 const _ICON_BASE = (typeof BASE_PATH!=='undefined'?BASE_PATH:'') + '/static/icons';
 
 const _TOFU_PLANNER_SVG = `<img src="${_ICON_BASE}/tofu-planner.svg?v=${_ICON_V}" alt="Planner" style="width:100%;height:100%;display:block">`;
@@ -189,12 +193,32 @@ const _PROVIDER_TEMPLATES = [
     base_url: 'https://api.anthropic.com/v1',
     balance_url: 'https://api.anthropic.com/v1/dashboard/billing/subscription',
     models: [
-      { model_id: 'claude-opus-4-6',            capabilities: ['text', 'vision', 'thinking'], rpm: 30,  cost: 0.025 },
-      { model_id: 'claude-sonnet-4-6',           capabilities: ['text', 'vision', 'thinking'], rpm: 50,  cost: 0.015 },
+      { model_id: 'claude-opus-4-7',            capabilities: ['text', 'vision', 'thinking'], rpm: 30,  cost: 0.015 },
+      { model_id: 'claude-opus-4-6',            capabilities: ['text', 'vision', 'thinking'], rpm: 30,  cost: 0.015 },
+      { model_id: 'claude-sonnet-4-6',           capabilities: ['text', 'vision', 'thinking'], rpm: 50,  cost: 0.009 },
       { model_id: 'claude-sonnet-4-5',           capabilities: ['text', 'vision', 'thinking'], rpm: 50,  cost: 0.009 },
-      { model_id: 'claude-opus-4-5',             capabilities: ['text', 'vision', 'thinking'], rpm: 30,  cost: 0.025 },
-      { model_id: 'claude-haiku-4-5',            capabilities: ['text', 'vision', 'cheap'],    rpm: 100, cost: 0.005 },
+      { model_id: 'claude-opus-4-5',             capabilities: ['text', 'vision', 'thinking'], rpm: 30,  cost: 0.015 },
+      { model_id: 'claude-haiku-4-5',            capabilities: ['text', 'vision', 'cheap'],    rpm: 100, cost: 0.003 },
       { model_id: 'claude-sonnet-4-20250514',    capabilities: ['text', 'vision', 'thinking'], rpm: 50,  cost: 0.009 },
+    ],
+  },
+  {
+    key: 'bedrock', brand: 'bedrock', category: 'official',
+    name: 'Amazon Bedrock (OpenAI-compat)',
+    // Replace <region> with your AWS region (us-east-1, us-west-2, eu-west-1, etc.)
+    // Authenticate with an Amazon Bedrock API key (Bearer token).
+    base_url: 'https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1',
+    balance_url: '',
+    models: [
+      { model_id: 'us.anthropic.claude-opus-4-7-v1:0',      capabilities: ['text', 'vision', 'thinking'], rpm: 30,  cost: 0.015 },
+      { model_id: 'us.anthropic.claude-opus-4-6-v1:0',      capabilities: ['text', 'vision', 'thinking'], rpm: 30,  cost: 0.015 },
+      { model_id: 'us.anthropic.claude-sonnet-4-6-v1:0',    capabilities: ['text', 'vision', 'thinking'], rpm: 50,  cost: 0.009 },
+      { model_id: 'us.anthropic.claude-sonnet-4-5-v1:0',    capabilities: ['text', 'vision', 'thinking'], rpm: 50,  cost: 0.009 },
+      { model_id: 'us.anthropic.claude-opus-4-5-v1:0',      capabilities: ['text', 'vision', 'thinking'], rpm: 30,  cost: 0.015 },
+      { model_id: 'us.anthropic.claude-haiku-4-5-v1:0',     capabilities: ['text', 'vision', 'cheap'],    rpm: 100, cost: 0.003 },
+      { model_id: 'us.anthropic.claude-sonnet-4-20250514-v1:0', capabilities: ['text', 'vision', 'thinking'], rpm: 50,  cost: 0.009 },
+      { model_id: 'openai.gpt-oss-120b-1:0',                capabilities: ['text', 'thinking', 'cheap'],  rpm: 60,  cost: 0.001 },
+      { model_id: 'openai.gpt-oss-20b-1:0',                 capabilities: ['text', 'cheap'],              rpm: 120, cost: 0.0005 },
     ],
   },
   {
@@ -890,6 +914,12 @@ function openSettings() {
     };
   }
 
+  // PPTX translate module toggle
+  var pptxCb = document.getElementById('settingPptxTranslateEnabled');
+  if (pptxCb) {
+    pptxCb.checked = !!(typeof _featureFlags !== 'undefined' && _featureFlags.pptx_translate_enabled);
+  }
+
   // Debug mode toggle
   var debugCb = document.getElementById('settingDebugMode');
   if (debugCb) {
@@ -918,7 +948,7 @@ function openSettings() {
   // Show version in footer
   var verEl = document.getElementById('settingsVersion');
   if (verEl) {
-    fetch('api/health').then(function(r){return r.json()}).then(function(d){
+    fetch(apiUrl('/api/health')).then(function(r){return r.json()}).then(function(d){
       if(d.version) verEl.textContent = 'v' + d.version;
     }).catch(function(){});
   }
@@ -2674,7 +2704,26 @@ function saveSettings() {
     }
   }
 
-  // 2b. Debug mode toggle
+  // 2b. PPTX translate toggle
+  var pptxCb = document.getElementById('settingPptxTranslateEnabled');
+  if (pptxCb) {
+    var newPptx = pptxCb.checked;
+    var curPptx = !!(typeof _featureFlags !== 'undefined' && _featureFlags.pptx_translate_enabled);
+    if (newPptx !== curPptx) {
+      fetch(apiUrl('/api/features'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pptx_translate_enabled: newPptx }),
+      }).then(function(r) { return r.json(); }).then(function(data) {
+        if (data.ok) {
+          debugLog('PPTX translate ' + (newPptx ? 'enabled' : 'disabled'), 'success');
+          if (typeof _featureFlags !== 'undefined') _featureFlags.pptx_translate_enabled = newPptx;
+        }
+      }).catch(function(e) { debugLog('Feature flag save failed: ' + e.message, 'error'); });
+    }
+  }
+
+  // 2c. Debug mode toggle
   var debugCb = document.getElementById('settingDebugMode');
   if (debugCb) {
     var newDbg = debugCb.checked;
@@ -3304,26 +3353,31 @@ function _renderMcpCatalog() {
     if (!a.featured && b.featured) return 1;
     return (a.name || '').localeCompare(b.name || '');
   });
+  var REPO_SVG = '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>';
   var html = '';
   items.forEach(function(e) {
     var installed = e.installed;
     var connected = e.connected;
-    html += '<div class="mcp-app-card' + (connected ? ' connected' : installed ? ' installed' : '') + '">';
+    var stateClass = connected ? ' connected' : installed ? ' installed' : '';
+    html += '<div class="mcp-app-card' + stateClass + '">';
     html += '<div class="mcp-app-icon">' + (e.icon || '🔌') + '</div>';
-    html += '<div class="mcp-app-body">';
-    html += '<div class="mcp-app-name">' + escapeHtml(e.name);
-    if (connected) html += ' <span class="mcp-app-badge on">● 已连接</span>';
-    else if (installed) html += ' <span class="mcp-app-badge off">已安装</span>';
+    html += '<div class="mcp-app-name"><span class="mcp-app-name-text">' + escapeHtml(e.name) + '</span>';
+    if (connected) html += '<span class="mcp-app-status on"><span class="dot"></span>ON</span>';
+    else if (installed) html += '<span class="mcp-app-status off">IDLE</span>';
     html += '</div>';
     html += '<div class="mcp-app-desc">' + escapeHtml(e.description || '') + '</div>';
+    // Footer: repo link (left) + tools count / action buttons (right)
+    html += '<div class="mcp-app-footer">';
     if (e.url) {
-      html += '<a class="mcp-app-repo" href="' + escapeHtml(e.url) + '" target="_blank" rel="noopener" title="Source Repository">'
-        + '<svg width="9" height="9" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>'
-        + ' Repo</a>';
+      html += '<a class="mcp-app-repo" href="' + escapeHtml(e.url) + '" target="_blank" rel="noopener" title="Source Repository">' + REPO_SVG + ' Repo</a>';
+    } else {
+      html += '<span></span>';
     }
-    html += '</div>';
     html += '<div class="mcp-app-action">';
     if (connected) {
+      if (e.tools_count) {
+        html += '<span class="mcp-app-tools-count">' + (e.tools_count || 0) + ' tools</span>';
+      }
       html += '<button class="btn btn-secondary btn-xs" onclick="_mcpUninstall(\'' + escapeHtml(e.id) + '\')">卸载</button>';
     } else if (installed) {
       html += '<button class="btn btn-primary btn-xs" onclick="_mcpReconnect(\'' + escapeHtml(e.id) + '\')">连接</button>';
@@ -3331,52 +3385,32 @@ function _renderMcpCatalog() {
     } else {
       html += '<button class="btn btn-primary btn-xs" onclick="_mcpOpenInstallModal(\'' + escapeHtml(e.id) + '\')">安装</button>';
     }
-    html += '</div>';
-    html += '</div>';
+    html += '</div></div>';  // action + footer
+    html += '</div>';  // card
   });
   grid.innerHTML = html;
 }
 
-/** Render the "Installed" section showing connected & installed-but-disconnected. */
+/** Update "installed" badge and "connect all" button in the header. */
 function _renderMcpInstalled() {
-  var section = document.getElementById('mcpInstalledSection');
-  var list = document.getElementById('mcpInstalledList');
   var countEl = document.getElementById('mcpInstalledCount');
   var connectAllBtn = document.getElementById('mcpConnectAllBtn');
-  if (!section || !list) return;
 
   var connectedApps = _mcpCatalog.filter(function(e) { return e.connected; });
   var installedNotConnected = _mcpCatalog.filter(function(e) { return e.installed && !e.connected; });
-  var allInstalled = connectedApps.concat(installedNotConnected);
+  var total = connectedApps.length + installedNotConnected.length;
 
-  if (allInstalled.length === 0) {
-    section.style.display = 'none';
-    return;
+  if (countEl) {
+    if (total > 0) {
+      countEl.textContent = total + ' installed';
+      countEl.style.display = '';
+    } else {
+      countEl.style.display = 'none';
+    }
   }
-  section.style.display = '';
-  if (countEl) countEl.textContent = allInstalled.length;
-
-  // Show "Connect All" button if any installed servers are disconnected
   if (connectAllBtn) {
     connectAllBtn.style.display = installedNotConnected.length > 0 ? '' : 'none';
   }
-
-  var html = '';
-  allInstalled.forEach(function(e) {
-    var isConnected = e.connected;
-    html += '<div class="mcp-installed-row">';
-    html += '<span class="mcp-installed-icon">' + (e.icon || '🔌') + '</span>';
-    html += '<span class="mcp-installed-name">' + escapeHtml(e.name) + '</span>';
-    if (isConnected) {
-      html += '<span class="mcp-installed-tools">' + (e.tools_count || 0) + ' tools</span>';
-    } else {
-      html += '<span class="mcp-installed-tools" style="color:var(--c-warning,#f59e0b);">未连接</span>';
-      html += '<button class="btn btn-primary btn-xs" onclick="_mcpReconnect(\'' + escapeHtml(e.id) + '\')">连接</button>';
-    }
-    html += '<button class="btn btn-secondary btn-xs" onclick="_mcpUninstall(\'' + escapeHtml(e.id) + '\')">卸载</button>';
-    html += '</div>';
-  });
-  list.innerHTML = html;
 }
 
 // ── Install Modal ──

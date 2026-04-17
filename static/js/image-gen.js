@@ -300,7 +300,7 @@ async function generateImageDirect() {
     <button class="ig-gen-cancel" onclick="_igCancelGeneration()" title="Cancel">✕ Cancel</button>
   </div>`;
   chatDiv.insertAdjacentHTML('beforeend', loadingHtml);
-  chatDiv.scrollTop = chatDiv.scrollHeight;
+  scrollToBottom();
 
   // ── Save early so page refresh doesn't lose the user message ──
   saveConversations(conv.id);

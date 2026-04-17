@@ -13,9 +13,6 @@ FROM python:3.12-slim AS base
 
 # ── System dependencies ─────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        # PostgreSQL (Debian bookworm ships v16 — compatible with PG 18+ protocol)
-        postgresql-16 \
-        postgresql-client-16 \
         # Build tools for compiled Python packages
         gcc g++ \
         # Playwright / browser automation system deps
@@ -49,8 +46,6 @@ RUN mkdir -p /app/data /app/logs /app/uploads
 # ── Environment defaults ───────────────────────────────────
 ENV PORT=15000 \
     BIND_HOST=0.0.0.0 \
-    # PostgreSQL runs as a local subprocess managed by the app
-    # Data lives in the mounted volume at /app/data
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
@@ -58,9 +53,9 @@ ENV PORT=15000 \
 EXPOSE 15000
 
 # ── Health check ───────────────────────────────────────────
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:15000/ || exit 1
 
 # ── Entrypoint ─────────────────────────────────────────────
-# server.py auto-bootstraps PostgreSQL on first run
+# SQLite auto-creates the database on first run — zero setup needed
 CMD ["python", "server.py"]

@@ -283,8 +283,6 @@ class TestFlaskRouteRegistration:
             '/api/me',
             '/api/health',
             '/api/pricing',
-            '/api/errors/recent',
-            '/api/errors/digest',
             '/api/server-config',
             '/api/features',
             '/api/log/compress',

@@ -1,0 +1,51 @@
+\begin{table*}[t!]
+% \small
+    \centering
+\bicaption{LXM数据集上的实验结果}{Experimental results on the LXM dataset}
+\footnotesize
+\resizebox{0.85\linewidth}{!}{
+    \begin{tabular}{l lll lll}
+        \toprule
+        \textbf{\large Method} & \textbf{\large BLEU} & \textbf{\large SAR\%} & \textbf{\large SMR\%} & \textbf{\large BLEU} & \textbf{\large SAR\%} & \textbf{\large SMR\%} \\
+        \midrule
+        \textit{Direction} & \multicolumn{3}{c}{\textit{English-Chinese}} & \multicolumn{3}{c}{\textit{English-German}} \\
+        \midrule
+        Vanilla Transformer   & \textit{61.2} & 99.85 & 99.25 & \textit{52.7} & 99.80 & 99.20 \\
+        % Remove  & 31.5 & n/a & n/a & 25.7 & n/a & n/a \\
+        Split-Inject  & 57.0 & \textbf{100.00} & 99.30 & 50.7 & \textbf{100.00} & \textbf{99.80} \\
+        Template   & \textbf{61.5} & \textbf{100.00} & \textbf{99.80} & \textbf{53.6} & \textbf{100.00} & \textbf{99.80} \\
+        LLM Translation   & 55.1 & \textit{99.95} & 98.95 & 49.2 & \textit{99.95} & 99.25  \\
+        LLM CAP & 56.4 & \textbf{100.00} & 99.50 & 49.2 & \textit{99.95} & 99.25  \\
+        \cdashline{1-7}
+        \rowcolor{black!20}
+        TAR & 56.5\textsubscript{(+0.1)} & \textbf{100.00\textsubscript{(+0.00)}} & \textit{99.75}\textsubscript{(+0.25)} & 49.2\textsubscript{(+0.0)} & \textbf{100.00\textsubscript{(+0.05)}} & 99.30\textsubscript{(+0.05)} \\
+        
+        % NMT Trans.     & \textit{62.5} & 99.15 & 98.10 & \textit{54.7} & 99.45 & 98.30  \\
+        % \rowcolor{black!20}
+        % \quad +Revision & \textbf{62.8\textsubscript{(+0.3)}} & 99.90\textsubscript{(+0.75)} & 99.55\textsubscript{(+1.45)} & \textbf{55.8\textsubscript{(+1.1)}} & \textbf{100.00\textsubscript{(+0.55)}} & \textit{99.75}\textsubscript{(+1.45)} \\
+
+        \midrule
+        
+        \textit{Direction} & \multicolumn{3}{c}{\textit{English-French}} & \multicolumn{3}{c}{\textit{English-Russian}} \\
+        \midrule
+        Vanilla Transformer   & \textit{65.3} & 99.55 & 99.30 & \textit{44.9
+        } & 99.45 & 98.90 \\
+        % Remove  & 31.4 & n/a & n/a & 21 & n/a & n/a \\
+        Split-Inject  & 66.1 & \textbf{100.00} & \textbf{100.00} & 43.1 & \textbf{100.00} & 99.85 \\
+        Template   & \textbf{67.3} & \textbf{100.00} & \textbf{100.00} & \textbf{45.8} & \textbf{100.00} & \textbf{99.80} \\
+        LLM Translation   & 58.1 & \textit{99.90} & 99.30 & 34.4 & \textit{99.90} & 99.35 \\
+        LLM CAP & 59.3 & \textbf{100.00} & \textit{99.95} & 36.0 & \textbf{100.00} & 99.60 \\
+        \cdashline{1-7}
+        \rowcolor{black!20}
+        TAR & 59.3\textsubscript{(+0.0)}& \textbf{100.00\textsubscript{(+0.00)}} & \textit{99.95}\textsubscript{(+0.00)} & 36.0\textsubscript{(+0.0)}& \textbf{100.00\textsubscript{(+0.00)}} & \textit{99.75}\textsubscript{(+0.15)} \\
+
+        
+        \bottomrule
+    \end{tabular} 
+   }
+
+
+    \label{tab:structure_res}
+
+
+\end{table*}

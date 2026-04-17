@@ -1,0 +1,30 @@
+\begin{table}[htbp]
+\centering
+
+\bicaption{CFT训练配置参数}{CFT Training Configuration Parameters}
+\footnotesize
+\begin{tabular}{|r|l|}
+\hline
+\textbf{参数} & \textbf{值} \\
+\hline
+Model\_name\_or\_path & LLaMA3-8B-Instruct \\
+Train\_batch\_size & 64 \\
+Max\_length & 512 \\
+Learning\_rate & 5e-5 \\
+Lr\_scheduler\_type & Cosine \\
+Weight\_decay & 0.01 \\
+Warmup\_ratio & 0.1 \\
+BF16 & True \\
+Zero\_stage & 1 \\
+LoRA\_rank & 32 \\
+LoRA\_alpha & 32 \\
+num\_train\_epochs & 1 \\
+hardware & 8 × A800 80GB \\
+framework & Huggingface Transformers \\
+Temperature & 0.0 \\
+Top-p & 0.9 \\
+\hline
+\end{tabular}
+
+\label{tab:method2-training_config}
+\end{table}

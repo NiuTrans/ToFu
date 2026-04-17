@@ -150,8 +150,6 @@ def remove_from_queue(conv_id: str, queue_id: str) -> bool:
         return False
 
     db_execute_with_retry(db, 'DELETE FROM message_queue WHERE id=?', (queue_id,))
-
-    # Re-number positions
     _renumber_positions(db, conv_id)
 
     logger.info('[Queue] Removed message %s from conv=%s', queue_id[:8], conv_id[:8])
@@ -176,6 +174,7 @@ def clear_queue(conv_id: str) -> int:
         logger.info('[Queue] Cleared %d messages from conv=%s', count, conv_id[:8])
 
     return count
+
 
 
 def _renumber_positions(db, conv_id: str):
@@ -254,91 +253,134 @@ def dispatch_next_queued(conv_id: str) -> str | None:
         payload = item['payload']
         config = item['config']
         text = payload.get('text', '')
+        # ★ _user_msg: pre-built (and already translated) user message dict
+        #   from /api/chat/send.  If present, skip translation and use directly.
+        pre_built_user_msg = payload.get('_user_msg')
 
-        logger.info('[Queue] Dispatching queued message for conv=%s text=%d chars',
-                    conv_id[:8], len(text))
+        logger.info('[Queue] Dispatching queued message for conv=%s text=%d chars pre_built=%s',
+                    conv_id[:8], len(text), bool(pre_built_user_msg))
 
-        # 0. Auto-translate if needed (Chinese → English)
-        import re
-        auto_translate = config.get('autoTranslate', False)
-        has_chinese = bool(re.search(r'[\u4e00-\u9fff\u3400-\u4dbf]', text)) if text else False
-        translated_text = text
-        _translate_model = None
-        if auto_translate and has_chinese:
-            try:
-                from routes.translate import _build_translate_prompt, _translate_one_chunk
-                system_prompt = _build_translate_prompt('English', 'Chinese')
-                result, _usage = _translate_one_chunk(
-                    text, system_prompt, chunk_label=':queue',
-                    source='Chinese', target='English',
-                )
-                if result and result.strip():
-                    translated_text = result.strip()
-                    if isinstance(_usage, dict):
-                        _disp = _usage.get('_dispatch', {})
-                        _translate_model = _disp.get('model', _usage.get('model'))
-                    logger.info('[Queue] Auto-translated queued message for conv=%s: %d→%d chars model=%s',
-                                conv_id[:8], len(text), len(translated_text), _translate_model)
-                else:
-                    translated_text = text
-            except Exception as e:
-                logger.warning('[Queue] Auto-translate failed for conv=%s: %s', conv_id[:8], e)
-                translated_text = text
-
-        # 1. Build user message
-        user_msg = {
-            'role': 'user',
-            'content': translated_text if auto_translate and has_chinese else text,
-            'timestamp': payload.get('timestamp', int(time.time() * 1000)),
-        }
-        if auto_translate and has_chinese and translated_text != text:
-            user_msg['originalContent'] = text
-            user_msg['_translateDone'] = True
-            if _translate_model:
-                user_msg['_translateModel'] = _translate_model
-        if payload.get('images'):
-            user_msg['images'] = payload['images']
-        if payload.get('pdfTexts'):
-            user_msg['pdfTexts'] = payload['pdfTexts']
-        if payload.get('replyQuotes'):
-            user_msg['replyQuotes'] = payload['replyQuotes']
-        if payload.get('convRefs'):
-            user_msg['convRefs'] = payload['convRefs']
-        if payload.get('convRefTexts'):
-            user_msg['convRefTexts'] = payload['convRefTexts']
-
-        # 2. Append user message to conversation in DB
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT messages, updated_at FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)
-        ).fetchone()
 
-        if not row:
-            logger.warning('[Queue] Conversation %s not found for dispatch', conv_id[:8])
-            return None
+        if pre_built_user_msg:
+            # ★ New path: /api/chat/send already built + translated the user message.
+            #   Just append it to the conversation DB.
+            row = db.execute(
+                'SELECT messages FROM conversations WHERE id=? AND user_id=1',
+                (conv_id,)
+            ).fetchone()
+            if not row:
+                logger.warning('[Queue] Conversation %s not found for dispatch', conv_id[:8])
+                return None
 
-        try:
-            messages = json.loads(row['messages'] or '[]')
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning('[Queue] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
-            messages = []
+            try:
+                messages = json.loads(row['messages'] or '[]')
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning('[Queue] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
+                messages = []
 
-        messages.append(user_msg)
+            messages.append(pre_built_user_msg)
 
-        from lib.database import json_dumps_pg
-        now_ms = int(time.time() * 1000)
-        messages_json = json_dumps_pg(messages)
+            from lib.database import json_dumps_pg
+            now_ms = int(time.time() * 1000)
+            db_execute_with_retry(db, '''
+                UPDATE conversations SET messages=?, updated_at=?, msg_count=?
+                WHERE id=? AND user_id=1
+            ''', (json_dumps_pg(messages), now_ms, len(messages), conv_id))
 
-        # Update conversation settings with activeTaskId (will be set after task creation)
-        # Also store queue depth for frontend to show
-        remaining = _get_queue_depth(db, conv_id)
+            remaining = _get_queue_depth(db, conv_id)
+            logger.info('[Queue] Appended pre-built user msg to conv=%s (now %d msgs)',
+                        conv_id[:8], len(messages))
 
-        db_execute_with_retry(db, '''
-            UPDATE conversations
-            SET messages=?, updated_at=?, msg_count=?
-            WHERE id=? AND user_id=1
-        ''', (messages_json, now_ms, len(messages), conv_id))
+        else:
+            # Legacy path: message was enqueued via /api/chat/queue (old API).
+            # Need to translate and append to conversation ourselves.
+            import re
+            auto_translate = config.get('autoTranslate', False)
+            has_chinese = bool(re.search(r'[\u4e00-\u9fff\u3400-\u4dbf]', text)) if text else False
+            translated_text = text
+            _translate_model = None
+            if auto_translate and has_chinese:
+                try:
+                    from routes.translate import _build_translate_prompt, _translate_one_chunk
+                    system_prompt = _build_translate_prompt('English', 'Chinese')
+                    result, _usage = _translate_one_chunk(
+                        text, system_prompt, chunk_label=':queue',
+                        source='Chinese', target='English',
+                    )
+                    if result and result.strip():
+                        translated_text = result.strip()
+                        if isinstance(_usage, dict):
+                            _disp = _usage.get('_dispatch', {})
+                            _translate_model = _disp.get('model', _usage.get('model'))
+                        logger.info('[Queue] Auto-translated queued message for conv=%s: %d→%d chars model=%s',
+                                    conv_id[:8], len(text), len(translated_text), _translate_model)
+                    else:
+                        translated_text = text
+                except Exception as e:
+                    logger.warning('[Queue] Auto-translate failed for conv=%s: %s', conv_id[:8], e)
+                    translated_text = text
+
+            # Build user message
+            user_msg = {
+                'role': 'user',
+                'content': translated_text if auto_translate and has_chinese else text,
+                'timestamp': payload.get('timestamp', int(time.time() * 1000)),
+            }
+            if auto_translate and has_chinese and translated_text != text:
+                user_msg['originalContent'] = text
+                user_msg['_translateDone'] = True
+                if _translate_model:
+                    user_msg['_translateModel'] = _translate_model
+            if payload.get('images'):
+                user_msg['images'] = payload['images']
+            if payload.get('pdfTexts'):
+                user_msg['pdfTexts'] = payload['pdfTexts']
+            if payload.get('replyQuotes'):
+                user_msg['replyQuotes'] = payload['replyQuotes']
+            if payload.get('convRefs'):
+                user_msg['convRefs'] = payload['convRefs']
+            conv_ref_texts = payload.get('convRefTexts')
+            if not conv_ref_texts and payload.get('convRefs'):
+                try:
+                    from routes.chat import _resolve_conv_refs
+                    conv_ref_texts = _resolve_conv_refs(payload['convRefs'])
+                except Exception as e:
+                    logger.warning('[Queue] Failed to resolve conv refs for conv=%s: %s',
+                                   conv_id[:8], e)
+            if conv_ref_texts:
+                user_msg['convRefTexts'] = conv_ref_texts
+
+            # Append user message to conversation in DB
+            row = db.execute(
+                'SELECT messages, updated_at FROM conversations WHERE id=? AND user_id=1',
+                (conv_id,)
+            ).fetchone()
+
+            if not row:
+                logger.warning('[Queue] Conversation %s not found for dispatch', conv_id[:8])
+                return None
+
+            try:
+                messages = json.loads(row['messages'] or '[]')
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning('[Queue] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
+                messages = []
+
+            messages.append(user_msg)
+
+            from lib.database import json_dumps_pg
+            now_ms = int(time.time() * 1000)
+            messages_json = json_dumps_pg(messages)
+
+            remaining = _get_queue_depth(db, conv_id)
+
+            db_execute_with_retry(db, '''
+                UPDATE conversations
+                SET messages=?, updated_at=?, msg_count=?
+                WHERE id=? AND user_id=1
+            ''', (messages_json, now_ms, len(messages), conv_id))
+        # (Legacy _msg_persisted path removed — no longer used)
 
         # 3. Build API messages and create task
         from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db

@@ -129,6 +129,78 @@ def _is_image_error(err_msg: str) -> bool:
     lower = err_msg.lower()
     return any(p in lower for p in _IMAGE_ERROR_PATTERNS)
 
+# Patterns in HTTP 400 / SSE errors that indicate the prompt exceeds the model's input limit
+_PROMPT_TOO_LONG_PATTERNS = [
+    'prompt is too long', 'context length exceeded',
+    'maximum context length', 'prompt too long',
+    'input too long', 'exceeds the model',
+    'token limit', 'context_length_exceeded',
+    'max_prompt_tokens', 'request too large',
+]
+
+def _is_prompt_too_long(err_msg: str) -> bool:
+    """Check if an error message indicates the prompt exceeds model limits."""
+    lower = err_msg.lower()
+    return any(p in lower for p in _PROMPT_TOO_LONG_PATTERNS)
+
+
+def _classify_http_error(status_code: int, err_msg: str, model: str,
+                         log_prefix: str, *, max_tokens: int = 0) -> None:
+    """Classify an HTTP error and raise the appropriate exception.
+
+    Centralizes the error-classification chain shared by ``chat()`` and
+    ``_stream_chat_once()``.  Always raises — never returns normally.
+
+    Raises:
+        RateLimitError, ContentFilterError, PermissionError_,
+        PromptTooLongError, ModelLimitError, InvalidImageError,
+        StreamOnlyError, RetryableAPIError, or generic Exception.
+    """
+    if status_code == 429:
+        raise RateLimitError(err_msg)
+    if status_code == 450:
+        logger.warning('%s Content filter triggered (HTTP 450)', log_prefix)
+        raise ContentFilterError(err_msg)
+    if status_code in _PERMISSION_STATUS_CODES:
+        logger.warning('%s Permission error (HTTP %d)', log_prefix, status_code)
+        raise PermissionError_(err_msg)
+    if status_code == 413:
+        logger.warning('%s Request entity too large (HTTP 413) — '
+                       'treating as prompt-too-long: %s', log_prefix, err_msg[:300])
+        raise PromptTooLongError(err_msg)
+    if status_code == 400:
+        _detected_limit = _parse_token_limit_from_error(err_msg, model)
+        if _detected_limit:
+            _learn_model_limit(model, _detected_limit)
+            raise ModelLimitError(err_msg, model, _detected_limit, max_tokens)
+        if _is_image_error(err_msg):
+            logger.warning('%s Image content error (HTTP 400): %s',
+                           log_prefix, err_msg[:300])
+            raise InvalidImageError(err_msg)
+        if _is_prompt_too_long(err_msg):
+            logger.warning('%s Prompt too long detected (HTTP 400): %s',
+                           log_prefix, err_msg[:300])
+            raise PromptTooLongError(err_msg)
+        if _is_stream_only_error(err_msg):
+            logger.warning('%s Model %s only supports stream mode — '
+                           'non-streaming request rejected', log_prefix, model)
+            raise StreamOnlyError(err_msg, model)
+    if status_code in _RETRYABLE_STATUS_CODES:
+        # ★ Detect wrapped overload / rate-limit inside a generic 500.
+        #   Some gateways receive 429 or 529 from the model server but
+        #   can't map it, so they wrap it as HTTP 500 with a body like:
+        #     {"status":500,"data":"No matching constant for [529]"}
+        #   Retrying on the same key is futile — escalate to dispatch.
+        if status_code == 500 and _is_wrapped_overload(err_msg):
+            logger.warning('%s Gateway wrapped overload/rate-limit in HTTP 500 '
+                           '— escalating to dispatch layer: %.200s',
+                           log_prefix, err_msg)
+            raise RateLimitError(err_msg)
+        raise RetryableAPIError(err_msg, status_code=status_code)
+    logger.error('%s Non-retryable API error (HTTP %d): %s',
+                 log_prefix, status_code, err_msg[:300])
+    raise Exception(err_msg)
+
 # Status codes that indicate a transient server-side issue (retry on same key)
 # NOTE: 429 is NOT here — it gets RateLimitError which escapes to dispatch layer
 _RETRYABLE_STATUS_CODES = {500, 502, 503, 504, 529}
@@ -137,6 +209,30 @@ _RETRYABLE_STATUS_CODES = {500, 502, 503, 504, 529}
 _PERMISSION_STATUS_CODES = {401, 403}
 
 # Errors considered transient and worth retrying ON THE SAME KEY
+
+# Regex to detect embedded overload/rate-limit status codes in gateway error bodies.
+# Matches patterns like: "No matching constant for [529]", "status_code: 429"
+_WRAPPED_OVERLOAD_RE = re.compile(
+    r'(?:'
+    r'No matching constant for \[(?:429|529)\]'  # gateway can't map 429/529
+    r'|"status"\s*:\s*(?:429|529)'               # JSON {"status": 529}
+    r'|status[_\s]*code["\s:]*(?:429|529)'        # status_code: 429
+    r')',
+    re.IGNORECASE,
+)
+
+
+def _is_wrapped_overload(error_text: str) -> bool:
+    """Detect if an HTTP 500 error body contains an embedded 429/529 overload.
+
+    Some API gateways receive a 429 (rate limit) or 529 (overloaded) from
+    the model server but cannot map it to a standard HTTP status, so they
+    wrap it as a generic HTTP 500 with the original status in the body.
+    Retrying on the same key is futile for overload — escalate to dispatch.
+    """
+    return bool(_WRAPPED_OVERLOAD_RE.search(error_text))
+
+
 _RETRYABLE = (ConnectionError, ChunkedEncodingError, BrokenPipeError,
               ConnectionResetError, RetryableAPIError)
 
@@ -450,6 +546,12 @@ def _downscale_oversized_images(messages: list, model: str) -> None:
 
                 # Resize with high-quality resampling
                 img = img.resize((new_w, new_h), Image.LANCZOS)
+
+                # ★ Strip ICC profile / EXIF — they bloat the JPEG encoder
+                #   buffer and cause "encoder error -2" on small outputs
+                #   (see Pillow#5448). Not needed for API calls.
+                img.info.pop('icc_profile', None)
+                img.info.pop('exif', None)
 
                 # Re-encode to JPEG (good compression) unless it's PNG with alpha
                 if img.mode == 'RGBA':
@@ -1376,15 +1478,8 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                 logger.debug('%s resp M-TraceId=%s', log_prefix, resp_trace)
             if resp.status_code != 200:
                 err_msg = f'API HTTP {resp.status_code}: {resp.text[:500]}'
-                if resp.status_code == 429:
-                    raise RateLimitError(err_msg)
-                if resp.status_code == 450:
-                    logger.warning('%s Content filter triggered (HTTP 450)', log_prefix)
-                    raise ContentFilterError(err_msg)
-                if resp.status_code in _PERMISSION_STATUS_CODES:
-                    logger.warning('%s Permission error (HTTP %d)', log_prefix, resp.status_code)
-                    raise PermissionError_(err_msg)
                 # ★ Detect and auto-learn max_tokens limit errors (HTTP 400)
+                # Intercept before _classify_http_error for recursive retry
                 if resp.status_code == 400 and not _limit_retry:
                     _detected_limit = _parse_token_limit_from_error(err_msg, model)
                     if _detected_limit:
@@ -1392,7 +1487,6 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                         logger.warning('%s ⚙️ max_tokens %d exceeds %s limit %d — '
                                       'auto-learned and retrying with corrected value',
                                       log_prefix, max_tokens, model, _detected_limit)
-                        # Recursive retry with corrected max_tokens (one level only)
                         content_r, usage_r = chat(
                             messages, model, max_tokens=_detected_limit,
                             temperature=temperature,
@@ -1408,40 +1502,8 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                             'new_limit': _detected_limit,
                         }
                         return content_r, usage_r
-                # ★ HTTP 413 = request body too large for gateway/API → same as prompt too long
-                if resp.status_code == 413:
-                    logger.warning('%s Request entity too large (HTTP 413) — '
-                                   'treating as prompt-too-long: %s',
-                                   log_prefix, err_msg[:300])
-                    raise PromptTooLongError(err_msg)
-                # ★ Detect image content errors (non-streaming)
-                if resp.status_code == 400 and _is_image_error(err_msg):
-                    logger.warning('%s Image content error (HTTP 400): %s',
-                                   log_prefix, err_msg[:300])
-                    raise InvalidImageError(err_msg)
-                # ★ Detect prompt-too-long errors for reactive compaction (non-streaming)
-                if resp.status_code == 400:
-                    _ptl_patterns = [
-                        'prompt is too long', 'context length exceeded',
-                        'maximum context length', 'prompt too long',
-                        'input too long', 'exceeds the model',
-                        'token limit', 'context_length_exceeded',
-                        'max_prompt_tokens', 'request too large',
-                    ]
-                    _err_lower = err_msg.lower()
-                    if any(p in _err_lower for p in _ptl_patterns):
-                        logger.warning('%s Prompt too long detected (HTTP 400): %s',
-                                       log_prefix, err_msg[:300])
-                        raise PromptTooLongError(err_msg)
-                if resp.status_code in _RETRYABLE_STATUS_CODES:
-                    raise RetryableAPIError(err_msg, status_code=resp.status_code)
-                # ★ Detect stream-only model errors (HTTP 400)
-                if resp.status_code == 400 and _is_stream_only_error(err_msg):
-                    logger.warning('%s Model %s only supports stream mode — '
-                                  'non-streaming request rejected', log_prefix, model)
-                    raise StreamOnlyError(err_msg, model)
-                logger.error('%s Non-retryable API error (HTTP %d): %s', log_prefix, resp.status_code, err_msg[:300])
-                raise Exception(err_msg)
+                _classify_http_error(resp.status_code, err_msg, model,
+                                     log_prefix, max_tokens=max_tokens)
             break   # success
         except (RateLimitError, PermissionError_, ContentFilterError, PromptTooLongError, StreamOnlyError, InvalidImageError):
             raise   # escape to dispatch layer immediately — don't retry same key
@@ -1695,51 +1757,9 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
 
         if resp.status_code != 200:
             err_msg = f'API HTTP {resp.status_code}: {resp.text[:800]}'
-            if resp.status_code == 429:
-                raise RateLimitError(err_msg)
-            if resp.status_code == 450:
-                logger.warning('%s Content filter triggered (HTTP 450)', log_prefix)
-                raise ContentFilterError(err_msg)
-            if resp.status_code in _PERMISSION_STATUS_CODES:
-                logger.warning('%s Permission error (HTTP %d)', log_prefix, resp.status_code)
-                raise PermissionError_(err_msg)
-            # ★ HTTP 413 = request body too large for gateway/API → same as prompt too long
-            if resp.status_code == 413:
-                logger.warning('%s Request entity too large (HTTP 413) — '
-                               'treating as prompt-too-long: %s',
-                               log_prefix, err_msg[:300])
-                raise PromptTooLongError(err_msg)
-            # ★ Detect and auto-learn max_tokens limit errors (HTTP 400)
-            if resp.status_code == 400:
-                _detected_limit = _parse_token_limit_from_error(
-                    err_msg, body.get('model', ''))
-                if _detected_limit:
-                    _learn_model_limit(body.get('model', ''), _detected_limit)
-                    raise ModelLimitError(
-                        err_msg, body.get('model', ''),
-                        _detected_limit, body.get('max_tokens', 0))
-                # ★ Detect image content errors (too large, corrupt, etc.)
-                if _is_image_error(err_msg):
-                    logger.warning('%s Image content error (HTTP 400): %s',
-                                   log_prefix, err_msg[:300])
-                    raise InvalidImageError(err_msg)
-                # ★ Detect prompt-too-long errors for reactive compaction
-                _ptl_patterns = [
-                    'prompt is too long', 'context length exceeded',
-                    'maximum context length', 'prompt too long',
-                    'input too long', 'exceeds the model',
-                    'token limit', 'context_length_exceeded',
-                    'max_prompt_tokens', 'request too large',
-                ]
-                _err_lower = err_msg.lower()
-                if any(p in _err_lower for p in _ptl_patterns):
-                    logger.warning('%s Prompt too long detected (HTTP 400): %s',
-                                   log_prefix, err_msg[:300])
-                    raise PromptTooLongError(err_msg)
-            if resp.status_code in _RETRYABLE_STATUS_CODES:
-                raise RetryableAPIError(err_msg, status_code=resp.status_code)
-            logger.error('%s Non-retryable API error (HTTP %d): %s', log_prefix, resp.status_code, err_msg[:300])
-            raise Exception(err_msg)
+            _classify_http_error(resp.status_code, err_msg,
+                                 body.get('model', ''), log_prefix,
+                                 max_tokens=body.get('max_tokens', 0))
 
         resp.encoding = 'utf-8'
         content = ''
@@ -1841,6 +1861,7 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             if 'error' in chunk:
                 eo = chunk['error']
                 err_text = eo.get('message', '') if isinstance(eo, dict) else str(eo)
+                _err_lower = err_text.lower()
                 # ★ Check if this is a max_tokens limit error — auto-learn & retry
                 _model_id = body.get('model', '')
                 _detected_limit = _parse_token_limit_from_error(err_text, _model_id)
@@ -1851,15 +1872,7 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                         _model_id, _detected_limit,
                         body.get('max_tokens', 0))
                 # ★ Check if this is a prompt-too-long error — trigger compaction
-                _err_lower = err_text.lower()
-                _ptl_patterns_sse = [
-                    'prompt is too long', 'context length exceeded',
-                    'maximum context length', 'prompt too long',
-                    'input too long', 'exceeds the model',
-                    'token limit', 'context_length_exceeded',
-                    'max_prompt_tokens', 'request too large',
-                ]
-                if any(p in _err_lower for p in _ptl_patterns_sse):
+                if _is_prompt_too_long(err_text):
                     logger.warning('%s Prompt too long detected in SSE error: %s',
                                    log_prefix, err_text[:300])
                     raise PromptTooLongError(f'SSE error: {err_text}')
@@ -2079,7 +2092,7 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                 # Phantom tool call: has a name but completely empty arguments,
                 # AND another tool call with the SAME name has real arguments.
                 # This avoids dropping legitimate no-arg tools (e.g.
-                # check_error_logs) that happen to appear alongside others.
+                # legitimate no-arg tools) that happen to appear alongside others.
                 if not fn_args_str.strip() and fn_name in _names_with_args:
                     logger.warning(
                         '%s Filtering phantom tool call: %s (tc_id=%s) has '

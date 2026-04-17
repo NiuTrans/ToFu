@@ -1194,184 +1194,6 @@ async function duplicateConversation(id, e) {
 }
 
 // ══════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════
-// ★ Format a conversation's messages into plain text for LLM context
-// ═══════════════════════════════════════════════════════
-function _formatConvRefText(title, msgs) {
-  if (!msgs || msgs.length === 0) return "(Empty conversation)";
-  const lines = [];
-  for (let i = 0; i < msgs.length; i++) {
-    const m = msgs[i];
-    const num = i + 1;
-    if (m.role === "user") {
-      lines.push(`── Message ${num} [User] ──`);
-      lines.push(m.content || "(empty)");
-    } else if (m.role === "assistant") {
-      lines.push(`── Message ${num} [Assistant] ──`);
-      // Include thinking/reasoning if present
-      if (m.thinking) lines.push(`<thinking>\n${m.thinking}\n</thinking>`);
-      lines.push(m.content || "(empty)");
-      // Include tool calls if present
-      if (m.toolCalls && m.toolCalls.length > 0) {
-        for (const tc of m.toolCalls) {
-          lines.push(`  Tool Call: ${tc.function?.name || tc.name || "unknown"}`);
-          const args = tc.function?.arguments || tc.arguments;
-          if (args) {
-            const argStr = typeof args === "string" ? args : JSON.stringify(args, null, 2);
-            // Truncate very large tool arguments
-            lines.push(`     Arguments: ${argStr.length > 2000 ? argStr.slice(0, 2000) + "\n     ... (truncated)" : argStr}`);
-          }
-        }
-      }
-    } else if (m.role === "tool") {
-      lines.push(`── Message ${num} [Tool Result: ${m.name || "unknown"}] ──`);
-      const content = m.content || "";
-      // Truncate very large tool results
-      lines.push(content.length > 3000 ? content.slice(0, 3000) + "\n... (truncated)" : content);
-    } else if (m.role === "system") {
-      lines.push(`── Message ${num} [System] ──`);
-      lines.push(m.content || "");
-    }
-    lines.push(""); // blank separator
-  }
-  return lines.join("\n");
-}
-
-// ★ FIX: buildApiMessages — include tool usage history
-// ══════════════════════════════════════════════════════
-function buildApiMessages(conv, opts = {}) {
-  const messages = [];
-  if (config.systemPrompt?.trim())
-    messages.push({ role: "system", content: config.systemPrompt.trim() });
-  const srcMsgs = opts.includeAll ? conv.messages : conv.messages.slice(0, -1);
-  for (const msg of srcMsgs) {
-    // ★ Skip endpoint-mode display-only messages:
-    //   - _isEndpointReview (critic feedback): causes consecutive user messages
-    //   - _isEndpointPlanner (planner output): causes consecutive assistant messages
-    //     (planner + worker are both assistant role). The planner's content already
-    //     replaced the user message in the LLM working messages, so including it
-    //     again in follow-up turns creates duplicate context + role alternation violation.
-    if (msg._isEndpointReview) continue;
-    if (msg._isEndpointPlanner) continue;
-    if (msg.role === "user") {
-      const hasImages =
-        msg.images?.length > 0 && msg.images.some((img) => img.base64 || img.url);
-      const hasPdfTexts = msg.pdfTexts?.length > 0;
-      let textContent = msg.content || "";
-      // ★ Strip <notranslate>/<nt> wrapper tags but keep inner content — chat LLM sees the full text
-      if (textContent.includes('<notranslate>') || textContent.includes('<nt>')) {
-        textContent = textContent.replace(/<\/?notranslate>/gi, '').replace(/<\/?nt>/gi, '');
-      }
-      // ★ Prepend reply quotes if present (supports array and legacy single)
-      const quotes = msg.replyQuotes || (msg.replyQuote ? [msg.replyQuote] : []);
-      if (quotes.length > 0) {
-        const quotesBlock = quotes.map((q, i) => `[引用${quotes.length > 1 ? (i+1) : ""}]\n${q}\n[/引用${quotes.length > 1 ? (i+1) : ""}]`).join("\n\n");
-        textContent = `${quotesBlock}\n\n${textContent}`;
-      }
-      // ★ Prepend conversation references if present
-      if (msg.convRefTexts && msg.convRefTexts.length > 0) {
-        const refsBlock = msg.convRefTexts.map((cr, i) =>
-          `[REFERENCED_CONVERSATION${msg.convRefTexts.length > 1 ? ` #${i+1}` : ""} title="${cr.title}" id="${cr.id}"]\n${cr.text}\n[/REFERENCED_CONVERSATION]`
-        ).join("\n\n");
-        textContent = `The user has attached the following conversation(s) for reference:\n\n${refsBlock}\n\n---\n\n${textContent}`;
-      }
-
-      if (hasPdfTexts) {
-        for (const pdf of msg.pdfTexts) {
-          textContent += `\n\n${"═".repeat(50)}\nPDF Document: ${pdf.name} (${pdf.pages} pages, ${(pdf.textLength / 1024).toFixed(1)}KB)\n${"═".repeat(50)}\n${pdf.text}`;
-        }
-      }
-
-      if (hasImages) {
-        const content = [];
-        msg.images.forEach((img) => {
-          // Prefer base64 data URL; pass through server URL as fallback
-          // (backend _validate_image_blocks resolves /api/images/ from disk)
-          let imgUrl = "";
-          if (img.base64) {
-            imgUrl = `data:${img.mediaType};base64,${img.base64}`;
-          } else if (img.url) {
-            // base64 not hydrated (page reload race, proxy error, etc.)
-            // Pass through — backend will resolve local /api/images/ URLs from disk
-            imgUrl = img.url;
-            console.warn(`[buildApiMessages] Image base64 not hydrated, passing URL: ${img.url.slice(0, 80)}`);
-          }
-          if (imgUrl) {
-            content.push({
-              type: "image_url",
-              image_url: { url: imgUrl },
-            });
-            if (img.caption)
-              content.push({
-                type: "text",
-                text: `[PDF p${img.pdfPage || "?"}: ${img.caption}]`,
-              });
-            else if (img.pdfPage)
-              content.push({
-                type: "text",
-                text: `[PDF page ${img.pdfPage}/${img.pdfTotal || "?"}]`,
-              });
-          }
-        });
-        if (textContent) content.push({ type: "text", text: textContent });
-        messages.push({ role: "user", content });
-      } else {
-        messages.push({ role: "user", content: textContent });
-      }
-    } else if (msg.role === "assistant") {
-      // ★ Build tool usage summary (used as fallback content if assistant text is empty)
-      let toolCtx = "";
-      if (msg.toolSummary) {
-        toolCtx = msg.toolSummary;
-      } else {
-        // Fallback: serialize raw tool calls (for old messages without toolSummary)
-        const rounds = getToolRoundsFromMsg(msg);
-        if (rounds.length > 0) {
-          const calls = rounds.map(r => {
-            const call = { name: r.toolName || "unknown" };
-            if (r.toolArgs) Object.assign(call, r.toolArgs);
-            else if (r.query) call.query = r.query;
-            return call;
-          });
-          toolCtx = JSON.stringify(calls);
-        }
-      }
-
-      // ★ FIX: Never skip assistant messages — empty content breaks
-      //   user↔assistant alternation causing consecutive USER messages.
-      //   If content is empty, use tool summary as placeholder content.
-      const assistantContent = msg.content || toolCtx;
-      messages.push({ role: "assistant", content: assistantContent });
-
-
-    }
-  }
-
-  // ★ Post-processing: merge consecutive same-role messages.
-  // After filtering out _isEndpointPlanner and _isEndpointReview, endpoint
-  // mode can produce consecutive assistant messages (multiple worker iterations)
-  // or consecutive user messages (edge cases). Merge them by concatenation
-  // to maintain strict user↔assistant alternation for LLM APIs.
-  for (let i = messages.length - 1; i > 0; i--) {
-    if (messages[i].role === messages[i - 1].role
-        && (messages[i].role === 'user' || messages[i].role === 'assistant')) {
-      const prev = messages[i - 1].content || '';
-      const curr = messages[i].content || '';
-      // Handle multimodal content (arrays)
-      if (Array.isArray(prev) || Array.isArray(curr)) {
-        const prevArr = Array.isArray(prev) ? prev : (prev ? [{ type: 'text', text: prev }] : []);
-        const currArr = Array.isArray(curr) ? curr : (curr ? [{ type: 'text', text: curr }] : []);
-        messages[i - 1].content = prevArr.concat(currArr);
-      } else {
-        const sep = (prev && curr) ? '\n\n' : '';
-        messages[i - 1].content = prev + sep + curr;
-      }
-      messages.splice(i, 1);
-    }
-  }
-
-  return messages;
-}
 
 // ══════════════════════════════════════════════════════
 //  ★ Shared config/settings builders for /api/chat/send and /api/chat/regenerate
@@ -1398,6 +1220,7 @@ function _buildConvConfig(conv) {
     schedulerEnabled: _isActive ? schedulerEnabled : (!!conv.schedulerEnabled),
     swarmEnabled: _isActive ? swarmEnabled : (!!conv.swarmEnabled),
     projectPath: _getConvProjectPath(conv),
+    projectPaths: conv.projectPaths || [],
     autoApply: autoApplyWrites,
     browserEnabled: _isActive ? browserEnabled : (!!conv.browserEnabled),
     desktopEnabled: _isActive ? desktopEnabled : (!!conv.desktopEnabled),
@@ -1439,26 +1262,45 @@ function _buildConvSettings(conv) {
 }
 
 /**
+ * Render a translating indicator bubble in the chat DOM.
+ * Shown while the server translates the user's message before starting the agent.
+ * Removed when the real streaming bubble appears.
+ */
+function _renderTranslatingBubble() {
+  const inner = document.getElementById("chatInner");
+  if (!inner) return;
+  // Remove any previous translating bubble
+  const old = document.getElementById("translating-msg");
+  if (old) old.remove();
+  const el = document.createElement("div");
+  el.className = "message message-new";
+  el.addEventListener('animationend', () => el.classList.remove('message-new'), { once: true });
+  el.id = "translating-msg";
+  const avatar = (typeof _TOFU_WORKER_SVG !== 'undefined') ? _TOFU_WORKER_SVG : '✦';
+  el.innerHTML = `<div class="message-avatar">${avatar}</div><div class="message-content"><div class="message-header"><span class="message-role">Agent</span><span class="message-time">${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></div><div class="message-body"><div class="stream-status"><div class="pulse"></div> ${t('sidebar.translating')}</div></div></div>`;
+  inner.appendChild(el);
+  scrollToBottom();
+}
+
+function _removeTranslatingBubble() {
+  const el = document.getElementById("translating-msg");
+  if (el) el.remove();
+}
+
+/**
  * Render the streaming assistant bubble in the chat DOM.
  * Shared by sendMessage and regenerateFromUser flows.
  */
 function _renderStreamingBubble(conv, sendConfig) {
   const inner = document.getElementById("chatInner");
   if (!inner) return;
-  const el = document.createElement("div");
-  el.className = "message message-new";
-  el.addEventListener('animationend', () => el.classList.remove('message-new'), { once: true });
-  el.id = "streaming-msg";
-  const _isEndpoint = !!sendConfig.endpointMode;
-  const _streamAvatar = _isEndpoint
-    ? ((typeof _TOFU_PLANNER_SVG !== 'undefined') ? _TOFU_PLANNER_SVG : '✦')
-    : ((typeof _TOFU_WORKER_SVG !== 'undefined') ? _TOFU_WORKER_SVG : '✦');
-  const _streamRole = _isEndpoint ? 'Planner' : 'Agent';
-  const _streamStatus = _isEndpoint ? 'Planning…' : 'Preparing...';
-  const _streamClass = _isEndpoint ? 'ep-planner-msg' : 'ep-worker-msg';
-  el.innerHTML = `<div class="message-avatar">${_streamAvatar}</div><div class="message-content"><div class="message-header"><span class="message-role">${_streamRole}</span><span class="message-time">${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span><span id="stream-elapsed-timer" class="stream-elapsed-timer"></span></div><div class="message-body" id="streaming-body"><div class="stream-status"><div class="pulse"></div> ${_streamStatus}</div></div></div>`;
-  if (_streamClass) el.classList.add(_streamClass);
-  inner.appendChild(el);
+  const role = _streamingBubbleRole(conv, sendConfig);
+  inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(role));
+  const el = document.getElementById('streaming-msg');
+  if (el) {
+    el.classList.add('message-new');
+    el.addEventListener('animationend', () => el.classList.remove('message-new'), { once: true });
+  }
   scrollToBottom();
 }
 
@@ -1467,7 +1309,7 @@ async function startAssistantResponse(convId) {
   if (!conv || activeStreams.has(convId) || conv.activeTaskId) return;
   /* ★ Ensure messages are loaded — Case E recovery can call this for _needsLoad shell convs
    *   that were detected as orphans via metadata (lastMsgRole/lastMsgTimestamp).
-   *   Without loading first, conv.messages is empty → buildApiMessages has no context. */
+   *   Without loading first, conv.messages is empty → the server-side message builder has no context. */
   if (conv._needsLoad) {
     console.info(`[startAssistantResponse] Loading messages for shell conv ${convId.slice(0,8)} before starting`);
     await loadConversationMessages(convId);
@@ -1490,24 +1332,18 @@ async function startAssistantResponse(convId) {
   if (activeConvId === convId) {
     const inner = document.getElementById("chatInner");
     if (inner) {
-      const el = document.createElement("div");
-      el.className = "message message-new";
-      el.addEventListener('animationend', () => el.classList.remove('message-new'), { once: true });
-      el.id = "streaming-msg";
       /* ★ Endpoint mode: show Planner avatar/role from the start.
        * The endpoint_iteration(planning) event may fire before SSE connects,
        * so the initial bubble must already show "Planner". */
       const _isEndpoint = (convId === activeConvId) ? endpointEnabled : (!!conv.endpointEnabled);
-      const _streamAvatar = _isEndpoint
-        ? ((typeof _TOFU_PLANNER_SVG !== 'undefined') ? _TOFU_PLANNER_SVG : '✦')
-        : ((typeof _TOFU_WORKER_SVG !== 'undefined') ? _TOFU_WORKER_SVG : '✦');
-      const _streamRole = _isEndpoint ? 'Planner' : 'Agent';
-      const _streamStatus = _isEndpoint ? 'Planning…' : 'Preparing...';
-      const _streamClass = _isEndpoint ? 'ep-planner-msg' : 'ep-worker-msg';
       if (_isEndpoint) assistantMsg._isEndpointPlanner = true;
-      el.innerHTML = `<div class="message-avatar">${_streamAvatar}</div><div class="message-content"><div class="message-header"><span class="message-role">${_streamRole}</span><span class="message-time">${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span><span id="stream-elapsed-timer" class="stream-elapsed-timer"></span></div><div class="message-body" id="streaming-body"><div class="stream-status"><div class="pulse"></div> ${_streamStatus}</div></div></div>`;
-      if (_streamClass) el.classList.add(_streamClass);
-      inner.appendChild(el);
+      const role = _isEndpoint ? 'planner' : 'worker';
+      inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(role));
+      const el = document.getElementById('streaming-msg');
+      if (el) {
+        el.classList.add('message-new');
+        el.addEventListener('animationend', () => el.classList.remove('message-new'), { once: true });
+      }
       scrollToBottom();
     }
   }
@@ -1527,77 +1363,18 @@ async function startAssistantResponse(convId) {
     convId,
   );
   let taskId;
-  /* ── ★ FIX: Read tool config from per-conversation state, NOT globals ──
-   * When startAssistantResponse is called for a BACKGROUND conversation
-   * (e.g. from _dispatchQueuedMessage after finishStream), the global
-   * variables (searchMode, browserEnabled, projectState, etc.) reflect
-   * the CURRENTLY VIEWED conversation, not convId's conversation.
-   * This caused crosstalk: Chat B's project/browser settings leaked into Chat A.
-   * Solution: always read from conv.* which _saveConvToolState() keeps in sync. */
-  const _isActive = (convId === activeConvId);
-  const _sm   = _isActive ? searchMode           : (conv.searchMode || "multi");
-  const _fe   = _isActive ? fetchEnabled          : (!!conv.fetchEnabled);
-  const _ce   = _isActive ? codeExecEnabled       : (!!conv.codeExecEnabled);
-  const _sk   = _isActive ? memoryEnabled         : (conv.memoryEnabled !== undefined ? !!conv.memoryEnabled : true);
-  const _sch  = _isActive ? schedulerEnabled      : (!!conv.schedulerEnabled);
-  const _sw   = _isActive ? swarmEnabled           : (!!conv.swarmEnabled);
-  const _be   = _isActive ? browserEnabled         : (!!conv.browserEnabled);
-  const _de   = _isActive ? desktopEnabled         : (!!conv.desktopEnabled);
-  const _ep   = _isActive ? endpointEnabled        : (!!conv.endpointEnabled);
-  const _ig   = _isActive ? imageGenEnabled        : (!!conv.imageGenEnabled);
-  const _hg   = _isActive ? humanGuidanceEnabled   : (!!conv.humanGuidanceEnabled);
-  const _pre  = _isActive ? (config.model || serverModel)     : (conv.model || serverModel);
-  const _dep  = _isActive ? config.thinkingDepth : (conv.thinkingDepth || null);
-  /* ★ FIX: ALWAYS read project path from per-conv state (conv.projectPath),
-   * never from the global projectState singleton.  The global state can be
-   * stale when: (a) user switches convs with text in the input box
-   * (skipping _restoreConvProject), (b) _restoreConvProject is async and
-   * hasn't completed yet, (c) another conv's _restoreConvProject changed
-   * the global.  conv.projectPath is always up-to-date because
-   * _saveConvProjectPath() updates it synchronously on every UI change. */
-  const _pp   = _getConvProjectPath(conv);
+  /* ★ Use shared _buildConvConfig to avoid config divergence.
+   * startAssistantResponse is now only used by continueAssistant() and
+   * Case E orphan recovery. sendMessage and regenerateFromUser use the
+   * atomic /api/chat/send and /api/chat/regenerate endpoints instead. */
+  const baseConfig = _buildConvConfig(conv);
+  const _ep = !!baseConfig.endpointMode;
+  const _pp = baseConfig.projectPath;
   /* Decide API route: endpoint mode uses /api/endpoint/start */
   const startUrl = _ep
     ? apiUrl("/api/endpoint/start")
     : apiUrl("/api/chat/start");
   try {
-    const baseConfig = {
-      maxTokens: config.maxTokens,
-      thinkingEnabled,
-      preset: _pre,
-      model: _pre,
-      systemPrompt: config.systemPrompt || '',
-      thinkingDepth: _dep,
-      temperature: config.temperature,
-      searchMode: _sm,
-      fetchEnabled: _fe,
-      codeExecEnabled: _ce,
-      memoryEnabled: _sk,
-      schedulerEnabled: _sch,
-      swarmEnabled: _sw,
-      projectPath: _pp,
-      autoApply: autoApplyWrites,
-      browserEnabled: _be,
-      desktopEnabled: _de,
-      imageGenEnabled: _ig,
-      humanGuidanceEnabled: _hg,
-      /* ★ Agent backend: external backends (claude-code, codex) bypass our
-       * orchestrator entirely — the config fields above are ignored by them. */
-      agentBackend: activeAgentBackend || 'builtin',
-      /* ★ AutoTranslate flag: tell the backend whether autoTranslate is on
-       * so it can skip the _needs_translation heuristic and always translate. */
-      autoTranslate: conv.autoTranslate !== undefined ? !!conv.autoTranslate : !!autoTranslate,
-      /* ★ Per-client browser routing: send the client ID of the extension
-       * that should execute browser commands for this task. */
-      browserClientId: _be ? (window._browserClientId || null) : null,
-      /* ★ Keep tool history: preserve full tool_use/tool_result messages
-       * across conversation turns so the model can see previous tool results. */
-      keepToolHistory: config.keepToolHistory !== false,
-    };
-    /* Endpoint-specific config — critic uses same model+tools as worker */
-    if (_ep) {
-      baseConfig.endpointMode = true;
-    }
     const resp = await fetch(startUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1618,7 +1395,7 @@ async function startAssistantResponse(convId) {
     const data = await resp.json();
     taskId = data.taskId;
     debugLog(
-      `Task started: ${taskId} (${_ep ? "ENDPOINT" : "normal"} search:${_sm} fetch:${_fe} project:${_pp ? "yes" : "no"} browser:${_be} autoApply:${autoApplyWrites}${_isActive ? "" : " bg-conv"})`,
+      `Task started: ${taskId} (${_ep ? "ENDPOINT" : "normal"} search:${baseConfig.searchMode} fetch:${baseConfig.fetchEnabled} project:${_pp ? "yes" : "no"} browser:${baseConfig.browserEnabled} autoApply:${baseConfig.autoApply}${convId === activeConvId ? "" : " bg-conv"})`,
       "success",
     );
   } catch (e) {
@@ -1755,77 +1532,6 @@ async function sendMessage() {
     _saveConvToolState();
     renderConversationList();
   }
-  // ── ★ Queue-on-stream: if currently streaming OR translating, queue to SERVER ──
-  if (activeStreams.has(conv.id) || conv.activeTaskId || conv._translating) {
-    const queuedItem = {
-      text: finalText,
-      images: [...pendingImages],
-      pdfTexts: [...pendingPdfTexts],
-      timestamp: Date.now(),
-    };
-    // Capture reply quotes
-    if (typeof getPendingReplyQuotes === "function") {
-      const rqs = getPendingReplyQuotes();
-      if (rqs && rqs.length > 0) {
-        queuedItem.replyQuotes = rqs;
-        clearReplyQuote();
-      }
-    }
-    // Capture conv refs (just the refs, not the fetched text — we'll fetch at send time)
-    if (typeof getPendingConvRefs === "function") {
-      const crs = getPendingConvRefs();
-      if (crs && crs.length > 0) {
-        queuedItem.convRefs = crs;
-        clearConvRefs();
-      }
-    }
-    // ★ Build config snapshot (same as startAssistantResponse) so the
-    //   server can dispatch with the correct settings later.
-    //   Reuse _buildConvConfig() to avoid duplicate logic that can diverge.
-    const _queueConfig = _buildConvConfig(conv);
-    // ★ Enqueue to SERVER (survives page refresh)
-    // Optimistic local update for instant UI feedback
-    if (!pendingMessageQueue.has(conv.id)) pendingMessageQueue.set(conv.id, []);
-    pendingMessageQueue.get(conv.id).push(queuedItem);
-    const depth = pendingMessageQueue.get(conv.id).length;
-    const hasImg = (queuedItem.images?.length || 0) > 0;
-    const hasPdf = (queuedItem.pdfTexts?.length || 0) > 0;
-    const hasRef = (queuedItem.convRefs?.length || 0) > 0;
-    const hasQuote = (queuedItem.replyQuotes?.length || 0) > 0;
-    const attachInfo = [hasImg && `${queuedItem.images.length}img`, hasPdf && `${queuedItem.pdfTexts.length}pdf`, hasRef && `${queuedItem.convRefs.length}ref`, hasQuote && `${queuedItem.replyQuotes.length}quote`].filter(Boolean).join('+');
-    console.log(
-      `%c[Queue] ✚ Enqueuing to server %c#${depth}%c for conv=${conv.id.slice(0,8)} | text=${finalText.length}ch${attachInfo ? ' | attach=' + attachInfo : ''} | reason=${activeStreams.has(conv.id) ? 'streaming' : conv._translating ? 'translating' : 'taskActive'}`,
-      'color:#a78bfa;font-weight:bold', 'color:#fbbf24;font-weight:bold', 'color:#a78bfa'
-    );
-    // Clear input immediately so user sees it was accepted
-    input.value = "";
-    input.style.height = "auto";
-    pendingImages = [];
-    pendingPdfTexts = [];
-    if (typeof _vlmClearState === 'function') _vlmClearState();
-    renderImagePreviews();
-    document.getElementById("pdfProgress").style.display = "none";
-    renderPendingQueueUI(conv.id);
-    updateSendButton();
-    debugLog(`消息已排队 (#${depth})，将在当前回复结束后自动发送`, 'info');
-    // Fire server enqueue in background (don't block UI)
-    fetch(apiUrl('/api/chat/queue'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ convId: conv.id, message: queuedItem, config: _queueConfig }),
-    }).then(resp => {
-      if (!resp.ok) {
-        console.error(`[Queue] Server enqueue failed: HTTP ${resp.status}`);
-        debugLog('排队消息发送到服务器失败', 'error');
-      } else {
-        console.log(`%c[Queue] ✓ Server confirmed enqueue for conv=${conv.id.slice(0,8)}`, 'color:#34d399');
-      }
-    }).catch(err => {
-      console.error('[Queue] Server enqueue error:', err);
-      debugLog('排队消息发送到服务器失败: ' + err.message, 'error');
-    });
-    return;
-  }
   const convId = conv.id;
 
   // ── Build message payload for backend ──
@@ -1843,31 +1549,12 @@ async function sendMessage() {
       clearReplyQuote();
     }
   }
-  // Conversation references (just the refs — server will format text from DB)
+  // Conversation references — send only {id, title}, backend resolves full text
   if (typeof getPendingConvRefs === "function") {
     const crs = getPendingConvRefs();
     if (crs && crs.length > 0) {
       msgPayload.convRefs = crs;
       clearConvRefs();
-      // Fetch and format conv ref texts (still needed for DB persistence)
-      const fetchPromises = crs.map(async (cr) => {
-        try {
-          let convMsgs = null;
-          const localConv = conversations.find(c => c.id === cr.id);
-          if (localConv && localConv.messages && localConv.messages.length > 0) {
-            convMsgs = localConv.messages;
-          } else {
-            const resp = await fetch(apiUrl(`/api/conversations/${cr.id}`));
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            const data = await resp.json();
-            convMsgs = data.messages || [];
-          }
-          return { id: cr.id, title: cr.title, text: _formatConvRefText(cr.title, convMsgs) };
-        } catch (e) {
-          return { id: cr.id, title: cr.title, text: `[Error loading conversation: ${e.message}]` };
-        }
-      });
-      msgPayload.convRefTexts = await Promise.all(fetchPromises);
     }
   }
   // Auto-assign folder
@@ -1889,7 +1576,6 @@ async function sendMessage() {
   };
   if (msgPayload.replyQuotes) userMsg.replyQuotes = msgPayload.replyQuotes;
   if (msgPayload.convRefs) userMsg.convRefs = msgPayload.convRefs;
-  if (msgPayload.convRefTexts) userMsg.convRefTexts = msgPayload.convRefTexts;
 
   conv._needsLoad = false;
   conv.messages.push(userMsg);
@@ -1924,19 +1610,40 @@ async function sendMessage() {
   // ── Atomic backend call: message creation + translate + task start ──
   const _sendConfig = _buildConvConfig(conv);
 
+  // ★ If autoTranslate is on and text has Chinese, show stop button immediately
+  //   so the user can abort during server-side translation.
+  const _sendAbortCtrl = new AbortController();
+  const _sendTimeout = setTimeout(() => _sendAbortCtrl.abort(), 60000); // 60s safety timeout
+  const _willTranslate = _sendConfig.autoTranslate && /[\u4e00-\u9fff\u3400-\u4dbf]/.test(finalText);
+  if (_willTranslate) {
+    conv._translating = true;
+    conv._translateAborted = false;
+    conv._translateAbortCtrl = _sendAbortCtrl;
+    updateSendButton();
+    renderConversationList();
+    if (activeConvId === convId) _renderTranslatingBubble();
+  }
+
   try {
-    const resp = await fetch(apiUrl('/api/chat/send'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    // ★ If the user just aborted a task, pass its ID so the backend can
+    //   abort it immediately — even if the fire-and-forget abort fetch
+    //   hasn't arrived yet. This eliminates the race where the send
+    //   arrives before the abort and the backend incorrectly enqueues.
+    const _sendBody = {
         convId,
         message: msgPayload,
         config: _sendConfig,
         settings: _buildConvSettings(conv),
-      }),
-      signal: typeof AbortSignal.timeout === 'function'
-        ? AbortSignal.timeout(60000)   // 60s timeout (includes translation time)
-        : undefined,
+    };
+    if (conv._lastAbortedTaskId) {
+      _sendBody.abortTaskId = conv._lastAbortedTaskId;
+      delete conv._lastAbortedTaskId;
+    }
+    const resp = await fetch(apiUrl('/api/chat/send'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(_sendBody),
+      signal: _sendAbortCtrl.signal,
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
@@ -1961,6 +1668,35 @@ async function sendMessage() {
     }
     conv._serverMsgCount = result.msgCount || conv.messages.length;
 
+    // ★ Backend decided to queue (active task running for this conversation)
+    if (result.queued) {
+      console.log(
+        `%c[Queue] ✚ Server queued message %c#${result.position}%c for conv=${convId.slice(0,8)} queueId=${result.queueId?.slice(0,8)}`,
+        'color:#a78bfa;font-weight:bold', 'color:#fbbf24;font-weight:bold', 'color:#a78bfa'
+      );
+      // ★ Remove the optimistic user message from conv.messages and DOM —
+      //   queued messages should only appear in the queue bar, not in chatInner.
+      //   The backend did NOT persist this message to the conversation DB.
+      if (conv.messages[userMsgIdx] === userMsg) {
+        conv.messages.splice(userMsgIdx, 1);
+        if (activeConvId === convId) {
+          const msgEl = document.getElementById('msg-' + userMsgIdx);
+          if (msgEl) msgEl.remove();
+        }
+      }
+      // Sync queue state from server for accurate UI
+      _refreshServerQueue(convId);
+      saveConversations(convId);
+      if (activeConvId === convId) {
+        _removeTranslatingBubble();
+      }
+      buildTurnNav(conv);
+      renderConversationList();
+      updateSendButton();
+      debugLog(`消息已排队 (#${result.position})，将在当前回复结束后自动发送`, 'info');
+      return;  // ← exit try block, falls through to finally
+    }
+
     // Push empty assistant msg + connect to task SSE
     const taskId = result.taskId;
     const assistantMsg = {
@@ -1977,31 +1713,68 @@ async function sendMessage() {
     debugLog(`Task started: ${taskId} (send)`, "success");
 
     if (activeConvId === convId) {
+      _removeTranslatingBubble();
       _renderStreamingBubble(conv, _sendConfig);
     }
     buildTurnNav(conv);
     connectToTask(convId, taskId);
 
   } catch (e) {
-    const errMsg = e.name === 'TimeoutError'
-      ? 'Request timed out — server may be overloaded.'
-      : e.message;
-    debugLog("Failed: " + errMsg, "error");
-    console.error('[sendMessage] /api/chat/send failed:', e.name, e.message);
-    // Show error on the user message
-    const errAssistant = {
-      role: "assistant", content: "", thinking: "",
-      error: errMsg, timestamp: Date.now(), toolRounds: [],
-    };
-    conv.messages.push(errAssistant);
-    if (activeConvId === convId) {
-      const chatInnerEl = document.getElementById("chatInner");
-      if (chatInnerEl)
-        chatInnerEl.insertAdjacentHTML("beforeend", renderMessage(errAssistant, conv.messages.length - 1));
+    // ★ If user aborted during translation, keep the message so the user
+    //   can edit the typo — don't remove it.  Also abort any server-side
+    //   task that may have been started (the server received the request
+    //   before the client-side abort fired).
+    if (e.name === 'AbortError' && _willTranslate) {
+      console.log('%c[sendMessage] ✗ Aborted during translation by user — keeping message for editing', 'color:#f59e0b;font-weight:bold');
+      _removeTranslatingBubble();
+      // ★ Keep the user message in conv.messages and DOM — user wants to edit it.
+      // Re-render to remove any stale translation overlay.
+      if (activeConvId === convId) {
+        const msgEl = document.getElementById('msg-' + userMsgIdx);
+        if (msgEl) msgEl.outerHTML = renderMessage(userMsg, userMsgIdx);
+      }
+      saveConversations(convId);
+      // ★ Sync to server so the DB matches the frontend state (the server
+      //   may have persisted its own version with translation + assistant msg).
+      syncConversationToServer(conv);
+      buildTurnNav(conv);
+      // ★ Abort any server-side task that may have started — the server
+      //   received the POST before the client abort fired, so it may have
+      //   already translated + started a task.  We abort by convId because
+      //   we never received the taskId from the response.
+      fetch(apiUrl(`/api/chat/abort-conv/${convId}`), { method: 'POST' }).catch(() => {});
+    } else {
+      const errMsg = e.name === 'TimeoutError'
+        ? 'Request timed out — server may be overloaded.'
+        : e.message;
+      debugLog("Failed: " + errMsg, "error");
+      console.error('[sendMessage] /api/chat/send failed:', e.name, e.message);
+      // Show error on the user message
+      const errAssistant = {
+        role: "assistant", content: "", thinking: "",
+        error: errMsg, timestamp: Date.now(), toolRounds: [],
+      };
+      conv.messages.push(errAssistant);
+      if (activeConvId === convId) {
+        const chatInnerEl = document.getElementById("chatInner");
+        if (chatInnerEl)
+          chatInnerEl.insertAdjacentHTML("beforeend", renderMessage(errAssistant, conv.messages.length - 1));
+      }
+      saveConversations(convId);
+      syncConversationToServer(conv);
+      buildTurnNav(conv);
     }
-    saveConversations(convId);
-    syncConversationToServer(conv);
-    buildTurnNav(conv);
+  } finally {
+    clearTimeout(_sendTimeout);
+    // ★ Always clean up translating state
+    if (_willTranslate) {
+      _removeTranslatingBubble();
+      conv._translating = false;
+      conv._translateAborted = false;
+      conv._translateAbortCtrl = null;
+      updateSendButton();
+      renderConversationList();
+    }
   }
 }
 
@@ -2009,225 +1782,18 @@ async function sendMessage() {
 //  ★ Non-blocking background translation → auto-start assistant
 // ══════════════════════════════════════════════════════
 
-/**
- * Translate user message in background, then auto-start assistant response.
- * Called fire-and-forget from sendMessage / saveEditAndResend / regenerateFromUser
- * so the UI stays responsive during translation.
- *
- * State transitions visible in sidebar:
- *   "翻译中" (conv._translating=true) → streaming dot (assistant running) → done
- */
-async function _translateThenRespond(conv, convId, userMsg, userMsgIdx, originalText, { allowTruncate = false } = {}) {
-  const _translateCtrl = new AbortController();
-  conv._translateAbortCtrl = _translateCtrl;
-  let _translateWasAborted = false;
-  try {
-    // Run translation + DB sync in parallel
-    const _translatePromise = fetch(apiUrl('/api/translate'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: _translateCtrl.signal,
-      body: JSON.stringify({
-        text: originalText,
-        targetLang: 'English',
-        sourceLang: 'Chinese',
-      }),
-    });
-    const _syncOpts = allowTruncate ? { allowTruncate: true } : {};
-    const [translateResp] = await Promise.all([
-      _translatePromise,
-      syncConversationToServer(conv, _syncOpts),
-    ]);
-    if (conv._translateAborted) {
-      _translateWasAborted = true;
-    } else if (translateResp.ok) {
-      const d = await translateResp.json();
-      if (d.translated) {
-        userMsg.content = d.translated;
-        if (d.model) userMsg._translateModel = d.model;
-        userMsg._translateDone = true;
-        saveConversations(convId);
-        syncConversationToServer(conversations.find(c => c.id === convId));
-        if (activeConvId === convId) {
-          const msgEl = document.getElementById('msg-' + userMsgIdx);
-          if (msgEl) { msgEl.classList.remove('user-translating'); msgEl.outerHTML = renderMessage(userMsg, userMsgIdx); }
-        }
-        console.log('%c[Translate] ✓ Background translation done', 'color:#22c55e;font-weight:bold');
-      } else {
-        console.warn('[Translate] No translated text in response, proceeding with original');
-      }
-    } else if (translateResp.status === 413) {
-      // Text too long for sync — fall back to async task
-      console.warn('[Translate] Text too long for sync, falling back to async');
-      const taskId = await _startTranslateTask(originalText, 'English', 'Chinese', convId, userMsgIdx, 'content');
-      if (taskId) {
-        for (let attempt = 0; attempt < 40; attempt++) {
-          await new Promise(r => setTimeout(r, attempt < 3 ? 1000 : 1500));
-          if (conv._translateAborted) { _translateWasAborted = true; break; }
-          const result = await _pollTranslateTask(taskId);
-          if (result.status === 'done' && result.translated) {
-            userMsg.content = result.translated;
-            if (result.model) userMsg._translateModel = result.model;
-            userMsg._translateDone = true;
-            saveConversations(convId);
-            syncConversationToServer(conversations.find(c => c.id === convId));
-            if (activeConvId === convId) {
-              const msgEl = document.getElementById('msg-' + userMsgIdx);
-              if (msgEl) { msgEl.classList.remove('user-translating'); msgEl.outerHTML = renderMessage(userMsg, userMsgIdx); }
-            }
-            break;
-          } else if (result.status === 'error' || result.status === 'not_found') { break; }
-        }
-      }
-    } else {
-      console.warn('[Translate] Background translate HTTP', translateResp.status, '— proceeding with original');
-    }
-  } catch (e) {
-    if (e.name === 'AbortError') {
-      console.log('%c[Translate] ✗ Translation aborted by user', 'color:#f59e0b;font-weight:bold');
-      _translateWasAborted = true;
-    } else {
-      console.error('Translation failed, proceeding with original text:', e);
-    }
-  }
-  // Clean up translating state
-  conv._translating = false;
-  conv._translateAborted = false;
-  conv._translateAbortCtrl = null;
-  updateSendButton();
-  renderConversationList();
-  if (activeConvId === convId) {
-    const msgEl = document.getElementById('msg-' + userMsgIdx);
-    if (msgEl) msgEl.classList.remove('user-translating');
-  }
-  if (_translateWasAborted) {
-    console.log('%c[Translate] Skipping LLM call — translation was aborted', 'color:#f59e0b;font-weight:bold');
-    saveConversations(convId);
-    if (activeConvId === convId) renderChat(conv);
-    return;
-  }
-  // ── Translation done → proceed to VLM wait + assistant response ──
-  await _waitForVlmParsing(userMsg, convId, userMsgIdx);
-  saveConversations(convId);
-  await startAssistantResponse(convId);
-}
+// ★ REMOVED: _translateThenRespond() — dead code.
+// Translation is now handled atomically by the backend in /api/chat/send,
+// /api/chat/regenerate, and dispatch_next_queued() in lib/message_queue.py.
 
 // ══════════════════════════════════════════════════════
 //  ★ Pending Message Queue — dispatch, UI, cancel
 // ══════════════════════════════════════════════════════
 
-/**
- * Dispatch the next queued message for a conversation.
- * Called from finishStream() after a stream completes.
- */
-async function _dispatchQueuedMessage(convId) {
-  const queue = pendingMessageQueue.get(convId);
-  if (!queue || queue.length === 0) {
-    pendingMessageQueue.delete(convId);
-    renderPendingQueueUI(convId);
-    console.log(`%c[Queue] ∅ Queue empty for conv=${convId.slice(0,8)}, nothing to dispatch`, 'color:#6b7280');
-    return;
-  }
-  const item = queue.shift();
-  const remaining = queue.length;
-  if (remaining === 0) pendingMessageQueue.delete(convId);
-  renderPendingQueueUI(convId);
-  updateSendButton();
-
-  const queuedAge = Date.now() - item.timestamp;
-  console.log(
-    `%c[Queue] ▶ Dispatching%c queued message for conv=${convId.slice(0,8)} | waited=${(queuedAge/1000).toFixed(1)}s | text=${item.text?.length || 0}ch | remaining=${remaining}`,
-    'color:#34d399;font-weight:bold', 'color:#34d399'
-  );
-  debugLog(`正在发送排队消息… (剩余 ${remaining} 条)`, 'info');
-
-  const conv = conversations.find(c => c.id === convId);
-  if (!conv) return;
-
-  // Re-hydrate the user message
-  const userMsg = {
-    role: "user",
-    content: item.text,
-    images: item.images || [],
-    pdfTexts: item.pdfTexts || [],
-    timestamp: item.timestamp,
-  };
-  if (item.replyQuotes) userMsg.replyQuotes = item.replyQuotes;
-
-  // Fetch conv ref texts if needed
-  if (item.convRefs && item.convRefs.length > 0) {
-    userMsg.convRefs = item.convRefs;
-    const fetchPromises = item.convRefs.map(async (cr) => {
-      try {
-        let convMsgs = null;
-        const localConv = conversations.find(c => c.id === cr.id);
-        if (localConv && localConv.messages && localConv.messages.length > 0) {
-          convMsgs = localConv.messages;
-        } else {
-          const resp = await fetch(apiUrl(`/api/conversations/${cr.id}`));
-          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-          const data = await resp.json();
-          convMsgs = data.messages || [];
-        }
-        return { id: cr.id, title: cr.title, text: _formatConvRefText(cr.title, convMsgs) };
-      } catch (e) {
-        return { id: cr.id, title: cr.title, text: `[Error loading conversation: ${e.message}]` };
-      }
-    });
-    userMsg.convRefTexts = await Promise.all(fetchPromises);
-  }
-
-  // Auto-translate: detect Chinese, defer translation to async task (non-blocking)
-  // ★ FIX: Use per-conv autoTranslate, NOT the global (which reflects the currently viewed conv)
-  const _convAutoTranslate = conv.autoTranslate !== undefined ? !!conv.autoTranslate : true;
-  let queueNeedsTranslation = false;
-  if (_convAutoTranslate && item.text) {
-    const hasChinese = /[\u4e00-\u9fff\u3400-\u4dbf]/.test(item.text);
-    if (hasChinese) {
-      userMsg.originalContent = item.text;
-      queueNeedsTranslation = true;
-    }
-  }
-
-  // Push and render immediately (no blocking on translation)
-  /* ★ FIX: Same _needsLoad guard as in sendMessage() — see comment there. */
-  conv._needsLoad = false;
-  conv.messages.push(userMsg);
-  const userMsgIdx = conv.messages.length - 1;
-  if (activeConvId === convId) {
-    const w = document.getElementById("welcome");
-    if (w) w.remove();
-    const chatInnerQ = document.getElementById("chatInner");
-    if (chatInnerQ) chatInnerQ.insertAdjacentHTML("beforeend", renderMessage(userMsg, userMsgIdx));
-    const newEl = document.getElementById("msg-" + userMsgIdx);
-    if (newEl) {
-      newEl.classList.add("message-new");
-      newEl.addEventListener('animationend', () => newEl.classList.remove('message-new'), { once: true });
-    }
-    scrollToBottom(true);
-  }
-  console.log(`%c[Queue] ▶ Dispatched msg rendered at idx=${userMsgIdx}, starting assistant response…`, 'color:#34d399');
-
-  // ── Non-blocking translation: fire background, reuse shared helper ──
-  if (queueNeedsTranslation) {
-    conv._translating = true;
-    conv._translateAborted = false;
-    updateSendButton();
-    renderConversationList();
-    if (activeConvId === convId) {
-      const msgEl = document.getElementById('msg-' + userMsgIdx);
-      if (msgEl) msgEl.classList.add('user-translating');
-    }
-    _translateThenRespond(conv, convId, userMsg, userMsgIdx, item.text);
-    return;
-  }
-
-  // ── ★ Wait for VLM parsing to complete (mandatory for PDFs) ──
-  await _waitForVlmParsing(userMsg, convId, userMsgIdx);
-
-  saveConversations(convId);
-  await startAssistantResponse(convId);
-}
+// ★ REMOVED: _dispatchQueuedMessage() — dead code.
+// Queue dispatch is now handled server-side by dispatch_next_queued() in
+// lib/message_queue.py. The frontend polls for auto-dispatched tasks via
+// _checkForQueuedTask() (called from finishStream in ui.js).
 
 // ══════════════════════════════════════════════════════
 //  ★ VLM Mandatory Wait — block until all PDF VLM parses finish
@@ -2399,14 +1965,34 @@ function clearPendingQueue(convId) {
  * Check if the server auto-dispatched a queued message and created a new task.
  * If found, load the new user message and connect to the task's SSE stream.
  */
-async function _checkForQueuedTask(convId) {
+async function _checkForQueuedTask(convId, _retryCount = 0) {
   try {
+    // ★ Skip if the conversation already has an active task (user may have
+    //   already started a new send/regenerate since finishStream scheduled us)
+    const _conv = conversations.find(c => c.id === convId);
+    if (_conv && (_conv.activeTaskId || activeStreams.has(convId))) {
+      console.log(`%c[Queue] Skipping _checkForQueuedTask — conv=${convId.slice(0,8)} already has active task/stream`, 'color:#a78bfa');
+      _refreshServerQueue(convId);
+      return;
+    }
     const resp = await fetch(apiUrl('/api/chat/active'));
     if (!resp.ok) return;
     const activeTasks = await resp.json();
-    const newTask = activeTasks.find(t => t.convId === convId && t.status === 'running');
+    // ★ Only connect to non-aborted running tasks — an aborted task
+    //   is winding down and should not be reconnected to.
+    const newTask = activeTasks.find(t => t.convId === convId && t.status === 'running' && !t.aborted);
     if (!newTask) {
-      // No new task — refresh queue UI (items may have been consumed)
+      // Server may still be dispatching (persist → dispatch timing gap).
+      // Only retry if there are actually queued items — avoids noisy polling
+      // after a simple stop (no queue).
+      const _hasQueueItems = pendingMessageQueue.has(convId) && pendingMessageQueue.get(convId).length > 0;
+      if (_hasQueueItems && _retryCount < 3) {
+        const _delay = [800, 1500, 3000][_retryCount];
+        console.log(`%c[Queue] No dispatched task yet for conv=${convId.slice(0,8)}, retry #${_retryCount + 1} in ${_delay}ms`, 'color:#a78bfa');
+        setTimeout(() => _checkForQueuedTask(convId, _retryCount + 1), _delay);
+        return;
+      }
+      // No new task after retries (or no queue) — refresh queue UI
       _refreshServerQueue(convId);
       return;
     }
@@ -2514,30 +2100,25 @@ async function regenerateFromUser(idx) {
   conv._serverMsgCount = conv.messages.length;
 
   /* ── Surgical DOM truncation ── */
-  let usedSurgical = false;
-  if (activeConvId === convId) {
-    const inner = document.getElementById("chatInner");
-    if (inner) {
-      const toRemove = [];
-      inner.querySelectorAll('.message[id^="msg-"]').forEach(el => {
-        const m = el.id.match(/^msg-(\d+)$/);
-        if (m && parseInt(m[1], 10) > idx) toRemove.push(el);
-      });
-      const oldStreaming = document.getElementById("streaming-msg");
-      if (oldStreaming) toRemove.push(oldStreaming);
-      if (toRemove.length > 0 || inner.querySelector('.message[id^="msg-"]')) {
-        for (const el of toRemove) el.remove();
-        usedSurgical = true;
-        _lastRenderedFingerprint = _convRenderFingerprint(conv);
-        buildTurnNav(conv);
-      }
-    }
-  }
-  if (!usedSurgical) renderChat(conv);
+  if (!_surgicalTruncateDOM(conv, idx)) renderChat(conv);
   renderConversationList();
 
   // ── Atomic backend call: truncate + translate + task start ──
   const _regenConfig = _buildConvConfig(conv);
+
+  // ★ If autoTranslate is on and message has Chinese, show stop button immediately
+  const _regenAbortCtrl = new AbortController();
+  const _regenTimeout = setTimeout(() => _regenAbortCtrl.abort(), 60000); // 60s safety timeout
+  const _regenText = msg.content || '';
+  const _regenWillTranslate = _regenConfig.autoTranslate && /[\u4e00-\u9fff\u3400-\u4dbf]/.test(_regenText);
+  if (_regenWillTranslate) {
+    conv._translating = true;
+    conv._translateAborted = false;
+    conv._translateAbortCtrl = _regenAbortCtrl;
+    updateSendButton();
+    renderConversationList();
+    if (activeConvId === convId) _renderTranslatingBubble();
+  }
 
   try {
     const resp = await fetch(apiUrl('/api/chat/regenerate'), {
@@ -2549,8 +2130,7 @@ async function regenerateFromUser(idx) {
         config: _regenConfig,
         settings: _buildConvSettings(conv),
       }),
-      signal: typeof AbortSignal.timeout === 'function'
-        ? AbortSignal.timeout(60000) : undefined,
+      signal: _regenAbortCtrl.signal,
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
@@ -2582,16 +2162,38 @@ async function regenerateFromUser(idx) {
     conv.activeTaskId = taskId;
     saveConversations(convId);
 
+    _removeTranslatingBubble();
     if (activeConvId === convId) _renderStreamingBubble(conv, _regenConfig);
     buildTurnNav(conv);
     connectToTask(convId, taskId);
 
   } catch (e) {
-    debugLog("Regenerate failed: " + e.message, "error");
-    console.error('[regenerateFromUser] /api/chat/regenerate failed:', e);
-    saveConversations(convId);
-    syncConversationToServer(conv, { allowTruncate: true });
-    buildTurnNav(conv);
+    if (e.name === 'AbortError' && _regenWillTranslate) {
+      console.log('%c[regenerateFromUser] ✗ Aborted during translation by user', 'color:#f59e0b;font-weight:bold');
+      _removeTranslatingBubble();
+      saveConversations(convId);
+      // ★ FIX: sync truncated messages to server (we already sliced conv.messages
+      //   above) and abort any server-side task that may have started.
+      syncConversationToServer(conv, { allowTruncate: true });
+      buildTurnNav(conv);
+      fetch(apiUrl(`/api/chat/abort-conv/${convId}`), { method: 'POST' }).catch(() => {});
+    } else {
+      debugLog("Regenerate failed: " + e.message, "error");
+      console.error('[regenerateFromUser] /api/chat/regenerate failed:', e);
+      saveConversations(convId);
+      syncConversationToServer(conv, { allowTruncate: true });
+      buildTurnNav(conv);
+    }
+  } finally {
+    clearTimeout(_regenTimeout);
+    if (_regenWillTranslate) {
+      _removeTranslatingBubble();
+      conv._translating = false;
+      conv._translateAborted = false;
+      conv._translateAbortCtrl = null;
+      updateSendButton();
+      renderConversationList();
+    }
   }
 }
 
@@ -3643,22 +3245,32 @@ function _initFolderTabs() {
   const tabsEl = document.getElementById('folderTabs');
   if (!tabsEl) return;
 
-  // ── Desktop: mouse wheel → horizontal scroll ──
-  // Only intercept vertical wheel (mouse scroll wheel) and convert to horizontal.
-  // Trackpad native horizontal swipe (deltaX) is left to the browser — intercepting
-  // it causes jitter because preventDefault() kills inertia scrolling.
-  tabsEl.addEventListener('wheel', (e) => {
+  // ── Expand/collapse toggle for wrapped folder tabs ──
+  tabsEl.addEventListener('click', (e) => {
+    const toggle = e.target.closest('.folder-tabs-toggle');
+    if (!toggle) return;
+    e.stopPropagation();
     const scrollEl = tabsEl.querySelector('.folder-tabs-scroll');
     if (!scrollEl) return;
-    if (scrollEl.scrollWidth <= scrollEl.clientWidth) return;
-    // Trackpad horizontal swipe: let the browser handle it natively
-    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
-    // Mouse wheel (vertical): convert to horizontal scroll
-    if (e.deltaY) {
-      e.preventDefault();
-      scrollEl.scrollLeft += e.deltaY;
+    _folderTabsExpanded = !_folderTabsExpanded;
+    scrollEl.classList.toggle('expanded', _folderTabsExpanded);
+    // Update label
+    const label = toggle.querySelector('.folder-tabs-toggle-label');
+    if (label) {
+      if (_folderTabsExpanded) {
+        label.textContent = t('sidebar.lessFolders');
+      } else {
+        // Count hidden folder tabs (exclude the "+" add button)
+        const collapsedMax = 94; // matches CSS max-height (3 rows)
+        const tabs = scrollEl.querySelectorAll('.folder-tab:not(.folder-tab-add)');
+        let hidden = 0;
+        tabs.forEach(tab => {
+          if (tab.offsetTop + tab.offsetHeight > collapsedMax) hidden++;
+        });
+        label.textContent = hidden > 0 ? `+${hidden}` : '';
+      }
     }
-  }, { passive: false });
+  });
 
   // Click: switch folder tab or create new folder
   tabsEl.addEventListener('click', (e) => {
@@ -4299,15 +3911,16 @@ async function initActiveTasks() {
       return;
     }
     const serverTasks = await activeResp.json();
+    // ★ Exclude aborted tasks — they are winding down and should not be reconnected to
     const runIds = new Set(
-      serverTasks.filter((t) => t.status === "running").map((t) => t.id),
+      serverTasks.filter((t) => t.status === "running" && !t.aborted).map((t) => t.id),
     );
     const toRecon = [];
     /* ★ Build a map from convId → running taskId for orphan recovery
           (handles the case where user refreshed before activeTaskId was saved) */
     const convIdToRunningTask = new Map();
     for (const t of serverTasks) {
-      if (t.status === "running" && t.convId) {
+      if (t.status === "running" && !t.aborted && t.convId) {
         // ★ Skip tasks that belong to branch streams — they are managed separately
         if (typeof isBranchTaskId === "function" && isBranchTaskId(t.id)) continue;
         convIdToRunningTask.set(t.convId, t.id);
@@ -4460,7 +4073,30 @@ async function initActiveTasks() {
       }
     }
 
-    /* ── Batch-poll finished tasks in parallel ── */
+    /* ── Case A: Reconnect to running tasks immediately ── */
+    /* ★ CROSS-TALK DETECTION: warn when reconnecting multiple tasks simultaneously */
+    if (toRecon.length > 1) {
+      console.warn(
+        `[initActiveTasks] ⚠️ MULTI-TASK RECONNECT: reconnecting ${toRecon.length} tasks simultaneously — ` +
+        `elevated cross-talk risk! Tasks: ${toRecon.map(t => `conv=${t.convId.slice(0,8)}→task=${t.taskId.slice(0,8)}`).join(', ')} ` +
+        `activeConvId=${activeConvId?.slice(0,8)||'null'}`
+      );
+    }
+    for (const { convId, taskId } of toRecon) connectToTask(convId, taskId);
+    // ── Reconnect any in-flight branch streams ──
+    if (typeof initBranchReconnect === "function") initBranchReconnect();
+
+    /* ── Render sidebar + active conv IMMEDIATELY ──
+     *   Case B/F recovery runs in the background so the user sees their
+     *   conversation without waiting for recovery of ALL conversations.
+     *   With the backend's recover_stale_tasks_on_startup(), most Case B
+     *   convs are already cleaned up (activeTaskId cleared, content merged). */
+    renderConversationList();
+    _ensureNewest();
+
+    /* ── Background recovery: Case B + F + E (non-blocking) ── */
+    const _bgRecovery = async () => {
+    /* ── Case B: Batch-poll finished tasks in parallel ── */
     if (caseBConvs.length > 0) {
       console.warn(`[initActiveTasks] Case B: recovering ${caseBConvs.length} conversations with finished tasks`);
       await Promise.all(
@@ -4542,6 +4178,9 @@ async function initActiveTasks() {
                 if (td.fallbackModel) am.fallbackModel = td.fallbackModel;
                 if (td.fallbackFrom) am.fallbackFrom = td.fallbackFrom;
                 if (td.modifiedFiles) am.modifiedFiles = td.modifiedFiles;
+                /* ★ emit_to_user: recover emitContent from poll response */
+                if (td.emitContent) am._emitContent = td.emitContent;
+                if (td.emitToolName) am._emitToolName = td.emitToolName;
               }
               /* ★ If server returned status='interrupted', the task was checkpointed
                  but the server crashed before completing. Mark it as interrupted
@@ -4688,19 +4327,6 @@ async function initActiveTasks() {
       }
     }
 
-    renderConversationList();
-    /* ★ CROSS-TALK DETECTION: warn when reconnecting multiple tasks simultaneously */
-    if (toRecon.length > 1) {
-      console.warn(
-        `[initActiveTasks] ⚠️ MULTI-TASK RECONNECT: reconnecting ${toRecon.length} tasks simultaneously — ` +
-        `elevated cross-talk risk! Tasks: ${toRecon.map(t => `conv=${t.convId.slice(0,8)}→task=${t.taskId.slice(0,8)}`).join(', ')} ` +
-        `activeConvId=${activeConvId?.slice(0,8)||'null'}`
-      );
-    }
-    for (const { convId, taskId } of toRecon) connectToTask(convId, taskId);
-    // ── Reconnect any in-flight branch streams ──
-    if (typeof initBranchReconnect === "function") initBranchReconnect();
-
     /* ── Case E dispatch: auto-start responses for orphaned user messages ── */
     if (caseEConvs.length > 0) {
       console.warn(`[initActiveTasks CaseE] ★ Auto-starting ${caseEConvs.length} orphaned conversations`);
@@ -4730,8 +4356,18 @@ async function initActiveTasks() {
         }
       }, 3000);
     }
+    }; /* end _bgRecovery */
 
-    _ensureNewest();
+    /* Fire background recovery — don't await it */
+    _bgRecovery().then(() => {
+      /* Re-render after background recovery completes to show updated state */
+      renderConversationList();
+      if (activeConvId && !activeStreams.has(activeConvId)) {
+        const c = getActiveConv();
+        if (c && !c.activeTaskId) renderChat(c, false);
+      }
+    }).catch(e => console.warn('[initActiveTasks] Background recovery error:', e.message));
+
   } catch (e) {
     debugLog("initActiveTasks: " + e.message, "warn");
   }

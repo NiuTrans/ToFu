@@ -79,7 +79,6 @@ class BackendCapabilities:
     has_image_gen: bool = False
     has_browser_ext: bool = False
     has_desktop_agent: bool = False
-    has_error_tracker: bool = False
     has_swarm: bool = False
     has_scheduler: bool = False
     has_conv_ref: bool = False
@@ -109,7 +108,6 @@ class BackendCapabilities:
             'hasImageGen': self.has_image_gen,
             'hasBrowserExt': self.has_browser_ext,
             'hasDesktopAgent': self.has_desktop_agent,
-            'hasErrorTracker': self.has_error_tracker,
             'hasSwarm': self.has_swarm,
             'hasScheduler': self.has_scheduler,
             'hasConvRef': self.has_conv_ref,

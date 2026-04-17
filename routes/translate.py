@@ -1,12 +1,13 @@
 """routes/translate.py — Translation endpoints (sync + async)."""
 
 import json
+import os
 import re
 import threading
 import time
 import uuid
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 
 from lib.database import DOMAIN_CHAT, db_execute_with_retry, json_dumps_pg
 from lib.log import get_logger
@@ -796,3 +797,194 @@ def translate_text():
         logger.error('[Translate] Error translating %d-char text (target=%s): %s',
                      input_len, target, e, exc_info=True)
         return jsonify({'error': str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════
+#  PPTX File Translation (formatting-preserving)
+#
+#  Core engine adapted from tristan-mcinnis/PPT-Translator-Formatting-Intact-with-LLMs
+#  https://github.com/tristan-mcinnis/PPT-Translator-Formatting-Intact-with-LLMs
+# ══════════════════════════════════════════════════════
+
+# PPTX translation tasks share the same task store as text translation tasks,
+# but include extra fields: 'type': 'pptx', 'filename', 'download_url'.
+
+_PPTX_UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                'uploads', 'pptx')
+_MAX_PPTX_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
+def _ensure_pptx_upload_dir():
+    """Ensure the PPTX upload directory exists."""
+    os.makedirs(_PPTX_UPLOAD_DIR, exist_ok=True)
+
+
+def _do_translate_pptx(task_id, input_path, filename, target, source):
+    """Background thread: translate a PPTX file."""
+    with _translate_tasks_lock:
+        task = _translate_tasks.get(task_id)
+    if not task:
+        return
+
+    system_prompt = _build_translate_prompt(target, source)
+
+    def _translate_segment(text):
+        """Translate a single text segment using our existing infrastructure."""
+        if not text or not text.strip():
+            return text
+        c, _u = _translate_one_chunk(text, system_prompt,
+                                      chunk_label=f':pptx-{task_id[:6]}',
+                                      source=source, target=target)
+        return c
+
+    def _progress_cb(current, total, status_msg):
+        with _translate_tasks_lock:
+            t = _translate_tasks.get(task_id)
+            if t:
+                t['progress'] = f'{current}/{total}'
+
+    try:
+        from lib.pptx_translator import translate_pptx
+
+        stem = os.path.splitext(filename)[0]
+        output_filename = f'{stem}_translated_{task_id}.pptx'
+        output_path = os.path.join(_PPTX_UPLOAD_DIR, output_filename)
+
+        result = translate_pptx(
+            input_path,
+            output_path,
+            translate_fn=_translate_segment,
+            progress_fn=_progress_cb,
+        )
+
+        if not result.get('ok'):
+            with _translate_tasks_lock:
+                task['status'] = 'error'
+                task['error'] = result.get('error', 'Translation failed')
+                task['completed_at'] = time.time()
+            logger.error('[PPTX-Translate] Task %s failed: %s', task_id[:8],
+                         result.get('error'))
+            return
+
+        with _translate_tasks_lock:
+            task['status'] = 'done'
+            task['result'] = {
+                'filename': output_filename,
+                'download_url': f'/api/translate/pptx/download/{output_filename}',
+                'slides': result.get('slides', 0),
+                'segments': result.get('segments', 0),
+                'chars_translated': result.get('chars_translated', 0),
+                'errors': result.get('errors', 0),
+                'elapsed': result.get('elapsed', 0),
+            }
+            task['completed_at'] = time.time()
+
+        logger.info('[PPTX-Translate] Task %s done: %s — %d slides, %d segments, '
+                    '%d chars, %.1fs',
+                    task_id[:8], filename, result.get('slides', 0),
+                    result.get('segments', 0), result.get('chars_translated', 0),
+                    result.get('elapsed', 0))
+
+    except Exception as e:
+        with _translate_tasks_lock:
+            task['status'] = 'error'
+            task['error'] = str(e)
+            task['completed_at'] = time.time()
+        logger.error('[PPTX-Translate] Task %s failed: %s', task_id[:8], e, exc_info=True)
+    finally:
+        # Clean up input file (translated file kept for download)
+        try:
+            if os.path.isfile(input_path):
+                os.remove(input_path)
+        except Exception as e:
+            logger.debug('[PPTX-Translate] Failed to clean up input: %s', e)
+
+
+@translate_bp.route('/api/translate/pptx', methods=['POST'])
+def translate_pptx_upload():
+    """Upload and translate a PPTX file (async).
+
+    Accepts multipart form upload with:
+        file: The .pptx file
+        targetLang: Target language (default: 'English')
+        sourceLang: Source language (default: '' = auto-detect)
+
+    Returns: {taskId} — poll with /api/translate/poll/<taskId>
+    When done, result contains {filename, download_url, slides, segments, ...}
+    """
+    import lib as _lib_rt
+    if not getattr(_lib_rt, 'PPTX_TRANSLATE_ENABLED', False):
+        return jsonify({'error': 'PPTX translation is not enabled. '
+                        'Enable it in Settings → Feature Modules.'}), 403
+    _cleanup_translate_tasks()
+    _ensure_pptx_upload_dir()
+
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    file = request.files['file']
+    if not file.filename:
+        return jsonify({'error': 'No filename'}), 400
+
+    filename = file.filename
+    if not filename.lower().endswith('.pptx'):
+        return jsonify({'error': 'Only .pptx files are supported'}), 400
+
+    if request.content_length and request.content_length > _MAX_PPTX_BYTES:
+        return jsonify({'error': f'File too large (max {_MAX_PPTX_BYTES // 1048576}MB)'}), 400
+
+    file_bytes = file.read()
+    if not file_bytes:
+        return jsonify({'error': 'Empty file'}), 400
+    if len(file_bytes) > _MAX_PPTX_BYTES:
+        return jsonify({'error': f'File too large ({len(file_bytes) // 1048576}MB, '
+                        f'max {_MAX_PPTX_BYTES // 1048576}MB)'}), 400
+
+    target = request.form.get('targetLang', 'English')
+    source = request.form.get('sourceLang', '')
+
+    # Save uploaded file
+    task_id = str(uuid.uuid4())[:12]
+    safe_filename = f'input_{task_id}.pptx'
+    input_path = os.path.join(_PPTX_UPLOAD_DIR, safe_filename)
+    try:
+        with open(input_path, 'wb') as f:
+            f.write(file_bytes)
+    except Exception as e:
+        logger.error('[PPTX-Translate] Failed to save upload: %s', e, exc_info=True)
+        return jsonify({'error': f'Failed to save file: {e}'}), 500
+
+    task = {
+        'id': task_id, 'status': 'running', 'type': 'pptx',
+        'result': None, 'error': None, 'model': None, 'progress': None,
+        'filename': filename, 'targetLang': target,
+        'fileSize': len(file_bytes),
+        'created_at': time.time(), 'completed_at': None,
+    }
+    with _translate_tasks_lock:
+        _translate_tasks[task_id] = task
+
+    threading.Thread(
+        target=_do_translate_pptx,
+        args=(task_id, input_path, filename, target, source),
+        daemon=True,
+        name=f'pptx-translate-{task_id}'
+    ).start()
+
+    logger.info('[PPTX-Translate] Started task %s: %s (%d KB) → %s',
+                task_id, filename, len(file_bytes) // 1024, target)
+    return jsonify({'taskId': task_id})
+
+
+@translate_bp.route('/api/translate/pptx/download/<filename>')
+def translate_pptx_download(filename):
+    """Download a translated PPTX file."""
+    safe = os.path.basename(filename)
+    filepath = os.path.join(_PPTX_UPLOAD_DIR, safe)
+    if not os.path.isfile(filepath):
+        return jsonify({'error': 'File not found'}), 404
+    return send_file(
+        filepath,
+        mimetype='application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        as_attachment=True,
+        download_name=safe,
+    )

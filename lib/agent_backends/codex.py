@@ -92,7 +92,6 @@ class CodexBackend(AgentBackend):
             has_image_gen=False,
             has_browser_ext=False,
             has_desktop_agent=False,
-            has_error_tracker=False,
             has_swarm=False,
             has_scheduler=False,
             has_conv_ref=False,

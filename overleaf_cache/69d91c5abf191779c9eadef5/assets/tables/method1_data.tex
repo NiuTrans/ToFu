@@ -1,0 +1,35 @@
+\begin{table}[htbp]
+    \centering
+    \bicaption{数据集统计信息}{Dataset Statistics}
+\resizebox{0.7\linewidth}{!}{
+\footnotesize
+    \begin{tabular}{c c c c c}
+        \toprule
+        \multirow{2}{*}{\textbf{Corpus}} & \textbf{Language} & \multirow{2}{*}{\textbf{\#Sentences}} & \textbf{\#Lines with} & \multirow{2}{*}{\textbf{\#Constraints}} \\
+        & \textbf{direction} & & \textbf{constraints} & \\
+        % \textbf{Corpus} & \textbf{Lang. direction} & \textbf{\#Sentences} & \textbf{Lines with const.} & \textbf{Num of const.} \\
+        \midrule
+        \multicolumn{5}{c}{\textbf{\textit{Lexical constraint}}} \\
+        \midrule
+        \textbf{IATE\citep{dinu2019training}} & En-De & 2000 & 414 & 452 \\
+        \textbf{Wiktionary\citep{dinu2019training}} & En-De & 2000 & 727 & 884 \\
+        \midrule
+        \multirow{2}{*}{\textbf{WMT21 TT\citep{DBLP:conf/wmt/AlamKABDFGJKN21}}}  & En-Ru & 2100 & 1307 & 2524 \\
+                               & En-Zh & 2100 & 1191 & 2229 \\
+        \midrule
+        \multirow{4}{*}{\textbf{ETC\citep{zeng2023extract}}} & En-Zh & 19144 & 12040 & 35253 \\
+         & En-Ru & 12985 & 3917 & 10308 \\
+         & Zh-En & 19144 & 12040 & 35253 \\
+         & Ru-En & 12985 & 3917 & 10308 \\
+        \Xhline{1.5pt}
+        \multicolumn{5}{c}{\textbf{\textit{Structural constraint}}} \\
+        \midrule
+        \multirow{4}{*}{\textbf{LXM\citep{hashimoto2020high}}}  & En-Zh & 2000 & 518 & 884 \\
+         & En-De & 2000 & 520 & 942 \\
+         & En-Ru & 2000 & 554 & 993 \\
+         & En-Fr & 2000 & 575 & 1051 \\
+        \bottomrule
+    \end{tabular} 
+}
+    \label{tab:method1_data_description}
+\end{table}

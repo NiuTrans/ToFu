@@ -7,7 +7,8 @@
 <p align="center">
   <a href="https://github.com/rangehow/ToFu/actions/workflows/ci.yml"><img src="https://github.com/rangehow/ToFu/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776ab?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/PostgreSQL-18+-336791?logo=postgresql&logoColor=white" alt="PostgreSQL" />
+  <img src="https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
+  <img src="https://img.shields.io/badge/PostgreSQL-18+ (optional)-336791?logo=postgresql&logoColor=white" alt="PostgreSQL optional" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
   <img src="https://img.shields.io/badge/platform-Linux%20·%20macOS%20·%20Windows-lightgrey" alt="Platform" />
 </p>
@@ -50,7 +51,9 @@ git clone https://github.com/rangehow/ToFu.git && cd ToFu
 python install.py
 ```
 
-This creates a virtual environment, installs dependencies, bootstraps PostgreSQL, and starts the server. Open **http://localhost:15000** when it's ready.
+This creates a virtual environment, installs dependencies, and starts the server. Open **http://localhost:15000** when it's ready.
+
+> 💾 **Database: zero-config out of the box.** Tofu uses **SQLite** by default — it's built into Python, no install needed. If PostgreSQL is available it will auto-bootstrap and upgrade to PG (better concurrency for 100+ users). Force SQLite with `CHATUI_DB_BACKEND=sqlite`.
 
 ```bash
 # Pre-configure API key and port
@@ -75,15 +78,29 @@ Open **http://localhost:15000** — done. All data persists in Docker volumes.
 <details>
 <summary><strong>Manual Install</strong> (for full control)</summary>
 
-**Prerequisites:** Python 3.10+, PostgreSQL 18+, ripgrep & fd-find (recommended)
+**Prerequisites:** Python 3.10+, ripgrep & fd-find (recommended). PostgreSQL 18+ is *optional* — Tofu uses SQLite by default.
+
+> 💡 **Strongly recommended: use [Miniforge](https://github.com/conda-forge/miniforge) to manage your Python environment.**
+> Old system-installed conda/Anaconda versions often cause dependency conflicts. Install the latest Miniforge for a clean, up-to-date conda-forge environment:
+> ```bash
+> # Download and install Miniforge (Linux x86_64 example)
+> wget -O /tmp/Miniforge3.sh "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
+> bash /tmp/Miniforge3.sh -b -p ~/miniforge3
+> ~/miniforge3/bin/conda init bash && source ~/.bashrc
+>
+> # Create a dedicated environment
+> conda create -n tofu python=3.10 -y
+> conda activate tofu
+> ```
+> For other platforms, see the [Miniforge releases page](https://github.com/conda-forge/miniforge/releases).
 
 ```bash
 git clone https://github.com/rangehow/ToFu.git && cd ToFu
 
-# Create environment
+# Create environment (skip if using conda/Miniforge)
 python -m venv .venv && source .venv/bin/activate
 
-# Install PostgreSQL (if not already)
+# Optional: install PostgreSQL for better concurrency (SQLite works out of the box)
 # macOS:   brew install postgresql@18
 # Ubuntu:  sudo apt install postgresql
 # conda:   conda install -c conda-forge postgresql>=18
@@ -104,7 +121,7 @@ python server.py
 
 </details>
 
-> **PostgreSQL** runs as a local userspace process — no `sudo`, no system service. On first launch, the database auto-bootstraps (initdb, schema creation, port selection).
+> **Database auto-detection:** On first launch, Tofu tries PostgreSQL first (for best concurrency). If PG isn't available, it falls back to **SQLite** automatically — no action needed on your part. PostgreSQL runs as a local userspace process when present (no `sudo`, no system service). Set `CHATUI_DB_BACKEND=sqlite` to force SQLite.
 
 > **Missing packages?** If any dependency is missing, `server.py` auto-delegates to `bootstrap.py`, which uses the LLM to diagnose the error and `pip install` the right packages — even when *every* pip package is missing.
 
@@ -120,7 +137,7 @@ Click **⚙️ Settings → 🔗 Providers** and add your API keys. Tofu works w
 
 | Provider | Setup |
 |---|---|
-| OpenAI, Anthropic, Google Gemini, DeepSeek, Qwen, MiniMax, GLM, Doubao, Mistral, Grok, Baidu Qianfan, OpenRouter | Click **⚡ Add from template** — one click |
+| OpenAI, Anthropic, Amazon Bedrock, Google Gemini, DeepSeek, Qwen, MiniMax, GLM, Doubao, Mistral, Grok, Baidu Qianfan, OpenRouter | Click **⚡ Add from template** — one click |
 | Ollama, vLLM, or any local model server | Add as custom provider with your local endpoint |
 | Azure OpenAI | Template available with deployment-specific base URL |
 
@@ -348,6 +365,22 @@ The agent connects to your Tofu server and exposes tools for file operations, cl
 
 ---
 
+### 📄 Paper Reader (beta)
+
+When you're reading research papers — arXiv PDFs, conference proceedings, internal whitepapers — Paper Reader turns Tofu into a dedicated research companion.
+
+**How to use:** Click the **📄 Paper** button in the sidebar. The screen splits: **PDF on the left**, **chat + notes on the right**. Upload a PDF or paste an arXiv URL (`arxiv.org/abs/XXXX.XXXXX`) — Tofu fetches, parses, and indexes the full text so the assistant can answer questions grounded in the paper.
+
+**What it does:**
+- **Grounded Q&A** — ask "what's the ablation result in Table 3?" or "explain Section 4.2" — the assistant cites the specific passage it's drawing from
+- **Paper library** — the left sidebar shows all papers you've read, grouped by date; switch between them without losing conversation context
+- **Side-by-side reading** — scroll the PDF while chatting; the assistant sees the page you're on
+- **Notes tab** — drop your own notes alongside the paper; they persist across sessions
+
+> ⚠️ **Beta:** Paper Reader is actively being iterated on. Feedback welcome on [GitHub Issues](https://github.com/rangehow/ToFu/issues).
+
+---
+
 ### 🖼️ Image Generation
 
 When you need visual content — illustrations, diagrams, logos, edited photos — the assistant can generate images mid-conversation.
@@ -501,7 +534,7 @@ The `.env.example` file documents all supported variables. Key ones:
 │   ├── agent_backends/        CLI backend switching (builtin/Claude Code/Codex)
 │   ├── llm_client.py          LLM API client (streaming, retry)
 │   ├── llm_dispatch/          Multi-key multi-model smart dispatcher
-│   ├── database/              PostgreSQL (auto-bootstrap, migrations)
+│   ├── database/              Dual backend — SQLite default, PostgreSQL auto-bootstrap
 │   ├── tasks_pkg/             Task orchestration & context compaction
 │   │   ├── orchestrator.py    Main LLM ↔ tool loop
 │   │   ├── executor.py        Tool execution engine
@@ -536,7 +569,8 @@ The `.env.example` file documents all supported variables. Key ones:
 | Feature | Linux | macOS | Windows |
 |---|:---:|:---:|:---:|
 | Core chat & tools | ✅ | ✅ | ✅ |
-| PostgreSQL auto-bootstrap | ✅ | ✅ | ✅ |
+| SQLite (default, zero-config) | ✅ | ✅ | ✅ |
+| PostgreSQL auto-bootstrap (optional) | ✅ | ✅ | ✅ |
 | Project co-pilot | ✅ | ✅ | ✅ |
 | Shell commands | ✅ | ✅ | ✅ (`cmd.exe`) |
 | Desktop agent | ✅ | ✅ | ✅ |

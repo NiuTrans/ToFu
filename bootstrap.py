@@ -32,7 +32,6 @@ import sys
 import textwrap
 import threading
 import time
-import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -606,6 +605,7 @@ _STATUS_HTML = r"""<!DOCTYPE html>
     <div class="provider-templates">
       <span class="provider-tpl active" onclick="_selectTemplate('openai')">OpenAI</span>
       <span class="provider-tpl" onclick="_selectTemplate('anthropic')">Anthropic</span>
+      <span class="provider-tpl" onclick="_selectTemplate('bedrock')">Bedrock</span>
       <span class="provider-tpl" onclick="_selectTemplate('deepseek')">DeepSeek</span>
       <span class="provider-tpl" onclick="_selectTemplate('openrouter')">OpenRouter</span>
       <span class="provider-tpl" onclick="_selectTemplate('custom')">Custom</span>
@@ -668,7 +668,8 @@ function appendLog(text, cls) {
 // ── Provider template presets ──
 const _TEMPLATES = {
   openai:     { url: 'https://api.openai.com/v1',   model: 'gpt-5.4' },
-  anthropic:  { url: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-6' },
+  anthropic:  { url: 'https://api.anthropic.com/v1', model: 'claude-opus-4-7' },
+  bedrock:    { url: 'https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1', model: 'us.anthropic.claude-opus-4-7-v1:0' },
   deepseek:   { url: 'https://api.deepseek.com/v1',  model: 'deepseek-chat' },
   openrouter: { url: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-sonnet-4.6' },
   custom:     { url: '',                              model: '' },
@@ -1244,7 +1245,7 @@ def _try_fix_mypyc(stderr_text: str) -> bool:
         _bus.emit('log', f'Failed to run pip: {e}')
         _bus.emit('phase', json.dumps({
             'id': 'mypyc-fix',
-            'label': f'🔧 mypyc fix — pip failed to start',
+            'label': '🔧 mypyc fix — pip failed to start',
             'status': 'error',
         }))
         return False
@@ -1267,7 +1268,7 @@ def _try_fix_mypyc(stderr_text: str) -> bool:
         _bus.emit('log', f'❌ pip install --force-reinstall failed (exit code {proc.returncode})')
         _bus.emit('phase', json.dumps({
             'id': 'mypyc-fix',
-            'label': f'🔧 mypyc fix failed',
+            'label': '🔧 mypyc fix failed',
             'status': 'error',
             'detail': f'Exit code {proc.returncode}. Try manually: '
                       f'pip install --force-reinstall {pkg_str}',
@@ -1418,7 +1419,7 @@ def main():
 
         if _is_import_or_package_error(stderr_text):
             # Still import errors after requirements.txt — fall through to LLM
-            print(f'[bootstrap] ⚠ Still failing after requirements.txt install.',
+            print('[bootstrap] ⚠ Still failing after requirements.txt install.',
                   file=sys.stderr)
             # Reset event bus so new browsers get a clean history
             _bus = EventBus()
@@ -1494,7 +1495,7 @@ def main():
                             'LLM API credentials in .env (LLM_API_KEY, LLM_BASE_URL) '
                             'for smarter auto-diagnosis.',
                 }))
-                print(f'[bootstrap] ❌ Non-dependency error and no LLM API configured.',
+                print('[bootstrap] ❌ Non-dependency error and no LLM API configured.',
                       file=sys.stderr)
                 _keep_alive_until_interrupt(status_server)
                 return
@@ -1519,8 +1520,8 @@ def main():
             'hint': 'Set LLM_API_KEY and LLM_BASE_URL in .env, then run '
                     '"pip install -r requirements.txt" and "python server.py".',
         }))
-        print(f'[bootstrap] ❌ No LLM API key configured. '
-              f'Set LLM_API_KEY in .env and retry.', file=sys.stderr)
+        print('[bootstrap] ❌ No LLM API key configured. '
+              'Set LLM_API_KEY in .env and retry.', file=sys.stderr)
         _keep_alive_until_interrupt(status_server)
         return
 

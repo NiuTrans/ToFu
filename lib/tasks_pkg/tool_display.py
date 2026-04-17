@@ -21,7 +21,6 @@ from lib.tools import (
     CODE_EXEC_TOOL_NAMES,
     CONV_REF_TOOL_NAMES,
     EMIT_TO_USER_TOOL_NAMES,
-    ERROR_TRACKER_TOOL_NAMES,
     IMAGE_GEN_TOOL_NAMES,
     PROJECT_TOOL_NAMES,
 )
@@ -33,6 +32,17 @@ from lib.tools import (
 
 def _tool_display_web_search(fn_name, fn_args, tc_id, tc_args_str):
     """Build display info for web_search tool calls."""
+    # ★ Batch mode: show number of queries
+    queries = fn_args.get('queries')
+    if queries and isinstance(queries, list):
+        n = len(queries)
+        previews = []
+        for s in queries[:3]:
+            if isinstance(s, dict):
+                previews.append(s.get('query', '?')[:30])
+        suffix = f' +{n - 3} more' if n > 3 else ''
+        display = f'{n} searches: {"; ".join(previews)}{suffix}'
+        return display, {'toolName': 'web_search', '_display_query': display}
     query = fn_args.get('query', '')
     return query, {'toolName': 'web_search'}
 
@@ -73,6 +83,17 @@ def _short_url(url, max_len=60):
 
 def _tool_display_fetch_url(fn_name, fn_args, tc_id, tc_args_str):
     """Build display info for fetch_url tool calls."""
+    # ★ Batch mode: show number of URLs
+    urls = fn_args.get('urls')
+    if urls and isinstance(urls, list):
+        n = len(urls)
+        previews = []
+        for s in urls[:3]:
+            if isinstance(s, dict):
+                previews.append(_short_url(s.get('url', '?'), max_len=40))
+        suffix = f' +{n - 3} more' if n > 3 else ''
+        display = f'📄 {n} URLs: {", ".join(previews)}{suffix}'
+        return display, {'toolName': 'fetch_url', '_display_query': display}
     target_url = fn_args.get('url', '')
     is_pdf_hint = target_url.lower().rstrip('/').endswith('.pdf')
     short = _short_url(target_url)
@@ -159,30 +180,6 @@ def _tool_display_image_gen(fn_name, fn_args, tc_id, tc_args_str):
     return f'🎨 Generating: {prompt}', {'toolName': 'generate_image'}
 
 
-def _tool_display_error_tracker(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for error tracker tool calls."""
-    if fn_name == 'check_error_logs':
-        mode = fn_args.get('mode', 'unresolved')
-        filt = fn_args.get('logger_filter', '')
-        display = f"🔍 Checking error logs ({mode})" + (f" filter={filt}" if filt else "")
-    elif fn_name == 'resolve_error':
-        fp = fn_args.get('fingerprint', '')
-        fps = fn_args.get('fingerprints', [])
-        lg = fn_args.get('logger_name', '')
-        pat = fn_args.get('message_pattern', '')
-        if fp:
-            display = f"✅ Resolving error: {fp}"
-        elif fps:
-            display = f"✅ Resolving {len(fps)} errors"
-        elif lg:
-            display = f"✅ Resolving errors from {lg}"
-        elif pat:
-            display = f"✅ Resolving errors matching /{pat}/"
-        else:
-            display = "✅ resolve_error"
-    else:
-        display = f"🔍 {fn_name}"
-    return display, {'toolName': fn_name}
 
 
 def _tool_display_human_guidance(fn_name, fn_args, tc_id, tc_args_str):
@@ -285,10 +282,6 @@ def _build_display_dispatch_table():
     # Image generation tools
     for name in IMAGE_GEN_TOOL_NAMES:
         table[name] = _tool_display_image_gen
-
-    # Error tracker tools
-    for name in ERROR_TRACKER_TOOL_NAMES:
-        table[name] = _tool_display_error_tracker
 
     # Human guidance tool
     table['ask_human'] = _tool_display_human_guidance

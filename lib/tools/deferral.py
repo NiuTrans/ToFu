@@ -70,9 +70,6 @@ DEFERRED_TOOL_HINTS: dict[str, str] = {
     'delete_memory':          'memory delete remove',
     'merge_memories':          'memory merge combine consolidate',
 
-    # Error tracker tools
-    'check_error_logs':      'error log check scan bugs issues',
-    'resolve_error':         'error resolve fix mark resolved',
 
     # Swarm tools
     'spawn_agents':          'swarm spawn agents parallel multi-agent',
@@ -88,8 +85,6 @@ CORE_TOOL_NAMES = frozenset({
     'web_search', 'fetch_url',
     # Memory
     'create_memory', 'update_memory', 'delete_memory', 'merge_memories',
-    # Error tracking
-    'check_error_logs', 'resolve_error',
     # Essential meta
     'emit_to_user', 'ask_human',
     # Swarm

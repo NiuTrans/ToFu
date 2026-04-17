@@ -21,12 +21,16 @@ from lib.project_mod.modifications import _start_new_session
 
 logger = get_logger(__name__)
 
-def ensure_project_state(path_str):
-    """Ensure the server's project state matches the given path.
+def ensure_project_state(path_str, extra_paths=None):
+    """Ensure the server's project state matches the given path(s).
 
     Called from the task orchestrator before context injection.
-    If the server's _state already matches, this is a no-op.
-    Otherwise calls set_project() to register the path (no scanning).
+    If the server's _state already matches (primary + extras), this is a no-op.
+    Otherwise calls set_project_paths() or set_project() to register.
+
+    Args:
+        path_str: Primary project path.
+        extra_paths: Optional list of additional root paths (multi-root workspace).
 
     Returns True if state was already correct or successfully set.
     """
@@ -36,17 +40,35 @@ def ensure_project_state(path_str):
     if not os.path.isdir(abs_path):
         return False
 
+    # Normalise extra paths
+    abs_extras = []
+    if extra_paths:
+        for ep in extra_paths:
+            aep = os.path.abspath(os.path.expanduser(ep))
+            if os.path.isdir(aep) and aep != abs_path and aep not in abs_extras:
+                abs_extras.append(aep)
+
     with _lock:
         if _state.get('path') == abs_path:
-            return True  # Already correct
+            # Primary matches — check if extras also match
+            current_extra_paths = {rs['path'] for rn, rs in _roots.items()
+                                   if rs['path'] != abs_path}
+            if set(abs_extras) == current_extra_paths:
+                return True  # Already correct — primary + extras match
 
-    # Register this path as the active project (no scanning)
+    # Register this path (+ extras) as the active project
     try:
-        set_project(abs_path)
-        logger.info('[Project] ensure_project_state: set %s', abs_path)
+        if abs_extras:
+            set_project_paths([abs_path] + abs_extras)
+            logger.info('[Project] ensure_project_state: set %s + %d extras',
+                        abs_path, len(abs_extras))
+        else:
+            set_project(abs_path)
+            logger.info('[Project] ensure_project_state: set %s', abs_path)
         return True
     except Exception as e:
-        logger.warning('[Project] ensure_project_state: set_project failed for %s: %s', abs_path, e)
+        logger.warning('[Project] ensure_project_state failed for %s (+%d extras): %s',
+                       abs_path, len(abs_extras), e)
     return False
 
 

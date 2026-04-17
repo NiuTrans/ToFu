@@ -35,7 +35,10 @@ SEARCH_TOOL_MULTI = {
             "Search the web. You may call this multiple times with different queries. "
             "Strategy: search → review summaries → fetch_url most relevant pages → "
             "refine with another search if needed. "
-            "Prefer fewer, targeted searches over many broad ones."
+            "Prefer fewer, targeted searches over many broad ones.\n"
+            "For MULTIPLE searches in one call, provide a 'queries' array — "
+            "each entry has {query}. All queries run concurrently. "
+            "This is much faster than multiple separate web_search calls."
         ),
         "parameters": {
             "type": "object",
@@ -43,9 +46,22 @@ SEARCH_TOOL_MULTI = {
                 "query": {
                     "type": "string",
                     "description": "Search query — be specific and targeted"
+                },
+                "queries": {
+                    "type": "array",
+                    "description": "Array of search queries (for batch mode). All queries run concurrently. Much faster than multiple separate web_search calls.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Search query"
+                            }
+                        },
+                        "required": ["query"]
+                    }
                 }
-            },
-            "required": ["query"]
+            }
         }
     }
 }
@@ -62,7 +78,10 @@ FETCH_URL_TOOL = {
             "When a page contains links to sub-pages (shown in '--- Page Links ---' section), "
             "you SHOULD use fetch_url to follow the most relevant links and explore deeper.\n"
             "IMPORTANT: This tool is for REMOTE web URLs only (http:// or https://). "
-            "Do NOT use for local file paths or file:// URIs — use read_files with an absolute path instead."
+            "Do NOT use for local file paths or file:// URIs — use read_files with an absolute path instead.\n"
+            "For MULTIPLE URLs in one call, provide a 'urls' array — "
+            "each entry has {url}. All fetches run concurrently. "
+            "This is much faster than multiple separate fetch_url calls."
         ),
         "parameters": {
             "type": "object",
@@ -70,9 +89,22 @@ FETCH_URL_TOOL = {
                 "url": {
                     "type": "string",
                     "description": "Complete remote URL starting with http:// or https://"
+                },
+                "urls": {
+                    "type": "array",
+                    "description": "Array of URLs to fetch (for batch mode). All fetches run concurrently. Much faster than multiple separate fetch_url calls.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "Complete remote URL starting with http:// or https://"
+                            }
+                        },
+                        "required": ["url"]
+                    }
                 }
-            },
-            "required": ["url"]
+            }
         }
     }
 }

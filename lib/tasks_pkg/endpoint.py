@@ -146,10 +146,20 @@ def _sync_endpoint_turns_to_conversation(task, endpoint_turns):
         search_text = build_search_text(new_messages)
         now_ms = int(time.time() * 1000)
         db_execute_with_retry(db, '''UPDATE conversations
-            SET messages=?, updated_at=?, msg_count=?, search_text=?,
-                search_tsv=to_tsvector('simple', left(?, 50000))
+            SET messages=?, updated_at=?, msg_count=?, search_text=?
             WHERE id=? AND user_id=1''',
-            (messages_json, now_ms, len(new_messages), search_text, search_text, conv_id))
+            (messages_json, now_ms, len(new_messages), search_text, conv_id))
+        # Update FTS5 index
+        if search_text:
+            try:
+                db.execute(
+                    "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
+                    "SELECT rowid, ? FROM conversations WHERE id = ?",
+                    (search_text, conv_id)
+                )
+                db.commit()
+            except Exception as _fts_err:
+                logger.debug('[EndpointSync] FTS update failed (non-fatal): %s', _fts_err)
 
         logger.info('%s conv=%s ✅ Synced %d endpoint turns to conversation '
                     '(base=%d + endpoint=%d = %d total msgs)',

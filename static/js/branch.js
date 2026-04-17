@@ -555,49 +555,38 @@ async function sendBranchMessage(text, images) {
   };
   branch.messages.push(userMsg, assistantMsg);
   saveConversations(conv.id);
-  syncConversationToServer(conv);
+  // ★ Must await sync so the backend can load fresh branch messages from DB
+  await syncConversationToServer(conv);
 
-  // Build API messages: reuse main chat's buildApiMessages for context
-  const apiMsgs = _buildBranchApiMessages(conv, msgIdx, branch, userMsg);
-
-  // Collect config — use the SAME global variables that main chat uses
-  // Tool flags (fetchEnabled, codeExecEnabled, browserEnabled, memoryEnabled,
-  // autoApplyWrites, projectState) are global `let` variables in core.js,
-  // NOT properties on the `config` object.
+  // ★ Server-side message building: the backend loads the conversation from DB,
+  //   extracts main chat context + branch messages, and runs the full transform
+  //   pipeline — message building is fully server-side.
+  const _branchConfig = (typeof _buildConvConfig === 'function') ? _buildConvConfig(conv) : {
+    model: serverModel,
+    maxTokens: config.maxTokens,
+    thinkingEnabled,
+    temperature: config.temperature,
+    searchMode,
+    fetchEnabled,
+    codeExecEnabled,
+    memoryEnabled,
+    projectPath: conv.projectPath || "",
+  };
+  _branchConfig.branchKey = bk;
   const body = {
     convId: conv.id,
-    messages: apiMsgs,
-    config: {
-      model: serverModel,
-      maxTokens: config.maxTokens,
-      thinkingEnabled,
-      temperature: config.temperature,
-      preset: config.preset || "medium",
-      searchMode,
-      fetchEnabled,
-      codeExecEnabled,
-      memoryEnabled,
-      schedulerEnabled,
-      browserEnabled,
-      autoApply: autoApplyWrites,
-      /* ★ FIX: read from per-conv state, not global projectState (same race as startAssistantResponse) */
-      projectPath: (typeof _getConvProjectPath === 'function') ? _getConvProjectPath(conv) : (conv.projectPath || ""),
-      branchKey: bk,
-    },
+    msgIdx,
+    branchIdx,
+    config: _branchConfig,
   };
 
   // ── Targeted DOM update: show the new user+assistant messages in the branch panel ──
   if (activeConvId === conv.id) _rebuildBranchPanelDOM(msg, msgIdx, branchIdx);
 
-  console.log("[Branch] sendBranchMessage config:", {
-    searchMode, fetchEnabled, codeExecEnabled, browserEnabled, memoryEnabled,
-    autoApply: autoApplyWrites, projectPath: (typeof _getConvProjectPath === 'function') ? _getConvProjectPath(conv) : (conv.projectPath || ""),
-    model: serverModel, preset: config.preset,
-  });
-  console.log("[Branch] API messages count:", apiMsgs.length, "body.config:", body.config);
+  console.log("[Branch] sendBranchMessage config:", _branchConfig);
 
   try {
-    const res = await fetch(apiUrl("/api/chat/start"), {
+    const res = await fetch(apiUrl("/api/chat/branch/start"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -647,51 +636,11 @@ async function sendBranchMessage(text, images) {
 }
 
 // ══════════════════════════════════════════
-//  Build API messages for branch
+//  Build API messages for branch — REMOVED
+//  ★ Branch messages are now built server-side by
+//    build_branch_api_messages() in conv_message_builder.py,
+//    called via POST /api/chat/branch/start.
 // ══════════════════════════════════════════
-function _buildBranchApiMessages(conv, msgIdx, branch, latestUserMsg) {
-  // ── 1. Determine the context cut-off in the main conversation ──
-  // Context = all completed rounds BEFORE the round being branched.
-  // Example: branching from assistant at index 19 (round 10):
-  //   - Original API call had: [sys, u1,a1, ..., u9,a9, u10]
-  //   - Branch context should be: [sys, u1,a1, ..., u9,a9]
-  //   - Branch's first user message replaces the original u10
-  const parentMsg = conv.messages[msgIdx];
-  let contextEnd;
-  if (parentMsg && parentMsg.role === "assistant" && msgIdx > 0) {
-    contextEnd = msgIdx;
-    for (let j = msgIdx - 1; j >= 0; j--) {
-      if (conv.messages[j].role === "user") contextEnd = j;
-      else break;
-    }
-  } else {
-    contextEnd = msgIdx;
-  }
-
-  // ── 2. Build a virtual conversation containing BOTH main context + branch messages ──
-  // This lets buildApiMessages handle toolSummary injection, role alternation,
-  // and image formatting consistently — exactly the same as the main chat.
-  const mainContext = conv.messages.slice(0, contextEnd);
-  const branchMsgs = (branch.messages || []).slice(0, -1); // exclude last empty assistant placeholder
-
-  // Decorate the first branch user message with branch topic + selection context
-  const decoratedBranch = branchMsgs.map((m, i) => {
-    if (i === 0 && m.role === "user") {
-      let prefix = `[分支话题: ${branch.title}]`;
-      if (branch.parentSelection) {
-        prefix += `\n[选中的上下文]\n${branch.parentSelection.slice(0, 2000)}\n[/选中的上下文]`;
-      }
-      return { ...m, content: `${prefix}\n${m.content || ""}` };
-    }
-    return m;
-  });
-
-  const virtualConv = {
-    ...conv,
-    messages: [...mainContext, ...decoratedBranch],
-  };
-  return buildApiMessages(virtualConv, { includeAll: true });
-}
 
 // ══════════════════════════════════════════
 //  Branch SSE streaming
@@ -883,8 +832,16 @@ async function _branchStreamPoll(conv, msgIdx, branchIdx, branch, assistantMsg, 
     if (controller.signal.aborted) return;
     await new Promise(r => setTimeout(r, 1500));
     try {
-      const res = await fetch(apiUrl(`/api/chat/status/${taskId}`));
-      if (!res.ok) { retries++; continue; }
+      const res = await fetch(apiUrl(`/api/chat/poll/${taskId}`));
+      if (!res.ok) {
+        if (res.status === 404) {
+          // Task gone (server restarted / cleaned up) — stop polling
+          console.warn(`[_branchStreamPoll] 404 for task ${taskId.slice(0,8)} — stopping`);
+          return;
+        }
+        retries++;
+        continue;
+      }
       const data = await res.json();
       if (data.thinking !== undefined) assistantMsg.thinking = data.thinking;
       if (data.content !== undefined) assistantMsg.content = data.content;
@@ -1010,7 +967,7 @@ async function _reconnectBranchStream(conv, msgIdx, branchIdx, branch) {
   if (!taskId) return;
 
   try {
-    const res = await fetch(apiUrl(`/api/chat/status/${taskId}`));
+    const res = await fetch(apiUrl(`/api/chat/poll/${taskId}`));
     if (!res.ok) {
       branch.activeTaskId = null;
       saveConversations(conv.id);
@@ -1222,10 +1179,10 @@ function approveBranchTool(msgIdx, branchIdx, action) {
   const bk = _branchKey(conv.id, msgIdx, branchIdx);
   const stream = _branchStreams.get(bk);
   if (!stream?.taskId) return;
-  fetch(apiUrl(`/api/chat/approve/${stream.taskId}`), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action }),
-  }).catch(console.error);
+
+  // External backend approval_required events are informational —
+  // the CLI backend manages its own approval flow via subprocess stdin.
+  // This is a best-effort attempt: won't work for external backends.
+  console.warn("[Branch] approveBranchTool: external backend approvals are not fully supported in branch mode");
 }
 

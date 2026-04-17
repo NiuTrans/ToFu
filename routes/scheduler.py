@@ -238,11 +238,11 @@ def start_scheduler_worker():
     import threading
     def _deferred_resume():
         import time
-        from lib.database import pg_available
+        from lib.database import db_available
         # Wait up to 120s for init_db() to create the timer_watchers table
         for attempt in range(60):
             time.sleep(2)
-            if not pg_available:
+            if not db_available:
                 continue
             try:
                 from lib.database import get_thread_db, DOMAIN_SYSTEM

@@ -61,10 +61,10 @@ from lib.tasks_pkg.server_message_store import (
     estimate_token_overhead as _estimate_token_overhead,
 )
 from lib.tasks_pkg.tool_dispatch import (
-    _TOOL_EXEC_LABELS,
     emit_tool_exec_phase,
     execute_tool_pipeline,
     parse_tool_calls,
+    tool_label,
 )
 
 
@@ -130,17 +130,7 @@ def _emit_tool_round_phase(task, assistant_msg, round_num):
     else:
         tool_names = [tc['function']['name'] for tc in assistant_msg.get('tool_calls', [])]
         unique_names = list(dict.fromkeys(tool_names))
-        def _orch_label(tn):
-            from lib.mcp.types import MCP_TOOL_PREFIX, parse_namespaced_name
-            lbl = _TOOL_EXEC_LABELS.get(tn)
-            if lbl:
-                return lbl
-            if tn.startswith(MCP_TOOL_PREFIX):
-                parsed = parse_namespaced_name(tn)
-                if parsed:
-                    return f'🔌 {parsed[0]}/{parsed[1]}'
-            return tn
-        labeled = [_orch_label(n) for n in unique_names]
+        labeled = [tool_label(n) for n in unique_names]
         summary = ', '.join(labeled)
         append_event(task, {
             'type': 'phase', 'phase': 'llm_thinking',
@@ -331,8 +321,6 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     if task.get('preset'): done_evt['preset'] = task['preset']
     done_evt['model'] = model
     task['model'] = model
-    if task.get('provider_id'):
-        done_evt['provider_id'] = task['provider_id']
     if thinking_depth:
         done_evt['thinkingDepth'] = thinking_depth
         task['thinkingDepth'] = thinking_depth
@@ -490,14 +478,19 @@ def run_task(task: dict[str, Any]) -> None:
         project_path    = mcfg['project_path']
         project_enabled = mcfg['project_enabled']
         if project_enabled and project_path:
-            logger.info('[Task:%s] project_path=%s', task['id'], project_path)
+            # ★ Extract extra root paths from projectPaths (frontend sends all roots).
+            #   projectPaths[0] = primary (same as projectPath), rest are extras.
+            _all_paths = cfg.get('projectPaths') or []
+            _extra_paths = [p for p in _all_paths[1:] if p and p != project_path] if len(_all_paths) > 1 else []
+            logger.info('[Task:%s] project_path=%s extra_roots=%d',
+                        task['id'], project_path, len(_extra_paths))
             # ★ Ensure the server's global project state matches this task's
-            # project path.  Another conversation may have switched the server
-            # to a different project, causing get_context_for_prompt to miss
+            # project path + extras.  Another conversation may have switched the
+            # server to a different project, causing get_context_for_prompt to miss
             # the file tree (path mismatch → no tree in system prompt → LLM
             # doesn't know the project structure → "backend cannot use tools").
             from lib.project_mod import ensure_project_state
-            ensure_project_state(project_path)
+            ensure_project_state(project_path, extra_paths=_extra_paths)
         code_exec_enabled = mcfg['code_exec_enabled']
         memory_enabled  = mcfg['memory_enabled']
         browser_enabled = mcfg['browser_enabled']

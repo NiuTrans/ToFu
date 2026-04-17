@@ -53,6 +53,7 @@ else:
 # ═══════════════════════════════════════════════════════
 
 def tool_list_dir(base, rel_path='.'):
+    ignore = IGNORE_DIRS
     try:
         target = _safe_path(base, rel_path)
     except ValueError as e:
@@ -74,10 +75,10 @@ def tool_list_dir(base, rel_path='.'):
             logger.debug('[Tools] is_dir check failed for entry %s', name)
             continue
         if is_d:
-            if name not in IGNORE_DIRS and not name.startswith('.'):
+            if name not in ignore and not name.startswith('.'):
                 try:
                     cc = sum(1 for e in os.scandir(entry.path)
-                             if not e.name.startswith('.') and e.name not in IGNORE_DIRS)
+                             if not e.name.startswith('.') and e.name not in ignore)
                 except Exception as e:
                     logger.debug('[Tools] child count scan failed for dir %s: %s', name, e, exc_info=True)
                     cc = '?'
@@ -451,33 +452,53 @@ def tool_grep(base, pattern, rel_path=None, include=None, context_lines=None,
     return _python_grep(base, target, pattern, include, cap, count_only)
 
 
-def _build_rg_cmd(target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
+def _build_rg_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
     """Build ripgrep command with equivalent behavior to our grep usage."""
     if count_only:
         cmd = ['rg', '-ci', '--color=never', '--no-heading']
     else:
         cmd = ['rg', '-ni', '--color=never', '--no-heading']
-    # Skip our standard ignore dirs (rg also auto-respects .gitignore)
-    for d in list(IGNORE_DIRS)[:20]:
+    # Skip ignored dirs
+    for d in list(IGNORE_DIRS)[:30]:
         cmd.extend(['-g', f'!{d}/'])
+    # ★ rg auto-respects .gitignore only inside a git repo (.git/ present).
+    #   When there's no .git/ (e.g. exported projects, workdir copies),
+    #   explicitly point rg at the .gitignore file so it still honors it.
+    #   This is critical — without it, rg crawls into huge ignored dirs
+    #   (swebench_workdir, conda_envs, etc.) and times out.
+    if base:
+        gitignore = os.path.join(base, '.gitignore')
+        if os.path.isfile(gitignore) and not os.path.isdir(os.path.join(base, '.git')):
+            cmd.extend(['--ignore-file', gitignore])
     if include:
         cmd.extend(['-g', include])
     if ctx_n > 0 and not count_only:
         cmd.extend(['-C', str(ctx_n)])
     if not count_only:
         cmd.extend(['-m', str(cap)])
+    # Safety caps: skip huge files and limit search depth
+    cmd.extend(['--max-filesize', _RG_MAX_FILESIZE])
+    cmd.extend(['--max-depth', str(_TOOL_MAX_DEPTH)])
     cmd.extend(['--', pattern, target])
     return cmd
 
 
-def _build_grep_cmd(target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
+def _build_grep_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
     """Build GNU grep command."""
     if count_only:
         cmd = ['grep', '-rci', '--color=never', '-I']
     else:
         cmd = ['grep', '-rni', '--color=never', '-I']
-    for d in list(IGNORE_DIRS)[:20]:
+    for d in list(IGNORE_DIRS)[:30]:
         cmd.extend(['--exclude-dir', d])
+    # ★ GNU grep doesn't have --ignore-file, so parse .gitignore manually
+    #   and add --exclude-dir for directory patterns found there.
+    if base:
+        gitignore = os.path.join(base, '.gitignore')
+        if os.path.isfile(gitignore):
+            gi_dirs = _load_gitignore_dirs(gitignore)
+            for d in gi_dirs:
+                cmd.extend(['--exclude-dir', d])
     if include:
         cmd.extend(['--include', include])
     if ctx_n > 0 and not count_only:
@@ -544,8 +565,19 @@ def _format_grep_output(base, raw_output, pattern, include, ctx_n,
     return hdr + '\n'.join(rel_lines)
 
 
-def _get_io_timeout(base, default=30):
-    """Get adjusted I/O timeout for the given base path (cross-DC aware)."""
+# Max filesize that rg should bother searching (skip huge data/binary files)
+_RG_MAX_FILESIZE = '2M'
+
+# Max depth for rg/fd to search (safety cap)
+_TOOL_MAX_DEPTH = 30
+
+
+def _get_io_timeout(base, default=60):
+    """Get adjusted I/O timeout for the given base path (cross-DC aware).
+
+    The base default is 60s (increased from 30s to accommodate large
+    projects on FUSE filesystems).
+    """
     try:
         from lib.cross_dc import get_timeout_multiplier
         return int(default * get_timeout_multiplier(base))
@@ -554,17 +586,108 @@ def _get_io_timeout(base, default=30):
         return default
 
 
+
+def _load_gitignore_dirs(gitignore_path):
+    """Extract directory names from a .gitignore file for GNU grep --exclude-dir.
+
+    Only returns simple directory entries (e.g. 'swebench_workdir/' or
+    'swebench_workdir') — NOT glob patterns, negations, or complex paths.
+    This is a lightweight parser for the specific case of feeding exclude
+    dirs to GNU grep, which doesn't support --ignore-file natively.
+    """
+    dirs = []
+    try:
+        with open(gitignore_path, errors='replace') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or line.startswith('!'):
+                    continue
+                # Strip leading / (anchored to repo root)
+                line = line.lstrip('/')
+                # Skip glob patterns and complex entries
+                if '*' in line or '?' in line or '**' in line:
+                    continue
+                # Directory entries: either explicit 'dir/' or bare 'dir' name
+                name = line.rstrip('/')
+                # Only take simple names (no nested paths like 'a/b')
+                if '/' in name:
+                    continue
+                if name and name not in IGNORE_DIRS:
+                    dirs.append(name)
+    except OSError as e:
+        logger.debug('[Tools] Failed to read .gitignore dirs: %s', e)
+    return dirs
+
+
+def _load_gitignore_patterns(base):
+    """Load .gitignore patterns from project root for Python fallback walkers.
+
+    Returns a list of compiled (pattern, is_negation) tuples, or empty list
+    if no .gitignore exists.  Supports basic glob patterns and directory
+    markers (trailing /).  Does NOT support full gitignore spec (nested
+    .gitignore, ** globstar, etc.) — this is a best-effort optimization
+    for the rare case when rg/fd are unavailable.
+    """
+    gi_path = os.path.join(base, '.gitignore')
+    if not os.path.isfile(gi_path):
+        return []
+    patterns = []
+    try:
+        with open(gi_path, errors='replace') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                negated = line.startswith('!')
+                if negated:
+                    line = line[1:]
+                # Normalize: strip leading / (anchored patterns → treat as relative)
+                line = line.lstrip('/')
+                patterns.append((line, negated))
+    except OSError as e:
+        logger.debug('[Tools] Failed to read .gitignore: %s', e)
+    return patterns
+
+
+def _gitignore_match(rel_path, is_dir, patterns):
+    """Check if rel_path matches any .gitignore pattern.
+
+    Returns True if the path should be ignored.
+    """
+    if not patterns:
+        return False
+    ignored = False
+    for pat, negated in patterns:
+        # Directory-only pattern (trailing /)
+        dir_only = pat.endswith('/')
+        if dir_only:
+            if not is_dir:
+                continue
+            pat = pat.rstrip('/')
+        # Match against both the full relative path and just the basename
+        basename = os.path.basename(rel_path)
+        matched = (fnmatch.fnmatch(rel_path, pat)
+                   or fnmatch.fnmatch(basename, pat)
+                   or fnmatch.fnmatch(rel_path, f'**/{pat}'))
+        if matched:
+            ignored = not negated
+    return ignored
+
+
 def _run_rg(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
     """Run ripgrep. Returns formatted string on success, None on binary-not-found."""
-    cmd = _build_rg_cmd(target, pattern, include, ctx_n, cap, count_only)
+    cmd = _build_rg_cmd(base, target, pattern, include, ctx_n, cap, count_only)
     io_timeout = _get_io_timeout(base)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True,
                                 timeout=io_timeout, cwd=base, errors='replace')
         return _format_grep_output(base, result.stdout, pattern, include, ctx_n, cap, count_only)
     except subprocess.TimeoutExpired:
-        logger.warning('[Tools] rg timed out: pattern=%s target=%s', pattern[:40], target)
-        return 'Grep timed out. Try a more specific pattern or path.'
+        logger.warning('[Tools] rg timed out after %ds: pattern=%s target=%s',
+                       io_timeout, pattern[:60], target)
+        rel_target = os.path.relpath(target, base) if target != base else '.'
+        return (f'Grep timed out after {io_timeout}s searching "{rel_target}". '
+                f'Try a more specific subdirectory path or narrower file glob (include parameter).')
     except FileNotFoundError:
         logger.warning('[Tools] rg binary not found despite detection at startup')
         return None
@@ -575,15 +698,18 @@ def _run_rg(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_o
 
 def _run_gnu_grep(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
     """Run GNU grep. Returns formatted string on success, None on binary-not-found."""
-    cmd = _build_grep_cmd(target, pattern, include, ctx_n, cap, count_only)
+    cmd = _build_grep_cmd(base, target, pattern, include, ctx_n, cap, count_only)
     io_timeout = _get_io_timeout(base)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True,
                                 timeout=io_timeout, cwd=base, errors='replace')
         return _format_grep_output(base, result.stdout, pattern, include, ctx_n, cap, count_only)
     except subprocess.TimeoutExpired:
-        logger.warning('[Tools] grep timed out: pattern=%s target=%s', pattern[:40], target)
-        return 'Grep timed out. Try a more specific pattern or path.'
+        logger.warning('[Tools] grep timed out after %ds: pattern=%s target=%s',
+                       io_timeout, pattern[:60], target)
+        rel_target = os.path.relpath(target, base) if target != base else '.'
+        return (f'Grep timed out after {io_timeout}s searching "{rel_target}". '
+                f'Try a more specific subdirectory path or narrower file glob (include parameter).')
     except FileNotFoundError:
         logger.debug('[Tools] GNU grep binary not found, will try fallback')
         return None
@@ -598,17 +724,34 @@ def _python_grep(base, target, pattern, include=None, cap=MAX_GREP_RESULTS, coun
     except re.error as e:
         logger.debug('[Tools] python_grep invalid regex pattern: %s', e, exc_info=True)
         return f'Invalid pattern: {e}'
+    gi_patterns = _load_gitignore_patterns(base)
     match_count = 0
     matches = []
-    deadline = time.time() + _get_io_timeout(base, default=20)
+    timeout_val = _get_io_timeout(base, default=40)
+    deadline = time.time() + timeout_val
     for root, dirs, files in os.walk(target):
-        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+        # Prune ignored, hidden, and .gitignore-matched directories
+        pruned = []
+        for d in dirs:
+            if d in IGNORE_DIRS or d.startswith('.'):
+                continue
+            if gi_patterns:
+                d_rel = os.path.relpath(os.path.join(root, d), base)
+                if _gitignore_match(d_rel, True, gi_patterns):
+                    continue
+            pruned.append(d)
+        dirs[:] = pruned
         for fname in files:
             if include and not fnmatch.fnmatch(fname, include):
                 continue
             if _should_ignore(fname):
                 continue
             fp = os.path.join(root, fname)
+            # .gitignore check for files
+            if gi_patterns:
+                f_rel = os.path.relpath(fp, base)
+                if _gitignore_match(f_rel, False, gi_patterns):
+                    continue
             try:
                 if os.path.getsize(fp) > MAX_FILE_SIZE:
                     continue
@@ -630,7 +773,9 @@ def _python_grep(base, target, pattern, include=None, cap=MAX_GREP_RESULTS, coun
             break
         if time.time() > deadline:
             if not count_only:
-                matches.append('\u23f0 (grep timed out \u2014 try a more specific path or pattern)')
+                matches.append(f'\u23f0 (grep timed out after {timeout_val}s \u2014 '
+                               f'try a more specific path or pattern)')
+            logger.warning('[Tools] python_grep timed out after %ds', timeout_val)
             break
 
     if count_only:
@@ -661,13 +806,20 @@ def _fd_find(target, base, pattern, cap):
 
     Returns list of formatted match strings, or None if fd fails.
     """
-    io_timeout = _get_io_timeout(target, default=15)
+    io_timeout = _get_io_timeout(target, default=30)
     cmd = [_FD_BIN, '-g', pattern, target,
            '--type', 'f',
-           '--max-results', str(cap)]
-    # Exclude our standard ignore dirs + hidden dirs
+           '--max-results', str(cap),
+           '--max-depth', str(_TOOL_MAX_DEPTH)]
+    # Exclude ignored dirs + hidden dirs
     for d in IGNORE_DIRS:
         cmd.extend(['--exclude', d])
+    # ★ fd auto-respects .gitignore only inside a git repo (.git/ present).
+    #   Explicitly point fd at .gitignore when there's no .git/ dir.
+    if base:
+        gitignore = os.path.join(base, '.gitignore')
+        if os.path.isfile(gitignore) and not os.path.isdir(os.path.join(base, '.git')):
+            cmd.extend(['--ignore-file', gitignore])
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=io_timeout,
@@ -688,7 +840,8 @@ def _fd_find(target, base, pattern, cap):
             matches.append(f'  {rel} ({_fmt_size(sz)})')
         return matches
     except subprocess.TimeoutExpired:
-        logger.warning('[Tools] fd timed out after 15s for pattern=%s', pattern)
+        logger.warning('[Tools] fd timed out after %ds for pattern=%s in %s',
+                       io_timeout, pattern, os.path.relpath(target, base))
         return None
     except Exception as e:
         logger.warning('[Tools] fd failed: %s', e)
@@ -696,17 +849,36 @@ def _fd_find(target, base, pattern, cap):
 
 
 def _python_find(target, base, pattern, cap):
-    """Find files using Python os.walk + fnmatch (fallback)."""
+    """Find files using Python os.walk + fnmatch (fallback).
+
+    Enhanced with .gitignore awareness, heavy directory detection,
+    depth limiting, and extra directory pruning.
+    """
+    gi_patterns = _load_gitignore_patterns(base)
     matches = []
-    deadline = time.time() + _get_io_timeout(base, default=15)
+    timeout_val = _get_io_timeout(base, default=30)
+    deadline = time.time() + timeout_val
     for root, dirs, files in os.walk(target):
-        dirs[:] = [d for d in sorted(dirs)
-                   if d not in IGNORE_DIRS and not d.startswith('.')]
+        # Prune directories
+        pruned = []
+        for d in sorted(dirs):
+            if d in IGNORE_DIRS or d.startswith('.'):
+                continue
+            if gi_patterns:
+                d_rel = os.path.relpath(os.path.join(root, d), base)
+                if _gitignore_match(d_rel, True, gi_patterns):
+                    continue
+            pruned.append(d)
+        dirs[:] = pruned
         for fname in sorted(files):
             if fnmatch.fnmatch(fname.lower(), pattern.lower()):
-                rel = os.path.relpath(os.path.join(root, fname), base)
+                fp = os.path.join(root, fname)
+                rel = os.path.relpath(fp, base)
+                # .gitignore check
+                if gi_patterns and _gitignore_match(rel, False, gi_patterns):
+                    continue
                 try:
-                    sz = os.path.getsize(os.path.join(root, fname))
+                    sz = os.path.getsize(fp)
                 except Exception as e:
                     logger.debug('[Tools] getsize failed for %s: %s', fname, e, exc_info=True)
                     sz = 0
@@ -716,9 +888,98 @@ def _python_find(target, base, pattern, cap):
         if len(matches) >= cap:
             return matches
         if time.time() > deadline:
-            matches.append('  \u23f0 (search timed out after 15s \u2014 try a more specific path)')
+            matches.append(f'  \u23f0 (search timed out after {timeout_val}s \u2014 '
+                           f'try a more specific path)')
             return matches
     return matches
+
+
+
+def tool_grep_batch(base, searches):
+    """Batch grep: run multiple searches in one call.
+
+    Each spec in *searches* is ``{pattern, path?, include?, context_lines?, max_results?, count_only?}``.
+    Returns combined results separated by headers.
+
+    Args:
+        base: Project root directory.
+        searches: List of search spec dicts.
+    """
+    if not searches or not isinstance(searches, list):
+        return 'Error: "searches" must be a non-empty array of {pattern, ...} objects.'
+    MAX_BATCH = 20
+    if len(searches) > MAX_BATCH:
+        searches = searches[:MAX_BATCH]
+
+    parts = []
+    total_chars = 0
+    BATCH_CHAR_BUDGET = 100_000
+    for i, spec in enumerate(searches):
+        if not isinstance(spec, dict) or 'pattern' not in spec:
+            parts.append(f'[{i+1}] Error: each entry must have a "pattern" field')
+            continue
+        result = tool_grep(
+            base,
+            spec['pattern'],
+            rel_path=spec.get('path'),
+            include=spec.get('include'),
+            context_lines=spec.get('context_lines'),
+            max_results=spec.get('max_results'),
+            count_only=bool(spec.get('count_only', False)),
+        )
+        if total_chars + len(result) > BATCH_CHAR_BUDGET:
+            remaining = BATCH_CHAR_BUDGET - total_chars
+            if remaining > 200:
+                result = result[:remaining] + '\n… [truncated — batch budget exceeded]'
+            else:
+                parts.append(f'[{i+1}] … [{len(searches) - i} more searches skipped — batch budget exceeded]')
+                break
+        total_chars += len(result)
+        parts.append(result)
+
+    return '\n\n'.join(parts)
+
+
+def tool_find_files_batch(base, searches):
+    """Batch find: run multiple find operations in one call.
+
+    Each spec in *searches* is ``{pattern, path?, max_results?}``.
+    Returns combined results separated by headers.
+
+    Args:
+        base: Project root directory.
+        searches: List of find spec dicts.
+    """
+    if not searches or not isinstance(searches, list):
+        return 'Error: "searches" must be a non-empty array of {pattern, ...} objects.'
+    MAX_BATCH = 20
+    if len(searches) > MAX_BATCH:
+        searches = searches[:MAX_BATCH]
+
+    parts = []
+    total_chars = 0
+    BATCH_CHAR_BUDGET = 100_000
+    for i, spec in enumerate(searches):
+        if not isinstance(spec, dict) or 'pattern' not in spec:
+            parts.append(f'[{i+1}] Error: each entry must have a "pattern" field')
+            continue
+        result = tool_find_files(
+            base,
+            spec['pattern'],
+            rel_path=spec.get('path'),
+            max_results=spec.get('max_results'),
+        )
+        if total_chars + len(result) > BATCH_CHAR_BUDGET:
+            remaining = BATCH_CHAR_BUDGET - total_chars
+            if remaining > 200:
+                result = result[:remaining] + '\n… [truncated — batch budget exceeded]'
+            else:
+                parts.append(f'[{i+1}] … [{len(searches) - i} more finds skipped — batch budget exceeded]')
+                break
+        total_chars += len(result)
+        parts.append(result)
+
+    return '\n\n'.join(parts)
 
 
 def tool_find_files(base, pattern, rel_path=None, max_results=None):

@@ -42,7 +42,6 @@ _IDEMPOTENT_TOOLS = frozenset({
     'browser_get_history', 'browser_get_cookies',
     'browser_summarize_page', 'browser_get_app_state',
     'browser_get_interactive_elements',
-    'check_error_logs',
     'list_conversations', 'get_conversation',
 })
 
@@ -55,7 +54,6 @@ _IDEMPOTENT_TOOLS = frozenset({
 _WRITE_TOOLS = frozenset({
     'write_file', 'apply_diff', 'run_command',
     'create_memory', 'update_memory', 'delete_memory', 'merge_memories',
-    'resolve_error',
 })
 
 
@@ -74,7 +72,6 @@ def _make_cache_key(fn_name: str, fn_args: dict[str, Any]) -> str:
 # Project tools whose cache entries become stale after a write operation
 _PROJECT_CACHEABLE_TOOLS = frozenset({
     'read_files', 'list_dir', 'grep_search', 'find_files',
-    'check_error_logs',
 })
 
 
@@ -145,6 +142,17 @@ def _build_cache_hit_meta(
     # For web_search, the cached_content is the text formatted for the LLM,
     # not display_results.  Build a minimal meta with char count.
     if fn_name == 'web_search':
+        queries = fn_args.get('queries')
+        if queries and isinstance(queries, list):
+            n = len(queries)
+            return {
+                'toolName': fn_name,
+                'title': f'{n} searches{badge_suffix}',
+                'snippet': f'{chars:,} chars total',
+                'source': source_label,
+                'fetched': True,
+                'fetchedChars': chars,
+            }
         query = fn_args.get('query', '')
         return {
             'toolName': fn_name,
@@ -185,8 +193,6 @@ _TOOL_EXEC_LABELS = {
     'code_exec':    '▶️ Running code',
     'bash_exec':    '▶️ Running command',
     'create_memory': '💡 Saving memory',
-    'check_error_logs': '🔍 Checking error logs',
-    'resolve_error': '✅ Marking errors resolved',
     'ask_human': '🙋 Asking for your input',
     'emit_to_user': '📤 Emitting result to user',
 }
@@ -194,6 +200,23 @@ _TOOL_EXEC_LABELS = {
 
 # _repair_json now lives in lib.utils — no lazy import wrapper needed.
 from lib.utils import repair_json as _repair_json
+
+
+def tool_label(tn: str) -> str:
+    """Get a human-readable label for a tool name, with MCP fallback.
+
+    Used by both ``emit_tool_exec_phase`` and ``orchestrator._emit_tool_round_phase``
+    to produce consistent labels.
+    """
+    label = _TOOL_EXEC_LABELS.get(tn)
+    if label:
+        return label
+    from lib.mcp.types import MCP_TOOL_PREFIX, parse_namespaced_name
+    if tn.startswith(MCP_TOOL_PREFIX):
+        parsed = parse_namespaced_name(tn)
+        if parsed:
+            return f'🔌 {parsed[0]}/{parsed[1]}'
+    return tn
 
 
 def parse_tool_calls(
@@ -265,9 +288,15 @@ def parse_tool_calls(
         if ':' in fn_name or fn_name.startswith('__'):
             logger.warning('[Task %s] Skipping spurious/internal tool call name: %s', tid, fn_name)
             continue
+        # Guard against corrupted tool names with XML/HTML artifacts
+        # (e.g. MiniMax emitting 'list_dir">.</parameter>\n</invoke>\n<invoke name="grep_search'
+        #  when it hallucinates raw XML in its tool call output)
+        if not fn_name.replace('_', '').replace('-', '').isalnum():
+            logger.warning('[Task %s] Skipping malformed tool name (non-alphanumeric): %.80s', tid, fn_name)
+            continue
         # Guard against phantom tool calls: valid name but empty arguments,
         # AND another tool call with the SAME name has real arguments.
-        # This avoids dropping legitimate no-arg tools (e.g. check_error_logs)
+        # This avoids dropping legitimate no-arg tools
         # that appear alongside other tool calls.
         _raw_check = (fn_obj.get('arguments', '') or '').strip()
         if not _raw_check and fn_name in _names_with_real_args:
@@ -374,22 +403,10 @@ def emit_tool_exec_phase(
     unique_tool_names = list(dict.fromkeys(tool_names_list))
     n = len(parsed_tcs)
 
-    def _label(tn):
-        """Get human-readable label for a tool name, with MCP fallback."""
-        label = _TOOL_EXEC_LABELS.get(tn)
-        if label:
-            return label
-        from lib.mcp.types import MCP_TOOL_PREFIX, parse_namespaced_name
-        if tn.startswith(MCP_TOOL_PREFIX):
-            parsed = parse_namespaced_name(tn)
-            if parsed:
-                return f'🔌 {parsed[0]}/{parsed[1]}'
-        return tn
-
     if n == 1:
-        detail = _label(unique_tool_names[0])
+        detail = tool_label(unique_tool_names[0])
     else:
-        labeled = [_label(tn) for tn in unique_tool_names]
+        labeled = [tool_label(tn) for tn in unique_tool_names]
         detail = f'Executing {n} tools: {", ".join(labeled)}'
 
     _append = event_sink.append_event if event_sink is not None else append_event
@@ -399,6 +416,44 @@ def emit_tool_exec_phase(
         'detail': detail,
         'tools': tool_names_list,
     })
+
+
+# ── Serial-dispatch config for long-blocking tools ──────────────────────
+# These tools must run serially (outside the thread pool) because they block
+# for user input or extended periods, exceeding TOOL_PARALLEL_TIMEOUT.
+# Each entry: tool_name → {match: callable(fn_args) → bool, inject: dict of extra args}
+_SERIAL_BLOCKING_TOOLS: dict[str, dict] = {
+    'ask_human': {
+        'match': lambda _args: True,
+        'reason': 'blocks for user input',
+    },
+    'await_task': {
+        'match': lambda args: args.get('action') == 'wait',
+        'reason': 'long-blocking, bypasses pool timeout',
+        'inject': lambda task, rn: {'_parent_task': task},
+    },
+    'timer_create': {
+        'match': lambda _args: True,
+        'reason': 'blocking poll, bypasses pool timeout',
+        'inject': lambda task, rn: {'_parent_task': task, '_tool_round_num': rn},
+    },
+}
+
+
+def _unpack_cache_entry(cached) -> tuple:
+    """Unpack a dedup cache entry into (content, is_search, source, display, engine_breakdown).
+
+    Handles all legacy tuple lengths (2–5) and bare values gracefully.
+    """
+    if not isinstance(cached, (tuple, list)):
+        logger.debug('[Dedup] cache value is %s not tuple — wrapping', type(cached).__name__)
+        return (cached, False, 'dedup', None, None)
+    # Pad to length 5 with defaults
+    defaults = (None, False, 'dedup', None, None)
+    padded = tuple(cached) + defaults[len(cached):]
+    if len(cached) < 2 or len(cached) > 5:
+        logger.warning('[Dedup] cache entry has unexpected length %d', len(cached))
+    return padded[:5]
 
 
 def execute_tool_pipeline(
@@ -490,29 +545,8 @@ def execute_tool_pipeline(
             cache_key = _make_cache_key(fn_name, fn_args)
             cached = _cache.get(cache_key)
             if cached is not None:
-                # Cache entries: (content, is_search, source, display_results?, engine_breakdown?)
-                # Legacy formats: (content, is_search) or (content, is_search, source)
-                cached_display = None
-                cached_engine_bkdn = None
-                if not isinstance(cached, (tuple, list)):
-                    # Safety: if cached is a bare string/value, wrap it
-                    logger.debug('[Dedup] cache value is %s not tuple — wrapping', type(cached).__name__)
-                    cached = (cached, False, 'dedup', None, None)
-                if len(cached) == 5:
-                    cached_content, cached_is_search, cached_source, cached_display, cached_engine_bkdn = cached
-                elif len(cached) == 4:
-                    cached_content, cached_is_search, cached_source, cached_display = cached
-                elif len(cached) == 3:
-                    cached_content, cached_is_search, cached_source = cached
-                elif len(cached) == 2:
-                    cached_content, cached_is_search = cached
-                    cached_source = 'dedup'
-                else:
-                    # 1-element or other unexpected length
-                    logger.warning('[Dedup] cache entry has unexpected length %d', len(cached))
-                    cached_content = cached[0] if cached else ''
-                    cached_is_search = False
-                    cached_source = 'dedup'
+                cached_content, cached_is_search, cached_source, cached_display, cached_engine_bkdn = \
+                    _unpack_cache_entry(cached)
                 is_prefetch = cached_source == 'prefetch'
                 # Compute content length for logging without materializing
                 # a massive str() for screenshot dicts (which contain base64)
@@ -585,58 +619,24 @@ def execute_tool_pipeline(
             tool_results[tc_id] = ('Task aborted by user.', False)
             continue
 
-        # ── Human guidance: must run serially (blocks for user input) ──
-        if fn_name == 'ask_human' and not task['aborted']:
-            logger.info('[Task %s] ask_human dispatched serially (blocks for user input) '
-                        'at round %d', tid, round_num)
+        # ── Serial-dispatch for long-blocking tools ──
+        _serial_cfg = _SERIAL_BLOCKING_TOOLS.get(fn_name)
+        if _serial_cfg and _serial_cfg['match'](fn_args) and not task['aborted']:
+            _reason = _serial_cfg['reason']
+            logger.info('[Task %s] %s dispatched serially (%s) at round %d',
+                        tid, fn_name, _reason, round_num)
+            # Inject extra args (e.g. _parent_task) if configured
+            _inject_fn = _serial_cfg.get('inject')
+            if _inject_fn:
+                fn_args.update(_inject_fn(task, rn))
             tc_id_ret, tool_content, is_search = _execute_tool_one(
                 task, tc, fn_name, tc_id, fn_args, rn, round_entry,
                 cfg, project_path, project_enabled,
                 all_tools=tool_list,
             )
             tool_results[tc_id_ret] = (tool_content, is_search)
-            logger.info('[Task %s] ask_human serial dispatch completed at round %d '
-                        '(result_len=%d)', tid, round_num, len(str(tool_content)))
-            continue
-
-        # ── await_task(wait): runs serially to avoid pool timeout conflict ──
-        # await_task(action='wait') can block for up to 600s (user-configurable
-        # up to 3600s), but TOOL_PARALLEL_TIMEOUT is only 300s. Running in the
-        # pool would always kill it prematurely.  Dispatch serially instead,
-        # and inject the parent task ref so the wait loop can check 'aborted'.
-        if fn_name == 'await_task' and fn_args.get('action') == 'wait' and not task['aborted']:
-            logger.info('[Task %s] await_task(wait) dispatched serially '
-                        '(long-blocking, bypasses pool timeout) at round %d',
-                        tid, round_num)
-            fn_args['_parent_task'] = task
-            tc_id_ret, tool_content, is_search = _execute_tool_one(
-                task, tc, fn_name, tc_id, fn_args, rn, round_entry,
-                cfg, project_path, project_enabled,
-                all_tools=tool_list,
-            )
-            tool_results[tc_id_ret] = (tool_content, is_search)
-            logger.info('[Task %s] await_task(wait) serial dispatch completed at round %d '
-                        '(result_len=%d)', tid, round_num, len(str(tool_content)))
-            continue
-
-        # ── timer_create: blocking inline poll with SSE progress events ──
-        # Like await_task, this can block for a very long time (hours).
-        # Dispatch serially so the thread pool timeout doesn't kill it.
-        # Inject parent task ref for abort detection + SSE event emission.
-        if fn_name == 'timer_create' and not task['aborted']:
-            logger.info('[Task %s] timer_create dispatched serially '
-                        '(blocking poll, bypasses pool timeout) at round %d',
-                        tid, round_num)
-            fn_args['_parent_task'] = task
-            fn_args['_tool_round_num'] = rn
-            tc_id_ret, tool_content, is_search = _execute_tool_one(
-                task, tc, fn_name, tc_id, fn_args, rn, round_entry,
-                cfg, project_path, project_enabled,
-                all_tools=tool_list,
-            )
-            tool_results[tc_id_ret] = (tool_content, is_search)
-            logger.info('[Task %s] timer_create serial dispatch completed at round %d '
-                        '(result_len=%d)', tid, round_num, len(str(tool_content)))
+            logger.info('[Task %s] %s serial dispatch completed at round %d '
+                        '(result_len=%d)', tid, fn_name, round_num, len(str(tool_content)))
             continue
 
         # ── Pre-tool hooks: validate/block/modify before execution ──

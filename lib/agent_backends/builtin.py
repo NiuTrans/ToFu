@@ -63,7 +63,6 @@ class BuiltinBackend(AgentBackend):
             has_image_gen=True,
             has_browser_ext=True,
             has_desktop_agent=True,
-            has_error_tracker=True,
             has_swarm=True,
             has_scheduler=True,
             has_conv_ref=True,

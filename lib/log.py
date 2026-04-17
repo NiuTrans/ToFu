@@ -394,5 +394,5 @@ def log_suppressed(logger: logging.Logger, context: str, exc: Exception = None,
 #  Log Analysis Utilities
 # ══════════════════════════════════════════
 # NOTE: All log scanning, error fingerprinting, and resolution tracking
-# is handled by lib/project_error_tracker.py (the universal module).
+# Error log scanning was previously handled by lib/project_error_tracker.py (removed).
 # No log-analysis utilities live here anymore.

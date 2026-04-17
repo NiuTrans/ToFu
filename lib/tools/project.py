@@ -26,7 +26,9 @@ PROJECT_TOOL_GREP = {
             "Supports max_results to limit output (like head -n) and count_only for fast counting (like grep -c).\n"
             "Use simple, short patterns for best results — "
             "e.g. 'handleRequest' instead of 'def handle_.*request'. "
-            "If unsure of naming, search for a core keyword substring."
+            "If unsure of naming, search for a core keyword substring.\n"
+            "For MULTIPLE searches, provide a 'searches' array — each entry has the same fields as the top-level parameters. "
+            "This is much faster than multiple separate grep_search calls."
         ),
         "parameters": {
             "type": "object",
@@ -36,9 +38,24 @@ PROJECT_TOOL_GREP = {
                 "include": {"type": "string", "description": "File glob filter, e.g. '*.py' or '*.js' (optional)"},
                 "context_lines": {"type": "integer", "description": "Number of context lines before and after each match (like grep -C). Default 0, max 10. Use 3-5 to see surrounding code without a separate read_files call."},
                 "max_results": {"type": "integer", "description": "Maximum number of matching lines to return (like head -n). Default 50. Use a small value (5-20) when you only need a few examples or to check existence."},
-                "count_only": {"type": "boolean", "description": "If true, return only the count of matching lines (like grep -c or wc -l), not the actual lines. Much faster for large result sets."}
-            },
-            "required": ["pattern"]
+                "count_only": {"type": "boolean", "description": "If true, return only the count of matching lines (like grep -c or wc -l), not the actual lines. Much faster for large result sets."},
+                "searches": {
+                    "type": "array",
+                    "description": "Array of search operations (for batch mode). Each entry has the same fields as the top-level parameters. Much faster than multiple separate grep_search calls.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "pattern": {"type": "string", "description": "Search pattern"},
+                            "path": {"type": "string", "description": "Relative path to search in (optional)"},
+                            "include": {"type": "string", "description": "File glob filter (optional)"},
+                            "context_lines": {"type": "integer", "description": "Context lines (optional)"},
+                            "max_results": {"type": "integer", "description": "Max results per search (optional)"},
+                            "count_only": {"type": "boolean", "description": "Count only mode (optional)"}
+                        },
+                        "required": ["pattern"]
+                    }
+                }
+            }
         }
     }
 }
@@ -47,15 +64,31 @@ PROJECT_TOOL_FIND = {
     "type": "function",
     "function": {
         "name": "find_files",
-        "description": "Find files by name pattern (glob) in the project. Useful for discovering test files, configs, etc.",
+        "description": (
+            "Find files by name pattern (glob) in the project. Useful for discovering test files, configs, etc.\n"
+            "For MULTIPLE searches, provide a 'searches' array — each entry has the same fields as the top-level parameters. "
+            "This is much faster than multiple separate find_files calls."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "pattern": {"type": "string", "description": "File name glob pattern, e.g. '*.test.py', 'Dockerfile', '*.config.*'"},
                 "path": {"type": "string", "description": "Relative path to search in (optional)"},
-                "max_results": {"type": "integer", "description": "Maximum number of files to return. Default 100. Use a small value (5-20) when you only need a quick sample."}
-            },
-            "required": ["pattern"]
+                "max_results": {"type": "integer", "description": "Maximum number of files to return. Default 100. Use a small value (5-20) when you only need a quick sample."},
+                "searches": {
+                    "type": "array",
+                    "description": "Array of find operations (for batch mode). Each entry has the same fields as the top-level parameters. Much faster than multiple separate find_files calls.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "pattern": {"type": "string", "description": "File name glob pattern"},
+                            "path": {"type": "string", "description": "Relative path to search in (optional)"},
+                            "max_results": {"type": "integer", "description": "Max results per search (optional)"}
+                        },
+                        "required": ["pattern"]
+                    }
+                }
+            }
         }
     }
 }

@@ -152,14 +152,20 @@ def sync_to_db(user_id: str) -> None:
         now = int(time.time() * 1000)
 
         db.execute(
-            '''INSERT INTO conversations (id, user_id, title, messages, created_at, updated_at, msg_count, search_text, search_tsv)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, to_tsvector('simple', left(?, 50000)))
-               ON CONFLICT(id, user_id) DO UPDATE SET
-                 title=excluded.title, messages=excluded.messages,
-                 updated_at=excluded.updated_at, msg_count=excluded.msg_count,
-                 search_text=excluded.search_text, search_tsv=excluded.search_tsv''',
-            (conv_id, db_user_id, title, messages_json, now, now, len(web_msgs), search_text, search_text)
+            '''INSERT OR REPLACE INTO conversations (id, user_id, title, messages, created_at, updated_at, msg_count, search_text)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+            (conv_id, db_user_id, title, messages_json, now, now, len(web_msgs), search_text)
         )
+        # Update FTS5 index
+        if search_text:
+            try:
+                db.execute(
+                    "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
+                    "SELECT rowid, ? FROM conversations WHERE id = ?",
+                    (search_text, conv_id)
+                )
+            except Exception as _fts_err:
+                logger.debug('[Feishu] FTS update failed (non-fatal): %s', _fts_err)
         db.commit()
         logger.debug('[Feishu] Synced %d messages for user %s to DB conv %s',
                       len(web_msgs), user_id, conv_id[:12])

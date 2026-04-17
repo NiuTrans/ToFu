@@ -90,12 +90,13 @@ TEST_TIMEOUT = int(os.environ.get('TEST_TIMEOUT', '1800'))  # 30 min — large t
 # Cooldown between API calls to avoid rate limits
 COOLDOWN_SECONDS = int(os.environ.get('COOLDOWN_SECONDS', '5'))
 
-# Directories
-DEFAULT_WORKDIR = Path(os.environ.get('SWEBENCH_WORKDIR', '/tmp/swebench_full'))
-REPO_CACHE_DIR = Path(os.environ.get('REPO_CACHE_DIR', '/tmp/swebench_repos'))
+# Directories — all under chatui project by default
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_WORKDIR = Path(os.environ.get('SWEBENCH_WORKDIR', str(_PROJECT_ROOT / 'swebench_workdir')))
+REPO_CACHE_DIR = Path(os.environ.get('REPO_CACHE_DIR', str(_PROJECT_ROOT / 'swebench_workdir' / 'repos')))
 CONDA_ENV_PREFIX = Path(os.environ.get(
     'CONDA_ENV_DIR',
-    '/tmp/swebench_conda_envs',
+    str(_PROJECT_ROOT / 'swebench_workdir' / 'conda_envs'),
 ))
 
 # Default pricing (Opus via example-corp gateway — Anthropic convention)
@@ -124,39 +125,59 @@ class ModelConfig:
     price_cache_write: float = 0.01875
 
 
-# Built-in model presets (user can override via --models)
+# Built-in model presets — Framework × Model matrix
+# Naming convention: {framework}-{model} for clarity in reports
+#
+# Tofu framework can run any model. Claude Code only supports Claude models.
+# So the matrix is:
+#   tofu-opus    = Tofu agent + Claude opus 4.6
+#   tofu-minimax = Tofu agent + MiniMax-M2.7
+#   tofu-glm     = Tofu agent + GLM 5.1
+#   cc-opus      = Claude Code CLI + Claude opus 4.6
+#
+# Backward compat: 'tofu' → 'tofu-opus', 'cc' → 'cc-opus'
 MODEL_PRESETS = {
-    'opus': ModelConfig(
-        name='opus', backend='tofu', model_id='aws.claude-opus-4.6',
-        concurrency=3,
+    'tofu-opus': ModelConfig(
+        name='tofu-opus', backend='tofu', model_id='aws.claude-opus-4.6',
+        concurrency=2,  # RPM=30, each request ~2-5min → 2 concurrent is safe
         price_input=0.015, price_output=0.075,
         price_cache_read=0.0015, price_cache_write=0.01875,
     ),
-    'cc': ModelConfig(
-        name='cc', backend='cc', model_id='opus',
-        concurrency=3,
+    'cc-opus': ModelConfig(
+        name='cc-opus', backend='cc', model_id='opus',
+        concurrency=1,  # Gateway rate-limited, keep at 1
         price_input=0.015, price_output=0.075,
         price_cache_read=0.0015, price_cache_write=0.01875,
     ),
-    'minimax': ModelConfig(
-        name='minimax', backend='tofu', model_id='MiniMax-M2.7',
-        concurrency=5,
+    'tofu-minimax': ModelConfig(
+        name='tofu-minimax', backend='tofu', model_id='MiniMax-M2.7',
+        concurrency=3,  # RPM=90, generous
         price_input=0.001, price_output=0.002,
         price_cache_read=0.0002, price_cache_write=0.001,
     ),
-    'glm': ModelConfig(
-        name='glm', backend='tofu', model_id='glm-5.1',
-        concurrency=5,
+    'tofu-glm': ModelConfig(
+        name='tofu-glm', backend='tofu', model_id='glm-5.1',
+        concurrency=2,  # RPM=60
         price_input=0.002, price_output=0.008,
         price_cache_read=0.0004, price_cache_write=0.002,
     ),
-    'longcat': ModelConfig(
-        name='longcat', backend='tofu', model_id='longcat-pro-0403',
-        concurrency=5,
-        price_input=0.001, price_output=0.004,
+    'cc-minimax': ModelConfig(
+        name='cc-minimax', backend='cc', model_id='MiniMax-M2.7',
+        concurrency=1,  # Gateway rate-limited, keep at 1
+        price_input=0.001, price_output=0.002,
         price_cache_read=0.0002, price_cache_write=0.001,
     ),
+    'cc-glm': ModelConfig(
+        name='cc-glm', backend='cc', model_id='glm-5.1',
+        concurrency=1,  # Gateway rate-limited, keep at 1
+        price_input=0.002, price_output=0.008,
+        price_cache_read=0.0004, price_cache_write=0.002,
+    ),
 }
+
+# Backward compat aliases
+MODEL_PRESETS['tofu'] = MODEL_PRESETS['tofu-opus']
+MODEL_PRESETS['cc'] = MODEL_PRESETS['cc-opus']
 
 # Thread-safe results management
 import threading as _threading
@@ -405,19 +426,36 @@ def get_conda_env_path(repo: str, version: str) -> Path:
 
 
 def _conda_run(env_path: Path, cmd: str, cwd: str = None, timeout: int = 600) -> subprocess.CompletedProcess:
-    """Run a command inside a conda environment by activating it directly."""
-    # Use direct PATH manipulation instead of 'conda run' which has version-specific flags
+    """Run a command inside a conda environment by activating it directly.
+    
+    Uses process groups so timeout kills ALL child processes (not just the shell).
+    Without this, shell=True + subprocess.run leaves orphaned grandchildren.
+    """
     env_bin = env_path / 'bin'
     env = {**os.environ}
     env['PATH'] = f'{env_bin}:{env.get("PATH", "")}'
     env['CONDA_PREFIX'] = str(env_path)
     env['VIRTUAL_ENV'] = str(env_path)
     env['PYTHONDONTWRITEBYTECODE'] = '1'
-    return subprocess.run(
+    
+    proc = subprocess.Popen(
         cmd, shell=True,
-        capture_output=True, text=True,
-        timeout=timeout, cwd=cwd, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, cwd=cwd, env=env,
+        start_new_session=True,  # new process group — killable as a unit
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        # Kill the entire process group (shell + all children)
+        import signal
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        proc.wait(timeout=10)
+        raise
 
 
 def setup_conda_env(repo: str, version: str, workspace: Path = None) -> Path:
@@ -517,8 +555,34 @@ def setup_conda_env(repo: str, version: str, workspace: Path = None) -> Path:
     elif workspace and packages == 'environment.yml':
         env_file = workspace / 'environment.yml'
         if env_file.exists():
-            log.info('  Installing from environment.yml')
-            # conda env update doesn't work with --prefix well, use pip for deps
+            log.info('  Installing deps from environment.yml')
+            # Parse environment.yml to extract pip-installable deps
+            try:
+                import yaml
+                with open(env_file) as _yf:
+                    env_yml = yaml.safe_load(_yf)
+                conda_deps = []
+                pip_deps = []
+                for dep in env_yml.get('dependencies', []):
+                    if isinstance(dep, str):
+                        # Skip python itself, pip, and build/lint tools
+                        dep_name = dep.split('>=')[0].split('==')[0].split('<')[0].strip()
+                        if dep_name in ('python', 'pip', 'pre-commit', 'mypy'):
+                            continue
+                        conda_deps.append(dep_name)
+                    elif isinstance(dep, dict) and 'pip' in dep:
+                        pip_deps.extend(dep['pip'])
+                if conda_deps:
+                    # Install via pip (more reliable than conda install for cross-env)
+                    dep_str = ' '.join(conda_deps)
+                    log.info('  Installing %d deps from environment.yml: %s', len(conda_deps), dep_str[:150])
+                    _conda_run(env_path, f'pip install {dep_str} --quiet', timeout=600)
+                if pip_deps:
+                    pip_str = ' '.join(pip_deps)
+                    log.info('  Installing %d pip deps: %s', len(pip_deps), pip_str[:150])
+                    _conda_run(env_path, f'pip install {pip_str} --quiet', timeout=300)
+            except Exception as e:
+                log.warning('  Failed to parse environment.yml: %s — falling back to pip install -e .', e)
             _conda_run(env_path, f'pip install -e . --quiet',
                        cwd=str(workspace), timeout=300)
 
@@ -596,10 +660,10 @@ def run_tofu_inference(inst: SWEInstance, workspace: Path,
     t0 = time.time()
 
     try:
-        # Retry the initial POST up to 3 times — the server may be briefly
-        # busy finishing a previous task (GIL contention, heavy streaming).
+        # Retry the initial POST up to 10 times — with parallel benchmarking,
+        # the server may rate-limit or be briefly busy.
         task_id = None
-        for attempt in range(1, 4):
+        for attempt in range(1, 11):
             try:
                 resp = requests.post(
                     f'{TOFU_BASE_URL}/api/chat/start',
@@ -616,10 +680,14 @@ def run_tofu_inference(inst: SWEInstance, workspace: Path,
                 resp.raise_for_status()
                 task_id = resp.json()['taskId']
                 break
-            except (requests.Timeout, requests.ConnectionError) as e:
-                log.warning('[Tofu] POST attempt %d/3 failed: %s', attempt, e)
-                if attempt < 3:
-                    time.sleep(10 * attempt)  # back off: 10s, 20s
+            except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as e:
+                log.warning('[%s] POST attempt %d/10 failed: %s', tool_name, attempt, e)
+                if attempt < 10:
+                    wait = 5 + 5 * attempt  # 10s, 15s, 20s, ...
+                    # Longer backoff for rate limits
+                    if isinstance(e, requests.HTTPError) and e.response is not None and e.response.status_code == 429:
+                        wait = 10 + 10 * attempt  # 20s, 30s, 40s, ...
+                    time.sleep(wait)
                 else:
                     raise  # final attempt — let outer handler catch it
         if not task_id:
@@ -645,8 +713,20 @@ def run_tofu_inference(inst: SWEInstance, workspace: Path,
                     f'{TOFU_BASE_URL}/api/chat/poll/{task_id}',
                     timeout=10,
                 )
+                # ★ 404 = task gone (server restarted, task cleaned up).
+                #   Don't keep polling for hours — treat as interrupted.
+                if poll_resp.status_code == 404:
+                    log.warning('Poll got 404 — task %s no longer exists '
+                                '(server restart?). Treating as interrupted '
+                                'after %.0fs.', task_id[:8], time.time() - t0)
+                    result.error = 'Task lost (server restarted during inference)'
+                    result.duration_s = time.time() - t0
+                    break
                 poll_resp.raise_for_status()
                 data = poll_resp.json()
+            except requests.HTTPError as e:
+                log.warning('Poll HTTP error: %s', e)
+                continue
             except Exception as e:
                 log.warning('Poll failed: %s', e)
                 continue
@@ -820,6 +900,10 @@ def run_cc_inference(inst: SWEInstance, workspace: Path,
             )
 
         try:
+            # Prepend /tmp/safe_bin to PATH so Claude CLI's `find` for python
+            # uses our fast wrapper instead of scanning the network filesystem
+            cc_env = os.environ.copy()
+            cc_env['PATH'] = '/tmp/safe_bin:' + cc_env.get('PATH', '')
             proc = subprocess.run(
                 [
                     'claude', '-p',
@@ -832,6 +916,7 @@ def run_cc_inference(inst: SWEInstance, workspace: Path,
                 timeout=INFERENCE_SAFETY_TIMEOUT,  # safety net only
                 cwd=str(workspace),
                 stdin=subprocess.DEVNULL,
+                env=cc_env,
             )
 
             # Check for retryable errors in output
@@ -892,17 +977,45 @@ _EXCLUDE_PREFIXES = [
 ]
 
 def _extract_git_diff(workspace: Path) -> str:
-    """Extract git diff of changes made by the agent."""
+    """Extract git diff of changes made by the agent.
+
+    Uses generous timeouts (120s) for FUSE/NFS filesystems where git operations
+    can be slow under concurrent load.  Falls back to unstaged diff if
+    'git add' times out.
+    """
+    _GIT_TIMEOUT = 120  # seconds — FUSE can be very slow under load
+
     try:
-        subprocess.run(
-            ['git', 'add', '-A'],
-            capture_output=True, text=True, timeout=10, cwd=str(workspace),
-        )
-        r_files = subprocess.run(
-            ['git', 'diff', '--cached', '--name-only'],
-            capture_output=True, text=True, timeout=10, cwd=str(workspace),
-        )
+        # First, try the staged-diff approach (git add -A → git diff --cached)
+        add_ok = True
+        try:
+            subprocess.run(
+                ['git', 'add', '-A'],
+                capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+                cwd=str(workspace),
+            )
+        except subprocess.TimeoutExpired:
+            log.warning('git add -A timed out after %ds in %s — falling back to unstaged diff',
+                        _GIT_TIMEOUT, workspace.name)
+            add_ok = False
+
+        if add_ok:
+            r_files = subprocess.run(
+                ['git', 'diff', '--cached', '--name-only'],
+                capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+                cwd=str(workspace),
+            )
+        else:
+            # Fallback: get unstaged diff (doesn't need git add)
+            r_files = subprocess.run(
+                ['git', 'diff', '--name-only'],
+                capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+                cwd=str(workspace),
+            )
+
         if r_files.returncode != 0:
+            log.warning('git diff --name-only failed (rc=%d) in %s: %s',
+                        r_files.returncode, workspace.name, r_files.stderr[:200])
             return ''
 
         source_files = []
@@ -919,16 +1032,18 @@ def _extract_git_diff(workspace: Path) -> str:
         if not source_files:
             return ''
 
+        diff_cmd = ['git', 'diff', '--cached', '--'] if add_ok else ['git', 'diff', '--']
         r = subprocess.run(
-            ['git', 'diff', '--cached', '--'] + source_files,
-            capture_output=True, text=True, timeout=30, cwd=str(workspace),
+            diff_cmd + source_files,
+            capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+            cwd=str(workspace),
         )
         diff = r.stdout.rstrip('\r') if r.returncode == 0 else ''
         if diff and not diff.endswith('\n'):
             diff += '\n'
         return diff
     except Exception as e:
-        log.warning('Failed to extract diff: %s', e)
+        log.warning('Failed to extract diff from %s: %s', workspace.name, e)
         return ''
 
 
@@ -988,10 +1103,13 @@ def _parse_django_log_fixed(log: str, test_spec) -> dict[str, str]:
             test_name = parts[1].strip() if len(parts) > 1 else stripped
 
         if status:
-            # If the test_name looks like a docstring and we have prev_test, use prev_test
+            # If the test_name looks like a docstring and we have prev_test,
+            # store BOTH: the docstring name AND the method name, since the
+            # SWE-bench dataset may use either format in FAIL_TO_PASS / PASS_TO_PASS.
             if prev_test and not re.match(r'^(\w+)\s+\(', test_name):
-                # test_name is a docstring — use prev_test instead
+                # test_name is a docstring — store under both keys
                 status_map[prev_test] = status
+                status_map[test_name] = status
             else:
                 status_map[test_name] = status
             prev_test = None
@@ -1160,12 +1278,25 @@ def evaluate_patch(
                 capture_output=True, text=True, timeout=30, cwd=str(eval_ws),
             )
 
-    # --- Install package ---
+    # --- Install package using PYTHONPATH isolation ---
+    # Instead of creating per-instance venvs (which can introduce version
+    # mismatches from setuptools upgrades or failed editable installs),
+    # we use PYTHONPATH to point to the eval workspace. This is simpler,
+    # faster, and ensures the workspace code always takes priority.
+    #
+    # Run pre_install and eval_commands from specs (but skip apt-get)
     if env_path:
         install_r = _install_in_conda(inst, eval_ws, env_path, specs)
         if install_r:
             result.install_stdout = (install_r.stdout or '')[-5000:]
             result.install_stderr = (install_r.stderr or '')[-5000:]
+
+    # Detect source layout for PYTHONPATH
+    src_layout = _detect_source_layout(inst.repo, eval_ws)
+    if src_layout == 'src':
+        workspace_pythonpath = str(eval_ws / 'src')
+    else:
+        workspace_pythonpath = str(eval_ws)
 
     # --- Run full test command (official SWE-bench approach) ---
     test_directives = _get_test_directives(inst)
@@ -1188,6 +1319,10 @@ def evaluate_patch(
     if 'django' in inst.repo:
         env_prefix = 'export LANG=en_US.UTF-8; export LC_ALL=en_US.UTF-8; ' + env_prefix
 
+    # Set PYTHONPATH to eval workspace — ensures the workspace code takes
+    # priority over any stale installs in the shared conda env.
+    env_prefix = f'export PYTHONPATH={workspace_pythonpath}:$PYTHONPATH; ' + env_prefix
+
     log.info('  Running tests: %s', full_test_cmd[:200])
 
     # Run the full test command
@@ -1202,20 +1337,33 @@ def evaluate_patch(
                 timeout=TEST_TIMEOUT,
             )
         else:
-            r = subprocess.run(
+            # Use Popen with process group for clean timeout kill
+            _p = subprocess.Popen(
                 f'bash -c "{env_prefix}{full_test_cmd}"',
-                shell=True, capture_output=True, text=True,
-                timeout=TEST_TIMEOUT, cwd=str(eval_ws),
+                shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, cwd=str(eval_ws), start_new_session=True,
             )
-        test_output.stdout = (r.stdout or '')[-50000:]  # keep more for log parsing
-        test_output.stderr = (r.stderr or '')[-50000:]
+            try:
+                _out, _err = _p.communicate(timeout=TEST_TIMEOUT)
+                r = subprocess.CompletedProcess(full_test_cmd, _p.returncode, _out, _err)
+            except subprocess.TimeoutExpired:
+                import signal
+                try:
+                    os.killpg(os.getpgid(_p.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    _p.kill()
+                _p.wait(timeout=10)
+                raise
+        # Keep FULL output for log parsing — truncation happens only when saving
+        test_output.stdout = r.stdout or ''
+        test_output.stderr = r.stderr or ''
         test_output.return_code = r.returncode
         test_output.command = full_test_cmd
     except subprocess.TimeoutExpired as e:
         test_output.stderr = f'TIMEOUT after {TEST_TIMEOUT}s'
         raw = getattr(e, 'stdout', None)
         if isinstance(raw, bytes):
-            test_output.stdout = raw.decode('utf-8', errors='replace')[-50000:]
+            test_output.stdout = raw.decode('utf-8', errors='replace')
         result.error = f'Test timeout after {TEST_TIMEOUT}s'
     except Exception as e:
         test_output.stderr = f'Test execution error: {e}'
@@ -1298,9 +1446,49 @@ def evaluate_patch(
     return result
 
 
+# ─── Per-instance source layout detection ────────────────────────────────────
+
+# Map repo → source directories to add to PYTHONPATH.
+# Repos with src/ layout need 'src' added; flat layout repos need '.' (workspace root).
+# This is detected once per repo from the workspace structure.
+_REPO_SRC_LAYOUT = {}  # repo → 'src' or '.'
+
+
+def _detect_source_layout(repo: str, workspace: Path) -> str:
+    """Detect whether a repo uses src/ layout or flat layout.
+
+    Returns 'src' for src-layout repos (pytest, flask), '.' for flat layout.
+    """
+    if repo in _REPO_SRC_LAYOUT:
+        return _REPO_SRC_LAYOUT[repo]
+
+    # Check for src/ directory containing Python packages
+    src_dir = workspace / 'src'
+    if src_dir.is_dir():
+        # Verify it contains actual Python packages (not just docs)
+        has_py_pkg = any(
+            (src_dir / d / '__init__.py').exists()
+            for d in os.listdir(src_dir)
+            if (src_dir / d).is_dir()
+        )
+        if has_py_pkg:
+            _REPO_SRC_LAYOUT[repo] = 'src'
+            log.info('  [Layout] %s uses src/ layout', repo)
+            return 'src'
+
+    _REPO_SRC_LAYOUT[repo] = '.'
+    return '.'
+
+
 def _install_in_conda(inst: SWEInstance, workspace: Path, env_path: Path,
                       specs: dict = None):
-    """Install the package in the conda env for testing."""
+    """Install the package in the conda env for testing.
+
+    Uses per-instance isolated install to avoid shared env corruption:
+    - Installs to a per-eval temp directory (--target) instead of the shared env
+    - The caller sets PYTHONPATH to include this directory + workspace
+    - This prevents parallel eval instances from clobbering each other's installs
+    """
     if specs is None:
         from swebench.harness.constants import MAP_REPO_VERSION_TO_SPECS
         specs = {}
@@ -1323,12 +1511,21 @@ def _install_in_conda(inst: SWEInstance, workspace: Path, env_path: Path,
             continue
         _conda_run(env_path, f'bash -c "{cmd}"', cwd=str(workspace), timeout=120)
 
-    # Install
+    # Install: run `pip install -e .` to handle dependencies (pytz, etc.)
+    # but rely on PYTHONPATH (set at test time) for source code isolation.
+    # The editable install may write .egg-link to the shared env, but
+    # PYTHONPATH takes priority in sys.path so the correct workspace
+    # code is always used regardless of where .egg-link points.
     install_cmd = specs.get('install', 'python -m pip install -e .')
-    log.debug('  Installing: %s', install_cmd[:100])
+    if '--no-build-isolation' not in install_cmd:
+        install_cmd = 'python -m pip install -e . --quiet --no-deps 2>/dev/null; python -m pip install -e . --quiet 2>/dev/null || true'
+        log.debug('  Installing (editable + deps): %s', install_cmd[:100])
+    else:
+        log.debug('  Installing (needs C build): %s', install_cmd[:100])
+
     r = _conda_run(env_path, install_cmd, cwd=str(workspace), timeout=600)
     if r.returncode != 0:
-        log.warning('  Install failed: %s', r.stderr[:200])
+        log.warning('  Install failed (non-fatal, PYTHONPATH will override): %s', r.stderr[:200])
     return r
 
 
@@ -1442,13 +1639,21 @@ def _save_per_run_detail(
 
 
 def _save_results(results: list[BenchmarkResult], instances: list[SWEInstance],
-                  output_path: Path):
+                  output_path: Path, model_configs: list[ModelConfig] = None):
     """Save results to JSON after each instance."""
+    models_info = {}
+    if model_configs:
+        for mc in model_configs:
+            models_info[mc.name] = {
+                'backend': mc.backend, 'model_id': mc.model_id,
+                'concurrency': mc.concurrency,
+            }
     summary = {
         'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
         'config': {
             'tofu_model': TOFU_MODEL,
             'cc_model': CC_MODEL,
+            'models': models_info,
             'inference_safety_timeout': INFERENCE_SAFETY_TIMEOUT,
             'num_instances': len(instances),
         },
@@ -1475,7 +1680,8 @@ def _save_results(results: list[BenchmarkResult], instances: list[SWEInstance],
 def _compute_summary_stats(results: list[BenchmarkResult]) -> dict:
     """Compute summary statistics for the results."""
     stats = {}
-    for tool in ['tofu', 'cc']:
+    all_tools = sorted(set(r.tool for r in results))
+    for tool in all_tools:
         rs = [r for r in results if r.tool == tool]
         if not rs:
             continue
@@ -1537,14 +1743,15 @@ def print_progress(results: list[BenchmarkResult], total_runs: int):
     if done == 0:
         return
 
-    for tool in ['tofu', 'cc']:
+    all_tools = sorted(set(r.tool for r in results))
+    for tool in all_tools:
         rs = [r for r in results if r.tool == tool]
         if not rs:
             continue
         resolved = sum(1 for r in rs if r.resolved)
         total = len(rs)
         cost = sum(r.cost_usd for r in rs)
-        label = 'Tofu' if tool == 'tofu' else 'CC  '
+        label = f'{tool:>10s}'
         print(f'    📊 {label}: {resolved}/{total} resolved ({100*resolved/max(total,1):.0f}%)  '
               f'${cost:.2f} spent  [{done}/{total_runs} runs done]')
 
@@ -1555,7 +1762,8 @@ def print_summary(results: list[BenchmarkResult]):
     print('                              SWE-BENCH VERIFIED — BENCHMARK SUMMARY')
     print('═' * 120)
 
-    for tool in ['tofu', 'cc']:
+    all_tools = sorted(set(r.tool for r in results))
+    for tool in all_tools:
         rs = [r for r in results if r.tool == tool]
         if not rs:
             continue
@@ -1576,7 +1784,7 @@ def print_summary(results: list[BenchmarkResult]):
         cache_rate = total_cr / max(total_in + total_cr + total_cw, 1) * 100
         errors = sum(1 for r in rs if r.error and 'timeout' in r.error.lower())
 
-        label = 'Tofu' if tool == 'tofu' else 'Claude Code'
+        label = tool.upper()
         print(f'\n  {label}:')
         print(f'    ✅ Resolved:         {resolved}/{total} ({100*resolved/max(total,1):.1f}%)')
         print(f'    📎 Patch applies:    {patch_applies}/{total}')
@@ -1607,44 +1815,36 @@ def print_summary(results: list[BenchmarkResult]):
             r_resolved = sum(1 for r in rr if r.resolved)
             print(f'      {repo:<30s}: {r_resolved}/{len(rr)} ({100*r_resolved/max(len(rr),1):.0f}%)')
 
-    # Head-to-head comparison
-    tofu_map = {r.instance_id: r for r in results if r.tool == 'tofu'}
-    cc_map = {r.instance_id: r for r in results if r.tool == 'cc'}
-    common = set(tofu_map.keys()) & set(cc_map.keys())
+    # Head-to-head comparison (pairwise for all tool combinations)
+    tool_maps = {}
+    for tool in all_tools:
+        tool_maps[tool] = {r.instance_id: r for r in results if r.tool == tool}
 
-    if common:
-        print(f'\n  Head-to-head ({len(common)} instances):')
-        both = sum(1 for i in common if tofu_map[i].resolved and cc_map[i].resolved)
-        tofu_only = sum(1 for i in common if tofu_map[i].resolved and not cc_map[i].resolved)
-        cc_only = sum(1 for i in common if not tofu_map[i].resolved and cc_map[i].resolved)
-        neither = sum(1 for i in common if not tofu_map[i].resolved and not cc_map[i].resolved)
-        print(f'    Both resolved:       {both}')
-        print(f'    Tofu only:           {tofu_only}')
-        print(f'    CC only:             {cc_only}')
-        print(f'    Neither:             {neither}')
+    if len(all_tools) >= 2:
+        # Build a cross-model resolution matrix
+        print(f'\n  Cross-model comparison:')
+        # Find instances common to ALL tools
+        common_all = set.intersection(*(set(m.keys()) for m in tool_maps.values())) if tool_maps else set()
+        if common_all:
+            print(f'    Instances tested by all {len(all_tools)} models: {len(common_all)}')
+            # Show how many each model solved
+            for tool in all_tools:
+                solved = sum(1 for i in common_all if tool_maps[tool][i].resolved)
+                print(f'      {tool:>12s}: {solved}/{len(common_all)} ({100*solved/max(len(common_all),1):.1f}%)')
 
-        if tofu_only:
-            print(f'\n    Tofu-only wins:')
-            for i in sorted(common):
-                if tofu_map[i].resolved and not cc_map[i].resolved:
-                    print(f'      • {i} (Tofu: {tofu_map[i].duration_s:.0f}s/${tofu_map[i].cost_usd:.3f})')
-        if cc_only:
-            print(f'\n    CC-only wins:')
-            for i in sorted(common):
-                if not tofu_map[i].resolved and cc_map[i].resolved:
-                    print(f'      • {i} (CC: {cc_map[i].duration_s:.0f}s/${cc_map[i].cost_usd:.3f})')
-
-        # Speed comparison on jointly-resolved instances
-        joint = [(i, tofu_map[i], cc_map[i]) for i in common
-                 if tofu_map[i].resolved and cc_map[i].resolved]
-        if joint:
-            avg_tofu_t = sum(t.duration_s for _, t, _ in joint) / len(joint)
-            avg_cc_t = sum(c.duration_s for _, _, c in joint) / len(joint)
-            avg_tofu_c = sum(t.cost_usd for _, t, _ in joint) / len(joint)
-            avg_cc_c = sum(c.cost_usd for _, _, c in joint) / len(joint)
-            print(f'\n    On jointly-resolved ({len(joint)} instances):')
-            print(f'      Avg time:  Tofu {avg_tofu_t:.0f}s vs CC {avg_cc_t:.0f}s  ({avg_cc_t/max(avg_tofu_t,1):.1f}×)')
-            print(f'      Avg cost:  Tofu ${avg_tofu_c:.3f} vs CC ${avg_cc_c:.3f}  ({avg_cc_c/max(avg_tofu_c,0.001):.1f}×)')
+            # Unique wins (solved by only one model)
+            print(f'\n    Unique wins (solved by only one model):')
+            for tool in all_tools:
+                unique = [i for i in common_all
+                          if tool_maps[tool][i].resolved and
+                          not any(tool_maps[t][i].resolved for t in all_tools if t != tool)]
+                if unique:
+                    print(f'      {tool:>12s}: {len(unique)}')
+                    for i in sorted(unique)[:5]:
+                        r = tool_maps[tool][i]
+                        print(f'        • {i} ({r.duration_s:.0f}s, ${r.cost_usd:.3f})')
+                    if len(unique) > 5:
+                        print(f'        ... and {len(unique)-5} more')
 
     print('\n' + '═' * 120)
 
@@ -1697,6 +1897,113 @@ def preflight(tools: list[str]) -> list[str]:
 
 # ─── Main Pipeline ────────────────────────────────────────────────────────────
 
+def _run_one_instance(
+    inst: SWEInstance,
+    mcfg: ModelConfig,
+    base_dir: Path,
+    env_map: dict,
+    skip_eval: bool = False,
+) -> BenchmarkResult:
+    """Run inference + eval for ONE instance + ONE model. Thread-safe."""
+    tool = mcfg.name
+    max_inference_retries = 3  # retry on empty/fluke inference (no patch, ≤1 turn)
+    try:
+        # Phase 1: Inference (with retry for empty/fluke results)
+        workspace = setup_workspace(inst, tool, base_dir)
+        inf_result = None
+
+        for inf_attempt in range(1, max_inference_retries + 1):
+            # Reset workspace for retry
+            if inf_attempt > 1:
+                log.info('  [%s] %s Retry %d/%d (previous attempt produced no patch)',
+                         tool.upper(), inst.instance_id, inf_attempt, max_inference_retries)
+                subprocess.run(['git', 'checkout', '.'], capture_output=True,
+                               text=True, timeout=30, cwd=str(workspace))
+                subprocess.run(['git', 'clean', '-fd', '--quiet'], capture_output=True,
+                               text=True, timeout=30, cwd=str(workspace))
+                time.sleep(5)  # small backoff between retries
+
+            if mcfg.backend == 'tofu':
+                inf_result = run_tofu_inference(inst, workspace, mcfg)
+            else:
+                inf_result = run_cc_inference(inst, workspace, mcfg)
+
+            # Decide whether to retry:
+            # - Has a patch → accept (success or failure, eval will judge)
+            # - Has a real error (timeout, crash) → accept (don't retry crashes)
+            # - No patch + ≤1 turn + no hard error → fluke, retry
+            has_patch = bool(inf_result.model_patch and inf_result.model_patch.strip())
+            has_hard_error = bool(inf_result.error and inf_result.error not in ('', 'No patch generated'))
+            is_fluke = not has_patch and not has_hard_error and inf_result.num_turns <= 1
+
+            if not is_fluke or inf_attempt == max_inference_retries:
+                break
+            log.warning('  [%s] %s Fluke inference: %d turns, %d patch chars — will retry',
+                        tool.upper(), inst.instance_id, inf_result.num_turns,
+                        len(inf_result.model_patch))
+
+        log.info('  [%s] %s → Patch: %d chars, %.0fs, $%.3f, %d turns',
+                 tool.upper(), inst.instance_id, len(inf_result.model_patch),
+                 inf_result.duration_s, inf_result.cost_usd, inf_result.num_turns)
+        if inf_result.error:
+            log.warning('  [%s] %s Error: %s', tool.upper(), inst.instance_id, inf_result.error[:200])
+
+        # ── Gate: reject failed inference (429, timeout, 0 tokens) ──
+        # Only record results where inference actually ran successfully.
+        # Failed runs return None → not saved → resume will re-run them.
+        has_real_inference = (
+            inf_result.model_patch.strip()
+            or inf_result.input_tokens > 0
+            or inf_result.cost_usd > 0
+        )
+        if not has_real_inference:
+            log.warning('  [%s] %s DISCARDED — inference failed (no patch, 0 tokens, 0 cost): %s',
+                        tool.upper(), inst.instance_id, inf_result.error[:200])
+            return None  # signal to caller: don't save this
+
+        # Phase 2: Evaluation
+        br = BenchmarkResult(
+            instance_id=inst.instance_id,
+            repo=inst.repo,
+            difficulty=inst.difficulty,
+            tool=tool,
+            duration_s=inf_result.duration_s,
+            cost_usd=inf_result.cost_usd,
+            input_tokens=inf_result.input_tokens,
+            output_tokens=inf_result.output_tokens,
+            cache_read_tokens=inf_result.cache_read_tokens,
+            cache_write_tokens=inf_result.cache_write_tokens,
+            num_turns=inf_result.num_turns,
+        )
+
+        eval_result = None
+
+        if skip_eval:
+            br.error = 'Eval skipped'
+        elif inf_result.model_patch:
+            log.info('  [%s] %s Evaluating...', tool.upper(), inst.instance_id)
+            eval_result = evaluate_patch(inst, inf_result.model_patch, tool, base_dir,
+                                         env_map or {})
+            br.resolved = eval_result.resolved
+            br.patch_applies = eval_result.patch_applies
+            br.fail_to_pass_passed = sum(1 for v in eval_result.fail_to_pass_results.values() if v)
+            br.fail_to_pass_total = len(eval_result.fail_to_pass_results)
+            br.pass_to_pass_passed = sum(1 for v in eval_result.pass_to_pass_results.values() if v)
+            br.pass_to_pass_total = len(eval_result.pass_to_pass_results)
+            if eval_result.error:
+                br.error = eval_result.error
+        else:
+            br.error = inf_result.error or 'No patch generated'
+
+        # Save per-run detail
+        _save_per_run_detail(base_dir, inst, tool, inf_result, eval_result, br)
+        return br
+
+    except Exception as e:
+        log.error('  [%s] CRASH on %s: %s', tool.upper(), inst.instance_id, e, exc_info=True)
+        return None  # crash = don't save, resume will re-try
+
+
 def run_pipeline(
     instances: list[SWEInstance],
     tools: list[str],
@@ -1707,124 +2014,133 @@ def run_pipeline(
     completed: set = None,
     env_map: dict = None,
     cooldown: int = COOLDOWN_SECONDS,
+    model_configs: list[ModelConfig] = None,
 ):
-    """Run the full inference + evaluation pipeline.
+    """Run the full inference + evaluation pipeline with parallel execution.
 
-    Saves results after each instance for robust resume.
+    Each model gets its own thread pool (sized by model.concurrency).
+    All models run in parallel, and within each model, multiple instances
+    run concurrently. Results are saved after each completion for robust resume.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     all_results = list(existing_results or [])
     completed = completed or set()
-    total_runs = len(instances) * len(tools)
-    done_runs = len(completed)
     start_time = time.time()
 
-    log.info('Pipeline: %d instances × %d tools = %d total runs (%d already done)',
-             len(instances), len(tools), total_runs, done_runs)
+    # Build model configs from tools list if not provided
+    if not model_configs:
+        model_configs = []
+        for t in tools:
+            if t in MODEL_PRESETS:
+                model_configs.append(MODEL_PRESETS[t])
+            elif t == 'cc':
+                model_configs.append(MODEL_PRESETS['cc'])
 
-    for idx, inst in enumerate(instances, 1):
-        log.info('━' * 80)
-        log.info('[%d/%d] %s (%s v%s, %s)',
-                 idx, len(instances), inst.instance_id,
-                 inst.repo, inst.version, inst.difficulty)
-        log.info('  Issue: %s', inst.problem_statement[:150].strip())
-        log.info('  Gold: %d chars, F2P: %d tests, P2P: %d tests',
-                 len(inst.patch), len(inst.fail_to_pass), len(inst.pass_to_pass))
+    total_runs = len(instances) * len(model_configs)
+    done_count = len(completed)
+    _done_lock = _threading.Lock()
 
-        for tool in tools:
-            run_key = f'{inst.instance_id}__{tool}'
-            if run_key in completed:
-                log.info('  [%s] Already completed, skipping', tool.upper())
-                continue
+    log.info('Pipeline: %d instances × %d models = %d total runs (%d already done)',
+             len(instances), len(model_configs), total_runs, done_count)
+    for mc in model_configs:
+        log.info('  Model: %s (backend=%s, model_id=%s, concurrency=%d)',
+                 mc.name, mc.backend, mc.model_id, mc.concurrency)
 
-            done_runs += 1
-            elapsed_total = time.time() - start_time
-            avg_per_run = elapsed_total / max(done_runs - len(completed or set()), 1)
-            remaining = (total_runs - done_runs) * avg_per_run
-            eta = time.strftime('%H:%M', time.localtime(time.time() + remaining)) if remaining > 0 else '?'
+    def _process_one(inst: SWEInstance, mcfg: ModelConfig):
+        """Process one (instance, model) pair — called from thread pool."""
+        nonlocal done_count
+        run_key = f'{inst.instance_id}__{mcfg.name}'
+        if run_key in completed:
+            return None
 
-            log.info('  [%s] Running (%d/%d, ETA: %s)...',
-                     tool.upper(), done_runs, total_runs, eta)
+        br = _run_one_instance(inst, mcfg, base_dir, env_map, skip_eval)
 
+        # None = inference failed (429, timeout, crash) → don't save,
+        # so --resume will re-try this instance next time.
+        if br is None:
+            with _done_lock:
+                done_count += 1
+                _dc = done_count
+            log.warning('[%d/%d] ⏭️  %s %s SKIPPED (inference failed, will retry on resume)',
+                        _dc, total_runs, mcfg.name.upper(), inst.instance_id)
+            return None
+
+        with _results_lock:
+            all_results.append(br)
+            with _done_lock:
+                done_count += 1
+                _dc = done_count
+            # Save after each completion
             try:
-                # Phase 1: Inference
-                workspace = setup_workspace(inst, tool, base_dir)
-
-                if tool == 'tofu':
-                    inf_result = run_tofu_inference(inst, workspace)
-                else:
-                    inf_result = run_cc_inference(inst, workspace)
-
-                log.info('  [%s] Patch: %d chars, %.0fs, $%.3f, %d turns',
-                         tool.upper(), len(inf_result.model_patch),
-                         inf_result.duration_s, inf_result.cost_usd, inf_result.num_turns)
-                if inf_result.error:
-                    log.warning('  [%s] Error: %s', tool.upper(), inf_result.error[:200])
-
-                # Phase 2: Evaluation
-                br = BenchmarkResult(
-                    instance_id=inst.instance_id,
-                    repo=inst.repo,
-                    difficulty=inst.difficulty,
-                    tool=tool,
-                    duration_s=inf_result.duration_s,
-                    cost_usd=inf_result.cost_usd,
-                    input_tokens=inf_result.input_tokens,
-                    output_tokens=inf_result.output_tokens,
-                    cache_read_tokens=inf_result.cache_read_tokens,
-                    cache_write_tokens=inf_result.cache_write_tokens,
-                    num_turns=inf_result.num_turns,
-                )
-
-                eval_result = None  # track for _save_per_run_detail
-
-                if skip_eval:
-                    br.error = 'Eval skipped'
-                elif inf_result.model_patch:
-                    log.info('  [%s] Evaluating...', tool.upper())
-                    eval_result = evaluate_patch(inst, inf_result.model_patch, tool, base_dir,  # noqa
-                                                env_map or {})
-                    br.resolved = eval_result.resolved
-                    br.patch_applies = eval_result.patch_applies
-                    br.fail_to_pass_passed = sum(1 for v in eval_result.fail_to_pass_results.values() if v)
-                    br.fail_to_pass_total = len(eval_result.fail_to_pass_results)
-                    br.pass_to_pass_passed = sum(1 for v in eval_result.pass_to_pass_results.values() if v)
-                    br.pass_to_pass_total = len(eval_result.pass_to_pass_results)
-                    if eval_result.error:
-                        br.error = eval_result.error
-                else:
-                    br.error = inf_result.error or 'No patch generated'
-
-                print_instance_result(br)
-                all_results.append(br)
-
-                # Save per-run detail (patch, raw output, test outputs)
-                _save_per_run_detail(base_dir, inst, tool, inf_result, eval_result, br)
-
-            except Exception as e:
-                # Catch ANY crash in inference/eval so we don't lose the whole run
-                log.error('  [%s] CRASH on %s: %s', tool.upper(), inst.instance_id, e, exc_info=True)
-                br = BenchmarkResult(
-                    instance_id=inst.instance_id,
-                    repo=inst.repo,
-                    difficulty=inst.difficulty,
-                    tool=tool,
-                    error=f'CRASH: {e}',
-                )
-                all_results.append(br)
-
-            # Save summary after each run (even on crash)
-            try:
-                _save_results(all_results, instances, output_path)
+                _save_results(all_results, instances, output_path, model_configs)
             except Exception as e:
                 log.error('Failed to save results: %s', e, exc_info=True)
 
-            # Print progress every 10 runs
-            if done_runs % 10 == 0:
+        status = '✅' if br.resolved else '❌'
+        log.info('[%d/%d] %s %s %s (%.0fs, $%.3f)',
+                 _dc, total_runs, status, mcfg.name.upper(),
+                 inst.instance_id, br.duration_s, br.cost_usd)
+
+        return br
+
+    # Launch one ThreadPoolExecutor per model, all running concurrently
+    all_futures = {}  # future → (inst, mcfg)
+    executors = []
+
+    for mcfg in model_configs:
+        # Build the work queue for this model (skip completed)
+        work = [(inst, mcfg) for inst in instances
+                if f'{inst.instance_id}__{mcfg.name}' not in completed]
+        if not work:
+            log.info('[%s] All %d instances already completed', mcfg.name.upper(), len(instances))
+            continue
+
+        log.info('[%s] Submitting %d instances (concurrency=%d)',
+                 mcfg.name.upper(), len(work), mcfg.concurrency)
+        executor = ThreadPoolExecutor(
+            max_workers=mcfg.concurrency,
+            thread_name_prefix=f'swe-{mcfg.name}',
+        )
+        executors.append(executor)
+
+        for inst, mc in work:
+            future = executor.submit(_process_one, inst, mc)
+            all_futures[future] = (inst, mc)
+
+    # Wait for all futures to complete, logging progress
+    completed_count = 0
+    total_futures = len(all_futures)
+    last_progress_time = time.time()
+
+    for future in as_completed(all_futures):
+        completed_count += 1
+        inst, mc = all_futures[future]
+        try:
+            br = future.result()
+        except Exception as e:
+            log.error('Future crashed for %s/%s: %s', mc.name, inst.instance_id, e, exc_info=True)
+
+        # Print progress every 60 seconds
+        now = time.time()
+        if now - last_progress_time > 60:
+            last_progress_time = now
+            elapsed = now - start_time
+            rate = completed_count / max(elapsed, 1) * 3600
+            remaining = (total_futures - completed_count) / max(rate / 3600, 0.001)
+            log.info('━ Progress: %d/%d futures done (%.0f/hr), ETA: %s ━',
+                     completed_count, total_futures, rate,
+                     time.strftime('%H:%M', time.localtime(now + remaining)))
+            with _results_lock:
                 print_progress(all_results, total_runs)
 
-            # Cooldown between runs
-            if done_runs < total_runs and cooldown > 0:
-                time.sleep(cooldown)
+    # Shutdown executors
+    for executor in executors:
+        executor.shutdown(wait=False)
+
+    # Final save
+    with _results_lock:
+        _save_results(all_results, instances, output_path, model_configs)
 
     return all_results
 
@@ -1846,7 +2162,12 @@ def main():
                         help='Filter by repository')
     parser.add_argument('--difficulty', type=str, default='',
                         help='Filter by difficulty')
-    parser.add_argument('--tool', choices=['tofu', 'cc', 'both'], default='both')
+    parser.add_argument('--tool', choices=['tofu', 'cc', 'both'], default='both',
+                        help='(Legacy) Run tofu, cc, or both')
+    parser.add_argument('--models', type=str, default='',
+                        help='Comma-separated model names to test. '
+                             f'Available: {",".join(MODEL_PRESETS.keys())}. '
+                             'Overrides --tool when specified.')
     parser.add_argument('--delay', type=int, default=COOLDOWN_SECONDS,
                         help=f'Delay between runs (default: {COOLDOWN_SECONDS}s)')
     parser.add_argument('--skip-eval', action='store_true',
@@ -1860,6 +2181,8 @@ def main():
                         help='Working directory for workspaces')
     parser.add_argument('--resume', action='store_true',
                         help='Resume from existing results')
+    parser.add_argument('--smart-resume', action='store_true', dest='smart_resume',
+                        help='Resume: keep resolved results, re-run all non-resolved instances')
     parser.add_argument('--reeval', action='store_true',
                         help='Re-evaluate all existing patches (skip inference)')
     parser.add_argument('--skip-c-repos', action='store_true', default=True,
@@ -1871,7 +2194,7 @@ def main():
 
     _cooldown = args.delay
 
-    base_dir = Path(args.workdir)
+    base_dir = Path(args.workdir).resolve()
     base_dir.mkdir(parents=True, exist_ok=True)
     output_path = Path(args.output) if args.output else base_dir / 'swebench_results.json'
 
@@ -1919,11 +2242,22 @@ def main():
         print(f'  By repo: {dict(sorted(repos.items(), key=lambda x: -x[1]))}')
 
         # Estimate cost
+        # Estimate with model configs if available
+        if args.models:
+            model_names = [m.strip() for m in args.models.split(',') if m.strip()]
+            n_models = len(model_names)
+        else:
+            n_models = 2 if args.tool == 'both' else 1
         avg_cost_per_instance = 0.5  # rough estimate
-        est_cost = len(instances) * avg_cost_per_instance * (2 if args.tool == 'both' else 1)
-        est_time_h = len(instances) * 2 * (2 if args.tool == 'both' else 1) / 60  # ~2 min avg
-        print(f'\n  Estimated cost: ~${est_cost:.0f}')
-        print(f'  Estimated time: ~{est_time_h:.1f} hours')
+        est_cost = len(instances) * avg_cost_per_instance * n_models
+        # With parallel execution, time ≈ instances × avg_time / max_concurrency
+        max_conc = sum(MODEL_PRESETS.get(m, MODEL_PRESETS.get('tofu')).concurrency
+                       for m in (args.models.split(',') if args.models else ['tofu']))
+        # ~5 min avg per run (inference + eval), divided by total concurrency
+        est_time_h = len(instances) * n_models * 5 / max(max_conc, 1) / 60
+        print(f'\n  Models: {n_models} | Total runs: {len(instances) * n_models}')
+        print(f'  Estimated cost: ~${est_cost:.0f}')
+        print(f'  Estimated time: ~{est_time_h:.1f} hours (parallel)')
         return
 
     # Setup conda envs only
@@ -1932,18 +2266,55 @@ def main():
         log.info('Done. %d environments ready.', sum(1 for v in env_map.values() if v))
         return
 
-    # Preflight
-    requested_tools = ['tofu', 'cc'] if args.tool == 'both' else [args.tool]
+    # Build model configs
+    if args.models:
+        model_names = [m.strip() for m in args.models.split(',') if m.strip()]
+        model_configs = []
+        for mn in model_names:
+            if mn in MODEL_PRESETS:
+                model_configs.append(MODEL_PRESETS[mn])
+            else:
+                log.error('Unknown model preset: %s. Available: %s', mn, list(MODEL_PRESETS.keys()))
+                sys.exit(1)
+    else:
+        # Legacy --tool mode
+        if args.tool == 'both':
+            model_configs = [MODEL_PRESETS['tofu'], MODEL_PRESETS['cc']]
+        elif args.tool == 'tofu':
+            model_configs = [MODEL_PRESETS['tofu']]
+        else:
+            model_configs = [MODEL_PRESETS['cc']]
+
+    # Preflight: check which backends are available
+    requested_tools = list(set(mc.backend for mc in model_configs))
     tools = preflight(requested_tools)
     if not tools:
-        log.error('No tools available. Exiting.')
+        log.error('No backends available. Exiting.')
         sys.exit(1)
 
-    # Resume
+    # Filter out models whose backends aren't available
+    model_configs = [mc for mc in model_configs if mc.backend in tools]
+    if not model_configs:
+        log.error('No models available after preflight. Exiting.')
+        sys.exit(1)
+
+    log.info('Models to benchmark: %s', [mc.name for mc in model_configs])
+
+    # Resume — smart mode: keep resolved, re-run failures + unfinished
     existing_results, completed = [], set()
+    if args.smart_resume:
+        args.resume = True
     if args.resume and not args.reeval:
         existing_results, completed = _load_completed(output_path)
-        if completed:
+        if args.smart_resume:
+            # Smart resume: only keep resolved results, re-run all non-resolved
+            keep_results = [r for r in existing_results if r.resolved]
+            rerun_keys = set(f'{r.instance_id}__{r.tool}' for r in existing_results if not r.resolved)
+            completed = set(f'{r.instance_id}__{r.tool}' for r in keep_results)
+            existing_results = keep_results
+            log.info('Smart resume: keeping %d resolved, re-running %d failed/unfinished',
+                     len(keep_results), len(rerun_keys))
+        elif completed:
             log.info('Resuming: %d runs already completed', len(completed))
 
     # Pre-build conda environments
@@ -1961,6 +2332,8 @@ def main():
 
     # ─── Re-evaluate existing patches (--reeval) ──────────────────────────
     if args.reeval:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         log.info('═══ RE-EVALUATION MODE: re-running eval on existing patches ═══')
         patch_dir = base_dir / 'patches'
         inst_map = {inst.instance_id: inst for inst in instances}
@@ -1969,36 +2342,45 @@ def main():
         patch_files = sorted(patch_dir.glob('*.diff')) if patch_dir.exists() else []
         log.info('Found %d patch files to re-evaluate', len(patch_files))
 
+        # Build set of model names to re-evaluate
+        reeval_model_names = set(mc.name for mc in model_configs)
+        log.info('Re-evaluating models: %s', sorted(reeval_model_names))
+
+        # Build work queue
+        work_items = []
         for pf in patch_files:
-            # Parse filename: {instance_id}__{tool}.diff
-            stem = pf.stem  # e.g. "astropy__astropy-12907__tofu"
+            stem = pf.stem
             parts = stem.rsplit('__', 1)
             if len(parts) != 2:
-                log.warning('Skipping malformed patch filename: %s', pf.name)
                 continue
             iid, tool = parts
-            if tool not in requested_tools:
+            if tool not in reeval_model_names:
                 continue
             inst = inst_map.get(iid)
             if not inst:
-                log.warning('Instance %s not in selected set, skipping', iid)
                 continue
-
             model_patch = pf.read_text()
             if not model_patch or model_patch.startswith('# (empty'):
-                log.info('  [%s] %s — empty patch, skipping', tool.upper(), iid)
                 continue
+            work_items.append((iid, tool, inst, model_patch))
 
+        log.info('Re-evaluating %d patches (parallel, %d workers)',
+                 len(work_items), MAX_EVAL_WORKERS)
+
+        def _reeval_one(iid, tool, inst, model_patch):
+            """Re-evaluate one patch. Thread-safe."""
             log.info('  [%s] %s — re-evaluating (%d chars)', tool.upper(), iid, len(model_patch))
             eval_result = evaluate_patch(inst, model_patch, tool, base_dir, env_map or {})
 
-            # Build result from existing detail file + new eval
             detail_file = base_dir / 'details' / f'{iid}__{tool}.json'
             inf_data = {}
             if detail_file.exists():
-                with open(detail_file) as f:
-                    detail = json.load(f)
-                inf_data = detail.get('inference', {})
+                try:
+                    with open(detail_file) as f:
+                        detail = json.load(f)
+                    inf_data = detail.get('inference', {})
+                except Exception:
+                    pass
 
             br = BenchmarkResult(
                 instance_id=iid,
@@ -2020,8 +2402,6 @@ def main():
                 pass_to_pass_total=len(eval_result.pass_to_pass_results),
                 error=eval_result.error or '',
             )
-            print_instance_result(br)
-            reeval_results.append(br)
 
             # Update detail file with new eval
             dummy_inf = type('obj', (object,), {
@@ -2038,34 +2418,73 @@ def main():
             })()
             _save_per_run_detail(base_dir, inst, tool, dummy_inf, eval_result, br)
 
-        # Save updated results (merge with any existing non-reevaled results)
+            return br
+
+        # Run in parallel
+        completed_count = 0
+        with ThreadPoolExecutor(max_workers=MAX_EVAL_WORKERS,
+                                thread_name_prefix='reeval') as executor:
+            futures = {
+                executor.submit(_reeval_one, iid, tool, inst, mp): (iid, tool)
+                for iid, tool, inst, mp in work_items
+            }
+            for future in as_completed(futures):
+                iid, tool = futures[future]
+                completed_count += 1
+                try:
+                    br = future.result()
+                    with _results_lock:
+                        reeval_results.append(br)
+                    status = '✅' if br.resolved else '❌'
+                    log.info('[%d/%d] %s %s %s F2P=%d/%d P2P=%d/%d',
+                             completed_count, len(work_items), status,
+                             tool.upper(), iid,
+                             br.fail_to_pass_passed, br.fail_to_pass_total,
+                             br.pass_to_pass_passed, br.pass_to_pass_total)
+                except Exception as e:
+                    log.error('[%d/%d] CRASH %s %s: %s',
+                              completed_count, len(work_items), tool, iid, e,
+                              exc_info=True)
+
+                # Save periodically (every 20 completions)
+                if completed_count % 20 == 0:
+                    with _results_lock:
+                        _save_results(reeval_results, instances, output_path)
+                    log.info('━ Progress: %d/%d done ━', completed_count, len(work_items))
+
+        # Final save
         _save_results(reeval_results, instances, output_path)
         print_summary(reeval_results)
-        log.info('Re-evaluation complete. Results saved: %s', output_path)
+        log.info('Re-evaluation complete. %d results saved: %s',
+                 len(reeval_results), output_path)
         return
 
     # Summary before starting
-    new_runs = len(instances) * len(tools) - len(completed)
+    tool_names = [mc.name for mc in model_configs]
+    new_runs = len(instances) * len(model_configs) - len(completed)
     log.info('')
     log.info('=' * 60)
     log.info('  SWE-bench Verified Benchmark')
-    log.info('  Instances: %d | Tools: %s | New runs: %d',
-             len(instances), ', '.join(tools), new_runs)
+    log.info('  Instances: %d | Models: %s | New runs: %d',
+             len(instances), ', '.join(tool_names), new_runs)
+    for mc in model_configs:
+        log.info('    %s: %s (backend=%s, concurrency=%d)',
+                 mc.name, mc.model_id, mc.backend, mc.concurrency)
     log.info('  Workdir: %s', base_dir)
     log.info('  Output: %s', output_path)
-    log.info('  Safety timeout: %ds | Cooldown: %ds',
-             INFERENCE_SAFETY_TIMEOUT, _cooldown)
+    log.info('  Safety timeout: %ds', INFERENCE_SAFETY_TIMEOUT)
     log.info('=' * 60)
     log.info('')
 
     # Run
     results = run_pipeline(
-        instances, tools, base_dir, output_path,
+        instances, tool_names, base_dir, output_path,
         skip_eval=args.skip_eval,
         existing_results=existing_results,
         completed=completed,
         env_map=env_map,
-        cooldown=_cooldown,
+        cooldown=0,  # No cooldown in parallel mode
+        model_configs=model_configs,
     )
 
     # Final summary

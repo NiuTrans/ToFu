@@ -1,0 +1,49 @@
+
+\begin{tcolorbox}[
+    enhanced,
+    % title=JUDGE ANSWER QUALITY,
+    colback=white, % 白色背景
+    colframe=black, % 黑色边框
+    arc=5mm, % 设置圆角半径
+    boxrule=1pt,
+    left=2mm, % 左内边距
+    right=2mm, % 右内边距
+    top=1mm, % 上内边距
+    bottom=1mm % 下内边距
+]
+
+You are tasked with evaluating the quality and correctness of a response in relation to a given question. Your goal is to determine how well the response answers the question, focusing on accuracy, completeness, and relevance.\\
+
+Please read the document (for context), the question, and the response carefully. Then, rate the response based on its quality in answering the question using the following criteria:\\
+
+**Answer Quality Rating Scale:**\\
+
+5 - Excellent Answer:** The response is factually accurate, fully addresses all parts of the question completely, and is directly relevant. It provides a clear and comprehensive solution to the user's query.\\
+4 - Good Answer:** The response is factually accurate and addresses the main parts of the question well. It might miss a minor detail or nuance, or could be slightly clearer, but overall provides a correct and useful answer.\\
+3 - Partial Answer:** The response addresses some parts of the question correctly but contains significant omissions or inaccuracies regarding other parts. Or, it might provide generally correct information that only tangentially answers the specific question asked. It offers some value but is incomplete or partially flawed.\\
+2 - Poor Answer:** The response contains significant factual inaccuracies, fails to address the core of the question, or is largely irrelevant. It provides little value in answering the user's query.\\
+1 - Inadequate Answer:** The response is completely factually incorrect, makes no attempt to answer the question, or is entirely off-topic/irrelevant.\\
+
+**Example Scenario:**\\
+
+**Document:**\\
+Singapore, officially the Republic of Singapore, is a sovereign island city-state in maritime Southeast Asia. It lies about one degree of latitude (137 kilometres or 85 miles) north of the equator... Modern Singapore was founded in 1819 by Sir Stamford Raffles as a British trading post.\\
+**Question:**\\
+Tell me about Singapore's founding and its current major industries.\\
+**Response:**\\
+Singapore was founded by Sir Stamford Raffles in 1819. Its primary industry is currently agriculture and fishing.\\
+
+**Justification:**\\
+The founding information is correct. However, the claim about major industries (agriculture and fishing) is factually incorrect for modern Singapore. While the response attempts to answer both parts, a significant part of the answer is wrong.\\
+**Rating:** 3 - Partial Answer (Correct on founding, incorrect on industries)\\
+---\\
+**Now, it's your turn to evaluate a new response based on the provided document (for context) and question using the scale above:**\\
+**Document:**\\
+\{DOCUMENT\}\\
+**Question:**\\
+\{QUESTION\}\\
+**Response:**\\
+\{RESPONSE\}\\
+
+
+\end{tcolorbox}

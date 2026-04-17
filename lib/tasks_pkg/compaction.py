@@ -320,7 +320,6 @@ TOOL_RESULT_MAX_CHARS: dict[str, int] = {
     'browser_get_interactive_elements': 30_000,
     'browser_execute_js': 30_000,
     'browser_get_app_state': 30_000,
-    'check_error_logs': 30_000,
 
 }
 _DEFAULT_TOOL_RESULT_MAX = 60_000
@@ -992,7 +991,6 @@ def micro_compact(messages: list, conv_id: str = '', **kwargs) -> int:
                         b.get('image_url', {}).get('url', ''))
 
             text_len = sum(len(t) for t in text_parts)
-            total_content_chars = text_len + image_chars
 
             # Images consume enormous context (base64 data URLs).
             # Always compact cold image tool results regardless of
@@ -1005,7 +1003,7 @@ def micro_compact(messages: list, conv_id: str = '', **kwargs) -> int:
                     f'{text_len:,} chars text — re-call tool if needed]\n'
                     f'Text was: {text_preview}'
                 )
-                tool_tokens_saved += total_content_chars // 4
+                tool_tokens_saved += text_len // 4 + image_count * _IMAGE_TOKENS_DEFAULT
                 compacted_count += 1
                 continue
 
@@ -1112,16 +1110,16 @@ def micro_compact(messages: list, conv_id: str = '', **kwargs) -> int:
                 f're-call tool if image needed]\n'
                 f'Text was: {text_preview}'
             )
-            image_tokens_saved += image_chars // 4
+            image_tokens_saved += image_count * _IMAGE_TOKENS_DEFAULT
             images_stripped += 1
 
     if images_stripped > 0:
         tokens_saved += image_tokens_saved
         logger.info('[L1-img] conv=%s  stripped %d cold image tool results '
-                    '(~%d tokens, %s base64 data freed)',
+                    '(~%d vision tokens, %s base64 data freed)',
                     conv_id[:8] if conv_id else '?',
                     images_stripped, image_tokens_saved,
-                    _human_size(image_tokens_saved * 4))
+                    _human_size(image_chars))
 
     # ── Phase D: Compact cold assistant message content ───────────────
     # In long agentic conversations, assistant messages from 20+ rounds ago
@@ -1226,9 +1224,24 @@ def micro_compact(messages: list, conv_id: str = '', **kwargs) -> int:
 #  Token estimation helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Vision-API image token estimates (OpenAI / Claude pricing).
+# Images are NOT tokenised as base64 text — the API charges a fixed
+# amount based on resolution, not on the byte size of the data URL.
+_IMAGE_TOKENS_LOW  = 85      # detail=low  (fixed)
+_IMAGE_TOKENS_HIGH = 800     # detail=high average (85 base + tiles)
+_IMAGE_TOKENS_DEFAULT = _IMAGE_TOKENS_HIGH  # conservative default
+
+
 def _estimate_msg_tokens(msg: dict) -> int:
-    """Rough token estimate for a single message (1 token ≈ 4 chars)."""
+    """Rough token estimate for a single message.
+
+    Text: 1 token ≈ 4 chars.
+    Images: fixed estimate per image (NOT base64 length) — the LLM API
+    processes images natively and charges ~85-1105 tokens regardless of
+    the data-URL size.
+    """
     chars = 0
+    image_tokens = 0
     for field in ('content', 'reasoning_content'):
         val = msg.get(field)
         if not val:
@@ -1241,11 +1254,11 @@ def _estimate_msg_tokens(msg: dict) -> int:
                     if block.get('type') == 'text':
                         chars += len(block.get('text', ''))
                     elif block.get('type') == 'image_url':
-                        chars += len(str(block.get('image_url', {})
-                                         .get('url', '')))
+                        # Count as fixed vision tokens, not base64 chars
+                        image_tokens += _IMAGE_TOKENS_DEFAULT
     for tc in msg.get('tool_calls', []):
         chars += len(tc.get('function', {}).get('arguments', ''))
-    return chars // 4
+    return chars // 4 + image_tokens
 
 
 def _estimate_total_tokens(messages: list) -> int:

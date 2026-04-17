@@ -82,8 +82,10 @@ def is_model_cheap(model_id: str, fallback_cost_per_1k: float = None,
 #  These are overridden by benchmark data at runtime.
 # ══════════════════════════════════════════════════════════════
 DEFAULT_SLOT_CONFIGS = {
-    # ── Claude (Anthropic — current gen: 4.6 family, Feb 2026) ──
-    'claude-opus-4-6':               {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.025},
+    # ── Claude (Anthropic — current gen: 4.7 flagship, Apr 2026) ──
+    'claude-opus-4-7':               {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
+    # ── Claude (Anthropic — 4.6 family, Feb 2026) ──
+    'claude-opus-4-6':               {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
     'claude-sonnet-4-6':             {'caps': {'text', 'vision', 'thinking'},      'rpm': 50,  'latency': 2000, 'cost': 0.015},
     'claude-haiku-4-5':              {'caps': {'text', 'vision', 'cheap'},         'rpm': 100, 'latency': 1500, 'cost': 0.005},
     'claude-haiku-4-5-20251001':     {'caps': {'text', 'vision', 'cheap'},         'rpm': 100, 'latency': 1500, 'cost': 0.005},
@@ -98,6 +100,17 @@ DEFAULT_SLOT_CONFIGS = {
     'claude-3-5-haiku-20241022':     {'caps': {'text', 'cheap'},                   'rpm': 100, 'latency': 1500, 'cost': 0.003},
 
     # ── Claude (AWS / Vertex gateway-prefixed names) ──
+    'aws.claude-opus-4.7':           {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
+    # ── Claude (Amazon Bedrock native model IDs, inference-profile form) ──
+    'us.anthropic.claude-opus-4-7-v1:0':         {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
+    'us.anthropic.claude-opus-4-6-v1:0':         {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
+    'us.anthropic.claude-sonnet-4-6-v1:0':       {'caps': {'text', 'vision', 'thinking'},      'rpm': 50,  'latency': 2000, 'cost': 0.009},
+    'us.anthropic.claude-sonnet-4-5-v1:0':       {'caps': {'text', 'vision', 'thinking'},      'rpm': 50,  'latency': 2000, 'cost': 0.009},
+    'us.anthropic.claude-opus-4-5-v1:0':         {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
+    'us.anthropic.claude-haiku-4-5-v1:0':        {'caps': {'text', 'vision', 'cheap'},         'rpm': 100, 'latency': 1500, 'cost': 0.003},
+    'us.anthropic.claude-sonnet-4-20250514-v1:0':{'caps': {'text', 'vision', 'thinking'},      'rpm': 50,  'latency': 2000, 'cost': 0.009},
+    'openai.gpt-oss-120b-1:0':                   {'caps': {'text', 'thinking', 'cheap'},       'rpm': 60,  'latency': 2000, 'cost': 0.001},
+    'openai.gpt-oss-20b-1:0':                    {'caps': {'text', 'cheap'},                   'rpm': 120, 'latency': 1500, 'cost': 0.0005},
     'aws.claude-opus-4.6':           {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.025},
     'aws.claude-opus-4.6-b':         {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.025},
     'vertex.claude-opus-4.6':        {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.025},
@@ -224,11 +237,15 @@ DEFAULT_SLOT_CONFIGS = {
 #  This benefits anyone routing Claude through multiple gateway prefixes.
 # ══════════════════════════════════════════════════════════════
 MODEL_ALIAS_GROUPS = [
-    # Claude Opus 4.6 — aws, vertex, direct API names are interchangeable
+    # Claude Opus 4.7 — aws gateway + direct API + Bedrock-native IDs are interchangeable
+    {'aws.claude-opus-4.7', 'claude-opus-4-7', 'us.anthropic.claude-opus-4-7-v1:0'},
+    # Claude Opus 4.6 — aws, vertex, direct API, Bedrock-native names are interchangeable
     {'aws.claude-opus-4.6', 'aws.claude-opus-4.6-b', 'vertex.claude-opus-4.6',
-     'claude-opus-4-20250514', 'claude-opus-4-6-20250514'},
-    # Claude Sonnet 4.6 — aws gateway vs direct API name
-    {'aws.claude-sonnet-4.6', 'claude-sonnet-4-20250514', 'claude-sonnet-4-6-20250514'},
+     'claude-opus-4-20250514', 'claude-opus-4-6-20250514', 'claude-opus-4-6',
+     'us.anthropic.claude-opus-4-6-v1:0'},
+    # Claude Sonnet 4.6 — aws gateway vs direct API name vs Bedrock-native
+    {'aws.claude-sonnet-4.6', 'claude-sonnet-4-20250514', 'claude-sonnet-4-6-20250514',
+     'claude-sonnet-4-6', 'us.anthropic.claude-sonnet-4-6-v1:0'},
 ]
 
 MODEL_ALIASES: dict[str, set[str]] = {}

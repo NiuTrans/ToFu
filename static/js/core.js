@@ -82,6 +82,11 @@ async function loadFolders() {
     console.warn('[Folders] Failed to load folders:', e.message);
   }
   _foldersLoaded = true;
+  /* ★ Trigger sidebar re-render so folder tabs appear immediately.
+   *   On init, loadFolders() runs in parallel with loadConversationsFromServer().
+   *   If conversations arrived first, the sidebar rendered with foldersReady=false
+   *   (hiding foldered convs). Now that folders are ready, re-render to show them. */
+  if (typeof renderConversationList === 'function') renderConversationList();
   return _folders;
 }
 
@@ -217,7 +222,7 @@ let activeConvId = sessionStorage.getItem('chatui_activeConvId') || null,
   pdfProcessing = false;
 /** ★ Message queue: when user sends while streaming, messages are queued here
  *  and auto-dispatched when the current stream finishes.
- *  Key = convId, Value = Array of { text, images, pdfTexts, replyQuotes, convRefs, convRefTexts, timestamp } */
+ *  Key = convId, Value = Array of { text, images, pdfTexts, replyQuotes, convRefs, timestamp } */
 let pendingMessageQueue = new Map();
 let _editingMsgIdx = null,
   _lastRenderedFingerprint = "";
@@ -292,8 +297,8 @@ const _LEGACY_PRESET_TO_MODEL = {
   'qwen': 'qwen3.6-plus', 'low': 'qwen3.6-plus',
   'gemini': 'gemini-3.1-flash-lite-preview', 'gemini_flash': 'gemini-3-flash-preview',
   'minimax': 'MiniMax-M2.7', 'doubao': 'Doubao-Seed-2.0-pro',
-  'opus': 'aws.claude-opus-4.6',
-  'medium': 'aws.claude-opus-4.6', 'high': 'aws.claude-opus-4.6', 'max': 'aws.claude-opus-4.6',
+  'opus': 'aws.claude-opus-4.7',
+  'medium': 'aws.claude-opus-4.7', 'high': 'aws.claude-opus-4.7', 'max': 'aws.claude-opus-4.7',
 };
 if (!config.model || config.model === serverModel) {
   // Try migrating from old preset/effort keys
@@ -650,25 +655,28 @@ function restoreDebugForConv(convId) {
   if (cached && cached.messages && cached.messages.length > 0) {
     showMessagesInDebug(cached.messages, cached.label, false, undefined, cached.tools);
   } else {
-    // ★ FIX: No memory cache — try to rebuild from conversation data as fallback
-    // This covers page refresh / different device scenarios where _debugCache is empty
+    // ★ No memory cache — fetch API-ready messages from backend.
+    // This covers page refresh / different device scenarios where _debugCache is empty.
+    // Uses the server-side message builder (same as what the LLM sees).
     const conv = conversations.find((c) => c.id === convId);
-    if (
-      conv &&
-      conv.messages &&
-      conv.messages.length > 0 &&
-      typeof buildApiMessages === "function"
-    ) {
-      const rebuilt = buildApiMessages(conv, { includeAll: true });
-      if (rebuilt.length > 0) {
-        showMessagesInDebug(
-          rebuilt,
-          `${conv.messages.length}条对话 (reconstructed)`,
-          false,
-          convId,
-        );
-        return;
-      }
+    if (conv && conv.messages && conv.messages.length > 0) {
+      const _sp = (typeof config !== 'undefined' && config.systemPrompt) || '';
+      fetch(apiUrl(`/api/conversations/${convId}/debug-messages?systemPrompt=${encodeURIComponent(_sp)}`))
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+          if (data && data.messages && data.messages.length > 0) {
+            showMessagesInDebug(
+              data.messages,
+              `${data.count}条对话 (server)`,
+              false,
+              convId,
+            );
+          } else {
+            clearDebug();
+          }
+        })
+        .catch(() => clearDebug());
+      return;
     }
     clearDebug();
   }
@@ -1353,10 +1361,6 @@ function _startOfflineRecoveryPolling() {
   }, 15000); // Check every 15 seconds
 }
 
-/* ★ _mergeFromStorage removed — DB is the single source of truth.
- *   Cross-tab sync now goes through BroadcastChannel → loadConversationsFromServer(). */
-function _mergeFromStorage() { /* no-op — localStorage no longer used for conversations */ }
-
 function saveConversations(changedConvId) {
   const now = Date.now();
   if (changedConvId) {
@@ -1372,9 +1376,7 @@ function saveConversations(changedConvId) {
      * (after activeStreams.delete, so the guard passes). */
     if (c && !activeStreams.has(changedConvId)) c.updatedAt = now;
   }
-  /* ★ DB-first: no localStorage merge, no _writeToLocalStorage.
-   *   The in-memory array IS the truth for this tab.
-   *   The DB is the truth across tabs/sessions. */
+  /* ★ DB-first: in-memory array is truth for this tab, DB across tabs/sessions. */
   conversations.sort(_convSorter);
   _broadcastToTabs("conv_saved", { convId: changedConvId });
 
@@ -1394,17 +1396,14 @@ function saveConversations(changedConvId) {
     }
   }
 }
-/* ★ _writeToLocalStorage is now a no-op.
- *   The DB is the single source of truth for conversations.
- *   Keeping the function signature so callers don't need to be updated —
- *   they will be cleaned up incrementally. */
-function _writeToLocalStorage() { /* no-op — DB-first architecture */ }
+
 
 /**
  * Hydrate image base64 from server URLs.
  * After server restart, images loaded from DB only have url (base64 stripped).
- * buildApiMessages needs base64 for LLM vision calls.
- * This fetches each image URL as a blob and converts back to base64.
+ * Needed for UI rendering of images in chat messages.
+ * (The backend now handles image resolution for LLM API calls independently
+ * via _validate_image_blocks in conv_message_builder.py.)
  */
 function _hydrateImageBase64(conv) {
   if (!conv || !conv.messages) { conv._hydratePromise = Promise.resolve(); return; }
@@ -1415,7 +1414,7 @@ function _hydrateImageBase64(conv) {
       if (img.base64) continue;  // already has base64
       const url = img.url || img.preview || "";
       if (!url || url.endsWith("...")) continue;  // truncated placeholder
-      // Fetch in background — tracked via promise so buildApiMessages can await
+      // Fetch in background — tracked via promise so message builder can use base64
       const p = fetch(url)
         .then(resp => { if (!resp.ok) throw new Error(`HTTP ${resp.status}`); return resp.blob(); })
         .then(blob => new Promise(resolve => {
@@ -1832,7 +1831,14 @@ async function loadConversationsFromServer(prefetchId) {
     /* ── Apply prefetched conversation data (eliminates second round-trip) ── */
     if (prefetchedConv && prefetchedConv.id) {
       const pc = conversations.find(c => c.id === prefetchedConv.id);
-      if (pc && pc._needsLoad && !activeStreams.has(pc.id) && !pc.activeTaskId) {
+      /* ★ FIX: Allow prefetch even when activeTaskId is set.  After a server
+       *   crash, the backend's recover_stale_tasks_on_startup() clears
+       *   activeTaskId and merges interrupted content into conversation
+       *   messages.  So by the time this runs, the conv has clean data.
+       *   Previously, `!pc.activeTaskId` blocked prefetch for the exact
+       *   case where it was most needed (crash recovery of the active conv),
+       *   forcing an extra round-trip through loadConversationMessages. */
+      if (pc && pc._needsLoad && !activeStreams.has(pc.id)) {
         const serverMsgs = prefetchedConv.messages || [];
         pc.messages = serverMsgs;
         pc.title = prefetchedConv.title || pc.title;
