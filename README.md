@@ -45,15 +45,29 @@ curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh | bas
 irm https://raw.githubusercontent.com/rangehow/ToFu/main/install.ps1 | iex
 ```
 
-**Or with Python directly** (any OS with Python 3.10+):
+**Or with Python directly** (any OS):
 ```bash
 git clone https://github.com/rangehow/ToFu.git && cd ToFu
 python install.py
 ```
 
-This creates a virtual environment, installs dependencies, and starts the server. Open **http://localhost:15000** when it's ready.
+This creates a dedicated conda environment, installs all dependencies from
+conda-forge, and starts the server. Open **http://localhost:15000** when it's
+ready.
 
-> 💾 **Database: zero-config out of the box.** Tofu uses **SQLite** by default — it's built into Python, no install needed. If PostgreSQL is available it will auto-bootstrap and upgrade to PG (better concurrency for 100+ users). Force SQLite with `CHATUI_DB_BACKEND=sqlite`.
+> 🐍 **Conda-based installer.** The installer uses **conda-forge exclusively** —
+> it auto-installs [Miniforge](https://github.com/conda-forge/miniforge) if no
+> conda is present, updates conda first (outdated versions cause solver hangs),
+> installs the `libmamba` solver, then creates a `tofu` env with Python 3.12
+> and all dependencies (including `lxml`, `playwright`, `postgresql`). This
+> avoids the GLIBC-mismatch trap that bites pip's manylinux wheels on older
+> hosts (CentOS 7, glibc 2.17).
+
+> 💾 **Database: zero-config.** Tofu uses **SQLite** by default (built into
+> Python). If `postgresql` is available (the installer fetches it from
+> conda-forge too), Tofu auto-bootstraps a rootless userspace PG instance for
+> better concurrency with 100+ users. Force SQLite with
+> `CHATUI_DB_BACKEND=sqlite`.
 
 ```bash
 # Pre-configure API key and port
@@ -61,6 +75,15 @@ python install.py --api-key sk-xxx --port 8080
 
 # Install only, don't launch
 python install.py --no-launch
+
+# Custom env name / Python version
+python install.py --env tofu --python 3.12
+
+# Skip conda self-update (not recommended)
+python install.py --no-update-conda
+
+# Destructive: remove the existing env and rebuild from scratch
+python install.py --reset-env
 
 # Use Docker instead
 python install.py --docker
@@ -78,52 +101,82 @@ Open **http://localhost:15000** — done. All data persists in Docker volumes.
 <details>
 <summary><strong>Manual Install</strong> (for full control)</summary>
 
-**Prerequisites:** Python 3.10+, ripgrep & fd-find (recommended). PostgreSQL 18+ is *optional* — Tofu uses SQLite by default.
+**Prerequisites:** A recent `conda` (Miniforge strongly recommended). Nothing
+else is needed — every runtime dependency (ripgrep, fd-find, PostgreSQL,
+Chromium shared libs, lxml, trafilatura, playwright, …) is installed from
+conda-forge so you never need `sudo` or system packages.
 
-> 💡 **Strongly recommended: use [Miniforge](https://github.com/conda-forge/miniforge) to manage your Python environment.**
-> Old system-installed conda/Anaconda versions often cause dependency conflicts. Install the latest Miniforge for a clean, up-to-date conda-forge environment:
-> ```bash
-> # Download and install Miniforge (Linux x86_64 example)
-> wget -O /tmp/Miniforge3.sh "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
-> bash /tmp/Miniforge3.sh -b -p ~/miniforge3
-> ~/miniforge3/bin/conda init bash && source ~/.bashrc
->
-> # Create a dedicated environment
-> conda create -n tofu python=3.10 -y
-> conda activate tofu
-> ```
-> For other platforms, see the [Miniforge releases page](https://github.com/conda-forge/miniforge/releases).
+> 💡 **Why conda-forge for everything?** On older Linux hosts (CentOS 7 /
+> glibc 2.17), pip's manylinux wheels for `lxml` et al. crash with
+> `GLIBC_2.25 not found` at import time. conda-forge builds link against an
+> older sysroot glibc and work everywhere.
 
 ```bash
+# 1. Install Miniforge if you don't have conda yet
+wget -O /tmp/Miniforge3.sh "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
+bash /tmp/Miniforge3.sh -b -p ~/miniforge3
+~/miniforge3/bin/conda init bash && source ~/.bashrc
+# (macOS: replace Linux-x86_64 with MacOSX-arm64 or MacOSX-x86_64.
+#  Other platforms: see https://github.com/conda-forge/miniforge/releases)
+
+# 2. Update conda FIRST — outdated conda is the #1 cause of solver hangs
+conda update -n base -c conda-forge -y conda
+conda install -n base -c conda-forge -y conda-libmamba-solver
+conda config --set solver libmamba
+
+# 3. Clone the repo
 git clone https://github.com/rangehow/ToFu.git && cd ToFu
 
-# Create environment (skip if using conda/Miniforge)
-python -m venv .venv && source .venv/bin/activate
+# 4. Create the env
+conda create -n tofu -c conda-forge -y python=3.12
+conda activate tofu
 
-# Optional: install PostgreSQL for better concurrency (SQLite works out of the box)
-# macOS:   brew install postgresql@18
-# Ubuntu:  sudo apt install postgresql
-# conda:   conda install -c conda-forge postgresql>=18
+# 5. Install ALL dependencies from conda-forge (NO pip)
+conda install -c conda-forge -y \
+    flask 'flask-compress>=1.14' 'requests>=2.31' psutil \
+    'trafilatura>=1.6' 'playwright>=1.40' pillow python-pptx 'lxml>=4.9' 'mcp>=1.0' \
+    ripgrep fd-find \
+    'postgresql>=16' 'psycopg2>=2.9'
 
-# Install ripgrep & fd-find (recommended — faster code search)
-# macOS:   brew install ripgrep fd
-# Ubuntu:  sudo apt install ripgrep fd-find
+# 6. Playwright Chromium (optional, for JS-rendered page fetching)
+# On Linux also install shared libs (rootless, no sudo):
+conda install -c conda-forge -y \
+    atk-1.0 at-spi2-atk at-spi2-core alsa-lib \
+    xorg-libxcomposite xorg-libxdamage xorg-libxfixes xorg-libxrandr \
+    libxkbcommon nspr nss mesa-libgbm-cos7-x86_64
+python -m playwright install chromium
 
-# Install dependencies
-pip install -r requirements.txt
+# 7. Sanity check — if this prints a version without GLIBC errors, you're set
+python -c "import lxml.etree, trafilatura; print('OK', lxml.__version__)"
 
-# Optional: browser automation
-pip install playwright && playwright install chromium
-
-# Run
+# 8. Run
 python server.py
 ```
 
+> ⚠️ **Never mix pip and conda for these packages.** If a prior run left a
+> pip-installed `lxml` wheel in your env, conda will no-op (version already
+> satisfied) and the broken wheel keeps crashing. If that happens:
+>
+> ```bash
+> pip uninstall -y lxml flask flask-compress requests psutil trafilatura \
+>                  playwright pillow python-pptx mcp
+> conda install -c conda-forge -y --force-reinstall <same package list>
+> ```
+>
+> The one-command `install.sh` / `install.py` does this automatically.
+
 </details>
 
-> **Database auto-detection:** On first launch, Tofu tries PostgreSQL first (for best concurrency). If PG isn't available, it falls back to **SQLite** automatically — no action needed on your part. PostgreSQL runs as a local userspace process when present (no `sudo`, no system service). Set `CHATUI_DB_BACKEND=sqlite` to force SQLite.
+> **Database auto-detection:** On first launch, Tofu tries PostgreSQL first
+> (for best concurrency). If PG isn't available, it falls back to **SQLite**
+> automatically — no action needed. PostgreSQL runs as a local userspace
+> process (no `sudo`, no system service). Set `CHATUI_DB_BACKEND=sqlite` to
+> force SQLite.
 
-> **Missing packages?** If any dependency is missing, `server.py` auto-delegates to `bootstrap.py`, which uses the LLM to diagnose the error and `pip install` the right packages — even when *every* pip package is missing.
+> **Missing packages?** If any dependency is missing, `server.py` auto-
+> delegates to `bootstrap.py`, which first tries `conda install -c conda-forge`
+> when running inside a conda env (avoiding the GLIBC trap), and falls back to
+> LLM-guided `pip install` otherwise.
 
 ---
 

@@ -1,0 +1,28 @@
+% \usepackage{tabularx}
+% \usepackage{booktabs}
+
+\begin{table}[htbp]
+\centering
+
+\bicaption{不同方法在约束翻译任务中的输出示例}{Translation Outputs of Different Methods in a Constraint Translation Task}
+\footnotesize
+\resizebox{0.9\linewidth}{!}{
+\label{tab:method2-case-study}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{输入信息} & \\
+\midrule
+源语言 & \small North Korea claimed, as of Thursday, it was one of the few countries remaining free of Coronavirus infections. \\
+目标语言 & \small 朝鲜宣称，截至到星期四，该国是少数没有冠状病毒感染的国家之一。 \\
+约束词对 & \small Coronavirus $\rightarrow$ 冠状病毒 \quad 以及 \quad infections $\rightarrow$ 感染 \\
+\midrule
+\textbf{模型输出} & \\
+\midrule
+\textbf{CAP} & \small 生成结果：北朝鲜称，从星期四起，它是仍然保持无新型冠状病毒感染的少数几个国家之一。 \\
+\textbf{SFT} & \small 生成结果：朝鲜称，截至到星期四，还有仅有少数几个国家未发现新冠病毒感染病例。 \\
+\textbf{CFT} & \small 生成结果：朝鲜周四称，自己仍是少几个无冠状病毒感染国家之一。 \\
+\bottomrule
+
+\end{tabularx}
+}
+\end{table}

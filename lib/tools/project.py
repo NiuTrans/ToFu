@@ -265,7 +265,67 @@ PROJECT_TOOL_RUN_COMMAND = {
     }
 }
 
-PROJECT_TOOL_READ_FILES = {
+PROJECT_TOOL_CREATE_PROJECT = {
+    "type": "function",
+    "function": {
+        "name": "create_project",
+        "description": (
+            "Create a new, initially-empty project directory at the given path and register it "
+            "as an EXTRA workspace root so subsequent write_file / apply_diff / insert_content / "
+            "run_command / read_files calls can target it.\n\n"
+            "Use this BEFORE trying to write any file that lives OUTSIDE the currently-open "
+            "project — e.g. when the user asks you to 'generate a new repository at /some/path' "
+            "or 'scaffold a project under ~/projects/foo while referencing the current repo'.\n\n"
+            "After this call, address files in the new project either as:\n"
+            "  • '<rootName>:<rel/path>'  (multi-root prefix — preferred)\n"
+            "  • absolute path under the new directory\n\n"
+            "The currently-open project is NOT replaced — it remains the primary root and can "
+            "still be read for reference. System paths (e.g. /etc, /usr, /bin, $HOME itself) "
+            "are rejected for safety."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute or ~-prefixed directory path where the new project will live. "
+                        "Parent directories are created as needed. Examples: "
+                        "'~/projects/my-new-repo', '/home/user/workspace/tool-X'."
+                    )
+                },
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Optional short root name used as the 'name:' prefix in subsequent tool calls. "
+                        "Defaults to the directory basename. If the name collides with an existing "
+                        "root, a numeric suffix is appended."
+                    )
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, allow registering a directory that already exists AND is not empty. "
+                        "Existing files are NOT deleted — this flag only bypasses the non-empty guard "
+                        "so the directory can still be registered as a workspace root. "
+                        "Default: false (non-empty existing directories are rejected)."
+                    )
+                }
+            },
+            "required": ["path"]
+        }
+    }
+}
+
+
+# ★ NOTE: read_files is NOT a project-scoped tool — it's registered globally
+#   in lib/tasks_pkg/model_config.py (and timer.py) so the model can read
+#   absolute local paths (images, PDFs, Office docs, text files) even when no
+#   project is attached. Its handler is registered independently via
+#   @tool_registry.tool('read_files', ...) in lib/tasks_pkg/handlers/project.py,
+#   and its display entry is set explicitly in tool_display.py. It is NOT in
+#   PROJECT_TOOLS or PROJECT_TOOL_NAMES.
+READ_FILES_TOOL = {
     "type": "function",
     "function": {
         "name": "read_files",
@@ -315,21 +375,25 @@ PROJECT_TOOL_READ_FILES = {
     }
 }
 
+# ★ read_files is intentionally NOT in PROJECT_TOOLS / PROJECT_TOOL_NAMES
+#   — it's a global tool registered unconditionally by the orchestrator
+#   so absolute-path file reads work regardless of project mode.
+#   See READ_FILES_TOOL above.
 PROJECT_TOOLS = [
-    PROJECT_TOOL_LIST_DIR, PROJECT_TOOL_READ_FILES,
+    PROJECT_TOOL_LIST_DIR,
     PROJECT_TOOL_GREP, PROJECT_TOOL_FIND,
     PROJECT_TOOL_WRITE_FILE, PROJECT_TOOL_APPLY_DIFF, PROJECT_TOOL_INSERT_CONTENT,
-    PROJECT_TOOL_RUN_COMMAND,
+    PROJECT_TOOL_CREATE_PROJECT, PROJECT_TOOL_RUN_COMMAND,
 ]
 PROJECT_TOOL_NAMES = {
-    'list_dir', 'read_files', 'grep_search', 'find_files',
-    'write_file', 'apply_diff', 'insert_content', 'run_command',
+    'list_dir', 'grep_search', 'find_files',
+    'write_file', 'apply_diff', 'insert_content', 'create_project', 'run_command',
 }
 
 __all__ = [
-    'PROJECT_TOOL_LIST_DIR', 'PROJECT_TOOL_READ_FILES',
+    'PROJECT_TOOL_LIST_DIR', 'READ_FILES_TOOL',
     'PROJECT_TOOL_GREP', 'PROJECT_TOOL_FIND',
     'PROJECT_TOOL_WRITE_FILE', 'PROJECT_TOOL_APPLY_DIFF', 'PROJECT_TOOL_INSERT_CONTENT',
-    'PROJECT_TOOL_RUN_COMMAND',
+    'PROJECT_TOOL_CREATE_PROJECT', 'PROJECT_TOOL_RUN_COMMAND',
     'PROJECT_TOOLS', 'PROJECT_TOOL_NAMES',
 ]

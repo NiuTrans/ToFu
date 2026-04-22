@@ -11,6 +11,28 @@ from lib.tasks_pkg.manager import append_event
 
 logger = get_logger(__name__)
 
+# Retry caps for abnormal stream termination.
+#
+# Two qualitatively different failure signatures get different budgets:
+#
+#   ── Classic premature close ──────────────────────────────────────
+#   Model produced substantial thinking (>1000 chars) then stream was
+#   cut off.  Each retry costs ~20-60s of tokens/work, so we keep the
+#   cap LOW to avoid burning tokens on a model that is genuinely
+#   struggling with the prompt.
+#
+#   ── Zero-byte stream anomaly ─────────────────────────────────────
+#   Gateway/proxy opens the SSE connection, returns zero tokens, and
+#   closes within a few seconds.  No work is wasted — each retry is
+#   essentially free.  These are transient upstream hiccups (e.g. AWS
+#   Bedrock behind a gateway occasionally 0-byte'ing requests).
+#   With a ~30% per-call failure rate in a bad window, cap=2 gives
+#   ~3% "all fail" probability (user-visible error); cap=16 drops it
+#   to effectively 0.  Retries go through append_event 'phase:retrying'
+#   so the UI shows a spinner with attempt count.
+_PREMATURE_RETRY_MAX_CLASSIC = 2
+_PREMATURE_RETRY_MAX_ZERO_BYTE = 16
+
 
 def analyse_stream_result(
     assistant_msg, last_finish_reason, task, tid, model,
@@ -122,51 +144,83 @@ def analyse_stream_result(
                           else 'stream_anomaly' if _is_anomaly_empty
                           else None)
 
-        if _is_abnormal and _premature_retry_count < 2:
+        # ── Split retry budget by failure signature ──
+        # Zero-byte anomaly: gateway cut the stream before model emitted
+        # anything (elapsed < 15s, thinking < 100 chars).  Each retry is
+        # ~free, so use the large cap.  Otherwise (classic premature
+        # close with substantial thinking), use the low cap.
+        _is_zero_byte = (
+            _is_anomaly_empty
+            and len(round_thinking) < 100
+            and _stream_elapsed_ms < 15000
+        )
+        _retry_cap = (_PREMATURE_RETRY_MAX_ZERO_BYTE if _is_zero_byte
+                      else _PREMATURE_RETRY_MAX_CLASSIC)
+        _retry_bucket = 'zero_byte' if _is_zero_byte else 'classic'
+
+        if _is_abnormal and _premature_retry_count < _retry_cap:
             _premature_retry_count += 1
             result['premature_retry_count'] = _premature_retry_count
             logger.warning(
-                '[%s] ⚠️ ABNORMAL STOP detected at round %d (type=%s): '
+                '[%s] ⚠️ ABNORMAL STOP detected at round %d (type=%s bucket=%s): '
                 'thinking=%dchars content=%dchars, no tool_calls. '
                 'stream_anomaly=%s empty_stop=%s '
                 'M-TraceId=%s resp_trace=%s elapsed=%.1fs model=%s '
-                'Retrying (%d/2)… The stream was likely cut off by proxy/gateway.',
-                tid, round_num, _abnormal_type,
+                'Retrying (%d/%d)… The stream was likely cut off by proxy/gateway.',
+                tid, round_num, _abnormal_type, _retry_bucket,
                 len(round_thinking), len(round_content),
                 _stream_anomaly, _empty_stop,
                 _trace_id, _resp_trace or 'none', _stream_elapsed_ms / 1000,
-                model, _premature_retry_count,
+                model, _premature_retry_count, _retry_cap,
             )
             # ★ Transparent retry: re-call LLM with the SAME messages.
             #   No fake assistant+user turns injected — the model starts fresh
             #   from the original context, just like clicking "Continue".
             #   Use a phase event (transient UI status) instead of a delta
             #   (which would permanently pollute the assistant message content).
+            #   'attempt' field lets the frontend dedup/update the retry bubble.
+            if _is_zero_byte:
+                _phase_detail = (
+                    f'⚠️ 网关空流异常（0字节，{_stream_elapsed_ms / 1000:.1f}s），'
+                    f'正在自动重试 ({_premature_retry_count}/{_retry_cap})…'
+                )
+            else:
+                _phase_detail = (
+                    f'⚠️ 网络中断（代理超时），正在自动重试 '
+                    f'({_premature_retry_count}/{_retry_cap})…'
+                )
             append_event(task, {
                 'type': 'phase',
                 'phase': 'retrying',
-                'detail': f'⚠️ 网络中断（代理超时），正在自动重试 ({_premature_retry_count}/2)…',
+                'attempt': _premature_retry_count,
+                'max': _retry_cap,
+                'bucket': _retry_bucket,
+                'detail': _phase_detail,
             })
             result['action'] = 'continue'
             return result
 
         # ABNORMAL STOP: retries exhausted — still no content
-        if _is_abnormal and _premature_retry_count >= 2:
+        if _is_abnormal and _premature_retry_count >= _retry_cap:
             _fr = 'premature_close' if _is_classic_premature else 'abnormal_stop'
             result['action'] = 'break'
             result['last_finish_reason'] = _fr
             result['loop_exit_reason'] = f'{_fr}_retries_exhausted_round_{round_num}'
             task['error'] = (
-                f'⚠️ 生成被网关/代理异常中断，重试已用完。回复内容可能不完整。'
-                f' (type: {_abnormal_type}, M-TraceId: {_trace_id})'
+                f'⚠️ 生成被网关/代理异常中断，重试已用完（{_premature_retry_count}/'
+                f'{_retry_cap}）。回复内容可能不完整。'
+                f' (type: {_abnormal_type}, bucket: {_retry_bucket}, '
+                f'M-TraceId: {_trace_id})'
             )
             logger.error(
-                '[%s] ⚠️ ABNORMAL STOP retries exhausted at round %d (type=%s). '
+                '[%s] ⚠️ ABNORMAL STOP retries exhausted at round %d '
+                '(type=%s bucket=%s attempts=%d/%d). '
                 'thinking=%dchars, content=%dchars. '
                 'stream_anomaly=%s empty_stop=%s '
                 'M-TraceId=%s resp_trace=%s elapsed=%.1fs model=%s '
                 'Setting finishReason=%s.',
-                tid, round_num, _abnormal_type,
+                tid, round_num, _abnormal_type, _retry_bucket,
+                _premature_retry_count, _retry_cap,
                 len(round_thinking), len(round_content),
                 _stream_anomaly, _empty_stop,
                 _trace_id, _resp_trace or 'none', _stream_elapsed_ms / 1000,

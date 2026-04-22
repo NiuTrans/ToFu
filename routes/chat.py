@@ -74,8 +74,12 @@ def chat_start():
     # ── Server-side message building ──
     # The frontend now sends {convId, config} only.
     # Messages are loaded from the DB and transformed server-side.
-    # Legacy path: if frontend still sends 'messages', use them as fallback.
+    # Legacy / external-caller path: if the POST body ships 'messages' inline
+    # (SWE-bench harness, eval tools, external backends), use them as-is and
+    # skip the DB-backed conversation write-back later — see `_inline_messages`
+    # flag below which is consumed by _sync_result_to_conversation().
     messages = data.get('messages')
+    inline_messages = bool(messages)
     if not messages:
         from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
         exclude_last = cfg.get('excludeLast', False)
@@ -100,6 +104,11 @@ def chat_start():
 
     # ── Default: built-in Tofu backend ──
     task = create_task(conv_id, messages, cfg)
+    # Tag tasks that were started with inline messages (no DB-backed
+    # conversation row). These tasks skip _sync_result_to_conversation()
+    # entirely — external callers read results from task_results directly.
+    if inline_messages:
+        task['_inline_messages'] = True
     from lib.tasks_pkg import run_task
     _cfg_model = cfg.get('model', '?')
     _cfg_preset = cfg.get('preset', cfg.get('effort', '?'))
@@ -365,7 +374,10 @@ def _start_task_for_conv(conv_id, config, data=None):
     from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
     from lib.tasks_pkg import run_task, abort_running_tasks_for_conv
 
-    api_messages = build_api_messages_from_db(conv_id, config)
+    # ``excludeLast`` is honored so /api/chat/continue can rebuild messages
+    # without the assistant message that is about to be regenerated.
+    _exclude_last = bool(config.get('excludeLast', False))
+    api_messages = build_api_messages_from_db(conv_id, config, exclude_last=_exclude_last)
     if api_messages is None:
         return None, (jsonify({'error': 'Conversation not found after save'}), 500)
     if not api_messages:
@@ -580,7 +592,7 @@ def chat_send():
 
     except Exception as e:
         logger.error('[Send] Failed for conv=%s: %s', conv_id[:8], e, exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'internal_error'}), 500
 
 
 
@@ -652,7 +664,7 @@ def chat_branch_start():
     except Exception as e:
         logger.error('[Branch] Failed for conv=%s msg=%d branch=%d: %s',
                      conv_id[:8], msg_idx, branch_idx, e, exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'internal_error'}), 500
 
 
 @chat_bp.route('/api/chat/regenerate', methods=['POST'])
@@ -780,7 +792,296 @@ def chat_regenerate():
 
     except Exception as e:
         logger.error('[Regen] Failed for conv=%s: %s', conv_id[:8], e, exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'internal_error'}), 500
+
+
+# ══════════════════════════════════════════════════════════
+#  Continue: checkpoint-based resumption of an assistant turn
+# ══════════════════════════════════════════════════════════
+
+def _build_tool_history_round(batch):
+    """Server-side port of ``_buildToolHistoryRound()`` (static/js/main.js).
+
+    Takes a batch of raw ``toolRounds`` entries (all from the same LLM round)
+    and converts them into the ``toolHistory[i]`` shape consumed by
+    ``lib/tasks_pkg/message_builder.inject_tool_history``.
+    """
+    round_out: dict = {
+        'assistantContent': '',
+        'toolCalls': [],
+        'toolResults': [],
+    }
+    for r in batch:
+        if not round_out['assistantContent'] and r.get('assistantContent'):
+            round_out['assistantContent'] = r.get('assistantContent')
+        if not round_out.get('thinking') and r.get('thinking'):
+            round_out['thinking'] = r.get('thinking')
+        if not round_out.get('thinkingSignature') and r.get('thinkingSignature'):
+            round_out['thinkingSignature'] = r.get('thinkingSignature')
+        tc = {
+            'id': r.get('toolCallId'),
+            'name': r.get('toolName'),
+            'arguments': r.get('toolArgs') or '{}',
+        }
+        if r.get('extraContent'):
+            tc['extraContent'] = r.get('extraContent')
+        round_out['toolCalls'].append(tc)
+        round_out['toolResults'].append({
+            'tool_call_id': r.get('toolCallId'),
+            'content': r.get('toolContent') or '',
+        })
+    return round_out
+
+
+def _scan_continue_checkpoint(assistant_msg):
+    """Scan the last assistant message's ``toolRounds`` for the latest recoverable
+    checkpoint.  Mirrors ``continueAssistant()`` (static/js/main.js:2214-2410).
+
+    Returns:
+        dict with keys:
+          kept_rounds (list), discarded_rounds (int),
+          tool_history (list), preserved_content (str),
+          preserved_thinking_chars (int),
+          discarded_content (int), discarded_thinking (int),
+          original_content_len (int), original_thinking_len (int)
+        OR ``None`` if no recoverable checkpoint (caller falls back to
+        full regeneration / pop-and-resend).
+    """
+    all_rounds = assistant_msg.get('toolRounds') or []
+    if not all_rounds:
+        return None
+    has_tool_call_ids = any(r.get('toolCallId') for r in all_rounds)
+    if not has_tool_call_ids:
+        return None
+
+    has_llm_round = any(r.get('llmRound') is not None for r in all_rounds)
+    batches: dict = {}
+    batch_key = 0
+    last_complete_idx = -1
+
+    for i, r in enumerate(all_rounds):
+        if not r.get('toolCallId'):
+            continue
+        if r.get('status') != 'done':
+            break
+        # Attempt to reconstruct toolContent from results metadata if missing
+        # (parity with the JS scan — happens after DB round-trip when backend
+        # checkpoint was written before toolContent was available).
+        if r.get('toolContent') is None:
+            results = r.get('results') or []
+            reconstructed = ''
+            if results:
+                parts = []
+                for res in results:
+                    if not isinstance(res, dict):
+                        continue
+                    parts.append(res.get('snippet') or res.get('title') or res.get('content') or '')
+                reconstructed = '\n'.join(p for p in parts if p)
+            if not reconstructed:
+                break
+            r['toolContent'] = reconstructed or '[tool result not available]'
+        if has_llm_round:
+            batch_key = r.get('llmRound')
+        else:
+            prev = all_rounds[i - 1] if i > 0 else None
+            if prev and prev.get('toolCallId') and r.get('roundNum', 0) > prev.get('roundNum', -999) + 1:
+                batch_key += 1
+        batches.setdefault(batch_key, []).append(r)
+        last_complete_idx = i
+
+    if last_complete_idx < 0:
+        return None
+
+    tool_history = [_build_tool_history_round(batch) for batch in batches.values()]
+    kept_rounds = all_rounds[:last_complete_idx + 1]
+    discarded_rounds = len(all_rounds) - len(kept_rounds)
+
+    preserved_content_parts = [r.get('assistantContent') or '' for r in kept_rounds]
+    preserved_content = '\n\n'.join(p for p in preserved_content_parts if p)
+    original_content = assistant_msg.get('content') or ''
+    # Fallback: if assistantContent was never populated on rounds (legacy DB rows),
+    # reuse the full prior content so the visible text is preserved.
+    if not preserved_content and kept_rounds and original_content:
+        preserved_content = original_content
+    discarded_content = max(0, len(original_content) - len(preserved_content))
+
+    preserved_thinking_chars = sum(len(r.get('thinking') or '') for r in kept_rounds)
+    original_thinking = assistant_msg.get('thinking') or ''
+    discarded_thinking = max(0, len(original_thinking) - preserved_thinking_chars)
+
+    return {
+        'kept_rounds': kept_rounds,
+        'discarded_rounds': discarded_rounds,
+        'tool_history': tool_history,
+        'preserved_content': preserved_content,
+        'preserved_thinking_chars': preserved_thinking_chars,
+        'discarded_content': discarded_content,
+        'discarded_thinking': discarded_thinking,
+        'original_content_len': len(original_content),
+        'original_thinking_len': len(original_thinking),
+    }
+
+
+@chat_bp.route('/api/chat/continue', methods=['POST'])
+def chat_continue():
+    """Atomic continue: roll back the last assistant message to its last
+    complete tool-call checkpoint, persist the rolled-back state to DB,
+    then start a new task that resumes from that checkpoint.
+
+    Body: {
+        convId: str,
+        config: { model, ... },
+        settings?: { per-conv tool state to persist }
+    }
+
+    Returns on success:
+        { taskId, convId, checkpoint: {
+            keptRounds, discardedRounds,
+            preservedContentLen, discardedContentLen,
+            preservedThinkingChars, discardedThinking,
+        }}
+
+    If no recoverable checkpoint is found (no complete tool rounds), returns
+    ``{fallback: "regenerate"}`` and the frontend should pop-and-resend.
+    """
+    data = request.get_json(silent=True) or {}
+    conv_id = data.get('convId', '')
+    if not conv_id:
+        return jsonify({'error': 'convId required'}), 400
+
+    config = data.get('config') or {}
+    settings_patch = data.get('settings')
+
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT messages, title FROM conversations WHERE id=? AND user_id=?',
+            (conv_id, DEFAULT_USER_ID)
+        ).fetchone()
+
+        if not row:
+            return jsonify({'error': 'Conversation not found'}), 404
+
+        try:
+            messages = json.loads(row['messages'] or '[]')
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning('[Continue] Failed to parse messages for conv=%s: %s',
+                           conv_id[:8], e)
+            return jsonify({'error': 'Failed to parse conversation'}), 500
+
+        title = row['title']
+
+        if not messages:
+            return jsonify({'error': 'Conversation has no messages'}), 400
+        if messages[-1].get('role') != 'assistant':
+            return jsonify({'error': 'Last message is not an assistant message'}), 400
+
+        assistant_msg = messages[-1]
+        # Trivial case: empty content & thinking → no checkpoint needed; ask
+        # the frontend to fall back to pop-and-resend (full regeneration).
+        if not assistant_msg.get('content') and not assistant_msg.get('thinking') \
+                and not (assistant_msg.get('toolRounds') or []):
+            logger.info('[Continue] conv=%s last assistant is empty — fallback to regenerate',
+                        conv_id[:8])
+            return jsonify({'fallback': 'regenerate', 'reason': 'empty_assistant'})
+
+        scan = _scan_continue_checkpoint(assistant_msg)
+        if scan is None:
+            logger.info('[Continue] conv=%s no tool-call checkpoint available — fallback to regenerate',
+                        conv_id[:8])
+            return jsonify({'fallback': 'regenerate', 'reason': 'no_checkpoint'})
+
+        # ── Apply rollback in place on the assistant message ──
+        preserved_content = scan['preserved_content']
+        assistant_msg['toolRounds'] = scan['kept_rounds']
+        assistant_msg['content'] = preserved_content
+        # Strip thinking — any replay-worthy thinking already lives on
+        # keptRounds[i].thinking and is carried forward via toolHistory.
+        assistant_msg['thinking'] = ''
+        for stale_key in ('finishReason', 'toolSummary', 'error'):
+            assistant_msg.pop(stale_key, None)
+
+        # Stash pre-checkpoint metadata on cfg for the task + for DB merge.
+        kept_usage = assistant_msg.get('usage') or None
+        kept_api_rounds = assistant_msg.get('apiRounds') or []
+        kept_modified_files = assistant_msg.get('modifiedFiles') or None
+        kept_modified_file_list = assistant_msg.get('modifiedFileList') or []
+
+        # Persist rolled-back state BEFORE starting the task — mirrors the
+        # order used in chat_regenerate to avoid the streaming task
+        # overwriting the rollback in ``_sync_result_to_conversation``.
+        _persist_conv_messages(db, conv_id, messages, title, settings_patch)
+
+        logger.info(
+            '[Continue] conv=%s kept=%d rounds discarded=%d rounds preservedContent=%d '
+            'discardedContent=%d preservedThinking=%d discardedThinking=%d',
+            conv_id[:8], len(scan['kept_rounds']), scan['discarded_rounds'],
+            len(preserved_content), scan['discarded_content'],
+            scan['preserved_thinking_chars'], scan['discarded_thinking'],
+        )
+
+        # Build cfg payload — same shape the frontend used to build.
+        cfg_payload = dict(config)
+        cfg_payload['excludeLast'] = True
+        if scan['tool_history']:
+            cfg_payload['toolHistory'] = scan['tool_history']
+        if preserved_content:
+            cfg_payload['contentPrefix'] = preserved_content
+        if scan['kept_rounds']:
+            cfg_payload['checkpointToolRounds'] = scan['kept_rounds']
+        if kept_usage:
+            cfg_payload['checkpointUsage'] = kept_usage
+        if kept_api_rounds:
+            cfg_payload['checkpointApiRounds'] = kept_api_rounds
+        if kept_modified_files:
+            cfg_payload['checkpointModifiedFiles'] = kept_modified_files
+        if kept_modified_file_list:
+            cfg_payload['checkpointModifiedFileList'] = kept_modified_file_list
+
+        # Start the task.
+        task_id, err_resp = _start_task_for_conv(conv_id, cfg_payload, data)
+        if err_resp is not None:
+            return err_resp if not isinstance(err_resp, tuple) else err_resp
+
+        # Persist activeTaskId (same as chat_regenerate).
+        try:
+            _persist_conv_messages(db, conv_id, messages, title,
+                                   {'activeTaskId': task_id})
+        except Exception as e:
+            logger.warning('[Continue] Failed to update activeTaskId: %s', e)
+
+        _invalidate_meta_cache()
+        try:
+            from lib.log import audit_log as _audit_log
+            _audit_log(
+                'continue_checkpoint',
+                conv_id=conv_id,
+                kept=len(scan['kept_rounds']),
+                discarded=scan['discarded_rounds'],
+                preservedContentLen=len(preserved_content),
+                discardedContentLen=scan['discarded_content'],
+                preservedThinking=scan['preserved_thinking_chars'],
+                discardedThinking=scan['discarded_thinking'],
+            )
+        except Exception as e:
+            logger.debug('[Continue] audit_log failed (non-fatal): %s', e)
+
+        return jsonify({
+            'taskId': task_id,
+            'convId': conv_id,
+            'checkpoint': {
+                'keptRounds': len(scan['kept_rounds']),
+                'discardedRounds': scan['discarded_rounds'],
+                'preservedContentLen': len(preserved_content),
+                'discardedContentLen': scan['discarded_content'],
+                'preservedThinkingChars': scan['preserved_thinking_chars'],
+                'discardedThinking': scan['discarded_thinking'],
+            },
+        })
+
+    except Exception as e:
+        logger.error('[Continue] Failed for conv=%s: %s', conv_id[:8], e, exc_info=True)
+        return jsonify({'error': 'internal_error'}), 500
 
 
 @chat_bp.route('/api/chat/tool-state/<conv_id>', methods=['PATCH'])
@@ -826,7 +1127,7 @@ def chat_tool_state(conv_id):
 
     except Exception as e:
         logger.error('[ToolState] Failed for conv=%s: %s', conv_id[:8], e, exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'internal_error'}), 500
 
 
 # ══════════════════════════════════════════════════════════
@@ -1292,13 +1593,26 @@ def chat_stream(task_id):
             _provider = task.get('provider_id') or '?'
             _err = task.get('error')
             if not done_sent:
-                logger.warning('[Chat] SSE stream %s DISCONNECTED PREMATURELY — '
-                             '%d events sent in %.1fs, task status=%s, content=%dchars, '
-                             'finishReason=%s model=%s provider=%s error=%s. '
-                             'Client may lose data if poll fallback fails!',
-                             task_id[:8], _events_sent, elapsed,
-                             task.get('status', '?'), content_len,
-                             _fr, _model, _provider, _err or 'none')
+                # Severity-aware: zero-events = real problem (SSE opened
+                # but nothing delivered); events>0 = normal client-side
+                # tab-close / network-retry — client poll fallback will
+                # pick up the rest.
+                if _events_sent == 0:
+                    logger.warning('[Chat] SSE stream %s DISCONNECTED PREMATURELY — '
+                                 '%d events sent in %.1fs, task status=%s, content=%dchars, '
+                                 'finishReason=%s model=%s provider=%s error=%s. '
+                                 'Client may lose data if poll fallback fails!',
+                                 task_id[:8], _events_sent, elapsed,
+                                 task.get('status', '?'), content_len,
+                                 _fr, _model, _provider, _err or 'none')
+                else:
+                    logger.info('[Chat] SSE stream %s DISCONNECTED PREMATURELY — '
+                               '%d events sent in %.1fs, task status=%s, content=%dchars, '
+                               'finishReason=%s model=%s provider=%s error=%s. '
+                               'Client may lose data if poll fallback fails!',
+                               task_id[:8], _events_sent, elapsed,
+                               task.get('status', '?'), content_len,
+                               _fr, _model, _provider, _err or 'none')
             else:
                 logger.info('[Chat] SSE stream %s closed after done — %d events, %.1fs, %dchars, '
                            'finishReason=%s model=%s provider=%s',

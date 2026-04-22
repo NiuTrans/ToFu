@@ -148,6 +148,13 @@ def connect_servers():
             return jsonify({'ok': False, 'error': f'Server "{target}" not in config'}), 404
         try:
             tools = bridge.connect_server(target, config[target])
+            # Auto re-enable if previously soft-uninstalled
+            if not config[target].get('enabled', True):
+                from lib.mcp.config import upsert_server as cfg_upsert
+                updated = dict(config[target])
+                updated['enabled'] = True
+                cfg_upsert(target, updated)
+                logger.info('[MCP:API] Re-enabled %s on successful connect', target)
             return jsonify({
                 'ok': True,
                 'server': target,
@@ -270,11 +277,20 @@ def get_catalog():
                     tools_count = s['tools_count']
                     break
 
+        # Report which env keys already have a stored non-empty value
+        # (boolean only — never leak the actual secret to the frontend).
+        stored_env = (config.get(sid, {}) or {}).get('env', {}) or {}
+        stored_env_keys = [
+            k for k, v in stored_env.items()
+            if isinstance(v, str) and v.strip()
+        ]
+
         entries.append({
             **entry,
             'installed': installed,
             'connected': connected,
             'tools_count': tools_count,
+            'stored_env_keys': stored_env_keys,
         })
 
     return jsonify({'ok': True, 'catalog': entries})
@@ -306,17 +322,28 @@ def install_from_catalog():
     if entry is None:
         return jsonify({'ok': False, 'error': f'Unknown server: {server_id}'}), 404
 
-    # Validate required env vars
+    # Merge with existing stored env (e.g. from a previous soft-uninstall).
+    # User-supplied values take precedence; missing required ones fall back to stored.
+    from lib.mcp.config import load_mcp_config
+    existing_cfg = load_mcp_config().get(server_id, {})
+    existing_env = existing_cfg.get('env', {}) or {}
+    merged_env = dict(existing_env)
+    for k, v in (env_values or {}).items():
+        if isinstance(v, str) and v.strip():
+            merged_env[k] = v
+
+    # Validate required env vars against merged set
     for spec in entry.get('env_specs', []):
-        if spec.get('required') and not env_values.get(spec['key'], '').strip():
+        if spec.get('required') and not str(merged_env.get(spec['key'], '')).strip():
             return jsonify({
                 'ok': False,
                 'error': f'Required: {spec.get("label", spec["key"])}',
             }), 400
 
-    server_cfg = build_server_config(server_id, env_values)
+    server_cfg = build_server_config(server_id, merged_env)
     if server_cfg is None:
         return jsonify({'ok': False, 'error': 'Failed to build config'}), 500
+    server_cfg['enabled'] = True  # re-enable if it was soft-uninstalled
 
     # Save config
     cfg_upsert(server_id, server_cfg)
@@ -345,17 +372,26 @@ def install_from_catalog():
 
 @mcp_bp.route('/api/mcp/catalog/uninstall', methods=['POST'])
 def uninstall_from_catalog():
-    """One-click uninstall: disconnect + remove config.
+    """Soft uninstall by default: disconnect + disable (keep env for easy re-enable).
+
+    Pass ``purge: true`` to hard-delete the config entirely (forget credentials).
 
     Request body::
 
-        {"id": "github"}
+        {"id": "github"}               — soft (default): keep env, set enabled=false
+        {"id": "github", "purge": true} — hard: remove config row completely
     """
+    from lib.log import audit_log
     from lib.mcp import get_bridge
-    from lib.mcp.config import remove_server as cfg_remove
+    from lib.mcp.config import (
+        load_mcp_config,
+        remove_server as cfg_remove,
+        upsert_server as cfg_upsert,
+    )
 
     data = request.get_json(silent=True) or {}
     server_id = data.get('id', '').strip()
+    purge = bool(data.get('purge', False))
     if not server_id:
         return jsonify({'ok': False, 'error': 'server id is required'}), 400
 
@@ -366,11 +402,30 @@ def uninstall_from_catalog():
     if server_id in connected_names:
         try:
             bridge._run_async(bridge._async_disconnect_one(server_id))
-            logger.info('[MCP:API] Disconnected %s before uninstall', server_id)
+            logger.info('[MCP:API] Disconnected %s before uninstall (purge=%s)',
+                        server_id, purge)
         except Exception as e:
             logger.warning('[MCP:API] Error disconnecting %s: %s', server_id, e)
 
-    cfg_remove(server_id)
-    logger.info('[MCP:API] Catalog uninstall: %s', server_id)
+    if purge:
+        cfg_remove(server_id)
+        audit_log('mcp_uninstall', server=server_id, mode='purge')
+        logger.info('[MCP:API] Catalog uninstall (purge): %s', server_id)
+        return jsonify({'ok': True, 'message': f'Uninstalled {server_id}', 'purged': True})
 
-    return jsonify({'ok': True, 'message': f'Uninstalled {server_id}'})
+    # Soft: keep config + env, just disable
+    config = load_mcp_config()
+    if server_id in config:
+        srv_cfg = dict(config[server_id])
+        srv_cfg['enabled'] = False
+        cfg_upsert(server_id, srv_cfg)
+        audit_log('mcp_uninstall', server=server_id, mode='soft')
+        logger.info('[MCP:API] Catalog uninstall (soft, env kept): %s', server_id)
+        return jsonify({
+            'ok': True,
+            'message': f'{server_id} disabled (credentials kept for re-enable)',
+            'purged': False,
+        })
+
+    logger.warning('[MCP:API] Uninstall requested but not in config: %s', server_id)
+    return jsonify({'ok': True, 'message': f'{server_id} was not installed', 'purged': False})

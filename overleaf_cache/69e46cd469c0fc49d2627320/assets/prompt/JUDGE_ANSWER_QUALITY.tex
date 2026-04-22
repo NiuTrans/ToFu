@@ -1,0 +1,47 @@
+
+\begin{tcolorbox}[
+    enhanced,
+    colback=white,
+    colframe=black,
+    arc=5mm,
+    boxrule=1pt,
+    left=2mm,
+    right=2mm,
+    top=1mm,
+    bottom=1mm
+]
+
+\textbf{Task.} Assess how well the candidate response answers the question from a user's perspective. This rubric is \emph{orthogonal} to source faithfulness; here you evaluate relevance, completeness, correctness, and clarity.
+
+\textbf{Rubric (integer 1--5).}\\
+\textbf{5 Excellent.} Fully addresses every sub-question, factually correct, clearly written, appropriately detailed.\\
+\textbf{4 Good.} Addresses the main point accurately; may miss a minor nuance or be marginally less clear than ideal.\\
+\textbf{3 Partial.} Handles some sub-questions but omits or mishandles others, or answers a slightly different question than asked.\\
+\textbf{2 Poor.} Contains substantial factual errors or largely fails to address the question.\\
+\textbf{1 Inadequate.} Irrelevant, off-topic, or uninformative.\\
+
+\textbf{Procedure.}\\
+1. Decompose the question into its explicit and implicit sub-questions.\\
+2. Check whether each sub-question is answered, not answered, or wrongly answered.\\
+3. Consider style and clarity only as a tie-breaker between adjacent rubric levels.\\
+4. Output the final line as \texttt{Rating: <integer 1-5>}.
+
+\textbf{Demonstration.}\\
+\emph{Passage (context only):} Modern Singapore was founded in 1819 by Raffles as a British trading post.\\
+\emph{Question:} Tell me about Singapore's founding and its current major industries.\\
+\emph{Response:} Singapore was founded by Raffles in 1819. Its primary industry is currently agriculture and fishing.\\
+\emph{Sub-question coverage:} founding — correct; current major industries — incorrect (modern Singapore is known for finance, biomedical, electronics, not agriculture).\\
+\emph{Rating: 3}
+
+\textbf{Now evaluate the real instance.}\\
+
+\textbf{Passage (context):}\\
+\{DOCUMENT\}\\
+
+\textbf{Question:}\\
+\{QUESTION\}\\
+
+\textbf{Response:}\\
+\{RESPONSE\}\\
+
+\end{tcolorbox}

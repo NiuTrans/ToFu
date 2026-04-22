@@ -53,18 +53,30 @@ logger = get_logger(__name__)
 
 # ── Layer 1 ──────────────────────────────────────────────────────────────────
 
-MICRO_HOT_TAIL = 30
+MICRO_HOT_TAIL = 60
 """Number of most-recent tool results to keep uncompressed.
-Everything older is archived to DB and replaced with a placeholder."""
+Everything older is archived to DB and replaced with a placeholder.
 
-MICRO_COMPACT_THRESHOLD = 500
+2026-04-19: Raised 30 → 60 to reduce compaction aggressiveness. Most
+SWE-bench-style tasks complete in 20-40 tool calls; doubling the hot
+tail keeps them fully uncompressed. Normal chats rarely exceed 60 either."""
+
+MICRO_COMPACT_THRESHOLD = 2000
 """Minimum character count before a tool result is worth compacting.
-Results shorter than this are left in place even outside the hot tail."""
+Results shorter than this are left in place even outside the hot tail.
+
+2026-04-19: Raised 500 → 2000 to reduce compaction aggressiveness.
+Leaves small/medium reads (grep output, file reads <2KB) untouched even
+when cold — only bulky outputs (big files, web_search blobs) get compacted."""
 
 # ── Layer 2 / Force compact ──────────────────────────────────────────────────
 
-_SUMMARY_TRIGGER_RATIO = 0.80
-"""Trigger force-compact when tokens exceed this fraction of usable context."""
+_SUMMARY_TRIGGER_RATIO = 0.90
+"""Trigger force-compact when tokens exceed this fraction of usable context.
+
+2026-04-19: Raised 0.80 → 0.90 to reduce compaction aggressiveness.
+Layer 2 summary is lossy; delay firing until we're truly close to the wall.
+With 1M context that's still 100k tokens of headroom."""
 
 _SUMMARY_MAX_TOKENS = 3000
 """Maximum output tokens for the summary LLM call."""
@@ -87,8 +99,11 @@ _COMPACTION_RESERVE = 8_000
 _COMPACT_TOOL_NAME = 'context_compact'
 """Tool name for the synthetic compact tool pair."""
 
-_KEEP_RECENT_PAIRS = 4
-"""Minimum number of user-assistant message pairs to always preserve verbatim."""
+_KEEP_RECENT_PAIRS = 8
+"""Minimum number of user-assistant message pairs to always preserve verbatim.
+
+2026-04-19: Raised 4 → 8 to reduce compaction aggressiveness. When
+summary does fire, preserve more of the live conversation verbatim."""
 
 
 # ── Internal state ───────────────────────────────────────────────────────────
@@ -878,7 +893,14 @@ def mark_empty_result(tool_name: str, content: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # How many recent assistant messages keep their thinking blocks intact.
-_THINKING_HOT_TAIL = 4
+#
+# 2026-04-19: Raised 4 → 20 to reduce compaction aggressiveness. Thinking
+# blocks are the model's scratchpad — stripping them mid-task forces the
+# model to re-derive reasoning each turn. 20 covers ~95% of conversations
+# (incl. SWE-bench iterations) while still protecting pathological 100+
+# turn sessions from unbounded growth. Non-reasoning models don't emit
+# thinking blocks, so this is a no-op for them.
+_THINKING_HOT_TAIL = 20
 
 
 def micro_compact(messages: list, conv_id: str = '', **kwargs) -> int:
@@ -1523,7 +1545,11 @@ def _generate_query_aware_summary(messages: list, current_query: str,
             return None
 
     except Exception as e:
-        logger.error('%s Summary generation failed: %s', tag, e, exc_info=True)
+        # Summary generation is best-effort — callers already fall back to
+        # keeping messages intact. Log as WARNING (network blips, upstream
+        # 429/500) without a stack trace to avoid polluting error.log.
+        logger.warning('%s Summary generation failed (will keep messages intact): %s: %s',
+                       tag, type(e).__name__, e)
         return None
 
 
@@ -1550,14 +1576,23 @@ def _extract_recently_accessed_files(messages: list,
                 continue
 
             if fn_name == 'read_files':
-                for spec in args.get('reads', []):
-                    p = spec.get('path', '')
+                for spec in args.get('reads', []) or []:
+                    # LLMs sometimes emit bare strings instead of {path: ...}
+                    # dicts. Tolerate both shapes instead of crashing.
+                    if isinstance(spec, dict):
+                        p = spec.get('path', '')
+                    elif isinstance(spec, str):
+                        p = spec.strip()
+                    else:
+                        logger.debug('[Compact] Skipping non-dict/str read spec type=%s',
+                                     type(spec).__name__)
+                        continue
                     if p and p not in files_set:
                         files_seen.append(p)
                         files_set.add(p)
             elif fn_name == 'apply_diff' and args.get('edits'):
                 # Batch apply_diff: paths are inside edits[i].path
-                for edit in args['edits']:
+                for edit in args['edits'] or []:
                     if isinstance(edit, dict):
                         p = edit.get('path', '')
                         if p and p not in files_set:
@@ -1565,14 +1600,14 @@ def _extract_recently_accessed_files(messages: list,
                             files_set.add(p)
             elif fn_name == 'insert_content' and args.get('edits'):
                 # Batch insert_content: paths are inside edits[i].path
-                for edit in args['edits']:
+                for edit in args['edits'] or []:
                     if isinstance(edit, dict):
                         p = edit.get('path', '')
                         if p and p not in files_set:
                             files_seen.append(p)
                             files_set.add(p)
             else:
-                p = args.get('path', '')
+                p = args.get('path', '') if isinstance(args, dict) else ''
                 if p and p not in files_set:
                     files_seen.append(p)
                     files_set.add(p)

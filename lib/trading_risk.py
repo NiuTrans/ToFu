@@ -124,6 +124,14 @@ class StopLossManager:
       - Trailing stop-loss (tracks highest NAV, triggers on pullback)
       - ATR-based stop (2× ATR below price)
       - Partial take-profit (sell portion at target, trail the rest)
+
+    Note:
+        A **separately-named** class, also called ``StopLossManager``, lives in
+        :mod:`lib.trading_backtest_engine.state`. That one is a simpler,
+        backtest-specific manager (``register``/``update`` API; different
+        per-position dict shape). The name collision is intentional (both
+        manage stop-losses); callers should import the one matching their
+        phase (live risk vs backtest).
     """
 
     def __init__(self):

@@ -200,7 +200,14 @@ def fetch_page_content(url, max_chars=None,
         if is_pdf:
             pdf_lim = pdf_max_chars if pdf_max_chars > 0 else 999999999
             from lib.pdf_parser import extract_pdf_text as _unified_extract_pdf_text
-            result = _unified_extract_pdf_text(raw, max(pdf_lim, _CACHE_EXTRACT_LIMIT), url)
+            # mode='fast': skip pymupdf4llm + table_strategy='lines'. Web-search
+            # and fetch_url callers only need plain text for BM25 / snippet /
+            # model context; the rich Markdown path (tables, math) is ~50×
+            # slower on academic PDFs (60-90s for a 30-page paper → ~2s).
+            # Reading Mode's paper reader uses extract_pdf_text directly (with
+            # default mode='rich'), so its quality is unaffected.
+            result = _unified_extract_pdf_text(
+                raw, max(pdf_lim, _CACHE_EXTRACT_LIMIT), url, mode='fast')
         elif 'text/plain' in ct:
             text = _decode_bytes(raw, resp.encoding).strip()
             result = (text[:_CACHE_EXTRACT_LIMIT] if len(text) > _CACHE_EXTRACT_LIMIT

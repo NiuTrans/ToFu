@@ -1,0 +1,28 @@
+% 创建一个表格环境
+\begin{table}[ht]
+    \centering % 将表格居中对齐
+    \begin{tabular}{llcccccccc} % 设置表格列格式，l表示左对齐，c表示居中对齐
+        \toprule % 表格顶线
+        % 合并单元格并设置列标题
+        & & \multicolumn{2}{c}{IWSLT17} & \multicolumn{2}{c}{WMT22} & \multicolumn{2}{c}{AVG} & \multicolumn{2}{c}{AVG Delta} \\
+        \cmidrule(r){3-4} \cmidrule(r){5-6} \cmidrule(r){7-8} \cmidrule(r){9-10} % 画出分割线
+        % 设置第二行列标题
+        & & BLEU & COMET & BLEU & COMET & BLEU & COMET & BLEU & COMET \\
+        \midrule % 表格中间的分割线
+        % 输入表格数据
+        \multirow{2}{*}{T5\_small} 
+        & NTP & 11.51 & \textbf{55.49}& 7.39 & \textbf{48.43}& 9.45 & \textbf{51.96} & \multirow{2}{*}{\textbf{+0.30}} & \multirow{2}{*}{-0.18} \\
+        & NDP & \textbf{11.56}& 55.39 & \textbf{7.93}& 48.16 & \textbf{9.75} & 51.78 &  &  \\
+        \midrule % 表格中间的分割线
+        \multirow{2}{*}{T5\_base} 
+        & NTP & 19.97 & 68.54 & \textbf{15.48}& 61.90 & 17.73 & 65.22 & \multirow{2}{*}{\textbf{+0.91}} & \multirow{2}{*}{\textbf{+1.97}} \\
+        & NDP & \textbf{21.87}& \textbf{70.66}& 15.41 & \textbf{63.72}& \textbf{18.64} & \textbf{67.19} &  &  \\
+        \midrule % 表格中间的分割线
+        \multirow{2}{*}{T5\_large} 
+        & NTP & 23.63 & 76.42 & 17.49 & 71.26 & 20.56 & 73.84 & \multirow{2}{*}{\textbf{+1.96}} & \multirow{2}{*}{\textbf{+1.17}} \\
+        & NDP & \textbf{25.70}& \textbf{77.29}& \textbf{19.34}& \textbf{72.72}& \textbf{22.52} & \textbf{75.01} &  &  \\
+        \bottomrule % 表格底线
+    \end{tabular}
+    \caption{Performance evaluation metrics for different T5 model sizes on IWSLT17 and WMT22 datasets.} % 设置表格标题
+    \label{tab:performance} % 设置表格标签，用于引用
+\end{table}

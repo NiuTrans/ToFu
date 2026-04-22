@@ -1,0 +1,39 @@
+
+\begin{table}[htbp]
+\centering
+
+\bicaption{各模型在不同翻译方向上的性能对比}{Performance Comparison of Different Models Across Translation Directions}
+\footnotesize
+\label{tab:method2-cft-results}
+\begin{tabular}{l ccc ccc}
+\toprule
+\multirow{2}{*}{\textbf{Method}} & \multicolumn{3}{c}{\textbf{En2De}} & \multicolumn{3}{c}{\textbf{En2Ru}} \\
+\cmidrule(r){2-4} \cmidrule(l){5-7}
+                                & \textbf{BLEU} & \textbf{COMET} & \textbf{CCR}                  & \textbf{BLEU} & \textbf{COMET} & \textbf{CCR} \\
+\midrule
+LLaMA3-8B & 38.38 & 85.33 & 89.43 & 21.96 & 82.28 & 76.21 \\
+CAP            & 38.76 & 87.13 & 90.86 & 21.67 & 83.81 & 77.32 \\
+SFT            & 40.44 & 87.04 & 91.06 & 20.29 & 83.77 & 76.33 \\
+Append         & 40.25 & 87.55 & 91.59 & 19.83 & 84.08 & 79.62 \\
+Code-switch    & 38.35 & 87.17 & 89.22 & 19.74 & 83.32 & 78.21 \\
+\cdashline{1-7}
+\rowcolor{gray!10}
+CFT            & 39.25 & 87.01 & 91.21 & 22.90 & 83.57 & 84.14 \\
+w/o self-improve. &	38.34 &	84.82 &	91.35 &	19.08 &	83.31 &	84.98 \\
+\Xhline{1.5pt}
+\multirow{2}{*}{\textbf{Method}} & \multicolumn{3}{c}{\textbf{En2Zh}} & \multicolumn{3}{c}{\textbf{Zh2En}} \\
+\cmidrule(r){2-4} \cmidrule(l){5-7}
+                                & \textbf{BLEU} & \textbf{COMET} & \textbf{CCR}                  & \textbf{BLEU} & \textbf{COMET} & \textbf{CCR} \\
+\midrule
+LLaMA3-8B & 36.36 & 80.65 & 91.19 & 13.45 & 73.13 & 82.44 \\
+CAP            & 37.21 & 81.57 & 92.03 & 13.21 & 74.68 & 83.67 \\
+SFT            & 43.02 & 86.51 & 93.43 & 10.97 & 72.01 & 79.63 \\
+Append         & 42.51 & 86.66 & 92.60 & 10.86 & 72.13 & 79.41 \\
+Code-switch    & 42.19 & 86.02 & 89.55 & 10.58 & 71.60 & 78.76 \\
+\cdashline{1-7}
+\rowcolor{gray!10}
+CFT            & 41.66 & 86.50 & 93.08 & 14.06 & 73.10 & 84.57 \\
+w/o self-improve. &	39.25 &	80.6 &	93.5 &	11.06 &	72.05 &	84.45 \\
+\bottomrule
+\end{tabular}
+\end{table}

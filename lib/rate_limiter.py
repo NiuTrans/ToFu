@@ -59,6 +59,14 @@ def rate_limit(limit=10, per=60):
                 if len(request_counts[endpoint][ip]) >= limit:
                     logger.warning('[RateLimit] %s from %s — %d/%d in %ds window',
                                    endpoint, ip, len(request_counts[endpoint][ip]), limit, per)
+                    try:
+                        from lib.log import audit_log as _audit
+                        _audit('rate_limit_violation',
+                               ip=ip, route=endpoint,
+                               limit=limit, per=per,
+                               count=len(request_counts[endpoint][ip]))
+                    except Exception as _aerr:
+                        logger.debug('[RateLimit] audit_log failed: %s', _aerr)
                     return {"error": "Too many requests"}, 429
 
                 # Record current request

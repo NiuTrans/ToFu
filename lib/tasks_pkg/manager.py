@@ -85,6 +85,17 @@ def abort_running_tasks_for_conv(conv_id: str, exclude_task_id: str | None = Non
                     len(t.get('content') or ''),
                     time.time() - t.get('created_at', time.time()),
                 )
+                try:
+                    from lib.log import audit_log as _audit
+                    _audit('task_abort',
+                           task_id=tid,
+                           conv_id=conv_id,
+                           reason='superseded_by_new_task',
+                           superseding_task_id=exclude_task_id or '',
+                           content_chars=len(t.get('content') or ''),
+                           elapsed_s=round(time.time() - t.get('created_at', time.time()), 2))
+                except Exception as _aerr:
+                    logger.debug('[Manager] audit_log task_abort failed: %s', _aerr)
     if aborted:
         logger.info('[Manager] conv=%s Auto-aborted %d stale task(s) before starting new task %s',
                     conv_id[:8], aborted, (exclude_task_id or '?')[:8])
@@ -327,6 +338,16 @@ def _sync_result_to_conversation(task, meta):
             )
             return
 
+    # ── External-caller short-circuit ──
+    # Tasks started via /api/chat/start with inline `messages` in the POST
+    # body (SWE-bench harness, eval tools, external backends) have no
+    # corresponding row in the `conversations` table — results are read by
+    # the caller from `task_results` directly. Skip the write-back path so
+    # we don't flood error.log with "Conversation not found" warnings.
+    if task.get('_inline_messages'):
+        logger.debug('%s conv=%s Inline-message task — skipping conv sync by design', pfx, conv_id)
+        return
+
     db = None
     try:
         db = get_thread_db(DOMAIN_CHAT)
@@ -363,12 +384,39 @@ def _sync_result_to_conversation(task, meta):
             extra_msgs = messages[expected_msg_count:]
             extra_summary = [(m.get('role'), len(m.get('content') or ''), m.get('model', 'N/A'))
                              for m in extra_msgs]
+            # ── Skip dedup when endpoint-mode history is present ──
+            # Endpoint mode legitimately produces consecutive-same-role messages
+            # by design: planner+worker are both role=assistant, and critic+next
+            # turn user are both role=user. These are NOT cross-talk anomalies.
+            # Dedup here would destroy workers (shorter than planners) and, worse,
+            # drop a short new user follow-up (e.g. "why did it stop?") in favor
+            # of the preceding long critic review.  The message builder already
+            # collapses historical endpoint sessions before sending to the LLM,
+            # so we don't need to touch the persisted conversation.
+            has_endpoint_history = any(
+                (m.get('_isEndpointPlanner')
+                 or m.get('_isEndpointReview')
+                 or m.get('_epIteration') is not None
+                 or m.get('_epIter') is not None
+                 or m.get('_epPlannerIteration') is not None
+                 or m.get('_epNextPhase'))
+                for m in messages
+            )
             # Check for consecutive same-role messages in the extras
             has_consecutive_same_role = any(
                 extra_msgs[i].get('role') == extra_msgs[i + 1].get('role')
                 for i in range(len(extra_msgs) - 1)
             )
-            if has_consecutive_same_role:
+            if has_consecutive_same_role and has_endpoint_history:
+                logger.info(
+                    '%s conv=%s Message count drift (DB=%d, task_start=%d, delta=%d) '
+                    'with consecutive same-role — but ENDPOINT history detected. '
+                    'Skipping dedup (planner+worker and critic+next-user are '
+                    'expected same-role pairs). Extra msgs: %s',
+                    pfx, conv_id, len(messages), expected_msg_count,
+                    len(extra_msgs), extra_summary
+                )
+            elif has_consecutive_same_role:
                 logger.error(
                     '%s conv=%s ⛔ MESSAGE COUNT ANOMALY with consecutive same-role: '
                     'DB has %d messages but task started with %d — %d extra. '
@@ -377,10 +425,15 @@ def _sync_result_to_conversation(task, meta):
                     len(extra_msgs), extra_summary
                 )
                 # Auto-fix: remove consecutive duplicate-role messages
-                # Keep the message with more content when two same-role msgs are adjacent
+                # Keep the message with more content when two same-role msgs are adjacent.
+                # ★ Guard: NEVER drop the last two messages (trailing user + assistant
+                #   slot) — a short new user follow-up (e.g. "why?") must always win
+                #   over any earlier same-role message it might be adjacent to.
+                _tail_protect_idx = max(0, len(messages) - 2)
                 deduped = [messages[0]]
-                for m in messages[1:]:
-                    if m.get('role') == deduped[-1].get('role'):
+                for idx, m in enumerate(messages[1:], start=1):
+                    if (m.get('role') == deduped[-1].get('role')
+                            and idx < _tail_protect_idx):
                         # Keep the one with more content
                         existing_len = len(deduped[-1].get('content') or '')
                         new_len = len(m.get('content') or '')
@@ -629,8 +682,10 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db):
         settings = json.loads(row[1] or '{}') if row[1] else {}
         auto_translate = settings.get('autoTranslate', True)
         if not auto_translate:
-            logger.debug('%s conv=%s autoTranslate is OFF — skipping',
-                         pfx, conv_id[:8])
+            logger.info('%s conv=%s msg=%d autoTranslate=false in settings — '
+                        'skipping (settings.autoTranslate=%r)',
+                        pfx, conv_id[:8], msg_idx,
+                        settings.get('autoTranslate'))
             return
 
         # Check if translation already exists (frontend may have triggered it first)
@@ -727,6 +782,36 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db):
     except Exception as e:
         logger.warning('%s conv=%s Failed to check/start auto-translate: %s',
                        pfx, conv_id[:8], e)
+
+
+def _maybe_auto_translate_critic(conv_id, content, msg_idx, db):
+    """Server-side auto-translate for endpoint-mode critic review messages.
+
+    Endpoint-mode critic output is authored by the Critic LLM (English by
+    default, sometimes mixed) and is stored as ``role='user'`` with
+    ``_isEndpointReview=true`` in the conversation's ``messages`` list.  The
+    existing ``_maybe_auto_translate_assistant`` safety-net commits to
+    ``messages[msg_idx]`` by index regardless of role, so we reuse it
+    directly and only override the log prefix + source-lang hint for
+    observability.
+
+    This path is only invoked from
+    ``endpoint._trigger_endpoint_auto_translate``.  The per-conv
+    ``autoTranslate`` gate, dedup against running frontend translate tasks,
+    and stale-partial re-translation logic are inherited verbatim.
+    """
+    pfx = '[AutoTranslate:Critic]'
+    if not conv_id or not content:
+        logger.debug('%s conv=%s msg=%s — empty conv/content; skipping',
+                     pfx, conv_id[:8] if conv_id else '?', msg_idx)
+        return
+    # Delegate to the shared helper — it is role-agnostic at the commit
+    # layer (writes to messages[msg_idx]).  We only log the role flavour
+    # here so operators can distinguish critic translations in the log.
+    logger.info('%s conv=%s msg=%d content=%dchars — delegating to '
+                '_maybe_auto_translate_assistant safety net',
+                pfx, conv_id[:8], msg_idx, len(content))
+    _maybe_auto_translate_assistant(conv_id, content, msg_idx, db)
 
 
 def checkpoint_task_partial(task):

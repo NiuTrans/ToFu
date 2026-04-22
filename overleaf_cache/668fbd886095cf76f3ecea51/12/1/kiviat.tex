@@ -1,0 +1,285 @@
+\documentclass{standalone}
+\usepackage{tikz}
+\usepackage{tkz-kiviat}
+\usepackage{xcolor} % 确保导入 xcolor 包来定义颜色
+
+\definecolor{c1}{HTML}{FF0000} % 红色
+\definecolor{c2}{HTML}{0000FF} % 蓝色
+\definecolor{c3}{HTML}{00FF00} % 绿色
+\definecolor{c4}{HTML}{FFA500} % 橙色
+\definecolor{c5}{HTML}{800080} % 紫色
+\definecolor{c6}{HTML}{00FFFF} % 青色
+
+\begin{document}
+\begin{tikzpicture}[scale=0.73]
+
+\useasboundingbox (-25em,-5em) rectangle (10em,7em);
+
+\begin{scope}[scale=0.36,local bounding box=a,shift={(-50em,0)}]
+
+\newcommand\KivStep{5}
+\pgfmathsetmacro\Unity{1/\KivStep}
+\newcommand\zeroshift{0}
+
+\tkzKiviatDiagram[
+   radial  style/.style ={-},
+   rotate=90,
+   lattice style/.style ={black!30},
+   step=\KivStep,
+   gap=1,
+   lattice=7,
+   ] 
+{medqa,medmcqa,pubmedqa,careqa,AVG}
+
+% 绘制数据集1的雷达图线条
+\tkzKiviatLine[
+  thin,
+  draw=c1,
+  fill=c1,
+  mark=square,
+  mark options={
+    ball color=c1,
+    mark size=4pt
+  },
+  opacity=.5
+](44.46190102,46.56944776,47.3,52.03700409,47.59208822)
+
+% 绘制数据集2的雷达图线条
+\tkzKiviatLine[
+  thin,
+  draw=c2,
+  fill=c2,
+  mark=triangle,
+  mark options={
+    mark size=4pt,
+    ball color=c2
+  },
+  opacity=.5
+](0.628436764,0.262969161,1.9,0.56929372,0.840174911)
+
+% 绘制数据集3的雷达图线条
+\tkzKiviatLine[
+  thin,
+  draw=c3,
+  fill=c3,
+  mark=square,
+  mark options={
+    mark size=4pt,
+    ball color=c3
+  },
+  opacity=.5
+](10.44776119,5.426727229,5.3,11.68831169,8.215700028)
+
+% 绘制数据集4的雷达图线条
+\tkzKiviatLine[
+  thin,
+  draw=c4,
+  fill=c4,
+  mark=triangle,
+  mark options={
+    mark size=4pt,
+    ball color=c4
+  },
+  opacity=.5
+](47.28986646,49.43820225,45.9,59.95374489,50.6454534)
+
+% 绘制数据集5的雷达图线条
+\tkzKiviatLine[
+  thin,
+  draw=c5,
+  fill=c5,
+  mark=square,
+  mark options={
+    mark size=4pt,
+    ball color=c5
+  },
+  opacity=.5
+](49.48939513,50.60961033,43.7,61.21686533,51.2539677)
+
+% 绘制数据集6的雷达图线条
+\tkzKiviatLine[
+  thin,
+  draw=c6,
+  fill=c6,
+  mark=triangle,
+  mark options={
+    mark size=4pt,
+    ball color=c6
+  },
+  opacity=.5
+](47.60408484,50.10757829,42.6,60.46966732,50.19533261)
+
+% 绘制刻度标签
+\foreach \nv in {40,45,50,55,60,65,70} {
+    \pgfmathsetmacro{\angle}{360/7*\nv}
+    \path[draw] (0,0) -- ({\angle}:70) 
+        node[pos=1.1,above] {\nv};
+}
+
+\end{scope}
+\end{tikzpicture}
+\end{document}
+\documentclass{standalone}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
+
+% Custom Kiviat diagram commands and definitions
+\makeatletter
+\def\tkz@KiviatGrad[#1](#2){% 
+\begingroup
+\pgfkeys{/kiviatgrad/.cd,
+graduation distance= 0 pt,
+prefix ={},
+suffix={},
+unity=1,
+label precision/.store in=\gradlabel@precision,
+label precision=0, % No decimal places
+zero point/.store in=\tkz@grad@zero,
+zero point=40 % Set zero point to 40
+}
+\pgfqkeys{/kiviatgrad}{#1}% 
+\let\tikz@label@distance@tmp\tikz@label@distance
+\global\let\tikz@label@distance\tkz@kiv@grad
+ \foreach \nv in {1,...,\tkz@kiv@lattice}{
+ \pgfmathsetmacro{\result}{40 + \nv * 5} % Start at 40 and increment by 5
+ \protected@edef\tkz@kiv@gd{%
+    \tkz@kiv@prefix%
+    \pgfmathprintnumber[precision=\gradlabel@precision,fixed]{\result}%% used \pgfmathprintnumber instead of "$\result$"
+    \tkz@kiv@suffix} 
+    \path[/kiviatgrad/.cd,#1] (0:0)--(360/\tkz@kiv@radial*#2:\nv*\tkz@kiv@gap)
+       node[label=(360/\tkz@kiv@radial*#2):\tiny\tkz@kiv@gd] {}; % added \tiny
+      }
+ \let\tikz@label@distance\tikz@label@distance@tmp  
+\endgroup
+}%
+\makeatother
+
+% Define the custom legend environment
+\newenvironment{customlegend}[1][]{%
+    \begingroup
+    % inits/clears the lists (which might be populated from previous axes):
+    \pgfplots@init@cleared@structures
+    \pgfplotsset{#1}%
+}{%
+    % draws the legend:
+    \pgfplots@createlegend
+    \endgroup
+}%
+
+\definecolor{c1}{HTML}{FF0000} % 定义颜色 c1 (红色)
+\definecolor{c2}{HTML}{0000FF} % 定义颜色 c2 (蓝色)
+\definecolor{c3}{HTML}{00FF00} % 定义颜色 c3 (绿色)
+\definecolor{c4}{HTML}{FFA500} % 定义颜色 c4 (橙色)
+\definecolor{c5}{HTML}{800080} % 定义颜色 c5 (紫色)
+\definecolor{c6}{HTML}{00FFFF} % 定义颜色 c6 (青色)
+
+% 定义全局缩放样式
+\tikzset{global scale/.style={
+    scale=#1, % 设置缩放比例
+    every node/.append style={scale=#1} % 应用于每个节点
+  }
+}
+
+\begin{document}
+
+\begin{tikzpicture}[
+  label distance=13em, % 标签距离
+  global scale = 1.5, % 全局缩放
+  plot1/.style={ % 数据集1样式
+    thin, % 线条细
+    draw=c1, % 绘制颜色为红色
+    mark=square, % 标记形状为方形
+    mark options={
+     ball color=c1, % 标记颜色为红色
+     mark size=4pt % 标记大小为4pt
+    },
+    opacity=.5 % 透明度为0.5
+  },
+  plot4/.style={ % 数据集4样式
+    thin,
+    draw=c2,
+    mark=triangle,
+    mark options={
+      mark size=4pt,
+      ball color=c4
+    },
+    opacity=.5
+  },
+  plot5/.style={ % 数据集5样式
+    thin,
+    draw=c3,
+    mark=square,
+    mark options={
+      mark size=4pt,
+      ball color=c5
+    },
+    opacity=.5
+  },
+  plot6/.style={ % 数据集6样式
+    thin,
+    draw=c4,
+    mark=triangle,
+    mark options={
+      mark size=4pt,
+      ball color=c6
+    },
+    opacity=.5
+  }
+]
+
+\useasboundingbox (-25em,-5em) rectangle (10em,7em); % 设置边界框
+
+\begin{scope}[scale=0.36,local bounding box=a,shift={(-50em,0)}] % 设置局部缩放和位置
+
+
+% define some macros for convenience
+\newcommand\KivStep{0.1}
+\pgfmathsetmacro\Unity{1/\KivStep}
+\newcommand\zeroshift{20}
+
+ \tkzKiviatDiagram[
+   radial  style/.style ={-},
+   rotate=90, 
+   lattice style/.style ={black!30},
+   step=\KivStep,
+   gap=1,
+   lattice=5,
+]% 
+{medmcqa,medqa,pubmedqa,careqa,AVG} % 定义雷达图标签
+
+% 绘制数据集1的雷达图线条
+\tkzKiviatLine[
+  plot1
+](26.56944776,24.46190102,27.3,32.03700409,27.59208822)
+
+% 绘制数据集4的雷达图线条
+\tkzKiviatLine[
+  plot4
+](29.43820225,27.28986646,25.9,39.95374489,20.6454534)
+
+% 绘制数据集5的雷达图线条
+\tkzKiviatLine[
+  plot5
+](30.60961033,29.48939513,23.7,21.21686533,31.2539677)
+
+% 绘制数据集6的雷达图线条
+\tkzKiviatLine[
+  plot6
+](30.10757829,27.60408484,22.6,40.46966732,30.19533261)
+
+% 绘制刻度标签
+\tkzKiviatGrad[unity=\Unity, label precision=0, zero point=\zeroshift](1)
+\end{scope}
+
+% Add custom legend below the radar chart
+\begin{customlegend}[legend columns=4,legend style={draw=none,column sep=2ex},legend entries={Ours,QAlign,MathOctopus,MetaMath}]
+    \addlegendimage{plot1}
+    \addlegendimage{plot4}
+    \addlegendimage{plot5}
+    \addlegendimage{plot6}
+\end{customlegend}
+
+\end{tikzpicture}
+
+\end{document}

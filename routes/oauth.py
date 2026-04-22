@@ -56,7 +56,7 @@ def oauth_login():
 
     except Exception as e:
         logger.error('[OAuth API] Login failed: %s', e, exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'internal_error'}), 500
 
 
 @oauth_bp.route('/api/oauth/callback', methods=['GET', 'POST'])
@@ -111,7 +111,7 @@ def oauth_callback():
 
     except Exception as e:
         logger.error('[OAuth API] Callback failed: %s', e, exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'internal_error'}), 500
 
 
 @oauth_bp.route('/api/oauth/status')
@@ -135,7 +135,7 @@ def oauth_status():
 
     except Exception as e:
         logger.error('[OAuth API] Status check failed: %s', e, exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'internal_error'}), 500
 
 
 @oauth_bp.route('/api/oauth/test')
@@ -207,4 +207,4 @@ def oauth_logout():
 
     except Exception as e:
         logger.error('[OAuth API] Logout failed: %s', e, exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'internal_error'}), 500

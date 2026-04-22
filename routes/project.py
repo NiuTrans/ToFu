@@ -136,7 +136,7 @@ def project_undo():
         return jsonify(result)
     except Exception as e:
         logger.error('[Project] undo failed: %s', e, exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'internal_error'}), 500
 
 
 @project_bp.route('/api/project/undo_all', methods=['POST'])
@@ -162,7 +162,7 @@ def project_undo_all():
         return jsonify(result)
     except Exception as e:
         logger.error('[Project] undo_all failed: %s', e, exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'internal_error'}), 500
 
 
 @project_bp.route('/api/project/rescan', methods=['POST'])
@@ -174,4 +174,4 @@ def project_rescan():
         return jsonify({'ok': True, **(result or {})})
     except Exception as e:
         logger.error('[Project] rescan failed: %s', e, exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'internal_error'}), 500

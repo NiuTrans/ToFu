@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 #  Schema Version Cache — Skip redundant DDL on subsequent startups
 # ═══════════════════════════════════════════════════════════════════════
 
-_SCHEMA_VERSION = 10  # Increment when tables/columns/indexes change
+_SCHEMA_VERSION = 12  # Increment when tables/columns/indexes change
 
 
 def _column_exists(conn, table, column):
@@ -260,6 +260,47 @@ def _init_chat_schema(conn):
             PRIMARY KEY (paper_hash, lang)
         )
     ''')
+
+    # ── Paper library: server-side bookshelf (shared across browsers) ──
+    # Stores one row per paper the user has loaded; the PDF bytes live under
+    # uploads/papers/<pdf_filename>, reports in paper_reports, images on disk.
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS paper_library (
+            id TEXT NOT NULL,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            title TEXT NOT NULL DEFAULT '',
+            pdf_url TEXT NOT NULL DEFAULT '',
+            pdf_filename TEXT NOT NULL DEFAULT '',
+            arxiv_id TEXT NOT NULL DEFAULT '',
+            paper_hash TEXT NOT NULL DEFAULT '',
+            parsed_text TEXT NOT NULL DEFAULT '',
+            qa_history TEXT NOT NULL DEFAULT '[]',
+            images TEXT NOT NULL DEFAULT '[]',
+            babel_cache TEXT NOT NULL DEFAULT '{}',
+            page_count INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (id, user_id)
+        )
+    ''')
+    # ── Daily cost cache: pre-aggregated per-day LLM costs (avoids full
+    # table scans on every calendar render).  date is 'YYYY-MM-DD' local time.
+    # conversations_json stores the per-conv breakdown for drill-down.
+    # Past days are cached forever (messages are immutable); today is always
+    # recomputed live.  Invalidated on conv delete / message delete.
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS daily_cost_cache (
+            user_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            cost REAL NOT NULL DEFAULT 0,
+            conversations_json TEXT NOT NULL DEFAULT '{}',
+            computed_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, date)
+        )
+    ''')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_daily_cost_user_date ON daily_cost_cache(user_id, date)')
+
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_paper_lib_user ON paper_library(user_id, updated_at DESC)')
 
     # Seed default user
     cur.execute("""

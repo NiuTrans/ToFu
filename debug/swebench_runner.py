@@ -123,6 +123,10 @@ class ModelConfig:
     price_output: float = 0.075
     price_cache_read: float = 0.0015
     price_cache_write: float = 0.01875
+    # Optional: extra fields to merge into the /api/chat/start `config` payload.
+    # Used to create tool-ablation variants (e.g. project-tools-only) without
+    # touching server defaults. Example: {'searchMode': 'off', 'mcpEnabled': False}.
+    config_overrides: dict = field(default_factory=dict)
 
 
 # Built-in model presets — Framework × Model matrix
@@ -139,9 +143,25 @@ class ModelConfig:
 MODEL_PRESETS = {
     'tofu-opus': ModelConfig(
         name='tofu-opus', backend='tofu', model_id='aws.claude-opus-4.6',
-        concurrency=2,  # RPM=30, each request ~2-5min → 2 concurrent is safe
+        concurrency=4,  # user-approved bump 2→4 (2026-04-18): RPM headroom ample
         price_input=0.015, price_output=0.075,
         price_cache_read=0.0015, price_cache_write=0.01875,
+    ),
+    # Ablation: project tools only — no web_search, fetch_url, memory, or MCP.
+    # keepToolHistory stays ON (server default). Used to measure how much of
+    # Tofu's SWE-bench performance comes from project tooling alone vs. the
+    # broader tool ecosystem.
+    'tofu-opus-notool': ModelConfig(
+        name='tofu-opus-notool', backend='tofu', model_id='aws.claude-opus-4.6',
+        concurrency=4,
+        price_input=0.015, price_output=0.075,
+        price_cache_read=0.0015, price_cache_write=0.01875,
+        config_overrides={
+            'searchMode': 'off',      # strip web_search
+            'fetchEnabled': False,    # strip fetch_url
+            'memoryEnabled': False,   # strip memory tools
+            'mcpEnabled': False,      # strip MCP bridge tools
+        },
     ),
     'cc-opus': ModelConfig(
         name='cc-opus', backend='cc', model_id='opus',
@@ -155,11 +175,35 @@ MODEL_PRESETS = {
         price_input=0.001, price_output=0.002,
         price_cache_read=0.0002, price_cache_write=0.001,
     ),
+    'tofu-minimax-notool': ModelConfig(
+        name='tofu-minimax-notool', backend='tofu', model_id='MiniMax-M2.7',
+        concurrency=3,
+        price_input=0.001, price_output=0.002,
+        price_cache_read=0.0002, price_cache_write=0.001,
+        config_overrides={
+            'searchMode': 'off',
+            'fetchEnabled': False,
+            'memoryEnabled': False,
+            'mcpEnabled': False,
+        },
+    ),
     'tofu-glm': ModelConfig(
         name='tofu-glm', backend='tofu', model_id='glm-5.1',
         concurrency=2,  # RPM=60
         price_input=0.002, price_output=0.008,
         price_cache_read=0.0004, price_cache_write=0.002,
+    ),
+    'tofu-glm-notool': ModelConfig(
+        name='tofu-glm-notool', backend='tofu', model_id='glm-5.1',
+        concurrency=2,
+        price_input=0.002, price_output=0.008,
+        price_cache_read=0.0004, price_cache_write=0.002,
+        config_overrides={
+            'searchMode': 'off',
+            'fetchEnabled': False,
+            'memoryEnabled': False,
+            'mcpEnabled': False,
+        },
     ),
     'cc-minimax': ModelConfig(
         name='cc-minimax', backend='cc', model_id='MiniMax-M2.7',
@@ -406,11 +450,11 @@ def setup_workspace(inst: SWEInstance, tool: str, base_dir: Path) -> Path:
     )
     subprocess.run(
         ['git', 'checkout', '--quiet', inst.base_commit],
-        capture_output=True, text=True, timeout=30, cwd=str(ws), check=True,
+        capture_output=True, text=True, timeout=120, cwd=str(ws), check=True,
     )
     subprocess.run(
         ['git', 'clean', '-fdx', '--quiet'],
-        capture_output=True, text=True, timeout=30, cwd=str(ws),
+        capture_output=True, text=True, timeout=120, cwd=str(ws),
     )
     return ws
 
@@ -665,15 +709,19 @@ def run_tofu_inference(inst: SWEInstance, workspace: Path,
         task_id = None
         for attempt in range(1, 11):
             try:
+                _config = {
+                    'model': model_id,
+                    'projectPath': str(workspace),
+                }
+                # Merge per-model tool-ablation overrides (e.g. tofu-opus-notool)
+                if mcfg and getattr(mcfg, 'config_overrides', None):
+                    _config.update(mcfg.config_overrides)
                 resp = requests.post(
                     f'{TOFU_BASE_URL}/api/chat/start',
                     json={
                         'convId': f'swebench-{inst.instance_id}-{tool_name}-{int(time.time())}',
                         'messages': [{'role': 'user', 'content': prompt}],
-                        'config': {
-                            'model': model_id,
-                            'projectPath': str(workspace),
-                        },
+                        'config': _config,
                     },
                     timeout=120,
                 )
@@ -981,48 +1029,83 @@ def _extract_git_diff(workspace: Path) -> str:
 
     Uses generous timeouts (120s) for FUSE/NFS filesystems where git operations
     can be slow under concurrent load.  Falls back to unstaged diff if
-    'git add' times out.
+    'git add' times out OR returns a non-zero exit code (e.g. stale index.lock).
+
+    Empty patches from this function are only returned when we have *proof*
+    (staged or unstaged name-only listing) that the workspace has no source
+    changes.  If any git sub-command errors out, we try progressively weaker
+    fallbacks before giving up — never silently returning ''.
     """
     _GIT_TIMEOUT = 120  # seconds — FUSE can be very slow under load
 
-    try:
-        # First, try the staged-diff approach (git add -A → git diff --cached)
-        add_ok = True
+    def _run(args, _cwd=str(workspace), _to=_GIT_TIMEOUT):
+        """Run a git command safely: never raises on non-zero, logs timeouts."""
         try:
-            subprocess.run(
-                ['git', 'add', '-A'],
-                capture_output=True, text=True, timeout=_GIT_TIMEOUT,
-                cwd=str(workspace),
+            return subprocess.run(
+                args, capture_output=True, text=True, timeout=_to, cwd=_cwd,
             )
         except subprocess.TimeoutExpired:
-            log.warning('git add -A timed out after %ds in %s — falling back to unstaged diff',
-                        _GIT_TIMEOUT, workspace.name)
-            add_ok = False
+            log.warning('git %s timed out after %ds in %s',
+                        ' '.join(args[1:]), _to, workspace.name)
+            return None
+        except Exception as e:
+            log.warning('git %s crashed in %s: %s',
+                        ' '.join(args[1:]), workspace.name, e)
+            return None
+
+    # Defensive: clear any stale index.lock from an interrupted prior run.
+    # This is safe — if a real git process were running in the workspace, it
+    # would have exited long ago (we only extract after inference finishes).
+    lock = workspace / '.git' / 'index.lock'
+    if lock.exists():
+        try:
+            lock.unlink()
+            log.info('Cleared stale index.lock in %s', workspace.name)
+        except Exception as e:
+            log.warning('Failed to clear stale index.lock in %s: %s', workspace.name, e)
+
+    try:
+        # First, try the staged-diff approach (git add -A → git diff --cached)
+        r_add = _run(['git', 'add', '-A'])
+        add_ok = r_add is not None and r_add.returncode == 0
+        if not add_ok:
+            rc = r_add.returncode if r_add is not None else -1
+            err = (r_add.stderr[:200] if r_add is not None else 'timeout/crash')
+            log.warning('git add -A failed in %s (rc=%d): %s — falling back to unstaged diff',
+                        workspace.name, rc, err)
 
         if add_ok:
-            r_files = subprocess.run(
-                ['git', 'diff', '--cached', '--name-only'],
-                capture_output=True, text=True, timeout=_GIT_TIMEOUT,
-                cwd=str(workspace),
-            )
+            r_files = _run(['git', 'diff', '--cached', '--name-only'])
         else:
-            # Fallback: get unstaged diff (doesn't need git add)
-            r_files = subprocess.run(
-                ['git', 'diff', '--name-only'],
-                capture_output=True, text=True, timeout=_GIT_TIMEOUT,
-                cwd=str(workspace),
-            )
+            r_files = _run(['git', 'diff', '--name-only'])
 
-        if r_files.returncode != 0:
-            log.warning('git diff --name-only failed (rc=%d) in %s: %s',
-                        r_files.returncode, workspace.name, r_files.stderr[:200])
-            return ''
+        # If the name-only listing itself failed, fall back to `git status --porcelain`
+        # before giving up, so we don't lose real changes to harness errors.
+        file_list = []
+        if r_files is not None and r_files.returncode == 0:
+            file_list = [f.strip() for f in r_files.stdout.strip().split('\n') if f.strip()]
+        else:
+            rc = r_files.returncode if r_files is not None else -1
+            log.warning('git diff --name-only failed (rc=%d) in %s — trying status --porcelain',
+                        rc, workspace.name)
+            r_stat = _run(['git', 'status', '--porcelain'])
+            if r_stat is not None and r_stat.returncode == 0:
+                for line in r_stat.stdout.splitlines():
+                    # Porcelain format: two-letter status + space + path
+                    if len(line) > 3:
+                        path = line[3:].strip()
+                        # Handle renames: "R  old -> new"
+                        if ' -> ' in path:
+                            path = path.split(' -> ', 1)[1].strip()
+                        if path:
+                            file_list.append(path)
+            else:
+                log.error('Could not list changed files in %s — all methods failed',
+                          workspace.name)
+                return ''
 
         source_files = []
-        for f in r_files.stdout.strip().split('\n'):
-            f = f.strip()
-            if not f:
-                continue
+        for f in file_list:
             if any(f.startswith(p) for p in _EXCLUDE_PREFIXES):
                 continue
             if f.endswith('.pyc'):
@@ -1032,18 +1115,26 @@ def _extract_git_diff(workspace: Path) -> str:
         if not source_files:
             return ''
 
-        diff_cmd = ['git', 'diff', '--cached', '--'] if add_ok else ['git', 'diff', '--']
-        r = subprocess.run(
-            diff_cmd + source_files,
-            capture_output=True, text=True, timeout=_GIT_TIMEOUT,
-            cwd=str(workspace),
-        )
-        diff = r.stdout.rstrip('\r') if r.returncode == 0 else ''
-        if diff and not diff.endswith('\n'):
-            diff += '\n'
-        return diff
+        # Emit the diff — try staged first, then unstaged, then HEAD-vs-worktree.
+        diff_attempts = []
+        if add_ok:
+            diff_attempts.append(['git', 'diff', '--cached', '--'] + source_files)
+        diff_attempts.append(['git', 'diff', '--'] + source_files)
+        diff_attempts.append(['git', 'diff', 'HEAD', '--'] + source_files)
+
+        for cmd in diff_attempts:
+            r = _run(cmd)
+            if r is not None and r.returncode == 0 and r.stdout.strip():
+                diff = r.stdout.rstrip('\r')
+                if not diff.endswith('\n'):
+                    diff += '\n'
+                return diff
+
+        log.warning('All diff attempts empty in %s despite %d changed files: %s',
+                    workspace.name, len(source_files), source_files[:5])
+        return ''
     except Exception as e:
-        log.warning('Failed to extract diff from %s: %s', workspace.name, e)
+        log.warning('Failed to extract diff from %s: %s', workspace.name, e, exc_info=True)
         return ''
 
 

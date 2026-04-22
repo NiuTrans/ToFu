@@ -53,9 +53,11 @@ from lib.project_mod.write_tools import (  # noqa: E402,F401
     _apply_one_diff,
     _find_closest_match,
     _insert_one,
+    _resolve_write_path,
     _touch_for_vscode,
     tool_apply_diff,
     tool_apply_diffs,
+    tool_create_project,
     tool_insert_content,
     tool_insert_contents,
     tool_write_file,
@@ -1038,8 +1040,10 @@ def _run_command_simple(command, full_command, timeout, base, task=None):
 
             # Check wall-clock timeout
             if timeout is not None and (time.time() - _start) >= timeout:
-                logger.warning('run_command timed out after %ss — killing PID %d',
-                               timeout, proc.pid)
+                # Expected outcome of user-declared timeout budget —
+                # caller already surfaces [TIMEOUT] in stdout.
+                logger.info('run_command timed out after %ss — killing PID %d',
+                            timeout, proc.pid)
                 _kill_process_tree(proc)
                 # Clean up task ref
                 if task is not None:
@@ -1250,8 +1254,16 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
             env=_get_cmd_env(),
             text=False,  # binary mode for non-blocking I/O
         )
+    except (FileNotFoundError, NotADirectoryError) as e:
+        # Bad cwd / missing shell binary — user-error, not a bug. Keep log
+        # concise (no traceback) so error.log isn't flooded when callers
+        # pass a non-existent project path.
+        logger.warning('run_command: cannot start (cwd=%s): %s', base, e)
+        return (f'$ {command}\n\n'
+                f'❌ Error starting command: {e}\n'
+                f'[exit code: -1]')
     except Exception as e:
-        logger.error('run_command Popen error: %s', e, exc_info=True)
+        logger.error('run_command Popen error (cwd=%s): %s', base, e, exc_info=True)
         return (f'$ {command}\n\n'
                 f'❌ Error starting command: {e}\n'
                 f'[exit code: -1]')
@@ -1282,7 +1294,9 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
             # Check timeout
             elapsed = time.monotonic() - start_time
             if timeout and elapsed > timeout:
-                logger.warning('run_command timed out after %ss (interactive)', timeout)
+                # Expected outcome of user-declared timeout budget —
+                # caller already surfaces [TIMEOUT] in stdout.
+                logger.info('run_command timed out after %ss (interactive)', timeout)
                 timed_out = True
                 proc.kill()
                 break
@@ -1556,11 +1570,18 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
         return tool_list_dir(bp, rp)
     elif fn_name == 'read_files':
         reads = fn_args.get('reads', [])
+        if not isinstance(reads, list):
+            return (
+                'Error: read_files expects "reads" to be an array of '
+                '{"path": "...", "start_line"?: int, "end_line"?: int} objects. '
+                f'Got type={type(reads).__name__}. Retry with the correct schema.'
+            )
         # Resolve multi-root 'rootname:path' and normalise bare-string specs.
         # Each spec gets a '_base' key so tool_read_files can use the correct
         # base per file (important for multi-root workspaces).
         resolved = []
-        for spec in reads:
+        invalid_specs = []  # (index, preview) pairs for error reporting
+        for i, spec in enumerate(reads):
             if isinstance(spec, dict) and 'path' in spec:
                 bp2, rp2 = _resolve_base(base_path, spec['path'])
                 resolved.append({'path': rp2, 'start_line': spec.get('start_line'),
@@ -1570,10 +1591,35 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
                 resolved.append({'path': rp2, '_base': bp2})
                 logger.debug('[Tools] read_files: normalised bare string spec %r → dict', spec[:80])
             else:
-                logger.warning('[Tools] read_files: skipping invalid spec type=%s val=%r',
-                               type(spec).__name__, str(spec)[:120])
-                continue
-        return tool_read_files(base_path, resolved)
+                invalid_specs.append((i, type(spec).__name__, str(spec)[:120]))
+                logger.warning('[Tools] read_files: invalid spec at index %d type=%s val=%r',
+                               i, type(spec).__name__, str(spec)[:120])
+        # If ALL specs were invalid, return a clear error so the model can retry
+        if not resolved and invalid_specs:
+            details = '; '.join(f'index {i}: {t} {v!r}' for i, t, v in invalid_specs[:5])
+            return (
+                f'Error: read_files received {len(invalid_specs)} invalid spec(s) '
+                f'and no valid ones. Each entry in "reads" must be '
+                f'{{"path": "...", "start_line"?: int, "end_line"?: int}} — '
+                f'a bare path string is also accepted as a shorthand. '
+                f'Invalid entries: {details}. Retry with correct schema.'
+            )
+        # If SOME specs were invalid, prepend a warning but still read the valid ones
+        result = tool_read_files(base_path, resolved)
+        if invalid_specs:
+            details = '; '.join(f'index {i}: {t} {v!r}' for i, t, v in invalid_specs[:5])
+            warn = (
+                f'[Note] read_files: {len(invalid_specs)} invalid spec(s) skipped — '
+                f'{details}. Each entry must be {{"path": "..."}} or a bare path string.\n\n'
+            )
+            if isinstance(result, str):
+                return warn + result
+            if isinstance(result, dict):
+                # Batch-image result — prepend warn to the text portion
+                result = dict(result)
+                result['_text_content'] = warn + result.get('_text_content', '')
+                return result
+        return result
     elif fn_name == 'grep_search':
         # ★ Batch mode: if 'searches' array is present, run all searches
         searches = fn_args.get('searches')
@@ -1640,6 +1686,17 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
         return tool_find_files(bp, fn_args.get('pattern', ''),
                                search_path,
                                max_results=fn_args.get('max_results'))
+    # ★ create_project — bootstrap a new workspace root
+    elif fn_name == 'create_project':
+        result = tool_create_project(
+            fn_args.get('path', ''),
+            name=fn_args.get('name'),
+            overwrite=bool(fn_args.get('overwrite', False)),
+            conv_id=conv_id, task_id=task_id,
+        )
+        if result.get('ok'):
+            return (f"✅ {result['message']}")
+        return f"❌ create_project failed: {result.get('error', 'unknown error')}"
     # ★ Write tools — pass conv_id + task_id for per-round undo
     elif fn_name == 'write_file':
         bp, rp = _resolve_base(base_path, fn_args.get('path', ''))
@@ -1874,6 +1931,10 @@ def project_tool_display(fn_name, fn_args):
             return f'Find {n} patterns: {", ".join(pats)}{suffix}'
         search_path = fn_args.get('path', '')
         return f'Find {fn_args.get("pattern", "?")}' + (f' in {search_path}' if search_path else '')
+    elif fn_name == 'create_project':
+        p = fn_args.get('path', '?')
+        nm = fn_args.get('name')
+        return f'Create project {p}' + (f' (name={nm})' if nm else '')
     elif fn_name == 'write_file':
         p = fn_args.get('path', '?')
         desc = fn_args.get('description', '')

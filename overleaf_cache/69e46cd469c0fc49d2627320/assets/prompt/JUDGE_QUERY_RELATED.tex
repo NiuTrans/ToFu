@@ -1,0 +1,38 @@
+
+\begin{tcolorbox}[
+    enhanced,
+    colback=white,
+    colframe=black,
+    arc=5mm,
+    boxrule=1pt,
+    left=2mm,
+    right=2mm,
+    top=1mm,
+    bottom=1mm
+]
+
+\textbf{Task.} You will be shown a candidate pool of passages (each prefixed with a unique \texttt{[Document ID]}) together with a user question. The candidate pool always contains exactly one passage originally labelled as the gold source plus several hard-negative distractors, but their order is randomised. Your job is to identify the single passage that most directly and completely supports the answer to the question.
+
+\textbf{Reasoning protocol.}\\
+1. For each candidate, jot down whether it explicitly contains the answer ("full"), implies or partially overlaps ("partial"), or is unrelated ("none").\\
+2. If more than one candidate is marked "full", prefer the one with the most directly cited evidence; ties are broken by the shortest quoted span that still uniquely answers the question.\\
+3. Return only one \texttt{[Document ID]}. Do not return multiple IDs and do not fabricate new IDs.
+
+\textbf{Demonstration.}\\
+\texttt{[1]} The Eiffel Tower, completed in 1889 for the World's Fair, was designed and built by the company of Gustave Eiffel... \\
+\texttt{[2]} The Statue of Liberty was dedicated on October 28, 1886...\\
+\texttt{[3]} Big Ben is the nickname of the Great Bell at the Palace of Westminster...\\
+
+\emph{Question:} Who designed the Eiffel Tower?\\
+\emph{Analysis:} [1] is "full" (names Gustave Eiffel's company). [2] and [3] are "none" (different landmarks).\\
+\emph{Document ID:} [1]
+
+\textbf{Now process the real instance.}\\
+
+\textbf{Passages:}\\
+\{DOCUMENTS\}\\
+
+\textbf{Question:}\\
+\{QUESTION\}\\
+
+\end{tcolorbox}

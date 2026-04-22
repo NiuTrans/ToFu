@@ -1,0 +1,53 @@
+\documentclass{article}
+\usepackage{pgfplots}
+\usepackage{pgfplotstable}
+\usepackage{filecontents}
+\pgfplotsset{compat=1.18}
+
+\begin{filecontents}{data.csv}
+Method,medqa,medmcqa,pubmedqa,careqa,AVG
+Qwen2-base,44.46190102,46.56944776,47.3,52.03700409,47.59208822
+Qwen2+PT,0.628436764,0.262969161,1.9,0.56929372,0.840174911
+Qwen2+PT+NTP,10.44776119,5.426727229,5.3,11.68831169,8.215700028
+Qwen2+NDP_epoch1,47.28986646,49.43820225,45.9,59.95374489,50.6454534
+Qwen2+NDP_epoch2,49.48939513,50.60961033,43.7,61.21686533,51.2539677
+Qwen2+NTP,47.60408484,50.10757829,42.6,60.46966732,50.19533261
+\end{filecontents}
+
+\begin{document}
+
+\begin{tikzpicture}
+\begin{axis}[
+    width=15cm,
+    height=15cm,
+    radar chart,
+    log basis x=10,
+    tick label style={font=\small},
+    axis line style={opacity=0},
+    tick style={line cap=round, line join=round},
+    tick pos=left,
+    ticks=10,
+    xlabel={},
+    ylabel={},
+    grid=major,
+    xtick=data,
+    xticklabel style={anchor=north},
+    yticklabel style={anchor=east},
+    enlargelimits=false,
+    visualization depends on=rawx\as\rawx,
+    visualization depends on=rawy\as\rawy,
+    point meta=explicit symbolic,
+    nodes near coords align={anchor=center},
+    cycle list name=color list
+    ]
+
+    \pgfplotstableread[col sep=comma]{data.csv}\datatable
+    \foreach \col in {2,3,...,6} {
+        \addplot+[mark=*, thick, mark options={scale=1.5}]
+            table[x expr=\coordindex, y index=\col, meta index=0] {\datatable};
+    }
+    \legend{Qwen2-base, Qwen2+PT, Qwen2+PT+NTP, Qwen2+NDP\_epoch1, Qwen2+NDP\_epoch2, Qwen2+NTP}
+\end{axis}
+\end{tikzpicture}
+
+\end{document}

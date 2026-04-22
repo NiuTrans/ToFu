@@ -1,0 +1,34 @@
+\begin{table}[htbp]
+    \centering
+    
+    \bicaption{常见机器翻译评价指标}{Common Evaluation Metrics for Machine Translation}
+    \label{tab:translation_metrics}
+    \footnotesize
+    \scalebox{0.85}{
+    \begin{tabular}{c c c c c c}
+    \toprule
+    \textbf{名称} & \textbf{评估维度} & \textbf{衡量角度} & \textbf{有无参考} & \textbf{粒度} & \textbf{计算方法} \\
+    \midrule
+    BLEU & 翻译质量 & n-gram & 有 & n-gram & 机器译文和参考译文之间的 \textit{n-gram} 匹配率 \\
+    
+    ROUGE & 翻译质量 & n-gram & 有 & n-gram & 机器译文与参考译文之间的重叠率 \\
+    
+    METEOR & 翻译质量 & 词对齐 & 有 & 单词 & 词干与同义词对齐匹配 \\
+    
+    TER & 翻译质量 & 距离 & 有 & 单词 & 将译文转换为参考译文所需的最小编辑次数 \\
+
+    COMET & 翻译质量 & 连续表示 & 有 & 句子 & 连续空间中的语义相似度 \\
+
+    LMScore & 翻译质量 & LM概率 & 无 & 句子 & 语言模型直接判断译文准确性 \\
+
+    CCR & 约束完成质量 & 单词 & 有 & 单词 & 译文词级别的约束完成率 \\
+
+    SAR & 约束完成质量 & 结构 & 有 & 单词 & 译文结构级别的约束完成率，强调完成率 \\
+
+    SMR & 约束完成质量 & 结构 & 有 & 单词 & 译文构级别的约束匹配率，强调顺序严格匹配 \\
+    
+    \bottomrule
+    \end{tabular}
+    }
+\end{table}
+    

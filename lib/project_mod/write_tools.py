@@ -1,4 +1,4 @@
-"""Project write tools — write_file, apply_diff, apply_diffs.
+"""Project write tools — write_file, apply_diff, apply_diffs, create_project.
 
 Extracted from tools.py for modularity. Re-exported via tools.py for backward compat.
 """
@@ -6,16 +6,236 @@ Extracted from tools.py for modularity. Re-exported via tools.py for backward co
 import os
 from difflib import SequenceMatcher
 
-from lib.log import get_logger
+from lib.log import audit_log, get_logger
+from lib.project_mod.config import _lock, _roots, _state
 from lib.project_mod.modifications import _record_modification
-from lib.project_mod.scanner import _fmt_size, _safe_path
+from lib.project_mod.scanner import _fmt_size, _safe_path, add_project_root
 
 logger = get_logger(__name__)
 
 
 # ═══════════════════════════════════════════════════════
+#  create_project — bootstrap a new workspace root
+# ═══════════════════════════════════════════════════════
+
+# System paths where a user-facing project MUST NOT be created.  These are
+# either OS-owned directories (where writing files would likely corrupt the
+# system) or special filesystems (/proc, /sys, /dev) where creating a
+# directory is meaningless or actively harmful.
+#
+# Note: we block both exact matches AND any path under these system roots
+# (e.g. '/etc/myproj' is rejected).  Windows equivalents are included for
+# cross-platform safety, though the dominant deployment is Linux/macOS.
+_FORBIDDEN_CREATE_ROOTS = (
+    '/', '/etc', '/usr', '/bin', '/sbin', '/boot',
+    '/sys', '/proc', '/dev', '/var', '/lib', '/lib32', '/lib64', '/root',
+    'C:\\', 'C:\\Windows', 'C:\\Program Files', 'C:\\Program Files (x86)',
+)
+
+
+def _is_forbidden_create_path(abs_path):
+    """Return True if *abs_path* must not host a new project.
+
+    Rejects:
+      - the filesystem root itself ('/' or 'C:\\')
+      - exact match with any entry in ``_FORBIDDEN_CREATE_ROOTS``
+      - any descendant of the Unix-style system roots
+      - the user's ``$HOME`` itself (a project at ~ would shadow many files)
+    """
+    if not abs_path:
+        return True
+    p = os.path.normpath(abs_path)
+    # Strip trailing separator for comparison, but preserve '/' and 'C:\\'.
+    p_cmp = p.rstrip(os.sep) if len(p) > 1 and not (len(p) == 3 and p[1] == ':') else p
+
+    for forb in _FORBIDDEN_CREATE_ROOTS:
+        forb_cmp = forb.rstrip(os.sep) if len(forb) > 1 and not (len(forb) == 3 and forb[1] == ':') else forb
+        if p_cmp == forb_cmp:
+            return True
+        # Descendant check — only for Unix-style system roots where
+        # every child is system-managed (not '/home', '/opt', '/tmp', etc.).
+        if forb in ('/etc', '/usr', '/bin', '/sbin', '/boot',
+                    '/sys', '/proc', '/dev', '/lib', '/lib32', '/lib64'):
+            if p_cmp.startswith(forb + os.sep):
+                return True
+
+    # Reject '$HOME' itself (but allow children like '~/projects/foo').
+    try:
+        home = os.path.expanduser('~')
+        if home and home != '~':
+            home_cmp = home.rstrip(os.sep) or home
+            if p_cmp == home_cmp:
+                return True
+    except (OSError, KeyError):
+        # Can't determine HOME — skip this check rather than blocking.
+        pass
+
+    return False
+
+
+def tool_create_project(path, name=None, overwrite=False, conv_id=None, task_id=None):
+    """Create a new project directory and register it as an extra workspace root.
+
+    After this call, the new path can be addressed with the ``<name>:<rel>``
+    prefix in any path-taking tool (``write_file``, ``apply_diff``,
+    ``read_files``, ``run_command``, …), or by the absolute path directly.
+
+    Args:
+        path: Target directory (may start with ``~``).  Created if missing.
+        name: Short root name used as the ``name:`` prefix.  Defaults to
+            the directory basename; collisions get a numeric suffix.
+        overwrite: If True, accept a non-empty existing directory (files are
+            NOT deleted — only the "non-empty" guard is bypassed so the root
+            can still be registered).
+        conv_id: Conversation ID (for audit log only).
+        task_id: Task ID (for audit log only).
+
+    Returns:
+        dict with keys: ok, action, path, rootName, created, message, error.
+    """
+    if not path or not isinstance(path, str):
+        return {'ok': False, 'error': 'path is required (non-empty string)',
+                'action': 'create_project', 'path': path}
+
+    # Normalise & expand.  abspath(expanduser(...)) handles '~/foo', relative
+    # paths resolved against CWD, and trailing separators.
+    try:
+        abs_path = os.path.abspath(os.path.expanduser(path.strip()))
+    except Exception as e:
+        logger.warning('[Project] create_project: invalid path %r: %s', path, e)
+        return {'ok': False, 'action': 'create_project', 'path': path,
+                'error': f'Invalid path: {e}'}
+
+    # ── Safety gate: forbid system paths ──
+    if _is_forbidden_create_path(abs_path):
+        msg = (f'Refusing to create a project at system path: {abs_path}. '
+               f'Choose a user-writable location (e.g. under ~/projects or '
+               f'a sibling of the current project).')
+        logger.warning('[Project] create_project blocked (system path): %s', abs_path)
+        return {'ok': False, 'action': 'create_project', 'path': abs_path, 'error': msg}
+
+    # ── Require an active project session (for audit context & session dir) ──
+    with _lock:
+        primary = _state.get('path')
+    if not primary:
+        return {'ok': False, 'action': 'create_project', 'path': abs_path,
+                'error': 'No primary project is set. Open a project before calling create_project.'}
+
+    # ── Create or verify directory ──
+    already_existed = os.path.exists(abs_path)
+    if already_existed:
+        if not os.path.isdir(abs_path):
+            return {'ok': False, 'action': 'create_project', 'path': abs_path,
+                    'error': f'Path exists but is not a directory: {abs_path}'}
+        try:
+            has_entries = any(True for _ in os.scandir(abs_path))
+        except OSError as e:
+            logger.warning('[Project] create_project scandir failed %s: %s', abs_path, e)
+            return {'ok': False, 'action': 'create_project', 'path': abs_path,
+                    'error': f'Cannot inspect directory: {e}'}
+        if has_entries and not overwrite:
+            return {'ok': False, 'action': 'create_project', 'path': abs_path,
+                    'error': (f'Directory exists and is not empty: {abs_path}. '
+                              f'Set overwrite=true to register it as a workspace root anyway '
+                              f'(existing files are NOT deleted).')}
+        created = False
+    else:
+        try:
+            os.makedirs(abs_path, exist_ok=True)
+        except OSError as e:
+            logger.error('[Project] create_project makedirs failed for %s: %s',
+                         abs_path, e, exc_info=True)
+            return {'ok': False, 'action': 'create_project', 'path': abs_path,
+                    'error': f'Cannot create directory: {e}'}
+        created = True
+
+    # ── Register as extra root (never replace primary) ──
+    # add_project_root auto-handles name collisions by appending a suffix
+    # and is a no-op if an existing root already maps to the same path.
+    try:
+        add_project_root(abs_path, name=name)
+    except Exception as e:
+        logger.error('[Project] create_project: add_project_root failed for %s: %s',
+                     abs_path, e, exc_info=True)
+        # Don't try to rm_rf the directory we just made — user may want it.
+        return {'ok': False, 'action': 'create_project', 'path': abs_path,
+                'error': f'Directory ready but failed to register as workspace root: {e}'}
+
+    # Look up the actually-assigned root name (may differ from `name` on collision).
+    root_name = None
+    with _lock:
+        for rn, rs in _roots.items():
+            if rs['path'] == abs_path:
+                root_name = rn
+                break
+    if not root_name:
+        # Shouldn't happen — add_project_root always adds or finds the entry.
+        root_name = (name or os.path.basename(abs_path) or 'root')
+        logger.warning('[Project] create_project: root lookup fell through for %s, '
+                       'using fallback name %s', abs_path, root_name)
+
+    audit_log('project_create',
+              path=abs_path, root_name=root_name,
+              created=created, overwrite=bool(overwrite),
+              conv_id=conv_id, task_id=task_id)
+    logger.info('[Project] create_project: path=%s root=%s created=%s overwrite=%s',
+                abs_path, root_name, created, bool(overwrite))
+
+    hint = (f'Use path prefix "{root_name}:<rel>" (e.g. '
+            f'write_file(path=\'{root_name}:README.md\', ...)) or absolute paths '
+            f'under {abs_path} for subsequent write operations.')
+    msg = (f'{"Created" if created else "Registered existing directory"} "{abs_path}" '
+           f'as workspace root "{root_name}". {hint}')
+
+    return {
+        'ok': True,
+        'action': 'create_project',
+        'path': abs_path,
+        'rootName': root_name,
+        'created': created,
+        'overwrite': bool(overwrite),
+        'message': msg,
+    }
+
+
+# ═══════════════════════════════════════════════════════
 #  Fuzzy match helper
 # ═══════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════
+#  Absolute-path write safety
+# ═══════════════════════════════════════════════════════
+
+def _resolve_write_path(base, rel_path):
+    """Return the on-disk target for a write/edit tool, accepting either
+    a project-relative path or an absolute path under a *registered* root.
+
+    Symmetrically mirrors ``read_files`` which also accepts absolute paths.
+    The key safety constraint: an absolute path must resolve INSIDE some
+    entry of ``_roots`` (the set of paths the user has explicitly opened
+    or created via ``create_project``).  Absolute paths outside every
+    registered root are rejected — preventing the model from silently
+    writing to ``/etc/passwd`` or similar just because it ignored the
+    ``rootname:`` convention.
+
+    Raises ``ValueError`` on rejection so callers can surface the error
+    consistently with the existing ``_safe_path`` code path.
+    """
+    if rel_path and (rel_path.startswith('/') or rel_path.startswith('~')):
+        abs_path = os.path.abspath(os.path.expanduser(rel_path))
+        # Check containment against every registered root.
+        with _lock:
+            roots_snapshot = [rs['path'] for rs in _roots.values()]
+        for root_path in roots_snapshot:
+            norm_root = os.path.abspath(root_path).rstrip(os.sep) or root_path
+            if abs_path == norm_root or abs_path.startswith(norm_root + os.sep):
+                return abs_path
+        raise ValueError(
+            f'Absolute path {abs_path} is outside all registered workspace roots. '
+            f'Call create_project(path=...) first, or use a "rootname:relative" prefix.'
+        )
+    return _safe_path(base, rel_path)
+
 
 def _find_closest_match(content, search, threshold=0.6):
     """Find the most similar block in content to the search string."""
@@ -82,11 +302,17 @@ def _touch_for_vscode(filepath):
 # ═══════════════════════════════════════════════════════
 
 def tool_write_file(base, rel_path, content, description='', conv_id=None, task_id=None):
-    """Write full content to a file. Creates parent dirs if needed."""
+    """Write full content to a file. Creates parent dirs if needed.
+
+    Accepts:
+      * project-relative paths (sandboxed to *base*), and
+      * absolute paths that resolve under a registered workspace root —
+        useful for writing into directories created by ``create_project``.
+    """
     try:
-        target = _safe_path(base, rel_path)
+        target = _resolve_write_path(base, rel_path)
     except ValueError as e:
-        logger.debug('[Tools] write_file safe_path rejected %s: %s', rel_path, e, exc_info=True)
+        logger.debug('[Tools] write_file path rejected %s: %s', rel_path, e, exc_info=True)
         return {'ok': False, 'error': str(e), 'action': 'write_file', 'path': rel_path}
 
     existed = os.path.isfile(target)
@@ -142,11 +368,14 @@ def tool_write_file(base, rel_path, content, description='', conv_id=None, task_
 # ═══════════════════════════════════════════════════════
 
 def _apply_one_diff(base, rel_path, search, replace, description='', conv_id=None, replace_all=False, task_id=None):
-    """Apply a single search-and-replace to a file."""
+    """Apply a single search-and-replace to a file.
+
+    Accepts project-relative paths and absolute paths under registered roots.
+    """
     try:
-        target = _safe_path(base, rel_path)
+        target = _resolve_write_path(base, rel_path)
     except ValueError as e:
-        logger.debug('[Tools] apply_diff safe_path rejected %s: %s', rel_path, e, exc_info=True)
+        logger.debug('[Tools] apply_diff path rejected %s: %s', rel_path, e, exc_info=True)
         return {'ok': False, 'error': str(e), 'action': 'apply_diff', 'path': rel_path}
 
     if not os.path.isfile(target):
@@ -350,9 +579,9 @@ def _insert_one(base, rel_path, anchor, content, position='after', description='
         dict with ok, action, path, error (on failure), or ok + line info (on success).
     """
     try:
-        target = _safe_path(base, rel_path)
+        target = _resolve_write_path(base, rel_path)
     except ValueError as e:
-        logger.debug('[Tools] insert_content safe_path rejected %s: %s', rel_path, e, exc_info=True)
+        logger.debug('[Tools] insert_content path rejected %s: %s', rel_path, e, exc_info=True)
         return {'ok': False, 'error': str(e), 'action': 'insert_content', 'path': rel_path}
 
     if not os.path.isfile(target):

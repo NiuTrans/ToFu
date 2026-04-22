@@ -1,0 +1,26 @@
+\documentclass{article}
+\usepackage{booktabs}   % 用于\toprule, \midrule, \bottomrule
+\usepackage{multirow}   % 用于\multirow
+\usepackage{adjustbox}  % 用于\begin{adjustbox}
+
+\begin{document}
+\begin{table*}[h]
+\renewcommand{\arraystretch}{1.03}
+\centering
+\begin{adjustbox}{width={0.99\textwidth},totalheight={\textheight},keepaspectratio}
+\begin{tabular}{lcccccccccccc}
+\toprule
+\multirow{2}{*}{Models}                                                                                                         & \multicolumn{2}{c}{Average} & \multicolumn{2}{c}{Doc2Dial} & \multicolumn{2}{c}{QuAC} & \multicolumn{2}{c}{QReCC} & \multicolumn{2}{c}{TopiOCQA} & \multicolumn{2}{c}{INSCIT} \\ \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9} \cmidrule(lr){10-11} \cmidrule(lr){12-13}
+& top-1         & top-5        & top-1       & top-5      & top-1       & top-5   & top-1        & top-5     & top-5*       & top-20*       & top-5*        & top-20*        \\ \midrule
+Dragon (w/ dialog history)   & 46.29       & 73.09    & 43.33         & 75.61        & 56.8        & 82.86      & 46.17       & 81.96       & 57.68        & 78.80   & 27.49 & 46.22           \\
+Dragon + Rewrite (w/ dialog history)      & 47.57        & 74.12     & 44.54         & 76.98        & 57.23       & 83.04      & 46.45       & 82.60        & 60.94        & 81.74 & 28.69 & 46.22            \\ 
+Dragon + Rewrite (w/ single query only)     & \textbf{54.46}       & \textbf{80.13}   & 47.60          & 80.60         & 47.10        & 77.15      & 51.73       & 85.78       & 73.07        & 88.19  & 52.79 & 68.92           \\ \midrule
+Dragon + Fine-tune (w/ dialog history) &  52.72 & 80.67 & 48.94 & 83.01 & 52.64 & 81.95 & 50.73 & 87.17 & 67.86 & 86.28 & 43.43 & 64.94 \\
+Dragon + Fine-tune + Rewrite (w/ dialog hisotry)    & \textbf{53.17}      & \textbf{80.84}   & 49.30          & 84.64        & 55.04       & 83.23      & 51.23       & 87.99       & 60.50         & 81.03  & 49.80 & 67.33        \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\caption{Comprehensive multi-turn retrieval results across five datasets.}
+\label{tab:retrieval_all}
+\end{table*}
+\end{document}

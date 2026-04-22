@@ -37,7 +37,8 @@ __all__ = [
     # Tools
     'tool_list_dir', 'tool_read_files', 'tool_grep', 'tool_grep_batch',
     'tool_find_files', 'tool_find_files_batch',
-    'tool_write_file', 'tool_apply_diff', 'tool_insert_content', 'tool_run_command',
+    'tool_write_file', 'tool_apply_diff', 'tool_insert_content',
+    'tool_create_project', 'tool_run_command',
     'execute_tool', 'execute_standalone_command',
     'project_tool_display', 'browse_directory',
     # Context
@@ -117,6 +118,7 @@ from lib.project_mod.tools import (
     execute_tool,
     project_tool_display,
     tool_apply_diff,
+    tool_create_project,
     tool_find_files,
     tool_find_files_batch,
     tool_grep,

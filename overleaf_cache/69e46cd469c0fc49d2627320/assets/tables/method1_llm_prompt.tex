@@ -1,0 +1,25 @@
+\begin{table}[h]
+
+\centering
+\bicaption{传统数据增强方法在大语言模型上的性能表现}{Performance of traditional data augmentation methods on LLMs}
+\small
+\resizebox{0.6\linewidth}{!}{
+\begin{tabular}{l ll ll}
+    \toprule
+    \textbf{\large Method} & \textbf{\large BLEU} & \textbf{\large CCR\%} & \textbf{\large BLEU} & \textbf{\large CCR\%} \\
+    \midrule
+    \textit{Dataset} & \multicolumn{2}{c }{\textit{IATE}} & \multicolumn{2}{c}{\textit{Wiktionary}} \\
+    \midrule
+    LLM Trans           & 32.0 & 85.4 & 32.0 & 88.7 \\
+    LLM Code-switching  & 31.8 & 94.0 & 31.9 & 92.6 \\
+    LLM Append          & 31.6 & 93.3 & 31.5 & 91.9 \\
+    LLM Const. Trans.   & 32.0 & 96.2 & 32.1 & 97.2 \\
+    \quad +Revision     & 32.0 & 98.9 & 32.0 & 98.9 \\
+    \bottomrule
+\end{tabular} 
+}
+
+\label{tab:method1_llm_prompt}
+\vspace{-1.1em}
+
+\end{table}

@@ -45,15 +45,17 @@ curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh | bas
 irm https://raw.githubusercontent.com/rangehow/ToFu/main/install.ps1 | iex
 ```
 
-**或直接用 Python**（任何装有 Python 3.10+ 的系统）：
+**或直接用 Python**（任何系统）：
 ```bash
 git clone https://github.com/rangehow/ToFu.git && cd ToFu
 python install.py
 ```
 
-安装脚本会自动创建虚拟环境、安装依赖并启动服务器。就绪后打开 **http://localhost:15000**。
+安装脚本会自动创建专用 conda 环境、从 conda-forge 安装所有依赖并启动服务器。就绪后打开 **http://localhost:15000**。
 
-> 💾 **数据库：开箱即用、无需配置。** Tofu 默认使用 **SQLite** —— Python 内置，无需安装。如果系统中有 PostgreSQL，Tofu 会自动初始化并升级为 PG 后端（支持 100+ 用户更高并发）。设置 `CHATUI_DB_BACKEND=sqlite` 即可强制使用 SQLite。
+> 🐍 **基于 conda 的安装器。** 安装器**完全使用 conda-forge** —— 如果没装 conda，会自动安装 [Miniforge](https://github.com/conda-forge/miniforge)；然后先升级 conda（旧版 conda 是求解器卡死的头号原因），装上 `libmamba` 求解器，再创建 `tofu` 环境（Python 3.12）并安装所有依赖（含 `lxml`、`playwright`、`postgresql`）。这样可以避开 pip 的 manylinux wheel 在旧主机（CentOS 7 / glibc 2.17）上触发的 GLIBC 不兼容问题。
+
+> 💾 **数据库：无需配置。** Tofu 默认使用 **SQLite**（Python 内置）。如果环境里有 `postgresql`（安装器会从 conda-forge 装上），Tofu 会自动启动一个用户态、免 root 的 PG 实例，为 100+ 用户提供更好的并发。设置 `CHATUI_DB_BACKEND=sqlite` 即可强制 SQLite。
 
 ```bash
 # 预配置 API 密钥和端口
@@ -61,6 +63,15 @@ python install.py --api-key sk-xxx --port 8080
 
 # 仅安装，不启动
 python install.py --no-launch
+
+# 指定 env 名 / Python 版本
+python install.py --env tofu --python 3.12
+
+# 跳过 conda 自升级（不推荐）
+python install.py --no-update-conda
+
+# 破坏性：删除已有 env 从头重建
+python install.py --reset-env
 
 # 用 Docker 安装
 python install.py --docker
@@ -78,52 +89,67 @@ docker compose up -d
 <details>
 <summary><strong>手动安装</strong>（完全控制）</summary>
 
-**前提条件：** Python 3.10+，ripgrep & fd-find（推荐）。PostgreSQL 18+ 为*可选* —— Tofu 默认使用 SQLite。
+**前提条件：** 一个较新的 `conda`（强烈推荐 Miniforge）。其余无需任何系统依赖 —— 所有运行时依赖（ripgrep、fd-find、PostgreSQL、Chromium 共享库、lxml、trafilatura、playwright……）都从 conda-forge 安装，无需 `sudo`，不碰系统包管理器。
 
-> 💡 **强烈推荐：使用 [Miniforge](https://github.com/conda-forge/miniforge) 管理 Python 环境。**
-> 旧版系统自带的 conda/Anaconda 经常导致依赖冲突。安装最新版 Miniforge 可获得干净、最新的 conda-forge 环境：
-> ```bash
-> # 下载并安装 Miniforge（Linux x86_64 示例）
-> wget -O /tmp/Miniforge3.sh "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
-> bash /tmp/Miniforge3.sh -b -p ~/miniforge3
-> ~/miniforge3/bin/conda init bash && source ~/.bashrc
->
-> # 创建专用环境
-> conda create -n tofu python=3.10 -y
-> conda activate tofu
-> ```
-> 其他平台请参考 [Miniforge 发布页面](https://github.com/conda-forge/miniforge/releases)。
+> 💡 **为何所有依赖都走 conda-forge？** 在较老的 Linux 主机（CentOS 7 / glibc 2.17）上，pip 的 manylinux wheel（尤其是 `lxml`）在导入时会报 `GLIBC_2.25 not found`。conda-forge 的构建链接到较老的 sysroot glibc，到处都能跑。
 
 ```bash
+# 1. 如果没有 conda，先装 Miniforge
+wget -O /tmp/Miniforge3.sh "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
+bash /tmp/Miniforge3.sh -b -p ~/miniforge3
+~/miniforge3/bin/conda init bash && source ~/.bashrc
+# （macOS：把 Linux-x86_64 换成 MacOSX-arm64 或 MacOSX-x86_64。
+#   其他平台见 https://github.com/conda-forge/miniforge/releases ）
+
+# 2. 先升级 conda —— 旧版 conda 是卡 solver 的头号原因
+conda update -n base -c conda-forge -y conda
+conda install -n base -c conda-forge -y conda-libmamba-solver
+conda config --set solver libmamba
+
+# 3. 克隆仓库
 git clone https://github.com/rangehow/ToFu.git && cd ToFu
 
-# 创建环境（如果已用 conda/Miniforge 则跳过此步）
-python -m venv .venv && source .venv/bin/activate
+# 4. 创建环境
+conda create -n tofu -c conda-forge -y python=3.12
+conda activate tofu
 
-# 可选：安装 PostgreSQL 以获得更高并发（SQLite 开箱即用）
-# macOS:   brew install postgresql@18
-# Ubuntu:  sudo apt install postgresql
-# conda:   conda install -c conda-forge postgresql>=18
+# 5. 从 conda-forge 装所有依赖（不用 pip）
+conda install -c conda-forge -y \
+    flask 'flask-compress>=1.14' 'requests>=2.31' psutil \
+    'trafilatura>=1.6' 'playwright>=1.40' pillow python-pptx 'lxml>=4.9' 'mcp>=1.0' \
+    ripgrep fd-find \
+    'postgresql>=16' 'psycopg2>=2.9'
 
-# 安装 ripgrep & fd-find（推荐 — 代码搜索更快）
-# macOS:   brew install ripgrep fd
-# Ubuntu:  sudo apt install ripgrep fd-find
+# 6. Playwright Chromium（可选，用于渲染 JS 页面）
+# Linux 上还需要装 Chromium 的共享库（免 root）：
+conda install -c conda-forge -y \
+    atk-1.0 at-spi2-atk at-spi2-core alsa-lib \
+    xorg-libxcomposite xorg-libxdamage xorg-libxfixes xorg-libxrandr \
+    libxkbcommon nspr nss mesa-libgbm-cos7-x86_64
+python -m playwright install chromium
 
-# 安装依赖
-pip install -r requirements.txt
+# 7. 健壮性校验 —— 下面这行能打印版本号就说明 GLIBC 问题不存在
+python -c "import lxml.etree, trafilatura; print('OK', lxml.__version__)"
 
-# 可选：浏览器自动化
-pip install playwright && playwright install chromium
-
-# 启动
+# 8. 启动
 python server.py
 ```
+
+> ⚠️ **千万别对这些包混用 pip 和 conda。** 如果上次运行在 env 里留下了 pip 装的 `lxml` wheel，conda 会直接 no-op（认为已满足版本），坏 wheel 继续崩。这时候：
+>
+> ```bash
+> pip uninstall -y lxml flask flask-compress requests psutil trafilatura \
+>                  playwright pillow python-pptx mcp
+> conda install -c conda-forge -y --force-reinstall <同一套包列表>
+> ```
+>
+> 一键的 `install.sh` / `install.py` 会自动做这件事。
 
 </details>
 
 > **数据库自动检测：**首次启动时，Tofu 优先尝试 PostgreSQL（更好的并发性）；如 PG 不可用则自动回退到 **SQLite** —— 你无需任何操作。PostgreSQL 如存在会以本地用户态进程运行（无需 `sudo`，无需系统服务）。设置 `CHATUI_DB_BACKEND=sqlite` 即可强制使用 SQLite。
 
-> **缺少依赖？** 如果有任何 pip 包缺失，`server.py` 会自动委托给 `bootstrap.py`，通过 LLM 诊断错误并自动 `pip install` 所需的包 —— 即使*所有*依赖都缺失也能工作。
+> **缺少依赖？** 如果任何依赖缺失，`server.py` 会自动委托给 `bootstrap.py`：若当前在 conda env 内，会优先用 `conda install -c conda-forge` 修复（绕开 GLIBC 陷阱），否则回退到 LLM 引导的 `pip install`。
 
 ---
 

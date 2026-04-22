@@ -182,7 +182,7 @@ def log_compress():
         return jsonify({'compressed': content, 'usage': usage})
     except Exception as e:
         logger.error('[LogCompress] Error: %s', e, exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'internal_error'}), 500
 
 
 # ══════════════════════════════════════════════════════
@@ -266,6 +266,84 @@ def dispatch_quota():
         'total_requests_5h': total_5h,
         'total_requests_all': total_all,
     })
+
+
+# ══════════════════════════════════════════════════════
+#  Dispatch Key Stats — today's success rate per API key
+#  (auto-disable < 50%, manual override)
+# ══════════════════════════════════════════════════════
+
+@common_bp.route('/api/dispatch/key-stats', methods=['GET'])
+def dispatch_key_stats():
+    """Return today's success/failure counts per API key.
+
+    Response:
+    {
+      "day": "2026-04-18",
+      "min_attempts": 5,
+      "min_success_rate": 0.5,
+      "providers": {
+        "<provider_id>": {
+          "<key_name>": {
+            "success": int, "failure": int, "total": int,
+            "success_rate": float|null,
+            "auto_disabled": bool, "override": bool|null, "enabled": bool,
+            "last_error": str
+          }, ...
+        }, ...
+      }
+    }
+    """
+    try:
+        from lib.key_stats import get_all_stats
+        snapshot = get_all_stats()
+    except Exception as e:
+        logger.warning('[dispatch/key-stats] Failed: %s', e, exc_info=True)
+        return jsonify({'day': '', 'providers': {},
+                        'min_attempts': 5, 'min_success_rate': 0.5})
+
+    providers = {}
+    for pk, row in (snapshot.get('keys') or {}).items():
+        if '::' in pk:
+            prov_id, key_name = pk.split('::', 1)
+        else:
+            prov_id, key_name = 'default', pk
+        providers.setdefault(prov_id, {})[key_name] = row
+
+    return jsonify({
+        'day': snapshot.get('day', ''),
+        'min_attempts': snapshot.get('min_attempts', 5),
+        'min_success_rate': snapshot.get('min_success_rate', 0.5),
+        'max_consecutive_429': snapshot.get('max_consecutive_429', 100),
+        'providers': providers,
+    })
+
+
+@common_bp.route('/api/dispatch/key-override', methods=['POST'])
+def dispatch_key_override():
+    """Manually toggle a key on/off for today.
+
+    Body: { "provider_id": str, "key_name": str, "enabled": bool|null }
+    If enabled is null, the override is cleared (revert to auto-disable logic).
+    """
+    data = request.get_json(silent=True) or {}
+    prov_id = (data.get('provider_id') or '').strip()
+    key_name = (data.get('key_name') or '').strip()
+    enabled = data.get('enabled', None)
+    if not key_name:
+        return jsonify({'error': 'key_name required'}), 400
+    try:
+        from lib.key_stats import clear_key_override, set_key_override
+        if enabled is None:
+            row = clear_key_override(prov_id, key_name)
+        else:
+            row = set_key_override(prov_id, key_name, bool(enabled))
+    except Exception as e:
+        logger.error('[dispatch/key-override] Failed: %s', e, exc_info=True)
+        return jsonify({'error': 'internal_error'}), 500
+    return jsonify({'ok': True, 'provider_id': prov_id, 'key_name': key_name,
+                    'row': row})
+
 
 # ══════════════════════════════════════════════════════
 #  Static Pages & Favicon
@@ -402,7 +480,18 @@ def save_features():
             json.dump(existing, f, indent=2)
     except Exception as e:
         logger.error('[Features] Failed to write features.json: %s', e, exc_info=True)
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        return jsonify({'ok': False, 'error': 'internal_error'}), 500
+
+    # ── Audit trail for each flag that actually changed ──
+    if changed:
+        try:
+            from lib.log import audit_log as _audit
+            for _param in changed:
+                _audit('feature_flag_change',
+                       param=_param,
+                       new=bool(existing.get(_param, False)))
+        except Exception as _aerr:
+            logger.debug('[Features] audit_log feature_flag_change failed: %s', _aerr)
 
     # Hot-reload TRADING_ENABLED on the lib module
     if 'trading_enabled' in changed:
@@ -443,7 +532,14 @@ def client_error():
                 log_parts.append('stack=%s' % extra['stack'][:500])
         else:
             log_parts.append('extra=%s' % str(extra)[:500])
-    logger.error('%s', ' | '.join(log_parts))
+    # Respect the client-side severity so we don't spam error.log with
+    # things the frontend only flagged as a warning (e.g. orphan-task
+    # recovery, polling fallback, sync 409 conflicts).
+    _msg_lower = message.lower()
+    if '[debuglog][warn]' in _msg_lower or '[debuglog][info]' in _msg_lower:
+        logger.warning('%s', ' | '.join(log_parts))
+    else:
+        logger.error('%s', ' | '.join(log_parts))
     return jsonify({'ok': True})
 
 @common_bp.route('/api/health')

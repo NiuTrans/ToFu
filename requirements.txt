@@ -4,6 +4,12 @@ requests>=2.31
 psutil>=5.9
 # sqlite3 is built into Python — no external package needed
 trafilatura>=1.6
+# playwright is optional — powers the JS-rendered fallback in lib/fetch.
+# On Linux, Chromium needs X11/GTK shared libs (libatk, libgbm, libXcomposite, …).
+#   With root:    sudo python -m playwright install-deps chromium
+#   Without root: install.py falls back to `conda install -c conda-forge`
+#                 (atk-1.0, xorg-libxcomposite, mesa-libgbm-cos7-x86_64, …) and
+#                 lib/fetch/playwright_pool.py auto-augments LD_LIBRARY_PATH.
 playwright>=1.40
 Pillow>=10.0
 python-pptx>=0.6.21

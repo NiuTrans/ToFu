@@ -1,13 +1,22 @@
-"""lib/swarm/compat.py — Backward-compatible functions from the original master.py.
+"""lib/swarm/compat.py — Backward-compatible swarm API wrappers.
 
-Extracted from master.py:
-  • spawn_sub_agent() — create a SubAgent from a SubTaskSpec
-  • _execute_wave() — execute a wave of agents in parallel (pre-StreamingScheduler)
-  • _retry_failed() — retry failed agents with error context
-  • run_swarm_task() — fire-and-forget functional API
-  • _STREAMING_SCHEDULER_MOVED — sentinel for backward compat
+**This module has NOTHING to do with** :mod:`lib.compat` (cross-platform
+helpers for Windows/macOS/Linux shell, pipe I/O, /proc). The name
+collision is historical — this file predates the cross-platform module.
+Here, "compat" means "API backward compatibility" for swarm callers
+that existed before :class:`~lib.swarm.scheduler.StreamingScheduler`.
 
-New code should prefer StreamingScheduler / MasterOrchestrator directly.
+Extracted from the old ``master.py``:
+  • :func:`spawn_sub_agent` — create a :class:`~lib.swarm.agent.SubAgent`
+    from a :class:`~lib.swarm.protocol.SubTaskSpec`
+  • :func:`_execute_wave` — execute a wave of agents in parallel
+    (pre-StreamingScheduler path)
+  • :func:`_retry_failed` — retry failed agents with error context
+  • :func:`run_swarm_task` — fire-and-forget functional API
+  • ``_STREAMING_SCHEDULER_MOVED`` — sentinel for backward compat
+
+New code should prefer :class:`~lib.swarm.scheduler.StreamingScheduler` /
+:class:`~lib.swarm.master.MasterOrchestrator` directly.
 """
 
 from collections.abc import Callable

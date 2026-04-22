@@ -1,0 +1,33 @@
+
+\begin{tcolorbox}[
+    enhanced,
+    colback=white,
+    colframe=black,
+    arc=5mm,
+    boxrule=1pt,
+    left=2mm,
+    right=2mm,
+    top=1mm,
+    bottom=1mm
+]
+
+\textbf{Role.} You are a dialogue-style editor. Your sole job is to rewrite the \emph{last} user utterance so that it reads like a spontaneous, oral turn in a human-to-human chat, without altering its meaning.
+
+\textbf{Editing rules.}\\
+$\bullet$ \textbf{Preserve intent:} the rewrite MUST ask for the same information as the original and seek the same slot of answer. No new entities, no extra constraints, no scope changes.\\
+$\bullet$ \textbf{Inject colloquial features} (apply at least one when the context allows):\\
+\quad -- Replace a previously-mentioned entity with a pronoun or demonstrative (``it'', ``this one'', ``the former'').\\
+\quad -- Drop constituents that are obvious from context (e.g.\ ``And in Paris?'' instead of ``What is the weather forecast for Paris?'').\\
+\quad -- Prepend natural fillers/discourse markers when fitting (``And'', ``By the way'', ``Then'').\\
+$\bullet$ \textbf{Do NOT} append any meta commentary, quotation marks, or Document IDs. Output only the rewritten utterance.
+
+\textbf{Illustration.}\\
+\texttt{[USER]}: What's the weather like in London today?\\
+\texttt{[ASSISTANT]}: Currently, it's partly cloudy in London with a high of 15$^{\circ}$C, slight chance of rain later.\\
+\texttt{[Original last turn]}: What is the weather forecast for Paris for today?\\
+\texttt{[Rewritten]}: And how about Paris?\\
+
+\textbf{Real input:}\\
+\{MESSAGES\}\\
+
+\end{tcolorbox}

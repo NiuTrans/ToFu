@@ -244,24 +244,48 @@ class TestRoleValidationHelpers:
 
 @pytest.mark.unit
 class TestVerdictParsing:
-    """Unit tests for _parse_verdict."""
+    """Unit tests for _parse_verdict (three-way: stop / worker / planner)."""
 
     def test_stop_verdict(self):
         from lib.tasks_pkg.endpoint_review import _parse_verdict
-        feedback, stop = _parse_verdict("All good! [VERDICT: STOP]")
-        assert stop is True
+        feedback, phase = _parse_verdict("All good! [VERDICT: STOP]")
+        assert phase == 'stop'
         assert "All good!" in feedback
 
-    def test_continue_verdict(self):
+    def test_continue_worker_verdict(self):
         from lib.tasks_pkg.endpoint_review import _parse_verdict
-        feedback, stop = _parse_verdict("Needs work. [VERDICT: CONTINUE]")
-        assert stop is False
+        feedback, phase = _parse_verdict("Needs work. [VERDICT: CONTINUE_WORKER]")
+        assert phase == 'worker'
         assert "Needs work." in feedback
 
-    def test_no_verdict_defaults_continue(self):
+    def test_legacy_continue_verdict_maps_to_worker(self):
+        """Backward compat: bare [VERDICT: CONTINUE] must map to 'worker'."""
         from lib.tasks_pkg.endpoint_review import _parse_verdict
-        feedback, stop = _parse_verdict("Some feedback without a verdict tag.")
-        assert stop is False
+        feedback, phase = _parse_verdict("Needs work. [VERDICT: CONTINUE]")
+        assert phase == 'worker'
+        assert "Needs work." in feedback
+
+    def test_continue_planner_verdict(self):
+        from lib.tasks_pkg.endpoint_review import _parse_verdict
+        feedback, phase = _parse_verdict(
+            "Plan is wrong. [VERDICT: CONTINUE_PLANNER]"
+        )
+        assert phase == 'planner'
+
+    def test_no_verdict_defaults_to_worker(self):
+        from lib.tasks_pkg.endpoint_review import _parse_verdict
+        feedback, phase = _parse_verdict("Some feedback without a verdict tag.")
+        assert phase == 'worker'
+
+    def test_stop_with_x_markers_overridden_to_planner(self):
+        """Defense-in-depth: STOP with unresolved ❌ → override to 'planner'."""
+        import os
+        os.environ['CHATUI_ENDPOINT_REPLAN'] = '1'
+        from lib.tasks_pkg.endpoint_review import _parse_verdict
+        feedback, phase = _parse_verdict(
+            "- ❌ Item 1 still failing\n[VERDICT: STOP]"
+        )
+        assert phase == 'planner'
 
 
 # ═══════════════════════════════════════════════════════════

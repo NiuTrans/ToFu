@@ -23,8 +23,15 @@ def parse_pdf(pdf_bytes: bytes, *,
               max_images: int = 20,
               min_img_dim: int = 80,
               min_img_bytes: int = 2000,
+              progress_callback=None,
 ) -> dict:
     """Full PDF parsing: text extraction + figure/table image extraction.
+
+    Args:
+        progress_callback: Optional ``Callable[[str, int, int], None]`` invoked
+            as ``(stage, done, total)`` where ``stage`` is ``'text'`` during
+            text extraction and ``'images'`` during figure clipping. Exceptions
+            from the callback are swallowed (logged at DEBUG).
 
     Returns dict with keys:
         text, images, totalPages, textLength, isScanned, method, warnings
@@ -32,7 +39,15 @@ def parse_pdf(pdf_bytes: bytes, *,
     max_chars = max_text_chars if max_text_chars > 0 else 999_999_999
 
     # ── Text (opens/closes its own doc internally) ──
-    text = extract_pdf_text(pdf_bytes, max_chars) or ''
+    def _text_cb(done, total):
+        if progress_callback is None:
+            return
+        try:
+            progress_callback('text', done, total)
+        except Exception as e:
+            logger.debug('[PDF] progress_callback raised (ignored): %s', e)
+
+    text = extract_pdf_text(pdf_bytes, max_chars, progress_callback=_text_cb) or ''
 
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
@@ -65,6 +80,11 @@ def parse_pdf(pdf_bytes: bytes, *,
                     if len(images) >= max_images:
                         break
                     images.append(img)
+                if progress_callback is not None:
+                    try:
+                        progress_callback('images', pi + 1, pages_to_render)
+                    except Exception as e:
+                        logger.debug('[PDF] progress_callback raised (ignored): %s', e)
     finally:
         doc.close()
 

@@ -11,6 +11,7 @@ from lib.log import get_logger
 from lib.scheduler import SCHEDULER_TOOL_NAMES, execute_scheduler_tool
 from lib.swarm.tools import SWARM_TOOL_NAMES
 from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round, tool_registry
+from lib.tasks_pkg.handlers._adapter import simple_call
 from lib.tasks_pkg.manager import append_event
 from lib.tools import CONV_REF_TOOL_NAMES, EMIT_TO_USER_TOOL_NAMES
 
@@ -98,38 +99,38 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     return tc_id, tool_content, False
 
 
+# ═══ Adapter-based handlers (simple_call does log→time→exec→meta→finalize) ═══
+
 @tool_registry.tool_set(SCHEDULER_TOOL_NAMES, category='scheduler',
                         description='Schedule reminders and recurring tasks')
 def _handle_scheduler_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
-    import time as _time
-    tid = task.get('id', '?')[:8]
-    _log_args = {k: v for k, v in fn_args.items() if not k.startswith('_')}
-    logger.info('[Task %s] [Scheduler] %s called with args=%s', tid, fn_name, str(_log_args)[:300])
-    t0 = _time.time()
     fn_args['_source_conv_id'] = task.get('convId', '')
     fn_args['_source_task_id'] = task.get('id', '')
-    tool_content = execute_scheduler_tool(fn_name, fn_args)
-    elapsed = _time.time() - t0
-    logger.info('[Task %s] [Scheduler] %s completed in %.1fs (result_len=%d)',
-                tid, fn_name, elapsed, len(str(tool_content)))
-    meta = _build_simple_meta(fn_name, tool_content, source='Scheduler', icon='⏰')
-    _finalize_tool_round(task, rn, round_entry, [meta])
-    return tc_id, tool_content, False
+    return simple_call(
+        task, fn_name, fn_args, rn, round_entry, tc_id,
+        executor=execute_scheduler_tool,
+        source='Scheduler', icon='⏰', module_tag='Scheduler',
+    )
+
+
+def _run_desktop(fn_name, fn_args):
+    """Desktop tool executor — wraps send_desktop_command + format_desktop_result."""
+    from routes.desktop import format_desktop_result, send_desktop_command
+    cmd_type = fn_name.replace('desktop_', '', 1)
+    result, error = send_desktop_command(cmd_type, fn_args, timeout=30)
+    if error:
+        return f'❌ Desktop Agent Error: {error}'
+    return format_desktop_result(cmd_type, result)
 
 
 @tool_registry.tool_set(DESKTOP_TOOL_NAMES, category='desktop',
                         description='Interact with the desktop agent')
 def _handle_desktop_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
-    from routes.desktop import format_desktop_result, send_desktop_command
-    cmd_type = fn_name.replace('desktop_', '', 1)
-    result, error = send_desktop_command(cmd_type, fn_args, timeout=30)
-    if error:
-        tool_content = f'❌ Desktop Agent Error: {error}'
-    else:
-        tool_content = format_desktop_result(cmd_type, result)
-    meta = _build_simple_meta(fn_name, tool_content, source='Desktop Agent', icon='🖥️')
-    _finalize_tool_round(task, rn, round_entry, [meta])
-    return tc_id, tool_content, False
+    return simple_call(
+        task, fn_name, fn_args, rn, round_entry, tc_id,
+        executor=_run_desktop,
+        source='Desktop Agent', icon='🖥️', module_tag='Desktop',
+    )
 
 
 # Module-level constant — swarm tool icon dispatch.
@@ -143,43 +144,50 @@ _SWARM_ICON_MAP = {
 @tool_registry.tool_set(SWARM_TOOL_NAMES, category='swarm',
                         description='Spawn and manage parallel sub-agents')
 def _handle_swarm_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
-    from lib.swarm.integration import execute_swarm_tool
-    tool_content = execute_swarm_tool(
-        fn_name, fn_args, task,
-        on_event=lambda ev: append_event(task, ev),
-        project_path=project_path,
-        project_enabled=project_enabled,
-        model=cfg.get('model'),
-        thinking_enabled=cfg.get('thinking_enabled', False),
-        search_mode=cfg.get('search_mode', 'multi'),
-        cfg=cfg,
-        all_tools=all_tools or [],
-    )
+    # Custom executor closes over task/cfg/all_tools to preserve the full swarm API
+    def _run_swarm(_fn_name, _fn_args):
+        from lib.swarm.integration import execute_swarm_tool
+        return execute_swarm_tool(
+            _fn_name, _fn_args, task,
+            on_event=lambda ev: append_event(task, ev),
+            project_path=project_path,
+            project_enabled=project_enabled,
+            model=cfg.get('model'),
+            thinking_enabled=cfg.get('thinking_enabled', False),
+            search_mode=cfg.get('search_mode', 'multi'),
+            cfg=cfg,
+            all_tools=all_tools or [],
+        )
+
     icon = _SWARM_ICON_MAP.get(fn_name, '🐝')
     badge = icon
     if fn_name in ('spawn_agents', 'spawn_more_agents'):
         num_agents = len(fn_args.get('agents', []))
         badge = f'{icon} {num_agents} agents'
-    meta = _build_simple_meta(fn_name, tool_content, source='Swarm', icon=icon, badge=badge)
-    _finalize_tool_round(task, rn, round_entry, [meta])
-    return tc_id, tool_content, False
+
+    return simple_call(
+        task, fn_name, fn_args, rn, round_entry, tc_id,
+        executor=_run_swarm,
+        source='Swarm', icon=icon, badge=badge, module_tag='Swarm',
+    )
 
 
 @tool_registry.tool_set(CONV_REF_TOOL_NAMES, category='conversations',
                         description='List and retrieve past conversations')
 def _handle_conv_ref_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
     current_conv_id = task.get('convId')
-    tool_content = execute_conv_ref_tool(fn_name, fn_args, current_conv_id=current_conv_id)
+
+    def _run(_fn_name, _fn_args):
+        return execute_conv_ref_tool(_fn_name, _fn_args, current_conv_id=current_conv_id)
+
     icon = '📋' if fn_name == 'list_conversations' else '💬'
     detail = fn_args.get('keyword', 'all') if fn_name == 'list_conversations' else fn_args.get('conversation_id', '?')[:8]
-    meta = _build_simple_meta(
-        fn_name, tool_content, source='Conversations', icon=icon,
+    return simple_call(
+        task, fn_name, fn_args, rn, round_entry, tc_id,
+        executor=_run,
+        source='Conversations', icon=icon, module_tag='ConvRef',
         title=f'{icon} {fn_name}: {detail}',
     )
-    _finalize_tool_round(task, rn, round_entry, [meta])
-    return tc_id, tool_content, False
-
-
 
 
 # ═══ emit_to_user handler (terminal — breaks orchestrator loop) ═══════
@@ -232,4 +240,3 @@ def _handle_emit_to_user(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     )
     _finalize_tool_round(task, rn, round_entry, [meta])
     return tc_id, comment, False
-

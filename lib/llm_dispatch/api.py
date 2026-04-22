@@ -153,7 +153,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                 time.sleep(0.3)
                 _429_count += 1
                 if _429_count % 20 == 0:
-                    logger.warning(
+                    logger.info(
                         '%s dispatch_chat: still cycling 429 (%d times), '
                         'waiting for cooldown to expire…',
                         log_prefix, _429_count)
@@ -201,8 +201,23 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
             return content, usage
 
         except RateLimitError as e:
-            slot.record_error(is_rate_limit=True)
+            _is_quota = bool(getattr(e, 'is_quota', False))
+            _err_str = str(e)[:200]
+            slot.record_error(is_rate_limit=True,
+                              is_quota_exhausted=_is_quota,
+                              error=_err_str if _is_quota else '')
             last_err = e
+            if _is_quota:
+                # ★ Persistent billing/quota exhaustion (HTTP 402 or
+                #   429+insufficient_quota). Retrying on this key all day
+                #   is pointless — exclude the entire key and move on.
+                exclude_keys.add(slot.key_name)
+                hard_attempts += 1
+                logger.warning(
+                    '%s Quota exhausted on %s:%s — disabling key for '
+                    'today: %s',
+                    log_prefix, slot.key_name, slot.model, _err_str)
+                continue
             _429_count += 1
             # ★ Don't exclude anything — slot.record_error() sets a 0.5s
             #   cooldown which naturally steers pick_and_reserve to another
@@ -217,13 +232,28 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                 logger.info(
                     '%s 429 rate-limited on %s:%s (cycle #%d)',
                     log_prefix, slot.key_name, slot.model, _429_count)
+            # ★ If this 429 just tripped the consecutive-429 streak threshold,
+            #   the key was auto-marked as exhausted — exclude it explicitly
+            #   so the current retry loop moves on immediately.
+            try:
+                from lib.key_stats import is_key_enabled
+                if not is_key_enabled(slot.provider_id, slot.key_name):
+                    exclude_keys.add(slot.key_name)
+                    hard_attempts += 1
+                    logger.warning(
+                        '%s Key %s auto-exhausted after %d consecutive 429s '
+                        '— excluding for today',
+                        log_prefix, slot.key_name, _429_count)
+                    continue
+            except Exception:
+                pass
             time.sleep(0.3)
             # ★ Don't increment hard_attempts — 429 retries are free
             continue
 
         except PermissionError_ as e:
             latency = (time.time() - t0) * 1000
-            slot.record_error(is_rate_limit=False)
+            slot.record_error(is_rate_limit=False, error=str(e)[:200])
             last_err = e
             exclude_pairs.add((slot.key_name, slot.model))
             hard_attempts += 1
@@ -368,11 +398,31 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
             body['reasoning_split'] = True
     elif not _tf and is_claude(new_model):
         if is_enabled:
+            # Keep this in sync with the Claude branch in build_body().
+            #   • 4.6 and earlier: adaptive + temperature=1.0
+            #   • 4.7+: adaptive + display='summarized' (required to see
+            #           reasoning trace), and NO temperature (ignored today,
+            #           may be rejected in a future revision).
+            from lib.llm_client import is_claude_opus_47
             body['thinking'] = {'type': 'adaptive'}
-            body['temperature'] = 1.0
+            if is_claude_opus_47(new_model):
+                body['thinking']['display'] = 'summarized'
+            else:
+                body['temperature'] = 1.0
             if effort:
+                # xhigh is Opus 4.7-only; downgrade on older Claude to avoid HTTP 400.
+                if effort == 'xhigh' and not is_claude_opus_47(new_model):
+                    effort = 'high'
                 body['effort'] = effort
     # else: standard OpenAI-compatible — no thinking params needed
+
+    # ── Claude Opus 4.7+ rejects sampling params (HTTP 400) ──
+    # Strip unconditionally after re-setting, since non-4.7 branches above
+    # may have assigned temperature=1.0 before a potential model swap.
+    from lib.llm_client import is_claude_opus_47
+    if is_claude_opus_47(new_model):
+        for _k in ('temperature', 'top_p', 'top_k'):
+            body.pop(_k, None)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -383,14 +433,22 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     on_tool_call_ready=None,
                     abort_check=None, max_tokens=4096, temperature=0,
                     thinking_enabled=False, preset='low', effort=None,
-                    capability='text', prefer_model=None,
+                    capability='text', prefer_model=None, tools=None,
                     max_retries=3, log_prefix='', strict_model=False,
                     on_retry=None):
     """Smart dispatch for streaming requests.
 
     Accepts either:
-      - A pre-built body dict (with 'messages' key)
-      - Raw messages list (will build body using the dispatched model)
+      - A pre-built body dict (with 'messages' key) — legacy path; the
+        body is re-adapted to each dispatched slot via
+        ``_readjust_thinking_params`` / ``_clamp_max_tokens``.
+      - Raw messages list — PREFERRED path: ``build_body`` is called for
+        the actual slot picked, so provider-specific quirks (Claude Opus 4.7
+        sampling param rejection, GLM temperature clamp, Qwen enable_thinking
+        shape, …) are always correct for the final target model.
+
+    The raw-messages path accepts ``tools=`` so callers doing tool loops
+    (e.g. paper report, swarm agents) no longer need to pre-build the body.
 
     429 handling:
       - Does NOT count toward max_retries — retries indefinitely.
@@ -497,7 +555,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 time.sleep(0.3)
                 _429_count += 1
                 if _429_count % 20 == 0:
-                    logger.warning(
+                    logger.info(
                         '%s dispatch_stream: still cycling 429 (%d times, strict=%s), '
                         'waiting for cooldown to expire…',
                         log_prefix, _429_count, strict_model)
@@ -519,6 +577,10 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
         if is_body:
             body = dict(body_or_messages)
             body['model'] = slot.model
+            # Allow callers to inject tools even on the pre-built path
+            # (uncommon, but keeps the API symmetric).
+            if tools is not None:
+                body['tools'] = tools
             # ★ Re-clamp max_tokens for the new model — the pre-built body
             #   may have been constructed for a model with a higher limit
             #   (e.g. Claude 128000) but dispatch swapped to a lower-limit
@@ -547,6 +609,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 temperature=temperature,
                 thinking_enabled=thinking_enabled,
                 preset=effort or preset,
+                tools=tools,
                 stream=True,
                 thinking_format=slot.thinking_format or '',
                 provider_id=slot.provider_id or '',
@@ -599,8 +662,26 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             return msg, finish, usage
 
         except RateLimitError as e:
-            slot.record_error(is_rate_limit=True)
+            _is_quota = bool(getattr(e, 'is_quota', False))
+            _err_str = str(e)[:200]
+            slot.record_error(is_rate_limit=True,
+                              is_quota_exhausted=_is_quota,
+                              error=_err_str if _is_quota else '')
             last_err = e
+            if _is_quota:
+                # ★ Persistent billing/quota exhaustion — disable this key
+                #   for the remainder of this dispatch and flag it so the
+                #   user sees "out of balance" in Settings.
+                exclude_keys.add(slot.key_name)
+                hard_attempts += 1
+                logger.warning(
+                    '%s Quota exhausted on %s:%s — disabling key for '
+                    'today: %s',
+                    log_prefix, slot.key_name, slot.model, _err_str)
+                if on_retry:
+                    on_retry(attempt=hard_attempts,
+                             reason='Key balance exhausted', status_code=429)
+                continue
             _429_count += 1
             # ★ Don't exclude anything — slot.record_error() sets a 0.5s
             #   cooldown which naturally steers pick_and_reserve to another
@@ -621,6 +702,24 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 logger.info(
                     '%s 429 rate-limited on %s:%s (cycle #%d)',
                     log_prefix, slot.key_name, slot.model, _429_count)
+            # ★ If the streak just tripped, the key is now flagged as
+            #   exhausted — exclude it so we don't cycle back to it.
+            try:
+                from lib.key_stats import is_key_enabled
+                if not is_key_enabled(slot.provider_id, slot.key_name):
+                    exclude_keys.add(slot.key_name)
+                    hard_attempts += 1
+                    logger.warning(
+                        '%s Key %s auto-exhausted after %d consecutive 429s '
+                        '— excluding for today',
+                        log_prefix, slot.key_name, _429_count)
+                    if on_retry:
+                        on_retry(attempt=hard_attempts,
+                                 reason='Key auto-exhausted (consecutive 429s)',
+                                 status_code=429)
+                    continue
+            except Exception:
+                pass
             if on_retry:
                 on_retry(attempt=_429_count, reason='Rate limited (429)', status_code=429)
             time.sleep(0.3)
@@ -943,6 +1042,17 @@ def smart_chat(messages, *, model=None, max_tokens=4096, temperature=0,
             from lib import GEMINI_MODEL
             _fb_model = GEMINI_MODEL   # gemini-2.5-flash — fast & cheap
             logger.info('%s Fallback using cheap model: %s', log_prefix, _fb_model)
+        # ── Audit trail: record the model switch on exhaustion fallback ──
+        try:
+            from lib.log import audit_log as _audit
+            _audit('model_switch',
+                   old=(model or '(dispatch-auto)'),
+                   new=(_fb_model or '(llm_client default)'),
+                   reason='dispatch_exhausted',
+                   capability=capability,
+                   error=str(e)[:200])
+        except Exception as _aerr:
+            logger.debug('%s audit_log model_switch failed: %s', log_prefix, _aerr)
         return chat(messages=messages, model=_fb_model,
                     max_tokens=max_tokens, temperature=temperature,
                     thinking_enabled=thinking_enabled, effort=effort or preset,

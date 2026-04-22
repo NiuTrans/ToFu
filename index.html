@@ -16,7 +16,7 @@
 <link rel="stylesheet" href="static/vendor/google-fonts-local.css">
 <link rel="stylesheet" href="static/vendor/github-dark.min.css">
 <link rel="stylesheet" href="static/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="static/styles.css?v=0.9.0">
+<link rel="stylesheet" href="static/styles.css?v=0.9.2">
 <script>
   // Prevent flash of wrong theme — apply before render (default: tofu)
   (function(){var t=localStorage.getItem('claude_ui_theme')||'tofu';document.documentElement.setAttribute('data-theme',t);})();
@@ -283,7 +283,7 @@
             <div class="paper-report-model-picker" id="paperReportModelPicker">
               <button class="paper-report-model-btn" onclick="_togglePaperReportModelDropdown(event)" title="Select model for report generation">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
-                <span id="paperReportModelLabel">Default</span>
+                <span id="paperReportModelLabel">Select model</span>
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
               </button>
               <div class="paper-report-model-dropdown" id="paperReportModelDropdown">
@@ -402,6 +402,7 @@
                 <button class="depth-btn" data-depth="off" onclick="selectThinkingDepth('off')">Off</button>
                 <button class="depth-btn active" data-depth="medium" onclick="selectThinkingDepth('medium')">Med</button>
                 <button class="depth-btn" data-depth="high" onclick="selectThinkingDepth('high')">High</button>
+                <button class="depth-btn" data-depth="xhigh" onclick="selectThinkingDepth('xhigh')" title="Claude Opus 4.7+ only — downgrades to High on other models">xHigh</button>
                 <button class="depth-btn" data-depth="max" onclick="selectThinkingDepth('max')">Max</button>
               </div>
             </div>
@@ -690,10 +691,11 @@
             <div class="settings-row two-col">
               <div class="settings-field">
                 <label data-i18n="settings.defaultThinkingDepth">默认思维深度 (Thinking Depth)</label>
-                <select id="settingDefaultThinkingDepth" style="max-width:200px">
+                <select id="settingDefaultThinkingDepth" style="max-width:340px">
                   <option value="off" data-i18n="settings.thinkingOff">Off — 关闭</option>
                   <option value="medium" selected data-i18n="settings.thinkingMedium">Medium — 中等</option>
                   <option value="high" data-i18n="settings.thinkingHigh">High — 深度</option>
+                  <option value="xhigh" data-i18n="settings.thinkingXHigh">xHigh — 超深度 (Claude 4.7+)</option>
                   <option value="max" data-i18n="settings.thinkingMax">Max — 最大</option>
                 </select>
                 <div class="settings-toggle-desc" data-i18n="settings.defaultThinkingDesc">新对话的默认思维深度级别</div>
@@ -1597,6 +1599,7 @@
       <button class="mobile-depth-btn" data-depth="off" onclick="selectThinkingDepth('off');updateMobileDepth()" data-i18n="mobile.off">关闭</button>
       <button class="mobile-depth-btn active" data-depth="medium" onclick="selectThinkingDepth('medium');updateMobileDepth()" data-i18n="mobile.medium">中</button>
       <button class="mobile-depth-btn" data-depth="high" onclick="selectThinkingDepth('high');updateMobileDepth()" data-i18n="mobile.high">高</button>
+      <button class="mobile-depth-btn" data-depth="xhigh" onclick="selectThinkingDepth('xhigh');updateMobileDepth()" data-i18n="mobile.xhigh">超高</button>
       <button class="mobile-depth-btn" data-depth="max" onclick="selectThinkingDepth('max');updateMobileDepth()" data-i18n="mobile.max">最大</button>
     </div>
   </div>
@@ -1730,26 +1733,26 @@
 </div>
 
 <!-- html2canvas: lazy-loaded on first Export click (199KB, avoids DevTools freeze) -->
-<script defer src="static/js/i18n.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/idb-cache.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/export-images.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/branch.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/i18n.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/idb-cache.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/export-images.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/branch.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- Feature modules (extracted from main.js) -->
-<script defer src="static/js/log-clean.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/translation.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/log-clean.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/translation.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 
-<script defer src="static/js/upload.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/image-gen.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/paper-reader.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/project.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/memory.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/scheduler.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/timer.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/myday.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/main.js?v=0.9.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/upload.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/image-gen.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/paper-reader.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/project.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/memory.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/scheduler.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/timer.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/myday.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main.js?v=0.9.2" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script>
 // Feature flags — show/hide optional modules
 var _featureFlags = {};

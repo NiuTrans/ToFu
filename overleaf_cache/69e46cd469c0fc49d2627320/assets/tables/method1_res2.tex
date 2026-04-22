@@ -1,0 +1,29 @@
+\begin{table}[t!]
+% \small
+\centering
+
+\bicaption{WMT21 TT数据集上的实验结果}{Experimental results on the WMT21 TT dataset}
+\footnotesize
+\resizebox{0.7\linewidth}{!}{
+    \begin{tabular}{l ll ll}
+        \toprule
+        \textbf{ Method} & \textbf{ BLEU} & \textbf{ CCR\%} & \textbf{ BLEU} & \textbf{ CCR\%} \\
+        \midrule
+        \textit{Direction} & \multicolumn{2}{c}{\textit{English-Chinese}} & \multicolumn{2}{c}{\textit{English-Russian}} \\
+        \midrule
+        HW-TSC        & \textbf{40.7} & 88.6 & - & - \\
+        TermMind-sys2  & \textit{40.5} & 85.6 & - & - \\
+        ProMT.soft     & - & - & \textbf{31.1} & 90.9  \\
+        TildeMT        & - & - & 28.2 & 86.3  \\
+        Lingua Custodia & 29.6 & 82.8 & 28.8 & 85.4  \\
+        LLM Translation     & 36.3 & 87.2 & 29.7 & 85.9  \\
+        LLM CAP & 36.4 & \textit{92.6} & 30.1 & \textit{95.8}  \\
+        \cdashline{1-5}
+        \rowcolor{black!20}
+        TAR & 35.9\textsubscript{(-0.5)} & \textbf{95.9\textsubscript{(+3.3)}}  & \textit{30.3\textsubscript{(+0.2)}}  & \textbf{97.5\textsubscript{(+1.7)}}  \\
+        \bottomrule
+    \end{tabular} 
+    }
+    \label{tab:term_res}
+    
+\end{table}

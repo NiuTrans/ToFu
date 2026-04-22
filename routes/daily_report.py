@@ -256,7 +256,8 @@ _LEGACY_PRESET_TO_MODEL = {
     'gemini': 'gemini-3.1-flash-lite-preview', 'gemini_flash': 'gemini-3-flash-preview',
     'minimax': 'MiniMax-M2.7', 'doubao': 'Doubao-Seed-2.0-pro',
     'opus': 'aws.claude-opus-4.7',
-    'medium': 'aws.claude-opus-4.7', 'high': 'aws.claude-opus-4.7', 'max': 'aws.claude-opus-4.7',
+    'medium': 'aws.claude-opus-4.7', 'high': 'aws.claude-opus-4.7',
+    'xhigh': 'aws.claude-opus-4.7', 'max': 'aws.claude-opus-4.7',
 }
 
 
@@ -359,46 +360,39 @@ def _calc_msg_cost_cny(usage, model_or_preset=''):
     return round(cost_usd * rate, 4)
 
 
-def _get_monthly_costs(year, month):
-    """Calculate per-day cost breakdown for an entire month from DB.
-
-    Scans all conversations and their messages, assigns costs to days
-    based on message timestamps (with interpolation for old messages
-    lacking timestamps, same as the frontend logic).
+def _scan_costs_in_range(ms_start, ms_end, year=None, month=None):
+    """Scan the conversations table and build per-day cost breakdowns in a range.
 
     Args:
-        year: Calendar year (int).
-        month: Calendar month 1-12 (int).
+        ms_start: Inclusive lower bound (epoch-ms).
+        ms_end:   Exclusive upper bound (epoch-ms).
+        year, month: Optional extra filter — only keep days whose date falls
+            in this year/month (when aggregating a full month).  If None,
+            all days in the range are kept.
 
     Returns:
-        dict mapping day-of-month (int) → {'cost': float, 'conversations': {conv_id: {'name': str, 'cost': float, 'tokens': int}}}.
+        dict mapping day-of-month (int) → {'cost': float,
+            'conversations': {conv_id: {'name', 'cost', 'tokens'}}}.
     """
     from lib.database import DOMAIN_CHAT, get_thread_db
     from lib.utils import safe_json
 
-    t0 = time.monotonic()
-    month_start = _dt.date(year, month, 1)
-    if month < 12:
-        month_end = _dt.date(year, month + 1, 1)
-    else:
-        month_end = _dt.date(year + 1, 1, 1)
-    ms_start = int(_dt.datetime.combine(month_start, _dt.time.min).timestamp() * 1000)
-    ms_end = int(_dt.datetime.combine(month_end, _dt.time.min).timestamp() * 1000)
-
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        # SQL-level date filter: only fetch convs updated within or after target month
-        # (created_at / updated_at are BIGINT epoch-ms)
+        # Bound on both ends so only the target window is scanned
+        # (previous version omitted the upper bound, causing full-history scans
+        #  for any month-open).
         rows = db.execute(
             'SELECT id, title, messages, created_at, updated_at, settings '
             'FROM conversations WHERE user_id=? AND '
-            'COALESCE(updated_at, created_at, 0) >= ? '
+            'COALESCE(updated_at, created_at, 0) >= ? AND '
+            'COALESCE(created_at, updated_at, 0) < ? '
             'ORDER BY updated_at DESC',
-            (DEFAULT_USER_ID, ms_start)
+            (DEFAULT_USER_ID, ms_start, ms_end)
         ).fetchall()
     except Exception as e:
-        logger.error('[DailyReport] Monthly cost DB query failed %d-%02d: %s',
-                     year, month, e, exc_info=True)
+        logger.error('[DailyReport] Cost DB query failed range=[%d,%d): %s',
+                     ms_start, ms_end, e, exc_info=True)
         return {}
 
     days = {}   # day_num → {cost, conversations}
@@ -408,7 +402,6 @@ def _get_monthly_costs(year, month):
         if not isinstance(msgs, list) or not msgs:
             continue
 
-        # Determine conversation-level model
         settings = safe_json(r.get('settings'), default={}, label='cost-settings')
         if not isinstance(settings, dict):
             settings = {}
@@ -431,7 +424,6 @@ def _get_monthly_costs(year, month):
             if not usage:
                 continue
 
-            # Timestamp resolution (mirrors frontend logic)
             ts = _safe_int_ts(msg.get('timestamp', 0))
             if not ts:
                 if (conv_start and conv_end and conv_start != conv_end
@@ -443,16 +435,15 @@ def _get_monthly_costs(year, month):
             if not ts:
                 continue
 
-            # Check if this message falls in the target month
             if ts < ms_start or ts >= ms_end:
                 continue
 
             d = _dt.datetime.fromtimestamp(ts / 1000)
-            if d.year != year or d.month != month:
-                continue
+            if year is not None and month is not None:
+                if d.year != year or d.month != month:
+                    continue
             day_num = d.day
 
-            # Per-message model (most accurate), fallback to conv-level
             msg_model = (msg.get('model') or msg.get('preset')
                          or msg.get('effort') or conv_model)
 
@@ -476,17 +467,227 @@ def _get_monthly_costs(year, month):
                 (usage.get('input_tokens') or usage.get('prompt_tokens') or 0) +
                 (usage.get('output_tokens') or usage.get('completion_tokens') or 0))
 
-    # Round final numbers
     for day_data in days.values():
         day_data['cost'] = round(day_data['cost'], 4)
         for conv_entry in day_data['conversations'].values():
             conv_entry['cost'] = round(conv_entry['cost'], 4)
 
+    return days
+
+
+def _load_cached_day_costs(year, month):
+    """Load persisted per-day costs for a given month from daily_cost_cache.
+
+    Returns:
+        dict mapping day-of-month (int) → {'cost': float, 'conversations': {...}}
+        for days that have cached entries.  Days without entries are absent.
+    """
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    from lib.utils import safe_json
+
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        prefix = f'{year:04d}-{month:02d}-'
+        # LIKE 'YYYY-MM-%' matches all days in the month
+        rows = db.execute(
+            'SELECT date, cost, conversations_json FROM daily_cost_cache '
+            'WHERE user_id=? AND date LIKE ?',
+            (DEFAULT_USER_ID, prefix + '%')
+        ).fetchall()
+    except Exception as e:
+        logger.warning('[DailyReport] Load cached costs %d-%02d failed: %s',
+                       year, month, e)
+        return {}
+
+    out = {}
+    for r in rows:
+        date_str = r['date']
+        try:
+            day_num = int(date_str.split('-')[2])
+        except (ValueError, IndexError, AttributeError) as e:
+            logger.debug('[DailyReport] Skipping invalid cached date %r: %s',
+                         date_str, e)
+            continue
+        cost_val = float(r['cost'])
+        # conversations_json is TEXT (SQLite) or JSONB rendered as string (PG,
+        # see _jsonb_as_string in _core.py).  Either way, safe_json parses it.
+        convs = safe_json(r['conversations_json'], default={},
+                          label='cached-day-convs')
+        if not isinstance(convs, dict):
+            convs = {}
+        out[day_num] = {'cost': round(cost_val, 4), 'conversations': convs}
+    return out
+
+
+def _persist_day_cost(date_str, day_data):
+    """Write a single day's cost aggregate to daily_cost_cache.
+
+    Args:
+        date_str: 'YYYY-MM-DD'.
+        day_data: {'cost': float, 'conversations': {conv_id: {...}}}.
+    """
+    from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db, json_dumps_pg
+
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        # Use json_dumps_pg so that PG's JSONB column accepts the payload
+        # (strips \u0000 / lone surrogates that would otherwise be rejected).
+        # SQLite treats this as plain TEXT, so behavior is identical.
+        convs_json = json_dumps_pg(day_data.get('conversations', {}))
+        db_execute_with_retry(
+            db,
+            'INSERT OR REPLACE INTO daily_cost_cache '
+            '(user_id, date, cost, conversations_json, computed_at) '
+            'VALUES (?, ?, ?, ?, ?)',
+            (DEFAULT_USER_ID, date_str, float(day_data.get('cost', 0.0)),
+             convs_json, int(time.time() * 1000))
+        )
+        db.commit()
+    except Exception as e:
+        logger.warning('[DailyReport] Persist day cost %s failed: %s',
+                       date_str, e)
+
+
+def invalidate_day_cost_cache(date_str=None):
+    """Invalidate persisted per-day cost cache entries.
+
+    Args:
+        date_str: If given, remove only that day ('YYYY-MM-DD').
+                  If None, clear all entries (e.g. on bulk delete).
+    """
+    from lib.database import DOMAIN_CHAT, get_thread_db
+
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        if date_str:
+            db.execute(
+                'DELETE FROM daily_cost_cache WHERE user_id=? AND date=?',
+                (DEFAULT_USER_ID, date_str)
+            )
+            logger.debug('[DailyReport] Invalidated day-cost cache for %s', date_str)
+        else:
+            db.execute('DELETE FROM daily_cost_cache WHERE user_id=?',
+                       (DEFAULT_USER_ID,))
+            logger.info('[DailyReport] Invalidated ALL day-cost cache entries')
+        db.commit()
+        # Also drop the in-process calendar TTL cache so the next request
+        # picks up the change.
+        _calendar_cache.clear()
+    except Exception as e:
+        logger.warning('[DailyReport] invalidate_day_cost_cache(%s) failed: %s',
+                       date_str, e)
+
+
+def _get_monthly_costs(year, month):
+    """Return per-day cost breakdown for a month, using persistent cache.
+
+    Strategy:
+      - For past days (date < today): read from daily_cost_cache.  On miss,
+        compute that day and persist (messages on past days are immutable).
+      - For today: always compute fresh (conversations are still being
+        written).  Do NOT persist today (it will be persisted once "today"
+        rolls over — handled by the scheduled backfill / on-demand fill for
+        any past day that still has no cache entry).
+      - Future days: skipped entirely.
+
+    Args:
+        year: Calendar year (int).
+        month: Calendar month 1-12 (int).
+
+    Returns:
+        dict mapping day-of-month (int) → {'cost': float,
+            'conversations': {conv_id: {'name': str, 'cost': float, 'tokens': int}}}.
+    """
+    t0 = time.monotonic()
+    today = _dt.date.today()
+
+    # Determine which past days need an on-demand compute+persist pass.
+    if month < 12:
+        next_month_start = _dt.date(year, month + 1, 1)
+    else:
+        next_month_start = _dt.date(year + 1, 1, 1)
+    month_start = _dt.date(year, month, 1)
+
+    # Past-day range for this month (days strictly before today):
+    if month_start >= today:
+        past_end = month_start  # no past days in this month
+    elif next_month_start <= today:
+        past_end = next_month_start  # whole month is past
+    else:
+        past_end = today  # part of month is past
+
+    # 1) Load already-persisted day rows.  This returns ALL cached rows
+    #    including zero-cost days — we need those to know they've been
+    #    scanned already (so we don't rescan them), but we filter them out
+    #    of the final response below to match legacy behavior.
+    cached_days = _load_cached_day_costs(year, month)
+    cached_hits = len(cached_days)
+    days = {}  # response payload — only non-zero days
+
+    # 2) Back-fill any past day that's missing from the cache by scanning
+    #    just those days' range and persisting the result (zeros included,
+    #    so they're not scanned again next time).
+    missing_past_days = []
+    if past_end > month_start:
+        d = month_start
+        while d < past_end:
+            if d.day not in cached_days:
+                missing_past_days.append(d)
+            d += _dt.timedelta(days=1)
+
+    if missing_past_days:
+        # Scan the tight range covering only the missing past days.
+        # In the common case (modal opened on a settled month with zero cache)
+        # this is still just one scan of the month — but once filled, it's
+        # free forever.
+        range_start = missing_past_days[0]
+        range_end = missing_past_days[-1] + _dt.timedelta(days=1)
+        ms_range_start = int(_dt.datetime.combine(range_start, _dt.time.min).timestamp() * 1000)
+        ms_range_end = int(_dt.datetime.combine(range_end, _dt.time.min).timestamp() * 1000)
+        scanned = _scan_costs_in_range(ms_range_start, ms_range_end, year, month)
+
+        for d_obj in missing_past_days:
+            day_num = d_obj.day
+            day_data = scanned.get(day_num, {'cost': 0.0, 'conversations': {}})
+            date_str = f'{year:04d}-{month:02d}-{day_num:02d}'
+            # Persist EVERY past day we've checked (including zero-cost) so
+            # future calendar renders skip the scan entirely.
+            _persist_day_cost(date_str, day_data)
+            cached_days[day_num] = day_data
+
+    # Copy non-zero cached/backfilled days into the response.
+    for day_num, day_data in cached_days.items():
+        if day_data.get('cost', 0) > 0:
+            days[day_num] = day_data
+
+    # 3) Compute today live (no persist — value isn't final yet).
+    today_cost = None
+    if year == today.year and month == today.month:
+        day_start = _dt.datetime.combine(today, _dt.time.min)
+        day_end = day_start + _dt.timedelta(days=1)
+        ms_today_start = int(day_start.timestamp() * 1000)
+        ms_today_end = int(day_end.timestamp() * 1000)
+        scanned_today = _scan_costs_in_range(ms_today_start, ms_today_end,
+                                             year, month)
+        today_day_data = scanned_today.get(today.day,
+                                           {'cost': 0.0, 'conversations': {}})
+        if today_day_data['cost'] > 0:
+            days[today.day] = today_day_data
+            today_cost = today_day_data['cost']
+        else:
+            # Drop any stale persisted value for today (e.g. from a previous
+            # day-boundary rollover where we cached yesterday's partial).
+            days.pop(today.day, None)
+
     elapsed = time.monotonic() - t0
     total_cost = sum(d['cost'] for d in days.values())
     logger.info('[DailyReport] Monthly costs %d-%02d: %d days with costs, '
-                '¥%.2f total (%.1fs)',
-                year, month, len(days), total_cost, elapsed)
+                '¥%.2f total (%d cache hits, %d live-computed past days, '
+                'today=%s) in %.2fs',
+                year, month, len(days), total_cost, cached_hits,
+                len(missing_past_days),
+                f'¥{today_cost:.2f}' if today_cost is not None else 'n/a',
+                elapsed)
     return days
 
 
@@ -1366,14 +1567,16 @@ def get_calendar_month(year, month):
             ms_end = int(_dt.datetime.combine(month_end, _dt.time.min).timestamp() * 1000)
 
             db = get_thread_db(DOMAIN_CHAT)
-            # SQL-level date filter: only fetch convs updated within or after target month
-            # (created_at / updated_at are BIGINT epoch-ms)
+            # SQL-level date filter: only fetch convs whose window overlaps
+            # the target month.  Bound both ends so we don't scan the whole
+            # future history (created_at / updated_at are BIGINT epoch-ms).
             rows = db.execute(
                 'SELECT id, messages, created_at, updated_at '
                 'FROM conversations WHERE user_id=? AND '
-                'COALESCE(updated_at, created_at, 0) >= ? '
+                'COALESCE(updated_at, created_at, 0) >= ? AND '
+                'COALESCE(created_at, updated_at, 0) < ? '
                 'ORDER BY updated_at DESC',
-                (DEFAULT_USER_ID, ms_start)
+                (DEFAULT_USER_ID, ms_start, ms_end)
             ).fetchall()
             for r in rows:
                 msgs = safe_json(r['messages'], default=[], label='cal-conv-days')

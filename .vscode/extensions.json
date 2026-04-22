@@ -1,0 +1,9 @@
+{
+  // Prompted once when a collaborator opens the workspace.
+  // Keep the list minimal — only extensions that match the project's
+  // conventions in CLAUDE.md §3.
+  "recommendations": [
+    "ms-python.python",
+    "charliermarsh.ruff"
+  ]
+}

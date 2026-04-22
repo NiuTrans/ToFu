@@ -12,6 +12,45 @@ function stripNoTranslateTags(text) {
   return text.replace(/<\/?notranslate>/gi, '').replace(/<\/?nt>/gi, '');
 }
 
+/**
+ * Targeted single-message PATCH. Sends only the whitelisted keys in `patch`
+ * to the server so chatInner actions (edit-only, translate toggle,
+ * translation completion) don't fall back to the full-conversation PUT.
+ *
+ * @param {string} convId       Conversation id.
+ * @param {number} msgIdx       Message index within conv.messages.
+ * @param {object} patch        Partial message — only whitelisted keys are
+ *                              accepted by the server. A literal `null`
+ *                              value removes that key from the message.
+ * @param {object} [opts]
+ * @param {function} [opts.onError]  Callback on server error, receives the
+ *                                   parsed error body.
+ * @returns {Promise<object|null>}  Server response `{ok, msgCount, msg}` or
+ *                                  null on failure.
+ */
+async function _patchMessageOnServer(convId, msgIdx, patch, opts = {}) {
+  if (!convId || msgIdx == null || !patch || Object.keys(patch).length === 0) return null;
+  try {
+    const res = await fetch(apiUrl(`/api/conversations/${convId}/messages/${msgIdx}`), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) {
+      let body = null;
+      try { body = await res.json(); } catch (_e) { /* ignore */ }
+      console.warn('[patchMsg] conv=%s idx=%d status=%d body=%o', convId, msgIdx, res.status, body);
+      if (typeof opts.onError === 'function') opts.onError(body, res.status);
+      return null;
+    }
+    return await res.json();
+  } catch (e) {
+    console.warn('[patchMsg] conv=%s idx=%d failed: %s', convId, msgIdx, e && e.message);
+    if (typeof opts.onError === 'function') opts.onError({ error: 'network', detail: String(e) });
+    return null;
+  }
+}
+
 function formatConvTime(ts) {
   if (!ts) return "";
   const d = new Date(ts),
@@ -566,7 +605,12 @@ function _streamingBubbleRole(conv, cfg) {
 
 /**
  * Surgically remove DOM elements for messages with index > cutoffIdx,
- * plus any leftover #streaming-msg. Updates fingerprint and turn nav.
+ * plus any leftover #streaming-msg / #translating-msg / stale endpoint bubbles.
+ * Updates fingerprint and turn nav.
+ *
+ * Also wipes the conv's streamBufs entry when the streaming bubble is removed,
+ * so a stale SSE callback can't keep accumulating into a now-detached buffer.
+ *
  * @param {Object} conv
  * @param {number} cutoffIdx — keep messages 0..cutoffIdx, remove cutoffIdx+1..
  * @returns {boolean} true if surgical path was used
@@ -582,13 +626,93 @@ function _surgicalTruncateDOM(conv, cutoffIdx) {
   });
   const oldStreaming = document.getElementById("streaming-msg");
   if (oldStreaming) toRemove.push(oldStreaming);
+  // ★ SyncFix: also evict translating bubble and any orphan endpoint bubbles
+  //   that may have been inserted without a msg-N id (critic/planner/worker
+  //   rendered directly by SSE reconnection paths).
+  const translating = document.getElementById("translating-msg");
+  if (translating) toRemove.push(translating);
+  inner.querySelectorAll('.message.ep-critic-msg, .message.ep-worker-msg, .message.ep-planner-msg').forEach(el => {
+    if (!el.id || !el.id.startsWith('msg-')) {
+      // Orphan role-styled message without msg-N id — leftover from a
+      // prior streaming/reconnect render. Safe to remove.
+      toRemove.push(el);
+    }
+  });
   if (toRemove.length > 0 || inner.querySelector('.message[id^="msg-"]')) {
+    const removedStreaming = toRemove.includes(oldStreaming) || toRemove.some(el => el === translating);
     for (const el of toRemove) el.remove();
+    // ★ SyncFix: wipe stream buffer so a still-alive SSE closure (for the
+    //   now-aborted task) stops accumulating into a detached object. twStop
+    //   also cancels any pending rAF/timeout render and clears _pendingStreamMsg.
+    if (removedStreaming && typeof twStop === 'function') {
+      try { twStop(conv.id); }
+      catch (e) { console.warn('[SyncFix] twStop during truncate failed:', e); }
+    } else if (typeof streamBufs !== 'undefined' && streamBufs.has(conv.id)) {
+      streamBufs.delete(conv.id);
+    }
     _lastRenderedFingerprint = _convRenderFingerprint(conv);
     buildTurnNav(conv);
+    console.info(`[SyncFix] _surgicalTruncateDOM conv=${conv.id.slice(0,8)} cutoffIdx=${cutoffIdx} removed=${toRemove.length} streamingCleared=${!!removedStreaming}`);
     return true;
   }
   return false;
+}
+
+/**
+ * Synchronously hard-cancel any in-flight stream/task for a conv, so that
+ * a subsequent edit/regen flow can truncate and restart without colliding
+ * with the old task's late SSE deliveries or polling responses.
+ *
+ * Fire-and-forget: the server-side abort POST is dispatched but not awaited.
+ * Local in-memory state is cleaned synchronously so the caller can proceed
+ * immediately to truncation + new task start.
+ *
+ * Safe to call when no stream is active — becomes a no-op.
+ *
+ * @param {Object} conv
+ * @returns {boolean} true if something was actually cancelled
+ */
+function _hardCancelActiveStream(conv) {
+  if (!conv) return false;
+  const convId = conv.id;
+  let cancelled = false;
+  const s = (typeof activeStreams !== 'undefined') ? activeStreams.get(convId) : null;
+  const oldTaskId = conv.activeTaskId || (s && s.taskId) || null;
+  if (s) {
+    try {
+      s._userAbort = true;
+      if (s.controller && !s.controller.signal.aborted) s.controller.abort();
+    } catch (e) {
+      console.warn(`[SyncFix] _hardCancelActiveStream: controller.abort failed for conv=${convId.slice(0,8)}:`, e);
+    }
+    cancelled = true;
+  }
+  if (oldTaskId) {
+    // Record last-aborted-task id so polling/SSE stragglers can be discarded
+    conv._lastAbortedTaskId = oldTaskId;
+    cancelled = true;
+  }
+  // Clear local in-memory state synchronously
+  if (typeof twStop === 'function') {
+    try { twStop(convId); }
+    catch (e) { console.warn('[SyncFix] _hardCancelActiveStream: twStop failed:', e); }
+  } else if (typeof streamBufs !== 'undefined') {
+    streamBufs.delete(convId);
+  }
+  conv.activeTaskId = null;
+  conv._activeTaskClearedAt = Date.now();
+  // Fire-and-forget abort-by-conv (covers any racing tasks server-side)
+  if (cancelled) {
+    try {
+      fetch(apiUrl(`/api/chat/abort-conv/${convId}`), { method: 'POST' }).catch(err => {
+        console.warn(`[SyncFix] abort-conv POST failed for conv=${convId.slice(0,8)}:`, err);
+      });
+    } catch (e) {
+      console.warn('[SyncFix] abort-conv fetch threw:', e);
+    }
+    console.info(`[SyncFix] _hardCancelActiveStream conv=${convId.slice(0,8)} oldTask=${oldTaskId?.slice(0,8)||'null'} hadStream=${!!s}`);
+  }
+  return cancelled;
 }
 
 // ── Chat rendering ──
@@ -1173,11 +1297,17 @@ function renderMessage(msg, idx) {
   } else if (msg.content) {
     try {
       let mdHtml;
-      // Show translated content only when translation is active (not toggled off)
-      const showTrans = !isUser && msg.translatedContent && msg._showingTranslation !== false;
+      // Show translated content only when translation is active (not toggled off).
+      // ★ Endpoint-mode critic messages are role=user but produced by the
+      //   Critic LLM — they DO receive server-side auto-translate.  Treat
+      //   them like assistants for the purposes of translation display.
+      const _isCritic = isUser && msg._isEndpointReview;
+      const showTrans = (!isUser || _isCritic)
+                        && msg.translatedContent
+                        && msg._showingTranslation !== false;
       if (showTrans) {
         mdHtml = renderMarkdown(msg.translatedContent);
-      } else if (isUser && msg._isEndpointReview) {
+      } else if (_isCritic) {
         // Critic messages are user-role but contain rich markdown
         mdHtml = renderMarkdown(msg.content);
       } else if (isUser) {
@@ -1213,8 +1343,17 @@ function renderMessage(msg, idx) {
     const _tmAsst = msg._translateModel ? `<span class="bilingual-model" title="${escapeHtml(msg._translateModel)}">${escapeHtml(msg._translateModel)}</span>` : '';
     body += `<div class="bilingual-block bilingual-original"><div class="bilingual-header" onclick="if(event.target.closest('.bilingual-copy-btn'))return;this.parentElement.classList.toggle('expanded')"><span class="bilingual-label"><span class="bilingual-type active">原文</span><span class="bilingual-sep">/</span><span class="bilingual-type">译文</span>${_tmAsst}</span><button class="bilingual-copy-btn" onclick="event.stopPropagation();copyBilingualOriginal(this,'assistant',${idx})" title="Copy original text"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button><span class="bilingual-toggle">▼</span></div><div class="bilingual-body"><div class="md-content">${renderMarkdown(msg.content)}</div></div></div>`;
   }
+  // ── Critic (endpoint review) bilingual block — symmetric with assistant ──
+  if (isUser && msg._isEndpointReview && msg.translatedContent && msg._showingTranslation !== false) {
+    const _tmCritic = msg._translateModel ? `<span class="bilingual-model" title="${escapeHtml(msg._translateModel)}">${escapeHtml(msg._translateModel)}</span>` : '';
+    body += `<div class="bilingual-block bilingual-original"><div class="bilingual-header" onclick="if(event.target.closest('.bilingual-copy-btn'))return;this.parentElement.classList.toggle('expanded')"><span class="bilingual-label"><span class="bilingual-type active">原文</span><span class="bilingual-sep">/</span><span class="bilingual-type">译文</span>${_tmCritic}</span><button class="bilingual-copy-btn" onclick="event.stopPropagation();copyBilingualOriginal(this,'critic',${idx})" title="Copy original text"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button><span class="bilingual-toggle">▼</span></div><div class="bilingual-body"><div class="md-content">${renderMarkdown(msg.content)}</div></div></div>`;
+  }
   // ── Persistent "translating..." indicator (survives re-render / tab switch) ──
-  if (!isUser && !msg.translatedContent && msg._translateDone === false) {
+  // Fires for both assistant messages AND endpoint-critic (role=user,
+  // _isEndpointReview) messages — both are routed through the auto-translate
+  // pipeline.
+  if ((!isUser || (isUser && msg._isEndpointReview))
+      && !msg.translatedContent && msg._translateDone === false) {
     const errText = msg._translateError;
     if (errText) {
       body += `<div class="translate-loading" id="translate-loading-${idx}" style="color:#f59e0b;cursor:pointer" onclick="translateMessage(${idx})">${t('translate.failed')}</div>`;
@@ -1246,7 +1385,11 @@ function renderMessage(msg, idx) {
       ? `<button class="msg-action-btn msg-continue-btn" onclick="event.stopPropagation();continueAssistant()" title="Continue generating from where it left off"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> Continue</button>`
       : "";
     const isShowingTrans = msg._showingTranslation;
-    const translateH = !isUser
+    // Show the Translate button on: (a) assistant messages, (b) endpoint
+    // critic review messages (role=user + _isEndpointReview) — they
+    // receive auto-translate too.
+    const _translateBtnAllowed = !isUser || (isUser && msg._isEndpointReview);
+    const translateH = _translateBtnAllowed
       ? `<button class="msg-action-btn msg-translate-btn${isShowingTrans ? " translated" : ""}" onclick="event.stopPropagation();translateMessage(${idx})" title="${isShowingTrans ? "Show Original" : "Translate"}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg> ${isShowingTrans ? "Original" : "Translate"}</button>`
       : "";
     const exportImgH = !isUser
@@ -1286,6 +1429,9 @@ function renderMessage(msg, idx) {
       criticBadge = `<span class="ep-verdict-badge ep-verdict-stop">Approved</span>`;
     } else if (msg._isStuck) {
       criticBadge = `<span class="ep-verdict-badge ep-verdict-stuck">Stuck</span>`;
+    } else if (msg._epNextPhase === 'planner') {
+      // Critic requested a full re-plan — distinct amber badge
+      criticBadge = `<span class="ep-verdict-badge ep-verdict-replan">Replan</span>`;
     } else {
       criticBadge = `<span class="ep-verdict-badge ep-verdict-continue">Iteration ${msg._epIteration || ""}</span>`;
     }
@@ -1703,7 +1849,34 @@ function renderFinishInfo(msg) {
  */
 function _extractFileChangesFromRounds(toolRounds) {
   if (!toolRounds || !toolRounds.length) return [];
-  const changes = new Map(); // path → {action, ok, pending}
+  // ★ Key by "root|path" so multi-root workspaces don't collapse files with
+  //   the same relative path in different roots into a single entry.
+  const changes = new Map(); // "root|path" → {action, ok, pending, root, path}
+  // Parse 'rootname:rel/path' prefix (multi-root syntax) from a raw path.
+  // Returns {root, path}. If no prefix, root='' and path is unchanged.
+  const _splitRoot = (rawPath) => {
+    if (!rawPath || typeof rawPath !== 'string') return { root: '', path: rawPath || '' };
+    // Don't match Windows drive letters (C:\...), absolute paths (/...),
+    // or paths with slashes before the colon.
+    if (rawPath.startsWith('/') || rawPath.startsWith('~')) return { root: '', path: rawPath };
+    const ci = rawPath.indexOf(':');
+    if (ci <= 0 || ci >= 40) return { root: '', path: rawPath };
+    const si = rawPath.indexOf('/');
+    if (si !== -1 && si < ci) return { root: '', path: rawPath };
+    return { root: rawPath.substring(0, ci), path: rawPath.substring(ci + 1) || '.' };
+  };
+  const _setChange = (rawPath, entry) => {
+    const { root, path } = _splitRoot(rawPath);
+    const key = (root || '') + '|' + path;
+    const prev = changes.get(key);
+    changes.set(key, {
+      action: entry.action,
+      ok: prev ? (prev.ok && entry.ok !== false) : (entry.ok !== false),
+      count: (prev?.count || 0) + (entry.count ?? 1),
+      pending: entry.pending || false,
+      root, path,
+    });
+  };
   for (const round of toolRounds) {
     const tn = round.toolName;
 
@@ -1713,12 +1886,7 @@ function _extractFileChangesFromRounds(toolRounds) {
       if (meta.fileChanges && Array.isArray(meta.fileChanges)) {
         for (const fc of meta.fileChanges) {
           if (!fc.path) continue;
-          const prev = changes.get(fc.path);
-          changes.set(fc.path, {
-            action: fc.action || 'modified',
-            ok: true,
-            count: (prev?.count || 0) + 1,
-          });
+          _setChange(fc.path, { action: fc.action || 'modified', ok: true });
         }
       }
       continue;
@@ -1737,8 +1905,10 @@ function _extractFileChangesFromRounds(toolRounds) {
             paths.push(args.path);
           }
           for (const p of paths) {
-            if (!changes.has(p)) {
-              changes.set(p, {
+            const { root, path } = _splitRoot(p);
+            const key = (root || '') + '|' + path;
+            if (!changes.has(key)) {
+              _setChange(p, {
                 action: tn === 'apply_diff' ? 'patching…' : tn === 'insert_content' ? 'inserting…' : 'writing…',
                 ok: true, count: 0, pending: true
               });
@@ -1757,22 +1927,18 @@ function _extractFileChangesFromRounds(toolRounds) {
         if (args.edits && Array.isArray(args.edits)) {
           for (const e of args.edits) {
             if (e.path) {
-              const prev = changes.get(e.path);
-              changes.set(e.path, {
+              _setChange(e.path, {
                 action: tn === 'insert_content' ? 'inserted' : 'patched',
-                ok: prev ? (prev.ok && ok) : ok,
-                count: (prev?.count || 0) + 1
+                ok,
               });
             }
           }
           continue;
         }
         if (args.path) {
-          const prev = changes.get(args.path);
-          changes.set(args.path, {
+          _setChange(args.path, {
             action: tn === 'insert_content' ? 'inserted' : 'patched',
-            ok: prev ? (prev.ok && ok) : ok,
-            count: (prev?.count || 0) + 1
+            ok,
           });
           continue;
         }
@@ -1782,16 +1948,16 @@ function _extractFileChangesFromRounds(toolRounds) {
     if (tn === 'write_file' && round.toolArgs) {
       try {
         const args = typeof round.toolArgs === 'string' ? JSON.parse(round.toolArgs) : round.toolArgs;
-        const path = args.path || '';
-        if (path) {
+        const rawPath = args.path || '';
+        if (rawPath) {
           const badge = (meta.badge || '').toLowerCase();
           const action = badge.includes('created') ? 'created' : 'written';
-          const prev = changes.get(path);
-          changes.set(path, {
-            action: prev ? (prev.action === 'created' ? 'created' : action) : action,
-            ok: prev ? (prev.ok && ok) : ok,
-            count: (prev?.count || 0) + 1
-          });
+          // Preserve 'created' across repeat writes: if prior action was
+          // 'created', keep 'created' (don't downgrade to 'written').
+          const { root, path } = _splitRoot(rawPath);
+          const prev = changes.get((root || '') + '|' + path);
+          const finalAction = (prev && prev.action === 'created') ? 'created' : action;
+          _setChange(rawPath, { action: finalAction, ok });
           continue;
         }
       } catch (_) {}
@@ -1799,16 +1965,15 @@ function _extractFileChangesFromRounds(toolRounds) {
     // Fallback: use meta.title which typically has the filename
     const fallbackPath = (meta.title || '').replace(/^(✅|❌|📝)\s*/, '');
     if (fallbackPath) {
-      const prev = changes.get(fallbackPath);
-      changes.set(fallbackPath, {
+      _setChange(fallbackPath, {
         action: tn === 'apply_diff' ? 'patched' : tn === 'insert_content' ? 'inserted' : 'written',
-        ok: prev ? (prev.ok && ok) : ok,
-        count: (prev?.count || 0) + 1
+        ok,
       });
     }
   }
-  return Array.from(changes.entries()).map(([path, info]) => ({
-    path, action: info.action, ok: info.ok, count: info.count, pending: !!info.pending
+  return Array.from(changes.values()).map(info => ({
+    path: info.path, action: info.action, ok: info.ok,
+    count: info.count, pending: !!info.pending, root: info.root || ''
   }));
 }
 
@@ -1821,7 +1986,8 @@ function renderFileChangesBar(msg, msgIdx) {
   let files = [];
   if (msg.modifiedFileList && msg.modifiedFileList.length) {
     files = msg.modifiedFileList.map(f => ({
-      path: f.path, action: f.action, ok: true, count: 1
+      path: f.path, action: f.action, ok: true, count: 1,
+      root: f.root || ''
     }));
   } else if (msg.toolRounds) {
     files = _extractFileChangesFromRounds(msg.toolRounds);
@@ -1862,15 +2028,32 @@ function _renderFileChangesHtml(files, isStreaming, msgIdx) {
   const pulseClass = isStreaming ? ' fc-pulse' : '';
   const summaryIcon = '';
 
+  // ★ Multi-root: show 'rootname:' prefix when > 1 workspace root is active
+  //   so files from different projects are visually distinguishable.
+  //   Uses window.projectState (defined in core.js) to detect multi-root mode.
+  //   Safe when projectState is undefined (e.g. standalone rendering).
+  const _ps = (typeof projectState !== 'undefined') ? projectState : null;
+  const _extrasCount = (_ps && Array.isArray(_ps.extraRoots)) ? _ps.extraRoots.length : 0;
+  const _multiRoot = _extrasCount > 0;
+  // Also collect rootnames seen among the files — if multiple distinct roots
+  // appear, force prefix display even if projectState is stale.
+  const _rootsSeen = new Set();
+  for (const f of files) if (f.root) _rootsSeen.add(f.root);
+  const _showRootPrefix = _multiRoot || _rootsSeen.size > 1;
+
   // File list items
   const fileItems = files.map(f => {
     const dir = f.path.includes('/') ? f.path.substring(0, f.path.lastIndexOf('/') + 1) : '';
     const fname = f.path.includes('/') ? f.path.substring(f.path.lastIndexOf('/') + 1) : f.path;
     const countBadge = f.count > 1 ? ` <span class="fc-count">×${f.count}</span>` : '';
     const pendingCls = f.pending ? ' fc-file-pending' : '';
-    return `<div class="fc-file${f.ok ? '' : ' fc-file-err'}${pendingCls}" title="${escapeHtml(f.path)}">
+    const rootPrefix = (_showRootPrefix && f.root)
+      ? `<span class="fc-root">${escapeHtml(f.root)}:</span>`
+      : '';
+    const fullPath = (f.root ? f.root + ':' : '') + f.path;
+    return `<div class="fc-file${f.ok ? '' : ' fc-file-err'}${pendingCls}" title="${escapeHtml(fullPath)}">
       ${actionIcon(f.action, f.ok, f.pending)}
-      <span class="fc-path"><span class="fc-dir">${escapeHtml(dir)}</span><span class="fc-fname">${escapeHtml(fname)}</span></span>
+      <span class="fc-path">${rootPrefix}<span class="fc-dir">${escapeHtml(dir)}</span><span class="fc-fname">${escapeHtml(fname)}</span></span>
       <span class="fc-action">${escapeHtml(f.action)}${countBadge}</span>
     </div>`;
   }).join('');
@@ -1929,6 +2112,7 @@ function _isRoundProject(round) {
     "write_file",
     "apply_diff",
     "insert_content",
+    "create_project",
     "run_command",
   ].includes(round.toolName);
 }
@@ -2000,6 +2184,7 @@ function _getRoundIcon(round) {
       write_file: "write",
       apply_diff: "diff",
       insert_content: "insert",
+      create_project: "folder",
       run_command: "terminal",
     };
     return m[round.toolName] || "folder";
@@ -2950,10 +3135,50 @@ function deleteTurn(idx) {
       <button class="delete-popup-btn delete-popup-cancel" onclick="_hideDeletePopup()">Cancel</button>`;
   }
 
-  // Position the popup near the delete button
+  // Position the popup near the delete button.
+  // ★ Attach to <body> with position:fixed so ancestor overflow:hidden / contain:layout
+  //   on .message-content (styles.css §143) cannot clip it away — that was the root
+  //   cause of "delete button does nothing": the popup WAS created but rendered above
+  //   the message-content top edge and immediately clipped.
   const msgEl = document.getElementById(`msg-${idx}`);
-  if (msgEl) {
-    msgEl.querySelector('.message-content').appendChild(_deletePopup);
+  const btnEl = msgEl ? msgEl.querySelector('.msg-delete-btn') : null;
+  // ★ The base CSS rule .delete-turn-popup sets bottom:calc(100% + 4px) and right:0 for
+  //   absolute-positioned use inside a relative parent. When we switch to fixed and
+  //   set top/left, we MUST clear bottom/right or the element stretches to fill the
+  //   viewport (caused the full-width horizontal bar bug).
+  _deletePopup.style.position = 'fixed';
+  _deletePopup.style.zIndex = '9999';
+  _deletePopup.style.bottom = 'auto';
+  _deletePopup.style.right = 'auto';
+  _deletePopup.style.margin = '0';
+  _deletePopup.style.maxWidth = 'calc(100vw - 16px)';
+
+  if (btnEl) {
+    const r = btnEl.getBoundingClientRect();
+    // Temporarily place off-screen to measure real size, then reposition
+    _deletePopup.style.top = '-9999px';
+    _deletePopup.style.left = '-9999px';
+    document.body.appendChild(_deletePopup);
+    const pw = _deletePopup.offsetWidth || 160;
+    const ph = _deletePopup.offsetHeight || 120;
+    // Horizontal: anchor right edge of popup to right edge of button
+    let left = Math.round(r.right - pw);
+    if (left < 8) left = 8;
+    const maxLeft = window.innerWidth - pw - 8;
+    if (left > maxLeft) left = maxLeft;
+    // Vertical: below button by default; flip above if it would overflow
+    let top = Math.round(r.bottom + 6);
+    if (top + ph > window.innerHeight - 8) {
+      top = Math.max(8, Math.round(r.top - ph - 6));
+    }
+    _deletePopup.style.left = `${left}px`;
+    _deletePopup.style.top = `${top}px`;
+  } else {
+    // Fallback: no button found — center in viewport
+    _deletePopup.style.top = '50%';
+    _deletePopup.style.left = '50%';
+    _deletePopup.style.transform = 'translate(-50%, -50%)';
+    document.body.appendChild(_deletePopup);
   }
 
   // Auto-dismiss after 5 seconds
@@ -3024,7 +3249,10 @@ async function translateMessage(idx) {
   const conv = getActiveConv();
   if (!conv) return;
   const msg = conv.messages[idx];
-  if (!msg || msg.role === "user") return;
+  if (!msg) return;
+  // Allow on: assistant messages AND endpoint critic reviews (role=user +
+  // _isEndpointReview).  Reject only plain user messages.
+  if (msg.role === "user" && !msg._isEndpointReview) return;
   // If we already have a cached translation (manual or auto-translate), just toggle
   if (msg._translatedCache || msg.translatedContent) {
     if (msg._showingTranslation !== false) {
@@ -3035,7 +3263,9 @@ async function translateMessage(idx) {
       msg._showingTranslation = true;
     }
     saveConversations(conv.id);
-    syncConversationToServerDebounced(conv);  // persist toggle state to server
+    // ★ Targeted PATCH — replaces full-conv PUT so only the toggled flag
+    //   hits the server. Fire-and-forget; on error we just log.
+    _patchMessageOnServer(conv.id, idx, { _showingTranslation: !!msg._showingTranslation });
     /* ★ FIX: Use surgical single-element replacement instead of full renderChat()
      *   to avoid destroying the #streaming-msg when a stream is active.
      *   renderChat(conv) without forceScroll=false does a full innerHTML wipe. */
@@ -3103,7 +3333,15 @@ async function translateMessage(idx) {
         msg._translateDone = true;
         delete msg._translateTaskId;
         saveConversations(conv.id);
-        syncConversationToServerDebounced(conv);
+        // ★ Targeted PATCH — replaces full-conv PUT. Server already
+        //   committed translatedContent via task persistence, but we
+        //   still need to persist _showingTranslation/_translateDone.
+        _patchMessageOnServer(conv.id, idx, {
+          translatedContent: msg.translatedContent,
+          _translateModel: msg._translateModel || null,
+          _translateDone: true,
+          _showingTranslation: true,
+        });
         /* ★ FIX: surgical render to avoid destroying #streaming-msg */
         if (activeConvId === conv.id) {
           const _te = document.getElementById(`msg-${idx}`);
@@ -3341,7 +3579,13 @@ function saveEditOnly(idx) {
                 if (result.model) msg._translateModel = result.model;
                 msg._translateDone = true;
                 saveConversations(convId);
-                syncConversationToServerDebounced(conversations.find(c => c.id === convId));
+                // ★ Targeted PATCH for just this message (was
+                //   syncConversationToServerDebounced — full-conv PUT).
+                _patchMessageOnServer(convId, idx, {
+                  content: msg.content,
+                  _translateDone: true,
+                  _translateModel: msg._translateModel || null,
+                });
                 if (activeConvId === convId) {
                   const msgEl = document.getElementById("msg-" + idx);
                   if (msgEl) msgEl.outerHTML = renderMessage(msg, idx);
@@ -3360,7 +3604,50 @@ function saveEditOnly(idx) {
     delete msg.replyQuote;
   }
   saveConversations(conv.id);
-  syncConversationToServerDebounced(conv);
+  // ★ Targeted single-message PATCH — replaces the full-conversation PUT that
+  //   ``syncConversationToServerDebounced(conv)`` would have issued, so a mere
+  //   edit-only action only mutates the one message on the server side.
+  //   Whitelisted keys only (see ``_PATCH_MSG_WHITELIST`` in
+  //   ``routes/conversations.py``). On server error we revert to the
+  //   pre-edit content from the DOM and show a toast.
+  (async () => {
+    const _prevSnapshot = {
+      content: msg.content,
+      originalContent: msg.originalContent,
+      images: msg.images,
+      pdfTexts: msg.pdfTexts,
+      replyQuotes: msg.replyQuotes,
+      timestamp: msg.timestamp,
+    };
+    const _patch = {
+      content: msg.content,
+      // null removes the key server-side when no longer present locally.
+      originalContent: msg.originalContent === undefined ? null : msg.originalContent,
+      images: msg.images || [],
+      pdfTexts: msg.pdfTexts || [],
+      replyQuotes: msg.replyQuotes || [],
+    };
+    if (msg.timestamp) _patch.timestamp = msg.timestamp;
+    const _convIdLocal = conv.id;
+    const _res = await _patchMessageOnServer(_convIdLocal, idx, _patch, {
+      onError: () => {
+        // Revert local state and show toast
+        const _c = conversations.find(c => c.id === _convIdLocal);
+        if (_c && _c.messages[idx]) {
+          Object.assign(_c.messages[idx], _prevSnapshot);
+          saveConversations(_convIdLocal);
+          if (activeConvId === _convIdLocal) {
+            const _el = document.getElementById('msg-' + idx);
+            if (_el) _el.outerHTML = renderMessage(_c.messages[idx], idx);
+          }
+        }
+        if (typeof showToast === 'function') showToast('Edit failed — reverted', 'error');
+      },
+    });
+    if (_res && _res.ok) {
+      debugLog(`[saveEditOnly] PATCH ok conv=${_convIdLocal.slice(0, 8)} idx=${idx} msgCount=${_res.msgCount}`, 'debug');
+    }
+  })();
   /* ★ FIX: Surgical single-message update instead of full renderChat().
    * renderChat() without forceScroll=false does a full innerHTML wipe +
    * _forceScrollToBottom, which causes the page to jump to the bottom.
@@ -3382,7 +3669,15 @@ async function saveEditAndResend(idx) {
     if (typeof hideLogCleanBanner === 'function') hideLogCleanBanner();
   }
   const conv = getActiveConv();
-  if (!conv || activeStreams.has(conv.id) || conv.activeTaskId) return;
+  if (!conv) return;
+  // ★ SyncFix: previously this early-returned silently when a stream/task was
+  //   in flight, leaving the user thinking nothing happened (common right after
+  //   clicking Stop while abort was still propagating). Instead, synchronously
+  //   hard-cancel the stale task so the edit flow can proceed.
+  if (activeStreams.has(conv.id) || conv.activeTaskId) {
+    console.info(`[SyncFix] saveEditAndResend hard-cancelling racing stream — conv=${conv.id.slice(0,8)} activeTaskId=${conv.activeTaskId?.slice(0,8)||'null'}`);
+    _hardCancelActiveStream(conv);
+  }
   const ta = document.getElementById("edit-textarea-" + idx);
   if (!ta) return;
   const t = ta.value.trim();
@@ -3423,8 +3718,17 @@ async function saveEditAndResend(idx) {
     const editedEl = document.getElementById("msg-" + idx);
     if (editedEl) editedEl.outerHTML = renderMessage(msg, idx);
   }
+  const _syncMsgsBefore = conv.messages.length;
   if (!_surgicalTruncateDOM(conv, idx)) renderChat(conv);
   renderConversationList();
+  // ★ SyncFix: invariant check — no stale streaming bubble or ghost msg-N
+  //   should survive the truncation. Assertion is a no-op in production when
+  //   console.assert is a no-op, but makes races obvious in dev.
+  console.assert(
+    !document.getElementById("streaming-msg"),
+    `[SyncFix] Stale streaming-msg after saveEditAndResend truncate — conv=${convId.slice(0,8)}`
+  );
+  console.info(`[SyncFix] saveEditAndResend conv=${convId.slice(0,8)} idx=${idx} msgsBefore=${_syncMsgsBefore} msgsAfter=${conv.messages.length} hasStreamingMsg=${!!document.getElementById('streaming-msg')} activeTaskId=${conv.activeTaskId?.slice(0,8)||'null'}`);
 
   // ── Atomic backend call: truncate + edit + translate + task start ──
   const _regenConfig = _buildConvConfig(conv);
@@ -3613,6 +3917,18 @@ function buildTurnNav(conv) {
       })
       .join("");
   requestAnimationFrame(() => updateActiveTurn());
+  /* Dev-only sanity check: ensure every turn-dot points at a msg in the DOM
+   * (scrollToTurn has a re-render fallback anyway, but this surfaces the
+   * regression early during development). Enable with window._TOFU_DEV_ASSERT=1 */
+  if (typeof window !== 'undefined' && window._TOFU_DEV_ASSERT) {
+    requestAnimationFrame(() => {
+      for (const t of turns) {
+        if (!document.getElementById('msg-' + t.msgIdx)) {
+          console.warn('[turnNav] missing msg-%d (turn %d)', t.msgIdx, t.num);
+        }
+      }
+    });
+  }
 }
 function scrollToTurn(idx) {
   let el = document.getElementById("msg-" + idx);
@@ -3620,15 +3936,15 @@ function scrollToTurn(idx) {
     el.scrollIntoView({ behavior: "smooth", block: "start" });
     return;
   }
-  /* Message not in DOM yet — lazy-load all messages down to idx, then scroll */
-  if (idx < _lazyRenderedFrom) {
-    const conv = conversations.find((c) => c.id === _lazyConvId);
-    if (!conv) return;
-    const inner = document.getElementById("chatInner");
-    const sentinel = document.getElementById("_lazyLoadSentinel");
-    const container = document.getElementById("chatContainer");
-    if (!inner || !container) return;
+  const conv = conversations.find((c) => c.id === _lazyConvId);
+  if (!conv) return;
+  const inner = document.getElementById("chatInner");
+  const container = document.getElementById("chatContainer");
+  if (!inner || !container) return;
 
+  /* Case A: target idx is above the currently rendered range — lazy-load upward */
+  if (idx < _lazyRenderedFrom) {
+    const sentinel = document.getElementById("_lazyLoadSentinel");
     const targetStart = Math.max(0, idx);
     const endIdx = _lazyRenderedFrom;
     let html = "";
@@ -3667,6 +3983,29 @@ function scrollToTurn(idx) {
     /* Now scroll to the newly rendered element */
     el = document.getElementById("msg-" + idx);
     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+
+  /* Case B: idx >= _lazyRenderedFrom but element still missing from DOM.
+   * Known cause: showStreamingUIForConv() used to slice(0,-1) the messages
+   * array unconditionally, so a trailing user/critic-done message (for which
+   * buildTurnNav DOES produce a dot) was never rendered as msg-{idx}.
+   * Defense-in-depth: force a re-render so the missing message appears. */
+  if (idx >= 0 && idx < conv.messages.length) {
+    console.warn("[scrollToTurn] msg-%d missing but idx>=_lazyRenderedFrom=%d — forcing re-render", idx, _lazyRenderedFrom);
+    if (activeStreams.has(conv.id) && typeof showStreamingUIForConv === 'function') {
+      showStreamingUIForConv(conv.id);
+    } else {
+      renderChat(conv, true);
+    }
+    el = document.getElementById("msg-" + idx);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    } else {
+      /* Still not in DOM — it must be rendered as the streaming bubble. */
+      const sm = document.getElementById("streaming-msg");
+      if (sm) sm.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
   }
 }
 /* ★ Perf: (1) cache one getBoundingClientRect for container, (2) only touch classList
@@ -3753,7 +4092,7 @@ function updateStreamingUI(msg) {
     if (fcZone._roundsFp !== _fcFp) {
       fcZone._roundsFp = _fcFp;
       const liveFiles = _extractFileChangesFromRounds(rounds);
-      const fcKey = liveFiles.map(f => `${f.path}:${f.action}:${f.ok}:${f.pending||''}`).join('|');
+      const fcKey = liveFiles.map(f => `${f.root||''}:${f.path}:${f.action}:${f.ok}:${f.pending||''}`).join('|');
       if (fcZone.getAttribute('data-fc-key') !== fcKey) {
         fcZone.setAttribute('data-fc-key', fcKey);
         fcZone.innerHTML = liveFiles.length ? _renderFileChangesHtml(liveFiles, true) : '';
@@ -4360,8 +4699,22 @@ function showStreamingUIForConv(convId) {
   _lazyConvId = convId;
   _lastRenderedFingerprint = "";
   const inner = document.getElementById("chatInner");
-  const prevMsgs = conv.messages.slice(0, -1);
-  const total = prevMsgs.length;
+
+  /* ★ FIX (Root Cause 3): Only drop the trailing message when it actually
+   * owns the streaming bubble (in-progress assistant, or in-progress critic).
+   * If the last message is a user/optimizer/critic-done entry, buildTurnNav
+   * will still create a dot for it, so we MUST render it statically — otherwise
+   * msg-{last} is missing from the DOM and the turn-dot click is a no-op. */
+  const _last = conv.messages[conv.messages.length - 1];
+  const _lastIsStreamingBubble =
+    !!_last && (
+      (_last.role === "assistant" && !_last.done) ||
+      (_last._isEndpointReview && !_last.done)
+    );
+  const renderMsgs = _lastIsStreamingBubble
+    ? conv.messages.slice(0, -1)
+    : conv.messages;
+  const total = renderMsgs.length;
   const startIdx = Math.max(0, total - _INITIAL_RENDER);
   _lazyRenderedFrom = startIdx;
 
@@ -4371,17 +4724,19 @@ function showStreamingUIForConv(convId) {
     html += `<div id="_lazyLoadSentinel" class="lazy-sentinel"><span class="lazy-sentinel-text">⬆ <span class="_lazy-count">${startIdx}</span> older messages</span></div>`;
   }
   for (let i = startIdx; i < total; i++) {
-    html += renderMessage(prevMsgs[i], i);
+    html += renderMessage(renderMsgs[i], i);
   }
 
-  const lastMsg = conv.messages[conv.messages.length - 1];
+  const lastMsg = _last;
   const _smTime = new Date(lastMsg?.timestamp || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  if (lastMsg && lastMsg.role === "assistant" && lastMsg._isEndpointPlanner && !lastMsg.done) {
-    html += _streamingBubbleHTML('planner', 'Planning…', _smTime);
-  } else if (lastMsg && lastMsg.role === "assistant") {
-    html += _streamingBubbleHTML('worker', 'Streaming…', _smTime);
-  } else if (lastMsg && lastMsg._isEndpointReview && !lastMsg.done) {
-    html += _streamingBubbleHTML('critic', 'Reviewing…', _smTime);
+  if (_lastIsStreamingBubble) {
+    if (lastMsg.role === "assistant" && lastMsg._isEndpointPlanner) {
+      html += _streamingBubbleHTML('planner', 'Planning…', _smTime);
+    } else if (lastMsg.role === "assistant") {
+      html += _streamingBubbleHTML('worker', 'Streaming…', _smTime);
+    } else if (lastMsg._isEndpointReview) {
+      html += _streamingBubbleHTML('critic', 'Reviewing…', _smTime);
+    }
   }
   inner.innerHTML = html;
   if (startIdx > 0) {
@@ -4391,7 +4746,7 @@ function showStreamingUIForConv(convId) {
   requestAnimationFrame(() => buildTurnNav(conv));
   _forceScrollToBottom(null, true);
   updateSendButton();
-  if (lastMsg && (lastMsg.role === "assistant" || (lastMsg._isEndpointReview && !lastMsg.done))) {
+  if (_lastIsStreamingBubble) {
     const buf = streamBufs.get(convId);
     /* ★ FIX: buf?.toolRounds is [] (truthy) even when empty, preventing
      *   fallback to getToolRoundsFromMsg(lastMsg).  Use .length check. */
@@ -4494,7 +4849,17 @@ function finishStream(convId) {
     if (activeConvId === convId) {
       const sm = document.getElementById("streaming-msg");
       const hasEndpointTurns = conv && conv.messages.some(m => m._epIteration);
-      if (sm && conv) {
+      // ★ SyncFix: if the aborted stream's trailing assistant was already
+      //   truncated away (user clicked Edit/Regen mid-abort), don't re-render
+      //   a ghost msg-N for a message that no longer exists. The last message
+      //   after truncation should be a user message; if so, just remove the
+      //   stale streaming-msg without replacing it.
+      const _fsLast = conv ? conv.messages[conv.messages.length - 1] : null;
+      const _truncatedAway = sm && _fsLast && _fsLast.role !== 'assistant';
+      if (_truncatedAway) {
+        console.info(`[SyncFix] finishStream skipping render — trailing assistant was truncated (conv=${convId.slice(0,8)}, lastRole=${_fsLast.role})`);
+        try { sm.remove(); } catch (e) { /* already detached */ }
+      } else if (sm && conv) {
         // Normal streaming finish — replace the streaming element with rendered message
         const idx = conv.messages.length - 1;
         const msg = conv.messages[idx];
@@ -4547,51 +4912,123 @@ function finishStream(convId) {
   // ── Auto-translate assistant response ──
   // ★ Use per-conversation setting, NOT the global (which reflects current viewed conv)
   const _convAutoTranslate = conv ? (conv.autoTranslate !== undefined ? !!conv.autoTranslate : true) : autoTranslate;
+  if (!_convAutoTranslate) {
+    console.info(`[finishStream] autoTranslate is OFF — skipping all ` +
+      `translation scheduling for conv=${convId.slice(0,8)} ` +
+      `(conv.autoTranslate=${conv?.autoTranslate}, global=${autoTranslate})`);
+  }
   if (_convAutoTranslate && conv) {
-    const lastMsg = conv.messages[conv.messages.length - 1];
-    if (
-      lastMsg &&
-      lastMsg.role === "assistant" &&
-      lastMsg.content &&
-      !lastMsg._igResult &&          // skip image gen results — nothing to translate
-      !lastMsg._isImageGen           // skip image gen error messages
-    ) {
-      // ★ FIX: detect stale partial translations (e.g. translation started mid-stream
-      //   with only partial content, then the full response grew much larger).
-      //   If the existing translation is less than 15% of the content length, consider
-      //   it stale and re-translate — even if _translateTaskId is already set.
-      const hasStaleTranslation = lastMsg.translatedContent &&
-        lastMsg.content.length > 500 &&  // only for non-trivial responses
-        lastMsg.translatedContent.length < lastMsg.content.length * 0.15;
+    /* ★ Per-message translate trigger — shared between the normal
+     *   single-last-message path and the endpoint-mode multi-turn path.
+     *   Returns true if a translation task was scheduled, false otherwise. */
+    const _maybeTranslateMsg = (msg, idx) => {
+      if (!msg || msg.role !== "assistant") {
+        console.debug(`[finishStream] skip idx=${idx}: role=${msg?.role} not assistant`);
+        return false;
+      }
+      if (!msg.content) {
+        console.debug(`[finishStream] skip idx=${idx}: empty content`);
+        return false;
+      }
+      if (msg._igResult || msg._isImageGen) {
+        console.debug(`[finishStream] skip idx=${idx}: image-gen output`);
+        return false;
+      }
+      // Stale-partial detection (mirrors existing behavior)
+      const hasStaleTranslation = msg.translatedContent &&
+        msg.content.length > 500 &&
+        msg.translatedContent.length < msg.content.length * 0.15;
       if (hasStaleTranslation) {
         console.warn(`[finishStream] 🔄 Stale partial translation detected — ` +
-          `translated=${lastMsg.translatedContent.length} vs content=${lastMsg.content.length} ` +
-          `(${(lastMsg.translatedContent.length/lastMsg.content.length*100).toFixed(1)}%) — re-translating`);
-        delete lastMsg.translatedContent;
-        delete lastMsg._translatedCache;
-        delete lastMsg._translateDone;
-        delete lastMsg._translateTaskId;  // ★ clear task ID so re-translate can proceed
+          `idx=${idx} translated=${msg.translatedContent.length} vs content=${msg.content.length} ` +
+          `(${(msg.translatedContent.length/msg.content.length*100).toFixed(1)}%) — re-translating`);
+        delete msg.translatedContent;
+        delete msg._translatedCache;
+        delete msg._translateDone;
+        delete msg._translateTaskId;
       }
       // Skip if a translate task is already running (and not stale)
-      if (lastMsg._translateTaskId) {
-        // Already have a valid translation or active task — skip
-      } else
-      if (!lastMsg.translatedContent) {
-        // ★ FIX: When autoTranslate is explicitly ON, always translate — don't
-        // rely on the language heuristic which fails for bilingual/mixed responses.
-        // The heuristic is only a fallback for when autoTranslate state is unknown.
-        let needsTranslation = true;  // autoTranslate is already confirmed ON above
-        const idx = conv.messages.length - 1;
-        if (needsTranslation) {
-          // Mark pending immediately so renderMessage shows "翻译中…" indicator
-          lastMsg._translateField = "translatedContent";
-          lastMsg._translateDone = false;
-          // Re-render the message to show the persistent "翻译中…" indicator
-          // (we set _translateTaskId AFTER the task starts, but _translateDone=false triggers indicator)
-          // Fire-and-forget: start async translate task
-          _startAutoTranslateForMsg(conv, convId, idx, lastMsg);
+      if (msg._translateTaskId) {
+        console.debug(`[finishStream] skip idx=${idx}: translate task already ` +
+          `in flight (taskId=${String(msg._translateTaskId).slice(0,8)})`);
+        return false;
+      }
+      if (msg.translatedContent) {
+        console.debug(`[finishStream] skip idx=${idx}: already has ` +
+          `translatedContent (${msg.translatedContent.length} chars)`);
+        return false;
+      }
+      // Mark pending so renderMessage shows the "翻译中…" indicator
+      msg._translateField = "translatedContent";
+      msg._translateDone = false;
+      _startAutoTranslateForMsg(conv, convId, idx, msg);
+      return true;
+    };
+
+    /* Endpoint mode: translate every planner + worker turn + critic review,
+     *   not just the last message.  In endpoint mode the last message is
+     *   often a critic review (role=user) or an approved-worker turn, so
+     *   the single-last path would leave all earlier planner/worker/critic
+     *   turns permanently untranslated. */
+    const _isEndpoint = conv.messages.some(
+      m => m._isEndpointPlanner || m._epIteration || m._isEndpointReview);
+
+    /* ★ Critic translation scheduler — critic messages are role=user +
+     *   _isEndpointReview and are explicitly part of the endpoint
+     *   auto-translate pipeline.  Uses the same _startAutoTranslateForMsg
+     *   helper since it commits by index into messages[idx], regardless
+     *   of role. */
+    const _maybeTranslateCritic = (msg, idx) => {
+      if (!msg || msg.role !== "user" || !msg._isEndpointReview) {
+        return false;
+      }
+      if (!msg.content) {
+        console.debug(`[finishStream:endpoint] skip critic idx=${idx}: empty content`);
+        return false;
+      }
+      const hasStaleTranslation = msg.translatedContent &&
+        msg.content.length > 500 &&
+        msg.translatedContent.length < msg.content.length * 0.15;
+      if (hasStaleTranslation) {
+        console.warn(`[finishStream:endpoint] 🔄 Stale partial critic translation — ` +
+          `idx=${idx} translated=${msg.translatedContent.length} vs content=${msg.content.length}`);
+        delete msg.translatedContent;
+        delete msg._translatedCache;
+        delete msg._translateDone;
+        delete msg._translateTaskId;
+      }
+      if (msg._translateTaskId) return false;
+      if (msg.translatedContent) return false;
+      msg._translateField = "translatedContent";
+      msg._translateDone = false;
+      _startAutoTranslateForMsg(conv, convId, idx, msg);
+      return true;
+    };
+
+    if (_isEndpoint) {
+      let _epScheduled = 0;
+      let _epAssistants = 0;
+      let _epCriticsScheduled = 0;
+      let _epCritics = 0;
+      for (let i = 0; i < conv.messages.length; i++) {
+        const m = conv.messages[i];
+        if (m.role === "assistant"
+            && (m._isEndpointPlanner || m._epIteration)) {
+          _epAssistants++;
+          if (_maybeTranslateMsg(m, i)) _epScheduled++;
+        } else if (m.role === "user" && m._isEndpointReview) {
+          _epCritics++;
+          if (_maybeTranslateCritic(m, i)) _epCriticsScheduled++;
         }
       }
+      console.info(`[finishStream:endpoint] Scheduling ${_epScheduled} auto-translation(s) ` +
+        `across ${_epAssistants} assistant turn(s) + ${_epCriticsScheduled}/${_epCritics} critic turn(s) — ` +
+        `conv=${convId.slice(0,8)}`);
+    } else {
+      // Normal (non-endpoint) path: translate only the last assistant message
+      const idx = conv.messages.length - 1;
+      const lastMsg = conv.messages[idx];
+      _maybeTranslateMsg(lastMsg, idx);
     }
   }
 
@@ -4970,6 +5407,21 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
     }
     /* ★ Continue checkpoint: toolRounds to merge with newly streamed ones */
     if (ev.type === "state") {
+      /* ★ SyncFix: discard stale state snapshots from an aborted/superseded
+       *   task. Without this, a delayed SSE state event from the OLD task
+       *   (after the user interrupted and hit Edit/Regen) can resurrect the
+       *   truncated endpoint turns into conv.messages — manifesting as the
+       *   old conversation reappearing without a page refresh. */
+      const _stateConv = conversations.find(c => c.id === convId);
+      if (_stateConv) {
+        const _aborted = stream && stream.controller && stream.controller.signal.aborted;
+        const _supersededByNewTask = _stateConv.activeTaskId && _stateConv.activeTaskId !== taskId;
+        const _isLastAborted = _stateConv._lastAbortedTaskId === taskId;
+        if (_aborted || _supersededByNewTask || _isLastAborted) {
+          console.info(`[SyncFix][SSE state] discarding stale state taskId=${taskId.slice(0,8)} activeTaskId=${_stateConv.activeTaskId?.slice(0,8)||'null'} aborted=${!!_aborted} superseded=${!!_supersededByNewTask} isLastAborted=${!!_isLastAborted}`);
+          return false;
+        }
+      }
       /* ★ Endpoint mode reconnection: rebuild conv.messages from endpointTurns
        *   and set the correct phase (working/reviewing) so streaming goes to
        *   the right target (assistantMsg vs _epCriticMsg). */
@@ -5888,11 +6340,17 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
       _epCriticPhase = false;
       const conv = conversations.find(c => c.id === convId);
       if (conv) {
+        // Derive next_phase with graceful legacy fallback: if the backend
+        // only sends the old should_stop boolean, treat as 'stop'/'worker'.
+        const nextPhase = ev.next_phase
+          || (ev.should_stop ? 'stop' : 'worker');
+
         // Update the critic message with final content from event
         // (the event content has the verdict tag stripped by the backend)
         if (_epCriticMsg) {
           _epCriticMsg.content = ev.content;
-          _epCriticMsg._epApproved = !!ev.should_stop;
+          _epCriticMsg._epApproved = nextPhase === 'stop';
+          _epCriticMsg._epNextPhase = nextPhase;
           _epCriticMsg._isStuck = ev.is_stuck || false;
           _epCriticMsg.done = true;
         }
@@ -5909,6 +6367,37 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
         // Clean up critic state
         _epCriticMsg = null;
         _epCriticBuf = null;
+
+        /* ── Replan branch: Critic requested CONTINUE_PLANNER ──
+         * Create a new planner placeholder message so the subsequent
+         * endpoint_planner_done event finalizes into it.  This mirrors
+         * the initial-plan placeholder created in startAssistantResponse
+         * (main.js L1337) and lets users see a second Plan bubble in-line
+         * with the iteration history. */
+        if (nextPhase === 'planner') {
+          const plannerPlaceholder = {
+            role: "assistant",
+            content: "",
+            thinking: "",
+            toolRounds: [],
+            timestamp: new Date().toISOString(),
+            _isEndpointPlanner: true,
+          };
+          conv.messages.push(plannerPlaceholder);
+          assistantMsg = plannerPlaceholder;
+
+          // Reset stream buffer for the planner turn
+          const newBuf = { content: "", thinking: "", toolRounds: [] };
+          streamBufs.set(convId, newBuf);
+          buf = newBuf;
+
+          if (activeConvId === convId) {
+            const inner = document.getElementById("chatInner");
+            if (inner) inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('planner', 'Replanning…'));
+            const banner = document.getElementById("ep-iter-banner");
+            if (banner) banner.textContent = `Replanning…`;
+          }
+        }
 
         // Save & update nav
         saveConversations(convId);
@@ -6321,6 +6810,24 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
       _consecutiveErrors = 0; // ★ Reset on any successful response
       const data = await resp.json();
 
+      /* ★ SyncFix: discard poll responses for a superseded/aborted task so we
+       *   don't resurrect old endpoint turns into conv.messages after the user
+       *   interrupted + edited. */
+      {
+        const _pollConv = conversations.find(c => c.id === convId);
+        if (_pollConv) {
+          const _aborted = stream && stream.controller && stream.controller.signal.aborted;
+          const _superseded = _pollConv.activeTaskId && _pollConv.activeTaskId !== taskId;
+          const _isLastAborted = _pollConv._lastAbortedTaskId === taskId;
+          if (_aborted || _superseded || _isLastAborted) {
+            console.info(`[SyncFix][_pollFallback] discarding stale poll taskId=${taskId.slice(0,8)} activeTaskId=${_pollConv.activeTaskId?.slice(0,8)||'null'} aborted=${!!_aborted} superseded=${!!_superseded} isLastAborted=${!!_isLastAborted}`);
+            twStop(convId);
+            finishStream(convId);
+            return;
+          }
+        }
+      }
+
       /* ★ Endpoint mode: poll returns endpointTurns with the full multi-turn
        *   structure.  Rebuild conv.messages from it instead of overwriting
        *   a single assistantMsg with the current turn's content. */
@@ -6672,6 +7179,12 @@ function updateSendButton() {
         fetch(apiUrl(`/api/chat/abort/${s.taskId}`), { method: "POST" }).catch(
           () => {},
         );
+        // ★ SyncFix: don't wait for finishStream to tear down the stream
+        //   buffer — a late delta event arriving between abort() and the
+        //   AbortError propagation would otherwise accumulate into a dead
+        //   buffer. twStop is idempotent and safe to call twice.
+        try { twStop(activeConvId); }
+        catch (_e) { console.warn('[stopBtn] twStop threw:', _e); }
       } else if (conv && conv.activeTaskId) {
         // ★ Record aborted task ID
         const _abortingTaskId = conv.activeTaskId;

@@ -1,0 +1,49 @@
+
+\begin{table}[h]
+
+    \centering
+    \bicaption{TAR增强NMT模型}{TAR-Enhanced NMT Models}
+    \footnotesize
+\resizebox{0.6\linewidth}{!}{
+    \begin{tabular}{l ll ll}
+        \toprule
+        \textbf{ } & \textbf{ BLEU} & \textbf{ CCR\%} & \textbf{ BLEU} & \textbf{ CCR\%} \\
+        \midrule
+        \textbf{WMT21 TT} & \multicolumn{2}{c }{\textit{English-Chinese}} & \multicolumn{2}{c}{\textit{English-Russian}} \\
+        \midrule
+        TAR & 35.9 & 95.9 & 30.3 & 97.5 \\
+        NMT     &   34.5    &   85.6    &   33.6  &  85.3    \\
+        \rowcolor{black!20}
+         + Revision &  35.2\textsubscript{(+0.7)}    &   95.6\textsubscript{(+10.0)}    &   34.0\textsubscript{(+0.4)}  &  96.6\textsubscript{(11.3)}       \\
+        \midrule
+        \textbf{ETC} & \multicolumn{2}{c }{\textit{English-Chinese}} & \multicolumn{2}{c}{\textit{English-Russian}} \\
+        \midrule
+        TAR & 40.0 & 97.6 & 32.5 & 89.8 \\
+        NMT &  41.2    &   74.5    &   40.1  &    72.3     \\
+        \rowcolor{black!20}
+         + Revision &  42.7\textsubscript{(+1.5)}    &   92.8\textsubscript{(+18.3)}    &  40.2\textsubscript{(+0.1)}   &    82.4\textsubscript{(+10.1)}      \\
+        % HW-TSC        & \textbf{40.7} & 88.6 & - & - \\
+        % TermMind-sys2  & \textit{40.5} & 85.6 & - & - \\
+        % ProMT.soft     & - & - & 31.1 & 90.9  \\
+        % TildeMT        & - & - & 28.2 & 86.3  \\
+        % Lingua Custodia & 29.6 & 82.8 & 28.8 & 85.4  \\
+        % LLM Trans.     & 36.3 & 87.2 & 29.7 & 85.9  \\
+        % \midrule
+        % LLM Const. Trans. & 36.4 & 92.6 & 30.1 & 95.8  \\
+        % \rowcolor{black!20}
+        % \quad +Revision & 35.9\textsubscript{(-0.5)} & \textbf{95.9\textsubscript{(+3.3)}}  & 30.3\textsubscript{(+0.2)}  & \textbf{97.5\textsubscript{(+1.7)}}  \\
+        % NMT Trans.     & 34.5 & 85.6 & \textit{33.6} & 85.3  \\
+        % \rowcolor{black!20}
+        % \quad +Revision& 35.2\textsubscript{(+0.7)} & \textit{95.6\textsubscript{(+10)}}  & \textbf{34.0\textsubscript{(+0.4)}}  & \textit{96.6\textsubscript{(+11.3)}}  \\
+        \bottomrule
+    \end{tabular} 
+   }
+
+    
+
+    \label{tab:nmt_base_tar}
+    
+% \vspace{-1em}
+
+\end{table}
+% \end{wraptable}

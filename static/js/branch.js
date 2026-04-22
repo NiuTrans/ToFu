@@ -393,6 +393,8 @@ function deleteBranch(msgIdx, branchIdx) {
   // Also check if the branch-zone has a pill for non-inlined branches
   const panelEl = document.getElementById(`branch-panel-${msgIdx}-${branchIdx}`);
 
+  // Optimistic local splice — server confirms via DELETE below.
+  const _prevBranches = msg.branches.slice();
   msg.branches.splice(branchIdx, 1);
   if (_activeBranch?.msgIdx === msgIdx) { _activeBranch = null; _exitBranchMode(); }
 
@@ -401,7 +403,39 @@ function deleteBranch(msgIdx, branchIdx) {
   if (panelEl && !panelEl.closest('.branch-anchor-inline')) panelEl.remove(); // standalone panel
 
   saveConversations(conv.id);
-  syncConversationToServer(conv);
+  // ★ Targeted DELETE — replaces full-conversation PUT so siblings and
+  //   anchor text stay intact on the server. On error we restore the
+  //   in-memory branches array and force a re-render from server state.
+  (async () => {
+    try {
+      const res = await fetch(
+        apiUrl(`/api/conversations/${conv.id}/messages/${msgIdx}/branches/${branchIdx}`),
+        { method: 'DELETE' }
+      );
+      if (!res.ok) {
+        let body = null;
+        try { body = await res.json(); } catch (_e) { /* ignore */ }
+        console.warn('[branch.delete] server rejected branch delete', res.status, body);
+        // Revert the local splice and reload from server to resync.
+        msg.branches = _prevBranches;
+        saveConversations(conv.id);
+        try {
+          const resp = await fetch(apiUrl(`/api/conversations/${conv.id}`));
+          if (resp.ok) {
+            const data = await resp.json();
+            if (Array.isArray(data.messages)) {
+              conv.messages = data.messages;
+              saveConversations(conv.id);
+              if (activeConvId === conv.id) renderChat(conv);
+            }
+          }
+        } catch (e2) { console.warn('[branch.delete] reload failed', e2); }
+        if (typeof showToast === 'function') showToast('Branch delete failed — restored', 'error');
+      }
+    } catch (e) {
+      console.warn('[branch.delete] network error', e);
+    }
+  })();
 
   // Update IDs of remaining inline branch elements (indices shifted after splice)
   const msgEl = document.getElementById(`msg-${msgIdx}`);

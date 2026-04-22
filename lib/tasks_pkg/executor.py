@@ -574,9 +574,53 @@ def _execute_tool_one(
 
     handler = tool_registry.lookup(fn_name, round_entry)
     if handler is not None:
-        return handler(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools)
+        # ★ Universal exception safety net: any uncaught exception inside
+        # a tool handler (unexpected arg shape, downstream bug, I/O failure…)
+        # is converted into an error tool-result returned to the LLM, so the
+        # model can see what went wrong and retry with corrected parameters
+        # instead of the whole task aborting with no result for this round.
+        try:
+            return handler(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
+                           cfg, project_path, project_enabled, all_tools)
+        except Exception as e:
+            _arg_preview = ''
+            try:
+                _arg_preview = json.dumps(fn_args, ensure_ascii=False)[:300]
+            except Exception as _dump_err:
+                logger.debug('[Executor] fn_args dump failed for %s: %s',
+                             fn_name, _dump_err)
+                _arg_preview = repr(fn_args)[:300]
+            logger.error(
+                '[Executor] Tool handler %s raised %s (tc_id=%s args=%.300s) — '
+                'returning error to LLM so it can retry',
+                fn_name, type(e).__name__, tc_id[:8], _arg_preview,
+                exc_info=True,
+            )
+            err_msg = (
+                f'Error: tool "{fn_name}" execution failed with '
+                f'{type(e).__name__}: {e}. Check the parameter schema '
+                f'(types, required fields) and retry with corrected arguments. '
+                f'Arguments received: {_arg_preview}'
+            )
+            # Finalize the round so the UI doesn't show a dangling
+            # "searching…" tool forever.
+            if round_entry is not None and round_entry.get('status') != 'done':
+                try:
+                    _finalize_tool_round(
+                        task, rn, round_entry,
+                        [{'type': 'error', 'content': err_msg,
+                          'toolName': fn_name}],
+                        query_override=round_entry.get('query', fn_name),
+                    )
+                except Exception as _fin_err:
+                    logger.debug('[Executor] _finalize_tool_round on error path '
+                                 'failed for %s: %s', fn_name, _fin_err)
+            return tc_id, err_msg, False
 
     # ── unknown tool ──
     logger.warning('[Executor] Unknown tool requested: %s', fn_name)
-    tool_content = f'Unknown tool: {fn_name}'
+    tool_content = (
+        f'Error: unknown tool "{fn_name}". This tool is not registered. '
+        f'Verify the tool name against the available tool list and retry.'
+    )
     return tc_id, tool_content, False

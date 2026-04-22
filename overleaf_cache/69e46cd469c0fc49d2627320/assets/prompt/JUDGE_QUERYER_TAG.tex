@@ -1,0 +1,38 @@
+
+\begin{tcolorbox}[
+    enhanced,
+    colback=white,
+    colframe=black,
+    arc=5mm,
+    boxrule=1pt,
+    left=2mm,
+    right=2mm,
+    top=1mm,
+    bottom=1mm
+]
+
+\textbf{Task.} You are a data-quality auditor. Given a single reference passage and a single question, decide to what extent the passage alone contains the information needed to answer that question.
+
+\textbf{Scoring rubric (integer 1--5).}\\
+\textbf{5 — Fully answerable.} Every piece of information required by the question is explicit in (or straightforwardly derivable from) the passage; no outside knowledge needed.\\
+\textbf{4 — Mostly answerable.} The passage supplies the core answer; only trivial world-knowledge or definitions lie outside.\\
+\textbf{3 — Partially answerable.} The passage touches the topic but is missing a non-trivial component of the answer.\\
+\textbf{2 — Minimally answerable.} Only distantly related evidence is present; a reliable answer cannot be drawn solely from this passage.\\
+\textbf{1 — Unanswerable.} The passage provides no information that bears on the question.\\
+
+\textbf{Output format.} First write two--three sentences of justification that quote the relevant span(s) of the passage. Then, on the final line, write exactly: \texttt{Rating: <integer 1-5>}.
+
+\textbf{Demonstration.}\\
+\emph{Passage:} Singapore is a sovereign city-state in maritime Southeast Asia... Modern Singapore was founded in 1819 by Sir Stamford Raffles as a British trading post.\\
+\emph{Question:} In what year did Singapore gain independence?\\
+\emph{Justification:} The passage mentions the 1819 founding by Raffles but says nothing about independence, which historically occurred later. No supporting span can be cited.\\
+\emph{Rating: 1}
+
+\textbf{Now audit the following real instance.}\\
+\textbf{Passage:}\\
+\{DOCUMENT\}\\
+
+\textbf{Question:}\\
+\{QUESTION\}\\
+
+\end{tcolorbox}

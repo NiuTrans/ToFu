@@ -713,18 +713,32 @@ CATALOG: list[CatalogEntry] = [
     {
         'id': 'overleaf',
         'name': 'Overleaf',
-        'description': 'Overleaf LaTeX projects: CRUD, compile, PDF, history, diff. Zero-config — run `overleaf_setup` tool after install.',
+        'description': 'Overleaf LaTeX projects: CRUD, compile, PDF, history, diff.',
         'icon': '🍃',
         'category': CAT_RESEARCH,
-        'command': 'overleaf-mcp',
-        'args': [],
-        # No env vars required — user runs the `overleaf_setup` tool for a
-        # guided walkthrough, then `overleaf_save_credentials` to persist them.
-        'env_specs': [],
-        'url': 'https://github.com/TofuLab/overleaf-mcp',
+        'command': 'uvx',
+        'args': ['--from', 'overleaf-mcp-plus[compile]', 'overleaf-mcp'],
+        'env_specs': [
+            {
+                'key': 'OVERLEAF_SESSION',
+                'label': 'Session Cookie (overleaf_session2)',
+                'hint': 's%3A... — from DevTools → Application → Cookies → overleaf.com → overleaf_session2',
+                'required': True,
+                'secret': True,
+            },
+            {
+                'key': 'OVERLEAF_GIT_TOKEN',
+                'label': 'Git Token (optional, for edit/read operations)',
+                'hint': 'olp_... — from Overleaf → Account Settings → Git Integration → Create Token',
+                'required': False,
+                'secret': True,
+            },
+        ],
+        'url': 'https://github.com/rangehow/overleaf-mcp',
         'tags': ['latex', 'overleaf', 'paper', 'academic', 'pdf', 'compile', 'research'],
         'featured': True,
     },
+
 
     # ── AI & Reasoning ─────────────────────────────────────
 

@@ -244,9 +244,9 @@ function _purgeEmptyConvs() {
 }
 // ── Per-conversation tool state helpers ──
 /* ── Brand detection for model_id — reuse _detectBrand from settings.js ── */
-const _DEPTH_ICONS  = { off: '', medium: '', high: '', max: '' };
+const _DEPTH_ICONS  = { off: '', medium: '', high: '', xhigh: '', max: '' };
 const _DEPTH_ICON_FALLBACK = '';
-const _DEPTH_LABELS = { off: 'Off', medium: 'Med', high: 'High', max: 'Max' };
+const _DEPTH_LABELS = { off: 'Off', medium: 'Med', high: 'High', xhigh: 'xHigh', max: 'Max' };
 /* Models whose model_id indicates thinking/depth support.
  * Uses server-provided thinking_default from _registeredModels;
  * falls back to regex before server config loads. */
@@ -799,8 +799,6 @@ function _restoreConvToolState(conv) {
   _applyImageGenToolUI(!!conv.imageGenEnabled);
   _applyImageGenUI(!!conv.imageGenMode);
   _applyHumanGuidanceUI(!!conv.humanGuidanceEnabled);
-  /* ★ Restore paper reading mode state */
-  if (typeof _restorePaperState === 'function') _restorePaperState(conv);
   /* ★ Restore the image gen model + batch count + aspect + resolution from conv settings */
   if (conv.imageGenModel) _igSelectedModel = conv.imageGenModel;
   if (conv.imageGenCount) {
@@ -2071,7 +2069,17 @@ async function _refreshServerQueue(convId) {
 // ══════════════════════════════════════════════════════
 async function regenerateFromUser(idx) {
   const conv = getActiveConv();
-  if (!conv || activeStreams.has(conv.id) || conv.activeTaskId) return;
+  if (!conv) return;
+  // ★ SyncFix: don't silently early-return on in-flight stream/task — that
+  //   leaves the user thinking nothing happened after clicking Stop. Instead,
+  //   synchronously hard-cancel the racing task so we can proceed to truncate
+  //   and start a new one in the same click.
+  if (activeStreams.has(conv.id) || conv.activeTaskId) {
+    console.info(`[SyncFix] regenerateFromUser hard-cancelling racing stream — conv=${conv.id.slice(0,8)} activeTaskId=${conv.activeTaskId?.slice(0,8)||'null'}`);
+    if (typeof _hardCancelActiveStream === 'function') {
+      _hardCancelActiveStream(conv);
+    }
+  }
   const msg = conv.messages[idx];
   if (!msg || msg.role !== "user") return;
 
@@ -2100,8 +2108,15 @@ async function regenerateFromUser(idx) {
   conv._serverMsgCount = conv.messages.length;
 
   /* ── Surgical DOM truncation ── */
+  const _syncMsgsBefore = conv.messages.length;
   if (!_surgicalTruncateDOM(conv, idx)) renderChat(conv);
   renderConversationList();
+  // ★ SyncFix: invariant + log (matches saveEditAndResend)
+  console.assert(
+    !document.getElementById("streaming-msg"),
+    `[SyncFix] Stale streaming-msg after regenerateFromUser truncate — conv=${convId.slice(0,8)}`
+  );
+  console.info(`[SyncFix] regenerateFromUser conv=${convId.slice(0,8)} idx=${idx} msgsBefore=${_syncMsgsBefore} msgsAfter=${conv.messages.length} hasStreamingMsg=${!!document.getElementById('streaming-msg')} activeTaskId=${conv.activeTaskId?.slice(0,8)||'null'}`);
 
   // ── Atomic backend call: truncate + translate + task start ──
   const _regenConfig = _buildConvConfig(conv);
@@ -2362,10 +2377,24 @@ async function continueAssistant() {
     );
   }
   const discardedContent = Math.max(0, originalContent.length - preservedContent.length);
-  const discardedThinking = (assistantMsg.thinking || "").length;
+  // ★ Preserved thinking = the per-round thinking fields on kept rounds
+  //   (tool_dispatch stores them at capture time).  Anything on
+  //   assistantMsg.thinking ABOVE that sum belongs to the interrupted
+  //   tail and must be discarded (no signature = Claude would reject it).
+  const preservedThinkingChars = keptRounds.reduce(
+    (n, r) => n + ((r.thinking || "").length),
+    0,
+  );
+  const discardedThinking = Math.max(
+    0,
+    (assistantMsg.thinking || "").length - preservedThinkingChars,
+  );
 
   assistantMsg.toolRounds = keptRounds;
   assistantMsg.content = preservedContent;
+  // NB: assistantMsg.thinking is cleared here — any thinking we want to
+  // replay is already stored per-round on keptRounds[i].thinking and will
+  // be sent forward via cfgPayload.toolHistory[].thinking.
   assistantMsg.thinking = "";
   // ★ Save the prefix so state/delta handlers can merge correctly
   if (preservedContent) {
@@ -2378,17 +2407,28 @@ async function continueAssistant() {
 
   debugLog(
     `Continue checkpoint: keeping ${keptRounds.length} tool entries ` +
-    `(preserved ${preservedContent.length} chars from completed rounds), ` +
+    `(preserved ${preservedContent.length} chars content + ` +
+    `${preservedThinkingChars} chars thinking from completed rounds), ` +
     `discarded ${discardedRounds} incomplete rounds + ` +
     `${discardedContent} chars new content + ${discardedThinking} chars thinking`,
     "info",
   );
-  if (discardedRounds > 0 || discardedContent > 0) {
-    const preserveNote = preservedContent.length > 0
-      ? ` (保留了 ${preservedContent.length} 字符已完成工具调用的内容)`
+  if (discardedRounds > 0 || discardedContent > 0 || discardedThinking > 0) {
+    const preserveParts = [];
+    if (preservedContent.length > 0) preserveParts.push(`${preservedContent.length} 字符内容`);
+    if (preservedThinkingChars > 0) preserveParts.push(`${preservedThinkingChars} 字符思考内容`);
+    const preserveNote = preserveParts.length > 0
+      ? ` (保留了 ${preserveParts.join(" + ")})`
+      : '';
+    const discardParts = [];
+    if (discardedContent > 0) discardParts.push(`${discardedContent} 字符后续文本`);
+    if (discardedThinking > 0) discardParts.push(`${discardedThinking} 字符思考`);
+    if (discardedRounds > 0) discardParts.push(`${discardedRounds} 个未完成工具调用`);
+    const discardNote = discardParts.length > 0
+      ? `，丢弃了 ${discardParts.join(" + ")}`
       : '';
     showToast(
-      `从第 ${keptRounds.length} 轮工具调用后恢复${preserveNote}${discardedContent > 0 ? `，丢弃了 ${discardedContent} 字符后续文本` : ''}${discardedRounds > 0 ? (discardedContent > 0 ? ' + ' : '，丢弃了 ') + discardedRounds + ' 个未完成工具调用' : ''}`,
+      `从第 ${keptRounds.length} 轮工具调用后恢复${preserveNote}${discardNote}`,
       "info",
     );
   }
@@ -2445,68 +2485,101 @@ async function continueAssistant() {
   //   Use _buildConvConfig() to get per-conv settings, avoiding the
   //   cross-talk bug where globals from the active conv leak into a
   //   background conv's continue request.
+  //
+  //   ★ Checkpoint assembly moved to the server (/api/chat/continue).
+  //   The server-side _scan_continue_checkpoint() ports this same logic
+  //   from the DB's assistant message — so we no longer ship
+  //   `toolHistory`, `contentPrefix`, `checkpointToolRounds`,
+  //   `checkpointUsage`, `checkpointApiRounds`, `checkpointModifiedFiles`
+  //   or `checkpointModifiedFileList` on the wire.  The `_continueXxx`
+  //   fields on `assistantMsg` stay local and are consumed by the SSE
+  //   stream handlers to merge prior rounds with newly-streamed ones.
   // ═══════════════════════════════════════════════════════════
   const cfgPayload = _buildConvConfig(conv);
-  if (toolHistory.length > 0) {
-    cfgPayload.toolHistory = toolHistory;
-  }
-  // ★ Send preserved content prefix so backend checkpoints include it
-  if (preservedContent) {
-    cfgPayload.contentPrefix = preservedContent;
-  }
-  // ★ Send checkpoint metadata so backend can merge into DB on persist.
-  //   Without this, _sync_result_to_conversation only writes NEW task data,
-  //   losing the pre-checkpoint toolRounds/usage/apiRounds on page refresh.
-  if (keptRounds.length > 0) {
-    cfgPayload.checkpointToolRounds = keptRounds;
-  }
-  if (assistantMsg._continueUsage) {
-    cfgPayload.checkpointUsage = assistantMsg._continueUsage;
-  }
-  if (assistantMsg._continueApiRounds && assistantMsg._continueApiRounds.length > 0) {
-    cfgPayload.checkpointApiRounds = assistantMsg._continueApiRounds;
-  }
-  if (assistantMsg._continueModifiedFiles) {
-    cfgPayload.checkpointModifiedFiles = assistantMsg._continueModifiedFiles;
-  }
-  if (assistantMsg._continueModifiedFileList && assistantMsg._continueModifiedFileList.length > 0) {
-    cfgPayload.checkpointModifiedFileList = assistantMsg._continueModifiedFileList;
-  }
   debugLog(
-    `Continue: sending ${toolHistory.length} tool round(s) as checkpoint` +
-    `${preservedContent ? ` + ${preservedContent.length} chars preserved content` : ''}, ` +
-    `LLM will regenerate content fresh from tool results`,
+    `Continue: delegating to /api/chat/continue with ${keptRounds.length} kept ` +
+    `round(s), preservedContent=${preservedContent.length} chars`,
     "info",
   );
 
-  // ★ Sync to server BEFORE POST so backend can load messages from DB
+  // ★ Sync to server BEFORE POST so backend can load messages from DB.
+  //   Note: the server's /api/chat/continue endpoint will itself roll back
+  //   the DB state to the checkpoint before starting the task — but we
+  //   still sync first so the server sees any local-only edits/attachments.
   await syncConversationToServer(conv);
   let taskId;
   try {
-    const res = await fetch(apiUrl("/api/chat/start"), {
+    const res = await fetch(apiUrl("/api/chat/continue"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         convId: conv.id,
-        config: { ...cfgPayload, excludeLast: true },
+        config: cfgPayload,
       }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Request failed");
+    // ★ Server may tell us to fall back to a plain regenerate (no checkpoint
+    //   available — e.g. all rounds incomplete). Honor it.
+    if (data.fallback === 'regenerate') {
+      debugLog(
+        `Continue: server reports no recoverable checkpoint (${data.reason}); ` +
+        `falling back to full regeneration`,
+        "info",
+      );
+      // Undo the local rollback: restore content/thinking/rounds, pop the
+      // trailing assistant and re-run the normal regenerate path.
+      assistantMsg.content = originalContent;
+      assistantMsg.thinking = "";
+      assistantMsg.toolRounds = allRounds;
+      delete assistantMsg._continueToolRounds;
+      delete assistantMsg._continueContentPrefix;
+      delete assistantMsg._continueApiRounds;
+      delete assistantMsg._continueUsage;
+      delete assistantMsg._continueModifiedFiles;
+      delete assistantMsg._continueModifiedFileList;
+      conv.messages.pop();
+      conv._needsLoad = false;
+      conv._serverMsgCount = conv.messages.length;
+      if (activeConvId === conv.id) renderChat(conv, false);
+      await syncConversationToServer(conv, { allowTruncate: true });
+      await startAssistantResponse(conv.id);
+      return;
+    }
     taskId = data.taskId;
+    if (data.checkpoint) {
+      debugLog(
+        `Continue: server checkpoint summary kept=${data.checkpoint.keptRounds} ` +
+        `discarded=${data.checkpoint.discardedRounds} ` +
+        `preservedContent=${data.checkpoint.preservedContentLen} ` +
+        `discardedContent=${data.checkpoint.discardedContentLen}`,
+        "info",
+      );
+    }
   } catch (e) {
     debugLog("Continue failed: " + e.message, "error");
     return;
   }
   conv.activeTaskId = taskId;
   saveConversations(conv.id);
-  syncConversationToServer(conv);
+  // No need to re-sync here — /api/chat/continue already persisted both the
+  // rolled-back state AND the activeTaskId. A second PUT would just race
+  // with the streaming task's checkpoints.
   connectToTask(conv.id, taskId);
 }
 
 /**
  * ★ Build a single tool history round from a batch of toolRound entries.
  * Each round represents one assistant message with tool_calls + their results.
+ *
+ * Optional per-provider continuity fields propagated through to the backend
+ * when present — the Python backend (lib/tasks_pkg/message_builder.py) gates
+ * them on the target model's actual API capability:
+ *   • assistantContent   — text emitted alongside the tool calls
+ *   • thinking           — reasoning trace (Claude extended-thinking)
+ *   • thinkingSignature  — opaque signature for the thinking block (Claude)
+ *   • toolCalls[i].extraContent — Gemini thought_signature envelope
+ * Old DB rows without these fields round-trip harmlessly as plain calls.
  */
 function _buildToolHistoryRound(batch) {
   const round = {
@@ -2514,17 +2587,28 @@ function _buildToolHistoryRound(batch) {
     toolCalls: [],
     toolResults: [],
   };
-  // ★ Pick up per-round assistantContent from the first entry in the batch
-  //   (tagged by the orchestrator when the LLM emitted text alongside tool calls)
+  // ★ Pick up per-round assistantContent + thinking from the first entry in
+  //   the batch (tool_dispatch tags only the first entry per LLM round).
   for (const r of batch) {
     if (!round.assistantContent && r.assistantContent) {
       round.assistantContent = r.assistantContent;
     }
-    round.toolCalls.push({
+    if (!round.thinking && r.thinking) {
+      round.thinking = r.thinking;
+    }
+    if (!round.thinkingSignature && r.thinkingSignature) {
+      round.thinkingSignature = r.thinkingSignature;
+    }
+    const tc = {
       id: r.toolCallId,
       name: r.toolName,
       arguments: r.toolArgs || "{}",
-    });
+    };
+    // Gemini 3.x thought_signature — carried on the tool_call entry itself.
+    if (r.extraContent) {
+      tc.extraContent = r.extraContent;
+    }
+    round.toolCalls.push(tc);
     round.toolResults.push({
       tool_call_id: r.toolCallId,
       content: r.toolContent || "",

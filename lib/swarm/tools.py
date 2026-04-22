@@ -170,9 +170,13 @@ SPAWN_MORE_AGENTS_TOOL = {
     "function": {
         "name": "spawn_more_agents",
         "description": (
-            "Spawn additional sub-agents based on insights from completed agents. "
-            "Use when results reveal new subtasks, gaps to fill, or follow-up work needed. "
-            "New agents can reference completed agents' results via context."
+            "[Reactive master only] Spawn additional sub-agents based on insights "
+            "from completed agents. This tool is ONLY available to the reactive "
+            "master LLM during the swarm review loop — NOT to normal agents or "
+            "to the main orchestrator. In normal (non-swarm) contexts, use "
+            "'spawn_agents' to launch parallel sub-tasks.\n\n"
+            "Use when results reveal new subtasks, gaps to fill, or follow-up "
+            "work needed. New agents can reference completed agents' results via context."
         ),
         "parameters": {
             "type": "object",

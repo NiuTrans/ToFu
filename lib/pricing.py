@@ -61,10 +61,14 @@ MODEL_PRICING = {
     'gpt-4-turbo':               {'input': 10.0,  'output': 30.0,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.50, 'name': 'GPT-4 Turbo'},
     'deepseek-chat':             {'input': 0.27,  'output': 1.10,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3'},
     'deepseek-v3.2':             {'input': 0.28,  'output': 0.41,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2'},  # ¥2/¥3 per 1M
+    # DeepSeek V3.2 mirrors on YourProvider gateway — tiered ¥2/¥4 input, ¥4/¥6 output at 32K (cheapest tier in USD)
+    'deepseek-v3.2-tencent':     {'input': 0.28,  'output': 0.55,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2 (Tencent)'},  # ¥2/¥4 per 1M ≤32K
+    'deepseek-v3.2-baidu':       {'input': 0.28,  'output': 0.55,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2 (Baidu)'},    # ¥2/¥4 per 1M ≤32K
+    'deepseek-v3.2-huawei':      {'input': 0.28,  'output': 0.55,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2 (Huawei)'},   # ¥2/¥4 per 1M ≤32K
+    'deepseek-v3.2-doubao':      {'input': 0.28,  'output': 0.55,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2 (Doubao)'},   # ¥2/¥4 per 1M ≤32K
     'deepseek-reasoner':         {'input': 0.55,  'output': 2.21,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek R1'},
     'LongCat-Flash-Thinking-2601': {'input': 0.0, 'output': 0.0,  'cacheWriteMul': 0,    'cacheReadMul': 0,    'name': 'LongCat Flash'},
     'LongCat-Flash-Chat-2603':      {'input': 0.28,'output': 1.10, 'cacheWriteMul': 0,    'cacheReadMul': 0,    'name': 'LongCat Flash Chat'},  # ¥2/¥8 per 1M
-    'longcat-pro-0403':             {'input': 0.0, 'output': 0.0,  'cacheWriteMul': 0,    'cacheReadMul': 0,    'name': 'LongCat Pro'},
     # ── Qwen (DashScope) — converted from CNY at 7.24 ──
     'qwen3.6-plus':              {'input': 0.28, 'output': 1.66, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Qwen 3.6 Plus'},  # ¥2/¥12 per 1M (≤256K)
     'qwen3.5-plus':              {'input': 0.11, 'output': 0.66, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Qwen 3.5 Plus'},  # ¥0.8/¥4.8 per 1M (≤128K)
@@ -155,6 +159,8 @@ MODEL_PRICING = {
     # ── xAI (Grok) ──
     'grok-3':                    {'input': 3.00, 'output': 15.0, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Grok 3'},
     'grok-3-mini':               {'input': 0.30, 'output': 0.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Grok 3 Mini'},
+    # ── Moonshot (Kimi) — per OpenRouter (2026-04-20 release) ──
+    'kimi-k2.6':                 {'input': 0.60, 'output': 2.80, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Kimi K2.6'},
 }
 
 # ── Qwen tiered pricing (CNY per 1M tokens) ──
@@ -180,6 +186,11 @@ QWEN_PRICING_CNY = {
     'qwen-vl-max':      {'input': [(1_000_000, 1.6)],  'output': [(1_000_000, 4.0)]},
     'qwen-vl-plus':     {'input': [(1_000_000, 0.8)],  'output': [(1_000_000, 2.0)]},
     'deepseek-v3.2':    {'input': [(1_000_000, 2.0)],  'output': [(1_000_000, 3.0)]},
+    # YourProvider mirrors: ¥2/¥4 input, ¥4/¥6 output, split at 32K context
+    'deepseek-v3.2-tencent': {'input': [(32_000, 2.0), (1_000_000, 4.0)], 'output': [(32_000, 4.0), (1_000_000, 6.0)]},
+    'deepseek-v3.2-baidu':   {'input': [(32_000, 2.0), (1_000_000, 4.0)], 'output': [(32_000, 4.0), (1_000_000, 6.0)]},
+    'deepseek-v3.2-huawei':  {'input': [(32_000, 2.0), (1_000_000, 4.0)], 'output': [(32_000, 4.0), (1_000_000, 6.0)]},
+    'deepseek-v3.2-doubao':  {'input': [(32_000, 2.0), (1_000_000, 4.0)], 'output': [(32_000, 4.0), (1_000_000, 6.0)]},
     'deepseek-r1':      {'input': [(1_000_000, 4.0)],  'output': [(1_000_000, 16.0)]},
     'glm-5v-turbo':     {'input': [(32_000, 5.0), (1_000_000, 7.0)],  'output': [(32_000, 22.0), (1_000_000, 26.0)]},
     '_default':         {'input': [(128_000, 0.8), (256_000, 2.0), (1_000_000, 4.0)], 'output': [(128_000, 4.8), (256_000, 12.0), (1_000_000, 24.0)]},

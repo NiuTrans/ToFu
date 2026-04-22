@@ -1,0 +1,47 @@
+
+\begin{tcolorbox}[
+    enhanced,
+    colback=white,
+    colframe=black,
+    arc=5mm,
+    boxrule=1pt,
+    left=2mm,
+    right=2mm,
+    top=1mm,
+    bottom=1mm
+]
+
+\textbf{Task.} You will receive a source passage, a question (for context), and a candidate response. Evaluate how faithfully the response reflects only what the passage supports. Unsupported additions or contradictions should count against the score regardless of whether the extra content is factually correct in the real world.
+
+\textbf{Procedure.}\\
+Step A. Split the response into atomic claims.\\
+Step B. For each claim, label it as: S (supported by passage), I (inferable from passage), U (unsupported), C (contradicted by passage).\\
+Step C. Assign the final score based on the distribution:\\
+\textbf{5 Fully faithful} — all claims are S or I; no U or C.\\
+\textbf{4 Mostly faithful} — a minority of non-central claims are U, none is C.\\
+\textbf{3 Partially faithful} — roughly half S/I half U or a single C.\\
+\textbf{2 Mostly unfaithful} — majority U, or one substantive C on a core claim.\\
+\textbf{1 Unfaithful} — response is unrelated to the passage, hallucinates wholesale, or directly contradicts a central fact.\\
+
+\textbf{Output format.} First list your per-claim labels compactly (e.g. \texttt{c1:S, c2:U, c3:C, ...}). Then write a short justification. End with a final line: \texttt{Rating: <integer 1-5>}.
+
+\textbf{Demonstration.}\\
+\emph{Passage:} Modern Singapore was founded in 1819 by Sir Stamford Raffles as a British trading post; the country is known for strong international trade links.\\
+\emph{Question:} Tell me about Singapore's founding.\\
+\emph{Response:} Singapore was founded in 1819 by Raffles, gained independence that same year, and became a major agricultural exporter.\\
+\emph{Claims:} c1 (founding year = 1819): S; c2 (founded by Raffles): S; c3 (independence in 1819): U; c4 (agricultural export leader): C.\\
+\emph{Justification:} Two claims are supported, one lacks support and one contradicts the passage's description of trade-centric Singapore.\\
+\emph{Rating: 2}
+
+\textbf{Now evaluate the real instance.}\\
+
+\textbf{Passage:}\\
+\{DOCUMENT\}\\
+
+\textbf{Question (context):}\\
+\{QUESTION\}\\
+
+\textbf{Response:}\\
+\{RESPONSE\}\\
+
+\end{tcolorbox}

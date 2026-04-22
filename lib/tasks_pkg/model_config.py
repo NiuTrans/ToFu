@@ -20,6 +20,7 @@ from lib.tools import (
     EMIT_TO_USER_TOOL,
     FETCH_URL_TOOL,
     PROJECT_TOOLS,
+    READ_FILES_TOOL,
     SEARCH_TOOL_MULTI,
     SEARCH_TOOL_SINGLE,
 )
@@ -112,9 +113,9 @@ def _resolve_model_config(cfg, task_id):
             model = resolved
         thinking_enabled = True
         logger.debug('[Task %s] legacy preset=%s → model=%s', tid, preset, model)
-    elif preset in ('opus', 'medium', 'high', 'max'):
+    elif preset in ('opus', 'medium', 'high', 'xhigh', 'max'):
         thinking_enabled = True
-        if preset in ('medium', 'high', 'max'):
+        if preset in ('medium', 'high', 'xhigh', 'max'):
             thinking_depth = preset
         if not thinking_depth:
             thinking_depth = _default_depth
@@ -140,7 +141,9 @@ def _resolve_model_config(cfg, task_id):
                     tid)
 
     search_enabled = search_mode in ('single', 'multi')
-    fetch_enabled = True  # always on — no longer a user-facing toggle
+    # fetch_url is normally always on (no user-facing toggle). Benchmarks/tests
+    # may pass fetchEnabled=False to strip all network tools — honored here.
+    fetch_enabled = cfg.get('fetchEnabled', True)
 
     project_path = cfg.get('projectPath', '')
     project_enabled = bool(project_path)
@@ -197,7 +200,12 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
     if fetch_enabled or search_enabled:
         tool_list.append(FETCH_URL_TOOL)
 
-    # ★ Project tools (read_files supports both relative and absolute paths)
+    # ★ read_files is ALWAYS on — it handles both project-relative and
+    #   absolute local paths (images, PDFs, Office docs, text files), so the
+    #   model can read local content even without a project attached.
+    tool_list.append(READ_FILES_TOOL)
+
+    # ★ Project tools (write/grep/list/run) — only when project is attached
     if project_enabled:
         tool_list.extend(PROJECT_TOOLS)
     elif code_exec_enabled:
@@ -278,17 +286,22 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
 
     # ★ MCP tools — bridge to external MCP servers (ClawHub tools, etc.)
     #   Injected after all native tools so they appear at the end of the list.
-    try:
-        from lib.mcp import get_bridge
-        bridge = get_bridge()
-        if bridge.connected:
-            mcp_tools = bridge.get_openai_tool_defs()
-            if mcp_tools:
-                tool_list.extend(mcp_tools)
-                logger.info('[Task %s] 🔌 MCP tools loaded: %d from %d servers',
-                            tid, len(mcp_tools), bridge.server_count)
-    except Exception as e:
-        logger.debug('[Task %s] MCP bridge not available: %s', tid, e)
+    #   Default: enabled. Benchmarks may pass mcpEnabled=False to isolate to
+    #   native tools only (e.g. project-tools-only SWE-bench runs).
+    if cfg.get('mcpEnabled', True):
+        try:
+            from lib.mcp import get_bridge
+            bridge = get_bridge()
+            if bridge.connected:
+                mcp_tools = bridge.get_openai_tool_defs()
+                if mcp_tools:
+                    tool_list.extend(mcp_tools)
+                    logger.info('[Task %s] 🔌 MCP tools loaded: %d from %d servers',
+                                tid, len(mcp_tools), bridge.server_count)
+        except Exception as e:
+            logger.debug('[Task %s] MCP bridge not available: %s', tid, e)
+    else:
+        logger.debug('[Task %s] MCP disabled via mcpEnabled=false', tid)
 
     deferred_tools = []  # tools discovered via tool_search
     if not tool_list:

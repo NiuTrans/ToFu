@@ -579,6 +579,23 @@ class LLMDispatcher:
         """
         self.initialize()
 
+        # ── Daily key-health filter ──
+        # A key may be auto-disabled for the rest of today if its success rate
+        # dropped below the threshold, or a user may have manually toggled it
+        # off in Settings. Look up once per pick call.
+        try:
+            from lib.key_stats import is_key_enabled as _key_enabled
+        except Exception:
+            _key_enabled = None
+
+        def _slot_key_enabled(s):
+            if _key_enabled is None:
+                return True
+            try:
+                return _key_enabled(s.provider_id, s.key_name)
+            except Exception:
+                return True
+
         with self._lock:
             candidates = []
             for slot in self.slots:
@@ -598,6 +615,8 @@ class LLMDispatcher:
                     continue
                 if not slot.is_available:
                     continue
+                if not _slot_key_enabled(slot):
+                    continue
                 candidates.append(slot)
 
             if not candidates:
@@ -611,6 +630,8 @@ class LLMDispatcher:
                     for slot in self.slots:
                         if 'text' in slot.capabilities and slot.is_available:
                             if not self._is_chat_compatible(slot):
+                                continue
+                            if not _slot_key_enabled(slot):
                                 continue
                             if not (exclude_models and slot.model in exclude_models):
                                 if not (exclude_keys and slot.key_name in exclude_keys):

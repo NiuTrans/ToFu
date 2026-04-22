@@ -210,6 +210,19 @@ def _build_insert_content(meta, fn_name, fn_args, tool_content, path):
         meta['writeOk'] = ok
 
 
+def _build_create_project(meta, fn_name, fn_args, tool_content, path):
+    ok = '✅' in tool_content
+    p = fn_args.get('path', '') or path
+    name = fn_args.get('name', '')
+    if ok:
+        meta['snippet'] = f'{p}' + (f'  name={name}' if name else '')
+        meta['badge'] = 'created'
+    else:
+        meta['snippet'] = f'{p} — {tool_content[:120]}'
+        meta['badge'] = 'failed'
+    meta['writeOk'] = ok
+
+
 def _build_default(meta, fn_name, fn_args, tool_content, path):
     meta['snippet'] = tool_content[:120].replace('\n', ' ')
     meta['badge'] = ''
@@ -230,8 +243,11 @@ def _build_mcp_tool(meta, fn_name, fn_args, tool_content, path):
 
 
 # Module-level dispatch table — O(1) lookup replaces if/elif chain
+# NOTE: 'read_file' (singular) is an obsolete tool name kept only for
+# backward compatibility with old persisted tool-round metadata in saved
+# conversations. New code always emits 'read_files' (plural).
 _META_BUILDERS = {
-    'read_file':    _build_read_files,
+    'read_file':    _build_read_files,   # legacy — persisted tool rounds only
     'read_files':   _build_read_files,
     'grep_search':  _build_grep_search,
     'list_dir':     _build_list_dir,
@@ -240,6 +256,7 @@ _META_BUILDERS = {
     'apply_diff':   _build_apply_diff,
     'run_command':  _build_run_command,
     'insert_content': _build_insert_content,
+    'create_project': _build_create_project,
 }
 
 

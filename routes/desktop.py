@@ -7,6 +7,7 @@ Mirrors the architecture of routes/browser.py:
 """
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -18,6 +19,34 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 desktop_bp = Blueprint('desktop', __name__)
+
+
+def _check_bridge_auth(kind: str = 'desktop') -> bool:
+    """Verify the optional X-Bridge-Secret header.
+
+    Currently a **no-op guard** that emits an audit entry on header
+    mismatch but does not yet reject. Full enforcement lands in Phase C
+    (SECURITY_AUDIT_REPORT A3/A4). See the twin in routes/browser.py.
+    """
+    expected = (os.environ.get('CHATUI_BRIDGE_SECRET', '') or '').strip()
+    if not expected:
+        return True
+    provided = request.headers.get('X-Bridge-Secret', '')
+    if provided == expected:
+        return True
+    try:
+        from lib.log import audit_log as _audit
+        _audit('bridge_auth_fail',
+               kind=kind,
+               path=request.path,
+               ip=request.remote_addr,
+               has_header=bool(provided),
+               ua=(request.user_agent.string or '')[:120])
+    except Exception as _aerr:
+        logger.debug('[Desktop] audit_log bridge_auth_fail failed: %s', _aerr)
+    logger.warning('[Desktop] bridge auth mismatch from %s on %s (Phase A: logged, not rejected)',
+                   request.remote_addr, request.path)
+    return True
 
 # ══════════════════════════════════════════════════════════
 #  Command Queue (mirrors lib/browser.py pattern)
@@ -109,6 +138,7 @@ def format_desktop_result(cmd_type, result):
 @desktop_bp.route('/api/desktop/poll', methods=['POST'])
 def desktop_poll():
     global _last_poll_time
+    _check_bridge_auth('desktop')
     _last_poll_time = time.time()
 
     # 1) Resolve any results from the agent

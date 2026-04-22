@@ -290,11 +290,15 @@ DESKTOP_TOOLS = [
     DESKTOP_TOOL_SYSTEM_INFO,
 ]
 
+# NOTE: DESKTOP_TOOL_NAMES lists only tools that have a schema defined
+# above (i.e. ones the LLM can actually call). 'desktop_move_file' has a
+# backend handler (cmd_move_file in lib/desktop_agent.py) but is NOT
+# exposed to the LLM — it's reachable only via direct HTTP, so it does
+# not belong in this set.
 DESKTOP_TOOL_NAMES = {
     'desktop_list_files',
     'desktop_read_file',
     'desktop_write_file',
-    'desktop_move_file',
     'desktop_open_file',
     'desktop_open_app',
     'desktop_run_command',

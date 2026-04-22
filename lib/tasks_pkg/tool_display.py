@@ -31,18 +31,35 @@ from lib.tools import (
 
 
 def _tool_display_web_search(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for web_search tool calls."""
-    # ★ Batch mode: show number of queries
+    """Build display info for web_search tool calls.
+
+    For batch mode (``queries`` array), renders ALL candidate search terms
+    (not just the first 3) with a generous per-query truncation (80 chars)
+    so users can see every term the model is trying. The full list is also
+    exposed via ``_batchQueries`` so the frontend can render it as a
+    structured list if desired.
+    """
+    # ★ Batch mode: show all candidate queries
     queries = fn_args.get('queries')
     if queries and isinstance(queries, list):
         n = len(queries)
         previews = []
-        for s in queries[:3]:
+        full_list = []
+        for s in queries:
             if isinstance(s, dict):
-                previews.append(s.get('query', '?')[:30])
-        suffix = f' +{n - 3} more' if n > 3 else ''
-        display = f'{n} searches: {"; ".join(previews)}{suffix}'
-        return display, {'toolName': 'web_search', '_display_query': display}
+                q = s.get('query', '?') or '?'
+            elif isinstance(s, str):
+                q = s.strip() or '?'
+            else:
+                q = '?'
+            full_list.append(q)
+            previews.append(q if len(q) <= 80 else q[:80] + '…')
+        display = f'{n} searches: {" | ".join(previews)}'
+        return display, {
+            'toolName': 'web_search',
+            '_display_query': display,
+            '_batchQueries': full_list,
+        }
     query = fn_args.get('query', '')
     return query, {'toolName': 'web_search'}
 
@@ -82,18 +99,33 @@ def _short_url(url, max_len=60):
 
 
 def _tool_display_fetch_url(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for fetch_url tool calls."""
-    # ★ Batch mode: show number of URLs
+    """Build display info for fetch_url tool calls.
+
+    For batch mode (``urls`` array), renders ALL candidate URLs (not just
+    the first 3) using short-hostname form so users can see every URL the
+    model is fetching. The full list is also exposed via ``_batchUrls``.
+    """
+    # ★ Batch mode: show all candidate URLs
     urls = fn_args.get('urls')
     if urls and isinstance(urls, list):
         n = len(urls)
         previews = []
-        for s in urls[:3]:
+        full_list = []
+        for s in urls:
             if isinstance(s, dict):
-                previews.append(_short_url(s.get('url', '?'), max_len=40))
-        suffix = f' +{n - 3} more' if n > 3 else ''
-        display = f'📄 {n} URLs: {", ".join(previews)}{suffix}'
-        return display, {'toolName': 'fetch_url', '_display_query': display}
+                u = s.get('url', '?') or '?'
+            elif isinstance(s, str):
+                u = s.strip() or '?'
+            else:
+                u = '?'
+            full_list.append(u)
+            previews.append(_short_url(u, max_len=60))
+        display = f'📄 {n} URLs: {", ".join(previews)}'
+        return display, {
+            'toolName': 'fetch_url',
+            '_display_query': display,
+            '_batchUrls': full_list,
+        }
     target_url = fn_args.get('url', '')
     is_pdf_hint = target_url.lower().rstrip('/').endswith('.pdf')
     short = _short_url(target_url)
@@ -252,6 +284,10 @@ def _build_display_dispatch_table():
     # Project tools
     for name in PROJECT_TOOL_NAMES:
         table.setdefault(name, _tool_display_project)
+
+    # ★ read_files — global tool (not in PROJECT_TOOL_NAMES), uses same
+    #   project-style display rendering (🔍 / 📂 / 📄 + path + lines).
+    table.setdefault('read_files', _tool_display_project)
 
     # Browser tools (basic + advanced)
     for name in BROWSER_TOOL_NAMES:

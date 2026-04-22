@@ -16,6 +16,39 @@ browser_bp = Blueprint('browser', __name__)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _check_bridge_auth(kind: str = 'browser') -> bool:
+    """Verify the optional X-Bridge-Secret header.
+
+    Currently a **no-op guard**: it inspects the header and emits an audit
+    trail when a mismatch would occur, but does NOT yet reject the request.
+    The full rejection path lands in Phase C (SECURITY_AUDIT_REPORT A3/A4).
+    This pre-wires the audit entry so Phase C only has to flip the return
+    path from logging to ``abort(401)``.
+
+    Returns True when auth check is disabled or passes; False would mean
+    fail-closed once Phase C lands.
+    """
+    expected = (os.environ.get('CHATUI_BRIDGE_SECRET', '') or '').strip()
+    if not expected:
+        return True  # not configured — skip (current behaviour)
+    provided = request.headers.get('X-Bridge-Secret', '')
+    if provided == expected:
+        return True
+    try:
+        from lib.log import audit_log as _audit
+        _audit('bridge_auth_fail',
+               kind=kind,
+               path=request.path,
+               ip=request.remote_addr,
+               has_header=bool(provided),
+               ua=(request.user_agent.string or '')[:120])
+    except Exception as _aerr:
+        logger.debug('[Browser] audit_log bridge_auth_fail failed: %s', _aerr)
+    logger.warning('[Browser] bridge auth mismatch from %s on %s (Phase A: logged, not rejected)',
+                   request.remote_addr, request.path)
+    return True  # Phase A: permissive; flip to False in Phase C
+
+
 @browser_bp.after_request
 def _browser_cors(response):
     """Add CORS headers for /api/browser/* so Chrome Extension can reach us."""
@@ -30,6 +63,7 @@ def _browser_cors(response):
 def browser_poll():
     if request.method == 'OPTIONS':
         return '', 204
+    _check_bridge_auth('browser')
     from lib.browser import mark_poll, resolve_batch, wait_for_commands
     data = request.get_json(silent=True) or {}
     client_id = data.get('clientId') or None

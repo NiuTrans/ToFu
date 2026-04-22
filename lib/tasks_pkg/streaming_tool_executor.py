@@ -271,18 +271,36 @@ class StreamingToolAccumulator:
                     def _do_search(q):
                         r = perform_web_search(q, user_question=user_q)
                         sd = getattr(r, '_search_diag', None)
-                        return q, format_search_for_tool_response(r, search_diag=sd)
+                        return q, r, format_search_for_tool_response(r, search_diag=sd)
                     parts = [None] * len(query_list)
+                    results_per_q = [None] * len(query_list)
                     with _TP(max_workers=min(len(query_list), 5)) as pool:
                         futs = {pool.submit(_do_search, q): i for i, q in enumerate(query_list)}
                         for f in _ac(futs):
                             idx = futs[f]
                             try:
-                                q, fmt = f.result()
+                                q, r, fmt = f.result()
                                 parts[idx] = f'=== Search: {q} ===\n{fmt}' if len(query_list) > 1 else fmt
+                                results_per_q[idx] = r
                             except Exception as e:
                                 parts[idx] = f'Search failed for "{query_list[idx]}": {e}'
-                    return '\n\n'.join(p for p in parts if p)
+                                results_per_q[idx] = []
+                    # Merge display_results across all queries (same as _handle_web_search_batch)
+                    all_display_results = []
+                    for r in results_per_q:
+                        if not r:
+                            continue
+                        for item in r:
+                            dr = {k: v for k, v in item.items() if k != 'full_content'}
+                            if item.get('full_content'):
+                                dr['fetched'] = True
+                                dr['fetchedChars'] = len(item['full_content'])
+                            all_display_results.append(dr)
+                    formatted = _ContentWithDisplayResults(
+                        '\n\n'.join(p for p in parts if p),
+                        all_display_results,
+                    )
+                    return formatted
                 query = fn_args.get('query', '')
                 user_question = self._task.get('lastUserQuery', '')
                 results = perform_web_search(query,
@@ -315,6 +333,7 @@ class StreamingToolAccumulator:
                 if urls and isinstance(urls, list):
                     from concurrent.futures import ThreadPoolExecutor as _TP, as_completed as _ac
                     import lib as _lib_ref
+                    from lib.tasks_pkg.tool_display import _short_url
                     url_list = [
                         (s.get('url') if isinstance(s, dict) else s)
                         for s in urls[:10]
@@ -325,19 +344,53 @@ class StreamingToolAccumulator:
                             u, max_chars=_lib_ref.FETCH_MAX_CHARS_DIRECT,
                             pdf_max_chars=_lib_ref.FETCH_MAX_CHARS_PDF,
                         )
-                        if c:
-                            return f"Content from {u} ({len(c):,} chars):\n\n{c}"
-                        return f"Failed to fetch {u}."
+                        is_pdf = (u.lower().rstrip('/').endswith('.pdf')
+                                  or (c and c.startswith('[Page ')))
+                        return c, is_pdf
                     parts = [None] * len(url_list)
+                    display_results = [None] * len(url_list)
                     with _TP(max_workers=min(len(url_list), 8)) as pool:
                         futs = {pool.submit(_do_fetch, u): i for i, u in enumerate(url_list)}
                         for f in _ac(futs):
                             idx = futs[f]
+                            u = url_list[idx]
                             try:
-                                parts[idx] = f.result()
+                                c, is_pdf = f.result()
+                                if c:
+                                    parts[idx] = f"Content from {u} ({len(c):,} chars):\n\n{c}"
+                                    display_results[idx] = {
+                                        'title': f'{"PDF" if is_pdf else "Page"}: {_short_url(u)}',
+                                        'snippet': f'{len(c):,} chars',
+                                        'url': u,
+                                        'source': 'PDF' if is_pdf else 'Direct Fetch',
+                                        'fetched': True,
+                                        'fetchedChars': len(c),
+                                    }
+                                else:
+                                    parts[idx] = f"Failed to fetch {u}."
+                                    display_results[idx] = {
+                                        'title': f'Page: {_short_url(u)}',
+                                        'snippet': 'Failed',
+                                        'url': u,
+                                        'source': 'Direct Fetch',
+                                        'fetched': False,
+                                        'fetchedChars': 0,
+                                    }
                             except Exception as e:
-                                parts[idx] = f"Failed to fetch {url_list[idx]}: {e}"
-                    return '\n\n'.join(p for p in parts if p)
+                                parts[idx] = f"Failed to fetch {u}: {e}"
+                                display_results[idx] = {
+                                    'title': f'Page: {_short_url(u)}',
+                                    'snippet': f'Error: {str(e)[:120]}',
+                                    'url': u,
+                                    'source': 'Direct Fetch',
+                                    'fetched': False,
+                                    'fetchedChars': 0,
+                                }
+                    formatted = _ContentWithDisplayResults(
+                        '\n\n'.join(p for p in parts if p),
+                        [d for d in display_results if d is not None],
+                    )
+                    return formatted
                 url = fn_args.get('url', '')
                 import lib as _lib_ref
                 content = fetch_page_content(

@@ -457,7 +457,24 @@ class ScheduledTaskManager:
                 try:
                     self._check_and_run_due_tasks()
                 except Exception as e:
-                    logger.error('[Scheduler] Error in scheduler check loop: %s', e, exc_info=True)
+                    # Transient DB connection errors (PG timeout, connection
+                    # reset) are routinely recoverable on the next 30s tick —
+                    # downgrade to WARNING without a traceback so they don't
+                    # pollute error.log. Anything else is still a real bug.
+                    etype = type(e).__name__
+                    _msg_lower = str(e).lower()
+                    is_transient_db = (
+                        etype in ('OperationalError', 'InterfaceError')
+                        or 'timeout expired' in _msg_lower
+                        or 'connection to server' in _msg_lower
+                        or 'database is locked' in _msg_lower
+                    )
+                    if is_transient_db:
+                        logger.warning('[Scheduler] Transient DB error in check loop '
+                                       '(will retry in 30s): %s: %s', etype, e)
+                    else:
+                        logger.error('[Scheduler] Error in scheduler check loop: %s',
+                                     e, exc_info=True)
                 time.sleep(30)  # Check every 30 seconds
 
         self._thread = threading.Thread(target=_loop, daemon=True)

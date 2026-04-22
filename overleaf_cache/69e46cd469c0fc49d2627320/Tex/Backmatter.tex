@@ -1,0 +1,328 @@
+% --- 在“获奖情况”之后，\cleardoublepage 之前插入 ---
+\chapter[附录]{附\quad 录}\chaptermark{附\quad 录}% syntax:
+\appendix % 关键命令：将后续的 \chapter 编号变为 A, B, C...
+\section{各基准评估热力图详细结果}
+\label{app:heatmap_results}
+
+我们在\ref{sec:audit_results}小节中，汇报了基于异构大语言模型裁判池（LLM-as-a-Judge）对现有对话检索基准进行 \textsc{CRB-Eval} 质量审计的综合平均得分。为了提供更细粒度的评估视角，并充分展示不同架构、不同规模的裁判模型在各项评估任务上的打分分布与一致性，本附录提供了详细的模型打分热力图。
+
+\begin{figure}[htbp]
+    \centering
+    \TBDFIG{4 款裁判模型 $\times$ 6 个历史基准 的 CRB-Eval 打分热力图（分别对应 4 个评估维度）}
+    \bicaption{不同模型在以前基准上的CRB-Eval分数总结。}{Summary of CRB-Eval scores for different models on previous benchmarks.}
+    \label{fig:dataset-heatmeap}
+\end{figure}
+针对本文纳入审计的每一个历史对话检索基准（包括 QReCC、QuAC、Doc2Dial、TopiOCQA、InSCIT 以及 CORAL），我们分别收集了 4 款参评大语言模型在四维指标上的独立评分。这一系统性的审计过程最终生成了 4 张规格为 $4 \times 6$ 的"裁判模型-评测基准"打分矩阵热力图，如图~\ref{fig:dataset-heatmeap} 所示。
+
+通过对热力图的纵向观察（即同一基准在不同裁判模型下的得分分布）可以发现，尽管 4 款大语言模型在绝对分值上存在微小的固有偏好差异，但它们在不同基准之间给出的相对排序与质量趋势保持了高度的一致性。这从微观层面进一步印证了正文中所采用的“异构多模型集成与逐点评分策略”能够有效稀释单一模型的评估偏见，确保审计结果的客观性与科学性。
+
+
+
+% --- 附录 B ---
+\section{CORAL 基准审计详细分析}
+\label{app:coral_audit}
+
+\textbf{构建机制与局限性。}CORAL 是利用大语言模型自动化构建多轮对话检索基准的早期尝试，其核心逻辑是利用维基百科固有的层级结构（标题--子标题--正文）来生成对话实例。具体而言，该方法利用 GPT-4 将各级标题改写为用户提出的问题，并将标题下的对应正文段落作为系统回答，而金标文档则标注为正文中引用的参考文献。
+
+然而，这种基于静态文档结构的启发式方法实质上是将“人工的局部视野”替换为了“规则的局部视野”。由于缺乏全局性的验证机制，生成的查询往往与标注文档之间存在严重的语义错位，且对话的展开路径直接反映了原始文档的物理组织而非用户的真实意图流转。
+
+通过 \textsc{CRB-Eval} 对 CORAL 原始数据集进行的四维量化审计显示，其数据质量在多个关键维度上显著低于人工标注基准及本文提出的 \textsc{CRB-Bench}。具体评分如下：
+\begin{itemize}
+    \item \textbf{证据完备性：} \TBD{} / 5.0
+    \item \textbf{查询--证据对齐度：} \TBD{} / 5.0
+    \item \textbf{答案--证据忠实度：} \TBD{} / 5.0
+    \item \textbf{答案质量：} \TBD{} / 5.0
+\end{itemize}
+其中，查询--证据对齐度与答案--证据忠实度的极低评分反映出该基准中充斥着严重的标注噪声与对齐失效问题。
+
+\textbf{典型对齐失效案例研究。}为了直观展示 CORAL 的质量缺陷，本节选取了数据集中的首个样本进行定性分析。该案例展示了明显的系统性错位：对话主题涉及天文学，而关联的证据文档却是关于数字对象标识符（DOI）系统的技术说明。
+
+\textbf{用户:} What methods are used to predict these geodynamic regimes?  
+
+\textbf{答案:} exoplanets have been directly observed and remotely sensed, [15] but due to their great distance and proximity to obscuring energy sources (the stars they orbit), there is little concrete knowledge of their composition and geodynamic regime. therefore, the majority of information and conjectures made about them come from alternative sources [cite: 
+
+\textbf{金标证据：} doi it uses a managed registry (providing social and technical infrastructure). it does not assume any specific business model for the provision of identifiers or services and enables other existing services to link to it in defined ways...
+
+\textbf{审计结论。}本研究发现，CORAL 生成的查询常与标注的支撑文档存在系统性脱节。在将上述定量与定性证据反馈给 CORAL 团队后，对方承认了原始版本中存在的质量问题，并随后撤回了原始仓库。这一案例深刻表明：脱离全局感知与意图驱动的自动化合成，仅能产出信噪比极低的数据，无法胜任严谨的检索能力评估任务。
+% --- 附录 C ---
+\section{标注认知边界案例研究}
+\label{app:cognitive_boundary}
+
+\textbf{理论概述：认知边界与标注稀疏性}。人工标注在构建多轮对话检索基准时，天然受到“认知边界”（Cognition Boundary）的局限 。标注者在设计评估实例（Evaluation Instances）时，通常采用“以文档为中心”的工作流：即先阅读一篇特定的文档，随后针对该文档的内容构思查询 。
+
+然而，在大规模语料库（Large-scale Corpus）环境下，标注者选定的所谓“金标文档”（Gold Document）往往并非该查询唯一或排他的答案来源 。由于标注者无法在标注过程中全局审视整个语料库，大量同样包含正确答案（甚至更优）的有效证据文档被系统性地遗漏了，这直接导致了标注稀疏性（Annotation Sparsity）问题 。
+
+\textbf{}{典型案例对比分析。}为了直观展示认知边界对数据集质量的影响，表 \ref{tab:sparsity_cases} 对比了各主流基准中人工标注的金标文档与 \textsc{CRB-Eval} 在语料库中识别出的有效替代证据（Alternative Valid Evidence）。
+
+\begin{table}[htbp]
+\small
+\bicaption{说明标注稀疏性的案例研究}{Case study illustrating annotation sparsity}
+\label{tab:sparsity_cases}
+\centering
+\renewcommand{\arraystretch}{1.5}
+\begin{tabularx}{\textwidth}{p{1.6cm} p{3.2cm} X X}
+\toprule
+\textbf{数据集} & \textbf{查询} & \textbf{金标文档} & \textbf{替代性证据（已检索）} \\
+\midrule
+
+\textbf{QReCC} & 
+\textit{请告诉我心律不齐的具体类型。} & 
+\dots 心律紊乱可能是正常的生理反应 \dots 当肺部无法提取氧气时可能会发生缺氧 \dots 严重贫血 \dots 会降低携氧能力 \dots & 
+\dots 心律失常根据其发生部位进行分类 \dots \textbf{心律失常共有十二种类型} \dots 当心房失去协调跳动的能力时，就会发生心房颤动 \dots \\
+\midrule
+
+\textbf{Doc2Dial} & 
+\textit{我想获取一些关于退休福利计划工具（retirement benefits planner）的信息。} & 
+福利计划工具：退休\textbf{在线计算器}（WEP版本）。下方显示的计算器可让您估算您的社会保障福利 \dots 注意：如果您的生日是1月1日 \dots & 
+\textbf{福利计划工具} \dots 使用我们的计划工具帮助您更好地了解您的社会保障 \dots \textbf{退休福利：使用我们的退休计划工具来了解}：您如何符合资格 \dots 关于可能的福利 \dots \\
+\midrule
+
+\textbf{TopiOCQA} & 
+\textit{Victor 什么时候开始出演《年轻和躁动不安》的？} & 
+William J. Bell 将 Victor 创作为短期非合约角色，\textbf{于1980年2月8日首演}。Bell 在1997年表示 \dots & 
+ Victor Newman 是一个虚构角色 \dots 他\textbf{自1980年起由 Eric Braeden 扮演}。最初作为客串角色，原计划出场八到十二周 \dots \\
+\midrule
+
+\textbf{InSCIT} & 
+\textit{唯一必须披露痕量过敏原的国家是哪个 \dots？} & 
+\dots 尽管如此，目前没有任何标签法律强制要求声明痕量过敏原的存在 \dots \textbf{除了巴西}。 & 
+ \textbf{在巴西，自2016年4月起}，当产品未故意添加任何致敏食品时，强制要求声明可能发生交叉污染 \dots \\
+\midrule
+
+\textbf{QuAC} & 
+\textit{《Death of a Ladies' Man》是一张专辑吗？} & 
+Spector 开始重新崭露头角 \dots 制作并参与创作了 Leonard Cohen 在1977年发行的一张备受争议的\textbf{专辑，名为《Death of a Ladies' Man》}。这激怒了许多 Cohen 的忠实粉丝 \dots & 
+ 所有歌曲均由 Leonard Cohen 创作 \dots 分类：\textbf{1977年专辑}，Leonard Cohen 专辑 \dots Cohen 于1978年出版了《Death of a Lady's Man》一书。它与该专辑没有任何共同之处 \dots \\
+
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{案例总结与启示。}通过上述案例可以观察到，语料库中的相关证据往往具有非唯一性：
+
+\textbf{事实冗余性}：在 TopiOCQA 和 InSCIT 中，替代文档包含与金标完全一致的事实信息（如日期“1980”或国家“巴西”），其证明力是相等的。
+
+\textbf{答案直接性}：在 QReCC 和 Doc2Dial 案例中，替代证据有时甚至比原标注文档更能直接、全面地回答用户的特定提问角度。
+
+
+综上所述，如果评估体系（如 Recall 或 MRR 指标）仅仅依赖由于认知边界产生的单一“金标”，将会错误地惩罚那些具备强大检索能力、能从长尾分布中寻找到最优证据的检索模型，从而导致评估结果的系统性偏差。
+
+
+\section{CRB-Pipeline工程实现细节}
+\label{app:pipeline_details}
+
+本附录详细阐述了 \textsc{CRB-Pipeline} 在实际构建过程中的技术决策，包括多智能体角色的模型对齐实验以及贪心遍历聚类算法的输出示例。
+
+\subsection{模型选择与组合评估}
+\label{subsec:app_model_selection}
+
+
+\begin{figure}[htbp]
+    \bicaption{评估由各种模型配对生成的基准的质量，以选择最佳组合}{Evaluating the quality of benchmarks generated by various model pairings to select the best combination}
+    \centering
+    \TBDFIG{提问者$\times$回答者模型配对热力图（$N\times N$ 交叉矩阵，评分为 CRB-Eval 四维平均）}
+    \label{fig:app_model_heatmap}
+\end{figure}
+
+在确定对话合成流水线中"提问者（Questioner）"与"回答者（Responder）"的最佳模型组合时，本文对选定的 \TBD{候选模型数} 款开源大语言模型进行了全矩阵交叉评估。实验探索了所有 \TBD{组合总数} 种两两组合可能性，并分别为每对组合生成了包含 \TBD{每对样本数} 个交互轮次的测试数据集 。
+
+这些生成的演示数据集构成了评估不同模型配对效能的实证基础，最终指导我们为特定角色选择表现最优的开源模型。图 \ref{fig:app_model_heatmap} 展示了这些模型组合在四个质量维度（查询相关性、答案质量、标注准确性、响应忠实度）上的打分热力图。
+
+
+
+根据评估结果，虽然更强大的模型组合往往能产生更高质量的数据，但本文也观察到部分模型在特定角色（如提问意图的多样性）上展现出独特的优势。这种角色解耦的设计允许研究人员根据计算预算和质量需求灵活调整模型配置。
+
+\subsection{聚类示例}
+\label{subsec:app_clustering_example}
+
+为了直观展示贪心遍历聚类算法如何模拟自然的话题演进规律，表 \ref{tab:clustering_example} 提供了一个典型的文档簇示例。该示例展示了围绕“加拿大原住民及其相关主题”构建的语义路径。
+
+在处理过程中，系统首先使用 \texttt{gte-Qwen2-7B} 模型将文本转换为嵌入向量，并利用 \texttt{Faiss} 库构建加权无向图 。随后通过贪心算法寻找 TSP 路径，并按固定步长切分为簇 。如表所示，同一个簇内的文档既保持了高度的语义关联，又在主题上实现了平滑的线性过渡（如从具体的“捕猎路径”逐步演进到宏观的“民族身份定义”）。
+
+\begin{table}[!htbp]
+\centering
+\bicaption{加拿大原住民及其相关主题的聚类路径示例}{A cluster on Indigenous Peoples and Related Topics in Canada}
+\label{tab:clustering_example}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lp{10cm}}
+\toprule
+\textbf{文档标题} & \textbf{摘要内容（精简）} \\ \midrule
+Trapline & 介绍捕猎路径的传统知识与文化意义，以及加拿大各省对其正式登记的管理制度。 \\ \midrule
+Economy of Saskatoon & 描述萨斯卡通市的“城市保留地合作模式”，其中原住民土地由城市提供服务并共同纳税。 \\ \midrule
+Indian Reserve & 定义了加拿大《印第安人法案》下的保留地概念，并说明其与原住民土地所有权的差异。 \\ \midrule
+First Nations in Canada & 详细说明“第一民族”这一称谓的演变过程及其法律地位，涵盖 600 多个公认的政府/部落。 \\ \midrule
+Indigenous peoples & 统称第一民族、因纽特人和梅蒂人，并讨论了宪法法律术语的演进趋势。 \\ \midrule
+Métis & 专门探讨梅蒂人的独特性，包括其作为欧洲定居者与原住民后裔的混合文化身份 。 \\ \midrule
+Cree & 介绍克里族原住民的历史，以及梅蒂人身份中经常包含的克里族血统背景 。 \\ \bottomrule
+\end{tabular}
+}
+\end{table}
+
+通过这种方式，\textsc{CRB-Pipeline} 成功克服了传统聚类方法产生的文档重叠与跨簇冗余问题，为后续多轮对话生成提供了纯净且具备逻辑深度的上下文基底。
+
+
+\section{各角色Prompt模板}
+\label{app:prompts}
+
+本附录汇集了本文所提框架中涉及的所有关键 Prompt 模板。
+
+\textsc{CRB-Pipeline} 数据合成模板。用于指导多智能体协作生成多轮对话检索数据的核心提示词。如表\ref{tab:prompt1}到\ref{tab:polisher}所示。
+
+\textbf{\textsc{CRB-Eval} 审计裁判模板。}用于自动化量化评估基准质量的细粒度打分提示词模板。如表\ref{tab:question_relevance_prompt}到\ref{tab:Answer Quality Prompt}所示。
+\begin{table}[!htbp]
+\bicaption{提问者提示词}{Questioner Prompt}
+\small
+\input{assets/prompt/QUERY_WO_HISTORY}
+
+    \label{tab:prompt1}
+\end{table}
+\begin{table}
+\bicaption{回答者提示词}{Reasoner Prompt}
+\small
+\input{assets/prompt/RESPONSE}
+    \label{tab:prompt2}
+    
+\end{table}
+
+
+\begin{table}[!htbp]
+\bicaption{润色者提示词}{Polisher Prompt}
+\small
+\input{assets/prompt/PHRASE}
+    \label{tab:polisher}
+\end{table}
+
+\begin{table}[!htbp]
+\bicaption{查询-证据对齐度提示词}{Query-Evidence Alignment Prompt}
+\small
+\input{assets/prompt/JUDGE_QUERYER_TAG}
+    \label{tab:question_relevance_prompt}
+\end{table}
+
+\begin{table}[!htbp]
+\bicaption{证据完备性提示词}{Evidence Completeness Prompt}
+\small
+\input{assets/prompt/JUDGE_QUERY_RELATED}
+    \label{tab:Annotation Correctness Prompt}
+\end{table}
+
+
+
+\begin{table}[!htbp]
+\bicaption{答案-证据忠实度提示词}{Answer-Evidence Faithfulness Prompt}
+\small
+\input{assets/prompt/JUDGE_RESPONSE_FAITHFUL}
+    \label{tab:RESPONSE_FAITHFUL}
+\end{table}
+
+
+
+\begin{table}[!htbp]
+\small
+\bicaption{答案质量}{Answer Quality Prompts}
+\input{assets/prompt/JUDGE_ANSWER_QUALITY}
+    \label{tab:Answer Quality Prompt}
+\end{table}
+
+
+
+\section{合成对话示例}
+\label{app:synthetic_dialogue}
+
+本附录展示了由 \textsc{CRB-Pipeline} 全自动合成的一段完整的多轮对话检索示例。该示例生动呈现了提问者智能体（Questioner）的话题转移、指代消解与省略现象，以及回答者智能体（Responder）基于长程上下文的详尽推理（Chain-of-Thought）与事实锚定能力。
+
+用CRB-Pipeline生成的对话如下所示（‘U’和‘A’分别代表用户和智能体）。该对话共包含 8 个交互轮次，涵盖了线性话题深化、硬话题跳跃、以及意图回溯等复杂的真实认知行为。
+
+U: 谁在莱比锡大学建立了第一个心理学实验室？
+
+A: 莱比锡大学的第一个心理学实验室由威廉·冯特（Wilhelm Wundt）建立。冯特是一位受过训练的生理学家，他对感官知觉进行了研究，并在化学进展的启发下致力于研究心理过程的基本组成部分。他的实验室将实验心理学带向了世界。
+
+U: 那么“心理物理学”（psychophysics）这个词是谁首创的？
+A: “心理物理学”一词是由古斯塔夫·西奥多·费希纳（Gustav Theodor Fechner）首创的。
+
+U: 等等，刚才说在莱比锡大学建立那个实验室的人是谁来着？
+
+A: 莱比锡大学的心理学实验室是由威廉·冯特建立的。冯特深受古斯塔夫·费希纳和赫尔曼·冯·亥姆霍兹在感官知觉方面工作的影响。在化学进展的启发下，冯特致力于使用实验方法研究心理过程的基本组成部分。他建立于1879年的实验室被广泛认为是第一个专门从事实验心理学研究的正式实验室，标志着心理学作为一门科学学科历史上的一个重要里程碑。
+
+U: 噢，顺便问一下，雨果·明斯特伯格（Hugo Münsterberg）出生在哪里？
+
+A: 雨果·明斯特伯格出生在但泽（Danzig），即现在的波兰格但斯克。在他出生时，但泽是西普鲁士的一个港口城市。
+
+U: 奥特拉皮兹（Otter Rapids）社区的人口是多少？
+
+A: 奥特拉皮兹社区的人口超过了 1,000 人。
+
+U: 那里有什么样的生活设施？
+
+A: 奥特拉皮兹社区设施齐全，能够满足居民的各种需求。这些设施包括银行和邮局等基本服务。在餐饮和购物方面，有一家小吃店和一家杂货店。娱乐设施也非常丰富，居民可以享受台球厅、保龄球馆、冰壶场和冰球场。安全和健康服务由消防站和一家拥有 10 张床位的医院提供。此外，社区还有一个礼堂，可能用于举办各种活动和集会。这些设施确保了这个拥有 1000 多人的社区能够获得必要的服务和休闲活动。
+
+U: 那么，科托溪（Coteau Creek）水电站是什么时候开始运营的？
+
+A: 为了确定科托溪水电站开始运营的年份，我们可以按照以下步骤进行推理：1. 确认建设时间线：为科托溪水电站供水的加德纳大坝（Gardiner Dam）建于1959年至1967年之间。2. 发电站的建设：发电站本身的建设需要近三年的时间。3. 运营年份：鉴于发电站的建设是在1967年加德纳大坝完工后开始的，并且耗时近三年，我们可以通过在1967年的基础上增加三年得出其运营年份。因此，科托溪水电站于1969年开始运营。
+
+U: 那么奥特拉皮兹的第一台发电机组是什么时候并网发电的？
+
+A: 为了确定奥特拉皮兹发电站第一台发电机组并网的年份，我们可以按照以下步骤进行：1. 确认开发时间线：奥特拉皮兹发电站的开发经历了几个关键的里程碑。初步的调查在1945年进行，1951年又收集了更多的现场信息。2. 批准与建设：该项目于1958年10月获得了相关法规的批准。这项批准为发电机组的实际建设和安装铺平了道路。3. 首台机组并网：奥特拉皮兹发电站的第一台发电机组于1961年9月26日并网。因此，第一台发电机组是在1961年并网发电的。
+
+
+
+% --- 附录结束 ---
+% --- 附录结束 ---
+
+\cleardoublepage[plain]
+
+
+
+\chapter[致谢]{致\quad 谢}\chaptermark{致\quad 谢}% syntax: \chapter[目录]{标题}\chaptermark{页眉}
+% \thispagestyle{noheaderstyle}% 如果需要移除当前页的页眉
+%\pagestyle{noheaderstyle}% 如果需要移除整章的页眉
+
+
+
+\reviewORprint{
+}{
+   
+}
+
+\chapter{攻硕期间参与项目、发表论文及获奖情况}
+
+
+\section*{专利:}
+\begin{enumerate}[leftmargin=*]
+    \item 一种基于检索增强生成的语音大模型问答
+方法\quad 三作
+\end{enumerate}
+
+\reviewORprint{
+    \section*{第一作者发表/录用学术论文:}
+    \begin{enumerate}[leftmargin=*]
+        \item Title[J]Journal, Year, Volume(Number):Pages. (\textbf{SCI, JCR1, 论文第三章})
+    \end{enumerate}
+    \section*{第一作者在审学术论文:}
+    \begin{enumerate}[leftmargin=*]
+        \item Title[J]Journal, Year, Volume(Number):Pages. (\textbf{SCI, JCR1, 论文第三章})
+    \end{enumerate}
+    \section*{通讯作者发表/录用学术论文:}
+    \begin{enumerate}[leftmargin=*]
+        \item Title[J]Journal, Year, Volume(Number):Pages. (\textbf{SCI, JCR1, 第二作者/通讯作者})
+    \end{enumerate}
+    \section*{合作作者发表/录用学术论文:}
+    \begin{enumerate}[leftmargin=*]
+        \item Title[J]Journal, Year, Volume(Number):Pages. (\textbf{SCI, JCR1, 第二作者})
+    \end{enumerate}
+}{
+    \section*{学术论文:}
+    \begin{enumerate}[leftmargin=*]
+        \item CRB-Suite: A Framework for Evaluating and Synthesizing Conversational Retrieval Benchmarks \quad ACL 2026 main\quad 第二作者
+        \item Enhancing Neural Machine Translation Through Target Language Data: A kNN-LM Approach for Domain Adaptation \quad ACL 2025 main\quad 第四作者
+    \end{enumerate}
+}
+
+\section*{获奖情况:}
+\begin{enumerate}[leftmargin=*]
+    \item 获得2023-2024年度东北大学硕士研究生一等奖学金
+    \item 获得2025-2026年度东北大学硕士研究生二等奖学金
+\end{enumerate}
+
+\cleardoublepage[plain]% 让文档总是结束于偶数页，可根据需要设定页眉页脚样式，如 [noheaderstyle]
+

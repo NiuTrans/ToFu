@@ -233,6 +233,7 @@ def _build_poll_tools(tools_config: dict) -> list | None:
             CODE_EXEC_TOOL,
             FETCH_URL_TOOL,
             PROJECT_TOOLS,
+            READ_FILES_TOOL,
             SEARCH_TOOL_MULTI,
         )
 
@@ -247,7 +248,10 @@ def _build_poll_tools(tools_config: dict) -> list | None:
         if tools_config.get('fetchEnabled', True) or search_mode:
             tool_list.append(FETCH_URL_TOOL)
 
-        # ★ Project tools (read_files supports both relative and absolute paths)
+        # ★ read_files — always on (handles relative + absolute paths)
+        tool_list.append(READ_FILES_TOOL)
+
+        # ★ Project tools (write/grep/list/run) — only when project attached
         if project_enabled:
             tool_list.extend(PROJECT_TOOLS)
         elif tools_config.get('codeExecEnabled', False):

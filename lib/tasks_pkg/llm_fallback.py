@@ -8,6 +8,7 @@ primary model errors out.
 """
 
 from lib.llm_client import build_body
+from lib.llm_error_format import format_llm_error_for_user
 from lib.log import get_logger
 from lib.tasks_pkg.manager import append_event, stream_llm_response
 
@@ -284,16 +285,30 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
         # If already on the fallback model, or no fallback configured — give up
         if not _FALLBACK_MODEL or model == _FALLBACK_MODEL:
             if tool_call_happened:
-                task['error'] = f'API error ({_FALLBACK_MODEL}): {err_str}'
+                _user_err = format_llm_error_for_user(
+                    e, model=model,
+                    context='no-fallback' if not _FALLBACK_MODEL else 'on-fallback-model')
+                task['error'] = _user_err
                 logger.warning('[%s] 🛑 Fallback model error with prior tool calls — giving up: %s',
                                tid, err_str, exc_info=True)
                 return {
-                    'assistant_msg': {'role': 'assistant', 'content': f'[Error: {err_str}]'},
+                    'assistant_msg': {'role': 'assistant', 'content': _user_err},
                     'finish_reason': 'error', 'usage': None,
                     'model': model, 'preset': preset, 'thinking_enabled': thinking_enabled,
                     '_loop_action': 'break',
                     '_loop_exit_reason': f'opus_error_with_tool_calls_round_{round_num}',
                 }
+            # No fallback / already on fallback and no prior tool calls —
+            # stash user-friendly text on the exception so the top-level
+            # FATAL handler in orchestrator can surface actionable text
+            # without losing the exception type (subclasses may have
+            # non-trivial __init__ signatures).
+            try:
+                e._user_message = format_llm_error_for_user(  # type: ignore[attr-defined]
+                    e, model=model,
+                    context='no-fallback' if not _FALLBACK_MODEL else 'on-fallback-model')
+            except Exception as _attr_err:
+                logger.debug('[%s] Could not attach _user_message: %s', tid, _attr_err)
             raise
 
         # ── Fallback: switch to configured fallback model ──
@@ -378,16 +393,25 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
         except Exception as e2:
             logger.error('[%s] Opus fallback also failed: %s', tid, e2, exc_info=True)
             if tool_call_happened:
-                task['error'] = (f'{original_model} and Opus fallback both failed: '
-                                 f'{str(e2)[:200]}')
+                _user_err = format_llm_error_for_user(
+                    e2, model=_FALLBACK_MODEL,
+                    context=f'both-failed ({original_model}→{_FALLBACK_MODEL})')
+                task['error'] = _user_err
                 logger.warning('[%s] 🛑 Both %s and fallback failed — giving up',
                                tid, original_model, exc_info=True)
                 return {
-                    'assistant_msg': {'role': 'assistant', 'content': f'[Error: {str(e2)[:200]}]'},
+                    'assistant_msg': {'role': 'assistant', 'content': _user_err},
                     'finish_reason': 'error', 'usage': None,
                     'model': _FALLBACK_MODEL, 'preset': 'medium',
                     'thinking_enabled': True,
                     '_loop_action': 'break',
                     '_loop_exit_reason': f'both_models_failed_round_{round_num}',
                 }
+            # Attach user-friendly message for top-level FATAL handler.
+            try:
+                e2._user_message = format_llm_error_for_user(  # type: ignore[attr-defined]
+                    e2, model=_FALLBACK_MODEL,
+                    context=f'both-failed ({original_model}→{_FALLBACK_MODEL})')
+            except Exception as _attr_err:
+                logger.debug('[%s] Could not attach _user_message: %s', tid, _attr_err)
             raise

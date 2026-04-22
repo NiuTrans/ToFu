@@ -185,7 +185,13 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
                 api_rounds.append({'round': 'fallback', 'model': model, 'usage': dict(usg), 'tag': 'FALLBACK'})
         except Exception as e:
             logger.error('[%s] ⚠️ Post-loop fallback failed: %s', tid, e, exc_info=True)
-            task['error'] = f'Fallback failed: {e}'
+            try:
+                from lib.llm_error_format import format_llm_error_for_user
+                task['error'] = format_llm_error_for_user(
+                    e, model=model, context='post-loop-fallback')
+            except Exception as _fmt_err:
+                logger.warning('[%s] format_llm_error_for_user failed: %s', tid, _fmt_err)
+                task['error'] = f'Fallback failed: {e}'
 
     # ── Content-filter: give user a meaningful error instead of blank bubble ──
     if (not task['content'].strip()
@@ -348,10 +354,13 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
                 # ★ Include taskId so frontend can do per-round undo
                 done_evt['taskId'] = task['id']
                 # ★ Include per-file detail so frontend can show which files changed
-                seen = {}  # path → action  (dedup, keep latest)
+                #   Key by (root, path) so a file with the same relative path in
+                #   two different workspace roots doesn't collapse to one entry.
+                seen = {}  # (root, path) → {action, root}
                 for m in turn_mods:
                     p = m.get('path', '?')
                     t = m.get('type', '')
+                    root_name = m.get('root', '') or ''
                     if t == 'write_file':
                         action = 'created' if not m.get('existed', True) else 'written'
                     elif t == 'apply_diff':
@@ -368,9 +377,11 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
                             action = 'modified'
                     else:
                         action = t
-                    seen[p] = action
+                    seen[(root_name, p)] = {'action': action, 'root': root_name}
                 file_list = [
-                    {'path': p, 'action': a} for p, a in seen.items()
+                    {'path': p, 'action': info['action'],
+                     **({'root': info['root']} if info['root'] else {})}
+                    for (root_name, p), info in seen.items()
                 ]
                 done_evt['modifiedFileList'] = file_list
                 task['modifiedFileList'] = file_list
@@ -408,14 +419,17 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
 
     _cp_mod_list = task.get('_checkpointModifiedFileList')
     if _cp_mod_list:
-        # Merge: old + new, dedup by path (new action wins)
+        # Merge: old + new, dedup by (root, path) so same relative path in
+        # different workspace roots stays distinct in multi-root setups.
         merged_map = {}
+        def _key(f):
+            if isinstance(f, dict):
+                return (f.get('root', '') or '', f.get('path', ''))
+            return ('', str(f))
         for f in _cp_mod_list:
-            p = f.get('path', f) if isinstance(f, dict) else str(f)
-            merged_map[p] = f
+            merged_map[_key(f)] = f
         for f in (done_evt.get('modifiedFileList') or []):
-            p = f.get('path', f) if isinstance(f, dict) else str(f)
-            merged_map[p] = f
+            merged_map[_key(f)] = f
         merged_list = list(merged_map.values())
         done_evt['modifiedFileList'] = merged_list
         task['modifiedFileList'] = merged_list
@@ -629,6 +643,18 @@ def run_task(task: dict[str, Any]) -> None:
         # ★ Apply preserved content prefix from Continue — ensures backend checkpoints
         #   include text the LLM generated alongside completed tool rounds in the prior
         #   task, so page-refresh mid-stream doesn't lose that content.
+        #
+        #   ⚠ IMPORTANT: contentPrefix is NEVER re-injected into `messages` as a
+        #   trailing assistant turn.  That would only work against OpenAI-compat
+        #   endpoints — Anthropic Messages API rejects a trailing assistant turn
+        #   ("This model does not support assistant message prefill. The
+        #   conversation must end with a user message.").  Rather than branching
+        #   by provider we keep the universal behaviour: use contentPrefix only
+        #   as a bookkeeping seed for `task['content']` so the resumed response
+        #   displays [preserved text] + [freshly generated continuation].  The
+        #   freshly generated part begins from the tool-result checkpoint, which
+        #   is replayed via `inject_tool_history` above — that shape every
+        #   provider accepts.
         _content_prefix = cfg.get('contentPrefix') or ''
         if _content_prefix:
             with task['content_lock']:
@@ -697,15 +723,24 @@ def run_task(task: dict[str, Any]) -> None:
             # ★ Per-turn attachments: dynamic context injection
             #   Inspired by Claude Code's getAttachments() — injects session
             #   memory, file reminders, tool discovery deltas each turn.
+            #   Wrapped defensively: attachment building is advisory and must
+            #   never crash an otherwise-healthy task. Any bug here (e.g. a
+            #   malformed tool_call arg from the model) degrades to "no
+            #   attachments this round" rather than aborting the task.
             if round_num > 0:  # skip round 0 (system contexts just injected)
-                _attachments = compute_turn_attachments(
-                    messages, task, round_num,
-                    conv_id=task.get('convId', ''),
-                    project_path=project_path,
-                    project_enabled=project_enabled,
-                )
-                if _attachments:
-                    inject_attachments(messages, _attachments)
+                try:
+                    _attachments = compute_turn_attachments(
+                        messages, task, round_num,
+                        conv_id=task.get('convId', ''),
+                        project_path=project_path,
+                        project_enabled=project_enabled,
+                    )
+                    if _attachments:
+                        inject_attachments(messages, _attachments)
+                except Exception as e:
+                    logger.error('[Task:%s] compute_turn_attachments failed '
+                                 'round=%d: %s — continuing without attachments',
+                                 tid, round_num, e, exc_info=True)
 
             # ★ Legacy cleanup: strip old "Current date and time:" from user
             #   messages.  Date is now injected in the system prompt (step 4.5)
@@ -1060,10 +1095,23 @@ def run_task(task: dict[str, Any]) -> None:
         )
     except Exception as e:
         logger.error('[Orchestrator] run_task FATAL error task=%s', task.get('id', '?')[:8], exc_info=True)
-        task['error'] = str(e); task['status'] = 'error'; task['finishReason'] = 'error'
+        # Prefer the user-friendly message attached by _llm_call_with_fallback;
+        # otherwise format the raw exception here so the frontend error-block
+        # always tells the user how to recover.
+        _user_err = getattr(e, '_user_message', None)
+        if not _user_err:
+            try:
+                from lib.llm_error_format import format_llm_error_for_user
+                _user_err = format_llm_error_for_user(
+                    e, model=task.get('config', {}).get('model', ''),
+                    context='task-fatal')
+            except Exception as _fmt_err:
+                logger.warning('[Orchestrator] format_llm_error_for_user failed: %s', _fmt_err)
+                _user_err = str(e)
+        task['error'] = _user_err; task['status'] = 'error'; task['finishReason'] = 'error'
         if task.get('_endpoint_managed'):
             return   # let endpoint.py handle the error
-        append_event(task, {'type': 'done', 'error': str(e), 'finishReason': 'error'})
+        append_event(task, {'type': 'done', 'error': _user_err, 'finishReason': 'error'})
         persist_task_result(task)
 
 

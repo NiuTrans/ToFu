@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 #  Schema Version Cache — Skip redundant DDL on subsequent startups
 # ═══════════════════════════════════════════════════════════════════════
 
-_SCHEMA_VERSION = 10  # Increment when tables/columns/indexes change
+_SCHEMA_VERSION = 13  # Increment when tables/columns/indexes change
 
 
 def _column_exists(conn, table, column):
@@ -269,6 +269,28 @@ def _init_chat_schema(conn):
     # ── GIN index on search_tsv for fast tsvector @@ queries ──
     cur.execute('CREATE INDEX IF NOT EXISTS idx_conv_search_tsv ON conversations USING gin (search_tsv)')
 
+    # ── Trigger: keep search_tsv in sync with search_text ──
+    # Without this, every INSERT/UPDATE on conversations would need to
+    # explicitly set search_tsv = to_tsvector(...), which is easy to forget
+    # (and was forgotten in routes/conversations.py save_conv — see
+    # https://… internal bug). A BEFORE trigger makes it automatic.
+    cur.execute('''
+        CREATE OR REPLACE FUNCTION conversations_search_tsv_update() RETURNS trigger AS $$
+        BEGIN
+            IF (TG_OP = 'INSERT') OR (NEW.search_text IS DISTINCT FROM OLD.search_text) THEN
+                NEW.search_tsv := to_tsvector('simple', left(coalesce(NEW.search_text, ''), 50000));
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    ''')
+    cur.execute('DROP TRIGGER IF EXISTS conversations_search_tsv_trg ON conversations')
+    cur.execute('''
+        CREATE TRIGGER conversations_search_tsv_trg
+        BEFORE INSERT OR UPDATE OF search_text ON conversations
+        FOR EACH ROW EXECUTE FUNCTION conversations_search_tsv_update();
+    ''')
+
     # ── Backfill search_text for existing conversations that have empty search_text ──
     cur.execute("SELECT count(*) FROM conversations WHERE search_text = '' AND msg_count > 0")
     backfill_count = cur.fetchone()[0]
@@ -320,6 +342,45 @@ def _init_chat_schema(conn):
             PRIMARY KEY (paper_hash, lang)
         )
     ''')
+
+    # ── Paper library: server-side bookshelf (shared across browsers) ──
+    _safe_create_table(cur, '''
+        CREATE TABLE IF NOT EXISTS paper_library (
+            id TEXT NOT NULL,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            title TEXT NOT NULL DEFAULT '',
+            pdf_url TEXT NOT NULL DEFAULT '',
+            pdf_filename TEXT NOT NULL DEFAULT '',
+            arxiv_id TEXT NOT NULL DEFAULT '',
+            paper_hash TEXT NOT NULL DEFAULT '',
+            parsed_text TEXT NOT NULL DEFAULT '',
+            qa_history TEXT NOT NULL DEFAULT '[]',
+            images TEXT NOT NULL DEFAULT '[]',
+            babel_cache TEXT NOT NULL DEFAULT '{}',
+            page_count INTEGER NOT NULL DEFAULT 0,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL,
+            PRIMARY KEY (id, user_id)
+        )
+    ''')
+    # ── Daily cost cache: pre-aggregated per-day LLM costs (avoids full
+    # table scans on every calendar render).  date is 'YYYY-MM-DD' local time.
+    # conversations_json stores the per-conv breakdown for drill-down.
+    # Past days are cached forever (messages are immutable); today is always
+    # recomputed live.  Invalidated on conv delete / message delete.
+    _safe_create_table(cur, '''
+        CREATE TABLE IF NOT EXISTS daily_cost_cache (
+            user_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+            conversations_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            computed_at BIGINT NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, date)
+        )
+    ''')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_daily_cost_user_date ON daily_cost_cache(user_id, date)')
+
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_paper_lib_user ON paper_library(user_id, updated_at DESC)')
 
     # Seed default user
     cur.execute("""

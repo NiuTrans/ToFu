@@ -31,6 +31,34 @@ def is_claude(model: str) -> bool:
     return 'claude' in m or 'anthropic' in m
 
 
+def is_claude_opus_47(model: str) -> bool:
+    """Claude Opus 4.7+ (AWS-gateway / Bedrock / direct-API aliases).
+
+    Opus 4.7 introduced breaking changes vs 4.6:
+      • Sampling params (temperature/top_p/top_k) are silently ignored.
+      • thinking.budget_tokens removed — only thinking.type='adaptive'.
+      • Thinking content is HIDDEN by default — must send
+        thinking.display='summarized' to surface the reasoning trace.
+      • New 'xhigh' effort level between 'high' and 'max'.
+
+    Detects these id variants:
+      - claude-opus-4-7
+      - aws.claude-opus-4.7
+      - us.anthropic.claude-opus-4-7-v1:0
+      - (future) claude-opus-4-8, etc.
+    """
+    m = model.lower()
+    if 'claude' not in m and 'anthropic' not in m:
+        return False
+    # Extract (major, minor) from "opus-X-Y" or "opus-X.Y" — returns True iff
+    # (major, minor) >= (4, 7).  Handles opus-4-7, opus-4.8, opus-5-0, etc.
+    match = re.search(r'opus[-_.]?(\d+)[-_.](\d+)', m)
+    if not match:
+        return False
+    major, minor = int(match.group(1)), int(match.group(2))
+    return (major, minor) >= (4, 7)
+
+
 def is_longcat(model: str) -> bool:
     """Internal LongCat models (Flash, MoE, etc.)."""
     return 'longcat' in model.lower()
@@ -65,7 +93,7 @@ def is_glm(model: str) -> bool:
 
 
 def is_kimi(model: str) -> bool:
-    """Moonshot Kimi models (kimi-k2, kimi-k2.5, moonshot-v1, etc.)."""
+    """Moonshot Kimi models (kimi-k2, kimi-k2.5, kimi-k2.6, moonshot-v1, etc.)."""
     m = model.lower()
     return 'kimi' in m or 'moonshot' in m
 
@@ -78,6 +106,75 @@ def is_ernie(model: str) -> bool:
 def is_gpt(model: str) -> bool:
     """OpenAI GPT models (gpt-4, gpt-4.1, gpt-4o, etc.)."""
     return 'gpt' in model.lower()
+
+
+
+# ══════════════════════════════════════════════════════════
+#  Continue / Resume capability probes
+# ══════════════════════════════════════════════════════════
+#
+# What each provider's API actually accepts when replaying an interrupted
+# assistant turn (tool_calls already made, results available):
+#
+#   Provider            | tool_use replay | thinking replay         | Prefill
+#   --------------------+-----------------+-------------------------+---------
+#   Anthropic (Claude)  | required        | thinking{} block with   | NO
+#                       |                 |   signature — mandatory |
+#                       |                 |   when tools were used  |
+#                       |                 |   and extended-thinking |
+#                       |                 |   is on                 |
+#   Gemini (openai cpt) | required        | extra_content.google.   | tolerated
+#                       |                 |   thought_signature on  |
+#                       |                 |   each tool_call        |
+#   OpenAI / DeepSeek / | standard        | reasoning_content is    | tolerated
+#   Qwen / GLM / Kimi / | tool_calls +    | NOT re-accepted (o1/o3  | (non-lossless —
+#   Doubao / MiniMax    | tool role msgs  | strip it server-side)   |  assistant turn
+#   ERNIE / LongCat     |                 |                         |  just gets appended)
+#
+# Anthropic's Messages API refuses a final `assistant` turn used as a
+# prefill for free text — the conversation must end on `user` or `tool`.
+# That's why "Continue" can NEVER be truly lossless against Claude for
+# free-form text written between tool batches.  For thinking replay it
+# CAN be lossless as long as we echo back the opaque `signature`.
+
+def model_requires_thinking_signature_replay(model: str) -> bool:
+    """True if this model's API requires echoing back the thinking block with
+    its opaque ``signature`` when replaying an assistant turn that made tool
+    calls.
+
+    Applies to Anthropic Claude models in extended-thinking mode.  Gating
+    callers on this keeps the thinking-block payload off requests that would
+    reject it (e.g. vanilla OpenAI chat/completions strips vendor fields).
+    """
+    # Claude is currently the only family whose API ties thinking continuity
+    # to a signed opaque block.  Opus 4.7+ hides thinking by default but STILL
+    # requires the signature replay for tool-use continuity.
+    return is_claude(model)
+
+
+def model_requires_thought_signature_on_tool_calls(model: str) -> bool:
+    """True if this model's API requires ``extra_content.google.thought_signature``
+    on each replayed tool_call entry (Gemini 3.x via OpenAI-compat proxy).
+
+    See memory ``gemini-thought-signature-openai-compat`` — omitting this
+    field on a subsequent request returns HTTP 400.
+    """
+    return is_gemini(model)
+
+
+def model_supports_assistant_prefill(model: str) -> bool:
+    """True if the API tolerates a trailing ``role='assistant'`` message as a
+    prefill / forced continuation.
+
+    Anthropic Messages API rejects this with HTTP 400 ("This model does not
+    support assistant message prefill. The conversation must end with a user
+    message."), so Claude is excluded.  All OpenAI-compatible endpoints we
+    ship with currently accept it (the server just concatenates the prefill
+    token-for-token), but the continuation is non-lossless: the model may
+    or may not honour the prefill and cannot recover mid-token decoder
+    state.  Callers should document this as best-effort, not exact.
+    """
+    return not is_claude(model)
 
 
 def model_supports_vision(model: str) -> bool:
@@ -209,6 +306,7 @@ def _kimi_max_output(model: str) -> int:
     """Return the max output token limit for a specific Kimi model.
 
     Moonshot Kimi model limits:
+      - kimi-k2.6:                 32,768  (default for K2.6 per docs)
       - kimi-k2.5:                 32,768  (default for K2.5)
       - kimi-k2-turbo-preview:     32,768
       - kimi-k2-thinking-turbo:    32,768

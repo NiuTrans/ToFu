@@ -157,6 +157,14 @@ class StrategyRegistry:
 
     Pre-populated with the four built-in strategies; call
     ``registry.register(strategy)`` to add custom ones at runtime.
+
+    Note:
+        A separately-named class also called ``StrategyRegistry`` lives at
+        :class:`lib.trading_autopilot.adaptive_decision_engine.StrategyRegistry`
+        — that one tracks *runtime effectiveness profiles* of autopilot
+        strategies loaded from the DB (different domain, different API).
+        The name collision is intentional (both are "strategy registries" in
+        their domains); consumers should import the specific module they need.
     """
 
     def __init__(self):

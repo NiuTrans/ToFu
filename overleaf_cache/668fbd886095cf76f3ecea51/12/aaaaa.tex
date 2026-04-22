@@ -1,0 +1,45 @@
+
+\centering
+\resizebox{1
+\textwidth}{!}{%
+  \begin{tabular}{l|c|c|cccccccccc|c}
+    \toprule
+    \multirow{2}{*}{\textbf{Model}} & 
+    \multirow{2}{*}{\shortstack{\\ \textbf{Training} \\ \textbf{Cost}}} &
+     \multirow{2}{*}{\shortstack{\\ \textbf{Trained} \\ \textbf{Param.}}} & 
+    \multirow{2}{*}{\textbf{Bn}} & \multirow{2}{*}{\textbf{Th}} & \multirow{2}{*}{\textbf{Sw}} & \multirow{2}{*}{\textbf{Ja}} & 
+    \multirow{2}{*}{\textbf{Zh}} & \multirow{2}{*}{\textbf{De}} & \multirow{2}{*}{\textbf{Fr}} & \multirow{2}{*}{\textbf{Ru}} & 
+    \multirow{2}{*}{\textbf{Es}} & \multirow{2}{*}{\textbf{En}} & \multirow{2}{*}{\textbf{Avg.}} \\
+    & & & & & & & & & & & & & \\
+    % & & & &&&&&&&&&
+
+    \midrule
+
+     \multicolumn{14}{c}{\multirow{1}{*}{\textit{7B Models}}} \\
+
+    \midrule
+ % RFT  & 100.0\% & 4.4  & 6.0  & 4.0  & 34.4 & 38.4 & \textbf{56.0} & 56.0 & 48.4 & 54.8 & 67.6 & 37.0 \\ 
+ MAmmoTH$^\dagger$ & 2.7$\times$ &100.0\% & \phantom{0}3.6 &  \phantom{0}4.8 &\phantom{0}2.4 & 10.8 & 17.2 & 33.2 & 32.8 & 26.0 & 32.4 & 49.6 &21.3 \\
+  WizardMath$^\dagger$ & 0.9$\times$ &  100.0\% &\phantom{0}2.0 &  \phantom{0}4.0 &\phantom{0}3.4 & 24.0 & 22.4 & 30.4 & 30.4 & 30.8 & 34.8 & 47.6 &23.0 \\
+MetaMath$^\dagger$ & 3.5$\times$ &100.0\%& \phantom{0}7.6  & \phantom{0}5.6  & \phantom{0}5.2  & 34.0 & 45.2 & 54.0 & \textbf{56.8} & 51.6 & 58.8 & 65.5 & 38.4 \\
+ MathOctopus$^\dagger$ & 0.8$\times$ & 100.0\% & 28.8 & 34.4 & 39.2 & 36.0 & 38.4 & 44.8 & 43.6 & 39.6 & 42.4 & 52.4 & 40.0 \\
+QAlign$^\dagger$  & 4.1$\times$ & 100.0\% & \textbf{32.4} & 39.6 & \textbf{40.4} & 44.0 & \textbf{48.4} & \textbf{54.8} & \textbf{56.8} & 52.4 & \textbf{59.6} & \textbf{68.0} & \textbf{49.6} \\
+\hspace{3mm}+LoRA (r=256) & 2.6$\times$ & \phantom{0}\phantom{0}8.7\%& \phantom{0}6.0 & \phantom{0}6.8 & \phantom{0}6.0 & 22.0 & 22.0 & 28.0 & 32.8 & 30.4 & 29.6 & 38.8 & 22.2 \\
+    \midrule
+\textbf{\ours}&1.0$\times$& \phantom{0}\phantom{0}8.0\% & 32.0 & \textbf{44.0} & 40.0 & \textbf{46.0} & \textbf{48.4} & 54.0 & 55.2 & \textbf{54.8} & 56.8 & 64.8 & \textbf{49.6} \\
+    \midrule
+   \multicolumn{14}{c}{\multirow{1}{*}{\textit{13B Models}}} \\
+    \midrule
+% RFT  & 100.0\% & 11.2 & 5.2  & 7.2  & 48.8 & 50.8 & \textbf{63.2} & \textbf{66.8} & 64.8 & \textbf{67.6} & \textbf{75.2} & 46.0 \\ 
+ MAmmoTH$^\dagger$ &7.3$\times$ & 100.0\%&\phantom{0}3.6 &  \phantom{0}5.2 &\phantom{0}1.6 & 19.2 & 31.2 & 45.6 & 39.6 & 36.8 & 50.0 & 56.4 &28.9 \\
+  WizardMath$^\dagger$ & 2.5$\times$ & 100.0\%&\phantom{0}6.4 &  \phantom{0}5.6 &\phantom{0}5.6 & 22.0 & 28.0 & 40.4 & 42.0 & 34.4 & 45.6 & 52.8 &28.3 \\
+MetaMath$^\dagger$ & 10.0$\times$\phantom{0} &100.0\% & 12.4 & 11.2  & \phantom{0}6.4  & 42.0 & 46.0 & \textbf{64.0} & 62.4 & 61.6 & 64.8 & 68.4 & 43.9 \\
+MathOctopus$^\dagger$ & 2.0$\times$ &100.0\% & 35.2 & 46.8 & 42.8 & 43.2 & 48.8 & 44.4 & 48.4 & 47.6 & 48.0 & 53.2 & 45.8 \\
+QAlign$^\dagger$ & 11.9$\times$\phantom{0} &100.0\% & 38.4 & \textbf{49.6} & 46.0 & 52.4 & \textbf{59.2} & 62.0 & 62.4 & \textbf{64.4} & 67.2 & 69.2 & 57.1 \\
+\hspace{3mm}+LoRA (r=256) & 3.1$\times$ & \phantom{0}\phantom{0}7.1\% &  12.8 &15.2 & 10.8 & 35.6 & 34.4 & 46.0 & 44.4 & 40.8 &47.2 &54.8  &34.2 \\
+    \midrule
+\textbf{\ours} & 1.0$\times$ & \phantom{0}\phantom{0}6.5\% & \textbf{45.6} & 47.6 & \textbf{46.4} & \textbf{54.0} & 58.8 & 62.8 & \textbf{65.2} & \textbf{64.4} & \textbf{67.6} & \textbf{71.2} & \textbf{58.3} \\
+    \bottomrule
+  \end{tabular}
+
+}

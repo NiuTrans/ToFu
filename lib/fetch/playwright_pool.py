@@ -6,6 +6,7 @@ run Playwright in a dedicated daemon thread and dispatch via a queue.
 """
 
 import atexit
+import os
 import queue as _queue_mod
 import re
 import threading
@@ -19,6 +20,67 @@ logger = get_logger(__name__)
 __all__ = [
     'PlaywrightPool',
 ]
+
+
+def _ensure_chromium_library_path():
+    """Augment LD_LIBRARY_PATH so Chromium can find its shared-library deps.
+
+    On Linux systems without sudo (e.g. CentOS 7 HPC nodes), users can't run
+    ``playwright install-deps`` to install Chromium's X11/GTK dependencies
+    (libatk, libgbm, libXcomposite, …) system-wide. Instead, we install them
+    via conda-forge into the active conda env. Those libs live under
+    ``$CONDA_PREFIX/lib`` and (for cos7-compat packages) the gcc sysroot at
+    ``$CONDA_PREFIX/x86_64-conda-linux-gnu/sysroot/usr/lib64``.
+
+    Chromium is a child subprocess of the Python process, so it inherits
+    ``LD_LIBRARY_PATH`` from ``os.environ``. We mutate os.environ once
+    before the first browser launch so subprocesses see the conda paths.
+
+    No-op on macOS/Windows (uses DYLD_LIBRARY_PATH / DLL search paths which
+    Playwright already handles via its own bundled binaries).
+
+    Users can override detection via CHROMIUM_EXTRA_LIB_DIRS (colon-separated).
+    """
+    # Linux-only — macOS/Windows use different mechanisms
+    import sys as _sys
+    if not _sys.platform.startswith('linux'):
+        return
+
+    extra_dirs: list[str] = []
+
+    # 1. Explicit override via env var
+    override = os.environ.get('CHROMIUM_EXTRA_LIB_DIRS', '').strip()
+    if override:
+        extra_dirs.extend(p for p in override.split(':') if p)
+
+    # 2. Auto-detect conda env
+    conda_prefix = os.environ.get('CONDA_PREFIX', '').strip()
+    if conda_prefix and os.path.isdir(conda_prefix):
+        lib_dir = os.path.join(conda_prefix, 'lib')
+        if os.path.isdir(lib_dir):
+            extra_dirs.append(lib_dir)
+        # cos7 sysroot (used by mesa-libgbm-cos7-x86_64 etc.)
+        sysroot_lib = os.path.join(
+            conda_prefix, 'x86_64-conda-linux-gnu', 'sysroot', 'usr', 'lib64'
+        )
+        if os.path.isdir(sysroot_lib):
+            extra_dirs.append(sysroot_lib)
+
+    if not extra_dirs:
+        return
+
+    current = os.environ.get('LD_LIBRARY_PATH', '')
+    current_parts = [p for p in current.split(':') if p]
+    # Prepend only the dirs that aren't already in the path (preserves caller intent)
+    new_parts = [d for d in extra_dirs if d not in current_parts]
+    if not new_parts:
+        return
+    combined = ':'.join(new_parts + current_parts)
+    os.environ['LD_LIBRARY_PATH'] = combined
+    logger.info(
+        '[Playwright] Augmented LD_LIBRARY_PATH with %d conda lib dir(s): %s',
+        len(new_parts), ':'.join(new_parts),
+    )
 
 
 class PlaywrightPool:
@@ -283,6 +345,16 @@ class PlaywrightPool:
         except _queue_mod.Empty:
             logger.warning('🎭 Playwright worker timeout — %s', url[:80], exc_info=True)
             return None
+
+
+# ── Module-load side effect ──
+# Augment LD_LIBRARY_PATH once on import, before any Chromium subprocess spawns.
+# This needs to happen before sync_playwright().start() so the node driver
+# inherits the right env. Safe no-op on non-Linux.
+try:
+    _ensure_chromium_library_path()
+except Exception as _e:
+    logger.debug('[Playwright] LD_LIBRARY_PATH augmentation skipped: %s', _e)
 
 
 # Module-level singleton

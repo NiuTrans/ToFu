@@ -1,0 +1,62 @@
+% --- 颜色定义（保留所需部分）---
+\definecolor{color1}{RGB}{190, 195, 205}   % 基础灰
+\definecolor{color2}{RGB}{170, 185, 180}   % 灰青色
+\definecolor{color3}{RGB}{160, 175, 195}   % 灰蓝色
+\definecolor{color4}{RGB}{165, 160, 180}   % 灰紫色
+\definecolor{color5}{RGB}{145, 165, 165}   % 深灰绿
+\definecolor{color6}{RGB}{130, 145, 165}   % 深灰岩色
+% --- 移除了 color7（MTR）的定义 ---
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    ymin=2,
+    ymax=5.5,       % 注意：删掉高分项后，上限可能偏高，可视情况调至 4.5 左右
+    width=15cm,
+    height=6cm,
+    bar width=11pt, 
+    symbolic x coords={证据完备性, 查询-证据对齐度 , 答案-证据忠实度 , 答案质量},
+    xtick=data,
+    xticklabel style={rotate=0, font=\small, yshift=-3pt},
+    tick label style={font=\small},
+    yticklabel style={
+        font=\small,
+        /pgf/number format/.cd,
+        fixed,
+        fixed zerofill,
+        precision=1
+    },
+    legend style={
+        at={(0.5, 0.80)}, 
+        anchor=south,     
+        legend columns=-1, 
+        /tikz/every even column/.append style={column sep=0.45cm}, 
+        font=\footnotesize, 
+        draw=black,       
+        fill=white,
+        inner sep=4pt,
+    },
+    ymajorgrids=true,
+    grid style=dashed,
+    enlarge x limits=0.18,      % 略微增加，使 6 根柱子分布更宽松
+    nodes near coords,
+    nodes near coords style={font=\scriptsize, yshift=1pt}, 
+    /pgf/number format/.cd,
+    fixed,
+    fixed zerofill,
+    precision=1
+]
+% --- 仅保留 6 个背景数据集 ---
+\addplot[fill=color1, draw=none] coordinates {(证据完备性, 3.7) (查询-证据对齐度 , 3.9) (答案-证据忠实度 , 4.1) (答案质量, 4.0)};
+\addplot[fill=color2, draw=none] coordinates {(证据完备性, 3.8) (查询-证据对齐度 , 3.7) (答案-证据忠实度 , 3.4) (答案质量, 2.4)};
+\addplot[fill=color3, draw=none] coordinates {(证据完备性, 3.3) (查询-证据对齐度 , 3.5) (答案-证据忠实度 , 3.9) (答案质量, 3.1)};
+\addplot[fill=color4, draw=none] coordinates {(证据完备性, 2.7) (查询-证据对齐度 , 3.2) (答案-证据忠实度 , 3.6) (答案质量, 3.4)};
+\addplot[fill=color5, draw=none] coordinates {(证据完备性, 2.1) (查询-证据对齐度 , 3.3) (答案-证据忠实度 , 3.1) (答案质量, 3.4)};
+\addplot[fill=color6, draw=none] coordinates {(证据完备性, 2.5) (查询-证据对齐度 , 2.2) (答案-证据忠实度 , 2.2) (答案质量, 3.6)};
+
+% --- 已移除 CRB-Bench 的 \addplot 段 ---
+
+% 更新图例：去掉 \textsc{CRB-Bench}
+\legend{QReCC, Doc2Dial, QuAC, TopiOCQA, Inscit, CORAL}
+
+\end{axis}
+\end{tikzpicture}

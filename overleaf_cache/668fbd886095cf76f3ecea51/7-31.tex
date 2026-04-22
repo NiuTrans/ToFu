@@ -1,0 +1,210 @@
+\documentclass{article} % 假设你使用的是article类
+\usepackage{tikz}
+\usepackage{xcolor} % 确保添加了xcolor宏包
+\usepackage{tkz-kiviat}
+\begin{document}
+
+\makeatletter
+\def\tkz@KiviatGrad[#1](#2){% 
+\begingroup
+\pgfkeys{/kiviatgrad/.cd,
+graduation distance= 0 pt,
+prefix ={},
+suffix={},
+unity=1,
+% added the following four lines
+label precision/.store in=\gradlabel@precision,
+label precision=1,
+zero point/.store in=\tkz@grad@zero,
+zero point=0
+}
+\pgfqkeys{/kiviatgrad}{#1}% 
+\let\tikz@label@distance@tmp\tikz@label@distance
+\global\let\tikz@label@distance\tkz@kiv@grad
+  % started loop at zero, to get label for center point
+ \foreach \nv in {0,...,\tkz@kiv@lattice}{
+ % skipped the \pgfmathparse, moved
+ % \tkz@kiv@unity*\nv-\tkz@grad@zero
+ % into \pgfmathsetmacro. The last term is added
+ \pgfmathsetmacro{\result}{\tkz@kiv@unity*\nv+20} % change from \pgfmathtruncatemacro
+ % NOTE: use \gradlabel@precision for the precision
+ \protected@edef\tkz@kiv@gd{%
+    \tkz@kiv@prefix%
+    \pgfmathprintnumber[precision=\gradlabel@precision,fixed]{\result}%% used \pgfmathprintnumber instead of "$\result$"
+    \tkz@kiv@suffix} 
+    \path[/kiviatgrad/.cd,#1] (0:0)--(360/\tkz@kiv@radial*#2:\nv*\tkz@kiv@gap)
+       % NOTE: (360/\tkz@kiv@radial*#2)-90  -> (360/\tkz@kiv@radial*#2)
+       % removed 90 because you rotate all the diagrams
+       node[label=(360/\tkz@kiv@radial*#2):\tiny\tkz@kiv@gd] {}; % added \tiny
+      }
+ \let\tikz@label@distance\tikz@label@distance@tmp  
+\endgroup
+}%
+
+
+\def\tkz@KiviatLine[#1](#2,#3){% 
+\begingroup
+\pgfkeys{/kiviatline/.cd,
+fill= {},
+opacity=.5,
+% add these two lines, similar to for kiviatline
+zero point/.store in=\tkz@line@zero,
+zero point=0
+}
+%
+% the code below has a lot of polar coordinates, of the form
+%   (angle: <value> * <some factor>)
+% all have been modified to get them on the form
+%   (angle:{(<value>+\tkz@line@zero) * <some factor>})
+% note extra braces, which are required when a component contains ()
+% 
+\pgfqkeys{/kiviatline}{#1}%   opacity ??????
+\ifx\tkzutil@empty\tkz@kivl@fill \else 
+\begin{scope}[on background layer]
+ \path[fill=\tkz@kivl@fill,opacity=\tkz@kivl@opacity] (360/\tkz@kiv@radial*0:{(#2+\tkz@line@zero)*\tkz@kiv@gap*\tkz@kiv@step})   
+\foreach \v [count=\rang from 1] in {#3}{%  
+ -- (360/\tkz@kiv@radial*\rang:{(\v+\tkz@line@zero)*\tkz@kiv@gap*\tkz@kiv@step}) } -- (360/\tkz@kiv@radial*0:{(#2+\tkz@line@zero)*\tkz@kiv@gap*\tkz@kiv@step}); 
+ \end{scope}
+ \fi       
+% added overlay option because something weird happened with the bounding box
+\draw[#1,opacity=1,overlay] (0:{(#2+\tkz@line@zero)*\tkz@kiv@gap}) plot coordinates {(360/\tkz@kiv@radial*0:{(#2+\tkz@line@zero)*\tkz@kiv@gap*\tkz@kiv@step})}  
+\foreach \v [count=\rang from 1] in {#3}{%  
+ -- (360/\tkz@kiv@radial*\rang:{(\v+\tkz@line@zero)*\tkz@kiv@gap*\tkz@kiv@step}) plot coordinates {(360/\tkz@kiv@radial*\rang:{(\v+\tkz@line@zero)*\tkz@kiv@gap*\tkz@kiv@step})}} -- (360/\tkz@kiv@radial*0:{(#2+\tkz@line@zero)*\tkz@kiv@gap*\tkz@kiv@step});   
+\endgroup
+}%  
+
+
+\makeatother
+\definecolor{c1}{HTML}{81BECE} % 定义颜色 c1
+\definecolor{c2}{HTML}{378BA4} % 定义颜色 c2
+\definecolor{c3}{HTML}{FF5733} % 定义颜色 c3
+\definecolor{c4}{HTML}{C70039} % 定义颜色 c4
+\definecolor{c5}{HTML}{900C3F} % 定义颜色 c5
+\definecolor{c6}{HTML}{581845} % 定义颜色 c6
+
+% 定义全局缩放样式
+\tikzset{global scale/.style={
+    scale=#1,
+    every node/.append style={scale=#1}
+  }
+}
+\begin{tikzpicture}[
+  label distance=13em, % 标签距离
+  global scale = 0.73, % 全局缩放
+  plot1/.style={ % 数据集1样式
+    thin,
+    draw=c1,
+    mark=square*,
+    mark options={
+     ball color=c1,
+     mark size=4pt
+    },
+    opacity=.5
+  },
+  plot2/.style={ % 数据集2样式
+    thin,
+    draw=c2,
+    mark=triangle*,
+    mark options={
+      mark size=4pt,
+      ball color=c2
+    },
+    opacity=.5
+  },
+  plot3/.style={ % 数据集3样式
+    thin,
+    draw=c3,
+    mark=square*,
+    mark options={
+      mark size=4pt,
+      ball color=c3
+    },
+    opacity=.5
+  },
+  plot4/.style={ % 数据集4样式
+    thin,
+    draw=c4,
+    mark=triangle*,
+    mark options={
+      mark size=4pt,
+      ball color=c4
+    },
+    opacity=.5
+  },
+  plot5/.style={ % 数据集5样式
+    thin,
+    draw=c5,
+    mark=square*,
+    mark options={
+      mark size=4pt,
+      ball color=c5
+    },
+    opacity=.5
+  },
+  plot6/.style={ % 数据集6样式
+    thin,
+    draw=c6,
+    mark=triangle*,
+    mark options={
+      mark size=4pt,
+      ball color=c6
+    },
+    opacity=.5
+  }
+]
+
+\useasboundingbox (-25em,-5em) rectangle (10em,7em); % 设置边界框
+
+\begin{scope}[scale=0.36,local bounding box=a,shift={(-50em,0)}] % 设置局部缩放和位置
+
+\newcommand\KivStep{0.1}
+\pgfmathsetmacro\Unity{1/\KivStep}
+\newcommand\zeroshift{10.00}
+
+ \tkzKiviatDiagram[
+   radial  style/.style ={-},
+   rotate=90, 
+   lattice style/.style ={black!30},
+   step=\KivStep,
+   gap=1,
+   lattice=7,  % 设置刻度数
+]% 
+{medqa,medmcqa,pubmedqa,careqa,AVG} % 定义雷达图标签
+
+% 绘制数据集1的雷达图线条
+\tkzKiviatLine[
+  plot1
+](44.46190102,46.56944776,47.3,52.03700409,47.59208822)
+
+% 绘制数据集2的雷达图线条
+\tkzKiviatLine[
+  plot2
+](0.628436764,0.262969161,1.9,0.56929372,0.840174911)
+
+% 绘制数据集3的雷达图线条
+\tkzKiviatLine[
+  plot3
+](10.44776119,5.426727229,5.3,11.68831169,8.215700028)
+
+% 绘制数据集4的雷达图线条
+\tkzKiviatLine[
+  plot4
+](47.28986646,49.43820225,45.9,59.95374489,50.6454534)
+
+% 绘制数据集5的雷达图线条
+\tkzKiviatLine[
+  plot5
+](49.48939513,50.60961033,43.7,61.21686533,51.2539677)
+
+% 绘制数据集6的雷达图线条
+\tkzKiviatLine[
+  plot6
+](47.60408484,50.10757829,42.6,60.46966732,50.19533261)
+
+% 绘制刻度标签
+\tkzKiviatGrad[unity=\Unity, label precision=0, zero point=\zeroshift](0)
+\end{scope}
+\end{tikzpicture}
+
+
+\end{document}

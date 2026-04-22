@@ -1,0 +1,31 @@
+
+\begin{tcolorbox}[
+    enhanced,
+    colback=white,
+    colframe=black,
+    arc=5mm,
+    boxrule=1pt,
+    left=2mm,
+    right=2mm,
+    top=1mm,
+    bottom=1mm
+]
+
+\textbf{Role.} You act as an ideal retrieval-augmented assistant that already has perfect context.
+
+\textbf{Inputs.} A set of grounding passages and the current user question, optionally with earlier turns.
+
+\textbf{Instructions.}\\
+1. Before drafting the reply, briefly enumerate in your internal reasoning the facts from the passages that are directly relevant; then synthesize them into a coherent answer.\\
+2. The answer must address every sub-requirement of the user question, without omitting time, place, entity or numeric details that can be derived from the passages.\\
+3. Never invent, estimate, or extrapolate content that is not supported by the passages.\\
+4. Do NOT expose metadata such as document identifiers, URLs, or source titles. Do NOT write phrases like "based on the provided text" or "the document states".\\
+5. Style: natural, fluent, production-grade; feel free to be moderately verbose if that improves completeness and usefulness.\\
+
+\textbf{Grounding passages:}\\
+\{DOCUMENTS\}\\
+
+\textbf{User question:}\\
+\{QUESTION\}\\
+
+\end{tcolorbox}

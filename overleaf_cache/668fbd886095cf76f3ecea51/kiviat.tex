@@ -1,0 +1,198 @@
+\makeatletter
+\def\tkz@KiviatGrad[#1](#2){% 
+\begingroup
+\pgfkeys{/kiviatgrad/.cd,
+graduation distance= 0 pt,
+prefix ={},
+suffix={},
+unity=1,
+% added the following four lines
+label precision/.store in=\gradlabel@precision,
+label precision=1,
+zero point/.store in=\tkz@grad@zero,
+zero point=0
+}
+\pgfqkeys{/kiviatgrad}{#1}% 
+\let\tikz@label@distance@tmp\tikz@label@distance
+\global\let\tikz@label@distance\tkz@kiv@grad
+  % started loop at zero, to get label for center point
+ \foreach \nv in {0,...,\tkz@kiv@lattice}{
+ % skipped the \pgfmathparse, moved
+ % \tkz@kiv@unity*\nv-\tkz@grad@zero
+ % into \pgfmathsetmacro. The last term is added
+ \pgfmathsetmacro{\result}{\tkz@kiv@unity*\nv+20} % change from \pgfmathtruncatemacro
+ % NOTE: use \gradlabel@precision for the precision
+ \protected@edef\tkz@kiv@gd{%
+    \tkz@kiv@prefix%
+    \pgfmathprintnumber[precision=\gradlabel@precision,fixed]{\result}%% used \pgfmathprintnumber instead of "$\result$"
+    \tkz@kiv@suffix} 
+    \path[/kiviatgrad/.cd,#1] (0:0)--(360/\tkz@kiv@radial*#2:\nv*\tkz@kiv@gap)
+       % NOTE: (360/\tkz@kiv@radial*#2)-90  -> (360/\tkz@kiv@radial*#2)
+       % removed 90 because you rotate all the diagrams
+       node[label=(360/\tkz@kiv@radial*#2):\tiny\tkz@kiv@gd] {}; % added \tiny
+      }
+ \let\tikz@label@distance\tikz@label@distance@tmp  
+\endgroup
+}%
+
+
+\def\tkz@KiviatLine[#1](#2,#3){% 
+\begingroup
+\pgfkeys{/kiviatline/.cd,
+fill= {},
+opacity=.5,
+% add these two lines, similar to for kiviatline
+zero point/.store in=\tkz@line@zero,
+zero point=0
+}
+%
+% the code below has a lot of polar coordinates, of the form
+%   (angle: <value> * <some factor>)
+% all have been modified to get them on the form
+%   (angle:{(<value>+\tkz@line@zero) * <some factor>})
+% note extra braces, which are required when a component contains ()
+% 
+\pgfqkeys{/kiviatline}{#1}%   opacity ??????
+\ifx\tkzutil@empty\tkz@kivl@fill \else 
+\begin{scope}[on background layer]
+ \path[fill=\tkz@kivl@fill,opacity=\tkz@kivl@opacity] (360/\tkz@kiv@radial*0:{(#2+\tkz@line@zero)*\tkz@kiv@gap*\tkz@kiv@step})   
+\foreach \v [count=\rang from 1] in {#3}{%  
+ -- (360/\tkz@kiv@radial*\rang:{(\v+\tkz@line@zero)*\tkz@kiv@gap*\tkz@kiv@step}) } -- (360/\tkz@kiv@radial*0:{(#2+\tkz@line@zero)*\tkz@kiv@gap*\tkz@kiv@step}); 
+ \end{scope}
+ \fi       
+% added overlay option because something weird happened with the bounding box
+\draw[#1,opacity=1,overlay] (0:{(#2+\tkz@line@zero)*\tkz@kiv@gap}) plot coordinates {(360/\tkz@kiv@radial*0:{(#2+\tkz@line@zero)*\tkz@kiv@gap*\tkz@kiv@step})}  
+\foreach \v [count=\rang from 1] in {#3}{%  
+ -- (360/\tkz@kiv@radial*\rang:{(\v+\tkz@line@zero)*\tkz@kiv@gap*\tkz@kiv@step}) plot coordinates {(360/\tkz@kiv@radial*\rang:{(\v+\tkz@line@zero)*\tkz@kiv@gap*\tkz@kiv@step})}} -- (360/\tkz@kiv@radial*0:{(#2+\tkz@line@zero)*\tkz@kiv@gap*\tkz@kiv@step});   
+\endgroup
+}%  
+
+\makeatother
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\definecolor{c1}{HTML}{81BECE}
+\definecolor{c2}{HTML}{378BA4}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\tikzset{global scale/.style={
+    scale=#1,
+    every node/.append style={scale=#1}
+  }
+}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{tikzpicture}[
+  label distance=13em,
+  global scale = 0.73,
+  plot1/.style={
+    thin,
+    draw=c1,
+    fill=c1,
+    mark=square*,
+    mark options={
+     ball color=blue, % note ball color inside mark options
+     mark size=4pt
+    },
+    opacity=.5
+  },
+  plot2/.style={
+    thin,
+    draw=c2,
+    fill=c2,
+    mark=triangle*,
+    mark options={
+      mark size=4pt,
+      ball color=blue
+    },
+    opacity=.5
+  },
+  plot3/.style={
+    thin,
+    draw=red!30,
+    fill=red!30,
+    mark=square*,
+    mark options={
+      mark size=4pt,
+      ball color=yellow
+    },
+    opacity=.5
+  },
+  plot4/.style={
+    thin,
+    draw=red!50,
+    fill=red!50,
+    mark=triangle*,
+    mark options={
+      mark size=4pt,
+      ball color=blue
+    },
+    opacity=.5
+  }
+]
+%%%%%%%%%%%%%%%%设置画布大小%%%%%%%%%%%%%%%%%%%%%%%%
+\useasboundingbox (-25em,-5em) rectangle (10em,7em);
+% Correlation coefficient
+\begin{scope}[scale=0.36,local bounding box=a,shift={(-50em,0)}]
+
+% define some macros for convenience
+\newcommand\KivStep{0.1}
+\pgfmathsetmacro\Unity{1/\KivStep}
+\newcommand\zeroshift{20.00}
+
+ \tkzKiviatDiagram[
+   radial  style/.style ={-},
+   rotate=90, 
+   lattice style/.style ={black!30},
+   step=\KivStep,
+   gap=1,
+   lattice=5,
+]% 
+% de$\rightarrow$en  en$\rightarrow$de
+{cs$\rightarrow$en,cs$\rightarrow$it,,ro$\rightarrow$en,en$\rightarrow$cs,it$\rightarrow$cs,,en$\rightarrow$ro}
+\node [align=center,rotate=90]at (0em,16em){de$\rightarrow$en};
+\node [align=center,rotate=270]at (0em,-16em){en$\rightarrow$de};
+
+% with tm
+\tkzKiviatLine[
+  % /kiviatline/zero point=\zeroshift,
+  plot3
+](38.58,27.93,39.74,39.66,32.58,27.22,33.56,30.18)
+% wo tm
+\tkzKiviatLine[
+  % /kiviatline/zero point=\zeroshift,
+  plot4
+](17.50,7.02,21.37,16.34,8.02,2.85,7.06,8.74)
+
+\tkzKiviatGrad[unity=\Unity, label precision=2, zero point=\zeroshift](0) % set unity as 0.1
+\end{scope}
+%PBIAS
+\begin{scope}[scale=0.36,local bounding box=b,shift={(-15em,0)}]
+
+\newcommand\KivStep{0.1}
+\pgfmathsetmacro\Unity{1/\KivStep}
+\newcommand\zeroshift{20.00}
+
+ \tkzKiviatDiagram[
+   radial  style/.style ={-},
+   rotate=90,
+   lattice style/.style ={black!30},
+   step=\KivStep,
+   gap=1,
+   lattice=5
+]% 
+% it$\rightarrow$en en$\rightarrow$it
+{es$\rightarrow$en,fr$\rightarrow$en,,de$\rightarrow$fr,en$\rightarrow$es,en$\rightarrow$fr,,fr$\rightarrow$de}
+\node [align=center,rotate=90]at (0em,16.5em){it$\rightarrow$en};
+\node [align=center,rotate=270]at (0em,-16.5em){en$\rightarrow$it};
+% with tm
+\tkzKiviatLine[
+  % /kiviatline/zero point=\zeroshift,
+plot1
+](41.25,44.45,41.80,33.52,39.18,44.60,37.71,30.08)
+% wo tm
+\tkzKiviatLine[
+  % /kiviatline/zero point=\zeroshift,
+plot2
+](21.89,24.06,21.13,14.78,17.10,23.78,13.53,8.93)
+%%%%%%%%
+\tkzKiviatGrad[unity=\Unity, zero point=\zeroshift](0) % set unity as 0.1
+\end{scope}
+
+\end{tikzpicture}

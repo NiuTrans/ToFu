@@ -37,39 +37,60 @@ logger = get_logger(__name__)
 # The hints are still useful for tool_search keyword matching when Phase 2
 # dynamically defers tools under token pressure.
 DEFERRED_TOOL_HINTS: dict[str, str] = {
-    # Browser tools
-    'browser_type':         'browser type input text field form keyboard',
-    'browser_scroll':       'browser scroll page up down',
-    'browser_select_option': 'browser select option dropdown menu choice',
-    'browser_switch_tab':   'browser switch tab window',
-    'browser_get_app_state': 'browser app state tabs url',
-    'browser_read_tab':     'browser read tab page content text',
-    'browser_screenshot':   'browser screenshot capture page visual',
-    'browser_execute_js':   'browser execute javascript code eval',
-    'browser_click':        'browser click element button link',
-    'browser_navigate':     'browser navigate url go open page',
+    # Browser tools (real names from lib/tools/browser.py and lib/browser/advanced.py)
+    'browser_list_tabs':     'browser list tabs windows',
+    'browser_read_tab':      'browser read tab page content text',
+    'browser_execute_js':    'browser execute javascript code eval',
+    'browser_screenshot':    'browser screenshot capture page visual',
+    'browser_get_cookies':   'browser cookies auth session token',
+    'browser_get_history':   'browser history url visits',
+    'browser_create_tab':    'browser create open new tab window',
+    'browser_close_tab':     'browser close tab window',
+    'browser_navigate':      'browser navigate url go open page',
     'browser_get_interactive_elements': 'browser interactive elements form input',
+    'browser_click':         'browser click element button link',
+    'browser_hover':         'browser hover dropdown menu mouseover',
+    'browser_keyboard':      'browser keyboard type input text keys shortcut',
+    'browser_wait':          'browser wait element selector load',
+    'browser_summarize_page': 'browser summarize page layout structure',
+    'browser_get_app_state': 'browser app state vue react framework chart',
+    'browser_right_click_menu': 'browser right click context menu',
+    'browser_hover_and_click': 'browser hover click dropdown menu',
+    'browser_fill_form':     'browser fill form fields input submit',
 
     # Image generation
     'generate_image':       'image generate create picture draw illustration diagram',
 
-    # Scheduler tools
-    'create_scheduled_task': 'schedule task cron timer periodic automatic recurring',
-    'list_scheduled_tasks':  'schedule list tasks cron show pending',
-    'cancel_scheduled_task': 'schedule cancel delete remove task cron',
+    # Scheduler tools (real names from lib/scheduler/tool_defs.py)
+    'schedule_create':       'schedule task cron timer periodic automatic recurring create',
+    'schedule_list':         'schedule list tasks cron show pending',
+    'schedule_manage':       'schedule cancel delete remove enable disable task cron manage',
+    'await_task':            'wait await task block conversation running',
+    'timer_create':          'timer watcher poll block wait continuation',
+    'timer_manage':          'timer cancel status list log manage',
 
-    # Desktop agent tools
+    # Desktop agent tools (real names from lib/desktop_tools.py)
+    'desktop_list_files':    'desktop list files directory local computer',
+    'desktop_read_file':     'desktop read file local computer',
+    'desktop_write_file':    'desktop write file local computer save',
+    'desktop_open_file':     'desktop open file default app',
+    'desktop_open_app':      'desktop open app launch application',
+    'desktop_run_command':   'desktop run command shell local computer',
     'desktop_screenshot':    'desktop screenshot capture screen monitor display',
-    'desktop_click':         'desktop click mouse cursor button',
-    'desktop_type':          'desktop type keyboard text input',
-    'desktop_move_mouse':    'desktop mouse move cursor position',
+    'desktop_gui_action':    'desktop gui click type hotkey drag scroll mouse keyboard',
+    'desktop_clipboard':     'desktop clipboard read write copy paste',
+    'desktop_system_info':   'desktop system info cpu memory disk processes kill',
 
     # Memory tools
-    'create_memory':          'memory create save accumulate knowledge',
-    'update_memory':          'memory update modify edit',
-    'delete_memory':          'memory delete remove',
-    'merge_memories':          'memory merge combine consolidate',
+    'create_memory':         'memory create save accumulate knowledge',
+    'update_memory':         'memory update modify edit',
+    'delete_memory':         'memory delete remove',
+    'merge_memories':        'memory merge combine consolidate',
+    'search_memories':       'memory search find query past experience',
 
+    # Conversation reference tools (real names from lib/tools/conversation.py)
+    'list_conversations':    'conversation list search past previous',
+    'get_conversation':      'conversation get retrieve full content past',
 
     # Swarm tools
     'spawn_agents':          'swarm spawn agents parallel multi-agent',
@@ -79,20 +100,21 @@ DEFERRED_TOOL_HINTS: dict[str, str] = {
 # Core tools that are ALWAYS loaded (never deferred)
 CORE_TOOL_NAMES = frozenset({
     # Project tools — fundamental for code work
+    # (run_command covers both project-mode shell execution AND the
+    #  standalone code_exec variant exposed when codeExecEnabled=True
+    #  without a project — same tool name, different schema variant.)
     'read_files', 'list_dir', 'grep_search', 'find_files',
-    'write_file', 'apply_diff', 'run_command',
+    'write_file', 'apply_diff', 'insert_content', 'create_project', 'run_command',
     # Search & fetch
     'web_search', 'fetch_url',
     # Memory
-    'create_memory', 'update_memory', 'delete_memory', 'merge_memories',
+    'create_memory', 'update_memory', 'delete_memory', 'merge_memories', 'search_memories',
     # Essential meta
     'emit_to_user', 'ask_human',
     # Swarm
     'spawn_agents', 'check_agents',
-    # Code execution
-    'code_exec',
-    # Conversation
-    'read_conversation', 'search_conversations',
+    # Conversation reference (user @-mentions)
+    'list_conversations', 'get_conversation',
 })
 
 
@@ -195,7 +217,7 @@ def partition_tools(tool_list: list,
         # Sort non-essential core tools by definition size (largest first)
         _NEVER_DEFER = frozenset({
             'read_files', 'list_dir', 'grep_search', 'find_files',
-            'write_file', 'apply_diff', 'run_command',
+            'write_file', 'apply_diff', 'insert_content', 'create_project', 'run_command',
             'web_search', 'fetch_url', 'emit_to_user',
         })
         deferrable = []

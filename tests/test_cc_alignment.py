@@ -484,9 +484,14 @@ class TestAssembleToolListReturnValue:
             messages=None,
         )
         assert deferred_tools == []
-        # With all features off (no project, no search, no browser),
-        # tool_list is None — no tools to offer the model
-        assert tool_list is None
+        # read_files is now always-on (handles absolute local paths like
+        # PDFs/images/Office docs regardless of project mode), so tool_list
+        # is never fully empty. It should contain read_files + memory tools
+        # + emit_to_user (the always-on auxiliaries).
+        assert tool_list is not None
+        names = {t['function']['name'] for t in tool_list}
+        assert 'read_files' in names
+        assert has_real_tools is True
 
 
 # ═══════════════════════════════════════════════════════════

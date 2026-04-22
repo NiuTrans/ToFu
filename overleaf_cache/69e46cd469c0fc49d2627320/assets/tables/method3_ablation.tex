@@ -1,0 +1,16 @@
+\begin{table}[htbp]
+\centering
+\bicaption{不同token加权策略下模型性能对比}{Comparison of Model Performance under Different Token Weighting Strategies}
+\label{tab:method3-weighting-ablation}
+\footnotesize
+\begin{tabular}{lccc}
+\toprule
+\textbf{加权策略} & \textbf{BLEU} & \textbf{COMET} & \textbf{CCR} \\
+\midrule
+命中位置加权（C$^2$-DPO） & \textbf{28.51} & \textbf{81.65} & \textbf{95.20} \\
+全句均匀加权 & 28.02 & 81.81 & 92.88 \\
+前半句加权 & 26.77 & 80.03 & 92.26 \\
+随机加权 & 26.42 & 79.90 & 91.17 \\
+\bottomrule
+\end{tabular}
+\end{table}

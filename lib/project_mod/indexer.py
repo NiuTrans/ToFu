@@ -61,6 +61,11 @@ Tools for code modification:
 - insert_content(path, anchor, content, position?, description?) — Insert new content before or after an anchor string without replacing it.
   The 'anchor' must match exactly once (errors on 0 or multiple matches, like apply_diff's search).
   position='before' or 'after' (default: 'after'). For MULTIPLE insertions, pass an 'edits' array.
+- create_project(path, name?, overwrite?) — Create a NEW project directory at the given absolute/~-prefixed path and
+  register it as an EXTRA workspace root. REQUIRED before writing files that live OUTSIDE the currently-open project
+  (e.g. "generate a complete new repo at /some/path while referencing this one"). After calling this, address the new
+  project via '<rootName>:<rel/path>' (preferred) or an absolute path under it. The currently-open project is NOT
+  replaced — it remains available for reading as reference. System paths like /etc, /usr, $HOME are rejected.
 - run_command(command, timeout?, working_dir?) — Execute shell command. In multi-root workspaces, use working_dir='rootname:' to run in a specific root.
 
 Token-saving tools (use these to avoid re-generating existing content):

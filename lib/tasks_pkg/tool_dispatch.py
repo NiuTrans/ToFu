@@ -52,7 +52,7 @@ _IDEMPOTENT_TOOLS = frozenset({
 # This is separate from _IDEMPOTENT_TOOLS (dedup) — a tool can be
 # concurrent-safe (run in parallel) but not idempotent (don't cache).
 _WRITE_TOOLS = frozenset({
-    'write_file', 'apply_diff', 'run_command',
+    'write_file', 'apply_diff', 'create_project', 'run_command',
     'create_memory', 'update_memory', 'delete_memory', 'merge_memories',
 })
 
@@ -121,6 +121,18 @@ def _build_cache_hit_meta(
 
     # ── fetch_url: include URL so frontend can render clickable link ──
     if fn_name == 'fetch_url':
+        # Batch mode fallback — no display_results available, best-effort summary
+        urls = fn_args.get('urls')
+        if urls and isinstance(urls, list):
+            n = len(urls)
+            return {
+                'toolName': fn_name,
+                'title': f'{n} URLs{badge_suffix}',
+                'snippet': f'{chars:,} chars total',
+                'source': source_label,
+                'fetched': True,
+                'fetchedChars': chars,
+            }
         target_url = fn_args.get('url', '')
         from lib.tasks_pkg.tool_display import _short_url
         short = _short_url(target_url) if target_url else ''
@@ -268,6 +280,13 @@ def parse_tool_calls(
     # ★ Capture per-round assistant content (text LLM emitted alongside tool calls)
     _assistant_content = (assistant_msg.get('content') or '').strip()
     _ac_tagged = False  # only tag the first entry per round
+    # ★ Capture per-round reasoning/thinking text so Continue can replay it
+    #   against APIs that accept thinking continuity (Claude extended-thinking).
+    #   Currently sourced from OpenAI-compat `reasoning_content`; if an upstream
+    #   proxy surfaces the block-level signature separately we can extend the
+    #   key set below (`thinkingSignature`).
+    _assistant_thinking = (assistant_msg.get('reasoning_content') or '').strip()
+    _assistant_thinking_signature = assistant_msg.get('thinking_signature') or ''
 
     _total_tcs = len(assistant_msg['tool_calls'])
     # Build set of function names that have non-empty arguments,
@@ -337,7 +356,18 @@ def parse_tool_calls(
             # ★ Attach assistantContent to the first early-announced entry
             if _assistant_content and not _ac_tagged:
                 round_entry['assistantContent'] = _assistant_content
+                if _assistant_thinking:
+                    round_entry['thinking'] = _assistant_thinking
+                if _assistant_thinking_signature:
+                    round_entry['thinkingSignature'] = _assistant_thinking_signature
                 _ac_tagged = True
+            # ★ Preserve Gemini thought_signature (and any other vendor-specific
+            #   extra_content) so the frontend can round-trip it on Continue.
+            #   Gemini 3.x REQUIRES echoing the signature back on subsequent
+            #   requests that replay this tool_call, else HTTP 400.  See
+            #   memory gemini-thought-signature-openai-compat.
+            if tc.get('extra_content'):
+                round_entry['extraContent'] = tc['extra_content']
             logger.debug('[Task %s] Reusing early-announced tool_start for '
                          '%s tc_id=%s rn=%d', tid, fn_name, tc_id[:8], rn)
             # Swarm tools need extra bookkeeping
@@ -363,7 +393,22 @@ def parse_tool_calls(
         if _assistant_content and not _ac_tagged:
             round_entry['assistantContent'] = _assistant_content
             event_payload['assistantContent'] = _assistant_content
+            if _assistant_thinking:
+                round_entry['thinking'] = _assistant_thinking
+                event_payload['thinking'] = _assistant_thinking
+            if _assistant_thinking_signature:
+                round_entry['thinkingSignature'] = _assistant_thinking_signature
+                event_payload['thinkingSignature'] = _assistant_thinking_signature
             _ac_tagged = True
+        # ★ Preserve Gemini thought_signature on the persisted tool round.
+        #   Captured off the assistant tool_call entry by llm_client's
+        #   streaming parser (see: "Gemini thought_signature: preserve
+        #   extra_content" branch in lib/llm_client.py).  Without this,
+        #   a Continue request against Gemini drops the signature and the
+        #   next API call 400s.
+        if tc.get('extra_content'):
+            round_entry['extraContent'] = tc['extra_content']
+            event_payload['extraContent'] = tc['extra_content']
         task['toolRounds'].append(round_entry)
         append_event(task, event_payload)
 
@@ -575,8 +620,10 @@ def execute_tool_pipeline(
                     dedup_content = cached_content if isinstance(cached_content, str) else str(cached_content)
                 # Update round_entry to show cached/prefetched status
                 if round_entry:
-                    # Use stored display_results for web_search if available
-                    if cached_display and fn_name == 'web_search':
+                    # Use stored display_results for web_search / fetch_url if available
+                    # — this preserves per-result rows (titles, URLs, snippets) in the UI
+                    # instead of collapsing to a single generic meta row.
+                    if cached_display and fn_name in ('web_search', 'fetch_url'):
                         extra = {}
                         if cached_engine_bkdn:
                             round_entry['engineBreakdown'] = cached_engine_bkdn
@@ -597,7 +644,7 @@ def execute_tool_pipeline(
                 tool_results[tc_id] = (dedup_content, cached_is_search)
                 continue
 
-        is_write_op = fn_name in ('write_file', 'apply_diff', 'insert_content')
+        is_write_op = fn_name in ('write_file', 'apply_diff', 'insert_content', 'create_project')
         needs_approval = (
             is_write_op and fn_name in PROJECT_TOOL_NAMES
             and not auto_apply and not task['aborted']
@@ -727,11 +774,13 @@ def execute_tool_pipeline(
                             for _pi in parallel_items:
                                 if _pi[2] == ret_tc_id:  # tc_id match
                                     _pi_cache_key = _make_cache_key(fut_fn_name, _pi[3])
-                                    # For web_search, also cache display_results + engineBreakdown
-                                    # from the round_entry for later cache hits
+                                    # For web_search / fetch_url, also cache display_results
+                                    # + engineBreakdown from the round_entry for later cache hits —
+                                    # this keeps the rich per-result UI even on dedup replay
+                                    # (e.g. batch "3 URLs" stays as 3 rows, not 1 generic row).
                                     _pi_display = None
                                     _pi_eng_bkdn = None
-                                    if fut_fn_name == 'web_search':
+                                    if fut_fn_name in ('web_search', 'fetch_url'):
                                         _pi_re = _pi[5]  # round_entry
                                         if _pi_re and _pi_re.get('results'):
                                             _pi_display = _pi_re['results']
@@ -740,8 +789,8 @@ def execute_tool_pipeline(
                                     _cache[_pi_cache_key] = (tool_content, is_search, 'dedup', _pi_display, _pi_eng_bkdn)
                                     break
                         # ── Invalidate project cache after write/exec ops ──
-                        elif fut_fn_name in ('write_file', 'apply_diff', 'code_exec',
-                                             'bash_exec', 'run_command'):
+                        elif fut_fn_name in ('write_file', 'apply_diff', 'create_project',
+                                             'code_exec', 'bash_exec', 'run_command'):
                             _invalidate_project_cache(_cache, trigger=fut_fn_name)
                     except Exception as e:
                         logger.error(
@@ -1033,6 +1082,23 @@ def _approval_meta_insert_content(approval_meta, fn_args):
         approval_meta['description'] = approval_meta.get('description', '') or f'Insert {pos} anchor'
 
 
+def _approval_meta_create_project(approval_meta, fn_args):
+    """Enrich approval metadata for ``create_project``."""
+    target_path = fn_args.get('path', '')
+    root_name = fn_args.get('name', '')
+    overwrite = bool(fn_args.get('overwrite', False))
+    approval_meta['path'] = target_path
+    approval_meta['rootName'] = root_name
+    approval_meta['overwrite'] = overwrite
+    if overwrite:
+        approval_meta['description'] = (
+            f'Create / register workspace root at {target_path} '
+            f'(overwrite=true — existing non-empty dir will be registered as-is)'
+        )
+    else:
+        approval_meta['description'] = f'Create new workspace root at {target_path}'
+
+
 # Module-level dispatch table — maps tool name → approval meta enricher.
 # Only tools that need special approval metadata are listed; tools not in
 # this dict get the base metadata only (path + description).
@@ -1041,6 +1107,7 @@ _APPROVAL_META_ENRICHERS = {
     'write_file':      _approval_meta_write_file,
     'apply_diff':      _approval_meta_apply_diff,
     'insert_content':  _approval_meta_insert_content,
+    'create_project':  _approval_meta_create_project,
 }
 
 

@@ -13,8 +13,16 @@ The transformations mirror what the old frontend ``buildApiMessages()`` did:
   5. Prepend conversation references
   6. Inline PDF text into user content
   7. Build multimodal image blocks (resolve /api/images/ URLs from disk)
-  8. Build toolSummary fallback for empty assistant messages
-  9. Merge consecutive same-role messages
+  8. Expand stored ``toolRounds`` back into proper OpenAI-style
+     ``assistant(tool_calls=[...])`` + ``tool(tool_call_id=..., content=...)``
+     message sequences when the rounds have complete info (toolCallId +
+     toolContent + status==done).  Falls back to a lossy ``toolSummary``
+     JSON placeholder when rounds are legacy/incomplete.  This mirrors
+     what ``lib.tasks_pkg.message_builder.inject_tool_history`` produces
+     for Continue requests, so the debug preview and the real request
+     see the same structure.
+  9. Merge consecutive same-role messages (but never across structured
+     tool-call sequences).
 """
 
 from __future__ import annotations
@@ -246,7 +254,9 @@ def _transform_messages(
             messages.append(_build_user_message(msg))
 
         elif role == 'assistant':
-            messages.append(_build_assistant_message(msg))
+            # May expand to multiple messages: assistant(tool_calls) +
+            # tool(result) per round — see _build_assistant_messages.
+            messages.extend(_build_assistant_messages(msg))
 
         # Skip other roles (system messages in the middle, etc.)
 
@@ -354,40 +364,192 @@ def _build_user_message(msg: dict) -> dict:
         return {'role': 'user', 'content': text_content}
 
 
-def _build_assistant_message(msg: dict) -> dict:
-    """Build a single assistant message for the API."""
-    # 8. Build toolSummary fallback for empty assistant messages
-    tool_ctx = ''
+def _build_assistant_messages(msg: dict) -> list[dict]:
+    """Build assistant message(s) for the API from a stored conversation row.
+
+    Returns a *list* because a single stored assistant message with tool
+    rounds expands into multiple OpenAI-style messages::
+
+        assistant(content=..., tool_calls=[...])    # one per batch
+        tool(tool_call_id=..., content=...)         # one per tool call
+        tool(tool_call_id=..., content=...)
+        ...
+        assistant(content=final_text)               # final answer text
+
+    A "batch" is a contiguous group of rounds sharing the same ``llmRound``
+    (or, for legacy data without ``llmRound``, separated by a gap of more
+    than 1 in ``roundNum``).  This mirrors how the live orchestrator
+    emits tool calls — and how ``inject_tool_history`` restores them on
+    Continue requests.
+
+    Fallback: if a round is missing the data needed to reconstruct a
+    proper tool_call (``toolCallId`` + ``toolContent`` + ``status=='done'``
+    + parsable ``toolArgs``), the whole message is collapsed to the
+    legacy ``toolSummary`` JSON placeholder — which is lossy but keeps
+    parity with older conversations that predate the checkpoint schema.
+    """
+    rounds = msg.get('toolRounds') or []
+    final_content = msg.get('content') or ''
+    final_thinking = msg.get('thinking') or ''
+
+    # ── Short-circuit: no tool rounds → single plain assistant message ──
+    if not rounds:
+        if final_content or final_thinking:
+            return [{'role': 'assistant', 'content': final_content or ''}]
+        # Empty assistant with nothing at all → preserve as empty placeholder
+        # (downstream merge-consecutive may clean it up).
+        return [{'role': 'assistant', 'content': ''}]
+
+    # ── Attempt structured reconstruction ──
+    structured = _reconstruct_tool_call_messages(rounds)
+    if structured is not None:
+        # Append the final assistant text (if any) as a trailing message.
+        if final_content:
+            structured.append({'role': 'assistant', 'content': final_content})
+        return structured
+
+    # ── Fallback: legacy / incomplete rounds → summary JSON placeholder ──
+    # This path is LOSSY (no tool_call_id/tool role messages) but keeps
+    # old conversations working when they lack the required metadata.
     if msg.get('toolSummary'):
         tool_ctx = msg['toolSummary']
     else:
-        rounds = msg.get('toolRounds') or []
-        if rounds:
-            calls = []
-            for r in rounds:
-                call = {'name': r.get('toolName', 'unknown')}
-                if r.get('toolArgs'):
-                    args = r['toolArgs']
-                    if isinstance(args, str):
-                        try:
-                            args = json.loads(args)
-                        except (json.JSONDecodeError, TypeError):
-                            args = None
-                    if isinstance(args, dict):
-                        call.update(args)
-                    elif args is not None:
-                        logger.debug('Skipping non-dict toolArgs type=%s', type(args).__name__)
-                elif r.get('query'):
-                    call['query'] = r['query']
-                calls.append(call)
-            try:
-                tool_ctx = json.dumps(calls, ensure_ascii=False)
-            except (TypeError, ValueError):
-                tool_ctx = str(calls)
+        calls = []
+        for r in rounds:
+            call = {'name': r.get('toolName', 'unknown')}
+            args = r.get('toolArgs')
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, TypeError):
+                    args = None
+            if isinstance(args, dict):
+                call.update(args)
+            elif r.get('query'):
+                call['query'] = r['query']
+            calls.append(call)
+        try:
+            tool_ctx = json.dumps(calls, ensure_ascii=False)
+        except (TypeError, ValueError):
+            tool_ctx = str(calls)
 
-    # Never skip assistant messages — use tool summary as placeholder
-    content = msg.get('content') or tool_ctx
-    return {'role': 'assistant', 'content': content}
+    content = final_content or tool_ctx
+    return [{'role': 'assistant', 'content': content}]
+
+
+def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
+    """Expand ``toolRounds`` into structured assistant/tool message pairs.
+
+    Returns a list of messages on success, or ``None`` if any round
+    lacks the data needed to reconstruct a proper tool_call sequence.
+    Callers fall back to the legacy summary placeholder on ``None``.
+
+    Required per-round fields:
+      * ``toolCallId`` (non-empty str) — uniquely identifies the call
+      * ``toolName`` (non-empty str)
+      * ``status == 'done'`` — round ran to completion
+      * ``toolContent`` (str) — the tool's result as seen by the model
+
+    ``toolArgs`` is best-effort normalized to a JSON string suitable for
+    ``function.arguments``.  ``assistantContent`` on the first round of
+    a batch becomes the batch's assistant ``content`` (text written
+    alongside the tool_calls, à la Claude).
+    """
+    # First pass: validate every round has the required data.
+    for r in rounds:
+        if not r.get('toolCallId'):
+            return None
+        if not r.get('toolName'):
+            return None
+        if r.get('status') != 'done':
+            return None
+        if r.get('toolContent') is None:
+            return None
+
+    # Group into batches by llmRound (preferred) or roundNum gap (legacy).
+    has_llm_round = any(r.get('llmRound') is not None for r in rounds)
+    batches: list[list[dict]] = []
+    current: list[dict] = []
+    prev_key = None
+    for r in rounds:
+        if has_llm_round:
+            key = r.get('llmRound')
+        else:
+            key = r.get('roundNum')
+            if current and isinstance(prev_key, int) and isinstance(key, int):
+                # legacy: gap > 1 in roundNum → new batch
+                if key > prev_key + 1:
+                    batches.append(current)
+                    current = []
+        if current and has_llm_round and key != prev_key:
+            batches.append(current)
+            current = []
+        current.append(r)
+        prev_key = key
+    if current:
+        batches.append(current)
+
+    out: list[dict] = []
+    for batch in batches:
+        tool_calls = []
+        tool_results = []
+        assistant_text = ''
+        assistant_thinking = ''
+        assistant_thinking_sig = ''
+        for r in batch:
+            tc_id = r['toolCallId']
+            args_raw = r.get('toolArgs')
+            if isinstance(args_raw, str):
+                args_str = args_raw
+            elif isinstance(args_raw, dict):
+                try:
+                    args_str = json.dumps(args_raw, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    args_str = '{}'
+            else:
+                args_str = '{}'
+            tc_entry: dict = {
+                'id': tc_id,
+                'type': 'function',
+                'function': {
+                    'name': r['toolName'],
+                    'arguments': args_str,
+                },
+            }
+            # Gemini: echo back thought_signature verbatim — the OpenAI-compat
+            # proxy requires it on every replayed tool_call or returns HTTP 400.
+            # Unused by other providers (they strip unknown fields server-side).
+            if r.get('extraContent'):
+                tc_entry['extra_content'] = r['extraContent']
+            tool_calls.append(tc_entry)
+            tool_results.append({
+                'role': 'tool',
+                'tool_call_id': tc_id,
+                'content': r['toolContent'] or '',
+            })
+            # First-seen assistantContent / thinking in the batch become the
+            # assistant message's text + reasoning (Claude-style prefix).
+            if not assistant_text and r.get('assistantContent'):
+                assistant_text = r['assistantContent']
+            if not assistant_thinking and r.get('thinking'):
+                assistant_thinking = r['thinking']
+            if not assistant_thinking_sig and r.get('thinkingSignature'):
+                assistant_thinking_sig = r['thinkingSignature']
+
+        asst_msg: dict = {'role': 'assistant', 'tool_calls': tool_calls}
+        if assistant_text:
+            asst_msg['content'] = assistant_text
+        # Only attach thinking block when we have BOTH text and signature —
+        # Anthropic rejects a thinking block with no signature; other
+        # providers just ignore both fields.  This matches the gating in
+        # lib/tasks_pkg/message_builder.inject_tool_history.
+        if assistant_thinking and assistant_thinking_sig:
+            asst_msg['reasoning_content'] = assistant_thinking
+            asst_msg['thinking_signature'] = assistant_thinking_sig
+        out.append(asst_msg)
+        out.extend(tool_results)
+
+    return out
 
 
 def _collapse_historical_endpoint_sessions(src: list[dict]) -> list[dict]:
@@ -455,11 +617,20 @@ def _merge_consecutive_same_role(messages: list) -> None:
     After filtering out endpoint-mode messages (_isEndpointPlanner,
     _isEndpointReview, _epIteration), there may still be consecutive
     same-role messages from normal conversation flow. Merge by concatenation.
+
+    NEVER merges structured tool-call messages (those with ``tool_calls``
+    or ``tool_call_id``) — those must remain intact for the model to
+    correlate calls and results.
     """
     i = len(messages) - 1
     while i > 0:
         curr = messages[i]
         prev = messages[i - 1]
+        # Do not collapse structured tool-call sequences
+        if (curr.get('tool_calls') or prev.get('tool_calls')
+                or curr.get('tool_call_id') or prev.get('tool_call_id')):
+            i -= 1
+            continue
         if (curr.get('role') == prev.get('role')
                 and curr.get('role') in ('user', 'assistant')):
             prev_content = prev.get('content', '') or ''

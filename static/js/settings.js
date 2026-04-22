@@ -7,6 +7,13 @@
 /** Cached server config loaded on first openSettings() */
 var _serverConfig = null;
 
+/** Cached today's per-key success/failure stats: { day, providers: {pid: {key_name: {...}}} } */
+var _keyStatsCache = {
+  day: '', providers: {},
+  min_attempts: 5, min_success_rate: 0.5, max_consecutive_429: 100,
+};
+var _keyStatsLoading = false;
+
 // ══════════════════════════════════════════════════════
 //  Brand Icons — SVG paths from lobehub/lobe-icons (MIT)
 // ══════════════════════════════════════════════════════
@@ -106,7 +113,7 @@ function _brandSvg(brand, size) {
 // Generate new icons: python3 scripts/gen_tofu_icons.py
 // Convert PNG→SVG:    python3 scripts/png_to_svg.py
 
-const _ICON_V = '0.9.0';  // cache-bust version — bump when icons change
+const _ICON_V = '0.9.2';  // cache-bust version — bump when icons change
 const _ICON_BASE = (typeof BASE_PATH!=='undefined'?BASE_PATH:'') + '/static/icons';
 
 const _TOFU_PLANNER_SVG = `<img src="${_ICON_BASE}/tofu-planner.svg?v=${_ICON_V}" alt="Planner" style="width:100%;height:100%;display:block">`;
@@ -154,6 +161,7 @@ const _PROVIDER_TEMPLATES = [
     base_url: 'https://api.moonshot.ai/v1',
     balance_url: '',
     models: [
+      { model_id: 'kimi-k2.6',                capabilities: ['text', 'vision', 'thinking'],  rpm: 60,  cost: 0.0017 },
       { model_id: 'kimi-k2.5',                capabilities: ['text', 'vision', 'thinking'],  rpm: 60,  cost: 0.003 },
       { model_id: 'kimi-k2-0905-preview',     capabilities: ['text', 'thinking'],            rpm: 60,  cost: 0.003 },
       { model_id: 'kimi-k2-thinking',         capabilities: ['text', 'thinking'],            rpm: 60,  cost: 0.003 },
@@ -977,6 +985,8 @@ function openSettings() {
       _renderProvidersTab();
       // Start auto-polling balance for all eligible providers
       _startBalancePolling();
+      // Fetch today's per-key success-rate stats and refresh inline badges.
+      _loadKeyStats();
     });
     _renderPresetsTab(cfg);
     _populateSearchTab(cfg);
@@ -1039,6 +1049,9 @@ function _renderProvidersTab() {
 
     html += '<div class="stg-field"><label>API 密钥 <span class="stg-hint">（每行一个，安全存储）</span></label>' +
       '<textarea rows="' + Math.max(2, Math.min(5, keyCount)) + '" onchange="_onProvKeys(' + pi + ',this.value)">' + escapeHtml((p.api_keys || []).join('\n')) + '</textarea></div>';
+
+    // ── Per-key daily success-rate stats (inline after the keys textarea) ──
+    html += _renderKeyStatsBlock(pi);
 
     // ── Balance URL field + Check Balance button ──
     var balancePlaceholder = (p.base_url && _guessBalanceUrl(p.base_url))
@@ -1303,6 +1316,240 @@ function _onProvExtraHeaders(provIdx, value) {
 function _onProvKeys(provIdx, value) {
   if (!_stgProviders[provIdx]) return;
   _stgProviders[provIdx].api_keys = value.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
+  // Re-render so that the per-key stats rows reflect the new key count/order.
+  _renderProviderKeyStats(provIdx);
+}
+
+// ══════════════════════════════════════════════════════
+//  Per-key Daily Success-rate Stats
+// ══════════════════════════════════════════════════════
+
+/** Fetch today's per-key stats from backend and re-render the currently
+ *  expanded provider cards. Called once on settings open and after any
+ *  user override. */
+function _loadKeyStats() {
+  if (_keyStatsLoading) return Promise.resolve(_keyStatsCache);
+  _keyStatsLoading = true;
+  return fetch(apiUrl('/api/dispatch/key-stats'))
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
+      if (data && typeof data === 'object') {
+        _keyStatsCache = {
+          day: data.day || '',
+          providers: data.providers || {},
+          min_attempts: data.min_attempts || 5,
+          min_success_rate: data.min_success_rate || 0.5,
+          max_consecutive_429: data.max_consecutive_429 || 100,
+        };
+      }
+    })
+    .catch(function(e) {
+      debugLog('[Settings] Failed to load key stats: ' + (e && e.message), 'warning');
+    })
+    .finally(function() {
+      _keyStatsLoading = false;
+      // Re-render stat rows for all visible providers.
+      for (var i = 0; i < _stgProviders.length; i++) _renderProviderKeyStats(i);
+    });
+}
+
+/** Format the numeric success rate as a percentage string (or '—' for N/A). */
+function _fmtSuccessRate(sr) {
+  if (sr == null) return '—';
+  return Math.round(sr * 100) + '%';
+}
+
+/** Pick the CSS class for a stats row based on health. */
+function _keyStatsClass(row) {
+  if (!row) return '';
+  if (row.exhausted && row.override !== true) return 'stg-keystat-exhausted';
+  if (!row.enabled) return 'stg-keystat-disabled';
+  if (row.auto_disabled) return 'stg-keystat-warn';
+  if (row.success_rate == null) return 'stg-keystat-idle';
+  if (row.success_rate >= 0.9) return 'stg-keystat-good';
+  if (row.success_rate >= _keyStatsCache.min_success_rate) return 'stg-keystat-ok';
+  return 'stg-keystat-warn';
+}
+
+/** Return the stat row for (provider_id, key_name) or null. */
+function _getKeyStatRow(providerId, keyName) {
+  var provs = _keyStatsCache.providers || {};
+  var p = provs[providerId] || provs['default'];
+  if (!p) return null;
+  return p[keyName] || null;
+}
+
+/** Build HTML for a provider's per-key stats block. Safe when stats haven't
+ *  loaded yet — just renders an "awaiting data" placeholder. */
+function _renderKeyStatsBlock(provIdx) {
+  var p = _stgProviders[provIdx];
+  if (!p) return '';
+  var keys = p.api_keys || [];
+  if (keys.length === 0) return '';
+
+  var providerId = p.id || 'default';
+  var rows = '';
+  for (var i = 0; i < keys.length; i++) {
+    var keyName = providerId + '_key_' + i;
+    var row = _getKeyStatRow(providerId, keyName);
+    var cls = _keyStatsClass(row);
+    var k = keys[i] || '';
+    // Mask the key value: keep first 4 + last 4 chars.
+    var masked = k.length > 10 ? k.slice(0, 4) + '…' + k.slice(-4) : (k || '(empty)');
+
+    var total = row ? (row.total || 0) : 0;
+    var succ = row ? (row.success || 0) : 0;
+    var fail = row ? (row.failure || 0) : 0;
+    var rl429 = row ? (row.rate_limited || 0) : 0;
+    var cons429 = row ? (row.consecutive_429 || 0) : 0;
+    var max429 = _keyStatsCache.max_consecutive_429 || 100;
+    var srTxt = row ? _fmtSuccessRate(row.success_rate) : '—';
+    var enabled = row ? !!row.enabled : true;
+    var autoOff = !!(row && row.auto_disabled && row.override == null);
+
+    var exhausted = !!(row && row.exhausted);
+
+    var badge = '';
+    var lastResort = !!(row && row.last_resort);
+    if (row && row.override === false) badge = '<span class="stg-keystat-badge off">手动关闭</span>';
+    else if (row && row.override === true) badge = '<span class="stg-keystat-badge on">手动开启</span>';
+    else if (lastResort) badge = '<span class="stg-keystat-badge warn" title="本应自动停用，但这是该服务商今天唯一可用的密钥 — 保留为最后备选">保留为最后备选</span>';
+    else if (exhausted) badge = '<span class="stg-keystat-badge warn" title="已连续返回 ' + max429 + ' 次 429 — 可能已欠费/额度耗尽，今日停用">自动停用 (连续 429)</span>';
+    else if (autoOff) badge = '<span class="stg-keystat-badge warn">自动停用</span>';
+
+    // Show warning when streak is building up (>= 50% of threshold)
+    var streakBadge = '';
+    if (!exhausted && cons429 >= Math.max(10, max429 / 2)) {
+      streakBadge = '<span class="stg-keystat-badge warn" title="连续 429 次数接近阈值 (' + max429 + ')，一旦达到将自动停用">连续 429 × ' + cons429 + '</span>';
+    }
+
+    // Show 最近错误 only when something actually went wrong (a bare 429
+    // doesn't count — it's already surfaced by the "限流" chip).
+    var showErr = row && row.last_error && (fail > 0 || exhausted);
+    var lastErr = showErr ? ('<span class="stg-keystat-err" title="' + escapeHtml(row.last_error) + '">最近错误</span>') : '';
+
+    var rateTitle = total > 0
+      ? '今日成功率 = 成功 ' + succ + ' / 调用 ' + total + '（429 限流不计入）'
+      : '今日尚无调用';
+    var countChip = total > 0
+      ? '<span class="stg-keystat-count" title="今日总调用次数（不含 429 限流）">调用 ' + total + '</span>'
+      : '<span class="stg-keystat-count" title="今日尚无调用">—</span>';
+
+    rows += '<div class="stg-keystat-row ' + cls + '">' +
+      '<div class="stg-keystat-name"><span class="stg-keystat-idx">#' + (i + 1) + '</span>' +
+        '<code class="stg-keystat-mask">' + escapeHtml(masked) + '</code>' +
+      '</div>' +
+      '<div class="stg-keystat-metrics">' +
+        '<span class="stg-keystat-rate" title="' + rateTitle + '">' + srTxt + '</span>' +
+        countChip +
+        (fail > 0 ? '<span class="stg-keystat-fail" title="真正的调用失败次数（网络/5xx/解析错误等，不含 429）">失败 ' + fail + '</span>' : '') +
+        (rl429 > 0 ? '<span class="stg-keystat-429" title="今日收到的 429 限流次数（不计入成功率）；连续 ' + max429 + ' 次会自动停用">限流 ' + rl429 + '</span>' : '') +
+        streakBadge + badge + lastErr +
+      '</div>' +
+      '<div class="stg-keystat-actions">' +
+        '<label class="stg-toggle" title="今日启用/禁用此密钥（明日自动重置）">' +
+          '<input type="checkbox"' + (enabled ? ' checked' : '') +
+              ' onchange="_onKeyToggle(' + provIdx + ',' + i + ',this.checked)">' +
+          '<span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>' +
+        '</label>' +
+        (row && row.override != null
+          ? '<button class="stg-btn-link" title="清除手动设置，恢复自动判定" onclick="_onKeyClearOverride(' + provIdx + ',' + i + ')">重置</button>'
+          : '') +
+      '</div>' +
+    '</div>';
+  }
+
+  var dayLabel = _keyStatsCache.day ? ('（' + _keyStatsCache.day +
+      '：连续 ' + (_keyStatsCache.max_consecutive_429 || 100) +
+      ' 次 429 或成功率 < ' +
+      Math.round(_keyStatsCache.min_success_rate * 100) + '% 时自动停用；次日自动重置）')
+    : '';
+
+  return '<div class="stg-keystats" data-prov-idx="' + provIdx + '">' +
+    '<div class="stg-keystats-head">' +
+      '<span class="stg-keystats-title">今日密钥状态</span>' +
+      '<span class="stg-keystats-sub">' + escapeHtml(dayLabel) + '</span>' +
+    '</div>' +
+    rows +
+  '</div>';
+}
+
+/** Replace the .stg-keystats block for a single provider in-place (or render
+ *  if not present). Avoids full provider re-render that would collapse the card. */
+function _renderProviderKeyStats(provIdx) {
+  var card = document.querySelector('.stg-provider-card[data-prov-idx="' + provIdx + '"]');
+  if (!card) return;
+  var existing = card.querySelector('.stg-keystats');
+  var html = _renderKeyStatsBlock(provIdx);
+  if (existing) {
+    if (!html) { existing.remove(); return; }
+    var tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    var newBlock = tmp.firstChild;
+    existing.parentNode.replaceChild(newBlock, existing);
+  } else if (html) {
+    // Insert after the API keys textarea field (its wrapper <div class="stg-field">
+    // with a <textarea onchange="_onProvKeys">).
+    var textareas = card.querySelectorAll('textarea[onchange^="_onProvKeys"]');
+    if (textareas.length) {
+      var keysField = textareas[0].closest('.stg-field');
+      if (keysField && keysField.parentNode) {
+        var tmp = document.createElement('div');
+        tmp.innerHTML = html;
+        keysField.parentNode.insertBefore(tmp.firstChild, keysField.nextSibling);
+      }
+    }
+  }
+}
+
+/** Toggle a single key on/off for today. Sends an explicit override. */
+function _onKeyToggle(provIdx, keyIdx, enabled) {
+  var p = _stgProviders[provIdx];
+  if (!p) return;
+  var providerId = p.id || 'default';
+  var keyName = providerId + '_key_' + keyIdx;
+  fetch(apiUrl('/api/dispatch/key-override'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      provider_id: providerId, key_name: keyName, enabled: !!enabled,
+    }),
+  }).then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
+      if (data && data.row) {
+        if (!_keyStatsCache.providers[providerId]) _keyStatsCache.providers[providerId] = {};
+        _keyStatsCache.providers[providerId][keyName] = data.row;
+        _renderProviderKeyStats(provIdx);
+      }
+    })
+    .catch(function(e) {
+      debugLog('[Settings] Key toggle failed: ' + (e && e.message), 'error');
+    });
+}
+
+/** Clear the manual override, reverting to automatic health-based logic. */
+function _onKeyClearOverride(provIdx, keyIdx) {
+  var p = _stgProviders[provIdx];
+  if (!p) return;
+  var providerId = p.id || 'default';
+  var keyName = providerId + '_key_' + keyIdx;
+  fetch(apiUrl('/api/dispatch/key-override'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      provider_id: providerId, key_name: keyName, enabled: null,
+    }),
+  }).then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
+      if (data && data.row) {
+        if (!_keyStatsCache.providers[providerId]) _keyStatsCache.providers[providerId] = {};
+        _keyStatsCache.providers[providerId][keyName] = data.row;
+        _renderProviderKeyStats(provIdx);
+      }
+    })
+    .catch(function(e) {
+      debugLog('[Settings] Key override clear failed: ' + (e && e.message), 'error');
+    });
 }
 
 /**
@@ -3265,6 +3512,7 @@ var _mcpCatalog = [];
 var _mcpActiveCategory = 'all';
 var _mcpSearchQuery = '';
 var _mcpInstallTarget = null;  // CatalogEntry being installed
+var _mcpInstallIsReinstall = false;  // true = editing existing (stored env will be honoured)
 
 /**
  * Load MCP tab data — fetch catalog with install/connect status.
@@ -3378,10 +3626,10 @@ function _renderMcpCatalog() {
       if (e.tools_count) {
         html += '<span class="mcp-app-tools-count">' + (e.tools_count || 0) + ' tools</span>';
       }
-      html += '<button class="btn btn-secondary btn-xs" onclick="_mcpUninstall(\'' + escapeHtml(e.id) + '\')">卸载</button>';
+      html += '<button class="btn btn-secondary btn-xs" onclick="_mcpUninstall(\'' + escapeHtml(e.id) + '\')" title="断开连接，但保留已填写的凭据，方便下次一键重新启用">卸载</button>';
     } else if (installed) {
-      html += '<button class="btn btn-primary btn-xs" onclick="_mcpReconnect(\'' + escapeHtml(e.id) + '\')">连接</button>';
-      html += '<button class="btn btn-secondary btn-xs" onclick="_mcpUninstall(\'' + escapeHtml(e.id) + '\')">卸载</button>';
+      html += '<button class="btn btn-primary btn-xs" onclick="_mcpOpenInstallModal(\'' + escapeHtml(e.id) + '\', true)" title="编辑凭据并重新连接（已有凭据会回填为默认；留空则沿用）">连接</button>';
+      html += '<button class="btn btn-secondary btn-xs" onclick="_mcpPurge(\'' + escapeHtml(e.id) + '\')" title="彻底删除配置，包括已保存的凭据">清除凭据</button>';
     } else {
       html += '<button class="btn btn-primary btn-xs" onclick="_mcpOpenInstallModal(\'' + escapeHtml(e.id) + '\')">安装</button>';
     }
@@ -3415,12 +3663,24 @@ function _renderMcpInstalled() {
 
 // ── Install Modal ──
 
-function _mcpOpenInstallModal(serverId) {
+function _mcpOpenInstallModal(serverId, isReinstall) {
   var entry = _mcpCatalog.find(function(e) { return e.id === serverId; });
   if (!entry) return;
   _mcpInstallTarget = entry;
+  _mcpInstallIsReinstall = !!isReinstall;
 
-  document.getElementById('mcpInstallIcon').textContent = entry.icon || '🔌';
+  // Icon may be either an emoji (e.g. '🐙') OR an inline SVG string (e.g.
+  // '<svg viewBox="0 0 24 24">…</svg>' for brand logos like Meituan/Hope).
+  // Using .textContent would render the SVG source as literal text, which
+  // is the "path d=…" garble users saw when opening brand-icon apps.
+  // Catalog icons are server-owned (lib/mcp/registry.py), not user input,
+  // so innerHTML is safe here — matches how _renderMcpCatalog() already
+  // emits the same icon strings into the grid cards on L3609.
+  var _icon = entry.icon || '🔌';
+  document.getElementById('mcpInstallIcon').innerHTML =
+    (typeof _icon === 'string' && _icon.trim().startsWith('<'))
+      ? _icon
+      : escapeHtml(_icon);
   document.getElementById('mcpInstallTitle').textContent = entry.name;
   document.getElementById('mcpInstallDesc').textContent = entry.description || '';
   var repoLink = document.getElementById('mcpInstallRepo');
@@ -3441,13 +3701,17 @@ function _mcpOpenInstallModal(serverId) {
   if (specs.length === 0) {
     fieldsHtml = '<p class="mcp-install-noenv">无需配置，直接安装即可。</p>';
   } else {
+    var storedKeys = (entry.stored_env_keys || []);
     specs.forEach(function(spec) {
       var inputType = (spec.secret !== false) ? 'password' : 'text';
+      var hasStored = storedKeys.indexOf(spec.key) !== -1;
       fieldsHtml += '<div class="stg-field">';
       fieldsHtml += '<label>' + escapeHtml(spec.label || spec.key);
       if (spec.required) fieldsHtml += ' <span style="color:#ef4444;">*</span>';
+      if (hasStored) fieldsHtml += ' <span style="color:#10b981;font-size:11px;">● 已保存</span>';
       fieldsHtml += '</label>';
-      fieldsHtml += '<input type="' + inputType + '" class="mcp-env-input" data-key="' + escapeHtml(spec.key) + '" placeholder="' + escapeHtml(spec.hint || '') + '">';
+      var ph = hasStored ? '已保存，留空则沿用；填写即覆盖' : (spec.hint || '');
+      fieldsHtml += '<input type="' + inputType + '" class="mcp-env-input" data-key="' + escapeHtml(spec.key) + '" data-has-stored="' + (hasStored ? '1' : '0') + '" placeholder="' + escapeHtml(ph) + '">';
       fieldsHtml += '</div>';
     });
   }
@@ -3455,7 +3719,7 @@ function _mcpOpenInstallModal(serverId) {
 
   var btn = document.getElementById('mcpInstallBtn');
   btn.disabled = false;
-  btn.textContent = '安装并连接';
+  btn.textContent = _mcpInstallIsReinstall ? '保存并连接' : '安装并连接';
 
   document.getElementById('mcpInstallOverlay').style.display = 'flex';
 }
@@ -3517,10 +3781,11 @@ async function _mcpDoInstall() {
 
 // ── Uninstall / Reconnect ──
 
+// Soft uninstall: disconnect + disable, but keep credentials for easy re-enable.
 async function _mcpUninstall(serverId) {
   var entry = _mcpCatalog.find(function(e) { return e.id === serverId; });
   var name = entry ? entry.name : serverId;
-  if (!confirm('确定要卸载 ' + name + ' 吗？')) return;
+  if (!confirm('卸载 ' + name + '？\n\n将断开连接并禁用，但会保留已填写的凭据；下次点击“连接”可一键重新启用，无需再填一遍。\n\n如需彻底清除凭据，请先卸载，再在空闲卡片上点“清除凭据”。')) return;
 
   try {
     var r = await fetch(apiUrl('/api/mcp/catalog/uninstall'), {
@@ -3530,10 +3795,31 @@ async function _mcpUninstall(serverId) {
     });
     var data = await r.json();
     if (!data.ok) { alert('卸载失败: ' + (data.error || '未知错误')); return; }
-    debugLog('[MCP] Uninstalled ' + serverId, 'info');
+    debugLog('[MCP] Uninstalled ' + serverId + (data.purged ? ' (purged)' : ' (soft, env kept)'), 'info');
     await _populateMcpTab();
   } catch (e) {
     alert('卸载失败: ' + e.message);
+  }
+}
+
+// Hard purge: remove config row entirely, forgetting stored credentials.
+async function _mcpPurge(serverId) {
+  var entry = _mcpCatalog.find(function(e) { return e.id === serverId; });
+  var name = entry ? entry.name : serverId;
+  if (!confirm('清除 ' + name + ' 的全部配置和已保存的凭据？\n\n此操作不可恢复，重新启用时需要再次填写所有凭据。')) return;
+
+  try {
+    var r = await fetch(apiUrl('/api/mcp/catalog/uninstall'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: serverId, purge: true }),
+    });
+    var data = await r.json();
+    if (!data.ok) { alert('清除失败: ' + (data.error || '未知错误')); return; }
+    debugLog('[MCP] Purged ' + serverId, 'info');
+    await _populateMcpTab();
+  } catch (e) {
+    alert('清除失败: ' + e.message);
   }
 }
 

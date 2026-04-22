@@ -1,0 +1,33 @@
+\documentclass{article}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{geometry}
+
+\geometry{a4paper, margin=1in}
+
+\begin{document}
+
+\begin{table}[ht]
+    \centering
+    \begin{tabular}{lccccccc}
+        \toprule
+        & \multicolumn{2}{c}{iwslt17} & \multicolumn{2}{c}{wmt22} & \multicolumn{2}{c}{AVG} & \multicolumn{1}{c}{AVG Delta} \\
+        \cmidrule(r){2-3} \cmidrule(r){4-5} \cmidrule(r){6-7} \cmidrule(r){8-8}
+        & bleu & comet & bleu & comet & bleu & comet & \\
+        \midrule
+        \multirow{2}{*}{t5\_small} 
+        & 11.51 & 55.49 & 7.39 & 48.43 & 9.45 & 51.96 & - \\
+        & 11.56 & 55.39 & 7.93 & 48.16 & 9.75 & 51.77 & 0.16 \\
+        \multirow{2}{*}{t5\_BASE} 
+        & 19.97 & 68.54 & 15.48 & 61.90 & 17.73 & 65.22 & - \\
+        & 21.87 & 70.66 & 15.41 & 63.72 & 18.64 & 67.19 & 1.44 \\
+        \multirow{2}{*}{t5\_large} 
+        & 23.63 & 76.42 & 17.49 & 71.26 & 20.56 & 73.84 & - \\
+        & 25.70 & 77.29 & 19.34 & 72.72 & 22.52 & 75.01 & 1.61 \\
+        \bottomrule
+    \end{tabular}
+    \caption{Performance evaluation metrics for different T5 model sizes on iwslt17 and wmt22 datasets.}
+    \label{tab:performance}
+\end{table}
+
+\end{document}

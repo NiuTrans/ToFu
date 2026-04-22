@@ -77,6 +77,10 @@ def _get_pk_columns(table_name):
         'error_resolutions':          ['fingerprint'],
         # Paper reports
         'paper_reports':              ['paper_hash', 'lang'],
+        # Paper library (server-side bookshelf)
+        'paper_library':              ['id', 'user_id'],
+        # Daily cost cache (per-day aggregate of conversation usage costs)
+        'daily_cost_cache':           ['user_id', 'date'],
     }
     return _PK_MAP.get(table_name)
 

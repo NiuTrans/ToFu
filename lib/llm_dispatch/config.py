@@ -142,6 +142,10 @@ DEFAULT_SLOT_CONFIGS = {
     # ── DeepSeek ──
     'deepseek-chat':                 {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
     'deepseek-v3.2':                 {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
+    'deepseek-v3.2-tencent':         {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
+    'deepseek-v3.2-baidu':           {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
+    'deepseek-v3.2-huawei':          {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
+    'deepseek-v3.2-doubao':          {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
     'deepseek-reasoner':             {'caps': {'text', 'thinking', 'cheap'},      'rpm': 30,  'latency': 3000, 'cost': 0.002, 'stream_only': True},
 
     # ── Gemini ──
@@ -207,7 +211,6 @@ DEFAULT_SLOT_CONFIGS = {
     # ── LongCat (internal, free) ──
     'LongCat-Flash-Thinking-2601':   {'caps': {'text', 'thinking', 'cheap'},       'rpm': 60,  'latency': 2000, 'cost': 0.0},
     'LongCat-Flash-Chat-2603':       {'caps': {'text', 'cheap'},                   'rpm': 60,  'latency': 1500, 'cost': 0.001},
-    'longcat-pro-0403':              {'caps': {'text', 'thinking', 'cheap'},       'rpm': 60,  'latency': 2000, 'cost': 0.0},
 
     # ── OpenAI Codex (ChatGPT Plus subscription) ──
     'gpt-5.2-codex':                 {'caps': {'text', 'vision', 'thinking'},      'rpm': 10,  'latency': 5000, 'cost': 0.0},
@@ -246,6 +249,8 @@ MODEL_ALIAS_GROUPS = [
     # Claude Sonnet 4.6 — aws gateway vs direct API name vs Bedrock-native
     {'aws.claude-sonnet-4.6', 'claude-sonnet-4-20250514', 'claude-sonnet-4-6-20250514',
      'claude-sonnet-4-6', 'us.anthropic.claude-sonnet-4-6-v1:0'},
+    # DeepSeek V3.2 — YourProvider gateway mirrors across Tencent/Baidu/Huawei/Doubao clouds
+    {'deepseek-v3.2-tencent', 'deepseek-v3.2-baidu', 'deepseek-v3.2-huawei', 'deepseek-v3.2-doubao'},
 ]
 
 MODEL_ALIASES: dict[str, set[str]] = {}

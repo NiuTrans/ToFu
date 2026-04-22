@@ -1,0 +1,158 @@
+{
+  // ─────────────────────────────────────────────────────────────────────
+  // Tofu / chatui — shared workspace settings
+  //
+  // Why this file exists:
+  //   VS Code (and code-server / web-VSCode) spawns a fileWatcher worker
+  //   that recursively walks every subdirectory of the workspace. On FUSE
+  //   mounts (dolphinfs, etc.) and on heavy runtime dirs (data/pgdata,
+  //   logs, node_modules, .git/objects, __pycache__) this can balloon to
+  //   10+ GB per worker and OOM the whole machine — we saw 201 GB of RSS
+  //   across 36 watcher processes on 2026-04-20.
+  //
+  //   These excludes mirror .gitignore plus anything runtime/generated
+  //   that shouldn't trigger watchers, searches, or indexing.
+  //
+  // NOTE: Keep in sync with .gitignore and CLAUDE.md §1 directory map.
+  // ─────────────────────────────────────────────────────────────────────
+
+  // Prevent the fileWatcher from recursing into heavy / generated / runtime dirs.
+  // This is the #1 thing that stops OOMs on shared / remote-FS boxes.
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/node_modules/**": true,
+    "**/__pycache__/**": true,
+    "**/.pytest_cache/**": true,
+    "**/.ruff_cache/**": true,
+    "**/.mypy_cache/**": true,
+
+    // Project runtime — auto-generated, per CLAUDE.md §1 / §9
+    "**/data/**": true,
+    "**/data/pgdata/**": true,
+    "**/logs/**": true,
+    "**/uploads/**": true,
+    "**/.project_sessions/**": true,
+    "**/.project_indexes/**": true,
+    "**/.chatui/**": true,
+    "**/.migrate_backup/**": true,
+    "**/swebench_workdir/**": true,
+
+    // Generated bundles / artifacts
+    "**/static/js/bundle-*.js": true,
+    "**/debug/benchmark_results.json": true,
+    "**/debug/benchmark_speed_results.json": true,
+    "**/*.log": true,
+    "**/*.db": true,
+    "**/*.db-journal": true,
+    "**/*.db-wal": true,
+    "**/*.db-shm": true
+  },
+
+  // Same excludes for the workspace-wide search / "Go to File" picker.
+  // Without this, Ctrl-P and Ctrl-Shift-F will scan gigabytes of DB pages
+  // and log files.
+  "search.exclude": {
+    "**/.git": true,
+    "**/node_modules": true,
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/.ruff_cache": true,
+    "**/.mypy_cache": true,
+    "**/data": true,
+    "**/logs": true,
+    "**/uploads": true,
+    "**/.project_sessions": true,
+    "**/.project_indexes": true,
+    "**/.chatui": true,
+    "**/.migrate_backup": true,
+    "**/swebench_workdir": true,
+    "**/static/js/bundle-*.js": true,
+    "**/*.log": true,
+    "**/*.db": true,
+    "**/*.db-journal": true,
+    "**/*.db-wal": true,
+    "**/*.db-shm": true,
+    "**/*.pyc": true
+  },
+
+  // Never follow symlinks when searching — cheap protection against
+  // cycles into FUSE-mounted sibling projects or conda envs.
+  "search.followSymlinks": false,
+
+  // Don't hammer Git status on huge dirs either.
+  "git.ignoreLimitWarning": true,
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Extension host memory — keeps Pylance / Python language server from
+  // indexing gigabytes of runtime state and OOMing the extension host
+  // (symptom: sad-robot "Extension Host terminated unexpectedly" page).
+  // ─────────────────────────────────────────────────────────────────────
+  "python.analysis.exclude": [
+    "**/data/**",
+    "**/logs/**",
+    "**/uploads/**",
+    "**/.project_sessions/**",
+    "**/.project_indexes/**",
+    "**/.chatui/**",
+    "**/.migrate_backup/**",
+    "**/swebench_workdir/**",
+    "**/node_modules/**",
+    "**/__pycache__/**",
+    "**/.pytest_cache/**",
+    "**/.ruff_cache/**",
+    "**/.mypy_cache/**"
+  ],
+  // Index only open files + explicit imports — do NOT walk the workspace.
+  // This single setting cuts Pylance RSS by ~10x on large repos.
+  "python.analysis.indexing": false,
+  "python.analysis.diagnosticMode": "openFilesOnly",
+  "python.analysis.autoImportCompletions": false,
+  "python.analysis.userFileIndexingLimit": 2000,
+  "python.analysis.packageIndexDepths": [
+    { "name": "", "depth": 2 }
+  ],
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Browser / renderer memory — prevents "Aw, snap! out of memory" in
+  // the tab when someone accidentally opens a huge generated file.
+  // ─────────────────────────────────────────────────────────────────────
+  // Don't auto-open large files; warn at 20 MB instead of silently loading.
+  "workbench.editorLargeFileConfirmation": 20,
+  // Disable syntax tokenization on files > 10 MB (keeps the tab responsive).
+  "editor.largeFileOptimizations": true,
+  // Minimap disabled on huge files is implicit; also skip for binary/log.
+  "files.exclude": {
+    "**/.git": true,
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/.ruff_cache": true,
+    "**/.mypy_cache": true,
+    "**/.project_sessions": true,
+    "**/.project_indexes": true,
+    "**/.migrate_backup": true,
+    "**/data/pgdata": true,
+    "**/swebench_workdir": true,
+    "**/*.pyc": true
+  },
+
+  // Telemetry / crash recovery — keep hot-exit enabled so a renderer
+  // crash doesn't lose unsaved edits.
+  "files.hotExit": "onExitAndWindowClose",
+
+  "[python]": {
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "editor.rulers": [100]
+  },
+
+  // Frontend: no build step, vanilla JS (CLAUDE.md §3.2).
+  "[javascript]": {
+    "editor.tabSize": 2,
+    "editor.insertSpaces": true
+  },
+
+  // Nice-to-haves
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true
+}

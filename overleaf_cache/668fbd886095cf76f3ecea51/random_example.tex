@@ -1,0 +1,61 @@
+\definecolor{c1}{HTML}{81BECE}
+\definecolor{c2}{HTML}{378BA4}
+    \begin{tikzpicture}
+    \tiny{
+    \begin{axis}[
+      at={(0,12em)},
+      legend entries={de2en},
+      ymajorgrids,
+      xmajorgrids,
+      grid style=dashed,
+      xbar,
+      legend image code/.code={%
+                    \draw[#1, draw=none] (0cm,-0.1cm) rectangle (0.6cm,0.1cm);
+                }, 
+      height=.24\textwidth,
+      width=.45\textwidth,
+      bar width=1em,
+      % xlabel={de2en},
+      % ylabel style={align=center},
+      legend style={at={(21.2em,8.8em)}},
+      symbolic y coords={ {few-shot\\(TM)}, {few-shot \\(out-domain)}, {few-shot\\ (in-domain)}, {zero-shot}},
+      yticklabel style={align=right,font=\tiny},
+      ytick=data,
+      nodes near coords,
+      nodes near coords align={horizontal},
+      enlarge y limits=0.2,xticklabel style={/pgf/number format/fixed,/pgf/number format/fixed zerofill,/pgf/number format/precision=2},
+      enlarge x limits=0.3,xticklabel style={/pgf/number format/fixed,/pgf/number format/fixed zerofill,/pgf/number format/precision=2},]
+      \addplot[fill=red!30, draw=red] coordinates {(69.99,{few-shot\\(TM)}) (42.45,{few-shot \\(out-domain)}) (44.56,{few-shot\\ (in-domain)}) (38.89,{zero-shot})};
+      \addlegendentry{de $\rightarrow$ en}
+    \end{axis}
+%-----------------------------------------------------------
+    \begin{axis}[
+      at={(0em,0em)},
+      ymajorgrids,
+      xmajorgrids,
+      grid style=dashed,
+      xbar,
+      height=.24\textwidth,
+      width=.45\textwidth,
+      bar width=1em,
+      legend image code/.code={%
+                    \draw[#1, draw=none] (0cm,-0.1cm) rectangle (0.6cm,0.1cm);
+                }, 
+      % xlabel={en2de},
+      legend style={at={(21.2em,8.8em)}},
+      symbolic y coords={ {few-shot\\(TM)}, {few-shot\\(out-domain)}, {few-shot\\(in-domain)}, {zero-shot}},
+      yticklabel style={align=right,font=\tiny},
+      ytick=data,
+      nodes near coords,
+      nodes near coords style={/pgf/number format/.cd,fixed zerofill,precision=2}, % 这里增加了精度设置
+      nodes near coords align={horizontal},
+      enlarge y limits=0.2,yticklabel style={/pgf/number format/fixed,/pgf/number format/fixed zerofill,/pgf/number format/precision=2},
+      enlarge x limits=0.3,xticklabel style={/pgf/number format/fixed,/pgf/number format/fixed zerofill,/pgf/number format/precision=2},]
+      \addplot[fill=c2!50, draw=c2] coordinates {(62.02,{few-shot\\(TM)}) (30.63,{few-shot\\(out-domain)}) (31.91,{few-shot\\(in-domain)}) (29.00,{zero-shot})};
+      \addlegendentry{en $\rightarrow$ de}
+    \end{axis}
+  }
+      % \node at (12em,13em) {de2en};
+      % \node at (12em,-2em) {en2de};
+    \end{tikzpicture}
+    % \caption{BLEU scores $[\%]$ of several $F(\cdot,\cdot)$ on the WMT En-De task.}

@@ -129,15 +129,42 @@ class Slot:
                 self.ttft_ema = (self.ema_alpha * ttft_ms +
                                  (1 - self.ema_alpha) * self.ttft_ema)
 
-    def record_error(self, is_rate_limit=False):
-        """Call after a failed request."""
+        # Daily success/failure tracker (outside lock — it has its own lock).
+        # Rate-limit failures don't get here, so every record_success is a
+        # genuine health signal for this key.
+        try:
+            from lib.key_stats import record_outcome
+            record_outcome(self.provider_id, self.key_name, success=True)
+        except Exception as e:
+            logger.debug('[Slot] key_stats record_outcome(success) failed: %s', e)
+
+    def record_error(self, is_rate_limit=False, error: str = '',
+                     is_quota_exhausted: bool = False):
+        """Call after a failed request.
+
+        Args:
+            is_rate_limit: True for HTTP 429/gateway-throttled errors — these
+                typically reflect contention, not key health, so they don't
+                count as failures in the daily success-rate tracker UNLESS
+                is_quota_exhausted is also True (persistent billing error).
+            error: short error description (optional, stored for UI display).
+            is_quota_exhausted: True when the 429/402 indicates a PERSISTENT
+                billing/quota problem (insufficient balance, credits too low).
+                Such keys should be marked as exhausted for the rest of the day,
+                not briefly cooled down and retried.
+        """
         with self._lock:
             self.inflight = max(0, self.inflight - 1)
             self.consecutive_errors += 1
             self.total_errors += 1
             self.last_error_time = time.time()
 
-            if is_rate_limit:
+            if is_quota_exhausted:
+                # Persistent billing/balance problem — long cooldown so this
+                # process stops cycling to the dead key for at least an hour
+                # (the daily key-stats tracker also disables it).
+                self.cooldown_until = time.time() + 3600
+            elif is_rate_limit:
                 # Reduce effective RPM estimate
                 self.rpm_limit = max(5, self.rpm_limit * 0.8)
                 # Very brief cooldown — just enough to steer picker to
@@ -150,6 +177,42 @@ class Slot:
                 self.cooldown_until = time.time() + cooldown
                 logger.warning('  ⚠️ Slot %s:%s cooled down %ds '
                       'after %d consecutive errors', self.key_name, self.model, cooldown, self.consecutive_errors)
+
+        # Daily key-health tracker.
+        #   - Quota-exhausted 429/402 (clear billing signal in body): immediately
+        #     mark the key as exhausted so it's disabled for the rest of today.
+        #   - Generic 429 rate-limit: feed the consecutive-429 streak counter —
+        #     provider error bodies are ambiguous ("达到使用量上限" can mean either
+        #     RPM-overrun on a paid key OR a dead key), so we only auto-exhaust
+        #     after the streak crosses MAX_CONSECUTIVE_429. Any success or non-
+        #     429 error resets the streak.
+        #   - Other errors: count as a regular failure for the success-rate column.
+        if is_quota_exhausted:
+            try:
+                from lib.key_stats import mark_key_exhausted
+                mark_key_exhausted(self.provider_id, self.key_name,
+                                   reason=error or 'quota exhausted (HTTP 402/429)')
+            except Exception as e:
+                logger.debug('[Slot] key_stats mark_key_exhausted failed: %s', e)
+        elif is_rate_limit:
+            try:
+                from lib.key_stats import record_rate_limit
+                just_exhausted = record_rate_limit(
+                    self.provider_id, self.key_name,
+                    reason=error or 'HTTP 429')
+                if just_exhausted:
+                    # Streak threshold tripped — stop hammering this key for
+                    # an hour (the UI toggle / day rollover will revive it).
+                    self.cooldown_until = time.time() + 3600
+            except Exception as e:
+                logger.debug('[Slot] key_stats record_rate_limit failed: %s', e)
+        else:
+            try:
+                from lib.key_stats import record_outcome
+                record_outcome(self.provider_id, self.key_name,
+                               success=False, error=error)
+            except Exception as e:
+                logger.debug('[Slot] key_stats record_outcome(failure) failed: %s', e)
 
     def score(self) -> float:
         """Lower score = better slot. Used for picking the best candidate.

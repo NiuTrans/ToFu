@@ -9,6 +9,7 @@ from lib.log import get_logger
 from lib.project_mod.config import (
     SESSIONS_DIR,
     _lock,
+    _roots,
     _state,
 )
 
@@ -116,6 +117,20 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
         mod['convId'] = conv_id
     if task_id:
         mod['taskId'] = task_id
+    # ★ Record workspace-root name so the frontend can display a
+    #   'rootname:path' prefix for modifications made outside the primary
+    #   root in multi-root workspaces. base_path is the absolute root
+    #   path the tool was actually executed against (result of
+    #   _resolve_base / resolve_namespaced_path).
+    try:
+        abs_base = os.path.abspath(base_path) if base_path else ''
+        with _lock:
+            for rn, rs in _roots.items():
+                if os.path.abspath(rs['path']) == abs_base:
+                    mod['root'] = rn
+                    break
+    except Exception as e:
+        logger.debug('[Modifications] root-name lookup failed for %s: %s', base_path, e)
     if mod_type == 'write_file':
         if original_content is not None:
             # Store original content for new files, or None if file didn't exist

@@ -42,7 +42,17 @@ class BacktestState:
 
 
 class StopLossManager:
-    """Manages per-position trailing stops, stop-loss, and take-profit."""
+    """Manages per-position trailing stops, stop-loss, and take-profit.
+
+    Note:
+        A separately-named class also called ``StopLossManager`` lives in
+        :mod:`lib.trading_risk`. That one is the richer, live risk-manager
+        version (``add_position``/``update`` API, supports ATR-based and
+        partial take-profit). This class is the **backtest-specific**
+        variant — simpler ``register``/``update`` API with a smaller
+        per-position dict. The name collision is intentional (both manage
+        stop-losses); callers should import the one matching their phase.
+    """
 
     def __init__(self):
         self.stops = {}  # {code: {entry_nav, high_nav, stop_nav, trailing_pct, take_profit_nav}}

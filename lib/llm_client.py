@@ -28,6 +28,111 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
+# ── Raw-SSE dumper (diagnostic) ──────────────────────────────────────────
+# Enable by setting LLM_DEBUG_RAW_SSE:
+#   ""       → off (zero overhead, default)
+#   "1"      → capture ALL requests
+#   <string> → capture only when model name contains the string
+#              (e.g. "opus-4-7" to debug Claude Opus 4.7 behavior)
+#
+# Output file: logs/raw_sse.log — appended, newest at bottom.
+# Contains: outgoing request body (sanitized), every SSE line verbatim,
+# and a summary footer (chunk count, bytes, wall clock).
+# Never logs Authorization headers or API keys.
+_RAW_SSE_FILTER = os.environ.get('LLM_DEBUG_RAW_SSE', '').strip()
+
+
+def _raw_sse_enabled(model: str) -> bool:
+    """Check whether raw SSE dumping is enabled for this model."""
+    if not _RAW_SSE_FILTER:
+        return False
+    if _RAW_SSE_FILTER == '1':
+        return True
+    return _RAW_SSE_FILTER in (model or '')
+
+
+class _RawSSEDumper:
+    """Appends request+SSE transcripts to logs/raw_sse.log. No-op if disabled.
+
+    Usage:
+        dumper = _RawSSEDumper(model, trace_id, body)
+        dumper.start()           # writes request header
+        dumper.line(sse_line)    # writes each SSE line
+        dumper.finish(summary)   # writes footer
+    """
+
+    def __init__(self, model: str, trace_id: str, body: dict):
+        self.enabled = _raw_sse_enabled(model)
+        self.model = model
+        self.trace_id = trace_id
+        self.body = body
+        self.t0 = 0.0
+        self.chunk_count = 0
+        self.byte_count = 0
+        self._fh = None
+
+    def _open(self):
+        if self._fh is not None:
+            return
+        try:
+            import pathlib
+            log_dir = pathlib.Path('logs')
+            log_dir.mkdir(parents=True, exist_ok=True)
+            self._fh = open(log_dir / 'raw_sse.log', 'a', encoding='utf-8', buffering=1)
+        except Exception as e:
+            logger.warning('[RawSSE] Failed to open logs/raw_sse.log: %s', e)
+            self.enabled = False
+
+    def start(self):
+        if not self.enabled:
+            return
+        self._open()
+        if not self._fh:
+            return
+        try:
+            ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+            # Sanitized body: drop huge message content but keep thinking/effort/model
+            _keys = ('model', 'thinking', 'effort', 'temperature', 'top_p',
+                     'top_k', 'max_tokens', 'stream', 'reasoning_split')
+            snapshot = {k: self.body.get(k) for k in _keys if k in self.body}
+            snapshot['_messages_count'] = len(self.body.get('messages', []))
+            snapshot['_tools_count'] = len(self.body.get('tools', []) or [])
+            self._fh.write(f'\n{"=" * 80}\n')
+            self._fh.write(f'[{ts}] REQUEST model={self.model} trace={self.trace_id}\n')
+            self._fh.write(f'body={json.dumps(snapshot, ensure_ascii=False)}\n')
+            self._fh.write(f'{"-" * 80}\n')
+            self.t0 = time.time()
+        except Exception as e:
+            logger.warning('[RawSSE] Failed to write header: %s', e)
+
+    def line(self, sse_line: str):
+        if not self.enabled or not self._fh:
+            return
+        try:
+            self._fh.write(sse_line)
+            self._fh.write('\n')
+            self.chunk_count += 1
+            self.byte_count += len(sse_line)
+        except Exception as e:
+            logger.debug('[RawSSE] Failed to write line: %s', e)
+
+    def finish(self, **summary):
+        if not self.enabled or not self._fh:
+            return
+        try:
+            elapsed = time.time() - self.t0 if self.t0 else 0
+            self._fh.write(f'{"-" * 80}\n')
+            self._fh.write(f'SUMMARY elapsed={elapsed:.2f}s lines={self.chunk_count} '
+                           f'bytes={self.byte_count} {summary}\n')
+            self._fh.write(f'{"=" * 80}\n')
+            self._fh.flush()
+            self._fh.close()
+        except Exception as e:
+            logger.debug('[RawSSE] Failed to write footer: %s', e)
+        finally:
+            self._fh = None
+
+
 # ── Retry config for transient API errors (streaming & non-streaming) ──
 MAX_STREAM_RETRIES = 4          # retry up to 4 times (5 attempts total)
 RETRY_BACKOFF_BASE = 3          # base backoff in seconds (exponential: 3, 6, 12, 24)
@@ -59,8 +164,21 @@ class RetryableAPIError(Exception):
         self.status_code = status_code
 
 class RateLimitError(Exception):
-    """HTTP 429 — should NOT retry on the same key; bubble up to dispatch layer to switch keys."""
-    pass
+    """HTTP 429 — should NOT retry on the same key; bubble up to dispatch layer to switch keys.
+
+    Attributes:
+        is_quota: True when the 429 indicates a PERSISTENT billing/quota problem
+            (e.g. OpenAI ``insufficient_quota``, DeepSeek ``Insufficient Balance``,
+            Anthropic ``credit_balance_too_low``).  These are NOT transient — no
+            amount of waiting will fix them, so the dispatch layer should mark
+            the entire KEY as exhausted for the day instead of cycling to it
+            again after a brief cooldown.
+        reason: Short human-readable reason (first ~200 chars of the error body).
+    """
+    def __init__(self, msg='', *, is_quota=False, reason=''):
+        super().__init__(msg)
+        self.is_quota = bool(is_quota)
+        self.reason = (reason or (str(msg) if msg else ''))[:200]
 
 class PermissionError_(Exception):
     """HTTP 401/403 — should NOT retry on the same key; bubble up to dispatch layer to switch keys."""
@@ -144,6 +262,49 @@ def _is_prompt_too_long(err_msg: str) -> bool:
     return any(p in lower for p in _PROMPT_TOO_LONG_PATTERNS)
 
 
+# Patterns that indicate a PERSISTENT quota / billing / balance exhaustion.
+# These typically come back as HTTP 429 (OpenAI-style) or HTTP 402 (DeepSeek,
+# Anthropic billing). Unlike transient RPM/TPM rate-limits, no amount of
+# retrying or waiting will resolve them — the key needs a top-up.
+#
+# Keep the list conservative: only match phrases that UNAMBIGUOUSLY mean
+# "pay more money", not phrases that could mean "wait a bit" (e.g. "rate
+# limit exceeded", "requests per minute").
+_QUOTA_EXHAUSTED_PATTERNS = [
+    'insufficient_quota',           # OpenAI error code (billing)
+    'insufficient quota',           # OpenAI (human text)
+    'exceeded your current quota',  # OpenAI canonical message
+    'check your plan and billing',  # OpenAI canonical message
+    'insufficient_balance',         # DeepSeek error code
+    'insufficient balance',         # DeepSeek / generic (human text)
+    'credit_balance_too_low',       # Anthropic (billing)
+    'credit balance is too low',    # Anthropic (human text)
+    'billing_not_active',           # OpenAI billing suspension
+    'account_deactivated',          # various
+    'quota_exceeded',               # Azure / generic (billing context)
+    'payment required',             # HTTP 402 literal
+    'out of credits',               # various
+    '余额不足',                       # DeepSeek / 国内服务商 (Chinese: insufficient balance)
+    '额度不足',                       # Chinese: insufficient quota
+    '余额为零',                       # Chinese: zero balance
+    '欠费',                           # Chinese: in arrears
+]
+
+
+def _is_quota_exhausted(err_msg: str) -> bool:
+    """Return True if *err_msg* indicates a persistent billing/quota problem.
+
+    Used to distinguish fatal "this key is out of money" 429s from transient
+    "slow down, try again" 429s. A quota-exhausted key should be disabled
+    for the day (via the daily key-stats tracker), not just cooled down for
+    0.5s and retried.
+    """
+    if not err_msg:
+        return False
+    lower = err_msg.lower()
+    return any(p in lower for p in _QUOTA_EXHAUSTED_PATTERNS)
+
+
 def _classify_http_error(status_code: int, err_msg: str, model: str,
                          log_prefix: str, *, max_tokens: int = 0) -> None:
     """Classify an HTTP error and raise the appropriate exception.
@@ -157,7 +318,21 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
         StreamOnlyError, RetryableAPIError, or generic Exception.
     """
     if status_code == 429:
+        # ★ Distinguish fatal billing 429s from transient rate-limit 429s.
+        #   OpenAI returns HTTP 429 with code="insufficient_quota" for
+        #   expired-balance keys — retrying on the same key is futile.
+        if _is_quota_exhausted(err_msg):
+            logger.warning('%s Quota exhausted (HTTP 429, persistent billing): %s',
+                           log_prefix, err_msg[:300])
+            raise RateLimitError(err_msg, is_quota=True, reason=err_msg[:200])
         raise RateLimitError(err_msg)
+    if status_code == 402:
+        # ★ HTTP 402 Payment Required — DeepSeek and some providers return
+        #   this for exhausted-balance keys. Treat identically to a quota-
+        #   exhausted 429 so it hard-disables the key for the day.
+        logger.warning('%s Payment required (HTTP 402): %s',
+                       log_prefix, err_msg[:300])
+        raise RateLimitError(err_msg, is_quota=True, reason=err_msg[:200])
     if status_code == 450:
         logger.warning('%s Content filter triggered (HTTP 450)', log_prefix)
         raise ContentFilterError(err_msg)
@@ -185,6 +360,17 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
             logger.warning('%s Model %s only supports stream mode — '
                            'non-streaming request rejected', log_prefix, model)
             raise StreamOnlyError(err_msg, model)
+    if status_code in _GATEWAY_THROTTLE_STATUS:
+        # ★ 502/503/504 from the gateway = upstream overload or transient
+        #   backend failure. Treat identically to 429: bubble to dispatch
+        #   layer, cooldown this slot 0.5s, rotate to another slot, retry
+        #   indefinitely. Retrying on the SAME key is futile — another
+        #   slot (different key/model/backend pool) is far more likely to
+        #   succeed. See CLAUDE.md §10.1 for the approved change history.
+        logger.warning('%s Gateway throttle (HTTP %d) — escalating to dispatch '
+                       'layer for slot rotation: %.200s',
+                       log_prefix, status_code, err_msg)
+        raise RateLimitError(err_msg, reason=f'HTTP {status_code}: {err_msg[:180]}')
     if status_code in _RETRYABLE_STATUS_CODES:
         # ★ Detect wrapped overload / rate-limit inside a generic 500.
         #   Some gateways receive 429 or 529 from the model server but
@@ -201,9 +387,19 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
                  log_prefix, status_code, err_msg[:300])
     raise Exception(err_msg)
 
-# Status codes that indicate a transient server-side issue (retry on same key)
-# NOTE: 429 is NOT here — it gets RateLimitError which escapes to dispatch layer
-_RETRYABLE_STATUS_CODES = {500, 502, 503, 504, 529}
+# Status codes that indicate a transient server-side issue (retry on same key).
+# NOTE: 429 is NOT here — it gets RateLimitError which escapes to dispatch layer.
+# NOTE: 502/503/504 are handled via _GATEWAY_THROTTLE_STATUS below (treated like
+#   429 — slot rotation instead of same-key retry) since the gateway in this
+#   project is stable and a 5xx almost always means upstream overload rather
+#   than a real outage. See CLAUDE.md §10.1 change log.
+_RETRYABLE_STATUS_CODES = {500, 529}
+
+# Status codes that indicate gateway-side throttling / upstream overload.
+# These are raised as RateLimitError so the dispatch layer rotates slots
+# (0.5s cooldown + rotate) instead of burning 5 same-key retries with up
+# to 24s exponential backoff. Effectively treats them identically to HTTP 429.
+_GATEWAY_THROTTLE_STATUS = {502, 503, 504}
 
 # Permission error status codes — escape immediately to dispatch layer
 _PERMISSION_STATUS_CODES = {401, 403}
@@ -270,6 +466,7 @@ from lib.model_info import (  # noqa: F401
     _parse_token_limit_from_error,
     _qwen_max_output,
     is_claude,
+    is_claude_opus_47,
     is_doubao,
     is_ernie,
     is_gemini,
@@ -309,6 +506,10 @@ _API_MESSAGE_FIELDS = frozenset({
     'role', 'content', 'name',              # standard OpenAI
     'tool_calls', 'tool_call_id',           # tool use
     'reasoning_content',                    # thinking models (vendor extension)
+    'thinking_signature',                   # Claude extended-thinking block signature
+                                            # — needed on Continue replay so the
+                                            # Anthropic proxy can re-attach a signed
+                                            # thinking block to the assistant turn.
     'cache_control',                        # Anthropic prompt caching
 })
 
@@ -939,6 +1140,7 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
 
     Handles provider-specific parameters automatically:
       • Claude:   thinking.type='adaptive', effort param, cache breakpoints
+                  (4.7+: thinking.display='summarized', no temperature, xhigh effort)
       • Kimi:     thinking.type='enabled'/'disabled', fixed temp (1.0/0.6)
       • GLM:      thinking.type='enabled', temperature clamped to (0, 1)
       • Doubao:   thinking.type='enabled'/'disabled'
@@ -1113,15 +1315,16 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
             body['thinking'] = {'type': 'disabled'}
             body['temperature'] = max(temperature, 0.01) if temperature else 0.7
     elif not _tf and is_kimi(model):
-        # Moonshot Kimi (K2/K2.5) uses thinking.type format:
+        # Moonshot Kimi (K2/K2.5/K2.6) uses thinking.type format:
         #   {"thinking": {"type": "enabled"}}  — enables thinking
         #   {"thinking": {"type": "disabled"}} — disables thinking
-        # K2.5: temperature fixed at 1.0 (thinking) or 0.6 (non-thinking).
-        # K2.5: top_p/n/presence_penalty/frequency_penalty are also fixed;
-        # sending non-default values causes HTTP 400.
+        # K2.5/K2.6: temperature fixed at 1.0 (thinking) or 0.6 (non-thinking).
+        # K2.5/K2.6: top_p (0.95) / n (1) / presence_penalty (0.0) /
+        # frequency_penalty (0.0) are also fixed; sending non-default
+        # values causes HTTP 400.
         # K2-thinking: thinking is always on, ignore disable request.
         # Reasoning output uses `reasoning_content` field (already handled).
-        # Docs: https://platform.moonshot.ai/docs/guide/kimi-k2-5-quickstart
+        # Docs: https://platform.kimi.ai/docs/guide/kimi-k2-6-quickstart
         _is_k2_thinking = 'k2-thinking' in model.lower() and 'turbo' not in model.lower()
         if _is_k2_thinking or thinking_enabled:
             body['thinking'] = {'type': 'enabled'}
@@ -1142,9 +1345,25 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
         body['reasoning_split'] = True
     elif not _tf and is_claude(model) and thinking_enabled:
         # Anthropic / Claude style (adaptive thinking)
+        #   • 4.6 and earlier: adaptive thinking, thinking trace streamed by default.
+        #   • 4.7+:            adaptive-only; thinking content HIDDEN by default —
+        #                      must send display='summarized' to surface reasoning.
+        #                      temperature/top_p/top_k silently ignored.
+        #                      New effort level 'xhigh' between 'high' and 'max'.
         body['thinking'] = {'type': 'adaptive'}
-        body['temperature'] = 1.0
+        if is_claude_opus_47(model):
+            body['thinking']['display'] = 'summarized'
+            # Do NOT send temperature on 4.7+ — it's ignored today and may
+            # start rejecting non-default values in a future revision.
+        else:
+            body['temperature'] = 1.0
         if _effort and _effort != 'medium':
+            # 'xhigh' is only valid on Opus 4.7+; on 4.6 it would return 400.
+            # Clamp: on non-4.7 models, map xhigh → high so presets stay safe.
+            if _effort == 'xhigh' and not is_claude_opus_47(model):
+                logger.info('[build_body] effort=xhigh not supported on %s — '
+                            'downgrading to high', model)
+                _effort = 'high'
             body['effort'] = _effort  # Claude API parameter is literally 'effort'
     elif _tf == 'none':
         # Provider explicitly opts out of thinking parameters
@@ -1171,6 +1390,18 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
     # transport layer so ALL callers are protected.
     if is_claude(model):
         _strip_trailing_assistant_for_claude(body['messages'], model)
+
+    # ── Claude Opus 4.7+ sampling-param guard ──────────────────
+    # Opus 4.7+ on the AWS/Bedrock gateway now REJECTS (not just ignores)
+    # temperature / top_p / top_k with HTTP 400:
+    #   "`temperature` is deprecated for this model."
+    # The thinking-enabled branch above already skips temperature, but the
+    # thinking-disabled branches (e.g. paper reading-mode report loop,
+    # _tf=='none', or the default else clause) still set it.
+    # Defence-in-depth: strip all sampling params for Opus 4.7+ unconditionally.
+    if is_claude_opus_47(model):
+        for _k in ('temperature', 'top_p', 'top_k'):
+            body.pop(_k, None)
 
     return body
 
@@ -1743,6 +1974,11 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
     # no SSE data for 5 minutes, assume the connection is dead".
     # Previous value of 3000s caused 50-minute hangs when the API
     # queued the request but never started streaming.
+    # ★ Raw-SSE dumper (diagnostic): writes to logs/raw_sse.log when
+    #    LLM_DEBUG_RAW_SSE env var matches. No-op when disabled.
+    _raw_dumper = _RawSSEDumper(body.get('model', ''), trace_id, body)
+    _raw_dumper.start()
+
     resp = requests.post(url, headers=hdrs, json=body,
                          stream=True, timeout=(60, 300),
                          proxies=_proxies_for(url))
@@ -1757,6 +1993,8 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
 
         if resp.status_code != 200:
             err_msg = f'API HTTP {resp.status_code}: {resp.text[:800]}'
+            if _raw_dumper.enabled:
+                _raw_dumper.line(f'[HTTP-{resp.status_code}] {resp.text[:2000]}')
             _classify_http_error(resp.status_code, err_msg,
                                  body.get('model', ''), log_prefix,
                                  max_tokens=body.get('max_tokens', 0))
@@ -1785,6 +2023,9 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                 _aborted_by_client = True
                 logger.debug('%s Stream aborted by client (abort_check=True) after %d chunks', log_prefix, _chunk_count)
                 break
+            # ★ Raw dump: capture EVERY line verbatim (incl. event: lines, blanks)
+            if _raw_dumper.enabled:
+                _raw_dumper.line(line if line is not None else '')
             if not line or not line.startswith('data: '):
                 continue
             data_str = line[6:].strip()
@@ -1903,11 +2144,22 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                     )
                 )
                 if _is_sse_retryable:
+                    _sse_status = int(_sse_http_code) if _sse_http_code.isdigit() else 500
+                    # ★ Mid-stream 502/503/504 = upstream gateway throttle —
+                    #   escalate to dispatch for slot rotation (same as entry-
+                    #   path classification in _classify_http_error).
+                    if _sse_status in _GATEWAY_THROTTLE_STATUS:
+                        logger.warning('%s SSE gateway throttle (HTTP %d) — '
+                                       'escalating to dispatch layer: %s',
+                                       log_prefix, _sse_status, err_text[:300])
+                        raise RateLimitError(
+                            f'SSE error: {err_text}',
+                            reason=f'HTTP {_sse_status}: {err_text[:180]}')
                     logger.warning('%s SSE server error (retryable): %s',
                                    log_prefix, err_text[:300])
                     raise RetryableAPIError(
                         f'SSE error: {err_text}',
-                        status_code=int(_sse_http_code) if _sse_http_code.isdigit() else 500)
+                        status_code=_sse_status)
                 raise Exception(f'SSE error: {err_text}')
 
             if chunk.get('usage'):
@@ -2208,6 +2460,22 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
         if _has_anomaly:
             usage['_stream_anomaly'] = True
 
+        # ★ Raw-SSE dumper: write footer with totals and key stats
+        _raw_dumper.finish(
+            finish_reason=finish_reason,
+            content_len=len(content),
+            thinking_len=len(thinking_text),
+            tool_calls=len(tool_calls_acc),
+            saw_done=_saw_done,
+            saw_finish_reason=_saw_finish_reason,
+        )
+
         return msg, finish_reason, usage
     finally:
+        # Ensure raw dumper closes even on exception path
+        try:
+            if _raw_dumper.enabled and _raw_dumper._fh is not None:
+                _raw_dumper.finish(error=True)
+        except Exception:
+            pass
         resp.close()

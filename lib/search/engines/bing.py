@@ -6,14 +6,11 @@ real URLs in the 'u' parameter.
 
 import base64
 import re
-import time
 from html import unescape
 from urllib.parse import parse_qs, urlparse
 
-import requests
-
 from lib.log import get_logger
-from lib.search._common import HEADERS, clean_text
+from lib.search._common import clean_text, http_search_get
 
 logger = get_logger(__name__)
 
@@ -44,55 +41,47 @@ def _bing_decode_url(raw_url):
     return raw_url
 
 
+def _parse_bing(resp):
+    """Parse Bing HTML response into result dicts."""
+    results = []
+    blocks = resp.text.split('class="b_algo"')
+    for block in blocks[1:]:
+        # Title + URL from <h2><a href="...">Title</a></h2>
+        h2_m = re.search(
+            r'<h2[^>]*>.*?<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+            block, re.DOTALL)
+        if not h2_m:
+            continue
+        raw_url = unescape(h2_m.group(1))
+        title = re.sub(r'<[^>]+>', '', h2_m.group(2)).strip()
+
+        # Decode Bing redirect to real URL
+        url = _bing_decode_url(raw_url)
+        if not url.startswith('http'):
+            continue
+
+        # Snippet from first <p>
+        snippet = ''
+        sm = re.search(r'<p[^>]*>(.*?)</p>', block, re.DOTALL)
+        if sm:
+            snippet = re.sub(r'<[^>]+>', '', unescape(sm.group(1))).strip()
+
+        results.append({
+            'title': clean_text(title)[:200],
+            'snippet': clean_text(snippet)[:500],
+            'url': url,
+            'source': 'Bing',
+        })
+    return results
+
+
 def search_bing(query, max_results=6):
     """Scrape Bing HTML search results."""
-    results = []
-    t0 = time.time()
-    try:
-        resp = requests.get(
-            'https://www.bing.com/search',
-            params={'q': query},
-            headers=HEADERS, timeout=12,
-        )
-        if not resp.ok:
-            logger.warning('[Search] Bing returned HTTP %d for query: %s', resp.status_code, query[:80])
-            return results
-
-        blocks = resp.text.split('class="b_algo"')
-        for block in blocks[1:]:
-            if len(results) >= max_results:
-                break
-
-            # Title + URL from <h2><a href="...">Title</a></h2>
-            h2_m = re.search(
-                r'<h2[^>]*>.*?<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
-                block, re.DOTALL)
-            if not h2_m:
-                continue
-            raw_url = unescape(h2_m.group(1))
-            title = re.sub(r'<[^>]+>', '', h2_m.group(2)).strip()
-
-            # Decode Bing redirect to real URL
-            url = _bing_decode_url(raw_url)
-            if not url.startswith('http'):
-                continue
-
-            # Snippet from first <p>
-            snippet = ''
-            sm = re.search(r'<p[^>]*>(.*?)</p>', block, re.DOTALL)
-            if sm:
-                snippet = re.sub(r'<[^>]+>', '', unescape(sm.group(1))).strip()
-
-            results.append({
-                'title': clean_text(title)[:200],
-                'snippet': clean_text(snippet)[:500],
-                'url': url,
-                'source': 'Bing',
-            })
-    except requests.Timeout:
-        logger.warning('[Search] Bing timeout for query: %s', query[:80])
-    except Exception as e:
-        logger.error('[Search] Bing error: %s', e, exc_info=True)
-    elapsed = time.time() - t0
-    logger.info('[Search] Bing: %d results in %.1fs  query=%r', len(results), elapsed, query[:60])
-    return results
+    return http_search_get(
+        name='Bing',
+        url='https://www.bing.com/search',
+        params={'q': query},
+        query=query,
+        parser=_parse_bing,
+        max_results=max_results,
+    )

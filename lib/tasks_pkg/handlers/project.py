@@ -18,6 +18,12 @@ from lib.tools import PROJECT_TOOL_NAMES, build_project_tool_meta
 logger = get_logger(__name__)
 
 
+# Register read_files independently — it's a global tool that works with or
+# without a project path (absolute paths route to lib.file_reader.read_local_file
+# for PDFs/images/Office docs/text). The shared _handle_project_tool handles
+# it uniformly; the no-project branch below routes via an anchor cwd of '.'.
+@tool_registry.tool('read_files', category='files',
+                    description='Read one or more files (relative or absolute)')
 @tool_registry.tool_set(PROJECT_TOOL_NAMES, category='project',
                         description='Read/write/search project files')
 def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
@@ -44,10 +50,10 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                     fn_args.get('path', '?'), task.get('id', '?')[:8])
 
     from lib.project_mod import execute_tool
-    # read_files supports absolute paths (images, PDFs, etc.) even without a project
+    # read_files is globally available — when no project is attached, absolute
+    # paths still work (routed inside tool_read_files via lib.file_reader);
+    # project-relative paths error out with a helpful message.
     if fn_name == 'read_files' and not project_path:
-        # Allow read_files to work without a project path — absolute paths
-        # are routed inside tool_read_files; project-relative paths will error
         tool_content = execute_tool(fn_name, fn_args, '.', conv_id=task['convId'], task_id=task['id'])
     else:
         _stdin_cb = _make_stdin_callback(task, rn, round_entry, fn_args.get('command', '')) if fn_name == 'run_command' else None

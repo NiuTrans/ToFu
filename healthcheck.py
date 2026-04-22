@@ -114,6 +114,7 @@ tl_checks = [
                            "get_recent_projects", "save_recent_project", "clear_recent_projects",
                            "tool_list_dir", "tool_read_files", "tool_grep", "tool_find_files",
                            "tool_write_file", "tool_apply_diff", "tool_run_command",
+                           "tool_create_project",
                            "execute_tool", "browse_directory",
                            "get_context_for_prompt",
                            "get_modifications", "undo_conv_modifications"]),

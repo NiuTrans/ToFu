@@ -1,0 +1,43 @@
+\documentclass{article}
+\usepackage{pgfplots}
+\usepackage{tikz}
+\usepackage{multirow}
+\usepackage{booktabs}
+\usepackage{natbib}
+\usetikzlibrary{patterns}
+\pgfplotsset{compat=1.18}
+
+
+\begin{document}
+
+\centering
+\resizebox{1\textwidth}{!}{%
+  \begin{tabular}{l|ccccc|ccccc|ccccc|ccccc|ccccc|ccccc}
+    \toprule
+    \multirow{2}{*}{\textbf{Model}} & 
+    \multicolumn{5}{c|}{\textbf{Doc2Dial}} & 
+    \multicolumn{5}{c|}{\textbf{MTR}} & 
+    \multicolumn{5}{c|}{\textbf{QuAC}} & 
+    \multicolumn{5}{c|}{\textbf{QReCC}} & 
+    \multicolumn{5}{c|}{\textbf{TopiOCQA}} &
+    \multicolumn{5}{c}{\textbf{Avg}} \\
+    \cmidrule(lr){2-6} \cmidrule(lr){7-11} \cmidrule(lr){12-16} \cmidrule(lr){17-21} \cmidrule(lr){22-26} \cmidrule(lr){27-31}
+    & R@1 & R@5 & R@20 & MRR & NDCG & R@1 & R@5 & R@20 & MRR & NDCG & R@1 & R@5 & R@20 & MRR & NDCG & R@1 & R@5 & R@20 & MRR & NDCG & R@1 & R@5 & R@20 & MRR & NDCG & R@1 & R@5 & R@20 & MRR & NDCG \\
+    \midrule
+    \multicolumn{31}{c}{\textit{Multi-turn (First Five Rounds)}} \\
+    \midrule
+Dragon+ & 43.95 & 77.61 & 92.05 & 58.71 & 66.55 & 14.41 & 35.16 & 47.09 & 23.36 & 28.85 & 62.09 & 86.01 & 96.48 & 72.66 & 78.25 & 49.00 & 85.16 & 97.20 & 64.55 & 72.34 & 29.40 & 61.38 & 81.46 & 43.35 & 52.13 & 39.77 & 69.06 & 82.86 & 52.53 & 59.62 \\
+Dragon multi & 50.11 & 83.85 & 95.33 & 64.74 & 72.03 & 23.05 & 41.82 & 51.34 & 31.39 & 36.05 & 60.02 & 86.51 & 96.60 & 71.57 & 77.49 & 49.43 & 86.63 & 98.28 & 65.52 & 73.70 & 32.14 & 66.35 & 84.81 & 47.03 & 55.81 & 42.95 & 73.03 & 85.27 & 56.05 & 63.02 \\
+dragon-docchat & 51.54 & 83.12 & 95.25 & 65.38 & 72.46 & 28.95 & 46.40 & 55.17 & 36.70 & 41.01 & 61.30 & 87.69 & 97.25 & 72.55 & 78.40 & 55.41 & 90.14 & 98.39 & 70.25 & 77.05 & 38.42 & 71.96 & 85.80 & 52.69 & 60.48 & 47.12 & 75.86 & 86.37 & 59.51 & 65.88 \\
+BGE-LARGE-EN-V1.5 & 32.55 & 66.13 & 86.98 & 47.57 & 56.68 & 6.89 & 20.41 & 30.43 & 12.78 & 16.81 & 47.93 & 74.26 & 92.02 & 59.81 & 67.22 & 32.76 & 74.27 & 95.63 & 50.83 & 61.28 & 15.35 & 36.95 & 55.57 & 25.19 & 32.07 & 27.10 & 54.40 & 72.13 & 39.24 & 46.81 \\
+BGE-SYN & 38.72 & 71.39 & 88.86 & 53.34 & 61.60 & 13.33 & 22.61 & 30.25 & 17.58 & 20.45 & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & 26.03 & 47.00 & 59.56 & 35.46 & 41.03 \\
+BGE-MTR & - & - & - & - & - & 45.16 & 65.38 & 75.93 & 54.20 & 59.27 & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & 45.16 & 65.38 & 75.93 & 54.20 & 59.27 \\
+    \midrule
+    \multicolumn{31}{c}{\textit{Single-turn}} \\
+    \midrule
+Dragon+ & 29.35 & 52.98 & 68.95 & 40.05 & 46.69 & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & 29.35 & 52.98 & 68.95 & 40.05 & 46.69 \\
+BGE-LARGE-EN-V1.5 & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - \\
+    \bottomrule
+  \end{tabular}
+}
+\end{document}

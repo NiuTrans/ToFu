@@ -140,7 +140,7 @@ def brain_analyze():
         _brain_state['running'] = False
         _brain_state['error'] = str(e)
         logger.error('[Brain] Analysis failed: %s', e, exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'internal_error'}), 500
 
 
 @trading_brain_bp.route('/api/trading/brain/stream', methods=['POST'])

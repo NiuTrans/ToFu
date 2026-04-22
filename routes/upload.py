@@ -6,6 +6,23 @@ import time
 
 from flask import Blueprint, jsonify, request, send_file
 
+# ── Magic-bytes image-type detector (imghdr replacement, Py 3.13+ safe) ──
+# Returns one of {'png','jpeg','gif','webp','bmp'} or None.
+def _detect_image_format(head: bytes) -> str | None:
+    if not head or len(head) < 4:
+        return None
+    if head.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'png'
+    if head[:3] == b'\xff\xd8\xff':
+        return 'jpeg'
+    if head[:6] in (b'GIF87a', b'GIF89a'):
+        return 'gif'
+    if len(head) >= 12 and head[:4] == b'RIFF' and head[8:12] == b'WEBP':
+        return 'webp'
+    if head[:2] == b'BM':
+        return 'bmp'
+    return None
+
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -30,22 +47,39 @@ def upload_image():
         media_type = data.get('mediaType', 'image/png')
         if not b64_data:
             return jsonify({'error': 'No base64 data'}), 400
+        # ★ SVG is intentionally excluded — user-supplied SVGs can embed
+        # <script> and enable stored XSS when served inline. See §10.4.
         ext_map = {
             'image/png': '.png', 'image/jpeg': '.jpg', 'image/jpg': '.jpg',
-            'image/gif': '.gif', 'image/webp': '.webp', 'image/svg+xml': '.svg',
+            'image/gif': '.gif', 'image/webp': '.webp',
             'image/bmp': '.bmp',
         }
+        if media_type not in ext_map:
+            logger.warning('[upload_image] Rejected media_type=%s (SVG/other not allowed)', media_type)
+            return jsonify({'error': 'Unsupported image type — SVG uploads are disabled for security. '
+                                     'Allowed: png, jpeg, gif, webp, bmp.'}), 400
         ext = ext_map.get(media_type, '.png')
+        try:
+            img_bytes = base64.b64decode(b64_data)
+        except Exception as e:
+            logger.warning('[upload_image] base64 decode failed: %s', e)
+            return jsonify({'error': 'Invalid base64 payload'}), 400
+        # ── Magic-bytes sanity check (defence in depth against content-type spoofing) ──
+        detected = _detect_image_format(img_bytes[:32])
+        if detected not in ('png', 'jpeg', 'gif', 'webp', 'bmp'):
+            logger.warning('[upload_image] Magic-bytes check failed: media_type=%s detected=%s len=%d',
+                           media_type, detected, len(img_bytes))
+            return jsonify({'error': 'Payload does not match any supported image format'}), 400
         filename = f"{int(time.time()*1000)}{ext}"
         filepath = os.path.join(UPLOAD_DIR, filename)
         try:
-            img_bytes = base64.b64decode(b64_data)
             with open(filepath, 'wb') as f:
                 f.write(img_bytes)
         except Exception as e:
             logger.error('[Common] image upload (base64) save failed: %s', e, exc_info=True)
-            return jsonify({'error': f'Failed to save: {str(e)}'}), 500
-        logger.info('[upload_image] Saved %s (%d bytes) from base64', filename, len(img_bytes))
+            return jsonify({'error': 'internal_error'}), 500
+        logger.info('[upload_image] Saved %s (%d bytes) from base64 (detected=%s)',
+                    filename, len(img_bytes), detected)
         return jsonify({'ok': True, 'url': f'/api/images/{filename}', 'filename': filename})
 
     # ── Multipart form upload (traditional file upload) ──
@@ -55,16 +89,27 @@ def upload_image():
     if not file.filename:
         return jsonify({'error': 'No filename'}), 400
     ext = os.path.splitext(file.filename)[1].lower()
-    if ext not in ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp'):
-        return jsonify({'error': 'Unsupported image type'}), 400
+    # ★ SVG is intentionally excluded — user-supplied SVGs can embed <script>
+    # and enable stored XSS when served inline. See §10.4.
+    if ext not in ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'):
+        logger.warning('[upload_image] Rejected extension=%s (SVG/other not allowed)', ext)
+        return jsonify({'error': 'Unsupported image type — SVG uploads are disabled for security. '
+                                 'Allowed: .png, .jpg, .jpeg, .gif, .webp, .bmp.'}), 400
+    # ── Magic-bytes sanity check ──
+    head = file.stream.read(32)
+    file.stream.seek(0)
+    detected = _detect_image_format(head)
+    if detected not in ('png', 'jpeg', 'gif', 'webp', 'bmp'):
+        logger.warning('[upload_image] Magic-bytes check failed: ext=%s detected=%s', ext, detected)
+        return jsonify({'error': 'Payload does not match any supported image format'}), 400
     filename = f"{int(time.time()*1000)}_{file.filename}"
     try:
         file.save(os.path.join(UPLOAD_DIR, filename))
     except Exception as e:
         logger.error('[Common] image upload save failed: %s', e, exc_info=True)
-        return jsonify({'error': f'Failed to save: {str(e)}'}), 500
-    logger.info('[upload_image] Saved %s (%d bytes)', filename,
-                os.path.getsize(os.path.join(UPLOAD_DIR, filename)))
+        return jsonify({'error': 'internal_error'}), 500
+    logger.info('[upload_image] Saved %s (%d bytes) detected=%s', filename,
+                os.path.getsize(os.path.join(UPLOAD_DIR, filename)), detected)
     return jsonify({'ok': True, 'url': f'/api/images/{filename}', 'filename': filename})
 
 

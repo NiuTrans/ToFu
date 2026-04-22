@@ -309,7 +309,7 @@ if (!config.model || config.model === serverModel) {
   if (!config.model) config.model = serverModel;
 }
 // Migrate thinking depth from compound presets
-if (['medium','high','max'].includes(config.preset) && !config.thinkingDepth) {
+if (['medium','high','xhigh','max'].includes(config.preset) && !config.thinkingDepth) {
   config.thinkingDepth = config.preset;
 }
 delete config.effort; // clean up legacy key
@@ -1983,12 +1983,57 @@ async function loadConversationMessages(convId) {
      * now has fewer/different messages (compaction, deletion), server wins. */
     const localHasUnsynced = hasLocalData && !cacheHit && localNewest > serverNewest;
 
+    /* ★ Always-on translation merge: regardless of which branch below
+     *   handles the main message-list reconciliation, copy server-side
+     *   translations (translatedContent + showingTranslation + translateDone
+     *   + translateModel + originalContent) into matching local messages.
+     *   This covers endpoint-mode convs where the backend committed
+     *   translatedContent for planner / worker / critic turns but the IDB
+     *   cache was populated before those commits ran.  Without this pass
+     *   the user sees English until the cache expires, even though the
+     *   server has the Chinese ready.  Matches by index + role identity +
+     *   content equality to avoid resurrecting stale translations.
+     */
+    const _mergeServerTranslations = (sourceMsgs, destMsgs) => {
+      if (!Array.isArray(sourceMsgs) || !Array.isArray(destMsgs)) return 0;
+      const overlap = Math.min(sourceMsgs.length, destMsgs.length);
+      let merged = 0;
+      for (let i = 0; i < overlap; i++) {
+        const sm = sourceMsgs[i], lm = destMsgs[i];
+        if (!sm || !lm) continue;
+        if (!sm.translatedContent) continue;
+        if (lm.translatedContent) continue;  // already have — don't overwrite
+        // Identity check
+        if (sm.role !== lm.role) continue;
+        if (!!sm._isEndpointPlanner !== !!lm._isEndpointPlanner) continue;
+        if (!!sm._isEndpointReview !== !!lm._isEndpointReview) continue;
+        if (sm._epIteration !== lm._epIteration) continue;
+        // Content must match byte-for-byte — stale content would make the
+        // preserved translation incorrect for the (edited) new content.
+        if ((sm.content || '') !== (lm.content || '')) continue;
+        lm.translatedContent = sm.translatedContent;
+        lm._showingTranslation = sm._showingTranslation !== false;
+        lm._translateDone = true;
+        if (sm._translateModel && !lm._translateModel) lm._translateModel = sm._translateModel;
+        if (sm.originalContent && !lm.originalContent) lm.originalContent = sm.originalContent;
+        merged++;
+      }
+      return merged;
+    };
+
     if (localHasUnsynced) {
       console.warn(`[loadConvMsgs] ⚠️ KEPT local data for conv=${convId.slice(0,8)} — ` +
         `local has ${conv.messages.length} msgs (newest=${new Date(localNewest).toISOString()}) ` +
         `vs server ${serverMsgs.length} msgs (newest=${new Date(serverNewest).toISOString()}). ` +
         `Will re-sync to server.`);
       syncConversationToServer(conv);
+      // Even when keeping local, merge server translations in — they are
+      // strictly additive and can't harm unsynced newer content.
+      const _mergedHU = _mergeServerTranslations(serverMsgs, conv.messages);
+      if (_mergedHU > 0) {
+        console.info(`[loadConvMsgs] 🈯 Merged ${_mergedHU} server translation(s) ` +
+          `into local-unsynced conv=${convId.slice(0,8)}`);
+      }
     } else if (conv.activeTaskId && hasLocalData) {
       /* ★ FIX: Active task with stale local data (e.g. IDB cache from before
        *   task started).  We can't replace conv.messages (would orphan the
@@ -2024,16 +2069,17 @@ async function loadConversationMessages(convId) {
        *   to avoid orphaning refs, but the IDB cache may be stale and missing
        *   translations that the server has (from _commit_translation_to_db).
        *   Without this merge, translations disappear when viewing a conv with
-       *   a stale activeTaskId, then get unnecessarily regenerated. */
+       *   a stale activeTaskId, then get unnecessarily regenerated.
+       *   Uses the strict identity check from _mergeServerTranslations. */
+      const _mergedAT = _mergeServerTranslations(serverMsgs, conv.messages);
+      if (_mergedAT > 0) {
+        console.info(`[loadConvMsgs] 🈯 Merged ${_mergedAT} server translation(s) ` +
+          `into active-task conv=${convId.slice(0,8)}`);
+      }
+      /* Also merge non-translation fields the local copy may lack */
       const _mergeLen = Math.min(conv.messages.length, serverMsgs.length);
       for (let _mi = 0; _mi < _mergeLen; _mi++) {
         const lm = conv.messages[_mi], sm = serverMsgs[_mi];
-        if (sm.translatedContent && !lm.translatedContent) {
-          lm.translatedContent = sm.translatedContent;
-          lm._showingTranslation = sm._showingTranslation !== false;
-          lm._translateDone = true;
-        }
-        /* Also merge finishReason/usage/model if local lacks them */
         if (sm.finishReason && !lm.finishReason) lm.finishReason = sm.finishReason;
         if (sm.usage && !lm.usage) lm.usage = sm.usage;
         if (sm.model && !lm.model) lm.model = sm.model;
@@ -2068,7 +2114,24 @@ async function loadConversationMessages(convId) {
             `server has ${serverMsgs.length} msgs (updatedAt=${serverUpdatedAt}), re-rendering`);
         }
       } else {
-        console.info(`[loadConvMsgs] ✅ Cache FRESH for conv=${convId.slice(0,8)} — no re-render needed`);
+        /* Cache-fresh path: message count+timestamp matched, so we are not
+         * replacing conv.messages.  But server-side auto-translate may have
+         * committed translatedContent into the DB AFTER the cache was
+         * written (this is the common endpoint-mode case).  Merge those
+         * translations in-place so the user sees Chinese immediately. */
+        const _mergedFresh = _mergeServerTranslations(serverMsgs, conv.messages);
+        if (_mergedFresh > 0) {
+          console.info(`[loadConvMsgs] 🈯 Cache FRESH but merged ${_mergedFresh} ` +
+            `server translation(s) — conv=${convId.slice(0,8)}`);
+          // Trigger re-render so Chinese appears now rather than on next action
+          if (convId === activeConvId) {
+            const _active = conversations.find(c => c.id === convId);
+            if (_active && typeof renderChat === 'function') renderChat(_active, false);
+          }
+          ConvCache.put(conv);  // persist merged translations into cache
+        } else {
+          console.info(`[loadConvMsgs] ✅ Cache FRESH for conv=${convId.slice(0,8)} — no re-render needed`);
+        }
       }
 
       conv._needsLoad = false;
@@ -2584,6 +2647,44 @@ function _fixTableExtraPipes(text) {
   return out.join('\n');
 }
 
+/* ── CJK-friendly emphasis preprocessor ──
+ * CommonMark 0.31.2's emphasis flanking rules treat CJK punctuation (。，！？（）「」etc.)
+ * the same as ASCII punctuation, which breaks emphasis adjacent to CJK punct:
+ *
+ *   ❌  **这是中文。**接下来   → closing ** is preceded by CJK punct (。) and followed
+ *                               by a non-ws/non-punct CJK char, so it is NOT right-flanking.
+ *   ❌  从**「重点」**开始     → opening ** is followed by CJK punct 「, so it is NOT left-flanking.
+ *
+ * The upstream markdown-cjk-friendly spec (tats-u/markdown-cjk-friendly) solves this by
+ * redefining flanking in terms of "non-CJK punctuation". Since marked.js has no extension
+ * API for the inline emphasis tokenizer, we achieve the equivalent effect by inserting
+ * U+200B (ZERO WIDTH SPACE) between delimiter runs and adjacent CJK punctuation.
+ *
+ * U+200B is Unicode category Cf (Format), so CommonMark treats it as neither whitespace
+ * nor punctuation — making it a "non-ws/non-punct character" in the flanking rule. That
+ * is exactly what the CJK-friendly spec requires treat CJK punctuation as.
+ *
+ * This runs while code/math are still placeholders (\x02CODE…\x03, \x02MATH…\x03) so
+ * emphasis characters inside code blocks/spans/math are untouched. */
+const _CJK_PUNCT_CLASS =
+  '[\u3000-\u303F\uFE30-\uFE4F\uFE50-\uFE6B\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65]';
+/* A homogeneous delimiter run (spec terminology). We keep runs homogeneous
+ * (*+ | _+ | ~+) — do NOT mix, per CommonMark. */
+const _EMPH_RUN_CLASS = '(?:\\*+|_+|~+)';
+const _CJK_FRIENDLY_BEFORE_RE = new RegExp(
+  '(' + _CJK_PUNCT_CLASS + ')(' + _EMPH_RUN_CLASS + ')', 'g');
+const _CJK_FRIENDLY_AFTER_RE = new RegExp(
+  '(' + _EMPH_RUN_CLASS + ')(' + _CJK_PUNCT_CLASS + ')', 'g');
+
+function _cjkFriendlyPreprocess(text) {
+  /* Fast reject: skip unless text contains both a CJK-range char AND a delimiter. */
+  if (!/[\u3000-\uFFEF]/.test(text)) return text;
+  if (!/[*_~]/.test(text)) return text;
+  return text
+    .replace(_CJK_FRIENDLY_BEFORE_RE, '$1\u200B$2')
+    .replace(_CJK_FRIENDLY_AFTER_RE, '$1\u200B$2');
+}
+
 function renderMarkdown(text) {
   if (!text) return "";
   if (typeof marked === "undefined" || typeof marked.parse !== "function") {
@@ -2622,6 +2723,10 @@ function renderMarkdown(text) {
     mathStore.push({ tex: t.trim(), display: false });
     return "\x02MATH" + (mathStore.length - 1) + "\x03";
   });
+  /* ★ FIX: CJK-friendly emphasis — insert U+200B between emphasis delimiters and
+   * adjacent CJK punctuation so marked's stock flanking rules detect emphasis.
+   * Runs while code/math are still placeholders → code blocks are untouched. */
+  p = _cjkFriendlyPreprocess(p);
   for (let i = 0; i < codeStore.length; i++) {
     p = p
       .split("\x02CODE" + i + "\x03")

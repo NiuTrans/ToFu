@@ -235,6 +235,194 @@ def _call_llm(error_text: str, cfg: dict) -> dict:
 #  requirements.txt fast path (no LLM needed)
 # ══════════════════════════════════════════════════════════
 
+# Map requirements.txt line → conda-forge package spec. Used when we detect
+# we're running inside a conda env (install.py / install.sh created one).
+# conda-forge builds link against an older sysroot glibc (2.17) so they work
+# on CentOS-7-class hosts where pip's manylinux wheels crash with
+# "GLIBC_2.25 not found" (classic lxml failure mode).
+_CONDA_PYTHON_DEPS = [
+    'flask>=3.0',
+    'flask-compress>=1.14',
+    'requests>=2.31',
+    'psutil>=5.9',
+    'trafilatura>=1.6',
+    'playwright>=1.40',
+    'pillow>=10.0',
+    'python-pptx>=0.6.21',
+    'lxml>=4.9',
+    'mcp>=1.0',
+]
+
+
+def _running_in_conda_env() -> bool:
+    """True when the current Python is running inside a conda env."""
+    # CONDA_PREFIX is set when a conda env is activated; also set by
+    # install.py launching via os.execv of the env's python.
+    prefix = os.environ.get('CONDA_PREFIX', '')
+    if prefix and os.path.isdir(prefix):
+        return True
+    # Fallback: site-packages path contains 'conda' / 'miniforge' / 'miniconda'
+    exe = sys.executable or ''
+    lowered = exe.lower()
+    return any(tok in lowered for tok in ('miniforge', 'miniconda', 'anaconda', '/conda/', '\\conda\\'))
+
+
+def _find_conda_exe() -> str | None:
+    """Locate the conda executable reachable from the current env."""
+    import shutil as _sh
+    # Prefer the one that created the current env
+    for env_name in ('CONDA_EXE', 'MAMBA_EXE'):
+        val = os.environ.get(env_name)
+        if val and os.path.isfile(val):
+            return val
+    # PATH lookup
+    for name in ('conda', 'mamba'):
+        path = _sh.which(name)
+        if path:
+            return path
+    # Guess from $CONDA_PREFIX → parent base env
+    prefix = os.environ.get('CONDA_PREFIX', '')
+    if prefix:
+        # e.g. ~/miniforge3/envs/tofu → ~/miniforge3/bin/conda
+        for up in (prefix, os.path.dirname(os.path.dirname(prefix))):
+            for rel in ('bin/conda', 'Scripts/conda.exe'):
+                cand = os.path.join(up, rel)
+                if os.path.isfile(cand):
+                    return cand
+    return None
+
+
+def _try_conda_install_deps() -> bool:
+    """Install dependencies via `conda install -c conda-forge` into the
+    current env, heal pre-existing broken pip wheels first.
+
+    This is the preferred repair path when we're inside a conda env —
+    conda-forge avoids the glibc-mismatch issue that breaks pip's
+    manylinux lxml wheel on older hosts (CentOS 7 / glibc 2.17).
+
+    Returns True on success.
+    """
+    conda = _find_conda_exe()
+    if not conda:
+        _bus.emit('log', 'conda not found — falling back to pip path')
+        return False
+
+    # Figure out the env name. If we can, install by name so it works even
+    # when CONDA_PREFIX points at a path that's awkward to pass to conda.
+    env_name = os.environ.get('CONDA_DEFAULT_ENV', '') or 'base'
+    env_prefix = os.environ.get('CONDA_PREFIX', '')
+
+    _bus.emit('phase', json.dumps({
+        'id': 'conda-deps',
+        'label': f'🐍 Detected conda env ({env_name}) — installing deps from conda-forge',
+        'status': 'active',
+        'detail': 'conda-forge wheels link against older glibc (CentOS 7-compatible). '
+                  'Pip manylinux wheels of lxml often require GLIBC_2.25+.',
+    }))
+
+    # ── Step 1: purge any pip-installed copies that would shadow conda-forge ──
+    _bus.emit('log', '🧹 Purging pip-installed deps that would shadow conda-forge…')
+    pip_list = subprocess.run(
+        [sys.executable, '-m', 'pip', 'list', '--format=freeze'],
+        capture_output=True, text=True, cwd=BASE_DIR,
+    )
+    installed_pip = set()
+    if pip_list.returncode == 0:
+        for line in pip_list.stdout.splitlines():
+            name = line.split('==', 1)[0].strip().lower()
+            if name:
+                installed_pip.add(name)
+
+    # Extract bare package names from _CONDA_PYTHON_DEPS (strip version specifiers)
+    bare_names = []
+    for spec in _CONDA_PYTHON_DEPS:
+        # e.g. "flask-compress>=1.14" → "flask-compress"
+        base = re.split(r'[<>=!~\[]', spec, 1)[0].strip()
+        bare_names.append(base)
+
+    to_uninstall = sorted({n for n in bare_names if n.lower() in installed_pip})
+    if to_uninstall:
+        _bus.emit('log', f'Removing pip copies: {to_uninstall}')
+        uninst = subprocess.run(
+            [sys.executable, '-m', 'pip', 'uninstall', '-y', *to_uninstall],
+            capture_output=True, text=True, cwd=BASE_DIR,
+        )
+        for line in (uninst.stdout + uninst.stderr).splitlines():
+            _bus.emit('pip_output', line)
+
+    # ── Step 2: refresh conda itself (outdated conda → solver hangs) ──
+    _bus.emit('log', '🔄 Updating conda itself (outdated conda causes solver issues)…')
+    upd = subprocess.run(
+        [conda, 'update', '-n', 'base', '-c', 'conda-forge', '-y', 'conda'],
+        capture_output=True, text=True, cwd=BASE_DIR,
+    )
+    for line in (upd.stdout + upd.stderr).splitlines()[-10:]:
+        _bus.emit('pip_output', line)
+    if upd.returncode != 0:
+        _bus.emit('log', '⚠ conda self-update failed — continuing with existing version')
+
+    # Install libmamba solver (10x faster, avoids classic solver hangs)
+    lm = subprocess.run(
+        [conda, 'install', '-n', 'base', '-c', 'conda-forge', '-y',
+         'conda-libmamba-solver'],
+        capture_output=True, text=True, cwd=BASE_DIR,
+    )
+    if lm.returncode == 0:
+        subprocess.run([conda, 'config', '--set', 'solver', 'libmamba'],
+                       capture_output=True, text=True, cwd=BASE_DIR)
+        _bus.emit('log', '✓ libmamba solver active')
+
+    # ── Step 3: conda install from conda-forge ──
+    if env_prefix and os.path.isdir(env_prefix):
+        target = ['-p', env_prefix]
+    else:
+        target = ['-n', env_name]
+
+    # --force-reinstall handles the case where pip previously dropped an
+    # incompatible manylinux wheel over conda's files. Without it, conda's
+    # cached metadata says the package is satisfied and it no-ops.
+    cmd = [conda, 'install', *target, '-c', 'conda-forge', '-y',
+           '--force-reinstall', *_CONDA_PYTHON_DEPS]
+    _bus.emit('log', f'$ {" ".join(cmd)}')
+
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, cwd=BASE_DIR)
+    except Exception as e:
+        _bus.emit('log', f'Failed to run conda: {e}')
+        _bus.emit('phase', json.dumps({
+            'id': 'conda-deps',
+            'label': '🐍 conda failed to start',
+            'status': 'error',
+        }))
+        return False
+
+    for line in proc.stdout:
+        line = line.rstrip('\n')
+        _bus.emit('pip_output', line)
+
+    proc.wait(timeout=600)  # conda can take a while, esp. first time
+
+    if proc.returncode == 0:
+        _bus.emit('log', '✅ conda install succeeded')
+        _bus.emit('phase', json.dumps({
+            'id': 'conda-deps',
+            'label': '🐍 Dependencies installed from conda-forge',
+            'status': 'done',
+        }))
+        return True
+
+    _bus.emit('log', f'❌ conda install failed (exit code {proc.returncode})')
+    _bus.emit('phase', json.dumps({
+        'id': 'conda-deps',
+        'label': '🐍 conda install failed',
+        'status': 'error',
+        'detail': f'Exit code {proc.returncode}. Falling back to pip…',
+    }))
+    return False
+
+
 def _try_requirements_txt() -> bool:
     """Try to install all packages from requirements.txt.
 
@@ -243,11 +431,20 @@ def _try_requirements_txt() -> bool:
     for freshly-exported projects where the LLM API keys haven't been
     configured yet.
 
-    Returns True if requirements.txt was found and pip succeeded.
+    If the current Python is inside a conda env, we use conda-forge
+    instead of pip — this avoids the glibc-mismatch trap where pip's
+    manylinux wheels (esp. lxml) require a newer glibc than the host.
+
+    Returns True if dependencies were successfully installed.
     """
     req_path = os.path.join(BASE_DIR, 'requirements.txt')
     if not os.path.isfile(req_path):
         return False
+
+    # Prefer conda when we're inside a conda env — see _try_conda_install_deps
+    # docstring for the glibc rationale.
+    if _running_in_conda_env() and _try_conda_install_deps():
+        return True
 
     _bus.emit('phase', json.dumps({
         'id': 'reqtxt',

@@ -242,6 +242,21 @@ def perform_web_search(query, max_results=None, user_question=''):
     # Build set of URLs we want to keep after content dedup
     kept_urls = {r['url'] for r in unique_results}
 
+    # ── Dynamically reduce target_ok when candidate pool is too small ──
+    # Race-to-N needs enough headroom (successful pages) to actually exit
+    # early. If len(kept_urls) < target_ok * 1.5, there aren't enough
+    # candidates for target_ok pages to succeed — the loop would wait
+    # for the 90s as_completed ceiling instead of racing.
+    # Scale target_ok down so it stays achievable, but never below
+    # max_results (we still need at least the user-requested count).
+    _original_target_ok = target_ok
+    if len(kept_urls) < target_ok * 1.5:
+        target_ok = max(max_results, int(len(kept_urls) / 1.5))
+        if target_ok < _original_target_ok:
+            logger.info('[Fetch] target_ok reduced %d → %d '
+                        '(candidate pool=%d, need headroom for Race-to-N)',
+                        _original_target_ok, target_ok, len(kept_urls))
+
     # ══════════════════════════════════════════════════════
     #  Step 4: Wait for fetch futures (already running!)
     # ══════════════════════════════════════════════════════
@@ -308,28 +323,35 @@ def perform_web_search(query, max_results=None, user_question=''):
                         step_timings['step1_engines'])
 
     # ── Step 5: LLM content filter — relevance + cleaning ──
+    # Short-circuit when the filter is disabled: skip the per-page
+    # (url, text) tuple build + batch round-trip (which otherwise costs
+    # 1-3s per pipeline under concurrent searches on FUSE storage).
     step5_t0 = time.time()
-    to_filter = [(r['url'], r['full_content']) for r in unique_results
-                 if r.get('full_content')]
     irrelevant_urls: set[str] = set()
-    if to_filter:
-        logger.info('[Search] LLM-filtering %d/%d fetched pages, query=%r user_question=%r',
-                    len(to_filter), len(unique_results), query[:80], user_question[:80])
-        filtered = filter_web_contents_batch(to_filter, query=query,
-                                             user_question=user_question,
-                                             min_chars=0)
-        for r in unique_results:
-            if r['url'] in filtered:
-                val = filtered[r['url']]
-                if val == IRRELEVANT_SENTINEL:
-                    irrelevant_urls.add(r['url'])
-                    r['full_content'] = ''
-                    logger.info('[Search] ✗ IRRELEVANT dropped: %s', r['url'][:100])
-                else:
-                    r['full_content'] = val
-        if irrelevant_urls:
-            logger.info('[Search] Dropped %d/%d irrelevant pages',
-                        len(irrelevant_urls), len(to_filter))
+    from lib.fetch.content_filter import FILTER_ENABLED as _FILTER_ENABLED
+    if not _FILTER_ENABLED:
+        logger.debug('[Search] step5 skipped — FETCH_LLM_FILTER disabled')
+    else:
+        to_filter = [(r['url'], r['full_content']) for r in unique_results
+                     if r.get('full_content')]
+        if to_filter:
+            logger.info('[Search] LLM-filtering %d/%d fetched pages, query=%r user_question=%r',
+                        len(to_filter), len(unique_results), query[:80], user_question[:80])
+            filtered = filter_web_contents_batch(to_filter, query=query,
+                                                 user_question=user_question,
+                                                 min_chars=0)
+            for r in unique_results:
+                if r['url'] in filtered:
+                    val = filtered[r['url']]
+                    if val == IRRELEVANT_SENTINEL:
+                        irrelevant_urls.add(r['url'])
+                        r['full_content'] = ''
+                        logger.info('[Search] ✗ IRRELEVANT dropped: %s', r['url'][:100])
+                    else:
+                        r['full_content'] = val
+            if irrelevant_urls:
+                logger.info('[Search] Dropped %d/%d irrelevant pages',
+                            len(irrelevant_urls), len(to_filter))
 
     step_timings['step5_llm_filter'] = time.time() - step5_t0
 

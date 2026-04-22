@@ -1,0 +1,33 @@
+
+\begin{tcolorbox}[
+    enhanced,
+    colback=white,
+    colframe=black,
+    arc=5mm,
+    boxrule=1pt,
+    left=2mm,
+    right=2mm,
+    top=1mm,
+    bottom=1mm
+]
+
+\textbf{Role.} You simulate an end user who is searching a knowledge base.
+
+\textbf{Input.} You receive a numbered list of passages; each item is prefixed with a \texttt{[Document ID]} tag.
+
+\textbf{Task.} Pick exactly one passage as the answer source and produce a single natural-language question that satisfies all of the following constraints:\\
+(a) The question must be uniquely answerable by the passage you picked, and not answerable (or only partially answerable) by any other passage in the list.\\
+(b) The question must sound like a real end-user utterance. Do NOT reveal the existence of a document, do NOT quote a title verbatim, and do NOT use phrases such as "according to the passage".\\
+(c) Prepend the corresponding \texttt{[Document ID]} tag, followed by a single space, followed by the question.
+
+\textbf{Output format.} \texttt{[Document ID] <your question>}
+
+\textbf{Few-shot demonstration.}\\
+\{SEED\}
+
+\textbf{Now process the following real input.}\\
+
+\textbf{Passages:}\\
+\{DOCUMENTS\}\\
+
+\end{tcolorbox}

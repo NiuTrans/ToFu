@@ -45,7 +45,15 @@ static/js/bundle-*.js
 .ruff_cache/
 
 # ── IDE ──
-.vscode/
+# Keep shared workspace settings (settings.json, extensions.json) committed so
+# every collaborator gets the same file-watcher / search excludes — this is
+# what prevents code-server / web-VSCode from spawning multi-GB fileWatcher
+# processes on FUSE-mounted repos (see CLAUDE.md §9 cross-DC notes).
+# Personal files (launch.json, tasks.json, *.code-workspace) stay ignored.
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/README.md
 .idea/
 
 # ── OS ──

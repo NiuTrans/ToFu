@@ -139,6 +139,14 @@ class StrategyRegistry:
 
     Loads strategies from DB, enriches them with failure/compatibility
     data from the learning engine, and provides selection methods.
+
+    Note:
+        A separately-named class also called ``StrategyRegistry`` lives at
+        :class:`lib.trading_strategy_engine.strategy.StrategyRegistry`
+        — that one is a name-lookup registry for *portfolio allocation
+        strategies* (different domain, ``()`` constructor vs ``(db)``). The
+        name collision is intentional (both are "strategy registries" in
+        their domains). Callers should import the specific module they need.
     """
 
     def __init__(self, db: Any):

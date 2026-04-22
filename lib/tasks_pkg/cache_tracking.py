@@ -370,8 +370,12 @@ def detect_cache_break(
         # Only warn when the API confirms a cache break (token drop) OR
         # when client-side changes are detected that WOULD break the cache.
         if client_changes and api_break:
-            # Confirmed cache break with known cause
-            logger.warning(
+            # Confirmed cache break with known cause — INFO level,
+            # diagnostic cost info only. The cause is already known
+            # (compaction, system prompt change, etc.) and this is not
+            # a production error; log_round_cache_stats already surfaces
+            # cache stats at INFO level.
+            logger.info(
                 '[CacheBreak] conv=%s call=%d CONFIRMED cache break: %s. '
                 'cache_read: %d → %d tokens (gap=%.1fs)',
                 conv_id[:8], prev.call_count,

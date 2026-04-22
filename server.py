@@ -224,14 +224,22 @@ logging.basicConfig(
 # These libraries generate thousands of DEBUG/INFO lines per hour.
 # Only let WARNING+ through to vendor.log.
 _NOISY_LIBS = (
-    'trafilatura', 'courlan', 'htmldate', 'justext',  # web scraping internals
+    'courlan', 'htmldate', 'justext',                   # web scraping internals
     'urllib3', 'requests', 'charset_normalizer',        # HTTP internals
     'websockets', 'websockets.client',                  # Feishu WS heartbeats
     'PIL', 'pymupdf',                                   # media libraries
-    'httpcore', 'httpx',                                 # async HTTP
+    'httpcore', 'httpx',                                # async HTTP
 )
 for _lib in _NOISY_LIBS:
     logging.getLogger(_lib).setLevel(logging.WARNING)
+
+# ── Extra-noisy: trafilatura emits thousands of WARNING lines per fetch
+#    for every malformed CSS/XPath selector it sees inside scraped HTML.
+#    Those are cosmetic (it falls back gracefully) — suppress at ERROR.
+logging.getLogger('trafilatura').setLevel(logging.ERROR)
+for _sub in ('trafilatura.xml', 'trafilatura.core', 'trafilatura.htmlprocessing',
+             'trafilatura.metadata'):
+    logging.getLogger(_sub).setLevel(logging.ERROR)
 
 # ── Quiet polling endpoints on werkzeug access log ──
 logging.getLogger('werkzeug').addFilter(_QuietPollFilter())
@@ -247,7 +255,62 @@ from lib.database import close_db, init_db, warmup_db
 app = Flask(__name__,
             static_folder=os.path.join(BASE_DIR, 'static'),
             static_url_path='/static')
-app.secret_key = 'not-needed-single-user'
+# ── Flask secret_key (random, persisted per-project) ──
+# Priority: FLASK_SECRET_KEY env var > data/config/flask_secret_key file >
+# newly-generated 32-byte key persisted to that file with mode 0600.
+# Rationale: the former hardcoded placeholder literal enabled session
+# forgery if the repo is ever public-facing; §10.4 config change.
+def _load_or_create_flask_secret_key():
+    _flasklog = logging.getLogger('server.flask_secret')
+    from lib.config_dir import config_path as _cfg_path
+    _env_key = os.environ.get('FLASK_SECRET_KEY', '').strip()
+    if _env_key:
+        _flasklog.debug('[FlaskSecret] Using FLASK_SECRET_KEY from env (%d chars)', len(_env_key))
+        return _env_key
+    _key_file = _cfg_path('flask_secret_key')
+    try:
+        if os.path.isfile(_key_file):
+            with open(_key_file, 'r', encoding='utf-8') as _kf:
+                _existing = _kf.read().strip()
+            if _existing:
+                _flasklog.debug('[FlaskSecret] Loaded persisted key from %s', _key_file)
+                return _existing
+    except Exception as _kerr:
+        _flasklog.warning('[FlaskSecret] Failed to read %s: %s', _key_file, _kerr)
+    # Generate fresh random key and persist
+    _new_key = os.urandom(32).hex()
+    try:
+        os.makedirs(os.path.dirname(_key_file), exist_ok=True)
+        # Write with restrictive mode 0600 (Unix); on Windows os.chmod is best-effort
+        _flag = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        try:
+            _fd = os.open(_key_file, _flag, 0o600)
+            try:
+                os.write(_fd, _new_key.encode('utf-8'))
+            finally:
+                os.close(_fd)
+        except (AttributeError, OSError):
+            # Fallback for platforms where os.open mode isn't honored
+            with open(_key_file, 'w', encoding='utf-8') as _kf:
+                _kf.write(_new_key)
+            try:
+                os.chmod(_key_file, 0o600)
+            except OSError:
+                pass
+        _flasklog.info('[FlaskSecret] Generated new random key at %s (32 bytes)', _key_file)
+        try:
+            from lib.log import audit_log as _audit
+            _audit('config_change', param='flask_secret_key',
+                   old='hardcoded', new='random_persisted', approved_by='user')
+        except Exception as _aerr:
+            _flasklog.debug('[FlaskSecret] audit_log failed: %s', _aerr)
+    except Exception as _werr:
+        _flasklog.error('[FlaskSecret] Failed to persist key to %s: %s — '
+                        'using in-memory key (sessions invalidated on restart)',
+                        _key_file, _werr, exc_info=True)
+    return _new_key
+
+app.secret_key = _load_or_create_flask_secret_key()
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 app.config['COMPRESS_MIMETYPES'] = [
     'text/html', 'text/css', 'text/javascript',
@@ -560,14 +623,53 @@ def _handle_415(exc):
 
 @app.errorhandler(500)
 def _handle_500(exc):
-    _lifecycle_log.error('500 Internal Server Error: %s %s', request.method, request.path, exc_info=exc)
+    rid = _get_req_id() or '-'
+    _lifecycle_log.error('500 Internal Server Error: [%s] %s %s',
+                         rid, request.method, request.path, exc_info=exc)
     if _is_api_request():
-        return jsonify({'ok': False, 'error': 'Internal Server Error'}), 500
+        # Uniform envelope — never leak str(exc) (may contain secrets or
+        # internal paths). Clients correlate via request_id in the log.
+        return jsonify({'ok': False, 'error': 'internal_error',
+                        'request_id': rid}), 500
     return make_response(
-        '<h2>500 — Internal Server Error</h2>'
-        '<p>Something went wrong. Check server logs for details.</p>',
+        '<h2>500 \u2014 Internal Server Error</h2>'
+        f'<p>Request ID: <code>{rid}</code>. Check server logs for details.</p>',
         500
     )
+
+
+@app.errorhandler(Exception)
+def _handle_uncaught_exception(exc):
+    """Catch-all for exceptions not already handled by werkzeug HTTP classes.
+
+    Werkzeug HTTPException subclasses (NotFound, BadRequest, 405, etc.)
+    short-circuit this handler because Flask matches more-specific handlers
+    first, so the existing 404/405/413/415 handlers still win. This only
+    catches genuine bare Exception bubbles from view handlers.
+    """
+    from werkzeug.exceptions import HTTPException
+    if isinstance(exc, HTTPException):
+        # Let Flask dispatch to the appropriate errorhandler
+        return exc
+    rid = _get_req_id() or '-'
+    _lifecycle_log.error('[%s] Uncaught exception in %s %s: %s',
+                         rid, request.method, request.path, exc, exc_info=True)
+    if _is_api_request():
+        return jsonify({'ok': False, 'error': 'internal_error',
+                        'request_id': rid}), 500
+    return make_response(
+        '<h2>500 \u2014 Internal Server Error</h2>'
+        f'<p>Request ID: <code>{rid}</code>. Check server logs for details.</p>',
+        500
+    )
+
+# Emit a single audit entry confirming handlers are installed (one-time per boot).
+try:
+    from lib.log import audit_log as _audit_boot
+    _audit_boot('error_handler_installed',
+                handlers=['404', '405', '413', '415', '500', 'Exception'])
+except Exception as _eerr:
+    _lifecycle_log.debug('[Boot] audit_log for error_handler_installed failed: %s', _eerr)
 
 
 # ── Static file cache (avoid re-transfer over tunnel) ──
@@ -756,19 +858,41 @@ if __name__ == '__main__':
     _lock_path = os.path.join(_lock_dir, '.server.lock')
     _instance_lock_fd = None
 
+    import socket as _sock_mod
+
+    def _read_lock_owner():
+        """Read lock file contents to find who holds the lock.
+
+        Returns (pid_str, hostname_str) or ('?', '?') on failure.
+        """
+        try:
+            with open(_lock_path) as f:
+                content = f.read().strip()
+            # Format: "PID@hostname" or just "PID" (legacy)
+            if '@' in content:
+                pid_s, host_s = content.split('@', 1)
+                return pid_s.strip(), host_s.strip()
+            return content, '?'
+        except Exception:
+            return '?', '?'
+
     def _acquire_instance_lock():
         """Acquire an exclusive file lock to prevent multiple instances.
 
         Returns True if lock acquired, False if another instance holds it.
         On Windows uses msvcrt; on Unix uses fcntl.
+
+        IMPORTANT: We open with 'r+' (or create then 'r+') and flock BEFORE
+        writing our PID, so the existing owner info is preserved on failure.
         """
         global _instance_lock_fd
         try:
-            _instance_lock_fd = open(_lock_path, 'w')
-            _instance_lock_fd.write(f'{os.getpid()}\n')
-            _instance_lock_fd.flush()
+            # Ensure the file exists (create if needed) but don't truncate
+            if not os.path.exists(_lock_path):
+                open(_lock_path, 'a').close()
+            _instance_lock_fd = open(_lock_path, 'r+')
         except Exception as e:
-            _server_log.warning('[Lock] Cannot create lock file %s: %s', _lock_path, e)
+            _server_log.warning('[Lock] Cannot open lock file %s: %s', _lock_path, e)
             return True  # fail-open: don't block startup on lock-file issues
 
         try:
@@ -778,45 +902,75 @@ if __name__ == '__main__':
             else:
                 import fcntl
                 fcntl.flock(_instance_lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return True
         except (IOError, OSError):
-            # Another instance holds the lock
+            # Another instance holds the lock — don't write anything
             _instance_lock_fd.close()
             _instance_lock_fd = None
             return False
 
-    if not _acquire_instance_lock():
-        # Try to read the PID of the other instance
-        _other_pid = '?'
+        # Lock acquired — now write our identity
         try:
-            with open(_lock_path) as _f:
-                _other_pid = _f.read().strip()
-        except Exception:
-            pass
-        _server_log.critical(
-            '\n'
-            '  ══════════════════════════════════════════════════════\n'
-            '  ❌ ANOTHER SERVER INSTANCE IS ALREADY RUNNING\n'
-            '  ❌ from this project directory!\n'
-            '  \n'
-            '  Project : %s\n'
-            '  Lock    : %s\n'
-            '  Other PID: %s\n'
-            '  \n'
-            '  Running multiple instances on the same project causes:\n'
-            '    • PostgreSQL connection exhaustion ("too many clients")\n'
-            '    • Database race conditions and data corruption\n'
-            '    • Port conflicts\n'
-            '  \n'
-            '  Solutions:\n'
-            '    1. Stop the other instance first\n'
-            '    2. Use a different PORT env var for a second instance\n'
-            '       (both share the same SQLite DB — WAL mode handles concurrency)\n'
-            '    3. Copy the project to a different directory for full isolation\n'
-            '  ══════════════════════════════════════════════════════',
-            BASE_DIR, _lock_path, _other_pid
-        )
-        sys.exit(1)
+            _instance_lock_fd.seek(0)
+            _instance_lock_fd.truncate()
+            _instance_lock_fd.write(f'{os.getpid()}@{_sock_mod.gethostname()}\n')
+            _instance_lock_fd.flush()
+        except Exception as e:
+            _server_log.warning('[Lock] Failed to write PID to lock file: %s', e)
+        return True
+
+    if not _acquire_instance_lock():
+        # Read the lock owner info (preserved because we didn't truncate)
+        _other_pid, _other_host = _read_lock_owner()
+        _my_host = _sock_mod.gethostname()
+        _is_remote = _other_host not in ('?', _my_host)
+
+        _remote_hint = ''
+        if _is_remote:
+            _remote_hint = (
+                f'\n'
+                f'  ⚠️  The lock is held by a DIFFERENT HOST: {_other_host}\n'
+                f'  ⚠️  You are on: {_my_host}\n'
+                f'  ⚠️  This is a shared filesystem — you cannot kill the\n'
+                f'  ⚠️  remote process from this machine.\n'
+                f'  \n'
+                f'  To fix:\n'
+                f'    • SSH to {_other_host} and stop PID {_other_pid} there, OR\n'
+                f'    • Set CHATUI_SKIP_LOCK=1 to bypass this check\n'
+            )
+
+        _skip_lock = os.environ.get('CHATUI_SKIP_LOCK', '').strip()
+        if _skip_lock == '1':
+            _server_log.warning(
+                '[Lock] CHATUI_SKIP_LOCK=1 — bypassing instance lock! '
+                'Lock held by PID=%s on host=%s. Proceeding anyway.',
+                _other_pid, _other_host
+            )
+        else:
+            _server_log.critical(
+                '\n'
+                '  ══════════════════════════════════════════════════════\n'
+                '  ❌ ANOTHER SERVER INSTANCE IS ALREADY RUNNING\n'
+                '  ❌ from this project directory!\n'
+                '  \n'
+                '  Project : %s\n'
+                '  Lock    : %s\n'
+                '  Owner   : PID %s on host %s\n'
+                '%s'
+                '  \n'
+                '  Running multiple instances on the same project causes:\n'
+                '    • PostgreSQL connection exhaustion ("too many clients")\n'
+                '    • Database race conditions and data corruption\n'
+                '    • Port conflicts\n'
+                '  \n'
+                '  Solutions:\n'
+                '    1. Stop the other instance first (on the correct host!)\n'
+                '    2. Set CHATUI_SKIP_LOCK=1 to force start (at your own risk)\n'
+                '    3. Use a different PORT env var for a second instance\n'
+                '    4. Copy the project to a different directory for full isolation\n'
+                '  ══════════════════════════════════════════════════════',
+                BASE_DIR, _lock_path, _other_pid, _other_host, _remote_hint
+            )
+            sys.exit(1)
 
     _server_log.info('[Lock] Instance lock acquired (PID=%d, lock=%s)', os.getpid(), _lock_path)
 

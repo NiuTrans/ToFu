@@ -164,16 +164,12 @@ def _pg_already_running_on_another_machine(pgdata, pg_port):
                 pid, owner_host, local_ip, is_remote_owner)
 
     if is_remote_owner:
-        reachable = False
-        try:
-            result = subprocess.run(
-                [_find_pg_binary('pg_isready'), '-h', owner_host, '-p', str(pg_port), '-d', 'template1'],
-                capture_output=True, text=True, timeout=5
-            )
-            reachable = (result.returncode == 0)
-        except Exception as e:
-            logger.debug('[DB] pg_isready to %s failed: %s', owner_host, e)
-        logger.info('[DB] PG owned by remote host %s (reachable=%s) — deferring to it', owner_host, reachable)
+        # Use a real psycopg2 connect probe — pg_isready can give false
+        # positives on "half-alive" containers (TCP accept works but real
+        # queries hang) which is exactly the container-switch scenario on
+        # shared FUSE storage.
+        reachable = _pg_real_connect_ok(owner_host, pg_port, None, None, timeout_s=5)
+        logger.info('[DB] PG owned by remote host %s (real_connect=%s) — deferring to it', owner_host, reachable)
         return True, owner_host
 
     try:
@@ -335,6 +331,50 @@ def _pg_has_database(host, port, dbname, pg_user):
     except Exception as e:
         logger.debug('[DB] Database existence check failed on %s:%d: %s', host, port, e)
         return True
+
+
+def _pg_real_connect_ok(host, port, pg_user, pg_dbname, timeout_s=5):
+    """Probe a PG host with a *real* connection, not just pg_isready.
+
+    pg_isready returns OK as soon as postmaster accepts a TCP connection,
+    even if the backend process that actually services queries is hung
+    (common with "half-alive" containers on shared FUSE storage where
+    the postmaster's FUSE-bound disk I/O is unreachable). A real
+    psycopg2.connect() is what the app uses, so it's what we probe.
+
+    Returns True if a fresh connection + trivial SELECT succeeds.
+    """
+    try:
+        import psycopg2
+    except ImportError:
+        logger.debug('[DB] psycopg2 not importable — cannot do real-connect probe')
+        return False
+    db_user = pg_user or _get_username()
+    dsn = f"host={host} port={port} dbname={pg_dbname or 'template1'} user={db_user}"
+    try:
+        conn = psycopg2.connect(
+            dsn,
+            connect_timeout=timeout_s,
+            application_name='chatui-probe',
+            gssencmode='disable',
+        )
+    except Exception as e:
+        logger.debug('[DB] Real-connect probe to %s:%d failed: %s', host, port, e)
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT 1')
+        cur.fetchone()
+        cur.close()
+        return True
+    except Exception as e:
+        logger.debug('[DB] Real-connect probe query to %s:%d failed: %s', host, port, e)
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception as _e:
+            logger.debug('[DB] Real-connect probe close failed: %s', _e)
 
 
 def _scan_for_our_pg(host, port_range, pgdata, pg_user):
@@ -529,6 +569,24 @@ def _bootstrap_pg(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password, pg_d
     return {'PG_HOST': '127.0.0.1', 'PG_PORT': free_port, 'PG_DSN': dsn}
 
 
+def _pg_binaries_present():
+    """Quick check: is pg_ctl available at all on this host?
+
+    Returns True only if the core PG binaries are discoverable. This lets
+    us bail out of the whole bootstrap flow early with a friendly
+    "fallback to SQLite" message, instead of emitting a string of ERROR
+    logs as we probe ports, scan directories, and finally try pg_ctl.
+    """
+    # _find_pg_binary returns the bare name as a fallback — but that only
+    # works as a launch argument if PATH has the real binary. So we also
+    # verify with shutil.which() that SOMETHING is there.
+    pg_ctl = _find_pg_binary('pg_ctl')
+    if os.path.isabs(pg_ctl) and os.path.isfile(pg_ctl):
+        return True
+    # Bare name — check PATH
+    return shutil.which(pg_ctl) is not None
+
+
 def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password, pg_dbname):
     """Ensure PostgreSQL is accessible. Start locally or discover remote instance.
 
@@ -542,6 +600,24 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
         if pg_password:
             dsn += f" password={pg_password}"
         return dsn
+
+    # ── Step 0: Early bail if PG binaries are simply not installed ──
+    # Unless the user has explicitly set CHATUI_PG_HOST to a remote, there's
+    # no point probing anything — we can't start, query, or verify PG.
+    # This turns a noisy "ERROR: pg_ctl not found" trace into a single
+    # friendly INFO line, and the caller seamlessly falls back to SQLite.
+    _explicit_host = os.environ.get('CHATUI_PG_HOST')
+    _explicit_remote = (_explicit_host
+                        and _explicit_host not in ('localhost', '127.0.0.1', '::1'))
+    if not _explicit_remote and not _pg_binaries_present():
+        logger.info(
+            '[DB] PostgreSQL client binaries (pg_ctl, initdb, psql) not found '
+            'on this host — SKIPPING PG bootstrap and falling back to SQLite. '
+            'This is normal when PG is not installed. '
+            'To enable PG (better concurrency for 100+ users): '
+            'conda install -c conda-forge postgresql>=18'
+        )
+        return None
 
     # ── Step 1: Explicit host/port override ──
     # When CHATUI_PG_HOST is set to a remote host, OR when CHATUI_PG_PORT is
@@ -626,15 +702,9 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
     # ── Step 3: Check if another machine owns the pgdata ──
     is_remote, remote_host = _pg_already_running_on_another_machine(pgdata, pg_port)
     if is_remote and remote_host:
-        remote_ok = False
-        try:
-            _check = subprocess.run(
-                [_find_pg_binary('pg_isready'), '-h', remote_host, '-p', str(pg_port), '-d', 'template1'],
-                capture_output=True, text=True, timeout=5
-            )
-            remote_ok = (_check.returncode == 0)
-        except Exception as _e:
-            logger.debug('[DB] pg_isready to remote %s:%d failed: %s', remote_host, pg_port, _e)
+        # Real-connect probe instead of pg_isready — see _pg_real_connect_ok
+        # docstring for why (half-alive container case).
+        remote_ok = _pg_real_connect_ok(remote_host, pg_port, pg_user, pg_dbname, timeout_s=5)
         if remote_ok:
             logger.info('[DB] PostgreSQL is running on remote machine %s — connecting as client', remote_host)
             _ensure_database_exists(remote_host, pg_port, pg_dbname, pg_user, pgdata)
@@ -654,21 +724,57 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
         return result
 
     # Clean up stale pidfile
+    #
+    # Container-switch scenario: a user uses web-based VS Code and moves
+    # between containers, so the machine IP changes but only ONE container
+    # is live at any time. The `.pg_owner_host` marker from the previous
+    # container will point at an IP that no longer runs PG. Treat such a
+    # marker as stale — probe reachability first before deferring to it.
+    #
+    # Rule:
+    #   - Remote host reachable on PG port → concurrent multi-host scenario,
+    #     defer to remote (preserves the original cross-machine safety net).
+    #   - Remote host NOT reachable → previous owner is dead (container gone
+    #     or machine switched), auto-heal by removing stale markers and
+    #     starting PG locally. This makes container switches a no-op.
     pidfile = os.path.join(pgdata, 'postmaster.pid')
     if os.path.exists(pidfile):
         owner_host = _read_pg_host_from_pidfile(pgdata)
         local_ip = _get_local_ip()
         if owner_host and owner_host not in (local_ip, 'localhost', '127.0.0.1'):
-            logger.warning('[DB] Step 4 safety net: postmaster.pid belongs to remote host %s '
-                          '(we are %s) — refusing to delete. Connecting to remote host.',
-                          owner_host, local_ip)
-            _ensure_database_exists(owner_host, pg_port, pg_dbname, pg_user, pgdata)
-            return {'PG_HOST': owner_host, 'PG_PORT': pg_port,
-                    'PG_DSN': _build_dsn(owner_host, pg_port)}
-        logger.warning('[DB] Removing stale postmaster.pid before starting PG '
-                      '(owner: %s, us: %s)', owner_host, local_ip)
+            # Real-connect probe instead of pg_isready — see _pg_real_connect_ok
+            # docstring for why (half-alive container on shared FUSE).
+            remote_alive = _pg_real_connect_ok(owner_host, pg_port, pg_user, pg_dbname, timeout_s=5)
+            if remote_alive:
+                logger.warning('[DB] Step 4 safety net: postmaster.pid belongs to '
+                               'remote host %s (we are %s) and it is LIVE — '
+                               'refusing to delete. Connecting to remote host.',
+                               owner_host, local_ip)
+                _ensure_database_exists(owner_host, pg_port, pg_dbname, pg_user, pgdata)
+                return {'PG_HOST': owner_host, 'PG_PORT': pg_port,
+                        'PG_DSN': _build_dsn(owner_host, pg_port)}
+            # Remote is unreachable — previous owner is dead (e.g. old
+            # container gone). Auto-heal: remove both ownership markers and
+            # proceed to start PG locally. Data files are untouched.
+            logger.warning('[DB] Step 4 auto-heal: previous owner %s is unreachable '
+                           '(we are %s) — treating as stale container/host, '
+                           'clearing ownership markers and taking over locally.',
+                           owner_host, local_ip)
+            owner_file = os.path.join(pgdata, '.pg_owner_host')
+            try:
+                if os.path.exists(owner_file):
+                    os.remove(owner_file)
+                    logger.info('[DB] Removed stale .pg_owner_host (was %s)', owner_host)
+            except Exception as _e:
+                logger.warning('[DB] Could not remove stale .pg_owner_host: %s', _e)
+        else:
+            logger.warning('[DB] Removing stale postmaster.pid before starting PG '
+                          '(owner: %s, us: %s)', owner_host, local_ip)
         try:
             os.remove(pidfile)
+        except FileNotFoundError:
+            # Already gone (race with another cleanup path) — fine.
+            logger.debug('[DB] postmaster.pid already removed')
         except PermissionError as e:
             if IS_WINDOWS:
                 logger.error('[DB] Cannot remove stale pidfile (file locked by another process '
@@ -741,6 +847,17 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
         else:
             logger.error('[DB] Failed to start PostgreSQL: %s', result.stderr)
             return None
+    except FileNotFoundError as e:
+        # pg_ctl / initdb binary not present — PostgreSQL is simply not
+        # installed on this host. This is a normal "PG not available →
+        # fallback to SQLite" path, NOT a bug. Log at INFO level so it's
+        # clear the system is intentionally degrading.
+        logger.info('[DB] PostgreSQL binaries not found on this host (%s). '
+                    'This is normal — tofu will automatically use SQLite. '
+                    'To enable PG (better concurrency): '
+                    '  conda install -c conda-forge postgresql>=18',
+                    e)
+        return None
     except Exception as e:
         logger.error('[DB] Failed to start PostgreSQL: %s', e, exc_info=True)
         return None

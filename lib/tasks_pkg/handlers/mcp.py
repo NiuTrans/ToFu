@@ -14,14 +14,26 @@ Registration pattern:
 
 from __future__ import annotations
 
-import time
+import types as _types
 from typing import Any
 
 from lib.log import get_logger
 from lib.mcp.types import MCP_TOOL_PREFIX
-from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round, tool_registry
+from lib.tasks_pkg.executor import tool_registry
+from lib.tasks_pkg.handlers._adapter import simple_call
 
 logger = get_logger(__name__)
+
+
+def _run_mcp(fn_name, fn_args):
+    """Executor callable for simple_call — returns tool_content string."""
+    from lib.mcp import get_bridge
+    bridge = get_bridge()
+    try:
+        return bridge.call_tool(fn_name, fn_args)
+    except Exception as e:
+        logger.error('[MCP] %s failed: %s', fn_name, e, exc_info=True)
+        return f'❌ MCP tool error: {e}'
 
 
 def handle_mcp_tool(
@@ -42,53 +54,28 @@ def handle_mcp_tool(
     This handler is invoked by the ToolRegistry fallback for any tool name
     that starts with ``mcp__``.
     """
+    # Look up server/tool display names before execution so meta is consistent
     from lib.mcp import get_bridge
-
     bridge = get_bridge()
-    tid = task.get('id', '?')[:8]
-
-    # Log the call
-    _log_args = str(fn_args)[:300]
-    logger.info('[Task %s] [MCP] %s called with args=%s', tid, fn_name, _log_args)
-
-    t0 = time.time()
-    try:
-        tool_content = bridge.call_tool(fn_name, fn_args)
-    except Exception as e:
-        elapsed = time.time() - t0
-        logger.error('[Task %s] [MCP] %s failed after %.1fs: %s',
-                     tid, fn_name, elapsed, e, exc_info=True)
-        tool_content = f'❌ MCP tool error: {e}'
-
-    elapsed = time.time() - t0
-
-    # Extract server name for display
     info = bridge.get_tool_info(fn_name)
     server_name = info['server_name'] if info else '?'
     tool_name = info['tool_name'] if info else fn_name
 
-    logger.info('[Task %s] [MCP] %s.%s completed in %.1fs (result_len=%d)',
-                tid, server_name, tool_name, elapsed, len(tool_content))
-
-    # Build metadata for frontend display
     icon = '🔌'
-    is_error = tool_content.startswith('❌')
-    badge = f'{icon} {server_name}' if not is_error else f'❌ {server_name}'
 
-    meta = _build_simple_meta(
-        fn_name, tool_content, source=f'MCP:{server_name}',
-        icon=icon,
-        title=f'{icon} {server_name}/{tool_name}',
-        snippet=tool_content[:120].replace('\n', ' '),
-        badge=badge,
-        extra={
-            'mcpServer': server_name,
-            'mcpTool': tool_name,
-            'elapsed': round(elapsed, 2),
-        },
+    def _post_build(meta, tool_content, _fn_args):
+        """Upgrade badge/title with MCP server/tool pair."""
+        is_error = isinstance(tool_content, str) and tool_content.startswith('❌')
+        meta['badge'] = f'{icon} {server_name}' if not is_error else f'❌ {server_name}'
+        meta['title'] = f'{icon} {server_name}/{tool_name}'
+
+    return simple_call(
+        task, fn_name, fn_args, rn, round_entry, tc_id,
+        executor=_run_mcp,
+        source=f'MCP:{server_name}', icon=icon, module_tag='MCP',
+        extra={'mcpServer': server_name, 'mcpTool': tool_name},
+        post_build=_post_build,
     )
-    _finalize_tool_round(task, rn, round_entry, [meta])
-    return tc_id, tool_content, False
 
 
 # ── Register the MCP fallback on the ToolRegistry ──
@@ -119,6 +106,5 @@ def _lookup_with_mcp_fallback(self, fn_name: str, round_entry=None):
 
 
 # Apply the patched lookup
-import types as _types
 tool_registry.lookup = _types.MethodType(_lookup_with_mcp_fallback, tool_registry)
 logger.debug('[MCP] ToolRegistry.lookup patched with MCP fallback')

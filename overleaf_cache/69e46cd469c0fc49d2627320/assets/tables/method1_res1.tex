@@ -1,0 +1,32 @@
+\begin{table}[t!]
+% \small
+\centering
+
+\bicaption{IATE \& Wiktionary数据集的实验结果}{Experimental results on the IATE \& Wiktionary datasets}
+\footnotesize
+    \resizebox{0.7\linewidth}{!}{
+    \begin{tabular}{l ll ll}
+        \toprule
+        \textbf{ Method} & \textbf{ BLEU} & \textbf{ CCR\%} & \textbf{ BLEU} & \textbf{ CCR\%} \\
+        \midrule
+        \textit{Dataset} & \multicolumn{2}{c}{\textit{IATE}} & \multicolumn{2}{c}{\textit{Wiktionary}} \\
+        \midrule
+        Vanilla Transformer        & 25.8 & 76.3 & 26.0 & 76.9 \\
+        Constraint Decoding  & 25.3 & 82.0 & 25.8 & \textbf{99.5} \\
+        Code-switching     & 26.0 & 94.5 & 26.3 & 93.4  \\
+        Append     & 26.0 & 92.8 & 26.9 & 90.7  \\
+        % TADA        & 27.1 & 98.0 & 26.7 & 96.8  \\
+        RTT & 27.2 & \textbf{99.6} & 27.8 & 98.3  \\
+        LLM Translation     & \textbf{32.0} & 85.4 & \textit{32.0} & 88.7  \\
+        LLM CAP & \textbf{32.0} & 96.2 & \textbf{32.1} & 97.2  \\
+        \cdashline{1-5}
+                \rowcolor{black!20}
+        TAR & \textbf{32.0\textsubscript{(+0.0)}} & \textit{98.9\textsubscript{(+2.7)}}  & \textit{32.0\textsubscript{(-0.1)}}  & \textit{98.9\textsubscript{(+1.7)}}  \\
+        % NMT Trans.     & \textit{35.3} & 85.4 & \textit{35.3} & 90.3  \\
+        % \rowcolor{black!20}
+        % \quad +Revision& \textbf{35.5\textsubscript{(+0.2)}} & 98.0\textsubscript{(+12.6)}  & \textbf{35.5\textsubscript{(+0.2)}}  & 97.9\textsubscript{(+7.6)}  \\
+        \bottomrule
+    \end{tabular} 
+    }
+    \label{tab:dinu_res}
+\end{table}

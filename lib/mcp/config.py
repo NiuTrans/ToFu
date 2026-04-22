@@ -60,10 +60,47 @@ def load_mcp_config() -> dict[str, MCPServerConfig]:
             logger.warning('[MCP:Config] Config file is not a dict, ignoring: %s', path)
             return {}
         logger.info('[MCP:Config] Loaded %d server configs from %s', len(data), path)
+        if _migrate_stale_entries(data):
+            save_mcp_config(data)
         return data
     except (json.JSONDecodeError, OSError) as e:
         logger.warning('[MCP:Config] Failed to load config: %s', e)
         return {}
+
+
+# Known stale entries from earlier versions that must be rewritten to use an
+# auto-installing runner (otherwise a FileNotFoundError is raised when the
+# bare executable is not on PATH). Preserves user-supplied env/credentials.
+_STALE_COMMAND_MIGRATIONS: dict[str, dict[str, Any]] = {
+    # Before v0.9.2 the Overleaf card shipped with `'command': 'overleaf-mcp'`
+    # which only works if the user has pip-installed the package globally.
+    # Switch to `uvx` which auto-installs from PyPI on first run.
+    'overleaf': {
+        'match_command': 'overleaf-mcp',
+        'new_command': 'uvx',
+        'new_args': ['--from', 'overleaf-mcp-plus[compile]', 'overleaf-mcp'],
+    },
+}
+
+
+def _migrate_stale_entries(config: dict[str, Any]) -> bool:
+    """Rewrite any known-stale server entries in-place. Returns True if mutated."""
+    changed = False
+    for name, rule in _STALE_COMMAND_MIGRATIONS.items():
+        entry = config.get(name)
+        if not isinstance(entry, dict):
+            continue
+        if entry.get('command') != rule['match_command']:
+            continue
+        old_cmd = entry.get('command')
+        entry['command'] = rule['new_command']
+        entry['args'] = list(rule['new_args'])
+        logger.info(
+            '[MCP:Config] Migrated stale entry %r: command %r -> %r (env preserved)',
+            name, old_cmd, rule['new_command'],
+        )
+        changed = True
+    return changed
 
 
 def save_mcp_config(config: dict[str, MCPServerConfig]) -> bool:
