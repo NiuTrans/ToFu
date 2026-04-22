@@ -205,19 +205,31 @@ required_tables = [
     'trading_intel_cache', 'trading_strategies',
 ]
 
-# Schema definitions moved from lib/database.py → lib/database/_schema.py
-_schema_file = 'lib/database/_schema.py'
-try:
-    with open(_schema_file) as f:
-        db_source = f.read()
+# Schema definitions moved from lib/database.py → lib/database/_schema_{pg,sqlite}.py.
+# We check BOTH backends: every required table must be defined in both files.
+_schema_files = ['lib/database/_schema_pg.py', 'lib/database/_schema_sqlite.py']
+_schema_sources = {}
+for _sf in _schema_files:
+    try:
+        with open(_sf) as f:
+            _schema_sources[_sf] = f.read()
+    except Exception as e:
+        logger.warning('Failed to read %s: %s', _sf, e, exc_info=True)
+        fail(f"Cannot read {_sf}: {e}")
+
+if _schema_sources:
     for table in required_tables:
-        if f"CREATE TABLE IF NOT EXISTS {table}" in db_source:
-            ok(f"Table '{table}' defined in schema")
+        # PG uses CREATE TABLE IF NOT EXISTS; SQLite also uses that form.
+        # The trading_* tables may be gated by TRADING_ENABLED at runtime but
+        # their DDL should still appear in the schema files.
+        missing_in = [
+            sf for sf, src in _schema_sources.items()
+            if f"CREATE TABLE IF NOT EXISTS {table}" not in src
+        ]
+        if not missing_in:
+            ok(f"Table '{table}' defined in both backends")
         else:
-            fail(f"Table '{table}' NOT found in schema")
-except Exception as e:
-    logger.warning('Failed to read %s: %s', _schema_file, e, exc_info=True)
-    fail(f"Cannot read {_schema_file}: {e}")
+            fail(f"Table '{table}' NOT found in: {missing_in}")
 
 
 # ═══════════════════════════════════════════════════════════════════════

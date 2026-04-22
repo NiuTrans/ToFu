@@ -150,14 +150,17 @@ class TestExtendedMicroCompact:
 
     def test_strips_old_thinking_blocks(self):
         from lib.tasks_pkg.compaction import _THINKING_HOT_TAIL, micro_compact
-        messages = self._make_messages(n_assistants=10, thinking_size=5000)
+        # Need more than _THINKING_HOT_TAIL assistants for stripping to kick in.
+        # (Stripping only applies to the cold tail beyond the hot tail.)
+        n_total = _THINKING_HOT_TAIL + 5
+        messages = self._make_messages(n_assistants=n_total, thinking_size=5000)
 
         # Count reasoning_content before
         rc_before = sum(
             1 for m in messages
             if m.get('role') == 'assistant' and m.get('reasoning_content')
         )
-        assert rc_before == 10
+        assert rc_before == n_total
 
         saved = micro_compact(messages, conv_id='test123')
         assert saved > 0
