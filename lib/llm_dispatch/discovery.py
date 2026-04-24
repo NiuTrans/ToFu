@@ -555,7 +555,9 @@ _THINKING_FORMAT_HINTS = [
     (re.compile(r'longcat', re.I),                'enable_thinking'),
     # GLM (Zhipu AI): thinking.type format
     (re.compile(r'glm', re.I),                    'thinking_type'),
-    # DeepSeek: no thinking param needed (separate model)
+    # DeepSeek V4 (Apr 2026) uses thinking.type = "enabled" (dual-mode API).
+    (re.compile(r'deepseek-v4', re.I),            'thinking_type'),
+    # DeepSeek V3 reasoner was a separate model — no thinking param needed.
     (re.compile(r'deepseek-reasoner', re.I),      'none'),
 ]
 

@@ -175,9 +175,13 @@ const _PROVIDER_TEMPLATES = [
     name: 'DeepSeek',
     base_url: 'https://api.deepseek.com',
     balance_url: 'https://api.deepseek.com/user/balance',
+    // V4 (Apr 2026): 1M ctx, dual Thinking / Non-Thinking modes. Legacy deepseek-chat /
+    // deepseek-reasoner retire 2026-07-24 and currently route to deepseek-v4-flash.
     models: [
-      { model_id: 'deepseek-chat',     capabilities: ['text'],              rpm: 60,  cost: 0.001 },
-      { model_id: 'deepseek-reasoner', capabilities: ['text', 'thinking'],  rpm: 30,  cost: 0.002 },
+      { model_id: 'deepseek-v4-pro',   capabilities: ['text', 'thinking', 'cheap'],  rpm: 30,  cost: 0.003 },
+      { model_id: 'deepseek-v4-flash', capabilities: ['text', 'thinking', 'cheap'],  rpm: 60,  cost: 0.0002 },
+      { model_id: 'deepseek-chat',     capabilities: ['text'],                       rpm: 60,  cost: 0.001 },
+      { model_id: 'deepseek-reasoner', capabilities: ['text', 'thinking'],           rpm: 30,  cost: 0.002 },
     ],
   },
   {

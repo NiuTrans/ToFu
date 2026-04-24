@@ -57,9 +57,9 @@ _MODEL_FAMILIES: dict[str, dict[str, str]] = {
         'heavy':    'qwen3-235b-a22b',
     },
     'deepseek': {
-        'light':    'deepseek-chat',
-        'standard': 'deepseek-chat',
-        'heavy':    'deepseek-reasoner',
+        'light':    'deepseek-v4-flash',
+        'standard': 'deepseek-v4-flash',
+        'heavy':    'deepseek-v4-pro',
     },
     'gemini': {
         'light':    'gemini-2.0-flash',

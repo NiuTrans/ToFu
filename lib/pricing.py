@@ -60,6 +60,10 @@ MODEL_PRICING = {
     'gpt-4o-mini':               {'input': 0.15,  'output': 0.6,   'cacheWriteMul': 1.00, 'cacheReadMul': 0.50, 'name': 'GPT-4o Mini'},
     'gpt-4-turbo':               {'input': 10.0,  'output': 30.0,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.50, 'name': 'GPT-4 Turbo'},
     'deepseek-chat':             {'input': 0.27,  'output': 1.10,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3'},
+    # DeepSeek V4 (2026-04-24) — both models have 1M ctx, dual Thinking / Non-Thinking modes.
+    # cacheReadMul derived from disclosed cache-hit pricing: Pro $0.145 / $1.74 ≈ 0.083, Flash $0.028 / $0.14 = 0.20.
+    'deepseek-v4-pro':           {'input': 1.74,  'output': 3.48,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.083, 'name': 'DeepSeek V4 Pro'},
+    'deepseek-v4-flash':         {'input': 0.14,  'output': 0.28,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.20,  'name': 'DeepSeek V4 Flash'},
     'deepseek-v3.2':             {'input': 0.28,  'output': 0.41,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2'},  # ¥2/¥3 per 1M
     # DeepSeek V3.2 mirrors on YourProvider gateway — tiered ¥2/¥4 input, ¥4/¥6 output at 32K (cheapest tier in USD)
     'deepseek-v3.2-tencent':     {'input': 0.28,  'output': 0.55,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2 (Tencent)'},  # ¥2/¥4 per 1M ≤32K

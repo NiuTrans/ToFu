@@ -870,7 +870,7 @@ const _TEMPLATES = {
   openai:     { url: 'https://api.openai.com/v1',   model: 'gpt-5.4' },
   anthropic:  { url: 'https://api.anthropic.com/v1', model: 'claude-opus-4-7' },
   bedrock:    { url: 'https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1', model: 'us.anthropic.claude-opus-4-7-v1:0' },
-  deepseek:   { url: 'https://api.deepseek.com/v1',  model: 'deepseek-chat' },
+  deepseek:   { url: 'https://api.deepseek.com/v1',  model: 'deepseek-v4-flash' },
   openrouter: { url: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-sonnet-4.6' },
   custom:     { url: '',                              model: '' },
 };
