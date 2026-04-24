@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Tofu · 真实案例 · 网页搜索 + 承认错误</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="_base.css">
+<style>
+  .demo .sub { margin-bottom: 24px; }
+  .scene-badge {
+    display: inline-block;
+    padding: 4px 14px;
+    background: rgba(74, 222, 128, 0.15);
+    border: 1px solid rgba(74, 222, 128, 0.4);
+    color: #86efac;
+    border-radius: 999px;
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 14px;
+  }
+  .bubble { font-size: 20px; padding: 16px 20px; }
+  .bubble.ai .tool {
+    font-size: 17px;
+    padding: 3px 10px;
+    margin-right: 5px;
+    line-height: 1.3;
+  }
+  .spec-box {
+    margin-top: 8px;
+    background: rgba(15, 23, 42, 0.65);
+    border: 1px solid rgba(74, 222, 128, 0.25);
+    border-radius: 12px;
+    padding: 12px 16px;
+    font-size: 18px;
+    line-height: 1.7;
+    color: #cbd5e1;
+  }
+  .spec-box b { color: #4ade80; }
+  .spec-box .x { color: #f87171; font-weight: 800; }
+  .srcs {
+    display: inline-block;
+    background: rgba(59, 130, 246, 0.15);
+    border: 1px solid rgba(59, 130, 246, 0.35);
+    color: #93c5fd;
+    border-radius: 8px;
+    padding: 2px 10px;
+    font-size: 15px;
+    margin-right: 6px;
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+<div class="poster demo">
+  <div class="scene-badge">真实案例 · #4 · 多引擎搜索 + 源头核查</div>
+  <h2 class="title">会<span class="accent">搜</span>、会<span class="accent">核</span><br>敢认错的 AI</h2>
+  <p class="sub">问:京东方 X3 vs Q10+ 哪个基材更好? · 3 轮才问到真相</p>
+
+  <div class="chat">
+    <div class="bubble user">
+      京东方 X3 和 Q10 Plus 哪个基材更好?
+    </div>
+
+    <div class="bubble ai">
+      <span class="tool">web_search</span>
+      Q10 Plus 更好,X3 → Q9 → Q10 → Q10+ 是代际关系,X3 是 2023 旧料。
+    </div>
+
+    <div class="bubble user">你怎么不去<b>读一下本地搜索结果</b>?</div>
+
+    <div class="bubble ai">
+      <span class="tool">read_files ×4</span>
+      对不起,只看了摘要 —— 我把百度百科、新浪财经、网易的原文都读了,修正如下:
+      <div class="srcs">baidu.com</div><div class="srcs">sina</div><div class="srcs">163.com</div><div class="srcs">qq.com</div>
+    </div>
+
+    <div class="bubble user">X3 不是也很新吗?你确定搜对了?</div>
+
+    <div class="bubble ai">
+      <span class="tool">web_search ×2</span>
+      <span class="tool">read_files</span>
+      你说得对,是我错了 —— X3 和 Q10+ 是<b>同代</b>发光材料,发布<b>只差一天</b>(2025.10.13 vs 10.14),属两条并行定制线:
+      <div class="spec-box">
+        <b>X 系列</b> / 一加·OPPO 东方屏: X1→X2→X3(一加 15,165Hz 高刷)<br>
+        <b>Q 系列</b> / vivo·iQOO: Q9→Q10→Q10+(vivo X300,4500nit)<br>
+        <span class="x">✗</span> 有两篇 AI 拼凑的博文把发光材料说成"4K 显示器",<b>没采用</b>。
+      </div>
+    </div>
+  </div>
+
+  <div class="footer-note">
+    不是"总是对" · 而是<b>愿意读全文 · 愿意认错 · 愿意给源头</b>
+  </div>
+</div>
+</body>
+</html>

@@ -3631,7 +3631,18 @@ function _renderMcpCatalog() {
       html += '<button class="btn btn-primary btn-xs" onclick="_mcpOpenInstallModal(\'' + escapeHtml(e.id) + '\', true)" title="编辑凭据并重新连接（已有凭据会回填为默认；留空则沿用）">连接</button>';
       html += '<button class="btn btn-secondary btn-xs" onclick="_mcpPurge(\'' + escapeHtml(e.id) + '\')" title="彻底删除配置，包括已保存的凭据">清除凭据</button>';
     } else {
-      html += '<button class="btn btn-primary btn-xs" onclick="_mcpOpenInstallModal(\'' + escapeHtml(e.id) + '\')">安装</button>';
+      // If the catalog entry has NO required env vars, skip the modal
+      // entirely and one-click-install with the built-in defaults. The
+      // modal is only useful when the user must fill something in
+      // (API keys, tokens, etc.) — showing a form full of optional
+      // "PATH TO EXECUTABLE / TIMEOUT / MAX CONCURRENCY" tweaks for
+      // servers like Hope just creates confusion.
+      var _needsInput = (e.env_specs || []).some(function(s) { return s.required; });
+      if (_needsInput) {
+        html += '<button class="btn btn-primary btn-xs" onclick="_mcpOpenInstallModal(\'' + escapeHtml(e.id) + '\')">安装</button>';
+      } else {
+        html += '<button class="btn btn-primary btn-xs" onclick="_mcpQuickInstall(\'' + escapeHtml(e.id) + '\')" title="无需配置，点击直接安装并连接；如需修改默认值可在安装后点“连接”">安装</button>';
+      }
     }
     html += '</div></div>';  // action + footer
     html += '</div>';  // card
@@ -3662,6 +3673,50 @@ function _renderMcpInstalled() {
 }
 
 // ── Install Modal ──
+
+/**
+ * One-click install: POST /api/mcp/catalog/install with an empty env so
+ * the backend uses every env_spec's default. Intended for catalog entries
+ * that have zero `required: true` env_specs (e.g. Hope, where all four
+ * fields — HOPE_BIN, HOPE_MCP_TIMEOUT, HOPE_MCP_MAX_PARALLEL,
+ * HOPE_MCP_DRY_RUN_DEFAULT — have sensible built-in defaults). Skips the
+ * modal entirely. Users who want to tweak the defaults can still do so
+ * by clicking the "连接" (Reconnect) button after installation, which
+ * opens the same modal pre-filled.
+ *
+ * NOTE: We intentionally do NOT show a confirmation dialog — the whole
+ * point is that a one-click install should feel instant. Status is
+ * surfaced via the grid's own connect/disconnect animation and the
+ * app-level debugLog, same as the "Connect All" button.
+ */
+async function _mcpQuickInstall(serverId) {
+  var entry = _mcpCatalog.find(function(e) { return e.id === serverId; });
+  if (!entry) return;
+  debugLog('[MCP] Quick-installing ' + serverId + ' (no required env)…', 'info');
+  try {
+    var r = await fetch(apiUrl('/api/mcp/catalog/install'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: serverId, env: {} }),
+    });
+    var data = await r.json();
+    if (data.ok) {
+      debugLog('[MCP] Installed ' + serverId + ': ' + (data.tools_count || 0) + ' tools', 'success');
+      await _populateMcpTab();
+    } else {
+      // Installation failed — fall back to opening the modal so the user
+      // can inspect the default values and/or override them. This is the
+      // safety net for "hope binary not on PATH" kinds of errors.
+      debugLog('[MCP] Quick install failed (' + (data.error || 'unknown') + '); opening install modal for ' + serverId, 'warning');
+      alert('一键安装失败: ' + (data.error || '未知错误') + '\n\n将打开高级设置，可手动调整参数后重试。');
+      _mcpOpenInstallModal(serverId);
+    }
+  } catch (e) {
+    debugLog('[MCP] Quick install error for ' + serverId + ': ' + e.message, 'error');
+    alert('一键安装失败: ' + e.message + '\n\n将打开高级设置，可手动调整参数后重试。');
+    _mcpOpenInstallModal(serverId);
+  }
+}
 
 function _mcpOpenInstallModal(serverId, isReinstall) {
   var entry = _mcpCatalog.find(function(e) { return e.id === serverId; });
@@ -3695,25 +3750,42 @@ function _mcpOpenInstallModal(serverId, isReinstall) {
   }
   document.getElementById('mcpInstallStatus').style.display = 'none';
 
-  // Build env fields
+  // Build env fields. Split into required + optional so the modal shows
+  // only what the user MUST configure by default, and hides the
+  // advanced knobs (timeouts, paths, …) behind a <details> toggle. For
+  // Hope this reduces the visible form from 4 confusing fields to one
+  // clear "username" prompt.
   var fieldsHtml = '';
   var specs = entry.env_specs || [];
+  var storedKeys = (entry.stored_env_keys || []);
+
+  function _renderSpec(spec) {
+    var inputType = (spec.secret !== false) ? 'password' : 'text';
+    var hasStored = storedKeys.indexOf(spec.key) !== -1;
+    var html = '<div class="stg-field">';
+    html += '<label>' + escapeHtml(spec.label || spec.key);
+    if (spec.required) html += ' <span style="color:#ef4444;">*</span>';
+    if (hasStored) html += ' <span style="color:#10b981;font-size:11px;">● 已保存</span>';
+    html += '</label>';
+    var ph = hasStored ? '已保存，留空则沿用；填写即覆盖' : (spec.hint || '');
+    html += '<input type="' + inputType + '" class="mcp-env-input" data-key="' + escapeHtml(spec.key) + '" data-has-stored="' + (hasStored ? '1' : '0') + '" placeholder="' + escapeHtml(ph) + '">';
+    html += '</div>';
+    return html;
+  }
+
   if (specs.length === 0) {
     fieldsHtml = '<p class="mcp-install-noenv">无需配置，直接安装即可。</p>';
   } else {
-    var storedKeys = (entry.stored_env_keys || []);
-    specs.forEach(function(spec) {
-      var inputType = (spec.secret !== false) ? 'password' : 'text';
-      var hasStored = storedKeys.indexOf(spec.key) !== -1;
-      fieldsHtml += '<div class="stg-field">';
-      fieldsHtml += '<label>' + escapeHtml(spec.label || spec.key);
-      if (spec.required) fieldsHtml += ' <span style="color:#ef4444;">*</span>';
-      if (hasStored) fieldsHtml += ' <span style="color:#10b981;font-size:11px;">● 已保存</span>';
-      fieldsHtml += '</label>';
-      var ph = hasStored ? '已保存，留空则沿用；填写即覆盖' : (spec.hint || '');
-      fieldsHtml += '<input type="' + inputType + '" class="mcp-env-input" data-key="' + escapeHtml(spec.key) + '" data-has-stored="' + (hasStored ? '1' : '0') + '" placeholder="' + escapeHtml(ph) + '">';
-      fieldsHtml += '</div>';
-    });
+    var required = specs.filter(function(s) { return s.required; });
+    var optional = specs.filter(function(s) { return !s.required; });
+    required.forEach(function(spec) { fieldsHtml += _renderSpec(spec); });
+    if (optional.length > 0) {
+      fieldsHtml += '<details class="mcp-advanced-toggle" style="margin-top:12px;">';
+      fieldsHtml += '<summary style="cursor:pointer;color:var(--text-muted);font-size:12px;user-select:none;">▸ 高级设置（可选，' + optional.length + ' 项）</summary>';
+      fieldsHtml += '<div style="margin-top:8px;">';
+      optional.forEach(function(spec) { fieldsHtml += _renderSpec(spec); });
+      fieldsHtml += '</div></details>';
+    }
   }
   document.getElementById('mcpInstallFields').innerHTML = fieldsHtml;
 

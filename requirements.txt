@@ -14,4 +14,27 @@ playwright>=1.40
 Pillow>=10.0
 python-pptx>=0.6.21
 lxml>=4.9
+# BeautifulSoup — HTML fallback parser in lib/fetch/html_extract.py.
+# Usually pulled in transitively by trafilatura, but listed here so it's
+# guaranteed even if trafilatura's deps change.
+beautifulsoup4>=4.12
+# python-dateutil — robust date parsing for HTML publish-date extraction
+# in lib/fetch/html_extract.py (imported eagerly, no ImportError fallback).
+python-dateutil>=2.8
+# Office document parsing — lib/doc_parser.py handles .docx/.pptx/.xlsx/
+# .doc/.xls/.ppt uploads. Each has a graceful ImportError fallback, but
+# shipping them by default means uploads Just Work.
+python-docx>=1.0
+openpyxl>=3.1
+xlrd>=2.0
+olefile>=0.46
 mcp>=1.0
+# PDF parsing stack — pymupdf (fitz) is used across lib/pdf_parser, routes/paper,
+# and lib/fetch for fast local PDF text/image extraction. pymupdf4llm is an
+# optional LLM-oriented Markdown extractor built on top of pymupdf.
+pymupdf>=1.24
+pymupdf4llm>=0.0.17
+# uv powers several MCP servers (via `uvx`) — see lib/mcp/client.py. Installing
+# it here guarantees uvx is on PATH inside the conda env without requiring a
+# separate curl|sh bootstrap.
+uv>=0.4

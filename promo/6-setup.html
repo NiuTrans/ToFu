@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Tofu · 一键安装</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="_base.css">
+</head>
+<body>
+<div class="poster setup">
+  <h2 class="title"><em>1 条</em>命令<br>把 AI 搬回自己电脑</h2>
+  <p class="sub">Conda-forge 全家桶 · 跨平台 · 零 sudo · 零配置</p>
+
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <h3>安装(Linux / macOS)</h3>
+        <p>自动装 Miniforge → 建 tofu env → 拉所有依赖</p>
+        <code>curl -fsSL ...install.sh | bash</code>
+        <p class="tip">※ Windows 用 <b>install.ps1</b>,任意平台 <b>python install.py</b> 也行。</p>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <h3>填 API Key</h3>
+        <p>浏览器打开 <b>localhost:15000</b> → 设置 → Providers</p>
+        <div class="howto">
+          <div class="line"><i class="n">1</i>点「Add from template」按钮,有 OpenAI / Claude / Gemini / DeepSeek / Qwen 等十几家模板</div>
+          <div class="line"><i class="n">2</i>本地跑的 vLLM / Ollama → 选 Custom,填你的 base URL</div>
+          <div class="line"><i class="n">3</i><b>一个厂商多把 Key 自动轮询</b>,跨厂商按实时延迟 &amp; 错误率智能调度</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <h3>开干</h3>
+        <p>聊天、搜资料、写代码、读论文、改 Overleaf —— <b>全在这一个网页里</b></p>
+        <code>docker compose up -d  &nbsp;# 或 Docker 一条也行</code>
+      </div>
+    </div>
+  </div>
+
+  <div class="final">
+    GitHub 搜 <span>rangehow/ToFu</span><br>
+    <span style="font-size:26px; color:#6b21a8; font-weight:600;">点个 Star,就是最大的支持</span>
+  </div>
+</div>
+</body>
+</html>

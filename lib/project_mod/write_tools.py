@@ -535,7 +535,12 @@ def tool_apply_diffs(base_path, edits, conv_id=None, task_id=None):
 
         ra = bool(edit.get('replace_all', False))
 
-        bp, resolved_rp = _resolve_base(base_path, rp)
+        try:
+            bp, resolved_rp = _resolve_base(base_path, rp)
+        except ValueError as _rve:
+            fail_count += 1
+            results.append(f'[{i}] ❌ {rp}: {_rve}')
+            continue
         result = _apply_one_diff(bp, resolved_rp, search, replace, desc, conv_id, replace_all=ra, task_id=task_id)
 
         if result['ok']:
@@ -786,7 +791,12 @@ def tool_insert_contents(base_path, edits, conv_id=None, task_id=None):
             fail_count += 1
             continue
 
-        bp, resolved_rp = _resolve_base(base_path, rp)
+        try:
+            bp, resolved_rp = _resolve_base(base_path, rp)
+        except ValueError as _rve:
+            fail_count += 1
+            results.append(f'[{i}] ❌ {rp}: {_rve}')
+            continue
         result = _insert_one(bp, resolved_rp, anchor, content, position, desc, conv_id, task_id=task_id)
 
         if result['ok']:

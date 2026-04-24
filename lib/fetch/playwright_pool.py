@@ -273,8 +273,14 @@ class PlaywrightPool:
             return None
 
         except Exception as e:
+            # Self-recovering fallback: caller treats None as "Playwright failed"
+            # and falls back to HTTP/trafilatura extraction. Common causes are
+            # renderer crashes (Target crashed), navigation timeouts, and hostile
+            # JS — all expected for a subset of pages. Keep at debug so
+            # error.log stays clean; upgrade to warning only if it blocks the
+            # whole pipeline (which it doesn't).
             ename = type(e).__name__
-            logger.warning('🎭 Playwright error (%s) — %s: %s', ename, url[:80], e, exc_info=True)
+            logger.debug('🎭 Playwright error (%s) — %s: %s', ename, url[:80], e, exc_info=True)
             return None
         finally:
             if context:

@@ -717,7 +717,7 @@ CATALOG: list[CatalogEntry] = [
         'icon': '🍃',
         'category': CAT_RESEARCH,
         'command': 'uvx',
-        'args': ['--from', 'overleaf-mcp-plus[compile]', 'overleaf-mcp'],
+        'args': ['--from', 'overleaf-mcp-plus[compile]>=0.1.3', 'overleaf-mcp'],
         'env_specs': [
             {
                 'key': 'OVERLEAF_SESSION',

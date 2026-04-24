@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Tofu · 自主 Agent &amp; Swarm</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="_base.css">
+</head>
+<body>
+<div class="poster tools">
+  <h2 class="title"><em>3 + N</em> 协作<br>不只是聊天机器人</h2>
+  <p class="sub">Endpoint 模式 3 角色闭环 + Swarm 并行多 Agent · 真正能「干活」的 AI</p>
+
+  <div class="pipeline">
+    <div class="role-row">
+      <div class="role-card planner">
+        <div class="tag">PLANNER 规划</div>
+        <h3>拆解需求</h3>
+        <p>把你的一句话重写成带<b>验收标准</b>的结构化任务简报</p>
+      </div>
+      <div class="role-card worker">
+        <div class="tag">WORKER 执行</div>
+        <h3>调用工具</h3>
+        <p>搜索 / 读文件 / 改代码 / 跑命令 —— 一路跑到交付</p>
+      </div>
+      <div class="role-card critic">
+        <div class="tag">CRITIC 评审</div>
+        <h3>对齐 checklist</h3>
+        <p>按规划逐项检查;不达标就反馈,<b>Worker 再跑一轮</b>,最多 10 轮</p>
+      </div>
+    </div>
+
+    <div class="pipeline-arrow">↓  规划 → 执行 → 评审 → 不过关就回到执行  ↓</div>
+
+    <div class="swarm-box">
+      <h3>◆ Swarm 模式 —— 任务大到一个 Agent 扛不下来?</h3>
+      <div class="swarm-agents">
+        <div class="swarm-agent"><span class="role-ico">M</span>Master 主编<br>拆任务 · 汇总</div>
+        <div class="swarm-agent"><span class="role-ico">R</span>Researcher<br>搜资料 · 读文档</div>
+        <div class="swarm-agent"><span class="role-ico">C</span>Coder<br>写代码 · 改项目</div>
+        <div class="swarm-agent"><span class="role-ico">W</span>Writer<br>整理输出 · 写报告</div>
+        <div class="swarm-agent"><span class="role-ico">V</span>Reviewer<br>只读复核 · 挑错</div>
+        <div class="swarm-agent"><span class="role-ico">⋯</span>自定义角色<br>按需命名</div>
+      </div>
+      <p style="font-size:18px; color:#4b5563; line-height:1.55; margin-top:14px;">
+        流式 <b>DAG 调度器</b> —— 依赖一就绪立刻起飞,不等整轮完成;共享 artifact store 传数据;
+        全局信号量限流,避免 API 429。
+      </p>
+    </div>
+  </div>
+
+  <div class="cta">
+    会<b>规划、反省、分工</b>的 AI,<br>
+    一次能把整个项目跑下来
+  </div>
+</div>
+</body>
+</html>

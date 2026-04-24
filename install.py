@@ -64,8 +64,30 @@ CONDA_PYTHON_DEPS = [
     "playwright>=1.40",
     "pillow>=10.0",
     "python-pptx>=0.6.21",
-    "lxml>=4.9",
+    "lxml>=5.3",
+    # BS4 — HTML fallback parser in lib/fetch/html_extract.py
+    "beautifulsoup4>=4.12",
+    # python-dateutil — eagerly imported by lib/fetch/html_extract.py
+    "python-dateutil>=2.8",
+    # Office document parsers for lib/doc_parser.py (upload pipeline)
+    "python-docx>=1.0",
+    "openpyxl>=3.1",
+    "xlrd>=2.0",
+    "olefile>=0.46",
     "mcp>=1.0",
+    # PDF parsing — fitz/pymupdf is required by lib/pdf_parser and routes/paper
+    "pymupdf>=1.24",
+    # uv / uvx — used by lib/mcp/client.py to launch MCP servers
+    "uv>=0.4",
+]
+
+# Pip-only dependencies — packages that conda-forge does not ship. These are
+# installed via `python -m pip install` INTO the conda env after the conda
+# solve, using conda-forge's pymupdf as the underlying native dep.
+PIP_ONLY_DEPS = [
+    # pymupdf4llm is a thin LLM-oriented Markdown extractor on top of pymupdf.
+    # Not available on conda-forge (as of 2026-04) — must come from PyPI.
+    "pymupdf4llm>=0.0.17",
 ]
 
 # Rootless Chromium shared-lib dependencies (Linux only). Matches the packages
@@ -293,13 +315,14 @@ def update_conda(conda: str):
     info(f"Current: {old_str}")
 
     res = run(
-        [conda, "update", "-n", "base", "-c", "conda-forge", "-y", "conda"],
+        [conda, "update", "-n", "base", "-c", "conda-forge",
+         "--override-channels", "-y", "conda"],
         check=False, capture=True,
     )
     if res.returncode != 0:
         warn("conda self-update failed — this is NOT fatal but may cause solver issues later")
         warn("If the next steps hang on 'Solving environment', re-run after:")
-        warn(f"  {conda} update -n base -c conda-forge -y conda")
+        warn(f"  {conda} update -n base -c conda-forge --override-channels -y conda")
     else:
         new_ver = run([conda, "--version"], check=False, capture=True)
         new_str = new_ver.stdout.strip() if new_ver.returncode == 0 else "latest"
@@ -313,8 +336,8 @@ def update_conda(conda: str):
     # conda-forge envs (hundreds of packages with interlocking deps).
     info("Ensuring libmamba solver is installed and active...")
     res = run(
-        [conda, "install", "-n", "base", "-c", "conda-forge", "-y",
-         "conda-libmamba-solver"],
+        [conda, "install", "-n", "base", "-c", "conda-forge",
+         "--override-channels", "-y", "conda-libmamba-solver"],
         check=False, capture=True,
     )
     if res.returncode == 0:
@@ -356,7 +379,8 @@ def _install_git_via_conda(conda: str) -> str | None:
     """Install git into base env via conda-forge when missing on PATH."""
     info("git not found — installing via conda-forge into base env...")
     res = run(
-        [conda, "install", "-n", "base", "-c", "conda-forge", "-y", "git"],
+        [conda, "install", "-n", "base", "-c", "conda-forge",
+         "--override-channels", "-y", "git"],
         check=False, capture=True,
     )
     if res.returncode != 0:
@@ -414,8 +438,8 @@ def setup_env(conda: str, env_name: str, py_ver: str,
         info("(tip: re-run with --reset-env to wipe and rebuild it from scratch)")
     else:
         info(f"Creating env '{env_name}' with Python {py_ver}...")
-        run([conda, "create", "-n", env_name, "-c", "conda-forge", "-y",
-             f"python={py_ver}"])
+        run([conda, "create", "-n", env_name, "-c", "conda-forge",
+             "--override-channels", "-y", f"python={py_ver}"])
         ok(f"Env '{env_name}' created")
 
     py = _env_python(conda, env_name)
@@ -442,7 +466,15 @@ _PIP_DIST_NAMES = [
     "pillow", "Pillow",
     "python-pptx",
     "lxml",
+    "beautifulsoup4", "bs4",
+    "python-dateutil", "dateutil",
+    "python-docx", "docx",
+    "openpyxl",
+    "xlrd",
+    "olefile",
     "mcp",
+    "pymupdf", "PyMuPDF",
+    "uv",
 ]
 
 
@@ -493,16 +525,39 @@ def install_deps(conda: str, env_name: str, install_dir: str, py: str):
     # --force-reinstall: make sure conda actually re-lays-down the files even
     # if its metadata still thinks the package is satisfied (common right
     # after a pip-uninstall — conda's view of the env can be stale).
-    run([conda, "install", "-n", env_name, "-c", "conda-forge", "-y",
-         "--force-reinstall", *CONDA_PYTHON_DEPS])
+    run([conda, "install", "-n", env_name, "-c", "conda-forge",
+         "--override-channels", "-y", "--force-reinstall", *CONDA_PYTHON_DEPS])
     ok("Python dependencies installed from conda-forge")
+
+    # Install pip-only deps (e.g. pymupdf4llm) into the conda env. Use the
+    # env's own python so they land inside $CONDA_PREFIX/lib/pythonX.Y/
+    # site-packages alongside conda-installed pymupdf.
+    if PIP_ONLY_DEPS:
+        info(f"Installing pip-only deps (not on conda-forge): {', '.join(PIP_ONLY_DEPS)}")
+        res = run([py, "-m", "pip", "install", "--no-deps", "--upgrade", *PIP_ONLY_DEPS],
+                  check=False, capture=True)
+        if res.returncode == 0:
+            ok("Pip-only deps installed")
+        else:
+            # Retry without --no-deps in case pymupdf4llm needs a transitive
+            # helper not satisfied by conda's pymupdf alone.
+            warn("pip install --no-deps failed — retrying with dependency resolution")
+            res = run([py, "-m", "pip", "install", "--upgrade", *PIP_ONLY_DEPS],
+                      check=False, capture=True)
+            if res.returncode == 0:
+                ok("Pip-only deps installed (with dependency resolution)")
+            else:
+                warn("Pip-only deps install failed — some PDF features may be degraded")
+                print(res.stdout)
+                print(res.stderr)
 
     # PostgreSQL + psycopg2 (optional but recommended for concurrency).
     # tofu auto-falls back to SQLite if PG is missing — but installing it
     # here means users with 100+ concurrent sessions get better performance
     # out of the box. The PG instance is rootless and auto-bootstraps.
     info("Installing PostgreSQL + psycopg2 from conda-forge (for multi-user concurrency)...")
-    res = run([conda, "install", "-n", env_name, "-c", "conda-forge", "-y",
+    res = run([conda, "install", "-n", env_name, "-c", "conda-forge",
+               "--override-channels", "-y",
                "postgresql>=16", "psycopg2>=2.9"], check=False, capture=True)
     if res.returncode == 0:
         ok("PostgreSQL + psycopg2 installed (will auto-bootstrap on first run)")
@@ -546,7 +601,8 @@ def check_sqlite(py: str):
 
 def install_search_tools(conda: str, env_name: str):
     step("Installing ripgrep + fd-find (fast code/file search)")
-    res = run([conda, "install", "-n", env_name, "-c", "conda-forge", "-y",
+    res = run([conda, "install", "-n", env_name, "-c", "conda-forge",
+               "--override-channels", "-y",
                "ripgrep", "fd-find"], check=False, capture=True)
     if res.returncode == 0:
         ok("ripgrep + fd-find installed via conda-forge")
@@ -567,8 +623,8 @@ def install_playwright(conda: str, env_name: str, py: str):
     if IS_LINUX:
         info("Installing Chromium shared-lib deps from conda-forge (rootless)...")
         res = run(
-            [conda, "install", "-n", env_name, "-c", "conda-forge", "-y",
-             *CHROMIUM_CONDA_DEPS],
+            [conda, "install", "-n", env_name, "-c", "conda-forge",
+             "--override-channels", "-y", *CHROMIUM_CONDA_DEPS],
             check=False, capture=True,
         )
         if res.returncode == 0:

@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Tofu · 真实案例 · 后台报错排查</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="_base.css">
+<style>
+  .demo .sub { margin-bottom: 24px; }
+  .scene-badge {
+    display: inline-block;
+    padding: 4px 14px;
+    background: rgba(74, 222, 128, 0.15);
+    border: 1px solid rgba(74, 222, 128, 0.4);
+    color: #86efac;
+    border-radius: 999px;
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 14px;
+  }
+  .bubble { font-size: 20px; padding: 16px 20px; }
+  .bubble.ai .tool {
+    font-size: 17px;
+    padding: 3px 10px;
+    margin-right: 5px;
+    line-height: 1.3;
+  }
+  .stack {
+    background: rgba(15, 23, 42, 0.65);
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 16px;
+    color: #cbd5e1;
+    line-height: 1.55;
+    margin-top: 6px;
+    font-family: "NotoSansSC", "Courier New", monospace;
+  }
+  .stack .k { color: #f87171; }
+  .verdict {
+    margin-top: 8px;
+    padding: 12px 16px;
+    background: rgba(74, 222, 128, 0.1);
+    border-left: 4px solid #4ade80;
+    border-radius: 10px;
+    font-size: 19px;
+    color: #e2e8f0;
+    line-height: 1.6;
+  }
+  .verdict b { color: #4ade80; }
+  .diff-box {
+    background: rgba(15, 23, 42, 0.65);
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin-top: 8px;
+    font-size: 17px;
+    color: #cbd5e1;
+    line-height: 1.7;
+    font-family: "NotoSansSC", "Courier New", monospace;
+  }
+  .diff-box .rm { color: #f87171; }
+  .diff-box .add { color: #4ade80; }
+</style>
+</head>
+<body>
+<div class="poster demo">
+  <div class="scene-badge">真实案例 · #3 · 长期记忆 + 代码排错</div>
+  <h2 class="title">甩一段报错<br><span class="accent">AI 查明不用修</span></h2>
+  <p class="sub">日志分级修正 · 自动沉淀经验到 memory</p>
+
+  <div class="chat">
+    <div class="bubble user">
+      后台这些报错啥原因?需要处理吗?
+      <div class="stack">
+<span class="k">Playwright:</span> Page.content: Target crashed<br>
+  at playwright_pool.py:266<br>
+<span class="k">JSONDecodeError:</span> Expecting ',' at char 126<br>
+  at tool_dispatch.py::_repair_json
+      </div>
+    </div>
+
+    <div class="bubble ai">
+      <span class="tool">search_memories ×2</span>
+      <span class="tool">read_files</span>
+      <div class="verdict">
+        两个都是 <b>已处理的良性 warning</b> —— 无需修:<br>
+        ① Chromium renderer 偶尔 crash,下一级 HTTP fetcher 自动 fallback<br>
+        ② JSON 流式偶尔断在字符串里,<b>_repair_json 已恢复成功</b>
+      </div>
+    </div>
+
+    <div class="bubble user">
+      如果不影响为啥还设成 error 级?只在需要我处理的时候再报 error 吧。
+    </div>
+
+    <div class="bubble ai">
+      <span class="tool">read_files</span>
+      <span class="tool">apply_diff ×2</span>
+      <span class="tool">create_memory</span>
+      对,按 <code style="font-size:17px;color:#fbbf24;">CLAUDE.md §2.2</code>:良性 fallback 应该是 debug。已降级:
+      <div class="diff-box">
+<span class="rm">- logger.warning(...)  # playwright _do_fetch</span><br>
+<span class="add">+ logger.debug(...)    # expected; HTTP fallback runs</span><br><br>
+<span class="rm">- logger.warning(...)  # _repair_json success</span><br>
+<span class="add">+ logger.debug(...)    # recovery OK; call proceeds</span>
+      </div>
+      未恢复的分支仍保留 warning —— 那种才需要你关注。<b>已存一条 memory,下次遇到同类报错直接命中。</b>
+    </div>
+  </div>
+
+  <div class="footer-note">
+    AI 不仅修 Bug,还<b>沉淀经验</b> · 下次再遇到同类问题直接秒答
+  </div>
+</div>
+</body>
+</html>

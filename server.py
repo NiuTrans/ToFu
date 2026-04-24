@@ -245,6 +245,34 @@ for _sub in ('trafilatura.xml', 'trafilatura.core', 'trafilatura.htmlprocessing'
 logging.getLogger('werkzeug').addFilter(_QuietPollFilter())
 
 
+# ══════════════════════════════════════════
+#  Startup progress — visible to terminal
+# ══════════════════════════════════════════
+# The console log handler only emits WARNING+ during boot, so `logger.info`
+# calls stay invisible until the final banner.  Early startup stages (DB
+# init on FUSE, critical-import validation of trafilatura/pymupdf, MCP
+# auto-connect, Feishu bot) can each take several seconds, making the
+# terminal *look* hung.  _boot() writes directly to stderr AND the logger
+# so the user sees progress in real time while the audit trail is still
+# captured in logs/app.log.
+
+_BOOT_T0 = time.time()
+_boot_logger = logging.getLogger('server.boot')
+
+def _boot(msg, *args):
+    """Print a startup progress line to stderr AND the app log."""
+    try:
+        line = msg % args if args else msg
+    except Exception:
+        line = msg
+    elapsed = time.time() - _BOOT_T0
+    sys.stderr.write('\033[36m[boot +%5.1fs]\033[0m %s\n' % (elapsed, line))
+    sys.stderr.flush()
+    _boot_logger.info('[boot +%.1fs] %s', elapsed, line)
+
+
+_boot('🫧 Tofu starting up — loading core modules…')
+
 from lib.database import close_db, init_db, warmup_db
 
 
@@ -719,9 +747,11 @@ except Exception as _bundle_err:
 
 with app.app_context():
     try:
+        _boot('Initialising database (this may take a moment on FUSE/NFS)…')
         _server_log.info('Initialising database (SQLite)...')
         init_db()
         warmup_db()
+        _boot('Database ready.')
         _server_log.info('Database ready (SQLite).')
         # ── Clean up stale tasks from previous crashes ──
         # Must run after DB init but before serving requests.
@@ -765,9 +795,11 @@ _CRITICAL_IMPORTS = [
     'lib.llm_client',               # LLM API client
 ]
 
+_boot('Validating critical imports (trafilatura, pymupdf, …)…')
 _server_log.info('Validating critical imports...')
 _import_failures = []
 for _mod_name in _CRITICAL_IMPORTS:
+    _boot('  • importing %s', _mod_name)
     try:
         __import__(_mod_name)
     except ImportError as _ie:
@@ -784,6 +816,7 @@ if _import_failures:
     _server_log.critical(_msg)
     raise ImportError(_msg)
 
+_boot('All critical imports validated.')
 _server_log.info('All critical imports validated successfully.')
 
 
@@ -972,6 +1005,7 @@ if __name__ == '__main__':
             )
             sys.exit(1)
 
+    _boot('Instance lock acquired (PID=%d)', os.getpid())
     _server_log.info('[Lock] Instance lock acquired (PID=%d, lock=%s)', os.getpid(), _lock_path)
 
     # ── Graceful SIGTERM handler ──
@@ -988,6 +1022,22 @@ if __name__ == '__main__':
     from lib.compat import safe_signal
     safe_signal(signal.SIGTERM, _sigterm_handler)
     _server_log.info('[Server] SIGTERM handler registered for graceful shutdown')
+
+    # ── Register PG shutdown hook ──
+    # This runs ONLY in the server.py process — not in short-lived Python
+    # subprocesses that import lib.database. That's important because
+    # agent-invoked `python3 -c "..."` commands (via the run_command tool)
+    # import lib.database at module load, which bootstraps PG; if their
+    # atexit hook stopped PG, they'd kill the server's own database while
+    # the server is still running. See stop_local_pg_if_owned() docstring.
+    try:
+        import atexit as _atexit
+        from lib.database._core import stop_local_pg_if_owned
+        _atexit.register(stop_local_pg_if_owned)
+        _server_log.info('[Server] PG shutdown hook registered '
+                         '(set CHATUI_STOP_PG_ON_EXIT=0 to disable)')
+    except Exception as _e:
+        _server_log.warning('[Server] Failed to register PG shutdown hook: %s', _e)
 
     # ── Auto-detect free port if preferred is occupied ──
     port = _find_free_web_port(start=preferred_port)
@@ -1021,9 +1071,11 @@ if __name__ == '__main__':
     WSGIRequestHandler.send_header = _patched_send_header
     logging.getLogger('server').info('Applied Werkzeug SSE streaming fix (HTTP/1.1 + suppress Connection:close)')
 
+    _boot('Starting background workers…')
     _start_background_workers()
 
     # ── MCP auto-connect (reconnect all enabled MCP servers) ──
+    _boot('Configuring MCP auto-connect…')
     _mcp_config = {}
     try:
         from lib.mcp.client import get_bridge
@@ -1055,6 +1107,7 @@ if __name__ == '__main__':
         _server_log.warning('[MCP] Auto-connect setup failed: %s', _mcp_err, exc_info=True)
 
     # ── DolphinFS keepalive (prevents FUSE mount from going stale) ──
+    _boot('Starting FS keepalive…')
     try:
         from lib.fs_keepalive import start_fs_keepalive
         start_fs_keepalive()
@@ -1062,6 +1115,7 @@ if __name__ == '__main__':
         _server_log.warning('Failed to start FS keepalive: %s', e, exc_info=True)
 
     # ── Cross-datacenter DolphinFS detection ──
+    _boot('Probing cross-datacenter FUSE latency…')
     try:
         from lib.cross_dc import init_cross_dc_detection
         init_cross_dc_detection()
@@ -1069,6 +1123,7 @@ if __name__ == '__main__':
         _server_log.warning('Failed to start cross-DC detection: %s', e, exc_info=True)
 
     # ── Feishu Bot (optional, needs FEISHU_APP_ID + FEISHU_APP_SECRET) ──
+    _boot('Checking Feishu Bot…')
     feishu_ok = False
     try:
         from lib.feishu import start_bot as start_feishu_bot, ENABLED as FEISHU_ENABLED
@@ -1109,9 +1164,11 @@ if __name__ == '__main__':
         _banner_lines.append('  🔑  First visit: http://HOST:PORT/?token=<TOKEN>')
     else:
         _banner_lines.append('  🔓  Tunnel Auth: OFF (set TUNNEL_TOKEN to enable)')
+    _banner_lines.append('  ⏱  Boot time: %.1fs' % (time.time() - _BOOT_T0))
     _banner_lines.append('=' * 52)
     _banner = '\n'.join(_banner_lines)
     _server_log.info('Server starting\n%s', _banner)
+    _boot('Ready — handing off to Werkzeug (Ctrl+C to stop).')
     # Always print the startup banner to terminal regardless of console
     # log level — users need to see the URL to open the app.
     sys.stderr.write('\n' + _banner + '\n\n')

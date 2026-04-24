@@ -71,35 +71,72 @@ def load_mcp_config() -> dict[str, MCPServerConfig]:
 # Known stale entries from earlier versions that must be rewritten to use an
 # auto-installing runner (otherwise a FileNotFoundError is raised when the
 # bare executable is not on PATH). Preserves user-supplied env/credentials.
-_STALE_COMMAND_MIGRATIONS: dict[str, dict[str, Any]] = {
+#
+# Each entry is a list of rules (matched in order). A rule is keyed by the
+# server-config 'name' and matches if either:
+#   - the config's 'command' field equals rule['match_command'], OR
+#   - the full 'args' list equals rule['match_args'] (when present).
+# If the rule's 'new_args' list differs from the current 'args', it is
+# applied (so we can evolve the args when the upstream package changes).
+_STALE_COMMAND_MIGRATIONS: dict[str, list[dict[str, Any]]] = {
     # Before v0.9.2 the Overleaf card shipped with `'command': 'overleaf-mcp'`
     # which only works if the user has pip-installed the package globally.
     # Switch to `uvx` which auto-installs from PyPI on first run.
-    'overleaf': {
-        'match_command': 'overleaf-mcp',
-        'new_command': 'uvx',
-        'new_args': ['--from', 'overleaf-mcp-plus[compile]', 'overleaf-mcp'],
-    },
+    #
+    # Between v0.9.2 and v0.9.3 the args list included playwright (unused, ~100 MB).
+    # The 0.1.3 release of `overleaf-mcp-plus` drops that extra. Force an
+    # args refresh so users get the slimmer install automatically.
+    'overleaf': [
+        {
+            'match_command': 'overleaf-mcp',
+            'new_command': 'uvx',
+            'new_args': ['--from', 'overleaf-mcp-plus[compile]>=0.1.3', 'overleaf-mcp'],
+        },
+        {
+            # uvx entry from 0.9.2 — refresh to pin >=0.1.3 so new installs
+            # pull the slimmer (playwright-free) release.
+            'match_command': 'uvx',
+            'match_args': ['--from', 'overleaf-mcp-plus[compile]', 'overleaf-mcp'],
+            'new_command': 'uvx',
+            'new_args': ['--from', 'overleaf-mcp-plus[compile]>=0.1.3', 'overleaf-mcp'],
+        },
+    ],
 }
+
+
+def _rule_matches(entry: dict[str, Any], rule: dict[str, Any]) -> bool:
+    if 'match_command' in rule and entry.get('command') != rule['match_command']:
+        return False
+    if 'match_args' in rule and entry.get('args') != rule['match_args']:
+        return False
+    return True
 
 
 def _migrate_stale_entries(config: dict[str, Any]) -> bool:
     """Rewrite any known-stale server entries in-place. Returns True if mutated."""
     changed = False
-    for name, rule in _STALE_COMMAND_MIGRATIONS.items():
+    for name, rules in _STALE_COMMAND_MIGRATIONS.items():
         entry = config.get(name)
         if not isinstance(entry, dict):
             continue
-        if entry.get('command') != rule['match_command']:
-            continue
-        old_cmd = entry.get('command')
-        entry['command'] = rule['new_command']
-        entry['args'] = list(rule['new_args'])
-        logger.info(
-            '[MCP:Config] Migrated stale entry %r: command %r -> %r (env preserved)',
-            name, old_cmd, rule['new_command'],
-        )
-        changed = True
+        for rule in rules:
+            if not _rule_matches(entry, rule):
+                continue
+            new_cmd = rule['new_command']
+            new_args = list(rule['new_args'])
+            # Skip if already up-to-date
+            if entry.get('command') == new_cmd and entry.get('args') == new_args:
+                continue
+            old_cmd = entry.get('command')
+            old_args = entry.get('args')
+            entry['command'] = new_cmd
+            entry['args'] = new_args
+            logger.info(
+                '[MCP:Config] Migrated %r: %r %s -> %r %s (env preserved)',
+                name, old_cmd, old_args, new_cmd, new_args,
+            )
+            changed = True
+            break  # only apply one rule per entry per run
     return changed
 
 

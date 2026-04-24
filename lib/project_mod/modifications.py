@@ -1,4 +1,26 @@
-"""Modification history, undo/redo, and session tracking."""
+"""Modification history, undo/redo, and session tracking.
+
+★ 2026-04-22 — Per-session-dir storage (multi-project concurrency safe)
+────────────────────────────────────────────────────────────────────────
+Previously this module kept a *single* global list ``_state['modifications']``.
+When the UI switched active projects, ``_start_new_session()`` wiped that
+list and repopulated it from the newly-active project's file — while
+background tasks belonging to the *old* project were still running and
+calling ``_record_modification()``.  The result: those background writes
+would flush the wrong (swapped-in) list into the old project's file,
+silently clobbering history.
+
+The robust fix below makes **disk the source of truth per session_dir**
+and keeps an in-memory cache keyed by ``session_dir`` instead of a single
+global list.  Every mutation goes through ``_locked_rmw`` (read-modify-
+write under the lock) so concurrent tasks operating on *different*
+roots cannot interfere with each other, and concurrent tasks on the
+*same* root still serialise correctly.
+
+``_state['modifications']`` / ``_state['sessionId']`` remain as a
+*read-only* projection of the currently-active primary root for the
+sake of ``get_state()`` / UI badges; nothing writes through them.
+"""
 import hashlib
 import json
 import os
@@ -14,6 +36,19 @@ from lib.project_mod.config import (
 )
 
 logger = get_logger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Per-session-dir in-memory cache
+# ═══════════════════════════════════════════════════════════════════
+# Maps absolute session_dir → list[mod dict].  Loaded on demand from
+# the session's modifications.json.  All access is guarded by _lock.
+_mods_cache: dict[str, list] = {}
+
+# Tracks session_dirs we have already loaded from disk in this process
+# (even if the resulting list was empty).  Prevents redundant disk reads
+# while still allowing a cold-path load for fresh session_dirs.
+_loaded_dirs: set[str] = set()
 
 
 def _atomic_json_write(filepath, data):
@@ -58,41 +93,168 @@ def _get_session_dir(base_path):
     return session_dir
 
 
+# Session dirs whose stale-tmp sweep has already run in this process.
+# We only clean at cold-load time so an in-flight _atomic_json_write
+# from a concurrent thread cannot have its .tmp rug-pulled.
+_stale_cleaned: set[str] = set()
+
+# Only remove .tmp files older than this — crash artifacts are much
+# older; in-flight atomic writes are sub-second.
+_STALE_TMP_AGE_SECONDS = 60.0
+
+
+def _clean_stale_tmp(session_dir):
+    """Remove leftover atomic-write temp files from previous crashes.
+
+    Safety rails:
+      - Only runs **once per session_dir per process** (see ``_stale_cleaned``).
+      - Only deletes files older than :data:`_STALE_TMP_AGE_SECONDS` so a
+        concurrent in-flight :func:`_atomic_json_write` on the same
+        session_dir cannot have its fresh .tmp file deleted before
+        ``os.replace`` runs.
+
+    Caller must hold ``_lock`` (we touch the shared ``_stale_cleaned`` set).
+    """
+    if session_dir in _stale_cleaned:
+        return
+    _stale_cleaned.add(session_dir)
+    try:
+        now = time.time()
+        for name in os.listdir(session_dir):
+            if not (name.startswith('.modifications_') and name.endswith('.tmp')):
+                continue
+            stale = os.path.join(session_dir, name)
+            try:
+                age = now - os.path.getmtime(stale)
+                if age < _STALE_TMP_AGE_SECONDS:
+                    continue  # likely in-flight, don't touch
+                os.unlink(stale)
+                logger.debug('Cleaned up stale temp file (age=%.0fs): %s', age, name)
+            except OSError as e:
+                logger.debug('Could not remove stale temp %s: %s', name, e)
+    except OSError as e:
+        logger.debug('Failed to list session dir for cleanup %s: %s', session_dir, e)
+
+
+def _load_from_disk(session_dir):
+    """Load modifications list from disk.  Returns ``[]`` on missing/corrupt.
+
+    Side-effect: renames a corrupt file to ``<name>.corrupt`` so subsequent
+    loads don't keep failing.  Caller must hold ``_lock``.
+    """
+    session_file = os.path.join(session_dir, 'modifications.json')
+    if not os.path.exists(session_file):
+        return []
+    try:
+        with open(session_file) as f:
+            data = json.load(f)
+        mods = data.get('modifications', [])
+        if not isinstance(mods, list):
+            logger.warning('[Modifications] %s: modifications is not a list, ignoring', session_file)
+            return []
+        return mods
+    except Exception as e:
+        logger.error('[Modifications] failed to load %s (corrupt file?): %s',
+                     session_file, e, exc_info=True)
+        corrupt_path = session_file + '.corrupt'
+        try:
+            os.replace(session_file, corrupt_path)
+            logger.warning('[Modifications] renamed corrupt file to %s', corrupt_path)
+        except OSError as rename_err:
+            logger.warning('[Modifications] could not rename corrupt file: %s', rename_err)
+        return []
+
+
+def _cache_get(session_dir):
+    """Return the cached mods list for ``session_dir``, loading on cold miss.
+
+    Caller must hold ``_lock``.  Returns a *live* reference to the cached
+    list — callers that mutate it must also call ``_flush_to_disk``.
+    """
+    if session_dir in _loaded_dirs:
+        return _mods_cache.setdefault(session_dir, [])
+    mods = _load_from_disk(session_dir)
+    _mods_cache[session_dir] = mods
+    _loaded_dirs.add(session_dir)
+    if mods:
+        logger.info('[Modifications] loaded %d pending records from %s',
+                    len(mods), os.path.basename(session_dir))
+    return mods
+
+
+def _flush_to_disk(session_dir, mods):
+    """Atomically persist ``mods`` to ``session_dir``'s modifications.json.
+
+    Removes the file when the list is empty.  Caller must hold ``_lock``.
+    """
+    session_file = os.path.join(session_dir, 'modifications.json')
+    try:
+        if mods:
+            _atomic_json_write(session_file, {'modifications': mods})
+        else:
+            if os.path.exists(session_file):
+                os.remove(session_file)
+    except Exception as e:
+        logger.error('[Modifications] failed to save %s: %s',
+                     session_file, e, exc_info=True)
+
+
+def _sync_primary_view(session_dir):
+    """Mirror the cached mods for ``session_dir`` into ``_state`` so that
+    ``get_state()`` / the UI badge reflects the currently-active primary
+    root.  ``_state['modifications']`` is intentionally **read-only** from
+    the rest of the codebase — nothing should ever mutate it directly.
+    Caller must hold ``_lock``.
+    """
+    mods = _mods_cache.get(session_dir, [])
+    # Store a shallow copy so UI iteration can't tear on subsequent
+    # background mutations.
+    _state['sessionId'] = session_dir
+    _state['modifications'] = list(mods)
+
+
+def _locked_rmw(session_dir, mutator):
+    """Atomic read-modify-write on ``session_dir``'s mod list.
+
+    ``mutator(mods)`` receives the cached list and may mutate it in-place
+    (or return a replacement list, which will overwrite the cache entry).
+    The lock is held for the entire cache-read → mutate → disk-flush
+    window so concurrent callers on the same session_dir see a consistent
+    view.  Different session_dirs do not contend on each other beyond the
+    short critical section that touches the shared ``_mods_cache`` dict.
+
+    Returns whatever ``mutator`` returns (useful for getters).
+    """
+    with _lock:
+        mods = _cache_get(session_dir)
+        ret = mutator(mods)
+        # Mutator may return a new list (replacement semantics) or None
+        # (in-place mutation).
+        if ret is not None and isinstance(ret, list) and ret is not mods:
+            _mods_cache[session_dir] = ret
+            mods = ret
+        _flush_to_disk(session_dir, mods)
+        # Keep the primary-root view fresh if this session_dir happens to
+        # match the currently-active primary.  This is a pure mirror —
+        # it does not drive persistence.
+        if _state.get('sessionId') == session_dir:
+            _state['modifications'] = list(mods)
+        return ret
+
+
 def _start_new_session(base_path):
-    """Start a new modification session."""
+    """Warm the cache for ``base_path``'s session_dir and point the
+    primary-view mirror at it.  Non-destructive: other session_dirs'
+    caches are untouched, so background tasks still running against a
+    previously-active project continue to record safely.
+    """
     session_dir = _get_session_dir(base_path)
     if not session_dir:
         return None
-    session_file = os.path.join(session_dir, 'modifications.json')
-    # Clean up stale .tmp files from previously crashed atomic writes
-    try:
-        for name in os.listdir(session_dir):
-            if name.startswith('.modifications_') and name.endswith('.tmp'):
-                stale = os.path.join(session_dir, name)
-                os.unlink(stale)
-                logger.debug('Cleaned up stale temp file: %s', name)
-    except OSError as e:
-        logger.debug('Failed to clean stale temp files: %s', e)
     with _lock:
-        _state['sessionId'] = session_dir
-        _state['modifications'] = []
-    # Load existing modifications if any
-    if os.path.exists(session_file):
-        try:
-            with open(session_file) as f:
-                data = json.load(f)
-            with _lock:
-                _state['modifications'] = data.get('modifications', [])
-            logger.info('Loaded %d pending modifications', len(_state["modifications"]))
-        except Exception as e:
-            logger.error('Failed to load modifications (corrupt file?): %s', e, exc_info=True)
-            # Rename corrupt file so we don't fail on every restart
-            corrupt_path = session_file + '.corrupt'
-            try:
-                os.replace(session_file, corrupt_path)
-                logger.warning('Renamed corrupt modifications file to %s', corrupt_path)
-            except OSError as rename_err:
-                logger.warning('Could not rename corrupt file: %s', rename_err)
+        _clean_stale_tmp(session_dir)    # safe: one-shot + age-gated
+        _cache_get(session_dir)          # force load if cold
+        _sync_primary_view(session_dir)
     return session_dir
 
 
@@ -109,7 +271,7 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
         return False
 
     mod = {
-        'type': mod_type,  # 'write_file', 'apply_diff', or 'run_command'
+        'type': mod_type,
         'path': path,
         'timestamp': time.time(),
     }
@@ -117,9 +279,10 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
         mod['convId'] = conv_id
     if task_id:
         mod['taskId'] = task_id
+
     # ★ Record workspace-root name so the frontend can display a
     #   'rootname:path' prefix for modifications made outside the primary
-    #   root in multi-root workspaces. base_path is the absolute root
+    #   root in multi-root workspaces.  base_path is the absolute root
     #   path the tool was actually executed against (result of
     #   _resolve_base / resolve_namespaced_path).
     try:
@@ -131,9 +294,9 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
                     break
     except Exception as e:
         logger.debug('[Modifications] root-name lookup failed for %s: %s', base_path, e)
+
     if mod_type == 'write_file':
         if original_content is not None:
-            # Store original content for new files, or None if file didn't exist
             mod['originalContent'] = original_content
             mod['existed'] = True
         else:
@@ -141,40 +304,51 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
     elif mod_type == 'apply_diff':
         mod['reversePatch'] = reverse_patch  # {search, replace}
     elif mod_type == 'run_command':
-        # run_command changes: original_content=None means file was created (didn't exist),
-        # original_content=<str|bytes> means file was deleted or modified (save for restore)
+        # run_command changes: original_content=None means file was created
+        # (didn't exist), original_content=<str|bytes> means file was deleted
+        # or modified (save for restore).
         if original_content is not None:
             mod['originalContent'] = original_content
             mod['existed'] = True
         else:
             mod['existed'] = False
 
-    with _lock:
-        _state['modifications'].append(mod)
-        # Save to disk (atomic write to prevent corruption on crash)
-        session_file = os.path.join(session_dir, 'modifications.json')
-        try:
-            _atomic_json_write(session_file, {'modifications': _state['modifications']})
-        except Exception as e:
-            logger.error('Failed to save modifications: %s', e, exc_info=True)
+    def _append(mods):
+        mods.append(mod)
 
-    logger.debug('Recorded modification: %s %s (conv=%s task=%s)', mod_type, path, conv_id or '?', task_id or '?')
+    try:
+        _locked_rmw(session_dir, _append)
+    except Exception as e:
+        logger.error('[Modifications] record failed type=%s path=%s session=%s: %s',
+                     mod_type, path, os.path.basename(session_dir), e, exc_info=True)
+        return False
+
+    logger.debug('Recorded modification: %s %s (conv=%s task=%s session=%s)',
+                 mod_type, path, conv_id or '?', task_id or '?',
+                 os.path.basename(session_dir))
     return True
 
 
 def get_modifications(base_path, conv_id=None):
     """Get list of pending modifications for undo, optionally filtered by conv_id."""
+    session_dir = _get_session_dir(base_path)
+    if not session_dir:
+        return []
     with _lock:
-        mods = list(_state['modifications'])
+        mods = list(_cache_get(session_dir))
     if conv_id:
         mods = [m for m in mods if m.get('convId') == conv_id]
     return mods
 
 
 def get_conv_ids_with_modifications(base_path):
-    """Get set of conversation IDs that have pending modifications."""
+    """Get list of conversation IDs that have pending modifications."""
+    session_dir = _get_session_dir(base_path)
+    if not session_dir:
+        return []
     with _lock:
-        return list(set(m.get('convId') for m in _state['modifications'] if m.get('convId')))
+        mods = list(_cache_get(session_dir))
+    return list({m.get('convId') for m in mods if m.get('convId')})
 
 
 def _undo_modifications_list(base_path, modifications):
@@ -221,7 +395,6 @@ def _undo_modifications_list(base_path, modifications):
                 else:
                     failed.append({'path': path, 'reason': 'No reverse patch available'})
             elif mod_type == 'run_command':
-                # run_command changes: undo by reversing the filesystem change
                 if not mod.get('existed', True):
                     # File was CREATED by the command → delete it
                     if os.path.exists(target):
@@ -258,19 +431,13 @@ def _undo_modifications_list(base_path, modifications):
     return undone, failed
 
 
+# Kept for backward compatibility — external callers (if any) still import it.
+# Internally, mutations should go through _locked_rmw.
 def _save_modifications(session_dir):
-    """Save current modifications to disk (atomic write)."""
-    session_file = os.path.join(session_dir, 'modifications.json')
-    try:
-        with _lock:
-            mods = list(_state['modifications'])
-        if mods:
-            _atomic_json_write(session_file, {'modifications': mods})
-        else:
-            if os.path.exists(session_file):
-                os.remove(session_file)
-    except Exception as e:
-        logger.error('Failed to save modifications: %s', e, exc_info=True)
+    """Flush the in-memory cache for ``session_dir`` to disk."""
+    with _lock:
+        mods = list(_cache_get(session_dir))
+        _flush_to_disk(session_dir, mods)
 
 
 def undo_conv_modifications(base_path, conv_id):
@@ -280,25 +447,25 @@ def undo_conv_modifications(base_path, conv_id):
         return {'ok': False, 'error': 'No session found'}
 
     with _lock:
-        all_mods = list(_state['modifications'])
+        conv_mods = [m for m in _cache_get(session_dir) if m.get('convId') == conv_id]
 
-    conv_mods = [m for m in all_mods if m.get('convId') == conv_id]
     if not conv_mods:
-        return {'ok': True, 'message': 'No modifications to undo for this conversation', 'undone': 0, 'failed': 0}
+        return {'ok': True, 'message': 'No modifications to undo for this conversation',
+                'undone': 0, 'failed': 0}
 
     undone, failed = _undo_modifications_list(base_path, conv_mods)
 
-    # Remove undone mods from state, keep others
-    with _lock:
-        _state['modifications'] = [m for m in _state['modifications'] if m.get('convId') != conv_id]
-    _save_modifications(session_dir)
+    def _filter(mods):
+        return [m for m in mods if m.get('convId') != conv_id]
+
+    _locked_rmw(session_dir, _filter)
 
     return {
         'ok': True,
         'undone': len(undone),
         'failed': len(failed),
         'convId': conv_id,
-        'details': {'undone': undone, 'failed': failed}
+        'details': {'undone': undone, 'failed': failed},
     }
 
 
@@ -313,25 +480,25 @@ def undo_task_modifications(base_path, task_id):
         return {'ok': False, 'error': 'No session found'}
 
     with _lock:
-        all_mods = list(_state['modifications'])
+        task_mods = [m for m in _cache_get(session_dir) if m.get('taskId') == task_id]
 
-    task_mods = [m for m in all_mods if m.get('taskId') == task_id]
     if not task_mods:
-        return {'ok': True, 'message': 'No modifications to undo for this task', 'undone': 0, 'failed': 0}
+        return {'ok': True, 'message': 'No modifications to undo for this task',
+                'undone': 0, 'failed': 0}
 
     undone, failed = _undo_modifications_list(base_path, task_mods)
 
-    # Remove undone mods from state, keep others
-    with _lock:
-        _state['modifications'] = [m for m in _state['modifications'] if m.get('taskId') != task_id]
-    _save_modifications(session_dir)
+    def _filter(mods):
+        return [m for m in mods if m.get('taskId') != task_id]
+
+    _locked_rmw(session_dir, _filter)
 
     return {
         'ok': True,
         'undone': len(undone),
         'failed': len(failed),
         'taskId': task_id,
-        'details': {'undone': undone, 'failed': failed}
+        'details': {'undone': undone, 'failed': failed},
     }
 
 
@@ -342,22 +509,21 @@ def undo_all_modifications(base_path):
         return {'ok': False, 'error': 'No session found'}
 
     with _lock:
-        modifications = list(_state['modifications'])
+        modifications = list(_cache_get(session_dir))
 
     if not modifications:
         return {'ok': True, 'message': 'No modifications to undo', 'undone': 0, 'failed': 0}
 
     undone, failed = _undo_modifications_list(base_path, modifications)
 
-    # Clear all modifications
-    with _lock:
-        _state['modifications'] = []
-    _save_modifications(session_dir)
+    def _clear(mods):
+        return []
+
+    _locked_rmw(session_dir, _clear)
 
     return {
         'ok': True,
         'undone': len(undone),
         'failed': len(failed),
-        'details': {'undone': undone, 'failed': failed}
+        'details': {'undone': undone, 'failed': failed},
     }
-

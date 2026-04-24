@@ -408,34 +408,83 @@ def _has_explicit_false_override_unlocked(pk: str) -> bool:
     return ov is False
 
 
+def _rank_for_last_resort_unlocked(pk: str) -> tuple:
+    """Ranking tuple for last-resort selection. Higher = "healthier".
+
+    Caller MUST hold _lock.  Ordering criteria (highest to lowest weight):
+      1. ``not exhausted``  — never-exhausted beats billing/streak-exhausted.
+      2. ``success_rate``   — higher is better.
+      3. ``success count``  — breaks ties between two 0%-rate keys.
+      4. ``-consecutive_429`` — fewer recent 429s is better.
+      5. ``-failure count`` — fewer hard failures is better.
+    """
+    entry = _cache['stats'].get(pk) or {}
+    s = int(entry.get('success') or 0)
+    f = int(entry.get('failure') or 0)
+    cons429 = int(entry.get('consecutive_429') or 0)
+    exhausted = bool(entry.get('exhausted'))
+    total = s + f
+    sr = (s / total) if total else 0.0
+    return (not exhausted, sr, s, -cons429, -f)
+
+
+def _pick_last_resort_unlocked(siblings: list):
+    """Pick the single pair-key to keep enabled as last-resort, or None.
+
+    Caller MUST hold _lock.  *siblings* is the list of pair-keys under a
+    single ``provider_id`` (see :func:`_list_siblings`).
+
+    Returns:
+        - ``None`` if any sibling is raw-enabled (no last-resort needed).
+        - ``None`` if the user has explicitly disabled every sibling
+          (``override=False``) — respect the user's choice.
+        - Otherwise, the pair-key with the "healthiest" stats per
+          :func:`_rank_for_last_resort_unlocked`.  Ties broken by later
+          index in the configured ``siblings`` list (i.e. the last key wins)
+          so behaviour is deterministic and matches the user's intuition
+          of "the LAST key is kept".
+    """
+    # If any sibling is genuinely healthy, nobody needs promotion.
+    eligible = []   # list of (idx, pk) tuples for ranking
+    for idx, sib in enumerate(siblings):
+        if _raw_enabled_unlocked(sib):
+            return None
+        if _has_explicit_false_override_unlocked(sib):
+            continue  # user said no — respect it
+        eligible.append((idx, sib))
+    if not eligible:
+        return None
+
+    # Ranking: healthier wins; higher idx breaks ties ("last key").
+    best_idx, best_pk = max(
+        eligible,
+        key=lambda item: _rank_for_last_resort_unlocked(item[1]) + (item[0],),
+    )
+    return best_pk
+
+
 def _is_last_resort_unlocked(pk: str, siblings: list) -> bool:
-    """True iff *pk* would be auto-disabled but is its provider's last key.
+    """True iff *pk* is THE ONE key chosen to stay alive as last-resort.
 
     Caller MUST hold _lock.  *siblings* is the full list of pair-keys under
-    the same provider_id (see :func:`_list_siblings`).  The key is "last
-    resort" when:
-      - raw check is False, AND
-      - the user has NOT explicitly overridden to False, AND
-      - every OTHER sibling is also raw-disabled (or there are no others).
+    the same provider_id (see :func:`_list_siblings`).  Returns False for
+    the keys that would remain disabled — we deliberately keep only ONE
+    alive so the user isn't stuck with (for example) an invalid key soaking
+    up requests alongside a merely-rate-limited one.
 
     A provider with a single configured key falls under this rule too —
-    its sole key never auto-disables.
+    its sole key becomes the "winner" of a 1-element contest and stays
+    enabled unless the user has explicitly overridden to False.
     """
     if _raw_enabled_unlocked(pk):
         return False
     if _has_explicit_false_override_unlocked(pk):
         return False
-    # Consider only siblings that are actually configured in the current
-    # provider list.  If *pk* itself is missing from siblings (e.g. stats
-    # refer to a removed key), treat it conservatively as NOT last-resort.
+    # pk must actually be configured under its provider; if stats refer to
+    # a removed key, don't resurrect it.
     if pk not in siblings:
         return False
-    for sib in siblings:
-        if sib == pk:
-            continue
-        if _raw_enabled_unlocked(sib):
-            return False
-    return True
+    return _pick_last_resort_unlocked(siblings) == pk
 
 
 def is_key_enabled(provider_id: str, key_name: str) -> bool:
@@ -448,8 +497,11 @@ def is_key_enabled(provider_id: str, key_name: str) -> bool:
          leave the provider with zero usable keys (users retain full
          control).
       3. Otherwise, the "last-resort" guard: if every sibling key under
-         the same ``provider_id`` is also raw-disabled, keep this key
-         enabled and log at INFO level (once per day per pair).
+         the same ``provider_id`` is raw-disabled, keep exactly ONE of
+         them enabled — the "healthiest" per
+         :func:`_rank_for_last_resort_unlocked`, with ties broken toward
+         the last configured key.  All other siblings stay disabled.
+         Logs once per (day, pk) at INFO level when a key is promoted.
       4. Otherwise return False (normal auto-disable).
     """
     if not key_name:

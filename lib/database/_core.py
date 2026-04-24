@@ -819,7 +819,13 @@ def warmup_db():
 # ═══════════════════════════════════════════════════════════════════════
 
 def shutdown_pool():
-    """Drain connection pool and stop PG if we own it."""
+    """Drain the connection pool. Called from atexit in ANY process that
+    imports this module — including short-lived Python subprocesses spawned
+    via run_command. Intentionally does NOT stop the PG server, because
+    a subprocess inheriting connections must not kill the long-lived PG
+    used by the parent server.py. PG lifecycle is owned by server.py itself
+    via ``stop_local_pg_if_owned()`` below.
+    """
     if _BACKEND == 'pg':
         with _conn_pool_lock:
             drained = 0
@@ -845,6 +851,44 @@ def shutdown_pool():
             logger.info('[DB] SQLite connection pool drained (%d connections)', drained)
         else:
             logger.debug('[DB] Shutdown called (SQLite pool was empty)')
+
+
+def stop_local_pg_if_owned():
+    """Stop the locally-running PG server if this process owns it.
+
+    Invoked from ``server.py``'s shutdown hook — NOT from an atexit hook in
+    this module — so short-lived Python subprocesses that import
+    ``lib.database`` (e.g. agent-invoked ``python3 -c ...`` commands) never
+    accidentally stop the PG server used by the long-running Flask app.
+
+    Controlled by env var ``CHATUI_STOP_PG_ON_EXIT`` (default ``1``):
+      - ``1`` / unset: stop local PG when server.py exits
+      - ``0``: leave PG running (faster dev-restart cycles, but requires
+        manual ``pg_ctl stop`` before switching hosts on shared FUSE pgdata)
+
+    Never stops a REMOTE PG — that belongs to another machine.
+    """
+    if _BACKEND != 'pg':
+        return
+    _stop_on_exit = os.environ.get('CHATUI_STOP_PG_ON_EXIT', '1').lower() \
+        not in ('0', 'false', 'no', 'off')
+    if not _stop_on_exit:
+        logger.info('[DB] CHATUI_STOP_PG_ON_EXIT=0 — leaving local PG running')
+        return
+    try:
+        from lib.database._bootstrap import (
+            _stop_pg as _boot_stop_pg,
+            is_pg_owned_locally,
+        )
+        if is_pg_owned_locally():
+            logger.info('[DB] Stopping local PostgreSQL (we own it) — '
+                        'set CHATUI_STOP_PG_ON_EXIT=0 to keep it running '
+                        'across server.py restarts')
+            _boot_stop_pg(_PGDATA)
+        else:
+            logger.debug('[DB] Not stopping PG on exit (remote or attached, not owned by us)')
+    except Exception as e:
+        logger.warning('[DB] Failed to stop local PG on exit: %s', e)
 
 
 atexit.register(shutdown_pool)

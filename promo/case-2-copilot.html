@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Tofu · 真实案例 · 项目 Co-Pilot 改 Bug</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="_base.css">
+<style>
+  .demo .sub { margin-bottom: 24px; }
+  .scene-badge {
+    display: inline-block;
+    padding: 4px 14px;
+    background: rgba(74, 222, 128, 0.15);
+    border: 1px solid rgba(74, 222, 128, 0.4);
+    color: #86efac;
+    border-radius: 999px;
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 14px;
+  }
+  .bubble { font-size: 20px; padding: 16px 20px; }
+  .bubble.ai .tool {
+    font-size: 17px;
+    padding: 3px 10px;
+    margin-right: 5px;
+    line-height: 1.3;
+  }
+  .endpoint-strip {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+    margin-bottom: -4px;
+  }
+  .ep-tag {
+    flex: 1;
+    text-align: center;
+    font-size: 15px;
+    font-weight: 800;
+    padding: 6px 4px;
+    border-radius: 10px;
+  }
+  .ep-planner { background: rgba(59, 130, 246, 0.18); color: #93c5fd; border: 1px solid rgba(59,130,246,0.4); }
+  .ep-worker  { background: rgba(16, 185, 129, 0.18); color: #6ee7b7; border: 1px solid rgba(16,185,129,0.4); }
+  .ep-critic  { background: rgba(245, 158, 11, 0.18); color: #fcd34d; border: 1px solid rgba(245,158,11,0.4); }
+  .checklist {
+    margin-top: 8px;
+    font-size: 18px;
+    line-height: 1.7;
+    color: #cbd5e1;
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid rgba(74, 222, 128, 0.25);
+    border-radius: 12px;
+    padding: 12px 18px;
+  }
+  .checklist .ck { color: #4ade80; font-weight: 800; margin-right: 6px; }
+</style>
+</head>
+<body>
+<div class="poster demo">
+  <div class="scene-badge">真实案例 · #2 · 自主 Endpoint 模式</div>
+  <h2 class="title">一个 Bug 描述<br><span class="accent">AI 自己拆解 + 反省</span></h2>
+  <p class="sub">lib/key_stats.py · 8 项验收 checklist · Planner → Worker → Critic</p>
+
+  <div class="chat">
+    <div class="bubble user">
+      key 自动关闭机制 —— 如果只剩最后一把可用了就别关,不然用户会错的莫名其妙。
+    </div>
+
+    <div class="bubble ai">
+      <span class="endpoint-strip">
+        <span class="ep-tag ep-planner">PLANNER</span>
+        <span class="ep-tag ep-worker">WORKER</span>
+        <span class="ep-tag ep-critic">CRITIC</span>
+      </span>
+      <span class="tool">search_memories</span>
+      <span class="tool">grep_search ×3</span>
+      <span class="tool">read_files ×6</span>
+      Planner 先把需求拆成 <b>8 项</b>带验收标准的任务简报(含日志格式、跨 provider 隔离、badge UI、测试用例)。
+    </div>
+
+    <div class="bubble ai">
+      <span class="tool">apply_diff ×5</span>
+      <span class="tool">run_command</span>
+      Worker 改完 <code style="font-size:17px;color:#fbbf24;">lib/key_stats.py</code> + <code style="font-size:17px;color:#fbbf24;">static/js/settings.js</code>,加了新测试 <code style="font-size:17px;color:#fbbf24;">test_key_stats_last_resort.py</code>。
+      <div class="checklist">
+        <span class="ck">✓</span>_list_siblings + 30s TTL 缓存<br>
+        <span class="ck">✓</span>单 key provider 永不自停<br>
+        <span class="ck">✓</span>跨 provider 不串扰<br>
+        <span class="ck">✓</span>UI 显示"保留为最后备选"<br>
+        <span class="ck">✓</span>5 个单元测试全绿
+      </div>
+    </div>
+
+    <div class="bubble user">不对啊,截图里明明这把 key 是坏的为啥也保留了?</div>
+
+    <div class="bubble ai">
+      <span class="tool">apply_diff ×4</span>
+      <span class="tool">run_command</span>
+      CRITIC 识别出原来是<b>保留了所有</b>候选 —— 改成<b>只保留最健康的一把</b>(按 success_rate / success_count / -429 排序);加了还原你那张截图的 <code style="font-size:17px;color:#fbbf24;">scenario_b4</code> 用例锁死行为。
+    </div>
+  </div>
+
+  <div class="footer-note">
+    <b>一次需求</b>,1 轮反省 · AI 自己把 Bug 定位到具体排序函数
+  </div>
+</div>
+</body>
+</html>

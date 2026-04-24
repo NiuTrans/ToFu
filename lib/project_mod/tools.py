@@ -1514,14 +1514,32 @@ def _resolve_base(base_path, rel_path):
             from lib.project_mod.config import resolve_namespaced_path
             try:
                 return resolve_namespaced_path(rel_path)
-            except ValueError:
-                # ★ Strip the 'name:' prefix to prevent the colon from
-                #   leaking into filesystem paths (colons are invalid in
-                #   most path contexts and cause Popen ENOENT errors).
+            except ValueError as _ve:
+                # ★ DO NOT silently strip the 'name:' prefix. Stripping
+                #   it converts a model typo ('CDP:foo' when meant 'cdp:foo',
+                #   or a stale root that was cleared by set_project) into a
+                #   DATA-LOSS bug: the write tools fall back to the primary
+                #   root and silently overwrite whatever file with the same
+                #   relative name exists there.  See the
+                #   chatui_create_project_frontend_sync_bug memo.
+                #
+                #   Instead, raise a sentinel that path-taking tools surface
+                #   as an explicit error to the model.  The only legitimate
+                #   case for a colon in a path is a Windows drive letter
+                #   ('C:\...'), which is already excluded by isabs() above.
                 _name, _, _rest = rel_path.partition(':')
-                rel_path = _rest if _rest else '.'
-                logger.debug('[Tools] namespaced path %s: not a known root, '
-                             'stripped prefix → rel_path=%s', _name, rel_path)
+                logger.warning('[Tools] namespaced path %r: unknown root %r — '
+                               'refusing to fall through to primary '
+                               '(would risk silent clobber). %s',
+                               rel_path, _name, _ve)
+                raise ValueError(
+                    f'Unknown workspace root "{_name}" in path "{rel_path}". '
+                    f'Either (1) call create_project(path=...) first to register '
+                    f'"{_name}" as a root, (2) use a known root name (see the '
+                    f'multi-root table shown at session start), or (3) use a '
+                    f'plain relative path without any colon prefix (will resolve '
+                    f'under the primary root).'
+                ) from _ve
 
     # ── Multi-root cross-check for path-misrouting ──
     # When the model forgets the 'rootname:' prefix in a multi-root
@@ -1562,6 +1580,20 @@ def _resolve_base(base_path, rel_path):
 
     return base_path, rel_path
 
+
+
+
+def _resolve_base_safe(base_path, rel_path):
+    """Same as _resolve_base but returns (None, error_string) on ValueError.
+
+    Used by execute_tool for tools that must surface the error as a tool
+    result to the model, rather than bubbling as an exception.
+    """
+    try:
+        return _resolve_base(base_path, rel_path), None
+    except ValueError as e:
+        logger.debug('[Tools] _resolve_base_safe rejected %r: %s', rel_path, e)
+        return None, str(e)
 
 def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwargs):
     # ★ Multi-root: resolve 'rootname:relative/path' for path-based tools
@@ -1699,7 +1731,10 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
         return f"❌ create_project failed: {result.get('error', 'unknown error')}"
     # ★ Write tools — pass conv_id + task_id for per-round undo
     elif fn_name == 'write_file':
-        bp, rp = _resolve_base(base_path, fn_args.get('path', ''))
+        try:
+            bp, rp = _resolve_base(base_path, fn_args.get('path', ''))
+        except ValueError as _rve:
+            return f"❌ write_file: {_rve}"
         result = tool_write_file(bp, rp,
                                  fn_args.get('content', ''),
                                  fn_args.get('description', ''),
@@ -1715,7 +1750,10 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
         if edits and isinstance(edits, list):
             return tool_apply_diffs(base_path, edits, conv_id=conv_id, task_id=task_id)
         # ★ Single-edit mode (backward compatible)
-        bp, rp = _resolve_base(base_path, fn_args.get('path', ''))
+        try:
+            bp, rp = _resolve_base(base_path, fn_args.get('path', ''))
+        except ValueError as _rve:
+            return f"❌ apply_diff: {_rve}"
         result = tool_apply_diff(bp, rp,
                                  fn_args.get('search', ''),
                                  fn_args.get('replace', ''),
@@ -1737,7 +1775,10 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
         if edits and isinstance(edits, list):
             return tool_insert_contents(base_path, edits, conv_id=conv_id, task_id=task_id)
         # ★ Single insertion mode
-        bp, rp = _resolve_base(base_path, fn_args.get('path', ''))
+        try:
+            bp, rp = _resolve_base(base_path, fn_args.get('path', ''))
+        except ValueError as _rve:
+            return f"❌ insert_content: {_rve}"
         result = tool_insert_content(bp, rp,
                                      fn_args.get('anchor', ''),
                                      fn_args.get('content', ''),

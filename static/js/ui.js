@@ -3730,6 +3730,21 @@ async function saveEditAndResend(idx) {
   );
   console.info(`[SyncFix] saveEditAndResend conv=${convId.slice(0,8)} idx=${idx} msgsBefore=${_syncMsgsBefore} msgsAfter=${conv.messages.length} hasStreamingMsg=${!!document.getElementById('streaming-msg')} activeTaskId=${conv.activeTaskId?.slice(0,8)||'null'}`);
 
+  // ★ SyncFix: persist truncated/edited state BEFORE /api/chat/regenerate fires,
+  //   so a page refresh during the "Waiting" window (fetch in flight) doesn't
+  //   resurrect the original unedited question. Without this, DB+IDB still have
+  //   the pre-edit messages, and on refresh Case E would auto-regenerate the
+  //   original user message, or Case A/B would reconnect to the old task.
+  //   Update IDB cache first (Phase 1 render on refresh), then server DB.
+  try { if (typeof ConvCache !== 'undefined') ConvCache.put(conv); }
+  catch (e) { console.warn('[SyncFix] ConvCache.put failed:', e); }
+  try {
+    await syncConversationToServer(conv, { allowTruncate: true });
+    console.info(`[SyncFix] saveEditAndResend pre-regenerate sync OK — conv=${convId.slice(0,8)} msgs=${conv.messages.length}`);
+  } catch (e) {
+    console.warn(`[SyncFix] saveEditAndResend pre-regenerate sync failed: ${e.message}`);
+  }
+
   // ── Atomic backend call: truncate + edit + translate + task start ──
   const _regenConfig = _buildConvConfig(conv);
 
@@ -5815,6 +5830,43 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
           if (ev.searchDiag) r.searchDiag = ev.searchDiag;
           if (ev.engineBreakdown) r.engineBreakdown = ev.engineBreakdown;
         }
+      }
+      /* ★ After create_project: refresh project status so the new extra
+       * root appears in the sidebar AND gets persisted to conv.projectPaths.
+       * Without this the backend has the root registered but the frontend
+       * will overwrite it on the next set_project call (e.g. page refresh,
+       * conv switch), causing any subsequent 'name:path' writes to land
+       * under the primary root — see create_project frontend-sync bug. */
+      if (ev.results && ev.results.some(r => r.toolName === 'create_project')) {
+        try {
+          fetch(apiUrl('/api/project/status'))
+            .then(r => r.ok ? r.json() : null)
+            .then(data => {
+              if (!data) return;
+              if (typeof _applyProjectData === 'function') _applyProjectData(data);
+              const c = typeof getActiveConv === 'function' ? getActiveConv() : null;
+              if (c && data.path) {
+                const paths = [data.path];
+                if (Array.isArray(data.extraRoots)) {
+                  for (const r of data.extraRoots) {
+                    const pp = typeof r === 'string' ? r : r.path;
+                    if (pp && !paths.includes(pp)) paths.push(pp);
+                  }
+                }
+                c.projectPath = data.path;
+                c.projectPaths = paths;
+                if (typeof saveConversations === 'function') saveConversations(c.id);
+                if (typeof syncConversationToServer === 'function') syncConversationToServer(c);
+              }
+              if (typeof showToast === 'function') {
+                const cp = ev.results.find(r => r.toolName === 'create_project');
+                showToast('', 'New workspace root',
+                  (cp && (cp.snippet || cp.title)) || 'Registered an additional project root',
+                  4000);
+              }
+            })
+            .catch(() => {});
+        } catch (_) {}
       }
       /* ★ Toast for create_memory */
       if (ev.results && ev.results.some(r => r.toolName === 'create_memory')) {

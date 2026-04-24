@@ -88,6 +88,15 @@ def set_project(path_str):
     with _lock:
         old_path = _state.get('path')
         old_roots = list(_roots.keys())
+        # ★ Idempotence guard: if the primary is unchanged, preserve the
+        # existing root set.  Without this guard every set_project call
+        # (including frontend auto-restore on page load or repeated
+        # /api/project/set from the same conv) would wipe any extra roots
+        # registered mid-conversation via tool_create_project — the model's
+        # newly-scaffolded project would silently disappear, and subsequent
+        # 'name:path' prefixes would fail to resolve, routing writes to the
+        # primary root instead.  See chatui_create_project_frontend_sync_bug.
+        same_primary = (old_path == abs_path)
         _state.update({
             'path': abs_path, 'tree': None,
             'fileCount': 0, 'dirCount': 0, 'totalSize': 0,
@@ -96,12 +105,18 @@ def set_project(path_str):
         })
         # ★ Also register as primary root in multi-root workspace
         name = os.path.basename(abs_path) or 'root'
-        _roots.clear()  # setting primary clears all extra roots
-        _roots[name] = _make_root_state(abs_path)
+        if not same_primary:
+            _roots.clear()  # switching primary clears all extra roots
+        if name in _roots and _roots[name]['path'] != abs_path:
+            # Stale entry with same name but different path — replace it.
+            del _roots[name]
+        if name not in _roots:
+            _roots[name] = _make_root_state(abs_path)
         _roots[name]['scanning'] = False
         _roots[name]['scannedAt'] = int(time.time() * 1000)
-    logger.info('[Project] set_project: %s → %s (cleared roots: %s)',
-                old_path, abs_path, old_roots)
+    logger.info('[Project] set_project: %s → %s (same_primary=%s, old_roots=%s, '
+                'new_roots=%s)', old_path, abs_path, same_primary, old_roots,
+                list(_roots.keys()))
 
     # ★ Cross-DC latency check — log warning if project is on a remote cluster.
     #   This is non-blocking: if benchmark hasn't finished yet, latency_class

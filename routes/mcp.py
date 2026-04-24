@@ -110,7 +110,7 @@ def delete_server(name):
     connected_names = {s['name'] for s in bridge.list_servers()}
     if name in connected_names:
         try:
-            bridge._run_async(bridge._async_disconnect_one(name))
+            bridge._disconnect_one(name)
             logger.info('[MCP:API] Disconnected server %s before removal', name)
         except Exception as e:
             logger.warning('[MCP:API] Error disconnecting %s: %s', name, e)
@@ -196,7 +196,7 @@ def disconnect_servers():
 
     if target:
         try:
-            bridge._run_async(bridge._async_disconnect_one(target))
+            bridge._disconnect_one(target)
             logger.info('[MCP:API] Disconnected server: %s', target)
             return jsonify({'ok': True, 'message': f'Disconnected from "{target}"'})
         except Exception as e:
@@ -401,7 +401,7 @@ def uninstall_from_catalog():
     connected_names = {s['name'] for s in bridge.list_servers()}
     if server_id in connected_names:
         try:
-            bridge._run_async(bridge._async_disconnect_one(server_id))
+            bridge._disconnect_one(server_id)
             logger.info('[MCP:API] Disconnected %s before uninstall (purge=%s)',
                         server_id, purge)
         except Exception as e:

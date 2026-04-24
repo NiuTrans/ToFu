@@ -100,28 +100,103 @@ def scenario_a():
 
 
 # ══════════════════════════════════════════════════════════════
-#  Scenario (b): two keys, both would auto-disable →
-#                whichever is checked second flips to last-resort
+#  Scenario (b): two keys, both would auto-disable → exactly ONE
+#                is promoted (healthier beats exhausted)
 # ══════════════════════════════════════════════════════════════
 def scenario_b():
-    print('\n[b] two keys both would auto-disable → last-resort triggers')
+    print('\n[b] two keys both would auto-disable → healthier wins, other stays off')
+    _reset_state()
+    _patch_siblings({'p1': ['p1_key_0', 'p1_key_1']})
+    _force_exhaust('p1', 'p1_key_0')           # billing-exhausted (worse)
+    _force_bad_success_rate('p1', 'p1_key_1')  # bad rate but not exhausted
+    enabled0 = ks.is_key_enabled('p1', 'p1_key_0')
+    enabled1 = ks.is_key_enabled('p1', 'p1_key_1')
+    _assert(enabled0 is False, 'exhausted key_0 stays disabled')
+    _assert(enabled1 is True, 'healthier key_1 promoted as last-resort')
+    row0 = ks.get_today_stats('p1', 'p1_key_0')
+    row1 = ks.get_today_stats('p1', 'p1_key_1')
+    _assert(row0['last_resort'] is False, 'row0 last_resort=False')
+    _assert(row1['last_resort'] is True, 'row1 last_resort=True')
+    _assert(row0['enabled'] is False,
+            'row0 enabled=False (not the chosen last-resort)')
+    _assert(row1['enabled'] is True, 'row1 enabled=True (chosen)')
+
+
+# ══════════════════════════════════════════════════════════════
+#  Scenario (b2): two keys, same health → tie-break to LAST
+#                 (matches user intuition "keep the last one")
+# ══════════════════════════════════════════════════════════════
+def scenario_b2():
+    print('\n[b2] two equally-bad keys → LAST key wins the tie-break')
     _reset_state()
     _patch_siblings({'p1': ['p1_key_0', 'p1_key_1']})
     _force_exhaust('p1', 'p1_key_0')
+    _force_exhaust('p1', 'p1_key_1')
+    _assert(ks.is_key_enabled('p1', 'p1_key_0') is False,
+            'earlier duplicate stays disabled')
+    _assert(ks.is_key_enabled('p1', 'p1_key_1') is True,
+            'last duplicate is the chosen last-resort')
+
+
+# ══════════════════════════════════════════════════════════════
+#  Scenario (b3): reported bug — 100% success key alongside
+#                 invalid/bad one must NOT be touched, and the
+#                 bad one must stay disabled.
+# ══════════════════════════════════════════════════════════════
+def scenario_b3():
+    print('\n[b3] healthy + invalid siblings → healthy keeps working, invalid stays off')
+    _reset_state()
+    _patch_siblings({'p1': ['p1_key_0', 'p1_key_1']})
+    # key_0 is perfectly healthy (>= MIN_ATTEMPTS success)
+    with ks._lock:
+        ks._ensure_fresh_unlocked()
+        entry = ks._cache['stats'].setdefault('p1::p1_key_0', ks._new_entry())
+        entry['success'] = 3794
+        entry['failure'] = 13
+    # key_1 is invalid — fails every call
     _force_bad_success_rate('p1', 'p1_key_1')
-    # Neither is raw-enabled now.  Both should come back True (last-resort).
-    enabled0 = ks.is_key_enabled('p1', 'p1_key_0')
-    enabled1 = ks.is_key_enabled('p1', 'p1_key_1')
-    _assert(enabled0 is True, 'key_0 kept enabled (last-resort)')
-    _assert(enabled1 is True, 'key_1 kept enabled (last-resort)')
+    _assert(ks.is_key_enabled('p1', 'p1_key_0') is True,
+            'healthy key_0 remains enabled (raw-enabled path)')
+    _assert(ks.is_key_enabled('p1', 'p1_key_1') is False,
+            'invalid key_1 stays disabled (sibling is healthy)')
     row0 = ks.get_today_stats('p1', 'p1_key_0')
     row1 = ks.get_today_stats('p1', 'p1_key_1')
-    _assert(row0['last_resort'] is True, 'row0 last_resort=True')
-    _assert(row1['last_resort'] is True, 'row1 last_resort=True')
-    _assert(row0['enabled'] is True and row1['enabled'] is True,
-            'both rows show enabled=True under last-resort')
-    _assert(row0['exhausted'] is True,
-            'row0 still shows exhausted=True (flag unchanged at write time)')
+    _assert(row0['last_resort'] is False,
+            'healthy key NOT flagged as last_resort')
+    _assert(row1['last_resort'] is False,
+            'invalid key NOT flagged as last_resort (sibling healthy)')
+
+
+# ══════════════════════════════════════════════════════════════
+#  Scenario (b4): reported screenshot — key_0 has huge success
+#                 history but a sticky exhausted flag, key_1 is
+#                 truly broken.  key_0 must win last-resort.
+# ══════════════════════════════════════════════════════════════
+def scenario_b4():
+    print('\n[b4] screenshot case — exhausted-but-high-success wins over truly-broken')
+    _reset_state()
+    _patch_siblings({'p1': ['p1_key_0', 'p1_key_1']})
+    # key_0 mirrors the screenshot: 3794 successes, 13 failures,
+    # but an earlier 429-streak left exhausted=True.
+    with ks._lock:
+        ks._ensure_fresh_unlocked()
+        e0 = ks._cache['stats'].setdefault('p1::p1_key_0', ks._new_entry())
+        e0['success'] = 3794
+        e0['failure'] = 13
+        e0['rate_limited'] = 134
+        e0['exhausted'] = True  # sticky from prior streak
+    # key_1 mirrors the second row: 0 success, many 429s, no real calls.
+    with ks._lock:
+        e1 = ks._cache['stats'].setdefault('p1::p1_key_1', ks._new_entry())
+        e1['success'] = 0
+        e1['failure'] = 0
+        e1['rate_limited'] = 254
+        e1['exhausted'] = True
+    # Both are raw-disabled → healthier (key_0) must win.
+    _assert(ks.is_key_enabled('p1', 'p1_key_0') is True,
+            'key_0 (3794 successes) promoted as last-resort')
+    _assert(ks.is_key_enabled('p1', 'p1_key_1') is False,
+            'key_1 (0 successes) stays disabled')
 
 
 # ══════════════════════════════════════════════════════════════
@@ -184,6 +259,9 @@ def main():
     try:
         scenario_a()
         scenario_b()
+        scenario_b2()
+        scenario_b3()
+        scenario_b4()
         scenario_c()
         scenario_d()
         scenario_e()

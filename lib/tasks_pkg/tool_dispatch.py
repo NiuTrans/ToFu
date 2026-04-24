@@ -335,9 +335,14 @@ def parse_tool_calls(
             try:
                 raw = fn_obj.get('arguments', '{}')
                 fn_args = _repair_json(raw if isinstance(raw, str) else '{}')
-                logger.warning(
+                # Successful repair — the LLM streamed slightly-malformed JSON
+                # (common with long code blobs in write_file). _repair_json
+                # recovered it and the tool call proceeds normally. Debug so
+                # error.log stays clean; only unrecovered failures below
+                # warrant a warning.
+                logger.debug(
                     '[Task %s] conv=%s Repaired malformed JSON for tool=%s tc_id=%s at round %d: original_err=%s',
-                    tid, task.get('convId', ''), fn_name, tc_id, round_num, e, exc_info=True)
+                    tid, task.get('convId', ''), fn_name, tc_id, round_num, e)
 
             except Exception as e:
                 logger.warning(

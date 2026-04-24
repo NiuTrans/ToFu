@@ -2118,6 +2118,19 @@ async function regenerateFromUser(idx) {
   );
   console.info(`[SyncFix] regenerateFromUser conv=${convId.slice(0,8)} idx=${idx} msgsBefore=${_syncMsgsBefore} msgsAfter=${conv.messages.length} hasStreamingMsg=${!!document.getElementById('streaming-msg')} activeTaskId=${conv.activeTaskId?.slice(0,8)||'null'}`);
 
+  // ★ SyncFix: persist truncated state BEFORE /api/chat/regenerate fires, so
+  //   a page refresh during the "Waiting" window (fetch in flight) doesn't
+  //   resurrect stale assistant messages or reconnect to an old aborted task.
+  //   Update IDB cache first (Phase 1 render on refresh), then server DB.
+  try { if (typeof ConvCache !== 'undefined') ConvCache.put(conv); }
+  catch (e) { console.warn('[SyncFix] ConvCache.put failed:', e); }
+  try {
+    await syncConversationToServer(conv, { allowTruncate: true });
+    console.info(`[SyncFix] regenerateFromUser pre-regenerate sync OK — conv=${convId.slice(0,8)} msgs=${conv.messages.length}`);
+  } catch (e) {
+    console.warn(`[SyncFix] regenerateFromUser pre-regenerate sync failed: ${e.message}`);
+  }
+
   // ── Atomic backend call: truncate + translate + task start ──
   const _regenConfig = _buildConvConfig(conv);
 

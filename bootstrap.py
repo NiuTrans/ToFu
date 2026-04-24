@@ -249,7 +249,7 @@ _CONDA_PYTHON_DEPS = [
     'playwright>=1.40',
     'pillow>=10.0',
     'python-pptx>=0.6.21',
-    'lxml>=4.9',
+    'lxml>=5.3',
     'mcp>=1.0',
 ]
 
@@ -353,7 +353,8 @@ def _try_conda_install_deps() -> bool:
     # ── Step 2: refresh conda itself (outdated conda → solver hangs) ──
     _bus.emit('log', '🔄 Updating conda itself (outdated conda causes solver issues)…')
     upd = subprocess.run(
-        [conda, 'update', '-n', 'base', '-c', 'conda-forge', '-y', 'conda'],
+        [conda, 'update', '-n', 'base', '-c', 'conda-forge',
+         '--override-channels', '-y', 'conda'],
         capture_output=True, text=True, cwd=BASE_DIR,
     )
     for line in (upd.stdout + upd.stderr).splitlines()[-10:]:
@@ -363,8 +364,8 @@ def _try_conda_install_deps() -> bool:
 
     # Install libmamba solver (10x faster, avoids classic solver hangs)
     lm = subprocess.run(
-        [conda, 'install', '-n', 'base', '-c', 'conda-forge', '-y',
-         'conda-libmamba-solver'],
+        [conda, 'install', '-n', 'base', '-c', 'conda-forge',
+         '--override-channels', '-y', 'conda-libmamba-solver'],
         capture_output=True, text=True, cwd=BASE_DIR,
     )
     if lm.returncode == 0:
@@ -381,7 +382,8 @@ def _try_conda_install_deps() -> bool:
     # --force-reinstall handles the case where pip previously dropped an
     # incompatible manylinux wheel over conda's files. Without it, conda's
     # cached metadata says the package is satisfied and it no-ops.
-    cmd = [conda, 'install', *target, '-c', 'conda-forge', '-y',
+    cmd = [conda, 'install', *target, '-c', 'conda-forge',
+           '--override-channels', '-y',
            '--force-reinstall', *_CONDA_PYTHON_DEPS]
     _bus.emit('log', f'$ {" ".join(cmd)}')
 
@@ -530,7 +532,8 @@ def _try_conda_install_postgresql() -> bool:
         'status': 'active',
     }))
 
-    cmd = [conda_bin, 'install', '-c', 'conda-forge', '-y', 'postgresql>=18']
+    cmd = [conda_bin, 'install', '-c', 'conda-forge', '--override-channels',
+           '-y', 'postgresql>=18']
     _bus.emit('log', f'$ {" ".join(cmd)}')
 
     try:

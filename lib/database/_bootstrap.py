@@ -16,6 +16,29 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 
+# Tracks whether THIS process owns (is responsible for) a locally-running
+# PG server. Set to True whenever _ensure_pg_running either starts PG via
+# pg_ctl or attaches to an already-running local PG that uses our pgdata
+# (which was almost certainly started by a prior invocation of server.py
+# from this same project). Consumed by shutdown_pool() in _core.py to
+# decide whether to call _stop_pg() on exit.
+#
+# NEVER set when we connect to a REMOTE PG (is_explicit_external, or the
+# Step 3 "defer to remote" branch) — that PG belongs to someone else.
+_PG_STARTED_BY_US = False
+
+
+def _mark_pg_owned_locally():
+    """Record that this process is responsible for the local PG."""
+    global _PG_STARTED_BY_US
+    _PG_STARTED_BY_US = True
+
+
+def is_pg_owned_locally():
+    """Return True if this process started / took over a local PG server."""
+    return _PG_STARTED_BY_US
+
+
 def _find_pg_binary(name):
     """Locate a PostgreSQL binary by name, cross-platform.
 
@@ -564,6 +587,7 @@ def _bootstrap_pg(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password, pg_d
     if pg_password:
         dsn += f" password={pg_password}"
     _write_owner_host(pgdata)
+    _mark_pg_owned_locally()
     logger.info('[DB] Bootstrap complete — DSN: host=127.0.0.1 port=%d dbname=%s',
                 free_port, pg_dbname)
     return {'PG_HOST': '127.0.0.1', 'PG_PORT': free_port, 'PG_DSN': dsn}
@@ -670,6 +694,10 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
                 if is_ours:
                     logger.info('[DB] PostgreSQL already running on %s:%d (verified ours)', _local, pg_port)
                     _ensure_database_exists(_local, pg_port, pg_dbname, pg_user, pgdata)
+                    # Already-running local PG on our pgdata — almost
+                    # certainly started by a previous server.py on this
+                    # host. Take ownership so shutdown_pool stops it.
+                    _mark_pg_owned_locally()
                     return {'PG_HOST': _local, 'PG_PORT': pg_port,
                             'PG_DSN': _build_dsn(_local, pg_port)}
                 else:
@@ -683,6 +711,7 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
                     found_our_port = _scan_for_our_pg(_local, range(15432, 15440), pgdata, pg_user)
                     if found_our_port:
                         _ensure_database_exists(_local, found_our_port, pg_dbname, pg_user, pgdata)
+                        _mark_pg_owned_locally()
                         return {'PG_HOST': _local, 'PG_PORT': found_our_port,
                                 'PG_DSN': _build_dsn(_local, found_our_port)}
         except Exception as _e:
@@ -696,6 +725,7 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
     found_our_port = _scan_for_our_pg(_local, range(15432, 15440), pgdata, pg_user)
     if found_our_port:
         _ensure_database_exists(_local, found_our_port, pg_dbname, pg_user, pgdata)
+        _mark_pg_owned_locally()
         return {'PG_HOST': _local, 'PG_PORT': found_our_port,
                 'PG_DSN': _build_dsn(_local, found_our_port)}
 
@@ -802,6 +832,7 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
                            '— reusing after pidfile cleanup', conf_port)
                 _ensure_database_exists('127.0.0.1', conf_port, pg_dbname, pg_user, pgdata)
                 _write_owner_host(pgdata)
+                _mark_pg_owned_locally()
                 return {'PG_HOST': '127.0.0.1', 'PG_PORT': conf_port,
                         'PG_DSN': _build_dsn('127.0.0.1', conf_port)}
             # Not ours — reassign to a different port
@@ -842,6 +873,7 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
             time.sleep(1)
             _ensure_database_exists('127.0.0.1', pg_port, pg_dbname, pg_user, pgdata)
             _write_owner_host(pgdata)
+            _mark_pg_owned_locally()
             return {'PG_HOST': '127.0.0.1', 'PG_PORT': pg_port,
                     'PG_DSN': _build_dsn('127.0.0.1', pg_port)}
         else:

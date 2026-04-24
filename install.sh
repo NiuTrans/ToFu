@@ -160,7 +160,7 @@ if [[ "$NO_UPDATE_CONDA" -eq 0 ]]; then
     info "Current version: ${OLD_VER}"
 
     # Always update from conda-forge to get latest solver (libmamba) fixes.
-    if conda update -n base -c conda-forge -y conda; then
+    if conda update -n base -c conda-forge --override-channels -y conda; then
         NEW_VER="$(conda --version 2>/dev/null || echo unknown)"
         if [[ "$OLD_VER" == "$NEW_VER" ]]; then
             ok "conda already up to date (${NEW_VER})"
@@ -170,14 +170,14 @@ if [[ "$NO_UPDATE_CONDA" -eq 0 ]]; then
     else
         warn "conda self-update failed — this is NOT fatal but may cause solver issues later"
         warn "If the next steps hang on 'Solving environment', re-run with updated conda:"
-        warn "  conda update -n base -c conda-forge -y conda"
+        warn "  conda update -n base -c conda-forge --override-channels -y conda"
     fi
 
     # Ensure libmamba solver is installed and set as default — it's 10x faster
     # and avoids many classic-solver hangs/failures. This is CRITICAL on
     # large conda-forge envs (hundreds of packages with interlocking deps).
     info "Ensuring libmamba solver is installed..."
-    if conda install -n base -c conda-forge -y conda-libmamba-solver >/dev/null 2>&1; then
+    if conda install -n base -c conda-forge --override-channels -y conda-libmamba-solver >/dev/null 2>&1; then
         conda config --set solver libmamba || true
         ok "libmamba solver active (10x faster than classic)"
     else
@@ -195,7 +195,7 @@ step "Getting Tofu source code"
 
 if ! command -v git &>/dev/null; then
     info "git not found — installing via conda-forge..."
-    conda install -n base -c conda-forge -y git
+    conda install -n base -c conda-forge --override-channels -y git
 fi
 
 if [[ -f "${INSTALL_DIR}/server.py" ]]; then
@@ -237,7 +237,7 @@ if [[ "$ENV_EXISTS" -eq 1 ]]; then
     info "(tip: re-run with --reset-env to wipe and rebuild it from scratch)"
 else
     info "Creating env '${ENV_NAME}' with Python ${PY_VER}..."
-    conda create -n "$ENV_NAME" -c conda-forge -y "python=${PY_VER}"
+    conda create -n "$ENV_NAME" -c conda-forge --override-channels -y "python=${PY_VER}"
     ok "Env '${ENV_NAME}' created"
 fi
 
@@ -263,8 +263,26 @@ CONDA_PKGS=(
     "playwright>=1.40"
     "pillow>=10.0"
     "python-pptx>=0.6.21"
-    "lxml>=4.9"
+    "lxml>=5.3"
+    # BS4 — HTML fallback parser in lib/fetch/html_extract.py
+    "beautifulsoup4>=4.12"
+    # python-dateutil — eagerly imported by lib/fetch/html_extract.py
+    "python-dateutil>=2.8"
+    # Office document parsers for lib/doc_parser.py (upload pipeline)
+    "python-docx>=1.0"
+    "openpyxl>=3.1"
+    "xlrd>=2.0"
+    "olefile>=0.46"
     "mcp>=1.0"
+    # PDF parsing (fitz) — used in lib/pdf_parser and routes/paper
+    "pymupdf>=1.24"
+    # uv / uvx — used by lib/mcp/client.py to launch MCP servers
+    "uv>=0.4"
+)
+
+# Pip-only deps — not available on conda-forge, installed via pip INTO the env.
+PIP_ONLY_PKGS=(
+    "pymupdf4llm>=0.0.17"
 )
 
 # ── Heal broken envs: remove any pip-installed versions of these deps ──
@@ -274,7 +292,9 @@ CONDA_PKGS=(
 # first so conda-forge's (sysroot-linked) version is the one used.
 info "Purging any pip-installed copies that would shadow conda-forge..."
 PIP_NAMES=(flask flask-compress Flask-Compress requests psutil trafilatura
-           playwright pillow Pillow python-pptx lxml mcp)
+           playwright pillow Pillow python-pptx lxml beautifulsoup4 bs4
+           python-dateutil dateutil python-docx docx openpyxl xlrd olefile
+           mcp pymupdf PyMuPDF uv)
 PIP_LIST="$(python -m pip list --format=freeze 2>/dev/null || true)"
 TO_UNINSTALL=()
 for name in "${PIP_NAMES[@]}"; do
@@ -290,18 +310,77 @@ else
 fi
 
 info "Solving and installing: ${CONDA_PKGS[*]}"
+# ── Pre-emptive conflict heal ──
+# Some packages from previous install runs (e.g. an older postgresql pulled
+# in a pinned icu/libxml2 that blocks newer trafilatura/lxml). Before the
+# main solve, purge known conflict sources so the solver has a clean slate.
+# All removes are best-effort — missing packages are fine.
+info "Purging potentially conflicting conda packages (best-effort)..."
+CONDA_CONFLICT_PKGS=(
+    postgresql psycopg2
+    trafilatura htmldate
+    lxml libxml2 libxml2-16 libxslt
+    icu
+)
+conda remove -n "$ENV_NAME" -y --force "${CONDA_CONFLICT_PKGS[@]}" >/dev/null 2>&1 || true
+ok "Conflict-prone packages cleared (will reinstall below)"
+
 # --force-reinstall: make sure conda actually re-lays-down the files even if
 # its metadata still thinks the package is satisfied (common right after a
 # pip-uninstall — conda's view of the env can be stale).
-conda install -n "$ENV_NAME" -c conda-forge -y --force-reinstall "${CONDA_PKGS[@]}"
+_install_main_deps() {
+    conda install -n "$ENV_NAME" -c conda-forge --override-channels -y --force-reinstall "${CONDA_PKGS[@]}"
+}
+
+if ! _install_main_deps; then
+    warn "First solve failed — doing a deeper reset of the conflicting packages and retrying"
+    # Deeper reset: also strip libs that often pin icu/libxml2, then retry.
+    conda remove -n "$ENV_NAME" -y --force \
+        postgresql psycopg2 libpq \
+        trafilatura htmldate courlan \
+        lxml libxml2 libxml2-16 libxslt \
+        icu \
+        >/dev/null 2>&1 || true
+    if ! _install_main_deps; then
+        # ── Last-resort: nuke the env and rebuild from scratch ──
+        # The env's conda-meta/history still pins old specs (e.g. postgresql>=18)
+        # that --force removes don't clear. Only `env remove` truly resets it.
+        warn "Deep reset still failed — conda env history has stale pins."
+        warn "Auto-rebuilding env '${ENV_NAME}' from scratch (one-time, ~2 min)..."
+        conda deactivate >/dev/null 2>&1 || true
+        conda env remove -n "$ENV_NAME" -y
+        conda create -n "$ENV_NAME" -c conda-forge --override-channels -y "python=${PY_VER}"
+        conda activate "$ENV_NAME"
+        PY="$(command -v python)"
+        ok "Env '${ENV_NAME}' rebuilt with fresh Python ${PY_VER}"
+        _install_main_deps
+    fi
+fi
 ok "Python dependencies installed"
+
+# ── Install pip-only deps (e.g. pymupdf4llm) into the conda env ──
+# pymupdf4llm is not shipped on conda-forge; it's a thin LLM-oriented Markdown
+# extractor built on top of pymupdf (which we just installed via conda).
+if [[ ${#PIP_ONLY_PKGS[@]} -gt 0 ]]; then
+    info "Installing pip-only deps (not on conda-forge): ${PIP_ONLY_PKGS[*]}"
+    if python -m pip install --no-deps --upgrade "${PIP_ONLY_PKGS[@]}"; then
+        ok "Pip-only deps installed"
+    else
+        warn "pip install --no-deps failed — retrying with dependency resolution"
+        if python -m pip install --upgrade "${PIP_ONLY_PKGS[@]}"; then
+            ok "Pip-only deps installed (with dependency resolution)"
+        else
+            warn "Pip-only deps install failed — some PDF features may be degraded"
+        fi
+    fi
+fi
 
 # ── Install PostgreSQL + psycopg2 from conda-forge (optional but recommended) ──
 # tofu uses PG for better concurrency (100+ concurrent users), auto-falls back
 # to SQLite if PG is missing. Installing from conda-forge gives a rootless,
 # userspace PG that auto-bootstraps at first run.
 info "Installing PostgreSQL + psycopg2 from conda-forge (for multi-user concurrency)..."
-if conda install -n "$ENV_NAME" -c conda-forge -y \
+if conda install -n "$ENV_NAME" -c conda-forge --override-channels -y \
         'postgresql>=16' 'psycopg2>=2.9' >/dev/null 2>&1; then
     ok "PostgreSQL + psycopg2 installed (will auto-bootstrap on first run)"
 else
@@ -329,7 +408,7 @@ ok "SQLite $SQLITE_VER (built into Python)"
 #  Step 7: Install ripgrep & fd-find from conda-forge (fast search)
 # ═══════════════════════════════════════════════════════════════
 step "Installing ripgrep + fd-find (fast code/file search)"
-if conda install -n "$ENV_NAME" -c conda-forge -y ripgrep fd-find; then
+if conda install -n "$ENV_NAME" -c conda-forge --override-channels -y ripgrep fd-find; then
     ok "ripgrep + fd-find installed"
 else
     warn "ripgrep/fd-find install failed — code search will fall back to grep / os.walk"
@@ -360,7 +439,7 @@ if [[ "$SKIP_PLAYWRIGHT" -eq 0 ]]; then
             nss
             mesa-libgbm-cos7-x86_64
         )
-        if ! conda install -n "$ENV_NAME" -c conda-forge -y "${CHROMIUM_LIBS[@]}"; then
+        if ! conda install -n "$ENV_NAME" -c conda-forge --override-channels -y "${CHROMIUM_LIBS[@]}"; then
             warn "Some Chromium shared-lib deps failed to install — browser may not launch"
             info "You can retry manually: conda install -n ${ENV_NAME} -c conda-forge <packages>"
         else
