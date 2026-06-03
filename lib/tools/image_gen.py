@@ -60,14 +60,12 @@ GENERATE_IMAGE_TOOL = {
                         "Options: '1:1' (square), '16:9' (landscape), '9:16' (portrait), "
                         "'4:3', '3:4'. Default: '1:1'."
                     ),
-                    "enum": ["1:1", "16:9", "9:16", "4:3", "3:4"],
-                    "default": "1:1"
+                    "enum": ["1:1", "16:9", "9:16", "4:3", "3:4"]
                 },
                 "resolution": {
                     "type": "string",
                     "description": "Image resolution. '1K' for standard, '2K' for high-res. Default: '1K'.",
-                    "enum": ["1K", "2K"],
-                    "default": "1K"
+                    "enum": ["1K", "2K"]
                 },
                 "output_path": {
                     "type": "string",
@@ -76,7 +74,12 @@ GENERATE_IMAGE_TOOL = {
                         "Example: 'assets/images/hero.png', 'static/logo.webp'. "
                         "If provided and a project is active, the image will be saved to this path "
                         "inside the project directory. The directory will be created if it doesn't exist. "
-                        "If not provided, the image is still saved to the server's uploads folder."
+                        "If not provided, the image is still saved to the server's uploads folder.\n"
+                        "**Multi-root workspaces**: prefix with `rootname:` to target a specific "
+                        "non-primary root (e.g. 'hope-mcp:assets/logo.png'). Plain relative paths "
+                        "resolve under the primary root. NEVER bake the colon into the filename — "
+                        "writing 'hope-mcp:assets/logo.png' as a literal name would create a "
+                        "top-level dir whose name contains a colon, which is almost never intended."
                     )
                 },
                 "svg": {
@@ -88,8 +91,7 @@ GENERATE_IMAGE_TOOL = {
                         "with the same name but .svg extension. "
                         "Useful for logos, icons, mascots, and illustrations that need to "
                         "scale without pixelation. Default: false."
-                    ),
-                    "default": False
+                    )
                 }
             },
             "required": ["prompt"]

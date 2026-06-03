@@ -11,10 +11,13 @@
 #    make healthcheck   — Run project diagnostics
 #    make ci            — Full CI pipeline (lint + unit + api + healthcheck)
 #    make smoke         — Run smoke tests only
+#    make desktop       — Build desktop installer (PyInstaller)
+#    make desktop-icons — Generate .ico/.icns from logo.png
+#    make stop          — Stop the running Tofu server (graceful SIGTERM)
 #
 # ═══════════════════════════════════════════════════════════════
 
-.PHONY: lint test-unit test-api test-visual test-all test-coverage healthcheck ci smoke help
+.PHONY: lint test-unit test-api test-visual test-all test-coverage healthcheck ci smoke help desktop desktop-icons stop
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -32,6 +35,11 @@ lint-format: ## Check formatting (non-blocking, for gradual adoption)
 lint-fix: ## Auto-fix lint issues
 	python -m ruff check --fix lib/ routes/ tests/
 	python -m ruff format lib/ routes/ tests/
+
+.PHONY: typecheck
+typecheck: ## Type-check the vanilla-JS frontend (tsc --checkJs, no build step)
+	@if [ ! -d node_modules/typescript ]; then echo '⚠️  Run `npm install` first (installs TypeScript dev-dep)'; exit 1; fi
+	npx tsc --noEmit
 
 # ── Tests ──────────────────────────────────────────────────────
 
@@ -64,3 +72,22 @@ ci: lint test-unit test-api healthcheck ## Full CI pipeline (lint + unit + api +
 	@echo ""
 	@echo "  ✅ CI pipeline passed"
 	@echo ""
+
+# ── Desktop Build ──────────────────────────────────────────────
+
+.PHONY: desktop desktop-icons
+
+desktop-icons: ## Generate platform icons (.ico/.icns) from logo.png
+	python scripts/gen_desktop_icons.py
+
+desktop: desktop-icons ## Build desktop installer (PyInstaller)
+	pip install -r desktop/requirements-desktop.txt
+	pyinstaller tofu.spec
+	@echo ""
+	@echo "  ✅ Desktop build complete → dist/Tofu/"
+	@echo ""
+
+# ── Server lifecycle ───────────────────────────────────────────
+
+stop: ## Stop the running Tofu server (reads data/.server.lock, SIGTERM)
+	./stop.sh

@@ -110,12 +110,10 @@ def do_request(url, timeout, verify=True, legacy_ssl=False):
                 logger.warning('Download exceeded %ss wall time — %s', total_deadline, url[:80])
                 break
     except _requests_mod.exceptions.ContentDecodingError as e:
-        # Brotli / gzip decode failure mid-stream — retry without Accept-Encoding
         resp.close()
         logger.warning('ContentDecodingError during download, retrying without br — %s: %s',
                        domain, e)
-        sess_retry = sess
-        resp2 = sess_retry.get(
+        resp2 = sess.get(
             url, timeout=(min(timeout, 8), timeout),
             stream=True, allow_redirects=True, verify=verify,
             headers={'Accept-Encoding': 'gzip, deflate'},
@@ -124,19 +122,27 @@ def do_request(url, timeout, verify=True, legacy_ssl=False):
             resp2.close()
             raise HttpError(resp2.status_code, url)
         chunks, dl = [], 0
-        for chunk in resp2.iter_content(65536):
-            chunks.append(chunk); dl += len(chunk)
-            if dl > _lib.FETCH_MAX_BYTES:
-                oversized = True
-                break
-            if time.time() - t0 > total_deadline:
-                break
+        try:
+            for chunk in resp2.iter_content(65536):
+                chunks.append(chunk); dl += len(chunk)
+                if dl > _lib.FETCH_MAX_BYTES:
+                    oversized = True
+                    break
+                if time.time() - t0 > total_deadline:
+                    break
+        finally:
+            resp2.close()
         elapsed_ms = int((time.time() - t0) * 1000)
         logger.debug('← 200 %sB in %dms (no-br retry) ct=%s — %s',
                      f'{dl:,}', elapsed_ms, ct[:40], domain)
         return resp2, b''.join(chunks)
-    if oversized:
+    except Exception:
+        # Any other error mid-stream (pool closed, socket reset, etc.)
+        # — always close to release the decompressor before GC can crash.
         resp.close()
+        raise
+    resp.close()
+    if oversized:
         logger.warning('Response body too large (%sB, limit %sB) — %s',
                        f'{dl:,}', f'{_lib.FETCH_MAX_BYTES:,}', url[:80])
         raise HttpError(413, url)

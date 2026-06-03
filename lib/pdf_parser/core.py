@@ -1,7 +1,7 @@
 """lib/pdf_parser/core.py — Unified PDF parsing entry point (text + images)."""
 
 from lib.log import get_logger
-from lib.pdf_parser._common import HAS_PYMUPDF4LLM
+from lib.pdf_parser._common import HAS_PYMUPDF4LLM, PYMUPDF_LOCK
 
 logger = get_logger(__name__)
 
@@ -61,52 +61,53 @@ def parse_pdf(pdf_bytes: bytes, *,
                             progress_callback=_text_cb,
                             mode=text_mode) or ''
 
-    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    try:
-        total_pages = len(doc)
-        avg_chars = len(text) / max(total_pages, 1)
-        is_scanned = (avg_chars < 50)
-        # Method label reflects the winning strategy — docling may have
-        # been requested but silently fallen back to pymupdf4llm.
-        if text_mode == 'structured':
-            # Best-effort: import guard mirrors text.py logic. We don't
-            # track the actual winner from here, so we tag both.
-            from lib.pdf_parser._common import HAS_DOCLING
-            method = 'docling' if HAS_DOCLING else ('pymupdf4llm' if HAS_PYMUPDF4LLM else 'pymupdf_raw')
-        else:
-            method = 'pymupdf4llm' if HAS_PYMUPDF4LLM else 'pymupdf_raw'
+    with PYMUPDF_LOCK:
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            total_pages = len(doc)
+            avg_chars = len(text) / max(total_pages, 1)
+            is_scanned = (avg_chars < 50)
+            # Method label reflects the winning strategy — docling may have
+            # been requested but silently fallen back to pymupdf4llm.
+            if text_mode == 'structured':
+                # Best-effort: import guard mirrors text.py logic. We don't
+                # track the actual winner from here, so we tag both.
+                from lib.pdf_parser._common import HAS_DOCLING
+                method = 'docling' if HAS_DOCLING else ('pymupdf4llm' if HAS_PYMUPDF4LLM else 'pymupdf_raw')
+            else:
+                method = 'pymupdf4llm' if HAS_PYMUPDF4LLM else 'pymupdf_raw'
 
-        warnings = []
-        if is_scanned:
-            warnings.append('PDF appears scanned / image-only; text may be incomplete.')
-        if not HAS_PYMUPDF4LLM:
-            warnings.append('pymupdf4llm not installed; tables/headers not preserved.')
+            warnings = []
+            if is_scanned:
+                warnings.append('PDF appears scanned / image-only; text may be incomplete.')
+            if not HAS_PYMUPDF4LLM:
+                warnings.append('pymupdf4llm not installed; tables/headers not preserved.')
 
-        # ── Images (figures & tables) ──
-        images = []
-        if max_images > 0:
-            pages_to_render = total_pages
-            for pi in range(pages_to_render):
-                if len(images) >= max_images:
-                    break
-                page = doc[pi]
-                page_imgs = detect_and_clip_figures(
-                    page, pi, total_pages,
-                    max_image_width=max_image_width,
-                    min_dim=min_img_dim,
-                    min_bytes=min_img_bytes,
-                )
-                for img in page_imgs:
+            # ── Images (figures & tables) ──
+            images = []
+            if max_images > 0:
+                pages_to_render = total_pages
+                for pi in range(pages_to_render):
                     if len(images) >= max_images:
                         break
-                    images.append(img)
-                if progress_callback is not None:
-                    try:
-                        progress_callback('images', pi + 1, pages_to_render)
-                    except Exception as e:
-                        logger.debug('[PDF] progress_callback raised (ignored): %s', e)
-    finally:
-        doc.close()
+                    page = doc[pi]
+                    page_imgs = detect_and_clip_figures(
+                        page, pi, total_pages,
+                        max_image_width=max_image_width,
+                        min_dim=min_img_dim,
+                        min_bytes=min_img_bytes,
+                    )
+                    for img in page_imgs:
+                        if len(images) >= max_images:
+                            break
+                        images.append(img)
+                    if progress_callback is not None:
+                        try:
+                            progress_callback('images', pi + 1, pages_to_render)
+                        except Exception as e:
+                            logger.debug('[PDF] progress_callback raised (ignored): %s', e)
+        finally:
+            doc.close()
 
     return {
         'text': text,

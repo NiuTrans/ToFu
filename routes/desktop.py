@@ -6,6 +6,7 @@ Mirrors the architecture of routes/browser.py:
   - Desktop Agent polls /api/desktop/poll → picks up commands, returns results
 """
 
+import hmac
 import json
 import threading
 import time
@@ -14,39 +15,75 @@ import uuid
 from flask import Blueprint, jsonify, request
 
 from lib.env_compat import getenv_compat
-from lib.log import get_logger
+from lib.log import audit_log, get_logger
+from lib.request_parser import parse_body
 
 logger = get_logger(__name__)
 
 desktop_bp = Blueprint('desktop', __name__)
 
 
+# ── One-time startup audit when bridge auth is configured ──
+_AUDIT_LOCK = threading.Lock()
+_AUDIT_LOGGED = False
+
+
+def _maybe_audit_enforcement_on() -> None:
+    global _AUDIT_LOGGED
+    if _AUDIT_LOGGED:
+        return
+    with _AUDIT_LOCK:
+        if _AUDIT_LOGGED:
+            return
+        _AUDIT_LOGGED = True
+        try:
+            audit_log('config_change',
+                      param='bridge_auth_enforcement',
+                      old='permissive (Phase A)',
+                      new='enforcing (Phase C)',
+                      reason='TOFU_BRIDGE_SECRET configured — desktop bridge '
+                             'now rejects requests without a matching X-Bridge-Secret',
+                      approved_by='user')
+        except Exception as e:
+            logger.debug('[Desktop] startup audit_log failed: %s', e)
+
+
 def _check_bridge_auth(kind: str = 'desktop') -> bool:
     """Verify the optional X-Bridge-Secret header.
 
-    Currently a **no-op guard** that emits an audit entry on header
-    mismatch but does not yet reject. Full enforcement lands in Phase C
-    (SECURITY_AUDIT_REPORT A3/A4). See the twin in routes/browser.py.
+    Behaviour mirrors routes.browser._check_bridge_auth:
+      * If TOFU_BRIDGE_SECRET is unset →
+        return True (auth disabled).
+      * Otherwise return True only on a timing-safe header match;
+        callers must abort(401) when this returns False.
     """
-    expected = (getenv_compat('TOFU_BRIDGE_SECRET', 'CHATUI_BRIDGE_SECRET') or '').strip()
+    expected = (getenv_compat('TOFU_BRIDGE_SECRET') or '').strip()
     if not expected:
         return True
+    _maybe_audit_enforcement_on()
     provided = request.headers.get('X-Bridge-Secret', '')
-    if provided == expected:
+    if provided and hmac.compare_digest(provided, expected):
         return True
     try:
-        from lib.log import audit_log as _audit
-        _audit('bridge_auth_fail',
-               kind=kind,
-               path=request.path,
-               ip=request.remote_addr,
-               has_header=bool(provided),
-               ua=(request.user_agent.string or '')[:120])
+        audit_log('bridge_auth_fail',
+                  kind=kind,
+                  path=request.path,
+                  ip=request.remote_addr,
+                  has_header=bool(provided),
+                  ua=(request.user_agent.string or '')[:120])
     except Exception as _aerr:
         logger.debug('[Desktop] audit_log bridge_auth_fail failed: %s', _aerr)
-    logger.warning('[Desktop] bridge auth mismatch from %s on %s (Phase A: logged, not rejected)',
-                   request.remote_addr, request.path)
-    return True
+    logger.warning('[Desktop] bridge auth rejected from %s on %s (header=%s)',
+                   request.remote_addr, request.path, 'present' if provided else 'missing')
+    return False
+
+
+def _bridge_unauthorized():
+    """Return a uniform 401 JSON envelope for bridge auth failures."""
+    return jsonify({
+        'error': 'bridge_auth_required',
+        'hint': 'set X-Bridge-Secret header to match TOFU_BRIDGE_SECRET',
+    }), 401
 
 # ══════════════════════════════════════════════════════════
 #  Command Queue (mirrors lib/browser.py pattern)
@@ -138,11 +175,12 @@ def format_desktop_result(cmd_type, result):
 @desktop_bp.route('/api/desktop/poll', methods=['POST'])
 def desktop_poll():
     global _last_poll_time
-    _check_bridge_auth('desktop')
+    if not _check_bridge_auth('desktop'):
+        return _bridge_unauthorized()
     _last_poll_time = time.time()
 
     # 1) Resolve any results from the agent
-    body = request.get_json(silent=True) or {}
+    body = parse_body()
     results = body.get('results', [])
     resolved = 0
 
@@ -184,18 +222,9 @@ def desktop_poll():
     return jsonify({'commands': pending})
 
 
-# ══════════════════════════════════════════════════════════
-#  Status Endpoint
-# ══════════════════════════════════════════════════════════
-
-@desktop_bp.route('/api/desktop/status', methods=['GET'])
-def desktop_status():
-    connected = is_desktop_agent_connected()
-    return jsonify({
-        'connected': connected,
-        'last_poll': _last_poll_time,
-        'pending_commands': sum(1 for c in _commands.values() if not c['event'].is_set()),
-    })
+# Status endpoint moved to routes/api_v1/desktop.py — read state via the
+# module-level `_commands`, `_last_poll_time`, and `is_desktop_agent_connected`
+# helpers above.
 
 
 # ══════════════════════════════════════════════════════════

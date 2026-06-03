@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Tofu Relay — Sign In</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0e1117; --panel: #1a1f2c; --panel-2: #232a3a;
+    --border: #2a3142; --text: #e6e8eb; --text-dim: #9aa3af;
+    --accent: #5cb38a; --accent-2: #7ab8e8; --danger: #e25;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100vh; background:var(--bg); color:var(--text);
+    font:14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display:flex; align-items:center; justify-content:center; }
+  .card { background:var(--panel); border:1px solid var(--border);
+    border-radius:8px; padding:32px; width:360px; box-shadow:0 8px 32px rgba(0,0,0,0.5); }
+  h1 { margin:0 0 4px; font-size:22px; text-align:center; }
+  .subtitle { text-align:center; color:var(--text-dim); margin-bottom:24px; font-size:13px; }
+  label { display:block; color:var(--text-dim); margin:12px 0 4px; font-size:12px; }
+  input { width:100%; background:var(--bg); border:1px solid var(--border);
+    color:var(--text); padding:9px 12px; border-radius:6px; font-size:14px; font-family:inherit; }
+  input:focus { outline:none; border-color:var(--accent); }
+  .btn { width:100%; margin-top:18px; background:var(--accent); color:#061712;
+    border:0; padding:10px; border-radius:6px; font-weight:600; font-size:14px;
+    cursor:pointer; }
+  .btn:hover { filter:brightness(1.1); }
+  .switch { text-align:center; margin-top:18px; color:var(--text-dim);
+    font-size:13px; }
+  .switch a { color:var(--accent-2); cursor:pointer; }
+  .err { background:rgba(238,34,85,0.12); border-left:3px solid var(--danger);
+    padding:8px 10px; margin-top:14px; font-size:13px; border-radius:4px;
+    display:none; }
+  .err.visible { display:block; }
+  .ok { background:rgba(80,180,160,0.12); border-left:3px solid var(--accent);
+    padding:8px 10px; margin-top:14px; font-size:13px; border-radius:4px;
+    display:none; }
+  .ok.visible { display:block; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🫧 Tofu Relay</h1>
+  <div class="subtitle" id="subtitle">登录以管理 API 密钥与余额</div>
+
+  <div id="loginPane">
+    <label>邮箱</label>
+    <input type="email" id="loginEmail" autocomplete="username">
+    <label>密码</label>
+    <input type="password" id="loginPassword" autocomplete="current-password" onkeypress="if(event.key==='Enter')doLogin()">
+    <button class="btn" onclick="doLogin()">登录</button>
+    <div class="switch">还没有账号? <a onclick="showSignup()">注册</a></div>
+  </div>
+
+  <div id="signupPane" style="display:none">
+    <label>邮箱</label>
+    <input type="email" id="signupEmail" autocomplete="username">
+    <label>密码 (≥ 8 字符)</label>
+    <input type="password" id="signupPassword" autocomplete="new-password">
+    <label>显示名 (可选)</label>
+    <input type="text" id="signupDisplayName">
+    <button class="btn" onclick="doSignup()">注册</button>
+    <div class="switch">已有账号? <a onclick="showLogin()">登录</a></div>
+  </div>
+
+  <div class="err" id="err"></div>
+  <div class="ok" id="ok"></div>
+</div>
+
+<script>
+'use strict';
+
+function showLogin() {
+  document.getElementById('loginPane').style.display = '';
+  document.getElementById('signupPane').style.display = 'none';
+  document.getElementById('subtitle').textContent = '登录以管理 API 密钥与余额';
+  hideMsgs();
+}
+function showSignup() {
+  document.getElementById('loginPane').style.display = 'none';
+  document.getElementById('signupPane').style.display = '';
+  document.getElementById('subtitle').textContent = '注册一个新账号开始使用';
+  hideMsgs();
+}
+function showErr(msg) {
+  const el = document.getElementById('err');
+  el.textContent = msg; el.classList.add('visible');
+  document.getElementById('ok').classList.remove('visible');
+}
+function showOk(msg) {
+  const el = document.getElementById('ok');
+  el.textContent = msg; el.classList.add('visible');
+  document.getElementById('err').classList.remove('visible');
+}
+function hideMsgs() {
+  document.getElementById('err').classList.remove('visible');
+  document.getElementById('ok').classList.remove('visible');
+}
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: 'POST', credentials: 'same-origin',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  let data = null;
+  try { data = await r.json(); } catch (_) {}
+  if (!r.ok) {
+    const msg = (data && (data.error || data.message)) || ('HTTP ' + r.status);
+    throw new Error(msg);
+  }
+  return data;
+}
+
+async function doLogin() {
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  if (!email || !password) { showErr('请填写邮箱和密码'); return; }
+  try {
+    await api('/api/v1/users/login', {email, password});
+    location.href = '/dashboard';
+  } catch (e) { showErr(e.message); }
+}
+
+async function doSignup() {
+  const email = document.getElementById('signupEmail').value.trim();
+  const password = document.getElementById('signupPassword').value;
+  const display_name = document.getElementById('signupDisplayName').value.trim();
+  if (!email || password.length < 8) {
+    showErr('邮箱必填,密码至少 8 字符'); return;
+  }
+  try {
+    const r = await api('/api/v1/users/signup', {email, password, display_name});
+    if (r.welcome_credit_micro > 0) {
+      showOk(`注册成功!赠送 ${(r.welcome_credit_micro / 1_000_000).toFixed(2)} 试用 credits。跳转中…`);
+    } else {
+      showOk('注册成功!跳转中…');
+    }
+    setTimeout(() => { location.href = '/dashboard'; }, 800);
+  } catch (e) { showErr(e.message); }
+}
+
+// Auto-route by hash
+if (location.hash === '#signup') showSignup();
+</script>
+</body>
+</html>

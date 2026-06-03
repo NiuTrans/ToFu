@@ -20,10 +20,10 @@ from lib.protocols import BodyBuilder
 
 logger = get_logger(__name__)
 
-from lib.llm_client import build_body as _build_body_impl
+from lib.llm import build_body as _build_body_impl
 
 build_body: BodyBuilder = _build_body_impl  # type: explicit protocol binding
-from lib.llm_client import AbortedError
+from lib.llm import AbortedError
 from lib.tasks_pkg.attachments import compute_turn_attachments, inject_attachments
 from lib.tasks_pkg.cache_tracking import (
     cleanup_stale_cache_states,
@@ -33,6 +33,7 @@ from lib.tasks_pkg.cache_tracking import (
     release_ttl_latch,
     sort_tool_results,
 )
+from lib.agent_core.events import EventType, build_event
 from lib.tasks_pkg.compaction import run_compaction_pipeline
 from lib.tasks_pkg.executor import (
     _generate_tool_summary,
@@ -126,18 +127,18 @@ from lib.utils import repair_json as _repair_json  # noqa: F401
 def _emit_tool_round_phase(task, assistant_msg, round_num):
     """Emit a 'phase' event describing the current tool round for the frontend."""
     if round_num == 0:
-        append_event(task, {'type': 'phase', 'phase': 'llm_thinking', 'detail': 'Generating response…', 'round': 1})
+        append_event(task, build_event(EventType.PHASE, phase='llm_thinking', detail='Generating response…', round=1))
     else:
         tool_names = [tc['function']['name'] for tc in assistant_msg.get('tool_calls', [])]
         unique_names = list(dict.fromkeys(tool_names))
         labeled = [tool_label(n) for n in unique_names]
         summary = ', '.join(labeled)
-        append_event(task, {
-            'type': 'phase', 'phase': 'llm_thinking',
-            'detail': f'Analyzing results and planning next step… (round {round_num+1})',
-            'toolContext': summary,
-            'round': round_num + 1,
-        })
+        append_event(task, build_event(
+            EventType.PHASE, phase='llm_thinking',
+            detail=f'Analyzing results and planning next step… (round {round_num+1})',
+            toolContext=summary,
+            round=round_num + 1,
+        ))
 
 
 def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, thinking_depth: str | None, cfg: dict[str, Any],
@@ -162,7 +163,7 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         fb.append({'role':'user','content':f'Here are fetched contents:\n\n{combined}\n\nProvide a comprehensive answer. Cite sources.'})
         try:
             snapshot = _strip_base64_for_snapshot(fb)
-            append_event(task, {'type': 'messages_snapshot', 'round': 'fallback', 'label': f'Fallback · {len(fb)}条', 'messages': snapshot})
+            append_event(task, build_event(EventType.MESSAGES_SNAPSHOT, round='fallback', label=f'Fallback · {len(fb)}条', messages=snapshot))
         except Exception as e:
             logger.warning('[Task %s] messages_snapshot fallback failed, model=%s: %s', tid, model, e, exc_info=True)
         body = build_body(
@@ -172,6 +173,7 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
             thinking_enabled=thinking_enabled,
             preset=preset,
             thinking_depth=thinking_depth,
+            response_format=cfg.get('responseFormat'),
             stream=True,
         )
         try:
@@ -183,15 +185,26 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
                     if isinstance(v, (int, float)):
                         accumulated_usage[k] = accumulated_usage.get(k, 0) + v
                 api_rounds.append({'round': 'fallback', 'model': model, 'usage': dict(usg), 'tag': 'FALLBACK'})
+                from lib.tasks_pkg.llm_fallback import _emit_round_usage
+                _emit_round_usage(task, 'fallback', model, usg, tag='FALLBACK')
         except Exception as e:
             logger.error('[%s] ⚠️ Post-loop fallback failed: %s', tid, e, exc_info=True)
             try:
                 from lib.llm_error_format import format_llm_error_for_user
                 task['error'] = format_llm_error_for_user(
-                    e, model=model, context='post-loop-fallback')
+                    e, model=model, context='post-loop-fallback',
+                    source='orchestrator')
             except Exception as _fmt_err:
                 logger.warning('[%s] format_llm_error_for_user failed: %s', tid, _fmt_err)
-                task['error'] = f'Fallback failed: {e}'
+                from lib.error_envelope import make_envelope as _make_env
+                task['error'] = _make_env(
+                    'internal',
+                    detail=f'Post-loop fallback failed: {e}',
+                    model=model,
+                    context='post-loop-fallback',
+                    source='orchestrator',
+                    raw=str(e),
+                )
 
     # ── Content-filter: give user a meaningful error instead of blank bubble ──
     if (not task['content'].strip()
@@ -217,7 +230,15 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
                            tid, _loop_exit_reason, model, _pre_abort_finish)
     elif last_finish_reason in ('tool_use', 'tool_calls') and not task.get('error'):
         last_finish_reason = 'error'
-        task['error'] = task['error'] or 'Model requested tool calls but the loop ended unexpectedly.'
+        from lib.error_envelope import make_envelope as _make_env
+        task['error'] = _make_env(
+            'internal',
+            detail='Model requested tool calls but the loop ended unexpectedly.',
+            model=model,
+            context='post-loop',
+            source='orchestrator',
+            raw='finish_reason=%s but loop exited without further tool execution' % last_finish_reason,
+        )
 
     task['finishReason'] = last_finish_reason
     task['usage'] = accumulated_usage if accumulated_usage else last_usage
@@ -241,6 +262,22 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
 
     # ── Release session-stable TTL latch (prevent memory leak) ──
     release_ttl_latch(task.get('id', ''))
+
+    # ── Tear down any active swarm session + drop unread inbox items ──
+    try:
+        from lib.agent_inbox import clear as _clear_inbox
+        from lib.swarm.integration import _remove_session as _remove_swarm_session
+        from lib.swarm.integration import get_active_session as _get_swarm_session
+        _swarm_sess = _get_swarm_session(task.get('id', ''))
+        if _swarm_sess is not None:
+            try:
+                _swarm_sess.abort()
+            except Exception as _e:
+                logger.debug('[Orchestrator] swarm abort on task end: %s', _e)
+            _remove_swarm_session(task.get('id', ''))
+        _clear_inbox(task.get('id', ''))
+    except Exception as _e:
+        logger.warning('[Orchestrator] swarm/inbox cleanup on task end failed: %s', _e, exc_info=True)
 
     # ── Log session-level aggregate cache stats ──
     _conv_id = task.get('convId', '')
@@ -320,7 +357,7 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     )
 
     # ── Build done event ──
-    done_evt = {'type': 'done'}
+    done_evt = build_event(EventType.DONE)
     if last_finish_reason: done_evt['finishReason'] = last_finish_reason
     final_usage = accumulated_usage if accumulated_usage else last_usage
     if final_usage: done_evt['usage'] = final_usage
@@ -363,9 +400,9 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
                     root_name = m.get('root', '') or ''
                     if t == 'write_file':
                         action = 'created' if not m.get('existed', True) else 'written'
-                    elif t == 'apply_diff':
+                    elif t in ('apply_diff', 'apply_diffs'):
                         action = 'patched'
-                    elif t == 'insert_content':
+                    elif t in ('insert_content', 'insert_contents'):
                         action = 'inserted'
                     elif t == 'run_command':
                         # run_command changes carry granular action based on existed flag
@@ -456,6 +493,77 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     if task.get('_endpoint_managed'):
         _spawn_async_commit_round(task, project_enabled, project_path)
         return
+    # ── Producer B: scan the finalized assistant content for inline
+    #    renderable artifacts (large fenced ```html / ```markdown blocks,
+    #    bare <!doctype html> documents).  Best-effort — failures here
+    #    must NOT block the done event or persistence.
+    try:
+        import lib as _lib_artifacts_gate
+        if getattr(_lib_artifacts_gate, 'ARTIFACTS_ENABLED', True):
+            from lib.artifacts import scan_message
+            scan_message(
+                task.get('convId') or '',
+                task.get('content') or '',
+                msg_id=task.get('_assistantMsgId') or '',
+                task_id=task.get('id') or '',
+                task=task,
+            )
+    except Exception as e:
+        logger.debug('[Artifacts:scan] orchestrator hook failed (non-fatal): %s',
+                     e, exc_info=True)
+
+    # ── Autopilot hook (runs BEFORE the done event so its result can
+    #    ride along on the same SSE message).  When autopilot is on and
+    #    the VU produces a reply, this also writes the synthetic user
+    #    message to the conversation DB and spawns the follow-up task.
+    #    The frontend reads ``autopilotNextTaskId`` + ``autopilotVuMessage``
+    #    from the done event and connects directly — no polling race.
+    try:
+        from lib.tasks_pkg.autopilot import maybe_run_autopilot
+        ap_result = maybe_run_autopilot(task)
+        if ap_result:
+            done_evt['autopilotNextTaskId'] = ap_result['next_task_id']
+            done_evt['autopilotVuMessage'] = ap_result['vu_msg']
+    except Exception as _ap_err:
+        logger.warning('[Autopilot] hook raised: %s — continuing without '
+                       'follow-up (this turn will still be persisted)',
+                       _ap_err, exc_info=True)
+
+    # ── Stamp cost snapshot on the done event ──
+    # Mirrors the persisted-cost write in
+    # lib.tasks_pkg.manager._sync_result_to_conversation: cost depends only
+    # on usage + model + provider + the active pricing table, all of which
+    # are final at this point. Sending it on the done event eliminates the
+    # per-render `/api/v1/messages/cost` round-trips on the LIVE path —
+    # the persisted-cost write covers reload paths.
+    try:
+        from lib.cost import compute_cost as _compute_cost
+        if done_evt.get('usage'):
+            _msg_cost = _compute_cost(
+                done_evt['usage'],
+                model_id=done_evt.get('model') or task.get('model') or '',
+                provider_id=task.get('provider_id') or None,
+            )
+            if _msg_cost:
+                done_evt['cost'] = _msg_cost
+        for _rd in done_evt.get('apiRounds') or []:
+            if not isinstance(_rd, dict) or _rd.get('cost'):
+                continue
+            _ru = _rd.get('usage') or {}
+            if not _ru:
+                continue
+            _rc = _compute_cost(
+                _ru,
+                model_id=_rd.get('model') or done_evt.get('model') or '',
+                provider_id=(_rd.get('provider_id')
+                              or _rd.get('providerId')
+                              or task.get('provider_id') or None),
+            )
+            if _rc:
+                _rd['cost'] = _rc
+    except Exception as _ce:
+        logger.warning('[Cost] done-event stamp failed (non-fatal): %s', _ce)
+
     append_event(task, done_evt)
     persist_task_result(task)
 
@@ -495,6 +603,8 @@ def _run_commit_round_async(task: dict, project_path: str) -> None:
     tid = task['id'][:8]
     try:
         from lib import file_history as fh
+        from lib.file_history.store import _project_lock as _fh_project_lock
+        from lib.file_history.store import load_tracked as _fh_load_tracked
         from lib.project_mod import get_modifications
 
         if not fh.is_enabled():
@@ -515,24 +625,63 @@ def _run_commit_round_async(task: dict, project_path: str) -> None:
             logger.debug('[Task:%s] async tool_names/rel_paths extraction failed: %s',
                          tid, _e)
 
-        # Find the snapshot that was active before this round started, so
-        # diff_name_status can isolate just the round's changes.
-        prev_snap = fh.get_last_snapshot_id(project_path)
+        # ── Atomic commit region (Fix 3) ───────────────────────────
+        # The sequence
+        #   prev_snap  = get_last_snapshot_id(...)
+        #   _snap_id   = make_snapshot(...)
+        #   fh_changes = diff_name_status(prev_snap, _snap_id)
+        #   tracked    = load_tracked(...)              # for Fix 2
+        # MUST run atomically against the per-project file-history
+        # store.  Each individual call already takes the
+        # ``_project_lock`` via ``@with_project_lock``, but releasing
+        # it between calls lets a concurrent commit thread (from
+        # another conversation pointing at the same project root)
+        # advance the snapshot log and ``tracked.json`` between our
+        # ``prev_snap`` capture and our ``make_snapshot``.  When that
+        # happens, our snapshot's file map ends up containing the
+        # OTHER task's edits too, and ``diff_name_status`` then
+        # attributes those edits to OUR round.  Holding the
+        # re-entrant lock across the whole sequence closes the window.
+        # The store's per-call ``with_project_lock`` re-acquires the
+        # same RLock, which is a no-op while we're holding it.
+        fh_changes: list[dict] = []
+        tracked_index: dict = {}
+        with _fh_project_lock(project_path):
+            # Find the snapshot that was active before this round
+            # started, so diff_name_status can isolate just the round's
+            # changes.
+            prev_snap = fh.get_last_snapshot_id(project_path)
 
-        _t0 = time.time()
-        _snap_id = fh.make_snapshot(
-            project_path,
-            task_id=task['id'],
-            conv_id=task.get('convId'),
-            tool_names=_tool_names or None,
-            summary=task.get('toolSummary'),
-            rel_paths=_rel_paths or None,
-        )
-        _elapsed = time.time() - _t0
-        if not _snap_id:
-            logger.debug('[Task:%s] async make_snapshot returned no id (no-op or disabled) elapsed=%.2fs',
-                         tid, _elapsed)
-            return
+            _t0 = time.time()
+            _snap_id = fh.make_snapshot(
+                project_path,
+                task_id=task['id'],
+                conv_id=task.get('convId'),
+                tool_names=_tool_names or None,
+                summary=task.get('toolSummary'),
+                rel_paths=_rel_paths or None,
+            )
+            _elapsed = time.time() - _t0
+            if not _snap_id:
+                logger.debug('[Task:%s] async make_snapshot returned no id (no-op or disabled) elapsed=%.2fs',
+                             tid, _elapsed)
+                return
+
+            # Diff + tracked-index snapshot still inside the lock so
+            # last_writer_task_id reflects the writers as of this
+            # snapshot's instant.
+            try:
+                fh_changes = fh.diff_name_status(project_path, prev_snap, _snap_id) or []
+            except Exception as _e:
+                logger.debug('[Task:%s] async diff_name_status fallback: %s',
+                             tid, _e)
+                fh_changes = []
+            try:
+                tracked_index = _fh_load_tracked(project_path) or {}
+            except Exception as _e:
+                logger.debug('[Task:%s] async load_tracked fallback: %s', tid, _e)
+                tracked_index = {}
+
         # Keep ``gitSha`` field for backward-compat with the frontend (which
         # captures it onto _gitSha for prospective undo UI but doesn't
         # currently consume it).  ``snapshotId`` is the new canonical name.
@@ -542,31 +691,95 @@ def _run_commit_round_async(task: dict, project_path: str) -> None:
             logger.info('[Task:%s] async make_snapshot completed in %.2fs id=%s',
                         tid, _elapsed, _snap_id[:8])
 
-        amend_evt = {'type': 'round_committed',
-                     'snapshotId': _snap_id,
-                     'gitSha': _snap_id,
-                     'taskId': task['id']}
+        amend_evt = build_event(EventType.ROUND_COMMITTED,
+                                snapshotId=_snap_id,
+                                gitSha=_snap_id,
+                                taskId=task['id'])
 
         # File-history-derived additions (run_command / code_exec / MCP side
         # effects that modifications.py doesn't track) come from
         # diff_name_status against the prior snapshot.
+        #
+        # Fix 2 — per-task attribution: filter the diff to keep ONLY
+        # paths whose latest tracked-index entry was last written by
+        # THIS task.  Any path whose ``last_writer_task_id`` is some
+        # other task belongs to a concurrent conversation operating
+        # on the same project root and must not be reported here.
+        # Paths with no writer attribution (legacy entries from before
+        # this fix, or external-edit drift snapshots) keep the prior
+        # behaviour and are still reported.
         try:
-            fh_changes = fh.diff_name_status(project_path, prev_snap, _snap_id)
             if fh_changes:
+                _own_task_id = task.get('id') or ''
+                _filtered: list[dict] = []
+                _dropped = 0
+                for entry in fh_changes:
+                    _writer = (tracked_index.get(entry.get('path'), {})
+                               .get('last_writer_task_id') or '')
+                    if not _writer or _writer == _own_task_id:
+                        _filtered.append(entry)
+                    else:
+                        _dropped += 1
+                if _dropped:
+                    logger.info('[Task:%s] fh side-channel dropped %d path(s) '
+                                'attributable to other concurrent task(s)',
+                                tid, _dropped)
+                fh_changes = _filtered
+        except Exception as _e:
+            logger.debug('[Task:%s] fh attribution filter failed: %s', tid, _e)
+
+        # Dedup must use the same root-tagging convention that
+        # ``modifications.py`` uses when it records a write.  That code
+        # reverse-looks-up ``base_path`` in the global ``_roots`` registry
+        # and stores the matching root NAME on each mod.  When the merger
+        # in ``_emit_done_event`` later builds ``modifiedFileList`` it
+        # carries that ``root`` field through.  If we naively dedup the
+        # fh side-channel by ``('', path)`` here, every file that
+        # modifications.py already recorded with a non-empty ``root``
+        # would be re-added by us — producing duplicate rows in the
+        # frontend's "files changed" bar (one entry with the root prefix,
+        # one without).  Resolve the project root's NAME first and use
+        # it as the dedup key so we collapse against the existing entry.
+        try:
+            if fh_changes:
+                fh_root = ''
+                try:
+                    from lib.project_mod.config import _lock as _proj_lock
+                    from lib.project_mod.config import _roots as _proj_roots
+                    _abs_proj = os.path.abspath(project_path)
+                    with _proj_lock:
+                        for _rn, _rs in _proj_roots.items():
+                            if os.path.abspath(_rs.get('path') or '') == _abs_proj:
+                                fh_root = _rn
+                                break
+                except Exception as _re:
+                    logger.debug('[Task:%s] fh_root lookup failed for %s: %s',
+                                 tid, project_path, _re)
+
                 existing = list(task.get('modifiedFileList') or [])
-                seen_paths = {
-                    (f.get('root', '') or '', f.get('path', ''))
-                    for f in existing if isinstance(f, dict)
-                }
+                seen_paths: set[tuple[str, str]] = set()
+                for f in existing:
+                    if not isinstance(f, dict):
+                        continue
+                    p = f.get('path', '')
+                    r = f.get('root', '') or ''
+                    seen_paths.add((r, p))
+                    # Also record an unrooted alias so a fh entry that
+                    # does not (yet) know the root name still dedups
+                    # against an existing rooted entry for the same file.
+                    seen_paths.add(('', p))
                 added: list[dict] = []
                 for entry in fh_changes:
-                    key = ('', entry['path'])
-                    if key in seen_paths:
+                    p = entry['path']
+                    if (fh_root, p) in seen_paths or ('', p) in seen_paths:
                         continue
-                    item = {'path': entry['path'], 'action': entry['action']}
+                    item = {'path': p, 'action': entry['action']}
+                    if fh_root:
+                        item['root'] = fh_root
                     existing.append(item)
                     added.append(item)
-                    seen_paths.add(key)
+                    seen_paths.add((fh_root, p))
+                    seen_paths.add(('', p))
                 if added:
                     task['modifiedFileList'] = existing
                     task['modifiedFiles'] = len(existing)
@@ -574,8 +787,8 @@ def _run_commit_round_async(task: dict, project_path: str) -> None:
                     amend_evt['modifiedFiles'] = len(existing)
                     amend_evt['addedByGit'] = added
                     logger.info('[Task:%s] async file-history modifiedFileList '
-                                'added %d file(s) missed by modifications.py',
-                                tid, len(added))
+                                'added %d file(s) missed by modifications.py '
+                                '(root=%s)', tid, len(added), fh_root or '-')
         except Exception as _e:
             logger.debug('[Task:%s] async diff_name_status fallback: %s',
                          tid, _e)
@@ -696,6 +909,17 @@ def run_task(task: dict[str, Any]) -> None:
     try:
         cfg = task['config']
 
+        # ── Capability profile: merge named profile defaults UNDER the
+        #    explicit cfg (explicit caller values always win).  No-op when
+        #    cfg has no 'profile' key or selects the empty 'default'.  Applied
+        #    here — before model resolution + tool assembly — so every
+        #    downstream consumer sees the merged values.  See lib/agent_profiles.py.
+        from lib.agent_profiles import apply_profile, resolve_profile_name
+        _profile_name = resolve_profile_name(cfg)
+        if _profile_name != 'default':
+            cfg = apply_profile(cfg)
+            task['config'] = cfg
+
         # ── Per-client browser routing: set thread-local client ID so all
         #    browser commands (tools, fetch fallback, search fallback) from
         #    this task thread route to the correct device's extension. ──
@@ -714,6 +938,7 @@ def run_task(task: dict[str, Any]) -> None:
         max_tokens      = mcfg['max_tokens']
         temperature     = mcfg['temperature']
         search_mode     = mcfg['search_mode']
+        response_format = mcfg.get('response_format')
         search_enabled  = mcfg['search_enabled']
         fetch_enabled   = mcfg['fetch_enabled']
         project_path    = mcfg['project_path']
@@ -773,11 +998,11 @@ def run_task(task: dict[str, Any]) -> None:
                                              task['id'][:8])
                                 return
                             if _ext.get('committed'):
-                                append_event(task, {
-                                    'type': 'project_external_edit',
-                                    'files': _ext.get('files', []),
-                                    'sha': _ext.get('snapshotId'),
-                                })
+                                append_event(task, build_event(
+                                    EventType.PROJECT_EXTERNAL_EDIT,
+                                    files=_ext.get('files', []),
+                                    sha=_ext.get('snapshotId'),
+                                ))
                                 logger.info('[Task:%s] captured %d external edit(s) snap=%s',
                                             task['id'][:8], len(_ext.get('files', [])),
                                             (_ext.get('snapshotId') or '')[:8])
@@ -811,9 +1036,11 @@ def run_task(task: dict[str, Any]) -> None:
         _prefetch_memory_future = None
 
         if project_enabled and project_path:
+            _prefetch_conv_id = task.get('convId') or task.get('id') or ''
             def _prefetch_project():
                 from lib.project_mod import get_context_for_prompt
-                return get_context_for_prompt(project_path)
+                return get_context_for_prompt(project_path,
+                                              conv_id=_prefetch_conv_id or None)
             _prefetch_project_future = _prefetch_executor.submit(_prefetch_project)
 
         # Simple heuristic: if any tool-providing feature is enabled, we'll
@@ -823,7 +1050,13 @@ def run_task(task: dict[str, Any]) -> None:
                                 desktop_enabled or swarm_enabled or
                                 code_exec_enabled or image_gen_enabled)
         _pp = project_path if project_enabled else None
-        if memory_enabled or _has_real_tools_hint:
+        # Memory toggle gates EVERYTHING memory-related: the count-hint
+        # background load, the per-turn prefetch (BM25 + cheap-LLM rerank),
+        # and the accumulation instructions injected into the system prompt.
+        # AI still accumulates memories in the background via the
+        # search_memories / create_memory tools — only the proactive
+        # injection path is muted.
+        if memory_enabled:
             def _prefetch_memory():
                 from lib.memory import build_memory_context
                 return build_memory_context(project_path=_pp)
@@ -834,7 +1067,7 @@ def run_task(task: dict[str, Any]) -> None:
         task['_prefetch_memory'] = _prefetch_memory_future
 
         # ── Section 2: Tool Assembly ──
-        tool_list, deferred_tools, has_real_tools, max_tool_rounds = _assemble_tool_list(
+        tool_list, has_real_tools, max_tool_rounds = _assemble_tool_list(
             cfg, project_path, project_enabled, task['id'],
             search_mode, search_enabled, fetch_enabled,
             code_exec_enabled, browser_enabled, desktop_enabled,
@@ -847,9 +1080,6 @@ def run_task(task: dict[str, Any]) -> None:
 
         # (Planner no-tools override removed — all endpoint roles now
         #  get full tool access.  See endpoint_review._run_planner_turn.)
-
-        # Store deferred tools on the task for the executor to access during tool_search
-        task['_deferred_tools'] = deferred_tools
 
         messages = list(task['messages'])
         original_messages = list(messages)
@@ -879,13 +1109,13 @@ def run_task(task: dict[str, Any]) -> None:
                 messages = rebuilt
                 original_messages = list(messages)
                 # Emit a diagnostic event for the debug panel
-                append_event(task, {
-                    'type': 'phase',
-                    'phase': 'tool_history_restored',
-                    'detail': f'Restored {_rebuild_stats["tool_msgs_restored"]} tool messages from server store',
-                    'stats': _rebuild_stats,
-                    'overhead': _oh,
-                })
+                append_event(task, build_event(
+                    EventType.PHASE,
+                    phase='tool_history_restored',
+                    detail=f'Restored {_rebuild_stats["tool_msgs_restored"]} tool messages from server store',
+                    stats=_rebuild_stats,
+                    overhead=_oh,
+                ))
             else:
                 logger.debug('[%s] conv=%s keepToolHistory enabled but no stored messages found',
                              tid, _conv_id[:8])
@@ -935,17 +1165,29 @@ def run_task(task: dict[str, Any]) -> None:
         #   thought to call search_memories on its own. Emits SSE
         #   `memory_prefetch` events so the frontend can show an indicator.
         #   Skipped if:
+        #     • Memory toggle disabled (memory_enabled=false)
         #     • feature flag disabled
         #     • continue/resume (tool_history was replayed → not a fresh turn)
         #     • no real tools (memory tools unavailable anyway)
-        if has_real_tools and not _injected_tool_calls:
+        if memory_enabled and has_real_tools and not _injected_tool_calls:
             try:
                 from lib.memory.prefetch import run_memory_prefetch
+                # Active-tools list lets the cheap-LLM filter drop memories
+                # about subsystems the user can't currently use (e.g.
+                # browser memories when browser is off).
+                _active_tools = []
+                for _t in (tool_list or []):
+                    try:
+                        _active_tools.append(_t['function']['name'])
+                    except (KeyError, TypeError) as _e_audit:
+                        logger.debug('[orchestrator] run_task caught %s: %s', type(_e_audit).__name__, _e_audit)
+                        continue
                 run_memory_prefetch(
                     messages,
                     project_path=project_path if project_enabled else None,
                     task=task,
                     emit_event=lambda ev: append_event(task, ev),
+                    active_tools=_active_tools,
                 )
             except Exception as _e:
                 # Advisory path — never block the task on prefetch failure.
@@ -1048,7 +1290,8 @@ def run_task(task: dict[str, Any]) -> None:
                         project_enabled=project_enabled,
                     )
                     if _attachments:
-                        inject_attachments(messages, _attachments)
+                        inject_attachments(messages, _attachments,
+                                            conv_id=task.get('convId') or None)
                 except Exception as e:
                     logger.error('[Task:%s] compute_turn_attachments failed '
                                  'round=%d: %s — continuing without attachments',
@@ -1061,17 +1304,84 @@ def run_task(task: dict[str, Any]) -> None:
             inject_search_addendum_to_user(messages, search_enabled,
                                            round_num=round_num)
 
+            # ★ Drain swarm inbox — async sub-agent completions (and any other
+            #   model-facing notifications) get injected as `user`-role
+            #   `_isMeta` messages right before the LLM call. Drained AFTER
+            #   attachments / search-addendum so it sits at the end of the
+            #   message list (just before the model takes its next turn).
+            #   Safe injection rule: if the previous turn ended with an
+            #   assistant tool_call awaiting tool_result, postpone — the
+            #   pair must close before another role can speak.
+            try:
+                _last_msg = messages[-1] if messages else None
+                _has_unmatched_tool_call = (
+                    bool(_last_msg)
+                    and _last_msg.get('role') == 'assistant'
+                    and _last_msg.get('tool_calls')
+                )
+                if not _has_unmatched_tool_call:
+                    from lib.agent_inbox import drain as _drain_inbox
+                    # NOTE: drain with the FULL task id — the inbox is keyed
+                    # by ``task['id']`` (see master.py enqueue + the task-end
+                    # clear below). ``tid`` is the 8-char log prefix and would
+                    # never match, leaving every <swarm-update> unread until it
+                    # was silently discarded at task end.
+                    _inbox_items = _drain_inbox(task['id'])
+                    if _inbox_items:
+                        # Coalesce ALL drained items into a single user
+                        # message — one message with N <swarm-update>
+                        # blocks instead of N adjacent user messages.
+                        # Reasons:
+                        #   1. Cuts message count → cleaner cache prefix.
+                        #   2. <swarm-update> is treated as factual data
+                        #      (not a system reminder), so this is a real
+                        #      user-role message — no _isMeta flag, no
+                        #      <system-reminder> wrapper.  Mirrors Claude
+                        #      Code's <task-notification> approach.
+                        _payloads = [it.get('value', '') for it in _inbox_items
+                                     if it.get('value')]
+                        if _payloads:
+                            messages.append({
+                                'role':    'user',
+                                'content': '\n\n'.join(_payloads),
+                            })
+                            logger.info(
+                                '[Task %s] injected %d swarm-update item(s) '
+                                'as 1 user message at round %d',
+                                tid, len(_payloads), round_num + 1)
+                            append_event(task, build_event(
+                                EventType.SWARM_INBOX_INJECT,
+                                round=round_num + 1,
+                                count=len(_payloads),
+                                agentIds=[it.get('agent_id', '')
+                                          for it in _inbox_items
+                                          if it.get('value')],
+                                # ★ Carry the actual <swarm-update> payloads
+                                #   (truncated) so the frontend can render an
+                                #   in-timeline ptool-panel row showing exactly
+                                #   what the model received — not just a count.
+                                previews=[{
+                                    'agentId': it.get('agent_id', ''),
+                                    'text': (it.get('value') or '')[:1200],
+                                } for it in _inbox_items if it.get('value')],
+                            ))
+            except Exception as _e:
+                logger.error(
+                    '[Task %s] swarm inbox drain/inject failed at round %d: %s '
+                    '— continuing without notifications',
+                    tid, round_num + 1, _e, exc_info=True)
+
             _tools_this_round = tool_list if (tool_list and round_num < max_tool_rounds) else None
 
             # ★ Emit messages snapshot for debug panel (before LLM call)
             try:
                 snapshot = _strip_base64_for_snapshot(messages)
-                snap_evt = {
-                    'type': 'messages_snapshot',
-                    'round': round_num + 1,
-                    'label': f'Round {round_num + 1} 请求前 · {len(messages)}条',
-                    'messages': snapshot,
-                }
+                snap_evt = build_event(
+                    EventType.MESSAGES_SNAPSHOT,
+                    round=round_num + 1,
+                    label=f'Round {round_num + 1} 请求前 · {len(messages)}条',
+                    messages=snapshot,
+                )
                 if _tools_this_round:
                     snap_evt['tools'] = _tools_this_round
                 append_event(task, snap_evt)
@@ -1091,6 +1401,7 @@ def run_task(task: dict[str, Any]) -> None:
                 preset=preset,
                 thinking_depth=thinking_depth,
                 tools=_tools_this_round,
+                response_format=response_format,
                 stream=True,
             )
             # ★ Attach task_id for session-stable TTL latch in
@@ -1188,11 +1499,42 @@ def run_task(task: dict[str, Any]) -> None:
                         tid, task.get('convId', ''), round_num + 1, last_finish_reason, model,
                         _round_content, _round_tcs)
 
+            # ── max_budget_usd gate (Claude Agent SDK parity) ──
+            # Hard $ ceiling on accumulated cost.  0 / unset disables.
+            _max_budget = float(cfg.get('maxBudgetUsd') or 0.0)
+            if _max_budget > 0:
+                from lib.cost_estimator import check_budget
+                _exceeded, _cost, _reason = check_budget(
+                    task, accumulated_usage, model, _max_budget,
+                    round_num=round_num,
+                )
+                if _exceeded:
+                    last_finish_reason = 'budget_exceeded'
+                    from lib.error_envelope import make_envelope as _make_env
+                    task['error'] = _make_env(
+                        'budget_exceeded',
+                        detail=_reason,
+                        model=model,
+                        context='budget-gate',
+                        source='orchestrator',
+                        raw=f'cost_usd={_cost:.6f} max={_max_budget:.6f}',
+                    )
+                    _loop_exit_reason = f'budget_exceeded_round_{round_num}_${_cost:.4f}'
+                    break
+
             # ── Tool round budget check ──
             if round_num >= max_tool_rounds:
                 # Safety ceiling: tool round budget exhausted
                 last_finish_reason = 'tool_rounds_exhausted'
-                task['error'] = f'⚠️ Tool call limit reached ({max_tool_rounds} rounds). The response may be incomplete.'
+                from lib.error_envelope import make_envelope as _make_env
+                task['error'] = _make_env(
+                    'tool_rounds_exhausted',
+                    detail=f'Tool call limit reached ({max_tool_rounds} rounds).',
+                    model=model,
+                    context='tool-budget',
+                    source='orchestrator',
+                    raw=f'max_tool_rounds={max_tool_rounds}',
+                )
                 logger.warning('[Task %s] conv=%s ⚠️ Tool rounds exhausted at round %d/%d', task['id'][:8], task.get('convId', ''), round_num+1, max_tool_rounds)
                 _loop_exit_reason = f'tool_rounds_exhausted_{round_num}'
                 break
@@ -1239,6 +1581,49 @@ def run_task(task: dict[str, Any]) -> None:
                 early_announced=_stream_acc.announced_tc_map,
             )
 
+            # ── Phase 1b: Sanitize tool_calls in messages so the next API
+            #   round doesn't carry malformed JSON args back to the gateway.
+            #
+            #   Background: when a model emits ``tool_calls=[{arguments: '...'}]``
+            #   where ``arguments`` is invalid JSON (common with weaker models
+            #   that mis-escape backslashes in regex args, e.g. ``\d`` instead
+            #   of ``\\d``), parse_tool_calls() catches the JSONDecodeError and
+            #   builds an error tool_result.  But the assistant message we
+            #   already appended at line ~1361 still contains the RAW bad args.
+            #
+            #   On the next round, server_message_store / orchestrator replays
+            #   ``assistant(tool_calls=[..bad args..]) + tool(error_msg)`` to
+            #   the upstream gateway, which validates the JSON-string itself
+            #   and rejects with HTTP 400 ``invalid function arguments json
+            #   string``.  The whole conversation gets stuck — model never
+            #   sees the error tool_result, can't recover, task ends in
+            #   ``finishReason=error``.
+            #
+            #   Fix: walk parsed_tcs and any tc with non-None ``_args_parse_error``
+            #   gets its ``arguments`` overwritten to ``'{}'`` in messages[-1].
+            #   The error tool_result still teaches the model what went wrong;
+            #   the gateway sees valid JSON and lets the next round through.
+            #   See May 2026 incident memory.
+            for tc, fn_name, tc_id, fn_args, rn, round_entry, args_parse_err in parsed_tcs:
+                if not args_parse_err:
+                    continue
+                # Find the matching tool_call in messages[-1] by tc_id and
+                # rewrite its arguments to a syntactically valid empty JSON.
+                last_msg = messages[-1] if messages else {}
+                for live_tc in last_msg.get('tool_calls', []) or []:
+                    if live_tc.get('id') != tc_id:
+                        continue
+                    fn = live_tc.get('function') or {}
+                    bad_args = fn.get('arguments', '')
+                    fn['arguments'] = '{}'
+                    logger.info(
+                        '[%s] conv=%s Sanitized malformed tool_call args for '
+                        'tool=%s tc_id=%s (was %d chars) — error fed back to '
+                        'model in matching tool_result; gateway sees valid JSON',
+                        tid, task.get('convId', ''), fn_name, tc_id[:12],
+                        len(bad_args) if isinstance(bad_args, str) else 0)
+                    break
+
             # ── Phase 2: Emit execution phase event ──
             emit_tool_exec_phase(task, parsed_tcs)
 
@@ -1251,59 +1636,6 @@ def run_task(task: dict[str, Any]) -> None:
             # Clean up live messages ref after tool execution
             task.pop('_compact_messages', None)
 
-            # ── Phase 4a: emit_to_user terminal detection ──
-            # If any tool in this round was emit_to_user, the model wants to
-            # end its turn by pointing the user to an existing tool result.
-            # Set the comment as final content and break the loop immediately
-            # — no further LLM calls needed.
-            #
-            # ★ The referenced tool round's content is extracted and sent to
-            #   the frontend via an emit_ref SSE event so it can be rendered
-            #   inline below the comment in the assistant message bubble.
-            _emit_detected = False
-            for _ptc in parsed_tcs:
-                _ptc_tc, _ptc_fn, _ptc_id, _ptc_args, _ptc_rn, _ptc_re, _ptc_pe = _ptc
-                if _ptc_re and _ptc_re.get('_emit_to_user'):
-                    _emit_comment = _ptc_re.get('_emit_comment', '')
-                    _emit_round = _ptc_re.get('_emit_tool_round', '?')
-
-                    # ★ Extract the referenced tool round's content so the
-                    #   frontend can render it inline as the answer.
-                    _emit_tool_content = ''
-                    _emit_tool_name = ''
-                    if isinstance(_emit_round, int):
-                        for _sr in task.get('toolRounds', []):
-                            if _sr.get('roundNum') == _emit_round:
-                                _emit_tool_content = _sr.get('toolContent') or ''
-                                _emit_tool_name = _sr.get('toolName') or ''
-                                break
-
-                    # Store emit content on task for persistence
-                    task['_emitContent'] = _emit_tool_content
-                    task['_emitToolName'] = _emit_tool_name
-
-                    with task['content_lock']:
-                        task['content'] = _emit_comment
-                    # Send comment as regular delta so it appears in the bubble
-                    append_event(task, {'type': 'delta', 'content': _emit_comment})
-                    # Send emit content for inline rendering below the comment
-                    append_event(task, {
-                        'type': 'emit_ref',
-                        'roundNum': _emit_round,
-                        'emitContent': _emit_tool_content,
-                        'emitToolName': task.get('_emitToolName', ''),
-                    })
-                    last_finish_reason = 'stop'
-                    _loop_exit_reason = f'emit_to_user_round_{_emit_round}'
-                    _emit_detected = True
-                    logger.info(
-                        '[%s] conv=%s emit_to_user: referencing tool_round=%s, '
-                        'comment=%d chars — breaking loop (no further LLM calls)',
-                        tid, task.get('convId', ''), _emit_round, len(_emit_comment))
-                    break
-            if _emit_detected:
-                break
-
             # ── Phase 4b: Consecutive tool-timeout circuit breaker ──
             if _tool_timed_out:
                 _consecutive_tool_timeouts += 1
@@ -1315,9 +1647,14 @@ def run_task(task: dict[str, Any]) -> None:
                     logger.error(
                         '[%s] conv=%s ⚠️ FORCE STOP: %d consecutive tool timeouts — breaking loop to prevent runaway task. model=%s',
                         tid, task.get('convId', ''), _consecutive_tool_timeouts, model)
-                    task['error'] = (
-                        f'⚠️ Task stopped: {_consecutive_tool_timeouts} consecutive tool execution timeouts. '
-                        f'The tool keeps timing out — try a simpler approach or increase the timeout.'
+                    from lib.error_envelope import make_envelope as _make_env
+                    task['error'] = _make_env(
+                        'tool_timeout',
+                        detail=f'{_consecutive_tool_timeouts} consecutive tool execution timeouts.',
+                        model=model,
+                        context='tool-loop',
+                        source='orchestrator',
+                        raw=f'consecutive_tool_timeouts={_consecutive_tool_timeouts}',
                     )
                     _loop_exit_reason = f'consecutive_tool_timeouts_{_consecutive_tool_timeouts}'
                     break
@@ -1391,6 +1728,10 @@ def run_task(task: dict[str, Any]) -> None:
             round_num=round_num,
             assistant_msg=assistant_msg,
         )
+
+        # ── Autopilot now runs INSIDE _finalize_and_emit_done (before
+        #    the done SSE event is emitted), so its result can ride on
+        #    the same event.  No standalone hook here.
     except Exception as e:
         logger.error('[Orchestrator] run_task FATAL error task=%s', task.get('id', '?')[:8], exc_info=True)
         # Prefer the user-friendly message attached by _llm_call_with_fallback;
@@ -1402,14 +1743,22 @@ def run_task(task: dict[str, Any]) -> None:
                 from lib.llm_error_format import format_llm_error_for_user
                 _user_err = format_llm_error_for_user(
                     e, model=task.get('config', {}).get('model', ''),
-                    context='task-fatal')
+                    context='task-fatal', source='orchestrator')
             except Exception as _fmt_err:
                 logger.warning('[Orchestrator] format_llm_error_for_user failed: %s', _fmt_err)
-                _user_err = str(e)
+                from lib.error_envelope import make_envelope as _make_env
+                _user_err = _make_env(
+                    'internal',
+                    detail=f'Task fatal: {e}',
+                    model=task.get('config', {}).get('model', ''),
+                    context='task-fatal',
+                    source='orchestrator',
+                    raw=str(e),
+                )
         task['error'] = _user_err; task['status'] = 'error'; task['finishReason'] = 'error'
         if task.get('_endpoint_managed'):
             return   # let endpoint.py handle the error
-        append_event(task, {'type': 'done', 'error': _user_err, 'finishReason': 'error'})
+        append_event(task, build_event(EventType.DONE, error=_user_err, finishReason='error'))
         persist_task_result(task)
 
 

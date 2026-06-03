@@ -32,7 +32,6 @@ if os.path.exists(os.environ['TOFU_DB_PATH']):
     os.unlink(os.environ['TOFU_DB_PATH'])
 
 from flask import Flask  # noqa: E402
-from flask_compress import Compress  # noqa: E402
 
 from lib.database import DOMAIN_CHAT, get_thread_db, init_db, json_dumps_pg  # noqa: E402
 
@@ -46,7 +45,6 @@ from routes.conversations import conversations_bp  # noqa: E402
 from routes.translate import _commit_translation_inner  # noqa: E402
 
 app = Flask(__name__)
-Compress(app)
 app.register_blueprint(conversations_bp)
 client = app.test_client()
 
@@ -89,16 +87,17 @@ def test_event_log_replay():
     flush_pending(tid)
 
     all_events = read_events(tid)
-    # 3 deltas should coalesce into 1; everything else stays
-    assert len(all_events) == 4, f'expected 4 rows, got {len(all_events)}'
-    delta_row = next(e for e in all_events if e['payload']['type'] == 'delta')
-    assert delta_row['payload']['content'] == 'Hello world!'
-    # Coalesced row uses LAST event_id so reconnects mid-coalesce don't lose
-    assert delta_row['event_id'] == 3, f'coalesced delta should sit at id=3, got {delta_row["event_id"]}'
+    # Each delta is its own row — no coalescing
+    assert len(all_events) == 6, f'expected 6 rows, got {len(all_events)}'
+    delta_rows = [e for e in all_events if e['payload']['type'] == 'delta']
+    assert len(delta_rows) == 3
+    assert delta_rows[0]['payload']['content'] == 'Hello '
+    assert delta_rows[1]['payload']['content'] == 'world'
+    assert delta_rows[2]['payload']['content'] == '!'
 
     # Last-Event-ID semantics
     since1 = read_events(tid, since_event_id=1)
-    assert [e['event_id'] for e in since1] == [3, 4, 5]
+    assert [e['event_id'] for e in since1] == [2, 3, 4, 5]
     since3 = read_events(tid, since_event_id=3)
     assert [e['event_id'] for e in since3] == [4, 5]
 

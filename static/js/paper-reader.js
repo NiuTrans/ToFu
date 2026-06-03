@@ -25,7 +25,7 @@ var _paperQAStreaming = false;
 var _paperQAAbort = null;
 var _paperReportModel = '';  // user-selected model for report generation
 var _paperImages = [];  // [{url, caption, page, source, width, height}] — for embedding in report
-var _paperPdfFilename = '';  // server-side PDF filename (for /api/paper/extract-images lookup)
+var _paperPdfFilename = '';  // server-side PDF filename — handed back from /api/paper/upload and /api/paper/fetch-arxiv-stream
 
 // ── Report streaming state (2026-04-18 rewrite) ──
 // Server owns the report task; the frontend only polls.
@@ -53,26 +53,30 @@ var _PAPER_MIGRATED_FLAG = 'paper_library_migrated_v1';
 /** Upsert this entry to the server. Per-paper PUT so one save can't
  *  clobber a concurrent save of another paper. Best-effort — failures
  *  are logged but don't block the UI. */
-function _persistPaperEntry(entry) {
+/** Persist client-owned mutable state for a paper to the server.
+ *  parsedText / images / paperHash / pdfFilename are server-derived and
+ *  ONLY sent on the first save (when ``_first`` is true) — afterwards
+ *  the server preserves whatever it already has, so we don't keep
+ *  re-uploading the parsed PDF text on every save.
+ */
+function _persistPaperEntry(entry, _first) {
   if (!entry || !entry.id) return Promise.resolve();
   var body = {
     title: entry.title || '',
-    pdfUrl: entry.pdfUrl || '',
-    pdfFilename: entry.pdfFilename || '',
-    arxivId: entry.arxivId || '',
-    paperHash: entry.paperHash || '',
-    parsedText: (entry.parsedText || '').slice(0, 200000),
     qaHistory: (entry.qaHistory || []).slice(-50),
-    images: Array.isArray(entry.images) ? entry.images.slice(0, 60) : [],
     babelCache: entry.babelCache || {},
     pageCount: entry.pageCount || 0,
     createdAt: entry.createdAt || Date.now(),
   };
-  return fetch(apiUrl('/api/paper/library/' + encodeURIComponent(entry.id)), {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  }).then(function(r) { return r.json(); })
+  if (_first) {
+    body.pdfUrl = entry.pdfUrl || '';
+    body.pdfFilename = entry.pdfFilename || '';
+    body.arxivId = entry.arxivId || '';
+    body.paperHash = entry.paperHash || '';
+    body.parsedText = (entry.parsedText || '').slice(0, 200000);
+    body.images = Array.isArray(entry.images) ? entry.images.slice(0, 60) : [];
+  }
+  return Api.paper.libraryUpsert(entry.id, body)
     .then(function(data) {
       if (!data || !data.ok) {
         console.warn('[Paper:Library] Upsert rejected:', data && data.error);
@@ -107,7 +111,7 @@ async function _migrateLegacyLibrary() {
   }
   debugLog('[Paper] Migrating ' + legacy.length + ' bookshelf entries to server…', 'info');
   for (var i = 0; i < legacy.length; i++) {
-    try { await _persistPaperEntry(legacy[i]); }
+    try { await _persistPaperEntry(legacy[i], true); }
     catch (e) { console.warn('[Paper:Library] Migrate entry failed:', e); }
   }
   localStorage.removeItem(_PAPER_LEGACY_LIB_KEY);
@@ -120,10 +124,12 @@ async function _loadPaperLibrary() {
   _activePaperId = localStorage.getItem(_PAPER_ACTIVE_KEY) || '';
   try {
     await _migrateLegacyLibrary();
-    var resp = await fetch(apiUrl('/api/paper/library'));
-    var data = await resp.json();
+    var data = await Api.paper.libraryList();
     if (data && data.ok && Array.isArray(data.papers)) {
       _paperLibrary = data.papers;
+      // Loaded from server → row already exists, subsequent saves are
+      // small-payload incremental updates (no parsed_text re-upload).
+      for (var pi = 0; pi < _paperLibrary.length; pi++) _paperLibrary[pi]._persisted = true;
     } else {
       _paperLibrary = [];
       console.warn('[Paper:Library] Unexpected server response:', data);
@@ -159,10 +165,12 @@ function _createPaperEntry(title, pdfUrl, parsedText, arxivId) {
     babelCache: {},
     createdAt: Date.now(),
     pageCount: 0,
+    _persisted: false,
   };
   _paperLibrary.unshift(entry);
   _setActivePaperId(entry.id);
-  _persistPaperEntry(entry);
+  // Don't seed the row yet — parsed_text / images come from the upload
+  // response. _saveActivePaperState() will do the first full persist.
   return entry;
 }
 
@@ -187,7 +195,13 @@ function _saveActivePaperState() {
   entry.images = Array.isArray(_paperImages) ? _paperImages : [];
   entry.babelCache = _babelTranslatedPages || {};
   entry.pageCount = _paperTotalPages;
-  _persistPaperEntry(entry);
+  // First save: include parsedText / images / paperHash / pdfFilename so
+  // the row gets seeded. Subsequent saves only ship the small mutable
+  // fields (qaHistory, babelCache, pageCount, title) — server preserves
+  // the heavy columns.
+  var first = !entry._persisted;
+  entry._persisted = true;
+  _persistPaperEntry(entry, first);
 }
 
 function _deletePaperEntry(id) {
@@ -195,7 +209,7 @@ function _deletePaperEntry(id) {
   if (_activePaperId === id) {
     _setActivePaperId(_paperLibrary.length > 0 ? _paperLibrary[0].id : '');
   }
-  fetch(apiUrl('/api/paper/library/' + encodeURIComponent(id)), { method: 'DELETE' })
+  Api.paper.libraryDelete(id)
     .catch(function(e) { console.warn('[Paper:Library] Delete failed:', e); });
   _renderPaperLibrary();
 
@@ -972,77 +986,42 @@ async function _paperUploadFile(file) {
   _renderPaperLibrary();
 
   var viewer = document.getElementById('paperPdfViewer');
-  if (viewer) viewer.innerHTML = '<div class="paper-loading"><div class="paper-loading-spinner"></div><div>Uploading PDF…</div></div>';
+  if (viewer) viewer.innerHTML = '<div class="paper-loading"><div class="paper-loading-spinner"></div><div>Uploading & parsing PDF…</div></div>';
 
   try {
+    // Single round-trip: server saves the PDF, parses text, AND extracts
+    // figures synchronously — no client-side parse fallback, no race with
+    // a background image-extraction call.
     var formData = new FormData();
     formData.append('file', file);
-    var uploadResp = await fetch(apiUrl('/api/paper/upload'), { method: 'POST', body: formData });
-    var uploadData = await uploadResp.json();
-    if (!uploadData.ok) throw new Error(uploadData.error || 'Upload failed');
+    var uploadData = await Api.paper.upload(formData);
+    if (!uploadData || !uploadData.ok) throw new Error((uploadData && uploadData.error) || 'Upload failed');
 
     _paperPdfUrl = apiUrl(uploadData.pdf_url);
     _paperPdfFilename = uploadData.filename || '';
-    _updatePaperTitles();
+    _paperParsedText = uploadData.parsed_text || '';
+    _paperHash = uploadData.paper_hash || '';
+    _paperImages = Array.isArray(uploadData.images) ? uploadData.images : [];
+    _paperTotalPages = uploadData.total_pages || 0;
 
-    // Parse text for QA/report
-    var parseForm = new FormData();
-    parseForm.append('file', file);
-    parseForm.append('maxTextChars', '0');
-    parseForm.append('maxImages', '0');
-    var parseResp = await fetch(apiUrl('/api/pdf/parse'), { method: 'POST', body: parseForm });
-    var parseData = await parseResp.json();
-    if (parseData.success) {
-      _paperParsedText = parseData.text || '';
-      debugLog('Paper parsed: ' + parseData.totalPages + ' pages, ' + parseData.textLength + ' chars', 'success');
+    if (uploadData.parse_error) {
+      debugLog('[Paper] PDF text extraction failed: ' + uploadData.parse_error, 'warning');
+    } else if (_paperParsedText) {
+      debugLog('Paper parsed: ' + _paperTotalPages + ' pages, ' +
+               (uploadData.text_length || _paperParsedText.length) + ' chars' +
+               (_paperImages.length ? ' (' + _paperImages.length + ' figures)' : ''),
+               'success');
     }
 
+    _updatePaperTitles();
     await _loadPaperPdf(_paperPdfUrl);
     _saveActivePaperState();
-
-    // Kick off image extraction in the background so the Report can embed figures/tables
-    _extractPaperImages();
 
   } catch (e) {
     console.error('[Paper] Upload failed:', e);
     if (viewer) viewer.innerHTML = '<div class="paper-error">Upload failed: ' + escapeHtml(e.message) + '</div>';
   } finally {
     _paperLoading = false;
-  }
-}
-
-/** Extract figures/tables from the current paper PDF (server-side).
- * Populates _paperImages with [{url, caption, page, source, width, height}]
- * and persists them on the active library entry. Silent / best-effort. */
-async function _extractPaperImages() {
-  if (!_paperPdfFilename) {
-    // Try to recover from the public URL: "/api/paper/pdf/<filename>"
-    var m = /\/api\/paper\/pdf\/([^?#]+)/.exec(_paperPdfUrl || '');
-    if (m) _paperPdfFilename = decodeURIComponent(m[1]);
-  }
-  if (!_paperPdfFilename) {
-    console.warn('[Paper] _extractPaperImages: no filename, skipping');
-    return;
-  }
-  try {
-    var body = { filename: _paperPdfFilename };
-    if (_paperHash) body.paper_hash = _paperHash;
-    var resp = await fetch(apiUrl('/api/paper/extract-images'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    var data = await resp.json();
-    if (!data.ok) {
-      console.warn('[Paper] Image extraction failed:', data.error);
-      return;
-    }
-    _paperImages = Array.isArray(data.images) ? data.images : [];
-    if (data.paper_hash && !_paperHash) _paperHash = data.paper_hash;
-    _saveActivePaperState();
-    if (_paperImages.length) debugLog('Extracted ' + _paperImages.length + ' figures/tables', 'success');
-  } catch (e) {
-    console.warn('[Paper] Image extraction error:', e);
   }
 }
 
@@ -1135,12 +1114,8 @@ async function _fetchArxivPaper() {
   _renderArxivFetchProgress({ stage: 'resolve' });
 
   try {
-    var resp = await fetch(apiUrl('/api/paper/fetch-arxiv-stream'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: url }),
-    });
-    if (!resp.ok || !resp.body) {
+    var resp = await Api.paper.fetchArxivStream(url);
+    if (!resp || !resp.ok || !resp.body) {
       var errText = '';
       try { var j = await resp.json(); errText = j.error || ''; } catch (_) {}
       throw new Error(errText || ('HTTP ' + resp.status));
@@ -1183,20 +1158,20 @@ async function _fetchArxivPaper() {
     if (!doneData) throw new Error('Fetch ended without completion');
 
     _paperPdfUrl = apiUrl(doneData.pdf_url);
-    // Extract filename from pdf_url (e.g. "/api/paper/pdf/arxiv_2301.12345.pdf") for image extraction
+    // Extract filename from pdf_url (e.g. "/api/paper/pdf/arxiv_2301.12345.pdf")
     var _pdfMatch = /\/api\/paper\/pdf\/([^?#]+)/.exec(doneData.pdf_url || '');
     _paperPdfFilename = _pdfMatch ? decodeURIComponent(_pdfMatch[1]) : '';
     _paperArxivId = doneData.arxiv_id || curArxivId || '';
     _paperFileName = 'arXiv:' + _paperArxivId;
     _paperParsedText = doneData.parsed_text || '';
     _paperTotalPages = doneData.total_pages || 0;
+    _paperHash = doneData.paper_hash || '';
+    _paperImages = Array.isArray(doneData.images) ? doneData.images : [];
 
     // Create library entry now that we have everything (sets _activePaperId)
     _createPaperEntry(_paperFileName, _paperPdfUrl, _paperParsedText, _paperArxivId);
     _paperQAHistory = [];
     _paperReportCache = '';
-    _paperHash = '';
-    _paperImages = [];
     _babelTranslatedPages = {};
     _updatePaperTitles();
     _renderPaperLibrary();
@@ -1204,16 +1179,16 @@ async function _fetchArxivPaper() {
     if (doneData.parse_error) {
       debugLog('[Paper] PDF text extraction failed: ' + doneData.parse_error, 'warning');
     } else if (_paperParsedText) {
-      debugLog('arXiv parsed: ' + _paperTotalPages + ' pages, ' + (doneData.text_length || _paperParsedText.length) + ' chars', 'success');
+      debugLog('arXiv parsed: ' + _paperTotalPages + ' pages, ' +
+               (doneData.text_length || _paperParsedText.length) + ' chars' +
+               (_paperImages.length ? ' (' + _paperImages.length + ' figures)' : ''),
+               'success');
     } else {
       debugLog('[Paper] arXiv PDF loaded but no text extracted — Q&A and Report unavailable', 'warning');
     }
 
     await _loadPaperPdf(_paperPdfUrl);
     _saveActivePaperState();
-
-    // Kick off image extraction in the background so the Report can embed figures/tables
-    _extractPaperImages();
 
     debugLog('Fetched arXiv:' + _paperArxivId + (doneData.cached ? ' (cached)' : ''), 'success');
   } catch (e) {
@@ -1293,13 +1268,8 @@ async function _ensurePaperText() {
   if (!fname) return false;
   try {
     debugLog('[Paper] Re-parsing PDF to recover text…', 'info');
-    var resp = await fetch(apiUrl('/api/paper/reparse'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: fname }),
-    });
-    var data = await resp.json();
-    if (!data.ok || !data.text) {
+    var data = await Api.paper.reparse(fname);
+    if (!data || !data.ok || !data.text) {
       debugLog('[Paper] Re-parse failed: ' + (data.error || 'empty text'), 'warning');
       return false;
     }
@@ -1342,11 +1312,10 @@ async function _sendPaperQuestion() {
 
   try {
     _paperQAAbort = new AbortController();
-    var resp = await fetch(apiUrl('/api/paper/chat'), {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      signal: _paperQAAbort.signal,
-      body: JSON.stringify({ messages: messages, stream: true }),
-    });
+    var resp = await Api.paper.chatStream(
+      { messages: messages, stream: true },
+      { signal: _paperQAAbort.signal }
+    );
     var reader = resp.body.getReader();
     var decoder = new TextDecoder();
     var buffer = '';
@@ -1468,6 +1437,9 @@ function _makeReportStreamState(paperId, lang, taskId) {
     error: '',
     pollTimer: null,
     pollBusy: false,
+    _lastRenderedLen: -1,
+    _lastRenderedStatus: '',
+    _lastToolKey: '',
   };
 }
 
@@ -1522,6 +1494,21 @@ function _applyReportEvent(s, ev) {
         r.status = 'done';
         if (typeof ev.elapsed === 'number') r._elapsed = ev.elapsed.toFixed(1) + 's';
         if (ev.toolContent) r.toolContent = ev.toolContent;
+        if (ev.results) {
+          r.results = ev.results;
+        } else if (ev.toolContent && ev.toolContent.length > 20) {
+          // Synthesize minimal results so renderToolRoundsHTML doesn't
+          // show "no results" for search/fetch that actually returned content.
+          r.results = [{
+            title: r.toolName === 'web_search' ? 'Search results' : 'Fetched content',
+            snippet: ev.toolContent.slice(0, 120).replace(/\n/g, ' '),
+            source: r.toolName === 'web_search' ? 'Web' : 'Direct Fetch',
+            fetched: true,
+            fetchedChars: ev.toolContent.length,
+          }];
+        }
+        if (ev.searchDiag) r.searchDiag = ev.searchDiag;
+        if (ev.engineBreakdown) r.engineBreakdown = ev.engineBreakdown;
       }
       return true;
     }
@@ -1545,21 +1532,33 @@ function _applyReportEvent(s, ev) {
 
     case 'enriched':
       s.fullText = ev.text || s.fullText;
-      if (ev.paperHash) _paperHash = ev.paperHash;
+      // Only mutate global hash when this stream still belongs to the active paper —
+      // a stream that was started for paper A and is now polling in the background
+      // must not stomp paper B's hash.
+      if (ev.paperHash && s.paperId === _activePaperId) _paperHash = ev.paperHash;
       return true;
 
     case 'done':
       s.status = 'done';
       if (ev.report) {
         s.fullText = ev.report;
-        _paperReportCache = ev.report;
+        if (s.paperId === _activePaperId) _paperReportCache = ev.report;
       }
-      if (ev.paperHash) _paperHash = ev.paperHash;
+      if (ev.paperHash && s.paperId === _activePaperId) _paperHash = ev.paperHash;
       return true;
 
     case 'error':
       s.status = 'error';
-      s.error = ev.error || 'Unknown error';
+      // ev.error is a typed error envelope dict from routes/paper.py.
+      // Display surfaces use the short ``message`` field; keep the full
+      // envelope on s._errorEnv for future kind-aware rendering.
+      s._errorEnv = (typeof normalizeErrorEnvelope === 'function')
+        ? normalizeErrorEnvelope(ev.error)
+        : null;
+      s.error = (typeof errorEnvelopeMessage === 'function'
+                 ? errorEnvelopeMessage(ev.error) : '')
+                || (typeof ev.error === 'string' ? ev.error : '')
+                || 'Unknown error';
       return true;
   }
   return false;
@@ -1571,9 +1570,13 @@ function _paintReportFromState() {
   if (!container || !_paperReportStream) return;
   var s = _paperReportStream;
 
-  // Terminal: done → just render final text.
+  // Terminal: done → just render final text (once).
   if (s.status === 'done' && s.fullText && !s.toolRounds.some(r => r.status === 'searching')) {
-    container.innerHTML = typeof renderMarkdown === 'function' ? renderMarkdown(s.fullText) : '<pre>' + escapeHtml(s.fullText) + '</pre>';
+    if (s._lastRenderedLen !== s.fullText.length || s._lastRenderedStatus !== 'done') {
+      container.innerHTML = typeof renderMarkdown === 'function' ? renderMarkdown(s.fullText) : '<pre>' + escapeHtml(s.fullText) + '</pre>';
+      s._lastRenderedLen = s.fullText.length;
+      s._lastRenderedStatus = 'done';
+    }
     return;
   }
 
@@ -1585,10 +1588,16 @@ function _paintReportFromState() {
   // Tool rounds — reuse chat's unified renderer for identical look & feel
   var toolZone = document.getElementById('reportToolZone');
   if (toolZone) {
-    if (s.toolRounds.length > 0 && typeof renderToolRoundsHTML === 'function') {
-      toolZone.innerHTML = renderToolRoundsHTML(s.toolRounds, s.status === 'running');
-    } else {
-      toolZone.innerHTML = '';
+    var toolCount = s.toolRounds.length;
+    var searchingCount = s.toolRounds.filter(r => r.status === 'searching').length;
+    var toolKey = toolCount + ':' + searchingCount;
+    if (s._lastToolKey !== toolKey) {
+      if (toolCount > 0 && typeof renderToolRoundsHTML === 'function') {
+        toolZone.innerHTML = renderToolRoundsHTML(s.toolRounds, s.status === 'running');
+      } else {
+        toolZone.innerHTML = '';
+      }
+      s._lastToolKey = toolKey;
     }
   }
 
@@ -1600,17 +1609,20 @@ function _paintReportFromState() {
       thBlock.style.display = '';
       if (s.contentStarted) thBlock.open = false;
     }
-    if (thBody) {
+    if (thBody && thBody.textContent.length !== s.thinkingText.length) {
       thBody.textContent = s.thinkingText;
       thBody.scrollTop = thBody.scrollHeight;
     }
   }
 
-  // Report body
+  // Report body — only re-render when content actually changed
   var bodyEl = document.getElementById('reportBodyContent');
   if (bodyEl) {
     if (s.contentStarted) {
-      bodyEl.innerHTML = typeof renderMarkdown === 'function' ? renderMarkdown(s.fullText) : '<pre>' + escapeHtml(s.fullText) + '</pre>';
+      if (s._lastRenderedLen !== s.fullText.length) {
+        bodyEl.innerHTML = typeof renderMarkdown === 'function' ? renderMarkdown(s.fullText) : '<pre>' + escapeHtml(s.fullText) + '</pre>';
+        s._lastRenderedLen = s.fullText.length;
+      }
     } else if (s.status === 'error' && !s.fullText) {
       bodyEl.innerHTML = '<div class="paper-error">' + escapeHtml(s.error || 'Failed') +
         '<br><button onclick="_generatePaperReport()" class="paper-retry-btn">Retry</button></div>';
@@ -1626,10 +1638,9 @@ async function _pollReportTask() {
   if (s.pollBusy) return;
   s.pollBusy = true;
   try {
-    var resp = await fetch(apiUrl('/api/paper/report/poll?task_id=' +
-      encodeURIComponent(s.taskId) + '&cursor=' + s.cursor));
-    if (!resp.ok) {
-      if (resp.status === 404) {
+    var resp = await Api.paper.reportPoll(s.taskId, s.cursor);
+    if (!resp || !resp.ok) {
+      if (resp && resp.status === 404) {
         // Task expired or server restarted
         s.status = 'error';
         s.error = 'Task no longer available on server. Please regenerate.';
@@ -1641,7 +1652,10 @@ async function _pollReportTask() {
     var data = await resp.json();
     if (!data.ok) {
       s.status = 'error';
-      s.error = data.error || 'Poll failed';
+      s.error = (typeof errorEnvelopeMessage === 'function'
+                 ? errorEnvelopeMessage(data.error) : '')
+                || (typeof data.error === 'string' ? data.error : '')
+                || 'Poll failed';
       _paintReportFromState();
       return;
     }
@@ -1658,12 +1672,21 @@ async function _pollReportTask() {
       s.status = 'done';
       if (data.report) {
         s.fullText = data.report;
-        _paperReportCache = data.report;
+        // Only persist into the global cache + library entry when this poll's
+        // stream is still bound to the active paper. Otherwise we'd overwrite
+        // a different paper's report (e.g. user regenerated paper A then
+        // switched to paper B before the task finished).
+        if (s.paperId === _activePaperId) {
+          _paperReportCache = data.report;
+          _saveActivePaperState();
+        }
       }
-      _saveActivePaperState();
     } else if (data.status === 'error') {
       s.status = 'error';
-      s.error = data.error || s.error;
+      s.error = (typeof errorEnvelopeMessage === 'function'
+                 ? errorEnvelopeMessage(data.error) : '')
+                || (typeof data.error === 'string' ? data.error : '')
+                || s.error;
     }
 
     // Only repaint DOM when the user is actually on this paper (and Report tab)
@@ -1691,6 +1714,11 @@ async function _generatePaperReport(force) {
   var container = document.getElementById('paperReportContent');
   if (!container) return;
 
+  // Snapshot which paper this generation is for. If the user switches paper
+  // mid-await, every continuation below must bail — otherwise paper A's
+  // task_id / report / hash leak into paper B's state. (See bug 2026-05-20.)
+  var startPaperId = _activePaperId;
+
   // Already polling a live task for this paper and not forcing → just paint
   if (!force && _paperReportStream
       && _paperReportStream.paperId === _activePaperId
@@ -1710,6 +1738,7 @@ async function _generatePaperReport(force) {
       '<div class="paper-loading"><div class="paper-loading-spinner"></div>' +
       '<div>Recovering paper text…</div></div>';
     var ok = await _ensurePaperText();
+    if (_activePaperId !== startPaperId) return;
     if (!ok) {
       container.innerHTML =
         '<div class="paper-report-empty"><p>No paper text available.</p>' +
@@ -1727,26 +1756,32 @@ async function _generatePaperReport(force) {
     _resetReportLocalState();
   }
 
-  // Make sure image metadata is fresh
-  if ((!_paperImages || _paperImages.length === 0) && _paperPdfFilename) {
-    try { await _extractPaperImages(); } catch (_) {}
-  }
-
   _renderReportSkeleton(container, reportLang);
 
   try {
-    var resp = await fetch(apiUrl('/api/paper/report/start'), {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        paper_text: _paperParsedText,
-        lang: reportLang,
-        model: reportModel,
-        force: !!force,
-        images: _paperImages || [],
-      }),
+    // Title fallback: paper_library may not have been upserted yet (the PUT
+    // is fire-and-forget) so the server can't always look up the title from
+    // paper_hash. Send the active entry's title (without `.pdf`) so the
+    // backend can still prepend `# Title` even when the DB is empty.
+    var entryNow = _getActivePaperEntry();
+    var clientTitle = (entryNow && entryNow.title)
+      || _paperFileName
+      || (_paperPdfFilename || '').replace(/^\d+_/, '');
+    if (clientTitle) clientTitle = String(clientTitle).replace(/\.pdf$/i, '').trim();
+
+    // Images are loaded from the server-side manifest by paper_hash —
+    // the client doesn't forward them. filename is a fallback path the
+    // server can use if no manifest exists yet (rare).
+    var data = await Api.paper.reportStart({
+      paper_text: _paperParsedText,
+      lang: reportLang,
+      model: reportModel,
+      force: !!force,
+      title: clientTitle || '',
+      filename: _paperPdfFilename || '',
     });
-    var data = await resp.json();
-    if (!data.ok) throw new Error(data.error || 'Start failed');
+    if (_activePaperId !== startPaperId) return;
+    if (!data || !data.ok) throw new Error((data && data.error) || 'Start failed');
 
     // DB cache hit — done in one round-trip
     if (data.cached && data.report) {
@@ -1759,10 +1794,11 @@ async function _generatePaperReport(force) {
 
     // Task started (or joined) — begin polling from cursor 0 so we replay all
     if (data.paper_hash) _paperHash = data.paper_hash;
-    _paperReportStream = _makeReportStreamState(_activePaperId, reportLang, data.task_id);
+    _paperReportStream = _makeReportStreamState(startPaperId, reportLang, data.task_id);
     _pollReportTask();
 
   } catch (e) {
+    if (_activePaperId !== startPaperId) return;
     console.warn('[Paper:Report] start failed:', e);
     container.innerHTML = '<div class="paper-error">Failed: ' + escapeHtml(e.message) +
       '<br><button onclick="_generatePaperReport()" class="paper-retry-btn">Retry</button></div>';
@@ -1777,6 +1813,7 @@ async function _generatePaperReport(force) {
  */
 async function _loadOrGenerateReport() {
   var reportLang = (typeof _i18nLang !== 'undefined' && _i18nLang === 'zh') ? 'zh' : 'en';
+  var startPaperId = _activePaperId;
 
   // (1) Existing local stream state for this paper
   if (_paperReportStream && _paperReportStream.paperId === _activePaperId) {
@@ -1790,36 +1827,31 @@ async function _loadOrGenerateReport() {
   // (2) Server-side task lookup (survives chat-mode round-trips)
   if (_paperHash) {
     try {
-      var lookupResp = await fetch(apiUrl('/api/paper/report/lookup'), {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paper_hash: _paperHash, lang: reportLang }),
-      });
-      var lookupData = await lookupResp.json();
-      if (lookupData.ok && lookupData.task_id
+      var lookupData = await Api.paper.reportLookup(_paperHash, reportLang);
+      if (_activePaperId !== startPaperId) return;
+      if (lookupData && lookupData.ok && lookupData.task_id
           && (lookupData.status === 'running' || lookupData.status === 'pending')) {
         // Attach to the running server-side task
         var container = document.getElementById('paperReportContent');
         if (container) _renderReportSkeleton(container, reportLang);
-        _paperReportStream = _makeReportStreamState(_activePaperId, reportLang, lookupData.task_id);
+        _paperReportStream = _makeReportStreamState(startPaperId, reportLang, lookupData.task_id);
         _pollReportTask();
         return;
       }
     } catch (e) {
+      if (_activePaperId !== startPaperId) return;
       console.warn('[Paper:Report] lookup failed (non-fatal):', e);
     }
   }
 
   // (3) Try server DB cache by hash (avoids re-sending text)
   try {
-    var cacheBody = { lang: reportLang, images: _paperImages || [] };
+    var cacheBody = { lang: reportLang };
     if (_paperHash) cacheBody.paper_hash = _paperHash;
     else cacheBody.paper_text = _paperParsedText;
-    var cacheResp = await fetch(apiUrl('/api/paper/report/cache'), {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cacheBody),
-    });
-    var cacheData = await cacheResp.json();
-    if (cacheData.ok && cacheData.report) {
+    var cacheData = await Api.paper.reportCache(cacheBody);
+    if (_activePaperId !== startPaperId) return;
+    if (cacheData && cacheData.ok && cacheData.report) {
       _paperReportCache = cacheData.report;
       if (cacheData.paper_hash) _paperHash = cacheData.paper_hash;
       _saveActivePaperState();
@@ -1830,10 +1862,12 @@ async function _loadOrGenerateReport() {
       return;
     }
   } catch (e) {
+    if (_activePaperId !== startPaperId) return;
     console.warn('[Paper:Report] Cache lookup failed:', e);
   }
 
   // (4) No cache, no running task — start a new one
+  if (_activePaperId !== startPaperId) return;
   _generatePaperReport();
 }
 
@@ -1934,6 +1968,18 @@ document.addEventListener('click', function() {
   if (dropdown) dropdown.classList.remove('open');
 });
 
+// Click-to-enlarge for figures/tables embedded in the paper report. CSS
+// already shows ``cursor:zoom-in`` on these images; this handler wires
+// them up to the shared fullscreen overlay used by image-gen.
+document.addEventListener('click', function(e) {
+  var img = e.target;
+  if (!img || img.tagName !== 'IMG') return;
+  if (!img.closest('.paper-report-body, .paper-report-content')) return;
+  if (typeof _openImageFullscreen === 'function') {
+    _openImageFullscreen(img.src);
+  }
+});
+
 
 function _regeneratePaperReport() {
   // Abort any running server task, then start fresh with force=true so
@@ -1942,10 +1988,7 @@ function _regeneratePaperReport() {
   _resetReportLocalState();
   _paperReportCache = '';
   if (prevTaskId) {
-    fetch(apiUrl('/api/paper/report/abort'), {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task_id: prevTaskId }),
-    }).catch(function(e) { console.warn('[Paper:Report] abort request failed:', e); });
+    Api.paper.reportAbort(prevTaskId).catch(function(e) { console.warn('[Paper:Report] abort request failed:', e); });
   }
   _generatePaperReport(true);
 }
@@ -1955,11 +1998,56 @@ function _copyPaperReport() {
   navigator.clipboard.writeText(_paperReportCache).then(function() { debugLog('Copied', 'success'); });
 }
 
-function _exportPaperReport() {
-  if (!_paperReportCache) return;
+function _togglePaperReportExportMenu(ev) {
+  if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+  var dd = document.getElementById('paperReportExportDropdown');
+  if (!dd) return;
+  var willOpen = !dd.classList.contains('open');
+  dd.classList.toggle('open', willOpen);
+  if (willOpen) {
+    var closeOnClick = function(e) {
+      if (!dd.contains(e.target) && !e.target.closest('#paperReportExportMenu')) {
+        dd.classList.remove('open');
+        document.removeEventListener('click', closeOnClick, true);
+      }
+    };
+    setTimeout(function() { document.addEventListener('click', closeOnClick, true); }, 0);
+  }
+}
+
+/** Export the report. format ∈ {'md','html','pdf'}. Defaults to 'md'.
+ *  All rendering happens server-side via /api/paper/report/export so the
+ *  same Markdown→HTML pipeline serves both download and live view, and
+ *  there's no client/server skew. PDF is rendered by the browser's
+ *  built-in print engine over the server-generated HTML. */
+function _exportPaperReport(format) {
+  if (!_paperHash) {
+    debugLog('No report to export yet', 'warning');
+    return;
+  }
+  var dd = document.getElementById('paperReportExportDropdown');
+  if (dd) dd.classList.remove('open');
+  format = format || 'md';
+  var reportLang = (typeof _i18nLang !== 'undefined' && _i18nLang === 'zh') ? 'zh' : 'en';
+  var url = Api.paper.exportUrl(_paperHash, reportLang, format);
+
+  if (format === 'pdf') {
+    // Server returns inline HTML with an embedded window.print() bootstrap
+    // that fires after all images load. The user picks "Save as PDF" in
+    // their browser's print dialog. (Returning Content-Disposition:
+    // attachment for HTML would download the file instead of opening it,
+    // so the format=pdf path is explicitly served inline by the server.)
+    var w = window.open(url, '_blank');
+    if (!w) {
+      debugLog('Pop-up blocked — please allow pop-ups to print/export PDF', 'warning');
+    }
+    return;
+  }
+
+  // Markdown / HTML — direct browser download via Content-Disposition.
   var a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([_paperReportCache], { type: 'text/markdown' }));
-  a.download = 'paper_report_' + (_paperFileName || 'paper').replace(/[^\w]/g, '_') + '.md';
+  a.href = url;
+  a.rel = 'noopener';
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
 }
 
@@ -2049,73 +2137,125 @@ function _startBabelTranslation() {
   _babelTranslateAllPages(_babelTargetLang);
 }
 
+/** Server-owned translation: chunking, retry, persistence, dedup all live
+ *  on the backend. The frontend just kicks off the task and polls events. */
 async function _babelTranslateAllPages(lang) {
   if (_babelTranslating) return;
   _babelTranslating = true;
 
-  var chunkSize = 2000;
-  var text = _paperParsedText;
-  var chunks = [];
-  for (var i = 0; i < text.length; i += chunkSize) {
-    chunks.push(text.slice(i, i + chunkSize));
+  var bar = document.getElementById('babelProgressBar');
+  var statusEl = document.getElementById('babelPdfStatus');
+
+  function _setProgress(done, total) {
+    if (bar && total > 0) bar.style.width = Math.round((done / total) * 100) + '%';
+    if (statusEl) statusEl.textContent = 'Translated ' + done + '/' + total + ' sections';
   }
 
-  var langNames = { zh: 'Chinese', en: 'English', ja: 'Japanese' };
-  var translated = [];
-  var bar = document.getElementById('babelProgressBar');
-
-  for (var ci = 0; ci < chunks.length; ci++) {
-    if (_babelTargetLang !== lang) break;
-
-    try {
-      var resp = await fetch(apiUrl('/api/paper/chat'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: [
-            { role: 'system', content: 'You are a professional academic translator. Translate the following text to ' + (langNames[lang] || lang) + '. Preserve all formatting, equations, and technical terms. Output ONLY the translation.' },
-            { role: 'user', content: chunks[ci] }
-          ],
-          stream: false
-        }),
-      });
-
-      var reader = resp.body.getReader();
-      var decoder = new TextDecoder();
-      var buf = '';
-      var chunkResult = '';
-      while (true) {
-        var rd = await reader.read();
-        if (rd.done) break;
-        buf += decoder.decode(rd.value, { stream: true });
-        var sseLines = buf.split('\n'); buf = sseLines.pop();
-        for (var sl = 0; sl < sseLines.length; sl++) {
-          if (!sseLines[sl].startsWith('data: ')) continue;
-          var sd = sseLines[sl].slice(6).trim();
-          if (sd === '[DONE]') continue;
-          try { chunkResult += JSON.parse(sd).choices?.[0]?.delta?.content || ''; } catch (_) {}
+  try {
+    // (1) Try server-side cache first — instant if the same translation was
+    //     done before (even on a different machine).
+    if (_paperHash) {
+      try {
+        var cacheData = await Api.paper.translateCache(_paperHash, lang);
+        if (cacheData && cacheData.ok && cacheData.text) {
+          if (_babelTargetLang === lang) {
+            _babelTranslatedPages[lang] = cacheData.text;
+            _renderBabelResult(cacheData.text);
+            _saveActivePaperState();
+            if (statusEl) statusEl.textContent = 'Translation complete (cached)';
+          }
+          return;
         }
+      } catch (e) {
+        console.warn('[Babel] Cache lookup failed:', e);
       }
-      translated.push(chunkResult);
-    } catch (e) {
-      console.warn('[Babel] Chunk', ci, 'failed:', e);
-      translated.push('[Translation error for this section]');
     }
 
-    var pct = Math.round(((ci + 1) / chunks.length) * 100);
-    if (bar) bar.style.width = pct + '%';
-    var statusEl = document.getElementById('babelPdfStatus');
-    if (statusEl) statusEl.textContent = 'Translated ' + (ci + 1) + '/' + chunks.length + ' sections';
-  }
+    // (2) Start (or join) the server task.
+    var startData = await Api.paper.translateStart({
+      paper_text: _paperParsedText,
+      lang: lang,
+      paper_hash: _paperHash || '',
+    });
+    if (!startData || !startData.ok) throw new Error((startData && startData.error) || 'Translate start failed');
 
-  _babelTranslating = false;
+    if (startData.cached && startData.text) {
+      if (_babelTargetLang === lang) {
+        _babelTranslatedPages[lang] = startData.text;
+        _renderBabelResult(startData.text);
+        _saveActivePaperState();
+        if (statusEl) statusEl.textContent = 'Translation complete (cached)';
+      }
+      return;
+    }
 
-  if (_babelTargetLang === lang) {
-    _babelTranslatedPages[lang] = translated.join('\n\n');
-    _renderBabelResult(_babelTranslatedPages[lang]);
-    _saveActivePaperState();
-    var statusEl2 = document.getElementById('babelPdfStatus');
-    if (statusEl2) statusEl2.textContent = 'Translation complete (' + chunks.length + ' sections)';
+    if (startData.paper_hash) _paperHash = startData.paper_hash;
+    var taskId = startData.task_id;
+    if (!taskId) throw new Error('Translate task did not return task_id');
+
+    // (3) Poll until the task completes (or the user switches language).
+    var cursor = 0;
+    var aggregated = [];
+    while (true) {
+      if (_babelTargetLang !== lang) {
+        // User switched away — abort the server task to free resources.
+        try {
+          await Api.paper.translateAbort(taskId);
+        } catch (_) {}
+        return;
+      }
+      var pollResp = await Api.paper.translatePoll(taskId, cursor);
+      if (!pollResp || !pollResp.ok) throw new Error('Poll HTTP ' + (pollResp ? pollResp.status : 'no response'));
+      var pollData = await pollResp.json();
+      if (!pollData.ok) throw new Error(pollData.error || 'Poll failed');
+      cursor = pollData.next_cursor || cursor;
+
+      var events = pollData.events || [];
+      for (var ei = 0; ei < events.length; ei++) {
+        var ev = events[ei];
+        if (ev.type === 'chunk') {
+          aggregated.push(ev.text || '');
+          _setProgress(ev.index + 1, ev.total);
+          if (_babelTargetLang === lang) {
+            _renderBabelResult(aggregated.join('\n\n'));
+          }
+        } else if (ev.type === 'done') {
+          if (_babelTargetLang === lang) {
+            _babelTranslatedPages[lang] = ev.text || aggregated.join('\n\n');
+            _renderBabelResult(_babelTranslatedPages[lang]);
+            _saveActivePaperState();
+            if (statusEl) statusEl.textContent = 'Translation complete';
+          }
+          return;
+        } else if (ev.type === 'error') {
+          var _evMsg = (typeof errorEnvelopeMessage === 'function')
+            ? errorEnvelopeMessage(ev.error)
+            : (typeof ev.error === 'string' ? ev.error : '');
+          throw new Error(_evMsg || 'Translation failed');
+        }
+      }
+
+      if (pollData.status === 'done') return;
+      if (pollData.status === 'error') {
+        var _pdMsg = (typeof errorEnvelopeMessage === 'function')
+          ? errorEnvelopeMessage(pollData.error)
+          : (typeof pollData.error === 'string' ? pollData.error : '');
+        throw new Error(_pdMsg || 'Translation failed');
+      }
+
+      await new Promise(function(r) { setTimeout(r, 700); });
+    }
+  } catch (e) {
+    console.warn('[Babel] Translation failed:', e);
+    var body = document.getElementById('babelPdfBody');
+    if (body && _babelTargetLang === lang) {
+      body.innerHTML = '<div class="paper-error">Translation failed: ' +
+                       escapeHtml(e.message || String(e)) +
+                       '<br><button class="paper-retry-btn" onclick="_startBabelTranslation()">Retry</button></div>';
+    }
+    if (statusEl) statusEl.textContent = 'Translation failed';
+  } finally {
+    _babelTranslating = false;
   }
 }
 
@@ -2147,6 +2287,28 @@ function _handlePaperKeyDown(e) {
 
 document.addEventListener('keydown', _handlePaperKeyDown);
 document.addEventListener('mouseup', function() { if (paperMode) setTimeout(_handlePaperTextSelection, 10); });
+
+// When KaTeX finishes lazy-loading after the report/QA already painted
+// math-pending fallback markup, repaint these surfaces so inline formulas
+// stop showing as gray <code> spans. (Chat is repainted by core.js itself.)
+window.addEventListener('katex:loaded', function() {
+  if (!paperMode) return;
+  // Report tab — prefer the stream-driven painter if a stream exists,
+  // since it handles tool rounds / thinking blocks too. Reset its
+  // dedup markers so the next paint actually re-renders the body.
+  if (_paperReportStream) {
+    _paperReportStream._lastRenderedLen = -1;
+    _paperReportStream._lastRenderedStatus = '';
+    if (typeof _paintReportFromState === 'function') _paintReportFromState();
+  } else {
+    var rc = document.getElementById('paperReportContent');
+    if (rc && _paperReportCache && typeof renderMarkdown === 'function') {
+      rc.innerHTML = renderMarkdown(_paperReportCache);
+    }
+  }
+  // QA tab.
+  if (typeof _renderPaperQA === 'function') _renderPaperQA();
+});
 
 document.addEventListener('DOMContentLoaded', function() {
   _loadPaperLibrary();

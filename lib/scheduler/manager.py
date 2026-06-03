@@ -517,8 +517,12 @@ class ScheduledTaskManager:
             logger.info('[Scheduler] Auto-registered Daily Optimizer task id=%s',
                         task.get('id'))
         except Exception as e:
-            logger.warning('[Scheduler] Could not auto-register Daily Optimizer: %s',
-                           e, exc_info=True)
+            # Missing column/table here means init_db() hasn't finished the
+            # scheduled_tasks migration yet. The readiness-gated caller in
+            # start_scheduler_worker retries once the schema is committed, so
+            # this is self-recovering — keep it at debug to avoid error.log noise.
+            logger.debug('[Scheduler] Could not auto-register Daily Optimizer '
+                         '(will retry after schema ready): %s', e)
 
     def start(self):
         """Start the background scheduler thread."""
@@ -526,11 +530,10 @@ class ScheduledTaskManager:
             return
         self._running = True
 
-        # Idempotent default task registration.  Safe to call on every boot.
-        try:
-            self._ensure_default_optimizer_task()
-        except Exception as e:
-            logger.warning('[Scheduler] default-task bootstrap failed: %s', e, exc_info=True)
+        # NOTE: Daily Optimizer auto-registration is deferred to the
+        # readiness-gated thread in ``start_scheduler_worker`` — calling it
+        # here would race ``init_db()`` (which adds scheduled_tasks columns
+        # ~30s into startup) and crash with UndefinedColumn.
 
         def _loop():
             logger.info('🕐 Background scheduler started')
@@ -583,4 +586,61 @@ def get_scheduler():
     return _manager
 
 
-__all__ = ['ScheduledTaskManager', 'get_scheduler']
+def start_scheduler_worker():
+    """Start the background scheduler thread and resume active timers.
+
+    Called from ``register_all`` in ``routes/__init__.py``. Spawns a
+    daemon thread that polls for the ``timer_watchers`` table to be
+    created (deferred since ``init_db()`` runs after route registration)
+    and resumes any active timers.
+    """
+    mgr = get_scheduler()
+    mgr.start()
+    logger.info('[Scheduler] Background scheduler worker started')
+
+    def _deferred_resume():
+        from lib.database import db_available
+        for attempt in range(60):
+            time.sleep(2)
+            if not db_available:
+                continue
+            try:
+                from lib.database import DOMAIN_SYSTEM, get_thread_db
+                db = get_thread_db(DOMAIN_SYSTEM)
+                # Probe both the timer table AND the scheduled_tasks proactive
+                # column — once both are visible, init_db() has committed the
+                # full system schema and it's safe to auto-register / resume.
+                db.execute("SELECT 1 FROM timer_watchers LIMIT 0")
+                db.execute("SELECT target_conv_id FROM scheduled_tasks LIMIT 0")
+                break
+            except Exception:
+                logger.debug('[Scheduler] system schema not ready yet '
+                             '(attempt %d/60)', attempt + 1)
+                continue
+        else:
+            logger.warning('[Scheduler] system schema not available '
+                           'after 120s, skipping optimizer register + timer resume')
+            return
+
+        # Now that scheduled_tasks is fully migrated, register the Daily
+        # Optimizer. Deferred here (out of mgr.start()) to avoid racing init_db.
+        try:
+            mgr._ensure_default_optimizer_task()
+        except Exception as e:
+            logger.debug('[Scheduler] default-task bootstrap failed: %s', e)
+
+        try:
+            from lib.scheduler.timer import resume_active_timers
+            resumed = resume_active_timers()
+            if resumed > 0:
+                logger.info('[Scheduler] Resumed %d active timer(s)', resumed)
+        except Exception as e:
+            logger.warning('[Scheduler] Failed to resume timers on startup: %s',
+                           e)
+
+    threading.Thread(target=_deferred_resume, name='timer-resume',
+                     daemon=True).start()
+    return mgr
+
+
+__all__ = ['ScheduledTaskManager', 'get_scheduler', 'start_scheduler_worker']

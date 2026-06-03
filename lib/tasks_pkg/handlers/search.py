@@ -1,5 +1,5 @@
 # HOT_PATH
-"""Search-related tool handlers: tool_search, web_search, fetch_url."""
+"""Search-related tool handlers: web_search, fetch_url."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import lib as _lib
 from lib.fetch import fetch_page_content
 from lib.log import get_logger
 from lib.search import format_search_for_tool_response, perform_web_search
+from lib.search.vertical import detect_vertical_intent, search_vertical
 from lib.tasks_pkg.executor import _finalize_tool_round, tool_registry
 from lib.tasks_pkg.handlers._adapter import run_batch_concurrent
 from lib.tasks_pkg.manager import append_event
@@ -16,69 +17,66 @@ from lib.tasks_pkg.manager import append_event
 logger = get_logger(__name__)
 
 
-@tool_registry.handler('tool_search', category='meta',
-                       description='Search for deferred tools by keyword')
-def _handle_tool_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
-    """Handle tool_search calls — discover and activate deferred tools."""
-    from lib.tools.deferral import format_search_results, search_deferred_tools
-    query = fn_args.get('query', '')
-    deferred = task.get('_deferred_tools', [])
-
-    if not deferred:
-        tool_content = 'No deferred tools available. All tools are already loaded.'
-        if round_entry is not None:
-            round_entry['status'] = 'done'
-        append_event(task, {'type': 'tool_result', 'roundNum': rn, 'tool': fn_name})
-        return tc_id, tool_content, False
-
-    matched = search_deferred_tools(query, deferred)
-
-    # Activate matched tools: add them to the task's tool list
-    if matched and all_tools is not None:
-        matched_names = {t['function']['name'] for t in matched}
-        existing_names = {t.get('function', {}).get('name', '') for t in all_tools}
-        for tool_def in matched:
-            if tool_def['function']['name'] not in existing_names:
-                all_tools.append(tool_def)
-        # Remove activated tools from deferred list
-        task['_deferred_tools'] = [
-            t for t in deferred
-            if t.get('function', {}).get('name', '') not in matched_names
-        ]
-        logger.info('[ToolSearch] Activated %d deferred tools, %d remaining deferred',
-                    len(matched), len(task['_deferred_tools']))
-
-    tool_content = format_search_results(matched)
-    if round_entry is not None:
-        round_entry['status'] = 'done'
-    append_event(task, {'type': 'tool_result', 'roundNum': rn, 'tool': fn_name})
-    return tc_id, tool_content, False
-
-
 # ══════════════════════════════════════════════════════════
 #  Helpers: single-query search and single-URL fetch
 # ══════════════════════════════════════════════════════════
 
-def _web_search_one(query: str, user_question: str):
-    """Run one web search — returns (results_list, search_diag, engine_breakdown)."""
+def _web_search_one(query: str, user_question: str, freshness: str = ''):
+    """Run one web search — returns (results_list, search_diag, engine_breakdown, vertical_result).
+
+    Vertical domain search (if detected) runs concurrently with the main
+    web search pipeline so it adds zero latency.
+    """
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
+    # Detect vertical intent
+    vertical_result = None
+    vertical_future = None
+    intent = detect_vertical_intent(query)
+    if intent:
+        domain, identifier, params = intent
+        logger.info('[Search] Vertical intent detected: %s/%s for query=%r', domain, identifier, query[:60])
+        # Launch vertical API call in a separate thread so it overlaps with the web pipeline
+        _vertical_pool = _TPE(max_workers=1)
+        vertical_future = _vertical_pool.submit(search_vertical, domain, identifier, params)
+
     try:
-        results = perform_web_search(query, user_question=user_question)
-        return (
-            results,
-            getattr(results, '_search_diag', None),
-            getattr(results, '_engine_breakdown', None),
-        )
+        results = perform_web_search(query, user_question=user_question, freshness=freshness)
     except Exception as e:
         logger.error('[Executor] web_search failed for query=%r: %s', query, e, exc_info=True)
+        results = []
+        # Collect vertical result even on web search failure
+        if vertical_future:
+            try:
+                vertical_result = vertical_future.result(timeout=10)
+            except Exception as ve:
+                logger.warning('[Search] Vertical query also failed: %s', ve)
+            _vertical_pool.shutdown(wait=False)
         return (
-            [],
+            results,
             {
                 'reason': 'exception',
                 'reason_detail': 'Search failed due to an internal error: %s' % str(e)[:200],
                 'engine_errors': {}, 'engine_empty': [], 'engine_ok': [],
             },
             None,
+            vertical_result,
         )
+
+    # Collect vertical result (should be done by now — web pipeline takes 5-15s)
+    if vertical_future:
+        try:
+            vertical_result = vertical_future.result(timeout=5)
+        except Exception as ve:
+            logger.warning('[Search] Vertical query failed: %s', ve)
+        _vertical_pool.shutdown(wait=False)
+
+    return (
+        results,
+        getattr(results, '_search_diag', None),
+        getattr(results, '_engine_breakdown', None),
+        vertical_result,
+    )
 
 
 def _fetch_url_one(target_url: str, user_question: str, fetch_reason: str = ''):
@@ -186,9 +184,23 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
     import time as _time
     handler_t0 = _time.time()
     query = fn_args.get('query', '')
+    freshness = fn_args.get('freshness', '')
     user_question = task.get('lastUserQuery', '')
 
-    results, search_diag, engine_breakdown = _web_search_one(query, user_question)
+    # ── Fast-path: short-circuit empty/whitespace queries before hitting
+    # the orchestrator (5 engines + retry + browser fallback ≈ 4s of wasted work).
+    if not query or not query.strip():
+        logger.debug('[Search] web_search short-circuit: empty query')
+        tool_content = (
+            'Error: "query" must be a non-empty string. '
+            'Pass the search terms in the `query` field (or `queries` for batch mode).'
+        )
+        round_entry['results'] = []
+        round_entry['status'] = 'done'
+        append_event(task, {'type': 'tool_result', 'roundNum': rn, 'query': query, 'results': []})
+        return tc_id, tool_content, False
+
+    results, search_diag, engine_breakdown, vertical_result = _web_search_one(query, user_question, freshness)
     display_results = _format_search_display_for_results(results)
 
     round_entry['results'] = display_results
@@ -203,10 +215,19 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
     append_event(task, event_payload)
 
     tool_content = format_search_for_tool_response(results, search_diag=search_diag)
+
+    # Prepend vertical domain data if available
+    if vertical_result:
+        vertical_header = (f'═══ Vertical Search Result ({vertical_result["source"]}) ═══\n\n'
+                           f'{vertical_result["content"]}\n\n'
+                           f'═══ Web Search Results ═══\n\n')
+        tool_content = vertical_header + tool_content
+
     handler_elapsed = _time.time() - handler_t0
-    logger.info('[Search] web_search handler TOTAL: %.1fs  query=%r  results=%d  content_chars=%d',
+    logger.info('[Search] web_search handler TOTAL: %.1fs  query=%r  results=%d  content_chars=%d  vertical=%s',
                 handler_elapsed, query[:60], len(display_results),
-                sum(r.get('fetchedChars', 0) for r in display_results))
+                sum(r.get('fetchedChars', 0) for r in display_results),
+                vertical_result['type'] if vertical_result else 'none')
     if handler_elapsed > 30:
         logger.warning('[Search] ⚠ web_search handler SLOW: %.1fs (>30s)  query=%r',
                        handler_elapsed, query[:60])
@@ -224,27 +245,38 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
 
     handler_t0 = _time.time()
     user_question = task.get('lastUserQuery', '')
+    freshness = fn_args.get('freshness', '')
     MAX_BATCH = 5
 
-    query_list = []
+    query_specs = []  # list of (query_str, freshness_str)
     for spec in queries[:MAX_BATCH]:
-        if isinstance(spec, dict) and spec.get('query'):
-            query_list.append(spec['query'])
+        if isinstance(spec, dict):
+            q = spec.get('query', '')
+            f = spec.get('freshness', '') or freshness
+            if isinstance(q, str) and q.strip():
+                query_specs.append((q.strip(), f))
         elif isinstance(spec, str) and spec.strip():
-            query_list.append(spec.strip())
-    if not query_list:
+            query_specs.append((spec.strip(), freshness))
+    if not query_specs:
         tool_content = 'Error: "queries" must contain at least one {query} entry.'
         _finalize_tool_round(task, rn, round_entry, [{'type': 'error', 'content': tool_content}])
         return tc_id, tool_content, False
 
+    query_list = [q for q, _ in query_specs]
     n = len(query_list)
 
-    def _worker(q):
-        results, search_diag, engine_breakdown = _web_search_one(q, user_question)
+    def _worker(spec):
+        q, f = spec
+        results, search_diag, engine_breakdown, vertical_result = _web_search_one(q, user_question, f)
         formatted = format_search_for_tool_response(results, search_diag=search_diag)
+        if vertical_result:
+            vertical_header = (f'══ Vertical ({vertical_result["source"]}) ══\n\n'
+                               f'{vertical_result["content"]}\n\n'
+                               f'══ Web Results ══\n\n')
+            formatted = vertical_header + formatted
         return (q, results, search_diag, engine_breakdown, formatted)
 
-    ordered = run_batch_concurrent(query_list, _worker, max_workers=5, tag='Search')
+    ordered = run_batch_concurrent(query_specs, _worker, max_workers=5, tag='Search')
 
     all_display_results = []
     all_formatted = []

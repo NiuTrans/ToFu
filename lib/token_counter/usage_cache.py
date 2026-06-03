@@ -19,7 +19,7 @@ Concurrency: a simple dict-with-lock works fine. Entries age out
 after ``USAGE_CACHE_TTL_SEC`` so stale data doesn't mislead a
 days-old conversation.
 
-Invalidation: ``record_usage()`` is called by ``lib/llm_client.py``
+Invalidation: ``record_usage()`` is called by ``lib/llm/stream.py``
 after each streamed response. If the conversation compacts, the
 caller should invalidate via ``invalidate(conv_id)``.
 """
@@ -89,7 +89,7 @@ def record_usage(conv_id: str, *,
                  messages: Optional[list] = None) -> None:
     """Record a successful API call's ``prompt_tokens`` for ``conv_id``.
 
-    Called from ``lib/llm_client.py`` after each stream completes.
+    Called from ``lib/llm/stream.py`` after each stream completes.
     ``messages`` is the message list sent *in that call* — used to
     compute the tail signature for staleness detection.
     """

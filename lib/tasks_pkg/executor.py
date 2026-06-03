@@ -10,6 +10,7 @@ import lib as _lib  # module ref for hot-reload
 from lib.fetch import extract_urls_from_text, fetch_urls
 from lib.fetch.content_filter import filter_web_contents_batch
 from lib.log import get_logger
+from lib.agent_core.events import EventType, build_event
 from lib.protocols import FetchService, ToolHandler
 from lib.swarm.tools import SWARM_TOOL_NAMES  # noqa: F401 — re-exported for tool_dispatch/tool_display
 from lib.tasks_pkg.manager import append_event
@@ -287,12 +288,18 @@ def _finalize_tool_round(
     """
     round_entry['results'] = results
     round_entry['status'] = 'done'
-    event = {
-        'type': 'tool_result',
-        'roundNum': rn,
-        'query': query_override or round_entry['query'],
-        'results': results,
-    }
+    event = build_event(
+        EventType.TOOL_RESULT,
+        roundNum=rn,
+        query=query_override or round_entry['query'],
+        results=results,
+    )
+    # ★ Carry the harness self-repair descriptor onto the tool_result event.
+    #   For early-announced rounds the original tool_start went out with the
+    #   pre-repair (possibly garbled) display, so the frontend relies on this
+    #   to swap in the corrected line + "auto-fixed" badge.
+    if round_entry.get('_repaired'):
+        event['_repaired'] = round_entry['_repaired']
     if extra_event_fields:
         event.update(extra_event_fields)
     append_event(task, event)
@@ -503,7 +510,7 @@ def _prefetch_user_urls(
         entry = {'roundNum': rn, 'query': f'📄 {url}', 'results': None, 'status': 'searching', 'toolName': 'fetch_url'}
         task['toolRounds'].append(entry)
         round_entries.append((url, entry, rn))
-        append_event(task, {'type': 'tool_start', 'roundNum': rn, 'query': f'Fetching {url[:80]}', 'toolName': 'fetch_url'})
+        append_event(task, build_event(EventType.TOOL_START, roundNum=rn, query=f'Fetching {url[:80]}', toolName='fetch_url'))
     # Dispatch through protocol or concrete import
     _fetch_urls = fetch_service.fetch_urls if fetch_service is not None else fetch_urls
     fetched = _fetch_urls(urls, max_chars=_lib.FETCH_MAX_CHARS_DIRECT, pdf_max_chars=_lib.FETCH_MAX_CHARS_PDF, timeout=_lib.FETCH_TIMEOUT)
@@ -530,7 +537,7 @@ def _prefetch_user_urls(
             'url': url, 'source': 'PDF' if is_pdf else 'Direct Fetch',
             'fetched': bool(content), 'fetchedChars': len(content) if content else 0}]
         entry['status'] = 'done'
-        append_event(task, {'type': 'tool_result', 'roundNum': rn, 'query': f'📄 {url}', 'results': entry['results']})
+        append_event(task, build_event(EventType.TOOL_RESULT, roundNum=rn, query=f'📄 {url}', results=entry['results']))
     return [(url, fetched[url]) for url in urls if url in fetched]
 
 
@@ -539,6 +546,22 @@ def _prefetch_user_urls(
 #  Importing the handlers package triggers @tool_registry registration.
 # ══════════════════════════════════════════════════════════
 import lib.tasks_pkg.handlers  # noqa: F401, E402 — triggers all handler registrations
+
+# ── Sync handlers attached to ToolSpec plugins into the dispatch registry ──
+# Built-in handlers register above via @tool_registry decorators.  Third-party
+# tools loaded through the ``tofu.tools`` entry point can ship schema + gate +
+# handler from ONE external package by attaching ``handler=`` to their
+# ToolSpec; this call binds those handlers into tool_registry.  Late-loaded
+# plugins (registered after startup) self-sync via register_tool_spec.
+try:
+    from lib.tools.registry import sync_spec_handlers as _sync_spec_handlers
+    _n_synced = _sync_spec_handlers(tool_registry)
+    if _n_synced:
+        logger.info('[Executor] synced %d ToolSpec-attached handler(s) into '
+                    'tool_registry', _n_synced)
+except Exception as _sync_err:
+    logger.error('[Executor] ToolSpec handler sync failed: %s', _sync_err,
+                 exc_info=True)
 
 
 def _execute_tool_one(

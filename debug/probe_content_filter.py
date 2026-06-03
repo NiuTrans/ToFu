@@ -35,7 +35,7 @@ def _test_content(content: str, model: str, label: str = '') -> tuple[bool, str]
     Returns:
         (is_blocked: bool, error_detail: str)
     """
-    from lib.llm_client import chat, ContentFilterError, RateLimitError
+    from lib.llm import chat, ContentFilterError, RateLimitError
 
     messages = [
         {'role': 'system', 'content': '你是一位助手。'},

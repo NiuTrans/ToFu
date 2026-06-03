@@ -64,12 +64,17 @@ def _parse_brave(resp):
     return results
 
 
-def search_brave(query, max_results=6):
+def search_brave(query, max_results=6, freshness=''):
     """Scrape Brave Search HTML results."""
+    params = {'q': query, 'source': 'web'}
+    # Brave supports tf= param: pd (past day), pw (past week), pm (past month), py (past year)
+    _FRESHNESS_MAP = {'day': 'pd', 'week': 'pw', 'month': 'pm', 'year': 'py'}
+    if freshness and freshness in _FRESHNESS_MAP:
+        params['tf'] = _FRESHNESS_MAP[freshness]
     return http_search_get(
         name='Brave',
         url='https://search.brave.com/search',
-        params={'q': query, 'source': 'web'},
+        params=params,
         query=query,
         parser=_parse_brave,
         max_results=max_results,

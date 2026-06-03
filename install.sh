@@ -79,7 +79,7 @@
 #   10. Writes .tofu_env.json marker so server.py/bootstrap.py auto-activate
 #   11. Launches the server
 #
-#  For Windows, use install.ps1 instead.
+#  For Windows, download the .exe installer from the GitHub release page.
 # ═══════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -207,7 +207,7 @@ ARCH="$(uname -m)"
 case "$OS" in
     Linux)   PLATFORM="Linux" ;;
     Darwin)  PLATFORM="MacOSX" ;;
-    *)       fail "Unsupported OS: $OS (use install.ps1 on Windows)" ;;
+    *)       fail "Unsupported OS: $OS (Windows: download Tofu-Setup-*.exe from the release page)" ;;
 esac
 info "Platform: $OS $ARCH"
 
@@ -254,6 +254,34 @@ CONDA_BIN=""
 CONDA_OWNED_BY_US=0   # 1 = we installed this conda (sibling); we may update it.
                       # 0 = pre-existing user conda; HANDS OFF (no update / init / config).
 
+# 0. Highest priority: a previous successful install wrote .tofu_env.json
+#    pointing at a specific conda_base. Reuse it so we never silently
+#    install a SECOND miniforge to a different location (which would leave
+#    the existing env's packages unused and cause pip to fall back to
+#    --user when its newly-created site-packages isn't ready yet).
+_TOFU_ENV_MARKER="${INSTALL_DIR}/.tofu_env.json"
+if [[ -f "$_TOFU_ENV_MARKER" ]] && command -v python3 &>/dev/null; then
+    _MARKER_BASE="$(python3 -c "import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get('conda_base',''))
+except Exception:
+    pass" "$_TOFU_ENV_MARKER" 2>/dev/null || true)"
+    if [[ -n "${_MARKER_BASE:-}" && -x "${_MARKER_BASE}/bin/conda" ]]; then
+        _ver_raw="$(_probe_conda_version "${_MARKER_BASE}/bin/conda")"
+        if _conda_version_ok "$_ver_raw"; then
+            CONDA_BIN="${_MARKER_BASE}/bin/conda"
+            # If this conda lives at our sibling path, we own it; otherwise
+            # treat it as user-owned (don't auto-update it).
+            if [[ "${_MARKER_BASE}" == "${SIBLING_CONDA_DIR}" ]]; then
+                CONDA_OWNED_BY_US=1
+            fi
+            ok "Reusing conda from .tofu_env.json: $CONDA_BIN (${_ver_raw})"
+        else
+            warn ".tofu_env.json points at conda ${_MARKER_BASE} but version is too old (${_ver_raw:-unknown}) — will search elsewhere"
+        fi
+    fi
+fi
+
 # 1. Existing user conda — accept only if version >= MIN_CONDA_MAJOR.
 _existing_conda_candidates=()
 if command -v conda &>/dev/null; then
@@ -268,7 +296,9 @@ for _cand in \
     [[ -x "$_cand" ]] && _existing_conda_candidates+=("$_cand")
 done
 
-if [[ "$FORCE_SIBLING_CONDA" -eq 1 ]]; then
+if [[ -n "$CONDA_BIN" ]]; then
+    : # already resolved from .tofu_env.json marker
+elif [[ "$FORCE_SIBLING_CONDA" -eq 1 ]]; then
     info "--force-sibling-conda: ignoring any pre-existing conda"
 else
     for _cand in "${_existing_conda_candidates[@]}"; do
@@ -438,7 +468,9 @@ fi
 CONDA_BASE="$("$CONDA_BIN" info --base 2>/dev/null)"
 [[ -n "$CONDA_BASE" ]] || fail "Could not determine conda base directory"
 # shellcheck disable=SC1091
+set +u
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
+set -u
 info "Conda base: $CONDA_BASE  (owned-by-us=${CONDA_OWNED_BY_US})"
 
 # ═══════════════════════════════════════════════════════════════
@@ -593,8 +625,13 @@ else
     ok "Env '${ENV_NAME}' created"
 fi
 
-# Activate it for subsequent installs
+# Activate it for subsequent installs.
+# Conda's own activate/deactivate scripts (e.g. gxx_linux-64) reference
+# CONDA_BACKUP_* variables that are unset on first run, which trips
+# `set -u`. Relax it just for the conda call.
+set +u
 conda activate "$ENV_NAME"
+set -u
 PY="$(command -v python)"
 ok "Using Python: $PY ($(python --version 2>&1))"
 
@@ -665,6 +702,11 @@ CONDA_PKGS=(
     # fails with "No module named pip" and trafilatura/htmldate never get
     # installed. Install pip explicitly every time.
     "pip>=23"
+    # Quart (async Flask) + Hypercorn (ASGI server) — the core server runtime.
+    # cryptography is needed for Hypercorn's auto-TLS (HTTP/2).
+    "quart>=0.19"
+    "hypercorn>=0.17"
+    "cryptography>=42"
     "flask>=3.0"
     "flask-compress>=1.14"
     "requests>=2.31"
@@ -722,6 +764,16 @@ PIP_ONLY_PKGS=(
     "charset-normalizer>=3.4.0"
     # htmldate's pure-Python deps.
     "dateparser>=1.1.2"
+    # Transitive runtime deps that are NOT auto-pulled because we install
+    # the pip stack with --no-deps (to keep conda's lxml 6 from being
+    # shadowed). All pure-Python wheels — they touch neither lxml nor icu,
+    # so listing them explicitly is safe. Skipping any of these breaks
+    # `from babel import Locale` (in courlan.filters) at server boot.
+    "babel>=2.12"          # required by courlan>=1.3 (Locale, UnknownLocaleError)
+    "tld>=0.13"            # required by courlan
+    "pytz>=2024.1"         # required by dateparser
+    "regex>=2024.0"        # required by dateparser
+    "tzlocal>=5.0"         # required by dateparser
 )
 
 # ── Heal broken envs: remove any pip-installed versions of these deps ──
@@ -734,7 +786,7 @@ info "Purging any pip-installed copies that would shadow conda-forge..."
 # pip versions of those — conda-forge's htmldate ≤1.9.3 has the
 # lxml<6 pin that locks us out of modern icu/PG). So we DON'T include
 # them in this purge list.
-PIP_NAMES=(flask flask-compress Flask-Compress requests psutil
+PIP_NAMES=(quart hypercorn cryptography flask flask-compress Flask-Compress requests psutil
            playwright pillow Pillow python-pptx lxml beautifulsoup4 bs4
            python-dateutil dateutil python-docx docx openpyxl xlrd olefile
            mcp pymupdf PyMuPDF uv)
@@ -797,10 +849,14 @@ if ! _install_main_deps; then
         # that --force removes don't clear. Only `env remove` truly resets it.
         warn "Deep reset still failed — conda env history has stale pins."
         warn "Auto-rebuilding env '${ENV_NAME}' from scratch (one-time, ~2 min)..."
+        set +u
         conda deactivate >/dev/null 2>&1 || true
+        set -u
         conda env remove -n "$ENV_NAME" -y
         conda create -n "$ENV_NAME" -c conda-forge --override-channels -y "python=${PY_VER}"
+        set +u
         conda activate "$ENV_NAME"
+        set -u
         PY="$(command -v python)"
         ok "Env '${ENV_NAME}' rebuilt with fresh Python ${PY_VER}"
         _install_main_deps
@@ -815,6 +871,9 @@ ok "Python dependencies installed"
 #    --force-reinstall targeted at just those.
 info "Verifying critical conda packages import correctly..."
 _IMPORT_CHECK_PKGS=(
+    "quart:quart"
+    "hypercorn:hypercorn"
+    "cryptography:cryptography"
     "flask:flask"
     "flask_compress:flask-compress"
     "requests:requests"
@@ -846,6 +905,53 @@ if [[ ${#_MISSING_PKGS[@]} -gt 0 ]]; then
         warn "Force-reinstall failed — env may need a full rebuild (re-run with --reset-env)"
 fi
 
+# ── pip-install helper: forces install into the conda env, never ~/.local ──
+#
+# Why this exists: pip silently falls back to `--user` (writes to
+# ~/.local/lib/pythonX.Y/site-packages) when it thinks the target
+# site-packages isn't writable. On cross-DC FUSE mounts the writability
+# probe can flake, and even when it succeeds, having any pip wheel
+# under ~/.local shadows the conda env's copy at runtime → mysterious
+# "wrong version" / "GLIBC not found" failures. We hard-disable that
+# fallback for every pip call in this script:
+#   - PIP_USER=0 + unset PYTHONUSERBASE: blocks --user mode
+#   - --prefix "$ENV_PREFIX": pin install location to the conda env
+#   - explicit Permission-denied detection: if pip *still* manages to
+#     write somewhere it can't, fail loudly instead of warn-and-continue
+#
+# Usage: _safe_pip_install <pip args...>
+#   Returns 0 on success.
+#   Returns 1 on ordinary failure (caller decides whether to retry).
+#   Calls fail() (exits) on Permission-denied — that is never recoverable
+#   without user intervention.
+_safe_pip_install() {
+    local _log
+    _log="$(mktemp -t tofu_pip.XXXXXX)"
+    local _rc=0
+    (
+        export PIP_USER=0
+        unset PYTHONUSERBASE
+        # Tee so the user still sees pip's output live; capture to log
+        # for the post-mortem permission check.
+        python -m pip install --prefix "$ENV_PREFIX" "$@" 2>&1 | tee "$_log"
+        exit "${PIPESTATUS[0]}"
+    )
+    _rc=$?
+    if [[ $_rc -ne 0 ]] && grep -qE 'Permission denied|\[Errno 13\]' "$_log"; then
+        warn "pip hit Permission denied — refusing to fall back to --user."
+        warn "  Offending output:"
+        grep -E 'Permission denied|\[Errno 13\]' "$_log" | head -5 | sed 's/^/    /' >&2
+        warn "  Likely cause: ~/.local has stale entries from a previous failed install,"
+        warn "  or the conda env site-packages is not writable for the current user."
+        warn "  Recovery: rm -rf ~/.local/lib/python*/site-packages/{courlan,trafilatura,htmldate}"
+        warn "           ls -ld ${ENV_PREFIX}/lib/python*/site-packages   # must be writable"
+        rm -f "$_log"
+        fail "pip install aborted on permission error — see messages above."
+    fi
+    rm -f "$_log"
+    return "$_rc"
+}
+
 # ── Install pip-only deps (e.g. pymupdf4llm) into the conda env ──
 # pymupdf4llm is not shipped on conda-forge; it's a thin LLM-oriented Markdown
 # extractor built on top of pymupdf (which we just installed via conda).
@@ -868,11 +974,11 @@ if [[ ${#PIP_ONLY_PKGS[@]} -gt 0 ]]; then
         warn "pip STILL not available — skipping pip installs (trafilatura/htmldate/pymupdf4llm)"
         warn "Manual recovery: conda install -n ${ENV_NAME} -c conda-forge pip && \\"
         warn "                 pip install ${PIP_ONLY_PKGS[*]}"
-    elif python -m pip install --no-deps --upgrade "${PIP_ONLY_PKGS[@]}"; then
+    elif _safe_pip_install --no-deps --upgrade "${PIP_ONLY_PKGS[@]}"; then
         ok "Pip-only deps installed"
     else
         warn "pip install --no-deps failed — retrying with dependency resolution"
-        if python -m pip install --upgrade "${PIP_ONLY_PKGS[@]}"; then
+        if _safe_pip_install --upgrade "${PIP_ONLY_PKGS[@]}"; then
             ok "Pip-only deps installed (with dependency resolution)"
         else
             warn "Pip-only deps install failed — some PDF features may be degraded"
@@ -901,7 +1007,7 @@ if [[ -d "${INSTALL_DIR}/vendor" ]]; then
         warn "Manual recovery later: pip install ${_BUNDLED_MCPS[*]}"
     else
         info "Installing: ${_BUNDLED_MCPS[*]}"
-        if python -m pip install --upgrade "${_BUNDLED_MCPS[@]}"; then
+        if _safe_pip_install --upgrade "${_BUNDLED_MCPS[@]}"; then
             ok "Bundled MCP servers installed (hope-mcp / xuecheng-mcp now on PATH)"
         else
             warn "Bundled MCP install failed — Settings → MCP install buttons may fail"
@@ -924,7 +1030,7 @@ if [[ "$WITH_DOCLING" -eq 1 ]]; then
         # to replace torch with the GPU variant.
         _DOCLING_INDEX="https://download.pytorch.org/whl/cpu"
         info "  pip install docling (--extra-index-url ${_DOCLING_INDEX})"
-        if python -m pip install --upgrade \
+        if _safe_pip_install --upgrade \
              --extra-index-url "${_DOCLING_INDEX}" \
              "docling>=2.0"; then
             ok "Docling installed — set PDF_TEXT_MODE=structured in .env to enable"
@@ -1030,14 +1136,59 @@ fi
 # ── Verify the full HTML-fetch stack imports (no hidden missing deps) ──
 # This runs the same chain that server.py will run at startup, so any
 # ModuleNotFoundError here surfaces BEFORE the user hits it.
-info "Verifying lxml + trafilatura + htmldate + justext import correctly..."
-if python -c "import lxml.etree, lxml_html_clean, trafilatura, htmldate, justext, courlan, dateparser; print('lxml', lxml.__version__, 'trafilatura', trafilatura.__version__, 'htmldate', htmldate.__version__, 'justext', justext.__version__)"; then
+#
+# We also include the transitive runtime deps (babel/tld/pytz/regex/tzlocal)
+# in the import probe — those are the ones most likely to be missing because
+# we install with --no-deps. If any leaf import fails, self-heal by re-running
+# pip WITH dependency resolution (constrained so it can't downgrade lxml),
+# then re-verify. Only fail-stop if the second attempt still doesn't import,
+# so install.sh never prints "Installation complete!" on a broken env again.
+info "Verifying lxml + trafilatura + htmldate + justext + transitive deps import correctly..."
+
+_TOFU_IMPORT_PROBE='import lxml.etree, lxml_html_clean, trafilatura, htmldate, justext, courlan, dateparser, babel, tld, pytz, regex, tzlocal; print("lxml", lxml.__version__, "trafilatura", trafilatura.__version__, "htmldate", htmldate.__version__, "justext", justext.__version__)'
+_TOFU_IMPORT_ERR="$(mktemp -t tofu_import_err.XXXXXX)"
+
+if python -c "$_TOFU_IMPORT_PROBE" 2>"$_TOFU_IMPORT_ERR"; then
     ok "Import check passed"
+    rm -f "$_TOFU_IMPORT_ERR"
 else
-    warn "One of lxml/trafilatura/htmldate/justext/courlan/dateparser failed to import."
-    warn "If you see 'GLIBC_2.xx not found', a pip wheel is still shadowing conda's copy."
-    warn "Try: conda activate ${ENV_NAME} && pip uninstall -y lxml && conda install -c conda-forge --force-reinstall lxml"
-    warn "If you see 'No module named X', run: pip install X"
+    warn "Import check FAILED — auto-healing missing transitive deps"
+    sed 's/^/    /' "$_TOFU_IMPORT_ERR" >&2 || true
+
+    # Self-heal: re-run pip WITH dep resolution, but constrain lxml so the
+    # resolver can't downgrade conda's lxml 6 (the original reason we used
+    # --no-deps). Constraint files apply to ALL packages pip considers,
+    # not just direct asks, so any lxml downgrade attempt is blocked.
+    _TOFU_PIP_CONSTRAINT="$(mktemp -t tofu_pip_constraint.XXXXXX)"
+    {
+        echo "lxml>=6"
+        echo "libxml2>=2.14"   # ignored if not on PyPI; harmless
+    } > "$_TOFU_PIP_CONSTRAINT"
+
+    info "Re-running pip install (with deps, constrained lxml>=6)..."
+    if _safe_pip_install --upgrade --constraint "$_TOFU_PIP_CONSTRAINT" "${PIP_ONLY_PKGS[@]}"; then
+        info "Re-installed pip stack with dependency resolution"
+    else
+        warn "Auto-heal pip install failed — falling back to explicit transitive set"
+        _safe_pip_install --upgrade babel tld pytz regex tzlocal || \
+            warn "  Could not install babel/tld/pytz/regex/tzlocal directly either"
+    fi
+    rm -f "$_TOFU_PIP_CONSTRAINT"
+
+    # Re-verify; this time, if it STILL doesn't import, abort the install
+    # so the user gets a real error instead of a silent broken state.
+    if python -c "$_TOFU_IMPORT_PROBE" 2>"$_TOFU_IMPORT_ERR"; then
+        ok "Import check passed after auto-heal"
+        rm -f "$_TOFU_IMPORT_ERR"
+    else
+        warn "Imports still broken after auto-heal. Last error:"
+        sed 's/^/    /' "$_TOFU_IMPORT_ERR" >&2 || true
+        warn "If you see 'GLIBC_2.xx not found', a pip wheel is still shadowing conda's copy."
+        warn "Try: conda activate ${ENV_NAME} && pip uninstall -y lxml && \\"
+        warn "     conda install -c conda-forge --force-reinstall lxml"
+        warn "If you see 'No module named X', run: pip install X"
+        fail "Critical fetch-stack imports broken — see ${_TOFU_IMPORT_ERR}"
+    fi
 fi
 
 # ═══════════════════════════════════════════════════════════════
@@ -1048,13 +1199,13 @@ SQLITE_VER="$(python -c 'import sqlite3; print(sqlite3.sqlite_version)')"
 ok "SQLite $SQLITE_VER (built into Python)"
 
 # ═══════════════════════════════════════════════════════════════
-#  Step 7: Install ripgrep & fd-find from conda-forge (fast search)
+#  Step 7: Install ripgrep, fd-find & tmux from conda-forge
 # ═══════════════════════════════════════════════════════════════
-step "Installing ripgrep + fd-find (fast code/file search)"
-if conda install -n "$ENV_NAME" -c conda-forge --override-channels -y ripgrep fd-find; then
-    ok "ripgrep + fd-find installed"
+step "Installing ripgrep + fd-find + tmux (fast search + terminal multiplexer)"
+if conda install -n "$ENV_NAME" -c conda-forge --override-channels -y ripgrep fd-find tmux; then
+    ok "ripgrep + fd-find + tmux installed"
 else
-    warn "ripgrep/fd-find install failed — code search will fall back to grep / os.walk"
+    warn "ripgrep/fd-find/tmux install failed — code search will fall back to grep / os.walk"
 fi
 
 # ═══════════════════════════════════════════════════════════════
@@ -1090,11 +1241,29 @@ if [[ "$SKIP_PLAYWRIGHT" -eq 0 ]]; then
         fi
     fi
 
-    info "Downloading Chromium browser binary via playwright..."
-    if python -m playwright install chromium; then
-        ok "Playwright Chromium installed"
+    # Self-heal: the Chromium download below runs `python -m playwright`, which
+    # needs the `playwright` pip package importable. If the earlier pip step
+    # failed/was skipped, this would die with "No module named 'playwright'"
+    # and leave JS-rendered fetching silently disabled. Reinstall it first.
+    if ! python -c "import playwright" 2>/dev/null; then
+        warn "playwright module not importable — reinstalling it before Chromium download"
+        if _safe_pip_install --upgrade "playwright>=1.40"; then
+            ok "playwright pip package installed"
+        else
+            warn "Could not install the playwright pip package — Chromium download will be skipped"
+        fi
+    fi
+
+    if ! python -c "import playwright" 2>/dev/null; then
+        warn "playwright still not importable — skipping Chromium download (fetching still works via requests)"
+        warn "Manual recovery: conda activate ${ENV_NAME} && pip install 'playwright>=1.40' && python -m playwright install chromium"
     else
-        warn "Playwright Chromium install failed (non-critical — fetching still works via requests)"
+        info "Downloading Chromium browser binary via playwright..."
+        if python -m playwright install chromium; then
+            ok "Playwright Chromium installed"
+        else
+            warn "Playwright Chromium install failed (non-critical — fetching still works via requests)"
+        fi
     fi
 else
     info "Skipping Playwright (--skip-playwright)"

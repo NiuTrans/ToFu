@@ -36,7 +36,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.llm_client import add_cache_breakpoints, build_body, stream_chat
+from lib.llm import add_cache_breakpoints, build_body, stream_chat
 from lib.model_info import is_claude
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -185,9 +185,9 @@ TOOL_RESULTS = {
         'lib/llm_client.py:764:def add_cache_breakpoints(body, log_prefix=\'\'):\n'
         'lib/llm_client.py:1190:    add_cache_breakpoints(body, log_prefix)\n'
         'lib/tasks_pkg/cache_tracking.py:26:  add_cache_breakpoints() places breakpoints to cover the growing prefix.\n'
-        'lib/tasks_pkg/cache_tracking.py:45:  from lib.llm_client import add_cache_breakpoints\n'
+        'lib/tasks_pkg/cache_tracking.py:45:  from lib.llm import add_cache_breakpoints\n'
         'tests/test_cache_breakpoints.py:1:"""Comprehensive regression tests for prompt-cache breakpoint placement.\n'
-        'tests/test_cache_breakpoints.py:35:from lib.llm_client import add_cache_breakpoints\n'
+        'tests/test_cache_breakpoints.py:35:from lib.llm import add_cache_breakpoints\n'
         'debug/test_cache_ab.py:259:\'lib/llm_client.py:765:def add_cache_breakpoints...\n'
         'debug/test_cache_bp4_live.py:278:"def add_cache_breakpoints(body, log_prefix=\'\')...\n'
     ),
@@ -377,7 +377,7 @@ ARM_CONFIGS = {
 
 def _monkeypatch_arm(arm_key: str):
     """Configure add_cache_breakpoints for the given arm."""
-    import lib.llm_client as _mod
+    import lib.llm as _mod
     import lib as _lib
 
     if not hasattr(_mod, '_original_add_cache_breakpoints'):
@@ -398,7 +398,7 @@ def _monkeypatch_arm(arm_key: str):
 
 def _restore_arm():
     """Restore original add_cache_breakpoints."""
-    import lib.llm_client as _mod
+    import lib.llm as _mod
     import lib as _lib
     if hasattr(_mod, '_original_add_cache_breakpoints'):
         _mod.add_cache_breakpoints = _mod._original_add_cache_breakpoints

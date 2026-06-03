@@ -492,8 +492,8 @@ def translate_pptx(
         if progress_fn:
             try:
                 progress_fn(slide_idx, n_slides, f'Translating slide {slide_idx}/{n_slides}')
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug('[PPTXTranslator] progress_fn raised: %s', e)
 
         for shape in slide.shapes:
             try:

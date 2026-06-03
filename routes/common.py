@@ -20,8 +20,11 @@ from flask import Blueprint, Response, abort, jsonify, make_response, request, s
 
 import lib as _lib  # module ref for hot-reload
 from lib.config_dir import config_path as _config_path
+from lib.css_bundler import get_styles_link_tag as _get_styles_link_tag
 from lib.js_bundler import get_bundle_script_tag as _get_bundle_tag
 from lib.log import get_logger
+from lib.api_response import api_bad_request, api_internal_error, api_ok
+from lib.request_parser import parse_body
 from lib.utils import safe_json as _safe_json
 
 logger = get_logger(__name__)
@@ -58,6 +61,8 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_USER_ID = 1
 
 common_bp = Blueprint('common', __name__)
+# v1 blueprint for the JSON routes (page-serving carve-outs above stay on common_bp).
+from routes.api_v1.common import api_v1_common_bp  # noqa: E402
 
 # ── In-memory cache for conversation metadata ──
 _meta_cache_lock = threading.Lock()
@@ -108,36 +113,21 @@ def _refresh_meta_cache_if_stale(db):
 #  Auth Stubs (single-user)
 # ══════════════════════════════════════════════════════
 
-@common_bp.route('/api/me')
-def me():
-    return jsonify({'authenticated': True, 'username': 'default', 'displayName': 'User'})
-
-@common_bp.route('/api/login', methods=['POST'])
-def login():
-    return jsonify({'ok': True})
-
-@common_bp.route('/api/logout', methods=['POST'])
-def logout():
-    return jsonify({'ok': True})
-
-@common_bp.route('/api/register', methods=['POST'])
-def register():
-    return jsonify({'ok': True})
-
+# /api/{me,login,logout,register} stubs removed 2026-05-29 — use /api/v1/users/{me,login,logout,signup}.
 
 # ══════════════════════════════════════════════════════
 #  Log Compress (LLM-powered)
 # ══════════════════════════════════════════════════════
 
-@common_bp.route('/api/log/compress', methods=['POST'])
+@api_v1_common_bp.route('/api/v1/logs/compress', methods=['POST'])
 def log_compress():
     """Use a cheap LLM to intelligently compress verbose logs."""
     from lib.llm_dispatch import smart_chat as llm_chat
 
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     text = (data.get('text') or '').strip()
     if not text:
-        return jsonify({'error': 'No text provided'}), 400
+        return api_bad_request('No text provided')
     if len(text) > 60000:
         text = text[:60000] + '\n... [truncated]'
 
@@ -182,20 +172,20 @@ def log_compress():
         return jsonify({'compressed': content, 'usage': usage})
     except Exception as e:
         logger.error('[LogCompress] Error: %s', e, exc_info=True)
-        return jsonify({'error': 'internal_error'}), 500
+        return api_internal_error('internal_error')
 
 
 # ══════════════════════════════════════════════════════
 #  Pricing
 # ══════════════════════════════════════════════════════
 
-@common_bp.route('/api/pricing', methods=['GET'])
-@common_bp.route('/api/pricing/data', methods=['GET'])
+@api_v1_common_bp.route('/api/v1/pricing', methods=['GET'])
+@api_v1_common_bp.route('/api/v1/pricing/data', methods=['GET'])
 def pricing_data():
     from lib.pricing import get_pricing_data
     return jsonify(get_pricing_data())
 
-@common_bp.route('/api/pricing/refresh', methods=['POST'])
+@api_v1_common_bp.route('/api/v1/pricing/refresh', methods=['POST'])
 def pricing_refresh():
     from lib.pricing import get_pricing_data, refresh_pricing_async
     logger.info('[pricing_refresh] Triggered pricing data refresh')
@@ -207,7 +197,7 @@ def pricing_refresh():
 #  Dispatch Quota — 5-hour rolling request counts per model
 # ══════════════════════════════════════════════════════
 
-@common_bp.route('/api/dispatch/quota', methods=['GET'])
+@api_v1_common_bp.route('/api/v1/dispatch/quota', methods=['GET'])
 def dispatch_quota():
     """Return 5-hour rolling request stats aggregated by model.
 
@@ -273,7 +263,128 @@ def dispatch_quota():
 #  (auto-disable < 50%, manual override)
 # ══════════════════════════════════════════════════════
 
-@common_bp.route('/api/dispatch/key-stats', methods=['GET'])
+@api_v1_common_bp.route('/api/v1/dispatch/endpoint-metrics', methods=['GET'])
+def dispatch_endpoint_metrics():
+    """Return per-endpoint live performance metrics aggregated from slot stats.
+
+    Aggregates over all slots that share the same base_url (one or many
+    models hosted on a self-hosted box). Frontend uses this to render
+    persistent ttft/latency/throughput/success-rate without manual probing.
+
+    Response:
+    {
+      "endpoints": {
+        "<base_url>": {
+          "slots": int,
+          "models": [str, ...],
+          "providers": [provider_id, ...],
+          "rpm_current": int, "rpm_limit": int,
+          "inflight": int,
+          "total_requests": int, "total_errors": int,
+          "success_rate": float|null,
+          "ttft_ms": float|null,        # weighted avg across slots
+          "latency_ms": float|null,
+          "throughput_tps": float|null,
+          "last_success_ts": float,     # epoch seconds
+          "last_error_ts": float,
+          "last_error_msg": str,
+          "available": bool,            # any slot in the bucket usable now
+          "consecutive_errors": int     # max across slots
+        }, ...
+      },
+      "ts": float
+    }
+    """
+    try:
+        from lib.llm_dispatch import get_dispatcher
+        d = get_dispatcher()
+        slots = d.get_slots_info()
+    except Exception as e:
+        logger.warning('[dispatch/endpoint-metrics] Failed: %s', e, exc_info=True)
+        return jsonify({'endpoints': {}, 'ts': time.time()})
+
+    buckets = {}
+    for s in slots:
+        url = (s.get('base_url') or '').rstrip('/')
+        if not url:
+            continue
+        b = buckets.setdefault(url, {
+            'slots': 0, 'models': set(), 'providers': set(),
+            'rpm_current': 0, 'rpm_limit': 0, 'inflight': 0,
+            'total_requests': 0, 'total_errors': 0,
+            '_ttft_num': 0.0, '_ttft_den': 0,
+            '_lat_num': 0.0, '_lat_den': 0,
+            '_tp_num': 0.0, '_tp_den': 0,
+            'last_success_ts': 0.0,
+            'last_error_ts': 0.0,
+            'last_error_msg': '',
+            'available': False,
+            'consecutive_errors': 0,
+        })
+        b['slots'] += 1
+        if s.get('model'): b['models'].add(s['model'])
+        if s.get('provider_id'): b['providers'].add(s['provider_id'])
+        b['rpm_current'] += s.get('rpm_current', 0) or 0
+        b['rpm_limit'] += s.get('rpm_limit', 0) or 0
+        b['inflight'] += s.get('inflight', 0) or 0
+        b['total_requests'] += s.get('total_requests', 0) or 0
+        b['total_errors'] += s.get('total_errors', 0) or 0
+        # Weight per-slot EMAs by request count so heavily-used slots dominate
+        n = s.get('total_requests', 0) or 0
+        w = max(1, n)  # at least 1 so cold slots still contribute
+        ttft = s.get('ttft_ema_ms') or 0
+        lat = s.get('latency_ema_ms') or 0
+        tps = s.get('throughput_ema_tps') or 0
+        if ttft > 0 and n > 0:
+            b['_ttft_num'] += ttft * w; b['_ttft_den'] += w
+        if lat > 0 and n > 0:
+            b['_lat_num'] += lat * w; b['_lat_den'] += w
+        if tps > 0 and n > 0:
+            b['_tp_num'] += tps * w; b['_tp_den'] += w
+        ts_s = s.get('last_success_time') or 0
+        if ts_s > b['last_success_ts']: b['last_success_ts'] = ts_s
+        ts_e = s.get('last_error_time') or 0
+        if ts_e > b['last_error_ts']:
+            b['last_error_ts'] = ts_e
+            b['last_error_msg'] = s.get('last_error_msg') or ''
+        if s.get('available'):
+            b['available'] = True
+        ce = s.get('consecutive_errors', 0) or 0
+        if ce > b['consecutive_errors']:
+            b['consecutive_errors'] = ce
+
+    # Finalize: serialize sets, compute success rate + averages
+    out = {}
+    for url, b in buckets.items():
+        sr = None
+        if b['total_requests'] >= 3:
+            sr = max(0.0, 1.0 - b['total_errors'] / b['total_requests'])
+        out[url] = {
+            'slots': b['slots'],
+            'models': sorted(b['models']),
+            'providers': sorted(b['providers']),
+            'rpm_current': b['rpm_current'],
+            'rpm_limit': b['rpm_limit'],
+            'inflight': b['inflight'],
+            'total_requests': b['total_requests'],
+            'total_errors': b['total_errors'],
+            'success_rate': round(sr, 3) if sr is not None else None,
+            'ttft_ms': round(b['_ttft_num'] / b['_ttft_den'], 1)
+                       if b['_ttft_den'] else None,
+            'latency_ms': round(b['_lat_num'] / b['_lat_den'], 1)
+                          if b['_lat_den'] else None,
+            'throughput_tps': round(b['_tp_num'] / b['_tp_den'], 1)
+                              if b['_tp_den'] else None,
+            'last_success_ts': b['last_success_ts'],
+            'last_error_ts': b['last_error_ts'],
+            'last_error_msg': b['last_error_msg'],
+            'available': b['available'],
+            'consecutive_errors': b['consecutive_errors'],
+        }
+    return jsonify({'endpoints': out, 'ts': time.time()})
+
+
+@api_v1_common_bp.route('/api/v1/dispatch/key-stats', methods=['GET'])
 def dispatch_key_stats():
     """Return today's success/failure counts per API key.
 
@@ -319,19 +430,19 @@ def dispatch_key_stats():
     })
 
 
-@common_bp.route('/api/dispatch/key-override', methods=['POST'])
+@api_v1_common_bp.route('/api/v1/dispatch/key-override', methods=['POST'])
 def dispatch_key_override():
     """Manually toggle a key on/off for today.
 
     Body: { "provider_id": str, "key_name": str, "enabled": bool|null }
     If enabled is null, the override is cleared (revert to auto-disable logic).
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     prov_id = (data.get('provider_id') or '').strip()
     key_name = (data.get('key_name') or '').strip()
     enabled = data.get('enabled', None)
     if not key_name:
-        return jsonify({'error': 'key_name required'}), 400
+        return api_bad_request('key_name required')
     try:
         from lib.key_stats import clear_key_override, set_key_override
         if enabled is None:
@@ -340,11 +451,9 @@ def dispatch_key_override():
             row = set_key_override(prov_id, key_name, bool(enabled))
     except Exception as e:
         logger.error('[dispatch/key-override] Failed: %s', e, exc_info=True)
-        return jsonify({'error': 'internal_error'}), 500
-    return jsonify({'ok': True, 'provider_id': prov_id, 'key_name': key_name,
+        return api_internal_error('internal_error')
+    return api_ok({'provider_id': prov_id, 'key_name': key_name,
                     'row': row})
-
-
 # ══════════════════════════════════════════════════════
 #  Static Pages & Favicon
 # ══════════════════════════════════════════════════════
@@ -365,31 +474,58 @@ FAVICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
 
 
 # ── Cached bundled index.html (avoids re-reading + regex on every page load) ──
-_bundled_index_cache = {'tag': None, 'html': None, 'mtime': 0}
+# Keyed by (bundle_tag, styles_link_tag, html_mtime) so any of those changing
+# triggers a re-render of the cached HTML.
+_bundled_index_cache = {'tag': None, 'styles_tag': None, 'html': None, 'mtime': 0}
 
-# Regex: match contiguous block of app script tags + interleaved HTML comments/blank lines
+# Regex: match contiguous block of app script tags + interleaved HTML comments/blank lines.
+# Two important details:
+#   1. Path char class includes '/' so subdirectory scripts (e.g. static/js/ui/popups.js,
+#      static/js/settings/branding.js, static/js/main/main_input_handling.js) are also
+#      stripped — otherwise they'd survive the bundle replacement and load as duplicate
+#      top-level <script> tags, causing "Identifier has already been declared" SyntaxErrors
+#      (see CLAUDE.md §3.2.1).
+#   2. The comment alternative `<!--[^<]*?-->` is body-restricted to chars that are NOT
+#      `<`, which lets us safely span 1-2 line subpackage comments (e.g. between
+#      core.js and core/folders.js) WITHOUT backtracking across whole HTML regions
+#      that happen to contain other comments. Without this carve-out the regex either
+#      fires multiple times (.*? doesn't cross \n → bundle injected per-block →
+#      duplicate-IIFE crash) or matches enormous spans ([\s\S]*? backtracks across
+#      <head> meta tags etc).
 _APP_SCRIPTS_RE = re.compile(
-    r'(?:(?:<!-- .*?-->\n)|(?:<script defer src="static/js/(?!bundle-)[\w.-]+\.js[^"]*"[^>]*></script>\n)|(?:\s*\n))*'
-    r'<script defer src="static/js/(?!bundle-)[\w.-]+\.js[^"]*"[^>]*></script>\n'
-    r'(?:(?:<!-- .*?-->\n)|(?:<script defer src="static/js/(?!bundle-)[\w.-]+\.js[^"]*"[^>]*></script>\n)|(?:\s*\n))*'
+    r'(?:(?:<!--[^<]*?-->\n)|(?:<script defer src="static/js/(?!bundle-)[\w./-]+\.js[^"]*"[^>]*></script>\n)|(?:\s*\n))*'
+    r'<script defer src="static/js/(?!bundle-)[\w./-]+\.js[^"]*"[^>]*></script>\n'
+    r'(?:(?:<!--[^<]*?-->\n)|(?:<script defer src="static/js/(?!bundle-)[\w./-]+\.js[^"]*"[^>]*></script>\n)|(?:\s*\n))*'
+)
+
+# Regex: match the app stylesheet `<link>` tag (with whatever ?v=… is in the
+# file) so we can swap it for a content-hashed version computed at request
+# time. Vendor stylesheets (static/vendor/...) are intentionally NOT matched
+# because they're versioned by their vendor URL and rarely change.
+_APP_STYLES_RE = re.compile(
+    r'<link rel="stylesheet" href="static/styles\.css(?:\?[^"]*)?">'
 )
 
 @common_bp.route('/')
 def index_page():
     bundle_tag = _get_bundle_tag()
+    styles_tag = _get_styles_link_tag()
     if not bundle_tag:
         # Bundling failed — serve original index.html with individual scripts
         resp = send_from_directory(BASE_DIR, 'index.html')
         resp.headers['Cache-Control'] = 'private, no-cache'
         return resp
 
-    # Use cached version if bundle tag AND index.html mtime haven't changed
+    # Use cached version if bundle tag, styles tag, AND index.html mtime
+    # are all unchanged. Any of those changing → rebuild the served HTML.
     html_path = os.path.join(BASE_DIR, 'index.html')
     try:
         html_mtime = os.path.getmtime(html_path)
-    except OSError:
+    except OSError as _e_audit:
+        logger.debug('[common] index_page caught %s: %s', type(_e_audit).__name__, _e_audit)
         html_mtime = 0
     if (_bundled_index_cache['tag'] == bundle_tag
+            and _bundled_index_cache['styles_tag'] == styles_tag
             and _bundled_index_cache['mtime'] == html_mtime
             and _bundled_index_cache['html']):
         resp = make_response(_bundled_index_cache['html'])
@@ -397,14 +533,20 @@ def index_page():
         resp.headers['Cache-Control'] = 'private, no-cache'
         return resp
 
-    # Read index.html and replace 16 individual script tags with 1 bundle tag
+    # Read index.html and rewrite both:
+    #   1. The contiguous block of <script defer src="static/js/*.js"> tags
+    #      → single bundle tag with content-hashed filename.
+    #   2. The single <link rel="stylesheet" href="static/styles.css?v=…">
+    #      → content-hashed query string (lib/css_bundler.py).
     try:
         with open(html_path, 'r', encoding='utf-8') as f:
             html = f.read()
 
         html = _APP_SCRIPTS_RE.sub(bundle_tag + '\n', html)
+        html = _APP_STYLES_RE.sub(styles_tag, html)
 
         _bundled_index_cache['tag'] = bundle_tag
+        _bundled_index_cache['styles_tag'] = styles_tag
         _bundled_index_cache['html'] = html
         _bundled_index_cache['mtime'] = html_mtime
 
@@ -423,7 +565,41 @@ def trading_page():
         abort(404)
     return send_from_directory(BASE_DIR, 'trading.html')
 
-@common_bp.route('/api/features')
+
+@common_bp.route('/login')
+@common_bp.route('/login/')
+@common_bp.route('/signup')
+@common_bp.route('/signup/')
+def login_signup_page():
+    """Customer login / signup HTML.
+
+    Same file serves both — the page picks login vs signup based on
+    ``#signup`` URL fragment (no server-side branching needed). Lives
+    next to ``static/dashboard.html``; no bundle dependency.
+    """
+    return send_from_directory(os.path.join(BASE_DIR, 'static'),
+                                'login.html')
+
+
+@common_bp.route('/dashboard')
+@common_bp.route('/dashboard/')
+def dashboard_page():
+    """Customer-facing relay dashboard.
+
+    Lightweight standalone HTML — wallet balance, redeem-code form,
+    API-key issuance, usage chart, base-URL snippet, account panel.
+    Served from the same Quart app as the chat UI but lives in a
+    separate file (``static/dashboard.html``) so a relay operator can
+    expose only ``/dashboard`` to customers via the reverse proxy
+    while the chat UI stays admin-only.
+
+    The page itself is plain HTML (no bundle dependency); all data
+    comes from ``/api/v1/billing/*`` and ``/api/v1/keys`` over fetch.
+    """
+    return send_from_directory(os.path.join(BASE_DIR, 'static'),
+                                'dashboard.html')
+
+@api_v1_common_bp.route('/api/v1/features')
 def features():
     return jsonify({
         'trading_enabled': _lib.TRADING_ENABLED,
@@ -431,12 +607,13 @@ def features():
         'cache_extended_ttl': getattr(_lib, 'CACHE_EXTENDED_TTL', False),
         'debug_mode': getattr(_lib, 'DEBUG_MODE', False),
         'optimizer_enabled': getattr(_lib, 'OPTIMIZER_ENABLED', True),
+        'artifacts_enabled': getattr(_lib, 'ARTIFACTS_ENABLED', True),
     })
 
 
-@common_bp.route('/api/features', methods=['POST'])
+@api_v1_common_bp.route('/api/v1/features', methods=['POST'])
 def save_features():
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     features_path = _config_path('features.json')
     existing = {}
     try:
@@ -488,7 +665,7 @@ def save_features():
             json.dump(existing, f, indent=2)
     except Exception as e:
         logger.error('[Features] Failed to write features.json: %s', e, exc_info=True)
-        return jsonify({'ok': False, 'error': 'internal_error'}), 500
+        return api_internal_error('internal_error')
 
     # ── Audit trail for each flag that actually changed ──
     if changed:
@@ -502,11 +679,25 @@ def save_features():
             logger.debug('[Features] audit_log feature_flag_change failed: %s', _aerr)
 
     # Hot-reload TRADING_ENABLED on the lib module
+    needs_restart = False
     if 'trading_enabled' in changed:
         _lib.TRADING_ENABLED = existing.get('trading_enabled', False)
-        logger.info('[Features] Hot-reloaded TRADING_ENABLED → %s '
-                    '(note: trading route registration requires restart)',
-                    _lib.TRADING_ENABLED)
+        # Blueprint registration is import-time only (`routes/__init__.py`).
+        # If trading is being enabled on a server that booted with it OFF, the
+        # /api/trading/* routes will not exist until restart. Tell the truth.
+        try:
+            from routes import TRADING_ROUTES_REGISTERED
+        except ImportError as e:
+            logger.debug('[Features] TRADING_ROUTES_REGISTERED unavailable: %s', e)
+            TRADING_ROUTES_REGISTERED = False
+        if _lib.TRADING_ENABLED and not TRADING_ROUTES_REGISTERED:
+            needs_restart = True
+            logger.info('[Features] TRADING_ENABLED → True but routes not '
+                        'registered at boot — needs_restart=True')
+        else:
+            logger.info('[Features] Hot-reloaded TRADING_ENABLED → %s '
+                        '(routes_registered=%s)',
+                        _lib.TRADING_ENABLED, TRADING_ROUTES_REGISTERED)
     if 'pptx_translate_enabled' in changed:
         _lib.PPTX_TRANSLATE_ENABLED = existing.get('pptx_translate_enabled', False)
         logger.info('[Features] Hot-reloaded PPTX_TRANSLATE_ENABLED → %s',
@@ -539,13 +730,11 @@ def save_features():
             logger.warning('[Features] Could not toggle Daily Optimizer task: %s',
                            _te, exc_info=True)
 
-    return jsonify({'ok': True, 'saved': existing,
-                    'needs_restart': False, 'changed': changed})
-
-
+    return api_ok({'saved': existing,
+                    'needs_restart': needs_restart, 'changed': changed})
 @common_bp.route('/api/client-error', methods=['POST'])
 def client_error():
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     message = (data.get('message') or 'unknown client error')[:2000]
     url = (data.get('url') or '')[:500]
     conv_count = data.get('conversationCount', '?')
@@ -567,8 +756,7 @@ def client_error():
         logger.warning('%s', ' | '.join(log_parts))
     else:
         logger.error('%s', ' | '.join(log_parts))
-    return jsonify({'ok': True})
-
+    return api_ok()
 @common_bp.route('/api/health')
 def health_check():
     from lib.database import db_available

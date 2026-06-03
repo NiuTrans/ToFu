@@ -241,11 +241,13 @@ def _probe_latency(path, timeout=_PROBE_TIMEOUT_S):
             probe_path = os.path.join(path, probe_name)
             try:
                 os.stat(probe_path)
-            except FileNotFoundError:
+            except FileNotFoundError as _e_audit:
+                logger.debug('[cross_dc] _do_probe caught %s: %s', type(_e_audit).__name__, _e_audit)
                 pass  # Expected — we're measuring the round-trip time
             result[0] = time.monotonic() - t0
-        except OSError:
+        except OSError as _e_audit:
             # Mount point itself is inaccessible
+            logger.debug('[cross_dc] _do_probe caught %s: %s', type(_e_audit).__name__, _e_audit)
             result[0] = time.monotonic() - t0
         finally:
             event.set()

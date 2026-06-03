@@ -23,6 +23,7 @@ import time
 import requests
 
 from lib.log import get_logger
+from lib.http_client import http_post
 
 logger = get_logger(__name__)
 
@@ -373,7 +374,6 @@ def _niutrans_v1(text, src_lang, tgt_lang, api_key, api_url=''):
     Endpoint: POST https://api.niutrans.com/NiuTransServer/translation
     Params: src_text, from, to, apikey
     """
-    from lib.proxy import proxies_for
 
     url = api_url or 'https://api.niutrans.com/NiuTransServer/translation'
 
@@ -385,8 +385,7 @@ def _niutrans_v1(text, src_lang, tgt_lang, api_key, api_url=''):
     }
 
     try:
-        resp = requests.post(url, data=payload, timeout=_REQUEST_TIMEOUT,
-                             proxies=proxies_for(url))
+        resp = http_post(url, data=payload, timeout=_REQUEST_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
     except requests.Timeout:
@@ -419,7 +418,6 @@ def _niutrans_v2(text, src_lang, tgt_lang, api_key, app_id, api_url=''):
     Endpoint: POST https://api.niutrans.com/v2/text/translate
     Params: srcText, from, to, appId, timestamp, authStr
     """
-    from lib.proxy import proxies_for
 
     url = api_url or 'https://api.niutrans.com/v2/text/translate'
     timestamp = str(int(time.time() * 1000))
@@ -446,8 +444,7 @@ def _niutrans_v2(text, src_lang, tgt_lang, api_key, app_id, api_url=''):
     payload['authStr'] = auth_str
 
     try:
-        resp = requests.post(url, json=payload, timeout=_REQUEST_TIMEOUT,
-                             proxies=proxies_for(url))
+        resp = http_post(url, json=payload, timeout=_REQUEST_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
     except requests.Timeout:

@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 # ══════════════════════════════════════════════════════════
 
 _SYSTEM = (
-    'You are the ChatUI Daily Optimizer. You analyse evidence from the '
+    'You are the Tofu Daily Optimizer. You analyse evidence from the '
     'last 24 hours of server activity and propose small, low-risk '
     'improvements. You return STRICT JSON only, no prose, no markdown '
     'fences. Every action_type MUST come from the whitelist provided.'

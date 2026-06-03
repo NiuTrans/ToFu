@@ -1,6 +1,6 @@
 """Disk-layer primitives for the file-history store.
 
-Serialises to ``<base_path>/.chatui/file-history/`` with three things on
+Serialises to ``<base_path>/.tofu/file-history/`` with three things on
 disk:
 
 * ``snapshots.jsonl`` — append-only log of :class:`FileHistorySnapshot`.
@@ -82,7 +82,7 @@ def with_project_lock(f):
 # ═══════════════════════════════════════════════════════════════════
 
 def store_dir(base_path: str) -> str:
-    return os.path.join(os.path.abspath(base_path), '.chatui', 'file-history')
+    return os.path.join(os.path.abspath(base_path), '.tofu', 'file-history')
 
 
 def snapshots_path(base_path: str) -> str:
@@ -130,10 +130,15 @@ def ensure_store(base_path: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  Atomic writes (matches modifications.py convention)
+#  Atomic writes — delegated to lib.json_store
 # ═══════════════════════════════════════════════════════════════════
 
 def _atomic_write_bytes(path: str, data: bytes) -> None:
+    """Atomically write bytes (file-history backup blobs).
+
+    Kept as a thin wrapper so callers don't need to reach into
+    json_store for binary writes — they can stay in this module.
+    """
     dn = os.path.dirname(path)
     os.makedirs(dn, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=dn, prefix='.fh-', suffix='.tmp')
@@ -150,8 +155,9 @@ def _atomic_write_bytes(path: str, data: bytes) -> None:
 
 
 def _atomic_write_json(path: str, payload) -> None:
-    raw = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
-    _atomic_write_bytes(path, raw)
+    """Atomically write JSON. Delegates to lib.json_store."""
+    from lib.json_store import write_json_atomic
+    write_json_atomic(path, payload, fsync=True, indent=2)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -235,13 +241,20 @@ def _copy_backup(abs_src: str, dst: str) -> bool:
 
 
 def stage_backup(base_path: str, rel_path: str,
-                 *, explicit_content: bytes | str | None = None) -> int | None:
+                 *, explicit_content: bytes | str | None = None,
+                 task_id: str | None = None) -> int | None:
     """Record the contents of ``rel_path`` as the next version.
 
     By default reads the current on-disk contents.  ``explicit_content``
     overrides that with caller-provided bytes/str — used when the write
     tool already has the pre-write content in memory and the on-disk
     file has already been overwritten.
+
+    ``task_id`` is recorded as ``last_writer_task_id`` on the tracked
+    entry whenever a NEW backup version is created (no-op when the
+    version is unchanged).  Used by the orchestrator's fh side-channel
+    to filter out file mutations attributable to other concurrent
+    tasks on the same project root.
 
     Returns the version number written, or ``None`` if no backup was
     needed (file unchanged since the last backed-up version) or if
@@ -250,7 +263,8 @@ def stage_backup(base_path: str, rel_path: str,
     Caller must hold the project lock.
     """
     if explicit_content is not None:
-        return _stage_explicit(base_path, rel_path, explicit_content)
+        return _stage_explicit(base_path, rel_path, explicit_content,
+                               task_id=task_id)
     abs_p = os.path.join(os.path.abspath(base_path), rel_path)
     st = _stat_or_none(abs_p)
     tracked = load_tracked(base_path)
@@ -270,6 +284,7 @@ def stage_backup(base_path: str, rel_path: str,
                 'mtime': 0,
                 'size': 0,
                 'first_seen': time.time(),
+                'last_writer_task_id': task_id or '',
             }
             save_tracked(base_path, tracked)
             return 0
@@ -280,6 +295,7 @@ def stage_backup(base_path: str, rel_path: str,
             'deleted': True,
             'mtime': 0,
             'size': 0,
+            'last_writer_task_id': task_id or '',
         }
         save_tracked(base_path, tracked)
         return new_v
@@ -297,6 +313,7 @@ def stage_backup(base_path: str, rel_path: str,
             'mtime': st.st_mtime,
             'size': st.st_size,
             'too_large': True,
+            'last_writer_task_id': task_id or '',
         }
         save_tracked(base_path, tracked)
         return new_v
@@ -320,6 +337,7 @@ def stage_backup(base_path: str, rel_path: str,
         'mtime': st.st_mtime,
         'size': st.st_size,
         'first_seen': entry.get('first_seen') or time.time(),
+        'last_writer_task_id': task_id or '',
     }
     save_tracked(base_path, tracked)
     _gc_old_versions(base_path, rel_path, new_v)
@@ -327,7 +345,8 @@ def stage_backup(base_path: str, rel_path: str,
 
 
 def _stage_explicit(base_path: str, rel_path: str,
-                    content: bytes | str) -> int | None:
+                    content: bytes | str,
+                    *, task_id: str | None = None) -> int | None:
     """Stage a backup blob from caller-provided content.
 
     Used by ``track_edit(... pre_content=...)`` so write tools can record
@@ -367,6 +386,7 @@ def _stage_explicit(base_path: str, rel_path: str,
         'mtime': 0,
         'size': len(data),
         'first_seen': entry.get('first_seen') or time.time(),
+        'last_writer_task_id': task_id or '',
     }
     save_tracked(base_path, tracked)
     _gc_old_versions(base_path, rel_path, new_v)
@@ -393,7 +413,8 @@ def _gc_old_versions(base_path: str, rel_path: str, latest: int) -> None:
             continue
         try:
             v = int(name.rsplit('@v', 1)[-1])
-        except ValueError:
+        except ValueError as _e_audit:
+            logger.debug('[store] _gc_old_versions caught %s: %s', type(_e_audit).__name__, _e_audit)
             continue
         if v == 1:
             continue
@@ -475,7 +496,8 @@ def read_blob(base_path: str, rel_path: str, version: int) -> bytes | None:
     try:
         with open(p, 'rb') as f:
             return f.read()
-    except FileNotFoundError:
+    except FileNotFoundError as _e_audit:
+        logger.debug('[store] read_blob caught %s: %s', type(_e_audit).__name__, _e_audit)
         return None
     except OSError as e:
         logger.warning('[FileHistory] read blob v%d for %s failed: %s',

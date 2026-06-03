@@ -37,6 +37,7 @@ __all__ = [
     'proxies_for',
     'get_bypass_domains', 'set_bypass_domains',
     'get_proxy_config', 'set_proxy_config',
+    'register_no_proxy_host', 'register_no_proxy_url',
 ]
 
 # ── The "real" bypass dict that makes requests skip env proxies ──
@@ -197,12 +198,75 @@ def proxies_for(url: str) -> dict:
     This is the **single entry point** for proxy decisions — every module
     that makes HTTP requests should call this.
     """
-    if not _bypass_domains:
-        return {}
     host = (urlparse(url).hostname or '').lower()
-    if host.endswith(_bypass_domains):
+    if not host:
+        return {}
+    # Always bypass the standard local hosts. ``requests`` already does this
+    # via its NO_PROXY env handling, but ``httpx`` doesn't honour NO_PROXY
+    # when given an explicit ``proxy=`` URL — so we MUST return the bypass
+    # marker for these hosts too, otherwise async callers send localhost
+    # traffic through the corporate proxy.
+    if host in _ALWAYS_BYPASS:
+        return _NO_PROXY
+    # Exact-match registered hosts (typically self-hosted local LLM endpoints
+    # whose IPs live in publicly-routable space and therefore aren't matched
+    # by RFC1918 detection).  We need both the literal host AND the global
+    # bypass-domain suffix list to bypass the proxy.
+    if host in _registered_hosts:
+        return _NO_PROXY
+    if _bypass_domains and host.endswith(_bypass_domains):
         return _NO_PROXY
     return {}
+
+
+# ═══════════════════════════════════════════════════════
+#  Registered No-Proxy Hosts (literal exact-match)
+# ═══════════════════════════════════════════════════════
+
+# Hosts (typically raw IPs of self-hosted LLM endpoints) that must bypass the
+# proxy. Populated at runtime by the dispatcher / probe paths so we don't have
+# to hardcode private-but-publicly-routable corporate IP ranges in env vars.
+_registered_hosts: set = set()
+
+
+def register_no_proxy_host(host: str) -> bool:
+    """Mark *host* as proxy-bypass for the lifetime of this process.
+
+    Idempotent and thread-safe. Updates both the per-request ``proxies_for``
+    decision AND the ``no_proxy`` env var (so any third-party library using
+    ``requests`` without our wrapper still bypasses correctly).
+
+    Returns True if the host was newly registered.
+    """
+    if not host:
+        return False
+    h = host.strip().lower()
+    if not h:
+        return False
+    with _lock:
+        if h in _registered_hosts:
+            return False
+        _registered_hosts.add(h)
+        # Append to no_proxy env var if not already present (substring check
+        # is cheap and false positives are harmless — they only over-bypass).
+        cur = os.environ.get('no_proxy', '')
+        if h not in cur.split(','):
+            new = (cur + ',' + h) if cur else h
+            _apply_to_env('no_proxy', new)
+    logger.info('[Proxy] Registered no-proxy host: %s', h)
+    return True
+
+
+def register_no_proxy_url(url: str) -> bool:
+    """Convenience wrapper: register the hostname extracted from *url*."""
+    if not url:
+        return False
+    try:
+        host = urlparse(url).hostname or ''
+    except Exception as e:
+        logger.debug('[Proxy] Failed to parse URL %s: %s', url, e)
+        return False
+    return register_no_proxy_host(host)
 
 
 def get_bypass_domains() -> list:

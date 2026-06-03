@@ -12,9 +12,18 @@ ASK_HUMAN_TOOL = {
         "name": "ask_human",
         "description": (
             "Ask the user a question and wait for their response. "
-            "Use this when you need clarification, confirmation, or "
+            "Use this when you genuinely need clarification, confirmation, or "
             "additional information from the user before proceeding. "
-            "You can ask a free-text question or present multiple-choice options."
+            "You can ask a free-text question or present multiple-choice options.\n\n"
+            "**Do NOT use this when you can decide from existing context.** Asking the "
+            "user for things they expect you to figure out yourself is a frustration "
+            "signal. Before asking, check: (1) does the conversation already contain "
+            "the answer? (2) can a quick read_files / grep_search resolve the "
+            "ambiguity? (3) is there a sensible default and the user can correct it "
+            "after seeing the result? Reserve ask_human for genuinely irreversible "
+            "decisions (which file to delete, which API key to use), strong "
+            "preference forks (UI palette, file naming), or missing facts that the "
+            "tools cannot recover (the user's intent, an offline credential)."
         ),
         "parameters": {
             "type": "object",

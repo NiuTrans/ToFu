@@ -19,31 +19,86 @@
 const _TRANSLATE_POLL_MAX_ATTEMPTS = 40;   // ~150s total budget
 const _TRANSLATE_POLL_FAST_DELAY  = 2000;  // first 5 polls
 const _TRANSLATE_POLL_SLOW_DELAY  = 4000;  // remaining polls
-const _TRANSLATE_STALE_FRAC       = 0.15;  // <15% → stale partial translation
+
+/* Stale-partial heuristic thresholds. The policy lives in Python
+ * (lib/text_lang.is_stale_partial_translation) and is served via
+ * /api/v1/server-config → cached on window._translationPolicy. The constants
+ * below are only the pre-config-load fallback — never the source of truth. */
+const _TRANSLATE_STALE_FRAC_FALLBACK = 0.15;  // <15% → stale partial translation
+const _TRANSLATE_STALE_MIN_SOURCE_FALLBACK = 500;
+
+/**
+ * Server-side language detection. Mirrors lib/text_lang.is_predominantly_chinese:
+ * returns true when the text is predominantly CJK and a target='Chinese'
+ * translation pass would be a no-op / wasted call. The threshold + regex
+ * policy lives in `lib/text_lang.py`.
+ *
+ * Async because the network round-trip is invisible — translation starts
+ * are user-initiated and already kick off a multi-second LLM call.
+ *
+ * Returns false on error (fail open: better to translate than to skip
+ * a real translation request because of a transient API hiccup).
+ */
+async function _isAlreadyChinese(text) {
+  if (!text || typeof text !== 'string' || text.replace(/\s+/g, '').length < 8) {
+    return false;
+  }
+  const body = await Api.text.detectLanguage(text);
+  return !!(body && body.is_chinese);
+}
 
 /**
  * Surgical single-message re-render with scroll preservation.
  * Replaces the duplicated outerHTML+scrollTop pattern that lived in
  * three different places across translation flows.
+ *
+ * `.message` has `content-visibility:auto;contain-intrinsic-size:auto 120px`,
+ * so a raw `outerHTML` swap drops the new element's intrinsic-size cache to
+ * the 120px estimate. If the real height was, say, 2000px, the page above
+ * the swapped node suddenly reports ~1880px shorter and the saved scrollTop
+ * resolves to a position near the top — the chat appears to "jump up" when
+ * a translation pipeline transitions a message from idle → translating →
+ * done. Wrapping the swap in `cv-off` (same trick `_forceScrollToBottom`
+ * uses) forces real height computation before scrollTop restoration.
  */
 function _renderMsgInPlace(convId, idx, msg) {
   if (typeof activeConvId === 'undefined' || activeConvId !== convId) return;
   if (typeof renderMessage !== 'function') return;
   const el = document.getElementById(`msg-${idx}`);
+  // No surgical target: the bubble isn't laid out yet (conversation still
+  // loading) or the index drifted.  Do NOT full-renderChat here — that
+  // rebuilds the whole DOM and resets scroll to the top (the "jumps to the
+  // beginning" bug).  The msg object is already mutated in memory + DB, so
+  // the next natural render (or scroll-into-view) shows the translation.
   if (!el) return;
   const ct = document.getElementById('chatContainer');
+  const inner = document.getElementById('chatInner');
   const sv = ct ? ct.scrollTop : -1;
+  if (inner) {
+    inner.classList.add('cv-off');
+    void inner.scrollHeight;
+  }
   el.outerHTML = renderMessage(msg, idx);
+  if (inner) {
+    void inner.scrollHeight;
+    inner.classList.remove('cv-off');
+  }
   if (sv >= 0 && ct) ct.scrollTop = sv;
 }
 
 /**
  * Stale-partial detector: a translation produced from mid-stream
- * partial content tends to be < 15% of the (now-final) source length.
+ * partial content tends to be a small fraction of the (now-final) source.
+ * Thresholds are backend-owned (lib/text_lang.is_stale_partial_translation),
+ * served via window._translationPolicy; fall back to constants pre-load.
  */
 function _isStalePartialTranslation(msg) {
-  return !!(msg && msg.translatedContent && msg.content && msg.content.length > 500 &&
-            msg.translatedContent.length < msg.content.length * _TRANSLATE_STALE_FRAC);
+  if (!msg || !msg.translatedContent || !msg.content) return false;
+  const p = (typeof window !== 'undefined' && window._translationPolicy) || null;
+  const frac = (p && p.stale_frac > 0) ? p.stale_frac : _TRANSLATE_STALE_FRAC_FALLBACK;
+  const minSrc = (p && p.min_source_chars > 0) ? p.min_source_chars : _TRANSLATE_STALE_MIN_SOURCE_FALLBACK;
+  return msg.content.length > minSrc &&
+         msg.translatedContent.length < msg.content.length * frac;
 }
 
 function _resetTranslationState(msg) {
@@ -101,12 +156,32 @@ function _applyTranslationDone(convId, idx, msg, result, field) {
 
 /**
  * Apply a 'running' status update (partial preview, retry status).
- * Surgically re-renders only when something changed, so we don't
- * thrash the DOM on every poll tick.
+ *
+ * IMPORTANT: this fires on EVERY poll tick (every 2-4s).  Replacing the whole
+ * message via outerHTML each tick had two visible side effects:
+ *   1. The .translate-spinner DOM is destroyed/recreated every tick, so the
+ *      CSS keyframe animation restarts and the user perceives a frozen
+ *      spinner that never advances.
+ *   2. content-visibility:auto on .message invalidates intrinsic-size on
+ *      every replacement, drifting scrollTop upward until the chat appears
+ *      to jump to the top.
+ * We now mutate just the .translate-status-sub / .translate-preview-sub
+ * children of the existing #translate-loading-N indicator. The spinner DOM
+ * survives, scrollTop is untouched, and we only fall back to the legacy
+ * full-message re-render if the loading indicator isn't in the DOM yet
+ * (e.g. first running tick after a reload).
  */
+// Status kinds that are NOT problems — the spinner + "翻译中…" label already
+// convey them, so surfacing them as a ⚠ warning sub-line is redundant noise
+// (the duplicate "正在调用翻译模型，请稍候…" the user reported). Only genuine
+// retry conditions (rate_limited, *_error, truncated, empty_output, …) warrant
+// the warning line.
+const _TRANSLATE_BENIGN_STATUS_KINDS = new Set(['started', 'in_progress']);
+
 function _applyTranslationStatus(convId, idx, msg, result) {
   let changed = false;
-  if (result.statusMessage && result.statusMessage !== msg._translateStatus) {
+  if (result.statusMessage && result.statusMessage !== msg._translateStatus
+      && !_TRANSLATE_BENIGN_STATUS_KINDS.has(result.statusKind || '')) {
     msg._translateStatus = result.statusMessage;
     msg._translateStatusKind = result.statusKind || '';
     changed = true;
@@ -115,8 +190,64 @@ function _applyTranslationStatus(convId, idx, msg, result) {
     msg._translatePartial = result.partial;
     changed = true;
   }
-  if (changed) _renderMsgInPlace(convId, idx, msg);
-  return changed;
+  if (!changed) return false;
+
+  if (typeof activeConvId !== 'undefined' && activeConvId === convId) {
+    const loadingEl = document.getElementById(`translate-loading-${idx}`);
+    if (loadingEl && _patchTranslateLoadingDom(loadingEl, msg)) {
+      return true;
+    }
+    _renderMsgInPlace(convId, idx, msg);
+  }
+  return true;
+}
+
+/**
+ * Patch the inner status-sub / preview-sub children of an existing
+ * #translate-loading-N element in place. Returns true if the patch was
+ * applied (and the caller should NOT fall back to full re-render).
+ */
+function _patchTranslateLoadingDom(loadingEl, msg) {
+  if (!loadingEl) return false;
+  // Bail when the indicator already transitioned to the failed state — the
+  // caller's full-render path handles that.
+  if (msg._translateError) return false;
+
+  // ── status sub-line ──
+  let statusEl = loadingEl.querySelector('.translate-status-sub');
+  if (msg._translateStatus) {
+    const kind = msg._translateStatusKind || '';
+    const i18nKey = kind ? `translate.retry.${kind}` : '';
+    const localized = (i18nKey && typeof t === 'function') ? t(i18nKey) : '';
+    const display = (localized && localized !== i18nKey) ? localized : msg._translateStatus;
+    if (!statusEl) {
+      statusEl = document.createElement('div');
+      statusEl.className = 'translate-status-sub';
+      statusEl.style.cssText = 'font-size:11px;color:#f59e0b;margin-top:2px';
+      loadingEl.appendChild(statusEl);
+    }
+    statusEl.title = msg._translateStatus;
+    statusEl.textContent = '⚠ ' + display;
+  } else if (statusEl) {
+    statusEl.remove();
+  }
+
+  // ── partial-preview sub-line ──
+  let previewEl = loadingEl.querySelector('.translate-preview-sub');
+  if (msg._translatePartial) {
+    if (!previewEl) {
+      previewEl = document.createElement('div');
+      previewEl.className = 'translate-preview-sub';
+      previewEl.style.cssText = 'font-size:12px;color:var(--text-secondary,#888);margin-top:4px;white-space:pre-wrap;opacity:0.7;max-height:200px;overflow:hidden';
+      loadingEl.appendChild(previewEl);
+    }
+    if (previewEl.textContent !== msg._translatePartial) {
+      previewEl.textContent = msg._translatePartial;
+    }
+  } else if (previewEl) {
+    previewEl.remove();
+  }
+  return true;
 }
 
 /**
@@ -146,9 +277,8 @@ function _applyTranslationError(convId, idx, msg, errMsg) {
  */
 async function _tryRecoverFromServer(convId, idx, msg, field) {
   try {
-    const resp = await fetch(apiUrl(`/api/conversations/${convId}`));
-    if (!resp.ok) return false;
-    const data = await resp.json();
+    const data = await Api.conversations.get(convId);
+    if (!data) return false;
     const dbMsg = data.messages?.[idx];
     if (!dbMsg) return false;
     if (field === 'translatedContent' && dbMsg.translatedContent) {
@@ -203,7 +333,13 @@ async function _pollTranslationLoop(opts) {
     if (result.status === 'error' || result.status === 'not_found') {
       const recovered = await _tryRecoverFromServer(convId, idx, msg, field);
       if (recovered) return;
-      return await _handleTerminalFailure(opts, result.error || result.status);
+      // result.error is a typed envelope dict from routes/translate.py.
+      // Surface its message; fall back to status when missing.
+      const _errMsg = (typeof errorEnvelopeMessage === 'function'
+                       ? errorEnvelopeMessage(result.error) : '')
+                       || (typeof result.error === 'string' ? result.error : '')
+                       || result.status;
+      return await _handleTerminalFailure(opts, _errMsg);
     }
   }
 }
@@ -260,6 +396,32 @@ async function _runTranslationPipeline(conv, idx, msg, opts) {
     return;
   }
 
+  // Source is already in the target language — skip the LLM round.
+  // Without this guard the translator may hallucinate an English
+  // "translation" of an already-Chinese message (the bug the user reported:
+  // “原文中文 · 译文却是英文”). Marks the message as done so the
+  // spinner clears and the bilingual block is not shown.
+  // _isAlreadyChinese is async — policy lives in lib/text_lang.py.
+  if (opts.targetLang === 'Chinese' && (await _isAlreadyChinese(text))) {
+    console.info(`[Translate] skip msg ${idx}: source is already predominantly Chinese (mode=${mode})`);
+    msg._translateDone = true;
+    msg._translateSkippedReason = 'already_target_language';
+    delete msg._translateTaskId;
+    delete msg._translateError;
+    delete msg._translateStatus;
+    delete msg._translateStatusKind;
+    delete msg._translatePartial;
+    if (typeof saveConversations === 'function') saveConversations(convId);
+    if (typeof _patchMessageOnServer === 'function') {
+      _patchMessageOnServer(convId, idx, {
+        _translateDone: true,
+        _translateTaskId: null,
+      });
+    }
+    _renderMsgInPlace(convId, idx, msg);
+    return;
+  }
+
   // Re-translate stale partial translations from prior mid-stream runs.
   if (_isStalePartialTranslation(msg)) {
     console.warn(`[Translate] 🔄 Stale partial translation on msg ${idx} ` +
@@ -305,14 +467,9 @@ async function _callTranslateAPI(text, targetLang, sourceLang, timeoutMs) {
   if (!timeoutMs) timeoutMs = text.length > 6000 ? 120000 : text.length > 3000 ? 90000 : 60000;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  let r;
+  let d;
   try {
-    r = await fetch(apiUrl("/api/translate"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, targetLang, sourceLang }),
-      signal: ctrl.signal,
-    });
+    d = await Api.translate.run({ text, targetLang, sourceLang }, { signal: ctrl.signal });
   } catch (fetchErr) {
     clearTimeout(timer);
     if (fetchErr.name === 'AbortError') {
@@ -322,12 +479,13 @@ async function _callTranslateAPI(text, targetLang, sourceLang, timeoutMs) {
   } finally {
     clearTimeout(timer);
   }
-  if (!r.ok) {
-    const body = await r.json().catch(() => ({}));
-    const detail = body.error || r.statusText || r.status;
+  if (!d._ok) {
+    const detail = (typeof errorEnvelopeMessage === 'function'
+                    ? errorEnvelopeMessage(d.error) : '')
+                    || (typeof d.error === 'string' ? d.error : '')
+                    || d._statusText || d._status;
     throw new Error(`Translation failed: ${detail}`);
   }
-  const d = await r.json();
   if (!d.translated) throw new Error("Translation returned empty result");
   return d.translated;
 }
@@ -347,16 +505,11 @@ async function _startTranslateTask(text, targetLang, sourceLang, convId, msgIdx,
   try {
     const body = { text, targetLang, sourceLang, convId, msgIdx, field };
     if (msgId) body.msgId = msgId;
-    const r = await fetch(apiUrl("/api/translate/start"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!r.ok) {
-      console.error("[TranslateTask] start failed:", r.status);
+    const d = await Api.translate.start(body);
+    if (!d || !d.taskId) {
+      console.error("[TranslateTask] start failed: no taskId returned");
       return null;
     }
-    const d = await r.json();
     console.log(`%c[TranslateTask] Started ${d.taskId} for conv=${convId?.slice(0,8)} msg=${msgIdx} msgId=${(msgId||'').slice(0,8)||'-'} field=${field}`, 'color:#8b5cf6');
     return d.taskId;
   } catch (e) {
@@ -369,14 +522,11 @@ async function _startTranslateTask(text, targetLang, sourceLang, convId, msgIdx,
  * Poll a single translation task. Returns {status, translated?, error?}
  */
 async function _pollTranslateTask(taskId) {
-  try {
-    const r = await fetch(apiUrl(`/api/translate/poll/${taskId}`));
-    if (r.status === 404) return { status: 'not_found' };
-    if (!r.ok) return { status: 'error', error: `HTTP ${r.status}` };
-    return await r.json();
-  } catch (e) {
-    return { status: 'error', error: e.message };
-  }
+  // The v1 alias `/api/v1/agents/translate/poll/{task_id}` returns the
+  // same flat-result shape; UI uses the legacy path for tunnel-token
+  // sessions (no scope-check overhead). SDK callers should use the
+  // v1 alias via tofu_sdk.agents.poll_translate(task_id).
+  return await Api.translate.poll(taskId);
 }
 
 /**
@@ -384,17 +534,10 @@ async function _pollTranslateTask(taskId) {
  */
 async function _pollTranslateTaskBatch(taskIds) {
   if (!taskIds.length) return [];
-  try {
-    const r = await fetch(apiUrl("/api/translate/poll_batch"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ taskIds }),
-    });
-    if (!r.ok) return taskIds.map(id => ({ taskId: id, status: 'error' }));
-    return await r.json();
-  } catch (e) {
-    return taskIds.map(id => ({ taskId: id, status: 'error', error: e.message }));
-  }
+  // v1 batch alias: /api/v1/agents/translate/poll/batch (for SDK callers).
+  const data = await Api.translate.pollBatch(taskIds);
+  if (!Array.isArray(data)) return taskIds.map(id => ({ taskId: id, status: 'error' }));
+  return data;
 }
 
 /**
@@ -519,8 +662,93 @@ async function _resumePendingTranslations(convId) {
           field: 'translatedContent', mode: 'auto',
         });
       } else {
-        _applyTranslationError(convId, p.idx, p.msg, result.error || 'Task expired');
+        const _errMsg = (typeof errorEnvelopeMessage === 'function'
+                         ? errorEnvelopeMessage(result.error) : '')
+                         || (typeof result.error === 'string' ? result.error : '')
+                         || 'Task expired';
+        _applyTranslationError(convId, p.idx, p.msg, _errMsg);
       }
     }
   }
 }
+
+// ═══════════════════════════════════════════════════════════
+//  ★ Server-push subscriber — render server-side auto-translations live
+//
+// Auto-translate is now driven entirely by the backend safety net
+// (lib/tasks_pkg/manager.py::_maybe_auto_translate_assistant). It runs
+// after the assistant content is persisted, so the SSE chat stream is
+// already closed and the frontend has no direct signal that the
+// translation finished. Without this listener the bilingual block only
+// surfaces when the user switches conversations and loadConversationMessages
+// re-reads from the DB.
+//
+// We subscribe with taskId='*' to receive every translate event, then
+// route it to the right message by convId+msgId (preferred) or msgIdx.
+// _applyTranslationDone is idempotent and patches the DOM in place.
+// ═══════════════════════════════════════════════════════════
+(function _wireServerPushTranslate() {
+  if (typeof pushSubscribe !== 'function') return;
+  if (window.__translatePushWired) return;
+  window.__translatePushWired = true;
+
+  pushSubscribe('translate', '*', (frame) => {
+    try {
+      if (!frame || frame.status !== 'done' || !frame.translated) return;
+      const convId = frame.convId;
+      if (!convId) return;
+      const conv = (typeof conversations !== 'undefined')
+        ? conversations.find(c => c.id === convId) : null;
+      if (!conv || !conv.messages) return;
+
+      // Resolve target message: prefer stable msgId, fall back to msgIdx.
+      let idx = -1, msg = null;
+      if (frame.msgId) {
+        idx = conv.messages.findIndex(m => m && m._msgId === frame.msgId);
+        if (idx >= 0) msg = conv.messages[idx];
+      }
+      if (!msg && frame.msgIdx !== null && frame.msgIdx !== undefined) {
+        idx = frame.msgIdx;
+        msg = conv.messages[idx];
+      }
+      if (!msg) return;
+
+      const field = frame.field || 'translatedContent';
+
+      // Skip when the message already has the translation (manual click /
+      // poll loop already applied it) — _applyTranslationDone is safe to
+      // re-run but writing again would trigger a redundant PATCH + render.
+      if (field === 'translatedContent' && msg.translatedContent === frame.translated) return;
+      if (field === 'content' && msg.content === frame.translated) return;
+
+      // The poll loop is the authoritative path for client-initiated tasks;
+      // skip when it's still running so we don't race with it.
+      if (msg._translateTaskId && !msg._translateDone) return;
+
+      console.log(`%c[Translate] ← push frame applied conv=${convId.slice(0,8)} msg=${idx}`,
+        'color:#22c55e');
+      // The server has already committed (or is about to) — skip the
+      // frontend PATCH to avoid a redundant write race. Just update the
+      // in-memory state and re-render the bubble in place.
+      if (field === 'translatedContent') {
+        msg.translatedContent = frame.translated;
+        msg._translatedCache = frame.translated;
+        msg._showingTranslation = true;
+      } else if (field === 'content') {
+        if (!msg.originalContent) msg.originalContent = msg.content;
+        msg.content = frame.translated;
+      }
+      if (frame.model) msg._translateModel = frame.model;
+      msg._translateDone = true;
+      delete msg._translateTaskId;
+      delete msg._translateStatus;
+      delete msg._translateStatusKind;
+      delete msg._translatePartial;
+      delete msg._translateError;
+      if (typeof saveConversations === 'function') saveConversations(convId);
+      _renderMsgInPlace(convId, idx, msg);
+    } catch (e) {
+      console.debug('[Translate] push handler error:', e?.message);
+    }
+  });
+})();

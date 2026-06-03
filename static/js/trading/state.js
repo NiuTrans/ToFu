@@ -14,7 +14,7 @@ window.TradingApp = window.TradingApp || {};
     return p.replace(/\/trading\.html$/i, "").replace(/\/+$/, "");
   })();
 
-  F._API = BASE_PATH + "/api/trading";
+  F._API = BASE_PATH + "/api/v1/trading";
   F._$ = (id) => document.getElementById(id);
 
   // ── Shared mutable state ──

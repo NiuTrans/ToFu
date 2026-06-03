@@ -4,10 +4,12 @@ import json
 import time
 
 import sqlite3
-from flask import Blueprint, Response, jsonify, request
+from flask import Response, jsonify, request
 
 from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_db, json_dumps_pg
 from lib.log import audit_log, get_logger
+from lib.api_response import api_bad_request, api_internal_error, api_not_found, api_ok
+from lib.request_parser import parse_body
 from lib.utils import safe_json as _safe_json
 from routes.common import DEFAULT_USER_ID, _db_safe, _invalidate_meta_cache, _refresh_meta_cache_if_stale
 
@@ -23,7 +25,8 @@ _PATCH_MSG_WHITELIST = {
 
 logger = get_logger(__name__)
 
-conversations_bp = Blueprint('conversations', __name__)
+from routes.api_v1 import api_v1_conversations_bp as conversations_bp  # noqa: E402
+# (alias kept for back-compat with `from routes.conversations import conversations_bp` callers)
 
 
 def build_search_text(messages):
@@ -87,9 +90,17 @@ def _conv_row_to_dict(r):
     }
 
 
-@conversations_bp.route('/api/conversations', methods=['GET'])
+@conversations_bp.route('/api/v1/conversations', methods=['GET'])
 @_db_safe
 def list_convs():
+    """List the user's conversations.
+
+    Default: full conversations (id, title, messages, timestamps, settings).
+    With ``?meta=1``: lightweight metadata only, served from an ETag-validated
+    cache so the sidebar can refresh cheaply. ``?prefetch=<conv_id>`` adds the
+    full payload of one specific conv to the meta response, saving one round-trip
+    on tab switch.
+    """
     meta_only = request.args.get('meta') == '1'
     prefetch_id = request.args.get('prefetch', '').strip()
     db = get_db(DOMAIN_CHAT)
@@ -130,7 +141,7 @@ def list_convs():
     return jsonify(convs)
 
 
-@conversations_bp.route('/api/conversations/<conv_id>', methods=['GET'])
+@conversations_bp.route('/api/v1/conversations/<conv_id>', methods=['GET'])
 @_db_safe
 def get_conv(conv_id):
     """Fetch a single conversation with full messages."""
@@ -140,12 +151,12 @@ def get_conv(conv_id):
         (conv_id, DEFAULT_USER_ID)
     ).fetchone()
     if not r:
-        return jsonify({'error': 'Not found'}), 404
+        return api_not_found('Not found')
     return jsonify(_conv_row_to_dict(r))
 
 
 
-@conversations_bp.route('/api/conversations/<conv_id>/debug-messages', methods=['GET'])
+@conversations_bp.route('/api/v1/conversations/<conv_id>/debug-messages', methods=['GET'])
 @_db_safe
 def debug_messages(conv_id):
     """Return API-ready messages for the debug panel.
@@ -153,21 +164,31 @@ def debug_messages(conv_id):
     Uses the server-side ``build_api_messages_from_db`` to produce the exact
     messages that the LLM would see — replacing the deprecated frontend
     ``buildApiMessages()`` fallback.
+
+    Base64 image data is stripped via ``_strip_base64_for_snapshot`` so the
+    response stays under a few hundred KB even for image-heavy convs — same
+    treatment the live ``messages_snapshot`` SSE gets.
     """
     from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
+    from lib.tasks_pkg.manager import _strip_base64_for_snapshot
     system_prompt = request.args.get('systemPrompt', '')
     config = {'systemPrompt': system_prompt}
     try:
         messages = build_api_messages_from_db(conv_id, config)
         if messages is None:
-            return jsonify({'error': 'Not found'}), 404
+            return api_not_found('Not found')
+        try:
+            messages = _strip_base64_for_snapshot(messages)
+        except Exception as e:
+            logger.warning('[debug_messages] strip_base64 failed for conv=%s: %s — '
+                           'returning raw messages', conv_id[:8], e)
         return jsonify({'messages': messages, 'count': len(messages)})
     except Exception as e:
         logger.error('[debug_messages] Failed for conv=%s: %s', conv_id[:8], e, exc_info=True)
-        return jsonify({'error': 'internal_error'}), 500
+        return api_internal_error('internal_error')
 
 
-@conversations_bp.route('/api/conversations/<conv_id>/export', methods=['GET'])
+@conversations_bp.route('/api/v1/conversations/<conv_id>/export', methods=['GET'])
 def export_conv(conv_id):
     """Export a conversation as formatted plain-text for LLM injection."""
     from lib.conv_ref import get_conversation
@@ -178,16 +199,25 @@ def export_conv(conv_id):
             conversation_id=conv_id,
             include_tool_details=include_details,
         )
-        return jsonify({'ok': True, 'text': result})
+        return api_ok({'text': result})
     except Exception as e:
         logger.error('[Common] get_conversation failed for conv_id=%s: %s', conv_id, e, exc_info=True)
-        return jsonify({'error': 'internal_error'}), 500
+        return api_internal_error('internal_error')
 
 
-@conversations_bp.route('/api/conversations/<conv_id>', methods=['PUT'])
+@conversations_bp.route('/api/v1/conversations/<conv_id>', methods=['PUT'])
 @_db_safe
 def save_conv(conv_id):
-    data = request.get_json(silent=True) or {}
+    """Persist a conversation (full upsert).
+
+    Body is ``{title, messages, createdAt?, updatedAt?, settings?, allowTruncate?}``.
+    Stable per-message IDs are assigned via ``_assign_message_ids`` so future
+    index-free addressing keeps working. Returns 409 with ``error='blocked_*'``
+    when guards fire (stale concurrent sync producing 0 or fewer messages than
+    the server has) — the client retries with fresh state. ``allowTruncate=true``
+    bypasses the regression guard for intentional truncation (regen / edit).
+    """
+    data = parse_body()
     title = data.get('title', 'Untitled')
     raw_messages = data.get('messages', [])
     msg_count = len(raw_messages)
@@ -447,11 +477,8 @@ def save_conv(conv_id):
         except Exception as e:
             logger.debug('[save_conv] FTS update failed (non-fatal): %s', e)
     _invalidate_meta_cache()
-    return jsonify({'ok': True})
-
-
-
-@conversations_bp.route('/api/conversations/<conv_id>/settings', methods=['PATCH'])
+    return api_ok()
+@conversations_bp.route('/api/v1/conversations/<conv_id>/settings', methods=['PATCH'])
 @_db_safe
 def patch_conv_settings(conv_id):
     """Lightweight endpoint to merge new keys into a conversation's settings JSON.
@@ -462,9 +489,9 @@ def patch_conv_settings(conv_id):
     Body: { folderId?: str|null, pinned?: bool, ... }
     All keys in the body are merged into the existing settings dict.
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     if not data:
-        return jsonify({'error': 'No settings provided'}), 400
+        return api_bad_request('No settings provided')
 
     db = get_db(DOMAIN_CHAT)
     row = db.execute(
@@ -472,7 +499,7 @@ def patch_conv_settings(conv_id):
         (conv_id, DEFAULT_USER_ID)
     ).fetchone()
     if not row:
-        return jsonify({'error': 'Not found'}), 404
+        return api_not_found('Not found')
 
     settings = _safe_json(row['settings'], default={}, label='patch_settings')
     settings.update(data)
@@ -485,10 +512,8 @@ def patch_conv_settings(conv_id):
     )
     _invalidate_meta_cache()
     logger.info('[patch_settings] Conv %s — patched keys: %s', conv_id[:12], list(data.keys()))
-    return jsonify({'ok': True})
-
-
-@conversations_bp.route('/api/conversations/<conv_id>/messages/<int:msg_idx>', methods=['DELETE'])
+    return api_ok()
+@conversations_bp.route('/api/v1/conversations/<conv_id>/messages/<int:msg_idx>', methods=['DELETE'])
 @_db_safe
 def delete_message(conv_id, msg_idx):
     """Delete a specific message (or a user+assistant turn) from a conversation.
@@ -511,16 +536,16 @@ def delete_message(conv_id, msg_idx):
         (conv_id, DEFAULT_USER_ID)
     ).fetchone()
     if not row:
-        return jsonify({'error': 'Not found'}), 404
+        return api_not_found('Not found')
 
     try:
         messages = json.loads(row['messages'] or '[]')
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning('[delete_message] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
-        return jsonify({'error': 'Failed to parse conversation messages'}), 500
+        return api_internal_error('Failed to parse conversation messages')
 
     if msg_idx < 0 or msg_idx >= len(messages):
-        return jsonify({'error': f'Index {msg_idx} out of range (0..{len(messages) - 1})'}), 400
+        return api_bad_request(f'Index {msg_idx} out of range (0..{len(messages) - 1})')
 
     # Determine which indices to delete
     deleted_indices = [msg_idx]
@@ -544,7 +569,8 @@ def delete_message(conv_id, msg_idx):
     # Merge settings — preserve existing, update lastMsg metadata
     try:
         settings = json.loads(row['settings'] or '{}')
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as _e_audit:
+        logger.debug('[conversations] delete_message caught %s: %s', type(_e_audit).__name__, _e_audit)
         settings = {}
     if messages:
         last = messages[-1]
@@ -585,7 +611,7 @@ def delete_message(conv_id, msg_idx):
     # Invalidate persisted per-day cost cache — the deleted message may have
     # had a usage dict that contributed to a past day's total.
     try:
-        from routes.daily_report import invalidate_day_cost_cache
+        from lib.daily_report import invalidate_day_cost_cache
         invalidate_day_cost_cache()
     except Exception as e:
         logger.debug('[delete_message] day-cost cache invalidation skipped: %s', e)
@@ -599,7 +625,7 @@ def delete_message(conv_id, msg_idx):
     })
 
 
-@conversations_bp.route('/api/conversations/<conv_id>/messages/<int:msg_idx>', methods=['PATCH'])
+@conversations_bp.route('/api/v1/conversations/<conv_id>/messages/<int:msg_idx>', methods=['PATCH'])
 @_db_safe
 def patch_message(conv_id, msg_idx):
     """Targeted single-message mutation for chatInner actions (edit-only,
@@ -615,9 +641,9 @@ def patch_message(conv_id, msg_idx):
     Returns:
         {ok, msgCount, msg}
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     if not isinstance(data, dict) or not data:
-        return jsonify({'error': 'empty_patch'}), 400
+        return api_bad_request('empty_patch')
 
     # Reject any key outside the whitelist — refuse silently and tell caller.
     unknown = [k for k in data.keys() if k not in _PATCH_MSG_WHITELIST]
@@ -632,22 +658,22 @@ def patch_message(conv_id, msg_idx):
         (conv_id, DEFAULT_USER_ID)
     ).fetchone()
     if not row:
-        return jsonify({'error': 'Not found'}), 404
+        return api_not_found('Not found')
 
     try:
         messages = json.loads(row['messages'] or '[]')
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning('[patch_msg] conv=%s failed to parse messages: %s', conv_id[:8], e)
-        return jsonify({'error': 'Failed to parse conversation messages'}), 500
+        return api_internal_error('Failed to parse conversation messages')
 
     if msg_idx < 0 or msg_idx >= len(messages):
         logger.warning('[patch_msg] conv=%s idx=%d OUT OF RANGE (len=%d)',
                        conv_id[:8], msg_idx, len(messages))
-        return jsonify({'error': f'Index {msg_idx} out of range (0..{len(messages) - 1})'}), 400
+        return api_bad_request(f'Index {msg_idx} out of range (0..{len(messages) - 1})')
 
     msg = messages[msg_idx]
     if not isinstance(msg, dict):
-        return jsonify({'error': 'Target message is not a dict'}), 500
+        return api_internal_error('Target message is not a dict')
 
     # Apply whitelisted merge. A literal None value deletes the key (lets
     # the frontend clear originalContent after a plain edit).
@@ -680,7 +706,8 @@ def patch_message(conv_id, msg_idx):
 
     try:
         settings = json.loads(row['settings'] or '{}')
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as _e_audit:
+        logger.debug('[conversations] patch_message caught %s: %s', type(_e_audit).__name__, _e_audit)
         settings = {}
     # Keep lastMsgRole/lastMsgTimestamp in sync with current tail.
     if messages:
@@ -729,7 +756,7 @@ def patch_message(conv_id, msg_idx):
     })
 
 
-@conversations_bp.route('/api/conversations/<conv_id>/messages/by-id/<msg_id>', methods=['PATCH'])
+@conversations_bp.route('/api/v1/conversations/<conv_id>/messages/by-id/<msg_id>', methods=['PATCH'])
 @_db_safe
 def patch_message_by_id(conv_id, msg_id):
     """Same as patch_message but addresses the target by stable ``_msgId``.
@@ -738,9 +765,9 @@ def patch_message_by_id(conv_id, msg_id):
     otherwise shift indices.  Returns 404 if no message with that id exists.
     The whitelist + persistence flow is identical to the index path.
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     if not isinstance(data, dict) or not data:
-        return jsonify({'error': 'empty_patch'}), 400
+        return api_bad_request('empty_patch')
 
     unknown = [k for k in data.keys() if k not in _PATCH_MSG_WHITELIST]
     if unknown:
@@ -754,13 +781,13 @@ def patch_message_by_id(conv_id, msg_id):
         (conv_id, DEFAULT_USER_ID)
     ).fetchone()
     if not row:
-        return jsonify({'error': 'Not found'}), 404
+        return api_not_found('Not found')
 
     try:
         messages = json.loads(row['messages'] or '[]')
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning('[patch_msg_id] conv=%s failed to parse messages: %s', conv_id[:8], e)
-        return jsonify({'error': 'Failed to parse conversation messages'}), 500
+        return api_internal_error('Failed to parse conversation messages')
 
     target_idx = None
     for i, m in enumerate(messages):
@@ -774,7 +801,7 @@ def patch_message_by_id(conv_id, msg_id):
 
     msg = messages[target_idx]
     if not isinstance(msg, dict):
-        return jsonify({'error': 'Target message is not a dict'}), 500
+        return api_internal_error('Target message is not a dict')
 
     applied_keys = []
     for key, value in data.items():
@@ -796,7 +823,8 @@ def patch_message_by_id(conv_id, msg_id):
 
     try:
         settings = json.loads(row['settings'] or '{}')
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as _e_audit:
+        logger.debug('[conversations] patch_message_by_id caught %s: %s', type(_e_audit).__name__, _e_audit)
         settings = {}
     if messages:
         last = messages[-1]
@@ -846,7 +874,7 @@ def patch_message_by_id(conv_id, msg_id):
 
 
 @conversations_bp.route(
-    '/api/conversations/<conv_id>/messages/<int:msg_idx>/branches/<int:branch_idx>',
+    '/api/v1/conversations/<conv_id>/messages/<int:msg_idx>/branches/<int:branch_idx>',
     methods=['DELETE'],
 )
 @_db_safe
@@ -865,29 +893,29 @@ def delete_branch(conv_id, msg_idx, branch_idx):
         (conv_id, DEFAULT_USER_ID)
     ).fetchone()
     if not row:
-        return jsonify({'error': 'Not found'}), 404
+        return api_not_found('Not found')
 
     try:
         messages = json.loads(row['messages'] or '[]')
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning('[delete_branch] conv=%s failed to parse messages: %s', conv_id[:8], e)
-        return jsonify({'error': 'Failed to parse conversation messages'}), 500
+        return api_internal_error('Failed to parse conversation messages')
 
     if msg_idx < 0 or msg_idx >= len(messages):
         logger.warning('[delete_branch] conv=%s msg_idx=%d OUT OF RANGE (len=%d)',
                        conv_id[:8], msg_idx, len(messages))
-        return jsonify({'error': f'msg_idx {msg_idx} out of range'}), 400
+        return api_bad_request(f'msg_idx {msg_idx} out of range')
 
     msg = messages[msg_idx]
     branches = msg.get('branches') if isinstance(msg, dict) else None
     if not isinstance(branches, list):
         logger.warning('[delete_branch] conv=%s msg_idx=%d has no branches',
                        conv_id[:8], msg_idx)
-        return jsonify({'error': 'Message has no branches'}), 400
+        return api_bad_request('Message has no branches')
     if branch_idx < 0 or branch_idx >= len(branches):
         logger.warning('[delete_branch] conv=%s msg_idx=%d branch_idx=%d OUT OF RANGE (len=%d)',
                        conv_id[:8], msg_idx, branch_idx, len(branches))
-        return jsonify({'error': f'branch_idx {branch_idx} out of range (0..{len(branches) - 1})'}), 400
+        return api_bad_request(f'branch_idx {branch_idx} out of range (0..{len(branches) - 1})')
 
     branches.pop(branch_idx)
     if not branches:
@@ -901,7 +929,8 @@ def delete_branch(conv_id, msg_idx, branch_idx):
 
     try:
         settings = json.loads(row['settings'] or '{}')
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as _e_audit:
+        logger.debug('[conversations] delete_branch caught %s: %s', type(_e_audit).__name__, _e_audit)
         settings = {}
     settings_json = json.dumps(settings, ensure_ascii=False)
 
@@ -939,10 +968,8 @@ def delete_branch(conv_id, msg_idx, branch_idx):
     except Exception as e:
         logger.debug('[delete_branch] audit_log failed (non-fatal): %s', e)
 
-    return jsonify({'ok': True, 'branchCount': branch_count})
-
-
-@conversations_bp.route('/api/conversations/<conv_id>', methods=['DELETE'])
+    return api_ok({'branchCount': branch_count})
+@conversations_bp.route('/api/v1/conversations/<conv_id>', methods=['DELETE'])
 @_db_safe
 def delete_conv(conv_id):
     db = get_db(DOMAIN_CHAT)
@@ -969,16 +996,13 @@ def delete_conv(conv_id):
     # contributed to any number of past days, so clear everything and let
     # the next calendar render re-fill.
     try:
-        from routes.daily_report import invalidate_day_cost_cache
+        from lib.daily_report import invalidate_day_cost_cache
         invalidate_day_cost_cache()
     except Exception as e:
         logger.debug('[delete_conv] day-cost cache invalidation skipped: %s', e)
     logger.info('[delete_conv] Deleted conv %s (rows: conv=%d, tasks=%d, transcripts=%d)',
                 conv_id[:12], c1.rowcount, c2.rowcount, c3.rowcount)
-    return jsonify({'ok': True})
-
-
-
+    return api_ok()
 # ════════════════════════════════════════════════════════════════════════════
 #  Endpoints moved to companion modules
 # ════════════════════════════════════════════════════════════════════════════

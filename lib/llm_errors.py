@@ -1,8 +1,7 @@
 """lib/llm_errors.py — LLM API exception classes and HTTP error classification.
 
-Extracted from ``lib/llm_client.py`` to keep that file's surface focused
-on payload construction and streaming. All names here are re-exported
-from ``lib.llm_client`` for backward compatibility.
+Extracted from the monolithic LLM client into a standalone module.
+All names are re-exported from ``lib.llm`` for convenience.
 
 Public exceptions
 =================

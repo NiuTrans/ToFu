@@ -45,7 +45,7 @@ from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.llm_client import add_cache_breakpoints, build_body, stream_chat
+from lib.llm import add_cache_breakpoints, build_body, stream_chat
 from lib.llm_dispatch.api import dispatch_stream
 from lib.model_info import is_claude
 
@@ -248,7 +248,7 @@ TOOL_RESULTS = {
         'grep "cache" — 8 matches:\n'
         'lib/llm_client.py:764:def add_cache_breakpoints\n'
         'lib/tasks_pkg/cache_tracking.py:26:  add_cache_breakpoints()\n'
-        'tests/test_cache_breakpoints.py:35:from lib.llm_client import\n'
+        'tests/test_cache_breakpoints.py:35:from lib.llm import\n'
     ),
     'web_search': "Search results: 1. Anthropic Docs — Prompt Caching\n",
     'fetch_url': "# Anthropic Prompt Caching\nCache breakpoints optimize API usage.\n",

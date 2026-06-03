@@ -1,0 +1,770 @@
+/* ═══════════════════════════════════════════════════════════════════
+   main folders mobile — extracted from main.js (split 2026-05-28)
+
+   Folder picker / tabs / drag-drop + sidebar + mobile sheet + mobile backend section.
+
+   This file is concatenated by lib/js_bundler.py BEFORE main.js so
+   the boot IIFE can reference these symbols. Symbols share `window`
+   scope — no imports / exports needed.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/** Show a dropdown under the folder-assign button to pick or create a folder */
+function _showFolderPicker(convId, anchorEl) {
+  // Remove any existing picker
+  _closeFolderPicker();
+  const conv = conversations.find(c => c.id === convId);
+  if (!conv) return;
+
+  const folders = typeof getFolders === 'function' ? getFolders() : [];
+  const picker = document.createElement('div');
+  picker.className = 'folder-picker';
+  picker.id = '_folderPicker';
+
+  let html = `<div class="folder-picker-title">${t('folder.moveToFolder')}</div>`;
+  // "Remove from folder" option if currently in a folder
+  if (conv.folderId) {
+    html += `<div class="folder-picker-item folder-picker-remove" data-folder-id="">` +
+      `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>` +
+      `${t('folder.removeFromFolder')}</div>`;
+  }
+  // Existing folders
+  for (const f of folders) {
+    const active = conv.folderId === f.id ? ' active' : '';
+    const dot = f.color ? `<span class="folder-color-dot" style="background:${escapeHtml(f.color)}"></span>` : '';
+    html += `<div class="folder-picker-item${active}" data-folder-id="${escapeHtml(f.id)}">${dot}${escapeHtml(f.name)}</div>`;
+  }
+  // "New folder" option
+  html += `<div class="folder-picker-divider"></div>`;
+  html += `<div class="folder-picker-item folder-picker-new">` +
+    `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>` +
+    `${t('folder.newFolder')}</div>`;
+
+  picker.innerHTML = html;
+
+  // Position near the anchor button
+  document.body.appendChild(picker);
+  const rect = anchorEl.getBoundingClientRect();
+  picker.style.top = Math.min(rect.bottom + 4, window.innerHeight - picker.offsetHeight - 8) + 'px';
+  picker.style.left = Math.min(rect.left, window.innerWidth - picker.offsetWidth - 8) + 'px';
+
+  // Handle clicks
+  picker.addEventListener('click', async (ev) => {
+    ev.stopPropagation();
+    const item = ev.target.closest('.folder-picker-item');
+    if (!item) return;
+
+    if (item.classList.contains('folder-picker-new')) {
+      _closeFolderPicker();
+      _promptCreateFolder(convId);
+      return;
+    }
+    const folderId = item.dataset.folderId;
+    setConversationFolder(convId, folderId || null);
+    _closeFolderPicker();
+    if (folderId) {
+      const f = getFolderById(folderId);
+      if (typeof showToast === 'function') showToast('', t('folder.movedToFolder'), f ? f.name : '', 2000);
+    } else {
+      if (typeof showToast === 'function') showToast('', t('folder.removedFromFolder'), '', 2000);
+    }
+  });
+
+  // Close on outside click
+  setTimeout(() => {
+    document.addEventListener('click', _closeFolderPicker, { once: true });
+  }, 0);
+}
+
+function _closeFolderPicker() {
+  const p = document.getElementById('_folderPicker');
+  if (p) p.remove();
+}
+
+/** Show inline dialog to create a new folder, optionally assigning a conv to it */
+function _promptCreateFolder(assignConvId) {
+  // Remove any existing dialog
+  const existing = document.getElementById('_folderCreateDialog');
+  if (existing) existing.remove();
+
+  const colors = ['#6e56cf', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#8b5cf6', '#14b8a6'];
+  let selectedColor = colors[Math.floor(Math.random() * colors.length)];
+
+  const overlay = document.createElement('div');
+  overlay.id = '_folderCreateDialog';
+  overlay.className = 'folder-dialog-overlay';
+  overlay.innerHTML = `
+    <div class="folder-dialog">
+      <div class="folder-dialog-title">${t('folder.createTitle')}</div>
+      <input type="text" class="folder-dialog-input" id="_folderNameInput"
+             placeholder="${t('folder.namePh')}" maxlength="50" autocomplete="off" spellcheck="false">
+      <div class="folder-dialog-colors" id="_folderColorPicker">
+        ${colors.map(c => `<span class="folder-color-dot${c === selectedColor ? ' selected' : ''}" data-color="${c}" style="background:${c}"></span>`).join('')}
+      </div>
+      <div class="folder-dialog-actions">
+        <button class="folder-dialog-cancel" id="_folderDialogCancel">${t('folder.cancel')}</button>
+        <button class="folder-dialog-ok" id="_folderDialogOk">${t('folder.create')}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const nameInput = document.getElementById('_folderNameInput');
+  const colorPicker = document.getElementById('_folderColorPicker');
+  const okBtn = document.getElementById('_folderDialogOk');
+  const cancelBtn = document.getElementById('_folderDialogCancel');
+
+  // Focus input
+  setTimeout(() => nameInput.focus(), 50);
+
+  // Color selection
+  colorPicker.addEventListener('click', (e) => {
+    const dot = e.target.closest('.folder-color-dot');
+    if (!dot) return;
+    colorPicker.querySelectorAll('.folder-color-dot').forEach(d => d.classList.remove('selected'));
+    dot.classList.add('selected');
+    selectedColor = dot.dataset.color;
+  });
+
+  function _closeDialog() { overlay.remove(); }
+
+  async function _submit() {
+    const name = nameInput.value.trim();
+    if (!name) { nameInput.focus(); return; }
+    okBtn.disabled = true;
+    okBtn.textContent = t('folder.creating');
+    const folder = await createFolder(name, selectedColor);
+    _closeDialog();
+    if (!folder) {
+      if (typeof showToast === 'function') showToast('', t('folder.createFailed'), t('folder.cannotCreate'), 3000);
+      return;
+    }
+    if (assignConvId) {
+      setConversationFolder(assignConvId, folder.id);
+    }
+    renderConversationList();
+    if (typeof showToast === 'function') showToast('', t('folder.created'), folder.name, 2000);
+  }
+
+  okBtn.addEventListener('click', _submit);
+  cancelBtn.addEventListener('click', _closeDialog);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) _closeDialog(); });
+  nameInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); _submit(); }
+    if (e.key === 'Escape') _closeDialog();
+  });
+}
+
+function _promptRenameFolder(folderId) {
+  const f = getFolderById(folderId);
+  if (!f) return;
+
+  // Remove any existing dialog
+  const existing = document.getElementById('_folderCreateDialog');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = '_folderCreateDialog';
+  overlay.className = 'folder-dialog-overlay';
+  overlay.innerHTML = `
+    <div class="folder-dialog">
+      <div class="folder-dialog-title">${t('folder.renameTitle')}</div>
+      <input type="text" class="folder-dialog-input" id="_folderNameInput"
+             placeholder="${t('folder.namePh')}" maxlength="50" autocomplete="off" spellcheck="false">
+      <div class="folder-dialog-actions">
+        <button class="folder-dialog-cancel" id="_folderDialogCancel">${t('folder.cancel')}</button>
+        <button class="folder-dialog-ok" id="_folderDialogOk">${t('folder.ok')}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const nameInput = document.getElementById('_folderNameInput');
+  nameInput.value = f.name;
+  setTimeout(() => { nameInput.focus(); nameInput.select(); }, 50);
+
+  function _closeDialog() { overlay.remove(); }
+
+  async function _submit() {
+    const name = nameInput.value.trim();
+    if (!name || name === f.name) { _closeDialog(); return; }
+    await updateFolder(folderId, { name });
+    _closeDialog();
+    renderConversationList();
+  }
+
+  document.getElementById('_folderDialogOk').addEventListener('click', _submit);
+  document.getElementById('_folderDialogCancel').addEventListener('click', _closeDialog);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) _closeDialog(); });
+  nameInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); _submit(); }
+    if (e.key === 'Escape') _closeDialog();
+  });
+}
+
+function _confirmDeleteFolder(folderId) {
+  const f = getFolderById(folderId);
+  if (!f) return;
+
+  const existing = document.getElementById('_folderCreateDialog');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = '_folderCreateDialog';
+  overlay.className = 'folder-dialog-overlay';
+  overlay.innerHTML = `
+    <div class="folder-dialog">
+      <div class="folder-dialog-title">${t('folder.deleteTitle')}</div>
+      <div style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;line-height:1.5">
+        ${t('folder.deleteConfirm')} <b style="color:var(--text-primary)">${f.name}</b>？<br>
+        ${t('folder.deleteHint')}
+      </div>
+      <div class="folder-dialog-actions">
+        <button class="folder-dialog-cancel" id="_folderDialogCancel">${t('folder.cancel')}</button>
+        <button class="folder-dialog-ok" id="_folderDialogOk" style="background:#ef4444">${t('common.delete')}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  function _closeDialog() { overlay.remove(); }
+
+  document.getElementById('_folderDialogOk').addEventListener('click', async () => {
+    _closeDialog();
+    // If we're viewing this folder, exit folder view first
+    if (typeof getActiveFolderId === 'function' && getActiveFolderId() === folderId) {
+      setActiveFolderId(null);
+    }
+    await deleteFolder(folderId);
+    renderConversationList();
+    if (typeof showToast === 'function') showToast('', t('folder.deleted'), f.name, 2000);
+  });
+  document.getElementById('_folderDialogCancel').addEventListener('click', _closeDialog);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) _closeDialog(); });
+}
+
+/** Initialize folder tab bar interactions */
+function _initFolderTabs() {
+  const tabsEl = document.getElementById('folderTabs');
+  if (!tabsEl) return;
+
+  // ── Expand/collapse toggle for wrapped folder tabs ──
+  tabsEl.addEventListener('click', (e) => {
+    const toggle = e.target.closest('.folder-tabs-toggle');
+    if (!toggle) return;
+    e.stopPropagation();
+    const scrollEl = tabsEl.querySelector('.folder-tabs-scroll');
+    if (!scrollEl) return;
+    _folderTabsExpanded = !_folderTabsExpanded;
+    scrollEl.classList.toggle('expanded', _folderTabsExpanded);
+    // Update label
+    const label = toggle.querySelector('.folder-tabs-toggle-label');
+    if (label) {
+      if (_folderTabsExpanded) {
+        label.textContent = t('sidebar.lessFolders');
+      } else {
+        // Count hidden folder tabs (exclude the "+" add button)
+        const collapsedMax = 94; // matches CSS max-height (3 rows)
+        const tabs = scrollEl.querySelectorAll('.folder-tab:not(.folder-tab-add)');
+        let hidden = 0;
+        tabs.forEach(tab => {
+          if (tab.offsetTop + tab.offsetHeight > collapsedMax) hidden++;
+        });
+        label.textContent = hidden > 0 ? `+${hidden}` : '';
+      }
+    }
+  });
+
+  // Click: switch folder tab or create new folder
+  tabsEl.addEventListener('click', (e) => {
+    const tab = e.target.closest('.folder-tab');
+    if (!tab) return;
+    e.stopPropagation();
+    if (tab.classList.contains('folder-tab-add')) {
+      _promptCreateFolder(null);
+      return;
+    }
+    const folderId = tab.dataset.folderId;
+    setActiveFolderId(folderId || null);
+  });
+
+  // Right-click / context menu on folder tabs (rename/delete)
+  tabsEl.addEventListener('contextmenu', (e) => {
+    const tab = e.target.closest('.folder-tab');
+    if (!tab || tab.classList.contains('folder-tab-add') || !tab.dataset.folderId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    _showFolderTabMenu(tab.dataset.folderId, e.clientX, e.clientY);
+  });
+
+  // Drag-and-drop: allow dragging conversations onto folder tabs
+  tabsEl.addEventListener('dragover', (e) => {
+    if (!_dragConvId) return;
+    const tab = e.target.closest('.folder-tab');
+    if (!tab || tab.classList.contains('folder-tab-add')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    tabsEl.querySelectorAll('.folder-tab').forEach(t => t.classList.remove('folder-tab-drop'));
+    tab.classList.add('folder-tab-drop');
+  });
+
+  tabsEl.addEventListener('dragleave', (e) => {
+    const tab = e.target.closest('.folder-tab');
+    if (tab) tab.classList.remove('folder-tab-drop');
+  });
+
+  tabsEl.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const convId = _dragConvId || e.dataTransfer.getData('text/plain');
+    if (!convId) return;
+    const tab = e.target.closest('.folder-tab');
+    if (!tab || tab.classList.contains('folder-tab-add')) return;
+    const folderId = tab.dataset.folderId || null;
+    tabsEl.querySelectorAll('.folder-tab').forEach(t => t.classList.remove('folder-tab-drop'));
+    setConversationFolder(convId, folderId);
+    const f = folderId ? getFolderById(folderId) : null;
+    if (f) {
+      if (typeof showToast === 'function') showToast('', '已移入文件夹', f.name, 2000);
+    } else if (!folderId) {
+      if (typeof showToast === 'function') showToast('', t('folder.removedFromFolder'), '', 2000);
+    }
+  });
+}
+
+/** Show context menu for a folder tab (rename/delete) */
+function _showFolderTabMenu(folderId, x, y) {
+  // Remove existing
+  const old = document.getElementById('_folderTabMenu');
+  if (old) old.remove();
+
+  const f = getFolderById(folderId);
+  if (!f) return;
+
+  const menu = document.createElement('div');
+  menu.id = '_folderTabMenu';
+  menu.className = 'folder-tab-menu';
+  menu.innerHTML = `
+    <div class="folder-tab-menu-item" data-action="rename">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+      ${t('folder.rename')}
+    </div>
+    <div class="folder-tab-menu-item folder-tab-menu-delete" data-action="delete">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      ${t('folder.deleteAction')}
+    </div>
+  `;
+  document.body.appendChild(menu);
+
+  // Position
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  menu.style.left = Math.min(x, window.innerWidth - mw - 8) + 'px';
+  menu.style.top = Math.min(y, window.innerHeight - mh - 8) + 'px';
+
+  menu.addEventListener('click', (e) => {
+    const item = e.target.closest('.folder-tab-menu-item');
+    if (!item) return;
+    menu.remove();
+    if (item.dataset.action === 'rename') _promptRenameFolder(folderId);
+    else if (item.dataset.action === 'delete') _confirmDeleteFolder(folderId);
+  });
+
+  // Close on outside click
+  setTimeout(() => {
+    document.addEventListener('click', function _close() {
+      menu.remove();
+      document.removeEventListener('click', _close);
+    }, { once: true });
+  }, 0);
+}
+
+/* ── Drag-and-drop conversations — drag from convList, drop on folder tabs ── */
+let _dragConvId = null;
+function _initFolderDragDrop() {
+  const convList = document.getElementById('convList');
+  if (!convList) return;
+
+  function _onDragStart(e) {
+    const item = e.target.closest('.conv-item');
+    if (!item || !item.dataset.convId) return;
+    _dragConvId = item.dataset.convId;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', item.dataset.convId);
+    item.classList.add('conv-dragging');
+    // Highlight folder tabs as drop targets
+    setTimeout(() => {
+      const tabsEl = document.getElementById('folderTabs');
+      if (tabsEl) tabsEl.classList.add('folder-tabs-drop-active');
+    }, 0);
+  }
+
+  function _onDragEnd() {
+    _dragConvId = null;
+    document.querySelectorAll('.conv-dragging').forEach(el => el.classList.remove('conv-dragging'));
+    const tabsEl = document.getElementById('folderTabs');
+    if (tabsEl) {
+      tabsEl.classList.remove('folder-tabs-drop-active');
+      tabsEl.querySelectorAll('.folder-tab-drop').forEach(t => t.classList.remove('folder-tab-drop'));
+    }
+  }
+
+  convList.addEventListener('dragstart', _onDragStart);
+  convList.addEventListener('dragend', _onDragEnd);
+}
+
+
+function toggleSidebar() {
+  const sidebar = document.getElementById("sidebar");
+  const backdrop = document.getElementById("sidebarBackdrop");
+  sidebar.classList.toggle("collapsed");
+  // Mobile only: show/hide backdrop overlay
+  if (backdrop) {
+    const isMobile = window.innerWidth <= 768;
+    const isOpen = !sidebar.classList.contains("collapsed");
+    backdrop.classList.toggle("visible", isMobile && isOpen);
+  }
+  /* Sidebar width change affects available space for toolbar */
+  setTimeout(_scheduleReflow, 250);  /* after sidebar transition finishes */
+}
+
+/* ── Mobile: auto-collapse sidebar on load ── */
+(function initMobileLayout() {
+  if (window.innerWidth <= 768) {
+    const sidebar = document.getElementById("sidebar");
+    if (sidebar && !sidebar.classList.contains("collapsed")) {
+      sidebar.classList.add("collapsed");
+    }
+  }
+})();
+
+/* ═══ Mobile "More" Bottom Sheet ═══
+ * Mirrors the state of the desktop toolbar toggles (codeExec, memory,
+ * translate, browser, imageGen, humanGuidance, swarm, endpoint).
+ * Each item reads the live state from the existing toggle elements. */
+
+function toggleMobileSheet() {
+  const sheet = document.getElementById("mobileSheet");
+  const backdrop = document.getElementById("mobileSheetBackdrop");
+  if (!sheet) return;
+  const isOpen = sheet.classList.contains("open");
+  if (isOpen) {
+    closeMobileSheet();
+  } else {
+    updateMobileSheet();
+    sheet.classList.add("open");
+    if (backdrop) backdrop.classList.add("open");
+  }
+}
+
+function closeMobileSheet() {
+  const sheet = document.getElementById("mobileSheet");
+  const backdrop = document.getElementById("mobileSheetBackdrop");
+  if (sheet) sheet.classList.remove("open");
+  if (backdrop) backdrop.classList.remove("open");
+}
+
+function updateMobileSheet() {
+  /* Sync mobile backend selector with active backend */
+  _updateMobileBackendSection();
+  /* Sync each mobile sheet item's .active class with the desktop toggle state */
+  const map = {
+    mobileCodeExec:    "codeExecToggle",
+    mobileMemory:      "memoryToggle",
+    mobileTranslate:   "translateToggle",
+    mobileBrowser:     "browserToggle",
+    mobileImageGen:    "imageGenToggle",
+    mobileHumanGuidance: "humanGuidanceToggle",
+    mobileSwarm:       "swarmToggle",
+    mobileEndpoint:    "endpointToggle"
+  };
+  let activeCount = 0;
+  for (const [mobileId, desktopId] of Object.entries(map)) {
+    const mobileEl = document.getElementById(mobileId);
+    const desktopEl = document.getElementById(desktopId);
+    if (!mobileEl || !desktopEl) continue;
+    const isActive = desktopEl.classList.contains("active");
+    mobileEl.classList.toggle("active", isActive);
+    if (isActive) activeCount++;
+  }
+  /* Update the "more" button to show if any toggles are active */
+  const moreBtn = document.getElementById("mobileMoreBtn");
+  if (moreBtn) moreBtn.classList.toggle("has-active", activeCount > 0);
+  /* Also update desktop submenu counts (they still exist in DOM) */
+  if (typeof updateSubmenuCounts === "function") updateSubmenuCounts();
+  /* Sync mobile depth section visibility + active state */
+  updateMobileDepth();
+}
+
+/**
+ * Sync the mobile bottom sheet depth bar with the desktop depth bar.
+ * Shows/hides the section based on whether the model supports thinking depth.
+ */
+function updateMobileDepth() {
+  const desktopBar = document.getElementById("thinkingDepthSection");
+  const mobileSection = document.getElementById("mobileDepthSection");
+  if (!mobileSection) return;
+  /* Show mobile depth section when desktop depth bar has display set to 'flex' by JS
+   * (on mobile, CSS hides it with display:none!important, but JS still sets .style.display) */
+  const isVisible = desktopBar && (desktopBar.style.display === "flex" || desktopBar.style.display === "");
+  mobileSection.style.display = isVisible ? "" : "none";
+  if (!isVisible) return;
+  /* Sync active button state */
+  const activeDesktop = desktopBar.querySelector(".depth-btn.active");
+  const activeDepth = activeDesktop ? activeDesktop.dataset.depth : "medium";
+  mobileSection.querySelectorAll(".mobile-depth-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.depth === activeDepth);
+  });
+}
+
+/**
+ * Switch backend from mobile bottom sheet.
+ * Calls the existing switchAgentBackend() and updates the sheet UI.
+ */
+async function switchMobileBackend(backendName) {
+  await switchAgentBackend(backendName);
+  _updateMobileBackendSection();
+}
+
+/**
+ * Sync the mobile backend section's active states and availability.
+ * Fetches backend status if not cached.
+ */
+async function _updateMobileBackendSection() {
+  const backends = _agentBackendCache || await _fetchAgentBackends();
+  // Sync active state
+  document.querySelectorAll('#mobileBackendSection .mobile-sheet-item').forEach(el => {
+    const bn = el.dataset.backend;
+    el.classList.toggle('active', bn === activeAgentBackend);
+  });
+  // Sync availability for non-builtin backends
+  for (const b of backends) {
+    if (b.name === 'builtin') continue;
+    const mobileEl = b.name === 'claude-code'
+      ? document.getElementById('mobileBackendClaudeCode')
+      : document.getElementById('mobileBackendCodex');
+    const statusEl = b.name === 'claude-code'
+      ? document.getElementById('ccStatusMobile')
+      : document.getElementById('codexStatusMobile');
+    if (!mobileEl) continue;
+    const usable = b.available && b.authenticated;
+    mobileEl.classList.toggle('disabled', !usable);
+    mobileEl.style.opacity = usable ? '' : '0.45';
+    if (statusEl) {
+      if (!b.available) {
+        statusEl.textContent = t('agent.notInstalled');
+        statusEl.style.color = 'var(--text-tertiary)';
+      } else if (!b.authenticated) {
+        statusEl.textContent = t('agent.notAuthenticated');
+        statusEl.style.color = '#f59e0b';
+      } else {
+        statusEl.textContent = b.version || t('agent.ready');
+        statusEl.style.color = '#22c55e';
+      }
+    }
+  }
+}
+
+/* ── Reflow toolbar on window resize ── */
+window.addEventListener('resize', (function() {
+  let tid;
+  return function() {
+    clearTimeout(tid);
+    tid = setTimeout(function() {
+      _scheduleReflow();
+      /* Hide mobile backdrop if resized past mobile breakpoint */
+      if (window.innerWidth > 768) {
+        const bd = document.getElementById('sidebarBackdrop');
+        if (bd) bd.classList.remove('visible');
+      }
+    }, 120);
+  };
+})());
+
+/* ── Mobile: swipe-to-open sidebar + swipe-to-close ── */
+(function initMobileGestures() {
+  if (!("ontouchstart" in window)) return;
+
+  let touchStartX = 0, touchStartY = 0, touchDelta = 0, tracking = false, direction = null;
+  const EDGE_WIDTH = 30;       // px from left edge to start tracking
+  const SWIPE_THRESHOLD = 60;  // px to confirm a swipe
+
+  document.addEventListener("touchstart", function(e) {
+    const t = e.touches[0];
+    touchStartX = t.clientX;
+    touchStartY = t.clientY;
+    touchDelta = 0;
+    direction = null;
+    const sidebar = document.getElementById("sidebar");
+    const isCollapsed = sidebar.classList.contains("collapsed");
+    // Track: swipe from left edge to open, or swipe on open sidebar/backdrop to close
+    if (isCollapsed && touchStartX < EDGE_WIDTH) {
+      tracking = true;
+    } else if (!isCollapsed) {
+      tracking = true;
+    }
+  }, { passive: true });
+
+  document.addEventListener("touchmove", function(e) {
+    if (!tracking) return;
+    const t = e.touches[0];
+    const dx = t.clientX - touchStartX;
+    const dy = t.clientY - touchStartY;
+    // Lock direction on first significant move
+    if (!direction) {
+      if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+        direction = Math.abs(dx) > Math.abs(dy) ? "horizontal" : "vertical";
+      }
+    }
+    if (direction === "horizontal") {
+      touchDelta = dx;
+    }
+  }, { passive: true });
+
+  document.addEventListener("touchend", function(e) {
+    if (!tracking || direction !== "horizontal") {
+      tracking = false;
+      return;
+    }
+    const sidebar = document.getElementById("sidebar");
+    const isCollapsed = sidebar.classList.contains("collapsed");
+    if (isCollapsed && touchDelta > SWIPE_THRESHOLD) {
+      // Swipe right from edge → open
+      toggleSidebar();
+    } else if (!isCollapsed && touchDelta < -SWIPE_THRESHOLD) {
+      // Swipe left → close
+      toggleSidebar();
+    }
+    tracking = false;
+  }, { passive: true });
+
+  // Mobile: close submenus/dropdowns when tapping outside
+  document.addEventListener("click", function(e) {
+    if (window.innerWidth > 768) return;
+    // Close open toolbar submenus
+    document.querySelectorAll(".toolbar-submenu.open").forEach(sub => {
+      if (!sub.contains(e.target)) sub.classList.remove("open");
+    });
+    // Close preset dropdown
+    const pw = document.querySelector(".preset-toggle-wrapper.open");
+    if (pw && !pw.contains(e.target)) pw.classList.remove("open");
+  });
+})();
+
+/* ── Mobile: auto-collapse sidebar on conversation select ── */
+(function patchMobileConvSelect() {
+  // After the page loads, intercept conversation clicks
+  document.addEventListener("click", function(e) {
+    if (window.innerWidth > 768) return;
+    const convItem = e.target.closest(".conv-item");
+    if (convItem) {
+      // Let the real click handler fire first, then close sidebar
+      setTimeout(() => {
+        const sidebar = document.getElementById("sidebar");
+        if (sidebar && !sidebar.classList.contains("collapsed")) {
+          toggleSidebar();
+        }
+      }, 150);
+    }
+  });
+})();
+
+/* ── Mobile: handle virtual keyboard resize via visualViewport API ── */
+(function initMobileKeyboardHandler() {
+  if (!window.visualViewport) return;
+  /* On mobile, when the virtual keyboard opens the visual viewport shrinks.
+   * We adjust body height to match, keeping the input area visible. */
+  let lastHeight = 0;
+  /* Track whether user was near bottom BEFORE keyboard starts closing.
+   * We sample this on every resize so we know the state at keyboard-open time. */
+  let _wasNearBottom = true;
+  function onViewportResize() {
+    if (window.innerWidth > 768) return;
+    const vv = window.visualViewport;
+    const newH = vv.height;
+    if (Math.abs(newH - lastHeight) < 1) return;
+    const growing = newH > lastHeight;
+    lastHeight = newH;
+    /* Set explicit height on body to match the visual viewport */
+    document.body.style.height = newH + 'px';
+    if (!growing) {
+      /* Keyboard opening (viewport shrinking) — record scroll state and
+       * scroll textarea into view */
+      _wasNearBottom = isNearBottom(200);
+      const ta = document.getElementById('userInput');
+      if (ta && document.activeElement === ta) {
+        requestAnimationFrame(function() {
+          ta.scrollIntoView({ block: 'end', behavior: 'smooth' });
+        });
+      }
+    } else {
+      /* ★ Keyboard closing (viewport growing) — the viewport height increases
+       * but scrollTop stays the same, so chat appears to "jump to the middle".
+       * Re-scroll to bottom if the user was near bottom before, or if there's
+       * an active stream (user just sent a message and is watching the reply).
+       * Force sync reflow first (void scrollHeight) so the layout reflects
+       * the new body height, then scroll immediately + schedule a safety rAF. */
+      if (_wasNearBottom || (typeof activeStreams !== 'undefined' && activeStreams.size > 0)) {
+        var cc = document.getElementById('chatContainer');
+        if (cc) {
+          void cc.scrollHeight; // force reflow after body height change
+          cc.scrollTop = cc.scrollHeight;
+        }
+        /* Safety: keyboard dismiss can fire multiple resize events as it
+         * animates closed — schedule another scroll after layout settles. */
+        requestAnimationFrame(function() {
+          scrollToBottom(true);
+        });
+      }
+    }
+  }
+  window.visualViewport.addEventListener('resize', onViewportResize);
+  /* Reset on blur / keyboard dismiss */
+  window.visualViewport.addEventListener('scroll', function() {
+    if (window.innerWidth > 768) return;
+    document.body.style.height = window.visualViewport.height + 'px';
+  });
+})();
+
+function _inputSendHintText() {
+  // Returns the footer hint string for the normal (non-image-gen) input mode,
+  // honoring config.inputSendMode and the current i18n language.
+  const m = (typeof config !== 'undefined' && config && config.inputSendMode) === 'ctrl_enter'
+    ? 'ctrl_enter' : 'enter';
+  try {
+    if (typeof t === 'function') {
+      return t(m === 'ctrl_enter' ? 'input.hintCtrlEnter' : 'input.hintEnter');
+    }
+  } catch (_) { /* fall through */ }
+  return m === 'ctrl_enter'
+    ? 'Ctrl+Enter send · Enter / Shift+Enter newline · 📎 or drop files'
+    : 'Enter send · Ctrl+Enter / Shift+Enter newline · 📎 or drop files';
+}
+
+function refreshInputSendHint() {
+  // Update the #inputHint footer if we are not in image-gen mode.
+  try {
+    if (typeof imageGenMode !== 'undefined' && imageGenMode) return;
+    const hint = document.getElementById('inputHint');
+    if (hint) hint.textContent = _inputSendHintText();
+  } catch (_) { /* noop */ }
+}
+if (typeof window !== 'undefined') window.refreshInputSendHint = refreshInputSendHint;
+
+function _insertNewlineAtCursor(ta) {
+  const start = ta.selectionStart;
+  const end = ta.selectionEnd;
+  ta.value = ta.value.substring(0, start) + '\n' + ta.value.substring(end);
+  ta.selectionStart = ta.selectionEnd = start + 1;
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function _getSendMode() {
+  // 'enter' (default) — Enter sends, Ctrl+Enter newline
+  // 'ctrl_enter'      — Ctrl+Enter sends, Enter newline
+  // Shift+Enter always inserts a newline regardless of mode.
+  const m = (typeof config !== 'undefined' && config && config.inputSendMode) || 'enter';
+  return m === 'ctrl_enter' ? 'ctrl_enter' : 'enter';
+}
+
+function _doSendOrGenerate() {
+  if (imageGenMode) { generateImageDirect(); }
+  else { sendMessage(); }
+}

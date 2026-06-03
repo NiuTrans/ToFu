@@ -11,7 +11,6 @@ Provides:
 
 import json
 import re
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -19,6 +18,7 @@ from datetime import time as dtime
 
 from lib.log import get_logger
 from lib.trading._common import _get_default_client
+from lib.ttl_cache import TTLCache
 
 logger = get_logger(__name__)
 
@@ -57,32 +57,33 @@ __all__ = [
     'fetch_market_overview',
 ]
 
-# ── In-memory cache ──
-_market_cache = {}
-_market_lock = threading.Lock()
-_CACHE_TTL = {
-    'indices': 30,       # 30s for indices
-    'sectors': 120,      # 2min for sectors
-    'breadth': 60,       # 1min for breadth
-    'northbound': 300,   # 5min for northbound
-    'trend': 30,         # 30s for intraday trend
-    'top_assets': 120,    # 2min for top assets
+# ── In-memory caches (one TTLCache per data type) ──
+# Each market data type has its own freshness window — indices update
+# every few seconds, northbound flow only every 5 minutes.
+_caches: dict[str, TTLCache] = {
+    'indices':    TTLCache(ttl=30,  name='market.indices'),
+    'sectors':    TTLCache(ttl=120, name='market.sectors'),
+    'breadth':    TTLCache(ttl=60,  name='market.breadth'),
+    'northbound': TTLCache(ttl=300, name='market.northbound'),
+    'trend':      TTLCache(ttl=30,  name='market.trend'),
+    'top_assets': TTLCache(ttl=120, name='market.top_assets'),
 }
+_DEFAULT_CACHE = TTLCache(ttl=60, name='market.default')
 
 
 def _cache_get(key):
-    """Get from cache if not expired."""
-    with _market_lock:
-        entry = _market_cache.get(key)
-    if entry and (time.time() - entry['ts']) < _CACHE_TTL.get(key.split(':')[0], 60):
-        return entry['data']
-    return None
+    """Get from cache. ``key`` is either a bare prefix ('indices') or
+    ``prefix:subkey`` (e.g. 'trend:1.000001')."""
+    prefix = key.split(':', 1)[0]
+    cache = _caches.get(prefix, _DEFAULT_CACHE)
+    return cache.get(key)
 
 
 def _cache_set(key, data):
-    """Store in cache."""
-    with _market_lock:
-        _market_cache[key] = {'data': data, 'ts': time.time()}
+    """Store in the appropriate per-prefix cache."""
+    prefix = key.split(':', 1)[0]
+    cache = _caches.get(prefix, _DEFAULT_CACHE)
+    cache.set(key, data)
 
 
 # ═══════════════════════════════════════════════════════════

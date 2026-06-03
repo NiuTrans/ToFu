@@ -42,7 +42,17 @@ class MCPToolInfo(TypedDict):
 
 
 def make_namespaced_name(server_name: str, tool_name: str) -> str:
-    """Build the namespaced tool name: ``mcp__{server}__{tool}``."""
+    """Build the namespaced tool name: ``mcp__{server}__{tool}``.
+
+    Deduping safety net: if ``tool_name`` starts with ``{server_name}_``
+    (e.g. server ``hope`` exposes ``hope_login``) we strip the redundant
+    prefix so the LLM sees ``mcp__hope__login`` instead of the stuttering
+    ``mcp__hope__hope_login``. The MCP protocol already namespaces by
+    server, so repeating the server name in the tool name is just noise.
+    """
+    prefix = f'{server_name}_'
+    if tool_name.startswith(prefix) and len(tool_name) > len(prefix):
+        tool_name = tool_name[len(prefix):]
     return f'{MCP_TOOL_PREFIX}{server_name}{MCP_TOOL_SEP}{tool_name}'
 
 

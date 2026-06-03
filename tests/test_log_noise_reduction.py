@@ -123,6 +123,34 @@ def test_unknown_workspace_root_error_raised(tmp_path):
     config.clear_conv_state(conv_id)
 
 
+def test_resolve_base_ignores_json_blob_in_path(tmp_path):
+    """A stringified reads array stuffed into 'path' must NOT be parsed as a
+    'rootname:path' spec (it contains a JSON ':' before char 40).  The
+    prefix '[{"path"' is not a valid root name, so it falls through to the
+    primary base_path instead of raising UnknownWorkspaceRootError."""
+    from lib.project_mod.tools import _resolve_base
+
+    blob = '[{"path": "lib/self_update.py", "start_line": 392, "end_line": 432]'
+    base, rel = _resolve_base(str(tmp_path), blob)
+    # Guard kicks in: prefix has '[{"' → not treated as a root name.
+    assert base == str(tmp_path)
+    assert rel == blob
+
+
+def test_resolve_base_still_honors_real_root_prefix(tmp_path):
+    """Genuine 'rootname:path' must still resolve via the registry."""
+    from lib.project_mod import config
+    from lib.project_mod.tools import _resolve_base
+
+    conv_id = 'test-conv-rootprefix'
+    config.set_conv_roots(conv_id, str(tmp_path))
+    root_name = tmp_path.name
+    base, rel = _resolve_base(str(tmp_path), f'{root_name}:sub/file.py', conv_id=conv_id)
+    assert base == str(tmp_path)
+    assert rel == 'sub/file.py'
+    config.clear_conv_state(conv_id)
+
+
 # ═════════════════════════════════════════════════════
 # 4. Benign 409 detection
 # ═════════════════════════════════════════════════════

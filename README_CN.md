@@ -33,123 +33,17 @@ Tofu 是一个**完全自托管的 AI 助手**，一条命令即可启动。它�
 
 ## 快速开始
 
-### 一键安装（推荐）
+挑一个匹配你系统的命令运行，结束后服务器会跑在 **http://localhost:15000**。
 
-**Linux / macOS：**
-```bash
-curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh | bash
-```
+| 系统 | 怎么做 |
+|---|---|
+| **Windows** | 从[最新 Release](https://github.com/rangehow/ToFu/releases/latest)下载 **`Tofu-Setup-x.y.z-win64.exe`**，双击运行。 |
+| **Linux / macOS** | `curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh \| bash` |
+| **Docker** | `git clone https://github.com/rangehow/ToFu.git && cd ToFu && docker compose up -d` |
 
-**Windows (PowerShell)：**
-```powershell
-irm https://raw.githubusercontent.com/rangehow/ToFu/main/install.ps1 | iex
-```
+就这一步。每个方式都会自动处理运行时、依赖、数据库、浏览器引擎，并启动服务器 —— 无需任何参数，无需后续操作。
 
-**或直接用 Python**（任何系统）：
-```bash
-git clone https://github.com/rangehow/ToFu.git && cd ToFu
-python install.py
-```
-
-安装脚本会自动创建专用 conda 环境、从 conda-forge 安装所有依赖并启动服务器。就绪后打开 **http://localhost:15000**。
-
-> 🐍 **基于 conda 的安装器。** 安装器**完全使用 conda-forge** —— 如果没装 conda，会自动安装 [Miniforge](https://github.com/conda-forge/miniforge)；然后先升级 conda（旧版 conda 是求解器卡死的头号原因），装上 `libmamba` 求解器，再创建 `tofu` 环境（Python 3.12）并安装所有依赖（含 `lxml`、`playwright`、`postgresql`）。这样可以避开 pip 的 manylinux wheel 在旧主机（CentOS 7 / glibc 2.17）上触发的 GLIBC 不兼容问题。
-
-> 💾 **数据库：无需配置。** Tofu 默认使用 **SQLite**（Python 内置）。如果环境里有 `postgresql`（安装器会从 conda-forge 装上），Tofu 会自动启动一个用户态、免 root 的 PG 实例，为 100+ 用户提供更好的并发。设置 `TOFU_DB_BACKEND=sqlite` （老名称 `CHATUI_DB_BACKEND=sqlite` 仍可用）即可强制 SQLite。
-
-```bash
-# 预配置 API 密钥和端口
-python install.py --api-key sk-xxx --port 8080
-
-# 仅安装，不启动
-python install.py --no-launch
-
-# 指定 env 名 / Python 版本
-python install.py --env tofu --python 3.12
-
-# 跳过 conda 自升级（不推荐）
-python install.py --no-update-conda
-
-# 破坏性：删除已有 env 从头重建
-python install.py --reset-env
-
-# 用 Docker 安装
-python install.py --docker
-```
-
-### Docker（零依赖）
-
-```bash
-git clone https://github.com/rangehow/ToFu.git && cd ToFu
-docker compose up -d
-```
-
-打开 **http://localhost:15000** —— 搞定。所有数据通过 Docker volume 持久化。
-
-<details>
-<summary><strong>手动安装</strong>（完全控制）</summary>
-
-**前提条件：** 一个较新的 `conda`（强烈推荐 Miniforge）。其余无需任何系统依赖 —— 所有运行时依赖（ripgrep、fd-find、PostgreSQL、Chromium 共享库、lxml、trafilatura、playwright……）都从 conda-forge 安装，无需 `sudo`，不碰系统包管理器。
-
-> 💡 **为何所有依赖都走 conda-forge？** 在较老的 Linux 主机（CentOS 7 / glibc 2.17）上，pip 的 manylinux wheel（尤其是 `lxml`）在导入时会报 `GLIBC_2.25 not found`。conda-forge 的构建链接到较老的 sysroot glibc，到处都能跑。
-
-```bash
-# 1. 如果没有 conda，先装 Miniforge
-wget -O /tmp/Miniforge3.sh "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
-bash /tmp/Miniforge3.sh -b -p ~/miniforge3
-~/miniforge3/bin/conda init bash && source ~/.bashrc
-# （macOS：把 Linux-x86_64 换成 MacOSX-arm64 或 MacOSX-x86_64。
-#   其他平台见 https://github.com/conda-forge/miniforge/releases ）
-
-# 2. 先升级 conda —— 旧版 conda 是卡 solver 的头号原因
-conda update -n base -c conda-forge -y conda
-conda install -n base -c conda-forge -y conda-libmamba-solver
-conda config --set solver libmamba
-
-# 3. 克隆仓库
-git clone https://github.com/rangehow/ToFu.git && cd ToFu
-
-# 4. 创建环境
-conda create -n tofu -c conda-forge -y python=3.12
-conda activate tofu
-
-# 5. 从 conda-forge 装所有依赖（不用 pip）
-conda install -c conda-forge -y \
-    flask 'flask-compress>=1.14' 'requests>=2.31' psutil \
-    'trafilatura>=1.6' 'playwright>=1.40' pillow python-pptx 'lxml>=4.9' 'mcp>=1.0' \
-    ripgrep fd-find \
-    'postgresql>=16' 'psycopg2>=2.9'
-
-# 6. Playwright Chromium（可选，用于渲染 JS 页面）
-# Linux 上还需要装 Chromium 的共享库（免 root）：
-conda install -c conda-forge -y \
-    atk-1.0 at-spi2-atk at-spi2-core alsa-lib \
-    xorg-libxcomposite xorg-libxdamage xorg-libxfixes xorg-libxrandr \
-    libxkbcommon nspr nss mesa-libgbm-cos7-x86_64
-python -m playwright install chromium
-
-# 7. 健壮性校验 —— 下面这行能打印版本号就说明 GLIBC 问题不存在
-python -c "import lxml.etree, trafilatura; print('OK', lxml.__version__)"
-
-# 8. 启动
-python server.py
-```
-
-> ⚠️ **千万别对这些包混用 pip 和 conda。** 如果上次运行在 env 里留下了 pip 装的 `lxml` wheel，conda 会直接 no-op（认为已满足版本），坏 wheel 继续崩。这时候：
->
-> ```bash
-> pip uninstall -y lxml flask flask-compress requests psutil trafilatura \
->                  playwright pillow python-pptx mcp
-> conda install -c conda-forge -y --force-reinstall <同一套包列表>
-> ```
->
-> 一键的 `install.sh` / `install.py` 会自动做这件事。
-
-</details>
-
-> **数据库自动检测：**首次启动时，Tofu 优先尝试 PostgreSQL（更好的并发性）；如 PG 不可用则自动回退到 **SQLite** —— 你无需任何操作。PostgreSQL 如存在会以本地用户态进程运行（无需 `sudo`，无需系统服务）。设置 `TOFU_DB_BACKEND=sqlite` （老名称 `CHATUI_DB_BACKEND=sqlite` 仍可用）即可强制使用 SQLite。
-
-> **缺少依赖？** 如果任何依赖缺失，`server.py` 会自动委托给 `bootstrap.py`：若当前在 conda env 内，会优先用 `conda install -c conda-forge` 修复（绕开 GLIBC 陷阱），否则回退到 LLM 引导的 `pip install`。
+> 想预设 API 密钥、改端口、或安装失败需要恢复？所有可选参数和故障排查方案都在 **[docs/INSTALL.md](docs/INSTALL.md)**。
 
 ---
 
@@ -175,6 +69,57 @@ export LLM_API_KEY=sk-xxx
 export LLM_BASE_URL=https://api.openai.com/v1
 export LLM_MODEL=gpt-4o
 ```
+
+---
+
+## 无头 API（Headless API）
+
+UI 里能做的事情同样以有文档的 HTTP API 形式暴露，你可以从脚本、Agent 或你自己的应用里驱动 Tofu，不需要渲染 Web UI。
+
+**挂载点：**
+
+| 前缀 | 接口面 |
+|---|---|
+| `/api/v1/*` | Tofu 原生 —— 与 UI 功能打平（chat、conversations、tasks、agents、capabilities、keys、usage、billing …） |
+| `/v1/...` | OpenAI 兼容 —— `chat/completions`、`models`、`embeddings`（OpenAI SDK 可直接点过来） |
+| `/v1/messages` | Anthropic 兼容 —— Messages API（Anthropic SDK 可直接点过来） |
+| `/metrics` | Prometheus 曝露格式（限 admin 作用域） |
+
+**自描述：**`/api/openapi.json` 和 `/api/openapi.yaml`（OpenAPI 3.1）、Swagger UI 位于 `/api/docs`、ReDoc 位于 `/api/redoc`。
+
+在 **设置 → 🔑 API Keys** 中**管理密钥**：创建、划分作用域（`chat`/`admin` 等）、设置每密钥的 RPM 和 TPD 限额、吊销、查看每密钥 30 天使用量图表。POST 请求支持 Idempotency-Key（24 小时缓存，按身份加盐）。所有响应都会返回标准的限速头（`X-RateLimit-*`、`Retry-After`）。
+
+**客户端 SDK** 在 [`clients/`](clients/) 下：
+
+```bash
+# Python —— 同步的 `Tofu` 类 + `tofu` 命令行
+pip install -e clients/python
+export TOFU_API_KEY=tofu_admin_xxx TOFU_BASE_URL=http://localhost:15000
+tofu chat "你好"
+
+# TypeScript —— Node 18+、浏览器、Cloudflare Workers、Vercel Edge、Deno、Bun
+npm install ./clients/typescript
+```
+
+也可直接用任意 OpenAI / Anthropic SDK，只需将 Base URL 指向你的 Tofu 服务、API Key 填 `tofu_admin_*` 即可。
+
+---
+
+## 多租户中继站（付费模式）
+
+当 `auth_mode=multi-user` 时，Tofu 变为一个**付费的 AI 中继站** —— 一份自托管部署服务多个用户，每个用户一个钱包，费用以你上游的 LLM 成本为准计费。
+
+**切换该模式后自动点亮的能力**（在 `open`/`private` 下为 no-op）：
+
+- **每用户钱包**，单位为微点数（1 信用点 = 1,000,000 µ ≈ 美元 0.001），以**追加写账本**为唯一真相源 —— 全部整数运算，无浮点误差。
+- **原子预扣 / 清算**：每个聊天请求先做预扣，余额不足直接返回 402；任务结束后按实际 token 用量清算；后台清扫器每 30 分钟释放过期的未清算预扣。
+- **面向用户的页面** —— `/login`、`/signup`、`/dashboard`（钱包、密钥、使用量、文档、账号页签）。注册准入策略与迎新信用在 `data/config/relay.json` 中配置。
+- **支付** —— Stripe Webhook 与支付宝异步通知，按 `(provider, provider_id)` 幂等。凭证在 `data/config/payments.json` 中配置。
+- **兑换码** —— 批量生成，发给用户，换入钱包。
+- **价格表** —— 每模型的单价（输入 / 输出 / 缓存）从 `data/config/pricing.json` 热加载，支持按模型族前缀回退与管理员可调的加价率。
+- **管理员设置面板** —— Users、Pricing、Redeem Codes、Payments 选项卡 —— 仅在 multi-user 模式下、且密钥具备 `admin` 作用域时可见。
+
+上述能力的实现全部位于 `lib/billing/` 与 `routes/api_v1/billing.py`；切回 `open` / `private` 后表便为空、面向用户的页面不再提供，闸道行为与上一节描述一致。
 
 ---
 
@@ -273,7 +218,7 @@ export LLM_MODEL=gpt-4o
 
 **多项目根目录** —— 可添加多个目录作为根（例如前端 + 后端仓库）。助手通过命名空间在所有根目录之间解析路径。
 
-**智能 Token 管理** —— `content_ref` 机制让助手可以将之前的工具结果直接写入文件而无需重新生成，`emit_to_user` 让助手指向已有的工具输出而非重复它。这在处理大文件时能节省大量 Token。
+**智能 Token 管理** —— `content_ref` 机制让助手可以将之前的工具结果直接写入文件而无需重新生成。这在处理大文件时能节省大量 Token。
 
 ---
 
@@ -410,15 +355,9 @@ python lib/desktop_agent.py --server http://your-server:15000 --allow-write --al
 默认的 PDF 解析管线（`pymupdf4llm`）在大多数论文上表现良好，但在 ML / 理论 CS 论文中常见的**无框表格**和**复杂数学公式**上效果较差。对于这类论文，Tofu 可以路由到
 [**Docling**](https://github.com/docling-project/docling)（IBM）——一个版面感知的模型，使用 TableFormer 处理表格，内置方程模型处理公式，输出更干净的 Markdown。
 
-**权衡：** Docling 会拉入 PyTorch + 约 2 GB 的模型权重，所以是**可选安装**。
+**权衡：** Docling 会拉入 PyTorch + 约 2 GB 的模型权重，所以是**可选安装**：
 
 ```bash
-# 安装时
-./install.sh --with-docling
-# 或：
-python install.py --with-docling
-
-# 也可以事后安装：
 pip install docling --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
@@ -561,8 +500,10 @@ vim .env   # 填入你的值
 | `LLM_BASE_URL` | API 端点 | `https://api.openai.com/v1` |
 | `LLM_MODEL` | 默认模型 | `gpt-4o` |
 | `PORT` | 服务器端口 | `15000` |
-| `BIND_HOST` | 绑定地址 | `0.0.0.0` |
-| `TUNNEL_TOKEN` | 公网隧道访问认证令牌 | *（关闭）* |
+| `BIND_HOST` | 绑定地址 | `127.0.0.1`（仅本机） |
+| `TOFU_AUTH_MODE` | 强制认证模式并锁定 UI：`open` / `private` / `multi-user` | *（以配置文件为准）* |
+| `TOFU_AUTO_KEY` | 设为 `0` 可跳过首次启动的管理员密钥初始化 | `1` |
+| `TUNNEL_TOKEN` | **已废弃**，仅作向后兼容垫——请改用 API Keys 体系 | *（关闭）* |
 | `TRADING_ENABLED` | 启用交易模块（`1`/`0`） | `0` |
 | `PDF_TEXT_MODE` | 默认 PDF 文本提取策略：`rich`（pymupdf4llm，默认）、`structured`（Docling，需 `pip install docling`）、`fast` | `rich` |
 | `PDF_VLM_BATCH_PAGES` | VLM 单次调用的页数（1–16） | `4` |
@@ -581,7 +522,7 @@ vim .env   # 填入你的值
 │
 ├── lib/                       核心库
 │   ├── agent_backends/        CLI 后端切换（内置/Claude Code/Codex）
-│   ├── llm_client.py          LLM API 客户端（流式，重试）
+│   ├── llm/                   LLM API 客户端包（build_body / stream / cache / diagnostics）
 │   ├── llm_dispatch/          多密钥多模型智能调度器
 │   ├── database/              双后端—— SQLite 默认，PostgreSQL 自动初始化
 │   ├── tasks_pkg/             任务编排与上下文压缩
@@ -604,7 +545,11 @@ vim .env   # 填入你的值
 │   ├── desktop_agent.py       桌面自动化代理
 │   └── ...
 │
-├── routes/                    Flask 蓝图（21 个 API 模块）
+├── routes/                    Flask 蓝图（28+ 个模块）+ routes/api_v1/（无头 API）
+├── lib/billing/               多租户中继计费（钱包、账本、价格、支付）
+├── lib/oauth/                 OAuth 流程（Claude、Codex、PKCE、Token 存储）
+├── lib/optimizer/             夜间自调优循环（分析器 → 提议器 → 应用器）
+├── clients/                   无头 API SDK（python/、typescript/）
 ├── static/                    CSS、JS、图标
 ├── browser_extension/         Chrome 插件（Manifest V3）
 ├── tests/                     测试套件（单元、API、E2E）
@@ -643,12 +588,29 @@ python -m pytest tests/test_visual_e2e.py
 
 ---
 
-## 安全
+## 认证模式与安全
 
-- **源码中无密钥** —— 所有凭证从环境变量或设置界面加载
-- **单用户模式** —— 无多租户认证；请在 VPN 或反向代理后面部署
-- **工具执行** —— 助手可以运行 Shell 命令和编辑文件；危险模式会被拦截，但请谨慎使用
-- **桌面代理** —— 需要显式启用 `--allow-write` / `--allow-exec` 标志
+Tofu 采用三态认证模型，持久化在 `data/config/auth.json`，可在 **设置 → 🔑 API Keys** 面板顶部切换：
+
+| 模式 | 闸道 | 适用场景 |
+|---|---|---|
+| `open`（默认） | 直通；合成本机管理员上下文 | 个人部署、只用前端、仅本机绑定 |
+| `private` | 必须携带 Bearer / `x-api-key` / Cookie / `?token=`；`/` 上返回 HTML 提示页 | 单使用者多设备 |
+| `multi-user` | 与 `private` 同样闸道，加上每用户钱包 + 注册页面 | 付费中继站，服务多个用户 |
+
+**默认绑定 `127.0.0.1`** —— 除非显式传入 `--host 0.0.0.0` 或设置 `BIND_HOST=0.0.0.0`，否则 API 不会对局域网曝露。默认 `open` 模式 + 本机绑定让个人使用场景开箱即用且不裸露接口。
+
+**首次启动初始化**（仅 private/multi-user）—— 当 api_keys 存储为空且 `TUNNEL_TOKEN` 未设置时，Tofu 会在启动时造一把 `tofu_admin_<hex>` 密钥，将明文 + 一次性 `?token=<...>` URL 打印到 stderr，同时将明文写入 `data/config/.first_run_token`（chmod 0600）。设置 `TOFU_AUTO_KEY=0` 可禁用。
+
+**Token 传输顺序**：`Authorization: Bearer` → `x-api-key`（Anthropic SDK）→ `tofu_session` HttpOnly Cookie → `?token=` 查询参数（会被消费后剩余、转为 Cookie，仅 private 模式）。
+
+**`TOFU_AUTH_MODE=<mode>`** 环境变量会锁死模式 —— UI 单选按钮被禁用，`PUT /api/v1/auth/mode` 会返回 409 + `error_kind=env_locked`。
+
+**其他安全要点：**
+- 源码中无密钥——所有凭证从环境变量或设置界面加载。
+- 工具执行——助手可以运行 Shell 命令和编辑文件；危险模式会被拦截，但请谨慎使用。
+- 桌面代理——需要显式启用 `--allow-write` / `--allow-exec` 标志。
+- `TUNNEL_TOKEN` 已废弃，仅作为向后兼容垫，启动时会警告——请迁移到 API Keys 体系。
 
 ---
 

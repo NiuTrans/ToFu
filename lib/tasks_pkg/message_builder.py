@@ -187,10 +187,28 @@ def inject_tool_history(messages, cfg, task, model):
         # ── Build tool_calls[] with optional extra_content passthrough ──
         built_tool_calls = []
         for tc in tc_list:
+            # Defense-in-depth: if a checkpoint stored an args string that
+            # isn't valid JSON (e.g. weak model emitted ``\d`` instead of
+            # ``\\d``), replay it as ``'{}'`` so the upstream gateway
+            # doesn't HTTP 400 ``invalid function arguments json string``.
+            # The matching tool result still tells the model the original
+            # call failed. See orchestrator.py:1364 (live sanitizer) and
+            # the May 2026 incident memory.
+            import json as _json
+            _args_str = tc['arguments']
+            try:
+                _json.loads(_args_str)
+            except (_json.JSONDecodeError, TypeError):
+                logger.warning(
+                    '[Task %s] conv=%s Replaying tool_call %s with sanitized '
+                    'arguments (original was malformed JSON, %d chars)',
+                    tid, conv_id_short, tc.get('name', '?'),
+                    len(_args_str) if isinstance(_args_str, str) else 0)
+                _args_str = '{}'
             tc_entry = {
                 'id': tc['id'],
                 'type': 'function',
-                'function': {'name': tc['name'], 'arguments': tc['arguments']},
+                'function': {'name': tc['name'], 'arguments': _args_str},
             }
             # Gemini: echo back thought_signature or the API 400s.
             extra = tc.get('extraContent')

@@ -74,7 +74,7 @@ class SubTaskSpec:
     priority: int = 0                            # Higher = run sooner (within wave)
     max_rounds: int = 0                          # Max LLM rounds (0 = unlimited)
     tools_hint: list = field(default_factory=list)  # Preferred tools (empty = all allowed)
-    timeout_seconds: int = 300                   # Max wall-clock time
+    timeout_seconds: int = 0                     # Max wall-clock time (0 = unlimited)
 
     # ── Extended fields ──
     max_retries: int = 0                         # Auto-retry on failure (0 = no retry)

@@ -147,7 +147,8 @@ def _try_json(text: str):
         return None
     try:
         return json.loads(s)
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except (json.JSONDecodeError, TypeError, ValueError) as _e_audit:
+        logger.debug('[project_names] _try_json caught %s: %s', type(_e_audit).__name__, _e_audit)
         return None
 
 

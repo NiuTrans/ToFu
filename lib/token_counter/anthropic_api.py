@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from lib.log import get_logger
+from lib.http_client import http_post
 
 from .base import TokenCounter
 from .config import API_TIMEOUT
@@ -28,8 +29,8 @@ from .config import API_TIMEOUT
 logger = get_logger(__name__)
 
 
-def _resolve_url(base_url: str) -> Optional[str]:
-    """Derive the count_tokens URL from a provider ``base_url``."""
+def _resolve_anthropic_count_url(base_url: str) -> Optional[str]:
+    """Derive the Anthropic count_tokens URL from a provider ``base_url``."""
     if not base_url:
         return None
     b = base_url.rstrip('/')
@@ -52,7 +53,7 @@ def _resolve_url(base_url: str) -> Optional[str]:
     return None
 
 
-def _build_body(messages, *, model, system=None, tools=None) -> dict:
+def _build_anthropic_count_body(messages, *, model, system=None, tools=None) -> dict:
     """Shape OpenAI-style messages → Anthropic count_tokens body.
 
     Anthropic requires alternating user/assistant turns; we collapse
@@ -138,27 +139,26 @@ class AnthropicAPICounter(TokenCounter):
               **kwargs) -> Optional[int]:
         if not api_base_url or not api_key:
             return None
-        url = _resolve_url(api_base_url)
+        url = _resolve_anthropic_count_url(api_base_url)
         if not url:
             return None
 
         try:
-            import requests  # local import to avoid hard dep at startup
-            from lib.proxy import proxies_for as _proxies_for
+            import requests  # noqa: F401  — availability probe (raises ImportError if absent)
+            from lib.proxy import proxies_for as _proxies_for  # noqa: F401
         except ImportError as e:
             logger.warning('[TokenCounter] requests / lib.proxy import failed: %s', e)
             return None
 
-        body = _build_body(messages, model=model, system=system, tools=tools)
+        body = _build_anthropic_count_body(messages, model=model, system=system, tools=tools)
         headers = {
             'Authorization': f'Bearer {api_key}',
             'anthropic-version': '2023-06-01',
             'Content-Type': 'application/json',
         }
         try:
-            r = requests.post(url, json=body, headers=headers,
+            r = http_post(url, json=body, headers=headers,
                               timeout=(10, API_TIMEOUT),
-                              proxies=_proxies_for(url),
                               verify=True)
             if r.status_code != 200:
                 logger.warning('[TokenCounter] Anthropic count_tokens HTTP %d: %.200s',

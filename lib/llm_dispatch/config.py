@@ -234,7 +234,9 @@ def reevaluate_pricing_tags(models: list[dict], *, log_prefix: str = '') -> dict
 #  These are overridden by benchmark data at runtime.
 # ══════════════════════════════════════════════════════════════
 DEFAULT_SLOT_CONFIGS = {
-    # ── Claude (Anthropic — current gen: 4.7 flagship, Apr 2026) ──
+    # ── Claude (Anthropic — current gen: 4.8 flagship, May 2026) ──
+    'claude-opus-4-8':               {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
+    # ── Claude (Anthropic — 4.7 family, Apr 2026) ──
     'claude-opus-4-7':               {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
     # ── Claude (Anthropic — 4.6 family, Feb 2026) ──
     'claude-opus-4-6':               {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
@@ -252,8 +254,10 @@ DEFAULT_SLOT_CONFIGS = {
     'claude-3-5-haiku-20241022':     {'caps': {'text', 'cheap'},                   'rpm': 100, 'latency': 1500, 'cost': 0.003},
 
     # ── Claude (AWS / Vertex gateway-prefixed names) ──
+    'aws.claude-opus-4.8':           {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
     'aws.claude-opus-4.7':           {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
     # ── Claude (Amazon Bedrock native model IDs, inference-profile form) ──
+    'us.anthropic.claude-opus-4-8-v1:0':         {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
     'us.anthropic.claude-opus-4-7-v1:0':         {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
     'us.anthropic.claude-opus-4-6-v1:0':         {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
     'us.anthropic.claude-sonnet-4-6-v1:0':       {'caps': {'text', 'vision', 'thinking'},      'rpm': 50,  'latency': 2000, 'cost': 0.009},
@@ -293,7 +297,7 @@ DEFAULT_SLOT_CONFIGS = {
 
     # ── DeepSeek ──
     # V4 family (Apr 2026) — 1M ctx, dual Thinking / Non-Thinking; pro=1.6T/49B, flash=284B/13B.
-    'deepseek-v4-pro':               {'caps': {'text', 'thinking', 'cheap'},      'rpm': 30,  'latency': 3000, 'cost': 0.003},
+    'deepseek-v4-pro':               {'caps': {'text', 'thinking', 'cheap'},      'rpm': 30,  'latency': 3000, 'cost': 0.001},
     'deepseek-v4-flash':             {'caps': {'text', 'thinking', 'cheap'},      'rpm': 60,  'latency': 2000, 'cost': 0.0002},
     'deepseek-v4-flash-huawei':      {'caps': {'text', 'thinking', 'cheap'},      'rpm': 60,  'latency': 2000, 'cost': 0.0002},
     'deepseek-chat':                 {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
@@ -311,6 +315,7 @@ DEFAULT_SLOT_CONFIGS = {
     'gemini-3.1-flash-lite-preview': {'caps': {'text', 'vision', 'cheap'},         'rpm': 30,  'latency': 1500, 'cost': 0.001},
     'gemini-3.1-pro-preview':        {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 5,   'latency': 3000, 'cost': 0.006},
     'gemini-3-flash-preview':        {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 60,  'latency': 1500, 'cost': 0.001},
+    'gemini-3.5-flash':              {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 30,  'latency': 2000, 'cost': 0.005},
 
     # ── Qwen (DashScope) ──
     'qwen3.6-plus':                  {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 60, 'latency': 2000, 'cost': 0.002},
@@ -333,6 +338,8 @@ DEFAULT_SLOT_CONFIGS = {
     'qwen-long':                     {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
 
     # ── MiniMax ──
+    # M3 (2026-06-01) — flagship: MSA sparse attn, 1M ctx, native multimodal (image+video in).
+    'MiniMax-M3':                    {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 60, 'latency': 2000, 'cost': 0.002},
     'MiniMax-M2':                    {'caps': {'text', 'vision', 'cheap'},        'rpm': 60,  'latency': 2000, 'cost': 0.001},
     'MiniMax-M2.1':                  {'caps': {'text', 'thinking', 'cheap'},      'rpm': 60,  'latency': 2000, 'cost': 0.001},
     'MiniMax-M2.1-highspeed':        {'caps': {'text', 'thinking', 'cheap'},      'rpm': 60,  'latency': 1500, 'cost': 0.002},
@@ -415,6 +422,8 @@ DEFAULT_SLOT_CONFIGS = {
 #  This benefits anyone routing Claude through multiple gateway prefixes.
 # ══════════════════════════════════════════════════════════════
 MODEL_ALIAS_GROUPS = [
+    # Claude Opus 4.8 — aws gateway + direct API + Bedrock-native IDs are interchangeable
+    {'aws.claude-opus-4.8', 'claude-opus-4-8', 'us.anthropic.claude-opus-4-8-v1:0'},
     # Claude Opus 4.7 — aws gateway + direct API + Bedrock-native IDs are interchangeable
     {'aws.claude-opus-4.7', 'claude-opus-4-7', 'us.anthropic.claude-opus-4-7-v1:0'},
     # Claude Opus 4.6 — aws, vertex, direct API, Bedrock-native names are interchangeable

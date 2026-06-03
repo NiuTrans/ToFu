@@ -8,14 +8,17 @@ import json
 import os
 import sys
 
-from flask import Blueprint, jsonify, request
+from flask import jsonify, request
 
 from lib.config_dir import config_path as _config_path
 from lib.log import get_logger
+from lib.api_response import api_bad_request, api_error, api_internal_error, api_ok
+from lib.request_parser import parse_body
 
 logger = get_logger(__name__)
 
-config_bp = Blueprint('config', __name__)
+from routes.api_v1.config import api_v1_config_bp as config_bp  # noqa: E402
+# (alias kept for back-compat: server.py + routes/upload.py import _read_server_config from routes.config)
 
 _SERVER_CONFIG_PATH = _config_path('server_config.json')
 
@@ -218,7 +221,7 @@ def _feishu_is_connected() -> bool:
 #  Endpoints
 # ══════════════════════════════════════════════════════
 
-@config_bp.route('/api/server-config')
+@config_bp.route('/api/v1/server-config')
 def get_server_config():
     """GET — return full server configuration."""
     import lib as _lib
@@ -307,6 +310,10 @@ def get_server_config():
         prov_name = prov.get('name', prov_id)
         for m in prov.get('models', []):
             mid = m.get('model_id', '')
+            # Per-model enable toggle: skip when explicitly disabled by the user
+            # in Settings. Matches the dispatcher's slot-pool filter.
+            if m.get('enabled') is False:
+                continue
             if mid:
                 dropdown_models.append({
                     'model_id': mid,
@@ -379,6 +386,7 @@ def get_server_config():
             provider_pricing[pid] = per_model
 
     model_limits = saved.get('model_limits', {})
+    model_context_limits = saved.get('model_context_limits', {})
     model_defaults = {
         'fallback_model': getattr(_lib, 'FALLBACK_MODEL', ''),
         'default_model': getattr(_lib, 'LLM_MODEL', ''),
@@ -417,6 +425,39 @@ def get_server_config():
         logger.warning('[ServerConfig] upload policy unavailable: %s', e)
         upload_policy = {}
 
+    # Context-window policy — single source of truth for the Context Health
+    # Bar (static/js/context-bar.js). The bar used to hard-code a copy of the
+    # limit table + compaction thresholds, which silently drifted from the
+    # Python constants (e.g. 0.82 vs the real 0.90). Now it reads these.
+    # ``per_model`` carries the resolved limit (static preset + auto-learned
+    # override) for every model in the dropdown, so the gauge never re-derives.
+    try:
+        from lib.tasks_pkg.compaction import (
+            build_context_policy, resolve_model_context_limit,
+        )
+        context_policy = build_context_policy()
+        per_model = {}
+        for dm in dropdown_models:
+            mid = dm.get('model_id', '')
+            if not mid or mid in per_model:
+                continue
+            per_model[mid] = resolve_model_context_limit(
+                mid, dm.get('provider_id', '') or '')
+        context_policy['per_model'] = per_model
+    except Exception as e:
+        logger.warning('[ServerConfig] context policy unavailable: %s', e)
+        context_policy = {}
+
+    # Translation policy — single source of truth for the frontend's
+    # stale-partial-translation heuristic (was hard-coded 0.15 in
+    # static/js/translation.js). See lib/text_lang.stale_translation_policy().
+    try:
+        from lib.text_lang import stale_translation_policy
+        translation_policy = stale_translation_policy()
+    except Exception as e:
+        logger.warning('[ServerConfig] translation policy unavailable: %s', e)
+        translation_policy = {}
+
     return jsonify({
         'providers': providers, 'presets': presets,
         'models': models, 'search': search_info,
@@ -428,14 +469,17 @@ def get_server_config():
         'model_pricing': model_pricing,
         'provider_pricing': provider_pricing,
         'model_limits': model_limits,
+        'model_context_limits': model_context_limits,
         'model_defaults': model_defaults,
         'network': network_info,
         'mt_provider': mt_provider_info,
         'upload': upload_policy,
+        'context': context_policy,
+        'translation': translation_policy,
     })
 
 
-@config_bp.route('/api/feishu/status')
+@config_bp.route('/api/v1/feishu/status')
 def feishu_status():
     """Return Feishu bot runtime status."""
     from lib.feishu._state import (
@@ -462,24 +506,24 @@ def feishu_status():
         })
     except Exception as e:
         logger.warning('[Feishu] Status check error: %s', e, exc_info=True)
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        return api_internal_error(e)
 
 
-@config_bp.route('/api/provider-balance', methods=['POST'])
+@config_bp.route('/api/v1/providers/balance', methods=['POST'])
 def check_provider_balance():
     """Proxy a balance/billing check to a provider's billing API."""
     import requests as _requests
 
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     balance_url = (data.get('balance_url') or '').strip()
     api_key = (data.get('api_key') or '').strip()
 
     if not balance_url:
-        return jsonify({'ok': False, 'error': 'No balance_url provided'}), 400
+        return api_bad_request('No balance_url provided')
     if not api_key:
-        return jsonify({'ok': False, 'error': 'No api_key provided'}), 400
+        return api_bad_request('No api_key provided')
     if not balance_url.startswith('https://'):
-        return jsonify({'ok': False, 'error': 'balance_url must use HTTPS'}), 400
+        return api_bad_request('balance_url must use HTTPS')
 
     headers = {'Authorization': 'Bearer %s' % api_key}
     logger.info('[Balance] Checking balance at %.200s', balance_url)
@@ -490,20 +534,18 @@ def check_provider_balance():
         billing = resp.json()
     except _requests.Timeout:
         logger.warning('[Balance] Timeout fetching %s', balance_url)
-        return jsonify({'ok': False, 'error': 'Request timed out (15s)'}), 504
+        return api_error('Request timed out (15s)', status=504)
     except _requests.RequestException as e:
         logger.warning('[Balance] Request failed for %s: %s', balance_url, e)
         return jsonify({'ok': False, 'error': 'Request failed: %s' % e}), 502
     except (ValueError, TypeError) as e:
         logger.warning('[Balance] Invalid JSON from %s: %s', balance_url, e)
-        return jsonify({'ok': False, 'error': 'Invalid JSON response'}), 502
+        return api_error('Invalid JSON response', status=502)
 
     result = _normalize_balance(billing, balance_url, headers, _requests)
 
     logger.info('[Balance] Result: %s', {k: v for k, v in result.items() if k != 'raw'})
-    return jsonify({'ok': True, 'balance': result})
-
-
+    return api_ok({'balance': result})
 def _normalize_balance(billing, balance_url, headers, _requests):
     """Normalize different provider balance formats into a unified structure.
 
@@ -593,18 +635,18 @@ def _normalize_balance(billing, balance_url, headers, _requests):
     return result
 
 
-@config_bp.route('/api/discover-models', methods=['POST'])
+@config_bp.route('/api/v1/providers/discover-models', methods=['POST'])
 def discover_models_endpoint():
     """Auto-discover models from a provider's /v1/models endpoint."""
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     base_url = data.get('base_url', '').strip()
     api_key = data.get('api_key', '').strip()
     models_path = data.get('models_path', '').strip()
 
     if not base_url:
-        return jsonify({'ok': False, 'error': 'base_url is required'}), 400
+        return api_bad_request('base_url is required')
     if not api_key:
-        return jsonify({'ok': False, 'error': 'api_key is required'}), 400
+        return api_bad_request('api_key is required')
 
     try:
         from lib.llm_dispatch.discovery import discover_models, enrich_models_with_pricing
@@ -614,13 +656,13 @@ def discover_models_endpoint():
 
         models = enrich_models_with_pricing(models)
         logger.info('[Discovery] Endpoint returned %d models for %s', len(models), base_url)
-        return jsonify({'ok': True, 'models': models})
+        return api_ok({'models': models})
     except Exception as e:
         logger.error('[Discovery] Endpoint failed: %s', e, exc_info=True)
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        return api_internal_error(e)
 
 
-@config_bp.route('/api/update-provider-template', methods=['POST'])
+@config_bp.route('/api/v1/providers/templates/update', methods=['PUT'])
 def update_provider_template():
     """Persist discovered models back into the hardcoded JS provider template.
 
@@ -633,14 +675,14 @@ def update_provider_template():
     import glob
     import re
 
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     tpl_key = (data.get('key') or '').strip()
     models = data.get('models')
 
     if not tpl_key:
-        return jsonify({'ok': False, 'error': 'key is required'}), 400
+        return api_bad_request('key is required')
     if not models or not isinstance(models, list):
-        return jsonify({'ok': False, 'error': 'models list is required'}), 400
+        return api_bad_request('models list is required')
 
     # Sanitize models to only keep template-relevant fields
     clean_models = []
@@ -657,7 +699,7 @@ def update_provider_template():
         clean_models.append(cm)
 
     if not clean_models:
-        return jsonify({'ok': False, 'error': 'No valid models in list'}), 400
+        return api_bad_request('No valid models in list')
 
     # Format models array as JS source (matching existing code style)
     def _fmt_model(m):
@@ -773,27 +815,30 @@ def update_provider_template():
     })
 
 
-@config_bp.route('/api/provider-probe', methods=['POST'])
+@config_bp.route('/api/v1/providers/probe', methods=['POST'])
 def probe_provider_endpoint():
     """One-shot provider auto-setup: discover models, detect brand, find balance URL.
 
     Accepts ``{base_url, api_key, models_path?}`` and returns a complete
     provider configuration ready to be inserted into the providers list.
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     base_url = (data.get('base_url') or '').strip()
     api_key = (data.get('api_key') or '').strip()
     models_path = (data.get('models_path') or '').strip()
 
     if not base_url:
-        return jsonify({'ok': False, 'error': '请填写 API 地址 (Base URL)'}), 400
-    if not api_key:
-        return jsonify({'ok': False, 'error': '请填写 API 密钥'}), 400
+        return api_bad_request('请填写 API 地址 (Base URL)')
+
+    from lib.llm_dispatch.discovery import is_local_endpoint, probe_provider
+    # Local self-hosted endpoints (vLLM / SGLang / Ollama) usually run without
+    # auth — make the API-key field optional in that case.
+    if not api_key and not is_local_endpoint(base_url):
+        return api_bad_request('请填写 API 密钥')
 
     logger.info('[Probe] Provider probe requested for %.200s', base_url)
 
     try:
-        from lib.llm_dispatch.discovery import probe_provider
         result = probe_provider(base_url, api_key, models_path=models_path)
 
         if result.get('ok'):
@@ -809,7 +854,454 @@ def probe_provider_endpoint():
         return jsonify({'ok': False, 'error': '探测出错: %s' % e}), 500
 
 
-@config_bp.route('/api/provider-templates')
+@config_bp.route('/api/v1/providers/probe-bulk', methods=['POST'])
+def probe_provider_bulk():
+    """Probe many endpoints at once for the 'Bulk Add Local Endpoints' UI.
+
+    Accepts ``{base_urls: [str], api_key?: str}`` (api_key optional — most
+    self-hosted vLLM/SGLang servers run without auth).  Probes are fanned
+    out concurrently with a small thread pool; per-URL failures are reported
+    individually so a single dead box doesn't kill the whole batch.
+
+    Returns ``{ok, results: [{base_url, ok, ...probe_payload}]}``.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from lib.llm_dispatch.discovery import normalize_base_url, probe_provider
+
+    data = parse_body()
+    raw_urls = data.get('base_urls') or []
+    api_key = (data.get('api_key') or '').strip()
+    models_path = (data.get('models_path') or '').strip()
+
+    if not isinstance(raw_urls, list) or not raw_urls:
+        return api_bad_request('请提供至少一个 API 地址')
+
+    # Normalize, dedupe, cap to a reasonable upper bound.
+    seen = set()
+    base_urls = []
+    for raw in raw_urls:
+        if not isinstance(raw, str):
+            continue
+        url = normalize_base_url(raw.strip())
+        if not url:
+            continue
+        if not (url.startswith('http://') or url.startswith('https://')):
+            url = 'http://' + url
+            url = normalize_base_url(url)
+        if url in seen:
+            continue
+        seen.add(url)
+        base_urls.append(url)
+
+    if not base_urls:
+        return api_bad_request('所有 URL 解析后均为空')
+
+    # Hard cap — keeps the UI snappy even when a user pastes 200 lines.
+    if len(base_urls) > 50:
+        return jsonify({
+            'ok': False,
+            'error': '单次最多探测 50 个端点（收到 %d 个）' % len(base_urls),
+        }), 400
+
+    logger.info('[Probe-Bulk] Probing %d endpoint(s)', len(base_urls))
+
+    def _probe_one(url: str):
+        try:
+            # The bulk-probe UI is explicitly labeled 'local' — anything the
+            # user adds through it is treated as a self-hosted endpoint, even
+            # when the IP happens to live in publicly-routable space.
+            res = probe_provider(url, api_key, models_path=models_path,
+                                 force_local=True)
+            res['base_url'] = res.get('base_url') or url
+            return res
+        except Exception as e:
+            logger.error('[Probe-Bulk] %s failed: %s', url, e, exc_info=True)
+            return {'ok': False, 'base_url': url, 'error': '探测异常: %s' % e}
+
+    results = [None] * len(base_urls)
+    workers = min(8, len(base_urls))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='probe-bulk') as pool:
+        futures = {pool.submit(_probe_one, u): i for i, u in enumerate(base_urls)}
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            try:
+                results[idx] = fut.result()
+            except Exception as e:
+                logger.error('[Probe-Bulk] future raised: %s', e, exc_info=True)
+                results[idx] = {'ok': False, 'base_url': base_urls[idx],
+                                'error': '探测异常: %s' % e}
+
+    n_ok = sum(1 for r in results if r and r.get('ok'))
+    logger.info('[Probe-Bulk] Done: %d/%d ok', n_ok, len(base_urls))
+
+    return jsonify({
+        'ok': True,
+        'count': len(base_urls),
+        'ok_count': n_ok,
+        'results': results,
+    })
+
+
+def _probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
+                    protocol='openai'):
+    """Send a minimal completion to test one (key, model) pair.
+
+    Returns one of: 'ok', 'rate_limited', 'unauthorized', 'not_found',
+    'unavailable', 'error' plus a short human-readable detail string.
+
+    A 200 OR an HTTP 400 both count as ``ok`` — a 400 means the gateway
+    accepted the (key, model) routing and only rejected the (deliberately
+    tiny) request shape, which still proves the pair is reachable.
+
+    ``protocol='anthropic'`` probes the Anthropic Messages API
+    (``POST /v1/messages`` with ``x-api-key`` + ``anthropic-version``)
+    instead of OpenAI Chat Completions. The status→verdict table is
+    identical for both protocols.
+    """
+    from lib.http_client import http_post
+
+    # ``max_tokens: 1`` is the floor — the probe only needs to learn whether
+    # the gateway accepts the (key, model) routing, never the completion
+    # itself, so output cost is held to a single token per attempt.
+    if protocol == 'anthropic':
+        from lib.llm.anthropic_outbound import (
+            anthropic_headers, anthropic_messages_url,
+        )
+        url = anthropic_messages_url(base_url)
+        headers = anthropic_headers(api_key, extra_headers)
+        payload = {
+            'model': model_id,
+            'messages': [{'role': 'user', 'content': '.'}],
+            'max_tokens': 1,
+        }
+    else:
+        url = base_url.rstrip('/') + '/chat/completions'
+        headers = {'Authorization': 'Bearer %s' % api_key} if api_key else {}
+        if extra_headers:
+            headers.update(extra_headers)
+        payload = {
+            'model': model_id,
+            'messages': [{'role': 'user', 'content': 'hi'}],
+            'max_tokens': 1,
+            'stream': False,
+        }
+    try:
+        resp = http_post(url, json=payload, headers=headers, timeout=timeout)
+    except Exception as e:
+        logger.warning('[CellProbe] %s @ %s network error: %s', model_id, base_url, e)
+        return 'unavailable', 'network: %s' % str(e)[:120]
+
+    code = resp.status_code
+    try:
+        body = resp.text[:400]
+    except Exception:
+        body = ''
+    lower = body.lower()
+
+    if code == 200 or code == 400:
+        return 'ok', 'HTTP %d' % code
+    if code == 429 or code == 402:
+        return 'rate_limited', 'HTTP %d %.120s' % (code, body)
+    if code in (401, 403):
+        return 'unauthorized', 'HTTP %d %.120s' % (code, body)
+    if code == 404 or 'model_not_found' in lower or 'does not exist' in lower or 'no such model' in lower:
+        return 'not_found', 'HTTP %d %.120s' % (code, body)
+    if code in (500, 502, 503, 504, 529):
+        return 'unavailable', 'HTTP %d %.120s' % (code, body)
+    return 'error', 'HTTP %d %.120s' % (code, body)
+
+
+# Verdicts that warrant a retry (could be a transient blip), versus ones
+# that are definitive on the first attempt (no point re-asking).
+_PROBE_TRANSIENT = {'rate_limited', 'unavailable', 'error'}
+_PROBE_DEFINITIVE = {'unauthorized', 'not_found'}
+
+
+def _probe_cell_multi(base_url, api_key, model_id, extra_headers, timeout,
+                      attempts=3, retry_delay=0.8, protocol='openai'):
+    """Probe a cell up to ``attempts`` times to filter out FALSE 429s.
+
+    Rationale: gateways routinely return a transient 429 / 5xx even for a
+    (key, model) pair the key is fully entitled to. Flagging it after one
+    shot would wrongly recommend disabling a working model. So:
+
+      * A single ``ok`` on ANY attempt wins immediately — the earlier
+        rate-limit was transient.
+      * ``unauthorized`` / ``not_found`` are definitive → return at once.
+      * Transient failures are retried after ``retry_delay`` seconds; if
+        every attempt fails we return the LAST transient verdict with an
+        ``(N/N attempts)`` note so the UI can show it was persistent.
+
+    Returns ``(status, detail)`` like :func:`_probe_one_cell`.
+    """
+    attempts = max(1, int(attempts))
+    last_status, last_detail = 'error', ''
+    for i in range(attempts):
+        status, detail = _probe_one_cell(base_url, api_key, model_id, extra_headers,
+                                         timeout, protocol)
+        if status == 'ok':
+            note = '' if i == 0 else ' (ok on attempt %d/%d)' % (i + 1, attempts)
+            return 'ok', detail + note
+        if status in _PROBE_DEFINITIVE:
+            return status, detail
+        last_status, last_detail = status, detail
+        if i < attempts - 1:
+            _time.sleep(retry_delay)
+    suffix = ' (%d/%d attempts failed)' % (attempts, attempts) if attempts > 1 else ''
+    return last_status, '%.120s%s' % (last_detail, suffix)
+
+
+# ══════════════════════════════════════════════════════
+#  Access-Matrix Cell Probe — server-owned background task
+# ══════════════════════════════════════════════════════
+#
+#  The probe sends a 1-token chat completion to every (key × concrete-id)
+#  cell of a provider. Because each alias on a gateway can route to a
+#  genuinely DIFFERENT upstream model, every alias is probed independently
+#  (it is its own matrix row), not merged with its root.
+#
+#  The probe is a long-running fan-out, so it runs in a background thread
+#  and its progress is **persisted to disk** under data/config/probe_cache/.
+#  Closing the Settings dialog (or even restarting the server) does NOT lose
+#  progress — the frontend re-attaches by provider id and keeps polling.
+#  Only an explicit "retest" (force=true) discards the saved result and
+#  starts over.
+
+import hashlib  # noqa: E402
+import threading  # noqa: E402
+import time as _time  # noqa: E402
+from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: E402
+
+from lib.json_store import read_json, write_json_atomic  # noqa: E402
+
+_CELL_PROBE_TASKS: dict = {}
+_CELL_PROBE_LOCK = threading.Lock()
+_PROBE_DISABLE_STATUSES = {'rate_limited', 'unauthorized', 'not_found', 'unavailable'}
+
+
+def _probe_cache_path(provider_id: str) -> str:
+    """Disk path for a provider's persisted probe snapshot."""
+    safe = hashlib.sha1((provider_id or '').encode('utf-8')).hexdigest()[:16]
+    return _config_path('probe_cache', '%s.json' % safe)
+
+
+def _probe_cell_key(key_idx, model_id) -> str:
+    return '%s::%s' % (key_idx, model_id)
+
+
+def _persist_probe_task(task: dict):
+    """Atomically write a public (key-free) snapshot of the task to disk."""
+    try:
+        write_json_atomic(_probe_cache_path(task['provider_id']),
+                          _public_probe_snapshot(task), fsync=False)
+    except Exception as e:
+        logger.warning('[CellProbe] persist failed for %s: %s',
+                       task.get('provider_id'), e)
+
+
+def _public_probe_snapshot(task: dict) -> dict:
+    """The serialisable, secret-free view of a probe task (for poll + disk)."""
+    return {
+        'provider_id': task['provider_id'],
+        'status': task['status'],
+        'started_at': task['started_at'],
+        'finished_at': task['finished_at'],
+        'total': task['total'],
+        'done_count': task['done_count'],
+        'attempts': task.get('attempts', 1),
+        'cells': task['cells'],
+        'summary': task['summary'],
+        'error': task['error'],
+    }
+
+
+def _run_cell_probe_task(task: dict, work: list, timeout: int):
+    """Background worker: fan out cell probes, updating + persisting progress."""
+    provider_id = task['provider_id']
+    base_url = task['_base_url']
+    extra_headers = task['_extra_headers']
+    protocol = task.get('_protocol', 'openai')
+    attempts = task.get('attempts', 3)
+    logger.info('[CellProbe] Started background probe for %s — %d cell(s), '
+                'up to %d attempt(s) each (protocol=%s)', provider_id, len(work),
+                attempts, protocol)
+
+    def _run(item):
+        key_idx, api_key, root, mid = item
+        # Multi-attempt so a FALSE 429 / transient 5xx doesn't wrongly flag a
+        # reachable cell. A single ok on any attempt wins.
+        status, detail = _probe_cell_multi(base_url, api_key, mid, extra_headers,
+                                           timeout, attempts=attempts,
+                                           protocol=protocol)
+        return {
+            'key_idx': key_idx,
+            'model_id': mid,
+            'root_model_id': root,
+            'status': status,
+            'detail': detail,
+            'recommend_disable': status in _PROBE_DISABLE_STATUSES,
+        }
+
+    last_persist = 0.0
+    try:
+        workers = min(8, len(work))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='cell-probe') as pool:
+            futures = [pool.submit(_run, it) for it in work]
+            for fut in as_completed(futures):
+                if task.get('_abort'):
+                    logger.info('[CellProbe] %s aborted', provider_id)
+                    break
+                try:
+                    cell = fut.result()
+                except Exception as e:
+                    logger.error('[CellProbe] cell task raised: %s', e, exc_info=True)
+                    continue
+                with _CELL_PROBE_LOCK:
+                    task['cells'][_probe_cell_key(cell['key_idx'], cell['model_id'])] = cell
+                    task['done_count'] = len(task['cells'])
+                    n_disable = sum(1 for c in task['cells'].values() if c['recommend_disable'])
+                    task['summary'] = {'ok': task['done_count'] - n_disable, 'disable': n_disable}
+                # Throttle disk writes: at most every ~1.5s during the run.
+                now = _time.monotonic()
+                if now - last_persist > 1.5:
+                    last_persist = now
+                    _persist_probe_task(task)
+        with _CELL_PROBE_LOCK:
+            task['status'] = 'done'
+            task['finished_at'] = _time.time()
+        _persist_probe_task(task)
+        logger.info('[CellProbe] %s done: %d cells, %d flagged',
+                    provider_id, task['done_count'], task['summary']['disable'])
+    except Exception as e:
+        logger.error('[CellProbe] background worker crashed for %s: %s',
+                     provider_id, e, exc_info=True)
+        with _CELL_PROBE_LOCK:
+            task['status'] = 'error'
+            task['error'] = str(e)[:300]
+            task['finished_at'] = _time.time()
+        _persist_probe_task(task)
+
+
+@config_bp.route('/api/v1/providers/probe-cells/start', methods=['POST'])
+def probe_provider_cells_start():
+    """Start (or resume) a background per-(key × id) reachability probe.
+
+    Body: ``{provider_id, base_url, api_keys: [str], extra_headers?: {},
+    models: [{model_id, aliases?: [str]}], timeout?: int, attempts?: int,
+    force?: bool}``. ``attempts`` (default 3, clamped 1..5) re-probes a
+    transiently-failing cell to filter out FALSE 429s.
+
+    Behaviour:
+      * If a probe for ``provider_id`` is already running → return its
+        live snapshot (does NOT restart).
+      * Else if ``force`` is false and a persisted snapshot exists on disk
+        → return that (resume after Settings was closed / server restarted).
+      * Else start a fresh background probe and return its initial snapshot.
+
+    Each alias is probed as its own cell (aliases are distinct models).
+    """
+    data = parse_body()
+    provider_id = (data.get('provider_id') or '').strip()
+    base_url = (data.get('base_url') or '').strip()
+    api_keys = data.get('api_keys') or []
+    extra_headers = data.get('extra_headers') or {}
+    models = data.get('models') or []
+    timeout = int(data.get('timeout') or 12)
+    attempts = max(1, min(5, int(data.get('attempts') or 3)))
+    protocol = (data.get('protocol') or 'openai').strip() or 'openai'
+    force = bool(data.get('force'))
+
+    if not provider_id:
+        return api_bad_request('provider_id is required')
+    if not base_url:
+        return api_bad_request('base_url is required')
+    if not isinstance(api_keys, list) or not api_keys:
+        return api_bad_request('api_keys (non-empty list) is required')
+    if not isinstance(models, list) or not models:
+        return api_bad_request('models (non-empty list) is required')
+
+    with _CELL_PROBE_LOCK:
+        existing = _CELL_PROBE_TASKS.get(provider_id)
+        if existing and existing['status'] == 'running' and not force:
+            logger.info('[CellProbe] %s already running — returning live snapshot', provider_id)
+            return api_ok(_public_probe_snapshot(existing))
+
+    if not force:
+        cached = read_json(_probe_cache_path(provider_id), default=None)
+        if isinstance(cached, dict) and cached.get('cells'):
+            logger.info('[CellProbe] %s resumed from disk (%d cells, status=%s)',
+                        provider_id, len(cached['cells']), cached.get('status'))
+            return api_ok(cached)
+
+    # Build the work list: one cell per (key_idx, concrete id). Every alias
+    # is its own cell because aliases can be different upstream models.
+    work = []
+    for key_idx, api_key in enumerate(api_keys):
+        for m in models:
+            root = (m.get('model_id') or '').strip()
+            if not root:
+                continue
+            for mid in [root] + [a for a in (m.get('aliases') or []) if a]:
+                work.append((key_idx, api_key, root, mid))
+
+    if not work:
+        return api_bad_request('no testable (key, model) pairs')
+    if len(work) > 400:
+        return api_bad_request('too many cells to probe (%d > 400)' % len(work))
+
+    task = {
+        'provider_id': provider_id,
+        'status': 'running',
+        'started_at': _time.time(),
+        'finished_at': None,
+        'total': len(work),
+        'done_count': 0,
+        'cells': {},
+        'summary': {'ok': 0, 'disable': 0},
+        'error': None,
+        'attempts': attempts,
+        '_abort': False,
+        '_base_url': base_url,
+        '_extra_headers': extra_headers,
+        '_protocol': protocol,
+    }
+    with _CELL_PROBE_LOCK:
+        _CELL_PROBE_TASKS[provider_id] = task
+    _persist_probe_task(task)
+
+    th = threading.Thread(target=_run_cell_probe_task, args=(task, work, timeout),
+                          name='cell-probe-%s' % provider_id[:24], daemon=True)
+    th.start()
+
+    logger.info('[CellProbe] Launched background probe for %s (%d cells, force=%s)',
+                provider_id, len(work), force)
+    return api_ok(_public_probe_snapshot(task))
+
+
+@config_bp.route('/api/v1/providers/probe-cells/status', methods=['GET'])
+def probe_provider_cells_status():
+    """Poll a provider's probe progress: live task if any, else disk snapshot.
+
+    Query: ``?provider_id=X``. Returns the same snapshot shape as ``start``,
+    or ``{status: 'none'}`` when nothing has ever been probed.
+    """
+    provider_id = (request.args.get('provider_id') or '').strip()
+    if not provider_id:
+        return api_bad_request('provider_id is required')
+
+    with _CELL_PROBE_LOCK:
+        task = _CELL_PROBE_TASKS.get(provider_id)
+        if task:
+            return api_ok(_public_probe_snapshot(task))
+
+    cached = read_json(_probe_cache_path(provider_id), default=None)
+    if isinstance(cached, dict) and cached.get('cells') is not None:
+        return api_ok(cached)
+    return api_ok({'status': 'none'})
+
+
+@config_bp.route('/api/v1/providers/templates')
 def get_provider_templates():
     """Serve external provider templates from static/provider_templates/*.json.
 
@@ -835,7 +1327,12 @@ def get_provider_templates():
         try:
             with open(fpath, encoding='utf-8') as f:
                 tpl = json.load(f)
-            if not (isinstance(tpl, dict) and tpl.get('key') and tpl.get('models')):
+            if not (isinstance(tpl, dict) and tpl.get('key')):
+                continue
+            # Normal templates must ship a model list. The 'local' template is
+            # an exception — its model list is filled in at probe time, not
+            # bundled in the file (every deployment hosts different models).
+            if not tpl.get('models') and tpl.get('category') != 'local':
                 continue
             # Normalize pricing-tier tags using live pricing data.
             try:
@@ -880,7 +1377,7 @@ def _hot_reload_feishu(feishu_data: dict):
         logger.warning('[Feishu] Hot-reload failed: %s', e, exc_info=True)
 
 
-@config_bp.route('/api/server-config', methods=['POST'])
+@config_bp.route('/api/v1/server-config', methods=['POST'])
 def save_server_config():
     """POST — save server configuration changes.
 
@@ -891,7 +1388,7 @@ def save_server_config():
     import lib as _lib
     from lib.log import audit_log
 
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     existing = _read_server_config()
     changes = []
     dispatch_reset_needed = False
@@ -986,7 +1483,7 @@ def save_server_config():
     # ── Persist to disk ──
     if not _write_server_config(existing):
         logger.error('[ServerConfig] Failed to write config file to %s', _SERVER_CONFIG_PATH)
-        return jsonify({'ok': False, 'error': 'Failed to write config file'}), 500
+        return api_internal_error('Failed to write config file')
 
     # ── Hot-reload: update all module-level variables from disk ──
     try:
@@ -1007,4 +1504,4 @@ def save_server_config():
         audit_log('server_config_change', changes=changes)
         logger.info('[ServerConfig] Config changes applied (hot-reload): %s', changes)
 
-    return jsonify({'ok': True, 'needs_restart': False, 'changes': changes})
+    return api_ok({'needs_restart': False, 'changes': changes})

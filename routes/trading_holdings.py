@@ -3,17 +3,20 @@
 import time
 from datetime import datetime
 
-from flask import Blueprint, jsonify, request
+from flask import jsonify, request
 
 from lib.database import DOMAIN_TRADING, db_execute_with_retry, get_db
 from lib.log import get_logger
+from lib.api_response import api_bad_request, api_ok
+from lib.request_parser import parse_body
 
 logger = get_logger(__name__)
 
-trading_holdings_bp = Blueprint('trading_holdings', __name__)
+from routes.api_v1.trading.holdings import api_v1_trading_holdings_bp as trading_holdings_bp  # noqa: E402
+# (alias kept for back-compat with `from routes.trading_holdings import trading_holdings_bp` callers)
 
 
-@trading_holdings_bp.route('/api/trading/holdings', methods=['GET'])
+@trading_holdings_bp.route('/api/v1/trading/holdings', methods=['GET'])
 def trading_holdings_list():
     """List all holdings with price data. Uses 3-layer cache — never blocks."""
     db = get_db(DOMAIN_TRADING)
@@ -54,12 +57,12 @@ def trading_holdings_list():
     return jsonify({'holdings': holdings, 'available_cash': cash})
 
 
-@trading_holdings_bp.route('/api/trading/holdings', methods=['POST'])
+@trading_holdings_bp.route('/api/v1/trading/holdings', methods=['POST'])
 def trading_holdings_add():
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     code = data.get('symbol', '').strip()
     if not code:
-        return jsonify({'error': 'symbol required'}), 400
+        return api_bad_request('symbol required')
     from lib.trading import fetch_asset_info
     info = fetch_asset_info(code)
     name = info.get('name', '') if info else data.get('asset_name', '')
@@ -74,22 +77,18 @@ def trading_holdings_add():
                (code, name, data.get('shares', 0), data.get('buy_price', 0),
                 round(data.get('shares', 0) * data.get('buy_price', 0), 2),
                 data.get('note', ''), data.get('buy_date', ''), now))
-    return jsonify({'ok': True})
-
-
-@trading_holdings_bp.route('/api/trading/holdings/<int:hid>', methods=['PUT'])
+    return api_ok()
+@trading_holdings_bp.route('/api/v1/trading/holdings/<int:hid>', methods=['PUT'])
 def trading_holdings_update(hid):
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     db = get_db(DOMAIN_TRADING)
     now = int(time.time() * 1000)
     db_execute_with_retry(db, '''UPDATE trading_holdings SET shares=?, buy_price=?, buy_date=?, note=?, updated_at=?
                   WHERE id=?''',
                (data.get('shares', 0), data.get('buy_price', 0),
                 data.get('buy_date', ''), data.get('note', ''), now, hid))
-    return jsonify({'ok': True})
-
-
-@trading_holdings_bp.route('/api/trading/holdings/<int:hid>', methods=['DELETE'])
+    return api_ok()
+@trading_holdings_bp.route('/api/v1/trading/holdings/<int:hid>', methods=['DELETE'])
 def trading_holdings_delete(hid):
     db = get_db(DOMAIN_TRADING)
     row = db.execute('SELECT * FROM trading_holdings WHERE id=?', (hid,)).fetchone()
@@ -101,10 +100,8 @@ def trading_holdings_delete(hid):
                     round(row['shares'] * row['buy_price'], 2),
                     datetime.now().strftime('%Y-%m-%d'), now))
     db_execute_with_retry(db, 'DELETE FROM trading_holdings WHERE id=?', (hid,))
-    return jsonify({'ok': True})
-
-
-@trading_holdings_bp.route('/api/trading/holdings/all', methods=['DELETE'])
+    return api_ok()
+@trading_holdings_bp.route('/api/v1/trading/holdings/all', methods=['DELETE'])
 def trading_holdings_delete_all():
     """Delete all holdings at once (一键清仓).
 
@@ -114,8 +111,7 @@ def trading_holdings_delete_all():
     rows = db.execute('SELECT * FROM trading_holdings').fetchall()
     if not rows:
         logger.info('[Portfolio] Delete-all requested but no holdings found')
-        return jsonify({'ok': True, 'deleted': 0})
-
+        return api_ok({'deleted': 0})
     now = int(time.time() * 1000)
     deleted = 0
     for row in rows:
@@ -134,26 +130,22 @@ def trading_holdings_delete_all():
 
     db_execute_with_retry(db, 'DELETE FROM trading_holdings')
     logger.info('[Portfolio] Delete-all completed: %d holdings removed', deleted)
-    return jsonify({'ok': True, 'deleted': deleted})
-
-
-@trading_holdings_bp.route('/api/trading/cash', methods=['POST'])
+    return api_ok({'deleted': deleted})
+@trading_holdings_bp.route('/api/v1/trading/cash', methods=['POST'])
 def trading_set_cash():
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     cash = float(data.get('amount', 0))
     db = get_db(DOMAIN_TRADING)
     db_execute_with_retry(db, "INSERT OR REPLACE INTO trading_config (key, value) VALUES ('available_cash', ?)", (str(cash),))
-    return jsonify({'ok': True})
-
-
-@trading_holdings_bp.route('/api/trading/cash', methods=['GET'])
+    return api_ok()
+@trading_holdings_bp.route('/api/v1/trading/cash', methods=['GET'])
 def trading_get_cash():
     db = get_db(DOMAIN_TRADING)
     cfg = db.execute("SELECT value FROM trading_config WHERE key='available_cash'").fetchone()
     return jsonify({'cash': float(cfg['value']) if cfg else 0})
 
 
-@trading_holdings_bp.route('/api/trading/search', methods=['GET'])
+@trading_holdings_bp.route('/api/v1/trading/search', methods=['GET'])
 def trading_search():
     """Search stocks, ETFs, and funds by keyword/code (universal search)."""
     q = request.args.get('q', '').strip()
@@ -164,23 +156,21 @@ def trading_search():
     return jsonify({'results': results})
 
 
-@trading_holdings_bp.route('/api/trading/nav/update', methods=['POST'])
+@trading_holdings_bp.route('/api/v1/trading/nav/update', methods=['POST'])
 def trading_price_update():
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     code = data.get('code', '').strip()
     nav = data.get('nav')
     nav_date = data.get('nav_date', datetime.now().strftime('%Y-%m-%d'))
     name = data.get('name', '')
     if not code or nav is None:
-        return jsonify({'error': 'code and nav required'}), 400
+        return api_bad_request('code and nav required')
     from lib.trading import update_nav_cache
     update_nav_cache(code, float(nav), nav_date, name)
-    return jsonify({'ok': True, 'code': code, 'nav': float(nav), 'date': nav_date})
-
-
-@trading_holdings_bp.route('/api/trading/nav/batch_update', methods=['POST'])
+    return api_ok({'code': code, 'nav': float(nav), 'date': nav_date})
+@trading_holdings_bp.route('/api/v1/trading/nav/batch_update', methods=['POST'])
 def trading_price_batch_update():
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     items = data.get('items', [])
     from lib.trading import update_nav_cache
     updated = 0
@@ -192,10 +182,8 @@ def trading_price_batch_update():
                              item.get('nav_date', datetime.now().strftime('%Y-%m-%d')),
                              item.get('name', ''))
             updated += 1
-    return jsonify({'ok': True, 'updated': updated})
-
-
-@trading_holdings_bp.route('/api/trading/network_status', methods=['GET'])
+    return api_ok({'updated': updated})
+@trading_holdings_bp.route('/api/v1/trading/network_status', methods=['GET'])
 def trading_network_status():
     from lib.trading._common import _check_external_network, _net_state
     is_ok = _check_external_network()
@@ -206,12 +194,12 @@ def trading_network_status():
     })
 
 
-@trading_holdings_bp.route('/api/trading/nav_history', methods=['GET'])
+@trading_holdings_bp.route('/api/v1/trading/nav_history', methods=['GET'])
 def trading_price_history():
     code = request.args.get('code', '').strip()
     days = int(request.args.get('days', '365'))
     if not code:
-        return jsonify({'error': 'code required'}), 400
+        return api_bad_request('code required')
     from datetime import timedelta
 
     from lib.trading import fetch_price_history
@@ -221,7 +209,7 @@ def trading_price_history():
     return jsonify({'code': code, 'history': data})
 
 
-@trading_holdings_bp.route('/api/trading/transactions', methods=['GET'])
+@trading_holdings_bp.route('/api/v1/trading/transactions', methods=['GET'])
 def trading_transactions():
     db = get_db(DOMAIN_TRADING)
     rows = db.execute('SELECT * FROM trading_transactions ORDER BY created_at DESC LIMIT 200').fetchall()

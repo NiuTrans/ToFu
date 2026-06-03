@@ -13,17 +13,7 @@ logger = get_logger(__name__)
 import re
 
 import lib as _lib  # module ref for hot-reload (Settings changes take effect without restart)
-from lib.browser.advanced import ADVANCED_BROWSER_TOOLS
-from lib.tools import (
-    BROWSER_TOOLS,
-    CODE_EXEC_TOOL,
-    EMIT_TO_USER_TOOL,
-    FETCH_URL_TOOL,
-    PROJECT_TOOLS,
-    READ_FILES_TOOL,
-    SEARCH_TOOL_MULTI,
-    SEARCH_TOOL_SINGLE,
-)
+from lib.tools import ToolContext, assemble_tool_list
 
 
 def _build_search_addendum() -> str:
@@ -93,6 +83,7 @@ def _resolve_model_config(cfg, task_id):
     temperature = cfg.get('temperature', 1.0)
     thinking_enabled = cfg.get('thinkingEnabled', False)
     search_mode = cfg.get('searchMode', 'multi')
+    response_format = cfg.get('responseFormat')
     thinking_depth = cfg.get('thinkingDepth', None)
     _default_depth = cfg.get('defaultThinkingDepth', 'off')  # user-configured default
 
@@ -162,6 +153,7 @@ def _resolve_model_config(cfg, task_id):
         'preset': preset,
         'max_tokens': max_tokens,
         'temperature': temperature,
+        'response_format': response_format,
         'search_mode': search_mode,
         'search_enabled': search_enabled,
         'fetch_enabled': fetch_enabled,
@@ -188,122 +180,49 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
 
     Returns (tool_list, has_real_tools, max_tool_rounds) where tool_list may be
     None if no tools are enabled.
+
+    **Caller-supplied tools take precedence.** When ``cfg['tools']`` is a
+    non-empty list (set by OpenAI/Anthropic compat adapters or by API
+    callers passing ``tools=[...]`` to /api/v1/chat/completions), we
+    use it verbatim — the auto-derived feature toggles
+    (search/fetch/memory/etc.) are ignored. This is the contract
+    documented in docs/COMPAT_OPENAI.md and COMPAT_ANTHROPIC.md.
     """
     tid = task_id[:8]
-    tool_list = []
+    explicit_tools = cfg.get('tools')
+    if isinstance(explicit_tools, list) and explicit_tools:
+        # Validate shape — each tool must be an OpenAI-style
+        # {type:'function', function:{name,description,parameters}}.
+        ok = []
+        for i, t in enumerate(explicit_tools):
+            if isinstance(t, dict) and (t.get('function') or t.get('type') == 'function'):
+                ok.append(t)
+            else:
+                logger.warning('[Task %s] dropping malformed tool[%d]: %r',
+                               tid, i, t)
+        if ok:
+            logger.info('[Task %s] using %d caller-supplied tool(s); '
+                        'auto-derived tools disabled', tid, len(ok))
+            return ok, True, 999_999_999
 
-    # ★ Search tools
-    if search_mode == 'single':
-        tool_list.append(SEARCH_TOOL_SINGLE)
-    elif search_mode == 'multi':
-        tool_list.append(SEARCH_TOOL_MULTI)
-    if fetch_enabled or search_enabled:
-        tool_list.append(FETCH_URL_TOOL)
+    # ── Declarative assembly — the per-feature if-ladder now lives as
+    #    self-describing ToolSpec objects in lib/tools/registry.py.  Native
+    #    tools AND third-party plugins (tofu.tools entry points) flow through
+    #    the same registry, so adding/removing a tool needs ZERO edits here.
+    #    The spec registration order reproduces the cache-stable layout the
+    #    old ladder produced.
+    ctx = ToolContext(
+        cfg=cfg, task_id=task_id,
+        project_path=project_path, project_enabled=project_enabled,
+        search_mode=search_mode, search_enabled=search_enabled,
+        fetch_enabled=fetch_enabled, code_exec_enabled=code_exec_enabled,
+        browser_enabled=browser_enabled, desktop_enabled=desktop_enabled,
+        swarm_enabled=swarm_enabled, image_gen_enabled=image_gen_enabled,
+        human_guidance_enabled=human_guidance_enabled,
+        scheduler_enabled=scheduler_enabled, messages=messages,
+    )
+    tool_list, has_real_tools = assemble_tool_list(ctx)
 
-    # ★ read_files is ALWAYS on — it handles both project-relative and
-    #   absolute local paths (images, PDFs, Office docs, text files), so the
-    #   model can read local content even without a project attached.
-    tool_list.append(READ_FILES_TOOL)
-
-    # ★ Project tools (write/grep/list/run) — only when project is attached
-    if project_enabled:
-        tool_list.extend(PROJECT_TOOLS)
-    elif code_exec_enabled:
-        tool_list.append(CODE_EXEC_TOOL)
-
-    # ★ Browser extension tools
-    if browser_enabled:
-        from lib.browser import is_extension_connected
-        if is_extension_connected():
-            tool_list.extend(BROWSER_TOOLS)
-            tool_list.extend(ADVANCED_BROWSER_TOOLS)
-            logger.debug('[Task %s] Browser extension connected — browser tools enabled (%d tools)',
-                         tid, len(BROWSER_TOOLS) + len(ADVANCED_BROWSER_TOOLS))
-        else:
-            logger.warning('[Task %s] Browser requested but extension not connected', tid)
-
-    # ★ Desktop Agent tools
-    if desktop_enabled:
-        from routes.desktop import is_desktop_agent_connected
-        if is_desktop_agent_connected():
-            from lib.desktop_tools import DESKTOP_TOOLS
-            tool_list.extend(DESKTOP_TOOLS)
-            logger.debug('[Task %s] 🖥️ Desktop agent connected — %d desktop tools enabled', tid, len(DESKTOP_TOOLS))
-        else:
-            logger.warning('[Task %s] Desktop requested but agent not connected', tid)
-
-    # ★ Image generation tool
-    if image_gen_enabled:
-        from lib.tools.image_gen import GENERATE_IMAGE_TOOL
-        tool_list.append(GENERATE_IMAGE_TOOL)
-        logger.debug('[Task %s] 🎨 Image generation tool enabled', tid)
-
-    # ★ Conversation reference tools — only available when user @-mentions a conversation
-    #   Detect by checking if any user message contains [REFERENCED_CONVERSATION
-    from lib.tools import CONV_REF_TOOLS
-    _has_conv_ref = False
-    if messages:
-        for _m in messages:
-            _c = _m.get('content', '') if isinstance(_m.get('content'), str) else ''
-            if '[REFERENCED_CONVERSATION' in _c:
-                _has_conv_ref = True
-                break
-    if _has_conv_ref and len(tool_list) > 0:
-        tool_list.extend(CONV_REF_TOOLS)
-        logger.debug('[Task %s] 💬 Conversation @mention detected — conv_ref tools enabled', tid)
-
-    # ★ Human Guidance tool — user opt-in via toggle
-    if human_guidance_enabled and len(tool_list) > 0:
-        from lib.tools.human_guidance import ASK_HUMAN_TOOL
-        tool_list.append(ASK_HUMAN_TOOL)
-        logger.info('[Task %s] 🙋 Human guidance (ask_human) tool enabled', tid)
-    elif human_guidance_enabled:
-        logger.debug('[Task %s] 🙋 Human guidance requested but no base tools — skipped', tid)
-
-    # ★ Memory tool — only when other tools exist
-    has_real_tools = len(tool_list) > 0
-    if has_real_tools:
-        from lib.memory import ALL_MEMORY_TOOLS
-        tool_list.extend(ALL_MEMORY_TOOLS)
-
-    # ★ emit_to_user — terminal tool to reference existing tool results
-    #   instead of re-outputting them. Only useful when other tools exist.
-    if has_real_tools:
-        tool_list.append(EMIT_TO_USER_TOOL)
-
-    # ★ Scheduler tools — proactive agent, cross-conv tasks, cron management
-    if scheduler_enabled and has_real_tools:
-        from lib.scheduler.tool_defs import SCHEDULER_TOOLS
-        tool_list.extend(SCHEDULER_TOOLS)
-        logger.debug('[Task %s] ⏰ Scheduler tools enabled (%d tools)', tid, len(SCHEDULER_TOOLS))
-
-    # ★ Swarm tools — when project tools exist AND user toggled swarm on
-    if swarm_enabled and project_enabled:
-        from lib.swarm.tools import CHECK_AGENTS_TOOL, SPAWN_AGENTS_TOOL
-        tool_list.append(SPAWN_AGENTS_TOOL)
-        tool_list.append(CHECK_AGENTS_TOOL)
-        logger.debug('[Task %s] 🐝 Swarm mode enabled — spawn_agents + check_agents tools available', tid)
-
-    # ★ MCP tools — bridge to external MCP servers (ClawHub tools, etc.)
-    #   Injected after all native tools so they appear at the end of the list.
-    #   Default: enabled. Benchmarks may pass mcpEnabled=False to isolate to
-    #   native tools only (e.g. project-tools-only SWE-bench runs).
-    if cfg.get('mcpEnabled', True):
-        try:
-            from lib.mcp import get_bridge
-            bridge = get_bridge()
-            if bridge.connected:
-                mcp_tools = bridge.get_openai_tool_defs()
-                if mcp_tools:
-                    tool_list.extend(mcp_tools)
-                    logger.info('[Task %s] 🔌 MCP tools loaded: %d from %d servers',
-                                tid, len(mcp_tools), bridge.server_count)
-        except Exception as e:
-            logger.debug('[Task %s] MCP bridge not available: %s', tid, e)
-    else:
-        logger.debug('[Task %s] MCP disabled via mcpEnabled=false', tid)
-
-    deferred_tools = []  # tools discovered via tool_search
     if not tool_list:
         tool_list = None
         max_tool_rounds = 0
@@ -315,12 +234,4 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
         #   而不是在 orchestrator 里粗暴截断。
         max_tool_rounds = 999_999_999  # effectively unlimited
 
-        # ★ Tool deferral: partition into core (always loaded) and deferred
-        #   (on-demand via tool_search). Saves 5-15K tokens on tool definitions.
-        #   Inspired by Claude Code's shouldDefer + ToolSearchTool pattern.
-        from lib.tools.deferral import partition_tools
-        core_tools, deferred_tools = partition_tools(tool_list)
-        if deferred_tools:
-            tool_list = core_tools
-
-    return tool_list, deferred_tools, has_real_tools, max_tool_rounds
+    return tool_list, has_real_tools, max_tool_rounds

@@ -75,12 +75,17 @@ def _parse_bing(resp):
     return results
 
 
-def search_bing(query, max_results=6):
+def search_bing(query, max_results=6, freshness=''):
     """Scrape Bing HTML search results."""
+    params = {'q': query}
+    # Bing supports filters= with ex1:"ez1" (past day), ex1:"ez2" (past week), ex1:"ez3" (past month)
+    _FRESHNESS_MAP = {'day': 'ex1:"ez1"', 'week': 'ex1:"ez2"', 'month': 'ex1:"ez3"'}
+    if freshness and freshness in _FRESHNESS_MAP:
+        params['filters'] = _FRESHNESS_MAP[freshness]
     return http_search_get(
         name='Bing',
         url='https://www.bing.com/search',
-        params={'q': query},
+        params=params,
         query=query,
         parser=_parse_bing,
         max_results=max_results,

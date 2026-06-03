@@ -259,7 +259,10 @@ class TestSearchMode:
     """Test search mode cycling and UI state."""
 
     def test_search_mode_cycles(self, page, screenshot_dir):
-        """Clicking search toggle should cycle: multi (default) → off → single → multi."""
+        """Clicking search toggle should cycle: multi (default) → off → multi.
+
+        The 'single' (one-shot) mode was retired — the toggle is now 2-state.
+        """
         _wait_for_app_ready(page)
 
         # Start a fresh conversation to ensure clean initial state
@@ -272,29 +275,23 @@ class TestSearchMode:
         initial_mode = toggle.get_attribute("data-mode")
         assert initial_mode == "multi", f"Initial search mode should be 'multi', got '{initial_mode}'"
 
-        # Click 1: off (cycle: off → single → multi → off, wraps from multi → off)
+        # Click 1: off
         toggle.click()
         time.sleep(0.3)
         mode1 = toggle.get_attribute("data-mode")
         assert mode1 == "off", f"After 1 click, mode should be 'off', got '{mode1}'"
 
-        # Click 2: single
+        path = _screenshot(page, screenshot_dir, "05_search_off")
+        _check(path, "Search mode set to 'off' — toggle should show inactive state", [
+            "search toggle in off/inactive state",
+            "search mode label showing 'OFF'",
+        ])
+
+        # Click 2: back to multi
         toggle.click()
         time.sleep(0.3)
         mode2 = toggle.get_attribute("data-mode")
-        assert mode2 == "single", f"After 2 clicks, mode should be 'single', got '{mode2}'"
-
-        path = _screenshot(page, screenshot_dir, "05_search_single")
-        _check(path, "Search mode set to 'single' — toggle should show active state", [
-            "search toggle in active/highlighted state",
-            "search mode label showing 'single' or similar",
-        ])
-
-        # Click 3: back to multi
-        toggle.click()
-        time.sleep(0.3)
-        mode3 = toggle.get_attribute("data-mode")
-        assert mode3 == "multi", f"After 3 clicks, mode should be 'multi', got '{mode3}'"
+        assert mode2 == "multi", f"After 2 clicks, mode should be 'multi', got '{mode2}'"
 
 
 # ═══════════════════════════════════════════════════════════

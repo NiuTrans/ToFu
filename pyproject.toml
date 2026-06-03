@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "tofu"
@@ -9,6 +9,7 @@ description = "Tofu (豆腐) — Self-hosted AI assistant with Flask backend and
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
+dynamic = ["dependencies"]
 
 [project.optional-dependencies]
 dev = [
@@ -16,6 +17,18 @@ dev = [
     "pytest-cov>=4.0",
     "ruff",
 ]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.packages.find]
+# Ship the importable Python packages. The in-process façade (`tofu`) and the
+# kernel it calls (`lib.tasks_pkg.entry`) require `lib*` and `routes*` to be
+# importable; `tofu*` is the supported public surface.
+include = ["tofu*", "lib*", "routes*"]
+exclude = ["tests*", "benchmarks*", "debug*", "clients*", "desktop*",
+           "browser_extension*", "docs*", "promo*", "propaganda*",
+           "swebench_rerun_workdir*", "outputs*", "paper*", "tools*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

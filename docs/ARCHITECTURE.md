@@ -4,7 +4,7 @@
 > `docs/architecture.html` (visual diagram) and whenever an AI assistant
 > needs a birds-eye view.
 >
-> **Last re-scanned:** 2026-05-09 against `lib/`, `routes/`, `static/js/`,
+> **Last re-scanned:** 2026-05-21 against `lib/`, `routes/`, `static/js/`,
 > `server.py`, `routes/__init__.py`.
 > **VERSION:** 0.9.4
 
@@ -52,15 +52,15 @@ nightly optimiser / scheduler.
 │                                 →  tasks_pkg.executor               │
 │                                 →  tasks_pkg.handlers/*.py          │
 │  Built-in: project / search / fetch / browser / code_exec /         │
-│            emit_to_user / image_gen / memory / conversation /       │
-│            human_guidance / meta(plan) / deferral                   │
+│            image_gen / memory / conversation /                      │
+│            human_guidance / meta(plan)                              │
 │  External: MCP (mcp/), Swarm agents, Desktop tools                  │
 └─────────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │              ⑥ LLM Dispatch  ·  ⑦ Infra  ·  ⑧ Ops                   │
-│  llm_dispatch/ (slot × model × key) + llm_client.py (SSE, retry)    │
+│  llm_dispatch/ (slot × model × key) + llm/ package (build_body/SSE)  │
 │  database/ (PG primary, SQLite fallback, dual schema)               │
 │  log.py (app/access/error/vendor/audit)                             │
 │  scheduler/ (cron, timer, proactive)                                │
@@ -159,7 +159,7 @@ flowchart TB
     api[llm_dispatch/api.py<br/>dispatch_chat · dispatch_stream]
     conf[llm_dispatch/config.py<br/>model aliases · routing]
     disc[llm_dispatch/discovery.py<br/>auto-discover /v1/models]
-    client[llm_client.py<br/>SSE stream · build_body · retries]
+    client[lib/llm/<br/>body · stream · cache · diagnostics]
     minfo[model_info.py<br/>_clamp_max_tokens]
     price[pricing.py<br/>MODEL_PRICING]
   end
@@ -230,11 +230,14 @@ Grounded against the current filesystem (2026-05-03).
 | Module / package | Purpose |
 |---|---|
 | `log.py` | `get_logger`, `log_context`, `log_exception`, `audit_log` |
-| `llm_client.py` (3664 L) | SSE streaming, build_body, retries |
+| `agent_core/` | **Browsable facade for the reusable agent base.** Re-exports the core public surface (`run_task`, `dispatch_chat/stream`, `TaskRuntime`, `push_event`, `apply_profile`, + the `ToolSpec`/`BodyDialect` registry seams) and maps each symbol → defining module in `CORE_MEMBERS`. Does NOT move files — it *names* the base. Machine-readable boundary lives in `agent_core_manifest.py`; enforced by `tests/test_agent_core_boundary.py` (core may not import a concrete plugin). |
+| `agent_core_manifest.py` | Declares `CORE_MODULES` / `REGISTRY_SEAMS` / `CONCRETE_PLUGIN_MODULES` — the source of truth for the core/plugin split. |
+| `agent_profiles.py` | Capability profiles: named cfg-default bundles (`default`/`research`/`coding`/`minimal` + `data/config/profiles/*.json`). `apply_profile(cfg)` fills gaps; explicit cfg wins. Applied once at top of `run_task`. |
+| `llm/` package | SSE streaming (`stream.py`), `build_body` (`body.py`), cache breakpoints (`cache.py`), retries (`_transport.py`), diagnostics (`diagnostics.py`) — split from the former `llm_client.py` (2026-05-21) |
 | `llm_dispatch/` | api · config · discovery · dispatcher · factory · slot (multi-key × multi-model) |
 | `model_info.py` | `_clamp_max_tokens` per-model caps |
 | `pricing.py` | MODEL_PRICING tables |
-| `tools/` | **Definitions**: browser · code_exec · conversation · deferral · emit · human_guidance · image_gen · meta · project · search |
+| `tools/` | **Definitions**: browser · code_exec · conversation · emit · human_guidance · image_gen · meta · project · search |
 | `tasks_pkg/` | **Execution** (27 files): orchestrator · manager · executor · streaming_tool_executor · executor_image · tool_dispatch · tool_display · tool_hooks · endpoint · endpoint_prompts · endpoint_review · compaction · cache_tracking · llm_fallback · stream_handler · message_builder · conv_message_builder · server_message_store · system_context · model_config · attachments · approval · human_guidance · stdin_handler · **event_log** (durable SSE replay) · handlers/ |
 | `tasks_pkg/handlers/` | misc · project · search · browser · mcp · memory · code_exec · _adapter |
 | `project_mod/` | tools · read_tools · write_tools · scanner · indexer · modifications · config |
@@ -300,7 +303,7 @@ Helps when explaining Tofu in a talk / diagram legend.
    - `system_context._inject_system_contexts()` (system prompt, memory, attachments)
    - per round:
      - `llm_dispatch.api.dispatch_stream()` → `llm_dispatch.dispatcher` picks
-       best **slot** (key × model) → `llm_client.stream_chat()` streams SSE.
+       best **slot** (key × model) → `lib.llm.stream_chat()` streams SSE.
      - `stream_handler.analyse_stream_result()` classifies finish reason /
        tool calls / retries; `llm_fallback` swaps model on failure.
      - `tool_dispatch.parse_tool_calls()` + `execute_tool_pipeline()` →
@@ -316,7 +319,7 @@ Helps when explaining Tofu in a talk / diagram legend.
    `message_queue.dispatch_next_queued()` kicks any queued next message.
 7. **Endpoint mode**: same loop wrapped in `endpoint.run_endpoint_task()`
    with Planner / Worker / Critic phases and `MAX_REPLANS=3`.
-8. **Swarm mode**: `routes/swarm.py` delegates to `swarm/master.py` which
+8. **Swarm mode**: `routes/api_v1/swarm.py` delegates to `swarm/master.py` which
    runs a streaming DAG of specialist agents via `swarm/scheduler.py`.
 
 ---
@@ -355,7 +358,7 @@ The current shape is the bridge layer:
 | Phase | Status | What landed |
 |---|---|---|
 | **0. Persisted SSE events** | ✅ 2026-05-09 | `task_events` table + `tasks_pkg/event_log.py`. `append_event` mirrors every event; SSE stream falls back to the table when the task is gone. Survives `cleanup_old_tasks` and server restart. |
-| **1. Comprehensive checkpoint** | ✅ 2026-05-09 | `_sync_partial_to_conversation` is now CAS-retried and writes the full structural payload (toolRounds, modifiedFileList, _emitContent, _memoryPrefetch, gitSha, model). Page-reload mid-stream reconstructs the same UI. |
+| **1. Comprehensive checkpoint** | ✅ 2026-05-09 | `_sync_partial_to_conversation` is now CAS-retried and writes the full structural payload (toolRounds, modifiedFileList, _memoryPrefetch, gitSha, model). Page-reload mid-stream reconstructs the same UI. |
 | **2. Stable per-message IDs** | ✅ 2026-05-09 | `_assign_message_ids()` backfills UUIDs onto every JSONB write site (save_conv, patch_message, partial sync, result sync). New `PATCH /api/conversations/<cid>/messages/by-id/<mid>` endpoint. `routes/translate.py` resolves by id first, then idx, then content. The "msg_idx N out of range" warning class is fixed. |
 | **3. Frontend reads via id** | ⏳ partial | `_patchMessageOnServer` and `_startTranslateTask` send `msgId` when available; legacy `msgIdx` paths still work. Other call sites (edit, regenerate, branch) still index-based — to migrate. |
 | **4. Stop frontend writes** | ⏳ planned | Remove `syncConversationToServer` PUT-with-messages-array path. Add `POST .../messages` for user-message creation. Backend becomes sole writer. Cross-talk autodedup heuristic deleted by construction. |

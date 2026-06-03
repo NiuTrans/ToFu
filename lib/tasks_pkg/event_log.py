@@ -20,14 +20,21 @@ Pruning is opportunistic: every Nth ``append_event`` call performs a TTL
 sweep on the table, deleting rows whose task is terminal and older than
 ``EVENT_TTL_MS``.  This keeps the table bounded without a background
 thread.
+
+Note on persistence semantics: every event (including each delta) is
+persisted as its own row on arrival.  No in-memory buffering, no
+coalescing — the previous "250 ms delta coalesce" behaviour was removed
+in 2026-05 because cold-replay required exact-cursor reconstruction.
+``flush_pending`` is retained as a no-op for API compatibility with the
+sole caller in ``manager.append_event``; it does not need to be called
+by new code.
 """
 
 import json
 import random
-import threading
 import time
 
-from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db
+from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -36,66 +43,48 @@ logger = get_logger(__name__)
 # (page refresh, network blip, proxy timeout) for a finished task.
 EVENT_TTL_MS = 6 * 3600 * 1000
 
-# Coalesce successive content/thinking deltas into a single row to keep
-# the table bounded for token-level streams.  Final flush happens when:
-#   - 250 ms elapses since the last delta of this kind
-#   - a non-delta event arrives (forcing flush)
-#   - the task transitions to terminal state
-_DELTA_FLUSH_MS = 250
-
 # Sample-based pruning: every ~Nth call runs a TTL sweep
 _PRUNE_PROBABILITY = 1 / 1024
 
-_pending_lock = threading.Lock()
-# task_id -> {'kind': 'content'|'thinking', 'text': str, 'first_ts': float}
-_pending_deltas = {}
-
 
 def _row_payload_to_json(payload):
-    """Serialize a payload dict for storage; tolerant of non-dict events."""
+    """Serialize a payload dict for storage; tolerant of non-dict events.
+
+    Uses ``json_dumps_pg`` so NUL bytes (``\\x00`` / ``\\u0000``) are stripped
+    before the row hits the ``task_events.payload`` JSONB column — PostgreSQL's
+    JSONB parser rejects ``\\u0000`` escapes, which would otherwise make the
+    INSERT raise and silently drop the event (e.g. a ``messages_snapshot``
+    carrying binary image data) from cold replay.
+    """
     try:
-        return json.dumps(payload, ensure_ascii=False)
+        return json_dumps_pg(payload)
     except (TypeError, ValueError) as e:
         logger.debug('[EventLog] payload serialize failed: %s', e)
         return json.dumps({'type': 'error', 'detail': 'unserializable'})
 
 
-def _flush_pending_locked(task_id, db):
-    """Caller holds _pending_lock. Persist the buffered delta if any.
-
-    The merged row is stored under the LAST coalesced event_id so a cold-path
-    client reconnecting with Last-Event-ID=N will only filter it out when
-    N >= last_id — i.e. they already saw everything inside it. This trades
-    occasional content re-delivery for avoiding silent loss.
-    """
-    p = _pending_deltas.pop(task_id, None)
-    if not p or not p.get('text'):
-        return
-    payload = {'type': 'delta', p['kind']: p['text']}
-    eid = p.get('last_event_id', p['event_id'])
-    try:
-        db_execute_with_retry(
-            db,
-            'INSERT OR IGNORE INTO task_events (task_id, event_id, ts_ms, type, payload) VALUES (?,?,?,?,?)',
-            (task_id, eid, int(p['first_ts'] * 1000),
-             'delta', _row_payload_to_json(payload))
-        )
-    except Exception as e:
-        logger.debug('[EventLog] flush delta failed for task=%s: %s', task_id[:8], e)
-
-
 def append_persistent_event(task_id, event_id, event):
-    """Persist one event to the task_events table.
+    """Persist one event to the task_events table immediately.
 
-    Coalesces consecutive same-kind delta events (content↔content,
-    thinking↔thinking) within a 250 ms window to reduce row count for
-    token-streaming workloads.  All other event types flush any pending
-    delta first and then write themselves.
+    Every event (including deltas) is written as its own row on arrival.
+    No in-memory buffering — a process crash never loses persisted state.
 
     This function MUST be cheap — it runs on every SSE delta.  It uses
     the per-thread DB connection (get_thread_db) and never throws.
     """
     if not task_id:
+        return
+    # ── Reject None event_id explicitly ──
+    # The legacy fallback path in ``manager.append_event`` (when a task is
+    # not registered in TaskRuntime) historically used ``seq=None``.  Letting
+    # that flow through here would either crash on ``int(None)`` or insert
+    # a NULL primary-key column, so we log loudly and skip — cold replay
+    # would silently drop these events otherwise.
+    if event_id is None:
+        logger.warning('[EventLog] Refusing to persist event with event_id=None for task=%s '
+                       'type=%s — caller (likely manager.append_event legacy fallback) bypassed '
+                       'TaskRuntime sequencing. Cold replay would have a hole here.',
+                       task_id[:8], (event or {}).get('type', '?'))
         return
     try:
         db = get_thread_db(DOMAIN_CHAT)
@@ -106,44 +95,34 @@ def append_persistent_event(task_id, event_id, event):
     etype = (event or {}).get('type', '')
     now = time.time()
 
-    # Delta coalescing path
-    if etype == 'delta':
-        kind = 'content' if 'content' in event else ('thinking' if 'thinking' in event else None)
-        if kind is None:
-            return
-        chunk = event.get(kind) or ''
-        if not chunk:
-            return
-        with _pending_lock:
-            p = _pending_deltas.get(task_id)
-            if p and p['kind'] == kind and (now - p['first_ts']) * 1000 < _DELTA_FLUSH_MS:
-                p['text'] += chunk
-                p['last_event_id'] = event_id  # row will be stored at the LAST id
-                return
-            # Flush whatever was buffered (different kind or stale)
-            if p:
-                _flush_pending_locked(task_id, db)
-            _pending_deltas[task_id] = {
-                'kind': kind, 'text': chunk,
-                'first_ts': now, 'event_id': event_id,
-                'last_event_id': event_id,
-            }
-        return
-
-    # Non-delta: flush any buffered delta with its own id, then write self
-    with _pending_lock:
-        if task_id in _pending_deltas:
-            _flush_pending_locked(task_id, db)
+    # We use INSERT OR IGNORE because the (task_id, event_id) PK guarantees
+    # idempotency on retry — but a real duplicate (caller minted the same
+    # seq twice for different events) WOULD silently drop data.  We detect
+    # that by checking ``rowcount`` and warning, so cold-replay holes are
+    # observable in logs/error.log instead of being invisible.
     try:
-        db_execute_with_retry(
-            db,
+        cur = db.execute(
             'INSERT OR IGNORE INTO task_events (task_id, event_id, ts_ms, type, payload) VALUES (?,?,?,?,?)',
             (task_id, event_id, int(now * 1000), etype or 'unknown',
-             _row_payload_to_json(event))
+             _row_payload_to_json(event)),
         )
+        db.commit()
+        rc = getattr(cur, 'rowcount', 1)
+        if rc == 0:
+            # Either an exact retry (harmless — same row already there) or
+            # two distinct events colliding on event_id (DATA LOSS).  We can't
+            # cheaply distinguish, but a non-zero rate is the canary.
+            logger.warning('[EventLog] event_id collision on task=%s event_id=%d type=%s — '
+                           'INSERT OR IGNORE dropped the row.  If this is not a retry, the '
+                           'caller minted a duplicate seq and cold replay will be missing this '
+                           'event.', task_id[:8], int(event_id), etype or 'unknown')
     except Exception as e:
-        logger.debug('[EventLog] persist event failed for task=%s type=%s: %s',
-                     task_id[:8], etype, e)
+        # Catch broadly because this runs on every SSE delta — we never want
+        # a transient DB blip to abort the stream.  Logged at WARNING (was
+        # DEBUG): a silent persist failure means cold replay returns nothing
+        # for that window, which the user perceives as data loss.
+        logger.warning('[EventLog] persist event failed for task=%s type=%s: %s',
+                       task_id[:8], etype, e)
 
     if random.random() < _PRUNE_PROBABILITY:
         try:
@@ -153,17 +132,14 @@ def append_persistent_event(task_id, event_id, event):
 
 
 def flush_pending(task_id):
-    """Force flush of any buffered delta for a task. Called on terminal events."""
-    if not task_id:
-        return
-    try:
-        db = get_thread_db(DOMAIN_CHAT)
-    except Exception as e:
-        logger.debug('[EventLog] flush thread db unavailable: %s', e)
-        return
-    with _pending_lock:
-        if task_id in _pending_deltas:
-            _flush_pending_locked(task_id, db)
+    """No-op kept for API compatibility.
+
+    Historically this drained a 250 ms delta coalescer.  The coalescer was
+    removed (see module docstring) because cold-replay needs every event
+    at its real cursor.  Now every event is persisted on arrival, so
+    there is nothing to flush.
+    """
+    pass
 
 
 def read_events(task_id, since_event_id=None, limit=10000):
@@ -204,18 +180,21 @@ def read_events(task_id, since_event_id=None, limit=10000):
     for r in rows:
         try:
             payload_raw = r['payload'] if 'payload' in r.keys() else r[2]
-        except Exception:
+        except Exception as e:
+            logger.debug('[EventLog] row.keys() unavailable, falling back to positional access: %s', e)
             payload_raw = r[2]
         if isinstance(payload_raw, dict):
             payload = payload_raw
         else:
             try:
                 payload = json.loads(payload_raw or '{}')
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError, json.JSONDecodeError) as _e_audit:
+                logger.debug('[event_log] read_events caught %s: %s', type(_e_audit).__name__, _e_audit)
                 payload = {'type': r['type'] if 'type' in r.keys() else r[1]}
         try:
             eid = int(r['event_id'] if 'event_id' in r.keys() else r[0])
-        except Exception:
+        except Exception as e:
+            logger.debug('[EventLog] row missing event_id, dropping: %s', e)
             continue
         out.append({'event_id': eid, 'payload': payload})
     return out
@@ -263,5 +242,5 @@ def _opportunistic_prune(db):
         logger.debug('[EventLog] prune query failed: %s', e)
         try:
             db.rollback()
-        except Exception:
-            pass
+        except Exception as re:
+            logger.debug('[EventLog] rollback after prune failure: %s', re)

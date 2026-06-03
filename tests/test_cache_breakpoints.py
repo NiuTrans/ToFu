@@ -19,7 +19,7 @@ import json
 import pytest
 
 import lib as _lib
-from lib.llm_client import add_cache_breakpoints
+from lib.llm import add_cache_breakpoints
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -361,7 +361,7 @@ class TestEdgeCases:
     def test_non_marker_models_get_no_breakpoints(self):
         """Models that don't honor cache markers must not be annotated.
 
-        Per the 2026-05-03 probe (``_CACHE_MARKERS_HELP`` in llm_client.py),
+        Per the 2026-05-03 probe (``_CACHE_MARKERS_HELP`` in lib/llm/cache.py),
         Claude + glm-5 + qwen + deepseek are the gateways where attaching
         cache_control markers is beneficial. Models outside that allow-list
         (gpt-4o, gemini, doubao, minimax, etc.) must receive zero

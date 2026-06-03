@@ -56,6 +56,7 @@ __all__ = [
     'pick_key_for_model',
     'dispatch_chat',
     'dispatch_stream',
+    'async_dispatch_stream',
     'dispatch_fastest',
     'dispatch_parallel',
     'get_dispatch_status',
@@ -96,7 +97,8 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                   thinking_enabled=False, preset='low', effort=None,
                   capability='text', prefer_model=None, tools=None,
                   extra=None, max_retries=3, log_prefix='',
-                  timeout=None, strict_model=False):
+                  timeout=None, strict_model=False,
+                  exclude_models=None):
     """Smart dispatch: pick the best available slot and send a non-streaming chat.
 
     Auto-retries on failure with fallback to different slots.
@@ -116,7 +118,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
     Returns:
         (content_text: str, usage_dict: dict)
     """
-    from lib.llm_client import ContentFilterError, InvalidImageError, PermissionError_, PromptTooLongError, RateLimitError, StreamOnlyError, chat
+    from lib.llm import ContentFilterError, InvalidImageError, PermissionError_, PromptTooLongError, RateLimitError, StreamOnlyError, chat
 
     # 2026-05-05 config-surface change (CLAUDE.md §10): per-cycle 429
     # severity downgraded from WARNING → INFO (routine backpressure; the
@@ -125,7 +127,11 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
     # change is discoverable in audit.log without a code-search.
     _audit_severity_downgrade()
     dispatcher = get_dispatcher()
-    exclude = set()           # models to exclude entirely (hard model errors)
+    exclude = set(exclude_models) if exclude_models else set()
+    # Caller-provided model exclusions are permanent for this dispatch call —
+    # remember them so the periodic exclusion-reset during 429 cycling doesn't
+    # silently re-introduce a model the caller explicitly banned.
+    _initial_exclude_models = set(exclude)
     exclude_keys = set()      # keys to exclude entirely
     exclude_pairs = set()     # (key_name, model) pairs to exclude (permission errors)
     last_err = None
@@ -176,12 +182,20 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                     exclude_keys, exclude_pairs)
                 exclude_keys.clear()
                 exclude_pairs.clear()
+                # Note: dispatch_chat does NOT clear `exclude` here — that
+                # set tracks model-level hard errors, which dispatch_chat
+                # accumulates across attempts. Caller-provided
+                # exclude_models is also preserved by virtue of being
+                # added to `exclude` at construction time.
             _last_exclusion_reset = time.monotonic()
 
+        # Caller-provided exclude_models must apply on attempt 1 too
+        # (failure-driven exclusions only kick in after total_attempts>0).
+        _eff_exclude = exclude if (total_attempts > 0 or _initial_exclude_models) else None
         slot = dispatcher.pick_and_reserve(
             capability=capability,
             prefer_model=prefer_model,
-            exclude_models=exclude if total_attempts > 0 else None,
+            exclude_models=_eff_exclude,
             exclude_keys=exclude_keys if total_attempts > 0 else None,
             exclude_pairs=exclude_pairs if total_attempts > 0 else None,
             strict_model=strict_model)
@@ -224,13 +238,24 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                 timeout=_timeout,
                 thinking_format=slot.thinking_format or '',
                 provider_id=slot.provider_id or '',
+                api_protocol=slot.protocol or 'openai',
             )
             latency = (time.time() - t0) * 1000
-            slot.record_success(latency)
+            _out_tokens = 0
+            if isinstance(usage, dict):
+                _out_tokens = (usage.get('completion_tokens')
+                               or usage.get('output_tokens') or 0)
+                try:
+                    _out_tokens = int(_out_tokens)
+                except (ValueError, TypeError) as _e_audit:
+                    logger.debug('[api] dispatch_chat caught %s: %s', type(_e_audit).__name__, _e_audit)
+                    _out_tokens = 0
+            slot.record_success(latency, output_tokens=_out_tokens)
             # Inject dispatch metadata so callers know which slot served this
             if isinstance(usage, dict):
                 usage['_dispatch'] = {
                     'key': slot.key_name, 'model': slot.model,
+                    'key_tail': (slot.api_key or '')[-4:],
                     'provider_id': slot.provider_id,
                     'latency_ms': round(latency),
                     'attempt': hard_attempts + 1,
@@ -288,8 +313,8 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                         '— excluding for today',
                         log_prefix, slot.key_name, _429_count)
                     continue
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug('%s is_key_enabled probe failed: %s', log_prefix, e)
             time.sleep(0.3)
             # ★ Don't increment hard_attempts — 429 retries are free
             continue
@@ -394,7 +419,7 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
     the wrong format, causing HTTP 400 errors. This function detects mismatches
     and converts to the correct format for the new model.
     """
-    from lib.llm_client import is_claude, is_doubao, is_gemini, is_glm, is_longcat, is_minimax, is_qwen
+    from lib.llm import is_claude, is_doubao, is_gemini, is_glm, is_longcat, is_minimax, is_qwen
 
     # Detect current thinking state from the body
     thinking_dict = body.get('thinking')
@@ -426,7 +451,40 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
 
     # Re-apply for the new model using the same logic as build_body
     _tf = thinking_format
-    if _tf == 'enable_thinking' or (not _tf and (is_longcat(new_model) or is_qwen(new_model) or is_gemini(new_model))):
+    # ── Plugin dialect (tofu.providers) first; built-ins fall through ──
+    _plugin_dialect = None
+    if _tf:
+        from lib.llm_dispatch.provider_registry import get_dialect
+        _plugin_dialect = get_dialect(_tf)
+    if _plugin_dialect is not None:
+        _readjust = _plugin_dialect.apply_readjust
+        try:
+            if _readjust is not None:
+                _readjust(body, is_enabled=is_enabled, model=new_model,
+                          effort=effort)
+            else:
+                _plugin_dialect.apply_build(
+                    body, thinking_enabled=is_enabled,
+                    temperature=body.get('temperature'), model=new_model,
+                    effort=effort)
+        except Exception as e:
+            logger.error('[_readjust_thinking_params] plugin dialect %r failed: '
+                         '%s', _tf, e, exc_info=True)
+    elif _tf == 'none':
+        # Engine accepts no thinking flag — leave the body without one.
+        # We already popped enable_thinking / reasoning_split / thinking
+        # above, so this branch is intentionally a no-op.
+        pass
+    elif _tf == 'chat_template_kwargs':
+        # sglang / vLLM dual-mode: thinking is gated through Jinja
+        # template, exposed as ``chat_template_kwargs.enable_thinking``.
+        # Top-level ``enable_thinking`` would be silently ignored.
+        kw = body.get('chat_template_kwargs')
+        if not isinstance(kw, dict):
+            kw = {}
+        kw['enable_thinking'] = bool(is_enabled)
+        body['chat_template_kwargs'] = kw
+    elif _tf == 'enable_thinking' or (not _tf and (is_longcat(new_model) or is_qwen(new_model) or is_gemini(new_model))):
         body['enable_thinking'] = is_enabled
     elif _tf == 'thinking_type' or (not _tf and is_doubao(new_model)):
         body['thinking'] = {'type': 'enabled' if is_enabled else 'disabled'}
@@ -446,7 +504,7 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
             #   • 4.7+: adaptive + display='summarized' (required to see
             #           reasoning trace), and NO temperature (ignored today,
             #           may be rejected in a future revision).
-            from lib.llm_client import is_claude_opus_47
+            from lib.llm import is_claude_opus_47
             body['thinking'] = {'type': 'adaptive'}
             if is_claude_opus_47(new_model):
                 body['thinking']['display'] = 'summarized'
@@ -462,10 +520,22 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
     # ── Claude Opus 4.7+ rejects sampling params (HTTP 400) ──
     # Strip unconditionally after re-setting, since non-4.7 branches above
     # may have assigned temperature=1.0 before a potential model swap.
-    from lib.llm_client import is_claude_opus_47
+    from lib.llm import is_claude_opus_47
     if is_claude_opus_47(new_model):
         for _k in ('temperature', 'top_p', 'top_k'):
             body.pop(_k, None)
+
+    # Observability: which dialect actually landed on the wire? Debug
+    # level so production logs stay quiet; flip the logger when
+    # diagnosing dialect mismatches across slot swaps.
+    logger.debug(
+        '_readjust_thinking_params: model=%s thinking_format=%r '
+        'is_enabled=%s has_chat_template_kwargs=%s has_enable_thinking=%s '
+        'has_thinking=%s', new_model, thinking_format or '(auto)',
+        is_enabled,
+        'chat_template_kwargs' in body, 'enable_thinking' in body,
+        'thinking' in body,
+    )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -478,7 +548,8 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     thinking_enabled=False, preset='low', effort=None,
                     capability='text', prefer_model=None, tools=None,
                     max_retries=3, log_prefix='', strict_model=False,
-                    on_retry=None):
+                    on_retry=None, avoid_pairs=None,
+                    exclude_models=None):
     """Smart dispatch for streaming requests.
 
     Accepts either:
@@ -507,10 +578,21 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
       model's slots (different keys / alias group members).  Use this for
       user-facing requests where the frontend explicitly chose a model.
 
+    avoid_pairs:
+      Optional set of ``(key_name, model)`` tuples the caller wants the
+      dispatcher to avoid for THIS call (in addition to whatever
+      ``exclude_pairs`` accumulates internally).  Used by zero-byte retry
+      logic in ``analyse_stream_result`` → ``stream_llm_response`` to
+      force slot rotation away from a poisoned upstream pool, mirroring
+      the ``gateway-5xx-treated-as-429`` pattern.  When the dispatcher
+      runs out of non-avoided slots it falls back to the avoided pair
+      rather than failing — better to retry the bad slot than to fail
+      the whole task.
+
     Returns:
         (msg: str, finish_reason: str, usage: dict)
     """
-    from lib.llm_client import (
+    from lib.llm import (
         AbortedError,
         ContentFilterError,
         InvalidImageError,
@@ -522,9 +604,20 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
     )
 
     dispatcher = get_dispatcher()
-    exclude = set()           # models to exclude entirely (hard model errors)
+    exclude = set(exclude_models) if exclude_models else set()
+    # Caller-provided model exclusions are permanent for this dispatch call —
+    # remember them so the periodic exclusion-reset during 429 cycling doesn't
+    # silently re-introduce a model the caller explicitly banned.
+    _initial_exclude_models = set(exclude)
     exclude_keys = set()      # keys to exclude entirely
     exclude_pairs = set()     # (key_name, model) pairs to exclude (permission errors)
+    # Seed the caller-provided avoid set so the very first slot pick
+    # already steers around it.  We track these separately so we know
+    # to re-introduce them as a last resort if every other slot is
+    # cooled down or excluded.
+    _initial_avoid = set(avoid_pairs) if avoid_pairs else set()
+    if _initial_avoid:
+        exclude_pairs |= _initial_avoid
     last_err = None
 
     # Detect if it's a pre-built body or raw messages
@@ -542,7 +635,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
     while hard_attempts < max_retries:
         # Abort check — let the user cancel during 429 cycling
         if abort_check and abort_check():
-            from lib.llm_client import AbortedError as _AE
+            from lib.llm import AbortedError as _AE
             raise _AE('Aborted during dispatch retry')
 
         # ★ Safety cap on 429 cycling — if we've been rate-limited for
@@ -578,21 +671,40 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     'exclude_models=%s exclude_keys=%s exclude_pairs=%s',
                     log_prefix, _EXCLUSION_RESET_INTERVAL, _429_count,
                     exclude, exclude_keys, exclude_pairs)
+                # Preserve caller-provided exclude_models across the reset.
                 exclude.clear()
+                exclude |= _initial_exclude_models
                 exclude_keys.clear()
                 exclude_pairs.clear()
                 # Don't reset hard_attempts — we still want to count
                 # genuinely broken slots toward the retry limit
             _last_exclusion_reset = time.monotonic()
 
+        # Caller-provided exclude_models must apply on attempt 1 too
+        # (failure-driven exclusions only kick in after total_attempts>0).
+        _eff_exclude = exclude if (total_attempts > 0 or _initial_exclude_models) else None
         slot = dispatcher.pick_and_reserve(
             capability=capability,
             prefer_model=prefer_model,
-            exclude_models=exclude if total_attempts > 0 else None,
+            exclude_models=_eff_exclude,
             exclude_keys=exclude_keys if total_attempts > 0 else None,
             exclude_pairs=exclude_pairs if total_attempts > 0 else None,
             strict_model=strict_model)
         if slot is None:
+            # ── Last-resort: drop the caller-provided avoid set ──
+            # Zero-byte force-rotate uses ``avoid_pairs`` to steer away
+            # from a freshly-poisoned slot. If the rest of the pool is
+            # already exhausted we'd rather retry the bad slot than fail
+            # outright — failure here means the task aborts, while a
+            # retry on the original slot might still succeed.
+            if _initial_avoid and _initial_avoid <= exclude_pairs:
+                exclude_pairs -= _initial_avoid
+                logger.info(
+                    '%s dispatch_stream: relaxing avoid_pairs %s — every '
+                    'other slot is in cooldown/excluded',
+                    log_prefix, _initial_avoid)
+                _initial_avoid = set()  # only relax once
+                continue
             # All slots in cooldown / excluded — wait briefly and retry
             if _429_count > 0:
                 time.sleep(0.3)
@@ -629,7 +741,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             #   (e.g. Claude 128000) but dispatch swapped to a lower-limit
             #   model (e.g. gpt-4.1-mini 32768).
             if 'max_tokens' in body:
-                from lib.llm_client import _clamp_max_tokens
+                from lib.llm import _clamp_max_tokens
                 body['max_tokens'] = _clamp_max_tokens(
                     slot.model, body['max_tokens'])
             # ★ Re-adjust thinking parameters when model family changes.
@@ -640,11 +752,17 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             # ★ Claude 4.6 prefill guard: if dispatch swapped the model
             #   to Claude on a pre-built body from a non-Claude model,
             #   ensure messages don't end with an assistant message.
-            from lib.llm_client import _downscale_oversized_images, _strip_trailing_assistant_for_claude, is_claude
+            from lib.llm import _downscale_oversized_images, _strip_trailing_assistant_for_claude, is_claude
             if is_claude(slot.model) and body.get('messages'):
                 _strip_trailing_assistant_for_claude(body['messages'], slot.model)
                 # ★ Downscale oversized images for Claude (pre-built body path)
                 _downscale_oversized_images(body['messages'], slot.model)
+            # ★ Gemini cross-model fallback: inject dummy thought_signature
+            #   on tool_calls produced by non-Gemini models (pre-built body path)
+            from lib.llm.body import _inject_gemini_thought_signatures
+            from lib.model_info import is_gemini as _is_gemini
+            if _is_gemini(slot.model) and body.get('messages'):
+                _inject_gemini_thought_signatures(body['messages'], slot.model)
         else:
             body = build_body(
                 slot.model, body_or_messages,
@@ -659,12 +777,12 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             )
 
         # Wrap on_content to capture TTFT
+        ttft_value = [None]  # mutable cell so closure can write
         def _on_content_wrapper(text):
             nonlocal ttft_recorded
             if not ttft_recorded:
                 ttft = (time.time() - t0) * 1000
-                slot.ttft_ema = (slot.ema_alpha * ttft +
-                                 (1 - slot.ema_alpha) * slot.ttft_ema)
+                ttft_value[0] = ttft
                 ttft_recorded = True
             if on_content:
                 on_content(text)
@@ -679,13 +797,25 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 on_tool_call_ready=on_tool_call_ready,
                 abort_check=abort_check,
                 log_prefix=tag,
+                api_protocol=slot.protocol or 'openai',
             )
             latency = (time.time() - t0) * 1000
-            slot.record_success(latency)
+            _out_tokens = 0
+            if isinstance(usage, dict):
+                _out_tokens = (usage.get('completion_tokens')
+                               or usage.get('output_tokens') or 0)
+                try:
+                    _out_tokens = int(_out_tokens)
+                except (ValueError, TypeError) as _e_audit:
+                    logger.debug('[api] dispatch_stream caught %s: %s', type(_e_audit).__name__, _e_audit)
+                    _out_tokens = 0
+            slot.record_success(latency, ttft_ms=ttft_value[0],
+                                output_tokens=_out_tokens)
             # Inject dispatch metadata so callers know which slot served this
             if isinstance(usage, dict):
                 usage['_dispatch'] = {
                     'key': slot.key_name, 'model': slot.model,
+                    'key_tail': (slot.api_key or '')[-4:],
                     'provider_id': slot.provider_id,
                     'latency_ms': round(latency),
                     'attempt': hard_attempts + 1,
@@ -765,8 +895,8 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                                  reason='Key auto-exhausted (consecutive 429s)',
                                  status_code=429)
                     continue
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug('%s is_key_enabled probe failed (stream): %s', log_prefix, e)
             if on_retry:
                 on_retry(attempt=_429_count, reason='Rate limited (429)', status_code=429)
             time.sleep(0.3)
@@ -849,8 +979,27 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 logger.debug('%s Stream error: %s — trying next slot', tag, str(e)[:200], exc_info=True)
             hard_attempts += 1
 
+    # All retries exhausted or no slot available — raise the last error
     raise last_err or RuntimeError(
         'All %d dispatch_stream attempts failed for capability=%s' % (max_retries, capability))
+
+
+# ═══════════════════════════════════════════════════════════
+#  Public API — async_dispatch_stream (async wrapper)
+# ═══════════════════════════════════════════════════════════
+
+async def async_dispatch_stream(body_or_messages, **kwargs):
+    """Async version of dispatch_stream.
+
+    Runs the dispatch loop in a thread pool so the event loop isn't blocked
+    during the streaming HTTP call. Same signature and semantics as
+    dispatch_stream — all kwargs are forwarded directly.
+
+    This is the preferred entry point for async callers (orchestrator when
+    converted to native async, or any route handler that is async def).
+    """
+    import asyncio
+    return await asyncio.to_thread(dispatch_stream, body_or_messages, **kwargs)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -876,7 +1025,7 @@ def dispatch_fastest(messages, *, max_tokens=4096, temperature=0,
     """
     from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
-    from lib.llm_client import chat
+    from lib.llm import chat
 
     dispatcher = get_dispatcher()
     slots = dispatcher.pick_top_n(n=n_race, capability=capability,
@@ -917,9 +1066,21 @@ def dispatch_fastest(messages, *, max_tokens=4096, temperature=0,
                 extra=_extra or None,
                 log_prefix=tag,
                 max_retries=0,
+                thinking_format=slot.thinking_format or '',
+                provider_id=slot.provider_id or '',
+                api_protocol=slot.protocol or 'openai',
             )
             latency = (time.time() - t0) * 1000
-            slot.record_success(latency)
+            _out_tokens = 0
+            if isinstance(usage, dict):
+                _out_tokens = (usage.get('completion_tokens')
+                               or usage.get('output_tokens') or 0)
+                try:
+                    _out_tokens = int(_out_tokens)
+                except (ValueError, TypeError) as _e_audit:
+                    logger.debug('[api] _race_worker caught %s: %s', type(_e_audit).__name__, _e_audit)
+                    _out_tokens = 0
+            slot.record_success(latency, output_tokens=_out_tokens)
             return (content, usage, slot)
         except Exception as e:
             latency = (time.time() - t0) * 1000
@@ -950,6 +1111,8 @@ def dispatch_fastest(messages, *, max_tokens=4096, temperature=0,
                             usage['_dispatch'] = {
                                 'key': winner.key_name,
                                 'model': winner.model,
+                                'key_tail': (winner.api_key or '')[-4:],
+                                'provider_id': winner.provider_id,
                                 'latency_ms': round(winner.latency_ema),
                                 'mode': 'race',
                             }
@@ -1054,14 +1217,15 @@ def _group_by_capability(slots_info):
 def smart_chat(messages, *, model=None, max_tokens=4096, temperature=0,
                thinking_enabled=False, preset='low', effort=None,
                capability='text', tools=None, extra=None,
-               log_prefix='', max_retries=3, timeout=None, **_kw):
-    """Drop-in replacement for ``llm_client.chat()`` with auto dispatch.
+               log_prefix='', max_retries=3, timeout=None,
+               exclude_models=None, **_kw):
+    """Drop-in replacement for ``lib.llm.chat()`` with auto dispatch.
 
     Uses the fastest available (key, model) slot across ALL keys.
     Falls back to direct ``chat()`` if dispatch fails entirely.
 
     Signature is intentionally close to ``chat()`` so call sites only
-    need to change ``from lib.llm_client import chat`` →
+    need to change ``from lib.llm import chat`` →
     ``from lib.llm_dispatch import smart_chat as chat``.
 
     Extra kwargs (api_key, etc.) are silently ignored so callers that
@@ -1075,12 +1239,13 @@ def smart_chat(messages, *, model=None, max_tokens=4096, temperature=0,
             prefer_model=model, tools=tools, extra=extra,
             max_retries=max_retries, log_prefix=log_prefix,
             timeout=timeout,
+            exclude_models=exclude_models,
         )
     except Exception as e:
         # Ultimate fallback — direct call with default key
         logger.warning('%s[Dispatch] All slots exhausted (%s), '
                     'falling back to direct chat()', log_prefix, e, exc_info=True)
-        from lib.llm_client import chat
+        from lib.llm import chat
         _fb_timeout = timeout if timeout is not None else 120
         # ★ For 'cheap' tasks (translate etc.), fall back to a cheap model,
         #   NOT the default LLM_MODEL (which is Opus — way too slow/expensive).
@@ -1094,7 +1259,7 @@ def smart_chat(messages, *, model=None, max_tokens=4096, temperature=0,
             from lib.log import audit_log as _audit
             _audit('model_switch',
                    old=(model or '(dispatch-auto)'),
-                   new=(_fb_model or '(llm_client default)'),
+                   new=(_fb_model or '(lib.llm default)'),
                    reason='dispatch_exhausted',
                    capability=capability,
                    error=str(e)[:200])

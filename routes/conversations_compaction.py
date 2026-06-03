@@ -11,13 +11,14 @@ from flask import jsonify
 
 from lib.database import DOMAIN_CHAT, get_db
 from lib.log import get_logger
+from lib.api_response import api_not_found
 from routes.common import _db_safe
 from routes.conversations import conversations_bp
 
 logger = get_logger(__name__)
 
 
-@conversations_bp.route('/api/conversations/<conv_id>/compactions', methods=['GET'])
+@conversations_bp.route('/api/v1/conversations/<conv_id>/compactions', methods=['GET'])
 @_db_safe
 def list_compactions(conv_id):
     """List compaction archives for a conversation (metadata only).
@@ -85,7 +86,7 @@ def list_compactions(conv_id):
     return jsonify({'compactions': out, 'count': len(out)})
 
 
-@conversations_bp.route('/api/conversations/<conv_id>/compactions/<int:archive_id>',
+@conversations_bp.route('/api/v1/conversations/<conv_id>/compactions/<int:archive_id>',
                         methods=['GET'])
 @_db_safe
 def get_compaction(conv_id, archive_id):
@@ -118,7 +119,7 @@ def get_compaction(conv_id, archive_id):
             logger.debug('[Compaction] Legacy fetch fallback failed: %s', e)
             r = None
     if not r:
-        return jsonify({'error': 'Not found'}), 404
+        return api_not_found('Not found')
 
     try:
         messages = json.loads(r['messages_json']) if r['messages_json'] else []
@@ -130,7 +131,8 @@ def get_compaction(conv_id, archive_id):
     def _maybe(col, default=''):
         try:
             return r[col]
-        except (IndexError, KeyError):
+        except (IndexError, KeyError) as _e_audit:
+            logger.debug('[conversations_compaction] _maybe caught %s: %s', type(_e_audit).__name__, _e_audit)
             return default
 
     archive_meta = {

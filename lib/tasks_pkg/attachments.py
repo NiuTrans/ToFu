@@ -5,7 +5,7 @@ Inspired by Claude Code's ``attachments.ts`` (3997 lines), which computes
 per-turn injections including file attachments, delta announcements, memory
 surfacing, TODO reminders, and memory discoveries.
 
-ChatUI adaptation: because we inject all context into the system message (not
+Tofu adaptation: because we inject all context into the system message (not
 via separate `user` messages like Claude Code), our attachments are appended
 to the last user message as <system-reminder> blocks.
 
@@ -13,15 +13,14 @@ Why we CAN'T replicate Claude Code's full attachment system:
   - Claude Code uses 40+ attachment types including hook outputs, teammate
     mailbox messages, diagnostic injections, and speculation overlay context.
     These require the Hook system, Coordinator mode, and Speculation system
-    which are not architecturally present in ChatUI.
+    which are not architecturally present in Tofu.
   - Claude Code's per-turn relevant memory surfacing uses hierarchical
-    CLAUDE.md files with @include directives.  ChatUI uses flat project
+    CLAUDE.md files with @include directives.  Tofu uses flat project
     context and memory.
 
 What we CAN implement:
   1. Recently modified files reminder
   2. Periodic TODO/next-step reminders
-  3. Tool announcement deltas (new tools discovered via tool_search)
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ logger = get_logger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _attachment_state: dict[str, dict[str, Any]] = {}
-"""Per-conv_id state tracking: last_write_round, last_reminder_round, discovered_tools"""
+"""Per-conv_id state tracking: last_write_round, last_reminder_round."""
 
 
 def _get_state(conv_id: str) -> dict[str, Any]:
@@ -47,7 +46,6 @@ def _get_state(conv_id: str) -> dict[str, Any]:
         _attachment_state[conv_id] = {
             'last_write_round': -1,
             'last_reminder_round': -1,
-            'discovered_tools': set(),
             'rounds_since_write': 0,
         }
     return _attachment_state[conv_id]
@@ -74,7 +72,7 @@ def _get_modified_files_attachment(messages: list, project_path: str,
     for msg in messages[-10:]:  # last 10 messages
         for tc in msg.get('tool_calls', []):
             fn_name = tc.get('function', {}).get('name', '')
-            if fn_name in ('write_file', 'apply_diff', 'insert_content'):
+            if fn_name in ('write_file', 'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents'):
                 has_write_in_recent = True
                 state['last_write_round'] = round_num
                 state['rounds_since_write'] = 0
@@ -113,48 +111,6 @@ def _get_modified_files_attachment(messages: list, project_path: str,
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Attachment 2: Tool Discovery Delta
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _get_tool_discovery_delta(task: dict, conv_id: str) -> str | None:
-    """Announce newly discovered tools from tool_search.
-
-    Inspired by Claude Code's getDeferredToolsDelta() — only announces
-    changes since the last announcement.
-    """
-    state = _get_state(conv_id)
-    current_discovered = set()
-
-    # Scan task for dynamically discovered tools
-    discovered_in_task = task.get('_discovered_tool_names', set())
-    if isinstance(discovered_in_task, (set, frozenset)):
-        current_discovered = set(discovered_in_task)
-    elif isinstance(discovered_in_task, list):
-        current_discovered = set(discovered_in_task)
-
-    if not current_discovered:
-        return None
-
-    previously_announced = state.get('discovered_tools', set())
-    new_tools = current_discovered - previously_announced
-
-    if not new_tools:
-        return None
-
-    state['discovered_tools'] = current_discovered
-
-    tool_list = ', '.join(sorted(new_tools))
-    return (
-        '<system-reminder>\n'
-        f'## Newly Available Tools\n'
-        f'The following tools have been discovered and are now available: '
-        f'{tool_list}\n'
-        f'You can call them directly.\n'
-        '</system-reminder>'
-    )
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 #  Main entry point
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -182,12 +138,6 @@ def compute_turn_attachments(
         if files_reminder:
             attachments.append(files_reminder)
 
-    # 3. Tool discovery delta
-    if task:
-        tool_delta = _get_tool_discovery_delta(task, conv_id)
-        if tool_delta:
-            attachments.append(tool_delta)
-
     if attachments:
         logger.debug('[Attachments] conv=%s round=%d injecting %d attachment(s)',
                      conv_id[:8] if conv_id else '?', round_num, len(attachments))
@@ -195,16 +145,27 @@ def compute_turn_attachments(
     return attachments
 
 
-def inject_attachments(messages: list, attachments: list[str]):
+def inject_attachments(messages: list, attachments: list[str],
+                        conv_id: str | None = None):
     """Inject computed attachments into the messages list.
 
     Appends attachments to the last user message as additional text blocks.
     If no user message exists, creates one.
+
+    Args:
+        messages:    Message list mutated in place.
+        attachments: Pre-computed attachment blocks from compute_turn_attachments.
+        conv_id:     If provided, notify cache_tracking that we legitimately
+            mutated a message inside the cache prefix. Without this, the
+            next detect_cache_break() call false-positives as
+            'PREFIX MUTATION DETECTED' (the original user message lives
+            inside messages[0:N-2] once any tool round has been emitted).
     """
     if not attachments:
         return
 
     combined = '\n\n'.join(attachments)
+    mutated_existing = False
 
     # Find last user message
     for i in range(len(messages) - 1, -1, -1):
@@ -217,8 +178,16 @@ def inject_attachments(messages: list, attachments: list[str]):
                     'type': 'text',
                     'text': '\n\n' + combined,
                 })
-            return
+            mutated_existing = True
+            break
+    else:
+        # No user message found — append as a new one
+        messages.append({'role': 'user', 'content': combined})
 
-    # No user message found — append as a new one
-    messages.append({'role': 'user', 'content': combined})
+    if mutated_existing and conv_id:
+        try:
+            from lib.tasks_pkg.cache_tracking import notify_compaction
+            notify_compaction(conv_id)
+        except Exception as e:
+            logger.debug('[Attachments] notify_compaction unavailable: %s', e)
 

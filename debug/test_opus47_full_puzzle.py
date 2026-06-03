@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ['LLM_DEBUG_RAW_SSE'] = 'opus'  # dump raw SSE to logs/raw_sse.log
 
-from lib.llm_client import build_body, stream_chat
+from lib.llm import build_body, stream_chat
 
 MODEL = 'aws.claude-opus-4.7'
 PROMPT = (

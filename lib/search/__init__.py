@@ -20,5 +20,7 @@ build_facade(__all__, orchestrator, _format_mod)
 
 # ── Optional sub-modules (degrade gracefully) ──
 _import('dedup', 'content deduplication')
+_import('deepen', 'one-hop link-following depth')
 _import('rerank', 'BM25 reranking')
 _import('browser_fallback', 'browser search fallback')
+_import('vertical', 'vertical domain search')

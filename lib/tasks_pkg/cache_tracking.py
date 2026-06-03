@@ -155,7 +155,8 @@ def _hash_tools_per_tool(tools: list | None) -> dict[str, str]:
         name = fn.get('name', 'unknown')
         try:
             h = _md5(json.dumps(tool, sort_keys=True, ensure_ascii=False))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as _e_audit:
+            logger.debug('[cache_tracking] _hash_tools_per_tool caught %s: %s', type(_e_audit).__name__, _e_audit)
             h = _md5(str(tool))
         result[name] = h
     return result

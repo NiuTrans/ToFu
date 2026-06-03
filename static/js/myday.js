@@ -51,7 +51,9 @@ function _getStatusLabels() {
     incomplete: t('myday.statusIncomplete'),
   };
 }
-const _STATUS_CYCLE = ['in_progress', 'done', 'blocked']; // toggle order
+/* The status cycle order (in_progress → done → blocked → …) is owned by the
+ * backend (routes/api_v1/daily_report.py::_STATUS_CYCLE). We POST action:'cycle'
+ * and render whatever status the server returns — no client-side next-status math. */
 
 /* ═══════ Date helpers ═══════ */
 function _mydayDateStr(y, m, d) {
@@ -177,12 +179,11 @@ async function _mydayFetchMonthOverview(year, month) {
     return; // skip — data is fresh enough
   }
   try {
-    const resp = await fetch(apiUrl(`/api/daily-report/calendar/${year}/${month + 1}`));
-    if (!resp.ok) {
-      console.warn('[MyDay] Calendar overview fetch failed: HTTP', resp.status);
+    const data = await Api.daily.calendar(year, month + 1);
+    if (!data) {
+      console.warn('[MyDay] Calendar overview fetch failed');
       return;
     }
-    const data = await resp.json();
     if (!data.days) return;
     let changed = false;
     for (const [dateStr, info] of Object.entries(data.days)) {
@@ -255,9 +256,8 @@ async function _mydaySelectDay(day) {
   // Check server for existing report or running job
   _mydayShowSkeleton();
   try {
-    const resp = await fetch(apiUrl(`/api/daily-report/status/${dateStr}`));
-    if (resp.ok) {
-      const data = await resp.json();
+    const data = await Api.daily.status(dateStr);
+    if (data) {
       if (data.status === 'done' && data.report) {
         data.report._full = true;
         _myday.cache[dateStr] = data.report;
@@ -383,9 +383,8 @@ function _mydayStartPolling(dateStr) {
 
   const pollFn = async () => {
     try {
-      const resp = await fetch(apiUrl(`/api/daily-report/status/${dateStr}`));
-      if (!resp.ok) return;
-      const data = await resp.json();
+      const data = await Api.daily.status(dateStr);
+      if (!data) return;
 
       if (data.status === 'done') {
         _mydayStopPolling(dateStr);
@@ -469,9 +468,8 @@ async function _mydayRenderWaiting(dateStr) {
   // Fetch conversation count from DB (authoritative source)
   let convCount = 0;
   try {
-    const resp = await fetch(apiUrl(`/api/daily-report/conv-count/${dateStr}`));
-    if (resp.ok) {
-      const data = await resp.json();
+    const data = await Api.daily.convCount(dateStr);
+    if (data) {
       convCount = data.count || 0;
     }
   } catch (e) { console.warn('[MyDay] conv-count fetch failed:', e); }
@@ -523,12 +521,8 @@ async function _mydayTriggerGenerate() {
   _mydayShowProgressUI(dateStr, { stage: 'starting' });
 
   try {
-    const resp = await fetch(apiUrl('/api/daily-report/generate'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date: dateStr, force: true }),
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const resp = await Api.daily.generate(dateStr, true);
+    if (!resp || !resp.ok) throw new Error(`HTTP ${resp ? resp.status : 'no response'}`);
     const data = await resp.json();
 
     if (data.status === 'done' && data.report) {
@@ -565,12 +559,8 @@ async function _mydayTriggerGenerateForDate(dateStr, force) {
   if (refreshBtn) refreshBtn.classList.add('spinning');
 
   try {
-    const resp = await fetch(apiUrl('/api/daily-report/generate'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date: dateStr, force: !!force }),
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const resp = await Api.daily.generate(dateStr, !!force);
+    if (!resp || !resp.ok) throw new Error(`HTTP ${resp ? resp.status : 'no response'}`);
     const data = await resp.json();
 
     if (data.status === 'done' && data.report) {
@@ -822,13 +812,9 @@ async function _mydayToggleInheritedTodo(todoId, originDate) {
   _mydayRenderTasks(cached);
 
   try {
-    const resp = await fetch(apiUrl('/api/daily-report/inherited-todo-toggle'), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ origin_date: originDate, todo_id: todoId, done: newDone }),
-    });
-    if (!resp.ok) {
-      console.warn('[MyDay] Inherited todo toggle failed:', resp.status);
+    const resp = await Api.daily.inheritedTodoToggle({ origin_date: originDate, todo_id: todoId, done: newDone });
+    if (!resp || !resp.ok) {
+      console.warn('[MyDay] Inherited todo toggle failed:', resp && resp.status);
       item.done = !newDone;
       _mydayRenderTasks(cached);
     }
@@ -849,31 +835,28 @@ async function _mydayToggleStreamStatus(streamId) {
   const stream = cached.streams.find(s => s.id === streamId);
   if (!stream) return;
   const oldStatus = stream.status;
-  const curIdx = _STATUS_CYCLE.indexOf(oldStatus);
-  const newStatus = _STATUS_CYCLE[(curIdx + 1) % _STATUS_CYCLE.length];
-
-  // Optimistic update
-  stream.status = newStatus;
-  if (newStatus === 'done') stream.remaining = null;
+  const oldRemaining = stream.remaining;
   stream._manual = true;
-  _mydayRenderTasks(cached);
 
   try {
-    const resp = await fetch(apiUrl('/api/daily-report/task-status'), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date: dateStr, stream_id: streamId, status: newStatus }),
-    });
-    if (!resp.ok) {
-      console.warn('[MyDay] Stream status toggle failed:', resp.status);
+    // Server owns the cycle order and returns the resolved status.
+    const resp = await Api.daily.taskStatus({ date: dateStr, stream_id: streamId, action: 'cycle' });
+    let body = null;
+    if (resp && resp.ok) { try { body = await resp.json(); } catch (_) { body = null; } }
+    if (body && body.ok && body.status) {
+      stream.status = body.status;
+      if (body.status === 'done') stream.remaining = null;
+    } else {
+      console.warn('[MyDay] Stream status toggle failed:', resp && resp.status);
       stream.status = oldStatus;
-      _mydayRenderTasks(cached);
+      stream.remaining = oldRemaining;
     }
   } catch (e) {
     console.warn('[MyDay] Stream status toggle error:', e);
     stream.status = oldStatus;
-    _mydayRenderTasks(cached);
+    stream.remaining = oldRemaining;
   }
+  _mydayRenderTasks(cached);
   _mydayRenderCalendar();
 }
 
@@ -893,13 +876,9 @@ async function _mydayToggleTodo(todoId) {
   _mydayRenderTasks(cached);
 
   try {
-    const resp = await fetch(apiUrl('/api/daily-report/todo-toggle'), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date: dateStr, todo_id: todoId, done: newDone }),
-    });
-    if (!resp.ok) {
-      console.warn('[MyDay] Todo toggle failed:', resp.status);
+    const resp = await Api.daily.todoToggle({ date: dateStr, todo_id: todoId, done: newDone });
+    if (!resp || !resp.ok) {
+      console.warn('[MyDay] Todo toggle failed:', resp && resp.status);
       item.done = !newDone;
       _mydayRenderTasks(cached);
     }
@@ -925,13 +904,9 @@ async function _mydayDeleteTodo(todoId) {
   _mydayRenderTasks(cached);
 
   try {
-    const resp = await fetch(apiUrl('/api/daily-report/task'), {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date: dateStr, task_id: todoId }),
-    });
-    if (!resp.ok) {
-      console.warn('[MyDay] Delete todo failed:', resp.status);
+    const resp = await Api.daily.taskDelete({ date: dateStr, task_id: todoId });
+    if (!resp || !resp.ok) {
+      console.warn('[MyDay] Delete todo failed:', resp && resp.status);
       cached.tomorrow.splice(idx, 0, removed);
       _mydayRenderTasks(cached);
     }
@@ -957,13 +932,9 @@ async function _mydayDeleteInheritedTodo(todoId, originDate) {
   _mydayRenderTasks(cached);
 
   try {
-    const resp = await fetch(apiUrl('/api/daily-report/inherited-todo'), {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ origin_date: originDate, todo_id: todoId }),
-    });
-    if (!resp.ok) {
-      console.warn('[MyDay] Delete inherited todo failed:', resp.status);
+    const resp = await Api.daily.inheritedTodoDelete({ origin_date: originDate, todo_id: todoId });
+    if (!resp || !resp.ok) {
+      console.warn('[MyDay] Delete inherited todo failed:', resp && resp.status);
       cached.today_todos.splice(idx, 0, removed);
       _mydayRenderTasks(cached);
     }
@@ -986,12 +957,8 @@ async function _mydayAddTodo() {
   if (!dateStr) return;
 
   try {
-    const resp = await fetch(apiUrl('/api/daily-report/task'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date: dateStr, task: text, status: 'incomplete' }),
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const resp = await Api.daily.taskCreate({ date: dateStr, task: text });
+    if (!resp || !resp.ok) throw new Error(`HTTP ${resp ? resp.status : 'no response'}`);
     const data = await resp.json();
     if (data.report) {
       data.report._full = true;
@@ -1010,12 +977,8 @@ async function _mydayDeleteTask(taskId) {
   if (!dateStr || !taskId) return;
 
   try {
-    const resp = await fetch(apiUrl('/api/daily-report/task'), {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date: dateStr, task_id: taskId }),
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const resp = await Api.daily.taskDelete({ date: dateStr, task_id: taskId });
+    if (!resp || !resp.ok) throw new Error(`HTTP ${resp ? resp.status : 'no response'}`);
     const data = await resp.json();
     if (data.report) {
       data.report._full = true;
@@ -1054,13 +1017,9 @@ async function _mydayToggleStatus(convId) {
   else body.conv_id = convId;
 
   try {
-    const resp = await fetch(apiUrl('/api/daily-report/task-status'), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) {
-      console.warn('[MyDay] Status toggle failed:', resp.status);
+    const resp = await Api.daily.taskStatus(body);
+    if (!resp || !resp.ok) {
+      console.warn('[MyDay] Status toggle failed:', resp && resp.status);
       task.status = oldStatus;
       _mydayRenderTasks(cached);
     }
@@ -1254,11 +1213,8 @@ function _mydayScheduleReminder() {
       // Check if there are conversations today (quick API check)
       let convCount = 0;
       try {
-        const resp = await fetch(apiUrl(`/api/daily-report/conv-count/${todayStr}`));
-        if (resp.ok) {
-          const data = await resp.json();
-          convCount = data.count || 0;
-        }
+        const data = await Api.daily.convCount(todayStr);
+        if (data) convCount = data.count || 0;
       } catch (e) { /* ignore */ }
 
       if (convCount < 3) return; // not enough activity to warrant a reminder

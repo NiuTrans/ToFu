@@ -24,6 +24,7 @@ _import('images', 'image extraction')
 _import('vlm', 'VLM-based parsing')
 _import('math', 'math formula detection')
 _import('postprocess', 'text postprocessing')
+_import('pool', 'process-pool PDF parsing offload')
 # docling is OPT-IN (heavy dep ~2 GB). The submodule import itself is
 # light — it only checks `HAS_DOCLING` and lazy-loads on first use.
 _import('docling', 'Docling layout-aware parsing (opt-in)')

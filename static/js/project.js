@@ -10,14 +10,9 @@ let _pendingWriteApprovals = new Map();
 
 async function resolveWriteApproval(approvalId, approved) {
   try {
-    const resp = await fetch(apiUrl("/api/project/write_approval"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ approvalId, approved }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-      debugLog("Approval failed: " + (data.error || "Unknown"), "warn");
+    const data = await Api.project.writeApproval(approvalId, approved);
+    if (!data || data.error) {
+      debugLog("Approval failed: " + ((data && data.error) || "Unknown"), "warn");
       return;
     }
     debugLog(
@@ -36,16 +31,11 @@ async function resolveWriteApproval(approvalId, approved) {
 async function submitStdinInput(stdinId, inputText) {
   if (!stdinId) return;
   try {
-    const resp = await fetch(apiUrl("/api/chat/stdin_response"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stdinId, input: inputText }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-      debugLog("Stdin submit failed: " + (data.error || "Unknown"), "warn");
+    const data = await Api.chat.stdinResponse(stdinId, inputText);
+    if (!data || data.error) {
+      debugLog("Stdin submit failed: " + ((data && data.error) || "Unknown"), "warn");
       if (typeof showToast === 'function')
-        showToast("", "Stdin Error", data.error || "Failed to send input", 5000);
+        showToast("", "Stdin Error", (data && data.error) || "Failed to send input", 5000);
       return;
     }
     debugLog(`Stdin input sent: ${stdinId}`, "success");
@@ -60,14 +50,9 @@ async function submitStdinEof(stdinId) {
   // Send EOF flag to signal stdin close
   if (!stdinId) return;
   try {
-    const resp = await fetch(apiUrl("/api/chat/stdin_response"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stdinId, input: "", eof: true }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-      debugLog("Stdin EOF failed: " + (data.error || "Unknown"), "warn");
+    const data = await Api.chat.stdinResponse(stdinId, "", true);
+    if (!data || data.error) {
+      debugLog("Stdin EOF failed: " + ((data && data.error) || "Unknown"), "warn");
       return;
     }
     debugLog(`Stdin EOF sent: ${stdinId}`, "success");
@@ -82,14 +67,9 @@ async function submitStdinEof(stdinId) {
 
 async function _submitHumanGuidanceResponse(guidanceId, responseText) {
   try {
-    const resp = await fetch(apiUrl("/api/chat/human_response"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ guidanceId, response: responseText }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-      debugLog("Human guidance submit failed: " + (data.error || "Unknown"), "warn");
+    const data = await Api.chat.humanResponse(guidanceId, responseText);
+    if (!data || data.error) {
+      debugLog("Human guidance submit failed: " + ((data && data.error) || "Unknown"), "warn");
       if (typeof showToast === 'function')
         showToast("Failed to submit response", "error");
       return false;
@@ -295,15 +275,11 @@ async function _restoreConvProject(conv) {
   _clearProjectStateLocal();
   try {
     // ★ Use multi-path API when there are extra roots, single-path otherwise
-    const endpoint = hasExtras ? "/api/project/set_paths" : "/api/project/set";
-    const payload = hasExtras ? { paths: allPaths } : { path: savedPath };
-    const resp = await fetch(apiUrl(endpoint), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const data = await resp.json();
-    if (resp.ok) {
+    const resp = hasExtras
+      ? await Api.project.setPaths(allPaths)
+      : await Api.project.setPath(savedPath);
+    const data = resp ? await resp.json().catch(() => ({})) : {};
+    if (resp && resp.ok) {
       _applyProjectData(data);
       // ★ BUG FIX: Update recent projects on restore so new projects appear
       //   in the recent list and last_used stays current.
@@ -398,9 +374,9 @@ function _mpRemove(index) {
 
 function _mpBrowseForAdd() {
   const el = document.getElementById("folderBrowser");
-  const visible = el.style.display !== "none";
-  el.style.display = visible ? "none" : "block";
-  if (!visible) {
+  const wasHidden = el.hidden;
+  el.hidden = !wasHidden;
+  if (wasHidden) {
     const inputPath = document.getElementById("mpPathInput").value.trim();
     browseDirectory(inputPath || (_mpFolders.length ? _mpFolders[0] : "~"));
   }
@@ -414,12 +390,19 @@ function _mpSelectBrowsed() {
       _mpRenderTags();
     }
     document.getElementById("mpPathInput").value = '';
-    document.getElementById("folderBrowser").style.display = "none";
+    document.getElementById("folderBrowser").hidden = true;
   }
 }
 
 /* ★ mpApplyFolders — the "Set Project" action.
-   First path → primary project; remaining → extra roots. */
+   First path → primary project; remaining → extra roots.
+
+   Optimistic UI: paint the project bar + close the modal immediately
+   from the user's typed paths, then fire /api/project/set_paths in the
+   background and reconcile when it returns.  The backend response
+   canonicalises paths (~ expansion, abs path) and adds crossDC info,
+   so reconciliation may rewrite the bar — that's fine and expected.
+   On failure we revert to the previous state and reopen the modal. */
 async function mpApplyFolders() {
   if (!_mpFolders.length) return;
   // ★ Ensure we have an active conversation
@@ -442,33 +425,45 @@ async function mpApplyFolders() {
     saveConversations(conv.id);
     renderConversationList();
   }
-  const statusEl = document.getElementById("projectModalStatus");
-  statusEl.innerHTML = '<div style="color:var(--thinking-text);font-size:12px">Applying…</div>';
+
+  const folders = _mpFolders.slice();
+  const primary = folders[0];
+  const extras = folders.slice(1);
+
+  // ── Optimistic apply: paint UI from typed paths and close the modal ──
+  const _prevProjectState = { ...projectState, extraRoots: (projectState.extraRoots || []).slice() };
+  _applyProjectData({
+    path: primary,
+    extraRoots: extras.map(p => ({ path: p })),
+    crossDC: null,
+  });
+  _saveConvProjectPath(primary, extras);
+  for (const p of folders) {
+    if (p) saveRecentProject(p);
+  }
+  closeProjectModal();
+  const nExtras = extras.length;
+  debugLog(`Project set: ${primary}` + (nExtras ? ` + ${nExtras} extra folder(s)` : ''), "success");
+
+  // ── Reconcile with the server in the background ──
   try {
-    // ★ Single atomic call — send all paths at once
-    const resp = await fetch(apiUrl("/api/project/set_paths"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ paths: _mpFolders }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || "Failed");
+    const resp = await Api.project.setPaths(folders);
+    const data = resp ? await resp.json().catch(() => ({})) : {};
+    if (!resp || !resp.ok) throw new Error(data.error || "Failed");
     _applyProjectData(data);
     _saveConvProjectPath(data.path, _mpFolders.slice(1));
-    // ★ Save EVERY applied folder to recent projects — not just the primary.
-    // Previously extras never showed up in the recent list because only
-    // `data.path` was saved. Each path gets its own row (de-duped by the
-    // UPSERT in save_recent_project), so typing an extra root into the
-    // modal and clicking Apply now makes it appear at the top next time.
-    for (const p of _mpFolders) {
-      if (p) saveRecentProject(p);
-    }
-
-    closeProjectModal();
-    const nExtras = _mpFolders.length - 1;
-    debugLog(`Project set: ${data.path}` + (nExtras ? ` + ${nExtras} extra folder(s)` : ''), "success");
   } catch (e) {
-    statusEl.innerHTML = `<div style="color:var(--error-text);font-size:12px">${escapeHtml(e.message)}</div>`;
+    // Revert the optimistic state and reopen the modal so the user can fix it.
+    projectState = _prevProjectState;
+    _saveConvProjectPath(_prevProjectState.path || "",
+                         (_prevProjectState.extraRoots || []).map(r => typeof r === 'string' ? r : r.path));
+    _updateProjectUI();
+    document.getElementById("projectModal").classList.add("open");
+    const statusEl = document.getElementById("projectModalStatus");
+    if (statusEl) {
+      statusEl.innerHTML = `<div style="color:var(--error-text);font-size:12px">${escapeHtml(e.message)}</div>`;
+    }
+    debugLog(`Project set failed: ${e.message}`, "error");
   }
 }
 
@@ -483,7 +478,7 @@ async function setProject(pathOverride) {
 
 async function clearProject() {
   _stopScanPoll();
-  await fetch(apiUrl("/api/project/clear"), { method: "POST" }).catch(e => debugLog(`[clearProject] ${e.message}`, 'warn'));
+  await Api.project.clear().catch(e => debugLog(`[clearProject] ${e.message}`, 'warn'));
   _saveConvProjectPath("");
   _mpFolders = [];
   projectState = {
@@ -500,11 +495,8 @@ async function clearProject() {
 
 function saveRecentProject(path) {
   if (!path) return;
-  fetch(apiUrl("/api/project/recent"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path }),
-  }).catch(e => debugLog(`[saveRecentProject] ${e.message}`, 'warn'));
+  Api.project.recentSave(path)
+    .catch(e => debugLog(`[saveRecentProject] ${e.message}`, 'warn'));
 }
 
 async function renderRecentProjects() {
@@ -513,17 +505,16 @@ async function renderRecentProjects() {
   if (!container || !listEl) return;
   let list = [];
   try {
-    const resp = await fetch(apiUrl("/api/project/recent"));
-    if (resp.ok) {
-      const data = await resp.json();
+    const data = await Api.project.recentList();
+    if (data) {
       list = Array.isArray(data) ? data : data.projects || [];
     }
   } catch {}
   if (list.length === 0) {
-    container.style.display = "none";
+    container.hidden = true;
     return;
   }
-  container.style.display = "";
+  container.hidden = false;
   listEl.innerHTML = list
     .map((item) => {
       const parts = item.path.split("/").filter(Boolean);
@@ -550,18 +541,16 @@ function selectRecentProject(path) {
 }
 
 async function clearRecentProjects() {
-  await fetch(apiUrl("/api/project/recent"), { method: "DELETE" }).catch(
-    () => {},
-  );
+  await Api.project.recentClear().catch(() => {});
   renderRecentProjects();
 }
 
 async function rescanProject() {
   if (!projectState.active) return;
   try {
-    const resp = await fetch(apiUrl("/api/project/rescan"), { method: "POST" });
-    const data = await resp.json();
-    if (resp.ok) {
+    const resp = await Api.project.rescan();
+    const data = resp ? await resp.json().catch(() => ({})) : {};
+    if (resp && resp.ok) {
       _applyProjectData(data);
       debugLog("Project refreshed", "success");
     }
@@ -588,13 +577,9 @@ async function undoConvModifications(msgIdx) {
     const body = msg._taskId
       ? { taskId: msg._taskId }
       : { convId: conv.id };
-    const resp = await fetch(apiUrl("/api/project/undo"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const data = await resp.json();
-    if (resp.ok && data.ok) {
+    const resp = await Api.project.undo(body);
+    const data = resp ? await resp.json().catch(() => ({})) : {};
+    if (resp && resp.ok && data.ok) {
       if (typeof showToast === 'function') {
         showToast('↩️', 'Undo Complete',
           `Reverted ${data.undone} file change${data.undone !== 1 ? 's' : ''}` +
@@ -628,13 +613,9 @@ async function undoAllModifications() {
   )
     return;
   try {
-    const resp = await fetch(apiUrl("/api/project/undo_all"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    const data = await resp.json();
-    if (resp.ok && data.ok) {
+    const resp = await Api.project.undoAll();
+    const data = resp ? await resp.json().catch(() => ({})) : {};
+    if (resp && resp.ok && data.ok) {
       if (typeof showToast === 'function') {
         showToast('↩️', 'Undo All Complete',
           `Reverted ${data.undone} file change${data.undone !== 1 ? 's' : ''}` +
@@ -778,9 +759,8 @@ async function loadProjectStatus() {
   }
   // Try to check server status first
   try {
-    const resp = await fetch(apiUrl("/api/project/status"));
-    if (!resp.ok) return;
-    const data = await resp.json();
+    const data = await Api.project.status();
+    if (!data) return;
     if (data.path && data.path === savedPath) {
       // Server already has this project active — check extras too
       const allPaths = (Array.isArray(conv.projectPaths) && conv.projectPaths.length)
@@ -793,13 +773,9 @@ async function loadProjectStatus() {
         // Primary matches but extras don't — re-apply with all paths
         debugLog("Restoring extra roots for conversation", "info");
         try {
-          const fixResp = await fetch(apiUrl("/api/project/set_paths"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ paths: allPaths }),
-          });
-          const fixData = await fixResp.json();
-          if (fixResp.ok) _applyProjectData(fixData);
+          const fixResp = await Api.project.setPaths(allPaths);
+          const fixData = fixResp ? await fixResp.json().catch(() => ({})) : {};
+          if (fixResp && fixResp.ok) _applyProjectData(fixData);
         } catch (e2) {
           debugLog("Extra roots restore failed: " + e2.message, "warn");
         }
@@ -817,15 +793,11 @@ async function loadProjectStatus() {
         const allPaths = (Array.isArray(conv.projectPaths) && conv.projectPaths.length)
           ? conv.projectPaths : [savedPath];
         const hasExtras = allPaths.length > 1;
-        const endpoint = hasExtras ? "/api/project/set_paths" : "/api/project/set";
-        const payload = hasExtras ? { paths: allPaths } : { path: savedPath };
-        const setResp = await fetch(apiUrl(endpoint), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        const setData = await setResp.json();
-        if (setResp.ok) {
+        const setResp = hasExtras
+          ? await Api.project.setPaths(allPaths)
+          : await Api.project.setPath(savedPath);
+        const setData = setResp ? await setResp.json().catch(() => ({})) : {};
+        if (setResp && setResp.ok) {
           _applyProjectData(setData);
           /* ★ FIX: Sync conv.projectPath after successful restore. */
           if (conv) conv.projectPath = setData.path || savedPath;
@@ -855,9 +827,9 @@ let _browseState = { path: "", dirs: [], parent: null, showHidden: false };
 
 function toggleFolderBrowser() {
   const el = document.getElementById("folderBrowser");
-  const visible = el.style.display !== "none";
-  el.style.display = visible ? "none" : "block";
-  if (!visible) {
+  const wasHidden = el.hidden;
+  el.hidden = !wasHidden;
+  if (wasHidden) {
     const inputPath = document.getElementById("mpPathInput").value.trim();
     browseDirectory(inputPath || "~");
   }
@@ -868,12 +840,11 @@ async function browseDirectory(path) {
   listEl.innerHTML =
     '<div style="color:var(--text-tertiary);padding:16px;text-align:center;font-size:12px">Loading…</div>';
   try {
-    const resp = await fetch(apiUrl("/api/project/browse"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path, showHidden: _browseState.showHidden }),
-    });
-    const data = await resp.json();
+    const data = await Api.project.browse(path, _browseState.showHidden);
+    if (!data) {
+      listEl.innerHTML = '<div style="color:var(--error-text);padding:16px;text-align:center;font-size:12px">Browse failed</div>';
+      return;
+    }
     if (data.error) {
       listEl.innerHTML =
         '<div style="color:var(--error-text);padding:16px;text-align:center;font-size:12px">' +
@@ -971,7 +942,7 @@ function selectBrowsedFolder() {
     _mpRenderTags();
   }
   input.value = "";
-  document.getElementById("folderBrowser").style.display = "none";
+  document.getElementById("folderBrowser").hidden = true;
 }
 
 // ══════════════════════════════════════════════════════
@@ -1066,13 +1037,8 @@ async function confirmApplyCode() {
   document.getElementById("applyStatus").innerHTML = "";
 
   try {
-    var resp = await fetch(apiUrl("/api/project/write"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: path, content: _applyPendingCode }),
-    });
-    var data = await resp.json();
-    if (data.ok) {
+    var data = await Api.project.write(path, _applyPendingCode);
+    if (data && data.ok) {
       var action = data.created ? "Created" : "Updated";
       document.getElementById("applyStatus").innerHTML =
         '<div style="color:#34d399;font-size:12px;margin-top:8px">' +

@@ -577,7 +577,7 @@ class TestCallbackThreading:
         """stream_chat accepts on_tool_call_ready parameter."""
         import inspect
 
-        from lib.llm_client import stream_chat
+        from lib.llm import stream_chat
         sig = inspect.signature(stream_chat)
         assert 'on_tool_call_ready' in sig.parameters
 

@@ -154,12 +154,17 @@ def fetch_page_content(url, max_chars=None,
             return browser_text
         return None
     except requests.exceptions.ConnectionError as e:
-        _circuit.record_failure(url)
         # 区分 timeout-in-disguise 和真正的连接错误
         err_str = str(e).lower()
-        if 'timeout' in err_str or 'timed out' in err_str:
+        if 'pool is closed' in err_str:
+            # Client-side pool exhaustion (too many concurrent requests) —
+            # not the server's fault, don't penalize the domain.
+            logger.warning('ConnectionError (pool closed, not server fault) — %s: %s', url[:80], e)
+        elif 'timeout' in err_str or 'timed out' in err_str:
+            _circuit.record_failure(url)
             logger.warning('Timeout (ConnectionError) — %s', url[:80], exc_info=True)
         else:
+            _circuit.record_failure(url)
             logger.warning('ConnectionError — %s: %s', url[:80], e, exc_info=True)
         # ── Browser fallback for connection errors ──
         browser_text = _try_browser_fetch(url, max_chars, reason='ConnectionError')
@@ -353,40 +358,41 @@ def fetch_contents_for_results(results, max_fetch=None,
                                      pdf_max_chars=_lib.FETCH_MAX_CHARS_PDF)
         fetch_elapsed = time.time() - fetch_t0
         return r, content, fetch_elapsed
+    # NOTE: we DRAIN, not cancel.  Future.cancel() on a running task is a
+    # no-op, but ThreadPoolExecutor.__exit__ then waits for the running
+    # thread anyway — and abandoning a streaming HTTP response mid-
+    # iter_content() while sibling threads are GC'ing C extensions has
+    # been correlated with `munmap_chunk(): invalid pointer` aborts.
+    # Once we hit target_ok we stop *using* further results, but we keep
+    # consuming completions so each thread can close its own response cleanly.
     with ThreadPoolExecutor(max_workers=16) as pool:
         futs = {pool.submit(_do, r): r for r in to_fetch}
-        pending = set(futs.keys())
-        cancelled_urls = []
+        target_reached_at = None
         try:
             for fut in as_completed(futs, timeout=90):
-                pending.discard(fut)
                 try:
                     result, content, fetch_elapsed = fut.result()
                     url = result['url']
                     ok = bool(content and len(content) > 50)
                     chars = len(content) if content else 0
-                    url_timings.append((url, fetch_elapsed, ok, chars))
-                    if ok:
-                        result['full_content'] = content
-                        ok_count += 1
-                    # Log individual slow fetches (>5s)
-                    if fetch_elapsed > 5:
-                        logger.info('[Fetch] ⚠ SLOW url=%.80s  %.1fs  ok=%s chars=%d',
-                                    url, fetch_elapsed, ok, chars)
+                    if target_reached_at is None:
+                        url_timings.append((url, fetch_elapsed, ok, chars))
+                        if ok:
+                            result['full_content'] = content
+                            ok_count += 1
+                        if fetch_elapsed > 5:
+                            logger.info('[Fetch] ⚠ SLOW url=%.80s  %.1fs  ok=%s chars=%d',
+                                        url, fetch_elapsed, ok, chars)
                 except Exception as e:
                     logger.warning('[Fetch] fetch_contents thread error: %s', e, exc_info=True)
-                # Race-to-N: once we have enough content, stop waiting
-                if ok_count >= target_ok and pending:
-                    elapsed_so_far = time.time() - t0
-                    cancelled_urls = [futs[p]['url'][:60] for p in pending]
+                # Race-to-N: log once when target is hit, then quietly drain
+                if ok_count >= target_ok and target_reached_at is None:
+                    target_reached_at = time.time()
+                    elapsed_so_far = target_reached_at - t0
+                    in_flight = sum(1 for f in futs if not f.done())
                     logger.info('[Fetch] Race-to-N: got %d/%d pages in %.1fs, '
-                                'cancelling %d slow fetches: %s',
-                                ok_count, len(to_fetch), elapsed_so_far,
-                                len(pending),
-                                ', '.join(cancelled_urls[:5]))
-                    for p in pending:
-                        p.cancel()
-                    break
+                                'draining %d in-flight fetches in background',
+                                ok_count, len(to_fetch), elapsed_so_far, in_flight)
         except TimeoutError:
             logger.warning('[Fetch] fetch_contents: as_completed timeout (90s)', exc_info=True)
     elapsed = time.time() - t0

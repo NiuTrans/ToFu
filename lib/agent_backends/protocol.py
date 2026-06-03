@@ -46,6 +46,7 @@ __all__ = [
     'BackendCapabilities',
     'NormalizedEvent',
     'NormalizedEventKind',
+    'KIND_TO_EVENT_TYPE',
 ]
 
 
@@ -128,7 +129,17 @@ class BackendCapabilities:
 # ═══════════════════════════════════════════════════════════
 
 class NormalizedEventKind:
-    """Event kind constants for NormalizedEvent.kind."""
+    """Event kind constants for NormalizedEvent.kind.
+
+    These are the BACKEND-FACING intermediate kinds a backend normalizer
+    yields.  They are deliberately distinct from the wire ``EventType``
+    vocabulary (``lib.agent_core.events``) because one kind can map to
+    different wire events (e.g. ``ERROR`` becomes a terminal ``done`` with an
+    ``error`` field).  :data:`KIND_TO_EVENT_TYPE` is the single, explicit
+    mapping the SSE bridge uses so the external-backend path emits events from
+    the SAME declared registry as the built-in orchestrator — one event model,
+    not two.
+    """
 
     TEXT_DELTA = 'text_delta'
     THINKING_DELTA = 'thinking_delta'
@@ -140,6 +151,28 @@ class NormalizedEventKind:
     APPROVAL_REQUEST = 'approval_request'
     DONE = 'done'
     ERROR = 'error'
+
+
+# Explicit mapping: backend kind → wire EventType (lib.agent_core.events).
+# This is the convergence point — every NormalizedEvent the SSE bridge
+# translates resolves its wire ``type`` through here, so external backends
+# (Claude Code / Codex) and the built-in orchestrator speak the SAME declared
+# event vocabulary.  ``TOOL_OUTPUT`` / ``FILE_CHANGE`` both surface as
+# ``tool_result``; ``ERROR`` surfaces as a terminal ``done``.
+from lib.agent_core.events import EventType as _ET  # noqa: E402
+
+KIND_TO_EVENT_TYPE: dict[str, str] = {
+    NormalizedEventKind.TEXT_DELTA:       _ET.DELTA,
+    NormalizedEventKind.THINKING_DELTA:   _ET.DELTA,
+    NormalizedEventKind.TOOL_START:       _ET.TOOL_START,
+    NormalizedEventKind.TOOL_OUTPUT:      _ET.TOOL_RESULT,
+    NormalizedEventKind.TOOL_COMPLETE:    _ET.TOOL_RESULT,
+    NormalizedEventKind.FILE_CHANGE:      _ET.TOOL_RESULT,
+    NormalizedEventKind.PHASE:            _ET.PHASE,
+    NormalizedEventKind.APPROVAL_REQUEST: _ET.APPROVAL_REQUIRED,
+    NormalizedEventKind.DONE:             _ET.DONE,
+    NormalizedEventKind.ERROR:            _ET.DONE,
+}
 
 
 @dataclass

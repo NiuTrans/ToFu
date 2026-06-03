@@ -326,7 +326,7 @@ class TestTTLLatch:
 
     def test_latch_used_in_add_cache_breakpoints(self):
         """add_cache_breakpoints uses latched value instead of live setting."""
-        from lib.llm_client import add_cache_breakpoints
+        from lib.llm import add_cache_breakpoints
         from lib.tasks_pkg.cache_tracking import latch_extended_ttl
 
         # Latch with extended TTL ON
@@ -360,7 +360,7 @@ class TestTTLLatch:
 
     def test_no_task_id_uses_live_setting(self):
         """Without _task_id, add_cache_breakpoints uses live CACHE_EXTENDED_TTL."""
-        from lib.llm_client import add_cache_breakpoints
+        from lib.llm import add_cache_breakpoints
 
         _lib.CACHE_EXTENDED_TTL = False
 
@@ -531,7 +531,7 @@ class TestTaskIdPassthrough:
 
     def test_task_id_stripped_for_non_claude(self):
         """_task_id should be removed from body for non-Claude models."""
-        from lib.llm_client import add_cache_breakpoints
+        from lib.llm import add_cache_breakpoints
 
         body = {
             'model': 'gpt-4o',
@@ -545,7 +545,7 @@ class TestTaskIdPassthrough:
 
     def test_task_id_popped_for_claude(self):
         """_task_id is consumed (popped) by add_cache_breakpoints for Claude."""
-        from lib.llm_client import add_cache_breakpoints
+        from lib.llm import add_cache_breakpoints
 
         body = {
             'model': 'claude-sonnet-4-20250514',

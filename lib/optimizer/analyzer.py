@@ -341,7 +341,8 @@ def _collect_cost_outliers() -> dict:
                 if key in v:
                     try:
                         return float(v[key] or 0)
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError) as _e_audit:
+                        logger.debug('[analyzer] _cost_of caught %s: %s', type(_e_audit).__name__, _e_audit)
                         return 0.0
         return 0.0
 

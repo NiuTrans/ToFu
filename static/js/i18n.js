@@ -34,6 +34,8 @@ var _i18n = {
   'sidebar.awaitingInput': { zh: '等待你的输入', en: 'Awaiting your input' },
   'sidebar.translating': { zh: '翻译中…', en: 'Translating…' },
   'sidebar.translatingTag': { zh: '翻译中', en: 'Translating' },
+  'sidebar.memoryPrefetch': { zh: '筛选记忆中…', en: 'Filtering memories…' },
+  'sidebar.memoryPrefetchTag': { zh: '筛选记忆', en: 'Filtering' },
   'sidebar.answering': { zh: '回答中', en: 'Answering' },
   'sidebar.copyConvId': { zh: '复制会话ID', en: 'Copy conversation ID' },
   'sidebar.refConv': { zh: '引用此对话', en: 'Reference this conversation' },
@@ -73,9 +75,14 @@ var _i18n = {
   'toolbar.humanAICollab': { zh: '人机协作', en: 'Human-AI Collab' },
   'toolbar.humanAICollabDesc': { zh: 'AI 可向你提问寻求指导', en: 'AI can ask you for guidance' },
   'toolbar.swarmAgents': { zh: '蜂群代理', en: 'Swarm Agents' },
-  'toolbar.swarmAgentsDesc': { zh: '并行子代理分解任务', en: 'Parallel sub-agents decompose tasks' },
+  'toolbar.swarmAgentsDesc': {
+    zh: '并行子代理分解任务 · 独立工具，无需开启 Project',
+    en: 'Parallel sub-agents · works without Project mode',
+  },
   'toolbar.autonomousMode': { zh: '自主模式', en: 'Autonomous Mode' },
   'toolbar.autonomousModeDesc': { zh: '自主执行+自我审查循环', en: 'Autonomous execution + self-review loop' },
+  'toolbar.autopilot': { zh: '自动驾驶', en: 'Autopilot' },
+  'toolbar.autopilotDesc': { zh: '虚拟用户自动回复，直到任务完成', en: 'Virtual user auto-replies until task is done' },
   'toolbar.moreOptions': { zh: '更多选项', en: 'More options' },
   'toolbar.exitCreativeMode': { zh: '退出创作模式 (Esc)', en: 'Exit creative mode (Esc)' },
   'toolbar.generate': { zh: '生成', en: 'Generate' },
@@ -139,7 +146,6 @@ var _i18n = {
   'skills.uninstallBtn': { zh: '卸载', en: 'Uninstall' },
   'skills.viewFiles': { zh: '查看文件', en: 'View files' },
   'skills.openHomepage': { zh: '主页', en: 'Homepage' },
-  'common.close': { zh: '关闭', en: 'Close' },
   'settings.cancel': { zh: '取消', en: 'Cancel' },
   'settings.save': { zh: '保存', en: 'Save' },
 
@@ -194,9 +200,36 @@ var _i18n = {
   'settings.autoSetup': { zh: '🚀 自动配置', en: '🚀 Auto Setup' },
   'settings.fromTemplate': { zh: '⚡ 从模板添加', en: '⚡ From Template' },
   'settings.syncTemplate': { zh: '同步模板', en: 'Sync Template' },
+  'settings.localProvider': { zh: '🖥️ 本地部署模型', en: '🖥️ Local Deployment' },
   'settings.customProvider': { zh: '+ 自定义服务商', en: '+ Custom Provider' },
   'settings.providersDesc': { zh: '使用「🚀 自动配置」只需填写 API 地址和密钥，系统自动发现模型、检测余额接口和定价。也可从模板添加或手动创建。', en: 'Use "🚀 Auto Setup" — just enter API URL and key, the system auto-discovers models, balance endpoint, and pricing. You can also add from templates or create manually.' },
   'settings.loadingConfig': { zh: '正在加载配置…', en: 'Loading config…' },
+
+  // ══════════════════════════════════════
+  //  Self-update (topbar button)
+  // ══════════════════════════════════════
+  'update.title': { zh: '软件更新', en: 'Software Update' },
+  'update.checkTitle': { zh: '检查更新', en: 'Check for updates' },
+  'update.availableTitle': { zh: '有可用更新：v%s', en: 'Update available: v%s' },
+  'update.checking': { zh: '正在检查更新…', en: 'Checking for updates…' },
+  'update.checkFailed': { zh: '无法检查更新，请稍后再试。', en: 'Could not check for updates. Please try again later.' },
+  'update.current': { zh: '当前版本', en: 'Current' },
+  'update.latest': { zh: '最新版本', en: 'Latest' },
+  'update.upToDate': { zh: '✅ 已是最新版本。', en: '✅ You are up to date.' },
+  'update.ready': { zh: '有新版本可用。点击下方按钮拉取更新（不会影响你的个人设置）。', en: 'A new version is available. Click below to pull it (your personal settings are untouched).' },
+  'update.applyBtn': { zh: '拉取更新', en: 'Pull update' },
+  'update.applying': { zh: '正在拉取…', en: 'Pulling…' },
+  'update.applyFailed': { zh: '更新失败。', en: 'Update failed.' },
+  'update.pulled': { zh: '已更新到 %s。需要重启服务器以生效。', en: 'Updated to %s. A restart is required to apply it.' },
+  'update.depsInstalled': { zh: '✅ 已安装新的依赖包。', en: '✅ New dependencies installed.' },
+  'update.depsFailed': { zh: '⚠️ 已更新到 %s，但安装新依赖失败。请手动运行 pip install -r requirements.txt 后再重启。', en: '⚠️ Updated to %s, but installing new dependencies failed. Run "pip install -r requirements.txt" manually, then restart.' },
+  'update.restartBtn': { zh: '立即重启', en: 'Restart now' },
+  'update.restarting': { zh: '正在重启…', en: 'Restarting…' },
+  'update.restartHint': { zh: '重启期间页面会短暂不可用，完成后会自动刷新。', en: 'The page will be briefly unavailable and will auto-refresh once back.' },
+  'update.restartWait': { zh: '正在等待服务器恢复…', en: 'Waiting for the server to come back…' },
+  'update.restartTimeout': { zh: '服务器重启耗时较长，请手动刷新页面。', en: 'Server is taking a while — please refresh manually.' },
+  'update.dirty': { zh: '⚠️ 检测到对受版本控制的源码文件的本地改动，已阻止自动更新（不会自动暂存或覆盖）。请先提交或还原以下文件：', en: '⚠️ Local changes to tracked source files were detected — the update is blocked (we never auto-stash or overwrite). Commit or revert these first:' },
+  'update.noGit': { zh: '当前不是 git 检出目录，无法原地更新。请重新运行 install.sh。', en: 'This is not a git checkout — in-place update is unavailable. Re-run install.sh.' },
   'settings.loadingFailed': { zh: '加载服务器配置失败。请检查服务器是否正在运行。', en: 'Failed to load server config. Please check if the server is running.' },
   'settings.noProviders': { zh: '还没有配置服务商。点击"+ 自定义服务商"开始添加。', en: 'No providers configured. Click "+ Custom Provider" to start.' },
   'settings.keys': { zh: '个密钥', en: 'keys' },
@@ -205,14 +238,26 @@ var _i18n = {
   'settings.displayName': { zh: '显示名称', en: 'Display Name' },
   'settings.baseUrl': { zh: 'API 地址 (Base URL)', en: 'API URL (Base URL)' },
   'settings.apiKeys': { zh: 'API 密钥', en: 'API Keys' },
-  'settings.apiKeysHint': { zh: '每行一个，安全存储', en: 'One per line, securely stored' },
+  'settings.apiKeysHint': { zh: '安全存储；点击 👁 切换可见性', en: 'Securely stored; click 👁 to toggle visibility' },
+  'settings.addApiKey': { zh: '+ 添加密钥', en: '+ Add Key' },
+  'settings.addApiKeyTitle': { zh: '新增一个 API 密钥', en: 'Add a new API key' },
+  'settings.deleteApiKeyTitle': { zh: '删除该密钥', en: 'Delete this key' },
+  'settings.showHideKeyTitle': { zh: '切换密钥可见性', en: 'Toggle key visibility' },
+  'settings.noApiKeys': { zh: '暂无 API 密钥。点击右上角 + 添加。', en: 'No API keys yet. Click + above to add one.' },
+  'settings.noApiKeysLocal': { zh: '暂无 API 密钥（多数本地部署不需要鉴权）。', en: 'No API keys (most local deployments don\'t need auth).' },
   'settings.balanceUrl': { zh: '余额查询地址', en: 'Balance Query URL' },
   'settings.balanceUrlHint': { zh: '可选 — OpenAI 兼容的账单接口', en: 'Optional — OpenAI-compatible billing endpoint' },
   'settings.checkBalance': { zh: '查询 ▸', en: 'Check ▸' },
   'settings.modelsPath': { zh: '模型发现路径', en: 'Models Discovery Path' },
   'settings.modelsPathHint': { zh: '可选 — 默认在 Base URL 后追加 /models', en: 'Optional — defaults to Base URL + /models' },
   'settings.customHeaders': { zh: '自定义请求头', en: 'Custom Headers' },
-  'settings.customHeadersHint': { zh: '可选 — JSON 对象，如 {"X-My-Header": "value"}', en: 'Optional — JSON object, e.g. {"X-My-Header": "value"}' },
+  'settings.customHeadersHint': { zh: '可选 — 每行一对，附加到本服务商的所有请求', en: 'Optional — one pair per row, appended to every request to this provider' },
+  'settings.addHeader': { zh: '+ 添加请求头', en: '+ Add Header' },
+  'settings.addHeaderTitle': { zh: '新增一行请求头', en: 'Add a new header row' },
+  'settings.deleteHeaderTitle': { zh: '删除该请求头', en: 'Delete this header' },
+  'settings.headerNamePlaceholder': { zh: 'Header 名称', en: 'Header-Name' },
+  'settings.headerValuePlaceholder': { zh: 'Header 值', en: 'value' },
+  'settings.noHeaders': { zh: '暂无自定义请求头。点击右上角 + 添加。', en: 'No custom headers yet. Click + above to add one.' },
   'settings.thinkingFormat': { zh: '思维参数格式', en: 'Thinking Parameter Format' },
   'settings.thinkingFormatAuto': { zh: '自动检测（按模型名称）', en: 'Auto-detect (by model name)' },
   'settings.thinkingFormatEnable': { zh: 'enable_thinking（LongCat/Qwen/Gemini 风格）', en: 'enable_thinking (LongCat/Qwen/Gemini style)' },
@@ -227,6 +272,55 @@ var _i18n = {
   'settings.autoDiscoverHint': { zh: '从 /v1/models 接口自动发现模型', en: 'Auto-discover models from /v1/models endpoint' },
   'settings.aliases': { zh: '别名：', en: 'Aliases:' },
   'settings.addAlias': { zh: '+ 别名', en: '+ Alias' },
+  'settings.apply': { zh: '应用', en: 'Apply' },
+  // ── Access Matrix (per-key × per-model capability grid) ──
+  'settings.matrixViewMatrix': { zh: '访问矩阵', en: 'Access Matrix' },
+  'settings.matrixViewCards': { zh: '卡片视图', en: 'Card View' },
+  'settings.matrixToggleHint': { zh: '按「密钥 × 模型」逐格管理访问、别名、限速与能力', en: 'Manage access, aliases, RPM and capabilities per (key × model) cell' },
+  'settings.matrixModelCol': { zh: '模型 ＼ 密钥', en: 'Model ＼ Key' },
+  'settings.matrixNoKeys': { zh: '该服务商还没有 API 密钥。', en: 'This provider has no API keys yet.' },
+  'settings.matrixBlankKey': { zh: '（无密钥）', en: '(no key)' },
+  'settings.matrixRenameKey': { zh: '为此密钥命名（如 高配额 / 测试）', en: 'Name this key (e.g. high-quota / test)' },
+  'settings.matrixLegendOn': { zh: '已开放', en: 'Granted' },
+  'settings.matrixLegendOff': { zh: '已禁用', en: 'Disabled' },
+  'settings.matrixLegendOverride': { zh: '有覆盖', en: 'Overridden' },
+  'settings.matrixGlobalToggle': { zh: '全局启用 / 禁用该模型（影响所有密钥）', en: 'Globally enable/disable this model (all keys)' },
+  'settings.matrixClickEnable': { zh: '点击：对该密钥开放此模型', en: 'Click: grant this key access to this model' },
+  'settings.matrixClickDisable': { zh: '点击：对该密钥禁用此模型', en: 'Click: deny this key access to this model' },
+  'settings.matrixEditCell': { zh: '为此（密钥 × 模型）设置专属别名 / 限速 / 能力', en: 'Set per-cell aliases / RPM / capabilities' },
+  'settings.matrixCellEnabled': { zh: '该密钥可访问此模型', en: 'This key may access this model' },
+  'settings.matrixOverrideRpm': { zh: '覆盖限速 (RPM)', en: 'Override RPM' },
+  'settings.matrixOverrideAlias': { zh: '覆盖别名', en: 'Override aliases' },
+  'settings.matrixOverrideCaps': { zh: '覆盖能力', en: 'Override capabilities' },
+  'settings.matrixInheritHint': { zh: '默认继承：', en: 'Inherits:' },
+  'settings.matrixNoAlias': { zh: '无别名', en: 'no aliases' },
+  // ── Access Matrix: probe & recommend ──
+  'settings.matrixProbe': { zh: '探测推荐', en: 'Probe & Recommend' },
+  'settings.matrixProbeHint': { zh: '逐格发送最小请求，检测每个密钥可访问哪些模型/别名。在后台运行并持久化——关闭设置也不会中断，重开后自动恢复', en: 'Send a tiny request per cell to detect which models/aliases each key can reach. Runs in the background and is persisted — closing Settings won\'t interrupt it; it resumes on reopen' },
+  'settings.matrixRetest': { zh: '重新探测', en: 'Retest' },
+  'settings.matrixProbing': { zh: '正在后台探测…', en: 'Probing in background…' },
+  'settings.matrixProbeFailed': { zh: '探测失败', en: 'Probe failed' },
+  'settings.matrixNothingToProbe': { zh: '没有可探测的密钥或模型', en: 'No keys or models to probe' },
+  'settings.matrixOkCount': { zh: '可用', en: 'reachable' },
+  'settings.matrixFlaggedCount': { zh: '建议禁用', en: 'flagged' },
+  'settings.matrixApplyRec': { zh: '应用推荐', en: 'Apply Recommendations' },
+  'settings.matrixApplyHint': { zh: '禁用所有「建议禁用」的格子（每个别名独立处理：失效别名单独禁用，根模型与其它别名保持可用）', en: 'Disable every flagged cell (each alias is independent: a dead alias is disabled on its own; the root and other aliases stay reachable)' },
+  'settings.matrixAliasTag': { zh: '别名', en: 'alias' },
+  'settings.matrixEditorSub': { zh: '限速与能力作用于整行模型；别名的开关请直接点击别名行的格子。', en: 'RPM & capabilities apply to the whole model entry; toggle an alias on/off by clicking its own row\'s cells.' },
+  'settings.matrixAliasOne': { zh: '别名', en: 'alias' },
+  'settings.matrixAliasMany': { zh: '别名', en: 'aliases' },
+  'settings.matrixAliasCountHint': { zh: '该模型的别名各自路由到不同的上游模型，可逐个开关', en: 'Each alias routes to a different upstream model and can be toggled independently' },
+  'settings.matrixAttempts': { zh: '探测次数', en: 'Attempts' },
+  'settings.matrixAttemptsHint': { zh: '每个格子探测多次以过滤偶发的假 429；任一次成功即视为可用', en: 'Probe each cell several times to filter out false 429s; a single success counts as reachable' },
+  'settings.matrixApplied': { zh: '已应用：禁用了 {n} 个格子', en: 'Applied: disabled {n} cell(s)' },
+  'settings.matrixNothingApplied': { zh: '没有需要禁用的格子', en: 'No cells needed disabling' },
+  'settings.matrixClearProbe': { zh: '清除探测结果', en: 'Clear results' },
+  'settings.probeOk': { zh: '可用', en: 'Reachable' },
+  'settings.probeRateLimited': { zh: '限流 (429)', en: 'Rate-limited (429)' },
+  'settings.probeUnauthorized': { zh: '无权限', en: 'Unauthorized' },
+  'settings.probeNotFound': { zh: '模型不存在', en: 'Model not found' },
+  'settings.probeUnavailable': { zh: '不可用 / 超时', en: 'Unavailable / timeout' },
+  'settings.probeError': { zh: '错误', en: 'Error' },
   'settings.edit': { zh: '编辑', en: 'Edit' },
   'settings.delete': { zh: '删除', en: 'Delete' },
   'settings.free': { zh: '免费', en: 'Free' },
@@ -240,6 +334,64 @@ var _i18n = {
   'settings.remaining': { zh: '剩余', en: 'Remaining' },
   'settings.quota': { zh: '额度', en: 'Quota' },
   'settings.checking': { zh: '查询中…', en: 'Checking…' },
+  'settings.apiKeysHintLocal': { zh: '可选 — 多数本地部署不需要鉴权', en: 'Optional — most local deployments don\'t need auth' },
+  'settings.checkBalanceTitle': { zh: '查询余额', en: 'Check balance' },
+  'settings.thinkingFormatHint': { zh: '默认自动检测 — 仅当端点使用非标准格式时需配置', en: 'Auto-detected by default — configure only if the endpoint uses a non-standard format' },
+  'settings.syncTemplateTitle': { zh: '从内置模板同步新增模型', en: 'Sync new models from the built-in template' },
+  'settings.probeAllEndpoints': { zh: '🔍 探测全部端点', en: '🔍 Probe All Endpoints' },
+  'settings.probeAllEndpointsTitle': { zh: '并行探测所有端点并合并模型列表', en: 'Probe all endpoints in parallel and merge their model lists' },
+  'settings.modelEnabledTitle': { zh: '该模型已启用 — 点击禁用', en: 'Model enabled — click to disable' },
+  'settings.modelDisabledTitle': { zh: '该模型已禁用 — 点击启用', en: 'Model disabled — click to enable' },
+  'settings.editTitle': { zh: '编辑', en: 'Edit' },
+  'settings.deleteTitle': { zh: '删除', en: 'Delete' },
+  'settings.endpointsSuffix': { zh: '个端点', en: 'endpoints' },
+  'settings.moreEndpointsSuffix': { zh: '个端点', en: 'more' },
+  // Local endpoint manager (inside provider card)
+  'settings.endpointUrlList': { zh: '端点 URL 列表', en: 'Endpoint URL List' },
+  'settings.addEndpoint': { zh: '+ 添加端点', en: '+ Add Endpoint' },
+  'settings.addEndpointTitle': { zh: '新增一行端点', en: 'Add a new endpoint row' },
+  'settings.bulkEdit': { zh: '📝 批量编辑', en: '📝 Bulk Edit' },
+  'settings.bulkEditTitle': { zh: '一次性粘贴或编辑全部 URL', en: 'Paste or edit all URLs at once' },
+  'settings.probeAll': { zh: '🔍 探测全部', en: '🔍 Probe All' },
+  'settings.probeAllTitle': { zh: '并行探测全部端点并合并模型列表', en: 'Probe all endpoints in parallel and merge their model lists' },
+  'settings.clearAll': { zh: '🗑 清空', en: '🗑 Clear' },
+  'settings.clearAllTitle': { zh: '清空全部端点', en: 'Clear all endpoints' },
+  'settings.localEndpointsHint': { zh: '调度器会在多个端点之间负载均衡，单个端点宕机会自动绕开。私网/公网 IP 都会自动加入代理白名单。', en: 'The scheduler load-balances across endpoints and routes around any that go down. Both private and public IPs are added to the proxy bypass list automatically.' },
+  'settings.testEndpointTitle': { zh: '立即刷新该端点的实时指标', en: 'Refresh live metrics for this endpoint now' },
+  'settings.deleteEndpointTitle': { zh: '删除该端点', en: 'Delete this endpoint' },
+  // Inline "thinking" toggle on model cards
+  'settings.thinking': { zh: '思考', en: 'thinking' },
+  'settings.enableThinkingHint': {
+    zh: '点击启用思考能力（开启后聊天时会显示思维深度选择器）',
+    en: 'Click to enable thinking capability (chat input will show the thinking-depth picker)'
+  },
+  'settings.disableThinkingHint': {
+    zh: '点击关闭思考能力',
+    en: 'Click to disable thinking capability'
+  },
+  // Live per-endpoint metrics (auto-polled, recorded from real traffic)
+  'settings.epHealthy':       { zh: '运行正常', en: 'Healthy' },
+  'settings.epRecentFailure': { zh: '近期失败', en: 'Recent failures' },
+  'settings.epNoTraffic':     { zh: '尚无流量 · 等待第一次请求', en: 'No traffic yet — waiting for first request' },
+  'settings.epLastSeen':      { zh: '最近', en: 'last' },
+  'settings.epLatency':       { zh: '延迟', en: 'Latency' },
+  'settings.epThroughput':    { zh: '吞吐', en: 'Throughput' },
+  'settings.epSuccessRate':   { zh: '成功率', en: 'Success' },
+  'settings.epInflight':      { zh: '在途', en: 'inflight' },
+  'settings.epRequests':      { zh: '次请求', en: 'requests' },
+  'settings.epAllFailed': { zh: '全部端点异常', en: 'All endpoints failing' },
+  'settings.epAllOk': { zh: '全部正常', en: 'All OK' },
+  'settings.epPartialOk': { zh: '{ok}/{total} 个端点正常', en: '{ok}/{total} endpoints OK' },
+  'settings.epNotProbed': { zh: '尚未探测', en: 'Not probed yet' },
+  'settings.epProbing': { zh: '探测中…', en: 'Probing…' },
+  'settings.epOk': { zh: '正常', en: 'OK' },
+  'settings.epError': { zh: '异常', en: 'Error' },
+  'settings.epProbeFailed': { zh: '探测失败', en: 'Probe failed' },
+  'settings.relJustNow': { zh: '刚刚', en: 'just now' },
+  'settings.relSecAgo': { zh: '秒前', en: 's ago' },
+  'settings.relMinAgo': { zh: '分钟前', en: 'min ago' },
+  'settings.relHourAgo': { zh: '小时前', en: 'h ago' },
+  'settings.relDayAgo': { zh: '天前', en: 'd ago' },
 
   // ══════════════════════════════════════
   //  Settings — Display / Preset Tab
@@ -494,7 +646,10 @@ var _i18n = {
   'mobile.allFeatures': { zh: '全部功能', en: 'All features' },
   'mobile.checkingStatus': { zh: '检查中...', en: 'Checking...' },
   'mobile.modes': { zh: '模式', en: 'Modes' },
-  'mobile.parallelAgents': { zh: '并行子代理', en: 'Parallel agents' },
+  'mobile.parallelAgents': {
+    zh: '并行子代理 · 无需 Project',
+    en: 'Parallel agents · no Project needed',
+  },
   'mobile.autoExecLoop': { zh: '自主执行循环', en: 'Auto-exec loop' },
   'mobile.paperReader': { zh: '论文阅读', en: 'Paper Reader' },
   'mobile.paperReaderDesc': { zh: 'PDF阅读 + 问答 + 报告 + Babel PDF', en: 'PDF reading + Q&A + reports + Babel PDF' },
@@ -626,6 +781,8 @@ var _i18n = {
   'translate.translated': { zh: '译文', en: 'Translation' },
   // Retry/status sub-messages shown below the spinner when the backend reports
   // a transient issue (rate-limit, empty output, etc.) while retrying.
+  'translate.retry.started': { zh: '正在调用翻译模型，请稍候…', en: 'Translating, please wait…' },
+  'translate.retry.in_progress': { zh: '翻译仍在进行中…', en: 'Still translating…' },
   'translate.retry.rate_limited': { zh: '所有密钥被限流，正在重试…', en: 'All keys rate-limited, retrying…' },
   'translate.retry.dispatch_error': { zh: '接口错误，正在重试…', en: 'Provider error, retrying…' },
   'translate.retry.dispatch_failed_final': { zh: '接口错误重试已耗尽', en: 'Provider errors exhausted' },
@@ -634,6 +791,7 @@ var _i18n = {
   'translate.retry.truncated': { zh: '输出被截断，正在重试…', en: 'Output truncated, retrying…' },
   'translate.retry.truncated_final': { zh: '多次截断后返回部分结果', en: 'Output truncated after retries' },
   'translate.retry.mt_fallback': { zh: '机器翻译失败，已切换到大模型', en: 'MT provider failed, using LLM' },
+  'translate.retry.timed_out': { zh: '翻译超时，已直接发送原文', en: 'Translation timed out, sent original text' },
 
   // ══════════════════════════════════════
   //  Time / Relative
@@ -728,6 +886,13 @@ var _i18n = {
   'optimizer.revertConfirm': { zh: '撤销此次已应用的变更？底层配置将回滚，lib.SKIP_DOMAINS（或类似）会热重载。', en: 'Revert this applied change? The underlying config will be rolled back and lib.SKIP_DOMAINS (or similar) will be hot-reloaded.' },
   'optimizer.blockSearchDomain': { zh: '🚫 屏蔽搜索域名', en: '🚫 block search domain' },
   'optimizer.untitled': { zh: '(无标题)', en: '(untitled)' },
+  // Status reasons emitted by the backend (lib/optimizer/applier.py).
+  // _optStatusReasonText() in optimizer.js maps the raw English string
+  // to one of these keys; unknown reasons fall through to the raw text.
+  'optimizer.reason.notInWhitelist': { zh: '未在自动应用白名单中', en: 'not in auto-apply whitelist' },
+  'optimizer.reason.dryRun': { zh: '试运行（未实际应用）', en: 'dry run (not actually applied)' },
+  'optimizer.reason.unknownAction': { zh: '未知的操作类型：{type}', en: 'unknown action type: {type}' },
+  'optimizer.reason.manualApproveBlocked': { zh: '手动批准被拦截：操作类型不在自动应用白名单中', en: 'manual approve blocked: action_type not in auto-apply whitelist' },
 
   // ══════════════════════════════════════
   //  Settings — Search/Fetch params (inline labels)
@@ -915,9 +1080,22 @@ function _onLanguageChange(lang) {
   _syncLangPicker(lang);
   // Re-render dynamic content that uses t()
   if (typeof renderConversationList === 'function') renderConversationList();
-  if (typeof renderMessages === 'function') renderMessages();
+  // ★ Repaint the open conversation so message chrome (tool labels,
+  //   finish-info, timestamps) re-renders with the new language. The
+  //   former call was to renderMessages(), which never existed — the
+  //   whole-chat repaint is renderChat(conv). (caught by tsc --checkJs)
+  if (typeof renderChat === 'function' && typeof getActiveConv === 'function') {
+    var _activeConv = getActiveConv();
+    if (_activeConv) renderChat(_activeConv, true);
+  }
   if (typeof _refreshOptimizerPanel === 'function') {
     try { _refreshOptimizerPanel(); } catch (e) { /* panel may not be open */ }
+  }
+  if (typeof _renderProvidersTab === 'function') {
+    try { _renderProvidersTab(); } catch (e) { /* tab may not be initialised */ }
+  }
+  if (typeof _renderPresetsTab === 'function' && typeof _serverConfig !== 'undefined' && _serverConfig) {
+    try { _renderPresetsTab(_serverConfig); } catch (e) { /* tab may not be initialised */ }
   }
 }
 

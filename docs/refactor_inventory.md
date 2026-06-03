@@ -113,7 +113,7 @@ think it's related to platform compat. No code change required.
 
 | File                              | LOC   | Action                                                              |
 |-----------------------------------|-------|---------------------------------------------------------------------|
-| `lib/llm_client.py`               | 3652  | split — body_builder / sse_stream / retry / dispatch                |
+| `lib/llm/` (split done 2026-05-21) | 1935  | split — body / cache / chat / stream / diagnostics / _transport      |
 | `lib/tasks_pkg/compaction.py`     | 2620  | split — layers / token_budget / strategies                          |
 | `routes/daily_report.py`          | 2669  | split — report_gen / prompts / scheduling / api                     |
 | `routes/paper.py`                 | 2547  | split — upload / render / qa / translate / cache                    |

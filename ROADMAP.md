@@ -28,8 +28,9 @@ can be objectively verified.
 
 - **Phase C** — Routes splits (`paper.py`, `daily_report.py`), persistent
   rate-limiter, `X-Bridge-Secret` auth on browser/desktop bridges.
-- **Phase D** — `tasks_pkg` monoliths + `llm_client.py` + frontend splits
-  (separate approval gate for frontend per `refactor_decomposition_proposal.md`).
+- **Phase D** — `tasks_pkg` monoliths + frontend splits
+  (`llm_client.py` already split into `lib/llm/` package on 2026-05-21).
+  Separate approval gate for frontend per `refactor_decomposition_proposal.md`.
 - **Phase E** — New capabilities (Critic discipline, swarm delegation
   template, planner write-block hook, speculation UI, MT provider
   expansion, CLI-backend parity, mobile polish).

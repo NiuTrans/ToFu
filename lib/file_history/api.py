@@ -39,9 +39,8 @@ _DISABLED_WARNED = False
 # ═══════════════════════════════════════════════════════════════════
 
 def is_enabled() -> bool:
-    """Honour ``TOFU_FILE_HISTORY`` (legacy ``CHATUI_FILE_HISTORY``).  Default ``1`` (enabled)."""
+    """Honour ``TOFU_FILE_HISTORY``.  Default ``1`` (enabled)."""
     flag = (os.environ.get('TOFU_FILE_HISTORY')
-            or os.environ.get('CHATUI_FILE_HISTORY')
             or '1').strip().lower()
     if flag in ('0', 'false', 'no', 'off'):
         global _DISABLED_WARNED
@@ -53,9 +52,8 @@ def is_enabled() -> bool:
 
 
 def probe_enabled() -> bool:
-    """External-edit probe gate. ``TOFU_FILE_HISTORY_PROBE`` (legacy ``CHATUI_FILE_HISTORY_PROBE``; default 1)."""
+    """External-edit probe gate. ``TOFU_FILE_HISTORY_PROBE`` (default 1)."""
     flag = (os.environ.get('TOFU_FILE_HISTORY_PROBE')
-            or os.environ.get('CHATUI_FILE_HISTORY_PROBE')
             or '1').strip().lower()
     return flag not in ('0', 'false', 'no', 'off')
 
@@ -67,7 +65,8 @@ def probe_enabled() -> bool:
 @with_project_lock
 def track_edit(base_path: str, rel_path: str, *,
                message_id: str | None = None,
-               pre_content: bytes | str | None = None) -> int | None:
+               pre_content: bytes | str | None = None,
+               task_id: str | None = None) -> int | None:
     """Record a backup version of ``rel_path``'s contents.
 
     By default reads the current on-disk contents (true pre-write hook
@@ -80,7 +79,10 @@ def track_edit(base_path: str, rel_path: str, *,
     was needed (file unchanged since last seen) or if the store is
     disabled.
 
-    ``message_id`` is recorded for diagnostics only.  ``rel_path``
+    ``message_id`` is recorded for diagnostics only.  ``task_id`` is
+    stored as the file's ``last_writer_task_id`` so the orchestrator
+    can attribute fh side-channel mutations correctly when multiple
+    tasks edit the same project root concurrently.  ``rel_path``
     should be project-relative with forward slashes; absolute paths are
     converted with ``os.path.relpath`` against ``base_path``.
     """
@@ -93,10 +95,12 @@ def track_edit(base_path: str, rel_path: str, *,
         return None
     try:
         ensure_store(base_path)
-        v = stage_backup(base_path, rel, explicit_content=pre_content)
+        v = stage_backup(base_path, rel, explicit_content=pre_content,
+                         task_id=task_id or message_id)
         if v is not None:
-            logger.debug('[FileHistory] track_edit %s → v%d (msg=%s explicit=%s)',
+            logger.debug('[FileHistory] track_edit %s → v%d (msg=%s task=%s explicit=%s)',
                          rel, v, (message_id or '-')[:8],
+                         (task_id or '-')[:8],
                          pre_content is not None)
         return v
     except Exception as e:
@@ -163,7 +167,7 @@ def make_snapshot(base_path: str, *,
             for rp in rel_paths:
                 norm = _normalize_rel(base_path, rp)
                 if norm:
-                    stage_backup(base_path, norm)
+                    stage_backup(base_path, norm, task_id=task_id)
 
         tracked = load_tracked(base_path)
         # Build the snapshot file map: {rel_path: latest_version}.
@@ -407,7 +411,8 @@ def restore_from(base_path: str, snapshot_id: str) -> dict:
                     tracked[rel] = {**entry, 'latest_version': v_int,
                                     'deleted': False,
                                     'mtime': st.st_mtime, 'size': st.st_size}
-                except OSError:
+                except OSError as _e_audit:
+                    logger.debug('[api] restore_from caught %s: %s', type(_e_audit).__name__, _e_audit)
                     tracked[rel] = {**entry, 'latest_version': v_int,
                                     'deleted': False}
         save_tracked(base_path, tracked)
@@ -449,6 +454,7 @@ def _restore_one(base_path: str, rel: str, version: int) -> tuple[bool, str]:
                 return True, 'deleted'
             return True, 'already_absent'
         except OSError as e:
+            logger.debug('[api] _restore_one caught %s: %s', type(e).__name__, e)
             return False, f'unlink failed: {e}'
     blob = read_blob(base_path, rel, version)
     if blob is None:
@@ -465,6 +471,7 @@ def _restore_one(base_path: str, rel: str, version: int) -> tuple[bool, str]:
         _nudge_vscode(abs_p)
         return True, 'restored'
     except OSError as e:
+        logger.debug('[api] _restore_one caught %s: %s', type(e).__name__, e)
         return False, f'write failed: {e}'
 
 
@@ -508,8 +515,9 @@ def detect_external_edits(base_path: str, *,
             abs_p = os.path.join(os.path.abspath(base_path), rel)
             try:
                 st = os.stat(abs_p)
-            except FileNotFoundError:
+            except FileNotFoundError as _e_audit:
                 # File deleted out-of-band → treat as drift.
+                logger.debug('[api] detect_external_edits caught %s: %s', type(_e_audit).__name__, _e_audit)
                 if stage_backup(base_path, rel) is not None:
                     drifted.append(rel)
                 continue
@@ -590,7 +598,9 @@ def diff_text(base_path: str, from_id: str | None, to_id: str | None,
         try:
             a_text = a.decode('utf-8', 'replace').splitlines(keepends=True)
             b_text = b.decode('utf-8', 'replace').splitlines(keepends=True)
-        except Exception:
+        except (AttributeError, LookupError) as e:
+            # `a`/`b` not bytes-like, or codec missing — skip this file.
+            logger.debug('[FileHistory] diff_text decode failed for %s: %s', rel, e)
             continue
         diff = list(difflib.unified_diff(a_text, b_text,
                                          fromfile=f'a/{rel}',

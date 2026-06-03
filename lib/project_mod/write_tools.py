@@ -4,6 +4,7 @@ Extracted from tools.py for modularity. Re-exported via tools.py for backward co
 """
 
 import os
+import re
 from difflib import SequenceMatcher
 
 from lib.log import audit_log, get_logger
@@ -66,8 +67,9 @@ def _is_forbidden_create_path(abs_path):
             home_cmp = home.rstrip(os.sep) or home
             if p_cmp == home_cmp:
                 return True
-    except (OSError, KeyError):
+    except (OSError, KeyError) as _e_audit:
         # Can't determine HOME — skip this check rather than blocking.
+        logger.debug('[write_tools] _is_forbidden_create_path caught %s: %s', type(_e_audit).__name__, _e_audit)
         pass
 
     return False
@@ -237,6 +239,29 @@ def _resolve_write_path(base, rel_path):
     return _safe_path(base, rel_path)
 
 
+# Match \uXXXX, \UXXXXXXXX and \xXX escape sequences (literal backslash form).
+_UNICODE_ESCAPE_RE = re.compile(r'\\U[0-9a-fA-F]{8}|\\u[0-9a-fA-F]{4}|\\x[0-9a-fA-F]{2}')
+
+
+def _decode_unicode_escapes(s):
+    """Decode literal ``\\uXXXX`` / ``\\UXXXXXXXX`` / ``\\xXX`` escapes to the
+    characters they denote, leaving all other text untouched.
+
+    Models frequently emit a real glyph (e.g. ``⏰``, em-dash ``—``) in an
+    ``apply_diff`` search where the file on disk holds the literal escape text
+    (``\\u23f0``, ``\\u2014``) — or the reverse. Decoding both sides before
+    comparison lets the matcher see through this representation drift. Only the
+    three numeric-escape forms are decoded; ``\\n`` / ``\\t`` and other C-style
+    escapes are deliberately left alone to avoid surprising false matches.
+    """
+    def _repl(m):
+        try:
+            return chr(int(m.group(0)[2:], 16))
+        except (ValueError, OverflowError):
+            return m.group(0)
+    return _UNICODE_ESCAPE_RE.sub(_repl, s)
+
+
 def _find_closest_match(content, search, threshold=0.6):
     """Find the most similar block in content to the search string."""
     search_lines = search.split('\n')
@@ -281,6 +306,48 @@ def _find_closest_match(content, search, threshold=0.6):
             'similarity': best_ratio,
         }
     return None
+
+
+def _describe_duplicate_matches(content, search, context=1, max_show=5):
+    """Build a human/LLM-friendly listing of where *search* matches in *content*.
+
+    For each occurrence, shows the 1-based line number plus a few lines of
+    surrounding context so the caller can pick a unique anchor.
+
+    Args:
+        content: The file text the search was run against.
+        search: The (already line-normalized) search block.
+        context: Lines of context to show before/after each match.
+        max_show: Cap on how many matches to render in detail.
+
+    Returns:
+        A formatted multi-line string, or '' if no line-aligned match exists.
+    """
+    search_lines = search.split('\n')
+    n = len(search_lines)
+    content_lines = content.split('\n')
+    if n == 0 or len(content_lines) < n:
+        return ''
+
+    starts = [i for i in range(len(content_lines) - n + 1)
+              if content_lines[i:i + n] == search_lines]
+    if not starts:
+        return ''
+
+    parts = []
+    for idx, start in enumerate(starts[:max_show], 1):
+        lo = max(0, start - context)
+        hi = min(len(content_lines), start + n + context)
+        block = []
+        for ln in range(lo, hi):
+            marker = '>' if start <= ln < start + n else ' '
+            block.append(f'{marker} {ln + 1}: {content_lines[ln]}')
+        parts.append(f'Match {idx} (line {start + 1}):\n' + '\n'.join(block))
+
+    out = '\n\n'.join(parts)
+    if len(starts) > max_show:
+        out += f'\n\n… and {len(starts) - max_show} more match(es).'
+    return out
 
 
 # ═══════════════════════════════════════════════════════
@@ -406,9 +473,14 @@ def _apply_one_diff(base, rel_path, search, replace, description='', conv_id=Non
 
             if tw_count >= 1:
                 if tw_count > 1 and not replace_all:
+                    locs = _describe_duplicate_matches(tw_content, tw_search)
+                    error_msg = (f'Search text matches {tw_count} locations (after trailing-whitespace '
+                                 f'normalization). Make it more specific (add surrounding lines so it '
+                                 f'matches exactly once), or set replace_all=true to replace all occurrences.')
+                    if locs:
+                        error_msg += f'\n\n{locs}'
                     return {'ok': False, 'action': 'apply_diff', 'path': rel_path,
-                            'error': f'Search text matches {tw_count} locations (after trailing-whitespace normalization). '
-                                     f'Make it more specific, or set replace_all=true to replace all occurrences.'}
+                            'error': error_msg}
                 tw_lines = tw_content.split('\n')
                 search_lines = tw_search.split('\n')
                 n_sl = len(search_lines)
@@ -435,7 +507,46 @@ def _apply_one_diff(base, rel_path, search, replace, description='', conv_id=Non
                 else:
                     tw_count = 0
 
+            # ── Tier 4: unicode-escape normalization ──
+            # The model often emits a real glyph (⏰, em-dash …) where the file
+            # holds the literal escape sequence (\u23f0, \u2014), or vice-versa.
+            # Decode \uXXXX / \UXXXXXXXX / \xXX on BOTH sides for the comparison
+            # only, then splice the model's verbatim replacement into the real
+            # file lines.
             if tw_count == 0:
+                esc_content_lines = [_decode_unicode_escapes(l).rstrip()
+                                     for l in norm_content.split('\n')]
+                esc_search_lines = [_decode_unicode_escapes(l).rstrip()
+                                    for l in norm_search.split('\n')]
+                n_el = len(esc_search_lines)
+                esc_starts = [i for i in range(len(esc_content_lines) - n_el + 1)
+                              if esc_content_lines[i:i + n_el] == esc_search_lines]
+                if esc_starts:
+                    if len(esc_starts) > 1 and not replace_all:
+                        esc_content = '\n'.join(esc_content_lines)
+                        esc_search = '\n'.join(esc_search_lines)
+                        locs = _describe_duplicate_matches(esc_content, esc_search)
+                        error_msg = (f'Search text matches {len(esc_starts)} locations (after unicode-escape '
+                                     f'normalization). Make it more specific (add surrounding lines so it '
+                                     f'matches exactly once), or set replace_all=true to replace all occurrences.')
+                        if locs:
+                            error_msg += f'\n\n{locs}'
+                        return {'ok': False, 'action': 'apply_diff', 'path': rel_path,
+                                'error': error_msg}
+                    content_lines = norm_content.split('\n')
+                    replace_lines = replace.replace('\r\n', '\n').split('\n')
+                    for start_idx in reversed(esc_starts):
+                        content_lines[start_idx:start_idx + n_el] = replace_lines
+                        if not replace_all:
+                            break
+                    content = '\n'.join(content_lines)
+                    search = norm_search
+                    count = len(esc_starts)
+                    _tw_replaced = True
+                    logger.debug('apply_diff: unicode-escape normalized match in %s '
+                                 '(%d locations)', rel_path, count)
+
+            if tw_count == 0 and not _tw_replaced:
                 hint = _find_closest_match(norm_content, norm_search)
                 error_msg = (f'Search text not found in {rel_path}. '
                              f'File has {content.count(chr(10))+1} lines. '
@@ -452,8 +563,13 @@ def _apply_one_diff(base, rel_path, search, replace, description='', conv_id=Non
             search = norm_search
 
     if count > 1 and not replace_all:
+        locs = _describe_duplicate_matches(content, search)
+        error_msg = (f'Search text matches {count} locations. Make it more specific (add surrounding '
+                     f'lines so it matches exactly once), or set replace_all=true to replace all occurrences.')
+        if locs:
+            error_msg += f'\n\n{locs}'
         return {'ok': False, 'action': 'apply_diff', 'path': rel_path,
-                'error': f'Search text matches {count} locations. Make it more specific, or set replace_all=true to replace all occurrences.'}
+                'error': error_msg}
 
     if _tw_replaced:
         new_content = content
@@ -540,6 +656,7 @@ def tool_apply_diffs(base_path, edits, conv_id=None, task_id=None):
         try:
             bp, resolved_rp = _resolve_base(base_path, rp)
         except ValueError as _rve:
+            logger.debug('[write_tools] tool_apply_diffs caught %s: %s', type(_rve).__name__, _rve)
             fail_count += 1
             results.append(f'[{i}] FAIL {rp}: {_rve}')
             continue
@@ -625,7 +742,37 @@ def _insert_one(base, rel_path, anchor, content, position='after', description='
             tw_anchor = _rstrip_lines(norm_anchor)
             tw_count = tw_content.count(tw_anchor)
 
+            # ── Tier 4: unicode-escape normalization ──
+            # Glyph-vs-literal-escape drift (anchor "⏰" vs file "\u23f0").
+            # Decode \uXXXX / \UXXXXXXXX / \xXX on both sides for matching,
+            # then reconstruct the real anchor text from the file lines.
             if tw_count == 0:
+                esc_content_lines = [_decode_unicode_escapes(l).rstrip()
+                                     for l in norm_content.split('\n')]
+                esc_anchor_lines = [_decode_unicode_escapes(l).rstrip()
+                                    for l in norm_anchor.split('\n')]
+                n_el = len(esc_anchor_lines)
+                esc_starts = [i for i in range(len(esc_content_lines) - n_el + 1)
+                              if esc_content_lines[i:i + n_el] == esc_anchor_lines]
+                if len(esc_starts) == 1:
+                    real_lines = norm_content.split('\n')[esc_starts[0]:esc_starts[0] + n_el]
+                    norm_anchor = '\n'.join(real_lines)
+                    count = 1
+                    _normalized = True
+                    logger.debug('insert_content: unicode-escape normalized match in %s', rel_path)
+                elif len(esc_starts) > 1:
+                    esc_content = '\n'.join(esc_content_lines)
+                    esc_anchor = '\n'.join(esc_anchor_lines)
+                    locs = _describe_duplicate_matches(esc_content, esc_anchor)
+                    error_msg = (f'Anchor text matches {len(esc_starts)} locations (after unicode-escape '
+                                 f'normalization). Make it more specific by adding surrounding lines so it '
+                                 f'matches exactly once.')
+                    if locs:
+                        error_msg += f'\n\n{locs}'
+                    return {'ok': False, 'action': 'insert_content', 'path': rel_path,
+                            'error': error_msg}
+
+            if tw_count == 0 and not _normalized:
                 hint = _find_closest_match(norm_content, norm_anchor)
                 error_msg = (f'Anchor text not found in {rel_path}. '
                              f'File has {file_content.count(chr(10))+1} lines. '
@@ -637,45 +784,54 @@ def _insert_one(base, rel_path, anchor, content, position='after', description='
                         'error': error_msg, 'anchorLen': len(anchor)}
 
             if tw_count > 1:
+                locs = _describe_duplicate_matches(tw_content, tw_anchor)
+                error_msg = (f'Anchor text matches {tw_count} locations (after trailing-whitespace '
+                             f'normalization). Make it more specific by adding surrounding lines so it '
+                             f'matches exactly once.')
+                if locs:
+                    error_msg += f'\n\n{locs}'
                 return {'ok': False, 'action': 'insert_content', 'path': rel_path,
-                        'error': f'Anchor text matches {tw_count} locations '
-                                 f'(after trailing-whitespace normalization). '
-                                 f'Make it more specific.'}
+                        'error': error_msg}
 
             # Single match after TW normalization — find the real position
-            # by matching line-by-line in the original content
-            tw_lines = tw_content.split('\n')
-            anchor_lines = tw_anchor.split('\n')
-            n_al = len(anchor_lines)
-            content_lines = norm_content.split('\n')
+            # by matching line-by-line in the original content.
+            # Skipped when tier-4 escape normalization already resolved a match.
+            if tw_count == 1 and not _normalized:
+                tw_lines = tw_content.split('\n')
+                anchor_lines = tw_anchor.split('\n')
+                n_al = len(anchor_lines)
+                content_lines = norm_content.split('\n')
 
-            match_start = None
-            for i in range(len(tw_lines) - n_al + 1):
-                if tw_lines[i:i + n_al] == anchor_lines:
-                    match_start = i
-                    break
+                match_start = None
+                for i in range(len(tw_lines) - n_al + 1):
+                    if tw_lines[i:i + n_al] == anchor_lines:
+                        match_start = i
+                        break
 
-            if match_start is not None:
-                # Reconstruct the original anchor text from the file
-                orig_anchor_lines = content_lines[match_start:match_start + n_al]
-                norm_anchor = '\n'.join(orig_anchor_lines)
-                norm_content = norm_content  # already LF-normalized
-                count = 1
-                _normalized = True
-                logger.debug('insert_content: trailing-WS normalized match in %s', rel_path)
-            else:
-                return {'ok': False, 'action': 'insert_content', 'path': rel_path,
-                        'error': 'Anchor matched after normalization but line mapping failed. '
-                                 'Please use read_files to get the exact content.'}
+                if match_start is not None:
+                    # Reconstruct the original anchor text from the file
+                    orig_anchor_lines = content_lines[match_start:match_start + n_al]
+                    norm_anchor = '\n'.join(orig_anchor_lines)
+                    count = 1
+                    _normalized = True
+                    logger.debug('insert_content: trailing-WS normalized match in %s', rel_path)
+                else:
+                    return {'ok': False, 'action': 'insert_content', 'path': rel_path,
+                            'error': 'Anchor matched after normalization but line mapping failed. '
+                                     'Please use read_files to get the exact content.'}
 
     if _normalized:
         file_content = norm_content
         anchor = norm_anchor
 
     if count > 1:
+        locs = _describe_duplicate_matches(file_content, anchor)
+        error_msg = (f'Anchor text matches {count} locations. Make it more specific to identify a '
+                     f'unique position by adding surrounding lines.')
+        if locs:
+            error_msg += f'\n\n{locs}'
         return {'ok': False, 'action': 'insert_content', 'path': rel_path,
-                'error': f'Anchor text matches {count} locations. '
-                         f'Make it more specific to identify a unique position.'}
+                'error': error_msg}
 
     # ── Build new content ──
     anchor_idx = file_content.index(anchor)
@@ -798,6 +954,7 @@ def tool_insert_contents(base_path, edits, conv_id=None, task_id=None):
         try:
             bp, resolved_rp = _resolve_base(base_path, rp)
         except ValueError as _rve:
+            logger.debug('[write_tools] tool_insert_contents caught %s: %s', type(_rve).__name__, _rve)
             fail_count += 1
             results.append(f'[{i}] FAIL {rp}: {_rve}')
             continue

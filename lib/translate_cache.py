@@ -6,11 +6,10 @@ hex chars to keep any single dir small).
 
 Hits skip both the MT-provider HTTP call AND the LLM dispatch in
 ``_translate_one_chunk()``.  Cache is purely additive — opt out with
-``TOFU_TRANSLATE_CACHE=0`` (legacy ``CHATUI_TRANSLATE_CACHE=0`` still honored).
+``TOFU_TRANSLATE_CACHE=0``.
 
 Eviction is lazy and bounded:
-  - Each entry has a TTL of ``TOFU_TRANSLATE_CACHE_TTL_DAYS`` (default 30)
-    (legacy ``CHATUI_TRANSLATE_CACHE_TTL_DAYS`` still honored).
+  - Each entry has a TTL of ``TOFU_TRANSLATE_CACHE_TTL_DAYS`` (default 30).
   - On every ~1/256 lookup we sweep the shard the key falls in, removing
     entries past the TTL (cheap — typical shards have a few hundred files).
   - There is no global eviction loop; under steady state the lazy sweep
@@ -37,9 +36,8 @@ logger = get_logger(__name__)
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CACHE_DIR = os.path.join(_BASE_DIR, 'data', 'translate_cache')
 
-_ENABLED = getenv_compat('TOFU_TRANSLATE_CACHE', 'CHATUI_TRANSLATE_CACHE', default='1') != '0'
+_ENABLED = getenv_compat('TOFU_TRANSLATE_CACHE', default='1') != '0'
 _TTL_SECONDS = int(getenv_compat('TOFU_TRANSLATE_CACHE_TTL_DAYS',
-                                 'CHATUI_TRANSLATE_CACHE_TTL_DAYS',
                                  default='30')) * 86400
 _SWEEP_PROBABILITY = 1.0 / 256  # one sweep per ~256 lookups, on the shard touched
 
@@ -93,7 +91,8 @@ def get(text: str, source: str, target: str):
     path = _path_for(key)
     try:
         st = os.stat(path)
-    except FileNotFoundError:
+    except FileNotFoundError as _e_audit:
+        logger.debug('[translate_cache] get caught %s: %s', type(_e_audit).__name__, _e_audit)
         return None
     except OSError as e:
         logger.debug('[TranslateCache] stat failed for %s: %s', path, e)
@@ -162,7 +161,8 @@ def _lazy_sweep_shard(shard_prefix: str):
     cutoff = time.time() - _TTL_SECONDS
     try:
         names = os.listdir(shard)
-    except OSError:
+    except OSError as _e_audit:
+        logger.debug('[translate_cache] _lazy_sweep_shard caught %s: %s', type(_e_audit).__name__, _e_audit)
         return
     removed = 0
     for name in names:
@@ -171,7 +171,8 @@ def _lazy_sweep_shard(shard_prefix: str):
             if os.stat(p).st_mtime < cutoff:
                 os.remove(p)
                 removed += 1
-        except OSError:
+        except OSError as _e_audit:
+            logger.debug('[translate_cache] _lazy_sweep_shard caught %s: %s', type(_e_audit).__name__, _e_audit)
             continue
     if removed:
         logger.debug('[TranslateCache] swept shard %s: removed %d expired entries',

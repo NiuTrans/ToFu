@@ -4,13 +4,51 @@
 from __future__ import annotations
 
 import os
+import threading
 
+from lib.agent_core.events import EventType, build_event
 from lib.log import get_logger
 
 logger = get_logger(__name__)
 
 # ── Shared constant: application root ──
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# ── png_to_svg module cache ──
+# scripts/png_to_svg.py is loaded via importlib (not a regular package import)
+# because it lives outside lib/. We cache the module after first load so we
+# don't re-exec_module() on every generate_image call. Beyond performance, the
+# previous per-call exec_module triggered SIGBUS / "Bus error (core dumped)"
+# crashes when the project's FUSE-mounted filesystem hiccupped during the
+# C-extension load chain (xml.etree.ElementTree → _elementtree). See
+# faulthandler.log dump anchored at scripts/png_to_svg.py:24 → executor_image.py:_convert_to_svg.
+_PNG_TO_SVG_MOD = None
+_PNG_TO_SVG_LOCK = threading.Lock()
+
+
+def _load_png_to_svg():
+    """Load scripts/png_to_svg.py once and cache the module.
+
+    Returns the cached module on subsequent calls. Raises ImportError if
+    the script cannot be loaded (caller should treat SVG conversion as
+    unavailable for this run).
+    """
+    global _PNG_TO_SVG_MOD
+    if _PNG_TO_SVG_MOD is not None:
+        return _PNG_TO_SVG_MOD
+    with _PNG_TO_SVG_LOCK:
+        if _PNG_TO_SVG_MOD is not None:
+            return _PNG_TO_SVG_MOD
+        import importlib.util
+        _svg_script = os.path.join(_APP_ROOT, 'scripts', 'png_to_svg.py')
+        spec = importlib.util.spec_from_file_location('png_to_svg', _svg_script)
+        if spec is None or spec.loader is None:
+            raise ImportError(f'Cannot create spec for {_svg_script}')
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _PNG_TO_SVG_MOD = mod
+        logger.info('[Tool:generate_image] png_to_svg loaded once and cached')
+        return _PNG_TO_SVG_MOD
 
 # ── LLM thumbnail constants ──
 # The sankuai openresty gateway enforces a ~4 MB request body limit. A 2K PNG
@@ -344,19 +382,39 @@ def _save_image_to_disk(image_b64, mime_type='image/png'):
 
 def _save_image_to_project(image_b64, mime_type, output_path, project_path,
                            conv_id=None, task_id=None):
-    """Save base64 image to a path inside the active project directory."""
+    """Save base64 image to a path inside the active project directory.
+
+    ``output_path`` may be a project-relative path OR a multi-root namespaced
+    path like ``rootname:rel/path.png``.  Without prefix resolution, the
+    literal colon is treated as part of the filename and silently creates
+    a top-level directory whose NAME is ``rootname:rel`` under the primary
+    root — see the ``tofu:static/posters/`` artifact from 2026-05-05.
+
+    Returns:
+        Tuple ``(display_path, eff_base, eff_rel)`` on success, ``('', '', '')``
+        on failure. ``display_path`` is what the LLM sees (preserves the
+        ``rootname:`` prefix if used). ``eff_base`` / ``eff_rel`` are the
+        resolved root + path-under-root, needed by callers that perform
+        further work (e.g. SVG conversion) on the same file.
+    """
     import base64 as _b64
 
     from lib.project_mod.modifications import _record_modification
     from lib.project_mod.scanner import _safe_path
-    from lib.project_mod.tools import _touch_for_vscode
+    from lib.project_mod.tools import _resolve_base, _touch_for_vscode
 
     try:
-        target = _safe_path(project_path, output_path)
+        eff_base, eff_rel = _resolve_base(project_path, output_path, conv_id=conv_id)
+    except ValueError as e:
+        logger.warning('[Tool:generate_image] Project save path namespace rejected %s: %s',
+                       output_path, e)
+        return '', '', ''
+    try:
+        target = _safe_path(eff_base, eff_rel)
     except ValueError as e:
         logger.warning('[Tool:generate_image] Project save path rejected %s: %s',
                        output_path, e)
-        return ''
+        return '', '', ''
 
     parent = os.path.dirname(target)
     if parent and not os.path.isdir(parent):
@@ -365,7 +423,7 @@ def _save_image_to_project(image_b64, mime_type, output_path, project_path,
         except Exception as e:
             logger.warning('[Tool:generate_image] makedirs failed for %s: %s',
                            parent, e, exc_info=True)
-            return ''
+            return '', '', ''
 
     existed = os.path.isfile(target)
     original_content = None
@@ -389,16 +447,16 @@ def _save_image_to_project(image_b64, mime_type, output_path, project_path,
                     output_path, len(raw_bytes) // 1024)
 
         _record_modification(
-            project_path, 'write_file', output_path,
+            eff_base, 'write_file', eff_rel,
             original_content=original_content if existed else None,
             conv_id=conv_id, task_id=task_id,
         )
 
-        return output_path
+        return output_path, eff_base, eff_rel
     except Exception as e:
         logger.error('[Tool:generate_image] Failed to save image to project path %s: %s',
                      output_path, e, exc_info=True)
-        return ''
+        return '', '', ''
 
 
 def _convert_to_svg(saved_url: str, project_save_path: str,
@@ -421,12 +479,7 @@ def _convert_to_svg(saved_url: str, project_save_path: str,
         Tuple of ``(svg_saved_url, svg_project_path)`` — empty strings on failure.
     """
     try:
-        import importlib.util
-        _svg_script = os.path.join(_APP_ROOT, 'scripts', 'png_to_svg.py')
-        spec = importlib.util.spec_from_file_location('png_to_svg', _svg_script)
-        _mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_mod)
-        convert_png_to_svg = _mod.convert_png_to_svg
+        convert_png_to_svg = _load_png_to_svg().convert_png_to_svg
     except Exception as e:
         logger.warning('[Tool:generate_image] SVG conversion unavailable: %s', e)
         return '', ''
@@ -535,8 +588,8 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
             'imageAspectRatio': aspect_ratio, 'imageResolution': resolution,
             'badge': badge_text,
         }]
-        append_event(task, {'type': 'tool_result', 'roundNum': rn,
-                            'query': round_entry['query'], 'results': round_entry['results']})
+        append_event(task, build_event(EventType.TOOL_RESULT, roundNum=rn,
+                            query=round_entry['query'], results=round_entry['results']))
 
         # ── Extract image gen history ──
         history = _extract_image_gen_history(task, messages=task.get('messages'))
@@ -558,8 +611,8 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
                 'imageAspectRatio': aspect_ratio, 'imageResolution': resolution,
                 'badge': badge_429,
             }]
-            append_event(task, {'type': 'tool_result', 'roundNum': rn,
-                                'query': round_entry['query'], 'results': round_entry['results']})
+            append_event(task, build_event(EventType.TOOL_RESULT, roundNum=rn,
+                                query=round_entry['query'], results=round_entry['results']))
 
         try:
             with log_context('generate_image_tool', logger=logger):
@@ -590,8 +643,10 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
             saved_url = _save_image_to_disk(image_b64, mime_type) if image_b64 else ''
 
             project_save_path = ''
+            project_save_base = ''
+            project_save_rel = ''
             if output_path and project_path and project_enabled and image_b64:
-                project_save_path = _save_image_to_project(
+                project_save_path, project_save_base, project_save_rel = _save_image_to_project(
                     image_b64, mime_type, output_path, project_path,
                     conv_id=task.get('convId'),
                     task_id=task.get('id'),
@@ -602,7 +657,7 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
             svg_project_path = ''
             if svg_convert and image_b64:
                 svg_saved_url, svg_project_path = _convert_to_svg(
-                    saved_url, project_save_path, project_path,
+                    saved_url, project_save_rel, project_save_base or project_path,
                     conv_id=task.get('convId'), task_id=task.get('id'),
                 )
 

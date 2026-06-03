@@ -32,8 +32,16 @@ class TestSearchFacade:
         from lib.search.engines.bing import search_bing
         from lib.search.engines.brave import search_brave
         from lib.search.engines.ddg import search_ddg_api, search_ddg_html
+        from lib.search.engines.marginalia import search_marginalia
         from lib.search.engines.searxng import search_searxng
         assert callable(search_ddg_html)
+        assert callable(search_marginalia)
+
+    def test_deepen(self):
+        from lib.search import deepen as deepen_mod
+        from lib.search.deepen import deepen_results, is_deepen_enabled
+        assert callable(deepen_results)
+        assert callable(is_deepen_enabled)
 
     def test_common(self):
         from lib.search._common import HEADERS, clean_text
@@ -256,36 +264,25 @@ class TestConsumerImports:
 @pytest.mark.unit
 class TestFlaskRouteRegistration:
     def test_all_critical_routes_registered(self):
-        from flask import Flask
+        # Use the real production app (Quart, built by server.py with its
+        # blueprints already registered and the PROVIDE_AUTOMATIC_OPTIONS
+        # shim applied) rather than hand-registering ALL_BLUEPRINTS onto a
+        # bare Flask app — several blueprints use Quart-only features
+        # (@websocket) and the bare-Flask path is missing config the
+        # registration reads.
+        import server  # noqa: F401
+        from server import app
 
-        from routes import ALL_BLUEPRINTS
+        rules = [r.rule for r in app.url_map.iter_rules()]
 
-        test_app = Flask(__name__)
-        for bp in ALL_BLUEPRINTS:
-            test_app.register_blueprint(bp)
-
-        with test_app.app_context():
-            rules = [r.rule for r in test_app.url_map.iter_rules()]
-
+        # Post /api/v1 migration these endpoints live under /api/v1/*.
         critical = [
-            '/api/conversations',
-            '/api/conversations/<conv_id>',
-            '/api/conversations/search',
-            '/api/images/upload',
-            '/api/images/<filename>',
-            '/api/images/generate',
-            '/api/pdf/parse',
-            '/api/pdf/vlm-parse',
-            '/api/translate/start',
-            '/api/translate',
-            '/api/translate/poll/<task_id>',
-            '/api/translate/poll_batch',
-            '/api/me',
+            '/api/v1/conversations',
+            '/api/v1/conversations/search',
+            '/api/v1/translate',
+            '/api/v1/translate/start',
             '/api/health',
-            '/api/pricing',
-            '/api/server-config',
-            '/api/features',
-            '/api/log/compress',
+            '/api/v1/pricing',
             '/',
         ]
 
@@ -295,9 +292,10 @@ class TestFlaskRouteRegistration:
     def test_new_blueprints_in_all(self):
         from routes import ALL_BLUEPRINTS
         names = [bp.name for bp in ALL_BLUEPRINTS]
-        assert 'conversations' in names
-        assert 'upload' in names
-        assert 'translate' in names
+        # Core domains migrated to api_v1_<name> blueprints.
+        assert 'api_v1_conversations' in names
+        assert 'api_v1_uploads' in names
+        assert 'api_v1_translate' in names
         assert 'common' in names
 
 

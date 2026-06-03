@@ -7,6 +7,7 @@ Extracted from _core.py for modularity. Re-exported via _core for backward compa
 import re
 
 from lib.log import get_logger
+from lib.ttl_cache import TTLCache
 
 logger = get_logger(__name__)
 
@@ -69,8 +70,10 @@ def _get_pk_columns(table_name):
         'trading_daily_briefing':     ['date'],
         'trading_bg_tasks':           ['task_id'],
         'trading_intel_crawl_log':    ['crawl_date', 'category', 'source_key'],
-        # Swarm artifact store
+        # Swarm artifact store (legacy in-memory, kept for back-compat)
         'artifacts':                  ['key'],
+        # Chat artifacts (renderable reports — md / html / svg)
+        'chat_artifacts':             ['id'],
         # Scheduler
         'scheduled_tasks':            ['id'],
         'proactive_poll_log':         ['id'],
@@ -78,6 +81,8 @@ def _get_pk_columns(table_name):
         'error_resolutions':          ['fingerprint'],
         # Paper reports
         'paper_reports':              ['paper_hash', 'lang'],
+        # Paper translations (Babel-mode whole-paper translations)
+        'paper_translations':         ['paper_hash', 'lang'],
         # Paper library (server-side bookshelf)
         'paper_library':              ['id', 'user_id'],
         # Daily cost cache (per-day aggregate of conversation usage costs)
@@ -87,8 +92,9 @@ def _get_pk_columns(table_name):
 
 
 # ── SQL translation cache ──
-_translate_sql_cache = {}  # str → (str|None, bool)
-_TRANSLATE_CACHE_MAX = 1024
+# Backed by lib.ttl_cache.TTLCache. ttl=0 disables expiry (translations
+# are deterministic per input SQL). max_size=1024 caps memory.
+_translate_sql_cache = TTLCache(ttl=0, max_size=1024, name='sql_translate')
 
 
 def translate_sql(sql):
@@ -100,13 +106,7 @@ def translate_sql(sql):
     Results are cached (same SQL template always produces the same output)
     to avoid regex overhead on hot paths (poll every 500ms, meta every 5s).
     """
-    cached = _translate_sql_cache.get(sql)
-    if cached is not None:
-        return cached
-    result = _translate_sql_uncached(sql)
-    if len(_translate_sql_cache) < _TRANSLATE_CACHE_MAX:
-        _translate_sql_cache[sql] = result
-    return result
+    return _translate_sql_cache.get_or_compute(sql, lambda: _translate_sql_uncached(sql))
 
 
 def _translate_sql_uncached(sql):

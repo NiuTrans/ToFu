@@ -18,7 +18,7 @@
    - [2.2 流式工具执行 (Streaming Tool Execution)](#22-流式工具执行-streaming-tool-execution)
    - [2.3 工具结果预算管理 (Tool Result Budgeting)](#23-工具结果预算管理-tool-result-budgeting)
    - [2.4 工具钩子系统 (Tool Hooks)](#24-工具钩子系统-tool-hooks)
-   - [2.5 省 Token 工具：emit_to_user 和 content_ref](#25-省-token-工具emit_to_user-和-content_ref)
+   - [2.5 省 Token 工具：content_ref](#25-省-token-工具content_ref)
 3. [Harness 编排 (Harness Programming)](#3-harness-编排-harness-programming)
    - [3.1 单 Agent 编排：Orchestrator 主循环](#31-单-agent-编排orchestrator-主循环)
    - [3.2 自主模式：Endpoint (Planner → Worker → Critic)](#32-自主模式endpoint-planner--worker--critic)
@@ -461,21 +461,7 @@ register_post_hook(_empty_result_marker_hook)  # 空结果标记
 - 我们是 web server 架构，用户无法在运行时注册 hook 脚本
 - 我们的 approval 系统（`request_write_approval`）已经处理了 "阻止执行" 的场景
 
-### 2.5 省 Token 工具：emit_to_user 和 content_ref
-
-两个机制避免 LLM 重新生成已经存在的内容：
-
-**`emit_to_user(comment)`**：终端工具。当工具结果已经完全回答了用户的问题时，模型调用此工具，直接引用之前的工具结果作为回答，不需要再做一轮 LLM 调用。
-
-```
-模型看到 grep_search 返回了完美的结果
-  → 调用 emit_to_user(comment="搜索结果如上")
-  → Orchestrator 检测到 _emit_to_user flag
-  → 提取被引用的 tool round 的 content
-  → 发送 emit_ref SSE event
-  → 前端渲染为内联内容块
-  → 循环立即 break（不再调用 LLM）
-```
+### 2.5 省 Token 工具：content_ref
 
 **`content_ref` on `write_file`**：当模型需要将之前的工具结果写入文件时，用 `content_ref={tool_round: N}` 引用，而不是在 response 中重新生成整个文件内容。
 
@@ -523,9 +509,8 @@ register_post_hook(_empty_result_marker_hook)  # 空结果标记
              │ 13. analyse_stream_result()            │
              │ 14. parse_tool_calls()                 │
              │ 15. execute_tool_pipeline()            │
-             │ 16. emit_to_user detection             │
-             │ 17. Timeout circuit breaker            │
-             │ 18. Crash-recovery checkpoint          │
+             │ 16. Timeout circuit breaker            │
+             │ 17. Crash-recovery checkpoint          │
              └──────────────┬───────────────────────┘
                             ↓
              ┌────────────────────────────────────┐

@@ -104,7 +104,8 @@ class StreamingScheduler:
 
     # ── Public API ───────────────────────────────────
 
-    def add_specs(self, specs: list[SubTaskSpec], inject_deps: bool = True):
+    def add_specs(self, specs: list[SubTaskSpec],
+                  inject_deps: bool = True) -> list[SubTaskSpec]:
         """Add specs and immediately launch any whose deps are satisfied.
 
         Performs lightweight cycle detection among the new specs +
@@ -112,8 +113,12 @@ class StreamingScheduler:
         already completed / pending / running specs by objective text
         similarity.  Raises ``ValueError`` on cycles so the caller can
         handle gracefully.
+
+        Returns the list of specs that were actually accepted (after
+        dedup).  Callers should compare against the original ``specs``
+        list to detect dropped duplicates and surface them to the LLM.
         """
-        from lib.swarm.master import resolve_execution_order
+        from lib.swarm.planner import resolve_execution_order
 
         logger.info('[Scheduler] add_specs called with %d spec(s): %s',
                      len(specs), [(s.id, s.role) for s in specs])
@@ -158,7 +163,7 @@ class StreamingScheduler:
             if not deduped_specs:
                 logger.debug('[Scheduler] All %d specs were duplicates, nothing to add',
                              len(specs))
-                return
+                return []
 
             if len(deduped_specs) < len(specs):
                 logger.debug('[Scheduler] Deduped %d → %d specs',
@@ -185,6 +190,7 @@ class StreamingScheduler:
                          len(self._pending), len(self._running), len(self._completed),
                          [s.id for s in self._pending])
             self._launch_ready_locked()
+            return list(specs)
 
     def run_until_idle(self, timeout: float = 600.0) -> list[tuple[SubTaskSpec, SubAgentResult]]:
         """Block until there are no pending or running specs.
@@ -452,7 +458,7 @@ class StreamingScheduler:
                         except Exception as e:
                             logger.warning('[Scheduler] on_retry callback error for %s: %s', spec.id, e, exc_info=True)
                     spec.context += (
-                        f'\n\n⚠️ Previous attempt failed with: '
+                        f'\n\nPrevious attempt failed with: '
                         f'{result.error_message}\n'
                         f'Please try a different approach.'
                     )
@@ -475,7 +481,7 @@ class StreamingScheduler:
                         except Exception as e:
                             logger.warning('[Scheduler] on_retry callback error for %s: %s', spec.id, e, exc_info=True)
                     spec.context += (
-                        f'\n\n⚠️ Previous attempt failed with: {err_msg}\n'
+                        f'\n\nPrevious attempt failed with: {err_msg}\n'
                         f'Please try a different approach.'
                     )
                 else:

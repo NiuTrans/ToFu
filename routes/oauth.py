@@ -13,6 +13,8 @@ Browser-centric flow:
 from flask import Blueprint, jsonify, request
 
 from lib.log import get_logger
+from lib.api_response import api_bad_request, api_internal_error
+from lib.request_parser import parse_body
 
 logger = get_logger(__name__)
 
@@ -41,7 +43,7 @@ def oauth_login():
         if request.method == 'GET':
             provider = request.args.get('provider', '')
         else:
-            data = request.get_json(force=True, silent=True) or {}
+            data = parse_body(force=True)
             provider = data.get('provider', '')
 
         if provider not in ('claude', 'codex'):
@@ -56,7 +58,7 @@ def oauth_login():
 
     except Exception as e:
         logger.error('[OAuth API] Login failed: %s', e, exc_info=True)
-        return jsonify({'error': 'internal_error'}), 500
+        return api_internal_error('internal_error')
 
 
 @oauth_bp.route('/api/oauth/callback', methods=['GET', 'POST'])
@@ -83,14 +85,14 @@ def oauth_callback():
             callback_url = request.args.get('callback_url', '')
             state = request.args.get('state', '')
         else:
-            data = request.get_json(force=True, silent=True) or {}
+            data = parse_body(force=True)
             provider = data.get('provider', '')
             code = data.get('code', '')
             callback_url = data.get('callback_url', '')
             state = data.get('state', '')
 
         if provider not in ('claude', 'codex'):
-            return jsonify({'error': 'Invalid provider'}), 400
+            return api_bad_request('Invalid provider')
 
         # Extract code from callback URL if provided
         if callback_url and not code:
@@ -98,10 +100,10 @@ def oauth_callback():
             params = parse_qs(parsed.query)
             code = params.get('code', [None])[0]
             if not code:
-                return jsonify({'error': 'No authorization code found in the URL'}), 400
+                return api_bad_request('No authorization code found in the URL')
 
         if not code:
-            return jsonify({'error': 'No authorization code provided'}), 400
+            return api_bad_request('No authorization code provided')
 
         result = exchange_code(provider, code, state=state)
 
@@ -111,73 +113,12 @@ def oauth_callback():
 
     except Exception as e:
         logger.error('[OAuth API] Callback failed: %s', e, exc_info=True)
-        return jsonify({'error': 'internal_error'}), 500
+        return api_internal_error('internal_error')
 
 
-@oauth_bp.route('/api/oauth/status')
-def oauth_status():
-    """Get OAuth status for all providers or a specific one.
-
-    Query: ?provider=claude (optional)
-    Returns: { "claude": {...}, "codex": {...} } or single provider dict.
-    """
-    try:
-        from lib.oauth.manager import get_oauth_status, get_all_oauth_status
-
-        provider = request.args.get('provider', '')
-
-        if provider:
-            if provider not in ('claude', 'codex'):
-                return jsonify({'error': 'Invalid provider'}), 400
-            return jsonify(get_oauth_status(provider))
-
-        return jsonify(get_all_oauth_status())
-
-    except Exception as e:
-        logger.error('[OAuth API] Status check failed: %s', e, exc_info=True)
-        return jsonify({'error': 'internal_error'}), 500
-
-
-@oauth_bp.route('/api/oauth/test')
-def oauth_test():
-    """Test server-side connectivity to OAuth endpoints.
-
-    Returns which endpoints are reachable from the server (for diagnosing
-    geo-blocking issues in China).
-    """
-    import requests as req
-    from lib.proxy import proxies_for
-
-    results = {}
-    endpoints = {
-        'claude_token': 'https://console.anthropic.com/v1/oauth/token',
-        'claude_auth': 'https://claude.ai/',
-        'codex_token': 'https://auth.openai.com/oauth/token',
-        'codex_auth': 'https://auth.openai.com/',
-    }
-
-    for name, url in endpoints.items():
-        try:
-            r = req.get(url, proxies=proxies_for(url), timeout=8,
-                        allow_redirects=False)
-            blocked = (
-                r.status_code == 302 and 'unavailable-in-region' in (r.headers.get('Location', ''))
-                or 'unsupported_country_region_territory' in r.text[:500]
-            )
-            results[name] = {
-                'url': url, 'status': r.status_code,
-                'reachable': not blocked,
-                'blocked': blocked,
-                'detail': r.headers.get('Location', '')[:200] if r.status_code == 302
-                          else r.text[:200],
-            }
-        except Exception as e:
-            results[name] = {
-                'url': url, 'status': 0, 'reachable': False,
-                'blocked': True, 'detail': str(e)[:200],
-            }
-
-    return jsonify(results)
+# OAuth status + test routes moved to routes/api_v1/oauth.py.
+# login/callback/logout stay here because they mix GET form-redirects
+# (geo-block fallback) and don't fit the v1 JSON contract.
 
 
 @oauth_bp.route('/api/oauth/logout', methods=['GET', 'POST'])
@@ -196,15 +137,15 @@ def oauth_logout():
         if request.method == 'GET':
             provider = request.args.get('provider', '')
         else:
-            data = request.get_json(force=True, silent=True) or {}
+            data = parse_body(force=True)
             provider = data.get('provider', '')
 
         if provider not in ('claude', 'codex'):
-            return jsonify({'error': 'Invalid provider'}), 400
+            return api_bad_request('Invalid provider')
 
         result = logout_oauth(provider)
         return jsonify(result)
 
     except Exception as e:
         logger.error('[OAuth API] Logout failed: %s', e, exc_info=True)
-        return jsonify({'error': 'internal_error'}), 500
+        return api_internal_error('internal_error')

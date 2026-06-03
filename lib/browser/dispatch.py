@@ -25,7 +25,43 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ['BROWSER_HANDLERS', 'execute_browser_tool']
+__all__ = ['BROWSER_HANDLERS', 'execute_browser_tool', 'normalize_browser_args']
+
+
+# The LLM-facing browser schemas use snake_case (consistent with all other
+# Tofu tools), but the handlers + extension wire protocol speak camelCase.
+# This maps the snake_case keys the model now emits onto the camelCase the
+# rest of the browser stack expects.  Old persisted conversations that still
+# carry camelCase args pass through unchanged (the camelCase key already
+# matches what handlers read).
+_SNAKE_TO_CAMEL = {
+    'tab_id': 'tabId',
+    'tab_ids': 'tabIds',
+    'max_chars': 'maxChars',
+    'max_results': 'maxResults',
+    'max_elements': 'maxElements',
+    'full_page': 'fullPage',
+    'right_click': 'rightClick',
+    'scroll_to': 'scrollTo',
+    'wait_for_load': 'waitForLoad',
+}
+
+
+def normalize_browser_args(fn_args):
+    """Translate snake_case LLM args to the camelCase handlers expect.
+
+    Returns a new dict; if a camelCase key is already present (legacy
+    persisted args) it wins and the snake_case alias is dropped.
+    """
+    if not isinstance(fn_args, dict):
+        return fn_args
+    out = dict(fn_args)
+    for snake, camel in _SNAKE_TO_CAMEL.items():
+        if snake in out:
+            if camel not in out:
+                out[camel] = out[snake]
+            del out[snake]
+    return out
 
 
 def _handle_advanced_tool(fn_name, fn_args):
@@ -108,6 +144,9 @@ def execute_browser_tool(fn_name, fn_args, client_id=None):
         fn_args: Tool arguments dict.
         client_id: Target browser extension client ID for per-device routing.
     """
+    # Normalize snake_case LLM args → camelCase handler args (see
+    # normalize_browser_args). Accepts legacy camelCase too.
+    fn_args = normalize_browser_args(fn_args)
     # Store client_id in thread-local so send_browser_command can access it
     # without modifying every handler's signature.
     _set_active_client(client_id)

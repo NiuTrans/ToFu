@@ -29,6 +29,7 @@ const COMMAND_TIMEOUT_OVERRIDES = {
 
 let SERVER_URL = '';
 let CLIENT_ID = '';               // Stable per-device client identifier
+let BRIDGE_SECRET = '';           // Optional: matches server TOFU_BRIDGE_SECRET
 let pollActive = false;
 let connected = false;
 let lastError = '';
@@ -65,17 +66,33 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 function init() {
-  // Generate or restore a stable client ID for per-device command routing
-  chrome.storage.local.get(['clientId'], (data) => {
+  // Generate or restore a stable client ID for per-device command routing.
+  // Also load the optional bridge secret (only needed when the server has
+  // TOFU_BRIDGE_SECRET configured for tunnel exposure).
+  chrome.storage.local.get(['clientId', 'bridgeSecret'], (data) => {
     if (data.clientId) {
       CLIENT_ID = data.clientId;
     } else {
       CLIENT_ID = crypto.randomUUID();
       chrome.storage.local.set({ clientId: CLIENT_ID });
     }
-    console.log('[Bridge] Client ID:', CLIENT_ID);
+    BRIDGE_SECRET = data.bridgeSecret || '';
+    console.log('[Bridge] Client ID:', CLIENT_ID,
+                BRIDGE_SECRET ? '(bridge secret configured)' : '');
     autoDetectServer();
   });
+}
+
+function setBridgeSecret(secret) {
+  BRIDGE_SECRET = (secret || '').trim();
+  chrome.storage.local.set({ bridgeSecret: BRIDGE_SECRET });
+  console.log('[Bridge] Bridge secret', BRIDGE_SECRET ? 'set' : 'cleared');
+}
+
+function buildHeaders() {
+  const h = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
+  if (BRIDGE_SECRET) h['X-Bridge-Secret'] = BRIDGE_SECRET;
+  return h;
 }
 
 // ══════════════════════════════════════════
@@ -145,12 +162,23 @@ async function poll() {
     const resp = await fetch(`${SERVER_URL}/api/browser/poll`, {
       method: 'POST',
       signal: controller.signal,
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      headers: buildHeaders(),
       body: JSON.stringify({ results: resultsToSend, clientId: CLIENT_ID }),
     });
     clearTimeout(timeoutId);
 
     if (!resp.ok) {
+      if (resp.status === 401) {
+        // Bridge auth misconfigured — no point hammering the server.
+        // Hold the results so they're not lost when the user fixes the secret.
+        _resultQueue.unshift(...resultsToSend);
+        connected = false;
+        lastError = 'Bridge auth failed (401) — set the Bridge Secret in the popup';
+        updateBadge('error');
+        console.warn(`[Bridge] ${lastError}`);
+        if (pollActive) setTimeout(poll, POLL_RETRY_DELAY * 3);
+        return;
+      }
       if (resp.status >= 500) {
         // Proxy error — put results back so they're not lost
         _resultQueue.unshift(...resultsToSend);
@@ -1749,6 +1777,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       connected,
       serverUrl: SERVER_URL,
       clientId: CLIENT_ID,
+      hasBridgeSecret: !!BRIDGE_SECRET,
       pollActive,
       lastError,
       inflight: _inflight.size,
@@ -1761,6 +1790,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'setServer') {
     setServer(msg.url);
     sendResponse({ ok: true });
+    return true;
+  }
+  if (msg.type === 'setBridgeSecret') {
+    setBridgeSecret(msg.secret);
+    // Trigger a poll attempt soon so the user sees the new auth state.
+    sendResponse({ ok: true, hasBridgeSecret: !!BRIDGE_SECRET });
     return true;
   }
   if (msg.type === 'toggle') {

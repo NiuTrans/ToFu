@@ -1,8 +1,7 @@
 """lib/llm_sanitize.py — Message-list sanitization helpers for the LLM API.
 
-Extracted from ``lib/llm_client.py`` to keep that file's surface focused on
-payload construction and streaming. All names here are re-exported from
-``lib.llm_client`` for backward compatibility.
+Extracted from the monolithic LLM client into a standalone module.
+All names are re-exported from ``lib.llm`` for convenience.
 
 Public surface
 ==============
@@ -12,10 +11,11 @@ Public surface
 - :func:`_sanitize_gateway_content` — single-string keyword replacement
 - :func:`_fix_orphaned_tool_calls` — defensive Anthropic tool_use/tool_result fixer
 - :func:`_fix_tool_call_adjacency` — Anthropic adjacency requirement enforcer
+- :func:`_fix_empty_user_messages` — replace empty user content with placeholder
 - :func:`_merge_consecutive_same_role` — merge consecutive user/assistant pairs
 
 These functions are pure data transformations with no I/O side effects
-beyond logging. They are called from ``build_body`` in lib/llm_client.py
+beyond logging. They are called from ``build_body`` in lib/llm/body.py
 during every API request.
 """
 
@@ -60,10 +60,10 @@ _API_MESSAGE_FIELDS = frozenset({
 #
 # Discovered via binary search probing (2026-04-03):
 _GATEWAY_BLOCKED_TERMS = {
-    '习主席':  '习主席',     # General Secretary Xi → Chairman Xi
+    '习主席':  '习主席',     # Xi Jinping / General Secretary Xi → Chairman Xi
     '江主席':  '江主席',     # Jiang Zemin → Chairman Jiang
     '赵总理':  '赵总理',     # Zhao Ziyang → Premier Zhao
-    'FLG':  'FLG',       # Falun Dafa → abbreviation
+    'FLG':  'FLG',       # Falun Gong / Falun Dafa → abbreviation
     'QNS':  'QNS',       # Eastern Lightning → abbreviation
 }
 
@@ -335,6 +335,85 @@ def _fix_tool_call_adjacency(messages: list) -> list:
         logger.info('[build_body] Tool adjacency fixes applied: %d total', fix_count)
 
     return result
+
+
+def _fix_empty_user_messages(messages: list) -> list:
+    """Replace empty user/tool message content with a placeholder.
+
+    Anthropic rejects requests where any user message has empty content
+    (HTTP 400: ``messages.N: user messages must have non-empty content``).
+    Empty content arises from:
+      - sanitization stripping every block (e.g. all-image content for a
+        non-vision model collapsing to ``''``)
+      - failed uploads / transcription saving a blank user turn
+      - compaction producing an empty placeholder
+      - tool messages whose result was an empty string
+
+    Strategy: scan all user and tool messages; for any whose ``content``
+    is empty (``''``, ``[]``, all-empty text blocks, or ``None``), swap in
+    a single text block with a non-empty placeholder so the request shape
+    stays valid without losing the message's positional meaning (which
+    matters for tool_call_id adjacency).
+
+    Mutates messages in-place. Returns the same list for chaining.
+    """
+    if not messages:
+        return messages
+
+    fixed_user = 0
+    fixed_tool = 0
+    for idx, msg in enumerate(messages):
+        role = msg.get('role')
+        if role not in ('user', 'tool'):
+            continue
+
+        content = msg.get('content')
+        is_empty = False
+        if content is None:
+            is_empty = True
+        elif isinstance(content, str):
+            if not content.strip():
+                is_empty = True
+        elif isinstance(content, list):
+            if not content:
+                is_empty = True
+            else:
+                # Empty if every block has no meaningful text/data
+                has_text = False
+                has_non_text = False
+                for block in content:
+                    if not isinstance(block, dict):
+                        has_non_text = True
+                        continue
+                    btype = block.get('type')
+                    if btype == 'text':
+                        if (block.get('text') or '').strip():
+                            has_text = True
+                    else:
+                        # image_url, tool_result, etc. — non-empty by virtue of presence
+                        has_non_text = True
+                if not has_text and not has_non_text:
+                    is_empty = True
+
+        if not is_empty:
+            continue
+
+        placeholder = ('[empty tool result]' if role == 'tool'
+                       else '[empty message]')
+        msg['content'] = placeholder
+        if role == 'user':
+            fixed_user += 1
+        else:
+            fixed_tool += 1
+        logger.warning('[build_body] Replaced empty %s message at index %d '
+                       'with placeholder (would trigger Anthropic HTTP 400)',
+                       role, idx)
+
+    if fixed_user or fixed_tool:
+        logger.info('[build_body] Empty-content fixes: user=%d tool=%d',
+                    fixed_user, fixed_tool)
+
+    return messages
 
 
 def _merge_consecutive_same_role(messages: list) -> list:

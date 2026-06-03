@@ -97,14 +97,13 @@ function _vlmResumePoll(entry, taskId) {
 /** Try to reconnect to a VLM task by filename when taskId was lost. */
 async function _vlmReconnectByFilename(entry, filename) {
   try {
-    var resp = await fetch(apiUrl('/api/pdf/vlm-tasks?filename=' + encodeURIComponent(filename)));
-    if (!resp.ok) {
-      console.warn('[VLM-Restore] Task lookup failed for %s: %d', filename, resp.status);
+    var data = await Api.pdf.vlmTasks(filename);
+    if (!data) {
+      console.warn('[VLM-Restore] Task lookup failed for %s', filename);
       entry.vlmStatus = 'unavailable';
       renderImagePreviews();
       return;
     }
-    var data = await resp.json();
     if (!data.tasks || data.tasks.length === 0) {
       console.warn('[VLM-Restore] No active VLM task found for %s', filename);
       // Task may have completed and expired — keep text parse result
@@ -128,15 +127,12 @@ async function _vlmReconnectByFilename(entry, filename) {
       _vlmPollTask(entry, task.taskId, isAlive, onUpdate);
     } else if (task.status === 'done') {
       // Fetch full result
-      var pollResp = await fetch(apiUrl('/api/pdf/vlm-parse/' + task.taskId));
-      if (pollResp.ok) {
-        var taskData = await pollResp.json();
-        if (taskData.result) {
-          entry.text = taskData.result;
-          entry.textLength = taskData.textLength || taskData.result.length;
-          entry.method = 'vlm';
-          entry.vlmStatus = 'done';
-        }
+      var taskData = await Api.pdf.vlmPoll(task.taskId);
+      if (taskData && taskData.result) {
+        entry.text = taskData.result;
+        entry.textLength = taskData.textLength || taskData.result.length;
+        entry.method = 'vlm';
+        entry.vlmStatus = 'done';
       }
     } else if (task.status === 'error') {
       entry.vlmStatus = 'failed';
@@ -155,19 +151,9 @@ async function _vlmReconnectByFilename(entry, filename) {
 // ── Image/PDF upload ──
 async function uploadImageToServer(imgObj) {
   try {
-    const resp = await fetch(apiUrl("/api/images/upload"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        base64: imgObj.base64,
-        mediaType: imgObj.mediaType,
-      }),
-    });
-    if (resp.ok) {
-      const data = await resp.json();
-      if (data.url) {
-        imgObj.url = apiUrl(data.url);
-      }
+    const data = await Api.images.upload({ base64: imgObj.base64, mediaType: imgObj.mediaType });
+    if (data && data.url) {
+      imgObj.url = apiUrl(data.url);
     }
   } catch (e) {
     debugLog("Image upload failed: " + e.message, "warn");
@@ -290,10 +276,8 @@ async function parsePdfToServer(file, pdfObj, opts) {
   formData.append("maxImageWidth", "0");
   formData.append("maxImages", "0");
   formData.append("maxTextChars", "0");
-  const resp = await fetch(apiUrl("/api/pdf/parse"), { method: "POST", body: formData });
-  if (!resp.ok) throw new Error(`Server ${resp.status}`);
-  const data = await resp.json();
-  if (!data.success) throw new Error(data.error || "Parse failed");
+  const data = await Api.pdf.parse(formData);
+  if (!data || !data.success) throw new Error((data && data.error) || "Parse failed");
   pdfObj.text = data.text || "";
   pdfObj.pages = data.totalPages;
   pdfObj.textLength = data.textLength;
@@ -474,10 +458,8 @@ async function handleDocUpload(file) {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("maxTextChars", "0");
-    const resp = await fetch(apiUrl("/api/doc/parse"), { method: "POST", body: formData });
-    if (!resp.ok) throw new Error(`Server ${resp.status}`);
-    const data = await resp.json();
-    if (!data.success) throw new Error(data.error || "Parse failed");
+    const data = await Api.doc.parse(formData);
+    if (!data || !data.success) throw new Error((data && data.error) || "Parse failed");
 
     const docObj = {
       name: file.name,
@@ -593,9 +575,8 @@ async function _vlmPollTask(entry, taskId, isAlive, onUpdate) {
     await new Promise((r) => setTimeout(r, 2000));
     if (!isAlive()) { _vlmSaveState(); return; }
     try {
-      const poll = await fetch(apiUrl(`/api/pdf/vlm-parse/${taskId}`));
-      if (!poll.ok) break;
-      const task = await poll.json();
+      const task = await Api.pdf.vlmPoll(taskId);
+      if (!task) break;
       if (task.status === "processing") {
         entry.vlmStatus = "parsing";
         entry.vlmProgress = task.progress;
@@ -657,18 +638,17 @@ window._vlmParseEntry = async function(file, entry, isAlive, onUpdate) {
   try {
     const fd = new FormData();
     fd.append("file", file);
-    const startResp = await fetch(apiUrl("/api/pdf/vlm-parse"), {
-      method: "POST",
-      body: fd,
-    });
-    if (!startResp.ok) {
-      console.warn("[VLM] start failed:", startResp.status);
+    let startData;
+    try {
+      startData = await Api.pdf.vlmStart(fd);
+    } catch (startErr) {
+      console.warn("[VLM] start failed:", startErr.message);
       entry.vlmStatus = "unavailable";
       onUpdate();
       _vlmSaveState();
       return;
     }
-    const { taskId } = await startResp.json();
+    const { taskId } = (startData || {});
     if (!taskId) {
       entry.vlmStatus = "unavailable";
       onUpdate();
@@ -798,14 +778,27 @@ document.addEventListener('click', function(e) {
       if (allRounds.length > 0) {
         trunc.remove();
         body.innerHTML = '';
-        for (const round of allRounds) {
+        /* Render in rAF-chunked batches: building 100+ tool rows synchronously
+         * freezes the main thread for ~1s (poor INP). Spreading the work across
+         * frames keeps the click responsive — same end state, rows stream in. */
+        const _renderSlot = (round) => {
           const slot = document.createElement('div');
           slot.setAttribute('data-prn', round.roundNum);
           slot.innerHTML = typeof _renderUnifiedToolLine === 'function'
             ? _renderUnifiedToolLine(round, false)
             : `<div class="ptool-line"><span class="ptool-text">${escapeHtml(round.toolName || round.query || '')}</span></div>`;
-          body.appendChild(slot);
-        }
+          return slot;
+        };
+        const CHUNK = 30;
+        let _i = 0;
+        const _renderChunk = () => {
+          const frag = document.createDocumentFragment();
+          const end = Math.min(_i + CHUNK, allRounds.length);
+          for (; _i < end; _i++) frag.appendChild(_renderSlot(allRounds[_i]));
+          body.appendChild(frag);
+          if (_i < allRounds.length) requestAnimationFrame(_renderChunk);
+        };
+        _renderChunk();
         return;
       }
     }

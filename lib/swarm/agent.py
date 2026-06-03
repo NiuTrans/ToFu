@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from lib.llm_client import build_body as _default_build_body
+from lib.llm import build_body as _default_build_body
 from lib.llm_dispatch import dispatch_stream as _default_dispatch_stream
 from lib.log import get_logger
 from lib.protocols import BodyBuilder
@@ -211,15 +211,25 @@ class SubAgent:
         return messages
 
     def _strip_parent_prompt(self, prompt: str) -> str:
-        """Remove parent-specific instructions that don't apply to sub-agents."""
+        """Remove parent-specific instructions that don't apply to sub-agents.
+
+        The ``<parallel_execution>`` block teaches the master how to use
+        spawn / await / get_agent_result and how to interpret
+        ``<swarm-update>``.  Sub-agents have none of those tools (see
+        ``SUB_AGENT_DENYLIST``) and never receive ``<swarm-update>``
+        notifications, so leaking the master's prompt would just confuse
+        them with rules they can't follow.
+        """
         if not prompt:
             return ''
         kept = []
         skip_section = False
         for line in prompt.split('\n'):
             lower = line.lower().strip()
-            if any(kw in lower for kw in ['spawn_agents', 'swarm mode',
-                                           'check_agents', 'spawn_more']):
+            if any(kw in lower for kw in [
+                'spawn_agents', 'await_agents', 'get_agent_result',
+                'parallel_execution', 'swarm-update', 'swarm mode',
+            ]):
                 skip_section = True
                 continue
             if skip_section and line.strip() == '':
@@ -400,11 +410,37 @@ class SubAgent:
             content_parts = []
             thinking_parts = []
 
+            # Optional per-agent streaming log file. ``output_file`` is
+            # set by the master orchestrator's _make_agent factory; if
+            # absent (e.g. unit tests), all writes are no-ops.
+            #
+            # Performance: streaming chunks can arrive ~50–500 times per
+            # second.  Opening the file per chunk is wasteful (a syscall
+            # per token-ish), so we buffer to memory and flush once per
+            # round at well-defined boundaries.
+            _output_path = getattr(self, 'output_file', '') or ''
+            _log_buffer: list[str] = []
+
+            def _flush_log():
+                if not _output_path or not _log_buffer:
+                    return
+                try:
+                    with open(_output_path, 'a', encoding='utf-8') as fp:
+                        fp.write(''.join(_log_buffer))
+                except OSError as _e:
+                    logger.debug('[Agent:%s] output_file write failed (non-fatal): %s',
+                                 self.agent_id, _e)
+                _log_buffer.clear()
+
             def on_content(chunk):
                 content_parts.append(chunk)
+                if _output_path and chunk:
+                    _log_buffer.append(chunk)
 
             def on_thinking(chunk):
                 thinking_parts.append(chunk)
+                if _output_path and chunk:
+                    _log_buffer.append(chunk)
 
             try:
                 msg, stop_reason, usage = self._dispatch_stream(
@@ -417,6 +453,9 @@ class SubAgent:
                 )
             except Exception as e:
                 logger.error('[%s] LLM call failed round %d: %s', self.agent_id, round_num, e, exc_info=True)
+                # Flush whatever we managed to stream before the error so
+                # the on-disk log isn't truncated.
+                _flush_log()
                 # On LLM error, try to extract partial answer from previous rounds
                 self.result.error_message = f'LLM call failed at round {round_num}: {e}'
                 self._extract_partial_answer(f'LLM error at round {round_num}')
@@ -426,6 +465,9 @@ class SubAgent:
                 else:
                     self.result.status = SubAgentStatus.FAILED.value
                 return
+
+            # Round complete — flush the streaming log file in one shot.
+            _flush_log()
 
             # Track token usage
             round_elapsed = time.time() - round_start
@@ -463,7 +505,7 @@ class SubAgent:
                     f'📝 [{self.spec.role}] Round {round_num}: produced final answer',
                     status='running', phase='done',
                     round_num=round_num,
-                    preview=(content or '')[:200],
+                    preview=(content or '')[:600],
                 )
                 return  # ← Early stop: agent gave final answer
 
@@ -580,6 +622,7 @@ class SubAgent:
         fn_info = tool_call.get('function', {})
         fn_name = fn_info.get('name', '?')
         fn_args_raw = fn_info.get('arguments', '{}')
+        tc_id = tool_call.get('id') or str(uuid.uuid4())[:8]
         tool_start = time.time()
 
         logger.debug('[Agent:%s] Round %d → TOOL_CALL %s args_raw=%s',
@@ -609,13 +652,47 @@ class SubAgent:
             'timestamp': time.time(),
         })
 
+        # ── Per-tool-call SSE event: started ──
+        # Surfaces the agent's execution timeline in the swarm panel —
+        # the user sees each sub-agent tool call live, not just an
+        # aggregate `Using X, Y, Z` summary.
+        args_brief = str(fn_args)[:200]
+        self._emit_event(
+            'agent_tool_call',
+            f'🔧 [{self.spec.role}] {fn_name}',
+            status='running', phase='tool_use',
+            round_num=round_num,
+            callId=tc_id, toolName=fn_name,
+            argsBrief=args_brief, callStatus='running',
+        )
+
+        def _emit_finish(status: str, *, preview: str = '', error: str = ''):
+            self._emit_event(
+                'agent_tool_call',
+                f'{"✅" if status == "done" else "❌"} [{self.spec.role}] {fn_name}',
+                status='running', phase='tool_use',
+                round_num=round_num,
+                callId=tc_id, toolName=fn_name,
+                argsBrief=args_brief, callStatus=status,
+                callElapsed=round(time.time() - tool_start, 2),
+                preview=preview[:300] if preview else '',
+                error=error[:300] if error else '',
+            )
+
         # ── Handle artifact tools locally ──
-        if fn_name == 'store_artifact':
-            return self._handle_store_artifact(fn_args)
-        if fn_name == 'read_artifact':
-            return self._handle_read_artifact(fn_args)
-        if fn_name == 'list_artifacts':
-            return self._handle_list_artifacts(fn_args)
+        if fn_name in ('store_artifact', 'read_artifact', 'list_artifacts'):
+            try:
+                if fn_name == 'store_artifact':
+                    result = self._handle_store_artifact(fn_args)
+                elif fn_name == 'read_artifact':
+                    result = self._handle_read_artifact(fn_args)
+                else:
+                    result = self._handle_list_artifacts(fn_args)
+                _emit_finish('done', preview=result or '')
+                return result
+            except Exception as e:
+                _emit_finish('failed', error=f'{type(e).__name__}: {e}')
+                raise
 
         # ── Dispatch to real tools via executor ──
         try:
@@ -628,11 +705,13 @@ class SubAgent:
                          self.agent_id, fn_name, tool_elapsed, len(truncated))
             logger.debug('[Agent:%s] Tool %s result preview: %s',
                          self.agent_id, fn_name, truncated[:300])
+            _emit_finish('done', preview=truncated)
             return truncated
         except Exception as e:
             tool_elapsed = time.time() - tool_start
             logger.warning('[Agent:%s] Tool %s FAILED in %.2fs: %s',
                            self.agent_id, fn_name, tool_elapsed, e, exc_info=True)
+            _emit_finish('failed', error=f'{type(e).__name__}: {e}')
             return f'Tool error ({fn_name}): {type(e).__name__}: {e}'
 
     # ─────────────────────────────────────────────────

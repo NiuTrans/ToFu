@@ -22,6 +22,7 @@ can fall back to ``pymupdf4llm``.
 """
 
 import io
+import os
 import threading
 import time as _time
 
@@ -31,6 +32,43 @@ from lib.pdf_parser._common import HAS_DOCLING
 logger = get_logger(__name__)
 
 __all__ = ['extract_pdf_text_docling', 'is_available']
+
+
+def _allowed_cpu_count() -> int:
+    """Return the number of CPUs this process is actually allowed to run on.
+
+    On cgroup/cpuset-restricted hosts (containers, k8s pods, YARN/Hope
+    containers, ``taskset``-launched jobs) ``os.cpu_count()`` reports the
+    HOST core count, but the kernel only permits the process to schedule
+    on a subset. ONNX Runtime (pulled in by Docling) otherwise spawns one
+    worker per host core and tries to ``pthread_setaffinity_np`` each one
+    to a physical core that may not be in the allowed set, producing a
+    storm of ``EINVAL`` errors in stderr.
+    """
+    try:
+        return max(1, len(os.sched_getaffinity(0)))  # type: ignore[attr-defined]
+    except (AttributeError, OSError) as _e_audit:
+        logger.debug('[docling] _allowed_cpu_count caught %s: %s', type(_e_audit).__name__, _e_audit)
+        return max(1, os.cpu_count() or 1)
+
+
+def _docling_thread_count() -> int:
+    override = os.environ.get('TOFU_DOCLING_THREADS', '').strip()
+    if override:
+        try:
+            n = int(override)
+            if n > 0:
+                return n
+        except ValueError as e:
+            logger.debug('[PDF/Docling] Invalid TOFU_DOCLING_THREADS=%r: %s',
+                         override, e)
+    return min(8, _allowed_cpu_count())
+
+
+# NOTE: ORT/OMP thread caps are seeded into the environment in
+# ``lib/pdf_parser/_common.py`` BEFORE ``import docling`` runs — putting
+# them here would be too late if onnxruntime is loaded transitively by
+# the docling import chain.
 
 
 # ── Lazy-loaded converter ──
@@ -77,9 +115,36 @@ def _get_converter():
         try:
             from docling.document_converter import DocumentConverter
             t0 = _time.time()
+            num_threads = _docling_thread_count()
             logger.info('[PDF/Docling] Loading DocumentConverter '
-                        '(first call may download model weights)...')
-            _converter = DocumentConverter()
+                        '(first call may download model weights, '
+                        'num_threads=%d)...', num_threads)
+            try:
+                from docling.datamodel.accelerator_options import (
+                    AcceleratorDevice,
+                    AcceleratorOptions,
+                )
+                from docling.datamodel.base_models import InputFormat
+                from docling.datamodel.pipeline_options import PdfPipelineOptions
+                from docling.document_converter import PdfFormatOption
+
+                pipeline_options = PdfPipelineOptions()
+                pipeline_options.accelerator_options = AcceleratorOptions(
+                    num_threads=num_threads,
+                    device=AcceleratorDevice.AUTO,
+                )
+                _converter = DocumentConverter(format_options={
+                    InputFormat.PDF: PdfFormatOption(
+                        pipeline_options=pipeline_options,
+                    ),
+                })
+            except ImportError as e:
+                # Older docling versions don't expose AcceleratorOptions.
+                # Fall back to the default constructor — env vars set at
+                # module import still cap ORT/OMP threads.
+                logger.debug('[PDF/Docling] AcceleratorOptions unavailable '
+                             '(%s); using default DocumentConverter()', e)
+                _converter = DocumentConverter()
             logger.info('[PDF/Docling] Converter ready in %.1fs',
                         _time.time() - t0)
         except Exception as e:
@@ -126,7 +191,7 @@ def extract_pdf_text_docling(pdf_bytes: bytes, *,
     except ImportError:
         # docling_core ships with docling — if missing, our import of
         # docling above would have already failed. Defensive only.
-        pass  # type: ignore[assignment]
+        pass
 
     t0 = _time.time()
     try:
@@ -154,7 +219,8 @@ def extract_pdf_text_docling(pdf_bytes: bytes, *,
         total_pages = 1
         try:
             total_pages = max(1, len(doc.pages)) if hasattr(doc, 'pages') else 1
-        except Exception:
+        except (TypeError, AttributeError) as e:
+            logger.debug('[PDF/Docling] doc.pages length probe failed: %s', e)
             total_pages = 1
 
         md = doc.export_to_markdown()

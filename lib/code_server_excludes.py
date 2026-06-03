@@ -56,7 +56,6 @@ import json
 import os
 import re
 import sys
-import tempfile
 import threading
 
 from lib.log import audit_log, get_logger
@@ -277,28 +276,13 @@ def _compute_merge(user_settings, canonical_source):
 # ═══════════════════════════════════════════════════════════════════════
 
 def _atomic_write(path, text):
-    """Write *text* to *path* atomically (tempfile + rename).
+    """Write *text* to *path* atomically. Delegates to lib.json_store.
 
-    Preserves the parent directory. Uses ``os.replace`` so it works on
-    both POSIX and Windows.
+    Disables fsync to match the legacy behaviour (settings sync is best-
+    effort and we don't pay the fsync cost for VS Code config files).
     """
-    parent = os.path.dirname(path) or '.'
-    fd, tmp_path = tempfile.mkstemp(
-        prefix='.settings-',
-        suffix='.json.tmp',
-        dir=parent,
-    )
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            f.write(text)
-        os.replace(tmp_path, path)
-    except Exception:
-        # Clean up tmp on failure
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    from lib.json_store import write_text_atomic
+    write_text_atomic(path, text, fsync=False)
 
 
 # ═══════════════════════════════════════════════════════════════════════

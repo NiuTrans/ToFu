@@ -1085,7 +1085,7 @@ def run_cc_inference(inst: SWEInstance, workspace: Path,
 # ─── Patch Extraction ─────────────────────────────────────────────────────────
 
 _EXCLUDE_PREFIXES = [
-    '.chatui/', '__pycache__/', '.project_sessions/',
+    '.tofu/', '__pycache__/', '.project_sessions/',
     '.claude/', '.git/',
 ]
 

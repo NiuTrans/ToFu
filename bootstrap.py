@@ -51,8 +51,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # inside the right interpreter (so subprocess [sys.executable, 'server.py']
 # correctly inherits the env's python).
 def _tofu_maybe_reexec_into_env():
-    if os.environ.get('_TOFU_ENV_REEXEC') == '1':
-        return
     marker = os.path.join(BASE_DIR, '.tofu_env.json')
     if not os.path.isfile(marker):
         return
@@ -74,6 +72,16 @@ def _tofu_maybe_reexec_into_env():
         same = (target_py == sys.executable)
     if same:
         return
+    if os.environ.get('_TOFU_ENV_REEXEC') == '1':
+        sys.stderr.write(
+            '\033[33m[bootstrap.py] WARNING: _TOFU_ENV_REEXEC=1 was inherited '
+            'from your shell, but the current python\n'
+            f'  ({sys.executable})\n'
+            '  is NOT the env python recorded in .tofu_env.json\n'
+            f'  ({target_py}).\n'
+            '  Run:  unset _TOFU_ENV_REEXEC _TOFU_VIA_BOOTSTRAP\n'
+            '  Overriding the leaked guard and re-execing into the env python now.\033[0m\n')
+        sys.stderr.flush()
     if env_prefix and os.path.isdir(env_prefix):
         env_lib = os.path.join(env_prefix, 'lib')
         if os.path.isdir(env_lib):
@@ -146,8 +154,6 @@ _BUILTIN_PROVIDER_TEMPLATES = [
      'models': [
          {'model_id': 'deepseek-v4-pro',   'capabilities': ['text', 'thinking', 'cheap']},
          {'model_id': 'deepseek-v4-flash', 'capabilities': ['text', 'thinking', 'cheap']},
-         {'model_id': 'deepseek-chat',     'capabilities': ['text', 'cheap']},
-         {'model_id': 'deepseek-reasoner', 'capabilities': ['text', 'thinking', 'cheap']},
      ]},
     {'key': 'glm', 'brand': 'glm', 'category': 'official',
      'name': 'GLM (Zhipu AI)',
@@ -441,7 +447,7 @@ def _call_llm(error_text: str, cfg: dict) -> dict:
 # ══════════════════════════════════════════════════════════
 
 # Map requirements.txt line → conda-forge package spec. Used when we detect
-# we're running inside a conda env (install.py / install.sh created one).
+# we're running inside a conda env (install.sh created one).
 # conda-forge builds link against an older sysroot glibc (2.17) so they work
 # on CentOS-7-class hosts where pip's manylinux wheels crash with
 # "GLIBC_2.25 not found" (classic lxml failure mode).
@@ -463,7 +469,7 @@ _CONDA_PYTHON_DEPS = [
 def _running_in_conda_env() -> bool:
     """True when the current Python is running inside a conda env."""
     # CONDA_PREFIX is set when a conda env is activated; also set by
-    # install.py launching via os.execv of the env's python.
+    # install.sh launching via exec into the env's python.
     prefix = os.environ.get('CONDA_PREFIX', '')
     if prefix and os.path.isdir(prefix):
         return True
@@ -1574,7 +1580,7 @@ def _try_start_server(first_attempt: bool = False) -> tuple[bool, str, int]:
     """
     env = os.environ.copy()
     env['_TOFU_VIA_BOOTSTRAP'] = '1'      # prevent server.py → bootstrap.py re-delegation loop
-    env['_CHATUI_VIA_BOOTSTRAP'] = '1'    # legacy alias for older server.py
+    env['BOOTSTRAP_LAUNCHER_PID'] = str(os.getpid())  # sentinel so server.py can tell a real bootstrap child from a leaked guard
     proc = subprocess.Popen(
         [sys.executable, os.path.join(BASE_DIR, 'server.py')],
         stdout=sys.stdout,     # always forward stdout transparently

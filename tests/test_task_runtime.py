@@ -1,0 +1,534 @@
+#!/usr/bin/env python3
+"""Unit tests for lib.task_runtime.TaskRuntime.
+
+Validates every lifecycle path before migrating production code (chat,
+paper, translate, trading_simulator) onto this runtime. Run standalone:
+
+    python tests/test_task_runtime.py
+"""
+
+import asyncio
+import os
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from lib.task_runtime import TaskRuntime  # noqa: E402
+
+
+def _color(s, c):
+    return f'\033[{c}m{s}\033[0m'
+
+
+def _ok(msg): print(' ', _color('✓', '32'), msg)
+def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
+
+
+def test_create_and_get():
+    rt = TaskRuntime('test-kind', ttl=60)
+    task = rt.create(meta={'foo': 'bar'})
+    assert task['id']
+    assert task['kind'] == 'test-kind'
+    assert task['status'] == 'pending'
+    assert task['events'] == []
+    assert task['meta']['foo'] == 'bar'
+    assert task['error'] is None
+    assert task['result'] is None
+    assert task['finished_at'] is None
+
+    found = rt.get(task['id'])
+    assert found is task
+    assert rt.get('nonexistent') is None
+    _ok('create() and get()')
+
+
+def test_explicit_task_id():
+    rt = TaskRuntime('test')
+    task = rt.create(task_id='custom-id-123')
+    assert task['id'] == 'custom-id-123'
+    assert rt.get('custom-id-123') is task
+    _ok('create() with explicit task_id')
+
+
+def test_append_event_assigns_seq():
+    rt = TaskRuntime('test')
+    task = rt.create()
+    s0 = rt.append_event(task['id'], {'type': 'progress', 'msg': 'one'})
+    s1 = rt.append_event(task['id'], {'type': 'progress', 'msg': 'two'})
+    s2 = rt.append_event(task['id'], {'type': 'progress', 'msg': 'three'})
+    assert s0 == 0 and s1 == 1 and s2 == 2
+    assert task['events'][0]['seq'] == 0
+    assert task['events'][1]['seq'] == 1
+    assert task['events'][2]['seq'] == 2
+    assert task['events'][1]['msg'] == 'two'
+    _ok('append_event() assigns monotonic seq')
+
+
+def test_append_event_transitions_to_running():
+    rt = TaskRuntime('test')
+    task = rt.create()
+    assert task['status'] == 'pending'
+    rt.append_event(task['id'], {'type': 'started'})
+    assert task['status'] == 'running'
+    _ok('append_event() transitions pending → running')
+
+
+def test_append_event_unknown_task():
+    rt = TaskRuntime('test')
+    seq = rt.append_event('does-not-exist', {'type': 'noop'})
+    assert seq is None
+    _ok('append_event() on unknown task returns None')
+
+
+def test_finish_done():
+    rt = TaskRuntime('test')
+    task = rt.create()
+    ok = rt.finish(task['id'], result={'output': 42})
+    assert ok
+    assert task['status'] == 'done'
+    assert task['result'] == {'output': 42}
+    assert task['error'] is None
+    assert task['finished_at'] is not None
+
+    # Terminal event must have been emitted
+    assert task['events'][-1]['type'] == 'done'
+    assert task['events'][-1]['status'] == 'done'
+    assert task['events'][-1]['result'] == {'output': 42}
+    _ok('finish(result=) emits done event')
+
+
+def test_finish_error_string():
+    rt = TaskRuntime('test', error_source='unit_test')
+    task = rt.create()
+    rt.finish(task['id'], error='something broke')
+    assert task['status'] == 'error'
+    assert task['error'] is not None
+    assert task['error']['detail'] == 'something broke'
+    assert task['events'][-1]['type'] == 'error'
+    assert task['events'][-1]['error'] == task['error']
+    _ok('finish(error="str") wraps in envelope and emits error event')
+
+
+def test_finish_error_exception():
+    rt = TaskRuntime('test')
+    task = rt.create()
+    try:
+        raise ValueError('oh no')
+    except ValueError as e:
+        rt.finish(task['id'], error=e)
+    assert task['status'] == 'error'
+    assert task['error'] is not None
+    assert 'oh no' in str(task['error'])
+    _ok('finish(error=Exception) wraps in envelope')
+
+
+def test_finish_error_dict():
+    rt = TaskRuntime('test')
+    task = rt.create()
+    envelope = {'kind': 'rate_limit', 'detail': 'too many requests'}
+    rt.finish(task['id'], error=envelope)
+    assert task['error'] is envelope
+    _ok('finish(error=dict) preserves existing envelope')
+
+
+def test_finish_idempotent():
+    rt = TaskRuntime('test')
+    task = rt.create()
+    assert rt.finish(task['id'], result='first') is True
+    # Second finish should be ignored
+    assert rt.finish(task['id'], result='second') is False
+    assert task['result'] == 'first'
+    _ok('finish() is idempotent (second call returns False)')
+
+
+def test_abort_then_finish_marks_aborted():
+    rt = TaskRuntime('test')
+    task = rt.create()
+    rt.abort(task['id'])
+    assert task['abort_event'].is_set()
+    rt.finish(task['id'])  # No error → should become 'aborted'
+    assert task['status'] == 'aborted'
+    assert task['events'][-1]['type'] == 'aborted'
+    _ok('abort() + finish() marks as aborted')
+
+
+def test_abort_then_finish_with_error_marks_error():
+    rt = TaskRuntime('test')
+    task = rt.create()
+    rt.abort(task['id'])
+    rt.finish(task['id'], error='crashed during abort')
+    # Errors take precedence over abort
+    assert task['status'] == 'error'
+    _ok('abort() + finish(error=) marks as error (error wins)')
+
+
+def test_abort_unknown_task():
+    rt = TaskRuntime('test')
+    assert rt.abort('does-not-exist') is False
+    _ok('abort() on unknown task returns False')
+
+
+def test_abort_already_finished():
+    rt = TaskRuntime('test')
+    task = rt.create()
+    rt.finish(task['id'], result='ok')
+    assert rt.abort(task['id']) is False
+    _ok('abort() on finished task returns False')
+
+
+def test_poll_cursor_replay():
+    rt = TaskRuntime('test')
+    task = rt.create()
+    for i in range(5):
+        rt.append_event(task['id'], {'type': 'progress', 'i': i})
+
+    # First poll from cursor=0
+    r0 = rt.poll(task['id'], cursor=0)
+    assert r0['ok'] is True
+    assert len(r0['events']) == 5
+    assert r0['next_cursor'] == 5
+    assert r0['done'] is False
+    assert r0['status'] == 'running'
+
+    # Add more events
+    rt.append_event(task['id'], {'type': 'progress', 'i': 5})
+    rt.append_event(task['id'], {'type': 'progress', 'i': 6})
+
+    # Poll from cursor=5 returns only new events
+    r1 = rt.poll(task['id'], cursor=5)
+    assert len(r1['events']) == 2
+    assert r1['next_cursor'] == 7
+    assert r1['events'][0]['i'] == 5
+    _ok('poll(cursor=N) returns only new events since cursor')
+
+
+def test_poll_after_done():
+    rt = TaskRuntime('test')
+    task = rt.create()
+    rt.append_event(task['id'], {'type': 'progress'})
+    rt.finish(task['id'], result={'value': 99})
+
+    r = rt.poll(task['id'], cursor=0)
+    assert r['done'] is True
+    assert r['status'] == 'done'
+    assert r['result'] == {'value': 99}
+    # Must include the terminal event
+    types = [e['type'] for e in r['events']]
+    assert 'done' in types
+    _ok('poll() after finish() returns done=True with result')
+
+
+def test_poll_after_error():
+    rt = TaskRuntime('test')
+    task = rt.create()
+    rt.finish(task['id'], error='something failed')
+    r = rt.poll(task['id'], cursor=0)
+    assert r['done'] is True
+    assert r['status'] == 'error'
+    assert r['error']['detail'] == 'something failed'
+    _ok('poll() after finish(error=) returns done=True with error envelope')
+
+
+def test_poll_unknown_task():
+    rt = TaskRuntime('test')
+    r = rt.poll('does-not-exist', cursor=0)
+    assert r['ok'] is False
+    assert r['error'] == 'not_found'
+    assert r['done'] is True
+    _ok('poll() on unknown task returns ok=False, error=not_found')
+
+
+def test_spawn_outside_event_loop():
+    """Spawn falls back to daemon thread when no asyncio loop is running."""
+    rt = TaskRuntime('test')
+    task = rt.create()
+    completed = threading.Event()
+
+    def worker(tid):
+        rt.append_event(tid, {'type': 'progress', 'step': 1})
+        time.sleep(0.05)
+        rt.append_event(tid, {'type': 'progress', 'step': 2})
+        rt.finish(tid, result='thread-result')
+        completed.set()
+
+    rt.spawn(task['id'], worker, task['id'])
+    assert completed.wait(timeout=2), 'Worker did not complete in 2s'
+    assert task['status'] == 'done'
+    assert task['result'] == 'thread-result'
+    _ok('spawn() works outside event loop (daemon thread)')
+
+
+def test_spawn_inside_event_loop():
+    """Spawn uses asyncio.to_thread when running inside a loop."""
+    rt = TaskRuntime('test')
+
+    async def _runner():
+        task = rt.create()
+        completed = threading.Event()
+
+        def worker():
+            rt.append_event(task['id'], {'type': 'progress'})
+            rt.finish(task['id'], result='loop-result')
+            completed.set()
+
+        rt.spawn(task['id'], worker)
+        # Wait for the asyncio task to complete
+        for _ in range(20):
+            if completed.is_set():
+                break
+            await asyncio.sleep(0.05)
+        return task
+
+    task = asyncio.run(_runner())
+    assert task['status'] == 'done'
+    assert task['result'] == 'loop-result'
+    _ok('spawn() works inside event loop (asyncio.to_thread)')
+
+
+def test_spawn_worker_crash_caught():
+    """If the worker raises uncaught, finish(error=) is auto-called."""
+    rt = TaskRuntime('test')
+    task = rt.create()
+
+    def bad_worker():
+        raise RuntimeError('worker exploded')
+
+    rt.spawn(task['id'], bad_worker)
+    # Wait for crash handling
+    for _ in range(20):
+        if task['status'] in ('error', 'done'):
+            break
+        time.sleep(0.05)
+    assert task['status'] == 'error'
+    assert task['error'] is not None
+    assert 'worker exploded' in str(task['error'])
+    _ok('spawn() catches worker crashes and auto-finishes with error')
+
+
+def test_abort_event_signal():
+    """Worker can poll task['abort_event'] to detect abort requests."""
+    rt = TaskRuntime('test')
+    task = rt.create()
+    iterations = []
+
+    def worker(tid):
+        for i in range(100):
+            t = rt.get(tid)
+            if t['abort_event'].is_set():
+                rt.append_event(tid, {'type': 'aborted_at', 'i': i})
+                rt.finish(tid)  # No error → 'aborted'
+                return
+            iterations.append(i)
+            time.sleep(0.01)
+
+    rt.spawn(task['id'], worker, task['id'])
+    time.sleep(0.05)
+    rt.abort(task['id'])
+    for _ in range(50):
+        if task['status'] in ('aborted', 'done', 'error'):
+            break
+        time.sleep(0.02)
+    assert task['status'] == 'aborted', f"Expected 'aborted', got {task['status']}"
+    assert len(iterations) > 0
+    assert len(iterations) < 100  # Stopped early
+    _ok('abort_event signals worker; finish() then marks aborted')
+
+
+def test_cleanup_stale():
+    rt = TaskRuntime('test', ttl=0.1)  # 100ms TTL for testing
+    t1 = rt.create()
+    t2 = rt.create()
+    t3 = rt.create()
+    rt.finish(t1['id'])
+    rt.finish(t2['id'], error='boom')
+    # t3 still pending — should NOT be cleaned even after TTL
+    assert rt.task_count == 3
+
+    time.sleep(0.15)  # Wait past TTL
+    removed = rt.cleanup_stale()
+    assert removed == 2, f'Expected 2 stale tasks cleaned, got {removed}'
+    assert rt.task_count == 1
+    assert rt.get(t1['id']) is None
+    assert rt.get(t2['id']) is None
+    assert rt.get(t3['id']) is not None  # Still pending — preserved
+    _ok('cleanup_stale() purges only finished tasks past TTL')
+
+
+def test_stats():
+    rt = TaskRuntime('test')
+    rt.create()  # pending
+    t2 = rt.create()
+    rt.append_event(t2['id'], {'type': 'started'})  # → running
+    t3 = rt.create()
+    rt.finish(t3['id'])
+    t4 = rt.create()
+    rt.finish(t4['id'], error='x')
+
+    s = rt.stats()
+    assert s['kind'] == 'test'
+    assert s['total'] == 4
+    assert s['pending'] == 1
+    assert s['running'] == 1
+    assert s['done'] == 1
+    assert s['error'] == 1
+    _ok('stats() returns aggregate counts by status')
+
+
+def test_list_running():
+    rt = TaskRuntime('test')
+    t1 = rt.create()
+    t2 = rt.create()
+    rt.append_event(t2['id'], {'type': 'started'})
+    t3 = rt.create()
+    rt.finish(t3['id'])
+
+    running = rt.list_running()
+    ids = sorted([t['id'] for t in running])
+    expected = sorted([t1['id'], t2['id']])
+    assert ids == expected
+    _ok('list_running() returns pending + running tasks')
+
+
+def test_concurrent_append_events():
+    """Stress test: multiple threads appending events concurrently."""
+    rt = TaskRuntime('test')
+    task = rt.create()
+    NUM_THREADS = 8
+    EVENTS_PER_THREAD = 50
+
+    def producer(thread_id):
+        for i in range(EVENTS_PER_THREAD):
+            rt.append_event(task['id'], {
+                'type': 'progress',
+                'thread': thread_id,
+                'i': i,
+            })
+
+    threads = [threading.Thread(target=producer, args=(t,))
+               for t in range(NUM_THREADS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    expected_total = NUM_THREADS * EVENTS_PER_THREAD
+    assert len(task['events']) == expected_total
+
+    # Verify seq numbers are monotonic and unique
+    seqs = [e['seq'] for e in task['events']]
+    assert seqs == list(range(expected_total)), 'seq numbers are not monotonic!'
+    _ok(f'thread-safe append_event() — {NUM_THREADS} threads × {EVENTS_PER_THREAD} events')
+
+
+def test_push_integration():
+    """Verify events are pushed to push_event when push_channel set.
+
+    TaskRuntime.append_event imports push_event from its canonical home
+    (lib.agent_core.push) — the leaf was relocated there 2026-06, with
+    lib.push kept as a re-export shim — so the capture patch targets that
+    module.
+    """
+    from lib.agent_core import push as push_module
+    received = []
+
+    # Monkey-patch push_event to capture calls
+    original = push_module.push_event
+
+    def capture(channel, task_id, event):
+        received.append((channel, task_id, event))
+
+    push_module.push_event = capture
+    try:
+        rt = TaskRuntime('test', push_channel='paper')
+        task = rt.create()
+        rt.append_event(task['id'], {'type': 'progress'})
+        rt.finish(task['id'], result='ok')
+
+        assert len(received) >= 2
+        for channel, tid, _ in received:
+            assert channel == 'paper'
+            assert tid == task['id']
+        _ok('push_channel auto-pushes events to lib.push.push_event')
+    finally:
+        push_module.push_event = original
+
+
+def test_no_push_channel():
+    """When push_channel=None, events are NOT pushed."""
+    from lib import push as push_module
+    received = []
+    original = push_module.push_event
+
+    def capture(channel, task_id, event):
+        received.append((channel, task_id, event))
+
+    push_module.push_event = capture
+    try:
+        rt = TaskRuntime('test', push_channel='')  # explicit empty string
+        # Empty push_channel still falsy, so push_event won't be called
+        task = rt.create()
+        rt.append_event(task['id'], {'type': 'x'})
+        rt.finish(task['id'])
+        assert len(received) == 0
+        _ok('push_channel="" disables push (events not broadcast)')
+    finally:
+        push_module.push_event = original
+
+
+# ════════════════════════════════════════════════════════════
+#  Run all tests
+# ════════════════════════════════════════════════════════════
+
+def main():
+    print()
+    print(_color('═══ TaskRuntime Unit Tests ═══', '36'))
+    print()
+
+    tests = [
+        test_create_and_get,
+        test_explicit_task_id,
+        test_append_event_assigns_seq,
+        test_append_event_transitions_to_running,
+        test_append_event_unknown_task,
+        test_finish_done,
+        test_finish_error_string,
+        test_finish_error_exception,
+        test_finish_error_dict,
+        test_finish_idempotent,
+        test_abort_then_finish_marks_aborted,
+        test_abort_then_finish_with_error_marks_error,
+        test_abort_unknown_task,
+        test_abort_already_finished,
+        test_poll_cursor_replay,
+        test_poll_after_done,
+        test_poll_after_error,
+        test_poll_unknown_task,
+        test_spawn_outside_event_loop,
+        test_spawn_inside_event_loop,
+        test_spawn_worker_crash_caught,
+        test_abort_event_signal,
+        test_cleanup_stale,
+        test_stats,
+        test_list_running,
+        test_concurrent_append_events,
+        test_push_integration,
+        test_no_push_channel,
+    ]
+
+    for test_fn in tests:
+        try:
+            test_fn()
+        except AssertionError as e:
+            _fail(f'{test_fn.__name__}: {e}')
+        except Exception as e:
+            _fail(f'{test_fn.__name__}: unexpected {type(e).__name__}: {e}')
+
+    print()
+    print(_color(f'═══ ALL {len(tests)} TESTS PASSED ═══', '32'))
+    print()
+
+
+if __name__ == '__main__':
+    main()

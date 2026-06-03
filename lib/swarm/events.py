@@ -134,10 +134,8 @@ class SwarmEvent:
         }
         mapped_type = _TYPE_MAP.get(self.type, f'swarm_{self.type}')
 
-        d: dict[str, Any] = {
-            'type': mapped_type,
-            'content': self.text,
-        }
+        from lib.agent_core.events import build_event
+        d: dict[str, Any] = build_event(mapped_type, content=self.text)
         # For agent_start, set phase to 'running'
         if self.type == 'agent_start':
             d['phase'] = 'running'

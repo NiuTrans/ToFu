@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Tofu Swarm 异步化设计深度报告</title>
+<style>
+  :root {
+    --bg: #0e1117;
+    --panel: #161b22;
+    --panel-2: #1c232c;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --good: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+    --code-bg: #0d1117;
+    --teal: #39c5cf;
+    --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    line-height: 1.7;
+    font-size: 15px;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 40px 28px 80px; }
+  h1 { font-size: 32px; line-height: 1.25; margin: 0 0 6px; letter-spacing: .3px; }
+  h2 { font-size: 24px; margin: 48px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 19px; margin: 32px 0 10px; color: var(--accent); }
+  h4 { font-size: 16px; margin: 22px 0 6px; color: var(--teal); }
+  p, li { color: var(--text); }
+  .lede { color: var(--muted); font-size: 16px; margin-top: 4px; }
+  .meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  code { background: var(--code-bg); border: 1px solid var(--border); padding: 1px 6px; border-radius: 4px; font-size: 13px; color: #d2a8ff; }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 14px 16px; border-radius: 8px; overflow-x: auto;
+    font-size: 13px; line-height: 1.55;
+  }
+  pre code { background: none; border: none; padding: 0; color: var(--text); }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 20px 24px; margin: 18px 0;
+  }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) {
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  }
+  .card {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .card h4 { margin-top: 0; }
+  .tag {
+    display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 99px;
+    border: 1px solid var(--border); margin-right: 6px;
+  }
+  .tag.bad   { color: var(--bad);  border-color: var(--bad); }
+  .tag.warn  { color: var(--warn); border-color: var(--warn); }
+  .tag.good  { color: var(--good); border-color: var(--good); }
+  .tag.info  { color: var(--accent); border-color: var(--accent); }
+  table {
+    width: 100%; border-collapse: collapse; margin: 14px 0;
+    font-size: 14px;
+  }
+  th, td { text-align: left; padding: 10px 12px; border: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--panel-2); color: var(--accent); font-weight: 600; }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  blockquote {
+    margin: 12px 0; padding: 10px 16px; border-left: 4px solid var(--accent);
+    background: rgba(88,166,255,0.06); color: var(--text); border-radius: 4px;
+  }
+  .toc {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 22px; margin: 24px 0 32px;
+  }
+  .toc ol { margin: 0; padding-left: 20px; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .ascii {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    white-space: pre; background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 18px; overflow-x: auto; font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .seq {
+    font-family: "JetBrains Mono", monospace; font-size: 12.5px; line-height: 1.6;
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 14px 18px; border-radius: 8px; white-space: pre; overflow-x: auto;
+  }
+  .kv { display: grid; grid-template-columns: 200px 1fr; row-gap: 6px; column-gap: 12px; font-size: 14px; }
+  .kv .k { color: var(--muted); }
+  .pill {
+    display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px;
+    background: var(--panel-2); border: 1px solid var(--border); margin-right: 4px;
+  }
+  .arrow { color: var(--accent); }
+  .red    { color: var(--bad); }
+  .green  { color: var(--good); }
+  .yellow { color: var(--warn); }
+  .blue   { color: var(--accent); }
+  .purple { color: var(--purple); }
+  .teal   { color: var(--teal); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+  .footnote { color: var(--muted); font-size: 13px; }
+  .ok::before  { content: "✓ "; color: var(--good); font-weight: 700; }
+  .no::before  { content: "✗ "; color: var(--bad);  font-weight: 700; }
+  .star::before { content: "★ "; color: var(--warn); }
+  details { margin: 10px 0; }
+  summary { cursor: pointer; color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Tofu Swarm 异步化设计深度报告</h1>
+<p class="lede">把"主智能体阻塞等子智能体"重构成"主智能体边干别的活、边收子智能体回执" — 现状分析、Claude Code 借鉴、协议方案与落地路径</p>
+<p class="meta">面向：Tofu 后端开发者 ｜ 范围：<code>lib/swarm/*</code>、<code>lib/tasks_pkg/orchestrator.py</code>、<code>lib/push.py</code>、新建 <code>lib/agent_inbox.py</code></p>
+
+<div class="toc">
+  <strong>目录</strong>
+  <ol>
+    <li><a href="#sec1">问题：主智能体为什么"卡住了"</a></li>
+    <li><a href="#sec2">现状解剖：Tofu Swarm 的同步阻塞链</a></li>
+    <li><a href="#sec3">三条候选协议（A / B / C）及其取舍</a></li>
+    <li><a href="#sec4">Claude Code 是怎么解的：一份活生生的参考实现</a></li>
+    <li><a href="#sec5">落地方案 C+：把 Claude Code 的设计搬过来</a></li>
+    <li><a href="#sec6">关键决策项（你需要拍板的几件事）</a></li>
+    <li><a href="#sec7">第一个 PR 的最小切片</a></li>
+  </ol>
+</div>
+
+<!-- ============================ §1 ============================ -->
+<h2 id="sec1">1. 问题：主智能体为什么"卡住了"</h2>
+
+<p>当前 Tofu 的多智能体协作模式下，<strong>主智能体（main agent）调用 <code>spawn_agents</code> 这个工具去派发子任务时，会从那一行开始一直阻塞，直到所有子任务跑完、再来一轮 master review、再 synthesize、再把整段最终答案塞回工具结果</strong>。这意味着：</p>
+
+<div class="grid-2">
+  <div class="card">
+    <h4 class="red">现状：同步阻塞</h4>
+    <ul>
+      <li>主智能体的一轮 LLM 推理被强行截断</li>
+      <li>等待时间 = max(子智能体耗时) + 复审 + 综合（很可能 <strong>2~5 分钟</strong>）</li>
+      <li>主智能体期间无法做<em>任何</em>事情：不能读文件、不能上网、不能回答用户中途的提问</li>
+      <li>用户体验上像"卡死"，调试时也很难判断是哪一段慢</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4 class="green">期望：异步收件箱</h4>
+    <ul>
+      <li><code>spawn_agents</code> 立刻返回一个"凭据"（handle）</li>
+      <li>主智能体继续做其它工作（搜索、读代码、与用户对话）</li>
+      <li>子智能体完成后，结果以"通知消息"形式自动注入到主智能体的下一轮上下文里</li>
+      <li>主智能体可以选择主动 <code>await_agents()</code> 阻塞等待，也可以被动收件</li>
+    </ul>
+  </div>
+</div>
+
+<blockquote>
+  打个比方：现状像是<strong>一个项目经理把活分给三个下属，然后自己在工位上坐着发呆等他们交活</strong>。期望状态是项目经理在等活的同时，可以接电话、写报告、回复其他同事；下属交活时把邮件丢进收件箱，项目经理下一次抬头就看到。
+</blockquote>
+
+<!-- ============================ §2 ============================ -->
+<h2 id="sec2">2. 现状解剖：Tofu Swarm 的同步阻塞链</h2>
+
+<h3>2.1 调用链路</h3>
+<p>当主智能体调一次 <code>spawn_agents</code>，发生的事情按顺序是这样的：</p>
+
+<pre class="ascii">main LLM round
+  └─ tool_call: spawn_agents(...)
+       └─ lib/tasks_pkg/executor.py::_execute_tool_one
+            └─ lib/swarm/integration.py::_handle_spawn_agents
+                 └─ MasterOrchestrator.run_reactive()    <span class="red">← 这里整个被阻塞</span>
+                      ├─ StreamingScheduler.iter_completions()
+                      ├─ _master_review()  (额外的 LLM 调用 × N 轮)
+                      └─ _synthesise()     (再一次 LLM 调用)
+            ↑ 返回一段已经合成好的最终答案（字符串）
+       ↑ 这段字符串作为 tool_result 拼回主对话
+main LLM round 继续</pre>
+
+<p>注意一个有意思的事情：<strong>swarm 内部已经是流式的</strong>了 —— <code>StreamingScheduler</code> 是 DAG 调度，依赖一满足就开跑；<code>iter_completions()</code> 是个 generator，子智能体一个接一个吐结果。</p>
+
+<p>但是这一切发生在主智能体看不到的"屋子里面"。<strong>对外暴露给主 LLM 的边界，是一次同步的 tool_call ↔ tool_result 配对</strong>，所以主智能体只能眼睁睁等。</p>
+
+<h3>2.2 为什么会有 master review + synthesise？</h3>
+
+<p>因为<strong>主智能体已经把控制权交出来了</strong>，只有等到一段字符串放在面前才能继续。所以 swarm 内部不得不"自己再起一个 mini-master"去做：</p>
+<ul>
+  <li><strong>review（复审）</strong>：一个轮巡的小 LLM 看着已完成结果，决定要不要 <code>spawn_more_agents</code> 再派一波，或者 <code>swarm_done</code> 结束。</li>
+  <li><strong>synthesise（综合）</strong>：再开一次 LLM 把所有子智能体输出合并成一段话。</li>
+</ul>
+
+<p>这两步<strong>都是因为同步边界存在才必须存在</strong>。一旦换成异步协议，主智能体本身就是 master、就是 synthesizer，这两步基本可以删掉。</p>
+
+<h3>2.3 现有可复用的基础设施（不用从零开始）</h3>
+
+<div class="grid-3">
+  <div class="card">
+    <h4>已经有了</h4>
+    <ul class="ok-list">
+      <li class="ok"><code>StreamingScheduler</code> / <code>AsyncStreamingScheduler</code></li>
+      <li class="ok"><code>MasterOrchestrator</code> 是长生命周期实例</li>
+      <li class="ok"><code>_active_sessions</code> 全局 session 表（带 TTL）</li>
+      <li class="ok"><code>ArtifactStore</code> 跨智能体共享数据</li>
+      <li class="ok"><code>RateLimiter</code> 退避</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>已经有但要扩</h4>
+    <ul>
+      <li><code>lib/push.py</code> 是 UI 推送通道，目标是给前端</li>
+      <li>需要新增一条 <strong>"模型收件箱"</strong>（model-facing inbox），目标是给主 LLM</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>需要重写或取消</h4>
+    <ul>
+      <li class="no"><code>_master_review()</code> 异步路径下不需要</li>
+      <li class="no"><code>_synthesise()</code> 异步路径下不需要</li>
+      <li class="star"><code>_handle_spawn_agents</code> 改成立即返回 handle</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ============================ §3 ============================ -->
+<h2 id="sec3">3. 三条候选协议（A / B / C）及其取舍</h2>
+
+<p>核心难题是：<strong>LLM API 的合同要求 tool_call 和 tool_result 必须配对出现</strong>。如果 <code>spawn_agents</code> 立刻返回，那子智能体真正完成时，结果该怎么"塞回"主对话里？以下三种方案。</p>
+
+<h3>3.1 方案 A：Handle + 主动轮询 / 等待</h3>
+<div class="panel">
+<p><span class="tag info">同步友好</span> <span class="tag warn">语义最简单</span></p>
+<ul>
+  <li><code>spawn_agents(...)</code> 立刻返回 <code>{swarm_id, agents:[{id, role, objective}], status:"running"}</code></li>
+  <li>主智能体后续可以选择：
+    <ul>
+      <li><code>check_agents()</code> — 不阻塞，拿一个状态快照</li>
+      <li><code>await_agents(ids=[...], mode="any"|"all", timeout=N)</code> — <strong>会阻塞</strong>，直到至少一个（或全部）完成</li>
+      <li><code>read_artifact(key)</code> — 取中间产物</li>
+      <li>这中间还可以做<em>任意其它 tool_call</em>（搜索、读文件、等等），子智能体一直在跑</li>
+    </ul>
+  </li>
+</ul>
+<p><strong>优点</strong>：完美贴合现有 tool_call/tool_result 协议，模型显式决定何时阻塞。</p>
+<p><strong>缺点</strong>：纯轮询会消耗 token；好在用 <code>await_agents</code> 一次阻塞一批就够了。</p>
+</div>
+
+<h3>3.2 方案 B：Inbox 注入（被动通知）</h3>
+<div class="panel">
+<p><span class="tag info">用户体验最好</span> <span class="tag bad">边界条件最棘手</span></p>
+<ul>
+  <li><code>spawn_agents</code> 同样返回 handle</li>
+  <li>每个子智能体完成时，<strong>orchestrator 在主智能体下一轮 LLM 推理之前</strong>，自动追加一条 <code>user</code>-role 消息：
+<pre><code>{role:"user", content:"[swarm-update] agent a1 (researcher) completed:
+&lt;compressed result&gt;"}</code></pre></li>
+  <li>主智能体每一轮自然能看到这些"通知"，无需调任何工具</li>
+</ul>
+<p><strong>优点</strong>：像团队 lead 收下属邮件，最贴近人类协作直觉。</p>
+<p><strong>缺点</strong>：无法在已有的 <code>assistant tool_calls → tool_result</code> 配对中间插入 user 消息。如果主智能体此刻正在做某个 tool_call、还没拿到 result，注入会破坏协议。所以必须只能在<strong>"轮的边界"</strong>注入 — 实际上和方案 C 已经差不多。</p>
+</div>
+
+<h3>3.3 方案 C（推荐）：Handle + 自动注入"swarm 摘要"</h3>
+<div class="panel" style="border-color: var(--good);">
+<p><span class="tag good">推荐</span> <span class="tag info">取 A 和 B 的优点</span></p>
+<ul>
+  <li><code>spawn_agents(...)</code> 立刻返回 <code>{swarm_id, agents:[…]}</code>。<strong>不再做 master review，不再 synthesize</strong>。</li>
+  <li>每一轮主 LLM 之前，orchestrator 排空一个<strong>per-task 收件箱</strong>：
+    <ul>
+      <li>有新完成的子智能体 → 拼一条简洁的 user 消息附上：<code>[swarm-update] N agents completed, M still running. Latest: …</code></li>
+      <li>正在 tool_call 中（消息对未闭合）→ 暂存，等下次合适时机注入</li>
+    </ul>
+  </li>
+  <li>同时给主智能体两个新工具：
+    <ul>
+      <li><code>await_agents(ids?, mode="any"|"all", timeout=60)</code> — 主动阻塞</li>
+      <li><code>get_agent_result(id)</code> — 拉某个智能体完整结果（注入摘要里只放 preview）</li>
+    </ul>
+  </li>
+  <li>子智能体的工具列表里，<strong>明确剥掉</strong> <code>spawn_agents</code> / <code>spawn_more_agents</code> / <code>await_agents</code> / <code>get_agent_result</code> —— 子智能体不能再派子任务。</li>
+  <li><code>_master_review</code>、<code>_synthesise</code>、<code>spawn_more_agents</code> 这些 swarm 内部的"小 master"逻辑全部退役（先放到 flag 后面，验稳后删）。</li>
+</ul>
+</div>
+
+<h3>3.4 方案对比表</h3>
+<table>
+  <tr><th>维度</th><th>A — 主动轮询</th><th>B — 全自动 inbox</th><th class="green">C — Handle + 摘要注入</th></tr>
+  <tr><td>协议合法性</td><td>完美</td><td>有边界 case</td><td>完美（只在 round 边界注入）</td></tr>
+  <tr><td>主智能体心智负担</td><td>需要记得调 await/check</td><td>最低</td><td>低（被动收 + 可选主动）</td></tr>
+  <tr><td>token 消耗</td><td>轮询多 → 高</td><td>低</td><td>低</td></tr>
+  <tr><td>实现复杂度</td><td>低</td><td>中（边界处理）</td><td>中</td></tr>
+  <tr><td>是否需要保留 master_review</td><td>不需要</td><td>不需要</td><td>不需要</td></tr>
+</table>
+
+<!-- ============================ §4 ============================ -->
+<h2 id="sec4">4. Claude Code 是怎么解的：一份活生生的参考实现</h2>
+
+<p>把 <code>~/claude-code/src</code> 翻一遍后能看到，Claude Code 没有一个统一的 "swarm" 抽象，而是把<strong>四种多智能体模式</strong>叠在同一个底层基础设施上。这种工程取舍特别值得借鉴。</p>
+
+<h3>4.1 四种模式概览</h3>
+<table>
+  <tr>
+    <th>模式</th>
+    <th>暴露给 LLM 的工具</th>
+    <th>同步 / 异步</th>
+    <th>沟通方式</th>
+    <th>对应 Tofu 的什么</th>
+  </tr>
+  <tr>
+    <td><strong>Subagent / Fork</strong><br><span class="footnote">即 CC 文档里的 "Task"</span></td>
+    <td><code>Agent({prompt, run_in_background?})</code></td>
+    <td>两种皆可，<code>run_in_background:true</code> 或自动后台化</td>
+    <td>tool_result <em>或</em> <code>&lt;task-notification&gt;</code> 注入</td>
+    <td class="green"><strong>最像我们要做的 spawn_agents</strong></td>
+  </tr>
+  <tr>
+    <td><strong>In-process Teammate</strong></td>
+    <td><code>Teammate.spawn</code> + <code>SendMessage</code></td>
+    <td>始终异步、长生命周期</td>
+    <td>文件 mailbox + AsyncLocalStorage 隔离</td>
+    <td>暂时用不上（更重）</td>
+  </tr>
+  <tr>
+    <td><strong>Pane Teammate (tmux/iTerm2)</strong></td>
+    <td>同上，换 backend</td>
+    <td>始终异步，外部进程</td>
+    <td>文件 mailbox</td>
+    <td>用不上</td>
+  </tr>
+  <tr>
+    <td><strong>TaskList 协调</strong></td>
+    <td><code>TaskCreate</code>/<code>List</code>/<code>Update</code></td>
+    <td>纯协调，不跑代码</td>
+    <td>共享 task 文件</td>
+    <td>跟 ArtifactStore 概念接近</td>
+  </tr>
+</table>
+
+<p>对我们最有参考价值的是 <strong>第一种（Subagent）</strong> + <strong>底层共享的"统一命令队列"</strong>。下面分别讲。</p>
+
+<h3>4.2 Subagent 流：<code>Agent</code> 工具 + <code>run_in_background</code></h3>
+
+<p>定义在 <code>src/tools/AgentTool/AgentTool.tsx</code>。同步调用是默认，但当下面任一条件成立时会"自动转后台"：</p>
+<ul>
+  <li>调用方显式给了 <code>run_in_background: true</code></li>
+  <li>环境变量 <code>CLAUDE_AUTO_BACKGROUND_TASKS=1</code> 或 GrowthBook 实验门 <code>tengu_auto_background_agents</code> 打开时，前台跑超过 <strong>120 秒</strong> 的会被悄悄改成后台模式</li>
+</ul>
+
+<h4>异步路径的关键调用 <code>registerAsyncAgent</code></h4>
+<p>位于 <code>src/tasks/LocalAgentTask/LocalAgentTask.tsx:466</code>，整个流程长这样：</p>
+
+<div class="seq">1. tool_call: Agent({prompt:"...", run_in_background:true})
+2. 立即返回:
+     {status:"async_launched",
+      agentId:"a-7f2c...",
+      outputFile:"/tmp/cc-tasks/a-7f2c.log",
+      canReadOutputFile:false}
+3. 主 LLM 继续干别的活 (search, read, ...)
+4. ...time passes... 子智能体在同进程内跑，输出流式写入 outputFile
+5. 子智能体完成 → enqueueAgentNotification(...) 把下面这段塞进 commandQueue:
+
+     &lt;task-notification&gt;
+       &lt;task-id&gt;a-7f2c...&lt;/task-id&gt;
+       &lt;tool-use-id&gt;toolu_xxx&lt;/tool-use-id&gt;
+       &lt;output-file&gt;/tmp/cc-tasks/a-7f2c.log&lt;/output-file&gt;
+       &lt;status&gt;completed&lt;/status&gt;
+       &lt;summary&gt;Agent "branch ship-audit" completed&lt;/summary&gt;
+       &lt;result&gt;...260 字摘要...&lt;/result&gt;
+       &lt;usage&gt;&lt;total_tokens&gt;8421&lt;/total_tokens&gt;...&lt;/usage&gt;
+     &lt;/task-notification&gt;
+
+6. 下一次主 LLM 回合开始前，orchestrator 把队列中的通知作为 user 消息排进对话
+7. 主 LLM 看到通知，自然地 "Audit's back. Three blockers: ..." 继续推理</div>
+
+<h4>它的 system prompt 里怎么教模型用</h4>
+<p>截自 <code>src/tools/AgentTool/prompt.ts</code>：</p>
+<blockquote>
+"You can optionally run agents in the background using the <code>run_in_background</code> parameter. When an agent runs in the background, you will be automatically notified when it completes — <strong>do NOT sleep, poll, or proactively check on its progress</strong>. Continue with other work or respond to the user instead."
+</blockquote>
+<blockquote>
+"<strong>Don't peek.</strong> The tool result includes an <code>output_file</code> path — do not Read or tail it unless the user explicitly asks for a progress check. <strong>You get a completion notification; trust it</strong>. Reading the transcript mid-flight pulls the fork's tool noise into your context, which defeats the point of forking."
+</blockquote>
+<blockquote>
+"<strong>Don't race.</strong> After launching, you know nothing about what the fork found. Never fabricate or predict fork results. <strong>The notification arrives as a user-role message in a later turn; it is never something you write yourself.</strong>"
+</blockquote>
+
+<p>注意最后一句：作者们已经清楚地把"通知什么时候到"这件事讲给模型听 —— 这是<em>方案 C</em> 的标准教法。</p>
+
+<h3>4.3 一个真实例子：CC 文档里给模型看的样例对话</h3>
+
+<p>这是写在 <code>prompt.ts</code> 里、训练模型怎么使用的标准对话样本（直接来自源码）：</p>
+
+<pre><code>user: "What's left on this branch before we can ship?"
+
+assistant: &lt;thinking&gt;Forking this — it's a survey question.
+              I want the punch list, not the git output in my context.&lt;/thinking&gt;
+           Agent({
+             name: "ship-audit",
+             description: "Branch ship-readiness audit",
+             prompt: "Audit what's left before this branch can ship.
+                      Check: uncommitted changes, commits ahead of main,
+                      whether tests exist, whether the GrowthBook gate is wired up,
+                      whether CI-relevant files changed. Report a punch list — done vs.
+                      missing. Under 200 words.",
+             run_in_background: true
+           })
+assistant: Ship-readiness audit running.
+
+----- 这一轮结束。模型并不知道审计结果。下面是【另一回合】，
+       通知作为 user-role 消息从外部到达 -----
+
+user: &lt;task-notification&gt;
+        &lt;task-id&gt;a-7f2c&lt;/task-id&gt;
+        &lt;status&gt;completed&lt;/status&gt;
+        &lt;result&gt;Found 3 blockers: ...&lt;/result&gt;
+      &lt;/task-notification&gt;
+
+assistant: Audit's back. Three blockers: no tests for the new prompt path,
+           GrowthBook gate wired but not in build_flags.yaml,
+           and one uncommitted file.</code></pre>
+
+<p>更妙的是它还<strong>训练模型如何处理"等待中用户突然提问"</strong>：</p>
+
+<pre><code>user: "so is the gate wired up or not"
+
+  &lt;commentary&gt;
+  User asks mid-wait. The audit fork was launched to answer exactly this,
+  and it hasn't returned. The coordinator does not have this answer.
+  Give status, not a fabricated result.
+  &lt;/commentary&gt;
+
+assistant: Still waiting on the audit — that's one of the things it's
+           checking. Should land shortly.</code></pre>
+
+<p>这套训练样本就把"<strong>handle 已发出 → 还没回来 → 用户中途插话 → 不要瞎编、给状态</strong>"的行为印进了模型脑子里。我们做异步 swarm 的时候，<strong>system prompt 的写法非常重要</strong>，不是写完就完事，得这样具体地举正反例。</p>
+
+<h3>4.4 底层共享：统一命令队列 <code>messageQueueManager.ts</code></h3>
+
+<p>这是 Claude Code 这套设计真正的"灵魂"。<strong>所有要塞回主智能体的东西，都进入同一个进程级队列</strong>：</p>
+
+<table>
+  <tr><th>来源</th><th>典型 mode</th><th>典型 priority</th></tr>
+  <tr><td>用户在 REPL 里敲的字</td><td><code>'prompt'</code></td><td><code>'next'</code></td></tr>
+  <tr><td>后台 agent 完成通知</td><td><code>'task-notification'</code></td><td><code>'later'</code></td></tr>
+  <tr><td>teammate 发来的消息</td><td><code>'channel'</code></td><td><code>'later'</code></td></tr>
+  <tr><td>孤立权限响应</td><td><code>'orphaned-permission'</code></td><td><code>'now'</code></td></tr>
+  <tr><td>定时任务 / 主动 tick</td><td><code>'proactive'</code></td><td><code>'later'</code></td></tr>
+</table>
+
+<p>主对话循环每次结束一个 round，从这个队列里 <code>dequeue()</code>。优先级排序保证 <strong>"用户输入永远不会被系统通知饿死"</strong>。</p>
+
+<p>关键代码：</p>
+<pre><code>// src/utils/messageQueueManager.ts
+const PRIORITY_ORDER: Record&lt;QueuePriority, number&gt; = {
+  now: 0,    // 最高
+  next: 1,   // 用户输入默认
+  later: 2,  // 系统通知默认
+}
+
+export function enqueuePendingNotification(command: QueuedCommand): void {
+  commandQueue.push({ ...command, priority: command.priority ?? 'later' })
+  notifySubscribers()
+}
+
+export function dequeue(filter?: (cmd) =&gt; boolean): QueuedCommand | undefined {
+  let bestIdx = -1, bestPriority = Infinity
+  for (let i = 0; i &lt; commandQueue.length; i++) {
+    const cmd = commandQueue[i]!
+    if (filter && !filter(cmd)) continue
+    const priority = PRIORITY_ORDER[cmd.priority ?? 'next']
+    if (priority &lt; bestPriority) { bestIdx = i; bestPriority = priority }
+  }
+  if (bestIdx === -1) return undefined
+  const [dequeued] = commandQueue.splice(bestIdx, 1)
+  notifySubscribers()
+  return dequeued
+}</code></pre>
+
+<p>对 Tofu 而言，<strong>这正是 <code>lib/push.py</code> 缺的那一半</strong>：<code>push.py</code> 现在只往前端推 UI 事件，但模型自己看不到。我们需要一个<strong>"模型收件箱"</strong>，跟 push 是双胞胎。</p>
+
+<h3>4.5 子智能体不能再派子任务（"prohibit sub-agents from sub-spawning"）</h3>
+
+<p>Claude Code 在 <code>prompt.ts:267-275</code> 里有一段非常具体的处理：</p>
+
+<pre><code>${
+  isInProcessTeammate()
+    ? `
+- The run_in_background, name, team_name, and mode parameters are not
+  available in this context. Only synchronous subagents are supported.`
+    : isTeammate()
+      ? `
+- The name, team_name, and mode parameters are not available in this
+  context — teammates cannot spawn other teammates. Omit them to spawn
+  a subagent.`
+      : ''
+}</code></pre>
+
+<p>注意他们的做法：<strong>不是把 <code>Agent</code> 这个工具直接拿掉</strong>，而是让 prompt 描述里告诉模型某些参数"在你这个角色下不能用"。这是更柔和的方式：teammate 仍然能起一个 fresh subagent 跑研究任务，但不能起一个对等的 teammate。</p>
+
+<p>对应到 Tofu 的现状：我们的 <code>scope_tools_for_role()</code> 已经做了"剥工具"的能力，但<strong>需要一个明确的单测</strong>来保证 <code>spawn_agents</code> / <code>spawn_more_agents</code> / 未来的 <code>await_agents</code> / <code>get_agent_result</code> 在<em>所有</em>非主角色下都被剥掉。</p>
+
+<h3>4.6 Claude Code 还干对了一件事：每个 agent 一个 output_file</h3>
+
+<p>每一个后台跑的 Claude Code agent，都会把自己的滚动输出写进 <code>getTaskOutputPath(taskId)</code> —— 一个真实存在于磁盘的日志文件。这件事的妙处是：</p>
+<ul>
+  <li>主 LLM <em>大多数时候</em> 看不到（系统提示告诉它别去 read）</li>
+  <li>但<em>必要时</em>主 LLM <strong>有这个能力</strong>去 read，比如用户问"那个 audit 现在到哪一步了"</li>
+  <li>开发者调试 swarm 卡住时，<code>tail -f /tmp/cc-tasks/a-xxx.log</code> 一目了然</li>
+</ul>
+
+<p>对比我们的 <code>ArtifactStore</code>：是<strong>内存</strong>的、<strong>只放最终产物</strong>，开发者基本没法在 swarm 跑的时候去看中间状态。<strong>建议异步化的同时把每个子智能体的流式输出落地一份到磁盘</strong>，handle 里返回这个路径。</p>
+
+<!-- ============================ §5 ============================ -->
+<h2 id="sec5">5. 落地方案 C+：把 Claude Code 的设计搬过来</h2>
+
+<p>下面用一份"对照新旧"的图来表达。整体路线是 <strong>方案 C</strong>，加上 Claude Code 教给我们的几个细节优化（标记为 C+）。</p>
+
+<h3>5.1 总体架构</h3>
+
+<pre class="ascii">┌──────────────────────────────────────────────────────────────────────┐
+│  主智能体 (main agent) — orchestrator.run_task                       │
+│                                                                      │
+│   round N         round N+1            round N+2          round N+3  │
+│   ┌───────┐       ┌────────────┐       ┌────────┐         ┌──────┐  │
+│   │ tool_ │  ──▶  │ inbox 注入 │  ──▶  │ tool_  │   ──▶   │ ...  │  │
+│   │ call: │       │  ↓ user msg│       │ call:  │         │      │  │
+│   │ spawn │       │  &lt;swarm-   │       │ web_   │         │      │  │
+│   │_agents│       │   update&gt; │       │ search │         │      │  │
+│   └───┬───┘       └────────────┘       └────────┘         └──────┘  │
+│       │ returns handle 立即返回                                      │
+│       ▼                                                              │
+└───────┼──────────────────────────────────────────────────────────────┘
+        │                                       ▲
+        │ 注册 session                          │ inbox 注入
+        ▼                                       │
+┌──────────────────────────────────────┐  ┌─────────────────────────┐
+│  MasterOrchestrator (后台线程)       │  │ lib/agent_inbox.py      │
+│  └─ StreamingScheduler               │──│ enqueue / drain         │
+│     ├─ SubAgent #1 ──▶ on_complete──▶│  │ priority='later'        │
+│     ├─ SubAgent #2 ──▶ on_complete──▶│  │ mode='task-notification'│
+│     └─ SubAgent #3 ──▶ on_complete──▶│  └─────────────────────────┘
+└──────────────────────────────────────┘            │
+        │                                           │ 同时
+        ▼                                           ▼
+┌──────────────────────────────────────┐  ┌─────────────────────────┐
+│  data/swarm/&lt;task_id&gt;/&lt;agent_id&gt;.log │  │ lib/push.py             │
+│  (每个子智能体的流式输出落盘)         │  │ → 前端 UI 事件          │
+└──────────────────────────────────────┘  └─────────────────────────┘</pre>
+
+<h3>5.2 协议细节：spawn_agents 改成什么样</h3>
+
+<div class="grid-2">
+  <div class="card">
+    <h4 class="red">现状：阻塞返回最终答案</h4>
+<pre><code>tool_call: spawn_agents({
+  agents: [
+    {role:"researcher", objective:"..."},
+    {role:"coder",      objective:"..."}
+  ]
+})
+
+(等 3 分钟)
+
+tool_result:
+"## 综合答案\n\n根据三位智能体的研究：1. ... 2. ... 3. ..."</code></pre>
+  </div>
+  <div class="card">
+    <h4 class="green">异步：handle 立即返回</h4>
+<pre><code>tool_call: spawn_agents({
+  agents: [
+    {role:"researcher", objective:"..."},
+    {role:"coder",      objective:"..."}
+  ]
+})
+
+(瞬间返回)
+
+tool_result: {
+  "status": "async_launched",
+  "swarm_id": "swarm-abc123",
+  "agents": [
+    {"id":"a1","role":"researcher",
+     "output_file":"data/swarm/&lt;tid&gt;/a1.log"},
+    {"id":"a2","role":"coder",
+     "output_file":"data/swarm/&lt;tid&gt;/a2.log"}
+  ]
+}</code></pre>
+  </div>
+</div>
+
+<h3>5.3 自动注入的"swarm-update"长什么样</h3>
+
+<p>建议直接抄 Claude Code 的 XML 风格 — 模型对结构化标签的拣选能力更强：</p>
+
+<pre><code>&lt;swarm-update&gt;
+  &lt;swarm-id&gt;swarm-abc123&lt;/swarm-id&gt;
+  &lt;event&gt;agent_completed&lt;/event&gt;
+  &lt;agent-id&gt;a1&lt;/agent-id&gt;
+  &lt;agent-role&gt;researcher&lt;/agent-role&gt;
+  &lt;status&gt;completed&lt;/status&gt;
+  &lt;elapsed-seconds&gt;42.8&lt;/elapsed-seconds&gt;
+  &lt;tokens&gt;8421&lt;/tokens&gt;
+  &lt;preview&gt;Found 3 candidate libraries: foo, bar, baz. foo has the
+           cleanest API; bar handles edge case X better.&lt;/preview&gt;
+  &lt;output-file&gt;data/swarm/&lt;tid&gt;/a1.log&lt;/output-file&gt;
+  &lt;remaining&gt;1 agent still running (a2:coder)&lt;/remaining&gt;
+&lt;/swarm-update&gt;</code></pre>
+
+<p>多条同时到达可以合并成一条带 <code>&lt;agents&gt;[...]&lt;/agents&gt;</code> 的更新。</p>
+
+<h3>5.4 新增的两个工具</h3>
+
+<table>
+  <tr>
+    <th>工具</th>
+    <th>用途</th>
+    <th>语义</th>
+    <th>子智能体能否用</th>
+  </tr>
+  <tr>
+    <td><code>await_agents(ids?, mode, timeout)</code></td>
+    <td>主智能体表态"我没别的活了，等"</td>
+    <td>阻塞至 mode='any' 一个完成 / 'all' 全部完成 / timeout</td>
+    <td class="red"><strong>否</strong></td>
+  </tr>
+  <tr>
+    <td><code>get_agent_result(id)</code></td>
+    <td>注入摘要里 preview 不够时拉完整结果</td>
+    <td>同步返回 <code>SubAgentResult</code> 内容</td>
+    <td class="red"><strong>否</strong></td>
+  </tr>
+</table>
+
+<h3>5.5 主智能体 system prompt 增量</h3>
+
+<p>建议直接借鉴 Claude Code 的写法：</p>
+
+<pre><code>## 关于 spawn_agents (异步模式)
+
+`spawn_agents` 是异步的：调用后立即返回 `{status:"async_launched", swarm_id, agents:[...]}`。
+你不需要轮询，也不应该轮询：
+  - 子智能体完成时，会自动以 user 消息 `&lt;swarm-update&gt;...&lt;/swarm-update&gt;` 出现在你下一轮上下文里。
+  - **不要去 read 或 tail output_file，除非用户明确要你做进度检查。** 信任通知。
+  - **不要编造子智能体的结果**。如果用户在通知到达前问起，给状态、不给答案。
+  - 如果你确实没别的活可干，调用 `await_agents(mode="any")` 一次阻塞拿到至少一个结果。
+  - 如果摘要里的 `&lt;preview&gt;` 不够，调 `get_agent_result(id)` 拿完整内容。
+
+## 子智能体 (sub-agent) 不能调用：
+spawn_agents / spawn_more_agents / await_agents / get_agent_result。
+它们只能完成自己的对象任务并返回最终答案。</code></pre>
+
+<h3>5.6 后端工程清单</h3>
+
+<table>
+  <tr><th>步骤</th><th>文件</th><th>动作</th></tr>
+  <tr><td>1</td><td><code>lib/agent_inbox.py</code> (新)</td>
+      <td>实现 <code>enqueue_agent_message(task_id, value, priority, mode)</code> + <code>drain_agent_inbox(task_id)</code> + <code>peek_agent_inbox</code>。线程安全。复刻 Claude Code 的优先级机制。</td></tr>
+  <tr><td>2</td><td><code>lib/swarm/master.py</code></td>
+      <td>新增 <code>MasterOrchestrator.run_in_background()</code>：把 <code>StreamingScheduler</code> 跑在 daemon 线程里立即返回；保留 <code>run_reactive()</code> 走老路径。</td></tr>
+  <tr><td>3</td><td><code>lib/swarm/master.py</code></td>
+      <td><code>_on_agent_complete_callback</code> 末尾追加：拼 <code>&lt;swarm-update&gt;</code> XML 调 <code>enqueue_agent_message(task_id, payload, priority='later')</code>。</td></tr>
+  <tr><td>4</td><td><code>lib/swarm/integration.py</code></td>
+      <td><code>_handle_spawn_agents</code> 在 <code>cfg.swarm_async=True</code> 分支下：建 orchestrator → <code>run_in_background()</code> → 立即返回 handle dict。</td></tr>
+  <tr><td>5</td><td><code>lib/swarm/tools.py</code></td>
+      <td>新增 <code>AWAIT_AGENTS_TOOL</code>、<code>GET_AGENT_RESULT_TOOL</code>。加进 <code>MASTER_TOOLS</code>，加进 <code>SWARM_TOOL_NAMES</code>。</td></tr>
+  <tr><td>6</td><td><code>lib/tasks_pkg/executor.py</code> + <code>integration.py</code></td>
+      <td>路由两个新工具。</td></tr>
+  <tr><td>7</td><td><code>lib/tasks_pkg/orchestrator.py</code></td>
+      <td>每轮主 LLM 之前：<code>messages = drain_agent_inbox(task_id) + messages</code>。注意保护 tool_call/tool_result 配对（在配对未闭合时延后注入）。</td></tr>
+  <tr><td>8</td><td><code>lib/swarm/agent.py</code></td>
+      <td>子智能体的流式 token 同时写一份到 <code>data/swarm/&lt;task_id&gt;/&lt;agent_id&gt;.log</code>。</td></tr>
+  <tr><td>9</td><td><code>tests/test_swarm_async.py</code> (新)</td>
+      <td>单测：<br>(a) <code>spawn_agents</code> 立即返回 handle；<br>(b) 完成后 inbox 收到 update；<br>(c) <code>await_agents</code> 正确阻塞；<br>(d) 子智能体看不到 spawn/await/get 工具。</td></tr>
+  <tr><td>10</td><td>文档</td>
+      <td>更新 <code>docs/ARCHITECTURE.md</code> 的 swarm 章节；加一段 system prompt 教程。</td></tr>
+</table>
+
+<h3>5.7 一段端到端的"演练"日志</h3>
+
+<p>假设用户问："帮我评估一下当前分支能不能上线"。下面是异步模式下应该看到的 round 序列：</p>
+
+<pre class="seq">[round 1]
+  user → "帮我评估一下当前分支能不能上线"
+  assistant → tool_call(spawn_agents, {agents:[
+    {role:"git_audit",   objective:"列出当前分支的未提交 + 领先 main 的 commits"},
+    {role:"test_audit",  objective:"检查相关测试是否存在并通过"},
+    {role:"flag_audit",  objective:"检查 GrowthBook gate 配置"}
+  ]})
+  tool_result → {status:"async_launched", swarm_id:"sw-7c2", agents:[a1,a2,a3]}
+  assistant → "已经派出三个子智能体审计，正在进行..."
+  [round 1 结束]
+
+[orchestrator 轮间钩子] inbox 空，无注入。
+
+[round 2]
+  user → "tests 那块大概多久?"
+  assistant → "test 审计还在跑，应该很快回来。其它两个也都在并行进行。"
+  [round 2 结束]
+
+[a1 完成 → enqueue_agent_message("&lt;swarm-update&gt;agent=a1 status=completed
+   preview='1 commit ahead, no uncommitted'&lt;/swarm-update&gt;")]
+
+[round 3]
+  [orchestrator 轮间钩子] drain_agent_inbox → 注入 1 条 &lt;swarm-update&gt;
+  user → "&lt;swarm-update&gt;agent=a1 ... preview='1 commit ahead, no uncommitted'&lt;/&gt;"
+  assistant → tool_call(web_search, "GrowthBook gate best practices")
+  tool_result → ...
+  assistant → "git 审计回来了：1 个 commit 领先 main，无未提交。继续等其它两个。"
+  [round 3 结束]
+
+[a2、a3 几秒内陆续完成 → 两条 update 进队]
+
+[round 4]
+  [orchestrator 轮间钩子] drain_agent_inbox → 注入 2 条 &lt;swarm-update&gt;
+  user → "&lt;swarm-update&gt;a2... 'tests pass'&lt;/&gt;
+          &lt;swarm-update&gt;a3... 'gate not in build_flags.yaml'&lt;/&gt;"
+  assistant → "好的，汇总一下：✓ 1 commit 领先 ✓ 测试通过 ✗ flag 没配进 build_flags.yaml。
+              准备上线之前需要把 flag 补上。"
+  [round 4 结束 — 用户拿到完整答案]</pre>
+
+<p>对比当前同步模式：用户问完那一刻 → 卡 3 分钟 → 一段长答案空降。<strong>新模式下用户每一轮都能跟主智能体互动，而且主智能体在等的时候真的在做事。</strong></p>
+
+<!-- ============================ §6 ============================ -->
+<h2 id="sec6">6. 关键决策项（你需要拍板的几件事）</h2>
+
+<div class="grid-2">
+  <div class="card">
+    <h4>决策 1：默认开启 还是 opt-in？</h4>
+    <p>建议第一阶段 <strong>opt-in</strong> via <code>cfg.swarm_async=True</code>。老的同步路径完全不动，一律走流量走稳后再删。</p>
+  </div>
+  <div class="card">
+    <h4>决策 2：摘要的"丰满度"</h4>
+    <p>建议摘要里只放：role + status + elapsed + tokens + 200 字 preview + output_file 路径。<br>需要完整内容时让模型显式调 <code>get_agent_result(id)</code>。</p>
+  </div>
+  <div class="card">
+    <h4>决策 3：master review / synthesise 是否保留？</h4>
+    <p>建议<strong>保留代码</strong>但<strong>异步路径下不调用</strong>，留作 fallback。一两个版本后确认无人使用，整段删除。</p>
+  </div>
+  <div class="card">
+    <h4>决策 4：<code>await_agents</code> 超时</h4>
+    <p>建议硬上限 120 秒。这跟 Claude Code 的 auto-background 阈值一致，且能防止主智能体被一个挂死的子智能体钉死。超时后返回部分结果 + "still running" 列表。</p>
+  </div>
+  <div class="card">
+    <h4>决策 5：子智能体工具收紧到什么程度？</h4>
+    <p>你之前问过"是否禁用所有工具"。我建议<strong>不要那么激进</strong>，但保证：<br>(a) 没有 swarm 系工具 (spawn/await/get/spawn_more)<br>(b) 没有 ask_user / human_guidance<br>子智能体仍然保留 web/read/grep —— 否则它们就退化成 prompt 拼接器，没价值。</p>
+  </div>
+  <div class="card">
+    <h4>决策 6：handle 的 task_id 是否对用户可见？</h4>
+    <p>建议在前端 swarm 面板里显示，但不暴露给主智能体的 system prompt（避免它把内部 ID 写进给用户的回答里）。</p>
+  </div>
+</div>
+
+<!-- ============================ §7 ============================ -->
+<h2 id="sec7">7. 第一个 PR 的最小切片</h2>
+
+<p>这个 PR 不动现有同步路径、不动 UI、不删 review/synthesise，只做"把异步管道铺好"：</p>
+
+<table>
+  <tr><th>#</th><th>文件</th><th>变更</th><th>测试</th></tr>
+  <tr><td>1</td><td><code>lib/agent_inbox.py</code></td><td>新文件，~120 行</td><td><code>tests/test_agent_inbox.py</code></td></tr>
+  <tr><td>2</td><td><code>lib/swarm/master.py</code></td><td>+<code>run_in_background()</code> 方法</td><td>跑现有 swarm tests 不退化</td></tr>
+  <tr><td>3</td><td><code>lib/swarm/integration.py</code></td><td>+<code>cfg.swarm_async</code> 分支</td><td>新增 async path test</td></tr>
+  <tr><td>4</td><td><code>lib/swarm/tools.py</code></td><td>+<code>AWAIT_AGENTS_TOOL</code> + <code>GET_AGENT_RESULT_TOOL</code></td><td>schema 单测</td></tr>
+  <tr><td>5</td><td><code>lib/tasks_pkg/orchestrator.py</code></td><td>每轮前 drain inbox → 注入 user 消息</td><td>round-boundary 测试</td></tr>
+  <tr><td>6</td><td>(无)</td><td>不动 UI、不动 master review、不动 synthesise</td><td>—</td></tr>
+</table>
+
+<p>验证标准：</p>
+<ul>
+  <li class="ok">老同步路径所有现有测试通过</li>
+  <li class="ok">设置 <code>cfg.swarm_async=True</code> 时 <code>spawn_agents</code> 在 50 ms 内返回</li>
+  <li class="ok">两个子智能体并行跑、完成后 inbox 收到两条 update</li>
+  <li class="ok"><code>await_agents(mode="any")</code> 在第一个完成后立即返回</li>
+  <li class="ok">子智能体的 tool 列表里没有 spawn/await/get/spawn_more 这四个</li>
+</ul>
+
+<p class="footnote">第二个 PR：把每个子智能体的流式 token 落盘 + handle 里返回 output_file 路径。<br>第三个 PR：删掉 master review / synthesise 代码（前两个 PR 稳了之后）。<br>第四个 PR：参照 Claude Code 写一份"主智能体 system prompt 教程"，并用真例对话训练（可放进 endpoint mode 的 worker prompt）。</p>
+
+<hr>
+
+<h2 style="border:none;">附录 A：Claude Code 关键代码位置速查</h2>
+
+<div class="kv">
+  <div class="k">Subagent 工具定义</div>          <div><code>src/tools/AgentTool/AgentTool.tsx</code></div>
+  <div class="k">异步注册函数</div>                <div><code>src/tasks/LocalAgentTask/LocalAgentTask.tsx:466</code> <code>registerAsyncAgent</code></div>
+  <div class="k">通知入队</div>                    <div><code>src/tasks/LocalAgentTask/LocalAgentTask.tsx:197</code> <code>enqueueAgentNotification</code></div>
+  <div class="k">统一命令队列</div>                <div><code>src/utils/messageQueueManager.ts</code></div>
+  <div class="k">Subagent 系统提示</div>           <div><code>src/tools/AgentTool/prompt.ts</code></div>
+  <div class="k">Teammate 调度</div>               <div><code>src/utils/swarm/inProcessRunner.ts</code></div>
+  <div class="k">Teammate 的 SendMessage 工具</div><div><code>src/tools/SendMessageTool/SendMessageTool.ts</code></div>
+  <div class="k">In-process backend</div>          <div><code>src/utils/swarm/backends/InProcessBackend.ts</code></div>
+  <div class="k">Task 模型基类</div>               <div><code>src/Task.ts</code></div>
+</div>
+
+<h2 style="border:none;">附录 B：Tofu 现状关键代码位置速查</h2>
+
+<div class="kv">
+  <div class="k">spawn_agents 工具</div>           <div><code>lib/swarm/tools.py:SPAWN_AGENTS_TOOL</code></div>
+  <div class="k">同步 master 入口</div>            <div><code>lib/swarm/integration.py:_handle_spawn_agents</code></div>
+  <div class="k">阻塞点</div>                      <div><code>lib/swarm/master.py:MasterOrchestrator.run_reactive()</code></div>
+  <div class="k">流式调度器</div>                  <div><code>lib/swarm/scheduler.py:StreamingScheduler</code></div>
+  <div class="k">子智能体执行</div>                <div><code>lib/swarm/agent.py:SubAgent.run()</code></div>
+  <div class="k">UI push 通道</div>                <div><code>lib/push.py</code></div>
+  <div class="k">主任务调度</div>                  <div><code>lib/tasks_pkg/orchestrator.py</code></div>
+  <div class="k">工具按角色裁剪</div>              <div><code>lib/swarm/registry.py:scope_tools_for_role</code></div>
+</div>
+
+<p style="text-align:center; color:var(--muted); margin-top:48px; font-size:13px;">
+  — 报告结束 —
+</p>
+
+</div>
+</body>
+</html>

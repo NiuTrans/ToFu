@@ -7,7 +7,7 @@ transparently retries with Claude Opus 4 (medium preset) when the
 primary model errors out.
 """
 
-from lib.llm_client import build_body
+from lib.llm import build_body
 from lib.llm_error_format import format_llm_error_for_user
 from lib.log import get_logger
 from lib.tasks_pkg.manager import append_event, stream_llm_response
@@ -36,6 +36,65 @@ def cleanup_reactive_compact_state(task_id: str):
     Called from orchestrator._finalize_and_emit_done to prevent memory leak.
     """
     _reactive_compact_attempts.pop(task_id, None)
+
+
+def _emit_round_usage(task, round_num, model, usage, *, tag=''):
+    """Emit a per-round usage SSE event so the frontend context-health
+    gauge can reflect the size of the prompt JUST sent to the model,
+    without waiting for the final ``done`` event to land ``apiRounds``.
+
+    The orchestrator's ``accumulated_usage`` is the per-message running
+    sum across all rounds (see :func:`_llm_call_with_fallback`), so the
+    only intra-task data that maps to "next-prompt size" is the raw
+    ``usage`` dict from THIS round.  We forward exactly that, plus a
+    pre-computed ``tokensIn`` (total input tokens including cache) so
+    the frontend doesn't need to know the Anthropic-vs-OpenAI cache
+    convention.
+
+    Parameters
+    ----------
+    task : dict
+        Live task dict — used by ``append_event`` for SSE delivery.
+    round_num : int
+        1-based round number (matches the value pushed into
+        ``api_rounds``).
+    model : str
+        Model id actually used for this round (may differ from the
+        primary on fallback / reactive paths).
+    usage : dict
+        Raw usage dict returned by the LLM (post-streaming).
+    tag : str
+        Diagnostic label such as ``R1`` / ``R3-FALLBACK`` /
+        ``R5-REACTIVE``.  Logged only.
+    """
+    if not usage:
+        return
+    try:
+        inp = usage.get('prompt_tokens') or usage.get('input_tokens') or 0
+        cw = (usage.get('cache_write_tokens')
+              or usage.get('cache_creation_input_tokens') or 0)
+        cr = (usage.get('cache_read_tokens')
+              or usage.get('cache_read_input_tokens') or 0)
+        # Anthropic convention: prompt_tokens excludes cache. OpenAI
+        # convention: prompt_tokens already includes cache. Mirrors the
+        # frontend test in ui.js:1853 / context-bar.js:_promptTokensFromUsage.
+        if (cw > 0 or cr > 0) and inp <= cw + cr:
+            tokens_in = inp + cw + cr
+        else:
+            tokens_in = inp
+        out = usage.get('completion_tokens') or usage.get('output_tokens') or 0
+        append_event(task, {
+            'type': 'round_usage',
+            'round': round_num,
+            'model': model,
+            'tag': tag,
+            'tokensIn': int(tokens_in or 0),
+            'tokensOut': int(out or 0),
+            'usage': dict(usage),
+        })
+    except Exception as e:
+        logger.debug('[round_usage] emit failed (round=%s tag=%s): %s',
+                     round_num, tag, e)
 
 
 def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
@@ -96,7 +155,7 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
     Exception
         Re-raised when both primary and fallback models fail and no prior
         tool calls exist (unrecoverable first-round error).
-    lib.llm_client.AbortedError
+    lib.llm.AbortedError
         Never caught — propagates directly to signal user abort.
     """
     tid = task['id'][:8]
@@ -111,15 +170,27 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
 
         # Detect safety-filter block: empty content on first round only.
         # Later rounds may legitimately have empty content after tool calls.
+        # IMPORTANT: skip when the stream layer flagged a transport anomaly
+        # (zero-byte close, missing [DONE]) — that's a gateway hiccup, not
+        # a safety block.  ``analyse_stream_result`` will route it to the
+        # zero-byte retry path (``_PREMATURE_RETRY_MAX_ZERO_BYTE`` = 16).
+        _stream_anom = bool((usage or {}).get('_stream_anomaly'))
         if (finish_reason == 'stop'
                 and not assistant_msg.get('content', '').strip()
                 and not task['content'].strip()
                 and not task['thinking'].strip()
-                and round_num == 0):
+                and round_num == 0
+                and not _stream_anom):
             last_finish_reason = 'content_filter'
             logger.warning('[%s] 🚫 CONTENT_FILTER detected at round %d: model returned stop '
                            'with empty content on first round — likely safety-blocked. model=%s',
                            tid, round_num, model)
+        elif (finish_reason == 'stop'
+                and not assistant_msg.get('content', '').strip()
+                and round_num == 0
+                and _stream_anom):
+            logger.info('[%s] 🔄 Round 0 empty stop with stream anomaly — deferring to '
+                        'zero-byte retry path (NOT content_filter). model=%s', tid, model)
 
         # Log output-token truncation so operators can tune max_tokens
         if finish_reason in ('length', 'max_tokens'):
@@ -141,6 +212,7 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                     accumulated_usage[k] = accumulated_usage.get(k, 0) + v
             api_rounds.append({'round': round_num + 1, 'model': model,
                                'usage': dict(usage), 'tag': f'R{round_num+1}'})
+            _emit_round_usage(task, round_num + 1, model, usage, tag=f'R{round_num+1}')
 
         _content_len = len(assistant_msg.get('content', '') or '')
         _tool_calls = len(assistant_msg.get('tool_calls', []))
@@ -164,7 +236,7 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
 
     except Exception as e:
         # AbortedError must escape — never fallback/retry on user abort
-        from lib.llm_client import AbortedError, ContentFilterError, PromptTooLongError
+        from lib.llm import AbortedError, ContentFilterError, PromptTooLongError
         if isinstance(e, AbortedError):
             logger.debug('[%s] ✋ AbortedError at round %d — stopping immediately', tid, round_num)
             raise
@@ -175,6 +247,39 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
         if isinstance(e, PromptTooLongError):
             _task_id = task.get('id', '')
             _attempts = _reactive_compact_attempts.get(_task_id, 0)
+
+            # ── Auto-learn a SHRUNK context limit for this (provider, model)
+            # ── before we compact. The next call will use the corrected
+            # ── ceiling, so future overflows on this provider become rarer.
+            try:
+                from lib.context_limits import learn_shrink_from_error
+                from lib.tasks_pkg.compaction import (
+                    _get_context_limit,
+                    _parse_reported_token_count,
+                )
+                _reported = _parse_reported_token_count(str(e))
+                _prior_limit = _get_context_limit(task)
+                _learned_info = learn_shrink_from_error(
+                    task.get('provider_id') or '',
+                    model,
+                    _reported,
+                    preset_limit=_prior_limit,
+                )
+                if _learned_info:
+                    append_event(task, {
+                        'type': 'phase',
+                        'phase': 'retrying',
+                        'detail': (
+                            f'⚙️ Auto-detected smaller context window for '
+                            f'{model}: '
+                            f'{_learned_info["new_limit"]:,} tokens '
+                            f'(was {_learned_info["old_limit"]:,})'
+                        ),
+                    })
+            except Exception as _learn_e:
+                logger.debug('[%s] context_limits shrink-learn failed: %s',
+                             tid, _learn_e)
+
             if _attempts < _REACTIVE_COMPACT_MAX_RETRIES:
                 _reactive_compact_attempts[_task_id] = _attempts + 1
                 logger.warning(
@@ -199,6 +304,7 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                     thinking_enabled=thinking_enabled,
                     preset=preset,
                     tools=_tools_this_round,
+                    response_format=body.get('response_format'),
                     stream=True,
                 )
 
@@ -220,6 +326,8 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                                 accumulated_usage[k] = accumulated_usage.get(k, 0) + v
                         api_rounds.append({'round': round_num + 1, 'model': model,
                                            'usage': dict(usage), 'tag': f'R{round_num+1}-REACTIVE'})
+                        _emit_round_usage(task, round_num + 1, model, usage,
+                                           tag=f'R{round_num+1}-REACTIVE')
                     return {
                         'assistant_msg': assistant_msg,
                         'finish_reason': finish_reason,
@@ -240,20 +348,32 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
 
         # InvalidImageError — image content rejected (too large, corrupt, etc.)
         # Fallback to another model won't help (same image = same rejection).
-        from lib.llm_client import InvalidImageError
+        from lib.llm import InvalidImageError
         if isinstance(e, InvalidImageError):
             err_str = str(e)[:300]
             logger.warning('[%s] 🖼️ INVALID_IMAGE at round %d model=%s: %s',
                            tid, round_num, model, err_str)
-            # Extract a user-friendly message
-            _user_msg = ('⚠️ Image error: one or more images in this conversation '
-                         'exceed the API size limit. Please try with a smaller image '
-                         'or remove the oversized image from the conversation.')
+            from lib.error_envelope import make_envelope as _make_env
             if 'many-image' in err_str.lower():
-                _user_msg = ('⚠️ Image error: too many large images. When sending 5+ images, '
-                             'each must be under 2000×2000 pixels. Please resize or remove some images.')
+                _hint_cn = '过多大图。同时发送 5 张以上图片时，每张需小于 2000×2000像素。请压缩或删除部分图片。'
+                _hint_en = ('Too many large images. When sending 5+ images, each must be '
+                            'under 2000×2000 pixels. Please resize or remove some images.')
+            else:
+                _hint_cn = '会话中某张图片超过了 API 大小限制。请使用更小的图片或删除过大的图片。'
+                _hint_en = ('One or more images in this conversation exceed the API size '
+                            'limit. Please use a smaller image or remove the oversized image.')
+            envelope = _make_env(
+                'invalid_image',
+                hint=f'解决办法 / How to fix:\n• {_hint_cn}\n\n• {_hint_en}',
+                detail=err_str,
+                model=model,
+                context=f'round-{round_num}',
+                source='llm-stream',
+                raw=str(e),
+            )
+            task['error'] = envelope
             return {
-                'assistant_msg': {'role': 'assistant', 'content': _user_msg},
+                'assistant_msg': {'role': 'assistant', 'content': ''},
                 'finish_reason': 'error',
                 'usage': None,
                 'model': model,
@@ -292,26 +412,32 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             if tool_call_happened:
                 _user_err = format_llm_error_for_user(
                     e, model=model,
-                    context='no-fallback' if not _FALLBACK_MODEL else 'on-fallback-model')
+                    context='no-fallback' if not _FALLBACK_MODEL else 'on-fallback-model',
+                    source='llm-stream')
                 task['error'] = _user_err
                 logger.warning('[%s] 🛑 Fallback model error with prior tool calls — giving up: %s',
                                tid, err_str, exc_info=True)
+                # ``content`` must be a string — the typed envelope is
+                # carried separately on task['error'] / done.error.  The
+                # assistant bubble shows the empty string; the frontend
+                # renders the error envelope as a typed error block.
                 return {
-                    'assistant_msg': {'role': 'assistant', 'content': _user_err},
+                    'assistant_msg': {'role': 'assistant', 'content': ''},
                     'finish_reason': 'error', 'usage': None,
                     'model': model, 'preset': preset, 'thinking_enabled': thinking_enabled,
                     '_loop_action': 'break',
                     '_loop_exit_reason': f'opus_error_with_tool_calls_round_{round_num}',
                 }
             # No fallback / already on fallback and no prior tool calls —
-            # stash user-friendly text on the exception so the top-level
+            # stash the typed envelope on the exception so the top-level
             # FATAL handler in orchestrator can surface actionable text
             # without losing the exception type (subclasses may have
             # non-trivial __init__ signatures).
             try:
                 e._user_message = format_llm_error_for_user(  # type: ignore[attr-defined]
                     e, model=model,
-                    context='no-fallback' if not _FALLBACK_MODEL else 'on-fallback-model')
+                    context='no-fallback' if not _FALLBACK_MODEL else 'on-fallback-model',
+                    source='llm-stream')
             except Exception as _attr_err:
                 logger.debug('[%s] Could not attach _user_message: %s', tid, _attr_err)
             raise
@@ -337,6 +463,7 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             preset='opus',
             thinking_depth='medium',
             tools=tool_list if (tool_list and round_num < max_tool_rounds) else None,
+            response_format=body.get('response_format'),
             stream=True,
         )
 
@@ -345,11 +472,13 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                 task, fallback_body, tag=f'R{round_num+1}-FALLBACK')
             last_finish_reason = finish_reason
 
+            _fb_stream_anom = bool((usage or {}).get('_stream_anomaly'))
             if (finish_reason == 'stop'
                     and not assistant_msg.get('content', '').strip()
                     and not task['content'].strip()
                     and not task['thinking'].strip()
-                    and round_num == 0):
+                    and round_num == 0
+                    and not _fb_stream_anom):
                 last_finish_reason = 'content_filter'
                 logger.warning('[%s] 🚫 CONTENT_FILTER detected at round %d (fallback model=%s): '
                                'stop with empty content on first round — likely safety-blocked',
@@ -372,6 +501,8 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                         accumulated_usage[k] = accumulated_usage.get(k, 0) + v
                 api_rounds.append({'round': round_num + 1, 'model': _FALLBACK_MODEL,
                                    'usage': dict(usage), 'tag': f'R{round_num+1}-FALLBACK'})
+                _emit_round_usage(task, round_num + 1, _FALLBACK_MODEL, usage,
+                                   tag=f'R{round_num+1}-FALLBACK')
 
             _fb_content_len = len(assistant_msg.get('content', '') or '')
             _fb_tool_calls = len(assistant_msg.get('tool_calls', []))
@@ -400,23 +531,25 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             if tool_call_happened:
                 _user_err = format_llm_error_for_user(
                     e2, model=_FALLBACK_MODEL,
-                    context=f'both-failed ({original_model}→{_FALLBACK_MODEL})')
+                    context=f'both-failed ({original_model}→{_FALLBACK_MODEL})',
+                    source='llm-fallback')
                 task['error'] = _user_err
                 logger.warning('[%s] 🛑 Both %s and fallback failed — giving up',
                                tid, original_model, exc_info=True)
                 return {
-                    'assistant_msg': {'role': 'assistant', 'content': _user_err},
+                    'assistant_msg': {'role': 'assistant', 'content': ''},
                     'finish_reason': 'error', 'usage': None,
                     'model': _FALLBACK_MODEL, 'preset': 'medium',
                     'thinking_enabled': True,
                     '_loop_action': 'break',
                     '_loop_exit_reason': f'both_models_failed_round_{round_num}',
                 }
-            # Attach user-friendly message for top-level FATAL handler.
+            # Attach typed envelope for top-level FATAL handler.
             try:
                 e2._user_message = format_llm_error_for_user(  # type: ignore[attr-defined]
                     e2, model=_FALLBACK_MODEL,
-                    context=f'both-failed ({original_model}→{_FALLBACK_MODEL})')
+                    context=f'both-failed ({original_model}→{_FALLBACK_MODEL})',
+                    source='llm-fallback')
             except Exception as _attr_err:
                 logger.debug('[%s] Could not attach _user_message: %s', tid, _attr_err)
             raise

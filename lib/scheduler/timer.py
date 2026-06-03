@@ -240,7 +240,7 @@ def _build_poll_tools(tools_config: dict) -> list | None:
     Returns a list of tool definitions or None if no tools should be available.
     The timer poll gets the same tools as the main agent (project tools,
     search, fetch, code_exec) except for human interaction tools (ask_human,
-    emit_to_user, scheduler, swarm, memory).
+    scheduler, swarm, memory).
     """
     try:
         from lib.tools import (

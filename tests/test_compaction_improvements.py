@@ -278,7 +278,7 @@ class TestPromptTooLongError:
     """Verify PromptTooLongError is properly defined and detectable."""
 
     def test_error_class_exists(self):
-        from lib.llm_client import PromptTooLongError
+        from lib.llm import PromptTooLongError
         err = PromptTooLongError("prompt is too long")
         assert isinstance(err, Exception)
         assert "prompt is too long" in str(err)
@@ -567,38 +567,6 @@ class TestReactiveCompactThreadSafety:
         assert 'keep_recent_pairs' in sig.parameters, \
             'force_compact_if_needed should have keep_recent_pairs parameter'
 
-    def test_find_pair_boundary_accepts_keep_recent(self):
-        """_find_pair_boundary should accept keep_recent parameter."""
-        from lib.tasks_pkg.compaction import _find_pair_boundary
-        messages = [
-            {'role': 'system', 'content': 'System'},
-        ]
-        for i in range(10):
-            messages.append({'role': 'user', 'content': f'Q{i}'})
-            messages.append({'role': 'assistant', 'content': f'A{i}'})
-
-        # With keep_recent=2, boundary should be more aggressive (earlier)
-        boundary_default = _find_pair_boundary(messages)
-        boundary_aggressive = _find_pair_boundary(messages, keep_recent=2)
-        # More aggressive = later index (less preserved)
-        assert boundary_aggressive >= boundary_default or boundary_aggressive > 0
-
-    def test_keep_recent_pairs_unchanged_after_reactive_compact(self):
-        """_KEEP_RECENT_PAIRS should not change after reactive_compact call."""
-        from lib.tasks_pkg.compaction import _KEEP_RECENT_PAIRS, reactive_compact
-        original_value = _KEEP_RECENT_PAIRS
-
-        messages = [{'role': 'system', 'content': 'S'}]
-        for i in range(5):
-            messages.append({'role': 'user', 'content': f'Q{i}'})
-            messages.append({'role': 'assistant', 'content': f'A{i}'})
-
-        reactive_compact(messages, task={'convId': 'test', 'id': 'test123',
-                                         'config': {'model': 'gpt-4'}})
-
-        from lib.tasks_pkg.compaction import _KEEP_RECENT_PAIRS as after
-        assert after == original_value, \
-            f'_KEEP_RECENT_PAIRS changed from {original_value} to {after}!'
 
 
 # ═══════════════════════════════════════════════════════════
@@ -638,7 +606,7 @@ class TestPromptTooLongNonStreaming:
         so the non-streaming path doesn't waste retries on it."""
         import inspect
 
-        from lib.llm_client import chat
+        from lib.llm import chat
         source = inspect.getsource(chat)
         # The except clause should include PromptTooLongError
         assert 'PromptTooLongError' in source, \
@@ -801,6 +769,53 @@ class TestDiskPersistence:
                                   'conv_fetchsingle')
         # Should go through the default path (single [Persisted to:] header)
         assert result.startswith('[Persisted to:')
+
+    def test_persisted_results_get_friendly_display_labels(self):
+        """read_files on spilled web_search results should render a human
+        label (title) instead of the opaque persisted filename."""
+        import os
+        import re as _re
+        from lib.tasks_pkg.compaction import _persist_to_disk
+        from lib.tasks_pkg.persist_registry import clear, lookup
+        from lib.tasks_pkg.tool_display import _persisted_read_labels
+
+        clear()
+        content = (
+            '[1] AI Model Deprecation Tracker 2026\n'
+            'URL: https://example.com/track\n'
+            '──── Full Page Content ────\n' + ('lorem ' * 6000) +
+            '\n════════════════════\n'
+            '[2] Second Result Title\n'
+            'URL: https://example.org/two\n'
+            '──── Full Page Content ────\n' + ('ipsum ' * 6000)
+        )
+        out = _persist_to_disk(content, 'web_search', 'toolu_xyz', 'conv_lbl')
+        files = _re.findall(r'File: (\S+\.txt)', out)
+        assert len(files) == 2
+        assert lookup(files[0]) == ('web_search', 'AI Model Deprecation Tracker 2026')
+
+        display = _persisted_read_labels({'reads': [{'path': p} for p in files]})
+        assert 'web search result' in display
+        assert 'AI Model Deprecation Tracker 2026' in display
+        # Opaque filename must NOT leak into the display.
+        assert 'toolu_xyz' not in display
+
+        # Stateless fallback after a restart wipes the registry.
+        clear()
+        fb = _persisted_read_labels({'reads': [{'path': files[0]}]})
+        assert 'web search result' in fb
+        assert 'toolu_xyz' not in fb
+
+        for f in files:
+            os.unlink(f)
+
+    def test_non_persisted_read_keeps_default_display(self):
+        """read_files on ordinary project files must keep the normal path
+        rendering (no friendly-label hijack)."""
+        from lib.tasks_pkg.persist_registry import clear
+        from lib.tasks_pkg.tool_display import _persisted_read_labels
+        clear()
+        assert _persisted_read_labels({'reads': [{'path': 'lib/server.py'}]}) == ''
 
     def test_find_files_batch_split_persist(self):
         """Batch find_files persist should produce per-search files + index listing ALL patterns."""
@@ -1461,30 +1476,20 @@ class TestTurnBoundary:
         assert boundary > 0
 
 
+
 @pytest.mark.unit
-class TestPairBoundaryBackwardCompat:
-    """_find_pair_boundary must remain a working wrapper over the new impl."""
+class TestTurnBoundaryRegression:
+    """Regression coverage for the conv=modearkif6k9tr bug — the old
+    pair-count boundary returned ``len(messages)`` when there were fewer
+    user turns than ``_MAX_PRESERVE_TURNS``. ``_find_turn_boundary`` must
+    always preserve at least the current turn."""
 
-    def test_keep_recent_is_mapped_to_max_turns(self):
-        from lib.tasks_pkg.compaction import _find_pair_boundary
+    def test_turn_boundary_preserves_current_turn_with_few_users(self):
+        from lib.tasks_pkg.compaction import (
+            _find_turn_boundary, _MAX_PRESERVE_TURNS,
+        )
         msgs = [{'role': 'system', 'content': 'sys'}]
-        for k in range(10):
-            msgs.append({'role': 'user', 'content': f'Q{k}'})
-            msgs.append({'role': 'assistant', 'content': f'A{k}'})
-        b_default = _find_pair_boundary(msgs)              # _KEEP_RECENT_PAIRS
-        b_tight   = _find_pair_boundary(msgs, keep_recent=2)
-        b_loose   = _find_pair_boundary(msgs, keep_recent=5)
-        # Smaller max_turns → larger boundary index (less preserved)
-        assert b_tight >= b_loose >= b_default or b_tight >= b_default
-
-    def test_regression_old_pair_boundary_would_return_end(self):
-        """The exact scenario that broke conv=modearkif6k9tr:
-        conversation with fewer user turns than _KEEP_RECENT_PAIRS.
-        Old pair-based impl returned len(messages); new impl must
-        preserve the current turn."""
-        from lib.tasks_pkg.compaction import _KEEP_RECENT_PAIRS, _find_pair_boundary
-        msgs = [{'role': 'system', 'content': 'sys'}]
-        # Only 4 user turns — fewer than _KEEP_RECENT_PAIRS (8).
+        # Only 4 user turns — fewer than _MAX_PRESERVE_TURNS (16).
         for k in range(4):
             msgs.append({'role': 'user', 'content': f'Q{k}'})
             for _ in range(20):  # many tool messages per turn
@@ -1496,13 +1501,13 @@ class TestPairBoundaryBackwardCompat:
                 msgs.append({'role': 'tool', 'tool_call_id': f't{k}',
                              'name': 'grep_search', 'content': 'x' * 500})
         n_users = sum(1 for m in msgs if m.get('role') == 'user')
-        assert n_users < _KEEP_RECENT_PAIRS   # precondition of the bug
+        assert n_users < _MAX_PRESERVE_TURNS  # precondition of the bug
 
-        boundary = _find_pair_boundary(msgs)
+        boundary = _find_turn_boundary(msgs)
         # MUST preserve at least the current (last) turn
         assert boundary < len(msgs), (
-            'REGRESSION: _find_pair_boundary returned len(messages) for a '
-            'conversation with fewer user turns than _KEEP_RECENT_PAIRS — '
+            'REGRESSION: _find_turn_boundary returned len(messages) for a '
+            'conversation with fewer user turns than _MAX_PRESERVE_TURNS — '
             'this is the exact bug from conv=modearkif6k9tr.'
         )
         last_user = max(i for i, m in enumerate(msgs) if m.get('role') == 'user')

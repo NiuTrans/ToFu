@@ -12,21 +12,126 @@ Also provides ``probe_provider()`` — a one-shot probe that discovers models,
 detects balance URL, infers brand/name, and suggests thinking format.
 """
 
+import ipaddress
+import os
 import re
 from urllib.parse import urlparse
 
 import requests
 
+from lib.http_client import http_get
 from lib.log import get_logger, log_context
-from lib.proxy import proxies_for as _proxies_for
+from lib.proxy import (
+    register_no_proxy_url as _register_no_proxy_url,
+)
 
 logger = get_logger(__name__)
 
 __all__ = [
     'discover_models',
     'enrich_models_with_pricing',
+    'is_local_endpoint',
+    'normalize_base_url',
     'probe_provider',
 ]
+
+
+# ══════════════════════════════════════════════════════
+#  Local-endpoint Helpers
+# ══════════════════════════════════════════════════════
+
+# Common chat/completion suffixes users paste — we strip these to recover
+# the OpenAI-compatible base URL that hosts /models.
+_CHAT_SUFFIXES = (
+    '/chat/completions',
+    '/completions',
+    '/embeddings',
+)
+
+
+def normalize_base_url(url: str) -> str:
+    """Strip well-known chat/completion suffixes so /models lookup succeeds.
+
+    Users frequently paste the full chat-completions URL (e.g.
+    ``http://10.0.0.5:8080/v1/chat/completions``) when they mean the
+    base URL (``http://10.0.0.5:8080/v1``). Normalizing here keeps the
+    UI forgiving without changing the wire protocol.
+    """
+    if not url:
+        return url
+    cleaned = url.rstrip('/ ')
+    lower = cleaned.lower()
+    for suffix in _CHAT_SUFFIXES:
+        if lower.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)]
+            break
+    return cleaned.rstrip('/')
+
+
+def _parse_local_cidrs() -> list:
+    """Parse ``TOFU_LOCAL_CIDRS`` (comma-separated CIDR list) once.
+
+    Lets operators tag internal-but-publicly-routable IP ranges (e.g. a
+    corp datacenter using 33.0.0.0/8) as 'local' so the health checker
+    polls them and the UI brands them correctly.  Empty by default.
+    """
+    raw = os.environ.get('TOFU_LOCAL_CIDRS', '').strip()
+    if not raw:
+        return []
+    nets = []
+    for tok in raw.split(','):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(tok, strict=False))
+        except ValueError as e:
+            logger.warning('[BrandDetect] Invalid TOFU_LOCAL_CIDRS entry %r: %s', tok, e)
+    return nets
+
+
+_LOCAL_CIDRS_CACHE = None
+
+
+def _local_cidrs() -> list:
+    global _LOCAL_CIDRS_CACHE
+    if _LOCAL_CIDRS_CACHE is None:
+        _LOCAL_CIDRS_CACHE = _parse_local_cidrs()
+    return _LOCAL_CIDRS_CACHE
+
+
+def is_local_endpoint(base_url: str) -> bool:
+    """True when the URL points at a private / loopback / .local host.
+
+    Used to tag self-hosted vLLM / SGLang / Ollama endpoints so the
+    health-checker only polls them and the UI groups them as 'local'.
+
+    Also returns True for IPs in any CIDR listed in the
+    ``TOFU_LOCAL_CIDRS`` env var (operator escape-hatch for internal
+    deployments on RFC-public IP space).
+    """
+    if not base_url:
+        return False
+    try:
+        host = (urlparse(base_url).hostname or '').lower()
+    except Exception as e:
+        logger.debug('[BrandDetect] Failed to parse URL %s: %s', base_url, e)
+        return False
+    if not host:
+        return False
+    if host in ('localhost',) or host.endswith(('.local', '.internal', '.lan', '.intranet')):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError as _e_audit:
+        logger.debug('[discovery] is_local_endpoint caught %s: %s', type(_e_audit).__name__, _e_audit)
+        return False
+    if ip.is_private or ip.is_loopback or ip.is_link_local:
+        return True
+    for net in _local_cidrs():
+        if ip in net:
+            return True
+    return False
 
 # ── Discovery timeout (keep short — runs during startup) ─────
 _DISCOVER_TIMEOUT = 10
@@ -38,9 +143,21 @@ _DISCOVER_TIMEOUT = 10
 _EMBEDDING_PAT = re.compile(r'embed', re.I)
 _IMAGE_GEN_PAT = re.compile(r'(dall-?e|[-_]image|image[-_])', re.I)
 
-# Thinking / reasoning models
+# Thinking / reasoning models. Most cloud families embed "think" or
+# "reason" in the model ID, but a few model families ship as dual-mode
+# (thinking-by-default) without that hint:
+#   • GLM 4.5+ / 5.x   (Zhipu AI; "glm-4.5", "glm-5", "glm5.1")
+#   • Kimi K2-thinking variants
+#   • Qwen3-* (dual-mode by default — name doesn't reveal it)
+#   • DeepSeek V4 (dual-mode)
+# Self-hosted vLLM/SGLang deployments expose those models with their
+# raw IDs (e.g. "glm5.1-fp8") and won't pick up thinking auto-tagging
+# unless the regex covers them explicitly.
 _THINKING_PAT = re.compile(
-    r'(think|reason|\bo[1234]-|\bo[1234]\b|ernie-x)',
+    r'(think|reason|\bo[1234]-|\bo[1234]\b|ernie-x'
+    r'|glm[-_]?(?:4\.[5-9]|[5-9])'
+    r'|qwen-?3'
+    r'|deepseek-?v[4-9])',
     re.I,
 )
 
@@ -212,15 +329,15 @@ def discover_models(base_url: str, api_key: str,
 
     logger.info('[Discovery] Fetching models from %s', models_url)
 
+    headers = {'User-Agent': 'Tofu/1.0'}
+    if api_key:
+        headers['Authorization'] = 'Bearer %s' % api_key
+
     try:
-        resp = requests.get(
+        resp = http_get(
             models_url,
-            headers={
-                'Authorization': 'Bearer %s' % api_key,
-                'User-Agent': 'Tofu/1.0',
-            },
+            headers=headers,
             timeout=timeout,
-            proxies=_proxies_for(models_url),
         )
         if not resp.ok:
             logger.warning('[Discovery] GET %s returned HTTP %d: %.500s',
@@ -268,6 +385,12 @@ def discover_models(base_url: str, api_key: str,
             'cost': cost,
             'thinking_default': 'thinking' in caps,
         }
+        # Pass-through self-identification fields so downstream
+        # heuristics (e.g. _detect_thinking_format) can branch on the
+        # serving engine without re-querying /v1/models.
+        owned_by = (model_data.get('owned_by') or '').strip()
+        if owned_by:
+            entry['owned_by'] = owned_by
         # If MODEL_PRICING has real input/output, include them
         from lib import MODEL_PRICING
         mp = MODEL_PRICING.get(model_id)
@@ -313,11 +436,10 @@ def enrich_models_with_pricing(models: list[dict]) -> list[dict]:
         The same list with updated cost values and 'cheap' tags.
     """
     try:
-        resp = requests.get(
+        resp = http_get(
             'https://openrouter.ai/api/v1/models',
             timeout=20,
             headers={'User-Agent': 'Tofu/1.0'},
-            proxies=_proxies_for('https://openrouter.ai/api/v1/models'),
         )
         if not resp.ok:
             logger.debug('[Discovery] OpenRouter pricing fetch failed: HTTP %d',
@@ -447,17 +569,37 @@ def _detect_brand(base_url: str) -> tuple[str, str]:
         return ('generic', 'Custom Provider')
 
     try:
-        hostname = urlparse(base_url).hostname or ''
+        parsed = urlparse(base_url)
+        hostname = parsed.hostname or ''
+        port = parsed.port
     except Exception as e:
         logger.debug('[BrandDetect] Failed to parse URL %s: %s', base_url, e)
         hostname = ''
+        port = None
 
     hostname_lower = hostname.lower()
+
+    # Self-hosted (vLLM / SGLang / Ollama / proxy) — keyed by host:port so
+    # multiple machines hosting different models stay distinguishable.
+    if is_local_endpoint(base_url):
+        label = '%s:%d' % (hostname, port) if port else hostname
+        return ('local', 'Local %s' % label)
 
     # Check known domain patterns
     for domain_frag, brand_id, display_name in _DOMAIN_BRAND_MAP:
         if domain_frag in hostname_lower:
             return (brand_id, display_name)
+
+    # Raw IP fallback — keep the full address so users can tell endpoints apart.
+    try:
+        ipaddress.ip_address(hostname)
+        is_ip = True
+    except ValueError as _e_audit:
+        logger.debug('[discovery] _detect_brand caught %s: %s', type(_e_audit).__name__, _e_audit)
+        is_ip = False
+    if is_ip:
+        label = '%s:%d' % (hostname, port) if port else hostname
+        return ('generic', label)
 
     # Fallback: extract a reasonable name from the hostname
     # e.g. "my-llm-proxy.example.com" → "My Llm Proxy"
@@ -512,11 +654,10 @@ def _probe_balance_url(base_url: str, api_key: str) -> str:
     for path in _BALANCE_PROBE_PATHS:
         probe_url = origin + path
         try:
-            resp = requests.get(
+            resp = http_get(
                 probe_url,
                 headers=headers,
                 timeout=_BALANCE_PROBE_TIMEOUT,
-                proxies=_proxies_for(probe_url),
             )
             if resp.ok:
                 # Verify it returns JSON (not an HTML error page)
@@ -560,8 +701,36 @@ _THINKING_FORMAT_HINTS = [
 ]
 
 
+# OpenAI-shim engines that expose dual-mode thinking through the
+# Jinja chat template (``chat_template_kwargs.enable_thinking``) rather
+# than a top-level ``enable_thinking`` body field. The engine
+# self-identifies in ``/v1/models`` via the ``owned_by`` field — that's
+# the durable signal we key on. Adding a future shim is a one-line
+# entry here, no other change required.
+_CHAT_TEMPLATE_KWARGS_ENGINES = frozenset({'sglang', 'vllm'})
+
+
+def _is_chat_template_kwargs_engine(models: list[dict]) -> bool:
+    """True iff /v1/models advertises a self-hosted shim that uses the
+    Jinja ``chat_template_kwargs`` thinking gate (sglang, vLLM)."""
+    for m in models:
+        owner = (m.get('owned_by') or m.get('ownedBy') or '').strip().lower()
+        if owner in _CHAT_TEMPLATE_KWARGS_ENGINES:
+            return True
+    return False
+
+
 def _detect_thinking_format(models: list[dict], brand: str) -> str:
     """Suggest the thinking_format for a provider based on its models and brand.
+
+    Resolution order (first match wins):
+
+    1. ``owned_by`` field from /v1/models indicates a chat-template-
+       kwargs engine (sglang / vLLM). This wins over brand because the
+       same model family (e.g. Qwen3) needs a different body shape when
+       served via sglang vs. Alibaba Bailian.
+    2. Brand-level overrides (Claude, Doubao, GLM, Qwen, Gemini cloud).
+    3. Per-model name pattern vote.
 
     Args:
         models: List of discovered model dicts.
@@ -570,7 +739,11 @@ def _detect_thinking_format(models: list[dict], brand: str) -> str:
     Returns:
         Suggested thinking_format string, or '' for auto-detect.
     """
-    # Brand-level overrides
+    # 1. Engine-level override (sglang / vLLM)
+    if _is_chat_template_kwargs_engine(models):
+        return 'chat_template_kwargs'
+
+    # 2. Brand-level overrides
     brand_map = {
         'claude': 'thinking_type',
         'doubao': 'thinking_type',
@@ -581,7 +754,7 @@ def _detect_thinking_format(models: list[dict], brand: str) -> str:
     if brand in brand_map:
         return brand_map[brand]
 
-    # Check model names for hints
+    # 3. Check model names for hints
     format_votes = {}
     for m in models:
         mid = m.get('model_id', '')
@@ -604,7 +777,8 @@ def _detect_thinking_format(models: list[dict], brand: str) -> str:
 # ══════════════════════════════════════════════════════
 
 def probe_provider(base_url: str, api_key: str,
-                   models_path: str = '') -> dict:
+                   models_path: str = '', *,
+                   force_local: bool = False) -> dict:
     """One-shot provider probe: discover models, detect brand, find balance URL.
 
     Orchestrates all discovery steps into a single call suitable for
@@ -626,9 +800,27 @@ def probe_provider(base_url: str, api_key: str,
         - thinking_format (str): Suggested thinking format, or ''.
         - summary (dict): Stats about discovered models.
     """
-    with log_context('probe_provider', logger=logger, url=base_url):
+    # Be forgiving: users often paste a /chat/completions URL when they mean
+    # the OpenAI-compatible base. Strip the suffix before doing anything else.
+    base_url = normalize_base_url(base_url)
+
+    logger.info('[Probe] Starting probe for %s', base_url)
+    with log_context('probe_provider', logger=logger):
         # ── Step 1: Detect brand from URL ──
         brand, name = _detect_brand(base_url)
+        is_local = force_local or brand == 'local' or is_local_endpoint(base_url)
+        # Self-hosted endpoints frequently sit on private (or pseudo-private)
+        # IPs that the corporate HTTP proxy can't reach. Register the host
+        # for proxy bypass before we do any HTTP — otherwise even the
+        # /v1/models GET below will time out via the corp proxy.
+        if is_local:
+            _register_no_proxy_url(base_url)
+        if force_local and brand != 'local':
+            # User explicitly added this URL via 'Bulk Add Local Endpoints',
+            # so override the auto-detected brand. Keep the auto-detected
+            # display name when it's already meaningful (host:port for IPs).
+            brand = 'local'
+            name = 'Local %s' % name if not name.lower().startswith('local') else name
         logger.info('[Probe] Brand detected: %s (%s) from %s', brand, name, base_url)
 
         # ── Step 2: Discover models ──
@@ -639,12 +831,17 @@ def probe_provider(base_url: str, api_key: str,
                 'error': '在 %s 未发现任何模型。请检查 API 地址和密钥是否正确。' % base_url,
                 'brand': brand,
                 'name': name,
+                'base_url': base_url,
+                'is_local': is_local,
             }
 
         logger.info('[Probe] Discovered %d models, enriching with pricing…', len(models))
 
         # ── Step 3: Enrich with OpenRouter pricing ──
-        models = enrich_models_with_pricing(models)
+        # Self-hosted models are not on OpenRouter — skip the upstream call so
+        # local probes stay fast and don't leak host names to the public API.
+        if not is_local:
+            models = enrich_models_with_pricing(models)
 
         # ── Step 4: Detect thinking format ──
         thinking_format = _detect_thinking_format(models, brand)
@@ -652,7 +849,9 @@ def probe_provider(base_url: str, api_key: str,
                    thinking_format or '(auto-detect)')
 
         # ── Step 5: Probe balance URL ──
-        balance_url = _probe_balance_url(base_url, api_key)
+        # Local OSS engines (vLLM / SGLang / Ollama) have no billing endpoint —
+        # skip 5+ pointless 404s.
+        balance_url = '' if is_local else _probe_balance_url(base_url, api_key)
 
         # ── Build summary ──
         n_text = sum(1 for m in models if 'text' in m.get('capabilities', []))
@@ -679,6 +878,8 @@ def probe_provider(base_url: str, api_key: str,
             'ok': True,
             'brand': brand,
             'name': name,
+            'base_url': base_url,
+            'is_local': is_local,
             'models': models,
             'balance_url': balance_url,
             'thinking_format': thinking_format,

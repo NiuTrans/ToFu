@@ -42,8 +42,7 @@ _PG_STARTED_BY_US = False
 #  network — only to time out when the abandoned remote eventually
 #  drops or stalls.
 #
-#  The heartbeat file (`pgdata/.tofu_heartbeat`, with `.chatui_heartbeat`
-#  read for back-compat with old peers) is written by the
+#  The heartbeat file (`pgdata/.tofu_heartbeat`) is written by the
 #  process that actually owns the local PG, refreshed every
 #  _HEARTBEAT_REFRESH_S seconds, and cleared on clean shutdown. A new
 #  startup considers the previous owner alive iff the heartbeat is
@@ -52,9 +51,6 @@ _PG_STARTED_BY_US = False
 # ─────────────────────────────────────────────────────────────────────
 
 _HEARTBEAT_FILE = '.tofu_heartbeat'
-# Legacy filename — read for back-compat with peers running older code,
-# and clear on shutdown so it doesn't outlive its writer.
-_LEGACY_HEARTBEAT_FILE = '.chatui_heartbeat'
 _HEARTBEAT_TTL_S = 120
 _HEARTBEAT_REFRESH_S = 30
 
@@ -92,11 +88,7 @@ _heartbeat_lock = threading.Lock()
 # ─────────────────────────────────────────────────────────────────────
 
 _STARTUP_LOCK_FILE = '.tofu_pg_start.lock'
-# Legacy filename — older peers only flock(2) this file. Acquire it
-# first so an old peer running concurrent startup is still blocked.
-_LEGACY_STARTUP_LOCK_FILE = '.chatui_pg_start.lock'
-_startup_lock_fd = None         # Canonical lock fd, retained for process life
-_legacy_startup_lock_fd = None  # Legacy lock fd, retained for process life
+_startup_lock_fd = None         # Lock fd, retained for process life
 _startup_lock_mu = threading.Lock()
 
 
@@ -104,16 +96,8 @@ def _startup_lock_path(pgdata):
     return os.path.join(pgdata, _STARTUP_LOCK_FILE)
 
 
-def _legacy_startup_lock_path(pgdata):
-    return os.path.join(pgdata, _LEGACY_STARTUP_LOCK_FILE)
-
-
 def _try_acquire_startup_lock(pgdata):
     """Try to acquire an exclusive cross-host lock on the pgdata startup lock.
-
-    Acquires both the canonical (``.tofu_pg_start.lock``) and the legacy
-    (``.chatui_pg_start.lock``) files so peers running older code that
-    only flock(2) the legacy filename still serialize correctly with us.
 
     Returns:
         True  — lock held (or flock unsupported / degraded to no-op).
@@ -195,91 +179,38 @@ def _try_acquire_startup_lock(pgdata):
 
         _startup_lock_fd = fd
         logger.info('[DB] Acquired cross-host startup lock on %s', path)
-        # Best-effort: also acquire the legacy lock so older peers that
-        # only know the legacy filename still serialize against us.
-        _try_acquire_legacy_startup_lock(pgdata)
         return True
-
-
-def _try_acquire_legacy_startup_lock(pgdata):
-    """Acquire the legacy ``.chatui_pg_start.lock`` flock (best-effort)."""
-    global _legacy_startup_lock_fd
-    if _legacy_startup_lock_fd is not None:
-        return
-    legacy_path = _legacy_startup_lock_path(pgdata)
-    try:
-        fd = os.open(legacy_path, os.O_CREAT | os.O_RDWR, 0o644)
-    except OSError as e:
-        logger.debug('[DB] Could not open legacy startup-lock %s: %s', legacy_path, e)
-        return
-    if IS_WINDOWS:
-        _legacy_startup_lock_fd = fd
-        return
-    try:
-        import fcntl
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        _legacy_startup_lock_fd = fd
-        logger.debug('[DB] Acquired legacy cross-host startup lock on %s', legacy_path)
-    except (ImportError, OSError) as e:
-        logger.debug('[DB] Legacy startup-lock acquire failed (harmless): %s', e)
-        try:
-            os.close(fd)
-        except OSError:
-            pass
 
 
 def _release_startup_lock():
     """Release the startup lock if held. Safe to call multiple times."""
-    global _startup_lock_fd, _legacy_startup_lock_fd
+    global _startup_lock_fd
     with _startup_lock_mu:
         fd = _startup_lock_fd
         _startup_lock_fd = None
-        legacy_fd = _legacy_startup_lock_fd
-        _legacy_startup_lock_fd = None
-    for _fd in (fd, legacy_fd):
-        if _fd is None:
-            continue
-        try:
-            if not IS_WINDOWS:
-                try:
-                    import fcntl
-                    fcntl.flock(_fd, fcntl.LOCK_UN)
-                except (ImportError, OSError) as e:
-                    logger.debug('[DB] flock release raised (harmless): %s', e)
-        finally:
+    if fd is None:
+        return
+    try:
+        if not IS_WINDOWS:
             try:
-                os.close(_fd)
-            except OSError as e:
-                logger.debug('[DB] Close of startup lock fd failed: %s', e)
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except (ImportError, OSError) as e:
+                logger.debug('[DB] flock release raised (harmless): %s', e)
+    finally:
+        try:
+            os.close(fd)
+        except OSError as e:
+            logger.debug('[DB] Close of startup lock fd failed: %s', e)
 
 
 def _heartbeat_path(pgdata):
     return os.path.join(pgdata, _HEARTBEAT_FILE)
 
 
-def _legacy_heartbeat_path(pgdata):
-    return os.path.join(pgdata, _LEGACY_HEARTBEAT_FILE)
-
-
-def _resolve_heartbeat_path(pgdata):
-    """Return the heartbeat path that exists, preferring the canonical name.
-
-    Falls back to the legacy ``.chatui_heartbeat`` so a new host running
-    Tofu code still notices peers running older code that only writes
-    the legacy file.
-    """
-    canonical = _heartbeat_path(pgdata)
-    if os.path.exists(canonical):
-        return canonical
-    legacy = _legacy_heartbeat_path(pgdata)
-    if os.path.exists(legacy):
-        return legacy
-    return canonical
-
-
 def _read_heartbeat(pgdata):
     """Return parsed heartbeat dict ({host, pid, ts}) or None."""
-    path = _resolve_heartbeat_path(pgdata)
+    path = _heartbeat_path(pgdata)
     try:
         with open(path) as f:
             data = json.load(f)
@@ -287,7 +218,8 @@ def _read_heartbeat(pgdata):
             return data
         logger.debug('[DB] Heartbeat at %s is not a dict', path)
         return None
-    except FileNotFoundError:
+    except FileNotFoundError as _e_audit:
+        logger.debug('[_bootstrap] _read_heartbeat caught %s: %s', type(_e_audit).__name__, _e_audit)
         return None
     except (OSError, json.JSONDecodeError) as e:
         logger.debug('[DB] Could not read heartbeat at %s: %s', path, e)
@@ -301,10 +233,11 @@ def _heartbeat_is_fresh(pgdata, ttl_s=_HEARTBEAT_TTL_S):
     info_dict carries {host, pid, ts, age_s} when the file is present
     (regardless of freshness) so the caller can log a useful message.
     """
-    path = _resolve_heartbeat_path(pgdata)
+    path = _heartbeat_path(pgdata)
     try:
         st = os.stat(path)
-    except FileNotFoundError:
+    except FileNotFoundError as _e_audit:
+        logger.debug('[_bootstrap] _heartbeat_is_fresh caught %s: %s', type(_e_audit).__name__, _e_audit)
         return False, None
     except OSError as e:
         logger.debug('[DB] stat heartbeat failed: %s', e)
@@ -318,35 +251,31 @@ def _heartbeat_is_fresh(pgdata, ttl_s=_HEARTBEAT_TTL_S):
 
 
 def _write_heartbeat(pgdata):
-    """Write/refresh the heartbeat file. Best-effort.
-
-    Writes both canonical and legacy filenames so peers running older
-    code (which only know ``.chatui_heartbeat``) still see us.
-    """
+    """Write/refresh the heartbeat file. Best-effort."""
     payload = {
         'host': _get_local_ip(),
         'pid': os.getpid(),
         'ts': time.time(),
     }
-    for path in (_heartbeat_path(pgdata), _legacy_heartbeat_path(pgdata)):
-        tmp = path + '.tmp'
-        try:
-            with open(tmp, 'w') as f:
-                json.dump(payload, f)
-            os.replace(tmp, path)
-        except OSError as e:
-            logger.debug('[DB] Could not write heartbeat to %s: %s', path, e)
+    path = _heartbeat_path(pgdata)
+    tmp = path + '.tmp'
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+    except OSError as e:
+        logger.debug('[DB] Could not write heartbeat to %s: %s', path, e)
 
 
 def _clear_heartbeat(pgdata):
-    for path in (_heartbeat_path(pgdata), _legacy_heartbeat_path(pgdata)):
-        try:
-            os.remove(path)
-            logger.debug('[DB] Cleared heartbeat %s', path)
-        except FileNotFoundError:
-            continue
-        except OSError as e:
-            logger.debug('[DB] Could not clear heartbeat at %s: %s', path, e)
+    path = _heartbeat_path(pgdata)
+    try:
+        os.remove(path)
+        logger.debug('[DB] Cleared heartbeat %s', path)
+    except FileNotFoundError as _e_audit:
+        logger.debug('[_bootstrap] _clear_heartbeat caught %s: %s', type(_e_audit).__name__, _e_audit)
+    except OSError as e:
+        logger.debug('[DB] Could not clear heartbeat at %s: %s', path, e)
 
 
 def _heartbeat_loop(pgdata):
@@ -812,12 +741,15 @@ def _verify_pg_after_start(pg_port, pgdata, pg_user, total_wait_s=12):
             with open(pidfile) as _f:
                 pid_str = _f.readline().strip()
             pid = int(pid_str)
-        except FileNotFoundError:
+        except FileNotFoundError as _e_audit:
+            logger.debug('[_bootstrap] _verify_pg_after_start caught %s: %s', type(_e_audit).__name__, _e_audit)
             last_err = 'postmaster.pid disappeared'
             consecutive_ok = 0
             time.sleep(0.5)
             continue
-        except Exception as e:
+        except (OSError, ValueError) as e:
+            # OSError: permission/filesystem; ValueError: int(pid_str) on garbage.
+            logger.debug('[DB:bootstrap] postmaster.pid unreadable: %s', e)
             last_err = f'postmaster.pid unreadable: {e}'
             consecutive_ok = 0
             time.sleep(0.5)
@@ -1197,7 +1129,7 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
     # no point probing anything — we can't start, query, or verify PG.
     # This turns a noisy "ERROR: pg_ctl not found" trace into a single
     # friendly INFO line, and the caller seamlessly falls back to SQLite.
-    _explicit_host = getenv_compat('TOFU_PG_HOST', 'CHATUI_PG_HOST')
+    _explicit_host = getenv_compat('TOFU_PG_HOST')
     _explicit_remote = (_explicit_host
                         and _explicit_host not in ('localhost', '127.0.0.1', '::1'))
     if not _explicit_remote and not _pg_binaries_present():
@@ -1215,8 +1147,8 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
     # explicitly set (even with localhost), skip local bootstrap and connect
     # directly.  This covers CI service containers, Docker Compose, managed PG,
     # or any external instance the user wants to use.
-    explicit_host = getenv_compat('TOFU_PG_HOST', 'CHATUI_PG_HOST')
-    explicit_port = getenv_compat('TOFU_PG_PORT', 'CHATUI_PG_PORT', default=None)
+    explicit_host = getenv_compat('TOFU_PG_HOST')
+    explicit_port = getenv_compat('TOFU_PG_PORT', default=None)
     is_explicit_external = (
         (explicit_host and explicit_host not in ('localhost', '127.0.0.1', '::1'))
         or explicit_port is not None  # any explicit port = user-managed PG

@@ -38,7 +38,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.log import get_logger
-from lib.llm_client import build_body, stream_chat, add_cache_breakpoints
+from lib.llm import build_body, stream_chat, add_cache_breakpoints
 from lib.model_info import is_claude
 
 logger = get_logger(__name__)

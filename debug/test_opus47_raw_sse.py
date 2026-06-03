@@ -13,13 +13,13 @@ import os
 import sys
 import time
 
-# Enable raw SSE dumper BEFORE importing lib.llm_client
+# Enable raw SSE dumper BEFORE importing lib.llm
 os.environ.setdefault('LLM_DEBUG_RAW_SSE', 'opus')
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from lib import LLM_API_KEYS  # noqa: E402
-from lib.llm_client import build_body, stream_chat  # noqa: E402
+from lib.llm import build_body, stream_chat  # noqa: E402
 
 MODEL = sys.argv[1] if len(sys.argv) > 1 else 'aws.claude-opus-4.7'
 

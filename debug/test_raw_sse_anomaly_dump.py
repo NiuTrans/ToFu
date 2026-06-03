@@ -31,7 +31,7 @@ os.environ.pop('LLM_DEBUG_RAW_SSE', None)
 _TMP = tempfile.mkdtemp(prefix='raw_sse_anomaly_test_')
 os.chdir(_TMP)
 
-from lib import llm_client  # noqa: E402
+from lib.llm import diagnostics as _llm_diag  # noqa: E402
 
 
 def _new_dumper(model='aws.claude-opus-4.7', body=None):
@@ -42,7 +42,7 @@ def _new_dumper(model='aws.claude-opus-4.7', body=None):
         'messages': [{'role': 'user', 'content': 'hi'}],
         'tools': [{'type': 'function'}],
     }
-    return llm_client._RawSSEDumper(model, 'trace-abc-123', body)
+    return _llm_diag.RawSSEDumper(model, 'trace-abc-123', body)
 
 
 def test_disabled_when_env_unset():
@@ -64,13 +64,13 @@ def test_ring_buffer_records_lines_when_disabled():
 
 def test_ring_buffer_caps_by_line_count():
     d = _new_dumper()
-    for i in range(llm_client._ANOMALY_RING_LINES + 50):
+    for i in range(_llm_diag._ANOMALY_RING_LINES + 50):
         d.line(f'line-{i}')
-    assert len(d._ring) == llm_client._ANOMALY_RING_LINES, (
+    assert len(d._ring) == _llm_diag._ANOMALY_RING_LINES, (
         f'ring exceeded line cap: {len(d._ring)}')
     # Oldest evicted, newest retained
     assert d._ring[0] == 'line-50'
-    assert d._ring[-1] == f'line-{llm_client._ANOMALY_RING_LINES + 49}'
+    assert d._ring[-1] == f'line-{_llm_diag._ANOMALY_RING_LINES + 49}'
     print('  ok: ring evicts FIFO at line-count cap')
 
 
@@ -80,12 +80,12 @@ def test_ring_buffer_caps_by_bytes():
     # 256 KB / 50 KB ≈ 5 lines max
     for _ in range(20):
         d.line(big)
-    assert d._ring_bytes <= llm_client._ANOMALY_RING_BYTES, (
+    assert d._ring_bytes <= _llm_diag._ANOMALY_RING_BYTES, (
         f'ring exceeded byte cap: {d._ring_bytes}')
     # And still has at least a few lines (proves it didn't drop them all)
     assert len(d._ring) >= 1
     print(f'  ok: ring respects byte cap ({d._ring_bytes} <= '
-          f'{llm_client._ANOMALY_RING_BYTES})')
+          f'{_llm_diag._ANOMALY_RING_BYTES})')
 
 
 def test_dump_anomaly_writes_file_when_disabled():

@@ -30,7 +30,7 @@ IGNORE_DIRS = [
     'node_modules', '.git', '__pycache__', '.venv', 'venv',
     '.tox', '.mypy_cache', '.pytest_cache', 'dist', 'build',
     '.next', '.nuxt', 'coverage', '.eggs', '*.egg-info',
-    'data', 'logs', '.chatui', 'uploads',
+    'data', 'logs', '.tofu', 'uploads',
 ]
 
 N_ITERATIONS = 20  # per test per tool

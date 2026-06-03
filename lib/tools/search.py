@@ -4,29 +4,6 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-SEARCH_TOOL_SINGLE = {
-    "type": "function",
-    "function": {
-        "name": "web_search",
-        "description": (
-            "Search the web for current information. "
-            "You will receive summaries and partial content of top results. "
-            "After reviewing, use fetch_url to read the most relevant 1-2 pages in full. "
-            "IMPORTANT: You can only search ONCE, so make your query precise and specific."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Precise, specific search query. Use English for broader coverage."
-                }
-            },
-            "required": ["query"]
-        }
-    }
-}
-
 SEARCH_TOOL_MULTI = {
     "type": "function",
     "function": {
@@ -40,8 +17,19 @@ SEARCH_TOOL_MULTI = {
             "pages are worth reading. Prefer fewer, targeted searches over many broad "
             "ones.\n\n"
             "For MULTIPLE searches in one call, provide a 'queries' array — each entry "
-            "has ``{query}``. All queries run concurrently and this is much faster than "
-            "multiple separate web_search calls."
+            "has ``{query, freshness?}``. All queries run concurrently and this is much "
+            "faster than multiple separate web_search calls.\n\n"
+            "**Vertical domain search**: Queries containing structured identifiers are "
+            "auto-detected and enriched with data from specialized APIs:\n"
+            "- CVE IDs (e.g. CVE-2024-1234) → NVD/NIST vulnerability data\n"
+            "- arXiv IDs (e.g. 2301.07041) → paper metadata + abstract\n"
+            "- DOIs (e.g. 10.1038/s41586-023-06221-2) → CrossRef citation data\n"
+            "- Stock tickers (e.g. AAPL, $TSLA) → Yahoo Finance price data\n"
+            "- PyPI packages (e.g. pypi:requests) → package info\n"
+            "- npm packages (e.g. npm:express) → registry data\n"
+            "- GitHub repos (e.g. github:facebook/react) → repo stats + README\n"
+            "- IP addresses (e.g. 8.8.8.8) → geolocation + org info\n\n"
+            "Vertical data is returned alongside regular web results automatically."
         ),
         "parameters": {
             "type": "object",
@@ -49,6 +37,11 @@ SEARCH_TOOL_MULTI = {
                 "query": {
                     "type": "string",
                     "description": "Search query — be specific and targeted"
+                },
+                "freshness": {
+                    "type": "string",
+                    "enum": ["day", "week", "month", "year"],
+                    "description": "Time filter for results recency. Only use when the user explicitly wants recent results."
                 },
                 "queries": {
                     "type": "array",
@@ -59,6 +52,11 @@ SEARCH_TOOL_MULTI = {
                             "query": {
                                 "type": "string",
                                 "description": "Search query"
+                            },
+                            "freshness": {
+                                "type": "string",
+                                "enum": ["day", "week", "month", "year"],
+                                "description": "Time filter for this specific query"
                             }
                         },
                         "required": ["query"]
@@ -112,4 +110,4 @@ FETCH_URL_TOOL = {
     }
 }
 
-__all__ = ['SEARCH_TOOL_SINGLE', 'SEARCH_TOOL_MULTI', 'FETCH_URL_TOOL']
+__all__ = ['SEARCH_TOOL_MULTI', 'FETCH_URL_TOOL']

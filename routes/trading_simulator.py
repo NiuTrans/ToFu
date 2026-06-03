@@ -18,101 +18,87 @@ Endpoints:
 """
 
 import threading
-import time
-import uuid
 
-from flask import Blueprint, jsonify, request
+from flask import jsonify, request
 
 from lib.database import DOMAIN_TRADING, get_thread_db
 from lib.log import get_logger
+from lib.api_response import api_bad_request
+from lib.request_parser import parse_body
+from lib.task_runtime import TaskRuntime
 
 logger = get_logger(__name__)
 
-trading_simulator_bp = Blueprint('trading_simulator', __name__)
+from routes.api_v1.trading.simulator import api_v1_trading_simulator_bp as trading_simulator_bp  # noqa: E402
+# (alias kept for back-compat with `from routes.trading_simulator import trading_simulator_bp` callers)
 
 
 # ═══════════════════════════════════════════════════════════
-#  Unified Task Store (in-memory, keyed by task_id)
-#  Used by BOTH fetch-data and sim-run.
+#  Unified task storage via TaskRuntime
+#  Used by BOTH fetch-data and sim-run (kind distinguishes them).
 # ═══════════════════════════════════════════════════════════
 
-_tasks = {}             # task_id → {type, events, done, result, error, created}
-_tasks_lock = threading.Lock()
-_TASK_TTL = 3600        # Auto-cleanup tasks older than 1 hour
-
-
-def _cleanup_old_tasks():
-    """Remove tasks older than TTL to prevent memory leak."""
-    now = time.time()
-    with _tasks_lock:
-        expired = [tid for tid, t in _tasks.items()
-                   if now - t.get('created', 0) > _TASK_TTL]
-        for tid in expired:
-            del _tasks[tid]
-    if expired:
-        logger.info('[SimRoute] Cleaned up %d expired tasks', len(expired))
+_runtime = TaskRuntime(
+    'trading-sim', ttl=3600,
+    push_channel='trading-sim',
+    error_source='routes.trading_simulator',
+)
 
 
 def _create_task(task_type: str) -> str:
-    """Create a new task and return its ID."""
-    task_id = str(uuid.uuid4())[:12]
-    task = {
-        'type': task_type,     # 'fetch' or 'sim'
-        'events': [],          # List of event dicts
-        'done': False,
-        'result': None,
-        'error': None,
-        'created': time.time(),
-    }
-    with _tasks_lock:
-        _tasks[task_id] = task
-    return task_id
+    """Create a new task and return its ID. ``task_type`` stored in meta."""
+    task = _runtime.create(meta={'type': task_type})
+    return task['id']
 
 
 def _append_event(task_id: str, evt: dict):
     """Thread-safe: append an event to a task's event list."""
-    with _tasks_lock:
-        task = _tasks.get(task_id)
-        if task:
-            task['events'].append(evt)
+    _runtime.append_event(task_id, evt)
 
 
-def _finish_task(task_id: str, result=None, error=None):
-    """Thread-safe: mark task as done with result or error."""
-    with _tasks_lock:
-        task = _tasks.get(task_id)
-        if task:
-            task['done'] = True
-            task['result'] = result
-            task['error'] = error
+def _finish_task(task_id: str, result=None, error=None, *,
+                 error_context: str = '', error_source: str = ''):
+    """Thread-safe: mark task as done with result or error.
+
+    ``error`` may be:
+      * ``None`` — success
+      * ``BaseException`` — wrapped via ``error_envelope.from_exception``
+      * ``str`` — wrapped via ``error_envelope.make_envelope('generic', ...)``
+      * ``dict`` (already an envelope) — stored as-is
+    """
+    _runtime.finish(task_id, result=result, error=error,
+                    error_context=error_context or 'trading-sim')
 
 
 def _get_task_progress(task_id: str, cursor: int = 0) -> dict:
-    """Get new events since cursor for a task."""
-    with _tasks_lock:
-        task = _tasks.get(task_id)
+    """Get new events since cursor (legacy response shape preserved).
 
-    if not task:
-        return {'error': 'Task not found', 'done': True, 'events': [], 'cursor': 0}
+    Maps TaskRuntime's standard shape to the legacy keys that the
+    frontend (static/js/trading/simulator.js) expects:
+      - ``cursor``      (not ``next_cursor``)
+      - ``error: 'Task not found'``  on missing task (string)
+      - top-level ``result`` / ``error`` (envelope) when done
+    """
+    poll_resp = _runtime.poll(task_id, cursor=cursor)
+    if not poll_resp['ok']:
+        # Match the legacy {'error': 'Task not found'} string shape
+        return {'error': 'Task not found', 'done': True,
+                'events': [], 'cursor': 0}
 
-    events = task['events']
-    new_events = events[cursor:]
-    new_cursor = len(events)
-
+    task = _runtime.get(task_id)
+    task_type = (task['meta'].get('type', 'unknown')
+                 if task else 'unknown')
     resp = {
-        'events': new_events,
-        'cursor': new_cursor,
-        'done': task['done'],
-        'task_type': task.get('type', 'unknown'),
+        'events': poll_resp['events'],
+        'cursor': poll_resp['next_cursor'],
+        'done': poll_resp['done'],
+        'task_type': task_type,
     }
-
-    # Include result/error only when done
-    if task['done']:
-        if task['error']:
-            resp['error'] = task['error']
-        elif task['result']:
-            resp['result'] = task['result']
-
+    if poll_resp['done']:
+        if poll_resp.get('error'):
+            resp['error'] = poll_resp['error']
+        elif poll_resp.get('result'):
+            resp['result'] = poll_resp['result']
     return resp
 
 
@@ -120,7 +106,7 @@ def _get_task_progress(task_id: str, cursor: int = 0) -> dict:
 #  Data Fetching — POLLING mode (proxy-safe + refresh-safe)
 # ═══════════════════════════════════════════════════════════
 
-@trading_simulator_bp.route('/api/trading/sim/fetch-data', methods=['POST'])
+@trading_simulator_bp.route('/api/v1/trading/sim/fetch-data', methods=['POST'])
 def sim_fetch_data():
     """Start historical data fetch in background.
 
@@ -135,7 +121,7 @@ def sim_fetch_data():
             "skip_intel": false
         }
     """
-    data = request.get_json(force=True, silent=True) or {}
+    data = parse_body(force=True)
     symbols = data.get('symbols', [])
     start_date = data.get('start_date', '')
     end_date = data.get('end_date', '')
@@ -150,7 +136,7 @@ def sim_fetch_data():
             register_sim_asset_name(code, name)
 
     if not start_date or not end_date:
-        return jsonify({'error': 'start_date, end_date are required'}), 400
+        return api_bad_request('start_date, end_date are required')
     # symbols may be empty — open-universe mode, AI discovers on its own
 
     task_id = _create_task('fetch')
@@ -177,17 +163,21 @@ def sim_fetch_data():
             _finish_task(task_id, result=result)
         except Exception as e:
             logger.error('[SimRoute] Data fetch failed: %s', e, exc_info=True)
-            _finish_task(task_id, error=str(e))
+            _finish_task(task_id, error=e,
+                         error_context='trading-sim:fetch',
+                         error_source='routes.trading_simulator:fetch')
 
     thread = threading.Thread(target=_run_fetch, daemon=True)
     thread.start()
 
-    _cleanup_old_tasks()
+    _stale = _runtime.cleanup_stale()
+    if _stale:
+        logger.info('[SimRoute] Cleaned up %d expired tasks', _stale)
 
     return jsonify({'task_id': task_id, 'status': 'started'})
 
 
-@trading_simulator_bp.route('/api/trading/sim/fetch-progress/<task_id>', methods=['GET'])
+@trading_simulator_bp.route('/api/v1/trading/sim/fetch-progress/<task_id>', methods=['GET'])
 def sim_fetch_progress(task_id):
     """Poll for fetch progress events.
 
@@ -221,7 +211,7 @@ def sim_fetch_progress(task_id):
 #  all events to rebuild the timeline and equity chart.
 # ═══════════════════════════════════════════════════════════
 
-@trading_simulator_bp.route('/api/trading/sim/run', methods=['POST'])
+@trading_simulator_bp.route('/api/v1/trading/sim/run', methods=['POST'])
 def sim_run():
     """Start LLM-driven historical simulation in background.
 
@@ -238,13 +228,13 @@ def sim_run():
             ...
         }
     """
-    data = request.get_json(force=True, silent=True) or {}
+    data = parse_body(force=True)
     symbols = data.get('symbols', [])
     start_date = data.get('start_date', '')
     end_date = data.get('end_date', '')
 
     if not start_date or not end_date:
-        return jsonify({'error': 'start_date, end_date are required'}), 400
+        return api_bad_request('start_date, end_date are required')
     # symbols may be empty — open-universe mode, AI discovers on its own
 
     task_id = _create_task('sim')
@@ -293,17 +283,21 @@ def sim_run():
 
         except Exception as e:
             logger.error('[SimRoute] Simulation failed: %s', e, exc_info=True)
-            _finish_task(task_id, error=str(e))
+            _finish_task(task_id, error=e,
+                         error_context='trading-sim:run',
+                         error_source='routes.trading_simulator:run')
 
     thread = threading.Thread(target=_run_sim, daemon=True)
     thread.start()
 
-    _cleanup_old_tasks()
+    _stale = _runtime.cleanup_stale()
+    if _stale:
+        logger.info('[SimRoute] Cleaned up %d expired tasks', _stale)
 
     return jsonify({'task_id': task_id, 'status': 'started'})
 
 
-@trading_simulator_bp.route('/api/trading/sim/run-progress/<task_id>', methods=['GET'])
+@trading_simulator_bp.route('/api/v1/trading/sim/run-progress/<task_id>', methods=['GET'])
 def sim_run_progress(task_id):
     """Poll for simulation progress events.
 
@@ -323,7 +317,7 @@ def sim_run_progress(task_id):
 #  Session Management
 # ═══════════════════════════════════════════════════════════
 
-@trading_simulator_bp.route('/api/trading/sim/sessions', methods=['GET'])
+@trading_simulator_bp.route('/api/v1/trading/sim/sessions', methods=['GET'])
 def sim_list_sessions():
     db = get_thread_db(DOMAIN_TRADING)
     limit = int(request.args.get('limit', 20))
@@ -332,7 +326,7 @@ def sim_list_sessions():
     return jsonify({'sessions': sessions})
 
 
-@trading_simulator_bp.route('/api/trading/sim/session/<session_id>', methods=['GET'])
+@trading_simulator_bp.route('/api/v1/trading/sim/session/<session_id>', methods=['GET'])
 def sim_get_session(session_id):
     db = get_thread_db(DOMAIN_TRADING)
     from lib.trading.llm_simulator import get_sim_stats
@@ -342,7 +336,7 @@ def sim_get_session(session_id):
     return jsonify(stats)
 
 
-@trading_simulator_bp.route('/api/trading/sim/journal/<session_id>', methods=['GET'])
+@trading_simulator_bp.route('/api/v1/trading/sim/journal/<session_id>', methods=['GET'])
 def sim_get_journal(session_id):
     """Get decision journal for a simulation.
 
@@ -364,7 +358,7 @@ def sim_get_journal(session_id):
 #  Asset Search — Stocks + ETFs + Funds
 # ═══════════════════════════════════════════════════════════
 
-@trading_simulator_bp.route('/api/trading/sim/search', methods=['GET'])
+@trading_simulator_bp.route('/api/v1/trading/sim/search', methods=['GET'])
 def sim_search_assets():
     """Universal asset search — finds stocks, ETFs, and funds.
 
@@ -390,7 +384,7 @@ def sim_search_assets():
 #  Data Coverage Check
 # ═══════════════════════════════════════════════════════════
 
-@trading_simulator_bp.route('/api/trading/sim/strategies', methods=['GET'])
+@trading_simulator_bp.route('/api/v1/trading/sim/strategies', methods=['GET'])
 def sim_strategy_analytics():
     """Get strategy analytics for the Strategy Lab display.
 
@@ -409,7 +403,7 @@ def sim_strategy_analytics():
     return jsonify(analytics)
 
 
-@trading_simulator_bp.route('/api/trading/sim/coverage', methods=['GET'])
+@trading_simulator_bp.route('/api/v1/trading/sim/coverage', methods=['GET'])
 def sim_data_coverage():
     db = get_thread_db(DOMAIN_TRADING)
     symbols = request.args.get('symbols', '').split(',')
@@ -417,7 +411,7 @@ def sim_data_coverage():
     start_date = request.args.get('start_date', '')
     end_date = request.args.get('end_date', '')
     if not symbols or not start_date or not end_date:
-        return jsonify({'error': 'symbols, start_date, end_date are required'}), 400
+        return api_bad_request('symbols, start_date, end_date are required')
     from lib.trading.historical_data import get_data_coverage_report
     report = get_data_coverage_report(db, symbols, start_date, end_date)
     return jsonify(report)

@@ -11,22 +11,25 @@ Provides:
 import json
 from datetime import datetime
 
-from flask import Blueprint, jsonify, request
+from flask import jsonify, request
 
 from lib.database import DOMAIN_TRADING, get_db, get_thread_db
 from lib.log import get_logger
+from lib.api_response import api_bad_request, api_not_found, api_ok
+from lib.request_parser import parse_body
 from lib.trading_tasks import cancel_task, get_task, list_active_tasks, poll_task, submit_task
 
 logger = get_logger(__name__)
 
-trading_tasks_bp = Blueprint('trading_tasks', __name__)
+from routes.api_v1.trading.tasks import api_v1_trading_tasks_bp as trading_tasks_bp  # noqa: E402
+# (alias kept for back-compat with `from routes.trading_tasks import trading_tasks_bp` callers)
 
 
 # ══════════════════════════════════════════
 #  Submit Task — universal entry point
 # ══════════════════════════════════════════
 
-@trading_tasks_bp.route('/api/trading/tasks/submit', methods=['POST'])
+@trading_tasks_bp.route('/api/v1/trading/tasks/submit', methods=['POST'])
 def tasks_submit():
     """Submit a long-running trading task.
 
@@ -34,7 +37,7 @@ def tasks_submit():
             ...extra params depending on type... }
     Returns: { "task_id": "...", "status": "running" }
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     task_type = data.get('type', '')
 
     params = data.get('params', {})
@@ -46,14 +49,14 @@ def tasks_submit():
     elif task_type == 'intel_backtest':
         return _submit_intel_backtest(params)
     else:
-        return jsonify({'error': f'Unknown task type: {task_type}'}), 400
+        return api_bad_request(f'Unknown task type: {task_type}')
 
 
 # ══════════════════════════════════════════
 #  Poll / Result / Cancel / List
 # ══════════════════════════════════════════
 
-@trading_tasks_bp.route('/api/trading/tasks/<task_id>/poll', methods=['GET'])
+@trading_tasks_bp.route('/api/v1/trading/tasks/<task_id>/poll', methods=['GET'])
 def tasks_poll(task_id):
     """Poll for new output chunks.
 
@@ -78,12 +81,12 @@ def tasks_poll(task_id):
     return jsonify(result)
 
 
-@trading_tasks_bp.route('/api/trading/tasks/<task_id>/result', methods=['GET'])
+@trading_tasks_bp.route('/api/v1/trading/tasks/<task_id>/result', methods=['GET'])
 def tasks_result(task_id):
     """Get final result of a completed task."""
     task = get_task(task_id)
     if not task:
-        return jsonify({'error': 'Task not found'}), 404
+        return api_not_found('Task not found')
     return jsonify({
         'task_id': task.task_id,
         'task_type': task.task_type,
@@ -94,16 +97,16 @@ def tasks_result(task_id):
     })
 
 
-@trading_tasks_bp.route('/api/trading/tasks/<task_id>/cancel', methods=['POST'])
+@trading_tasks_bp.route('/api/v1/trading/tasks/<task_id>/cancel', methods=['POST'])
 def tasks_cancel(task_id):
     """Cancel a running task."""
     ok = cancel_task(task_id)
     if ok:
-        return jsonify({'ok': True, 'task_id': task_id})
-    return jsonify({'error': 'Task not found or not running'}), 404
+        return api_ok({'task_id': task_id})
+    return api_not_found('Task not found or not running')
 
 
-@trading_tasks_bp.route('/api/trading/tasks/active', methods=['GET'])
+@trading_tasks_bp.route('/api/v1/trading/tasks/active', methods=['GET'])
 def tasks_active():
     """List all active (and recently completed) tasks."""
     task_type = request.args.get('type')
@@ -341,7 +344,7 @@ def _submit_intel_backtest(data):
     # Build context
     grp = db.execute("SELECT * FROM trading_strategy_groups WHERE id=?", (strategy_group_id,)).fetchone()
     if not grp:
-        return jsonify({'error': 'Strategy group not found'}), 404
+        return api_not_found('Strategy group not found')
     grp = dict(grp)
     try:
         sids = json.loads(grp.get('strategy_ids', '[]'))

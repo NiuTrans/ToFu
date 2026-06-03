@@ -396,6 +396,11 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
     if not rounds:
         if final_content or final_thinking:
             return [{'role': 'assistant', 'content': final_content or ''}]
+        # No rounds, no content — but a legacy `toolSummary` placeholder
+        # may still describe what the assistant did. Use it as the body
+        # so the model sees something instead of an empty turn.
+        if msg.get('toolSummary'):
+            return [{'role': 'assistant', 'content': msg['toolSummary']}]
         # Empty assistant with nothing at all → preserve as empty placeholder
         # (downstream merge-consecutive may clean it up).
         return [{'role': 'assistant', 'content': ''}]
@@ -421,7 +426,8 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
             if isinstance(args, str):
                 try:
                     args = json.loads(args)
-                except (json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError) as _e_audit:
+                    logger.debug('[conv_message_builder] _build_assistant_messages caught %s: %s', type(_e_audit).__name__, _e_audit)
                     args = None
             if isinstance(args, dict):
                 call.update(args)
@@ -430,7 +436,8 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
             calls.append(call)
         try:
             tool_ctx = json.dumps(calls, ensure_ascii=False)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as _e_audit:
+            logger.debug('[conv_message_builder] _build_assistant_messages caught %s: %s', type(_e_audit).__name__, _e_audit)
             tool_ctx = str(calls)
 
     content = final_content or tool_ctx
@@ -504,9 +511,22 @@ def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
             elif isinstance(args_raw, dict):
                 try:
                     args_str = json.dumps(args_raw, ensure_ascii=False)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError) as _e_audit:
+                    logger.debug('[conv_message_builder] _reconstruct_tool_call_messages caught %s: %s', type(_e_audit).__name__, _e_audit)
                     args_str = '{}'
             else:
+                args_str = '{}'
+            # Defense-in-depth: if a stored toolArgs string is itself not
+            # valid JSON, replay it as ``'{}'`` so the upstream gateway
+            # doesn't HTTP 400 ``invalid function arguments json string``.
+            # The matching tool_result still tells the model the original
+            # call failed, so this replay path stays equivalent to live
+            # execution. See orchestrator.py:1364 (live sanitizer) and
+            # the May 2026 incident memory.
+            try:
+                json.loads(args_str)
+            except (json.JSONDecodeError, TypeError) as _e_audit:
+                logger.debug('[conv_message_builder] _reconstruct_tool_call_messages caught %s: %s', type(_e_audit).__name__, _e_audit)
                 args_str = '{}'
             tc_entry: dict = {
                 'id': tc_id,

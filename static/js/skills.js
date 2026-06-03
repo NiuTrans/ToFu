@@ -3,8 +3,8 @@
    Mirrors mcp-tab patterns from settings.js.
    ═══════════════════════════════════════════════════════════ */
 
-var _skillsCatalog = [];          // entries from /api/memory/catalog
-var _skillsInstalled = [];        // package memories from /api/memory
+var _skillsCatalog = [];          // entries from /api/v1/memory/catalog
+var _skillsInstalled = [];        // package memories from /api/v1/memory
 var _skillsScope = 'catalog';     // 'catalog' | 'installed'
 var _skillsActiveCategory = 'all';
 var _skillsSearchQuery = '';
@@ -16,19 +16,13 @@ var _SKILLS_PAGE_SIZE = 12;       // cards per page (grid-friendly)
 // ── Population (called from openSettings → _populateSkillsTab) ──
 async function _populateSkillsTab() {
   try {
-    var [catalogResp, listResp] = await Promise.all([
-      fetch(apiUrl('/api/memory/catalog')),
-      fetch(apiUrl('/api/memory?scope=all')),
+    var [cdata, ldata] = await Promise.all([
+      Api.memory.catalog(),
+      Api.memory.list('all'),
     ]);
-    if (catalogResp.ok) {
-      var cdata = await catalogResp.json();
-      _skillsCatalog = cdata.catalog || [];
-    }
-    if (listResp.ok) {
-      var ldata = await listResp.json();
-      var all = ldata.memories || ldata.skills || [];
-      _skillsInstalled = all.filter(function (m) { return m.is_package; });
-    }
+    _skillsCatalog = (cdata && cdata.catalog) || [];
+    var all = (ldata && (ldata.memories || ldata.skills)) || [];
+    _skillsInstalled = all.filter(function (m) { return m.is_package; });
     _skillsRender();
     _skillsAttachDropZone();
   } catch (e) {
@@ -275,13 +269,9 @@ async function _skillsCatalogInstall(skillId, btn) {
   if (btn) { btn.disabled = true; btn.textContent = '安装中…'; }
   _skillsToast('正在下载并安装 ' + skillId + ' …');
   try {
-    var r = await fetch(apiUrl('/api/memory/catalog/install'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ skill_id: skillId, scope: 'project' }),
-    });
-    var d = await r.json().catch(function () { return {}; });
-    if (!r.ok) {
+    var r = await Api.memory.catalogInstall(skillId, 'project');
+    var d = (r ? await r.json().catch(function () { return {}; }) : {});
+    if (!r || !r.ok) {
       _skillsToast('安装失败: ' + (d.error || r.statusText), 'error');
       if (btn) { btn.disabled = false; btn.textContent = '安装'; }
       return;
@@ -301,10 +291,10 @@ async function _skillsCatalogInstall(skillId, btn) {
 async function _skillsUninstall(memoryId) {
   if (!confirm('确定要卸载技能包 "' + memoryId + '" 吗？整个目录会被删除。')) return;
   try {
-    var r = await fetch(apiUrl('/api/memory/' + encodeURIComponent(memoryId)), { method: 'DELETE' });
-    if (!r.ok) {
-      var d = await r.json().catch(function () { return {}; });
-      _skillsToast('卸载失败: ' + (d.error || r.statusText), 'error');
+    var r = await Api.memory.remove(memoryId);
+    if (!r || !r.ok) {
+      var d = (r ? await r.json().catch(function () { return {}; }) : {});
+      _skillsToast('卸载失败: ' + (d.error || (r && r.statusText) || 'no response'), 'error');
       return;
     }
     _skillsToast('已卸载 ' + memoryId, 'success');
@@ -316,8 +306,8 @@ async function _skillsUninstall(memoryId) {
 
 async function _skillsToggleEnabled(memoryId, btn) {
   try {
-    var r = await fetch(apiUrl('/api/memory/' + encodeURIComponent(memoryId) + '/toggle'), { method: 'POST' });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    var r = await Api.memory.toggle(memoryId);
+    if (!r || !r.ok) throw new Error('HTTP ' + (r ? r.status : 'no response'));
     await _populateSkillsTab();
   } catch (e) {
     _skillsToast('切换失败: ' + e.message, 'error');
@@ -337,13 +327,11 @@ async function _skillsViewFiles(memoryId) {
   listEl.innerHTML = '';
   overlay.style.display = 'flex';
   try {
-    var r = await fetch(apiUrl('/api/memory/' + encodeURIComponent(memoryId) + '/files'));
-    if (!r.ok) {
-      var e = await r.json().catch(function () { return {}; });
-      descEl.textContent = '加载失败: ' + (e.error || r.statusText);
+    var d = await Api.memory.files(memoryId);
+    if (!d) {
+      descEl.textContent = '加载失败';
       return;
     }
-    var d = await r.json();
     descEl.textContent = d.count + ' 个文件 · ' + d.root;
     var iconMap = { skill: '⭐', doc: '📄', script: '⚙️', config: '🔧', asset: '📎' };
     var html = d.files.map(function (f) {
@@ -436,10 +424,10 @@ async function _skillsUploadZip(file) {
   fd.append('file', file);
   fd.append('scope', 'project');
   try {
-    var r = await fetch(apiUrl('/api/memory/install'), { method: 'POST', body: fd });
-    var d = await r.json().catch(function () { return {}; });
-    if (!r.ok) {
-      _skillsToast('安装失败: ' + (d.error || r.statusText), 'error');
+    var r = await Api.memory.install(fd);
+    var d = (r ? await r.json().catch(function () { return {}; }) : {});
+    if (!r || !r.ok) {
+      _skillsToast('安装失败: ' + (d.error || (r && r.statusText) || 'no response'), 'error');
       return;
     }
     var hints = d.install_hints || [];

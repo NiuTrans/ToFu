@@ -12,7 +12,7 @@ For the executed refactors, see `docs/refactor_inventory.md`.
 
 1. **P1 — Most value, lowest risk**: `lib/tasks_pkg/compaction.py` split.
 2. **P2 — High value, medium risk**: `routes/paper.py`, `routes/daily_report.py`.
-3. **P3 — High value, high risk** (hot path): `lib/llm_client.py`,
+3. **P3 — High value, high risk** (hot path): `lib/llm_client.py` ✅ (done 2026-05-21 → `lib/llm/`),
    `lib/tasks_pkg/orchestrator.py`, `lib/tasks_pkg/manager.py`,
    `lib/tasks_pkg/tool_dispatch.py`.
 4. **P4 — Frontend (separate approval gate)**: `static/js/ui.js`,
@@ -146,36 +146,32 @@ routes/chat/
 
 ---
 
-## P3c. `lib/llm_client.py` — 3652 LOC (HIGH RISK)
+## P3c. `lib/llm_client.py` — 3652 LOC (HIGH RISK) — ✅ EXECUTED 2026-05-21
 
-### Current responsibilities
-- `build_body` (model-aware request body construction for 10+ providers).
-- `stream_chat` (SSE streaming with retry, fallback, abort).
-- JSON parsing for SSE events.
-- Tool call accumulation + streaming.
-- Token/usage reporting.
+The file was split into a `lib/llm/` package (no compat shim left behind):
 
-### Proposed split
 ```
-lib/llm_client/
-  __init__.py                           # re-export stable public API
-  _build_body.py                        # build_body + model adapters    (~1000L)
-  _sse.py                               # SSE line parse, event state    (~800L)
-  _stream.py                            # stream_chat top-level loop     (~800L)
-  _retry.py                             # retry/backoff policy           (~400L)
-  _usage.py                             # token / usage accumulator      (~300L)
-  _tool_stream.py                       # streaming tool-call accumulator (~400L)
+lib/llm/
+  __init__.py       — Public facade re-exporting all 45 symbols
+  body.py           — build_body() + image validation/downscaling + Claude prefill fix (~570L)
+  cache.py          — add_cache_breakpoints() with mixed-TTL strategy (~150L)
+  chat.py           — Non-streaming chat() with auto-learn token-limit retry (~215L)
+  stream.py         — stream_chat() / _stream_chat_once() SSE parser (~650L)
+  diagnostics.py    — RawSSEDumper (anomaly ring buffer + opt-in transcript) (~170L)
+  _transport.py     — Retry config, headers(), chat_url(), abortable_sleep() (~50L)
 ```
 
-### Risk notes
-- **§10.1 / §10.2 triggers**: retry counts, timeouts, max_tokens handling,
-  model-specific branches. **Split only — do not tune behavior**.
-- `build_body` has provider-scoped content-filter handling (Sankuai).
-  Must remain intact.
-- Hot-reload: `_lib.STREAM_TIMEOUT` etc. read at call time — preserve.
-- Dispatch code in `lib/llm_dispatch/` imports from this module heavily;
-  public names (`build_body`, `stream_chat`, `stream_one_completion`, …)
-  must remain importable from `lib.llm_client`.
+All callers in `lib/`, `routes/`, `tests/`, `debug/`, `benchmarks/` and the
+prose docs were migrated to `from lib.llm import …`. The old
+`lib/llm_client.py` was **deleted** — no backward-compat shim. Importing
+`lib.llm_client` raises `ImportError`.
+
+Provider-specific branches in `build_body` (Sankuai content sanitisation,
+Claude prefill stripping, Gemini extra_content) all kept their behavior
+verbatim. The `_lib.LLM_BASE_URL` / `_lib.LLM_API_KEY` hot-reload lookup
+is preserved through `_transport.headers()` / `_transport.chat_url()`.
+
+See project memory `llm-package-split` for the full migration log.
 
 ---
 
@@ -316,8 +312,8 @@ static/js/core/
    logic into `lib/paper/` / `lib/daily_report/` packages.
 3. Then the `lib/tasks_pkg/` monoliths (`manager`, `orchestrator`,
    `tool_dispatch`) — require careful hot-path validation.
-4. Then `lib/llm_client.py` — largest file, most risk; do after tasks_pkg
-   split to derisk the test matrix.
+4. ~~Then `lib/llm_client.py` — largest file, most risk; do after tasks_pkg
+   split to derisk the test matrix.~~ ✅ Executed 2026-05-21 (see P3c above).
 5. Frontend last, under a separate approval session.
 
 Each step should be a **single PR**, green test suite, and

@@ -104,6 +104,8 @@ _DISPLAY_HANDLERS = {
 
 def browser_tool_display(fn_name, fn_args):
     """Return a concise display string for a browser tool call."""
+    from lib.browser.dispatch import normalize_browser_args
+    fn_args = normalize_browser_args(fn_args)
     handler = _DISPLAY_HANDLERS.get(fn_name)
     if handler is not None:
         return handler(fn_args)

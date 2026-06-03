@@ -59,7 +59,7 @@ class TestImportValidation:
         "lib.database",
         "lib.embeddings",
         "lib.image_gen",
-        "lib.llm_client",
+        "lib.llm",
         "lib.log",
         "lib.pdf_parser",
         "lib.pricing",
@@ -150,7 +150,7 @@ class TestPythonSyntax:
 
     _SKIP_DIRS = {
         ".git", "__pycache__", "node_modules", "debug", "analysis_scripts",
-        "offline_pkgs", "logs", ".project_sessions", ".chatui", "uploads",
+        "offline_pkgs", "logs", ".project_sessions", ".tofu", "uploads",
     }
 
     def _collect_py_files(self):

@@ -49,12 +49,21 @@ You have memory management tools to maintain a reusable knowledge base across se
 Guidelines:
 - Keep each memory focused on ONE topic.
 - Use `scope='project'` for project-specific, `scope='global'` for general patterns.
-- Write body as clear, actionable Markdown (not a conversation recap).
 - Don't duplicate — search first, then create/update/merge as needed.
 - Don't ask permission — manage memories quietly when relevant.
 
-⚠️ **Description quality is critical** — search_memories uses BM25 over name+description+body.
-  Write descriptions that are specific and include key trigger words (40-80 chars).
+**Description quality is critical** — both `search_memories` and the per-turn
+  prefetch rank with BM25 over name+description+body, and the description is shown
+  verbatim to the relevance filter and in the injected block. Write ONE dense, specific
+  sentence (~120 chars) that front-loads the concrete trigger words someone would search
+  for: the symptom, the symbol / file name, and the fix or rule. Vague summaries
+  ("fixes a bug") are useless for retrieval. Don't pad to a fixed length — pack signal.
+
+**Body structure** — write the body as skimmable Markdown, not a conversation recap.
+  A reliable skeleton (adapt section names as the topic needs):
+    ## Symptom / Why   — what goes wrong and how to recognise it
+    ## Fix / What      — the concrete change, with `file:line` and code / commands
+    ## Guardrail       — the rule to follow next time, plus any test that covers it
 </memory_accumulation>"""
 
 
@@ -68,7 +77,10 @@ if they ask about an external project/library use web_search. A `<relevant_memor
 already surfaces likely-relevant memories — don't re-search the same topic.
 Proactively save memories when you discover: bug patterns, project conventions,
 user preferences, complex workflows, or tool/API quirks.
-Keep memories focused, well-described (40-80 chars), scope='project' or 'global'.
+Keep each memory focused on ONE topic; write a dense ~120-char description that
+front-loads trigger words (symptom, symbol/file, fix) — it's the primary search signal —
+and a skimmable Markdown body (e.g. Symptom/Why → Fix/What → Guardrail).
+Use scope='project' or 'global'.
 </memory_accumulation>"""
 
 

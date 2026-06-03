@@ -34,7 +34,7 @@ def run():
     init_db()
 
     # Need Flask app context? get_thread_db doesn't use g, so it's fine.
-    from routes.daily_report import (
+    from lib.daily_report import (
         _get_monthly_costs, _load_cached_day_costs, _persist_day_cost,
         invalidate_day_cost_cache,
     )

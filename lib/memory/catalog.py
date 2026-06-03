@@ -183,8 +183,9 @@ CATALOG: list[SkillCatalogEntry] = [
 
     # \u2500\u2500 Meituan internal (stripped by export.py opensource mode) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
-    # (none bundled by default \u2014 users can drag-drop citadel.zip / mlp-skills.zip
-    #  or configure an internal registry via CHATUI_SKILL_CATALOG_URL.)
+    # (none bundled by default \u2014 users can drag-drop citadel.zip /
+    #  mlp-skills.zip or configure an internal registry via
+    #  TOFU_SKILL_CATALOG_URL.)
 ]
 
 

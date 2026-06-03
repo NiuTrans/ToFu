@@ -3,9 +3,7 @@
 Tests cover:
   1. System prompt sections (FRC, summarize guidance, tool usage, output efficiency)
   2. Ultrathink/effort keyword detection
-  3. Tool deferral system (partition, search, format)
-  4. Tool search handler integration
-  5. System prompt role validation (only system/user/assistant/tool)
+  3. System prompt role validation (only system/user/assistant/tool)
 
 Run:  pytest tests/test_cc_alignment.py -m unit -v
 """
@@ -200,210 +198,13 @@ class TestUltrathinkDetection:
 
 
 # ═══════════════════════════════════════════════════════════
-#  3. Tool Deferral System
+#  3. (removed) Tool Deferral System — deferral subsystem deleted
 # ═══════════════════════════════════════════════════════════
 
-@pytest.mark.unit
-class TestToolDeferral:
-    """Verify tool partitioning, search, and formatting."""
-
-    def _make_tool(self, name):
-        return {
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": f"Tool {name}",
-                "parameters": {"type": "object", "properties": {}}
-            }
-        }
-
-    def test_partition_core_tools_stay(self):
-        from lib.tools.deferral import partition_tools
-        tools = [self._make_tool('read_files'), self._make_tool('grep_search')]
-        core, deferred = partition_tools(tools)
-        assert len(core) == 2
-        assert len(deferred) == 0
-
-    def test_partition_no_static_deferral(self):
-        """Phase 1 static deferral removed — formerly-deferred tools stay in core."""
-        from lib.tools.deferral import partition_tools
-        tools = [
-            self._make_tool('read_files'),
-            self._make_tool('browser_type'),
-            self._make_tool('browser_scroll'),
-        ]
-        core, deferred = partition_tools(tools)
-        core_names = {t['function']['name'] for t in core}
-        assert 'read_files' in core_names
-        assert 'browser_type' in core_names
-        assert 'browser_scroll' in core_names
-        assert len(deferred) == 0
-
-    def test_partition_no_tool_search_when_no_deferred(self):
-        """When there are NO deferred tools, tool_search is NOT added."""
-        from lib.tools.deferral import partition_tools
-        tools = [self._make_tool('read_files')]
-        core, deferred = partition_tools(tools)
-        core_names = {t['function']['name'] for t in core}
-        assert 'tool_search' not in core_names
-
-    def test_partition_empty_list(self):
-        from lib.tools.deferral import partition_tools
-        core, deferred = partition_tools([])
-        assert core == []
-        assert deferred == []
-
-    def test_search_finds_matching_tools(self):
-        from lib.tools.deferral import search_deferred_tools
-        deferred = [
-            self._make_tool('browser_type'),
-            self._make_tool('browser_scroll'),
-            self._make_tool('generate_image'),
-        ]
-        matched = search_deferred_tools('browser', deferred)
-        matched_names = {t['function']['name'] for t in matched}
-        assert 'browser_type' in matched_names
-        assert 'browser_scroll' in matched_names
-        assert 'generate_image' not in matched_names
-
-    def test_search_finds_by_hint_keywords(self):
-        from lib.tools.deferral import search_deferred_tools
-        deferred = [self._make_tool('generate_image')]
-        matched = search_deferred_tools('image create picture', deferred)
-        assert len(matched) == 1
-        assert matched[0]['function']['name'] == 'generate_image'
-
-    def test_search_no_match(self):
-        from lib.tools.deferral import search_deferred_tools
-        deferred = [self._make_tool('browser_type')]
-        matched = search_deferred_tools('database sql', deferred)
-        assert len(matched) == 0
-
-    def test_search_empty_query(self):
-        from lib.tools.deferral import search_deferred_tools
-        deferred = [self._make_tool('browser_type')]
-        matched = search_deferred_tools('', deferred)
-        assert len(matched) == 0
-
-    def test_search_empty_deferred(self):
-        from lib.tools.deferral import search_deferred_tools
-        matched = search_deferred_tools('browser', [])
-        assert len(matched) == 0
-
-    def test_format_results_with_matches(self):
-        from lib.tools.deferral import format_search_results
-        tools = [self._make_tool('browser_type')]
-        result = format_search_results(tools)
-        assert 'browser_type' in result
-        assert 'Found 1' in result
-        assert 'available' in result.lower()
-
-    def test_format_results_no_matches(self):
-        from lib.tools.deferral import format_search_results
-        result = format_search_results([])
-        assert 'No matching tools' in result
-
-    def test_no_static_deferral(self):
-        """Phase 1 static deferral is removed — all user-selected tools stay core.
-
-        Tools previously in DEFERRED_TOOL_HINTS should NOT be auto-deferred.
-        Only Phase 2 dynamic threshold deferral can move tools.
-        """
-        from lib.tools.deferral import partition_tools
-        tools = [
-            self._make_tool('read_files'),
-            self._make_tool('create_scheduled_task'),
-            self._make_tool('list_scheduled_tasks'),
-            self._make_tool('browser_type'),
-            self._make_tool('generate_image'),
-            self._make_tool('desktop_screenshot'),
-        ]
-        core, deferred = partition_tools(tools)
-        core_names = {t['function']['name'] for t in core}
-        # All tools should remain in core — no static deferral
-        assert 'create_scheduled_task' in core_names
-        assert 'list_scheduled_tasks' in core_names
-        assert 'browser_type' in core_names
-        assert 'generate_image' in core_names
-        assert 'desktop_screenshot' in core_names
-        assert len(deferred) == 0
-
-
-# ═══════════════════════════════════════════════════════════
-#  4. Tool Search Handler Integration
-# ═══════════════════════════════════════════════════════════
-
-@pytest.mark.unit
-class TestToolSearchHandler:
-    """Verify tool_search handler behavior."""
-
-    def _make_tool(self, name):
-        return {
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": f"Tool {name}",
-                "parameters": {"type": "object", "properties": {}}
-            }
-        }
-
-    def test_handler_registered(self):
-        """Verify tool_search is registered in the tool registry."""
-        from lib.tasks_pkg.executor import tool_registry
-        handler = tool_registry.lookup('tool_search')
-        assert handler is not None
-
-    def test_handler_no_deferred_tools(self):
-        """When task has no deferred tools, handler returns appropriate message."""
-        from lib.tasks_pkg.executor import tool_registry
-        handler = tool_registry.lookup('tool_search')
-        import threading
-        task = {'id': 'test123', '_deferred_tools': [], 'events': [], 'events_lock': threading.Lock()}
-        result = handler(
-            task=task, tc=None, fn_name='tool_search', tc_id='tc1',
-            fn_args={'query': 'browser'}, rn=1, round_entry=None,
-            cfg={}, project_path='/tmp', project_enabled=False,
-            all_tools=[],
-        )
-        # Handler returns (tc_id, tool_content, is_search) tuple
-        assert isinstance(result, tuple) and len(result) == 3
-        ret_tc_id, tool_content, is_search = result
-        assert ret_tc_id == 'tc1'
-        assert 'No deferred tools' in tool_content or 'already loaded' in tool_content
-        assert is_search is False
-
-    def test_handler_discovers_and_activates_tools(self):
-        """tool_search should discover deferred tools and add them to all_tools."""
-        from lib.tasks_pkg.executor import tool_registry
-        handler = tool_registry.lookup('tool_search')
-
-        import threading
-        deferred = [self._make_tool('browser_type'), self._make_tool('generate_image')]
-        all_tools = [self._make_tool('read_files')]
-        task = {'id': 'test123', '_deferred_tools': deferred.copy(), 'events': [], 'events_lock': threading.Lock()}
-
-        result = handler(
-            task=task, tc=None, fn_name='tool_search', tc_id='tc1',
-            fn_args={'query': 'browser'}, rn=1, round_entry=None,
-            cfg={}, project_path='/tmp', project_enabled=False,
-            all_tools=all_tools,
-        )
-
-        # Handler returns (tc_id, tool_content, is_search) tuple
-        assert isinstance(result, tuple) and len(result) == 3
-        ret_tc_id, tool_content, is_search = result
-        assert ret_tc_id == 'tc1'
-        assert is_search is False
-
-        # browser_type should be activated (added to all_tools)
-        active_names = {t['function']['name'] for t in all_tools}
-        assert 'browser_type' in active_names
-        # generate_image should NOT be activated (didn't match query)
-        assert 'generate_image' not in active_names
-        # browser_type should be removed from deferred
-        remaining = {t['function']['name'] for t in task['_deferred_tools']}
-        assert 'browser_type' not in remaining
-        assert 'generate_image' in remaining
+# Tool deferral subsystem (TestToolDeferral / TestToolSearchHandler) was
+# removed when the deferral framework itself was deleted — frontend toggles
+# already gate per-feature tool inclusion, so partition/search machinery had
+# no remaining role.
 
 
 # ═══════════════════════════════════════════════════════════
@@ -454,10 +255,26 @@ class TestMessageRoles:
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
-class TestAssembleToolListReturnValue:
-    """Verify _assemble_tool_list returns 4-tuple with deferred_tools."""
+class TestResolveModelConfigResponseFormat:
+    """Verify _resolve_model_config surfaces responseFormat into the mcfg dict."""
 
-    def test_returns_four_values(self):
+    def test_response_format_surfaced(self):
+        from lib.tasks_pkg.model_config import _resolve_model_config
+        rf = {'type': 'json_object'}
+        mcfg = _resolve_model_config({'model': 'gpt-x', 'responseFormat': rf}, 'tid12345')
+        assert mcfg['response_format'] == rf
+
+    def test_response_format_none_by_default(self):
+        from lib.tasks_pkg.model_config import _resolve_model_config
+        mcfg = _resolve_model_config({'model': 'gpt-x'}, 'tid12345')
+        assert mcfg['response_format'] is None
+
+
+@pytest.mark.unit
+class TestAssembleToolListReturnValue:
+    """Verify _assemble_tool_list returns the expected 3-tuple."""
+
+    def test_returns_three_values(self):
         from lib.tasks_pkg.model_config import _assemble_tool_list
         result = _assemble_tool_list(
             cfg={'messages': []},
@@ -474,13 +291,13 @@ class TestAssembleToolListReturnValue:
             scheduler_enabled=False,
             messages=None,
         )
-        assert len(result) == 4, f'Expected 4-tuple, got {len(result)}-tuple'
-        tool_list, deferred_tools, has_real_tools, max_tool_rounds = result
-        assert isinstance(deferred_tools, list)
+        assert len(result) == 3, f'Expected 3-tuple, got {len(result)}-tuple'
+        tool_list, has_real_tools, max_tool_rounds = result
+        assert tool_list is not None
 
-    def test_no_tools_returns_empty_deferred(self):
+    def test_default_tool_list_includes_read_files(self):
         from lib.tasks_pkg.model_config import _assemble_tool_list
-        tool_list, deferred_tools, has_real_tools, max_tool_rounds = _assemble_tool_list(
+        tool_list, has_real_tools, max_tool_rounds = _assemble_tool_list(
             cfg={'messages': []},
             project_path=None,
             project_enabled=False,
@@ -495,11 +312,8 @@ class TestAssembleToolListReturnValue:
             scheduler_enabled=False,
             messages=None,
         )
-        assert deferred_tools == []
-        # read_files is now always-on (handles absolute local paths like
-        # PDFs/images/Office docs regardless of project mode), so tool_list
-        # is never fully empty. It should contain read_files + memory tools
-        # + emit_to_user (the always-on auxiliaries).
+        # read_files is always-on (handles absolute local paths like
+        # PDFs/images/Office docs regardless of project mode).
         assert tool_list is not None
         names = {t['function']['name'] for t in tool_list}
         assert 'read_files' in names
@@ -513,48 +327,6 @@ class TestAssembleToolListReturnValue:
 @pytest.mark.unit
 class TestFullPipelineIntegration:
     """End-to-end integration tests."""
-
-    def test_deferral_partition_real_tools(self):
-        """Test partitioning with realistic tool definitions — no static deferral.
-
-        With Phase 1 removed, all user-selected tools stay in core.
-        Only Phase 2 dynamic threshold can defer tools.
-        """
-        from lib.tools.deferral import partition_tools
-
-        tools = []
-        for name in ['read_files', 'list_dir', 'grep_search', 'find_files',
-                      'write_file', 'apply_diff', 'run_command',
-                      'web_search', 'fetch_url',
-                      'create_memory', 'update_memory',
-                      'check_error_logs', 'resolve_error',
-                      'emit_to_user', 'ask_human',
-                      'browser_type', 'browser_scroll',
-                      'browser_select_option', 'generate_image',
-                      'create_scheduled_task']:
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": f"Tool {name}",
-                    "parameters": {"type": "object", "properties": {}}
-                }
-            })
-
-        core, deferred = partition_tools(tools)
-        core_names = {t['function']['name'] for t in core}
-
-        # ALL user-selected tools stay in core (no static deferral)
-        assert 'read_files' in core_names
-        assert 'web_search' in core_names
-        assert 'emit_to_user' in core_names
-        assert 'browser_type' in core_names
-        assert 'generate_image' in core_names
-        assert 'create_scheduled_task' in core_names
-        # No deferred tools → no tool_search added
-        assert len(deferred) == 0
-        assert 'tool_search' not in core_names
-        assert len(core) == len(tools)
 
     def test_ultrathink_escalation_in_config(self):
         """Verify ultrathink in user message escalates thinking depth."""
@@ -709,12 +481,14 @@ class TestSystemReminderAndBlocks:
         """Static guidance sections are part of the cache-segmented system
         message. After the Layout A consolidation, the CC static block
         contains FRC + tool usage + output efficiency, and the memory
-        block (when has_real_tools=True) gets its OWN separate cache block
-        so a memory CRUD doesn't invalidate the FRC/tools/static prefix."""
+        block (when has_real_tools=True AND memory_enabled=True) gets its
+        OWN separate cache block so a memory CRUD doesn't invalidate the
+        FRC/tools/static prefix."""
         from lib.tasks_pkg.system_context import _inject_system_contexts
         messages = [{'role': 'system', 'content': 'Pre-existing prompt'}]
+        # memory_enabled=True so the memory_accumulation block is injected
         _inject_system_contexts(
-            messages, '/tmp', False, False, False, False,
+            messages, '/tmp', False, True, False, False,
             has_real_tools=True,
         )
         content = messages[0]['content']
@@ -732,7 +506,7 @@ class TestSystemReminderAndBlocks:
 
     def test_cache_breakpoints_per_block(self):
         """add_cache_breakpoints should cache each text block independently."""
-        from lib.llm_client import add_cache_breakpoints
+        from lib.llm import add_cache_breakpoints
         body = {
             'model': 'claude-sonnet-4-20250514',
             'messages': [{

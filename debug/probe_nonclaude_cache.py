@@ -6,7 +6,7 @@ Motivation
 ----------
 Our SWE-bench results showed tofu-minimax had 0% cache hit rate while
 cc-minimax (same model, same gateway) hit 57.9%. The cause is that
-``lib.llm_client.add_cache_breakpoints`` bails out unless
+``lib.llm.add_cache_breakpoints`` bails out unless
 ``is_claude(model)`` is true — so for non-Claude models we send NO
 ``cache_control`` markers and thus never cache anything client-side.
 
@@ -132,7 +132,7 @@ def _build_body(model: str, *, kind: str, with_cache_control: bool,
       - the system block (BP1: stable prefix)
       - the last user block (BP2: tail)
 
-    This mirrors what ``lib.llm_client.add_cache_breakpoints`` does for
+    This mirrors what ``lib.llm.add_cache_breakpoints`` does for
     Claude — just without the ``is_claude`` gate.
     """
     if with_cache_control:

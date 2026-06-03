@@ -8,7 +8,6 @@ handler's ``apply()``.  Any ``action_type`` that is not marked
 
 from __future__ import annotations
 
-
 from lib.log import audit_log, get_logger
 
 from . import storage

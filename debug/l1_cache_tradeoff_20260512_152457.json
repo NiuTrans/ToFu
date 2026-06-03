@@ -1,0 +1,141 @@
+{
+  "timestamp": "2026-05-12 07:26:27 UTC",
+  "arm_a": {
+    "label": "STATUS_QUO (cache-prefix skip)",
+    "rounds": [
+      {
+        "arm": "STATUS_QUO",
+        "round_num": 1,
+        "msg_count": 159,
+        "tool_msg_count": 72,
+        "big_tool_count": 18,
+        "api_input_chars": 156464,
+        "prompt_tokens": 101844,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output_tokens": 256,
+        "elapsed": 9.077704429626465,
+        "status": "MISS",
+        "error": "",
+        "cost_usd": 0.51562
+      },
+      {
+        "arm": "STATUS_QUO",
+        "round_num": 2,
+        "msg_count": 161,
+        "tool_msg_count": 72,
+        "big_tool_count": 18,
+        "api_input_chars": 156724,
+        "prompt_tokens": 101950,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output_tokens": 118,
+        "elapsed": 6.401391983032227,
+        "status": "MISS",
+        "error": "",
+        "cost_usd": 0.5127
+      },
+      {
+        "arm": "STATUS_QUO",
+        "round_num": 3,
+        "msg_count": 163,
+        "tool_msg_count": 72,
+        "big_tool_count": 18,
+        "api_input_chars": 156992,
+        "prompt_tokens": 102046,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output_tokens": 256,
+        "elapsed": 8.606140375137329,
+        "status": "MISS",
+        "error": "",
+        "cost_usd": 0.5166299999999999
+      },
+      {
+        "arm": "STATUS_QUO",
+        "round_num": 4,
+        "msg_count": 165,
+        "tool_msg_count": 72,
+        "big_tool_count": 18,
+        "api_input_chars": 157260,
+        "prompt_tokens": 102156,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output_tokens": 256,
+        "elapsed": 8.415045261383057,
+        "status": "MISS",
+        "error": "",
+        "cost_usd": 0.51718
+      }
+    ]
+  },
+  "arm_b": {
+    "label": "AGGRESSIVE (no cache-prefix skip)",
+    "rounds": [
+      {
+        "arm": "AGGRESSIVE",
+        "round_num": 1,
+        "msg_count": 159,
+        "tool_msg_count": 72,
+        "big_tool_count": 18,
+        "api_input_chars": 156464,
+        "prompt_tokens": 101844,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output_tokens": 256,
+        "elapsed": 11.674519300460815,
+        "status": "MISS",
+        "error": "",
+        "cost_usd": 0.51562
+      },
+      {
+        "arm": "AGGRESSIVE",
+        "round_num": 2,
+        "msg_count": 161,
+        "tool_msg_count": 72,
+        "big_tool_count": 18,
+        "api_input_chars": 156724,
+        "prompt_tokens": 101954,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output_tokens": 128,
+        "elapsed": 6.146509647369385,
+        "status": "MISS",
+        "error": "",
+        "cost_usd": 0.5129699999999999
+      },
+      {
+        "arm": "AGGRESSIVE",
+        "round_num": 3,
+        "msg_count": 163,
+        "tool_msg_count": 72,
+        "big_tool_count": 18,
+        "api_input_chars": 156992,
+        "prompt_tokens": 102054,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output_tokens": 256,
+        "elapsed": 8.17271637916565,
+        "status": "MISS",
+        "error": "",
+        "cost_usd": 0.51667
+      },
+      {
+        "arm": "AGGRESSIVE",
+        "round_num": 4,
+        "msg_count": 165,
+        "tool_msg_count": 72,
+        "big_tool_count": 18,
+        "api_input_chars": 157260,
+        "prompt_tokens": 102161,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output_tokens": 256,
+        "elapsed": 8.577608823776245,
+        "status": "MISS",
+        "error": "",
+        "cost_usd": 0.5172049999999999
+      }
+    ]
+  }
+}

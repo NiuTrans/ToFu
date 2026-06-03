@@ -37,7 +37,7 @@ BROWSER_TOOL_READ_TAB = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tabId": {
+                "tab_id": {
                     "type": "integer",
                     "description": "Tab ID from browser_list_tabs"
                 },
@@ -45,12 +45,12 @@ BROWSER_TOOL_READ_TAB = {
                     "type": "string",
                     "description": "CSS selector to extract specific elements (optional, reads full page if omitted)"
                 },
-                "maxChars": {
+                "max_chars": {
                     "type": "integer",
                     "description": "Maximum characters to return (default 50000)"
                 }
             },
-            "required": ["tabId"]
+            "required": ["tab_id"]
         }
     }
 }
@@ -75,7 +75,7 @@ BROWSER_TOOL_EXECUTE_JS = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tabId": {
+                "tab_id": {
                     "type": "integer",
                     "description": "Tab ID from browser_list_tabs"
                 },
@@ -84,7 +84,7 @@ BROWSER_TOOL_EXECUTE_JS = {
                     "description": "JavaScript code to execute in the page context"
                 }
             },
-            "required": ["tabId", "code"]
+            "required": ["tab_id", "code"]
         }
     }
 }
@@ -106,7 +106,7 @@ BROWSER_TOOL_SCREENSHOT = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tabId": {
+                "tab_id": {
                     "type": "integer",
                     "description": "Tab ID to screenshot. If omitted, captures the currently active tab."
                 },
@@ -115,7 +115,7 @@ BROWSER_TOOL_SCREENSHOT = {
                     "enum": ["png", "jpeg"],
                     "description": "Image format (default: png)"
                 },
-                "fullPage": {
+                "full_page": {
                     "type": "boolean",
                     "description": "If true (default), capture the entire scrollable page. If false, capture only the visible viewport."
                 }
@@ -166,7 +166,7 @@ BROWSER_TOOL_GET_HISTORY = {
                     "type": "string",
                     "description": "Search query to filter history entries (empty string = all)"
                 },
-                "maxResults": {
+                "max_results": {
                     "type": "integer",
                     "description": "Maximum results to return (default 100)"
                 }
@@ -205,11 +205,11 @@ BROWSER_TOOL_CLOSE_TAB = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tabId": {
+                "tab_id": {
                     "type": "integer",
                     "description": "Single tab ID to close"
                 },
-                "tabIds": {
+                "tab_ids": {
                     "type": "array",
                     "items": {"type": "integer"},
                     "description": "Multiple tab IDs to close"
@@ -230,7 +230,7 @@ BROWSER_TOOL_NAVIGATE = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tabId": {
+                "tab_id": {
                     "type": "integer",
                     "description": "Tab ID to navigate"
                 },
@@ -238,12 +238,12 @@ BROWSER_TOOL_NAVIGATE = {
                     "type": "string",
                     "description": "URL to navigate to"
                 },
-                "waitForLoad": {
+                "wait_for_load": {
                     "type": "boolean",
                     "description": "Wait for the page to fully load before returning (default false)"
                 }
             },
-            "required": ["tabId", "url"]
+            "required": ["tab_id", "url"]
         }
     }
 }
@@ -263,7 +263,7 @@ BROWSER_TOOL_GET_INTERACTIVE_ELEMENTS = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tabId": {
+                "tab_id": {
                     "type": "integer",
                     "description": "Tab ID from browser_list_tabs"
                 },
@@ -271,12 +271,12 @@ BROWSER_TOOL_GET_INTERACTIVE_ELEMENTS = {
                     "type": "boolean",
                     "description": "If true, only return elements currently visible in the viewport (default: false = all elements)"
                 },
-                "maxElements": {
+                "max_elements": {
                     "type": "integer",
                     "description": "Maximum number of elements to return (default: 200)"
                 }
             },
-            "required": ["tabId"]
+            "required": ["tab_id"]
         }
     }
 }
@@ -296,7 +296,7 @@ BROWSER_TOOL_CLICK = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tabId": {
+                "tab_id": {
                     "type": "integer",
                     "description": "Tab ID from browser_list_tabs"
                 },
@@ -304,16 +304,16 @@ BROWSER_TOOL_CLICK = {
                     "type": "string",
                     "description": "CSS selector of the element to click (get this from browser_get_interactive_elements)"
                 },
-                "rightClick": {
+                "right_click": {
                     "type": "boolean",
                     "description": "If true, perform a right-click (contextmenu event) instead of left-click (default: false)"
                 },
-                "scrollTo": {
+                "scroll_to": {
                     "type": "boolean",
                     "description": "Whether to scroll the element into view before clicking (default: true)"
                 }
             },
-            "required": ["tabId", "selector"]
+            "required": ["tab_id", "selector"]
         }
     }
 }
@@ -332,7 +332,7 @@ BROWSER_TOOL_HOVER = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tabId": {
+                "tab_id": {
                     "type": "integer",
                     "description": "Tab ID from browser_list_tabs"
                 },
@@ -341,7 +341,7 @@ BROWSER_TOOL_HOVER = {
                     "description": "CSS selector of the element to hover over"
                 }
             },
-            "required": ["tabId", "selector"]
+            "required": ["tab_id", "selector"]
         }
     }
 }
@@ -361,7 +361,7 @@ BROWSER_TOOL_KEYBOARD = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tabId": {
+                "tab_id": {
                     "type": "integer",
                     "description": "Tab ID from browser_list_tabs"
                 },
@@ -374,7 +374,7 @@ BROWSER_TOOL_KEYBOARD = {
                     "description": "CSS selector of target element (optional, defaults to activeElement)"
                 }
             },
-            "required": ["tabId", "keys"]
+            "required": ["tab_id", "keys"]
         }
     }
 }
@@ -396,7 +396,7 @@ BROWSER_TOOL_WAIT = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tabId": {
+                "tab_id": {
                     "type": "integer",
                     "description": "Tab ID from browser_list_tabs"
                 },
@@ -418,7 +418,7 @@ BROWSER_TOOL_WAIT = {
                     "description": "Wait for specified seconds instead of element (e.g., 0.5 for 500ms)"
                 }
             },
-            "required": ["tabId"]
+            "required": ["tab_id"]
         }
     }
 }
@@ -436,12 +436,12 @@ BROWSER_TOOL_SUMMARIZE_PAGE = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tabId": {
+                "tab_id": {
                     "type": "integer",
                     "description": "Tab ID from browser_list_tabs"
                 }
             },
-            "required": ["tabId"]
+            "required": ["tab_id"]
         }
     }
 }
@@ -459,7 +459,7 @@ BROWSER_TOOL_GET_APP_STATE = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tabId": {
+                "tab_id": {
                     "type": "integer",
                     "description": "Tab ID from browser_list_tabs"
                 },
@@ -468,7 +468,7 @@ BROWSER_TOOL_GET_APP_STATE = {
                     "description": "Extraction depth: 'shallow' (default) or 'deep' (more aggressive data extraction)"
                 }
             },
-            "required": ["tabId"]
+            "required": ["tab_id"]
         }
     }
 }

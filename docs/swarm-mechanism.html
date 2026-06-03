@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tofu Agent 集群（Swarm）——运行机制详解</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c2230; --border:#2b3240;
+    --text:#e6edf3; --muted:#9aa7b4; --accent:#4ea1ff; --green:#3fb950;
+    --amber:#d29922; --red:#f85149; --purple:#bc8cff; --mono:#79c0ff;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.8;font-size:16px;
+  }
+  .wrap{max-width:960px;margin:0 auto;padding:48px 24px 120px}
+  h1{font-size:34px;margin:0 0 8px;letter-spacing:-.5px}
+  h2{font-size:24px;margin:56px 0 16px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  h3{font-size:18px;margin:32px 0 10px;color:var(--accent)}
+  p{margin:12px 0}
+  .sub{color:var(--muted);font-size:17px;margin-top:0}
+  code{font-family:"SF Mono",Menlo,Consolas,monospace;background:#21262d;
+    padding:2px 6px;border-radius:5px;font-size:.88em;color:var(--mono)}
+  pre{background:#0a0d12;border:1px solid var(--border);border-radius:10px;
+    padding:16px 18px;overflow-x:auto;font-size:13.5px;line-height:1.5}
+  pre code{background:none;padding:0;color:var(--text)}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+    padding:20px 24px;margin:18px 0}
+  .tag{display:inline-block;font-size:12px;font-weight:600;padding:2px 9px;
+    border-radius:20px;vertical-align:middle;margin-right:6px}
+  .tag.file{background:#1f2a3a;color:var(--mono)}
+  .callout{border-left:4px solid var(--accent);background:var(--panel2);
+    padding:14px 18px;border-radius:0 10px 10px 0;margin:18px 0}
+  .callout.warn{border-color:var(--amber)}
+  .callout.key{border-color:var(--green)}
+  .callout.q{border-color:var(--purple)}
+  .callout h4{margin:0 0 6px;font-size:15px;letter-spacing:.3px}
+  table{border-collapse:collapse;width:100%;margin:16px 0;font-size:14.5px}
+  th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  .muted{color:var(--muted)}
+  .pill{font-size:12px;padding:1px 8px;border-radius:5px;font-weight:600}
+  .pill.run{background:#1d3a2a;color:var(--green)}
+  .pill.wait{background:#3a341d;color:var(--amber)}
+  .pill.done{background:#1f2a3a;color:var(--mono)}
+  .lane{display:grid;grid-template-columns:120px 1fr;gap:0;margin:6px 0}
+  .lane .who{color:var(--muted);font-size:13px;padding-top:10px;font-weight:600}
+  .lane .bar{display:flex;gap:6px;flex-wrap:wrap}
+  .blk{border-radius:6px;padding:7px 11px;font-size:12.5px;font-weight:600;white-space:nowrap}
+  .blk.main{background:#15324f;color:#9cd0ff;border:1px solid #2a5688}
+  .blk.agent{background:#2a1f3d;color:#d7b8ff;border:1px solid #5a3f86}
+  .blk.idle{background:#161b22;color:#667;border:1px dashed #333}
+  .arrow{color:var(--green);font-weight:700;font-size:13px;align-self:center}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin:8px 0 0}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
+  ul{margin:10px 0;padding-left:22px}
+  li{margin:6px 0}
+  .small{font-size:13.5px}
+  .toc a{color:var(--accent);text-decoration:none}
+  .toc a:hover{text-decoration:underline}
+  .flow{display:flex;flex-direction:column;gap:0}
+  .step{display:flex;gap:14px;align-items:flex-start;padding:12px 0;border-bottom:1px dashed var(--border)}
+  .step:last-child{border-bottom:none}
+  .num{flex:0 0 30px;height:30px;border-radius:50%;background:var(--accent);color:#04111f;
+    font-weight:700;display:flex;align-items:center;justify-content:center;font-size:14px}
+  .step .body{flex:1}
+  .step .body b{color:var(--text)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>🐝 Tofu 多智能体集群（Agent Swarm）</h1>
+  <p class="sub">子智能体如何被启动、如何把结果回传、以及前端做了什么——从零讲清楚，并配示例。</p>
+
+  <div class="card toc">
+    <b>目录</b>
+    <ul class="small" style="margin-bottom:0">
+      <li><a href="#mental">1. 一句话心智模型</a></li>
+      <li><a href="#tools">2. 主智能体能看到的三个工具</a></li>
+      <li><a href="#life">3. 一次 Swarm 的完整生命周期</a></li>
+      <li><a href="#comms">4. 通信机制——收件箱（inbox）</a></li>
+      <li><a href="#question">5. ⭐ 你的疑问："异步 agent 是不是偷偷阻塞了？"</a></li>
+      <li><a href="#two-paths">6. ⭐ 关键：结果回传有<b>两条</b>不同的路径</a></li>
+      <li><a href="#realcase">7. 实战案例：对话 mpuxb6omxi1ti5 的日志复盘</a></li>
+      <li><a href="#frontend">8. 前端行为</a></li>
+      <li><a href="#files">9. 文件地图 / 去哪里看代码</a></li>
+    </ul>
+  </div>
+
+  <!-- ───────────────────────────── -->
+  <h2 id="mental">1. 一句话心智模型</h2>
+
+  <div class="callout key">
+    <h4>💡 核心思想</h4>
+    <p style="margin:0 0 8px">子智能体运行在一个<b>后台守护线程（daemon thread）</b>上，与主智能体当前的"回合（turn）"完全脱钩。
+    <code>spawn_agents</code> <b>永远不会</b>自动阻塞主智能体——它发射后立即返回。</p>
+    <p style="margin:0">至于结果<b>怎么</b>回到主智能体手里，有<b>两条完全不同的路径</b>（这是本文档此前讲错、现已更正的关键点，详见
+    <a href="#two-paths">第 6 节</a>）：</p>
+    <ul style="margin:8px 0 0">
+      <li><b>路径 A（收件箱）</b>：主智能体 spawn 后继续干别的活；子智能体完成时把便条投进<b>收件箱（inbox）</b>，
+      在主智能体<b>下一回合开始前</b>被注入为一条 <code>user</code> 消息。</li>
+      <li><b>路径 B（await / get_result 的工具返回值）</b>：主智能体主动调用 <code>await_agents</code>（阻塞等待）或
+      <code>get_agent_result</code>，结果直接作为<b>工具返回结果（tool result）</b>回来——<b>完全不经过收件箱</b>。</li>
+    </ul>
+  </div>
+
+  <p>可以把它想象成：一位经理（主智能体）把任务分给同事。
+  <b>路径 A</b>：经理继续做自己的事，同事把便利贴贴在他桌上，他下次坐回办公桌（下一次 LLM 调用）时才看。
+  <b>路径 B</b>：经理干脆搬张椅子坐在会议室门口<b>盯着等</b>（<code>await_agents</code>），同事一做完就当面把结果递给他——
+  这时便利贴（收件箱）根本没用上。</p>
+
+  <!-- ───────────────────────────── -->
+  <h2 id="tools">2. 主智能体能看到的三个工具</h2>
+
+  <table>
+    <tr><th>工具</th><th>是否阻塞</th><th>作用</th></tr>
+    <tr>
+      <td><code>spawn_agents</code></td>
+      <td><span class="pill run">不阻塞</span></td>
+      <td>发射后不管（fire-and-forget）。在后台线程上启动 N 个子智能体，并<b>立即返回</b>一个句柄
+      （<code>{status:"async_launched", swarm_id, agents:[…]}</code>）。主智能体的回合继续进行。</td>
+    </tr>
+    <tr>
+      <td><code>await_agents</code></td>
+      <td><span class="pill wait">阻塞</span></td>
+      <td><b>唯一</b>会阻塞的工具，且可选。当主智能体没有别的事可做时使用。最多等待 120 秒，等
+      <code>any</code>（任意一个）/ <code>all</code>（全部）完成后返回它们的摘要。</td>
+    </tr>
+    <tr>
+      <td><code>get_agent_result</code></td>
+      <td><span class="pill done">不阻塞</span></td>
+      <td>当 200 字的预览不够时，拉取某个<b>已完成</b>子智能体的<b>完整</b>最终答案。</td>
+    </tr>
+  </table>
+
+  <p class="small muted">子智能体自身<b>不能</b>调用这三个工具——它们会从每个子智能体的工具集中被剔除
+  （<code>SUB_AGENT_DENYLIST</code>），因此 swarm 无法递归地再生出 swarm。</p>
+
+  <!-- ───────────────────────────── -->
+  <h2 id="life">3. 一次 Swarm 的完整生命周期</h2>
+
+  <div class="card">
+  <div class="flow">
+    <div class="step"><div class="num">1</div><div class="body">
+      <b>主智能体调用 <code>spawn_agents([...])</code>。</b>
+      请求路由到 <code>_handle_spawn_agents</code>，它构造一个 <code>MasterOrchestrator</code> 并调用
+      <code>run_in_background()</code>。
+    </div></div>
+    <div class="step"><div class="num">2</div><div class="body">
+      <b>启动一个守护线程</b>——名为 <code>swarm-driver-&lt;task_id&gt;</code>。它运行一个
+      <code>StreamingScheduler</code>，按 <code>depends_on</code> 依赖顺序，一次最多并行启动
+      <code>max_parallel</code> 个子智能体。
+      <br><span class="small muted">函数<i>就在这里</i>返回句柄——主智能体随即重获自由。</span>
+    </div></div>
+    <div class="step"><div class="num">3</div><div class="body">
+      <b>每个子智能体运行自己独立的 LLM 会话</b>，带有按角色裁剪的工具集，并把思考/输出流式写入
+      <code>data/swarm/&lt;task_id&gt;/&lt;agent_id&gt;.log</code>。
+    </div></div>
+    <div class="step"><div class="num">4</div><div class="body">
+      <b>当某个子智能体完成时</b>，调度器触发 <code>_on_agent_complete_callback</code>，它会：
+      <br>&nbsp;&nbsp;(a) 发出一个 UI 事件（<code>swarm_agent_complete</code>）给前端实时面板；
+      <br>&nbsp;&nbsp;(b) <b>把一条 <code>&lt;swarm-update&gt;</code> 便条塞进收件箱</b>。
+    </div></div>
+    <div class="step"><div class="num">5</div><div class="body">
+      <b>结果回到主智能体——走两条路之一：</b>
+      <br>&nbsp;&nbsp;<b>路径 A：</b>如果主智能体 spawn 后<b>继续干别的活</b>，则在它<b>下一次 LLM 调用之前</b>，
+      orchestrator <b>清空收件箱</b>，把待处理便条合并为一条 <code>user</code> 消息注入。
+      <br>&nbsp;&nbsp;<b>路径 B：</b>如果主智能体调用了 <code>await_agents</code> / <code>get_agent_result</code>，
+      结果直接作为<b>工具返回结果</b>回来，<b>收件箱被绕过</b>（便条留在队列里没人取）。
+      <br><span class="small muted">⚠️ 关键：路径 A 的注入<b>只发生在"还有下一回合"时</b>。若任务在收件箱被清空前就结束了，
+      那些便条会在任务收尾时被丢弃（日志：<code>cleared N unread item(s) on task end</code>）。</span>
+    </div></div>
+    <div class="step"><div class="num">6</div><div class="body">
+      <b>整个任务结束时</b>，会话被中止、收件箱被清空、驱动线程被回收——不会泄漏。
+    </div></div>
+  </div>
+  </div>
+
+  <!-- ───────────────────────────── -->
+  <h2 id="comms">4. 通信机制——收件箱（inbox）</h2>
+
+  <p>这里有<b>两条彼此独立的通道</b>，千万不要混淆：</p>
+
+  <table>
+    <tr><th>通道</th><th>受众</th><th>用途</th></tr>
+    <tr>
+      <td><span class="tag file">lib/agent_inbox.py</span></td>
+      <td><b>LLM</b>（主智能体）</td>
+      <td>一个按任务区分的优先级队列，存放 <code>&lt;swarm-update&gt;</code> XML 便条。这是结果重新进入模型上下文的
+      <b>路径 A</b>，在主智能体<b>下一次 LLM 调用前</b>被清空注入。<b>注意：若主智能体走路径 B（await）或任务提前结束，
+      此队列会被绕过或丢弃——这正是你在 debug 面板里常常看不到 <code>&lt;swarm-update&gt;</code> 消息的原因。</b></td>
+    </tr>
+    <tr>
+      <td><span class="tag file">lib/push.py</span> / UI 事件</td>
+      <td><b>浏览器</b></td>
+      <td>实时进度事件（<code>swarm_phase</code>、<code>swarm_agent_complete</code> …），用来驱动 swarm 面板的动画。
+      模型永远看不到这些事件。</td>
+    </tr>
+  </table>
+
+  <h3>一个"完成"如何变成模型可见的消息</h3>
+
+  <p>当 agent <code>a2</code> 完成时，<code>_on_agent_complete_callback</code> 通过
+  <code>format_swarm_update(...)</code> 构造下面这条便条并入队：</p>
+
+<pre><code>&lt;swarm-update&gt;
+  &lt;agent-id&gt;a2&lt;/agent-id&gt;
+  &lt;role&gt;coder&lt;/role&gt;
+  &lt;status&gt;completed&lt;/status&gt;
+  &lt;elapsed-seconds&gt;12.4&lt;/elapsed-seconds&gt;
+  &lt;preview&gt;...最终答案的前 200 字...&lt;/preview&gt;
+  &lt;output-file&gt;data/swarm/&lt;task_id&gt;/a2.log&lt;/output-file&gt;
+  &lt;remaining running="1" pending="0"/&gt;
+&lt;/swarm-update&gt;</code></pre>
+
+  <p>随后，在主智能体的下一回合，orchestrator 的清空钩子会把它注入
+  （<span class="tag file">lib/tasks_pkg/orchestrator.py</span>，就在 LLM 调用处附近）：</p>
+
+<pre><code># ★ 在 LLM 调用前清空 swarm 收件箱
+if not _has_unmatched_tool_call:          # 不要打断尚未闭合的 tool_call / result 配对
+    _inbox_items = drain(tid)
+    if _inbox_items:
+        messages.append({
+            'role': 'user',               # 一条真正的 user 消息——不是 system-reminder
+            'content': '\n\n'.join(payloads),   # 把所有待处理便条合并成「一条」消息
+        })</code></pre>
+
+  <div class="callout">
+    <h4>两条微妙但重要的规则</h4>
+    <ul style="margin:0">
+      <li><b>合并（Coalescing）：</b>所有待处理便条会被合并进<b>一条</b> user 消息（更干净的 prompt 缓存、更少的消息条数）。</li>
+      <li><b>配对安全（Pair-safety）：</b>如果上一回合以一条带有未闭合 <code>tool_calls</code> 的
+      <code>assistant</code> 消息结尾（还在等它的 <code>tool_result</code>），注入会被<b>推迟</b>——
+      你不能在工具调用和它的结果之间插一条 user 消息。</li>
+    </ul>
+  </div>
+
+  <!-- ───────────────────────────── -->
+  <h2 id="question">5. ⭐ 你的疑问：异步 agent 是不是偷偷阻塞了？</h2>
+
+  <div class="callout q">
+    <h4>❓ 你的原话</h4>
+    <p style="margin:0"><i>"启动异步 agent 之后，主 agent 确实能继续调用其他工具，但看起来这些异步 agent 仍然是一起执行、
+    全部完成后才返回。这是通过 await 那个 agent 工具实现的吗？"</i></p>
+  </div>
+
+  <div class="callout key">
+    <h4>✅ 简短回答：不是——并没有隐藏的 await。</h4>
+    <p style="margin:0"><code>spawn_agents</code> 瞬间返回，子智能体运行在一个脱离的守护线程上。驱动循环在<b>那个线程上</b>
+    （而非主智能体线程上）迭代 <code>scheduler.iter_completions()</code>。主智能体从未与它们 join。</p>
+  </div>
+
+  <h3>那为什么<i>看起来</i>像"全部完成后才返回"？</h3>
+
+  <p>因为关键在于结果<b>什么时候、以什么形式</b>重新进入对话。子智能体的结果<b>不会</b>流式插进主智能体当前回合的中间，
+  它只能在<b>某个回合的边界</b>出现——要么作为下一回合开头注入的 <code>&lt;swarm-update&gt;</code> user 消息（路径 A），
+  要么作为 <code>await_agents</code> / <code>get_agent_result</code> 的工具返回结果（路径 B）。
+  无论哪种，从对话记录看都像"spawn → … → 突然所有结果一起冒出来"。这种"批量出现"是回合边界的批量送达，
+  而不是 spawn 本身在阻塞。两条路径的完整对比见 <a href="#two-paths">第 6 节</a>。</p>
+
+  <h3>产生这种观感的两种场景</h3>
+
+  <div class="card">
+    <h3 style="margin-top:0">场景 A —— 主智能体让自己一直忙着（真正的并行）</h3>
+    <div class="lane"><div class="who">主智能体</div><div class="bar">
+      <span class="blk main">spawn_agents</span>
+      <span class="blk main">grep_search</span>
+      <span class="blk main">read_files</span>
+      <span class="arrow">▶ 下一回合</span>
+      <span class="blk main">读收件箱 → 汇总</span>
+    </div></div>
+    <div class="lane"><div class="who">子智能体</div><div class="bar">
+      <span class="blk idle">已启动</span>
+      <span class="blk agent">a1 ▓▓▓▓▓▓▓</span>
+      <span class="blk agent">a2 ▓▓▓▓▓</span>
+    </div></div>
+    <p class="small muted" style="margin-bottom:0">主智能体自己的工具调用在墙钟时间上与子智能体重叠。
+    这是预期路径——真正的并行。结果在它们完成后经由收件箱送达。</p>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">场景 B —— 主智能体无事可做，于是主动 <code>await_agents</code>（结果走<b>工具返回</b>，<b>不走收件箱</b>）</h3>
+    <div class="lane"><div class="who">主智能体</div><div class="bar">
+      <span class="blk main">spawn_agents</span>
+      <span class="blk wait" style="background:#3a341d;color:#e3c46b;border:1px solid #6b5a23">await_agents（阻塞 ≤120s）</span>
+      <span class="blk main">get_agent_result ×N</span>
+      <span class="blk main">汇总</span>
+    </div></div>
+    <div class="lane"><div class="who">子智能体</div><div class="bar">
+      <span class="blk idle">已启动</span>
+      <span class="blk agent">a1 ▓▓▓▓▓▓▓</span>
+      <span class="blk agent">a2 ▓▓▓▓▓</span>
+    </div></div>
+    <p class="small muted" style="margin-bottom:0">这里的阻塞是真实的——但只因为<b>模型自己显式调用了
+    <code>await_agents</code></b>（系统提示词的建议："等待期间若无事可做，就调用 <code>await_agents</code>"）。
+    <b>这条路径下，结果作为 <code>await_agents</code> / <code>get_agent_result</code> 的工具返回结果直接回来，
+    收件箱里的 <code>&lt;swarm-update&gt;</code> 便条<b>从头到尾没被取用</b></b>，最后在任务结束时被丢弃。
+    这就是为什么这种对话的 debug 面板里<b>根本没有</b> <code>&lt;swarm-update&gt;</code> 的 <code>user</code> 消息。</p>
+    <div class="legend">
+      <span><span class="dot" style="background:#15324f"></span> 主智能体的工作</span>
+      <span><span class="dot" style="background:#2a1f3d"></span> 子智能体的工作（后台线程）</span>
+      <span><span class="dot" style="background:#3a341d"></span> 显式的阻塞等待</span>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <h4>⚠️ 这一节之前讲错了什么</h4>
+    <p style="margin:0">本文档早先的版本声称"结果总是经由收件箱、在下一回合注入"。
+    这<b>只对路径 A 成立</b>。<code>await_agents</code> 和 <code>get_agent_result</code>
+    <b>不消费收件箱</b>——它们从 <code>MasterOrchestrator</code> 的 <code>_results_by_id</code> 直接读结果并作为工具返回值返回。
+    收件箱的入队（<code>_on_agent_complete_callback</code>）照常发生，但若没有"下一回合"去 drain，那些便条就只是躺在队列里，
+    直到任务收尾被 <code>clear()</code> 丢弃。实测见 <a href="#realcase">第 7 节</a>。</p>
+  </div>
+
+  <p>真正发生阻塞时，它不过是 <code>await_agents</code> 内部的一个条件变量等待
+  （<span class="tag file">lib/swarm/master.py</span>）：</p>
+
+<pre><code>while True:
+    with self._lock:
+        done_now = set(self._results_by_id.keys())
+        if mode == 'any' and (to_wait &amp; done_now):  break
+        if mode == 'all' and to_wait.issubset(done_now): break
+    remaining = deadline - time.monotonic()
+    if remaining &lt;= 0:
+        timed_out = True; break
+    self._completion_event.clear()
+    self._completion_event.wait(timeout=min(remaining, 2.0))   # ← 唯一真正的"等待"</code></pre>
+
+  <div class="callout warn">
+    <h4>⚠️ 如何判断你遇到的是哪个场景</h4>
+    <p style="margin:0">看对话记录 / 日志：
+    若 spawn 之后紧跟着 <code>await_agents</code> / <code>get_agent_result</code> 工具调用 → <b>场景 B</b>（结果走工具返回，
+    收件箱被绕过，debug 面板看不到 <code>&lt;swarm-update&gt;</code>）。
+    若中间看到的是其他工具（grep、read 等），且<b>之后还有 LLM 回合</b> → <b>场景 A</b>（结果经由收件箱注入，
+    那一回合的 <code>请求前</code> 快照里能看到一条 <code>&lt;swarm-update&gt;</code> 的 <code>user</code> 消息）。
+    经验上，当 swarm <b>就是整个任务</b>时，模型几乎总会选场景 B，所以你很少见到收件箱注入。</p>
+  </div>
+
+  <!-- ───────────────────────────── -->
+  <h2 id="two-paths">6. ⭐ 关键：结果回传有<b>两条</b>不同的路径</h2>
+
+  <p>这是把一切串起来的核心。子智能体的产出如何回到主智能体的上下文，取决于<b>主智能体 spawn 之后做了什么</b>：</p>
+
+  <table>
+    <tr><th></th><th>路径 A —— 收件箱注入</th><th>路径 B —— 工具返回值</th></tr>
+    <tr><td><b>触发条件</b></td>
+      <td>spawn 后主智能体<b>继续调用别的工具</b>（grep/read/…），而且<b>之后还有 LLM 回合</b></td>
+      <td>主智能体调用 <code>await_agents</code> 或 <code>get_agent_result</code></td></tr>
+    <tr><td><b>结果载体</b></td>
+      <td>一条 <code>role:"user"</code> 消息，内容是 <code>&lt;swarm-update&gt;</code> XML</td>
+      <td><code>await_agents</code> / <code>get_agent_result</code> 的 <code>tool</code> 返回结果</td></tr>
+    <tr><td><b>是否消费收件箱</b></td>
+      <td>✅ 是（<code>drain()</code> 在每回合 LLM 调用前执行）</td>
+      <td>❌ 否——直接从 <code>_results_by_id</code> 读，收件箱被<b>绕过</b></td></tr>
+    <tr><td><b>是否阻塞主智能体</b></td>
+      <td>否（真正的并行）</td>
+      <td><code>await_agents</code> 会阻塞 ≤120s；<code>get_agent_result</code> 不阻塞</td></tr>
+    <tr><td><b>debug 面板可见性</b></td>
+      <td>那一回合的 <code>请求前</code> 快照里能看到一条 <code>&lt;swarm-update&gt;</code> 的 USER 消息
+      （没有特殊标签，外观和普通用户消息一样）</td>
+      <td>看不到 <code>&lt;swarm-update&gt;</code>；只看到 <code>await_agents</code> / <code>get_agent_result</code>
+      这些 ASSISTANT 工具调用和它们的 TOOL 返回</td></tr>
+    <tr><td><b>收件箱里的便条结局</b></td>
+      <td>被取用并注入</td>
+      <td>无人取用，任务结束时 <code>clear()</code> 丢弃，日志记 <code>cleared N unread item(s)</code></td></tr>
+  </table>
+
+  <div class="callout key">
+    <h4>✅ 为什么你在前端 / debug 面板从没见过收件箱</h4>
+    <p style="margin:0 0 8px"><b>1. "收件箱"本身没有 UI。</b>它只是 <code>lib/agent_inbox.py</code> 里的一个内存队列，是<b>给模型看的</b>，
+    不是给人看的——刻意没有任何面板、标签或图标。</p>
+    <p style="margin:0 0 8px"><b>2. 即便走了路径 A，注入物也只是一条普通 <code>user</code> 消息。</b>按设计它<b>不带</b>
+    <code>_isMeta</code> 标记、<b>不裹</b> <code>&lt;system-reminder&gt;</code>，所以在 debug 面板里它就是一条 USER 气泡，
+    内容碰巧是 <code>&lt;swarm-update&gt;…&lt;/swarm-update&gt;</code> 而已，没有"收件箱"字样。</p>
+    <p style="margin:0"><b>3. 而当 swarm 是整个任务时，模型几乎总走路径 B</b>（<code>await_agents</code>），于是收件箱被整体绕过——
+    这就是你"哪儿都没见过它"的真正原因。</p>
+  </div>
+
+  <!-- ───────────────────────────── -->
+  <h2 id="realcase">7. 实战案例：对话 <code>mpuxb6omxi1ti5</code> 的日志复盘</h2>
+
+  <p>这正是上面"为什么看不到收件箱"的活体证据。下面是从 <code>logs/app.log</code> 抽取的真实时间线
+  （Task <code>21a7950b</code>，模型 <code>claude-opus-4.8</code>）：</p>
+
+<pre><code>16:06:48  R6: spawn_agents → 启动 3 个 agent（reviewer + 2×coder）   [工具 #11/#12]
+16:06:54  R7: await_agents(mode='all', timeout=120)                  [工具 #13]
+          ⏳ 主任务线程在此阻塞 93.1s
+16:07:43      AGENT_COMPLETE coder-08ec3f86   (54.3s)  ┐
+16:07:57      AGENT_COMPLETE reviewer-65bf6567 (69.0s)  │ 三条 &lt;swarm-update&gt;
+16:08:27      AGENT_COMPLETE coder-d5eb8a36   (98.5s)  ┘ 依次入队收件箱
+16:08:27  Driver done → await_agents 返回（result_len=2185）         [工具 #14]
+16:08:35  get_agent_result ×3（取完整正文 5557/…/… 字）   [工具 #15/#16/#17/#18]
+16:09:16  R7 输出最终答案，finish_reason=stop → 任务结束
+16:09:16  [Inbox] cleared 3 unread item(s) on task end   ← ★ 决定性证据</code></pre>
+
+  <div class="callout">
+    <h4>这张时间线说明了什么</h4>
+    <ul style="margin:0">
+      <li><b>"为什么 agent 跑完后总有个 await"：</b>其实 <code>await_agents</code> 是在 spawn 之后<b>立刻</b>调用的，
+      它<b>就是那个在等</b>的动作；在记录里它夹在 spawn 和结果之间，看着像"跑完才 await"。模型这么做是合理的——
+      整个任务就是这三个审计，spawn 完它没别的事可干，于是按系统提示词的建议去 <code>await_agents</code>。</li>
+      <li><b>三条 <code>&lt;swarm-update&gt;</code> 确实被入队了</b>（<code>_on_agent_complete_callback</code> 照常跑），
+      但结果是通过 <code>await_agents</code> + 3×<code>get_agent_result</code> 的<b>工具返回</b>拿到的。</li>
+      <li><b>R7 直接 <code>finish_reason=stop</code>，没有 R8。</b>收件箱的 drain 钩子只在"新回合的 LLM 调用前"触发——
+      既然没有下一回合，drain 从未执行。</li>
+      <li>于是那 3 条便条原封不动躺到任务收尾，被 <code>clear()</code> 丢弃：日志里清清楚楚写着
+      <code>cleared 3 unread item(s) on task end</code>。<b>这就是 debug 面板里没有任何 <code>&lt;swarm-update&gt;</code> 的根因。</b></li>
+    </ul>
+  </div>
+
+  <p class="small muted">想自己验证：在 <code>logs/app.log</code> 里
+  grep <code>injected N swarm-update item(s) as 1 user message at round</code>（路径 A 发生时才有这行）
+  与 <code>cleared N unread item(s) on task end</code>（路径 B / 提前结束时出现这行）。</p>
+
+  <!-- ───────────────────────────── -->
+  <h2 id="frontend">8. 前端行为</h2>
+
+  <p>浏览器从不读取收件箱——它渲染的是任务进行中推送的 <b>UI 事件</b>。相关处理逻辑位于
+  <span class="tag file">static/js/ui/sse_pipeline.js</span>。</p>
+
+  <h3>UI 监听的事件类型</h3>
+  <table>
+    <tr><th>事件</th><th>对 swarm 面板的影响</th></tr>
+    <tr><td><code>swarm_phase</code> <span class="muted small">(spawning / spawn_more / complete)</span></td>
+      <td>创建或收尾 swarm 面板；用各 agent 的目标填充卡片；设置最终的"✅ Swarm 完成 —— N 个 agent，T tokens"汇总行。</td></tr>
+    <tr><td><code>swarm_agent_complete</code></td>
+      <td>把某张 agent 卡片标记为完成，并展示它的耗时、token 数和 200 字预览。</td></tr>
+    <tr><td><code>swarm_agent_phase</code> / <code>_progress</code> / <code>_tool_call</code> / <code>_error</code></td>
+      <td>逐 agent 的实时状态更新（如"🔄 正在重试 [coder]…"、当前工具、错误信息）。</td></tr>
+  </table>
+
+  <h3>"回合漂移"难题——以及 UI 如何解决</h3>
+  <div class="callout">
+    <p style="margin:0 0 8px">由于 swarm 是<b>异步</b>的，一个 agent 可能在<i>晚于</i>启动它的那个回合才完成。届时原来那条
+    assistant 消息已经"漂移"（滚到了对话历史里）。朴素的 UI 会把完成事件挂到错误的消息上——甚至丢弃它。</p>
+    <p style="margin:0">流水线的做法是：给启动 swarm 的那条 assistant 消息打上 <code>_swarmRoundNum</code> 标记，
+    并给它的工具回合面板打上 <code>_swarmActive</code> / <code>_asyncRunning</code> 标记。之后到来的
+    <code>swarm_agent_*</code> 事件会<b>向前回溯</b>历史消息，找到拥有该 <code>agentId</code> 的那个面板并就地更新——
+    因此即便完成事件在几个回合后才到达，也总能落到正确的、原始的 swarm 面板上。</p>
+  </div>
+
+  <h3>用户实际看到的</h3>
+  <ul>
+    <li>在工具流的时间线上、spawn 发生的位置，出现一块<b>内嵌的 swarm 面板</b>——一排 agent 卡片，每张展示角色 + 目标。</li>
+    <li>卡片实时更新：转圈 → ✅/❌，并带上耗时与简短预览。点击卡片可展开它的完整输出。</li>
+    <li>底部有一行汇总：agent 数量、失败数、总 token、总耗时。</li>
+    <li>关键在于：尽管 agent 异步完成，面板始终锚定在它原始的对话位置——从而保持工具的时间先后顺序。</li>
+  </ul>
+
+  <!-- ───────────────────────────── -->
+  <h2 id="files">9. 文件地图——去哪里看代码</h2>
+  <table>
+    <tr><th>关注点</th><th>文件</th></tr>
+    <tr><td>工具定义 + 子智能体黑名单</td><td><code>lib/swarm/tools.py</code></td></tr>
+    <tr><td>spawn / await / get_result 处理器 + 会话注册表</td><td><code>lib/swarm/integration.py</code></td></tr>
+    <tr><td>后台驱动线程、完成回调、阻塞式 await</td><td><code>lib/swarm/master.py</code></td></tr>
+    <tr><td>并行调度器（max_parallel、depends_on、重试）</td><td><code>lib/swarm/scheduler.py</code></td></tr>
+    <tr><td>逐个子智能体的 LLM 会话</td><td><code>lib/swarm/agent.py</code></td></tr>
+    <tr><td>面向模型的收件箱 + <code>format_swarm_update</code></td><td><code>lib/agent_inbox.py</code></td></tr>
+    <tr><td>收件箱清空 + 注入 + 任务结束清理</td><td><code>lib/tasks_pkg/orchestrator.py</code></td></tr>
+    <tr><td>系统提示词中的 <code>&lt;parallel_execution&gt;</code> 指引</td><td><code>lib/tasks_pkg/system_context.py</code></td></tr>
+    <tr><td>前端 swarm 面板渲染</td><td><code>static/js/ui/sse_pipeline.js</code></td></tr>
+  </table>
+
+  <p class="small muted" style="margin-top:40px">本文基于对代码库与真实日志（对话 <code>mpuxb6omxi1ti5</code>）的直接阅读生成。
+  核心不变式：<b>spawn 是发射后不管；结果回传有两条路——主智能体继续干活则走收件箱注入（路径 A），
+  主智能体主动 await/get_result 则走工具返回、绕过收件箱（路径 B）；唯一的阻塞是一次显式、可选的
+  <code>await_agents</code> 调用。当 swarm 即整个任务时，模型几乎总走路径 B，这就是收件箱在前端不可见的原因。</b></p>
+
+</div>
+</body>
+</html>

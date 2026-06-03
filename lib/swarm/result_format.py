@@ -125,7 +125,7 @@ def format_sub_results_for_master(
                 len(results), max_chars_per_result)
     parts: list[str] = []
     for i, (spec, result) in enumerate(results):
-        status_icon = '✅' if result.status == SubAgentStatus.COMPLETED.value else '❌'
+        status_icon = '[OK]' if result.status == SubAgentStatus.COMPLETED.value else '[FAILED]'
         retried = f' (retried {result.retry_count}x)' if result.retry_count > 0 else ''
 
         # Use final_answer preferentially, fall back to answer

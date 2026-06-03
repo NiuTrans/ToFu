@@ -33,150 +33,21 @@ Everything runs on your machine. Your data never leaves your infrastructure. One
 
 ## Quick Start
 
-### One-Command Install (recommended)
+Pick the row that matches your OS. Each one ends with a running server on **http://localhost:15000**.
 
-**Linux / macOS:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh | bash
-```
+| OS | What to do |
+|---|---|
+| **Windows** | Download **`Tofu-Setup-x.y.z-win64.exe`** from the [latest release](https://github.com/rangehow/ToFu/releases/latest) and double-click. |
+| **Linux / macOS** | `curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh \| bash` |
+| **Docker** | `git clone https://github.com/rangehow/ToFu.git && cd ToFu && docker compose up -d` |
 
-**Windows (PowerShell):**
-```powershell
-irm https://raw.githubusercontent.com/rangehow/ToFu/main/install.ps1 | iex
-```
+That's it. Each path handles conda/runtime, dependencies, the database,
+the browser engine, and starts the server — no flags, no follow-up
+steps.
 
-**Or with Python directly** (any OS):
-```bash
-git clone https://github.com/rangehow/ToFu.git && cd ToFu
-python install.py
-```
-
-This creates a dedicated conda environment, installs all dependencies from
-conda-forge, and starts the server. Open **http://localhost:15000** when it's
-ready.
-
-> 🐍 **Conda-based installer.** The installer uses **conda-forge exclusively** —
-> it auto-installs [Miniforge](https://github.com/conda-forge/miniforge) if no
-> conda is present, updates conda first (outdated versions cause solver hangs),
-> installs the `libmamba` solver, then creates a `tofu` env with Python 3.12
-> and all dependencies (including `lxml`, `playwright`, `postgresql`). This
-> avoids the GLIBC-mismatch trap that bites pip's manylinux wheels on older
-> hosts (CentOS 7, glibc 2.17).
-
-> 💾 **Database: zero-config.** Tofu uses **SQLite** by default (built into
-> Python). If `postgresql` is available (the installer fetches it from
-> conda-forge too), Tofu auto-bootstraps a rootless userspace PG instance for
-> better concurrency with 100+ users. Force SQLite with
-> `TOFU_DB_BACKEND=sqlite` (legacy `CHATUI_DB_BACKEND=sqlite` still works).
-
-```bash
-# Pre-configure API key and port
-python install.py --api-key sk-xxx --port 8080
-
-# Install only, don't launch
-python install.py --no-launch
-
-# Custom env name / Python version
-python install.py --env tofu --python 3.12
-
-# Skip conda self-update (not recommended)
-python install.py --no-update-conda
-
-# Destructive: remove the existing env and rebuild from scratch
-python install.py --reset-env
-
-# Use Docker instead
-python install.py --docker
-```
-
-### Docker (zero dependencies)
-
-```bash
-git clone https://github.com/rangehow/ToFu.git && cd ToFu
-docker compose up -d
-```
-
-Open **http://localhost:15000** — done. All data persists in Docker volumes.
-
-<details>
-<summary><strong>Manual Install</strong> (for full control)</summary>
-
-**Prerequisites:** A recent `conda` (Miniforge strongly recommended). Nothing
-else is needed — every runtime dependency (ripgrep, fd-find, PostgreSQL,
-Chromium shared libs, lxml, trafilatura, playwright, …) is installed from
-conda-forge so you never need `sudo` or system packages.
-
-> 💡 **Why conda-forge for everything?** On older Linux hosts (CentOS 7 /
-> glibc 2.17), pip's manylinux wheels for `lxml` et al. crash with
-> `GLIBC_2.25 not found` at import time. conda-forge builds link against an
-> older sysroot glibc and work everywhere.
-
-```bash
-# 1. Install Miniforge if you don't have conda yet
-wget -O /tmp/Miniforge3.sh "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
-bash /tmp/Miniforge3.sh -b -p ~/miniforge3
-~/miniforge3/bin/conda init bash && source ~/.bashrc
-# (macOS: replace Linux-x86_64 with MacOSX-arm64 or MacOSX-x86_64.
-#  Other platforms: see https://github.com/conda-forge/miniforge/releases)
-
-# 2. Update conda FIRST — outdated conda is the #1 cause of solver hangs
-conda update -n base -c conda-forge -y conda
-conda install -n base -c conda-forge -y conda-libmamba-solver
-conda config --set solver libmamba
-
-# 3. Clone the repo
-git clone https://github.com/rangehow/ToFu.git && cd ToFu
-
-# 4. Create the env
-conda create -n tofu -c conda-forge -y python=3.12
-conda activate tofu
-
-# 5. Install ALL dependencies from conda-forge (NO pip)
-conda install -c conda-forge -y \
-    flask 'flask-compress>=1.14' 'requests>=2.31' psutil \
-    'trafilatura>=1.6' 'playwright>=1.40' pillow python-pptx 'lxml>=4.9' 'mcp>=1.0' \
-    ripgrep fd-find \
-    'postgresql>=16' 'psycopg2>=2.9'
-
-# 6. Playwright Chromium (optional, for JS-rendered page fetching)
-# On Linux also install shared libs (rootless, no sudo):
-conda install -c conda-forge -y \
-    atk-1.0 at-spi2-atk at-spi2-core alsa-lib \
-    xorg-libxcomposite xorg-libxdamage xorg-libxfixes xorg-libxrandr \
-    libxkbcommon nspr nss mesa-libgbm-cos7-x86_64
-python -m playwright install chromium
-
-# 7. Sanity check — if this prints a version without GLIBC errors, you're set
-python -c "import lxml.etree, trafilatura; print('OK', lxml.__version__)"
-
-# 8. Run
-python server.py
-```
-
-> ⚠️ **Never mix pip and conda for these packages.** If a prior run left a
-> pip-installed `lxml` wheel in your env, conda will no-op (version already
-> satisfied) and the broken wheel keeps crashing. If that happens:
->
-> ```bash
-> pip uninstall -y lxml flask flask-compress requests psutil trafilatura \
->                  playwright pillow python-pptx mcp
-> conda install -c conda-forge -y --force-reinstall <same package list>
-> ```
->
-> The one-command `install.sh` / `install.py` does this automatically.
-
-</details>
-
-> **Database auto-detection:** On first launch, Tofu tries PostgreSQL first
-> (for best concurrency). If PG isn't available, it falls back to **SQLite**
-> automatically — no action needed. PostgreSQL runs as a local userspace
-> process (no `sudo`, no system service). Set `TOFU_DB_BACKEND=sqlite` to
-> force SQLite (legacy `CHATUI_DB_BACKEND=sqlite` still works).
-
-> **Missing packages?** If any dependency is missing, `server.py` auto-
-> delegates to `bootstrap.py`, which first tries `conda install -c conda-forge`
-> when running inside a conda env (avoiding the GLIBC trap), and falls back to
-> LLM-guided `pip install` otherwise.
+> Need to pre-set an API key, change the port, or recover from a failed
+> install? See **[docs/INSTALL.md](docs/INSTALL.md)** for all flags and
+> troubleshooting recipes.
 
 ---
 
@@ -202,6 +73,57 @@ export LLM_API_KEY=sk-xxx
 export LLM_BASE_URL=https://api.openai.com/v1
 export LLM_MODEL=gpt-4o
 ```
+
+---
+
+## Headless API
+
+Everything you can do in the UI is also exposed as a documented HTTP API, so you can drive Tofu from scripts, agents, or your own apps without rendering the web UI.
+
+**Mounts:**
+
+| Prefix | Surface |
+|---|---|
+| `/api/v1/*` | Tofu native — full feature parity with the UI (chat, conversations, tasks, agents, capabilities, keys, usage, billing, …) |
+| `/v1/...` | OpenAI compat — `chat/completions`, `models`, `embeddings` (drop-in for the OpenAI SDK) |
+| `/v1/messages` | Anthropic compat — Messages API (drop-in for the Anthropic SDK) |
+| `/metrics` | Prometheus exposition (admin-scoped) |
+
+**Self-description:** `/api/openapi.json` and `/api/openapi.yaml` (OpenAPI 3.1), Swagger UI at `/api/docs`, ReDoc at `/api/redoc`.
+
+**Manage keys** in **Settings → 🔑 API Keys**: mint, scope (`chat`/`admin`/etc.), set per-key RPM and TPD limits, revoke, view a 30-day usage chart per key. Idempotency-Key is supported on POSTs (24-hour cache, salted by principal). Standard rate-limit headers (`X-RateLimit-*`, `Retry-After`) are returned on every response.
+
+**Client SDKs** ship in [`clients/`](clients/):
+
+```bash
+# Python — sync `Tofu` class + `tofu` CLI
+pip install -e clients/python
+export TOFU_API_KEY=tofu_admin_xxx TOFU_BASE_URL=http://localhost:15000
+tofu chat "hello"
+
+# TypeScript — Node 18+, browsers, Cloudflare Workers, Vercel Edge, Deno, Bun
+npm install ./clients/typescript
+```
+
+Or use any OpenAI / Anthropic SDK directly by pointing it at your Tofu base URL with your `tofu_admin_*` key as the API key.
+
+---
+
+## Multi-Tenant Relay (paid mode)
+
+When `auth_mode=multi-user`, Tofu turns into a **paid AI relay station** — one self-hosted instance, many users, each with their own wallet, billed against your upstream LLM costs.
+
+**What lights up automatically when you flip the mode** (no-op in `open`/`private`):
+
+- **Per-user wallets** in micro-credits (1 credit = 1,000,000 µ ≈ US $0.001), backed by an append-only ledger as the source of truth — no floats, no rounding bugs.
+- **Atomic reserve / settle** on every chat request — pre-flight 402 on insufficient funds, post-flight settlement of actual token usage; a background janitor sweeps stale reservations every 30 minutes.
+- **Customer pages** — `/login`, `/signup`, and `/dashboard` (Wallet, Keys, Usage, Docs, Account). Signup gating + welcome credit in `data/config/relay.json`.
+- **Payments** — Stripe webhooks and Alipay async-notify, idempotent on `(provider, provider_id)`. Configure credentials in `data/config/payments.json`.
+- **Redeem codes** — generate batches, hand them to users, redeem to wallet.
+- **Pricing table** — per-model unit prices (input/output/cache) hot-reloaded from `data/config/pricing.json`, with family-prefix fallback and an admin-tunable margin.
+- **Admin Settings tabs** — Users, Pricing, Redeem Codes, Payments — visible only to keys with the `admin` scope under multi-user mode.
+
+Everything is implemented in `lib/billing/` and `routes/api_v1/billing.py`; switch back to `open` or `private` and the tables stay empty, the customer pages stop being served, and the gate behaves as in the previous section.
 
 ---
 
@@ -300,7 +222,7 @@ Point Tofu at any codebase and it becomes a coding assistant that can read, sear
 
 **Multi-root projects** — add multiple directories as roots (e.g. frontend + backend repos). The assistant resolves namespaced paths across all roots.
 
-**Smart token management** — the `content_ref` mechanism lets the assistant write a previous tool result to a file without re-generating it, and `emit_to_user` ends a turn by pointing you to existing tool output instead of repeating it. This saves significant tokens on large files.
+**Smart token management** — the `content_ref` mechanism lets the assistant write a previous tool result to a file without re-generating it. This saves significant tokens on large files.
 
 ---
 
@@ -441,15 +363,9 @@ common in ML / theoretical CS papers. For those, Tofu can route through
 model that uses TableFormer for tables and an internal equation model for math,
 producing much cleaner Markdown.
 
-**Trade-off:** Docling pulls in PyTorch + ~2 GB of model weights, so it's **opt-in**.
+**Trade-off:** Docling pulls in PyTorch + ~2 GB of model weights, so it's **opt-in**:
 
 ```bash
-# At install time
-./install.sh --with-docling
-# Or:
-python install.py --with-docling
-
-# Or after the fact:
 pip install docling --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
@@ -594,8 +510,10 @@ The `.env.example` file documents all supported variables. Key ones:
 | `LLM_BASE_URL` | API endpoint | `https://api.openai.com/v1` |
 | `LLM_MODEL` | Default model | `gpt-4o` |
 | `PORT` | Server port | `15000` |
-| `BIND_HOST` | Bind address | `0.0.0.0` |
-| `TUNNEL_TOKEN` | Auth token for public tunnel access | *(disabled)* |
+| `BIND_HOST` | Bind address | `127.0.0.1` (loopback) |
+| `TOFU_AUTH_MODE` | Force auth mode and lock the UI: `open` / `private` / `multi-user` | *(file-driven)* |
+| `TOFU_AUTO_KEY` | Set to `0` to skip first-boot admin-key bootstrap | `1` |
+| `TUNNEL_TOKEN` | **DEPRECATED** back-compat shim — use the API-keys system instead | *(disabled)* |
 | `TRADING_ENABLED` | Enable trading module (`1`/`0`) | `0` |
 | `PDF_TEXT_MODE` | Default PDF text-extract strategy: `rich` (pymupdf4llm, default), `structured` (Docling; requires `pip install docling`), `fast` | `rich` |
 | `PDF_VLM_BATCH_PAGES` | Pages per VLM call when VLM parsing is used (1–16) | `4` |
@@ -614,7 +532,7 @@ The `.env.example` file documents all supported variables. Key ones:
 │
 ├── lib/                       Core libraries
 │   ├── agent_backends/        CLI backend switching (builtin/Claude Code/Codex)
-│   ├── llm_client.py          LLM API client (streaming, retry)
+│   ├── llm/                   LLM API client package (build_body / stream / cache / diagnostics)
 │   ├── llm_dispatch/          Multi-key multi-model smart dispatcher
 │   ├── database/              Dual backend — SQLite default, PostgreSQL auto-bootstrap
 │   ├── tasks_pkg/             Task orchestration & context compaction
@@ -637,7 +555,11 @@ The `.env.example` file documents all supported variables. Key ones:
 │   ├── desktop_agent.py       Desktop automation agent
 │   └── ...
 │
-├── routes/                    Flask Blueprints (21 API modules)
+├── routes/                    Flask Blueprints (28+ modules) + routes/api_v1/ (headless API)
+├── lib/billing/               Multi-tenant relay billing (wallet, ledger, pricing, payments)
+├── lib/oauth/                 OAuth flows (Claude, Codex, PKCE, token store)
+├── lib/optimizer/             Nightly self-tuning loop (analyzer → proposer → applier)
+├── clients/                   Headless API SDKs (python/, typescript/)
 ├── static/                    CSS, JS, icons
 ├── browser_extension/         Chrome extension (Manifest V3)
 ├── tests/                     Test suite (unit, API, E2E)
@@ -676,12 +598,29 @@ python -m pytest tests/test_visual_e2e.py
 
 ---
 
-## Security
+## Auth Modes & Security
 
-- **No secrets in source** — all credentials loaded from environment variables or Settings UI
-- **Single-user mode** — no multi-tenant auth; deploy behind a VPN or reverse proxy for production
-- **Tool execution** — the assistant can run shell commands and edit files; dangerous patterns are blocked, but use with appropriate caution
-- **Desktop agent** — requires explicit `--allow-write` / `--allow-exec` flags
+Tofu has a tri-state auth model, persisted at `data/config/auth.json` and switchable from **Settings → 🔑 API Keys** (top of the tab):
+
+| Mode | Gate | Use case |
+|---|---|---|
+| `open` (DEFAULT) | Pass-through; synthetic local-admin context | Personal install, frontend-only, loopback-bound |
+| `private` | Bearer / `x-api-key` / cookie / `?token=` required; HTML hint page on `/` | Single multi-device operator |
+| `multi-user` | Same gate as `private`, plus per-user wallets + signup pages | Paid relay station serving many users |
+
+**Default bind is `127.0.0.1`** — the API is not reachable from the LAN unless you pass `--host 0.0.0.0` or `BIND_HOST=0.0.0.0`. Combined with open-by-default mode, personal use just works locally without exposure.
+
+**First-boot bootstrap** (private/multi-user only) — when the api_keys store is empty and `TUNNEL_TOKEN` is unset, Tofu mints one `tofu_admin_<hex>` key on startup, prints the plaintext + a one-shot `?token=<...>` URL to stderr, and writes the plaintext to `data/config/.first_run_token` (chmod 0600). Disable with `TOFU_AUTO_KEY=0`.
+
+**Token transports** (priority): `Authorization: Bearer` → `x-api-key` (Anthropic SDK) → `tofu_session` HttpOnly cookie → `?token=` query string (consumed + stripped → cookie, private mode only).
+
+**`TOFU_AUTH_MODE=<mode>`** environment variable locks the mode — the UI radios are disabled and a 409 `error_kind=env_locked` is returned on `PUT /api/v1/auth/mode`.
+
+**Other security notes:**
+- No secrets in source — all credentials loaded from environment variables or Settings UI.
+- Tool execution — the assistant can run shell commands and edit files; dangerous patterns are blocked, but use with appropriate caution.
+- Desktop agent — requires explicit `--allow-write` / `--allow-exec` flags.
+- `TUNNEL_TOKEN` is a deprecated back-compat shim and prints a warning at boot — migrate to the API-keys system.
 
 ---
 

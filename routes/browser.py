@@ -1,14 +1,17 @@
 """routes/browser.py — Browser Extension Bridge API."""
 
+import hmac
 import io
 import os
-import time
+import threading
 import zipfile
 
 from flask import Blueprint, jsonify, request, send_file
 
 from lib.env_compat import getenv_compat
-from lib.log import get_logger
+from lib.log import audit_log, get_logger
+from lib.api_response import api_bad_request, api_not_found, api_ok
+from lib.request_parser import parse_body
 
 logger = get_logger(__name__)
 
@@ -17,56 +20,83 @@ browser_bp = Blueprint('browser', __name__)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+# ── One-time startup audit when bridge auth is configured ──
+# Emits a single audit_log entry the first time enforcement runs, so
+# operators have a trace that the §10.4-gated change is in effect.
+_AUDIT_LOCK = threading.Lock()
+_AUDIT_LOGGED = False
+
+
+def _maybe_audit_enforcement_on() -> None:
+    global _AUDIT_LOGGED
+    if _AUDIT_LOGGED:
+        return
+    with _AUDIT_LOCK:
+        if _AUDIT_LOGGED:
+            return
+        _AUDIT_LOGGED = True
+        try:
+            audit_log('config_change',
+                      param='bridge_auth_enforcement',
+                      old='permissive (Phase A)',
+                      new='enforcing (Phase C)',
+                      reason='TOFU_BRIDGE_SECRET configured — bridge endpoints '
+                             'now reject requests without a matching X-Bridge-Secret',
+                      approved_by='user')
+        except Exception as e:
+            logger.debug('[Browser] startup audit_log failed: %s', e)
+
+
 def _check_bridge_auth(kind: str = 'browser') -> bool:
     """Verify the optional X-Bridge-Secret header.
 
-    Currently a **no-op guard**: it inspects the header and emits an audit
-    trail when a mismatch would occur, but does NOT yet reject the request.
-    The full rejection path lands in Phase C (SECURITY_AUDIT_REPORT A3/A4).
-    This pre-wires the audit entry so Phase C only has to flip the return
-    path from logging to ``abort(401)``.
+    Behaviour:
+      * If TOFU_BRIDGE_SECRET is unset →
+        return True (auth disabled, current LAN-only default).
+      * If set and the header matches (timing-safe compare) → return True.
+      * If set and the header is missing or wrong → emit an audit entry
+        and return False. Callers must abort(401) when this returns False.
 
-    Returns True when auth check is disabled or passes; False would mean
-    fail-closed once Phase C lands.
+    Reads the env var at call time rather than module load so Settings UI
+    hot-reload works the same way as proxy / model config.
     """
-    expected = (getenv_compat('TOFU_BRIDGE_SECRET', 'CHATUI_BRIDGE_SECRET') or '').strip()
+    expected = (getenv_compat('TOFU_BRIDGE_SECRET') or '').strip()
     if not expected:
-        return True  # not configured — skip (current behaviour)
+        return True
+    _maybe_audit_enforcement_on()
     provided = request.headers.get('X-Bridge-Secret', '')
-    if provided == expected:
+    if provided and hmac.compare_digest(provided, expected):
         return True
     try:
-        from lib.log import audit_log as _audit
-        _audit('bridge_auth_fail',
-               kind=kind,
-               path=request.path,
-               ip=request.remote_addr,
-               has_header=bool(provided),
-               ua=(request.user_agent.string or '')[:120])
+        audit_log('bridge_auth_fail',
+                  kind=kind,
+                  path=request.path,
+                  ip=request.remote_addr,
+                  has_header=bool(provided),
+                  ua=(request.user_agent.string or '')[:120])
     except Exception as _aerr:
         logger.debug('[Browser] audit_log bridge_auth_fail failed: %s', _aerr)
-    logger.warning('[Browser] bridge auth mismatch from %s on %s (Phase A: logged, not rejected)',
-                   request.remote_addr, request.path)
-    return True  # Phase A: permissive; flip to False in Phase C
+    logger.warning('[Browser] bridge auth rejected from %s on %s (header=%s)',
+                   request.remote_addr, request.path, 'present' if provided else 'missing')
+    return False
 
 
-@browser_bp.after_request
-def _browser_cors(response):
-    """Add CORS headers for /api/browser/* so Chrome Extension can reach us."""
-    if request.path.startswith('/api/browser/'):
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Accept'
-    return response
+def _bridge_unauthorized():
+    """Return a uniform 401 JSON envelope for bridge auth failures."""
+    return jsonify({
+        'error': 'bridge_auth_required',
+        'hint': 'set X-Bridge-Secret header to match TOFU_BRIDGE_SECRET',
+    }), 401
 
 
 @browser_bp.route('/api/browser/poll', methods=['POST', 'OPTIONS'])
 def browser_poll():
     if request.method == 'OPTIONS':
         return '', 204
-    _check_bridge_auth('browser')
+    if not _check_bridge_auth('browser'):
+        return _bridge_unauthorized()
     from lib.browser import mark_poll, resolve_batch, wait_for_commands
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     client_id = data.get('clientId') or None
     mark_poll(client_id)
     results = data.get('results', [])
@@ -90,6 +120,8 @@ def browser_get_commands():
     """Legacy GET commands endpoint."""
     if request.method == 'OPTIONS':
         return '', 204
+    if not _check_bridge_auth('browser'):
+        return _bridge_unauthorized()
     from lib.browser import mark_poll, wait_for_commands
     client_id = request.args.get('clientId') or None
     mark_poll(client_id)
@@ -102,11 +134,13 @@ def browser_post_result():
     """Legacy POST result endpoint."""
     if request.method == 'OPTIONS':
         return '', 204
-    data = request.get_json(silent=True) or {}
+    if not _check_bridge_auth('browser'):
+        return _bridge_unauthorized()
+    data = parse_body()
     cmd_id = data.get('id', '')
     if not cmd_id:
         logger.warning('[Browser] result POST missing command id')
-        return jsonify({'error': 'No command id'}), 400
+        return api_bad_request('No command id')
     from lib.browser import resolve_command
     has_error = data.get('error')
     if has_error:
@@ -114,61 +148,13 @@ def browser_post_result():
     ok = resolve_command(cmd_id, result=data.get('result'), error=has_error)
     if not ok:
         logger.warning('[Browser] result for cmd %s — command not found or expired', cmd_id[:8])
-        return jsonify({'error': 'Command not found or expired'}), 404
+        return api_not_found('Command not found or expired')
     logger.info('[Browser] result resolved for cmd %s', cmd_id[:8])
-    return jsonify({'ok': True})
-
-
-@browser_bp.route('/api/browser/status', methods=['GET'])
-def browser_status():
-    from lib.browser import _commands, _commands_lock, _last_poll_time, get_connected_clients, is_extension_connected
-    connected = is_extension_connected()
-    clients = get_connected_clients()
-    with _commands_lock:
-        pending_count = sum(1 for c in _commands.values() if not c.get('picked_up'))
-        total_count = len(_commands)
-    return jsonify({
-        'connected': connected,
-        'lastPoll': _last_poll_time,
-        'secondsAgo': round(time.time() - _last_poll_time, 1) if _last_poll_time else None,
-        'clients': clients,
-        'pendingCommands': pending_count,
-        'totalCommands': total_count,
-    })
-
-
-@browser_bp.route('/api/browser/clients', methods=['GET'])
-def browser_clients():
-    """List all connected browser extension clients."""
-    from lib.browser import get_connected_clients
-    return jsonify({'clients': get_connected_clients()})
-
-
-@browser_bp.route('/api/browser/test', methods=['GET'])
-def browser_test():
-    from lib.browser import (
-        _commands,
-        _commands_lock,
-        _last_poll_time,
-        get_connected_clients,
-        is_extension_connected,
-        send_browser_command,
-    )
-    client_id = request.args.get('clientId') or None
-    status = {
-        'connected': is_extension_connected(client_id),
-        'lastPoll': round(time.time() - _last_poll_time, 1) if _last_poll_time else None,
-        'clients': get_connected_clients(),
-    }
-    with _commands_lock:
-        status['pendingCommands'] = len(_commands)
-        status['commandIds'] = list(_commands.keys())[:5]
-    if not is_extension_connected(client_id):
-        return jsonify({'status': status, 'error': 'Extension not connected'}), 503
-    result, error = send_browser_command('list_tabs', timeout=10, client_id=client_id)
-    if error:
-        return jsonify({'status': status, 'result': result, 'error': error}), 502
-    return jsonify({'status': status, 'result': result, 'error': error})
+    return api_ok()
+# Operator-facing status / clients / test endpoints moved to
+# routes/api_v1/browser.py. The remaining bridge-secret-authenticated
+# long-poll routes (poll/commands/result) and the binary download stay
+# here since they're not JSON REST verbs.
 
 
 @browser_bp.route('/api/browser/download', methods=['GET'])
@@ -176,7 +162,7 @@ def browser_download():
     ext_dir = os.path.join(BASE_DIR, 'browser_extension')
     if not os.path.isdir(ext_dir):
         logger.warning('[Browser] download requested but extension directory not found: %s', ext_dir)
-        return jsonify({'error': 'Extension directory not found'}), 404
+        return api_not_found('Extension directory not found')
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk(ext_dir):

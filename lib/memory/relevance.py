@@ -35,26 +35,54 @@ _STOP_WORDS = frozenset({
     'use', 'when', 'who', 'new', 'get', 'set', 'one', 'two', 'any',
 })
 
-# Regex: split on whitespace + common punctuation
+# Regex: split on whitespace + common punctuation (also treats every
+# non-Latin char — including CJK — as a delimiter; CJK is handled separately).
 _TOKENIZE_RE = re.compile(r'[^a-z0-9_]+')
+
+# Contiguous runs of CJK characters: unified ideographs + extension-A
+# (mirrors lib/text_lang._CJK_RE) plus Japanese kana, so Chinese/Japanese
+# memories are searchable. Latin tokenization above strips these out, so
+# without dedicated handling every CJK-only description was invisible to BM25.
+_CJK_RUN_RE = re.compile(r'[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+')
 
 
 # ═══════════════════════════════════════════════════════
 #  Tokenizer
 # ═══════════════════════════════════════════════════════
 
+def _cjk_tokens(text: str) -> list[str]:
+    """Tokenize CJK text into overlapping bigrams (segmenter-free).
+
+    Chinese/Japanese has no word boundaries, so a pure word-split yields
+    nothing. Overlapping character bigrams are the standard lightweight
+    substitute for a segmenter: ``中文海报`` → ``中文 文海 海报``. Applied
+    symmetrically to query and documents, this gives robust partial-match
+    recall. Isolated single CJK chars fall back to a unigram.
+    """
+    tokens: list[str] = []
+    for run in _CJK_RUN_RE.findall(text):
+        if len(run) == 1:
+            tokens.append(run)
+        else:
+            tokens.extend(run[i:i + 2] for i in range(len(run) - 1))
+    return tokens
+
+
 def _tokenize(text: str) -> list[str]:
     """Tokenize text into lowercase tokens, removing stop words.
 
     Splits on whitespace and punctuation. Also splits snake_case and
     kebab-case identifiers into sub-tokens (e.g. 'flask_migration' →
-    ['flask', 'migration']).
+    ['flask', 'migration']). CJK runs are tokenized into overlapping
+    bigrams via :func:`_cjk_tokens` so Chinese/Japanese is searchable.
     """
     lowered = text.lower()
     # Replace hyphens and underscores with spaces for sub-token splitting
     lowered = lowered.replace('-', ' ').replace('_', ' ')
     tokens = _TOKENIZE_RE.split(lowered)
-    return [t for t in tokens if t and t not in _STOP_WORDS and len(t) > 1]
+    out = [t for t in tokens if t and t not in _STOP_WORDS and len(t) > 1]
+    out.extend(_cjk_tokens(lowered))
+    return out
 
 
 # ═══════════════════════════════════════════════════════

@@ -28,14 +28,12 @@ if not hasattr(werkzeug, '__version__'):
     werkzeug.__version__ = '0.0.0'
 
 from flask import Flask  # noqa: E402
-from flask_compress import Compress  # noqa: E402
 
 from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg  # noqa: E402
 from routes.conversations import conversations_bp  # noqa: E402
 from routes.chat import chat_bp  # noqa: E402
 
 app = Flask(__name__)
-Compress(app)
 app.register_blueprint(conversations_bp)
 app.register_blueprint(chat_bp)
 client = app.test_client()

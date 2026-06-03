@@ -19,6 +19,7 @@ import json
 from typing import Any
 
 from lib.agent_backends.protocol import NormalizedEvent, NormalizedEventKind
+from lib.agent_core.events import EventType, build_event
 from lib.log import get_logger
 
 __all__ = ['SSEBridgeState', 'normalized_to_sse']
@@ -194,23 +195,23 @@ class SSEBridgeState:
         if kind == K.TEXT_DELTA:
             if not event.text:
                 return None
-            return {'type': 'delta', 'content': event.text}
+            return build_event(EventType.DELTA, content=event.text)
 
         elif kind == K.THINKING_DELTA:
             if not event.text:
                 return None
-            return {'type': 'delta', 'thinking': event.text}
+            return build_event(EventType.DELTA, thinking=event.text)
 
         elif kind == K.TOOL_START:
             return self._translate_tool_start(event)
 
         elif kind == K.TOOL_OUTPUT:
             rn = self._tool_id_to_round.get(event.tool_id, 0)
-            evt: dict[str, Any] = {
-                'type': 'tool_result',
-                'roundNum': rn,
-                'streaming': True,
-            }
+            evt: dict[str, Any] = build_event(
+                EventType.TOOL_RESULT,
+                roundNum=rn,
+                streaming=True,
+            )
             if event.tool_id:
                 evt['toolCallId'] = event.tool_id
             if event.tool_output:
@@ -221,35 +222,35 @@ class SSEBridgeState:
             return self._translate_tool_complete(event)
 
         elif kind == K.FILE_CHANGE:
-            return {
-                'type': 'tool_result',
-                'tool': 'file_change',
-                'result': json.dumps({
+            return build_event(
+                EventType.TOOL_RESULT,
+                tool='file_change',
+                result=json.dumps({
                     'path': event.file_path,
                     'action': event.file_action,
                 }, ensure_ascii=False),
-            }
+            )
 
         elif kind == K.PHASE:
-            return {
-                'type': 'phase',
-                'phase': event.phase_type or 'working',
-                'detail': event.text,
-            }
+            return build_event(
+                EventType.PHASE,
+                phase=event.phase_type or 'working',
+                detail=event.text,
+            )
 
         elif kind == K.APPROVAL_REQUEST:
             rn = self._tool_id_to_round.get(event.tool_id, 0)
-            return {
-                'type': 'approval_required',
-                'roundNum': rn,
-                'tool': event.tool_name,
-                'toolId': event.tool_id,
-                'args': event.tool_input,
-                'detail': event.text,
-            }
+            return build_event(
+                EventType.APPROVAL_REQUIRED,
+                roundNum=rn,
+                tool=event.tool_name,
+                toolId=event.tool_id,
+                args=event.tool_input,
+                detail=event.text,
+            )
 
         elif kind == K.DONE:
-            evt = {'type': 'done'}
+            evt = build_event(EventType.DONE)
             if event.finish_reason:
                 evt['finishReason'] = event.finish_reason
             if event.usage:
@@ -261,11 +262,11 @@ class SSEBridgeState:
             return evt
 
         elif kind == K.ERROR:
-            return {
-                'type': 'done',
-                'error': event.error_message or 'Unknown error',
-                'finishReason': 'error',
-            }
+            return build_event(
+                EventType.DONE,
+                error=event.error_message or 'Unknown error',
+                finishReason='error',
+            )
 
         # Unknown kind — skip
         return None
@@ -281,13 +282,13 @@ class SSEBridgeState:
 
         query = _build_tool_query(event.tool_name, event.tool_input)
 
-        evt: dict[str, Any] = {
-            'type': 'tool_start',
-            'roundNum': rn,
-            'query': query,
-            'toolName': event.tool_name or 'tool',
-            'toolCallId': tool_id,
-        }
+        evt: dict[str, Any] = build_event(
+            EventType.TOOL_START,
+            roundNum=rn,
+            query=query,
+            toolName=event.tool_name or 'tool',
+            toolCallId=tool_id,
+        )
         if event.tool_input:
             evt['toolArgs'] = json.dumps(event.tool_input, ensure_ascii=False)[:2000]
         return evt
@@ -310,14 +311,14 @@ class SSEBridgeState:
             tool_name, event.tool_output, event.tool_is_error,
         )
 
-        return {
-            'type': 'tool_result',
-            'roundNum': rn,
-            'toolCallId': tool_id,
-            'toolName': tool_name,
-            'results': results,
-            'isError': event.tool_is_error,
-        }
+        return build_event(
+            EventType.TOOL_RESULT,
+            roundNum=rn,
+            toolCallId=tool_id,
+            toolName=tool_name,
+            results=results,
+            isError=event.tool_is_error,
+        )
 
     def get_round_for_tool(self, tool_id: str) -> int:
         """Get the roundNum assigned to a tool_id, or 0 if unknown."""
@@ -346,18 +347,18 @@ def normalized_to_sse(event: NormalizedEvent) -> dict[str, Any] | None:
     if kind == K.TEXT_DELTA:
         if not event.text:
             return None
-        return {'type': 'delta', 'content': event.text}
+        return build_event(EventType.DELTA, content=event.text)
 
     elif kind == K.THINKING_DELTA:
         if not event.text:
             return None
-        return {'type': 'delta', 'thinking': event.text}
+        return build_event(EventType.DELTA, thinking=event.text)
 
     elif kind == K.TOOL_START:
-        evt: dict[str, Any] = {
-            'type': 'tool_start',
-            'tool': event.tool_name,
-        }
+        evt: dict[str, Any] = build_event(
+            EventType.TOOL_START,
+            tool=event.tool_name,
+        )
         if event.tool_id:
             evt['toolId'] = event.tool_id
         if event.tool_input:
@@ -365,10 +366,10 @@ def normalized_to_sse(event: NormalizedEvent) -> dict[str, Any] | None:
         return evt
 
     elif kind == K.TOOL_OUTPUT:
-        evt = {
-            'type': 'tool_result',
-            'streaming': True,
-        }
+        evt = build_event(
+            EventType.TOOL_RESULT,
+            streaming=True,
+        )
         if event.tool_id:
             evt['toolId'] = event.tool_id
         if event.tool_output:
@@ -376,9 +377,7 @@ def normalized_to_sse(event: NormalizedEvent) -> dict[str, Any] | None:
         return evt
 
     elif kind == K.TOOL_COMPLETE:
-        evt = {
-            'type': 'tool_result',
-        }
+        evt = build_event(EventType.TOOL_RESULT)
         if event.tool_id:
             evt['toolId'] = event.tool_id
         if event.tool_name:
@@ -389,33 +388,33 @@ def normalized_to_sse(event: NormalizedEvent) -> dict[str, Any] | None:
         return evt
 
     elif kind == K.FILE_CHANGE:
-        return {
-            'type': 'tool_result',
-            'tool': 'file_change',
-            'result': json.dumps({
+        return build_event(
+            EventType.TOOL_RESULT,
+            tool='file_change',
+            result=json.dumps({
                 'path': event.file_path,
                 'action': event.file_action,
             }, ensure_ascii=False),
-        }
+        )
 
     elif kind == K.PHASE:
-        return {
-            'type': 'phase',
-            'phase': event.phase_type or 'working',
-            'detail': event.text,
-        }
+        return build_event(
+            EventType.PHASE,
+            phase=event.phase_type or 'working',
+            detail=event.text,
+        )
 
     elif kind == K.APPROVAL_REQUEST:
-        return {
-            'type': 'approval_required',
-            'tool': event.tool_name,
-            'toolId': event.tool_id,
-            'args': event.tool_input,
-            'detail': event.text,
-        }
+        return build_event(
+            EventType.APPROVAL_REQUIRED,
+            tool=event.tool_name,
+            toolId=event.tool_id,
+            args=event.tool_input,
+            detail=event.text,
+        )
 
     elif kind == K.DONE:
-        evt = {'type': 'done'}
+        evt = build_event(EventType.DONE)
         if event.finish_reason:
             evt['finishReason'] = event.finish_reason
         if event.usage:
@@ -427,10 +426,10 @@ def normalized_to_sse(event: NormalizedEvent) -> dict[str, Any] | None:
         return evt
 
     elif kind == K.ERROR:
-        return {
-            'type': 'done',
-            'error': event.error_message or 'Unknown error',
-            'finishReason': 'error',
-        }
+        return build_event(
+            EventType.DONE,
+            error=event.error_message or 'Unknown error',
+            finishReason='error',
+        )
 
     return None

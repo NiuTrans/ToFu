@@ -196,10 +196,13 @@ def _read_absolute_file(path: str, start_line=None, end_line=None):
         total = len(lines)
         s = max(1, start_line or 1) - 1
         e = min(total, end_line or total)
-        sliced = '\n'.join(lines[s:e])
         expanded_path = os.path.expanduser(path)
         expanded_path = os.path.abspath(expanded_path)
         filename = os.path.basename(expanded_path)
+        if s >= e:
+            return (f'Error: requested line range {start_line or 1}-{end_line or total} '
+                    f'is empty or out of bounds for {filename} ({total} lines).')
+        sliced = '\n'.join(lines[s:e])
         header = f'File: {filename} (lines {s + 1}-{e} of {total})\n'
         return header + '─' * 40 + '\n' + sliced
 
@@ -221,8 +224,9 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None):
     if not os.path.isfile(target):
         return f'File not found: {rel_path}'
     sz = os.path.getsize(target)
-    if sz > MAX_FILE_SIZE:
-        return f'File too large ({_fmt_size(sz)}). Use grep_search to find specific content.'
+    if sz > MAX_FILE_SIZE and not (start_line or end_line):
+        return (f'File too large ({_fmt_size(sz)}). Use grep_search to find specific content, '
+                f'or read_files with start_line/end_line for a specific range.')
 
     filename = os.path.basename(rel_path)
     is_data = _is_data_file(filename, sz)
@@ -234,6 +238,9 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None):
                 total = len(all_lines)
                 s = max(1, start_line or 1) - 1
                 e = min(total, end_line or total)
+                if s >= e:
+                    return (f'Error: requested line range {start_line or 1}-{end_line or total} '
+                            f'is empty or out of bounds for {rel_path} ({total} lines).')
                 text = ''.join(all_lines[s:e])
                 header = f'File: {rel_path} (lines {s + 1}-{e} of {total})\n'
             else:
@@ -342,6 +349,24 @@ def tool_read_files(base, reads):
     MAX_BATCH = 20
     if len(reads) > MAX_BATCH:
         reads = reads[:MAX_BATCH]
+
+    # ★ Coerce LLM-emitted string line numbers to int. The model
+    # occasionally returns ``start_line: "70"`` instead of ``70`` and
+    # downstream arithmetic (``sl <= prev_e + GAP_THRESHOLD``) crashes
+    # with ``TypeError: can only concatenate str (not "int") to str``.
+    # Treat unparseable values as None (== "no range given").
+    for spec in reads:
+        if not isinstance(spec, dict):
+            continue
+        for k in ('start_line', 'end_line'):
+            v = spec.get(k)
+            if v is None or isinstance(v, int):
+                continue
+            try:
+                spec[k] = int(v)
+            except (ValueError, TypeError) as e:
+                logger.debug('[Tools] read_files: dropping non-numeric %s=%r (%s)', k, v, e)
+                spec[k] = None
 
     reads = _merge_same_file_ranges(reads)
 
@@ -534,7 +559,8 @@ def _format_grep_output(base, raw_output, pattern, include, ctx_n,
             parts = line.rsplit(':', 1)
             try:
                 total += int(parts[-1])
-            except (ValueError, IndexError):
+            except (ValueError, IndexError) as _e_audit:
+                logger.debug('[read_tools] _format_grep_output caught %s: %s', type(_e_audit).__name__, _e_audit)
                 continue
         hdr = f'grep "{pattern}"'
         if include:
@@ -548,19 +574,32 @@ def _format_grep_output(base, raw_output, pattern, include, ctx_n,
     max_line_len = 300
     max_total_chars = 20000 if ctx_n > 0 else 12000
     bp = base + '/'
-    for line in lines[:cap]:
-        if line.startswith(bp):
-            line = line[len(bp):]
-        if len(line) > max_line_len:
-            line = line[:max_line_len] + '  \u2026(truncated)'
-        total_chars += len(line) + 1
+    # rg/grep with -C N emits three kinds of lines:
+    #   match     "<path>:<lineno>:<content>"   (separator ':')
+    #   context   "<path>-<lineno>-<content>"   (separator '-')
+    #   group sep "--"
+    # `cap` must apply to MATCH lines only — otherwise context inflates the
+    # apparent count and prematurely truncates real results when ctx_n>0.
+    match_count = 0
+    for line in lines:
+        stripped = line[len(bp):] if line.startswith(bp) else line
+        is_match = bool(_RG_MATCH_LINE.match(stripped))
+        if is_match:
+            if match_count >= cap:
+                # Hit the per-formatter cap on real matches; drop the rest
+                # (including any trailing context that would follow).
+                truncated = True
+                break
+            match_count += 1
+        if len(stripped) > max_line_len:
+            stripped = stripped[:max_line_len] + '  \u2026(truncated)'
+        total_chars += len(stripped) + 1
         if total_chars > max_total_chars:
             truncated = True
             break
-        rel_lines.append(line)
-    match_count = len(rel_lines)
+        rel_lines.append(stripped)
     if truncated:
-        rel_lines.append(f'\u2026 (output truncated at {max_total_chars} chars, {len(lines)} total matches)')
+        rel_lines.append(f'\u2026 (output truncated at {max_total_chars} chars or {cap} matches)')
     hdr = f'grep "{pattern}"'
     if include:
         hdr += f' ({include})'
@@ -573,6 +612,15 @@ _RG_MAX_FILESIZE = '2M'
 
 # Max depth for rg/fd to search (safety cap)
 _TOOL_MAX_DEPTH = 30
+
+# Real-match line discriminator for rg/grep output. Two emitted shapes:
+#   multi-file : "<path>:<lineno>:<content>"   (path prefix present)
+#   single-file: "<lineno>:<content>"          (rg/grep omit the path when
+#                                               searching exactly one file)
+# The path prefix is therefore optional. Context lines use '-' after the
+# line number ("<path>-<lineno>-..." / "<lineno>-...") and group separators
+# are literal "--", so neither matches.
+_RG_MATCH_LINE = re.compile(r'^(?:.+?:)?\d+:')
 
 
 def _get_io_timeout(base, default=60):
@@ -689,7 +737,8 @@ def _run_grep_subprocess(cmd, base, io_timeout):
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, cwd=base, errors='replace')
-    except FileNotFoundError:
+    except FileNotFoundError as _e_audit:
+        logger.debug('[read_tools] _run_grep_subprocess caught %s: %s', type(_e_audit).__name__, _e_audit)
         return None, False
     try:
         stdout, _ = proc.communicate(timeout=io_timeout)
@@ -831,8 +880,8 @@ def _python_grep(base, target, pattern, include=None, cap=MAX_GREP_RESULTS, coun
             break
         if time.time() > deadline:
             if not count_only:
-                matches.append(f'\u23f0 (grep timed out after {timeout_val}s \u2014 '
-                               f'try a more specific path or pattern)')
+                matches.append(f'[grep timed out after {timeout_val}s - '
+                               f'try a more specific path or pattern]')
             logger.warning('[Tools] python_grep timed out after %ds', timeout_val)
             break
 
@@ -946,8 +995,8 @@ def _python_find(target, base, pattern, cap):
         if len(matches) >= cap:
             return matches
         if time.time() > deadline:
-            matches.append(f'  \u23f0 (search timed out after {timeout_val}s \u2014 '
-                           f'try a more specific path)')
+            matches.append(f'  [search timed out after {timeout_val}s - '
+                           f'try a more specific path]')
             return matches
     return matches
 
@@ -1078,4 +1127,8 @@ def tool_find_files(base, pattern, rel_path=None, max_results=None):
     hdr = f'Files matching "{pattern}"'
     if rel_path:
         hdr += f' in {rel_path}'
-    return hdr + f' ({len(matches)} found):\n\n' + '\n'.join(matches)
+    # The timeout sentinel ("[search timed out ...]") is appended to `matches`
+    # for display but is not a real file - exclude it from the count so the
+    # header is honest.
+    n_real = sum(1 for m in matches if '[search timed out' not in m)
+    return hdr + f' ({n_real} found):\n\n' + '\n'.join(matches)

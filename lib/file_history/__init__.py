@@ -12,7 +12,7 @@ Design summary
 * Pure filesystem — no subprocesses, no ``index.lock``, no FUSE timeouts.
 * Disk layout (per-project, alongside the project — survives moves):
 
-      <base_path>/.chatui/file-history/
+      <base_path>/.tofu/file-history/
           snapshots.jsonl          — append-only round log
           backups/
               <sha256(rel)[:2]>/
@@ -47,10 +47,9 @@ Public API (mirrors the surface ``git_shim`` exposed):
 
 Env knobs:
 
-* ``TOFU_FILE_HISTORY``      — ``1`` (default) / ``0`` to disable. Legacy ``CHATUI_FILE_HISTORY`` still honored.
+* ``TOFU_FILE_HISTORY``      — ``1`` (default) / ``0`` to disable.
 * ``TOFU_FILE_HISTORY_PROBE`` — ``1`` (default) / ``0`` to disable the
   per-round external-edit probe (mtime-based — cheap, but skippable).
-  Legacy ``CHATUI_FILE_HISTORY_PROBE`` still honored.
 """
 from __future__ import annotations
 

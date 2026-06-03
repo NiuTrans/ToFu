@@ -1,10 +1,10 @@
 """lib/memory/storage.py — File I/O, YAML frontmatter, CRUD operations.
 
 Memories are plain Markdown files stored in:
-  • Global:  <project>/.chatui/memory/global/*.md  (apply across projects)
-  • Project: <project>/.chatui/memory/*.md           (project-specific)
+  • Global:  <project>/.tofu/skills/global/*.md  (apply across projects)
+  • Project: <project>/.tofu/skills/*.md         (project-specific)
 
-All memories live under the project directory — no external ~/.chatui/ dependency.
+All memories live under the project directory.
 """
 
 import json
@@ -14,7 +14,6 @@ import shutil
 import threading
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 from lib.log import get_logger
 
@@ -33,15 +32,8 @@ __all__ = [
 #  Constants
 # ═══════════════════════════════════════════════════════
 
-# Legacy path kept for one-time migration only
-_LEGACY_GLOBAL_MEMORY_DIR = os.path.join(Path.home(), '.chatui', 'skills')
-
-# Both global and project memories now live under the project directory
-# NOTE: Physical paths still use 'skills' for backward compatibility with
-# existing .chatui/skills/ directories on disk. A future migration can rename
-# the directories themselves.
-GLOBAL_MEMORY_SUBDIR = os.path.join('.chatui', 'skills', 'global')
-PROJECT_MEMORY_SUBDIR = os.path.join('.chatui', 'skills')
+GLOBAL_MEMORY_SUBDIR = os.path.join('.tofu', 'skills', 'global')
+PROJECT_MEMORY_SUBDIR = os.path.join('.tofu', 'skills')
 MIN_DESCRIPTION_LENGTH = 20
 
 # Keep GLOBAL_MEMORY_DIR as a computed property for backward compat
@@ -313,8 +305,9 @@ def _memory_from_file(filepath, scope='global', package_dir=None,
     # Pull OpenClaw / Anthropic-style gating fields out of metadata.
     pkg_meta = _extract_package_metadata(meta)
 
-    # Top-level frontmatter overrides (``requires_bins:`` directly in
-    # frontmatter, used by legacy ChatUI memories).
+    # Top-level frontmatter overrides (``requires_bins:`` /
+    # ``requires_env:`` directly in frontmatter, predating the
+    # ``metadata.openclaw`` block format).
     legacy_bins = _coerce_str_list(meta.get('requires_bins'))
     legacy_env = _coerce_str_list(meta.get('requires_env'))
 
@@ -424,60 +417,23 @@ def _list_memories_in_dir(dirpath, scope='global'):
 
 
 def _get_global_memory_dir(project_path):
-    """Return the global memory directory for a given project.
+    """Return the global memory directory for ``project_path``.
 
-    Global memories are stored at <project>/.chatui/skills/global/.
-    On first call, migrates any legacy memories from ~/.chatui/skills/.
+    Global memories live at ``<project>/.tofu/skills/global/``.  Returns
+    ``None`` when no project root is set — the caller must handle that
+    (typically by skipping global enumeration).
     """
     if not project_path:
-        # Fallback when no project is set — use legacy path
-        return _LEGACY_GLOBAL_MEMORY_DIR
+        return None
     return os.path.join(project_path, GLOBAL_MEMORY_SUBDIR)
-
-
-def _migrate_legacy_global_memories(project_path):
-    """One-time migration: copy memories from ~/.chatui/skills/ into the project.
-
-    Only copies files that don't already exist in the destination.
-    """
-    if not project_path:
-        return
-    src_dir = _LEGACY_GLOBAL_MEMORY_DIR
-    if not os.path.isdir(src_dir):
-        return
-    dst_dir = os.path.join(project_path, GLOBAL_MEMORY_SUBDIR)
-    _ensure_dir(dst_dir)
-
-    migrated = 0
-    for fname in os.listdir(src_dir):
-        if not fname.endswith('.md') or fname.startswith('.'):
-            continue
-        src_path = os.path.join(src_dir, fname)
-        dst_path = os.path.join(dst_dir, fname)
-        if not os.path.exists(dst_path):
-            try:
-                shutil.copy2(src_path, dst_path)
-                migrated += 1
-            except OSError as e:
-                logger.warning('Failed to migrate memory %s: %s', fname, e)
-    if migrated:
-        logger.info('[Memory] Migrated %d global memory(s) from %s → %s',
-                     migrated, src_dir, dst_dir)
-
-
-_migration_done = set()  # Track which project_paths have been migrated
 
 
 def list_all_memories(project_path=None):
     """List all global + project memories."""
     with _lock:
-        # One-time migration from legacy ~/.chatui/skills/
-        if project_path and project_path not in _migration_done:
-            _migration_done.add(project_path)
-            _migrate_legacy_global_memories(project_path)
-
         global_dir = _get_global_memory_dir(project_path)
-        memories = _list_memories_in_dir(global_dir, scope='global')
+        memories = (_list_memories_in_dir(global_dir, scope='global')
+                    if global_dir else [])
         if project_path:
             proj_dir = os.path.join(project_path, PROJECT_MEMORY_SUBDIR)
             memories += _list_memories_in_dir(proj_dir, scope='project')
@@ -532,10 +488,14 @@ def resolve_target_dir(scope, project_path):
     """Return the on-disk directory where a memory of ``scope`` should live.
 
     Used by both :func:`create_memory` and the package installer.
+    Raises ``ValueError`` when ``project_path`` is missing — the in-tree
+    layout requires a project root.
     """
-    if scope == 'project' and project_path:
+    if not project_path:
+        raise ValueError('project_path required for memory storage')
+    if scope == 'project':
         return os.path.join(project_path, PROJECT_MEMORY_SUBDIR)
-    return _get_global_memory_dir(project_path)
+    return os.path.join(project_path, GLOBAL_MEMORY_SUBDIR)
 
 
 def create_memory(name, description='', body='', tags=None, scope='global', project_path=None):

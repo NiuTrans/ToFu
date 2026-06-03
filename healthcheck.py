@@ -35,6 +35,28 @@ if not logger.handlers:
 ROOT = Path(__file__).resolve().parent
 os.chdir(ROOT)
 
+# ─── Flask→Quart shim ────────────────────────────────────────────────
+# routes/ and lib/ import from `flask`, but at runtime server.py installs a
+# shim that maps `flask` → `quart` (Quart is a Flask API superset). Several
+# modules use Quart-only features such as `@blueprint.websocket` (routes/push.py).
+# Without the shim, importing routes here raises
+# `'Blueprint' object has no attribute 'websocket'`, which cascades into every
+# section-2/3 import check below. Install the same shim before any route import.
+def _install_flask_quart_shim():
+    try:
+        import quart
+    except ImportError:
+        logger.warning('quart not installed — skipping flask→quart shim')
+        return
+    sys.modules['flask'] = quart
+    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
+        quart_sub = sys.modules.get(f'quart.{attr}')
+        if quart_sub is not None:
+            sys.modules[f'flask.{attr}'] = quart_sub
+
+
+_install_flask_quart_shim()
+
 # ─── Helpers ─────────────────────────────────────────────────────────
 class C:
     OK   = '\033[92m✓\033[0m'
@@ -101,7 +123,7 @@ section("2. Top-Level Imports")
 tl_checks = [
     ("lib.database",      ["get_db", "close_db", "init_db"]),
     ("lib",               ["LLM_MODEL", "LLM_API_KEY", "LLM_BASE_URL"]),
-    ("lib.llm_client",    ["chat", "build_body", "stream_chat"]),
+    ("lib.llm",           ["chat", "build_body", "stream_chat"]),
     ("lib.memory",        ["list_memories", "create_memory", "update_memory", "delete_memory", "toggle_memory"]),
     ("lib.browser",       ["wait_for_commands", "mark_poll", "resolve_batch",
                            "resolve_command", "is_extension_connected", "send_browser_command"]),
@@ -361,19 +383,29 @@ if cdn_leaks == 0:
 # ═══════════════════════════════════════════════════════════════════════
 section("8. JS Defensive Guards")
 
-try:
-    core_js = (ROOT / 'static/js/core.js').read_text()
-except FileNotFoundError:
-    fail("static/js/core.js not found — cannot check JS defensive guards")
-    core_js = None
-except Exception as e:
-    logger.warning('Failed to read static/js/core.js: %s', e, exc_info=True)
-    fail(f"static/js/core.js: could not read file — {e}")
-    core_js = None
+# The markdown rendering + library guards were refactored out of the old
+# monolithic static/js/core.js into static/js/core/*.js. Concatenate the
+# relevant modules and scan the combined source.
+_guard_files = [
+    'static/js/core/markdown.js',
+    'static/js/core/cache_stats.js',
+    'static/js/core.js',
+]
+core_js_parts = []
+for _gf in _guard_files:
+    try:
+        core_js_parts.append((ROOT / _gf).read_text())
+    except FileNotFoundError:
+        logger.debug('JS guard source not present (ok): %s', _gf)
+    except Exception as e:
+        logger.warning('Failed to read %s: %s', _gf, e, exc_info=True)
 
-if core_js is not None:
+if not core_js_parts:
+    fail("No JS guard source files found — cannot check JS defensive guards")
+else:
+    core_js = '\n'.join(core_js_parts)
     checks = {
-        "marked.setOptions guarded":    r"typeof\s+marked\s*!==?\s*['\"]undefined['\"]\s*\)\s*marked\.setOptions",
+        "marked.setOptions guarded":    r"typeof\s+marked\s*!==?\s*['\"]undefined['\"]\s*\)\s*\{?\s*marked\.setOptions",
         "renderMarkdown has fallback":  r"typeof\s+marked\s*===?\s*['\"]undefined['\"][\s\S]*?return\s+['\"]?<pre",
         "hljs usage guarded":          r"typeof\s+hljs\s*===?\s*['\"]undefined['\"]",
         "katex usage guarded":         r"typeof\s+katex\s*!==?\s*['\"]undefined['\"]",

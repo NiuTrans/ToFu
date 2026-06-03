@@ -108,7 +108,7 @@ class ArmResult:
 def _raw_chat(messages: list, *, model: str, max_tokens: int = 256,
               timeout: float = 90.0) -> tuple[dict, dict]:
     """Single POST to the Sankuai gateway. Returns (response_json, usage)."""
-    from lib.llm_client import build_body, add_cache_breakpoints
+    from lib.llm import build_body, add_cache_breakpoints
 
     # Build body with cache_control breakpoints exactly like the production client.
     body = build_body(

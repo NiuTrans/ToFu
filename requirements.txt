@@ -1,3 +1,9 @@
+quart>=0.20
+hypercorn>=0.17
+# cryptography — auto-generates TLS certificates for zero-config HTTP/2.
+# Also pulls in the standard Python crypto stack (used transitively by many packages).
+cryptography>=42.0
+# flask + flask-compress kept for import compatibility (quart depends on flask)
 flask>=3.0
 flask-compress>=1.14
 requests>=2.31
@@ -7,7 +13,7 @@ trafilatura>=1.6
 # playwright is optional — powers the JS-rendered fallback in lib/fetch.
 # On Linux, Chromium needs X11/GTK shared libs (libatk, libgbm, libXcomposite, …).
 #   With root:    sudo python -m playwright install-deps chromium
-#   Without root: install.py falls back to `conda install -c conda-forge`
+#   Without root: install.sh falls back to `conda install -c conda-forge`
 #                 (atk-1.0, xorg-libxcomposite, mesa-libgbm-cos7-x86_64, …) and
 #                 lib/fetch/playwright_pool.py auto-augments LD_LIBRARY_PATH.
 playwright>=1.40
@@ -38,7 +44,18 @@ mcp>=1.0
 # optional LLM-oriented Markdown extractor built on top of pymupdf.
 pymupdf>=1.24
 pymupdf4llm>=0.0.17
+# Markdown — server-side renderer for paper-report HTML export
+# (routes/paper.py:export_report). Frontend still uses marked.js for live
+# rendering; this dep is only used for downloadable .html exports.
+markdown>=3.5
 # uv powers several MCP servers (via `uvx`) — see lib/mcp/client.py. Installing
 # it here guarantees uvx is on PATH inside the conda env without requiring a
 # separate curl|sh bootstrap.
 uv>=0.4
+# SQLAlchemy Core (NOT the ORM) — used by lib/database/_core_schema.py as a
+# single-source table-definition + dual-dialect DDL/DML *compiler* for NEW
+# tables (PG primary, SQLite fallback), retiring the hand-maintained twin-DDL
+# + regex _sql_translate path for those tables. Compile-only: no Engine is
+# opened; execution stays on the existing get_db() connection. Importing the
+# _core_schema module is optional — the legacy DB path does not depend on it.
+sqlalchemy>=2.0

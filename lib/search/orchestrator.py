@@ -24,9 +24,11 @@ from lib.fetch.content_filter import IRRELEVANT_SENTINEL, filter_web_contents_ba
 from lib.log import get_logger
 from lib.search.browser_fallback import search_via_browser
 from lib.search.dedup import dedup_by_content
+from lib.search.deepen import deepen_results, is_deepen_enabled
 from lib.search.engines.bing import search_bing
 from lib.search.engines.brave import search_brave
 from lib.search.engines.ddg import search_ddg_api, search_ddg_html
+from lib.search.engines.marginalia import search_marginalia
 from lib.search.engines.searxng import search_searxng
 from lib.search.rerank import rerank_by_bm25
 
@@ -50,11 +52,23 @@ class SearchResultList(list):
 
 
 def _url_dedup_key(url: str) -> str:
-    """Normalise a URL into a dedup key."""
-    return url.lower().rstrip('/').replace('https://', '').replace('http://', '')[:150]
+    """Normalise a URL into a dedup key.
+
+    Strips only the leading scheme — a bare ``.replace('http://', '')``
+    would also mangle URLs carrying another URL in a query param
+    (e.g. ``?target=http://...``), distorting otherwise-distinct keys.
+    """
+    key = url.lower().rstrip('/')
+    for scheme in ('https://', 'http://'):
+        if key.startswith(scheme):
+            key = key[len(scheme):]
+            break
+    return key[:150]
 
 
-def perform_web_search(query, max_results=None, user_question=''):
+def perform_web_search(query, max_results=None, user_question='', freshness='',
+                       *, fetch_pages=True, filter_pages=True, rerank=True,
+                       engines=None, max_chars_per_page=None, deepen=None):
     """Run search engines and page fetches in an overlapping streaming pipeline.
 
     As each engine returns results, its URLs are immediately deduped and
@@ -66,6 +80,20 @@ def perform_web_search(query, max_results=None, user_question=''):
         query: Search query string.
         max_results: Max results to return. Defaults to FETCH_TOP_N.
         user_question: The user's original question (true intent).
+        freshness: Time filter — 'day', 'week', 'month', 'year', or '' (none).
+        fetch_pages: When False, skip step 4 (page fetch) and return only
+            engine snippets. Cheap (~1-3s) and deterministic.
+        filter_pages: When False, skip step 5 (LLM relevance filter). Pages
+            are returned with raw extracted text.
+        rerank: When False, skip step 6 (BM25 rerank); preserves engine-pool
+            ordering after content dedup.
+        engines: Optional iterable of engine tags (subset of
+            {'DDG-HTML', 'Brave', 'Bing', 'DDG-API', 'SearXNG'}). None ⇒ all.
+        max_chars_per_page: Override FETCH_MAX_CHARS_SEARCH for this call.
+        deepen: When True, after the main fetch, follow the top query-relevant
+            outbound links one hop deeper for extra depth. None ⇒ use the
+            ``SEARCH_DEEPEN_HOPS`` env / ``search_deepen`` feature flag default
+            (off). Requires ``fetch_pages=True``.
 
     Returns:
         SearchResultList: Search results with diagnostics.
@@ -75,6 +103,10 @@ def perform_web_search(query, max_results=None, user_question=''):
 
     if max_results is None:
         max_results = _lib.FETCH_TOP_N
+
+    if freshness and freshness not in ('day', 'week', 'month', 'year'):
+        logger.warning('[Search] Ignoring unknown freshness=%r (expected day|week|month|year)', freshness)
+        freshness = ''
 
     # ── Shared state for the streaming pipeline ──
     # All access is protected by _lock since engine callbacks and
@@ -94,9 +126,17 @@ def perform_web_search(query, max_results=None, user_question=''):
     engine_errors = {}
     engine_empty = []
 
-    ALL_ENGINE_NAMES = ['DDG-HTML', 'Brave', 'Bing', 'DDG-API', 'SearXNG']
+    ALL_ENGINE_NAMES = ['DDG-HTML', 'Brave', 'Bing', 'DDG-API', 'SearXNG', 'Marginalia']
+    if engines:
+        engine_allow = {e for e in engines if e in ALL_ENGINE_NAMES}
+        if not engine_allow:
+            logger.warning('[Search] all requested engines unknown (%s) — falling back to default set',
+                           list(engines))
+            engine_allow = set(ALL_ENGINE_NAMES)
+    else:
+        engine_allow = set(ALL_ENGINE_NAMES)
 
-    max_chars = _lib.FETCH_MAX_CHARS_SEARCH
+    max_chars = max_chars_per_page if max_chars_per_page else _lib.FETCH_MAX_CHARS_SEARCH
     pdf_max_chars = _lib.FETCH_MAX_CHARS_PDF
 
     # ── The fetch pool lives for the entire pipeline ──
@@ -123,7 +163,7 @@ def perform_web_search(query, max_results=None, user_question=''):
                     new_results.append(r)
             all_results.extend(batch)
 
-        if not new_results:
+        if not new_results or not fetch_pages:
             return
 
         # Submit fetches for new URLs (outside the lock — pool.submit is fast)
@@ -149,13 +189,18 @@ def perform_web_search(query, max_results=None, user_question=''):
     # ══════════════════════════════════════════════════════
     step1_t0 = time.time()
 
-    with ThreadPoolExecutor(max_workers=5) as engine_pool:
+    _ENGINE_SPECS = [
+        ('DDG-HTML', search_ddg_html, 20),
+        ('Brave',    search_brave,    20),
+        ('Bing',     search_bing,     20),
+        ('DDG-API',  search_ddg_api,   6),
+        ('SearXNG',  search_searxng,   6),
+        ('Marginalia', search_marginalia, 6),
+    ]
+    with ThreadPoolExecutor(max_workers=max(1, len(engine_allow))) as engine_pool:
         engine_futs = {
-            engine_pool.submit(search_ddg_html, query, 20): 'DDG-HTML',
-            engine_pool.submit(search_brave, query, 20):     'Brave',
-            engine_pool.submit(search_bing, query, 20):       'Bing',
-            engine_pool.submit(search_ddg_api, query, 6):    'DDG-API',
-            engine_pool.submit(search_searxng, query, 6):    'SearXNG',
+            engine_pool.submit(fn, query, n, freshness): tag
+            for tag, fn, n in _ENGINE_SPECS if tag in engine_allow
         }
         try:
             for fut in as_completed(engine_futs, timeout=20):
@@ -306,11 +351,38 @@ def perform_web_search(query, max_results=None, user_question=''):
         except TimeoutError:
             logger.warning('[Fetch] as_completed timeout (90s)', exc_info=True)
 
-    # Shut down the fetch pool (cancel any stragglers)
-    fetch_pool.shutdown(wait=False)
+    # Shut down the fetch pool — wait for stragglers to finish so threads
+    # don't accumulate across concurrent searches (report mode runs 2-5
+    # searches in parallel; abandoned threads from shutdown(wait=False)
+    # pile up and can crash the process).
+    fetch_pool.shutdown(wait=True, cancel_futures=True)
 
     fetch_count = sum(1 for r in unique_results if r.get('full_content'))
     step_timings['step4_page_fetch'] = time.time() - step4_t0
+
+    # ── Step 4b: One-hop link-following (depth) — opt-in ──
+    # Reuses links already extracted into each page's full_content. Bounded
+    # to a single hop with a hard cap; deeper pages are appended to
+    # unique_results so they pass through the LLM filter + BM25 rerank below.
+    _do_deepen = is_deepen_enabled() if deepen is None else deepen
+    if _do_deepen and fetch_pages and fetch_count:
+        step4b_t0 = time.time()
+        try:
+            deeper = deepen_results(query, unique_results,
+                                    max_chars=max_chars, pdf_max_chars=pdf_max_chars)
+        except Exception as e:
+            logger.error('[Search] deepen stage failed: %s', e, exc_info=True)
+            deeper = []
+        for dr in deeper:
+            key = _url_dedup_key(dr['url'])
+            if key not in seen_urls:
+                seen_urls.add(key)
+                unique_results.append(dr)
+                kept_urls.add(dr['url'])
+        step_timings['step4b_deepen'] = time.time() - step4b_t0
+        if deeper:
+            logger.info('[Search] Deepen added %d pages in %.1fs',
+                        len(deeper), step_timings['step4b_deepen'])
 
     # Log overlap savings
     if first_fetch_submitted_at:
@@ -329,7 +401,9 @@ def perform_web_search(query, max_results=None, user_question=''):
     step5_t0 = time.time()
     irrelevant_urls: set[str] = set()
     from lib.fetch.content_filter import FILTER_ENABLED as _FILTER_ENABLED
-    if not _FILTER_ENABLED:
+    if not filter_pages:
+        logger.debug('[Search] step5 skipped — caller passed filter_pages=False')
+    elif not _FILTER_ENABLED:
         logger.debug('[Search] step5 skipped — FETCH_LLM_FILTER disabled')
     else:
         to_filter = [(r['url'], r['full_content']) for r in unique_results
@@ -365,7 +439,9 @@ def perform_web_search(query, max_results=None, user_question=''):
 
     # ── Step 6: BM25 rerank on cleaned full text → top-N ──
     step6_t0 = time.time()
-    if len(has_content) > max_results:
+    if not rerank:
+        logger.debug('[Search] step6 skipped — caller passed rerank=False')
+    elif len(has_content) > max_results:
         relevant = rerank_by_bm25(query, has_content, max_results)
     elif len(relevant) > max_results:
         relevant = rerank_by_bm25(query, relevant, max_results)

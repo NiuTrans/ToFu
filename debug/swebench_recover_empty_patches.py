@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Recover patches wrongly reported as empty due to the git-add-timeout bug.
 
-Background (see .chatui/skills/swebench-git-add-timeout-bug.md):
+Background (see .tofu/skills/swebench-git-add-timeout-bug.md):
   The previous run used `timeout=10` for `git add -A`; on FUSE/NFS under concurrent
   load those commands routinely exceeded 10s and the extractor silently returned ''.
   The surviving per-instance workspaces still contain the real edits, so we can

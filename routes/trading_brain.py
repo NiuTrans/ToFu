@@ -18,14 +18,17 @@ import json
 import threading
 from datetime import datetime
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Response, jsonify, request
 
 from lib.database import DOMAIN_TRADING, get_db, get_thread_db
 from lib.log import get_logger
+from lib.api_response import api_conflict, api_internal_error, api_not_found, api_ok
+from lib.request_parser import parse_body
 
 logger = get_logger(__name__)
 
-trading_brain_bp = Blueprint('trading_brain', __name__)
+from routes.api_v1.trading.brain import api_v1_trading_brain_bp as trading_brain_bp  # noqa: E402
+# (alias kept for back-compat with `from routes.trading_brain import trading_brain_bp` callers)
 
 
 # ── Shared brain state ──
@@ -63,7 +66,7 @@ def init_brain():
     _init_cycle_count()
 
 
-@trading_brain_bp.route('/api/trading/brain/state', methods=['GET'])
+@trading_brain_bp.route('/api/v1/trading/brain/state', methods=['GET'])
 def brain_state():
     """Get brain state including recent cycles and stats."""
     db = get_db(DOMAIN_TRADING)
@@ -97,13 +100,13 @@ def brain_state():
     return jsonify(state)
 
 
-@trading_brain_bp.route('/api/trading/brain/analyze', methods=['POST'])
+@trading_brain_bp.route('/api/v1/trading/brain/analyze', methods=['POST'])
 def brain_analyze():
     """Trigger a brain analysis (sync). Returns full analysis result."""
     if _brain_state.get('running'):
-        return jsonify({'error': 'Brain is already running an analysis'}), 409
+        return api_conflict('Brain is already running an analysis')
 
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     trigger = data.get('trigger', 'manual')
 
     db = get_db(DOMAIN_TRADING)
@@ -140,10 +143,10 @@ def brain_analyze():
         _brain_state['running'] = False
         _brain_state['error'] = str(e)
         logger.error('[Brain] Analysis failed: %s', e, exc_info=True)
-        return jsonify({'error': 'internal_error'}), 500
+        return api_internal_error('internal_error')
 
 
-@trading_brain_bp.route('/api/trading/brain/stream', methods=['POST'])
+@trading_brain_bp.route('/api/v1/trading/brain/stream', methods=['POST'])
 def brain_stream():
     """SSE streaming brain analysis — primary endpoint for AI操盘 tab."""
     from lib.llm_dispatch import dispatch_stream
@@ -151,7 +154,7 @@ def brain_stream():
     from lib.trading_autopilot.cycle import _apply_strategy_updates, _store_cycle_result
     from lib.trading_autopilot.reasoning import parse_autopilot_result
 
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     trigger = data.get('trigger', 'manual')
 
     db = get_db(DOMAIN_TRADING)
@@ -279,7 +282,7 @@ def brain_stream():
     )
 
 
-@trading_brain_bp.route('/api/trading/brain/cycles', methods=['GET'])
+@trading_brain_bp.route('/api/v1/trading/brain/cycles', methods=['GET'])
 def brain_cycles():
     """List recent brain analysis cycles."""
     db = get_db(DOMAIN_TRADING)
@@ -302,7 +305,7 @@ def brain_cycles():
     return jsonify({'cycles': cycles})
 
 
-@trading_brain_bp.route('/api/trading/brain/cycles/<cycle_id>', methods=['GET'])
+@trading_brain_bp.route('/api/v1/trading/brain/cycles/<cycle_id>', methods=['GET'])
 def brain_cycle_detail(cycle_id):
     """Get detail for a specific brain cycle."""
     db = get_db(DOMAIN_TRADING)
@@ -317,7 +320,7 @@ def brain_cycle_detail(cycle_id):
         except (ValueError, TypeError) as _e:
             logger.debug('[Brain] cycle_id int parse failed: %s', _e)
     if not row:
-        return jsonify({'error': 'Cycle not found'}), 404
+        return api_not_found('Cycle not found')
 
     d = dict(row)
     for key in ('structured_result', 'kpi_evaluations', 'correlations'):
@@ -335,10 +338,10 @@ def brain_cycle_detail(cycle_id):
     return jsonify({'cycle': d})
 
 
-@trading_brain_bp.route('/api/trading/brain/auto/toggle', methods=['POST'])
+@trading_brain_bp.route('/api/v1/trading/brain/auto/toggle', methods=['POST'])
 def brain_auto_toggle():
     """Toggle automatic brain analysis (scheduled mode)."""
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     enabled = data.get('enabled', False)
     _brain_state['auto_enabled'] = enabled
 
@@ -349,4 +352,4 @@ def brain_auto_toggle():
     except Exception as e:
         logger.warning('[Brain] Autopilot sync failed: %s', e, exc_info=True)
 
-    return jsonify({'ok': True, 'auto_enabled': enabled})
+    return api_ok({'auto_enabled': enabled})

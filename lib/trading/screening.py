@@ -16,7 +16,6 @@ Also provides stock-level screening for A-share equities via eastmoney APIs.
 import json
 import math
 import re
-import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -41,22 +40,17 @@ __all__ = [
 ]
 
 # ── In-memory screening cache ──
-_screen_cache = {}
-_screen_lock = threading.Lock()
-_SCREEN_CACHE_TTL = 600  # 10 min
+from lib.ttl_cache import TTLCache  # noqa: E402
+
+_screen_cache = TTLCache(ttl=600, name='trading.screening')  # 10 min
 
 
 def _cache_get(key):
-    with _screen_lock:
-        entry = _screen_cache.get(key)
-    if entry and (time.time() - entry['ts']) < _SCREEN_CACHE_TTL:
-        return entry['data']
-    return None
+    return _screen_cache.get(key)
 
 
 def _cache_set(key, data):
-    with _screen_lock:
-        _screen_cache[key] = {'data': data, 'ts': time.time()}
+    _screen_cache.set(key, data)
 
 
 # Consolidated into lib.utils — single source of truth

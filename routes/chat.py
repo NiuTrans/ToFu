@@ -7,7 +7,10 @@ import time
 from flask import Blueprint, Response, jsonify, request
 
 from lib.database import DOMAIN_CHAT, get_db
-from lib.log import get_logger
+from lib.log import audit_log, get_logger
+from lib.api_response import api_bad_request, api_internal_error, api_not_found, api_ok
+from lib.request_parser import parse_body
+from routes.api_v1.auth import current_auth, require_scope
 
 from lib.tasks_pkg import cleanup_old_tasks, create_task, tasks, tasks_lock
 
@@ -19,6 +22,8 @@ from routes.common import DEFAULT_USER_ID, _invalidate_meta_cache
 logger = get_logger(__name__)
 
 chat_bp = Blueprint('chat', __name__)
+# v1 blueprint for the JSON routes (the carve-out /api/chat/stream/<id> stays on chat_bp).
+from routes.api_v1.chat import api_v1_chat_bp  # noqa: E402
 
 
 def _extract_db_meta(row):
@@ -33,7 +38,18 @@ def _extract_db_meta(row):
 
 
 def _extract_task_meta(task):
-    """Extract metadata fields from an in-memory task dict."""
+    """Extract metadata fields from an in-memory task dict.
+
+    MUST stay in sync with ``_extract_db_meta`` (DB-row equivalent) and
+    with the ``meta`` dict built in ``manager.persist_task_result``.  Any
+    field added here must also appear in:
+      * persist_task_result ’s ``meta`` dict (so it lands in task_results)
+      * the chat_poll DB-path field loop (so /api/chat/poll returns it)
+      * the cold-replay synth-done in chat_stream (so Last-Event-ID
+        replay after server restart returns the same shape)
+    Asymmetry between these four paths historically caused "my apiRounds
+    disappeared after I came back" / "modifiedFiles missing on reload".
+    """
     meta = {}
     if task.get('finishReason'):
         meta['finishReason'] = task['finishReason']
@@ -43,10 +59,18 @@ def _extract_task_meta(task):
         meta['preset'] = task['preset']
     if task.get('model'):
         meta['model'] = task['model']
+    if task.get('provider_id'):
+        meta['provider_id'] = task['provider_id']
     if task.get('thinkingDepth'):
         meta['thinkingDepth'] = task['thinkingDepth']
     if task.get('toolSummary'):
         meta['toolSummary'] = task['toolSummary']
+    if task.get('apiRounds'):
+        meta['apiRounds'] = task['apiRounds']
+    if task.get('modifiedFiles'):
+        meta['modifiedFiles'] = task['modifiedFiles']
+    if task.get('modifiedFileList'):
+        meta['modifiedFileList'] = task['modifiedFileList']
     if task.get('_fallback_model'):
         meta['fallbackModel'] = task['_fallback_model']
     if task.get('_fallback_from'):
@@ -54,8 +78,15 @@ def _extract_task_meta(task):
     return meta
 
 
-@chat_bp.route('/api/chat/active', methods=['GET'])
+@api_v1_chat_bp.route('/api/v1/chat/active', methods=['GET'], endpoint='ui_chat_active')
+@require_scope('chat')
 def chat_active():
+    """List in-memory tasks (id, conv, status, abort flag).
+
+    Used by the frontend on reload to decide whether to resume polling
+    a task it knew about before navigation. Cleans up stale finished
+    tasks as a side effect.
+    """
     cleanup_old_tasks()
     with tasks_lock:
         result = [{'id': t['id'], 'convId': t['convId'], 'status': t['status'],
@@ -64,10 +95,21 @@ def chat_active():
     return jsonify(result)
 
 
-@chat_bp.route('/api/chat/start', methods=['POST'])
-
+@api_v1_chat_bp.route('/api/v1/chat/start', methods=['POST'], endpoint='ui_chat_start')
+@require_scope('chat')
 def chat_start():
-    data = request.get_json(silent=True) or {}
+    """Start a chat task. Body is ``{convId, config[, messages, agentBackend]}``.
+
+    Default flow: load messages from the DB via ``build_api_messages_from_db``,
+    then dispatch to the built-in orchestrator. External callers (SWE-bench,
+    eval harnesses) may pass ``messages`` inline, which sets ``_inline_messages``
+    so :func:`_sync_result_to_conversation` skips DB write-back. Selecting a
+    non-builtin ``config.agentBackend`` (codex / claude_code / …) routes to
+    :func:`_start_external_backend` instead.
+
+    Returns ``{taskId}``; the client polls ``/api/v1/chat/poll/<taskId>``.
+    """
+    data = parse_body()
     conv_id = data.get('convId', '')
     cfg = data.get('config', {})
 
@@ -85,9 +127,9 @@ def chat_start():
         exclude_last = cfg.get('excludeLast', False)
         messages = build_api_messages_from_db(conv_id, cfg, exclude_last=exclude_last)
         if messages is None:
-            return jsonify({'error': 'Conversation not found'}), 404
+            return api_not_found('Conversation not found')
         if not messages:
-            return jsonify({'error': 'No messages'}), 400
+            return api_bad_request('No messages')
         logger.info('[Chat] Built %d API messages from DB for conv %s',
                     len(messages), conv_id[:8])
 
@@ -109,19 +151,27 @@ def chat_start():
     # entirely — external callers read results from task_results directly.
     if inline_messages:
         task['_inline_messages'] = True
-    from lib.tasks_pkg import run_task
+    from lib.tasks_pkg import spawn_task
     _cfg_model = cfg.get('model', '?')
     _cfg_preset = cfg.get('preset', cfg.get('effort', '?'))
     logger.info('[Chat] Starting task %s for conv %s model=%s preset=%s',
                 task['id'], task['convId'], _cfg_model, _cfg_preset)
     try:
-        threading.Thread(target=run_task, args=(task,), daemon=True).start()
-    except Exception:
+        spawn_task(task)
+    except Exception as _spawn_err:
         logger.exception('[Chat] Failed to start thread for task %s conv=%s',
                          task['id'], task['convId'])
+        from lib.error_envelope import make_envelope as _make_env
         task['status'] = 'error'
-        task['error'] = 'Server failed to start task thread'
-        return jsonify({'error': 'Failed to start task'}), 500
+        task['error'] = _make_env(
+            'internal',
+            detail='Server failed to start task thread.',
+            model=cfg.get('model', ''),
+            context='chat-start',
+            source='routes.chat',
+            raw=str(_spawn_err),
+        )
+        return api_internal_error('Failed to start task')
 
     return jsonify({'taskId': task['id']})
 
@@ -130,8 +180,11 @@ def chat_start():
 #  Atomic send: user message creation + task start
 # ══════════════════════════════════════════════════════════
 
-# Max time (seconds) for auto-translate during send — prevents frontend timeout
-_TRANSLATE_SEND_TIMEOUT = 20
+# Max time (seconds) for the synchronous auto-translate during /api/chat/send.
+# Must stay comfortably below the frontend's safety abort timer
+# (`_sendTimeout` in static/js/main.js — currently 90 s) so the user sees a
+# clean fallback ("sending original text") rather than a generic AbortError.
+_TRANSLATE_SEND_TIMEOUT = 45
 
 
 # ══════════════════════════════════════════════════════════
@@ -211,7 +264,8 @@ def _clear_send_translate_status(conv_id):
         _send_translate_status.pop(conv_id, None)
 
 
-@chat_bp.route('/api/chat/send-translate-status/<conv_id>', methods=['GET'])
+@api_v1_chat_bp.route('/api/v1/chat/translate-status/<conv_id>', methods=['GET'], endpoint='ui_chat_send_translate_status')
+@require_scope('chat')
 def chat_send_translate_status(conv_id):
     """Return the current send-path translate retry status for a conv.
 
@@ -268,19 +322,74 @@ def _auto_translate_user(text, config, conv_id=None):
             return _strip_notranslate_tags(text), {'model': 'skipped',
                                                    '_dispatch': {'model': 'skipped'}}
         translate_target = inner_text if nt_blocks else text
+        # Tighter inner deadline than the outer wait — leaves a small
+        # margin for status publication and pool teardown so the HTTP
+        # response arrives well before the frontend safety abort.
         translated, _u = _translate_one_chunk(
             translate_target, system_prompt, chunk_label=':send',
             source='Chinese', target='English',
             status_cb=_status_cb if conv_id else None,
+            overall_deadline=max(5.0, _TRANSLATE_SEND_TIMEOUT - 5),
         )
         if nt_blocks and translated:
             translated = _reattach_notranslate_blocks(translated, nt_blocks)
         return translated, _u
 
+    # Build the executor manually — a `with` block calls shutdown(wait=True)
+    # on exit, which would block the HTTP request until the worker actually
+    # finishes (up to _translate_one_chunk's internal 10-min retry deadline)
+    # and defeat the whole point of the timeout. We tear it down with
+    # wait=False / cancel_futures=True so the request returns as soon as the
+    # timeout hits, even if the worker thread is mid-LLM-call.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = None
+    timed_out = False
+    started_at = time.time()
+    # Heartbeat: if the inner translate hasn't surfaced its own status yet,
+    # publish a "still translating" event every few seconds so the polling
+    # frontend doesn't show a static "Translating…" with no clue.
+    _heartbeat_stop = threading.Event()
+
+    def _heartbeat():
+        while not _heartbeat_stop.wait(4.0):
+            try:
+                _set_send_translate_status(conv_id, {
+                    'kind': 'in_progress',
+                    'attempt': 0,
+                    'elapsed': time.time() - started_at,
+                    'detail': '',
+                })
+            except Exception as e:
+                logger.debug('[Send] heartbeat status publish failed conv=%s: %s',
+                             (conv_id or '?')[:8], e)
+
+    _hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+    if conv_id:
+        _hb_thread.start()
+
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_do_translate)
+        future = pool.submit(_do_translate)
+        try:
             result, _usage = future.result(timeout=_TRANSLATE_SEND_TIMEOUT)
+        except concurrent.futures.TimeoutError:
+            timed_out = True
+            elapsed = time.time() - started_at
+            logger.warning('[Send] Auto-translate timed out after %.1fs, '
+                           'sending original text (conv=%s, %d chars)',
+                           elapsed, (conv_id or '?')[:8], len(text))
+            # Surface the timeout to the frontend BEFORE we clear the
+            # status dict in `finally` — the poll loop will pick it up
+            # on the very next tick and the user sees a concrete reason.
+            _set_send_translate_status(conv_id, {
+                'kind': 'timed_out',
+                'attempt': 1,
+                'elapsed': elapsed,
+                'detail': f'no result after {_TRANSLATE_SEND_TIMEOUT}s',
+            })
+            # Do NOT block on shutdown — the worker may still be mid-LLM
+            # call. cancel_futures requires Python 3.9+; we already require it.
+            pool.shutdown(wait=False, cancel_futures=True)
+            return text, None, None
         if result and result.strip():
             _model = None
             if isinstance(_usage, dict):
@@ -294,12 +403,19 @@ def _auto_translate_user(text, config, conv_id=None):
             logger.info('[Send] Auto-translated user message: %d→%d chars model=%s nt_stripped=%s',
                         len(text), len(clean), _model, clean != result.strip())
             return clean, text, _model
-    except concurrent.futures.TimeoutError:
-        logger.warning('[Send] Auto-translate timed out after %ds, sending original text',
-                       _TRANSLATE_SEND_TIMEOUT)
     except Exception as e:
-        logger.warning('[Send] Auto-translate failed: %s', e)
+        logger.warning('[Send] Auto-translate failed: %s', e, exc_info=True)
     finally:
+        _heartbeat_stop.set()
+        # Tear down the pool. When we timed out we already shut it down
+        # non-blocking above. On the success / generic-error paths the
+        # future is finished, so a regular shutdown(wait=False) returns
+        # immediately and the worker thread is collected by the GC.
+        if not timed_out:
+            try:
+                pool.shutdown(wait=False)
+            except Exception as e:
+                logger.debug('[Send] translate pool shutdown failed: %s', e)
         # Always clear the per-conv status on exit — no stale retry hint
         # should leak into a subsequent poll after the send returns.
         _clear_send_translate_status(conv_id)
@@ -390,6 +506,52 @@ def _build_user_msg_from_payload(payload, config, conv_id=None):
     return user_msg
 
 
+def _append_user_msg_idempotent(messages, user_msg):
+    """Append ``user_msg`` to ``messages`` unless the tail is already it.
+
+    Root-cause guard for the duplicate-user-message bug: the frontend pushes
+    an optimistic user message into the in-memory conversation, and a racing
+    sync (the "rescue local-only conv" PUT from loadConversationsFromServer,
+    another browser tab, or a /chat/send network retry) can plant that
+    optimistic copy as the conversation's last row BEFORE this handler runs.
+    A blind ``messages.append`` would then produce two user rows for one send.
+
+    The optimistic copy and the server-built ``user_msg`` share the SAME
+    ``timestamp`` (the frontend's payload timestamp flows through
+    ``_build_user_msg_from_payload``), so we treat a trailing user message
+    with a matching timestamp as "the same logical message" and reconcile it
+    in place instead of appending a duplicate.  The server copy wins because
+    it carries the authoritative translation fields (``content`` =
+    translated, ``originalContent``, ``_translateDone``, ``_translateModel``).
+
+    Args:
+        messages: The conversation message list (mutated in place).
+        user_msg: The freshly-built server-side user message dict.
+
+    Returns:
+        True if a new row was appended; False if an existing tail row was
+        reconciled (duplicate prevented).
+    """
+    if messages:
+        tail = messages[-1]
+        if (isinstance(tail, dict)
+                and tail.get('role') == 'user'
+                and tail.get('timestamp') == user_msg.get('timestamp')):
+            # Same logical message already present (optimistic copy planted by
+            # a racing sync). Overwrite it with the authoritative server copy,
+            # preserving any stable _msgId already assigned to the tail.
+            preserved_id = tail.get('_msgId')
+            tail.clear()
+            tail.update(user_msg)
+            if preserved_id and '_msgId' not in tail:
+                tail['_msgId'] = preserved_id
+            logger.info('[Send] Reconciled duplicate optimistic user msg in place '
+                        '(ts=%s) — prevented duplicate row', user_msg.get('timestamp'))
+            return False
+    messages.append(user_msg)
+    return True
+
+
 def _load_or_create_conv(db, conv_id, config, payload):
     """Load existing conversation messages or create a new one.
 
@@ -430,7 +592,20 @@ def _load_or_create_conv(db, conv_id, config, payload):
 
 
 def _persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
-    """Write messages + metadata to the conversation row."""
+    """Write messages + metadata to the conversation row.
+
+    Backfills stable per-message ``_msgId`` UUIDs before writing.  Every
+    code path that mutates ``messages`` and persists the array (send,
+    regenerate, edit, continue, chat_continue) goes through this helper,
+    so this is the single point of truth for id assignment on the chat
+    write side \u2014 mirroring ``_assign_message_ids`` calls in
+    ``manager.py`` for the partial/result sync paths.  Without this,
+    newly appended messages on those flows would have no ``_msgId``,
+    forcing PATCH /messages/by-id to silently fall back to index lookup.
+    """
+    # Lazy import to avoid the routes \u2192 lib.tasks_pkg.manager cycle.
+    from lib.tasks_pkg.manager import _assign_message_ids
+    _assign_message_ids(messages)
     now_ms = int(time.time() * 1000)
     messages_json = json_dumps_pg(messages)
 
@@ -456,7 +631,8 @@ def _persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
     if existing:
         try:
             settings = json.loads(existing['settings'] or '{}')
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as _e_audit:
+            logger.debug('[chat] _persist_conv_messages caught %s: %s', type(_e_audit).__name__, _e_audit)
             settings = {}
         settings.update(settings_update)
         # ★ Preserve original created_at — INSERT OR REPLACE would overwrite
@@ -501,7 +677,7 @@ def _start_task_for_conv(conv_id, config, data=None):
     races with the new task and corrupts the conversation DB.
     """
     from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
-    from lib.tasks_pkg import run_task, abort_running_tasks_for_conv
+    from lib.tasks_pkg import abort_running_tasks_for_conv
 
     # ``excludeLast`` is honored so /api/chat/continue can rebuild messages
     # without the assistant message that is about to be regenerated.
@@ -539,6 +715,18 @@ def _start_task_for_conv(conv_id, config, data=None):
     # ★ Endpoint mode: route to the autonomous planner → worker → critic loop
     is_endpoint = config.get('endpointMode', False)
 
+    # ★ Autopilot is mutually exclusive with endpoint mode — both share the
+    #   same "model stopped → loop again" boundary, so running them together
+    #   would produce a double-loop with confusing semantics.  Endpoint
+    #   wins; the autopilot flag is silently dropped.
+    if is_endpoint and config.get('autopilot'):
+        logger.warning('[Chat] conv=%s autopilot=True dropped — '
+                       'endpointMode=True takes precedence',
+                       conv_id[:8])
+        config = dict(config)
+        config['autopilot'] = False
+        task['config'] = config
+
     if is_endpoint:
         from lib.tasks_pkg.endpoint import run_endpoint_task
         task['endpoint_mode'] = True
@@ -548,28 +736,46 @@ def _start_task_for_conv(conv_id, config, data=None):
                     task_id[:8], conv_id[:8], _cfg_model)
         try:
             threading.Thread(target=run_endpoint_task, args=(task,), daemon=True).start()
-        except Exception:
+        except Exception as _spawn_err:
             logger.exception('[Chat] Failed to start endpoint thread for task %s conv=%s',
                              task_id[:8], conv_id[:8])
+            from lib.error_envelope import make_envelope as _make_env
             task['status'] = 'error'
-            task['error'] = 'Server failed to start task thread'
+            task['error'] = _make_env(
+                'internal',
+                detail='Server failed to start endpoint task thread.',
+                model=config.get('model', ''),
+                context='endpoint-start',
+                source='routes.chat',
+                raw=str(_spawn_err),
+            )
             return None, (jsonify({'error': 'Failed to start task'}), 500)
     else:
         logger.info('[Chat] Starting task %s for conv %s model=%s',
                     task_id[:8], conv_id[:8], _cfg_model)
         try:
-            threading.Thread(target=run_task, args=(task,), daemon=True).start()
-        except Exception:
+            from lib.tasks_pkg import spawn_task
+            spawn_task(task)
+        except Exception as _spawn_err:
             logger.exception('[Chat] Failed to start thread for task %s conv=%s',
                              task_id[:8], conv_id[:8])
+            from lib.error_envelope import make_envelope as _make_env
             task['status'] = 'error'
-            task['error'] = 'Server failed to start task thread'
+            task['error'] = _make_env(
+                'internal',
+                detail='Server failed to start task thread.',
+                model=config.get('model', ''),
+                context='task-start',
+                source='routes.chat',
+                raw=str(_spawn_err),
+            )
             return None, (jsonify({'error': 'Failed to start task'}), 500)
 
     return task_id, None
 
 
-@chat_bp.route('/api/chat/send', methods=['POST'])
+@api_v1_chat_bp.route('/api/v1/chat/send', methods=['POST'], endpoint='ui_chat_send')
+@require_scope('chat')
 def chat_send():
     """Atomic send: create user message + auto-translate + persist + start task.
 
@@ -592,10 +798,10 @@ def chat_send():
     Returns on queue:
         { queued: true, queueId, position, convId, title, userMessage, isNew, msgCount }
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     conv_id = data.get('convId', '')
     if not conv_id:
-        return jsonify({'error': 'convId required'}), 400
+        return api_bad_request('convId required')
 
     payload = data.get('message', {})
     config = data.get('config', {})
@@ -603,7 +809,7 @@ def chat_send():
 
     text = payload.get('text', '')
     if not text and not payload.get('images') and not payload.get('pdfTexts'):
-        return jsonify({'error': 'Empty message'}), 400
+        return api_bad_request('Empty message')
 
     # Snapshot the request start wall-clock BEFORE the synchronous
     # auto-translate call. If /api/chat/abort-conv runs while we are
@@ -710,8 +916,12 @@ def chat_send():
                 'msgCount': len(messages),  # excludes the queued user msg
             })
 
-        # 4. Append user message and persist (only for immediate start)
-        messages.append(user_msg)
+        # 4. Append user message and persist (only for immediate start).
+        #    Idempotent: if a racing sync already planted the optimistic copy
+        #    as the tail (matching timestamp), reconcile in place instead of
+        #    appending a duplicate. This is the root-cause guard — the
+        #    frontend _sendInFlight flag merely avoids triggering the race.
+        _append_user_msg_idempotent(messages, user_msg)
         _persist_conv_messages(db, conv_id, messages, title, settings_patch)
 
         # 5. Start task (no active task — send immediately)
@@ -742,11 +952,12 @@ def chat_send():
 
     except Exception as e:
         logger.error('[Send] Failed for conv=%s: %s', conv_id[:8], e, exc_info=True)
-        return jsonify({'error': 'internal_error'}), 500
+        return api_internal_error('internal_error')
 
 
 
-@chat_bp.route('/api/chat/branch/start', methods=['POST'])
+@api_v1_chat_bp.route('/api/v1/chat/branch', methods=['POST'], endpoint='ui_chat_branch_start')
+@require_scope('chat')
 def chat_branch_start():
     """Start a branch task with server-side message building.
 
@@ -765,15 +976,15 @@ def chat_branch_start():
 
     Returns: { taskId }
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     conv_id = data.get('convId', '')
     if not conv_id:
-        return jsonify({'error': 'convId required'}), 400
+        return api_bad_request('convId required')
 
     msg_idx = data.get('msgIdx')
     branch_idx = data.get('branchIdx')
     if msg_idx is None or branch_idx is None:
-        return jsonify({'error': 'msgIdx and branchIdx required'}), 400
+        return api_bad_request('msgIdx and branchIdx required')
 
     cfg = data.get('config', {})
 
@@ -782,9 +993,9 @@ def chat_branch_start():
 
         api_messages = build_branch_api_messages(conv_id, msg_idx, branch_idx, cfg)
         if api_messages is None:
-            return jsonify({'error': 'Branch not found'}), 404
+            return api_not_found('Branch not found')
         if not api_messages:
-            return jsonify({'error': 'No messages to process'}), 400
+            return api_bad_request('No messages to process')
 
         cleanup_old_tasks()
 
@@ -800,24 +1011,33 @@ def chat_branch_start():
         logger.info('[Branch] Starting task %s for conv %s msg=%d branch=%d model=%s',
                     task_id[:8], conv_id[:8], msg_idx, branch_idx, _cfg_model)
 
-        from lib.tasks_pkg import run_task
+        from lib.tasks_pkg import spawn_task
         try:
-            threading.Thread(target=run_task, args=(task,), daemon=True).start()
-        except Exception:
+            spawn_task(task)
+        except Exception as _spawn_err:
             logger.exception('[Branch] Failed to start thread for task %s', task_id[:8])
+            from lib.error_envelope import make_envelope as _make_env
             task['status'] = 'error'
-            task['error'] = 'Server failed to start task thread'
-            return jsonify({'error': 'Failed to start task'}), 500
+            task['error'] = _make_env(
+                'internal',
+                detail='Server failed to start branch task thread.',
+                model=cfg.get('model', ''),
+                context='branch-start',
+                source='routes.chat',
+                raw=str(_spawn_err),
+            )
+            return api_internal_error('Failed to start task')
 
         return jsonify({'taskId': task_id})
 
     except Exception as e:
         logger.error('[Branch] Failed for conv=%s msg=%d branch=%d: %s',
                      conv_id[:8], msg_idx, branch_idx, e, exc_info=True)
-        return jsonify({'error': 'internal_error'}), 500
+        return api_internal_error('internal_error')
 
 
-@chat_bp.route('/api/chat/regenerate', methods=['POST'])
+@api_v1_chat_bp.route('/api/v1/chat/regenerate', methods=['POST'], endpoint='ui_chat_regenerate')
+@require_scope('chat')
 def chat_regenerate():
     """Atomic regenerate/edit: truncate messages + optional edit + auto-translate + start task.
 
@@ -833,14 +1053,14 @@ def chat_regenerate():
 
     Returns: { taskId, convId, title, msgCount, userMessage? }
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     conv_id = data.get('convId', '')
     if not conv_id:
-        return jsonify({'error': 'convId required'}), 400
+        return api_bad_request('convId required')
 
     truncate_to = data.get('truncateToIndex')
     if truncate_to is None:
-        return jsonify({'error': 'truncateToIndex required'}), 400
+        return api_bad_request('truncateToIndex required')
 
     config = data.get('config', {})
     edited_content = data.get('editedContent')
@@ -856,18 +1076,18 @@ def chat_regenerate():
         ).fetchone()
 
         if not row:
-            return jsonify({'error': 'Conversation not found'}), 404
+            return api_not_found('Conversation not found')
 
         try:
             messages = json.loads(row['messages'] or '[]')
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning('[Regen] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
-            return jsonify({'error': 'Failed to parse conversation'}), 500
+            return api_internal_error('Failed to parse conversation')
 
         title = row['title']
 
         if truncate_to < 0 or truncate_to >= len(messages):
-            return jsonify({'error': f'truncateToIndex {truncate_to} out of range (0..{len(messages)-1})'}), 400
+            return api_bad_request(f'truncateToIndex {truncate_to} out of range (0..{len(messages)-1})')
 
         # 1. Truncate
         messages = messages[:truncate_to + 1]
@@ -957,7 +1177,7 @@ def chat_regenerate():
 
     except Exception as e:
         logger.error('[Regen] Failed for conv=%s: %s', conv_id[:8], e, exc_info=True)
-        return jsonify({'error': 'internal_error'}), 500
+        return api_internal_error('internal_error')
 
 
 # ══════════════════════════════════════════════════════════
@@ -1069,10 +1289,29 @@ def _scan_continue_checkpoint(assistant_msg):
     if not preserved_content and kept_rounds and original_content:
         preserved_content = original_content
     discarded_content = max(0, len(original_content) - len(preserved_content))
+    # The prose tail dropped on rollback — surfaced to the UI as a display-only
+    # "Earlier Response" block (priorContent), mirroring discarded_thinking_text.
+    # Cannot be replayed on the wire (the model regenerates from the tool-result
+    # checkpoint), so it is stripped by _strip_non_api_fields before any LLM call.
+    if discarded_content > 0:
+        discarded_content_text = (
+            original_content[len(preserved_content):].lstrip('\n')
+            if original_content.startswith(preserved_content)
+            else original_content
+        )
+    else:
+        discarded_content_text = ''
 
     preserved_thinking_chars = sum(len(r.get('thinking') or '') for r in kept_rounds)
     original_thinking = assistant_msg.get('thinking') or ''
     discarded_thinking = max(0, len(original_thinking) - preserved_thinking_chars)
+    # Capture the message-level thinking text whenever it is not fully covered
+    # by per-round thinking — this is the trailing reasoning the model emitted
+    # after the last completed tool batch.  We can never replay it on the wire
+    # (Anthropic rejects orphan thinking blocks; OpenAI-compat strips reasoning
+    # server-side), but it is still useful to surface to the user as a
+    # display-only "earlier thinking" block on the rolled-back turn.
+    discarded_thinking_text = original_thinking if discarded_thinking > 0 else ''
 
     return {
         'kept_rounds': kept_rounds,
@@ -1081,13 +1320,16 @@ def _scan_continue_checkpoint(assistant_msg):
         'preserved_content': preserved_content,
         'preserved_thinking_chars': preserved_thinking_chars,
         'discarded_content': discarded_content,
+        'discarded_content_text': discarded_content_text,
         'discarded_thinking': discarded_thinking,
+        'discarded_thinking_text': discarded_thinking_text,
         'original_content_len': len(original_content),
         'original_thinking_len': len(original_thinking),
     }
 
 
-@chat_bp.route('/api/chat/continue', methods=['POST'])
+@api_v1_chat_bp.route('/api/v1/chat/continue', methods=['POST'], endpoint='ui_chat_continue')
+@require_scope('chat')
 def chat_continue():
     """Atomic continue: roll back the last assistant message to its last
     complete tool-call checkpoint, persist the rolled-back state to DB,
@@ -1109,10 +1351,10 @@ def chat_continue():
     If no recoverable checkpoint is found (no complete tool rounds), returns
     ``{fallback: "regenerate"}`` and the frontend should pop-and-resend.
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     conv_id = data.get('convId', '')
     if not conv_id:
-        return jsonify({'error': 'convId required'}), 400
+        return api_bad_request('convId required')
 
     config = data.get('config') or {}
     settings_patch = data.get('settings')
@@ -1125,21 +1367,21 @@ def chat_continue():
         ).fetchone()
 
         if not row:
-            return jsonify({'error': 'Conversation not found'}), 404
+            return api_not_found('Conversation not found')
 
         try:
             messages = json.loads(row['messages'] or '[]')
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning('[Continue] Failed to parse messages for conv=%s: %s',
                            conv_id[:8], e)
-            return jsonify({'error': 'Failed to parse conversation'}), 500
+            return api_internal_error('Failed to parse conversation')
 
         title = row['title']
 
         if not messages:
-            return jsonify({'error': 'Conversation has no messages'}), 400
+            return api_bad_request('Conversation has no messages')
         if messages[-1].get('role') != 'assistant':
-            return jsonify({'error': 'Last message is not an assistant message'}), 400
+            return api_bad_request('Last message is not an assistant message')
 
         assistant_msg = messages[-1]
         # Trivial case: empty content & thinking → no checkpoint needed; ask
@@ -1160,9 +1402,29 @@ def chat_continue():
         preserved_content = scan['preserved_content']
         assistant_msg['toolRounds'] = scan['kept_rounds']
         assistant_msg['content'] = preserved_content
-        # Strip thinking — any replay-worthy thinking already lives on
+        # Strip live thinking — any replay-worthy thinking already lives on
         # keptRounds[i].thinking and is carried forward via toolHistory.
+        # If there was trailing message-level thinking (reasoning emitted
+        # after the last completed tool batch) we can't replay it on the
+        # wire, but we stash it on a display-only field so the UI can
+        # render it as a collapsed "earlier thinking" block.  Stripped by
+        # _strip_non_api_fields before any LLM call (not in _API_MESSAGE_FIELDS).
         assistant_msg['thinking'] = ''
+        if scan.get('discarded_thinking_text'):
+            # Replace rather than append — a Continue cycle that produced new
+            # trailing thinking is the freshest signal of "what the model was
+            # reasoning about right before we resumed."  Older priorThinking
+            # from a prior Continue is no longer the immediate context.
+            assistant_msg['priorThinking'] = scan['discarded_thinking_text']
+        # else: leave any existing priorThinking from a previous Continue cycle
+        # in place — streaming this turn produced no extra trailing thinking,
+        # so the prior "earlier thinking" remains the most recent discard.
+        # Same treatment for the discarded prose tail (display-only priorContent)
+        # so a post-Continue page refresh (DB reload) doesn't lose the visible
+        # record of what was rolled back — keeping the content area honest
+        # rather than silently empty beside an unchanged tool panel.
+        if scan.get('discarded_content_text'):
+            assistant_msg['priorContent'] = scan['discarded_content_text']
         for stale_key in ('finishReason', 'toolSummary', 'error'):
             assistant_msg.pop(stale_key, None)
 
@@ -1179,10 +1441,11 @@ def chat_continue():
 
         logger.info(
             '[Continue] conv=%s kept=%d rounds discarded=%d rounds preservedContent=%d '
-            'discardedContent=%d preservedThinking=%d discardedThinking=%d',
+            'discardedContent=%d preservedThinking=%d discardedThinking=%d priorThinking=%s',
             conv_id[:8], len(scan['kept_rounds']), scan['discarded_rounds'],
             len(preserved_content), scan['discarded_content'],
             scan['preserved_thinking_chars'], scan['discarded_thinking'],
+            'preserved' if scan.get('discarded_thinking_text') else 'none',
         )
 
         # Build cfg payload — same shape the frontend used to build.
@@ -1227,6 +1490,7 @@ def chat_continue():
                 discardedContentLen=scan['discarded_content'],
                 preservedThinking=scan['preserved_thinking_chars'],
                 discardedThinking=scan['discarded_thinking'],
+                priorThinkingChars=len(scan.get('discarded_thinking_text') or ''),
             )
         except Exception as e:
             logger.debug('[Continue] audit_log failed (non-fatal): %s', e)
@@ -1246,7 +1510,7 @@ def chat_continue():
 
     except Exception as e:
         logger.error('[Continue] Failed for conv=%s: %s', conv_id[:8], e, exc_info=True)
-        return jsonify({'error': 'internal_error'}), 500
+        return api_internal_error('internal_error')
 
 
 # ══════════════════════════════════════════════════════════
@@ -1277,7 +1541,7 @@ def _start_external_backend(data, messages, backend_name):
 
     backend = get_backend(backend_name)
     if backend is None:
-        return jsonify({'error': f'Unknown backend: {backend_name}'}), 400
+        return api_bad_request(f'Unknown backend: {backend_name}')
     if not backend.is_available():
         return jsonify({
             'error': f'{backend.display_name} CLI is not installed. '
@@ -1411,9 +1675,15 @@ def _start_external_backend(data, messages, backend_name):
         except Exception as e:
             logger.error('[Chat] External task %s failed: %s',
                          task['id'][:8], e, exc_info=True)
-            task['error'] = str(e)
+            from lib.error_envelope import from_exception as _err_from_exc
+            envelope = _err_from_exc(
+                e, model=data.get('config', {}).get('model', ''),
+                context=f'external-backend:{backend_name}',
+                source='routes.chat',
+            )
+            task['error'] = envelope
             task['status'] = 'done'
-            append_event(task, {'type': 'done', 'error': str(e), 'finishReason': 'error'})
+            append_event(task, {'type': 'done', 'error': envelope, 'finishReason': 'error'})
             try:
                 persist_task_result(task)
             except Exception as e:
@@ -1421,18 +1691,27 @@ def _start_external_backend(data, messages, backend_name):
 
     try:
         threading.Thread(target=_run_external, daemon=True).start()
-    except Exception:
+    except Exception as _spawn_err:
         logger.exception('[Chat] Failed to start external backend thread for task %s',
                          task['id'])
+        from lib.error_envelope import make_envelope as _make_env
         task['status'] = 'error'
-        task['error'] = 'Server failed to start backend thread'
-        return jsonify({'error': 'Failed to start task'}), 500
+        task['error'] = _make_env(
+            'internal',
+            detail='Server failed to start backend thread.',
+            model=data.get('config', {}).get('model', ''),
+            context=f'external-backend:{backend_name}',
+            source='routes.chat',
+            raw=str(_spawn_err),
+        )
+        return api_internal_error('Failed to start task')
 
     return jsonify({'taskId': task['id']})
 
 
 @chat_bp.route('/api/chat/stream/<task_id>', methods=['GET'])
-def chat_stream(task_id):
+async def chat_stream(task_id):
+    import asyncio
     with tasks_lock:
         task = tasks.get(task_id)
 
@@ -1447,11 +1726,13 @@ def chat_stream(task_id):
         if _replay_cursor_hdr:
             try:
                 _replay_cursor = int(_replay_cursor_hdr)
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as _e_audit:
+                logger.debug('[chat] chat_stream caught %s: %s', type(_e_audit).__name__, _e_audit)
                 _replay_cursor = None
             if _replay_cursor is not None and _replay_cursor >= 0:
                 from lib.tasks_pkg.event_log import read_events as _read_events
-                _persisted = _read_events(task_id, since_event_id=_replay_cursor)
+                _persisted = await asyncio.to_thread(
+                    _read_events, task_id, since_event_id=_replay_cursor)
                 if _persisted:
                     logger.info('[Chat] Stream %s cold replay from event_log: %d event(s) since id=%d',
                                 task_id[:8], len(_persisted), _replay_cursor)
@@ -1465,26 +1746,56 @@ def chat_stream(task_id):
                             yield f'id: {eid}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n'
                             if isinstance(payload, dict) and payload.get('type') == 'done':
                                 return
-                        # No persisted 'done' — synthesize one from task_results
+                        # No persisted 'done' — synthesize state+done from task_results.
+                        # We MUST emit a 'state' event before 'done' here: a
+                        # client whose Last-Event-ID points past the end of
+                        # the persisted log (e.g. TTL prune ran, or the
+                        # client's last cursor was very recent) would
+                        # otherwise see only metadata and lose all text.
+                        # Mirrors the warm-fallback shape further down.
                         try:
                             db_local = get_db(DOMAIN_CHAT)
                             row_local = db_local.execute(
-                                'SELECT error,status,metadata FROM task_results WHERE task_id=?',
+                                'SELECT content,thinking,error,status,tool_rounds,metadata '
+                                'FROM task_results WHERE task_id=?',
                                 (task_id,)
                             ).fetchone()
+                            if row_local:
+                                state_local = {
+                                    'type': 'state',
+                                    'content': row_local['content'] or '',
+                                    'thinking': row_local['thinking'] or '',
+                                    'status': row_local['status'],
+                                }
+                                if row_local['tool_rounds']:
+                                    try:
+                                        state_local['toolRounds'] = json.loads(row_local['tool_rounds'])
+                                    except (json.JSONDecodeError, TypeError) as _e:
+                                        logger.debug('[Chat] cold-replay tool_rounds parse failed: %s', _e)
+                                if row_local['error']:
+                                    from lib.error_envelope import from_json as _err_from_json
+                                    state_local['error'] = _err_from_json(row_local['error'])
+                                yield f'data: {json.dumps(state_local, ensure_ascii=False)}\n\n'
                             done_evt_local = {'type': 'done'}
                             if row_local:
                                 if row_local['metadata']:
                                     try:
                                         m = json.loads(row_local['metadata'])
+                                        # Field list MUST mirror _extract_task_meta /
+                                        # _extract_db_meta / chat_poll's DB-path loop.
+                                        # See _extract_task_meta docstring for why.
                                         for k in ('finishReason', 'usage', 'preset', 'toolSummary',
-                                                  'model', 'thinkingDepth', 'fallbackModel', 'fallbackFrom'):
+                                                  'model', 'provider_id', 'thinkingDepth',
+                                                  'apiRounds', 'modifiedFiles', 'modifiedFileList',
+                                                  'fallbackModel', 'fallbackFrom'):
                                             if m.get(k):
                                                 done_evt_local[k] = m[k]
-                                    except (json.JSONDecodeError, TypeError):
+                                    except (json.JSONDecodeError, TypeError) as _e_audit:
+                                        logger.debug('[chat] gen_persisted caught %s: %s', type(_e_audit).__name__, _e_audit)
                                         pass
                                 if row_local['error']:
-                                    done_evt_local['error'] = row_local['error']
+                                    from lib.error_envelope import from_json as _err_from_json
+                                    done_evt_local['error'] = _err_from_json(row_local['error'])
                             yield f'data: {json.dumps(done_evt_local, ensure_ascii=False)}\n\n'
                         except Exception as _e:
                             logger.debug('[Chat] cold-replay synthetic done failed: %s', _e)
@@ -1497,35 +1808,44 @@ def chat_stream(task_id):
                     })
 
         db = get_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT content,thinking,error,status,tool_rounds,metadata FROM task_results WHERE task_id=?',
-            (task_id,)
-        ).fetchone()
+        row = await asyncio.to_thread(
+            lambda: db.execute(
+                'SELECT content,thinking,error,status,tool_rounds,metadata FROM task_results WHERE task_id=?',
+                (task_id,)
+            ).fetchone())
         if row:
             state = {
                 'type': 'state', 'content': row['content'],
                 'thinking': row['thinking'], 'status': row['status'],
             }
             if row['error']:
-                state['error'] = row['error']
+                from lib.error_envelope import from_json as _err_from_json
+                state['error'] = _err_from_json(row['error'])
             if row['tool_rounds']:
                 try:
                     state['toolRounds'] = json.loads(row['tool_rounds'])
                 except (json.JSONDecodeError, TypeError) as e:
                     logger.warning('[Chat] Failed to parse tool_rounds for task %s: %s', task_id, e, exc_info=True)
             meta = _extract_db_meta(row)
-            for key in ('finishReason', 'usage', 'preset', 'model', 'thinkingDepth'):
+            # Field lists MUST stay aligned with _extract_task_meta and
+            # the chat_poll DB-path loop. See _extract_task_meta docstring.
+            for key in ('finishReason', 'usage', 'preset', 'model',
+                        'provider_id', 'thinkingDepth',
+                        'apiRounds', 'modifiedFiles', 'modifiedFileList'):
                 if meta.get(key):
                     state[key] = meta[key]
             done_evt = {'type': 'done'}
-            for key in ('finishReason', 'usage', 'preset', 'toolSummary', 'model', 'thinkingDepth'):
+            for key in ('finishReason', 'usage', 'preset', 'toolSummary',
+                        'model', 'provider_id', 'thinkingDepth',
+                        'apiRounds', 'modifiedFiles', 'modifiedFileList'):
                 if meta.get(key):
                     done_evt[key] = meta[key]
             if meta.get('fallbackModel'):
                 done_evt['fallbackModel'] = meta['fallbackModel']
                 done_evt['fallbackFrom'] = meta.get('fallbackFrom', '')
             if row['error']:
-                done_evt['error'] = row['error']
+                from lib.error_envelope import from_json as _err_from_json
+                done_evt['error'] = _err_from_json(row['error'])
 
             logger.info('[Chat] Stream %s served from DB — status=%s content=%dchars '
                        'finishReason=%s model=%s error=%s',
@@ -1546,7 +1866,7 @@ def chat_stream(task_id):
                 'Connection': 'keep-alive',
             })
         logger.warning('[Chat] Task %s not found (stream)', task_id)
-        return jsonify({'error': 'Task not found'}), 404
+        return api_not_found('Task not found')
 
     # ★ SSE reader dedup: supersede any previous SSE reader for this task.
     #   When a client reconnects (proxy timeout, page switch), the old reader
@@ -1569,7 +1889,7 @@ def chat_stream(task_id):
 
     _stream_start = time.time()
     _events_sent = 0
-    def generate():
+    async def generate():
         nonlocal _events_sent
         for _ in range(4):
             yield ':' + ' ' * 2048 + '\n\n'
@@ -1623,6 +1943,8 @@ def chat_stream(task_id):
                         state[key] = meta[key]
                 if task.get('preset'):
                     state['preset'] = task['preset']
+                if task.get('_memoryPrefetch'):
+                    state['memoryPrefetch'] = task['_memoryPrefetch']
                 # ★ Endpoint mode: include phase and completed turns for reconnection
                 if task.get('endpoint_mode'):
                     state['endpointMode'] = True
@@ -1688,10 +2010,14 @@ def chat_stream(task_id):
                 if ev.get('type') == 'done':
                     _done_fr = ev.get('finishReason', '?')
                     _done_err = ev.get('error')
+                    _done_err_summary = (
+                        _done_err.get('kind') if isinstance(_done_err, dict)
+                        else (_done_err or 'none')
+                    )
                     logger.info('[Chat] SSE stream %s finished normally — %d events sent in %.1fs '
                                'finishReason=%s error=%s',
                                task_id[:8], _events_sent, time.time() - _stream_start,
-                               _done_fr, _done_err or 'none')
+                               _done_fr, _done_err_summary)
                     return
             if task['status'] != 'running' and not new_evts:
                 late_done = {'type': 'done'}
@@ -1710,11 +2036,16 @@ def chat_stream(task_id):
                 _late_fr = late_meta.get('finishReason', '?')
                 _is_benign = _late_fr in ('aborted', 'interrupted', 'stop')
                 _log_fn = logger.info if _is_benign else logger.warning
+                _err_obj = task['error']
+                _err_summary = (
+                    _err_obj.get('detail') or _err_obj.get('message') or _err_obj.get('kind')
+                    if isinstance(_err_obj, dict) else (_err_obj or 'none')
+                )
                 _log_fn('[Chat] SSE stream %s emitting LATE done '
                         '(task finished but no done event in queue) — '
                         'finishReason=%s model=%s error=%s',
                         task_id[:8], _late_fr,
-                        late_meta.get('model', '?'), task['error'] or 'none')
+                        late_meta.get('model', '?'), _err_summary)
                 yield f'id: {cursor}\ndata: {json.dumps(late_done, ensure_ascii=False)}\n\n'
                 return
             # ★ SSE reader dedup: if a newer SSE reader connected, exit this one
@@ -1727,17 +2058,17 @@ def chat_stream(task_id):
             if time.time() - last_t > 15:
                 yield ': keepalive\n\n'
                 last_t = time.time()
-            time.sleep(0.05)
+            await asyncio.sleep(0.05)
 
-    def generate_with_disconnect_log():
+    async def generate_with_disconnect_log():
         """Wrap generate() to detect client disconnect (SSE premature close)."""
         done_sent = False
         try:
-            for chunk in generate():
+            async for chunk in generate():
                 if '"type"' in chunk and ('"type": "done"' in chunk or '"type":"done"' in chunk):
                     done_sent = True
                 yield chunk
-        except GeneratorExit:
+        except (GeneratorExit, asyncio.CancelledError):
             logger.debug('[Chat] SSE stream closed by client (GeneratorExit)', exc_info=True)
         finally:
             elapsed = time.time() - _stream_start
@@ -1773,15 +2104,18 @@ def chat_stream(task_id):
                            task_id[:8], _events_sent, elapsed, content_len,
                            _fr, _model, _provider)
 
-    return Response(generate_with_disconnect_log(), mimetype='text/event-stream', headers={
+    resp = Response(generate_with_disconnect_log(), mimetype='text/event-stream', headers={
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache, no-transform',
         'X-Accel-Buffering': 'no',
         'Connection': 'keep-alive',
     })
+    resp.timeout = None
+    return resp
 
 
-@chat_bp.route('/api/chat/abort-conv/<conv_id>', methods=['POST'])
+@api_v1_chat_bp.route('/api/v1/chat/abort-conv/<conv_id>', methods=['POST'], endpoint='ui_chat_abort_conv')
+@require_scope('chat')
 def chat_abort_conv(conv_id):
     """Abort all running tasks for a conversation by conv ID.
 
@@ -1800,18 +2134,31 @@ def chat_abort_conv(conv_id):
         logger.info('[Chat] Abort-by-conv conv=%s — aborted %d task(s)', conv_id[:8], aborted)
     else:
         logger.debug('[Chat] Abort-by-conv conv=%s — no running tasks found', conv_id[:8])
-    return jsonify({'ok': True, 'aborted': aborted})
-
-
-@chat_bp.route('/api/chat/abort/<task_id>', methods=['POST'])
+    return api_ok({'aborted': aborted})
+@api_v1_chat_bp.route('/api/v1/chat/abort/<task_id>', methods=['POST'], endpoint='ui_chat_abort')
+@require_scope('chat')
 def chat_abort(task_id):
+    """Abort a running task by id.
+
+    Sets ``task['aborted']`` (the orchestrator polls this between rounds),
+    SIGTERMs any spawned ``run_command`` subprocess, and signals the external
+    backend if one is in use. Idempotent — a duplicate abort logs at WARNING
+    and returns ok.
+
+    This is the single, authoritative abort handler — it carries the real
+    subprocess / external-backend kill logic. The previous duplicate stub in
+    ``routes/api_v1/chat.py`` (which only flipped ``aborted``) was removed.
+    """
     with tasks_lock:
         task = tasks.get(task_id)
     if not task:
-        return jsonify({'error': 'Not found'}), 404
+        return api_not_found('Not found')
     was_already_aborted = task.get('aborted', False)
     task['aborted'] = True
     task['_abort_timestamp'] = time.time()
+    audit_log('api_chat_abort',
+              key_id=(current_auth().key_id if current_auth() else ''),
+              task_id=task_id)
     # Log comprehensive abort context
     _status = task.get('status', '?')
     _elapsed = time.time() - task.get('created_at', time.time())
@@ -1857,11 +2204,18 @@ def chat_abort(task_id):
         except Exception as e:
             logger.warning('[Chat] Failed to abort external backend %s: %s',
                            _backend_name, e)
-    return jsonify({'ok': True})
-
-
-@chat_bp.route('/api/chat/poll/<task_id>', methods=['GET'])
+    return api_ok()
+@api_v1_chat_bp.route('/api/v1/chat/poll/<task_id>', methods=['GET'], endpoint='ui_chat_poll')
+@require_scope('chat')
 def chat_poll(task_id):
+    """Poll a task by id; returns the live in-memory task or its DB checkpoint.
+
+    Memory hit returns the full live task dict; DB hit deserialises the
+    persisted ``task_results`` row. Tasks whose DB row says ``status='running'``
+    but which are absent from memory are reported as ``status='interrupted'``
+    (server crashed mid-task) so the frontend stops polling and recovers the
+    partial content.
+    """
     with tasks_lock:
         task = tasks.get(task_id)
 
@@ -1882,9 +2236,11 @@ def chat_poll(task_id):
             'id': task['id'], 'status': task['status'],
             'content': task['content'], 'thinking': task['thinking'],
         }
+        # Field list MUST mirror chat_poll's DB-path loop and
+        # _extract_task_meta. See _extract_task_meta docstring.
         for key in ('error', 'toolRounds', 'finishReason', 'usage', 'preset',
                      'toolSummary', 'phase', 'modifiedFiles', 'modifiedFileList',
-                     'model', 'thinkingDepth', 'apiRounds'):
+                     'model', 'provider_id', 'thinkingDepth', 'apiRounds'):
             if task.get(key):
                 r[key] = task[key]
         if task.get('id'):
@@ -1893,12 +2249,6 @@ def chat_poll(task_id):
             r['fallbackModel'] = task['_fallback_model']
         if task.get('_fallback_from'):
             r['fallbackFrom'] = task['_fallback_from']
-        # ★ emit_to_user: include emitted tool content so poll fallback
-        #   and Case B recovery can display inline emit blocks.
-        if task.get('_emitContent'):
-            r['emitContent'] = task['_emitContent']
-        if task.get('_emitToolName'):
-            r['emitToolName'] = task['_emitToolName']
         # ★ Memory prefetch indicator (persists through poll fallback + reload)
         if task.get('_memoryPrefetch'):
             r['memoryPrefetch'] = task['_memoryPrefetch']
@@ -1946,30 +2296,31 @@ def chat_poll(task_id):
             'content': row['content'], 'thinking': row['thinking'],
         }
         if row['error']:
-            r['error'] = row['error']
+            from lib.error_envelope import from_json as _err_from_json
+            r['error'] = _err_from_json(row['error'])
         if row['tool_rounds']:
             try:
                 r['toolRounds'] = json.loads(row['tool_rounds'])
             except (json.JSONDecodeError, TypeError) as e:
                 logger.warning('[Chat] Failed to parse tool_rounds in poll for task %s: %s', task_id, e, exc_info=True)
+        # Field list MUST mirror chat_poll's in-memory loop and
+        # _extract_task_meta. provider_id was previously dropped here
+        # even though persist_task_result writes it into meta_json,
+        # silently round-tripping through the DB.
         for key in ('finishReason', 'usage', 'preset', 'toolSummary',
-                     'model', 'thinkingDepth', 'apiRounds',
+                     'model', 'provider_id', 'thinkingDepth', 'apiRounds',
                      'modifiedFiles', 'modifiedFileList'):
             if _db_meta.get(key):
                 r[key] = _db_meta[key]
         if _db_meta.get('fallbackModel'):
             r['fallbackModel'] = _db_meta['fallbackModel']
             r['fallbackFrom'] = _db_meta.get('fallbackFrom', '')
-        # ★ emit_to_user data is not stored in task_results metadata —
-        #   it's persisted directly into conversation messages by
-        #   _sync_result_to_conversation. For DB-sourced polls, the
-        #   frontend recovers it from loadConversationMessages on page load.
         return jsonify(r)
 
     logger.warning('[Chat] Poll %s — NOT FOUND in memory or DB! Task may have been cleaned up. '
                    'Client will receive 404 and may lose accumulated content.',
                    task_id[:8])
-    return jsonify({'error': 'Task not found'}), 404
+    return api_not_found('Task not found')
 
 
 # ══════════════════════════════════════════════════════════

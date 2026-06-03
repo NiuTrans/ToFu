@@ -6,7 +6,12 @@
   "models": [
     {
       "model_id": "gpt-4.1",
-      "capabilities": ["text", "vision", "thinking", "cheap"],
+      "capabilities": [
+        "text",
+        "vision",
+        "thinking",
+        "cheap"
+      ],
       "rpm": 30,
       "cost": 0.008
     },

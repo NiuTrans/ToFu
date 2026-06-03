@@ -7,17 +7,20 @@ call frequently (every tool toggle).
 
 import json
 
-from flask import jsonify, request
 
 from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db
 from lib.log import get_logger
-from routes.chat import chat_bp
+from lib.api_response import api_bad_request, api_internal_error, api_ok
+from lib.request_parser import parse_body
+from routes.api_v1.chat import api_v1_chat_bp  # noqa: E402
+from routes.api_v1.auth import require_scope
 from routes.common import DEFAULT_USER_ID
 
 logger = get_logger(__name__)
 
 
-@chat_bp.route('/api/chat/tool-state/<conv_id>', methods=['PATCH'])
+@api_v1_chat_bp.route('/api/v1/chat/tool-state/<conv_id>', methods=['PATCH'], endpoint='ui_chat_tool_state')
+@require_scope('chat')
 def chat_tool_state(conv_id):
     """Lightweight tool-state sync: merge tool settings into conversation settings.
 
@@ -27,9 +30,9 @@ def chat_tool_state(conv_id):
 
     Body: { model?, searchMode?, fetchEnabled?, browserEnabled?, projectPath?, ... }
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     if not data:
-        return jsonify({'error': 'No settings provided'}), 400
+        return api_bad_request('No settings provided')
 
     try:
         db = get_thread_db(DOMAIN_CHAT)
@@ -40,11 +43,11 @@ def chat_tool_state(conv_id):
 
         if not row:
             # Conv not in DB yet (no messages sent) — that's OK, skip
-            return jsonify({'ok': True, 'skipped': True})
-
+            return api_ok({'skipped': True})
         try:
             settings = json.loads(row['settings'] or '{}')
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as _e_audit:
+            logger.debug('[chat_tool_state] chat_tool_state caught %s: %s', type(_e_audit).__name__, _e_audit)
             settings = {}
 
         settings.update(data)
@@ -56,8 +59,7 @@ def chat_tool_state(conv_id):
 
         logger.debug('[ToolState] conv=%s patched %d keys: %s',
                      conv_id[:8], len(data), list(data.keys())[:10])
-        return jsonify({'ok': True})
-
+        return api_ok()
     except Exception as e:
         logger.error('[ToolState] Failed for conv=%s: %s', conv_id[:8], e, exc_info=True)
-        return jsonify({'error': 'internal_error'}), 500
+        return api_internal_error('internal_error')

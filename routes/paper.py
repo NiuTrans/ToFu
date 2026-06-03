@@ -1,713 +1,122 @@
-"""routes/paper.py — Paper Reading Mode endpoints.
+"""routes/paper.py — Paper Reading Mode HTTP endpoints (thin route layer).
 
-Provides:
-- /api/paper/chat      — Streaming LLM chat for paper Q&A and translation
-- /api/paper/report    — Single-model streaming deep analysis report
-- /api/paper/report/cache — Lookup cached report by paper hash
-- /api/paper/fetch-arxiv — Fetch PDF from arXiv URL and return a serveable path
-- /api/paper/upload    — Upload a PDF for reading
+Every piece of business logic (hashing, prompts, LLM streaming, tool
+execution, figure extraction + injection, report TaskRuntime + engine,
+translate TaskRuntime + engine, arxiv ID parser, library schema) lives
+in ``lib.paper.*``.
+
+Endpoints:
+  POST /api/paper/chat                   — Streaming LLM chat (Q&A / translate)
+  POST /api/paper/extract-images         — Force figure/table extraction
+  GET  /api/paper/images/<phash>/<file>  — Serve an extracted image
+  POST /api/paper/report/start           — Start (or join) report task
+  GET  /api/paper/report/poll            — Poll report events
+  POST /api/paper/report/abort           — Abort running report
+  POST /api/paper/report/lookup          — Find by (paper_hash, lang)
+  GET  /api/paper/report/export          — MD / HTML / PDF export
+  POST /api/paper/report/cache           — DB cache lookup
+  POST /api/paper/translate/start        — Start (or join) translate task
+  GET  /api/paper/translate/poll         — Poll translate events
+  POST /api/paper/translate/abort        — Abort running translate
+  POST /api/paper/translate/lookup       — Find by (paper_hash, lang)
+  POST /api/paper/translate/cache        — DB cache lookup
+  POST /api/paper/fetch-arxiv            — Download PDF (sync)
+  POST /api/paper/fetch-arxiv-stream     — Download + parse + extract (SSE)
+  GET  /api/paper/pdf/<file>             — Serve a stored PDF
+  POST /api/paper/reparse                — Re-parse stored PDF
+  POST /api/paper/upload                 — Upload + parse + extract
+  GET  /api/paper/library                — List bookshelf
+  PUT  /api/paper/library/<id>           — Upsert a library entry
+  DELETE /api/paper/library/<id>         — Remove from bookshelf
+
+Back-compat: ``routes/api_v1/agents.py`` imports ``start_report_task``,
+``start_translate_task``, ``poll_report_task``, ``poll_translate_task``
+from this module; ``tests/test_paper_migration.py`` imports the private
+runtime symbols (``_report_runtime``, ``_translate_runtime``, ``_new_*_task``,
+``_append_*_event``, ``_cleanup_stale_*_tasks``, ``_*_index_get``, …).
+All those names are re-exported here.
 """
 
-import hashlib
+import base64
 import json
 import os
-import queue
 import re
-import threading
 import time
 
 import requests as _requests
 from flask import Blueprint, Response, jsonify, request, send_file
 
-import lib as _lib
+from lib.api_response import (
+    api_bad_request,
+    api_error,
+    api_internal_error,
+    api_not_found,
+    api_ok,
+)
+from lib.database import db_execute_with_retry, get_db, get_thread_db
 from lib.log import get_logger
-from lib.database import get_db, get_thread_db, db_execute_with_retry
-from lib.llm_dispatch.api import dispatch_stream
-from lib.tools.search import SEARCH_TOOL_MULTI, FETCH_URL_TOOL
-from lib.search.orchestrator import perform_web_search
-from lib.fetch import fetch_page_content
+from lib.paper import (  # noqa: F401  — back-compat re-exports
+    BASE_DIR,
+    PAPER_DIR,
+    PAPER_IMG_DIR,
+    _FIG_EXTRACT_VERSION,
+    _LANG_NAMES,
+    _LIB_IMAGES_CAP,
+    _LIB_PARSED_TEXT_CAP,
+    _LIB_QA_HISTORY_CAP,
+    _LIB_TITLE_CAP,
+    _MAX_REPORT_TOOL_ROUNDS,
+    _PAPER_LIB_COLUMNS,
+    _REPORT_PROMPT_EN,
+    _REPORT_PROMPT_ZH,
+    _REPORT_TASK_TTL,
+    _REPORT_TOOLS,
+    _TRANSLATE_CHUNK_SIZE,
+    _TRANSLATE_TASK_TTL,
+    _append_report_event,
+    _append_translate_event,
+    _build_image_manifest,
+    _cleanup_stale_report_tasks,
+    _cleanup_stale_translate_tasks,
+    _ensure_paper_images,
+    _ensure_title_heading,
+    _execute_report_tool,
+    _extract_arxiv_id,
+    _extract_paper_figures,
+    _inject_images_into_report,
+    _lib_row_to_dict,
+    _load_image_manifest,
+    _lookup_paper_title,
+    _new_report_task,
+    _new_translate_task,
+    _paper_hash,
+    _report_dedup_index,
+    _report_dedup_lock,
+    _report_index_get,
+    _report_index_register,
+    _report_runtime,
+    _report_tasks,
+    _report_tasks_lock,
+    _run_report_task,
+    _run_translate_task,
+    _safe_hash_dir,
+    _stream_llm_sse,
+    _translate_dedup_index,
+    _translate_dedup_lock,
+    _translate_index_get,
+    _translate_index_register,
+    _translate_runtime,
+    _translate_tasks,
+    _translate_tasks_lock,
+)
+from lib.request_parser import parse_body
 from routes.common import DEFAULT_USER_ID
 
 logger = get_logger(__name__)
 
 paper_bp = Blueprint('paper', __name__)
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PAPER_DIR = os.path.join(BASE_DIR, 'uploads', 'papers')
-PAPER_IMG_DIR = os.path.join(PAPER_DIR, 'images')
-os.makedirs(PAPER_DIR, exist_ok=True)
-os.makedirs(PAPER_IMG_DIR, exist_ok=True)
-
-
-def _paper_hash(text):
-    """Compute a stable hash of the paper text for DB caching."""
-    return hashlib.sha256(text.encode('utf-8')).hexdigest()[:32]
-
-
-def _safe_hash_dir(phash):
-    """Validate/normalize a paper hash to prevent path traversal.
-
-    Returns the 32-char hex string or None if invalid.
-    """
-    if not phash or not isinstance(phash, str):
-        return None
-    if not re.fullmatch(r'[a-f0-9]{8,64}', phash):
-        return None
-    return phash
-
-
-# ══════════════════════════════════════════════════════
-#  Report prompt — single comprehensive analysis
-# ══════════════════════════════════════════════════════
-
-_REPORT_PROMPT_EN = """\
-You are a senior research scientist writing a comprehensive analysis report for an academic paper.
-Read the paper below carefully and produce a **complete, structured Markdown report** covering all of the following sections in order.
-
-Write the full report in one pass. Be specific, quantitative, and analytical — not vague or superficial. Cite actual numbers, method names, and benchmarks from the paper.
-
-## 🧮 Formatting rules — READ CAREFULLY
-
-1. **Math** — ALL mathematical notation MUST use KaTeX delimiters so the reader's browser can render it:
-   - Inline math: `$E = mc^2$`, `$d_{\\text{model}}=512$`, `$\\sqrt{d_k}$`, `$\\mathcal{O}(n^2)$`
-   - Display/block math (own line): `$$\\text{Attention}(Q,K,V) = \\text{softmax}\\left(\\frac{QK^\\top}{\\sqrt{d_k}}\\right)V$$`
-   - **Never** wrap math in backticks (e.g. `` `d_k=64` ``) — backticks render as gray code, not formulas.
-   - Inside table cells, keep math in `$...$`. For literal `|` inside math use `\\vert` or `\\mid`.
-
-2. **Figures / tables from the paper** — you are provided a manifest of images extracted from the paper (below the paper text). For each figure or table you discuss, embed the image inline using Markdown syntax, placing it right before or after the paragraph that discusses it:
-   ```
-   ![Figure 3 — Transformer architecture](IMG_URL_FROM_MANIFEST)
-   ```
-   Use the **exact** URL given in the manifest. Only embed images that are relevant to the section you are currently writing. Do not invent URLs. If the manifest is empty, skip images silently.
-
----
-
-## ⚡ TL;DR
-2-3 crisp sentences: what they did, the key result, and why it matters. Include specific method names, numbers, and benchmarks. A busy professor should get the full picture in 10 seconds.
-
-## 📋 Paper Card
-| Field | Detail |
-|-------|--------|
-| **Title** | (full title) |
-| **Authors** | (first author et al., or all if ≤4) |
-| **Affiliation** | (primary institutions) |
-| **Venue / Year** | (conference/journal, year — infer if needed) |
-| **arXiv / DOI** | (if identifiable) |
-| **Code / Data** | (any URLs mentioned) |
-
-## 🎯 Problem & Motivation
-1. The specific problem — the exact gap or limitation being addressed.
-2. Why existing approaches fail — cite specific prior methods, explain their shortcomings concretely.
-3. Real-world impact — who benefits and how.
-4. The key insight that enables their approach.
-
-## 💡 Method — How It Works
-### Core Insight
-The central idea in 2-3 sentences.
-
-### Architecture / Pipeline
-Step-by-step walkthrough with numbered steps. For each: input, output, what operation happens, and what makes it different from the naive approach.
-
-### Novel Components vs. Borrowed
-Explicitly separate new contributions from adopted/standard components.
-
-### Key Design Choices & Trade-offs
-For each important decision: what was chosen, what were alternatives, why, and what trade-offs.
-
-### Training & Optimization Details
-Loss functions, training data, hyperparameters, engineering tricks.
-
-## 📊 Experimental Analysis
-### Main Results
-Compact comparison table:
-| Benchmark / Task | Their Method | Best Baseline | Δ Improvement |
-|------------------|-------------|---------------|---------------|
-| ... | ... | ... | ... |
-
-### Experimental Setup
-Datasets, metrics, baselines, compute resources.
-
-### Deep Dive
-Where the method shines, where it struggles, surprising findings, consistency of results.
-
-### Ablation Studies
-Which components contribute most, which are unimportant, diminishing returns patterns.
-
-### What's Missing
-Experiments you'd want to see, omitted baselines, fairness of comparisons.
-
-## ✅ Strengths
-5-7 bullet points. For each, explain WHY it's a strength. Consider novelty, experiment thoroughness, clarity, theoretical grounding, reproducibility.
-
-## ⚠️ Weaknesses & Limitations
-5-7 bullet points. Be honest but constructive. State the weakness, its impact on claims, and how it could be addressed.
-
-## 🗺️ Research Landscape & Impact
-### Positioning
-Where this paper sits in the research timeline. Comparison with closest prior work.
-
-### Intellectual Lineage
-2-3 key ancestor ideas this builds upon.
-
-### Impact Assessment
-Likely impact (transformative/incremental/niche), downstream applications, societal concerns.
-
-### Future Directions
-Most promising next step, a risky high-reward extension, connections to emerging trends.
-
-## 📝 Technical Reference
-### Key Concepts & Glossary
-| Term | Definition |
-|------|-----------|
-| (8-12 domain-specific terms) | (clear definitions) |
-
-### Key Equations & Theorems
-Most important formulations with plain-language explanations.
-
-### Reproducibility Checklist
-- [ ] Code available?
-- [ ] Data available?
-- [ ] Hyperparameters fully specified?
-- [ ] Compute requirements stated?
-- [ ] Random seeds / variance reported?
-
----
-
-Write in the same language as the paper. Be thorough but concise — aim for quality over length.
-
-Paper text:
-{paper_text}"""
-
-_REPORT_PROMPT_ZH = """\
-你是一位资深研究科学家，正在为一篇学术论文撰写全面的分析报告。
-请仔细阅读下面的论文，按照以下所有章节顺序，**一次性生成完整的 Markdown 结构化报告**。
-
-要求：具体、量化、有分析深度，不要空泛笼统。引用论文中的实际数据、方法名和基准测试。
-
-## 🧮 格式规范（必须严格遵守）
-
-1. **数学公式** — 所有数学符号必须使用 KaTeX 定界符，便于浏览器渲染：
-   - 行内公式：`$E = mc^2$`、`$d_{\\text{model}}=512$`、`$\\sqrt{d_k}$`、`$\\mathcal{O}(n^2)$`
-   - 独立公式（单独成行）：`$$\\text{Attention}(Q,K,V) = \\text{softmax}\\left(\\frac{QK^\\top}{\\sqrt{d_k}}\\right)V$$`
-   - **严禁**用反引号包住公式（例如 `` `d_k=64` ``）——反引号会被渲染成灰色代码而不是公式。
-   - 表格单元格内也用 `$...$`；若公式中需要字面量 `|`，改写为 `\\vert` 或 `\\mid`。
-
-2. **论文中的图表** — 系统已从论文中抽取了一批图/表图像，清单见"论文正文"下方的"Image manifest"部分。你在讲解某张图/表时，请在对应段落前后用 Markdown 嵌入图片：
-   ```
-   ![图 3 — Transformer 架构](清单中给出的图片 URL)
-   ```
-   URL 必须**照抄**清单里给出的地址，不要臆造；只嵌入与当前讨论相关的图；若清单为空则不嵌图。
-
----
-
-## ⚡ 一句话总结
-2-3 句话精炼概括：他们做了什么，关键结果是什么，为什么重要。包含具体方法名、数字和基准。让忙碌的教授 10 秒内掌握全貌。
-
-## 📋 论文信息卡
-| 字段 | 内容 |
-|------|------|
-| **标题** | （完整标题） |
-| **作者** | （第一作者 et al.，或全部作者（≤4人时）） |
-| **机构** | （主要机构） |
-| **发表会议/期刊 / 年份** | （会议/期刊名，年份——可推断） |
-| **arXiv / DOI** | （如能识别） |
-| **代码 / 数据** | （论文中提到的任何仓库或数据集链接） |
-
-## 🎯 问题与动机
-1. **具体问题** — 不是泛泛的研究领域，而是该论文要解决的精确缺口或局限。
-2. **现有方法为何失败** — 引用论文中提到的具体先前方法，用实例解释它们的不足。不要只说"已有工作有局限"，要说清楚什么方法在什么情况下失败了、为什么。
-3. **现实影响** — 谁会受益？解决这个问题能改变什么？具体说明应用场景。
-4. **核心洞察** — 是什么关键观察或假设让他们的方案成为可能？
-
-## 💡 方法详解
-### 核心思想
-2-3 句话说清中心思想，"灵光一现"在哪里。
-
-### 架构 / 流程
-分步骤描述方法（编号列表）。每一步说明：
-- 输入和输出是什么？
-- 具体执行了什么操作？（不要含糊——要精确）
-- 与朴素/直觉方法有什么不同？
-
-### 新贡献 vs. 借鉴
-明确区分：
-- 哪些是本文的**新贡献**
-- 哪些是**借鉴/改编**自前人工作（注明出处）
-- 哪些是**标准组件**（如"标准 Transformer 编码器"）
-
-### 关键设计选择与权衡
-对每个重要决策：选了什么、有哪些备选方案、为什么这样选、有什么权衡。
-
-### 训练与优化细节
-损失函数及其直觉、训练数据、数据增强、关键超参数、工程技巧。
-
-## 📊 实验分析
-### 主要结果
-核心对比表格：
-| 基准/任务 | 本文方法 | 最强基线 | 提升幅度 |
-|-----------|---------|---------|---------|
-| ... | ... | ... | ... |
-
-### 实验设置
-数据集（名称、规模、领域）、评估指标、对比基线、计算资源。
-
-### 结果深入分析
-方法在哪些任务/数据集上表现突出？在哪些方面较弱？有无意外发现或矛盾之处？
-
-### 消融实验
-哪个组件贡献最大、哪些出乎意料地不重要、有无边际递减。
-
-### 缺失的实验
-你还想看到什么实验？是否遗漏了明显的基线或数据集？对比是否公平？
-
-## ✅ 优点
-5-7 个要点，每个都解释**为什么**这是优点（不是只列现象）。考虑新颖性、实验充分性、表述清晰度、理论基础、可复现性。
-
-## ⚠️ 不足与局限
-5-7 个要点。坦诚但有建设性。每个要点说清不足本身、对论文结论的影响、以及改进建议。
-
-## 🗺️ 研究全景与影响
-### 定位
-这篇论文在研究时间线上处于什么位置？与最接近的先前工作对比如何？
-
-### 学术脉络
-本文建立在哪 2-3 个关键前序思想之上？
-
-### 影响评估
-对领域的可能影响（变革性/渐进式/小众）、下游应用、潜在社会影响。
-
-### 未来方向
-最有前景的下一步、一个高风险高回报的拓展、与当前研究趋势的关联。
-
-## 📝 技术参考
-### 关键概念与术语表
-| 术语 | 定义 |
-|------|------|
-| （8-12 个领域专有术语或缩写） | （清晰简明的定义） |
-
-### 关键公式与定理
-最重要的数学公式及其通俗解释。
-
-### 可复现性检查
-- [ ] 代码是否公开？
-- [ ] 数据是否公开？
-- [ ] 超参数是否完整？
-- [ ] 计算资源是否注明？
-- [ ] 随机种子/方差是否报告？
-
----
-
-用中文撰写。专有名词、模型名称、基准测试名保留英文原文。力求深入透彻而不冗长。
-
-论文正文：
-{paper_text}"""
-
-
-# ══════════════════════════════════════════════════════
-#  Internal LLM helpers
-# ══════════════════════════════════════════════════════
-
-def _stream_llm_sse(messages, model=None, max_tokens=128000, temperature=0):
-    """Streaming SSE generator for paper Q&A / translate.
-
-    Reuses dispatch_stream for retry handling and rate-limit rotation.
-    Yields SSE-formatted lines including a final ``data: [DONE]\\n\\n``.
-
-    ``max_tokens`` defaults to a very large ceiling (128k) so responses run
-    to completion without artificial truncation.  ``_clamp_max_tokens()`` in
-    ``build_body`` automatically reduces this to each model's native API
-    limit, so the effective value is "as much as the model allows."
-    """
-    q = queue.Queue()
-    _sentinel = object()
-
-    def _worker():
-        try:
-            def _on_content(text):
-                q.put(text)
-
-            dispatch_stream(
-                messages,
-                on_content=_on_content,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                prefer_model=model or None,
-                strict_model=bool(model),
-                log_prefix='[Paper:Chat]',
-            )
-        except Exception as e:
-            logger.error('[Paper:Chat] Stream failed: %s', e, exc_info=True)
-            q.put(('__error__', str(e)))
-        finally:
-            q.put(_sentinel)
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-
-    while True:
-        item = q.get()
-        if item is _sentinel:
-            break
-        if isinstance(item, tuple) and item[0] == '__error__':
-            yield f'data: {json.dumps({"error": item[1]})}\n\n'
-            break
-        yield f'data: {json.dumps({"choices": [{"delta": {"content": item}}]})}\n\n'
-
-    yield 'data: [DONE]\n\n'
-
-
-# ── Report tool definitions ──
-_REPORT_TOOLS = [SEARCH_TOOL_MULTI, FETCH_URL_TOOL]
-_MAX_REPORT_TOOL_ROUNDS = 8
-
-
-def _execute_report_tool(name, args_str):
-    """Execute a tool call from the report agent and return the result string.
-
-    Supports web_search (single + batch) and fetch_url (single + batch).
-    """
-    try:
-        args = json.loads(args_str) if args_str else {}
-    except json.JSONDecodeError as e:
-        logger.warning('[Paper:Report:Tool] Bad JSON args for %s: %s', name, e)
-        return f'Error: invalid arguments JSON — {e}'
-
-    if name == 'web_search':
-        queries = args.get('queries', [])
-        if not queries:
-            q = args.get('query', '')
-            if q:
-                queries = [{'query': q}]
-        if not queries:
-            return 'Error: no query provided'
-        all_results = []
-        for qobj in queries[:5]:  # cap at 5 concurrent
-            q = qobj.get('query', '') if isinstance(qobj, dict) else str(qobj)
-            if not q:
-                continue
-            logger.info('[Paper:Report:Tool] web_search query=%r', q[:100])
-            try:
-                results = perform_web_search(q, max_results=5)
-                for r in results:
-                    snippet = (r.get('full_content') or r.get('snippet', ''))[:3000]
-                    all_results.append(f"### {r.get('title', 'No title')}\nURL: {r.get('url', '')}\n{snippet}")
-            except Exception as e:
-                logger.warning('[Paper:Report:Tool] web_search failed for %r: %s', q, e)
-                all_results.append(f'Search for "{q}" failed: {e}')
-        return '\n\n---\n\n'.join(all_results) if all_results else 'No results found.'
-
-    elif name == 'fetch_url':
-        urls = args.get('urls', [])
-        if not urls:
-            u = args.get('url', '')
-            if u:
-                urls = [{'url': u}]
-        if not urls:
-            return 'Error: no url provided'
-        all_contents = []
-        for uobj in urls[:3]:  # cap at 3
-            u = uobj.get('url', '') if isinstance(uobj, dict) else str(uobj)
-            if not u:
-                continue
-            logger.info('[Paper:Report:Tool] fetch_url url=%.100s', u)
-            try:
-                content = fetch_page_content(u, max_chars=8000)
-                all_contents.append(f"### Content from {u}\n{content[:8000]}")
-            except Exception as e:
-                logger.warning('[Paper:Report:Tool] fetch_url failed for %.100s: %s', u, e)
-                all_contents.append(f'Fetch {u} failed: {e}')
-        return '\n\n---\n\n'.join(all_contents) if all_contents else 'No content fetched.'
-
-    else:
-        return f'Unknown tool: {name}'
-
-
-# ══════════════════════════════════════════════════════
-#  Report task store — server-owned background generation
-# ══════════════════════════════════════════════════════
-#
-# Design goals (per user request 2026-04-18):
-#   • Report generation happens ONCE per (paper_hash, lang). If a task is
-#     already running, any new /start request joins it and polls the same
-#     events.
-#   • Task is server-owned: tool-call progress, deltas, status are all
-#     accumulated in an append-only `events` list. Frontend polls
-#     /api/paper/report/poll?cursor=N and replays — no SSE, no client-held
-#     state, refresh-safe and tab-switch-safe.
-#   • Event schema mirrors the chat stream (tool_start / tool_done /
-#     delta / thinking / done / enriched / error) so the frontend can
-#     reuse `renderToolRoundsHTML` directly.
-#   • On completion the enriched report is persisted to the `paper_reports`
-#     table. Subsequent opens hit the DB cache instantly (no task spawned).
-
-# Keyed by (paper_hash, lang). Value is a task dict (see _new_report_task).
-_report_tasks = {}
-_report_tasks_lock = threading.Lock()
-_REPORT_TASK_TTL = 3600  # keep finished tasks for 1 h so late pollers can read final events
-
-
-def _new_report_task(task_id, phash, lang, model):
-    """Create a fresh task dict for a report generation run."""
-    return {
-        'task_id': task_id,
-        'paper_hash': phash,
-        'lang': lang,
-        'model': model,
-        'status': 'pending',        # pending → running → done | error
-        'created_at': time.time(),
-        'finished_at': None,
-        'events': [],               # append-only: [{seq, type, ...}]
-        'events_lock': threading.Lock(),
-        'abort_event': threading.Event(),
-        'full_text': '',            # accumulated delta text
-        'enriched_text': '',        # final enriched text (with images)
-        'tool_rounds': [],          # synchronised toolRounds array (chat-compatible schema)
-        'round_counter': 0,         # monotonic tool round numbers
-        'error': '',
-    }
-
-
-def _append_report_event(task, event):
-    """Append an event to the task's event log. Thread-safe.
-
-    Every event gets a monotonic `seq` so pollers can resume from a cursor.
-    """
-    with task['events_lock']:
-        event['seq'] = len(task['events'])
-        task['events'].append(event)
-
-
-def _cleanup_stale_report_tasks():
-    """Drop finished tasks older than TTL to keep memory bounded."""
-    now = time.time()
-    with _report_tasks_lock:
-        stale = []
-        for key, task in _report_tasks.items():
-            if task['status'] in ('done', 'error') and task.get('finished_at'):
-                if now - task['finished_at'] > _REPORT_TASK_TTL:
-                    stale.append(key)
-        for key in stale:
-            _report_tasks.pop(key, None)
-        if stale:
-            logger.debug('[Paper:Report] Cleaned %d stale task(s)', len(stale))
-
-
-def _run_report_task(task, messages, images):
-    """Background worker: runs the tool loop and populates task events.
-
-    Event schema (mirrors chat stream for frontend reuse):
-      - {type: 'tool_start', roundNum, toolName, query, toolCallId, toolArgs}
-      - {type: 'tool_done',  roundNum, toolName, toolContent (truncated preview), elapsed}
-      - {type: 'thinking',   delta}
-      - {type: 'delta',      delta}
-      - {type: 'enriched',   text}             — post-stream image injection
-      - {type: 'done',       report, paperHash}
-      - {type: 'error',      error}
-    """
-    task['status'] = 'running'
-    _append_report_event(task, {'type': 'status', 'status': 'running'})
-
-    phash = task['paper_hash']
-    lang = task['lang']
-    model = task['model']
-    abort_event = task['abort_event']
-
-    def _abort_check():
-        return abort_event.is_set()
-
-    model_name = model or _lib.LLM_MODEL
-    t0 = time.time()
-    full_content = ''
-
-    try:
-        for rnd in range(_MAX_REPORT_TOOL_ROUNDS + 1):
-            if _abort_check():
-                logger.info('[Paper:Report] Task %s aborted', task['task_id'])
-                break
-
-            _round_tools = _REPORT_TOOLS if rnd < _MAX_REPORT_TOOL_ROUNDS else None
-            logger.info('[Paper:Report] Task %s round %d — model=%s msgs=%d',
-                        task['task_id'], rnd + 1, model_name, len(messages))
-
-            def _on_content(text):
-                nonlocal full_content
-                full_content += text
-                task['full_text'] = full_content
-                _append_report_event(task, {'type': 'delta', 'delta': text})
-
-            def _on_thinking(text):
-                _append_report_event(task, {'type': 'thinking', 'delta': text})
-
-            # ★ max_tokens: pass a very large ceiling so the report can run
-            #   to completion without artificial truncation.  dispatch_stream
-            #   → build_body → _clamp_max_tokens() automatically reduces this
-            #   to each model's native API limit (GPT=32k, Claude=128k,
-            #   Qwen per-model 16–64k, etc.), so we get "as much as the model
-            #   allows" without hardcoding a small cap.
-            #   Prior behavior: fell back to dispatch_stream's default 4096,
-            #   which truncated long reports mid-section.
-            msg, finish, usage = dispatch_stream(
-                messages,
-                on_content=_on_content,
-                on_thinking=_on_thinking,
-                abort_check=_abort_check,
-                prefer_model=model_name if model else None,
-                strict_model=bool(model),
-                tools=_round_tools,
-                max_tokens=128000,
-                temperature=0,
-                thinking_enabled=False,
-                log_prefix='[Paper:Report]',
-            )
-
-            tool_calls = msg.get('tool_calls')
-            if not tool_calls:
-                logger.info('[Paper:Report] Task %s — no tool calls, report complete '
-                            '(%d chars, %.1fs)', task['task_id'], len(full_content), time.time() - t0)
-                break
-
-            messages.append(msg)
-
-            # Execute tool calls — emit chat-compatible tool_start / tool_done events
-            for tc in tool_calls:
-                fn_name = tc['function']['name']
-                fn_args_raw = tc['function']['arguments']
-                tc_id = tc.get('id', '')
-
-                # Parse args for display
-                try:
-                    fn_args = json.loads(fn_args_raw) if isinstance(fn_args_raw, str) else (fn_args_raw or {})
-                except (json.JSONDecodeError, TypeError):
-                    fn_args = {}
-
-                # Build chat-style round entry (subset of what
-                # lib.tasks_pkg.tool_display produces — for paper report we
-                # only have web_search / fetch_url).
-                task['round_counter'] += 1
-                rn = task['round_counter']
-
-                if fn_name == 'web_search':
-                    queries = fn_args.get('queries') or []
-                    if not queries and fn_args.get('query'):
-                        queries = [{'query': fn_args['query']}]
-                    if len(queries) > 1:
-                        previews = [q.get('query', '?')[:30] for q in queries[:3] if isinstance(q, dict)]
-                        suffix = f' +{len(queries) - 3} more' if len(queries) > 3 else ''
-                        display_query = f'{len(queries)} searches: {"; ".join(previews)}{suffix}'
-                    else:
-                        display_query = queries[0].get('query', '') if queries and isinstance(queries[0], dict) else ''
-                elif fn_name == 'fetch_url':
-                    urls = fn_args.get('urls') or []
-                    if not urls and fn_args.get('url'):
-                        urls = [{'url': fn_args['url']}]
-                    if len(urls) > 1:
-                        previews = []
-                        for u in urls[:3]:
-                            if isinstance(u, dict):
-                                url = u.get('url', '?')
-                                # short host+path
-                                try:
-                                    from urllib.parse import urlparse
-                                    p = urlparse(url)
-                                    previews.append((p.netloc or '') + (p.path or '')[:30])
-                                except Exception:
-                                    previews.append(url[:40])
-                        suffix = f' +{len(urls) - 3} more' if len(urls) > 3 else ''
-                        display_query = f'📄 {len(urls)} URLs: {", ".join(previews)}{suffix}'
-                    else:
-                        target_url = urls[0].get('url', '') if urls and isinstance(urls[0], dict) else ''
-                        display_query = f'🌐 {target_url}'
-                else:
-                    display_query = fn_name
-
-                round_entry = {
-                    'roundNum': rn,
-                    'toolName': fn_name,
-                    'query': display_query,
-                    'toolCallId': tc_id,
-                    'toolArgs': fn_args_raw if isinstance(fn_args_raw, str) else json.dumps(fn_args, ensure_ascii=False),
-                    'status': 'searching',
-                    'results': None,
-                }
-                task['tool_rounds'].append(round_entry)
-
-                _append_report_event(task, {
-                    'type': 'tool_start',
-                    'roundNum': rn,
-                    'toolName': fn_name,
-                    'query': display_query,
-                    'toolCallId': tc_id,
-                    'toolArgs': round_entry['toolArgs'],
-                })
-
-                tool_t0 = time.time()
-                result = _execute_report_tool(fn_name, fn_args_raw)
-                tool_elapsed = time.time() - tool_t0
-                logger.info('[Paper:Report:Tool] %s → %d chars in %.1fs', fn_name, len(result), tool_elapsed)
-
-                # Update round entry → done
-                round_entry['status'] = 'done'
-                round_entry['_elapsed'] = f'{tool_elapsed:.1f}s'
-                # Preview of the tool content (capped, so polling responses stay small)
-                tool_preview = result[:4000]
-                round_entry['toolContent'] = tool_preview
-
-                _append_report_event(task, {
-                    'type': 'tool_done',
-                    'roundNum': rn,
-                    'toolName': fn_name,
-                    'toolCallId': tc_id,
-                    'elapsed': round(tool_elapsed, 1),
-                    'toolContent': tool_preview,
-                })
-
-                messages.append({
-                    'role': 'tool',
-                    'tool_call_id': tc_id,
-                    'content': result[:30000],
-                })
-
-        elapsed = time.time() - t0
-        logger.info('[Paper:Report] Task %s content stream complete — %d chars in %.1fs',
-                    task['task_id'], len(full_content), elapsed)
-
-        # Inject figures/tables into the report
-        enriched = _inject_images_into_report(full_content, images, lang=lang)
-        task['enriched_text'] = enriched
-
-        # Persist to DB
-        if enriched:
-            try:
-                db2 = get_thread_db()
-                db_execute_with_retry(
-                    db2,
-                    "INSERT OR REPLACE INTO paper_reports (paper_hash, lang, report, model, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (phash, lang, enriched, model or _lib.LLM_MODEL, int(time.time())),
-                )
-                logger.info('[Paper:Report] Persisted — hash=%s lang=%s %d chars (%d imgs)',
-                            phash, lang, len(enriched), len(images))
-            except Exception as e:
-                logger.warning('[Paper:Report] Failed to persist: %s', e)
-
-        # If enrichment changed the text, emit an enriched event so pollers
-        # replay the image-embedded version as the canonical body.
-        if enriched and enriched != full_content:
-            _append_report_event(task, {'type': 'enriched', 'text': enriched, 'paperHash': phash})
-
-        task['status'] = 'done'
-        task['finished_at'] = time.time()
-        _append_report_event(task, {'type': 'done', 'report': enriched or full_content, 'paperHash': phash})
-
-    except Exception as e:
-        logger.error('[Paper:Report] Task %s failed after %.1fs: %s',
-                     task['task_id'], time.time() - t0, e, exc_info=True)
-        task['status'] = 'error'
-        task['error'] = str(e)
-        task['finished_at'] = time.time()
-        _append_report_event(task, {'type': 'error', 'error': str(e)})
-    finally:
-        _cleanup_stale_report_tasks()
+# v1 blueprint for the JSON routes (the 5 carve-outs above stay on paper_bp).
+from routes.api_v1.paper import api_v1_paper_bp  # noqa: E402
 
 
 # ══════════════════════════════════════════════════════
@@ -724,13 +133,13 @@ def paper_chat():
     Returns:
         SSE stream of chat completion deltas.
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     messages = data.get('messages', [])
     model = data.get('model') or None
 
     if not messages:
         logger.warning('[Paper:Chat] Request with no messages')
-        return jsonify({'error': 'No messages provided'}), 400
+        return api_bad_request('No messages provided')
 
     # Log the request (truncate user message for privacy)
     last_msg = messages[-1] if messages else {}
@@ -745,7 +154,7 @@ def paper_chat():
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
-@paper_bp.route('/api/paper/extract-images', methods=['POST'])
+@api_v1_paper_bp.route('/api/v1/paper/extract-images', methods=['POST'])
 def extract_images():
     """Extract figure/table images from a previously uploaded PDF.
 
@@ -758,114 +167,31 @@ def extract_images():
     Returns:
         { ok: true, paper_hash: str, images: [{url, caption, page, source, width, height}] }
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     filename = os.path.basename((data.get('filename') or '').strip())
     if not filename:
         logger.warning('[Paper:Images] Request with no filename')
-        return jsonify({'error': 'No filename'}), 400
+        return api_bad_request('No filename')
 
     filepath = os.path.join(PAPER_DIR, filename)
     if not os.path.isfile(filepath):
         logger.warning('[Paper:Images] PDF not found: %s', filename)
-        return jsonify({'error': 'PDF not found'}), 404
+        return api_not_found('PDF not found')
 
     try:
         max_images = int(data.get('max_images', 30))
         max_image_width = int(data.get('max_image_width', 900))
     except (ValueError, TypeError) as e:
         logger.warning('[Paper:Images] Invalid numeric parameter: %s', e)
-        return jsonify({'error': f'Invalid parameter: {e}'}), 400
+        return api_bad_request(f'Invalid parameter: {e}')
 
     # Cache key — prefer client-provided hash (matches the report cache key),
     # fall back to filename-based hash.
     phash = _safe_hash_dir(data.get('paper_hash', '').strip()) or _paper_hash(filename)
-    out_dir = os.path.join(PAPER_IMG_DIR, phash)
-
-    # ── Cache hit: re-use previously extracted images ──
-    manifest_path = os.path.join(out_dir, 'manifest.json')
-    if os.path.isfile(manifest_path):
-        try:
-            with open(manifest_path, 'r', encoding='utf-8') as f:
-                cached = json.load(f)
-            logger.info('[Paper:Images] Cache hit — hash=%s, %d images', phash, len(cached))
-            return jsonify({'ok': True, 'paper_hash': phash, 'images': cached, 'cached': True})
-        except Exception as e:
-            logger.warning('[Paper:Images] Manifest cache read failed (will regenerate): %s', e)
-
-    # ── Extract ──
-    try:
-        import pymupdf
-    except ImportError as e:
-        logger.error('[Paper:Images] pymupdf not available: %s', e)
-        return jsonify({'error': 'pymupdf not available on server'}), 500
-
-    from lib.pdf_parser.images import detect_and_clip_figures
-
-    t0 = time.time()
-    try:
-        with open(filepath, 'rb') as f:
-            pdf_bytes = f.read()
-    except Exception as e:
-        logger.error('[Paper:Images] Read failed: %s', e, exc_info=True)
-        return jsonify({'error': f'Read failed: {e}'}), 500
-
-    os.makedirs(out_dir, exist_ok=True)
-    images_out = []
-    try:
-        doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
-        try:
-            total_pages = len(doc)
-            for pi in range(total_pages):
-                if len(images_out) >= max_images:
-                    break
-                try:
-                    page_imgs = detect_and_clip_figures(
-                        doc[pi], pi, total_pages,
-                        max_image_width=max_image_width,
-                    )
-                except Exception as pe:
-                    logger.warning('[Paper:Images] detect failed on page %d: %s', pi, pe)
-                    continue
-                for img in page_imgs:
-                    if len(images_out) >= max_images:
-                        break
-                    try:
-                        import base64 as _b64
-                        raw = _b64.b64decode(img['base64'])
-                        idx = len(images_out) + 1
-                        ext = '.jpg' if 'jpeg' in img.get('mediaType', '') else '.png'
-                        fname = f'fig_{idx:02d}_p{img.get("page", pi+1)}{ext}'
-                        fpath = os.path.join(out_dir, fname)
-                        with open(fpath, 'wb') as f:
-                            f.write(raw)
-                        images_out.append({
-                            'url': f'/api/paper/images/{phash}/{fname}',
-                            'caption': img.get('caption', ''),
-                            'page': img.get('page'),
-                            'source': img.get('source', ''),
-                            'width': img.get('width'),
-                            'height': img.get('height'),
-                        })
-                    except Exception as se:
-                        logger.warning('[Paper:Images] Failed to save figure %d on page %d: %s',
-                                       len(images_out)+1, pi, se)
-        finally:
-            doc.close()
-    except Exception as e:
-        logger.error('[Paper:Images] Extraction failed: %s', e, exc_info=True)
-        return jsonify({'error': f'Extraction failed: {e}'}), 500
-
-    # Persist manifest for future cache hits
-    try:
-        with open(manifest_path, 'w', encoding='utf-8') as f:
-            json.dump(images_out, f, ensure_ascii=False)
-    except Exception as e:
-        logger.warning('[Paper:Images] Failed to write manifest: %s', e)
-
-    elapsed = time.time() - t0
-    logger.info('[Paper:Images] Extracted %d images from %s in %.1fs (hash=%s)',
-                len(images_out), filename, elapsed, phash)
-    return jsonify({'ok': True, 'paper_hash': phash, 'images': images_out})
+    images_out = _extract_paper_figures(
+        filepath, phash, max_images=max_images, max_image_width=max_image_width,
+    )
+    return api_ok({'paper_hash': phash, 'images': images_out})
 
 
 @paper_bp.route('/api/paper/images/<phash>/<filename>')
@@ -874,150 +200,20 @@ def serve_paper_image(phash, filename):
     phash_safe = _safe_hash_dir(phash)
     if not phash_safe:
         logger.debug('[Paper:Images] Invalid hash: %.40s', phash)
-        return jsonify({'error': 'Invalid hash'}), 400
+        return api_bad_request('Invalid hash')
     filename = os.path.basename(filename)
     # Only allow our known filename pattern
     if not re.fullmatch(r'fig_\d+_p\d+\.(jpg|jpeg|png)', filename, re.IGNORECASE):
         logger.debug('[Paper:Images] Invalid filename: %s', filename)
-        return jsonify({'error': 'Invalid filename'}), 400
+        return api_bad_request('Invalid filename')
     filepath = os.path.join(PAPER_IMG_DIR, phash_safe, filename)
     if not os.path.isfile(filepath):
-        return jsonify({'error': 'Image not found'}), 404
+        return api_not_found('Image not found')
     mt = 'image/jpeg' if filename.lower().endswith(('.jpg', '.jpeg')) else 'image/png'
     return send_file(filepath, mimetype=mt)
 
 
-def _inject_images_into_report(report_md, images, lang='en'):
-    """Auto-insert extracted figures/tables into the report markdown.
-
-    LLMs frequently ignore "please embed ``![caption](url)``" instructions in
-    the manifest, so we do it deterministically: for each image whose caption
-    begins with a figure/table number (e.g. ``Figure 3: …`` / ``Table 1 …`` /
-    ``图 3 …``), find the first paragraph in the report that mentions that
-    number and insert the image right after it. Any images that can't be
-    matched to a mention are appended as an appendix at the end.
-
-    If the model *did* embed images correctly (unlikely but possible) we
-    bail out to avoid duplicates.
-
-    Args:
-        report_md: The generated report Markdown.
-        images: Manifest entries ``[{url, caption, page, source, ...}]``.
-        lang: 'zh' or 'en' — controls the appendix heading.
-
-    Returns:
-        Enriched report Markdown, or the original string on failure / no-op.
-    """
-    if not images or not report_md:
-        return report_md
-    try:
-        # If the model already embedded any paper image, trust it and skip.
-        if re.search(r'!\[[^\]]*\]\(/api/paper/images/', report_md):
-            return report_md
-
-        # Parse each caption for kind + number so we can find textual mentions.
-        fig_re = re.compile(r'^\s*(?:Figure|Fig\.?|图)\s*\.?\s*(\d+)', re.IGNORECASE)
-        tab_re = re.compile(r'^\s*(?:Table|Tab\.?|表)\s*\.?\s*(\d+)', re.IGNORECASE)
-        parsed = []
-        for img in images:
-            url = (img.get('url') or '').strip()
-            cap = (img.get('caption') or '').strip()
-            if not url:
-                continue
-            kind, num = None, None
-            m = fig_re.match(cap)
-            if m:
-                kind, num = 'figure', int(m.group(1))
-            else:
-                m = tab_re.match(cap)
-                if m:
-                    kind, num = 'table', int(m.group(1))
-            # Alt text must not contain newlines or ] that would break syntax.
-            alt = (cap.replace('\n', ' ')
-                      .replace(']', ')')
-                      .replace('[', '(')).strip()[:200] or (
-                      ('Figure' if kind == 'figure' else 'Table' if kind == 'table' else 'Figure')
-                      + (f' {num}' if num else ''))
-            parsed.append({'url': url, 'caption': cap, 'alt': alt,
-                           'kind': kind, 'num': num})
-
-        # Split report into paragraphs preserving separators.
-        # paras = [p0, sep0, p1, sep1, ...]
-        paras = re.split(r'(\n\n+)', report_md)
-
-        placed = set()
-        by_para: dict[int, list[str]] = {}
-        for i in range(0, len(paras), 2):
-            p = paras[i]
-            stripped = p.strip()
-            if not stripped:
-                continue
-            # Skip code fences & table rows (inserting there breaks layout).
-            if stripped.startswith('```') or stripped.startswith('|'):
-                continue
-            for pi, img in enumerate(parsed):
-                if pi in placed or img['kind'] is None or img['num'] is None:
-                    continue
-                if img['kind'] == 'figure':
-                    pat = rf'(?:Figure|Fig\.?|图)\s*\.?\s*{img["num"]}\b'
-                else:
-                    pat = rf'(?:Table|Tab\.?|表)\s*\.?\s*{img["num"]}\b'
-                if re.search(pat, p, re.IGNORECASE):
-                    by_para.setdefault(i, []).append(
-                        f'\n\n![{img["alt"]}]({img["url"]})\n\n')
-                    placed.add(pi)
-
-        # Insert from the end so earlier indices stay valid.
-        for i in sorted(by_para.keys(), reverse=True):
-            paras.insert(i + 1, ''.join(by_para[i]))
-        out = ''.join(paras)
-
-        # Append any unreferenced images as an appendix gallery.
-        unplaced = [p for pi, p in enumerate(parsed) if pi not in placed]
-        if unplaced:
-            title = '图表附录' if lang == 'zh' else 'Figures & Tables (Appendix)'
-            blurb = ('论文中未在报告正文中显式引用的图表：'
-                     if lang == 'zh'
-                     else 'Figures and tables from the paper not referenced above:')
-            out = out.rstrip() + f'\n\n---\n\n## 📎 {title}\n\n{blurb}\n\n'
-            for img in unplaced:
-                out += f'![{img["alt"]}]({img["url"]})\n\n'
-                if img['caption']:
-                    cap_clean = img['caption'].replace('\n', ' ').strip()
-                    out += f'*{cap_clean}*\n\n'
-
-        logger.info('[Paper:Report] Image inject — %d placed inline, %d in appendix '
-                    '(%d total)', len(placed), len(unplaced), len(parsed))
-        return out
-    except Exception as e:
-        logger.warning('[Paper:Report] Image injection failed (returning original): %s',
-                       e, exc_info=True)
-        return report_md
-
-
-def _build_image_manifest(images, lang='en'):
-    """Build a compact image manifest block for the LLM prompt."""
-    if not images:
-        return ''
-    header = ('Image manifest — figures/tables extracted from the paper.\n'
-              'Embed each as `![caption](url)` in Markdown where relevant.\n'
-              'URLs must be copied VERBATIM from this list.\n') if lang != 'zh' else (
-              '图像清单 —— 从论文中抽取的图/表。\n'
-              '如需引用请在正文中用 `![说明](url)` 嵌入，URL 必须原样照抄。\n')
-    lines = [header]
-    for i, img in enumerate(images, 1):
-        cap = (img.get('caption') or '').strip().replace('\n', ' ')[:160]
-        page = img.get('page', '?')
-        src = img.get('source', '')
-        url = img.get('url', '')
-        if not url:
-            continue
-        kind = 'table' if 'table' in src else 'figure'
-        lines.append(f'{i}. [{kind} · p.{page}] {url}\n   caption: {cap}')
-    return '\n'.join(lines)
-
-
-@paper_bp.route('/api/paper/report/start', methods=['POST'])
+@api_v1_paper_bp.route('/api/v1/paper/report/start', methods=['POST'])
 def start_report_task():
     """Start (or join) a background paper-report generation task.
 
@@ -1036,26 +232,36 @@ def start_report_task():
         - Task started/joined: {ok: true, task_id: str, paper_hash: str,
                                 running: bool, existed: bool}
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     paper_text = data.get('paper_text', '').strip()
     if not paper_text:
         logger.warning('[Paper:Report] Start request with no paper_text')
-        return jsonify({'ok': False, 'error': 'No paper_text provided'}), 400
+        return api_bad_request('No paper_text provided')
     if len(paper_text) < 100:
         logger.warning('[Paper:Report] Paper text too short: %d chars', len(paper_text))
-        return jsonify({'ok': False, 'error': 'Paper text too short (< 100 chars)'}), 400
+        return api_bad_request('Paper text too short (< 100 chars)')
 
     model = data.get('model') or None
     lang = data.get('lang', 'en') or 'en'
     force = bool(data.get('force'))
-    raw_images = data.get('images') or []
-    if not isinstance(raw_images, list):
-        raw_images = []
-    images = [im for im in raw_images
-              if isinstance(im, dict) and im.get('url')][:30]
+    # Client-supplied title — sent so the title prepend works even when the
+    # paper_library row hasn't been upserted yet (the frontend's
+    # _saveActivePaperState() PUT is fire-and-forget and may race with the
+    # report start). Stripped of trailing ``.pdf`` for cleanliness.
+    client_title = (data.get('title') or '').strip()
+    if client_title.lower().endswith('.pdf'):
+        client_title = client_title[:-4].strip()
 
     phash = _paper_hash(paper_text)
-    key = (phash, lang)
+    # Server is the source of truth for figure manifests. The client never
+    # forwards the images list any more — we load (or extract) it here.
+    images = _load_image_manifest(phash)
+    if not images:
+        # Manifest missing — try to derive a filename from the request and
+        # extract on-the-fly. Otherwise the report renders without figures.
+        derived_fn = os.path.basename((data.get('filename') or '').strip())
+        if derived_fn:
+            images = _ensure_paper_images(derived_fn, phash)
 
     # DB cache check (unless force) — no task needed, report is already done
     if not force:
@@ -1069,6 +275,7 @@ def start_report_task():
                 logger.info('[Paper:Report] DB cache hit — hash=%s lang=%s %d chars',
                             phash, lang, len(row['report']))
                 enriched = _inject_images_into_report(row['report'], images, lang=lang)
+                enriched = _ensure_title_heading(enriched, phash)
                 return jsonify({
                     'ok': True, 'cached': True,
                     'report': enriched, 'paper_hash': phash,
@@ -1076,59 +283,79 @@ def start_report_task():
         except Exception as e:
             logger.warning('[Paper:Report] DB cache lookup failed (will start task): %s', e)
 
-    # Task dedup
-    with _report_tasks_lock:
-        existing = _report_tasks.get(key)
-        if existing and not force and existing['status'] in ('pending', 'running', 'done'):
-            logger.info('[Paper:Report] Joining existing task %s (status=%s) — hash=%s lang=%s',
-                        existing['task_id'], existing['status'], phash, lang)
-            return jsonify({
-                'ok': True, 'task_id': existing['task_id'], 'paper_hash': phash,
-                'running': existing['status'] in ('pending', 'running'), 'existed': True,
-            })
+    # Task dedup via the dedup index ((paper_hash, lang) → task_id)
+    existing = _report_index_get(phash, lang)
+    if existing and not force and existing['status'] in ('pending', 'running', 'done'):
+        logger.info('[Paper:Report] Joining existing task %s (status=%s) — hash=%s lang=%s',
+                    existing['task_id'], existing['status'], phash, lang)
+        return jsonify({
+            'ok': True, 'task_id': existing['task_id'], 'paper_hash': phash,
+            'running': existing['status'] in ('pending', 'running'), 'existed': True,
+        })
 
-        # Force: abort the old task if any, then create a new one
-        if existing and force:
-            logger.info('[Paper:Report] Force regen — aborting old task %s', existing['task_id'])
-            existing['abort_event'].set()
-            existing['status'] = 'error'
-            existing['finished_at'] = time.time()
+    # Force: abort the old task if any, then create a new one
+    if existing and force:
+        logger.info('[Paper:Report] Force regen — aborting old task %s', existing['task_id'])
+        existing['abort_event'].set()
+        existing['status'] = 'error'
+        existing['finished_at'] = time.time()
 
-        # Build prompt for new task
-        prompt_template = _REPORT_PROMPT_ZH if lang == 'zh' else _REPORT_PROMPT_EN
-        max_text = 120000
-        truncated_text = paper_text[:max_text]
-        if len(paper_text) > max_text:
-            logger.info('[Paper:Report] Truncating paper text from %d to %d chars', len(paper_text), max_text)
-        manifest = _build_image_manifest(images, lang=lang)
-        if manifest:
-            truncated_text = truncated_text + '\n\n---\n\n' + manifest
-            logger.info('[Paper:Report] Injected image manifest — %d images, hash=%s', len(images), phash)
-        prompt = prompt_template.replace('{paper_text}', truncated_text)
-        tool_instruction = (
-            "You have access to web_search and fetch_url tools. "
-            "Use them to look up additional context when needed — for example, "
-            "to find related work, verify claims, check the paper's impact/citations, "
-            "or fill in details about referenced methods/datasets. "
-            "You may call tools multiple times before writing the report. "
-            "After gathering sufficient information, write the complete report.\n\n"
-        )
-        messages = [
-            {'role': 'system', 'content': tool_instruction},
-            {'role': 'user', 'content': prompt},
-        ]
+    # Build prompt for new task (runs for both new and force-regen paths)
+    prompt_template = _REPORT_PROMPT_ZH if lang == 'zh' else _REPORT_PROMPT_EN
+    max_text = 120000
+    truncated_text = paper_text[:max_text]
+    if len(paper_text) > max_text:
+        logger.info('[Paper:Report] Truncating paper text from %d to %d chars', len(paper_text), max_text)
+    manifest = _build_image_manifest(images, lang=lang)
+    if manifest:
+        truncated_text = truncated_text + '\n\n---\n\n' + manifest
+        logger.info('[Paper:Report] Injected image manifest — %d images, hash=%s', len(images), phash)
+    prompt = prompt_template.replace('{paper_text}', truncated_text)
+    tool_instruction = (
+        "You have access to web_search (batch) and fetch_url (batch) tools.\n\n"
+        "BEFORE writing any of the report, you are EXPECTED to do a research-grade "
+        "literature scan. The reader's most common complaint is that follow-up work "
+        "is missing — do not let that happen.\n\n"
+        "Recommended search plan (run several batches in parallel for speed):\n"
+        "  1. Identify the paper's title, first author, and approximate year. Then search:\n"
+        "     - '<title> citing OR follow-up' to surface later papers that built on it.\n"
+        "     - '<title> survey' / '<key method name> survey' for review articles that "
+        "place it in context (these are gold for related-work).\n"
+        "     - '<key method name> vs <closest competitor>' to find direct comparisons.\n"
+        "  2. For the 2-3 closest prior methods named in the paper, search "
+        "'<method> limitations' / '<method> improvement' to find what came after.\n"
+        "  3. If the paper is older than 12 months, search for its successor / scaled-up "
+        "versions explicitly (e.g. 'BERT successors', 'Transformer follow-ups', "
+        "'<paper-name> extension 2023 2024'). At least 3-5 concrete follow-up papers must end up "
+        "in your Research Landscape section.\n"
+        "  4. Verify any specific quantitative claim you find ambiguous (citation counts, "
+        "benchmark records, who first proposed an idea) via fetch_url on arXiv abstracts, "
+        "Papers-with-Code, or the original paper page.\n\n"
+        "Tool-call budget: up to "
+        f"{_MAX_REPORT_TOOL_ROUNDS} rounds. You may batch many queries per round — "
+        "prefer a few wide rounds over many narrow ones. Once you've gathered enough, "
+        "stop calling tools and write the FULL structured report in one pass.\n\n"
+        "Quality reminder: methodology must be reproduction-grade (the *why* of every "
+        "design choice, not just the *what*). Related-work survey must include "
+        "predecessors, contemporaries, AND post-publication follow-ups.\n\n"
+        "Output discipline: when you start writing the report, begin IMMEDIATELY with "
+        "the first heading (`## ⚡ TL;DR` or `## ⚡ 一句话总结`). Do NOT emit ANY text "
+        "before that heading — no 'I'll research...', no 'I have enough material...', "
+        "no 'Now I'll write...', no transition sentences. The reader sees your raw "
+        "output verbatim, and ANY pre-heading chatter is a bug. The very first "
+        "characters of your final response MUST be `## ⚡`.\n\n"
+    )
+    messages = [
+        {'role': 'system', 'content': tool_instruction},
+        {'role': 'user', 'content': prompt},
+    ]
 
-        task_id = f'rpt_{int(time.time() * 1000)}_{phash[:8]}_{lang}'
-        task = _new_report_task(task_id, phash, lang, model)
-        _report_tasks[key] = task
+    task_id = f'rpt_{int(time.time() * 1000)}_{phash[:8]}_{lang}'
+    task = _new_report_task(task_id, phash, lang, model, client_title=client_title)
 
     logger.info('[Paper:Report] Starting task %s — model=%s lang=%s text_len=%d hash=%s',
                 task_id, model, lang, len(paper_text), phash)
-    threading.Thread(
-        target=_run_report_task,
-        args=(task, messages, images),
-        daemon=True, name=f'paper-report-{task_id}',
-    ).start()
+    _report_runtime.spawn(task_id, _run_report_task, task, messages, images)
 
     return jsonify({
         'ok': True, 'task_id': task_id, 'paper_hash': phash,
@@ -1136,7 +363,7 @@ def start_report_task():
     })
 
 
-@paper_bp.route('/api/paper/report/poll', methods=['GET'])
+@api_v1_paper_bp.route('/api/v1/paper/report/poll', methods=['GET'])
 def poll_report_task():
     """Poll a report task for new events.
 
@@ -1161,23 +388,19 @@ def poll_report_task():
     task_id = request.args.get('task_id', '').strip()
     try:
         cursor = int(request.args.get('cursor', 0))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as _e_audit:
+        logger.debug('[paper] poll_report_task caught %s: %s', type(_e_audit).__name__, _e_audit)
         cursor = 0
 
     if not task_id:
-        return jsonify({'ok': False, 'error': 'task_id required'}), 400
+        return api_bad_request('task_id required')
 
-    # Find task by id (we key by (hash, lang) for dedup, so scan)
-    task = None
-    with _report_tasks_lock:
-        for t in _report_tasks.values():
-            if t['task_id'] == task_id:
-                task = t
-                break
-
+    # Direct lookup by task_id (runtime is keyed by task_id; dedup index
+    # maps (paper_hash, lang) → task_id for the start endpoint).
+    task = _report_runtime.get(task_id)
     if not task:
         logger.debug('[Paper:Report:Poll] Unknown task_id=%s', task_id)
-        return jsonify({'ok': False, 'error': 'task not found (may have expired)'}), 404
+        return api_not_found('task not found (may have expired)')
 
     # Snapshot events since cursor
     with task['events_lock']:
@@ -1199,23 +422,22 @@ def poll_report_task():
     return jsonify(resp)
 
 
-@paper_bp.route('/api/paper/report/abort', methods=['POST'])
+@api_v1_paper_bp.route('/api/v1/paper/report/abort', methods=['POST'])
 def abort_report_task():
     """Abort a running report task (best-effort)."""
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     task_id = (data.get('task_id') or '').strip()
     if not task_id:
-        return jsonify({'ok': False, 'error': 'task_id required'}), 400
-    with _report_tasks_lock:
-        for t in _report_tasks.values():
-            if t['task_id'] == task_id:
-                t['abort_event'].set()
-                logger.info('[Paper:Report] Abort requested for task %s', task_id)
-                return jsonify({'ok': True})
-    return jsonify({'ok': False, 'error': 'task not found'}), 404
+        return api_bad_request('task_id required')
+    task = _report_runtime.get(task_id)
+    if not task:
+        return api_not_found('task not found')
+    task['abort_event'].set()
+    logger.info('[Paper:Report] Abort requested for task %s', task_id)
+    return api_ok()
 
 
-@paper_bp.route('/api/paper/report/lookup', methods=['POST'])
+@api_v1_paper_bp.route('/api/v1/paper/report/lookup', methods=['POST'])
 def lookup_report_task():
     """Find an existing running task by (paper_hash, lang).
 
@@ -1226,24 +448,255 @@ def lookup_report_task():
     Body JSON: {paper_hash: str, lang: str}
     Returns: {ok: true, task_id: str, status: str} or {ok: false}
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     phash = (data.get('paper_hash') or '').strip()
     lang = data.get('lang', 'en') or 'en'
     if not phash:
-        return jsonify({'ok': False, 'error': 'paper_hash required'}), 400
-    with _report_tasks_lock:
-        task = _report_tasks.get((phash, lang))
-        if task:
-            return jsonify({
-                'ok': True,
-                'task_id': task['task_id'],
-                'status': task['status'],
-                'paper_hash': phash,
-            })
+        return api_bad_request('paper_hash required')
+    task = _report_index_get(phash, lang)
+    if task:
+        return jsonify({
+            'ok': True,
+            'task_id': task['task_id'],
+            'status': task['status'],
+            'paper_hash': phash,
+        })
     return jsonify({'ok': False})
 
 
-@paper_bp.route('/api/paper/report/cache', methods=['POST'])
+@api_v1_paper_bp.route('/api/v1/paper/report/export', methods=['GET'])
+def export_report():
+    """Download a stored report as Markdown or standalone HTML.
+
+    Query string:
+        paper_hash: str (required)
+        lang: str (default 'en')
+        format: 'md' | 'html' (default 'md')
+
+    Returns the file inline as a download. The HTML variant is a self-
+    contained document — figure URLs are rewritten to absolute so the file
+    works when opened from disk while the Tofu server is running.
+    """
+    phash = (request.args.get('paper_hash') or '').strip()
+    lang = (request.args.get('lang') or 'en').strip() or 'en'
+    fmt = (request.args.get('format') or 'md').strip().lower()
+    # `pdf` is a client-side rendering of the HTML body via window.print() —
+    # the server emits the same HTML doc but inline (no attachment) and with
+    # an auto-print bootstrap so the new tab opens the print dialog.
+    if fmt not in ('md', 'html', 'pdf'):
+        return api_bad_request('format must be md, html, or pdf')
+    if not _safe_hash_dir(phash):
+        return api_bad_request('invalid paper_hash')
+    inline_html = (fmt == 'pdf') or (request.args.get('inline') in ('1', 'true', 'yes'))
+
+    try:
+        db = get_db()
+        row = db.execute(
+            'SELECT report FROM paper_reports WHERE paper_hash=? AND lang=?',
+            (phash, lang),
+        ).fetchone()
+    except Exception as e:
+        logger.error('[Paper:Report:Export] Lookup failed: %s', e, exc_info=True)
+        return api_internal_error('lookup failed')
+    if not row or not row['report']:
+        return api_not_found('report not found')
+
+    images = _load_image_manifest(phash)
+    body_md = _inject_images_into_report(row['report'], images, lang=lang)
+    body_md = _ensure_title_heading(body_md, phash)
+
+    # Get the paper title for the export filename / page title
+    title = 'Paper Report'
+    try:
+        trow = db.execute(
+            'SELECT title, arxiv_id FROM paper_library '
+            'WHERE paper_hash=? AND user_id=? ORDER BY updated_at DESC LIMIT 1',
+            (phash, DEFAULT_USER_ID),
+        ).fetchone()
+        if trow:
+            title = trow['title'] or (f'arXiv:{trow["arxiv_id"]}' if trow['arxiv_id'] else title)
+    except Exception as e:
+        logger.debug('[Paper:Report:Export] Title lookup failed: %s', e)
+
+    safe_slug = re.sub(r'[^\w\-]+', '_', title)[:80] or 'paper'
+
+    if fmt == 'md':
+        return Response(
+            body_md,
+            mimetype='text/markdown; charset=utf-8',
+            headers={'Content-Disposition':
+                     f'attachment; filename="paper_report_{safe_slug}.md"'},
+        )
+
+    # HTML — render Markdown to HTML and wrap in a self-contained document.
+    # Protect math delimiters from Python's markdown processor: $...$ inline
+    # math contains underscores and asterisks (e.g. $a_i$, $f^*$) that
+    # markdown otherwise interprets as emphasis, mangling the LaTeX. We
+    # extract math regions, swap in placeholders, run markdown, then put
+    # the original math back so KaTeX's auto-render can find it client-side.
+    math_store: list[str] = []
+
+    def _stash_math(m):
+        math_store.append(m.group(0))
+        return f'\x02MATH{len(math_store) - 1}\x03'
+
+    md_protected = body_md
+    # Display math first ($$...$$ and \[...\]). Order matters — $$ would
+    # otherwise be eaten by the inline $ pattern.
+    md_protected = re.sub(r'\$\$[\s\S]+?\$\$', _stash_math, md_protected)
+    md_protected = re.sub(r'\\\[[\s\S]+?\\\]', _stash_math, md_protected)
+    # Inline math: $...$ on a single line, no $ inside, no | (table cell
+    # separator) to avoid swallowing rows when a cell holds a literal $.
+    md_protected = re.sub(
+        r'\$(?!\$)((?:[^$\\\n|]|\\.)+?)\$(?!\$)', _stash_math, md_protected,
+    )
+    md_protected = re.sub(r'\\\(.+?\\\)', _stash_math, md_protected)
+
+    try:
+        import markdown as _md
+        body_html = _md.markdown(
+            md_protected,
+            extensions=['tables', 'fenced_code', 'attr_list', 'sane_lists'],
+            output_format='html5',
+        )
+    except Exception as e:
+        logger.error('[Paper:Report:Export] markdown render failed: %s', e, exc_info=True)
+        return api_internal_error('render failed')
+
+    # Restore math placeholders. KaTeX's auto-render extension (loaded
+    # below) will scan for $...$ / $$...$$ on the client and replace with
+    # rendered formulas — this works for both Standalone HTML download and
+    # the PDF print preview.
+    def _unstash(m):
+        idx = int(m.group(1))
+        return math_store[idx] if 0 <= idx < len(math_store) else m.group(0)
+
+    body_html = re.sub(r'\x02MATH(\d+)\x03', _unstash, body_html)
+
+    # Embed paper-image URLs as base64 data: URIs so the standalone HTML
+    # file works offline (no server reachability required) — this is the
+    # common case for users who download the report to share or archive.
+    # Other root-anchored URLs (e.g. third-party `/static/...`) are
+    # rewritten to absolute http(s) URLs against the server origin.
+    origin = request.host_url.rstrip('/')
+
+    def _embed_paper_image(match):
+        attr = match.group(1)
+        url = match.group(2)
+        m = re.match(r'^/api/paper/images/([a-f0-9]{8,64})/([\w\-.]+)$', url)
+        if not m:
+            return attr + origin + url
+        ph, fn = m.group(1), m.group(2)
+        ph_safe = _safe_hash_dir(ph)
+        if not ph_safe:
+            return attr + origin + url
+        fpath = os.path.join(PAPER_IMG_DIR, ph_safe, os.path.basename(fn))
+        if not os.path.isfile(fpath):
+            logger.debug('[Paper:Report:Export] Image missing on disk, '
+                         'falling back to URL: %s', fpath)
+            return attr + origin + url
+        try:
+            with open(fpath, 'rb') as f:
+                raw = f.read()
+        except Exception as e:
+            logger.warning('[Paper:Report:Export] Image read failed for %s: %s', fpath, e)
+            return attr + origin + url
+        ext = os.path.splitext(fn)[1].lower()
+        mime = 'image/png' if ext == '.png' else 'image/jpeg'
+        b64 = base64.b64encode(raw).decode('ascii')
+        return f'{attr}data:{mime};base64,{b64}'
+
+    body_html = re.sub(
+        r'((?:src|href)=["\'])(/[^"\']+)',
+        _embed_paper_image,
+        body_html,
+    )
+
+    safe_title = (title.replace('&', '&amp;').replace('<', '&lt;')
+                       .replace('>', '&gt;').replace('"', '&quot;'))
+    css = (
+        'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;'
+        'max-width:820px;margin:32px auto;padding:0 24px;line-height:1.7;color:#222;background:#fff}'
+        'h1,h2,h3{margin-top:1.6em;line-height:1.3}'
+        'h2{border-bottom:1px solid #eee;padding-bottom:6px}'
+        'img{max-width:100%;height:auto;display:block;margin:14px auto;border:1px solid #eaeaea;'
+        'border-radius:6px;padding:4px;background:#fff}'
+        'pre{background:#f6f8fa;padding:12px 14px;border-radius:6px;overflow:auto;font-size:13px}'
+        'code{background:#f1f1f1;padding:1px 5px;border-radius:3px;font-size:90%}'
+        'pre code{background:none;padding:0}'
+        'blockquote{border-left:3px solid #6366f1;padding-left:12px;margin:8px 0;color:#555}'
+        'table{border-collapse:collapse;margin:8px 0;font-size:13px}'
+        'th,td{border:1px solid #e0e0e0;padding:6px 10px}th{background:#fafafa}'
+        '@media print{body{margin:0;max-width:none}img{break-inside:avoid}h2,h3{break-after:avoid}}'
+    )
+    # Avoid duplicate H1: the report body itself now starts with `# Title`
+    # (prepended in _run_report_task). For older cached reports without it,
+    # fall back to the wrapper H1.
+    body_starts_with_h1 = bool(re.match(r'\s*<h1\b', body_html))
+    title_block = '' if body_starts_with_h1 else f'<h1>{safe_title}</h1>'
+
+    # KaTeX auto-render — paper reports are math-heavy. The client-side
+    # reading view uses KaTeX too (lib/static/js/core.js renderMarkdown),
+    # so the exported HTML/PDF must match. We load KaTeX from a public CDN
+    # so the file works offline (cached) and renders math even when opened
+    # by `file://`. ``displayMode: 'block'`` for $$ and ``\[`` only.
+    # CDN URLs only (no SRI hashes — they pin the bundle to one version, and
+    # cdn.jsdelivr.net already serves over HTTPS with reasonable caching).
+    katex_assets = (
+        '<link rel="stylesheet" '
+        'href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" '
+        'crossorigin="anonymous">'
+        '<script defer '
+        'src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" '
+        'crossorigin="anonymous"></script>'
+        '<script defer '
+        'src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" '
+        'crossorigin="anonymous" '
+        'onload="renderMathInElement(document.body,{'
+        "delimiters:["
+        "{left:'$$',right:'$$',display:true},"
+        "{left:'\\\\[',right:'\\\\]',display:true},"
+        "{left:'$',right:'$',display:false},"
+        "{left:'\\\\(',right:'\\\\)',display:false}"
+        "],"
+        "throwOnError:false,"
+        "errorColor:'#d33'"
+        '});window.__katexReady=true;"></script>'
+    )
+
+    # PDF flow: bootstrap an auto-print on load (waits for images AND for
+    # KaTeX to render so figures + formulas show up in the printed PDF).
+    # Standalone HTML download has no print script.
+    auto_print_js = (
+        '<script>window.addEventListener("load",function(){'
+        'function waitKatex(cb){'
+        'if(window.__katexReady||!document.querySelector("script[src*=\\"auto-render\\"]"))cb();'
+        'else setTimeout(function(){waitKatex(cb);},120);}'
+        'var imgs=document.images,pending=imgs.length?0:0;'
+        'function go(){setTimeout(function(){'
+        'try{window.focus();window.print();}catch(e){}},400);}'
+        'function r(){pending--;if(pending<=0)waitKatex(go);}'
+        'for(var i=0;i<imgs.length;i++){if(!imgs[i].complete){pending++;'
+        'imgs[i].addEventListener("load",r);imgs[i].addEventListener("error",r);}}'
+        'if(pending===0)waitKatex(go);'
+        '});</script>'
+    ) if fmt == 'pdf' else ''
+    html_doc = (
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        f'<title>{safe_title}</title><style>{css}</style>{katex_assets}{auto_print_js}</head><body>'
+        f'{title_block}{body_html}</body></html>'
+    )
+    if inline_html:
+        return Response(html_doc, mimetype='text/html; charset=utf-8')
+    return Response(
+        html_doc,
+        mimetype='text/html; charset=utf-8',
+        headers={'Content-Disposition':
+                 f'attachment; filename="paper_report_{safe_slug}.html"'},
+    )
+
+
+@api_v1_paper_bp.route('/api/v1/paper/report/cache', methods=['POST'])
 def get_report_cache():
     """Lookup cached report by paper hash.
 
@@ -1254,20 +707,15 @@ def get_report_cache():
     Returns:
         { ok: true, report: str, paper_hash: str } or { ok: false }
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     phash = data.get('paper_hash', '').strip()
     lang = data.get('lang', 'en') or 'en'
-    raw_images = data.get('images') or []
-    if not isinstance(raw_images, list):
-        raw_images = []
-    images = [im for im in raw_images
-              if isinstance(im, dict) and im.get('url')][:30]
 
     # Prefer pre-computed hash; fall back to computing from text
     if not phash:
         paper_text = data.get('paper_text', '').strip()
         if not paper_text:
-            return jsonify({'ok': False, 'error': 'No paper_hash or paper_text'}), 400
+            return api_bad_request('No paper_hash or paper_text')
         phash = _paper_hash(paper_text)
 
     try:
@@ -1278,21 +726,165 @@ def get_report_cache():
         ).fetchone()
         if row and row['report']:
             logger.debug('[Paper:Report:Cache] Hit — hash=%s lang=%s', phash, lang)
-            # Enrich with images so older cached reports (pre-injection) still
-            # render figures inline. No-op if images already embedded.
+            # Server-side enrichment: load the manifest from disk (the client
+            # is no longer trusted to forward image URLs).
+            images = _load_image_manifest(phash)
             enriched = _inject_images_into_report(row['report'], images, lang=lang)
-            return jsonify({'ok': True, 'report': enriched, 'paper_hash': phash})
+            enriched = _ensure_title_heading(enriched, phash)
+            return api_ok({'report': enriched, 'paper_hash': phash})
     except Exception as e:
         logger.warning('[Paper:Report:Cache] Lookup failed: %s', e)
 
     return jsonify({'ok': False})
 
 
-# ══════════════════════════════════════════════════════
-#  arXiv / Upload / Serve endpoints
-# ══════════════════════════════════════════════════════
+@api_v1_paper_bp.route('/api/v1/paper/translate/start', methods=['POST'])
+def start_translate_task():
+    """Start (or join) a Babel-mode whole-paper translation task.
 
-@paper_bp.route('/api/paper/fetch-arxiv', methods=['POST'])
+    Body JSON:
+        paper_text: str
+        lang: str — target language (e.g. 'zh', 'en', 'ja')
+        paper_hash: str (optional) — used as cache key; computed if missing.
+        model: str (optional)
+        force: bool (optional)
+    """
+    data = parse_body()
+    paper_text = (data.get('paper_text') or '').strip()
+    lang = (data.get('lang') or '').strip()
+    if not paper_text:
+        return api_bad_request('No paper_text')
+    if not lang:
+        return api_bad_request('lang required')
+
+    phash = (data.get('paper_hash') or '').strip() or _paper_hash(paper_text)
+    model = data.get('model') or None
+    force = bool(data.get('force'))
+
+    if not force:
+        try:
+            db = get_db()
+            row = db.execute(
+                'SELECT text FROM paper_translations WHERE paper_hash=? AND lang=?',
+                (phash, lang),
+            ).fetchone()
+            if row and row['text']:
+                logger.info('[Paper:Translate] DB cache hit — hash=%s lang=%s %d chars',
+                            phash, lang, len(row['text']))
+                return api_ok({'cached': True,
+                                'text': row['text'], 'paper_hash': phash})
+        except Exception as e:
+            logger.warning('[Paper:Translate] Cache lookup failed: %s', e)
+
+    existing = _translate_index_get(phash, lang)
+    if existing and not force and existing['status'] in ('pending', 'running', 'done'):
+        return api_ok({'task_id': existing['task_id'],
+                        'paper_hash': phash, 'existed': True,
+                        'running': existing['status'] in ('pending', 'running')})
+    if existing and force:
+        existing['abort_event'].set()
+        existing['status'] = 'error'
+        existing['finished_at'] = time.time()
+
+    task_id = f'tr_{int(time.time() * 1000)}_{phash[:8]}_{lang}'
+    task = _new_translate_task(task_id, phash, lang, model)
+
+    _translate_runtime.spawn(task_id, _run_translate_task, task, paper_text)
+
+    return api_ok({'task_id': task_id, 'paper_hash': phash,
+                    'running': True, 'existed': False})
+
+
+@api_v1_paper_bp.route('/api/v1/paper/translate/poll', methods=['GET'])
+def poll_translate_task():
+    """Poll a translation task for new events."""
+    task_id = request.args.get('task_id', '').strip()
+    try:
+        cursor = int(request.args.get('cursor', 0))
+    except (ValueError, TypeError) as _e_audit:
+        logger.debug('[paper] poll_translate_task caught %s: %s', type(_e_audit).__name__, _e_audit)
+        cursor = 0
+    if not task_id:
+        return api_bad_request('task_id required')
+
+    task = _translate_runtime.get(task_id)
+    if not task:
+        return api_not_found('task not found (expired?)')
+
+    with task['events_lock']:
+        total = len(task['events'])
+        cursor = max(0, min(cursor, total))
+        new_events = list(task['events'][cursor:])
+
+    resp = {
+        'ok': True,
+        'status': task['status'],
+        'events': new_events,
+        'next_cursor': total,
+        'paper_hash': task['paper_hash'],
+        'progress': dict(task['progress']),
+    }
+    if task['status'] == 'done':
+        resp['text'] = task.get('full_text', '')
+    if task['status'] == 'error':
+        resp['error'] = task.get('error', '')
+    return jsonify(resp)
+
+
+@api_v1_paper_bp.route('/api/v1/paper/translate/abort', methods=['POST'])
+def abort_translate_task():
+    data = parse_body()
+    task_id = (data.get('task_id') or '').strip()
+    if not task_id:
+        return api_bad_request('task_id required')
+    task = _translate_runtime.get(task_id)
+    if not task:
+        return api_not_found('task not found')
+    task['abort_event'].set()
+    logger.info('[Paper:Translate] Abort requested for task %s', task_id)
+    return api_ok()
+
+
+@api_v1_paper_bp.route('/api/v1/paper/translate/lookup', methods=['POST'])
+def lookup_translate_task():
+    data = parse_body()
+    phash = (data.get('paper_hash') or '').strip()
+    lang = (data.get('lang') or '').strip()
+    if not phash or not lang:
+        return api_bad_request('paper_hash and lang required')
+    task = _translate_index_get(phash, lang)
+    if task:
+        return api_ok({'task_id': task['task_id'],
+                        'status': task['status'], 'paper_hash': phash})
+    return jsonify({'ok': False})
+
+
+@api_v1_paper_bp.route('/api/v1/paper/translate/cache', methods=['POST'])
+def get_translate_cache():
+    data = parse_body()
+    phash = (data.get('paper_hash') or '').strip()
+    lang = (data.get('lang') or '').strip()
+    if not phash:
+        paper_text = (data.get('paper_text') or '').strip()
+        if not paper_text:
+            return api_bad_request('paper_hash or paper_text required')
+        phash = _paper_hash(paper_text)
+    if not lang:
+        return api_bad_request('lang required')
+    try:
+        db = get_db()
+        row = db.execute(
+            'SELECT text FROM paper_translations WHERE paper_hash=? AND lang=?',
+            (phash, lang),
+        ).fetchone()
+        if row and row['text']:
+            return api_ok({'text': row['text'], 'paper_hash': phash})
+    except Exception as e:
+        logger.warning('[Paper:Translate:Cache] Lookup failed: %s', e)
+    return jsonify({'ok': False})
+
+
+@api_v1_paper_bp.route('/api/v1/paper/fetch-arxiv', methods=['POST'])
 def fetch_arxiv():
     """Download PDF from arXiv URL and serve it locally.
 
@@ -1301,16 +893,16 @@ def fetch_arxiv():
     Returns:
         { ok: true, pdf_url: str, title: str, arxiv_id: str }
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     url_input = data.get('url', '').strip()
     if not url_input:
         logger.warning('[Paper:arXiv] Fetch request with no URL')
-        return jsonify({'error': 'No URL provided'}), 400
+        return api_bad_request('No URL provided')
 
     arxiv_id = _extract_arxiv_id(url_input)
     if not arxiv_id:
         logger.warning('[Paper:arXiv] Could not parse arXiv ID from: %.200s', url_input)
-        return jsonify({'error': 'Could not parse arXiv ID from URL'}), 400
+        return api_bad_request('Could not parse arXiv ID from URL')
 
     pdf_url = f'https://arxiv.org/pdf/{arxiv_id}.pdf'
     filename = f'arxiv_{arxiv_id.replace("/", "_")}.pdf'
@@ -1353,10 +945,10 @@ def fetch_arxiv():
 
     except _requests.Timeout:
         logger.warning('[Paper:arXiv] Download timeout (60s): %s', pdf_url)
-        return jsonify({'error': 'Download timed out (60s)'}), 504
+        return api_error('Download timed out (60s)', status=504)
     except _requests.RequestException as e:
         logger.warning('[Paper:arXiv] Download failed: %s — %s', pdf_url, e)
-        return jsonify({'error': f'Download failed: {str(e)}'}), 502
+        return api_error(f'Download failed: {str(e)}', status=502)
 
 
 @paper_bp.route('/api/paper/fetch-arxiv-stream', methods=['POST'])
@@ -1376,16 +968,16 @@ def fetch_arxiv_stream():
                parsed_text: str, total_pages: int, text_length: int, cached: bool}
         {stage: 'error', error: str}
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     url_input = (data.get('url') or '').strip()
     if not url_input:
         logger.warning('[Paper:arXiv:Stream] Fetch request with no URL')
-        return jsonify({'error': 'No URL provided'}), 400
+        return api_bad_request('No URL provided')
 
     arxiv_id = _extract_arxiv_id(url_input)
     if not arxiv_id:
         logger.warning('[Paper:arXiv:Stream] Could not parse arXiv ID from: %.200s', url_input)
-        return jsonify({'error': 'Could not parse arXiv ID from URL'}), 400
+        return api_bad_request('Could not parse arXiv ID from URL')
 
     pdf_url = f'https://arxiv.org/pdf/{arxiv_id}.pdf'
     filename = f'arxiv_{arxiv_id.replace("/", "_")}.pdf'
@@ -1500,6 +1092,9 @@ def fetch_arxiv_stream():
                         progress_callback=_on_progress,
                     )
                 except Exception as ex:
+                    # Surface the failure via shared state — parent thread
+                    # logs and re-raises with full context.
+                    logger.debug('[Paper] PDF parse worker captured exception: %s', ex)
                     result_holder['error'] = ex
                 finally:
                     progress_q.put(('done', None, None, None))
@@ -1561,9 +1156,27 @@ def fetch_arxiv_stream():
                         'parsed_text': '',
                         'total_pages': 0,
                         'text_length': 0,
+                        'paper_hash': '',
+                        'images': [],
                         'cached': cached,
                         'parse_error': f'PDF parse failed: {e}'})
             return
+
+        # ── Step 3: Extract figure/table images (server-side, before
+        #     handing control back to the client — eliminates the race where
+        #     the user clicks Report before background extraction finishes).
+        phash = _paper_hash(parsed_text) if parsed_text else ''
+        images = []
+        if phash:
+            yield _sse({'stage': 'extract_start'})
+            t_ex = time.time()
+            try:
+                images = _extract_paper_figures(filepath, phash)
+            except Exception as e:
+                logger.warning('[Paper:arXiv:Stream] Image extraction failed: %s', e)
+            yield _sse({'stage': 'extract_done',
+                        'images_count': len(images),
+                        'elapsed': round(time.time() - t_ex, 2)})
 
         # ── Done — return everything the client needs ──
         yield _sse({'stage': 'done', 'ok': True,
@@ -1572,6 +1185,8 @@ def fetch_arxiv_stream():
                     'parsed_text': parsed_text,
                     'total_pages': total_pages,
                     'text_length': text_length,
+                    'paper_hash': phash,
+                    'images': images,
                     'cached': cached})
 
     return Response(generate(), mimetype='text/event-stream',
@@ -1587,11 +1202,11 @@ def serve_paper_pdf(filename):
     filepath = os.path.join(PAPER_DIR, filename)
     if not os.path.exists(filepath):
         logger.debug('[Paper] PDF not found: %s', filename)
-        return jsonify({'error': 'PDF not found'}), 404
+        return api_not_found('PDF not found')
     return send_file(filepath, mimetype='application/pdf')
 
 
-@paper_bp.route('/api/paper/reparse', methods=['POST'])
+@api_v1_paper_bp.route('/api/v1/paper/reparse', methods=['POST'])
 def reparse_paper():
     """Re-parse an already-stored paper PDF to recover its text.
 
@@ -1605,16 +1220,16 @@ def reparse_paper():
     Returns:
         { ok: true, text: str, total_pages: int, text_length: int }
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     filename = os.path.basename((data.get('filename') or '').strip())
     if not filename:
         logger.warning('[Paper:Reparse] No filename provided')
-        return jsonify({'error': 'No filename'}), 400
+        return api_bad_request('No filename')
 
     filepath = os.path.join(PAPER_DIR, filename)
     if not os.path.exists(filepath):
         logger.warning('[Paper:Reparse] PDF not found: %s', filename)
-        return jsonify({'error': 'PDF not found'}), 404
+        return api_not_found('PDF not found')
 
     try:
         with open(filepath, 'rb') as f:
@@ -1636,26 +1251,40 @@ def reparse_paper():
         })
     except Exception as e:
         logger.error('[Paper:Reparse] Failed for %s: %s', filename, e, exc_info=True)
-        return jsonify({'error': f'Reparse failed: {e}'}), 500
+        return api_internal_error(f'Reparse failed: {e}')
 
 
 @paper_bp.route('/api/paper/upload', methods=['POST'])
 def upload_paper():
-    """Upload a PDF file for paper reading mode.
+    """Upload a PDF and run the full server-side ingestion pipeline.
+
+    Single round-trip: save PDF → parse text → extract figures →
+    return everything the frontend needs to populate library state.
 
     Returns:
-        { ok: true, pdf_url: str, filename: str }
+        {
+            ok: true,
+            pdf_url: str,
+            filename: str,
+            file_size: int,
+            parsed_text: str,
+            total_pages: int,
+            text_length: int,
+            paper_hash: str,
+            images: [{url, caption, page, source, width, height}],
+            parse_error: str (only on parse failure — PDF is still served)
+        }
     """
     if 'file' not in request.files:
         logger.warning('[Paper:Upload] No file in request')
-        return jsonify({'error': 'No file'}), 400
+        return api_bad_request('No file')
     file = request.files['file']
     if not file.filename:
         logger.warning('[Paper:Upload] Empty filename')
-        return jsonify({'error': 'No filename'}), 400
+        return api_bad_request('No filename')
     if not file.filename.lower().endswith('.pdf'):
         logger.warning('[Paper:Upload] Non-PDF file rejected: %s', file.filename)
-        return jsonify({'error': 'Only PDF files are supported'}), 400
+        return api_bad_request('Only PDF files are supported')
 
     original_name = file.filename
     filename = f"{int(time.time() * 1000)}_{original_name}"
@@ -1665,106 +1294,55 @@ def upload_paper():
     try:
         file.save(filepath)
         file_size = os.path.getsize(filepath)
-        logger.info('[Paper:Upload] Saved: %s (%d bytes) — original=%s', filename, file_size, original_name)
-        return jsonify({
-            'ok': True,
-            'pdf_url': f'/api/paper/pdf/{filename}',
-            'filename': filename,
-            'file_size': file_size,
-        })
+        logger.info('[Paper:Upload] Saved: %s (%d bytes) — original=%s',
+                    filename, file_size, original_name)
     except Exception as e:
         logger.error('[Paper:Upload] Failed to save %s: %s', filename, e, exc_info=True)
-        return jsonify({'error': f'Upload failed: {str(e)}'}), 500
+        return api_internal_error(f'Upload failed: {str(e)}')
 
+    parsed_text = ''
+    total_pages = 0
+    text_length = 0
+    parse_error = ''
+    try:
+        from lib.pdf_parser import parse_pdf as _parse_pdf
+        with open(filepath, 'rb') as f:
+            pdf_bytes = f.read()
+        t0 = time.time()
+        result = _parse_pdf(pdf_bytes, max_text_chars=0, max_images=0)
+        parsed_text = result.get('text') or ''
+        total_pages = result.get('totalPages', 0)
+        text_length = result.get('textLength', len(parsed_text))
+        logger.info('[Paper:Upload] Parsed %s — %d pages, %d chars in %.1fs',
+                    filename, total_pages, text_length, time.time() - t0)
+    except Exception as e:
+        logger.warning('[Paper:Upload] PDF parse failed for %s: %s', filename, e, exc_info=True)
+        parse_error = f'PDF parse failed: {e}'
 
-def _extract_arxiv_id(url_or_id):
-    """Extract arXiv paper ID from various URL formats.
+    phash = _paper_hash(parsed_text) if parsed_text else ''
+    images = _extract_paper_figures(filepath, phash) if phash else []
 
-    Supports:
-        - 2301.12345
-        - 2301.12345v2
-        - arxiv.org/abs/2301.12345
-        - arxiv.org/pdf/2301.12345
-        - arxiv.org/pdf/2301.12345.pdf
-        - arxiv.org/abs/hep-th/0601001
-        - https://arxiv.org/abs/2301.12345
-    """
-    url_or_id = url_or_id.strip()
-
-    m = re.match(r'^(\d{4}\.\d{4,5})(v\d+)?$', url_or_id)
-    if m:
-        return m.group(1) + (m.group(2) or '')
-
-    m = re.match(r'^([a-z-]+/\d{7})(v\d+)?$', url_or_id)
-    if m:
-        return m.group(1) + (m.group(2) or '')
-
-    m = re.search(r'arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5}(?:v\d+)?)', url_or_id)
-    if m:
-        return m.group(1)
-
-    m = re.search(r'arxiv\.org/(?:abs|pdf)/([a-z-]+/\d{7}(?:v\d+)?)', url_or_id)
-    if m:
-        return m.group(1)
-
-    return None
-
-
-
-# ══════════════════════════════════════════════════════
-#  Paper Library — server-side bookshelf (shared across browsers)
-# ══════════════════════════════════════════════════════
-#
-# Papers used to live only in localStorage which meant each browser had its
-# own bookshelf. Now every entry is persisted in the `paper_library` SQL
-# table keyed by (id, user_id); the PDF bytes stay in uploads/papers/ and
-# the generated report stays in paper_reports. The frontend treats the
-# server as the source of truth and does a one-time migration of any old
-# localStorage entries on first load.
-
-_PAPER_LIB_COLUMNS = (
-    'id', 'title', 'pdf_url', 'pdf_filename', 'arxiv_id', 'paper_hash',
-    'parsed_text', 'qa_history', 'images', 'babel_cache', 'page_count',
-    'created_at', 'updated_at',
-)
-
-# Soft caps to keep JSON payloads sane — the full report is in paper_reports,
-# not in this row, so we only need enough parsed_text for Q&A / re-rendering.
-_LIB_PARSED_TEXT_CAP = 200000
-_LIB_QA_HISTORY_CAP = 50       # messages
-_LIB_IMAGES_CAP = 60
-_LIB_TITLE_CAP = 500
-
-
-def _lib_row_to_dict(row):
-    """Convert a paper_library row to the JSON shape the frontend expects."""
-    def _j(raw, fallback):
-        if not raw:
-            return fallback
-        try:
-            return json.loads(raw)
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.debug('[Paper:Library] Failed to parse JSON column (%s): %s', e, raw[:80])
-            return fallback
-
-    return {
-        'id': row['id'],
-        'title': row['title'] or '',
-        'pdfUrl': row['pdf_url'] or '',
-        'pdfFilename': row['pdf_filename'] or '',
-        'arxivId': row['arxiv_id'] or '',
-        'paperHash': row['paper_hash'] or '',
-        'parsedText': row['parsed_text'] or '',
-        'qaHistory': _j(row['qa_history'], []),
-        'images': _j(row['images'], []),
-        'babelCache': _j(row['babel_cache'], {}),
-        'pageCount': int(row['page_count'] or 0),
-        'createdAt': int(row['created_at'] or 0),
-        'updatedAt': int(row['updated_at'] or 0),
+    resp = {
+        'ok': True,
+        'pdf_url': f'/api/paper/pdf/{filename}',
+        'filename': filename,
+        'file_size': file_size,
+        'parsed_text': parsed_text,
+        'total_pages': total_pages,
+        'text_length': text_length,
+        'paper_hash': phash,
+        'images': images,
     }
+    if parse_error:
+        resp['parse_error'] = parse_error
+    return jsonify(resp)
 
 
-@paper_bp.route('/api/paper/library', methods=['GET'])
+# ══════════════════════════════════════════════════════
+#  Paper Library — server-side bookshelf
+# ══════════════════════════════════════════════════════
+
+@api_v1_paper_bp.route('/api/v1/paper/library', methods=['GET'])
 def list_library():
     """Return all papers on the current user's bookshelf, newest first.
 
@@ -1799,13 +1377,13 @@ def list_library():
 
         logger.debug('[Paper:Library] Listed %d papers (%d with reports)',
                      len(papers), len(reported))
-        return jsonify({'ok': True, 'papers': papers})
+        return api_ok({'papers': papers})
     except Exception as e:
         logger.error('[Paper:Library] List failed: %s', e, exc_info=True)
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        return api_internal_error(e)
 
 
-@paper_bp.route('/api/paper/library/<paper_id>', methods=['PUT'])
+@api_v1_paper_bp.route('/api/v1/paper/library/<paper_id>', methods=['PUT'])
 def upsert_library_entry(paper_id):
     """Create or update a paper on the bookshelf.
 
@@ -1816,27 +1394,15 @@ def upsert_library_entry(paper_id):
     paper_id = (paper_id or '').strip()
     if not paper_id or len(paper_id) > 128 or not re.fullmatch(r'[\w.\-]+', paper_id):
         logger.warning('[Paper:Library] Upsert rejected bad id: %.60s', paper_id)
-        return jsonify({'ok': False, 'error': 'invalid id'}), 400
+        return api_bad_request('invalid id')
 
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     now_ms = int(time.time() * 1000)
-
-    title = str(data.get('title') or '')[:_LIB_TITLE_CAP]
-    pdf_url = str(data.get('pdfUrl') or '')[:2000]
-    pdf_filename = os.path.basename(str(data.get('pdfFilename') or ''))[:500]
-    arxiv_id = str(data.get('arxivId') or '')[:64]
-    paper_hash = str(data.get('paperHash') or '')[:64]
-    parsed_text = str(data.get('parsedText') or '')[:_LIB_PARSED_TEXT_CAP]
 
     qa = data.get('qaHistory') or []
     if not isinstance(qa, list):
         qa = []
     qa = qa[-_LIB_QA_HISTORY_CAP:]
-
-    images = data.get('images') or []
-    if not isinstance(images, list):
-        images = []
-    images = images[:_LIB_IMAGES_CAP]
 
     babel = data.get('babelCache') or {}
     if not isinstance(babel, dict):
@@ -1848,17 +1414,61 @@ def upsert_library_entry(paper_id):
         logger.debug('[Paper:Library] Non-numeric pageCount, defaulting to 0: %s', e)
         page_count = 0
 
-    created_at = int(data.get('createdAt') or now_ms)
-
     try:
         db = get_thread_db()
-        # Preserve original created_at if the row already exists
+        # Pull existing row so the client only has to send the small mutable
+        # state (qaHistory, babelCache, pageCount, title) — it doesn't need
+        # to re-ship parsed_text / images / paperHash on every save. The
+        # ingestion endpoints (/api/paper/upload, /api/paper/fetch-arxiv-stream)
+        # are the only places that originate those big columns.
         existing = db.execute(
-            'SELECT created_at FROM paper_library WHERE id=? AND user_id=?',
+            'SELECT title, pdf_url, pdf_filename, arxiv_id, paper_hash, '
+            '       parsed_text, images, page_count, created_at '
+            'FROM paper_library WHERE id=? AND user_id=?',
             (paper_id, DEFAULT_USER_ID),
         ).fetchone()
+
+        def _take(client_key, exist_key, *, cap=None, sanitize=None, default=''):
+            """Use client value if provided AND non-empty, else preserve existing."""
+            v = data.get(client_key)
+            if v is None or v == '':
+                v = existing[exist_key] if existing else default
+            v = '' if v is None else str(v)
+            if sanitize:
+                v = sanitize(v)
+            if cap is not None:
+                v = v[:cap]
+            return v
+
+        title = _take('title', 'title', cap=_LIB_TITLE_CAP)
+        pdf_url = _take('pdfUrl', 'pdf_url', cap=2000)
+        pdf_filename = _take('pdfFilename', 'pdf_filename', cap=500,
+                             sanitize=os.path.basename)
+        arxiv_id = _take('arxivId', 'arxiv_id', cap=64)
+        paper_hash = _take('paperHash', 'paper_hash', cap=64)
+        parsed_text = _take('parsedText', 'parsed_text', cap=_LIB_PARSED_TEXT_CAP)
+
+        # Images: accept client list on first write; fall back to disk
+        # manifest (server source of truth) so the row always reflects reality.
+        if isinstance(data.get('images'), list):
+            images = data['images'][:_LIB_IMAGES_CAP]
+        elif paper_hash:
+            images = _load_image_manifest(paper_hash)[:_LIB_IMAGES_CAP]
+        elif existing:
+            try:
+                images = json.loads(existing['images'] or '[]')[:_LIB_IMAGES_CAP]
+            except (json.JSONDecodeError, TypeError) as _e_audit:
+                logger.debug('[paper] upsert_library_entry caught %s: %s', type(_e_audit).__name__, _e_audit)
+                images = []
+        else:
+            images = []
+
         if existing and existing['created_at']:
             created_at = int(existing['created_at'])
+        else:
+            created_at = int(data.get('createdAt') or now_ms)
+        if not page_count and existing:
+            page_count = int(existing['page_count'] or 0)
 
         db_execute_with_retry(
             db,
@@ -1878,13 +1488,13 @@ def upsert_library_entry(paper_id):
         )
         logger.info('[Paper:Library] Upserted %s — title=%.60s qa=%d imgs=%d',
                     paper_id[:16], title, len(qa), len(images))
-        return jsonify({'ok': True, 'id': paper_id, 'updatedAt': now_ms})
+        return api_ok({'id': paper_id, 'updatedAt': now_ms})
     except Exception as e:
         logger.error('[Paper:Library] Upsert failed for %s: %s', paper_id[:16], e, exc_info=True)
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        return api_internal_error(e)
 
 
-@paper_bp.route('/api/paper/library/<paper_id>', methods=['DELETE'])
+@api_v1_paper_bp.route('/api/v1/paper/library/<paper_id>', methods=['DELETE'])
 def delete_library_entry(paper_id):
     """Remove a paper from the bookshelf.
 
@@ -1894,7 +1504,7 @@ def delete_library_entry(paper_id):
     """
     paper_id = (paper_id or '').strip()
     if not paper_id:
-        return jsonify({'ok': False, 'error': 'invalid id'}), 400
+        return api_bad_request('invalid id')
     try:
         db = get_thread_db()
         db_execute_with_retry(
@@ -1903,7 +1513,7 @@ def delete_library_entry(paper_id):
             (paper_id, DEFAULT_USER_ID),
         )
         logger.info('[Paper:Library] Deleted %s', paper_id[:16])
-        return jsonify({'ok': True})
+        return api_ok()
     except Exception as e:
         logger.error('[Paper:Library] Delete failed for %s: %s', paper_id[:16], e, exc_info=True)
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        return api_internal_error(e)

@@ -26,10 +26,8 @@ function toggleSchedulerPanel(e) {
 
 async function _refreshSchedulerPanel() {
   try {
-    const resp = await fetch(apiUrl("/api/scheduler/proactive/status"));
-    if (!resp.ok) return;
-    const data = await resp.json();
-    if (!data.ok) return;
+    const data = await Api.scheduler.proactiveStatus();
+    if (!data || !data.ok) return;
     const info = data.proactive;
     const content = document.getElementById("schedulerPanelContent");
     const countEl = document.getElementById("proactiveCount");
@@ -86,13 +84,12 @@ async function _refreshSchedulerPanel() {
 
 async function _triggerProactiveTask(taskId) {
   try {
-    const resp = await fetch(apiUrl(`/api/scheduler/tasks/${taskId}/trigger`), { method: "POST" });
-    const data = await resp.json();
-    if (data.ok) {
+    const data = await Api.scheduler.triggerTask(taskId);
+    if (data && data.ok) {
       debugLog(`⏰ Proactive task triggered! Execution: ${data.execution_task_id}`, "success");
       _refreshSchedulerPanel();
     } else {
-      debugLog(`⏰ Trigger failed: ${data.error}`, "error");
+      debugLog(`⏰ Trigger failed: ${data && data.error}`, "error");
     }
   } catch (e) {
     debugLog(`⏰ Trigger error: ${e.message}`, "error");
@@ -101,23 +98,22 @@ async function _triggerProactiveTask(taskId) {
 
 async function _pauseProactiveTask(taskId) {
   try {
-    await fetch(apiUrl(`/api/scheduler/tasks/${taskId}/pause`), { method: "POST" });
+    await Api.scheduler.pauseTask(taskId);
     _refreshSchedulerPanel();
   } catch (e) { console.warn("[Scheduler] pause failed:", e); }
 }
 
 async function _resumeProactiveTask(taskId) {
   try {
-    await fetch(apiUrl(`/api/scheduler/tasks/${taskId}/resume`), { method: "POST" });
+    await Api.scheduler.resumeTask(taskId);
     _refreshSchedulerPanel();
   } catch (e) { console.warn("[Scheduler] resume failed:", e); }
 }
 
 async function _viewPollLog(taskId) {
   try {
-    const resp = await fetch(apiUrl(`/api/scheduler/tasks/${taskId}/poll-log?limit=20`));
-    const data = await resp.json();
-    if (!data.ok || !data.poll_log || data.poll_log.length === 0) {
+    const data = await Api.scheduler.pollLog(taskId, 20);
+    if (!data || !data.ok || !data.poll_log || data.poll_log.length === 0) {
       debugLog("⏰ No poll log entries yet.", "info");
       return;
     }

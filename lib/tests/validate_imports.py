@@ -47,7 +47,7 @@ _TOP_LEVEL_MODULES = [
     'lib.trading_risk',
     'lib.trading_signals',
     'lib.trading_tasks',
-    'lib.llm_client',
+    'lib.llm',
     'lib.log',
     'lib.pdf_parser',
     'lib.pricing',

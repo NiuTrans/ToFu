@@ -5,39 +5,23 @@ The handlers register on the same ``chat_bp`` Blueprint (imported here)
 to keep the public URLs unchanged.
 """
 
-from flask import jsonify, request
+from flask import jsonify
 
 from lib.log import get_logger
-from routes.chat import chat_bp
+from lib.api_response import api_not_found, api_ok
+from routes.api_v1.chat import api_v1_chat_bp  # noqa: E402
+from routes.api_v1.auth import require_scope
 
 logger = get_logger(__name__)
 
 
-@chat_bp.route('/api/chat/queue', methods=['POST'])
-def chat_queue_enqueue():
-    """Legacy enqueue endpoint — kept for programmatic/API use.
-
-    The primary send path is now ``/api/chat/send`` which auto-detects
-    whether to start immediately or enqueue.  This endpoint is a thin
-    wrapper around ``enqueue_message`` for backward compat.
-    """
-    data = request.get_json(silent=True) or {}
-    conv_id = data.get('convId', '')
-    if not conv_id:
-        return jsonify({'error': 'convId required'}), 400
-
-    message_data = data.get('message', {})
-    config = data.get('config', {})
-
-    if not message_data.get('text') and not message_data.get('images') and not message_data.get('pdfTexts'):
-        return jsonify({'error': 'Empty message'}), 400
-
-    from lib.message_queue import enqueue_message
-    result = enqueue_message(conv_id, message_data, config)
-    return jsonify(result)
+# Legacy POST /api/chat/queue (manual enqueue) deleted 2026-05-29.
+# /api/v1/chat/send now auto-detects whether to start immediately or
+# enqueue, so the manual enqueue endpoint had no remaining callers.
 
 
-@chat_bp.route('/api/chat/queue/<conv_id>', methods=['GET'])
+@api_v1_chat_bp.route('/api/v1/chat/queue/<conv_id>', methods=['GET'], endpoint='ui_chat_queue_get')
+@require_scope('chat')
 def chat_queue_get(conv_id):
     """Get all queued messages for a conversation.
 
@@ -60,17 +44,17 @@ def chat_queue_get(conv_id):
     return jsonify(queue)
 
 
-@chat_bp.route('/api/chat/queue/<conv_id>/<queue_id>', methods=['DELETE'])
+@api_v1_chat_bp.route('/api/v1/chat/queue/<conv_id>/<queue_id>', methods=['DELETE'], endpoint='ui_chat_queue_remove')
+@require_scope('chat')
 def chat_queue_remove(conv_id, queue_id):
     """Remove a specific message from the queue."""
     from lib.message_queue import remove_from_queue
     removed = remove_from_queue(conv_id, queue_id)
     if not removed:
-        return jsonify({'error': 'Not found'}), 404
-    return jsonify({'ok': True})
-
-
-@chat_bp.route('/api/chat/queue/<conv_id>', methods=['DELETE'])
+        return api_not_found('Not found')
+    return api_ok()
+@api_v1_chat_bp.route('/api/v1/chat/queue/<conv_id>', methods=['DELETE'], endpoint='ui_chat_queue_clear')
+@require_scope('chat')
 def chat_queue_clear(conv_id):
     """Clear all queued messages for a conversation."""
     from lib.message_queue import clear_queue

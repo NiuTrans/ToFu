@@ -1,174 +1,108 @@
 #!/usr/bin/env python3
-"""Tofu Server
+"""Tofu Server — Quart + Hypercorn (HTTP/2, ASGI).
 
-Refactored: all route handlers live in routes/ package.
-This file handles:
-  - App creation & Flask configuration
-  - Tunnel token authentication (TUNNEL_TOKEN env var)
-  - Gateway prefix middleware (GatewayMiddleware)
-  - Request lifecycle logging & method override middleware
-  - Database initialisation & NFS warmup
-  - Background worker orchestration (trading intel, autopilot)
-  - Feishu Bot startup (optional, via FEISHU_APP_ID/SECRET)
-  - Werkzeug SSE streaming monkey-patch for tunnel environments
+App entry point. Uses:
+  - Quart (async Flask from Pallets) as the application framework
+  - Hypercorn as the ASGI server with HTTP/2 support
+  - Auto-generated self-signed TLS for zero-config HTTP/2 in browsers
+
+All existing Flask-style sync route handlers run unchanged in a thread pool.
+
+Usage:
+    python server.py                          # HTTPS + HTTP/2 (auto-cert)
+    python server.py --no-tls                 # HTTP/1.1 only
+    python server.py --certfile cert.pem --keyfile key.pem   # custom cert
 """
 
+import asyncio
 import os
-import io
 import sys
 import json
 import logging
 import time
 import hashlib
+import signal
+import faulthandler
 
+# ── Capture C-level fatal signals (SIGSEGV / SIGABRT / SIGFPE / SIGILL / SIGBUS) ──
+# These fire on heap corruption (e.g. `munmap_chunk(): invalid pointer`) from
+# native extensions like urllib3's response decompressor. Without this the
+# abort prints to fd 2 only and we lose the Python stack of every thread.
+# Writing to a dedicated file (instead of stderr) ensures the trace survives
+# even when stderr is the controlling terminal of a process that's about
+# to die. all_threads=True captures every Python thread, not just the
+# crashing one — essential for diagnosing concurrent-fetch races.
+try:
+    _FAULT_LOG_PATH = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'logs', 'faulthandler.log')
+    os.makedirs(os.path.dirname(_FAULT_LOG_PATH), exist_ok=True)
+    _fault_log = open(_FAULT_LOG_PATH, 'a', buffering=1)  # line-buffered
+    _fault_log.write('\n=== faulthandler armed pid=%d at %s ===\n'
+                     % (os.getpid(), time.strftime('%Y-%m-%d %H:%M:%S')))
+    faulthandler.enable(file=_fault_log, all_threads=True)
+except OSError:
+    # Fall back to stderr if logs/ is unwritable — better than no handler.
+    faulthandler.enable(all_threads=True)
 
-# ══════════════════════════════════════════════════════════
-#  Earliest possible heartbeat — before ANY heavy import
-# ══════════════════════════════════════════════════════════
-# On cold FUSE/NFS, `from flask import …` + opening 4 rotating log
-# handlers can take 10–30s BEFORE the first _boot(...) line fires at
-# ~line 374. The terminal looks frozen during that window. Emit a
-# minimal stdlib-only ping so the user sees activity immediately. Uses
-# os.write(2, …) directly to bypass any stderr buffering.
-#
-# We also record _PROC_T0 here (process wall time) so _boot() can later
-# switch to this earlier zero-point and expose the real cost of the
-# cold imports (otherwise they're hidden before _BOOT_T0 is set).
+# ── Record process start time (same as server.py) ──
 _PROC_T0 = time.time()
 try:
     os.write(2, b'\033[36m[boot +  0.0s]\033[0m \xf0\x9f\xab\xa7 Tofu '
-                b'bootstrap \xe2\x80\x94 importing core libraries '
-                b'(first run on cold FUSE may take 10\xe2\x80\x9330s)\xe2\x80\xa6\n')
+                b'async bootstrap \xe2\x80\x94 importing core libraries\xe2\x80\xa6\n')
 except OSError:
     pass
 
+# ── Auto-activate conda env (reuse server.py logic) ──
+# This must happen before any third-party imports.
+_PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _PROJ_DIR)
 
-# ══════════════════════════════════════════════════════════
-#  Auto-activate Tofu's conda env via .tofu_env.json marker
-# ══════════════════════════════════════════════════════════
-# install.sh writes <project>/.tofu_env.json after creating the env. When
-# the user runs `python server.py` from a shell where the Tofu env wasn't
-# explicitly `conda activate`d (very common — fresh terminal, system
-# python first on PATH, IDE play button, systemd unit, …), we re-exec
-# into the env's python here. This avoids any need to run `conda init`
-# (which would mutate ~/.bashrc) and survives `git pull`.
-#
-# Loop guard: _TOFU_ENV_REEXEC=1 prevents infinite re-exec.
-# Failure mode: if the marker is malformed or the python no longer exists,
-#   we log to stderr and continue with the current interpreter — never
-#   block startup on a stale marker.
-#
-# Uses ONLY the standard library (os/sys/json) so it works even when
-# every third-party package is missing (that case is handled afterwards
-# by the bootstrap excepthook below).
+
 def _tofu_maybe_reexec_into_env():
-    if os.environ.get('_TOFU_ENV_REEXEC') == '1':
-        return  # already re-execed once — don't loop
-    marker = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), '.tofu_env.json')
+    """Re-exec into Tofu's conda env if not already there."""
+    marker = os.path.join(_PROJ_DIR, '.tofu_env.json')
     if not os.path.isfile(marker):
         return
     try:
         with open(marker, 'r', encoding='utf-8') as f:
             cfg = json.load(f)
-    except Exception as e:
-        sys.stderr.write(
-            f'[server.py] Could not read .tofu_env.json ({e}) — '
-            f'continuing with current python.\n')
+    except Exception:
         return
     target_py = cfg.get('python') or ''
     env_prefix = cfg.get('env_prefix') or ''
     if not target_py or not os.access(target_py, os.X_OK):
-        sys.stderr.write(
-            f'[server.py] .tofu_env.json points at python={target_py!r} '
-            f'which is not executable — ignoring.\n')
         return
     try:
         same = os.path.realpath(target_py) == os.path.realpath(sys.executable)
     except OSError:
         same = (target_py == sys.executable)
     if same:
-        return  # already running under the right interpreter
-
-    # Make conda env shared libs visible (libpq, libxml2, Chromium libs, …)
-    # without invoking `conda activate`. This is enough for everything
-    # tofu needs — the env's site-packages comes free with the python
-    # binary itself.
+        return
+    if os.environ.get('_TOFU_ENV_REEXEC') == '1':
+        return
     if env_prefix and os.path.isdir(env_prefix):
         env_lib = os.path.join(env_prefix, 'lib')
         if os.path.isdir(env_lib):
             os.environ['LD_LIBRARY_PATH'] = (
                 env_lib + os.pathsep + os.environ.get('LD_LIBRARY_PATH', ''))
-        # Help any subprocess that DOES rely on PATH (e.g. playwright,
-        # pg_ctl). Front-prepend so the env wins over system tools.
         env_bin = os.path.join(env_prefix, 'bin')
         if os.path.isdir(env_bin):
             os.environ['PATH'] = env_bin + os.pathsep + os.environ.get('PATH', '')
         os.environ.setdefault('CONDA_PREFIX', env_prefix)
-    if cfg.get('env_name'):
-        os.environ.setdefault('CONDA_DEFAULT_ENV', cfg['env_name'])
-
     os.environ['_TOFU_ENV_REEXEC'] = '1'
-    sys.stderr.write(
-        f'[server.py] Re-exec into Tofu env python: {target_py}\n')
-    sys.stderr.flush()
     try:
         os.execv(target_py, [target_py, *sys.argv])
-    except OSError as e:
-        # execv failure is rare (binary disappeared mid-run) — log and
-        # fall through; the current interpreter may still work.
-        sys.stderr.write(f'[server.py] os.execv failed: {e}\n')
+    except OSError:
         os.environ.pop('_TOFU_ENV_REEXEC', None)
 
 
 _tofu_maybe_reexec_into_env()
 
-
-# ══════════════════════════════════════════
-#  Auto-delegate to bootstrap.py on missing deps
-# ══════════════════════════════════════════
-# When server.py is launched directly (not via bootstrap.py) and a
-# package import fails (e.g. flask not installed in a fresh conda env),
-# automatically re-exec through bootstrap.py which provides LLM-guided
-# dependency repair with a live status page in the browser.
-#
-# If bootstrap.py doesn't exist or we're already running under it,
-# the guard is skipped and normal Python error handling applies.
-
-_BOOTSTRAP_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), 'bootstrap.py')
-
-if (os.environ.get('_TOFU_VIA_BOOTSTRAP') != '1'
-        and os.environ.get('_CHATUI_VIA_BOOTSTRAP') != '1'  # legacy
-        and os.path.isfile(_BOOTSTRAP_PATH)):
-
-    def _bootstrap_excepthook(exc_type, exc_value, exc_tb):
-        """Intercept ImportError at module level → delegate to bootstrap.py."""
-        if issubclass(exc_type, ImportError):
-            # Print the original traceback so the user sees what's missing
-            import traceback as _tb
-            sys.stderr.write('\n')
-            _tb.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
-            sys.stderr.write(
-                '\n\033[33m[server.py] Missing dependency detected. '
-                'Delegating to bootstrap.py for auto-repair…\033[0m\n\n')
-            sys.stderr.flush()
-            # os.execv replaces the current process entirely — no return
-            os.execv(sys.executable, [sys.executable, _BOOTSTRAP_PATH])
-        # Non-import errors: use Python's built-in default handler
-        sys.__excepthook__(exc_type, exc_value, exc_tb)
-
-    sys.excepthook = _bootstrap_excepthook
-
-
-# ── Auto-load .env if present (enables migrate.py workflow) ──
+# ── .env loading ──
 def _load_dotenv():
-    _dotenv_log = logging.getLogger('server.dotenv')
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+    env_path = os.path.join(_PROJ_DIR, '.env')
     if not os.path.exists(env_path):
-        _dotenv_log.debug('.env not found at %s — skipping', env_path)
         return
-    loaded_keys = []
     with open(env_path) as f:
         for line in f:
             line = line.strip()
@@ -176,37 +110,186 @@ def _load_dotenv():
                 continue
             key, _, value = line.partition('=')
             key, value = key.strip(), value.strip()
-            if key not in os.environ:   # explicit env takes priority
+            if key not in os.environ:
                 os.environ[key] = value
-                loaded_keys.append(key)
-    if loaded_keys:
-        _dotenv_log.info('Loaded %d env var(s) from .env: %s', len(loaded_keys), ', '.join(loaded_keys))
-    else:
-        _dotenv_log.debug('.env found but no new vars loaded (all already set)')
+
 _load_dotenv()
 
-# ══════════════════════════════════════════
-#  Proxy bypass — auto-managed by lib/proxy.py
-# ══════════════════════════════════════════
-# NO_PROXY / no_proxy is now auto-synced from the unified bypass domains
-# list in lib/proxy.py (_sync_no_proxy), which combines:
-#   - env PROXY_BYPASS_DOMAINS
-#   - Settings UI bypass domains
-#   - standard always-bypass entries (localhost, 127.0.0.1)
-# The old manual merge here is no longer needed — lib/proxy.py import
-# triggers _rebuild() + _sync_no_proxy() automatically.
-from flask import Flask, request, make_response, redirect, jsonify
-from flask_compress import Compress
 
-# ── MIME type safety net (macOS / Windows compat) ──
-# Python's mimetypes module reads system MIME databases which may be
-# incomplete on some platforms (e.g., macOS without /etc/mime.types).
-# Explicitly register critical types to ensure Flask serves static
-# assets with correct Content-Type headers.
-# IMPORTANT: call init() FIRST so the system DB is loaded, THEN add_type()
-# to override with our known-good values.  Without init(), add_type() sets
-# inited=True which prevents the system DB from ever loading — causing
-# other extensions (e.g. .woff2, .ttf) to return None on macOS.
+# ═══════════════════════════════════════════════════════════════════════
+#  Framework Compatibility Shim
+# ═══════════════════════════════════════════════════════════════════════
+# Quart is API-compatible with Flask but lives under `quart.*` imports.
+# Our routes and lib/ code import from flask. We install a shim so that
+# `from flask import *` resolves to Quart's equivalents at runtime.
+# This is the official Quart migration approach.
+
+def _install_flask_shim():
+    """Make `from flask import X` resolve to Quart equivalents.
+
+    Quart is a superset of Flask's API. This shim allows all existing
+    route code to work without changing any import statements.
+
+    Key difference: Quart makes send_from_directory, send_file, and
+    make_response async. When sync route handlers (running in Quart's
+    thread pool) call these, they get coroutine objects. We wrap them
+    with sync-safe versions that detect this and await appropriately.
+    """
+    try:
+        import quart
+    except ImportError:
+        sys.stderr.write(
+            '\033[31m[server.py] ERROR: quart is not installed.\n'
+            '  Install with: pip install quart hypercorn cryptography\033[0m\n')
+        sys.exit(1)
+
+    import asyncio
+    import functools
+    import inspect
+
+    # Recover the GENUINE async helpers. If server.py is imported/exec'd
+    # more than once in the same process (e.g. a test re-imports it via
+    # importlib), ``quart.make_response`` etc. are already our sync-safe
+    # wrappers from the first install. Capturing those as the "originals"
+    # and wrapping them again would corrupt ``_orig_make_response_async``
+    # (it would point at a sync-safe wrapper instead of the real async
+    # ``quart.make_response``), so error handlers that
+    # ``await _orig_make_response_async(...)`` would route through the
+    # thread-bridge and deadlock. ``_sync_safe`` stashes the genuine async
+    # function on ``.__wrapped__``; unwrap through it so a re-install
+    # always starts from the real async helpers.
+    def _genuine(fn):
+        while getattr(fn, '_quart_async_wrapper', False):
+            fn = getattr(fn, '__wrapped__', fn)
+        return fn
+
+    _orig_send_from_directory = _genuine(quart.send_from_directory)
+    _orig_send_file = _genuine(quart.send_file)
+    _orig_make_response = _genuine(quart.make_response)
+
+    def _sync_safe(async_fn):
+        """Wrap an async function to be callable from sync code in a thread."""
+        @functools.wraps(async_fn)
+        def wrapper(*args, **kwargs):
+            coro = async_fn(*args, **kwargs)
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                # We're in a thread with an event loop running elsewhere.
+                # Use the Quart-provided mechanism to run coroutines from
+                # sync code within a request context.
+                import concurrent.futures
+                future = asyncio.run_coroutine_threadsafe(coro, loop)
+                return future.result(timeout=30)
+            else:
+                return asyncio.run(coro)
+        # Also make it awaitable for async callers
+        wrapper._async = async_fn
+        wrapper.__wrapped__ = async_fn
+        # Mark it so Quart's ensure_async can detect the dual nature
+        wrapper._quart_async_wrapper = True
+        return wrapper
+
+    # Replace in quart module so `from flask import send_from_directory`
+    # gets the sync-safe version
+    quart.send_from_directory = _sync_safe(_orig_send_from_directory)
+    quart.send_file = _sync_safe(_orig_send_file)
+    quart.make_response = _sync_safe(_orig_make_response)
+
+    # Expose originals at module level for async code that needs to await directly
+    global _orig_make_response_async
+    _orig_make_response_async = _orig_make_response
+
+    # ── Patch Request async methods/properties for sync route handlers ──
+    # In Quart, get_json(), form, files, data, and json are async. Sync
+    # route handlers (run in executor threads via run_sync) get coroutine
+    # objects instead of values. Monkey-patch the Request class to run
+    # the coroutine on the MAIN event loop — NOT a fresh child loop.
+    #
+    # The naive ``asyncio.run(coro)`` here is wrong: it spins up a new
+    # loop in the worker thread, and the coroutine then awaits hypercorn's
+    # request body Future, which lives on the main loop. Cross-loop
+    # awaits never wake up — symptom: large POST bodies hang server-side
+    # until the client times out, while small bodies (already inlined
+    # into the ASGI scope before dispatch) work fine. Fix: schedule via
+    # ``run_coroutine_threadsafe`` on the loop saved by
+    # ``hub.set_loop`` at startup.
+    from quart.wrappers import Request as _QuartRequest
+
+    _orig_get_json = _QuartRequest.get_json
+
+    def _run_coro_sync(coro):
+        """Run a coroutine from a sync context (executor thread)."""
+        if not inspect.iscoroutine(coro):
+            return coro
+        try:
+            from lib.push import hub as _push_hub
+            main_loop = getattr(_push_hub, '_loop', None)
+        except Exception:
+            main_loop = None
+        if main_loop is not None and main_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coro, main_loop)
+            return future.result()
+        return asyncio.run(coro)
+
+    def _sync_safe_get_json(self, *args, **kwargs):
+        return _run_coro_sync(_orig_get_json(self, *args, **kwargs))
+
+    _QuartRequest.get_json = _sync_safe_get_json
+
+    # Patch async properties: form, files, data, json
+    _orig_form_prop = _QuartRequest.form
+    _orig_files_prop = _QuartRequest.files
+    _orig_data_prop = _QuartRequest.data
+
+    def _make_sync_safe_property(orig_prop):
+        _fget = orig_prop.fget
+        @property
+        def _prop(self):
+            return _run_coro_sync(_fget(self))
+        return _prop
+
+    _QuartRequest.form = _make_sync_safe_property(_orig_form_prop)
+    _QuartRequest.files = _make_sync_safe_property(_orig_files_prop)
+    _QuartRequest.data = _make_sync_safe_property(_orig_data_prop)
+
+    # json property delegates to the already-patched sync get_json
+    @property
+    def _json_prop(self):
+        return self.get_json()
+    _QuartRequest.json = _json_prop
+
+    # Install the shim: make `import flask` resolve to quart
+    sys.modules['flask'] = quart
+    # Also shim sub-modules that code might import from
+    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
+        quart_sub = f'quart.{attr}'
+        flask_sub = f'flask.{attr}'
+        if quart_sub in sys.modules:
+            sys.modules[flask_sub] = sys.modules[quart_sub]
+
+    # Werkzeug exceptions are used directly in some places
+    # Quart re-exports them, but ensure werkzeug is still importable
+    try:
+        import werkzeug
+    except ImportError:
+        pass
+
+
+_install_flask_shim()
+
+
+# ── Now safe to import Quart (which the routes will see as 'flask') ──
+import quart
+from quart import Quart, request, make_response, redirect, jsonify, g
+import io
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Logging (reuse server.py's architecture)
+# ═══════════════════════════════════════════════════════════════════════
+
 import mimetypes
 mimetypes.init()
 mimetypes.add_type('text/javascript', '.js')
@@ -217,81 +300,50 @@ mimetypes.add_type('font/woff2', '.woff2')
 mimetypes.add_type('font/ttf', '.ttf')
 mimetypes.add_type('application/wasm', '.wasm')
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = _PROJ_DIR
 
+# ── Logging setup (identical to server.py) ──
+from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 
-# ══════════════════════════════════════════
-#  Logging — structured, multi-file, noise-free
-# ══════════════════════════════════════════
-#
-# Log files produced:
-#   logs/app.log     — Business logic only (lib.*, routes.*, server)  INFO+
-#   logs/access.log  — HTTP request log (werkzeug), with noisy polls filtered
-#   logs/error.log   — WARNING/ERROR/CRITICAL from ALL sources
-#   logs/vendor.log  — Third-party libraries (trafilatura, websockets …)
-#   logs/audit.log   — Structured JSON audit trail (unchanged)
-#
-# Console: business INFO+ and access log (no vendor noise)
-#
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# --- Central log format ---
 _LOG_FMT = '%(asctime)s [%(levelname)s] %(name)s [%(threadName)s]: %(message)s'
 _LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
 _formatter = logging.Formatter(_LOG_FMT, datefmt=_LOG_DATEFMT)
 
-from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
-
-# ── Filters ──
-
-_BIZ_PREFIXES = ('lib.', 'routes.', 'server')   # business code only (no werkzeug)
+_BIZ_PREFIXES = ('lib.', 'routes.', 'server')
 
 class _BizOnly(logging.Filter):
-    """Pass only records from our own business code (lib.*, routes.*, server)."""
     def filter(self, record):
         return record.name.startswith(_BIZ_PREFIXES)
 
 class _VendorOnly(logging.Filter):
-    """Pass only records from third-party libraries (not biz, not werkzeug)."""
     def filter(self, record):
         return (not record.name.startswith(_BIZ_PREFIXES)
-                and record.name != 'werkzeug')
+                and record.name != 'werkzeug'
+                and record.name != 'hypercorn'
+                and not record.name.startswith('hypercorn.'))
 
-class _BizAndWerkzeugOnly(logging.Filter):
-    """Pass biz + werkzeug records, EXCLUDE third-party vendor records.
-
-    Attached to error.log so noisy vendor libraries (trafilatura, urllib3,
-    pymupdf, etc.) don't duplicate into error.log — they remain fully
-    visible in vendor.log per the original logging contract (CLAUDE.md §9).
-    Routing, not silencing: every vendor event is still captured.
-    """
+class _BizAndServerOnly(logging.Filter):
     def filter(self, record):
         return (record.name.startswith(_BIZ_PREFIXES)
+                or record.name == 'hypercorn'
+                or record.name.startswith('hypercorn.'))
+
+class _AccessOnly(logging.Filter):
+    def filter(self, record):
+        return (record.name == 'hypercorn.access'
                 or record.name == 'werkzeug')
 
-class _WerkzeugOnly(logging.Filter):
-    """Pass only werkzeug (HTTP access) records."""
-    def filter(self, record):
-        return record.name == 'werkzeug'
-
 class _QuietPollFilter(logging.Filter):
-    """Suppress noisy HTTP polling endpoints from werkzeug access log."""
     _NOISY_PATHS = ('/api/chat/poll/', '/api/chat/stream/', '/api/browser/commands')
     def filter(self, record):
         msg = record.getMessage()
-        if any(p in msg for p in self._NOISY_PATHS) and '" 200' in msg:
+        if any(p in msg for p in self._NOISY_PATHS) and '200' in msg:
             return False
         return True
 
-class _BizAndAccessFilter(logging.Filter):
-    """Pass business code + werkzeug (for console output)."""
-    def filter(self, record):
-        return (record.name.startswith(_BIZ_PREFIXES)
-                or record.name == 'werkzeug')
-
-
-# ── Handler 1: logs/app.log — business logic, INFO+ (daily rotation) ──
 _app_handler = TimedRotatingFileHandler(
     os.path.join(LOG_DIR, 'app.log'),
     when='midnight', backupCount=30, encoding='utf-8')
@@ -299,29 +351,20 @@ _app_handler.setFormatter(_formatter)
 _app_handler.setLevel(logging.INFO)
 _app_handler.addFilter(_BizOnly())
 
-# ── Handler 2: logs/access.log — HTTP requests (werkzeug), INFO+ ──
 _access_handler = TimedRotatingFileHandler(
     os.path.join(LOG_DIR, 'access.log'),
     when='midnight', backupCount=14, encoding='utf-8')
 _access_handler.setFormatter(_formatter)
 _access_handler.setLevel(logging.INFO)
-_access_handler.addFilter(_WerkzeugOnly())
+_access_handler.addFilter(_AccessOnly())
 
-# ── Handler 3: logs/error.log — all WARNING/ERROR/CRITICAL ──
-# 2026-05-05 noise-reduction: exclude vendor-library records from
-# error.log (they remain in vendor.log). Previously trafilatura/urllib3
-# WARNINGs (malformed CSS, certificate hostname mismatch on random
-# third-party URLs) flooded error.log with cosmetic events that the
-# libraries already recover from gracefully. CLAUDE.md §9 says every
-# warning must still appear *somewhere* — vendor.log is where.
 _error_handler = RotatingFileHandler(
     os.path.join(LOG_DIR, 'error.log'),
     maxBytes=5 * 1024 * 1024, backupCount=10, encoding='utf-8')
 _error_handler.setFormatter(_formatter)
 _error_handler.setLevel(logging.WARNING)
-_error_handler.addFilter(_BizAndWerkzeugOnly())
+_error_handler.addFilter(_BizAndServerOnly())
 
-# ── Handler 4: logs/vendor.log — third-party libs, WARNING+ ──
 _vendor_handler = RotatingFileHandler(
     os.path.join(LOG_DIR, 'vendor.log'),
     maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8')
@@ -329,63 +372,38 @@ _vendor_handler.setFormatter(_formatter)
 _vendor_handler.setLevel(logging.WARNING)
 _vendor_handler.addFilter(_VendorOnly())
 
-# ── Handler 5: console — business + access, INFO+ ──
 _console_handler = logging.StreamHandler(sys.stderr)
 _console_handler.setFormatter(_formatter)
 _console_handler.setLevel(logging.WARNING)
-_console_handler.addFilter(_BizAndAccessFilter())
+_console_handler.addFilter(_BizAndServerOnly())
 
-# ── Root logger: route everything through our handlers ──
 logging.basicConfig(
     level=logging.INFO,
     handlers=[_app_handler, _access_handler, _error_handler,
               _vendor_handler, _console_handler],
 )
 
-# ── Suppress noisy third-party libs at source ──
-# These libraries generate thousands of DEBUG/INFO lines per hour.
-# Only let WARNING+ through to vendor.log.
 _NOISY_LIBS = (
-    'courlan', 'htmldate', 'justext',                   # web scraping internals
-    'urllib3', 'requests', 'charset_normalizer',        # HTTP internals
-    'websockets', 'websockets.client',                  # Feishu WS heartbeats
-    'PIL', 'pymupdf',                                   # media libraries
-    'httpcore', 'httpx',                                # async HTTP
+    'courlan', 'htmldate', 'justext',
+    'urllib3', 'requests', 'charset_normalizer',
+    'websockets', 'websockets.client',
+    'PIL', 'pymupdf',
+    'httpcore', 'httpx',
 )
-for _lib in _NOISY_LIBS:
-    logging.getLogger(_lib).setLevel(logging.WARNING)
-
-# ── Extra-noisy: trafilatura emits thousands of WARNING lines per fetch
-#    for every malformed CSS/XPath selector it sees inside scraped HTML.
-#    Those are cosmetic (it falls back gracefully) — suppress at ERROR.
+for _lib_name in _NOISY_LIBS:
+    logging.getLogger(_lib_name).setLevel(logging.WARNING)
 logging.getLogger('trafilatura').setLevel(logging.ERROR)
 for _sub in ('trafilatura.xml', 'trafilatura.core', 'trafilatura.htmlprocessing',
              'trafilatura.metadata'):
     logging.getLogger(_sub).setLevel(logging.ERROR)
-
-# ── Quiet polling endpoints on werkzeug access log ──
-logging.getLogger('werkzeug').addFilter(_QuietPollFilter())
+logging.getLogger('hypercorn.access').addFilter(_QuietPollFilter())
 
 
-# ══════════════════════════════════════════
-#  Startup progress — visible to terminal
-# ══════════════════════════════════════════
-# The console log handler only emits WARNING+ during boot, so `logger.info`
-# calls stay invisible until the final banner.  Early startup stages (DB
-# init on FUSE, critical-import validation of trafilatura/pymupdf, MCP
-# auto-connect, Feishu bot) can each take several seconds, making the
-# terminal *look* hung.  _boot() writes directly to stderr AND the logger
-# so the user sees progress in real time while the audit trail is still
-# captured in logs/app.log.
-
-# Use _PROC_T0 (set at the very top of the file, before any heavy import)
-# so the [boot +N.Ns] counter reflects real wall time from `python server.py`,
-# including the 10–30s cold-FUSE import cost before logging is even wired up.
+# ── Boot progress ──
 _BOOT_T0 = _PROC_T0
 _boot_logger = logging.getLogger('server.boot')
 
 def _boot(msg, *args):
-    """Print a startup progress line to stderr AND the app log."""
     try:
         line = msg % args if args else msg
     except Exception:
@@ -396,29 +414,33 @@ def _boot(msg, *args):
     _boot_logger.info('[boot +%.1fs] %s', elapsed, line)
 
 
-_boot('🫧 Tofu starting up — loading core modules…')
+_boot('🫧 Tofu (async) starting up — loading core modules…')
 
 from lib.database import close_db, init_db, warmup_db
 
 
-# ══════════════════════════════════════════
-#  Flask App
-# ══════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
+#  Quart App
+# ═══════════════════════════════════════════════════════════════════════
 
-app = Flask(__name__,
+# Flask 3.1+ / newer Quart dropped PROVIDE_AUTOMATIC_OPTIONS from default
+# config, but add_url_rule (called during __init__ for the static route)
+# still reads it → KeyError.  Inject it into the class defaults before
+# instantiation so it's present from the very first add_url_rule call.
+_orig_default_config = Quart.default_config
+if 'PROVIDE_AUTOMATIC_OPTIONS' not in _orig_default_config:
+    Quart.default_config = {**_orig_default_config, 'PROVIDE_AUTOMATIC_OPTIONS': True}
+
+app = Quart(__name__,
             static_folder=os.path.join(BASE_DIR, 'static'),
             static_url_path='/static')
-# ── Flask secret_key (random, persisted per-project) ──
-# Priority: FLASK_SECRET_KEY env var > data/config/flask_secret_key file >
-# newly-generated 32-byte key persisted to that file with mode 0600.
-# Rationale: the former hardcoded placeholder literal enabled session
-# forgery if the repo is ever public-facing; §10.4 config change.
+
+
+# ── Flask secret key (reuse server.py logic) ──
 def _load_or_create_flask_secret_key():
-    _flasklog = logging.getLogger('server.flask_secret')
     from lib.config_dir import config_path as _cfg_path
     _env_key = os.environ.get('FLASK_SECRET_KEY', '').strip()
     if _env_key:
-        _flasklog.debug('[FlaskSecret] Using FLASK_SECRET_KEY from env (%d chars)', len(_env_key))
         return _env_key
     _key_file = _cfg_path('flask_secret_key')
     try:
@@ -426,15 +448,12 @@ def _load_or_create_flask_secret_key():
             with open(_key_file, 'r', encoding='utf-8') as _kf:
                 _existing = _kf.read().strip()
             if _existing:
-                _flasklog.debug('[FlaskSecret] Loaded persisted key from %s', _key_file)
                 return _existing
-    except Exception as _kerr:
-        _flasklog.warning('[FlaskSecret] Failed to read %s: %s', _key_file, _kerr)
-    # Generate fresh random key and persist
+    except Exception:
+        pass
     _new_key = os.urandom(32).hex()
     try:
         os.makedirs(os.path.dirname(_key_file), exist_ok=True)
-        # Write with restrictive mode 0600 (Unix); on Windows os.chmod is best-effort
         _flag = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
         try:
             _fd = os.open(_key_file, _flag, 0o600)
@@ -443,228 +462,138 @@ def _load_or_create_flask_secret_key():
             finally:
                 os.close(_fd)
         except (AttributeError, OSError):
-            # Fallback for platforms where os.open mode isn't honored
             with open(_key_file, 'w', encoding='utf-8') as _kf:
                 _kf.write(_new_key)
-            try:
-                os.chmod(_key_file, 0o600)
-            except OSError:
-                pass
-        _flasklog.info('[FlaskSecret] Generated new random key at %s (32 bytes)', _key_file)
-        try:
-            from lib.log import audit_log as _audit
-            _audit('config_change', param='flask_secret_key',
-                   old='hardcoded', new='random_persisted', approved_by='user')
-        except Exception as _aerr:
-            _flasklog.debug('[FlaskSecret] audit_log failed: %s', _aerr)
-    except Exception as _werr:
-        _flasklog.error('[FlaskSecret] Failed to persist key to %s: %s — '
-                        'using in-memory key (sessions invalidated on restart)',
-                        _key_file, _werr, exc_info=True)
+    except Exception as e:
+        logging.getLogger('server').warning('[FlaskSecret] Failed to persist: %s', e)
     return _new_key
+
 
 app.secret_key = _load_or_create_flask_secret_key()
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
-app.config['COMPRESS_MIMETYPES'] = [
+# ── Disable response/body timeouts for long-lived SSE streams ──
+# Quart's defaults (60s) silently kill /api/chat/stream connections during
+# long LLM responses, causing the UI to "stop updating without refresh".
+# SSE clients keep their own keepalive (15s comment ping in chat_stream),
+# so we set these to None to defer entirely to the SSE layer.
+app.config['RESPONSE_TIMEOUT'] = None
+app.config['BODY_TIMEOUT'] = None
+
+
+# ── Compression (Quart-native, no flask-compress dependency) ──
+# Quart does not use flask-compress. Instead, we add a simple
+# after_request hook for gzip. For heavy production use, Hypercorn
+# + a reverse proxy handle this better.
+_COMPRESS_MIMETYPES = frozenset([
     'text/html', 'text/css', 'text/javascript',
     'application/javascript', 'application/json',
-    # ❌ Do NOT compress text/event-stream!  gzip internally buffers small
-    # data chunks, which delays SSE event delivery — especially severe in
-    # tunnel environments like VSCode port-forwarding.
-]
-app.config['COMPRESS_MIN_SIZE'] = 256  # only compress responses >256 bytes
-Compress(app)
-app.teardown_appcontext(close_db)
+])
+_COMPRESS_MIN_SIZE = 256
+
+import gzip as _gzip
+
+@app.after_request
+async def _compress_response(response):
+    """Simple gzip compression for eligible responses."""
+    # Skip SSE (buffering breaks streaming), small responses, already encoded
+    if (response.content_type
+            and 'text/event-stream' in response.content_type):
+        return response
+    if response.content_encoding:
+        return response
+    accept_enc = request.headers.get('Accept-Encoding', '')
+    if 'gzip' not in accept_enc:
+        return response
+    mime = (response.content_type or '').split(';')[0].strip()
+    if mime not in _COMPRESS_MIMETYPES:
+        return response
+    data = await response.get_data()
+    if len(data) < _COMPRESS_MIN_SIZE:
+        return response
+    # gzip is CPU-bound; running it inline would block the event loop (and
+    # every other connection / SSE keepalive) for the duration. Offload to
+    # the sync executor so a multi-MB body doesn't stall the whole server.
+    loop = asyncio.get_running_loop()
+    compressed = await loop.run_in_executor(None, _gzip.compress, data, 6)
+    if len(compressed) >= len(data):
+        return response
+    response.set_data(compressed)
+    response.headers['Content-Encoding'] = 'gzip'
+    response.headers['Content-Length'] = len(compressed)
+    response.headers.pop('Vary', None)
+    response.headers['Vary'] = 'Accept-Encoding'
+    return response
 
 
-# ── Gateway Middleware (strip leading /gateway prefix) ──
-
-class GatewayMiddleware:
-    def __init__(self, wsgi_app):
-        self.wsgi_app = wsgi_app
-
-    def __call__(self, environ, start_response):
-        path = environ.get('PATH_INFO', '')
-        if path.startswith('/gateway'):
-            environ['PATH_INFO'] = path[len('/gateway'):]
-            environ['SCRIPT_NAME'] = environ.get('SCRIPT_NAME', '') + '/gateway'
-            logging.getLogger('server.gateway').debug(
-                'GatewayMiddleware: stripped /gateway prefix → %s', environ['PATH_INFO'])
-        return self.wsgi_app(environ, start_response)
-
-
-app.wsgi_app = GatewayMiddleware(app.wsgi_app)
-
-
-# ── Tunnel auth (protects public-facing tunnel access) ──
-
-TUNNEL_TOKEN = os.environ.get('TUNNEL_TOKEN', '')  # set to enable auth
+# ── Auth (legacy compat constants only) ──
+# The active auth middleware lives in routes/api_v1/auth.py and is
+# registered after blueprints are wired in. ``TUNNEL_TOKEN`` is kept
+# only as a deprecated back-compat shim; new deployments mint API
+# keys instead (see lib.api_keys.bootstrap_personal_key).
+TUNNEL_TOKEN = os.environ.get('TUNNEL_TOKEN', '')
 TUNNEL_COOKIE = '_tunnel_auth'
-TUNNEL_COOKIE_MAX_AGE = 86400 * 30  # 30 days
+TUNNEL_COOKIE_MAX_AGE = 86400 * 30
+if TUNNEL_TOKEN:
+    logging.getLogger('server.auth').warning(
+        '[Auth] TUNNEL_TOKEN is deprecated. Migrate to API keys '
+        '(POST /api/v1/keys with admin scope). The shim remains '
+        'for now but new code paths target the unified auth gate.')
 
+
+# ── Method Override + CloudIDE JSON fix ──
 @app.before_request
-def tunnel_auth():
-    """Simple token-based auth for public tunnel access.
-    
-    - If TUNNEL_TOKEN env is not set → auth disabled (pure LAN mode)
-    - First visit: append ?token=<your_token> to any URL
-    - Sets a cookie so subsequent requests are transparent
-    - API calls can also use header: X-Tunnel-Token: <token>
-    """
-    _auth_log = logging.getLogger('server.auth')
-    if not TUNNEL_TOKEN:
-        return  # Auth disabled — LAN-only mode
-
-    # Check cookie first (browser sessions)
-    cookie_val = request.cookies.get(TUNNEL_COOKIE)
-    expected = hashlib.sha256(TUNNEL_TOKEN.encode()).hexdigest()[:32]
-    if cookie_val == expected:
-        _auth_log.debug('Tunnel auth: valid cookie for %s', request.remote_addr)
-        return  # ✅ Already authenticated
-    elif cookie_val is not None:
-        _auth_log.debug('Tunnel auth: cookie present but invalid for %s', request.remote_addr)
-
-    # Check header (API / programmatic access)
-    header_token = request.headers.get('X-Tunnel-Token', '')
-    if header_token == TUNNEL_TOKEN:
-        _auth_log.debug('Tunnel auth: valid header token for %s', request.remote_addr)
-        return  # ✅ Valid header
-
-    # From here on, all paths are rejections (except valid query token below).
-    # Log the rejection attempt for audit / debugging.
-
-    # Check query param (first-time login from browser)
-    query_token = request.args.get('token', '')
-    if query_token == TUNNEL_TOKEN:
-        # Set cookie and redirect to clean URL (strip ?token=)
-        from urllib.parse import urlencode, parse_qs, urlparse, urlunparse
-        parsed = urlparse(request.url)
-        params = parse_qs(parsed.query)
-        params.pop('token', None)
-        clean_query = urlencode(params, doseq=True)
-        clean_url = urlunparse(parsed._replace(query=clean_query))
-        resp = make_response(redirect(clean_url))
-        resp.set_cookie(TUNNEL_COOKIE, expected,
-                        max_age=TUNNEL_COOKIE_MAX_AGE,
-                        httponly=True, samesite='Lax')
-        _auth_log.info('Tunnel auth: token accepted, cookie set for %s', request.remote_addr)
-        return resp
-
-    # ❌ Not authenticated — return 401
-    _auth_log.warning('Tunnel auth: 401 rejected %s %s from %s (UA: %s)',
-                      request.method, request.path, request.remote_addr,
-                      request.headers.get('User-Agent', '<none>'))
-    return make_response(
-        '<h2>🔒 Access Denied</h2>'
-        '<p>Append <code>?token=YOUR_TOKEN</code> to the URL to authenticate.</p>',
-        401
-    )
-
-
-@app.before_request
-def method_override():
-    _mo_log = logging.getLogger('server.method_override')
+async def method_override():
     override = request.args.get('_method')
     if override:
-        original = request.environ['REQUEST_METHOD']
-        request.environ['REQUEST_METHOD'] = override.upper()
-        _mo_log.info('HTTP method overridden: %s → %s for %s', original, override.upper(), request.path)
-    # CloudIDE nested JSON fix
+        request.scope['method'] = override.upper()
+    # CloudIDE sometimes double-encodes JSON bodies (sends a JSON string
+    # whose value is itself a JSON object). Detect and unwrap in-place so
+    # downstream ``request.get_json()`` returns the correct dict.
     ct = request.content_type or ''
     if request.method in ('POST', 'PUT') and 'json' in ct:
-        raw = request.get_data(as_text=True)
+        raw = (await request.get_data()).decode('utf-8', errors='replace')
         if raw:
             try:
                 data = json.loads(raw)
                 if isinstance(data, str):
-                    data = json.loads(data)
-                    body_bytes = json.dumps(data).encode('utf-8')
-                    request.environ['wsgi.input'] = io.BytesIO(body_bytes)
-                    request.environ['CONTENT_LENGTH'] = str(len(body_bytes))
-                    request.environ['CONTENT_TYPE'] = 'application/json'
-                    _mo_log.debug('CloudIDE double-encoded JSON fix applied for %s %s', request.method, request.path)
-            except (json.JSONDecodeError, TypeError) as e:
-                _mo_log.warning('method_override JSON re-parse failed: %s', e, exc_info=True)
+                    corrected = json.dumps(json.loads(data)).encode('utf-8')
+                    request._body = corrected
+            except (json.JSONDecodeError, TypeError):
+                pass
 
 
 # ── Request lifecycle logging ──
-# Assigns a unique request ID to every request and logs timing.
-# Skip noisy polling & static-file endpoints.
-
 from lib.log import get_logger, set_req_id, req_id as _get_req_id
 import uuid as _uuid
 
 _lifecycle_log = get_logger('server.lifecycle')
-
-# Paths that are polled frequently — log at DEBUG only
 _QUIET_PREFIXES = ('/api/browser/', '/api/desktop/', '/static/', '/api/task/')
-_SLOW_THRESHOLD_S = 2.0  # warn if response takes longer
+_SLOW_THRESHOLD_S = 2.0
 
 @app.before_request
-def _assign_req_id_and_log():
-    """Assign a unique request ID and log request entry."""
+async def _assign_req_id_and_log():
     rid = request.headers.get('X-Request-ID') or _uuid.uuid4().hex[:12]
     set_req_id(rid)
     request._start_time = time.time()
-
     path = request.path
     is_quiet = any(path.startswith(p) for p in _QUIET_PREFIXES)
     level = logging.DEBUG if is_quiet else logging.INFO
     _lifecycle_log.log(level, '[%s] → %s %s', rid, request.method, path)
 
-# Known-benign 409 error codes — our own regression guards in
-# routes/conversations.py that block stale concurrent syncs. These are
-# the GUARD firing correctly, not an error.
-_BENIGN_409_ERRORS = frozenset({
-    'blocked_msg_regression',
-    'blocked_empty_overwrite',
-    'blocked_stale_checkpoint',
-})
-
-
-def _is_benign_409(response) -> bool:
-    """Return True if *response* is a 409 emitted by one of our known
-    regression guards (body includes `error` field in :data:`_BENIGN_409_ERRORS`).
-
-    Safe / cheap: bails out on any extraction failure.
-    """
-    try:
-        if not response.is_json:
-            return False
-        data = response.get_json(silent=True)
-        if not isinstance(data, dict):
-            return False
-        return data.get('error') in _BENIGN_409_ERRORS
-    except Exception as e:
-        # Defensive: any extraction failure → fall back to WARNING path
-        _lifecycle_log.debug('_is_benign_409 extract failed: %s', e)
-        return False
-
 
 @app.after_request
-def _log_response(response):
-    """Log response status and duration for every request."""
+async def _log_response(response):
     elapsed = time.time() - getattr(request, '_start_time', time.time())
     rid = _get_req_id()
-    path = request.full_path.rstrip('?')  # include query string
+    path = request.full_path.rstrip('?')
     status = response.status_code
-
     is_quiet = any(path.startswith(p) for p in _QUIET_PREFIXES)
 
     if status >= 500:
         _lifecycle_log.error('[%s] ← %s %s %d (%.3fs)', rid, request.method, path, status, elapsed)
     elif status >= 400:
-        # Suppress noisy Chrome/Safari DevTools probes and favicon
         if status == 404 and request.path.startswith('/.well-known/'):
             _lifecycle_log.debug('[%s] ← %s %s %d (%.3fs)', rid, request.method, path, status, elapsed)
-        # 2026-05-05: 409 Conflict from our own regression guards
-        # (blocked_msg_regression / blocked_empty_overwrite /
-        # blocked_stale_checkpoint) is the EXPECTED success signal for
-        # the guard — it means we correctly refused a stale concurrent
-        # sync. Demote to INFO so error.log isn't flooded (176+/day).
-        elif status == 409 and _is_benign_409(response):
-            _lifecycle_log.info('[%s] ← %s %s %d benign-guard (%.3fs)',
-                                rid, request.method, path, status, elapsed)
         else:
             _lifecycle_log.warning('[%s] ← %s %s %d (%.3fs)', rid, request.method, path, status, elapsed)
     elif elapsed >= _SLOW_THRESHOLD_S and not is_quiet:
@@ -675,362 +604,287 @@ def _log_response(response):
         _lifecycle_log.debug('[%s] ← %s %s %d (%.3fs)', rid, request.method, path, status, elapsed)
 
     response.headers['X-Request-ID'] = rid
-
-    # ── Force correct MIME type for static assets ──
-    # Fixes macOS/Windows environments where Python's mimetypes module
-    # may return text/plain for .js files, causing browsers to silently
-    # refuse script execution.
-    if request.path.startswith('/static/'):
-        if request.path.endswith('.js'):
-            response.content_type = 'application/javascript; charset=utf-8'
-        elif request.path.endswith('.css'):
-            response.content_type = 'text/css; charset=utf-8'
-
     return response
 
+
 @app.teardown_request
-def _clear_req_id(exc):
-    """Clear request ID after request is fully handled."""
+async def _clear_req_id(exc):
     if exc:
         rid = _get_req_id()
-        _lifecycle_log.error('[%s] Request teardown with exception', rid, exc_info=exc)
+        # Client disconnect mid-request (CancelledError during body read) is
+        # benign — log at debug. Real handler exceptions are already logged
+        # by _handle_uncaught with full context, so reaching teardown with
+        # any other exception means the framework swallowed it; warn so it's
+        # still visible without the alarming ERROR + traceback.
+        if isinstance(exc, asyncio.CancelledError):
+            _lifecycle_log.debug('[%s] Request teardown: client disconnected', rid)
+        else:
+            _lifecycle_log.warning('[%s] Request teardown with exception: %s', rid, exc)
     set_req_id(None)
 
 
-# ══════════════════════════════════════════
-#  Register all Blueprints
-# ══════════════════════════════════════════
+# ── DB teardown ──
+app.teardown_appcontext(close_db)
 
+
+# ── Register all Blueprints ──
 from routes import register_all
 register_all(app)
 
 
-# ── Load persisted proxy config from server_config.json ──
+# ── Unified auth gate (single middleware) ──
+# Replaces the legacy dual scheme (tunnel_auth + bearer_auth). One
+# before_request hook resolves an AuthContext from any of:
+#   - Authorization: Bearer / x-api-key header
+#   - tofu_session cookie  (set on first browser visit via ?token=…)
+#   - X-Tunnel-Token / TUNNEL_TOKEN  (deprecated back-compat shim)
+# Public routes (static, /, /api/health, /api/v1/capabilities, etc.)
+# bypass the gate — see _PUBLIC_EXACT in routes/api_v1/auth.py.
+from routes.api_v1.auth import attach_rate_headers, auth_before_request
+app.before_request(auth_before_request)
+app.after_request(attach_rate_headers)
+
+
+# ── First-boot personal key bootstrap ──
+# Only relevant when the auth gate is in ``private`` or ``multi-user``
+# mode. In ``open`` mode (the default for personal installs) no
+# credential is required and minting a key would just confuse the
+# operator. When in private/multi-user mode and the key store is
+# empty AND no TUNNEL_TOKEN is configured, mint a personal admin key
+# so the local UI and SDK "just work". The plaintext is printed once
+# to stderr and persisted (0600) at data/config/.first_run_token.
+# Disable with TOFU_AUTO_KEY=0.
+_BOOTSTRAP_TOKEN = ''
 try:
-    from routes.config import _read_server_config, _write_server_config
+    from lib.auth_mode import get_mode as _get_auth_mode
+    _AUTH_MODE = _get_auth_mode()
+except Exception as _e:
+    logging.getLogger('server.boot').warning(
+        '[AuthMode] could not resolve mode: %s', _e)
+    _AUTH_MODE = 'open'
+
+
+def _bootstrap_personal_key_if_needed():
+    global _BOOTSTRAP_TOKEN
+    if (os.environ.get('TOFU_AUTO_KEY', '1') or '1').strip() == '0':
+        return
+    if _AUTH_MODE == 'open':
+        return  # gate is open — no credential needed at all
+    if TUNNEL_TOKEN:
+        return  # legacy mode — user explicitly chose a shared secret
+    try:
+        from lib.api_keys import bootstrap_personal_key, has_any_key
+    except Exception as _e:
+        logging.getLogger('server.boot').warning(
+            '[Auth] could not import bootstrap helpers: %s', _e)
+        return
+    if has_any_key():
+        return
+    plaintext = bootstrap_personal_key(name='personal')
+    if plaintext:
+        _BOOTSTRAP_TOKEN = plaintext
+
+
+_bootstrap_personal_key_if_needed()
+
+
+# ── Billing janitor: release stale credit reservations ──
+# Spawns one daemon thread that sweeps the ledger every 5 minutes.
+# A no-op if multi-user mode never gets used (the sweep just finds 0
+# rows). Disabled with TOFU_BILLING_JANITOR=0.
+try:
+    from lib.billing.janitor import start_janitor as _start_billing_janitor
+    _start_billing_janitor()
+except Exception as _e:
+    logging.getLogger('server.boot').warning(
+        '[Billing] janitor failed to start: %s', _e)
+
+
+# ── Static file cache headers ──
+@app.after_request
+async def add_cache_headers(response):
+    if request.path.startswith('/static/'):
+        if request.path.endswith('.js'):
+            response.content_type = 'text/javascript; charset=utf-8'
+        elif request.path.endswith('.css'):
+            response.content_type = 'text/css; charset=utf-8'
+        if '/vendor/' in request.path or '/bundle-' in request.path:
+            response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+        elif request.path.endswith(('.js', '.css')):
+            if 'v=' in request.query_string.decode('ascii', errors='ignore'):
+                response.headers['Cache-Control'] = 'public, max-age=604800, immutable'
+            else:
+                response.headers['Cache-Control'] = 'public, max-age=300, must-revalidate'
+        else:
+            response.headers['Cache-Control'] = 'public, max-age=86400'
+    return response
+
+
+# ── Proxy config (reuse server.py logic) ──
+try:
+    from routes.config import _read_server_config
     from lib.proxy import set_bypass_domains, set_proxy_config
     _saved_cfg = _read_server_config()
-
-    # ── Migration: merge legacy proxy_config.no_proxy into proxy_bypass_domains ──
     _saved_pc = _saved_cfg.get('proxy_config', {})
-    _legacy_no_proxy = _saved_pc.get('no_proxy', '')
-    _migrated = False
-    if _legacy_no_proxy:
-        _existing_bypass = _saved_cfg.get('proxy_bypass_domains', [])
-        _existing_set = set(d.lower().strip() for d in _existing_bypass)
-        for _d in _legacy_no_proxy.split(','):
-            _d = _d.strip()
-            if _d and _d.lower() not in _existing_set and _d not in ('localhost', '127.0.0.1', '0.0.0.0'):
-                _existing_bypass.append(_d)
-                _existing_set.add(_d.lower())
-                _migrated = True
-        if _migrated:
-            _saved_cfg['proxy_bypass_domains'] = _existing_bypass
-            _saved_pc.pop('no_proxy', None)
-            _saved_cfg['proxy_config'] = _saved_pc
-            _write_server_config(_saved_cfg)
-            _lifecycle_log.info('[Proxy] Migrated legacy no_proxy entries into proxy_bypass_domains: %s',
-                               ', '.join(_existing_bypass))
-
-    # Proxy address (http_proxy / https_proxy — no_proxy is now auto-managed)
     if _saved_pc and any(_saved_pc.get(k) for k in ('http_proxy', 'https_proxy')):
         set_proxy_config(
             http_proxy=_saved_pc.get('http_proxy', ''),
             https_proxy=_saved_pc.get('https_proxy', ''),
         )
-        _lifecycle_log.info('Loaded proxy config from server_config.json: http=%s https=%s',
-                           _saved_pc.get('http_proxy', '') or '(env)',
-                           _saved_pc.get('https_proxy', '') or '(env)')
-
-    # Bypass domains (feeds both proxies_for() and no_proxy env automatically)
     _saved_proxy = _saved_cfg.get('proxy_bypass_domains', [])
     if _saved_proxy:
         set_bypass_domains(_saved_proxy)
-        _lifecycle_log.info('Loaded %d proxy bypass domains from server_config.json', len(_saved_proxy))
 except Exception as _e:
     _lifecycle_log.warning('Failed to load proxy config: %s', _e)
 
 
 # ── Global error handlers ──
-# API routes (/api/*) always get JSON; browser routes get HTML.
+from lib.api_response import (
+    api_internal_error,
+    api_method_not_allowed,
+    api_not_found,
+    api_payload_too_large,
+)
+
 
 def _is_api_request():
-    """Check if the current request targets an API endpoint."""
     return request.path.startswith('/api/')
 
+
+def _ws_safe_method_path():
+    """Return (method, path) tolerating contexts where request is unavailable."""
+    try:
+        return request.method, request.path
+    except RuntimeError:
+        from quart import websocket as _ws
+        try:
+            return 'WS', _ws.path
+        except RuntimeError:
+            return '?', '?'
+
+
 @app.errorhandler(404)
-def _handle_404(exc):
-    # Suppress noisy Chrome DevTools probe
+async def _handle_404(exc):
     if request.path.startswith('/.well-known/'):
         _lifecycle_log.debug('404 (well-known probe): %s', request.path)
     else:
         _lifecycle_log.warning('404 Not Found: %s %s', request.method, request.path)
     if _is_api_request():
-        return jsonify({'ok': False, 'error': 'Not Found: %s' % request.path}), 404
-    return make_response(
-        '<h2>404 — Not Found</h2>'
-        '<p>The requested URL was not found on this server.</p>',
-        404
-    )
+        return api_not_found('Not Found: %s' % request.path)
+    return await _orig_make_response_async(
+        '<h2>404 — Not Found</h2><p>The requested URL was not found.</p>', 404)
+
 
 @app.errorhandler(413)
-def _handle_413(exc):
-    _lifecycle_log.warning('413 Payload Too Large: %s %s', request.method, request.path)
-    max_mb = app.config['MAX_CONTENT_LENGTH'] / (1024 * 1024)
+async def _handle_413(exc):
     if _is_api_request():
-        return jsonify({'ok': False, 'error': 'Payload too large (max %.0f MB)' % max_mb}), 413
-    return make_response(
-        '<h2>413 — Payload Too Large</h2>'
-        f'<p>The uploaded file exceeds the maximum allowed size ({max_mb:.0f} MB).</p>',
-        413
-    )
+        return api_payload_too_large(app.config['MAX_CONTENT_LENGTH'])
+    return await _orig_make_response_async('<h2>413 — Payload Too Large</h2>', 413)
+
 
 @app.errorhandler(405)
-def _handle_405(exc):
-    _lifecycle_log.warning('405 Method Not Allowed: %s %s (allowed: %s)',
-                           request.method, request.path,
-                           exc.valid_methods if hasattr(exc, 'valid_methods') else 'unknown')
+async def _handle_405(exc):
     if _is_api_request():
-        return jsonify({'ok': False, 'error': 'Method Not Allowed',
-                        'allowed': list(exc.valid_methods) if hasattr(exc, 'valid_methods') and exc.valid_methods else []}), 405
-    return make_response(
-        '<h2>405 — Method Not Allowed</h2>'
-        '<p>The method <code>%s</code> is not allowed for this URL.</p>' % request.method,
-        405
-    )
+        return api_method_not_allowed()
+    return await _orig_make_response_async('<h2>405 — Method Not Allowed</h2>', 405)
 
-@app.errorhandler(415)
-def _handle_415(exc):
-    _lifecycle_log.warning('415 Unsupported Media Type: %s %s (Content-Type: %s)',
-                           request.method, request.path, request.content_type)
-    if _is_api_request():
-        return jsonify({'ok': False, 'error': 'Unsupported Media Type — send Content-Type: application/json'}), 415
-    return make_response(
-        '<h2>415 — Unsupported Media Type</h2>'
-        '<p>The server does not support the media type transmitted in the request.</p>',
-        415
-    )
 
 @app.errorhandler(500)
-def _handle_500(exc):
+async def _handle_500(exc):
     rid = _get_req_id() or '-'
-    _lifecycle_log.error('500 Internal Server Error: [%s] %s %s',
-                         rid, request.method, request.path, exc_info=exc)
-    if _is_api_request():
-        # Uniform envelope — never leak str(exc) (may contain secrets or
-        # internal paths). Clients correlate via request_id in the log.
-        return jsonify({'ok': False, 'error': 'internal_error',
-                        'request_id': rid}), 500
-    return make_response(
-        '<h2>500 \u2014 Internal Server Error</h2>'
-        f'<p>Request ID: <code>{rid}</code>. Check server logs for details.</p>',
-        500
-    )
+    method, path = _ws_safe_method_path()
+    _lifecycle_log.error('500 ISE: [%s] %s %s', rid, method, path, exc_info=exc)
+    if path.startswith('/api/'):
+        return api_internal_error(exc, log_traceback=False)
+    return await _orig_make_response_async(
+        f'<h2>500</h2><p>Request ID: <code>{rid}</code></p>', 500)
 
 
 @app.errorhandler(Exception)
-def _handle_uncaught_exception(exc):
-    """Catch-all for exceptions not already handled by werkzeug HTTP classes.
-
-    Werkzeug HTTPException subclasses (NotFound, BadRequest, 405, etc.)
-    short-circuit this handler because Flask matches more-specific handlers
-    first, so the existing 404/405/413/415 handlers still win. This only
-    catches genuine bare Exception bubbles from view handlers.
-    """
+async def _handle_uncaught(exc):
     from werkzeug.exceptions import HTTPException
     if isinstance(exc, HTTPException):
-        # Let Flask dispatch to the appropriate errorhandler
         return exc
     rid = _get_req_id() or '-'
-    _lifecycle_log.error('[%s] Uncaught exception in %s %s: %s',
-                         rid, request.method, request.path, exc, exc_info=True)
-    if _is_api_request():
-        return jsonify({'ok': False, 'error': 'internal_error',
-                        'request_id': rid}), 500
-    return make_response(
-        '<h2>500 \u2014 Internal Server Error</h2>'
-        f'<p>Request ID: <code>{rid}</code>. Check server logs for details.</p>',
-        500
-    )
-
-# Emit a single audit entry confirming handlers are installed (one-time per boot).
-try:
-    from lib.log import audit_log as _audit_boot
-    _audit_boot('error_handler_installed',
-                handlers=['404', '405', '413', '415', '500', 'Exception'])
-except Exception as _eerr:
-    _lifecycle_log.debug('[Boot] audit_log for error_handler_installed failed: %s', _eerr)
+    method, path = _ws_safe_method_path()
+    _lifecycle_log.error('[%s] Uncaught: %s %s: %s', rid, method, path, exc, exc_info=True)
+    if path.startswith('/api/'):
+        return api_internal_error(exc, log_traceback=False)
+    return await _orig_make_response_async(
+        f'<h2>500</h2><p>Request ID: <code>{rid}</code></p>', 500)
 
 
-# ── Static file cache (avoid re-transfer over tunnel) ──
-# JS/CSS: short cache + must-revalidate so bug fixes propagate fast
-# Images/fonts: long cache (rarely change)
-
-@app.after_request
-def add_cache_headers(response):
-    if request.path.startswith('/static/'):
-        # ── MIME type enforcement (macOS / cross-platform safety net) ──
-        # Even with mimetypes.init() + add_type(), some macOS Python builds
-        # serve .js as text/plain.  Browsers with strict MIME checking silently
-        # refuse to execute such scripts, causing "init failed" errors.
-        if request.path.endswith('.js'):
-            response.content_type = 'text/javascript; charset=utf-8'
-        elif request.path.endswith('.css'):
-            response.content_type = 'text/css; charset=utf-8'
-        # ★ Vendor files (highlight.js, marked, katex, fonts) essentially never change
-        # ★ Bundle files have content hash in filename → safe for long cache
-        if '/vendor/' in request.path or '/bundle-' in request.path:
-            response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'  # 1 year
-        elif request.path.endswith(('.js', '.css')):
-            # ★ If ?v= cache-bust parameter is present, the file is version-pinned
-            #   and safe to cache aggressively. This eliminates revalidation round-trips
-            #   through VS Code port forwarding tunnels.
-            if 'v=' in request.query_string.decode('ascii', errors='ignore'):
-                response.headers['Cache-Control'] = 'public, max-age=604800, immutable'  # 7 days
-            else:
-                response.headers['Cache-Control'] = 'public, max-age=300, must-revalidate'  # 5min + revalidate
-        else:
-            response.headers['Cache-Control'] = 'public, max-age=86400'  # 24h for images
-    return response
-
-
-# ══════════════════════════════════════════
-#  Database init & background workers
-# ══════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
+#  Startup & Main
+# ═══════════════════════════════════════════════════════════════════════
 
 _server_log = logging.getLogger('server')
 
-# ── JS bundle (concatenate 16 app scripts → 1 file for faster page load) ──
+# ── JS bundle ──
 try:
     from lib.js_bundler import build_bundle
     build_bundle()
 except Exception as _bundle_err:
-    _server_log.warning('JS bundle build failed (will serve individual files): %s', _bundle_err)
+    _server_log.warning('JS bundle build failed: %s', _bundle_err)
 
-with app.app_context():
+
+def _init_database():
+    """Initialize database (runs in app context)."""
+    _boot('Initialising database…')
+    init_db()
+    warmup_db()
     try:
-        _boot('Initialising database (this may take a moment on FUSE/NFS)…')
-        _server_log.info('Initialising database (SQLite)...')
-        init_db()
-        warmup_db()
-        # Auto-heal any TOAST corruption that may have been carried over
-        # from a prior hot-copied pgdata (see heal_toast_corruption docstring).
-        # Silent no-op on SQLite and on healthy PG clusters.
-        try:
-            from lib.database import heal_toast_corruption
-            heal_toast_corruption()
-        except Exception as _heal_exc:
-            _server_log.warning('TOAST auto-heal failed (non-fatal): %s', _heal_exc)
-        _boot('Database ready.')
-        _server_log.info('Database ready (SQLite).')
-        # ── Clean up stale tasks from previous crashes ──
-        # Must run after DB init but before serving requests.
-        try:
-            from lib.tasks_pkg import recover_stale_tasks_on_startup
-            recover_stale_tasks_on_startup()
-        except Exception as _stale_exc:
-            _server_log.warning('Stale task recovery failed (non-fatal): %s', _stale_exc)
-    except Exception as exc:
-        _server_log.critical('Database init/warmup failed — server will start but DB operations will fail: %s', exc, exc_info=True)
-        # Don't raise — let the server start so the UI can load (settings page,
-        # API config, etc.).  Individual endpoints will fail with clear errors
-        # when they try to access the DB.
-
-    # Seed built-in strategies (trading feature only)
-    from lib import TRADING_ENABLED
-    if TRADING_ENABLED:
-        try:
-            _server_log.info('Seeding trading strategies & migrating intel categories...')
-            from routes.trading_intel import seed_builtin_strategies, migrate_intel_categories
-            seed_builtin_strategies()
-            migrate_intel_categories()
-            _server_log.info('Trading seed complete.')
-        except Exception as exc:
-            _server_log.critical('Trading seed/migration failed — trading features will be degraded: %s', exc, exc_info=True)
-
-# ══════════════════════════════════════════
-#  Eager import validation — surface ImportErrors at startup
-# ══════════════════════════════════════════
-# The task pipeline uses lazy imports (lib.tasks_pkg.__init__) so missing
-# packages like trafilatura, pymupdf, etc. won't crash until the first
-# user request — by which time bootstrap.py's sys.excepthook can no
-# longer intercept.  Force-import the critical request path here so any
-# missing dependency crashes at startup where bootstrap can auto-repair.
-
-_CRITICAL_IMPORTS = [
-    'lib.tasks_pkg.orchestrator',   # run_task (the main chat path)
-    'lib.tasks_pkg.executor',       # tool dispatch
-    'lib.fetch',                    # web fetching (trafilatura, etc.)
-    'lib.search',                   # web search
-    'lib.llm_client',               # LLM API client
-]
-
-_boot('Validating critical imports (trafilatura, pymupdf, …)…')
-_server_log.info('Validating critical imports...')
-_import_failures = []
-for _mod_name in _CRITICAL_IMPORTS:
-    _boot('  • importing %s', _mod_name)
+        from lib.database import heal_toast_corruption
+        heal_toast_corruption()
+    except Exception as e:
+        _server_log.warning('TOAST auto-heal failed: %s', e)
+    _boot('Database ready.')
     try:
-        __import__(_mod_name)
-    except ImportError as _ie:
-        _import_failures.append((_mod_name, _ie))
-        _server_log.error('Critical import failed: %s — %s', _mod_name, _ie)
+        from lib.tasks_pkg import recover_stale_tasks_on_startup
+        recover_stale_tasks_on_startup()
+    except Exception as e:
+        _server_log.warning('Stale task recovery failed: %s', e)
 
-if _import_failures:
-    # Build a clear error message and raise so bootstrap.py can catch it
-    _fail_msgs = [f'  {m}: {e}' for m, e in _import_failures]
-    _msg = (
-        'Critical dependencies are missing — the server cannot handle requests:\n'
-        + '\n'.join(_fail_msgs)
-    )
-    _server_log.critical(_msg)
-    raise ImportError(_msg)
 
-_boot('All critical imports validated.')
-_server_log.info('All critical imports validated successfully.')
+def _validate_imports():
+    """Validate critical imports at startup."""
+    _CRITICAL_IMPORTS = [
+        'lib.tasks_pkg.orchestrator',
+        'lib.tasks_pkg.executor',
+        'lib.fetch',
+        'lib.search',
+        'lib.llm',
+    ]
+    _boot('Validating critical imports…')
+    failures = []
+    for mod_name in _CRITICAL_IMPORTS:
+        _boot('  • importing %s', mod_name)
+        try:
+            __import__(mod_name)
+        except ImportError as ie:
+            failures.append((mod_name, ie))
+            _server_log.error('Critical import failed: %s — %s', mod_name, ie)
+    if failures:
+        msgs = [f'  {m}: {e}' for m, e in failures]
+        raise ImportError('Missing dependencies:\n' + '\n'.join(msgs))
+    _boot('All critical imports validated.')
 
 
 def _start_background_workers():
-    """Launch all background threads (trading workers gated by TRADING_ENABLED)."""
+    """Launch background threads (same as server.py)."""
     from lib import TRADING_ENABLED
     if not TRADING_ENABLED:
-        _server_log.info('TRADING_ENABLED is off — skipping background workers')
         return
-
     try:
-        # Intel crawl worker
-        _server_log.info('Starting intel crawl worker...')
         from routes.trading_intel import start_intel_worker
         start_intel_worker(app)
-
-        # Autopilot worker
-        _server_log.info('Starting autopilot worker...')
         from routes.trading_autopilot import start_autopilot_worker
         start_autopilot_worker()
-        _server_log.info('Background workers started.')
     except Exception as e:
-        # Intentionally not re-raised: server should remain functional
-        # even if optional background workers fail to start.
         _server_log.error('Failed to start background workers: %s', e, exc_info=True)
 
 
-# ══════════════════════════════════════════
-#  Main
-# ══════════════════════════════════════════
-
-def _find_free_web_port(start=15000, end=15100):
-    """Find an available TCP port for the Flask server.
-
-    Scans sequentially from *start*. Returns the first port where
-    nothing is listening on localhost.
-
-    Args:
-        start: First port to try (default 15000).
-        end:   Exclusive upper bound.
-
-    Returns:
-        An available port number, or *start* if all are somehow busy.
-    """
+def _find_free_port(start=15000, end=15100):
     import socket
     for p in range(start, end):
         try:
@@ -1038,323 +892,431 @@ def _find_free_web_port(start=15000, end=15100):
             s.settimeout(0.5)
             result = s.connect_ex(('localhost', p))
             s.close()
-            if result != 0:          # connection refused → port is free
+            if result != 0:
                 return p
-        except Exception as e:
-            _server_log.debug('[Server] Port %d probe error (assuming free): %s', p, e)
-            return p                 # any error → assume free
+        except Exception:
+            return p
     return start
 
 
+def _ensure_tls_certs(certfile='', keyfile=''):
+    """Ensure TLS certificates exist for HTTP/2 support.
+
+    Browsers only negotiate HTTP/2 over TLS (ALPN). Without certs the
+    server falls back to HTTP/1.1 and we lose the multiplexing benefit.
+
+    Strategy:
+      1. If user provides --certfile/--keyfile, use those.
+      2. If certs already exist at data/certs/tofu.{pem,key}, reuse them.
+      3. Otherwise, auto-generate via the `cryptography` library (pure Python).
+
+    Disable with TOFU_TLS=0 or --no-tls.
+
+    Returns:
+        (certfile_path, keyfile_path) or (None, None) if TLS unavailable.
+    """
+    _tls_log = logging.getLogger('server.tls')
+
+    if certfile and keyfile:
+        if os.path.isfile(certfile) and os.path.isfile(keyfile):
+            _tls_log.info('[TLS] Using provided certs: %s, %s', certfile, keyfile)
+            return certfile, keyfile
+        _tls_log.warning('[TLS] Provided cert/key files not found: %s, %s', certfile, keyfile)
+
+    cert_dir = os.path.join(BASE_DIR, 'data', 'certs')
+    cert_path = os.path.join(cert_dir, 'tofu.pem')
+    key_path = os.path.join(cert_dir, 'tofu.key')
+
+    if os.path.isfile(cert_path) and os.path.isfile(key_path):
+        _tls_log.info('[TLS] Reusing existing self-signed certs at %s', cert_dir)
+        return cert_path, key_path
+
+    _boot('Generating self-signed TLS certificate for HTTP/2…')
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        import datetime
+        import ipaddress
+        import socket
+
+        os.makedirs(cert_dir, exist_ok=True)
+        hostname = socket.gethostname()
+
+        # Generate RSA 2048-bit key
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+        # Build X.509 certificate — valid 10 years, SAN for local access
+        subject = x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, f'Tofu Server ({hostname})'),
+        ])
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + datetime.timedelta(days=3650))
+            .add_extension(
+                x509.SubjectAlternativeName([
+                    x509.DNSName('localhost'),
+                    x509.DNSName(hostname),
+                    x509.IPAddress(ipaddress.IPv4Address('127.0.0.1')),
+                    x509.IPAddress(ipaddress.IPv4Address('0.0.0.0')),
+                ]),
+                critical=False,
+            )
+            .add_extension(
+                x509.BasicConstraints(ca=False, path_length=None),
+                critical=True,
+            )
+            .sign(key, hashes.SHA256())
+        )
+
+        # Write key (mode 0600)
+        key_pem = key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        _fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(_fd, key_pem)
+        finally:
+            os.close(_fd)
+
+        # Write cert
+        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+        with open(cert_path, 'wb') as f:
+            f.write(cert_pem)
+
+        _tls_log.info('[TLS] Generated self-signed cert at %s (valid 10 years)', cert_dir)
+        _boot('TLS certificate ready (self-signed, valid 10 years).')
+        return cert_path, key_path
+    except ImportError:
+        _tls_log.warning('[TLS] cryptography library not installed — '
+                         'falling back to HTTP/1.1. Install: pip install cryptography')
+        return None, None
+    except Exception as e:
+        _tls_log.warning('[TLS] Certificate generation failed: %s — falling back to HTTP/1.1', e)
+        return None, None
+
+
 if __name__ == '__main__':
-    host = os.environ.get('BIND_HOST', '0.0.0.0')
-    preferred_port = int(os.environ.get('PORT', 15000))
-    debug_mode = os.environ.get('FLASK_DEBUG', '0') == '1'
+    try:
+        from hypercorn.config import Config as HypercornConfig
+        from hypercorn.asyncio import serve as hypercorn_serve
+    except ImportError:
+        sys.stderr.write(
+            '\033[31m[server.py] ERROR: hypercorn is not installed.\n'
+            '  Install with: pip install hypercorn\033[0m\n')
+        sys.exit(1)
+
+    import asyncio
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Tofu Async Server')
+    # Default to loopback. Networked exposure is an explicit choice via
+    # --host 0.0.0.0 / BIND_HOST=0.0.0.0. Personal use stays effortless;
+    # accidental LAN exposure stops being the default.
+    parser.add_argument('--host', default=os.environ.get('BIND_HOST', '127.0.0.1'))
+    parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', 15000)))
+    parser.add_argument('--certfile', default=os.environ.get('TLS_CERTFILE', ''))
+    parser.add_argument('--keyfile', default=os.environ.get('TLS_KEYFILE', ''))
+    parser.add_argument('--no-tls', action='store_true',
+                        help='Disable TLS (HTTP/1.1 only, no HTTP/2 in browsers)')
+    parser.add_argument('--workers', type=int, default=1)
+    args = parser.parse_args()
+
+    host = args.host
 
     # ── Instance lock — prevent multiple servers on the same project dir ──
-    # Uses a lock file in data/ that is held for the lifetime of the process.
-    # If another instance is already running from this project directory,
-    # we warn loudly and exit instead of silently sharing the same DB
-    # and causing file lock contention or data races.
+    import socket as _sock_mod
     _lock_dir = os.path.join(BASE_DIR, 'data')
     os.makedirs(_lock_dir, exist_ok=True)
     _lock_path = os.path.join(_lock_dir, '.server.lock')
     _instance_lock_fd = None
 
-    import socket as _sock_mod
-
-    def _read_lock_owner():
-        """Read lock file contents to find who holds the lock.
-
-        Returns (pid_str, hostname_str) or ('?', '?') on failure.
-        """
-        try:
-            with open(_lock_path) as f:
-                content = f.read().strip()
-            # Format: "PID@hostname" or just "PID" (legacy)
-            if '@' in content:
-                pid_s, host_s = content.split('@', 1)
-                return pid_s.strip(), host_s.strip()
-            return content, '?'
-        except Exception:
-            return '?', '?'
-
     def _acquire_instance_lock():
-        """Acquire an exclusive file lock to prevent multiple instances.
-
-        Returns True if lock acquired, False if another instance holds it.
-        On Windows uses msvcrt; on Unix uses fcntl.
-
-        IMPORTANT: We open with 'r+' (or create then 'r+') and flock BEFORE
-        writing our PID, so the existing owner info is preserved on failure.
-        """
         global _instance_lock_fd
         try:
-            # Ensure the file exists (create if needed) but don't truncate
             if not os.path.exists(_lock_path):
                 open(_lock_path, 'a').close()
             _instance_lock_fd = open(_lock_path, 'r+')
-        except Exception as e:
-            _server_log.warning('[Lock] Cannot open lock file %s: %s', _lock_path, e)
-            return True  # fail-open: don't block startup on lock-file issues
-
+        except Exception:
+            return True
         try:
-            if os.name == 'nt':
-                import msvcrt
-                msvcrt.locking(_instance_lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(_instance_lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            import fcntl
+            fcntl.flock(_instance_lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (IOError, OSError):
-            # Another instance holds the lock — don't write anything
             _instance_lock_fd.close()
             _instance_lock_fd = None
             return False
-
-        # Lock acquired — now write our identity
         try:
             _instance_lock_fd.seek(0)
             _instance_lock_fd.truncate()
             _instance_lock_fd.write(f'{os.getpid()}@{_sock_mod.gethostname()}\n')
             _instance_lock_fd.flush()
-        except Exception as e:
-            _server_log.warning('[Lock] Failed to write PID to lock file: %s', e)
+        except Exception:
+            pass
         return True
 
     if not _acquire_instance_lock():
-        # Read the lock owner info (preserved because we didn't truncate)
-        _other_pid, _other_host = _read_lock_owner()
-        _my_host = _sock_mod.gethostname()
-        _is_remote = _other_host not in ('?', _my_host)
-
-        _remote_hint = ''
-        if _is_remote:
-            _remote_hint = (
-                f'\n'
-                f'  ⚠️  The lock is held by a DIFFERENT HOST: {_other_host}\n'
-                f'  ⚠️  You are on: {_my_host}\n'
-                f'  ⚠️  This is a shared filesystem — you cannot kill the\n'
-                f'  ⚠️  remote process from this machine.\n'
-                f'  \n'
-                f'  To fix:\n'
-                f'    • SSH to {_other_host} and stop PID {_other_pid} there, OR\n'
-                f'    • Set TOFU_SKIP_LOCK=1 to bypass this check\n'
-            )
-
-        _skip_lock = (os.environ.get('TOFU_SKIP_LOCK', '')
-                      or os.environ.get('CHATUI_SKIP_LOCK', '')).strip()
-        if _skip_lock == '1':
-            _server_log.warning(
-                '[Lock] TOFU_SKIP_LOCK=1 — bypassing instance lock! '
-                'Lock held by PID=%s on host=%s. Proceeding anyway.',
-                _other_pid, _other_host
-            )
-        else:
-            _server_log.critical(
-                '\n'
-                '  ══════════════════════════════════════════════════════\n'
-                '  ❌ ANOTHER SERVER INSTANCE IS ALREADY RUNNING\n'
-                '  ❌ from this project directory!\n'
-                '  \n'
-                '  Project : %s\n'
-                '  Lock    : %s\n'
-                '  Owner   : PID %s on host %s\n'
-                '%s'
-                '  \n'
-                '  Running multiple instances on the same project causes:\n'
-                '    • PostgreSQL connection exhaustion ("too many clients")\n'
-                '    • Database race conditions and data corruption\n'
-                '    • Port conflicts\n'
-                '  \n'
-                '  Solutions:\n'
-                '    1. Stop the other instance first (on the correct host!)\n'
-                '    2. Set TOFU_SKIP_LOCK=1 to force start (at your own risk)\n'
-                '    3. Use a different PORT env var for a second instance\n'
-                '    4. Copy the project to a different directory for full isolation\n'
-                '  ══════════════════════════════════════════════════════',
-                BASE_DIR, _lock_path, _other_pid, _other_host, _remote_hint
-            )
+        _skip = (os.environ.get('TOFU_SKIP_LOCK', '') or '').strip()
+        if _skip != '1':
+            _server_log.critical('Another server instance is already running from this project directory.\n'
+                                 '  Set TOFU_SKIP_LOCK=1 to force start.')
             sys.exit(1)
+        _server_log.warning('[Lock] TOFU_SKIP_LOCK=1 — bypassing instance lock')
 
     _boot('Instance lock acquired (PID=%d)', os.getpid())
-    _server_log.info('[Lock] Instance lock acquired (PID=%d, lock=%s)', os.getpid(), _lock_path)
 
-    # ── Graceful SIGTERM handler ──
-    # Python's atexit handlers only run on normal exit or sys.exit(),
-    # NOT on SIGTERM (which is what kill, systemd, Docker send).
-    # Convert SIGTERM into sys.exit() so atexit handlers (shutdown_pool,
-    # etc.) execute properly.
-    import signal
-
-    def _sigterm_handler(signum, frame):
-        _server_log.info('[Server] Received SIGTERM — initiating graceful shutdown...')
-        sys.exit(0)
-
+    # ── SIGTERM → graceful shutdown ──
+    # Set a shutdown flag instead of calling sys.exit(0) from the signal
+    # handler. sys.exit raises SystemExit in the main thread, which aborts
+    # Hypercorn mid-serve and skips connection draining (graceful_timeout).
+    # The flag is consumed by an asyncio.Event created inside the serving
+    # loop (see _serve) and handed to hypercorn_serve(shutdown_trigger=…)
+    # so in-flight requests / SSE streams drain cleanly.
+    import threading as _threading
+    _shutdown_requested = _threading.Event()
     from lib.compat import safe_signal
-    safe_signal(signal.SIGTERM, _sigterm_handler)
-    _server_log.info('[Server] SIGTERM handler registered for graceful shutdown')
+    def _signal_shutdown(signum, frame):
+        _server_log.info('[Server] Received signal %s — shutting down…', signum)
+        _shutdown_requested.set()
+    # Passing a custom shutdown_trigger to hypercorn_serve suppresses
+    # Hypercorn's own signal handlers, so we own BOTH signals here and
+    # funnel them into the same graceful-drain flag.
+    safe_signal(signal.SIGTERM, _signal_shutdown)
+    safe_signal(signal.SIGINT, _signal_shutdown)
 
-    # ── Register PG shutdown hook ──
-    # This runs ONLY in the server.py process — not in short-lived Python
-    # subprocesses that import lib.database. That's important because
-    # agent-invoked `python3 -c "..."` commands (via the run_command tool)
-    # import lib.database at module load, which bootstraps PG; if their
-    # atexit hook stopped PG, they'd kill the server's own database while
-    # the server is still running. See stop_local_pg_if_owned() docstring.
+    # ── PG shutdown hook ──
     try:
         import atexit as _atexit
         from lib.database._core import stop_local_pg_if_owned
         _atexit.register(stop_local_pg_if_owned)
-        _server_log.info('[Server] PG shutdown hook registered '
-                         '(set TOFU_STOP_PG_ON_EXIT=0 to disable)')
     except Exception as _e:
-        _server_log.warning('[Server] Failed to register PG shutdown hook: %s', _e)
+        _server_log.warning('[Server] PG shutdown hook failed: %s', _e)
 
-    # ── Auto-detect free port if preferred is occupied ──
-    port = _find_free_web_port(start=preferred_port)
-    if port != preferred_port:
-        logging.getLogger('server').info(
-            'Port %d is in use — auto-selected port %d', preferred_port, port
-        )
+    port = _find_free_port(start=args.port)
+    if port != args.port:
+        _server_log.info('Port %d in use — using %d', args.port, port)
 
-    # ── Fix SSE streaming through VSCode port-forward ──
-    #    1) HTTP/1.1 enables Transfer-Encoding: chunked so each yield
-    #       is framed as a discrete chunk the proxy can forward immediately.
-    #    2) Werkzeug hard-codes "Connection: close" in run_wsgi() which
-    #       tells HTTP-aware proxies (like VSCode tunnel) the response is
-    #       a one-shot — some interpret this as "buffer until socket close".
-    #       We monkey-patch send_header to suppress that single header so
-    #       HTTP/1.1 default keep-alive semantics apply and proxies stream
-    #       each chunk as it arrives.
-    #    NOTE: Werkzeug's run_wsgi() hard-codes "Connection: close".
-    #          This monkey-patch remains necessary until that changes.
-    #          Re-test after any Werkzeug upgrade.
-    from werkzeug.serving import WSGIRequestHandler
-    WSGIRequestHandler.protocol_version = 'HTTP/1.1'
-    _orig_send_header = WSGIRequestHandler.send_header
-    def _patched_send_header(self, keyword, value):
-        # Drop Werkzeug's forced "Connection: close" — it causes VSCode
-        # port-forward (and similar HTTP-aware proxies) to buffer the
-        # entire streamed response instead of forwarding chunks in real-time.
-        if keyword.lower() == 'connection' and value.lower() == 'close':
-            return
-        _orig_send_header(self, keyword, value)
-    WSGIRequestHandler.send_header = _patched_send_header
-    logging.getLogger('server').info('Applied Werkzeug SSE streaming fix (HTTP/1.1 + suppress Connection:close)')
+    # ── TLS / HTTP/2 setup ──
+    from lib.env_compat import getenv_compat
+    _force_tls = (getenv_compat('TOFU_TLS') or '').strip() == '1'
+    _force_no_tls = (args.no_tls
+                     or (getenv_compat('TOFU_TLS') or '').strip() == '0')
+    # Auto-detect VS Code port forwarding / proxy environments.
+    # These proxies provide their own HTTPS+HTTP/2 on the public URL and
+    # connect to our backend over plain HTTP. Adding TLS on our side causes
+    # "socket hang up" because the proxy doesn't expect a TLS handshake.
+    _vscode_proxy = os.environ.get('VSCODE_PROXY_URI', '')
+    _behind_proxy = bool(_vscode_proxy
+                         or os.environ.get('CODESPACES', '')
+                         or os.environ.get('GITPOD_WORKSPACE_URL', ''))
 
-    _boot('Starting background workers…')
-    _start_background_workers()
+    if _force_no_tls:
+        _tls_cert, _tls_key = None, None
+        _boot('TLS disabled (--no-tls or TOFU_TLS=0).')
+    elif _behind_proxy and not _force_tls:
+        _tls_cert, _tls_key = None, None
+        _proxy_name = 'VS Code' if _vscode_proxy else 'cloud IDE'
+        _boot('TLS auto-disabled — %s proxy detected (provides its own HTTPS). '
+              'Force with TOFU_TLS=1.', _proxy_name)
+    else:
+        _tls_cert, _tls_key = _ensure_tls_certs(args.certfile, args.keyfile)
 
-    # ── MCP auto-connect (reconnect all enabled MCP servers) ──
-    _boot('Configuring MCP auto-connect…')
-    _mcp_config = {}
-    try:
-        from lib.mcp.client import get_bridge
-        from lib.mcp.config import load_mcp_config
+    # ── Init DB + validate imports in app context ──
+    import asyncio
 
-        _mcp_config = load_mcp_config()
-        if _mcp_config:
-            _enabled_count = sum(1 for c in _mcp_config.values() if c.get('enabled', True))
-            if _enabled_count > 0:
-                _server_log.info('[MCP] Auto-connecting %d enabled server(s) in background…', _enabled_count)
+    async def _startup():
+        async with app.app_context():
+            _init_database()
+            _validate_imports()
+            _start_background_workers()
 
-                def _mcp_auto_connect():
-                    try:
-                        bridge = get_bridge()
-                        result = bridge.connect_all()
-                        total = sum(len(v) for v in result.values())
-                        _server_log.info('[MCP] Auto-connect complete: %d server(s), %d tool(s)',
-                                         len(result), total)
-                    except Exception as e:
-                        _server_log.error('[MCP] Auto-connect failed: %s', e, exc_info=True)
+            # ── MCP auto-connect ──
+            _boot('Configuring MCP auto-connect…')
+            mcp_config = {}
+            try:
+                from lib.mcp.client import get_bridge
+                from lib.mcp.config import load_mcp_config
+                mcp_config = load_mcp_config()
+                if mcp_config:
+                    enabled = sum(1 for c in mcp_config.values() if c.get('enabled', True))
+                    if enabled > 0:
+                        import threading
+                        def _mcp_auto():
+                            try:
+                                bridge = get_bridge()
+                                result = bridge.connect_all()
+                                total = sum(len(v) for v in result.values())
+                                _server_log.info('[MCP] Auto-connect: %d servers, %d tools', len(result), total)
+                            except Exception as e:
+                                _server_log.error('[MCP] Auto-connect failed: %s', e, exc_info=True)
+                        threading.Thread(target=_mcp_auto, name='mcp-auto-connect', daemon=True).start()
+            except Exception as e:
+                _server_log.warning('[MCP] Auto-connect setup failed: %s', e)
 
-                import threading
-                threading.Thread(target=_mcp_auto_connect, name='mcp-auto-connect', daemon=True).start()
-            else:
-                _server_log.info('[MCP] No enabled MCP servers — skipping auto-connect')
-        else:
-            _server_log.debug('[MCP] No MCP config found — skipping auto-connect')
-    except Exception as _mcp_err:
-        _server_log.warning('[MCP] Auto-connect setup failed: %s', _mcp_err, exc_info=True)
+            # ── Local health checker ──
+            try:
+                from lib.llm_dispatch.health_local import start_local_health_checker
+                start_local_health_checker()
+            except Exception as e:
+                _server_log.warning('[HealthLocal] Failed: %s', e)
 
-    # ── DolphinFS keepalive (prevents FUSE mount from going stale) ──
-    _boot('Starting FS keepalive…')
-    try:
-        from lib.fs_keepalive import start_fs_keepalive
-        start_fs_keepalive()
-    except Exception as e:
-        _server_log.warning('Failed to start FS keepalive: %s', e, exc_info=True)
+            # ── FS keepalive ──
+            try:
+                from lib.fs_keepalive import start_fs_keepalive
+                start_fs_keepalive()
+            except Exception as e:
+                _server_log.warning('FS keepalive failed: %s', e)
 
-    # ── code-server / VS Code fileWatcher exclude sync ──
-    # Mirrors .vscode/settings.json excludes into User-scope settings so
-    # they apply even when the workspace root is above the project dir.
-    # Non-blocking daemon thread; see lib/code_server_excludes.py.
-    _boot('Syncing code-server fileWatcher excludes…')
-    try:
-        from lib.code_server_excludes import start_code_server_excludes_sync
-        start_code_server_excludes_sync()
-    except Exception as e:
-        _server_log.warning('Failed to start code-server excludes sync: %s',
-                            e, exc_info=True)
+            # ── Cross-DC detection ──
+            try:
+                from lib.cross_dc import init_cross_dc_detection
+                init_cross_dc_detection()
+            except Exception as e:
+                _server_log.warning('Cross-DC detection failed: %s', e)
 
-    # ── Cross-datacenter DolphinFS detection ──
-    _boot('Probing cross-datacenter FUSE latency…')
-    try:
-        from lib.cross_dc import init_cross_dc_detection
-        init_cross_dc_detection()
-    except Exception as e:
-        _server_log.warning('Failed to start cross-DC detection: %s', e, exc_info=True)
+            # ── Feishu Bot ──
+            feishu_ok = False
+            try:
+                from lib.feishu import start_bot as start_feishu_bot, ENABLED as FEISHU_ENABLED
+                if FEISHU_ENABLED:
+                    feishu_ok = start_feishu_bot()
+            except Exception as e:
+                _server_log.warning('Feishu Bot failed: %s', e)
 
-    # ── Feishu Bot (optional, needs FEISHU_APP_ID + FEISHU_APP_SECRET) ──
-    _boot('Checking Feishu Bot…')
-    feishu_ok = False
-    try:
-        from lib.feishu import start_bot as start_feishu_bot, ENABLED as FEISHU_ENABLED
-        if FEISHU_ENABLED:
-            feishu_ok = start_feishu_bot()
-            if not feishu_ok:
-                _server_log.warning('Feishu Bot start_bot() returned False — bot did not start')
-        else:
-            _server_log.info('Feishu Bot disabled (FEISHU_APP_ID/FEISHU_APP_SECRET not set)')
-    except Exception as e:
-        _server_log.warning('Feishu Bot failed to start: %s', e, exc_info=True)
+            return mcp_config, feishu_ok
 
+    mcp_config, feishu_ok = asyncio.run(_startup())
+
+    # ── Banner ──
     from lib import TRADING_ENABLED as _trading_on
     from lib.version import __version__ as _ver
-    _mcp_count = len(_mcp_config)
+    _mcp_count = len(mcp_config)
+    _has_tls = bool(_tls_cert and _tls_key)
+    _proto = 'https' if _has_tls else 'http'
+    if _has_tls:
+        _h2_status = 'HTTP/2 + HTTP/1.1 (TLS, auto-cert)'
+    elif _behind_proxy:
+        _h2_status = 'HTTP/1.1 (proxy provides HTTP/2)'
+    elif _force_no_tls:
+        _h2_status = 'HTTP/1.1 only (TLS disabled)'
+    else:
+        _h2_status = 'HTTP/1.1 (TLS unavailable — pip install cryptography)'
     _banner_lines = [
-        '=' * 52,
-        f'  🫧 Tofu Server  v{_ver}',
-        f'  http://{host}:{port}',
+        '=' * 56,
+        f'  🫧 Tofu Server  v{_ver}  [ASYNC]',
     ]
+    if _behind_proxy and _vscode_proxy:
+        _public_url = _vscode_proxy.replace('{{port}}', str(port))
+        _banner_lines.append(f'  {_public_url}')
+    _banner_lines.extend([
+        f'  {_proto}://{host}:{port}',
+        f'  Protocol: {_h2_status}',
+        f'  Server: Hypercorn (ASGI)',
+    ])
+    if _has_tls and not args.certfile:
+        _banner_lines.append('  🔐  Self-signed cert (accept once in browser)')
     if _trading_on:
         _banner_lines.append('  Trading Advisor:  /trading.html')
-        _banner_lines.append('  📡  Intel Crawler: auto every 2h')
-        _banner_lines.append('  🤖  Autopilot: background scheduler active')
-    else:
-        _banner_lines.append('  💰  Trading Advisor: OFF (set TRADING_ENABLED=1)')
     if feishu_ok:
-        _banner_lines.append('  💬  Feishu Bot: ON (WebSocket long-connection)')
-    else:
-        _banner_lines.append('  💬  Feishu Bot: OFF (set FEISHU_APP_ID & FEISHU_APP_SECRET)')
+        _banner_lines.append('  💬  Feishu Bot: ON')
     if _mcp_count > 0:
-        _banner_lines.append(f'  🔌  MCP Apps: {_mcp_count} server(s) auto-connecting')
-    else:
-        _banner_lines.append('  🔌  MCP Apps: none configured (install via Settings → Apps)')
-    _banner_lines.append('  ⏰  Proactive Agent Scheduler: active')
+        _banner_lines.append(f'  🔌  MCP Apps: {_mcp_count} server(s)')
     if TUNNEL_TOKEN:
-        _banner_lines.append('  🔒  Tunnel Auth: ON')
-        _banner_lines.append('  🔑  First visit: http://HOST:PORT/?token=<TOKEN>')
-    else:
-        _banner_lines.append('  🔓  Tunnel Auth: OFF (set TUNNEL_TOKEN to enable)')
+        _banner_lines.append('  🔒  Tunnel Auth: ON (deprecated — prefer API keys)')
+    # Auth mode banner. Always show so the operator knows whether the
+    # API surface is gated. Loud warning if open + non-loopback bind.
+    if _AUTH_MODE == 'open':
+        _banner_lines.append('  🔓  Auth: OPEN — no token required')
+        if host not in ('127.0.0.1', 'localhost', '::1'):
+            _banner_lines.append(
+                f'  ⚠️   Bound to {host}: API is reachable on the LAN '
+                'WITHOUT auth.')
+            _banner_lines.append(
+                '      Switch to private mode in Settings → API Keys, '
+                'or set TOFU_AUTH_MODE=private.')
+    elif _AUTH_MODE == 'private':
+        _banner_lines.append('  🔒  Auth: PRIVATE — Bearer token required')
+    elif _AUTH_MODE == 'multi-user':
+        _banner_lines.append('  👥  Auth: MULTI-USER — Bearer token required')
+    if _BOOTSTRAP_TOKEN:
+        _banner_lines.append('  🔑  Personal admin key minted (first boot)')
+        _banner_lines.append(f'      Token: {_BOOTSTRAP_TOKEN}')
+        _banner_lines.append(
+            f'      Open: {_proto}://{host}:{port}/?token={_BOOTSTRAP_TOKEN}')
+        _banner_lines.append(
+            '      Saved to data/config/.first_run_token (chmod 0600)')
+        _banner_lines.append(
+            '      (auto-cleared when this bootstrap key is revoked)')
     _banner_lines.append('  ⏱  Boot time: %.1fs' % (time.time() - _BOOT_T0))
-    _banner_lines.append('=' * 52)
+    _banner_lines.append('=' * 56)
     _banner = '\n'.join(_banner_lines)
     _server_log.info('Server starting\n%s', _banner)
-    _boot('Ready — handing off to Werkzeug (Ctrl+C to stop).')
-    # Always print the startup banner to terminal regardless of console
-    # log level — users need to see the URL to open the app.
+    _boot('Ready — handing off to Hypercorn.')
     sys.stderr.write('\n' + _banner + '\n\n')
     sys.stderr.flush()
 
-    app.run(host=host, port=port, debug=debug_mode, threaded=True)
+    # ── Configure Hypercorn ──
+    hconfig = HypercornConfig()
+    hconfig.bind = [f'{host}:{port}']
+    hconfig.accesslog = logging.getLogger('hypercorn.access')
+    hconfig.errorlog = logging.getLogger('hypercorn.error')
+    # SSE streams can last minutes (long LLM responses with tool use).
+    # Default keep_alive_timeout=5s is fine (it's idle-between-requests),
+    # but we increase it to avoid edge cases where a proxy holds a
+    # connection just past the threshold. Graceful timeout for shutdown.
+    hconfig.keep_alive_timeout = 600
+    hconfig.graceful_timeout = 10
+
+    if _has_tls:
+        hconfig.certfile = _tls_cert
+        hconfig.keyfile = _tls_key
+
+    # ── Run ──
+    async def _serve():
+        loop = asyncio.get_running_loop()
+
+        # ── Size the default executor ──
+        # Every sync route handler runs in this loop's default executor via
+        # Quart's run_sync. Python's default ThreadPoolExecutor is capped at
+        # min(32, os.cpu_count()+4) — too small once long-lived sync handlers
+        # (chat_send, upload, PDF parse) and per-stream poll storms coexist:
+        # the pool saturates and new requests queue behind it. Size it
+        # explicitly. Override via TOFU_SYNC_WORKERS.
+        from concurrent.futures import ThreadPoolExecutor
+        try:
+            _sync_workers = int(os.environ.get('TOFU_SYNC_WORKERS', '0') or '0')
+        except (ValueError, TypeError):
+            _sync_workers = 0
+        if _sync_workers <= 0:
+            _sync_workers = min(128, (os.cpu_count() or 4) * 8)
+        _executor = ThreadPoolExecutor(max_workers=_sync_workers,
+                                       thread_name_prefix='tofu-sync')
+        loop.set_default_executor(_executor)
+        _server_log.info('[Server] Sync route executor sized to %d threads', _sync_workers)
+
+        from lib.push import hub as _push_hub
+        _push_hub.set_loop(loop)
+
+        # Bridge the SIGTERM threading.Event to an async trigger Hypercorn
+        # awaits. When set, Hypercorn stops accepting new connections and
+        # drains in-flight ones within graceful_timeout. Poll cheaply (the
+        # signal handler can't touch loop state directly from a thread).
+        async def _shutdown_trigger():
+            while not _shutdown_requested.is_set():
+                await asyncio.sleep(0.25)
+
+        await hypercorn_serve(app, hconfig, shutdown_trigger=_shutdown_trigger)
+
+    try:
+        asyncio.run(_serve())
+    except KeyboardInterrupt:
+        _server_log.info('[Server] Received SIGINT — shutting down…')

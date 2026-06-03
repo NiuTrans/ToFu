@@ -35,9 +35,9 @@ import re
 import threading
 import time
 
-import requests  # noqa: E402  (lazy-loaded in functions for proxy/lib/db)
 
 from lib.log import get_logger
+from lib.http_client import http_get
 
 logger = get_logger(__name__)
 
@@ -54,6 +54,9 @@ DEFAULT_USD_CNY_RATE = 7.24
 #   OpenAI GPT:       write=1.00x, read=0.50x
 #   DeepSeek:         write=1.00x, read=0.10x (disk cache)
 MODEL_PRICING = {
+    'aws.claude-opus-4.8':       {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.8'},
+    'claude-opus-4-8':           {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.8'},
+    'us.anthropic.claude-opus-4-8-v1:0':        {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.8 (Bedrock)'},
     'aws.claude-opus-4.7':       {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.7'},
     'claude-opus-4-7':           {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.7'},
     'us.anthropic.claude-opus-4-7-v1:0':        {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.7 (Bedrock)'},
@@ -79,8 +82,9 @@ MODEL_PRICING = {
     'gpt-4-turbo':               {'input': 10.0,  'output': 30.0,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.50, 'name': 'GPT-4 Turbo'},
     'deepseek-chat':             {'input': 0.27,  'output': 1.10,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3'},
     # DeepSeek V4 (2026-04-24) — both models have 1M ctx, dual Thinking / Non-Thinking modes.
-    # cacheReadMul derived from disclosed cache-hit pricing: Pro $0.145 / $1.74 ≈ 0.083, Flash $0.028 / $0.14 = 0.20.
-    'deepseek-v4-pro':           {'input': 1.74,  'output': 3.48,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.083, 'name': 'DeepSeek V4 Pro'},
+    # Pro: 75% price cut made permanent 2026-05-22 ($1.74/$3.48 → $0.435/$0.87); cached input $0.003625 → cacheReadMul ≈ 0.0083.
+    # Flash cacheReadMul from disclosed cache-hit pricing: $0.028 / $0.14 = 0.20.
+    'deepseek-v4-pro':           {'input': 0.435, 'output': 0.87,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.0083, 'name': 'DeepSeek V4 Pro'},
     'deepseek-v4-flash':         {'input': 0.14,  'output': 0.28,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.20,  'name': 'DeepSeek V4 Flash'},
     # Meituan gateway Huawei-cloud mirror for DeepSeek V4 Flash — same pricing.
     'deepseek-v4-flash-huawei':  {'input': 0.14,  'output': 0.28,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.20,  'name': 'DeepSeek V4 Flash (Huawei)'},
@@ -119,6 +123,7 @@ MODEL_PRICING = {
     'gemini-3.1-flash-lite-preview': {'input': 0.25, 'output': 1.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.1 Flash-Lite'},
     'gemini-3.1-pro-preview':    {'input': 2.00, 'output': 12.0, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.1 Pro'},
     'gemini-3-flash-preview':    {'input': 0.15, 'output': 0.60, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3 Flash'},
+    'gemini-3.5-flash':          {'input': 1.49, 'output': 8.95, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.5 Flash'},  # ¥10.80/¥64.80 per 1M
     'gemini-3.1-flash-image-preview': {'input': 0.25, 'output': 1.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.1 Flash Image'},
     'gemini-3-pro-image-preview':    {'input': 2.50, 'output': 12.0, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3 Pro Image'},
     'gemini-2.5-flash-image':        {'input': 0.15, 'output': 0.60, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 2.5 Flash Image'},
@@ -159,6 +164,9 @@ MODEL_PRICING = {
     'claude-opus-4-20250514':    {'input': 15.0,  'output': 75.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4'},
     'claude-sonnet-4-20250514':  {'input': 3.0,   'output': 15.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Sonnet 4'},
     # ── MiniMax ──
+    # M3 (2026-06-01) — new flagship: MSA sparse attn, 1M ctx, native multimodal (image+video in).
+    # Standard rate $0.60/$2.40; launch promo halves it to $0.30/$1.20 (temporary — not stored).
+    'MiniMax-M3':                {'input': 0.60, 'output': 2.40, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'MiniMax M3'},
     'MiniMax-M2':                {'input': 0.30, 'output': 1.20, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'MiniMax M2'},
     'MiniMax-M2.1':              {'input': 0.30, 'output': 1.20, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'MiniMax M2.1'},
     'MiniMax-M2.1-highspeed':    {'input': 0.30, 'output': 2.40, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'MiniMax M2.1 HS'},
@@ -329,7 +337,6 @@ def refresh_pricing_async():
 # ══════════════════════════════════════════════════════
 
 def _fetch_exchange_rate():
-    from lib.proxy import proxies_for as _proxies_for
     apis = [
         ('https://api.exchangerate-api.com/v4/latest/USD', lambda d: d.get('rates', {}).get('CNY')),
         ('https://open.er-api.com/v6/latest/USD', lambda d: d.get('rates', {}).get('CNY')),
@@ -337,8 +344,7 @@ def _fetch_exchange_rate():
     ]
     for url, extract in apis:
         try:
-            resp = requests.get(url, timeout=12, headers={'User-Agent': 'PricingBot/1.0'},
-                               proxies=_proxies_for(url))
+            resp = http_get(url, timeout=12, headers={'User-Agent': 'PricingBot/1.0'})
             if resp.ok:
                 rate = extract(resp.json())
                 if rate and float(rate) > 0:
@@ -348,15 +354,13 @@ def _fetch_exchange_rate():
     return None
 
 def _fetch_model_pricing_online(model_name):
-    from lib.proxy import proxies_for as _proxies_for
     try:
         norm = model_name.lower()
         for prefix in ('aws.', 'gcp.', 'azure.', 'bedrock.'):
             norm = norm.replace(prefix, '')
         norm = re.sub(r'\.\d+$', '', norm)
-        resp = requests.get('https://openrouter.ai/api/v1/models', timeout=20,
-                            headers={'User-Agent': 'PricingBot/1.0'},
-                            proxies=_proxies_for('https://openrouter.ai/api/v1/models'))
+        resp = http_get('https://openrouter.ai/api/v1/models', timeout=20,
+                            headers={'User-Agent': 'PricingBot/1.0'})
         if not resp.ok:
             return None
         norm_parts = set(norm.replace('-', ' ').replace('.', ' ').split())

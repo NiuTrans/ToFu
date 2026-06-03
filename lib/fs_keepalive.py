@@ -95,8 +95,9 @@ def _stat_with_timeout(path, timeout):
         try:
             os.stat(path)
             result[0] = True
-        except OSError:
+        except OSError as _e_audit:
             # Path doesn't exist — that's fine, the mount is still alive
+            logger.debug('[fs_keepalive] _do_stat caught %s: %s', type(_e_audit).__name__, _e_audit)
             result[0] = True
         finally:
             result[1] = time.monotonic() - t0

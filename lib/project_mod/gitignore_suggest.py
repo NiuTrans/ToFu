@@ -101,7 +101,8 @@ def _probe_top_dirs(base: str, already_ignored: set[str]) -> list[dict]:
         try:
             if not entry.is_dir(follow_symlinks=False):
                 continue
-        except OSError:
+        except OSError as _e_audit:
+            logger.debug('[gitignore_suggest] _probe_top_dirs caught %s: %s', type(_e_audit).__name__, _e_audit)
             continue
         count = 0
         try:

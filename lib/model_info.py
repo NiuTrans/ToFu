@@ -1,8 +1,9 @@
 # HOT_PATH — functions in this module are called per-request.
 """lib/model_info.py — Model family detection and per-model token limit management.
 
-Extracted from lib/llm_client.py to reduce module size and improve reusability.
-All public names are re-exported from llm_client.py for backward compatibility.
+Standalone module containing model family detection and per-model token
+limit management.  All public names are re-exported from ``lib.llm`` for
+convenience.
 
 Contains:
   • Model family detection helpers (is_claude, is_qwen, is_gemini, etc.)

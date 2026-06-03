@@ -1,4 +1,14 @@
-"""Task lifecycle management — creation, events, persistence, cleanup, streaming."""
+"""Task lifecycle management — creation, events, persistence, cleanup, streaming.
+
+★ Migrated to ``lib.task_runtime.TaskRuntime`` 2026-05-22 (last of the
+five legacy registries). The module-level ``tasks`` / ``tasks_lock``
+names remain exported because 47 import sites across routes/, lib/, and
+tests/ reference them directly. They now alias the runtime's internal
+storage. All custom behaviour (phase tracking, persistent event log,
+freshness-guard `_conv_latest_task` index, content_lock, etc.) is
+preserved on top of the runtime by augmenting the task dict after
+``runtime.create()``.
+"""
 
 import json
 import threading
@@ -6,14 +16,31 @@ import time
 import uuid
 from datetime import datetime
 
+from lib.agent_core.events import EventType, build_event
 from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db, json_dumps_pg
+from lib.error_envelope import to_json as _err_to_json
 from lib.llm_dispatch import dispatch_stream
 from lib.log import get_logger
+from lib.task_runtime import TaskRuntime
 
 logger = get_logger(__name__)
 
-tasks = {}
-tasks_lock = threading.Lock()
+# ── Backing runtime ──────────────────────────────────────────────
+# kind='chat'. push_channel='chat' (matches the existing /api/push routes
+# and the frontend ``pushSubscribe('chat', taskId)`` consumer).
+# ttl=3600 matches the legacy cleanup_old_tasks threshold.
+_chat_runtime = TaskRuntime(
+    'chat', ttl=3600,
+    push_channel='chat',
+    error_source='lib.tasks_pkg.manager',
+)
+
+# ── Module-level compatibility exports ─────────────────────────────
+# Both names alias the runtime's internals so the 47 existing call sites
+# (routes/chat.py, routes/endpoint.py, lib/agent_backends/builtin.py, etc.)
+# continue to work without modification.
+tasks = _chat_runtime._tasks  # type: ignore[attr-defined]
+tasks_lock = _chat_runtime._lock  # type: ignore[attr-defined]
 
 # ── Conversation → latest task_id mapping for freshness guard ──
 # When a new task starts for a conv, the old task becomes stale and its
@@ -28,27 +55,59 @@ def create_task(conv_id, messages, config):
     # the filter can assess relevance against the ORIGINAL intent, not just
     # the model-generated search keywords.
     last_user_query = ''
-    for m in reversed(messages or []):
+    last_user_idx = -1
+    for i in range(len(messages or []) - 1, -1, -1):
+        m = messages[i]
         if m.get('role') == 'user':
             c = m.get('content', '')
             if isinstance(c, list):
                 # multimodal: extract text blocks
                 c = ' '.join(b.get('text', '') for b in c if isinstance(b, dict) and b.get('type') == 'text')
             last_user_query = (c or '')[:500]
+            last_user_idx = i
             break
-    task = {
-        'id': task_id, 'convId': conv_id, 'messages': messages, 'config': config,
-        'status': 'running', 'content': '', 'thinking': '', 'error': None,
-        'aborted': False, 'toolRounds': [], 'events': [],
-        'events_lock': threading.Lock(), 'content_lock': threading.Lock(),
-        'created_at': time.time(),
+
+    # ── UserPromptSubmit hooks (Claude Agent SDK parity) ──
+    # Fire ONCE per turn, BEFORE the prompt enters the agent loop. Hooks
+    # can rewrite the latest user message (PII redaction, safety filters,
+    # prompt augmentation).  Only the rewritten text is propagated; the
+    # message structure (role, attachments, tool_call_id) is preserved.
+    if last_user_idx >= 0 and isinstance(messages[last_user_idx].get('content'), str):
+        try:
+            from lib.tasks_pkg.tool_hooks import run_user_prompt_hooks
+            _orig = messages[last_user_idx]['content']
+            _rewritten = run_user_prompt_hooks(_orig, {
+                'id': task_id, 'convId': conv_id, 'config': config or {},
+            })
+            if _rewritten != _orig:
+                messages[last_user_idx]['content'] = _rewritten
+                last_user_query = _rewritten[:500]
+        except Exception as e:
+            logger.warning('[Task %s] UserPromptSubmit hooks failed: %s',
+                           task_id[:8], e, exc_info=True)
+
+    # Create through TaskRuntime so the task is registered in the unified
+    # store. Then augment with every chat-specific field that downstream
+    # code (orchestrator, route handlers, tool_display, …) depends on.
+    task = _chat_runtime.create(
+        task_id=task_id,
+        meta={'convId': conv_id, 'msg_count': len(messages or [])},
+    )
+    task.update({
+        'convId': conv_id, 'messages': messages, 'config': config,
+        # Override TaskRuntime defaults with chat-specific shape:
+        'status': 'running',          # chat tasks start running, not pending
+        'content': '', 'thinking': '', 'error': None,
+        'aborted': False, 'toolRounds': [],
+        'content_lock': threading.Lock(),
         'finishReason': None, 'usage': None, 'toolSummary': None,
-        'phase': None,  # ★ Current phase for polling fallback
-        'lastUserQuery': last_user_query,  # ★ Original user question for content filter relevance
-        '_initial_msg_count': len(messages or []),  # ★ For cross-talk detection in _sync_result_to_conversation
-    }
-    with tasks_lock:
-        tasks[task_id] = task
+        'phase': None,                # current phase for polling fallback
+        'lastUserQuery': last_user_query,
+        '_initial_msg_count': len(messages or []),  # cross-talk detection
+        '_premature_retry_count_phase': 0,
+        # '_force_rotate_pair' is set transiently by analyse_stream_result
+        # and consumed (cleared) by stream_llm_response on the next call.
+    })
     # ★ Register as the LATEST task for this conversation — freshness guard
     if conv_id:
         with _conv_latest_task_lock:
@@ -171,9 +230,35 @@ def _strip_base64_for_snapshot(messages):
     return stripped
 
 def append_event(task, event):
-    with task['events_lock']:
-        task['events'].append(event)
-        event_id = len(task['events']) - 1  # mirrors SSE 'id:' assigned by chat_stream
+    """Append an event to the task's event log (chat-specific behaviour).
+
+    Chat extends the runtime's plain append with:
+      1. Phase tracking on task['phase'] (polling fallback consumer).
+      2. Persistent event_log row for durable Last-Event-ID replay across
+         cleanup_old_tasks + server restart.
+
+    The runtime takes care of ``events`` append, the ``events_lock``, and
+    pushing to the 'chat' WebSocket channel.
+    """
+    seq = _chat_runtime.append_event(task['id'], event)
+    if seq is None:
+        # Task not in runtime (registered via legacy direct dict insert in
+        # tests, etc.) — fall back to direct append for backward compat.
+        # We MUST mint a seq ourselves before falling through to event_log
+        # persistence below; otherwise append_persistent_event would receive
+        # ``event_id=None`` and refuse the row, leaving cold replay with a
+        # hole that looks (to the user) like the message disappeared.
+        with task['events_lock']:
+            seq = len(task['events'])
+            event['seq'] = seq
+            task['events'].append(event)
+        try:
+            from lib.push import push_event
+            push_event('chat', task['id'], event)
+        except Exception as e:
+            logger.warning('[Task] push_event fallback failed task=%s: %s',
+                           task['id'][:8], e)
+
     # ★ Track phase in task for polling fallback
     if event.get('type') == 'phase':
         p = {'phase': event['phase'], 'detail': event.get('detail', '')}
@@ -189,7 +274,7 @@ def append_event(task, event):
     #   "tool list disappeared after I came back" class of bugs.
     try:
         from lib.tasks_pkg.event_log import append_persistent_event, flush_pending
-        append_persistent_event(task['id'], event_id, event)
+        append_persistent_event(task['id'], seq, event)
         if event.get('type') == 'done':
             flush_pending(task['id'])
     except Exception as e:
@@ -245,11 +330,16 @@ def persist_task_result(task):
         db = get_thread_db(DOMAIN_CHAT)
         tr_json = json.dumps(_merged_tr, ensure_ascii=False)
         meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
+        # Error envelope is JSON-serialised at the wire — task_results.error
+        # is TEXT, but every consumer (SSE done, /api/chat/poll, conversation
+        # message persistence) round-trips through lib.error_envelope so the
+        # frontend only ever sees the typed dict.
+        error_json = _err_to_json(task['error']) if task.get('error') is not None else None
         db_execute_with_retry(db, '''INSERT OR REPLACE INTO task_results
             (task_id,conv_id,content,thinking,error,status,tool_rounds,metadata,created_at,completed_at)
             VALUES (?,?,?,?,?,?,?,?,?,?)''',
             (task['id'], task['convId'], task['content'], task['thinking'],
-             task['error'], task['status'], tr_json, meta_json,
+             error_json, task['status'], tr_json, meta_json,
              int(task['created_at']*1000), int(time.time()*1000)))
         logger.debug('[Task %s] conv=%s Persisted to DB successfully', task_id_short, conv_id_short)
     except Exception:
@@ -321,6 +411,17 @@ def _dispatch_queued_message(task):
     if not conv_id:
         return
 
+    # Autopilot's hook (``maybe_run_autopilot``) runs immediately before us
+    # and may have already spawned a synthetic-user follow-up.  Spawning a
+    # second successor here would race-abort it.  The queued real message
+    # is left in the queue and will be picked up when the autopilot
+    # follow-up itself completes.
+    if task.get('_autopilot_spawned_followup'):
+        logger.info('[Queue] Skipping dispatch — autopilot already spawned '
+                    'follow-up task %s for conv=%s',
+                    task['_autopilot_spawned_followup'][:8], conv_id[:8])
+        return
+
     try:
         from lib.message_queue import dispatch_next_queued, get_queue_depth
         # Check if there are queued messages before dispatching
@@ -373,14 +474,42 @@ def _sync_result_to_conversation(task, meta):
             latest = _conv_latest_task.get(conv_id)
         if latest and latest != task['id']:
             _abort_reason = task.get('_abort_reason', '')
-            logger.warning(
-                '%s conv=%s ⛔ STALE TASK — refusing conv sync. '
-                'This task (%s) was superseded by task %s. '
-                'abort_reason=%s content=%dchars. '
-                'Without this guard, old task data would overwrite the new task\'s content.',
-                pfx, conv_id[:8], task_id_short, latest[:8],
-                _abort_reason, len(content),
-            )
+            _autopilot_child = task.get('_autopilot_spawned_followup')
+            if task.get('aborted') or _abort_reason:
+                # Expected path: the user started a newer task (e.g. Stop →
+                # Edit → Regenerate) for this conv, so this task was aborted
+                # and is now finishing its in-flight work. Cooperative abort
+                # means it only stops at the next checkpoint, so it can reach
+                # this point with stale content. Skipping the write is correct
+                # and routine — not an error.
+                logger.debug(
+                    '%s conv=%s skipping conv sync: superseded by newer task %s '
+                    '(this task aborted, reason=%s, %dchars stale content discarded)',
+                    pfx, conv_id[:8], latest[:8], _abort_reason or 'superseded', len(content),
+                )
+            elif _autopilot_child:
+                # Expected path: this task's OWN autopilot hook spawned a
+                # follow-up task (the virtual-user turn) before persist ran,
+                # so the follow-up is now 'latest' for the conv. This task was
+                # not aborted — it finished normally and was superseded by its
+                # own child. The follow-up rebuilt the conversation from the DB
+                # (including this task's answer), so skipping the write here is
+                # correct — the autopilot append path owns the DB write.
+                logger.debug(
+                    '%s conv=%s skipping conv sync: superseded by own autopilot '
+                    'follow-up %s (%dchars; autopilot owns the DB write)',
+                    pfx, conv_id[:8], _autopilot_child[:8], len(content),
+                )
+            else:
+                # Unexpected: a task that was never aborted is no longer the
+                # latest for its conv. This shouldn't normally happen and may
+                # point to a missing abort path — worth a look.
+                logger.warning(
+                    '%s conv=%s skipping conv sync: superseded by newer task %s, '
+                    'but this task was never aborted (%dchars discarded). '
+                    'Unexpected — a new task replaced this one without aborting it.',
+                    pfx, conv_id[:8], latest[:8], len(content),
+                )
             return
 
     # ── External-caller short-circuit ──
@@ -405,8 +534,10 @@ def _sync_result_to_conversation(task, meta):
             logger.warning('%s conv=%s Conversation not found in DB — cannot sync result back', pfx, conv_id)
             return
 
-        # Capture updated_at for optimistic locking (CAS guard)
-        _row_updated_at = row['updated_at'] if hasattr(row, 'get') else row[1]
+        # Capture updated_at for optimistic locking (CAS guard).
+        # ``row`` is a sqlite3.Row / psycopg DictRow — named access works
+        # for both backends, no need for the hasattr() shim.
+        _row_updated_at = row['updated_at']
         try:
             messages = json.loads(row[0] or '[]')
         except (json.JSONDecodeError, TypeError):
@@ -598,17 +729,52 @@ def _sync_result_to_conversation(task, meta):
         if meta.get('modifiedFileList'):
             last_msg['modifiedFileList'] = meta['modifiedFileList']
 
+        # ── Cost snapshot (persisted at sync time, not lazily fetched) ──
+        # Cost depends only on usage + model + provider + the pricing table
+        # at the time of the call. By stamping the result onto the message
+        # AND each apiRounds entry now, every render path reads the value
+        # directly from msg.cost / rd.cost — zero per-render network calls.
+        # See `compute_cost` in lib/cost.py.
+        # The cost is "as of message time" — pricing changes do NOT
+        # retroactively rewrite history. This matches what was actually
+        # charged and is what billing/auditing wants anyway.
+        try:
+            from lib.cost import compute_cost as _compute_cost
+            _msg_model = (last_msg.get('model') or meta.get('model') or '')
+            _msg_provider = (last_msg.get('provider_id')
+                              or meta.get('provider_id') or None)
+            if last_msg.get('usage') and not last_msg.get('cost'):
+                _c = _compute_cost(last_msg['usage'],
+                                    model_id=_msg_model,
+                                    provider_id=_msg_provider)
+                if _c:
+                    last_msg['cost'] = _c
+            _rounds = last_msg.get('apiRounds') or []
+            for _rd in _rounds:
+                if not isinstance(_rd, dict):
+                    continue
+                if _rd.get('cost'):
+                    continue
+                _ru = _rd.get('usage') or {}
+                if not _ru:
+                    continue
+                _rc = _compute_cost(
+                    _ru,
+                    model_id=_rd.get('model') or _msg_model,
+                    provider_id=(_rd.get('provider_id')
+                                  or _rd.get('providerId')
+                                  or _msg_provider))
+                if _rc:
+                    _rd['cost'] = _rc
+        except Exception as _ce:
+            logger.warning('%s conv=%s Cost stamp failed (non-fatal): %s',
+                           pfx, conv_id[:8] if conv_id else '?', _ce)
+
         # Backfill stable per-message IDs.  Newly created messages get a
         # UUID; existing messages keep theirs.  Index-free addressing is
         # what makes routes/translate.py and PATCH /messages/by-id/<mid>
         # robust against concurrent inserts.
         _assign_message_ids(messages)
-
-        # emit_to_user: persist emitted tool content for inline display
-        if task.get('_emitContent'):
-            last_msg['_emitContent'] = task['_emitContent']
-        if task.get('_emitToolName'):
-            last_msg['_emitToolName'] = task['_emitToolName']
 
         # memory prefetch: persist indicator payload for reload visibility
         if task.get('_memoryPrefetch'):
@@ -657,24 +823,33 @@ def _sync_result_to_conversation(task, meta):
         # ── Also update search_text for fast conversation search ──
         from routes.conversations import build_search_text
         search_text = build_search_text(messages)
+        # ── Why use raw db.execute()+commit instead of db_execute_with_retry?
+        #     The retry helper masks rowcount (its docstring says "returns
+        #     None"), and we need the rowcount to detect CAS-miss reliably.
+        #     A re-SELECT of updated_at has a TOCTOU window where a third
+        #     writer landing between our UPDATE and the verify SELECT would
+        #     falsely report CAS-miss — suppressing side-effects (cost
+        #     stamp, auto-translate) that we just durably committed.
         if settings_json:
-            db_execute_with_retry(
-                db,
+            cur = db.execute(
                 '''UPDATE conversations
                    SET messages=?, updated_at=?, msg_count=?, settings=?, search_text=?
                    WHERE id=? AND user_id=1 AND updated_at=?''',
                 (messages_json, now_ms, len(messages), settings_json, search_text, conv_id, _row_updated_at)
             )
         else:
-            db_execute_with_retry(
-                db,
+            cur = db.execute(
                 '''UPDATE conversations
                    SET messages=?, updated_at=?, msg_count=?, search_text=?
                    WHERE id=? AND user_id=1 AND updated_at=?''',
                 (messages_json, now_ms, len(messages), search_text, conv_id, _row_updated_at)
             )
-        # Update FTS5 index
-        if search_text:
+        db.commit()
+        _cas_succeeded = (getattr(cur, 'rowcount', 0) or 0) > 0
+        # FTS index is only updated when CAS succeeds.  Updating FTS for a
+        # write we lost would leave search hits pointing at content we
+        # never persisted — search results would surface dead data.
+        if _cas_succeeded and search_text:
             try:
                 db.execute(
                     "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
@@ -684,19 +859,11 @@ def _sync_result_to_conversation(task, meta):
                 db.commit()
             except Exception as _fts_err:
                 logger.debug('[Task] FTS update failed (non-fatal): %s', _fts_err)
-        # Check if optimistic lock succeeded (row was updated)
-        # db_execute_with_retry returns None but the last execute sets rowcount
-        _check_row = db.execute(
-            'SELECT updated_at FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)
-        ).fetchone()
-        _actual_ts = _check_row[0] if _check_row else None
-        _cas_succeeded = (_actual_ts == now_ms)
         if not _cas_succeeded:
             logger.info('%s conv=%s Optimistic lock missed — row was updated concurrently '
-                       '(read_ts=%s, expected=%s, actual=%s). '
+                       '(expected_updated_at=%s). '
                        'Frontend likely synced first; backend sync skipped (safe).',
-                       pfx, conv_id, _row_updated_at, now_ms, _actual_ts)
+                       pfx, conv_id, _row_updated_at)
         else:
             logger.info('%s conv=%s ✅ Synced result to conversation — content=%dchars thinking=%dchars '
                         'msgs=%d (was: content=%d thinking=%d)',
@@ -713,8 +880,14 @@ def _sync_result_to_conversation(task, meta):
 
         # ── Auto-translate: server-side safety net for translation ──
         # Ensures translation happens even if the frontend is offline / switched away.
-        # Skip if optimistic lock missed (frontend already has the data).
-        if _cas_succeeded and content and not error:
+        # Independent of the row CAS above: _maybe_auto_translate_assistant
+        # re-reads fresh DB state, dedups against existing translatedContent
+        # and running translate tasks, and commits via a targeted by-id write
+        # — it never does the full-row write the CAS guards.  Gating it on
+        # _cas_succeeded meant that when a live frontend won the conversation
+        # row-write race (the active-view case), nobody translated until the
+        # user switched conversations or clicked translate.  Fire regardless.
+        if content and not error:
             try:
                 _maybe_auto_translate_assistant(conv_id, content, len(messages) - 1, db)
             except Exception as te:
@@ -813,6 +986,17 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db):
                                 pfx, conv_id[:8], msg_idx, tid)
                     return
 
+        # ── Resolve the stable per-message id so the live push frame can be
+        #    routed by id (the preferred path) instead of the fragile msgIdx
+        #    fallback.  Without this the frontend's '*' translate subscriber
+        #    can only match by index, which drifts for multi-turn agent /
+        #    endpoint conversations and post-stream reconciliation — the
+        #    surgical _renderMsgInPlace then targets the wrong (or no) DOM
+        #    node and the translation never appears until a full re-render. ──
+        _msg_id = ''
+        if msg_idx is not None and 0 <= msg_idx < len(messages):
+            _msg_id = messages[msg_idx].get('_msgId') or ''
+
         # ── Start background translation thread ──
         logger.info('%s conv=%s msg=%d Starting server-side auto-translation (%d chars)',
                     pfx, conv_id[:8], msg_idx, len(content))
@@ -830,6 +1014,7 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db):
                     'progress': None,
                     'convId': conv_id,
                     'msgIdx': msg_idx,
+                    'msgId': _msg_id,
                     'field': 'translatedContent',
                     'targetLang': 'Chinese',
                     'textLen': len(content),
@@ -839,7 +1024,8 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db):
                 with _translate_tasks_lock:
                     _translate_tasks[task_id] = task
                 logger.info('%s task=%s conv=%s Translate thread started', pfx, task_id, conv_id[:8])
-                _do_translate(task_id, content, 'Chinese', 'English', conv_id, msg_idx, 'translatedContent')
+                _do_translate(task_id, content, 'Chinese', 'English', conv_id, msg_idx, 'translatedContent',
+                              msg_id=_msg_id or None)
             except Exception as e:
                 logger.error('%s conv=%s Translate thread failed: %s', pfx, conv_id[:8], e, exc_info=True)
 
@@ -913,11 +1099,13 @@ def checkpoint_task_partial(task):
         if task.get('preset'): meta['preset'] = task['preset']
         if task.get('thinkingDepth'): meta['thinkingDepth'] = task['thinkingDepth']
         meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
+        # Error envelope is JSON-serialised at the wire — see persist_task_result.
+        _cp_error_json = _err_to_json(task['error']) if task.get('error') is not None else None
         db_execute_with_retry(db, '''INSERT OR REPLACE INTO task_results
             (task_id,conv_id,content,thinking,error,status,tool_rounds,metadata,created_at,completed_at)
             VALUES (?,?,?,?,?,?,?,?,?,?)''',
             (task['id'], conv_id, task.get('content') or '', task.get('thinking') or '',
-             task.get('error'), 'running', tr_json, meta_json,
+             _cp_error_json, 'running', tr_json, meta_json,
              int(task['created_at']*1000), int(time.time()*1000)))
         logger.debug('[Checkpoint %s] conv=%s Saved partial: content=%dchars thinking=%dchars',
                      task_id_short, conv_id, content_len, thinking_len)
@@ -948,7 +1136,7 @@ def _sync_partial_to_conversation(task):
     """Write partial streaming state into the conversation's last assistant message.
 
     Comprehensive checkpoint: writes content, thinking, toolRounds, and
-    structural metadata (model, modifiedFileList, _emitContent, _memoryPrefetch,
+    structural metadata (model, modifiedFileList, _memoryPrefetch,
     gitSha) so a page reload mid-stream reconstructs the same UI the user
     saw before the disconnect — without depending on the in-memory task
     object, the activeTaskId stash, or poll fallback.
@@ -1044,8 +1232,6 @@ def _sync_partial_to_conversation(task):
                 ('modifiedFiles', 'modifiedFiles'),
                 ('modifiedFileList', 'modifiedFileList'),
                 ('apiRounds', 'apiRounds'),
-                ('_emitContent', '_emitContent'),
-                ('_emitToolName', '_emitToolName'),
                 ('_memoryPrefetch', '_memoryPrefetch'),
             ):
                 v = task.get(src_key)
@@ -1081,6 +1267,11 @@ def _sync_partial_to_conversation(task):
                              conv_id[:8], attempt + 1, MAX_CAS)
                 time.sleep(0.02 * (attempt + 1))
                 continue
+            # FTS update is gated on CAS success.  Without this guard, a
+            # losing partial checkpoint would still rewrite the FTS row,
+            # making search hits point at content the messages column
+            # never accepted.  See _sync_result_to_conversation for the
+            # equivalent guard on the terminal sync path.
             if search_text:
                 try:
                     db.execute(
@@ -1154,7 +1345,8 @@ def recover_stale_tasks_on_startup():
             cid = crow['id']
             try:
                 settings = json.loads(crow['settings'] or '{}')
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError) as _e_audit:
+                logger.debug('[manager] recover_stale_tasks_on_startup caught %s: %s', type(_e_audit).__name__, _e_audit)
                 continue
             atid = settings.get('activeTaskId')
             if not atid:
@@ -1195,7 +1387,8 @@ def recover_stale_tasks_on_startup():
                                         tr = json.loads(task_row['tool_rounds'])
                                         if tr and len(tr) > len(last_msg.get('toolRounds') or []):
                                             last_msg['toolRounds'] = tr
-                                    except (json.JSONDecodeError, TypeError):
+                                    except (json.JSONDecodeError, TypeError) as _e_audit:
+                                        logger.debug('[manager] recover_stale_tasks_on_startup caught %s: %s', type(_e_audit).__name__, _e_audit)
                                         pass
                                 # Merge metadata
                                 if task_row['metadata']:
@@ -1203,7 +1396,8 @@ def recover_stale_tasks_on_startup():
                                         meta = json.loads(task_row['metadata'])
                                         if meta.get('model') and not last_msg.get('model'):
                                             last_msg['model'] = meta['model']
-                                    except (json.JSONDecodeError, TypeError):
+                                    except (json.JSONDecodeError, TypeError) as _e_audit:
+                                        logger.debug('[manager] recover_stale_tasks_on_startup caught %s: %s', type(_e_audit).__name__, _e_audit)
                                         pass
                                 messages_json = json_dumps_pg(messages)
                             elif last_msg.get('role') == 'user':
@@ -1218,14 +1412,16 @@ def recover_stale_tasks_on_startup():
                                 if task_row['tool_rounds']:
                                     try:
                                         new_msg['toolRounds'] = json.loads(task_row['tool_rounds'])
-                                    except (json.JSONDecodeError, TypeError):
+                                    except (json.JSONDecodeError, TypeError) as _e_audit:
+                                        logger.debug('[manager] recover_stale_tasks_on_startup caught %s: %s', type(_e_audit).__name__, _e_audit)
                                         pass
                                 if task_row['metadata']:
                                     try:
                                         meta = json.loads(task_row['metadata'])
                                         if meta.get('model'):
                                             new_msg['model'] = meta['model']
-                                    except (json.JSONDecodeError, TypeError):
+                                    except (json.JSONDecodeError, TypeError) as _e_audit:
+                                        logger.debug('[manager] recover_stale_tasks_on_startup caught %s: %s', type(_e_audit).__name__, _e_audit)
                                         pass
                                 messages.append(new_msg)
                                 messages_json = json_dumps_pg(messages)
@@ -1266,8 +1462,8 @@ def recover_stale_tasks_on_startup():
             try:
                 from routes.common import _invalidate_meta_cache
                 _invalidate_meta_cache()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug('[Startup] meta cache invalidation skipped: %s', e)
         else:
             logger.debug('[Startup] No stale tasks or activeTaskIds found — clean shutdown')
 
@@ -1276,17 +1472,37 @@ def recover_stale_tasks_on_startup():
 
 
 def cleanup_old_tasks():
+    """Drop finished tasks past TTL and prune the conv-latest-task index.
+
+    Notes:
+      - Legacy semantics removed tasks based on ``created_at`` regardless of
+        finish time. TaskRuntime uses ``finished_at`` instead, which is more
+        accurate (a task that ran for 30 minutes shouldn't be wiped 30 minutes
+        after starting if it's still streaming).
+      - We snapshot the task ids ABOUT to be cleaned BEFORE calling
+        cleanup_stale() so we can prune the conv-latest-task index too.
+    """
     now = time.time()
-    with tasks_lock:
-        to_rm = [tid for tid, t in tasks.items() if now - t['created_at'] > 3600 and t['status'] != 'running']
-        for tid in to_rm: del tasks[tid]
-    # Also clean up _conv_latest_task entries whose tasks no longer exist
-    if to_rm:
-        _rm_set = set(to_rm)
+    finished_ids: set = set()
+    with _chat_runtime._lock:
+        for tid, t in _chat_runtime._tasks.items():
+            if t['status'] in ('done', 'error', 'aborted'):
+                finished_at = t.get('finished_at')
+                # Fall back to created_at for tasks that don't have finished_at
+                # (e.g. tests that mark status='done' directly without finish()).
+                ref_t = finished_at if finished_at else t.get('created_at', 0)
+                if now - ref_t > _chat_runtime.ttl:
+                    finished_ids.add(tid)
+    n = _chat_runtime.cleanup_stale()
+    # Clean up _conv_latest_task entries whose tasks were just removed
+    if finished_ids:
         with _conv_latest_task_lock:
-            stale_convs = [cid for cid, tid in _conv_latest_task.items() if tid in _rm_set]
+            stale_convs = [cid for cid, tid in _conv_latest_task.items()
+                           if tid in finished_ids]
             for cid in stale_convs:
                 del _conv_latest_task[cid]
+    if n:
+        logger.debug('[Manager] cleanup_old_tasks removed %d tasks', n)
 
 # ── Streaming checkpoint interval (seconds) ──
 # During LLM token streaming, we periodically persist partial content to
@@ -1327,13 +1543,13 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
     def _on_thinking(td):
         with task['content_lock']:
             task['thinking'] += td
-        append_event(task, {'type': 'delta', 'thinking': td})
+        append_event(task, build_event(EventType.DELTA, thinking=td))
         _maybe_checkpoint_during_stream()
 
     def _on_content(cd):
         with task['content_lock']:
             task['content'] += cd
-        append_event(task, {'type': 'delta', 'content': cd})
+        append_event(task, build_event(EventType.DELTA, content=cd))
         _maybe_checkpoint_during_stream()
 
     def _on_retry(attempt, reason='', status_code=0):
@@ -1354,21 +1570,35 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
             detail = f'Retrying… {reason} ({model}, attempt {attempt})'
         else:
             detail = f'Retrying {model}… (attempt {attempt})'
-        append_event(task, {
-            'type': 'phase',
-            'phase': 'retrying',
-            'detail': detail,
-            'attempt': attempt,
-            'statusCode': status_code,
-            'model': model,
-        })
+        append_event(task, build_event(
+            EventType.PHASE,
+            phase='retrying',
+            detail=detail,
+            attempt=attempt,
+            statusCode=status_code,
+            model=model,
+        ))
+
+    # ── Consume zero-byte force-rotate signal ──
+    # If the previous round zero-byte'd, ``analyse_stream_result`` set
+    # ``task['_force_rotate_pair']`` to ``(key_name, model)``.  We pass
+    # it as ``avoid_pairs`` to dispatch so the picker steers away from
+    # the poisoned slot for THIS attempt only — clear immediately after
+    # so a third zero-byte on a different slot doesn't keep the avoid
+    # list stuck on the original.
+    _avoid_pairs = None
+    _rotate_signal = task.pop('_force_rotate_pair', None)
+    if _rotate_signal:
+        _avoid_pairs = {_rotate_signal}
+        logger.info('%s zero-byte force-rotate: avoiding %s:%s for this dispatch',
+                    pfx, _rotate_signal[0], _rotate_signal[1])
 
     msg, finish_reason, usage = dispatch_stream(
         body,
         on_thinking=_on_thinking,
         on_content=_on_content,
         on_tool_call_ready=on_tool_call_ready,
-        abort_check=lambda: task['aborted'],
+        abort_check=lambda: task.get('aborted', False),
         prefer_model=model,
         log_prefix=pfx,
         # ★ User-facing request: the user explicitly chose this model in
@@ -1377,6 +1607,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
         #   silently fall back to a cheaper/different model.
         strict_model=True,
         on_retry=_on_retry,
+        avoid_pairs=_avoid_pairs,
     )
 
     # ★ Propagate provider_id from dispatch metadata into task
@@ -1389,13 +1620,13 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
     if _limit_info:
         # Notify via phase event (transient UI status, does NOT pollute
         # assistantMsg.content).  The limit is persisted automatically.
-        append_event(task, {
-            'type': 'phase',
-            'phase': 'retrying',
-            'detail': (f'⚙️ Auto-detected model limit: {_limit_info["model"]} '
-                       f'max_tokens={_limit_info["new_limit"]:,} '
-                       f'(was {_limit_info["old_limit"]:,})'),
-        })
+        append_event(task, build_event(
+            EventType.PHASE,
+            phase='retrying',
+            detail=(f'⚙️ Auto-detected model limit: {_limit_info["model"]} '
+                    f'max_tokens={_limit_info["new_limit"]:,} '
+                    f'(was {_limit_info["old_limit"]:,})'),
+        ))
         logger.info('%s ⚙️ Model limit auto-learned and user notified: %s max_tokens=%d',
                     pfx, _limit_info['model'], _limit_info['new_limit'])
 
@@ -1413,6 +1644,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
     #   falling back to the CJK-aware heuristic. Inspired by OpenCode's
     #   MessageV2.Assistant.tokens — the provider already told us the
     #   truth, so trust it instead of re-estimating.
+    _total_prompt_tokens = 0
     try:
         conv_id = task.get('convId', '') or ''
         # prompt_tokens is OpenAI-shape; Anthropic returns input_tokens.
@@ -1423,6 +1655,15 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
                 or usage.get('input_tokens')
                 or 0
             )
+            # Anthropic excludes cache from input_tokens; add it back so
+            # _total_prompt_tokens reflects the FULL prompt the provider
+            # accepted (which is what we use for context-limit expansion).
+            _cw = int(usage.get('cache_creation_input_tokens') or 0)
+            _cr = int(usage.get('cache_read_input_tokens') or 0)
+            if (_cw or _cr) and _prompt_tokens <= (_cw + _cr):
+                _total_prompt_tokens = _prompt_tokens + _cw + _cr
+            else:
+                _total_prompt_tokens = _prompt_tokens
         if conv_id and _prompt_tokens > 0:
             from lib.token_counter import record_usage
             # ``body['messages']`` is the exact list we sent. Recording it
@@ -1439,5 +1680,37 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
         # Usage-cache is a best-effort optimisation — never let a bug
         # here break the LLM return path.
         logger.debug('%s record_usage failed (non-fatal): %s', pfx, e)
+
+    # ★ Auto-learn an EXPANDED context limit when this provider just
+    #   accepted a prompt larger than our presumed ceiling. Mirrors the
+    #   shrink-on-overflow path in llm_fallback.py.
+    if _total_prompt_tokens > 0:
+        try:
+            from lib.context_limits import learn_expand_from_success
+            from lib.tasks_pkg.compaction import _get_context_limit
+            _prior_limit = _get_context_limit(task)
+            _expand_info = learn_expand_from_success(
+                task.get('provider_id') or '',
+                model,
+                _total_prompt_tokens,
+                preset_limit=_prior_limit,
+            )
+            if _expand_info:
+                append_event(task, build_event(
+                    EventType.PHASE,
+                    phase='retrying',
+                    detail=(
+                        f'⚙️ Auto-detected larger context window for '
+                        f'{model}: '
+                        f'{_expand_info["new_limit"]:,} tokens '
+                        f'(was {_expand_info["old_limit"]:,})'
+                    ),
+                ))
+                logger.info('%s ⚙️ Context limit expanded: %s %d → %d '
+                            '(observed prompt=%d)',
+                            pfx, model, _expand_info['old_limit'],
+                            _expand_info['new_limit'], _total_prompt_tokens)
+        except Exception as e:
+            logger.debug('%s context_limits expand-learn failed: %s', pfx, e)
 
     return msg, finish_reason, usage

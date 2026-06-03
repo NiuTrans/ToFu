@@ -117,7 +117,7 @@ def set_project(path_str):
         # registered mid-conversation via tool_create_project — the model's
         # newly-scaffolded project would silently disappear, and subsequent
         # 'name:path' prefixes would fail to resolve, routing writes to the
-        # primary root instead.  See chatui_create_project_frontend_sync_bug.
+        # primary root instead.  See create_project_frontend_sync_bug memo.
         same_primary = (old_path == abs_path)
         _state.update({
             'path': abs_path, 'tree': None,

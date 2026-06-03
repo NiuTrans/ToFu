@@ -18,7 +18,7 @@ This backend is **off by default** in container deployments because
 the download can be slow. Enable explicitly via either:
   - installing ``transformers`` + running the first call once to warm
     the cache (e.g. during deploy), or
-  - setting ``CHATUI_TOKEN_COUNTER_HF_AUTOFETCH=1``.
+  - setting ``TOFU_TOKEN_COUNTER_HF_AUTOFETCH=1``.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ _HF_REPO_MAP = {
 }
 
 
-_AUTOFETCH = os.environ.get('CHATUI_TOKEN_COUNTER_HF_AUTOFETCH', '0').strip() in ('1', 'true', 'yes')
+_AUTOFETCH = os.environ.get('TOFU_TOKEN_COUNTER_HF_AUTOFETCH', '0').strip() in ('1', 'true', 'yes')
 
 
 _lock = threading.Lock()

@@ -55,6 +55,18 @@ class _SilentCatchFinder(ast.NodeVisitor):
     def __init__(self):
         self.issues: list[tuple[int, str]] = []
 
+    # Names that count as "the failure was handled" inside an except block.
+    # Includes lib.api_response error helpers — they communicate the failure
+    # outward to the HTTP client (NOT silent) and api_internal_error also
+    # auto-logs at ERROR with traceback (CLAUDE.md §4.6.2).
+    _LOG_OR_HANDLE_NAMES = frozenset({
+        'debug', 'info', 'warning', 'error', 'critical', 'exception',
+        'log_exception', 'audit_log',
+        'api_internal_error', 'api_error', 'api_bad_request',
+        'api_not_found', 'api_unauthorized', 'api_forbidden',
+        'api_conflict', 'api_payload_too_large', 'api_method_not_allowed',
+    })
+
     def visit_ExceptHandler(self, node: ast.ExceptHandler):
         body = node.body
         is_silent = False
@@ -66,11 +78,16 @@ class _SilentCatchFinder(ast.NodeVisitor):
         if is_silent:
             has_log = False
             for child in ast.walk(node):
+                # `raise` / `raise X` — caller logs.
+                if isinstance(child, ast.Raise):
+                    has_log = True
+                    break
                 if isinstance(child, ast.Call):
                     func = child.func
-                    if isinstance(func, ast.Attribute) and func.attr in (
-                        'debug', 'info', 'warning', 'error', 'critical', 'exception'
-                    ):
+                    if isinstance(func, ast.Attribute) and func.attr in self._LOG_OR_HANDLE_NAMES:
+                        has_log = True
+                        break
+                    if isinstance(func, ast.Name) and func.id in self._LOG_OR_HANDLE_NAMES:
                         has_log = True
                         break
             if not has_log:

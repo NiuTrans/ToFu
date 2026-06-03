@@ -40,20 +40,43 @@ function isBranchTaskId(taskId) {
 }
 
 // ── Auto-icon based on branch title ──
-function _branchAutoIcon(title) {
-  if (!title) return "";
-  const t = title.toLowerCase();
-  if (/paper|论文|arxiv/.test(t)) return "";
-  if (/code|代码|实现|implement/.test(t)) return "";
-  if (/data|数据|dataset/.test(t)) return "";
-  if (/math|公式|proof|证明/.test(t)) return "";
-  if (/image|图|visual|vision/.test(t)) return "";
-  if (/compare|对比|vs\.?/.test(t)) return "";
-  if (/bug|error|issue|问题/.test(t)) return "";
-  if (/todo|plan|计划/.test(t)) return "";
-  if (/idea|想法|thought/.test(t)) return "";
-  if (/summary|总结|概述/.test(t)) return "";
-  return "";
+// Branch creation is now server-authoritative.
+// Server endpoint: POST /api/v1/conversations/{id}/messages/{i}/branches
+// generates the branch ID, classifies the title (icon + kind), validates
+// the message index, persists, and returns the new branch dict + index.
+// The JS no longer mints local IDs (race-free) and no longer holds
+// classification policy.
+async function _createBranchOnServer(convId, msgIdx, title, anchorText, parentSelection) {
+  if (!convId || !title) return null;
+  try {
+    const url = (typeof apiUrl === 'function')
+      ? apiUrl(`/api/v1/conversations/${convId}/messages/${msgIdx}/branches`)
+      : `/api/v1/conversations/${convId}/messages/${msgIdx}/branches`;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title,
+        anchor_text: anchorText || '',
+        parent_selection: parentSelection || '',
+      }),
+      credentials: 'same-origin',
+    });
+    if (!r.ok) {
+      if (typeof debugLog === 'function') {
+        debugLog(`[Branch] create failed: HTTP ${r.status}`, 'warn');
+      }
+      return null;
+    }
+    const body = await r.json();
+    if (!body.ok || !body.branch) return null;
+    return { branch: body.branch, branchIdx: body.branch_idx };
+  } catch (err) {
+    if (typeof debugLog === 'function') {
+      debugLog(`[Branch] create error: ${err && err.message}`, 'warn');
+    }
+    return null;
+  }
 }
 
 // ══════════════════════════════════════════
@@ -117,7 +140,7 @@ function _injectAnchoredBranches(html, msg, msgIdx) {
     const conv = getActiveConv();
     const isActive = _activeBranch?.msgIdx === msgIdx && _activeBranch?.branchIdx === bi;
     const isStreaming = conv && _isBranchStreaming(conv.id, msgIdx, bi);
-    const icon = b.icon || _branchAutoIcon(b.title);
+    const icon = b.icon || '';
     const count = (b.messages || []).filter(m => m.role === "user").length;
 
     let pillHtml = `<div class="branch-anchor-inline" id="branch-inline-${msgIdx}-${bi}">
@@ -154,7 +177,7 @@ function renderBranchZone(msg, msgIdx, inlinedSet) {
     if (inlinedSet && inlinedSet.has(bi)) return "";  // skip inlined ones
     const isActive = _activeBranch?.msgIdx === msgIdx && _activeBranch?.branchIdx === bi;
     const isStreaming = conv && _isBranchStreaming(conv.id, msgIdx, bi);
-    const icon = b.icon || _branchAutoIcon(b.title);
+    const icon = b.icon || '';
     const count = (b.messages || []).filter(m => m.role === "user").length;
     return `<button class="branch-node${isActive ? " active" : ""}${isStreaming ? " streaming" : ""}"
       onclick="toggleBranchPanel(${msgIdx},${bi})" title="${escapeHtml(b.title)}">
@@ -243,7 +266,7 @@ function _renderBranchPanel(msg, msgIdx, bi) {
   if (!branch) return "";
   const conv = getActiveConv();
   const msgs = branch.messages || [];
-  const icon = branch.icon || _branchAutoIcon(branch.title);
+  const icon = branch.icon || '';
   const userCount = msgs.filter(m => m.role === "user").length;
   const bk = conv ? _branchKey(conv.id, msgIdx, bi) : "";
   const isStreaming = _branchStreams.has(bk);
@@ -408,26 +431,20 @@ function deleteBranch(msgIdx, branchIdx) {
   //   in-memory branches array and force a re-render from server state.
   (async () => {
     try {
-      const res = await fetch(
-        apiUrl(`/api/conversations/${conv.id}/messages/${msgIdx}/branches/${branchIdx}`),
-        { method: 'DELETE' }
-      );
-      if (!res.ok) {
+      const res = await Api.conversations.deleteBranch(conv.id, msgIdx, branchIdx);
+      if (!res || !res.ok) {
         let body = null;
-        try { body = await res.json(); } catch (_e) { /* ignore */ }
-        console.warn('[branch.delete] server rejected branch delete', res.status, body);
+        try { body = res ? await res.json() : null; } catch (_e) { /* ignore */ }
+        console.warn('[branch.delete] server rejected branch delete', res && res.status, body);
         // Revert the local splice and reload from server to resync.
         msg.branches = _prevBranches;
         saveConversations(conv.id);
         try {
-          const resp = await fetch(apiUrl(`/api/conversations/${conv.id}`));
-          if (resp.ok) {
-            const data = await resp.json();
-            if (Array.isArray(data.messages)) {
-              conv.messages = data.messages;
-              saveConversations(conv.id);
-              if (activeConvId === conv.id) renderChat(conv);
-            }
+          const data = await Api.conversations.get(conv.id);
+          if (data && Array.isArray(data.messages)) {
+            conv.messages = data.messages;
+            saveConversations(conv.id);
+            if (activeConvId === conv.id) renderChat(conv);
           }
         } catch (e2) { console.warn('[branch.delete] reload failed', e2); }
         if (typeof showToast === 'function') showToast('Branch delete failed — restored', 'error');
@@ -515,7 +532,7 @@ function _enterBranchMode(msgIdx, branchIdx) {
   const msg = conv.messages[msgIdx];
   const branch = msg?.branches?.[branchIdx];
   if (!branch) return;
-  const icon = branch.icon || _branchAutoIcon(branch.title);
+  const icon = branch.icon || '';
   const input = document.getElementById("userInput");
   if (input) input.placeholder = `在「${branch.title}」分支中输入消息…`;
 
@@ -595,17 +612,8 @@ async function sendBranchMessage(text, images) {
   // ★ Server-side message building: the backend loads the conversation from DB,
   //   extracts main chat context + branch messages, and runs the full transform
   //   pipeline — message building is fully server-side.
-  const _branchConfig = (typeof _buildConvConfig === 'function') ? _buildConvConfig(conv) : {
-    model: serverModel,
-    maxTokens: config.maxTokens,
-    thinkingEnabled,
-    temperature: config.temperature,
-    searchMode,
-    fetchEnabled,
-    codeExecEnabled,
-    memoryEnabled,
-    projectPath: conv.projectPath || "",
-  };
+  // ★ _buildConvConfig is async (resolved by /api/v1/conversations/config/resolve).
+  const _branchConfig = await _buildConvConfig(conv);
   _branchConfig.branchKey = bk;
   const body = {
     convId: conv.id,
@@ -620,17 +628,8 @@ async function sendBranchMessage(text, images) {
   console.log("[Branch] sendBranchMessage config:", _branchConfig);
 
   try {
-    const res = await fetch(apiUrl("/api/chat/branch/start"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      console.error("[Branch] HTTP error:", res.status, errText);
-      throw new Error(`HTTP ${res.status}`);
-    }
-    const data = await res.json();
+    const data = await Api.chat.branchStart(body);
+    if (!data) throw new Error('No response from chat/branch/start');
     const taskId = data.taskId;
     if (!taskId) throw new Error("No taskId returned");
 
@@ -764,14 +763,29 @@ async function _branchStreamSSE(conv, msgIdx, branchIdx, branch, assistantMsg, t
       // Store toolContent on the round for preview
       if (assistantMsg.toolRounds) {
         const r = assistantMsg.toolRounds.find(r => r.roundNum === ev.roundNum && r.toolCallId === ev.toolCallId);
-        if (r) r.toolContent = ev.toolContent || null;
+        if (r) {
+          r.toolContent = ev.toolContent || null;
+          if (ev.toolTokens != null) r.toolTokens = ev.toolTokens;
+          if (ev.compactionLayer) {
+            r.compactionLayer = ev.compactionLayer;
+            r.compactedFromChars = ev.compactedFromChars;
+            r.compactedToChars = ev.compactedToChars;
+          }
+        }
       }
       // ★ Re-render branch UI so preview button appears reactively
       _updateBranchStreamingUI(msgIdx, branchIdx, assistantMsg);
-    } else if (ev.type === "emit_ref") {
-      // ★ emit_to_user: store emitted tool content on message for inline rendering
-      assistantMsg._emitContent = ev.emitContent || '';
-      assistantMsg._emitToolName = ev.emitToolName || '';
+    } else if (ev.type === "tool_compacted") {
+      // Per-tool compaction stamp — see ui.js handler for full doc.
+      if (assistantMsg.toolRounds) {
+        const r = assistantMsg.toolRounds.find(r => r.toolCallId === ev.toolCallId);
+        if (r) {
+          r.compactionLayer = ev.compactionLayer || r.compactionLayer || "L1";
+          if (ev.compactedFromChars != null) r.compactedFromChars = ev.compactedFromChars;
+          if (ev.compactedToChars != null) r.compactedToChars = ev.compactedToChars;
+          if (ev.toolTokens != null) r.toolTokens = ev.toolTokens;
+        }
+      }
       _updateBranchStreamingUI(msgIdx, branchIdx, assistantMsg);
     } else if (ev.type === "project_external_edit") {
       // ★ Git-shim: external edits captured outside Tofu round boundary.
@@ -793,11 +807,14 @@ async function _branchStreamSSE(conv, msgIdx, branchIdx, branch, assistantMsg, t
       }
     } else if (ev.type === "done") {
       /* ★ DIAGNOSTIC: log endpoint/swarm done event */
+      const _doneErrSummary = ev.error
+        ? (typeof ev.error === 'object' ? (ev.error.kind || 'unknown') : String(ev.error).slice(0, 100))
+        : 'none';
       console.log(
         `[processEvent/endpoint] DONE — ` +
         `finishReason=${ev.finishReason || 'none'} ` +
         `contentLen=${assistantMsg.content?.length || 0} ` +
-        `error=${ev.error || 'none'} model=${ev.model || 'unknown'}`
+        `error=${_doneErrSummary} model=${ev.model || 'unknown'}`
       );
       if (ev._diagnostics) {
         console.warn(`[processEvent/endpoint]  SERVER DIAGNOSTICS:`, ev._diagnostics);
@@ -815,8 +832,15 @@ async function _branchStreamSSE(conv, msgIdx, branchIdx, branch, assistantMsg, t
       assistantMsg.approvalRequired = false;
       return "done";
     } else if (ev.type === "error") {
-      console.error(`[processEvent/endpoint] ERROR event: ${ev.error || ev.message || 'unknown'}`);
-      assistantMsg.error = ev.error || ev.message || "Unknown error";
+      const _errSummary = ev.error
+        ? (typeof ev.error === 'object' ? (ev.error.kind || ev.error.message || 'unknown') : String(ev.error))
+        : (ev.message || 'unknown');
+      console.error(`[processEvent/endpoint] ERROR event: ${_errSummary}`);
+      /* Branch SSE error events come through pre-typed when emitted by
+       * the orchestrator; legacy sources (raw error strings) get wrapped
+       * by normalizeErrorEnvelope() into a generic envelope. */
+      assistantMsg.error = normalizeErrorEnvelope(
+        ev.error || ev.message || 'Unknown error');
       return "done";
     }
 
@@ -832,10 +856,8 @@ async function _branchStreamSSE(conv, msgIdx, branchIdx, branch, assistantMsg, t
 
   // SSE fetch
   try {
-    const res = await fetch(apiUrl(`/api/chat/stream/${taskId}`), {
-      signal: controller.signal,
-    });
-    if (!res.ok) throw new Error(`SSE HTTP ${res.status}`);
+    const res = await Api.chat.streamResponse(taskId, { signal: controller.signal });
+    if (!res || !res.ok) throw new Error(`SSE HTTP ${res ? res.status : 'no response'}`);
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -886,9 +908,9 @@ async function _branchStreamPoll(conv, msgIdx, branchIdx, branch, assistantMsg, 
     if (controller.signal.aborted) return;
     await new Promise(r => setTimeout(r, 1500));
     try {
-      const res = await fetch(apiUrl(`/api/chat/poll/${taskId}`));
-      if (!res.ok) {
-        if (res.status === 404) {
+      const res = await Api.chat.poll(taskId);
+      if (!res || !res.ok) {
+        if (res && res.status === 404) {
           // Task gone (server restarted / cleaned up) — stop polling
           console.warn(`[_branchStreamPoll] 404 for task ${taskId.slice(0,8)} — stopping`);
           return;
@@ -1021,8 +1043,8 @@ async function _reconnectBranchStream(conv, msgIdx, branchIdx, branch) {
   if (!taskId) return;
 
   try {
-    const res = await fetch(apiUrl(`/api/chat/poll/${taskId}`));
-    if (!res.ok) {
+    const res = await Api.chat.poll(taskId);
+    if (!res || !res.ok) {
       branch.activeTaskId = null;
       saveConversations(conv.id);
       if (activeConvId === conv.id) {
@@ -1109,7 +1131,7 @@ function initBranchReconnect() {
 // ══════════════════════════════════════════
 //  Create a new branch
 // ══════════════════════════════════════════
-function promptNewBranch(msgIdx, preTitle, selectedText, selectionRange) {
+async function promptNewBranch(msgIdx, preTitle, selectedText, selectionRange) {
   const conv = getActiveConv();
   if (!conv) return;
   const msg = conv.messages[msgIdx];
@@ -1118,20 +1140,31 @@ function promptNewBranch(msgIdx, preTitle, selectedText, selectionRange) {
   if (msg.role === "user" && !selectedText) return;
   const title = preTitle || prompt("分支名称：");
   if (!title?.trim()) return;
-  if (!msg.branches) msg.branches = [];
-  const branch = {
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    title: title.trim(),
-    icon: _branchAutoIcon(title.trim()),
-    messages: [],
-  };
-  if (selectedText) {
-    branch.anchorText = selectedText.slice(0, 200);
-    branch.parentSelection = selectedText;
-  }
-  msg.branches.push(branch);
 
-  const bi = msg.branches.length - 1;
+  // Server-authoritative branch creation: ID, icon, kind, validation,
+  // persistence — all on the server. We just receive the new branch dict
+  // and place it locally so the rest of the UI flow (DOM insertion,
+  // _activeBranch tracking) keeps working.
+  const created = await _createBranchOnServer(
+    conv.id, msgIdx, title.trim(),
+    selectedText ? selectedText.slice(0, 200) : '',
+    selectedText || '',
+  );
+  if (!created) {
+    alert('分支创建失败，请重试');
+    return;
+  }
+  const branch = created.branch;
+  const bi = created.branchIdx;
+
+  // Mirror server state locally for instant render. Server is the
+  // source of truth — a subsequent syncConversationToServer pull would
+  // re-fetch this same data.
+  if (!msg.branches) msg.branches = [];
+  // The server appended at branchIdx; ensure local array agrees.
+  while (msg.branches.length < bi) msg.branches.push(null);
+  msg.branches[bi] = branch;
+
   _activeBranch = { msgIdx, branchIdx: bi };
 
   // ── DOM insertion: use the actual Selection Range to place branch right after selected text ──
@@ -1207,11 +1240,11 @@ function promptNewBranch(msgIdx, preTitle, selectedText, selectionRange) {
     });
   });
 
-  // Deferred save
-  setTimeout(() => {
-    saveConversations(conv.id);
-    syncConversationToServer(conv);
-  }, 100);
+  // Server persisted the branch on the create POST above; we only need
+  // to refresh the local IDB cache so a page-refresh sees it without
+  // a server round-trip.  No PUT-sync — server is already the source
+  // of truth for branches.
+  setTimeout(() => { saveConversations(conv.id); }, 100);
 }
 
 // ══════════════════════════════════════════

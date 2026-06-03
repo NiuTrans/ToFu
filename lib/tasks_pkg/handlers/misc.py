@@ -1,5 +1,5 @@
 # HOT_PATH
-"""Miscellaneous tool handlers: ask_human, scheduler, desktop, swarm, conv_ref, emit_to_user."""
+"""Miscellaneous tool handlers: ask_human, scheduler, desktop, swarm, conv_ref."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from lib.swarm.tools import SWARM_TOOL_NAMES
 from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round, tool_registry
 from lib.tasks_pkg.handlers._adapter import simple_call
 from lib.tasks_pkg.manager import append_event
-from lib.tools import CONV_REF_TOOL_NAMES, EMIT_TO_USER_TOOL_NAMES
+from lib.tools import CONV_REF_TOOL_NAMES
 
 logger = get_logger(__name__)
 
@@ -94,10 +94,49 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         'options': options,
     })
 
-    logger.info('[Executor] ask_human blocking indefinitely for user '
-                'response: guidance_id=%s, task=%s',
-                guidance_id, task.get('id', '?')[:8])
-    user_response = request_human_guidance(guidance_id, task=task)
+    # ── Autopilot: simulated user answers the question instead of blocking ──
+    # When autopilot is on, we don't want to wait for a real human; the VU
+    # answers using the conversation context.  We still emit the synthetic
+    # request → response pair so the frontend renders the autopilot bubble
+    # in place of a normal ask_human prompt.
+    from lib.tasks_pkg.autopilot import is_autopilot_enabled, run_virtual_user
+    if is_autopilot_enabled(task):
+        logger.info('[Executor] ask_human → routed to Autopilot VU '
+                    '(no human wait): guidance_id=%s, task=%s',
+                    guidance_id, task.get('id', '?')[:8])
+        # Build a minimal augmented messages list so the VU sees the
+        # exact question being asked, not just the last assistant turn.
+        _vu_task = task
+        try:
+            _orig_msgs = list(task.get('messages') or [])
+            _augmented = list(_orig_msgs)
+            _augmented.append({'role': 'assistant', 'content': question})
+            _vu_task = dict(task)
+            _vu_task['messages'] = _augmented
+        except Exception as _e:
+            logger.debug('[Executor] ask_human VU augmentation failed '
+                         '(falling back to raw history): %s', _e)
+        vu_reply = run_virtual_user(_vu_task)
+        if vu_reply is None:
+            user_response = None  # task aborted or VU stopped
+        else:
+            user_response = vu_reply or '(no further input)'
+            # Resolve so the SSE event consumer (frontend) sees a synthetic
+            # response, matching the live human-guidance event shape.
+            from lib.tasks_pkg.human_guidance import resolve_human_guidance
+            resolve_human_guidance(guidance_id, user_response)
+            append_event(task, {
+                'type': 'human_guidance_response',
+                'roundNum': rn,
+                'guidanceId': guidance_id,
+                'response': user_response,
+                'isVirtualUser': True,
+            })
+    else:
+        logger.info('[Executor] ask_human blocking indefinitely for user '
+                    'response: guidance_id=%s, task=%s',
+                    guidance_id, task.get('id', '?')[:8])
+        user_response = request_human_guidance(guidance_id, task=task)
 
     if task.get('aborted') or user_response is None:
         tool_content = '[Task was aborted while waiting for human guidance]'
@@ -176,14 +215,17 @@ def _handle_desktop_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
 
 # Module-level constant — swarm tool icon dispatch.
 _SWARM_ICON_MAP = {
-    'spawn_agents': '🐝', 'spawn_more_agents': '🐝➕',
-    'check_agents': '📊', 'swarm_done': '✅',
-    'store_artifact': '📦', 'read_artifact': '📖', 'list_artifacts': '📋',
+    'spawn_agents':     '🐝',
+    'await_agents':     '⏳',
+    'get_agent_result': '📥',
+    'store_artifact':   '📦',
+    'read_artifact':    '📖',
+    'list_artifacts':   '📋',
 }
 
 
 @tool_registry.tool_set(SWARM_TOOL_NAMES, category='swarm',
-                        description='Spawn and manage parallel sub-agents')
+                        description='Spawn and manage parallel sub-agents (async)')
 def _handle_swarm_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
     # Custom executor closes over task/cfg/all_tools to preserve the full swarm API
     def _run_swarm(_fn_name, _fn_args):
@@ -202,15 +244,65 @@ def _handle_swarm_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
 
     icon = _SWARM_ICON_MAP.get(fn_name, '🐝')
     badge = icon
-    if fn_name in ('spawn_agents', 'spawn_more_agents'):
+    if fn_name == 'spawn_agents':
         num_agents = len(fn_args.get('agents', []))
         badge = f'{icon} {num_agents} agents'
+    elif fn_name == 'await_agents':
+        ids = fn_args.get('ids') or []
+        badge = f'{icon} await {len(ids) or "all"}'
+    elif fn_name == 'get_agent_result':
+        badge = f'{icon} {(fn_args.get("agent_id") or "?")[:8]}'
+
+    post_build = _build_await_post_build(icon) if fn_name == 'await_agents' else None
 
     return simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,
         executor=_run_swarm,
         source='Swarm', icon=icon, badge=badge, module_tag='Swarm',
+        post_build=post_build,
     )
+
+
+def _build_await_post_build(icon):
+    """Return a post_build hook that rewrites the await_agents result badge
+    from its JSON payload so the UI shows the real outcome.
+
+    Without this every await row gets a generic ``⏳ await all`` badge that
+    looks identical whether the wait completed cleanly or hit the hard-cap
+    timeout. The hook surfaces ``done N/M`` plus a ``timed out`` marker so the
+    user has full visibility of partial completions.
+    """
+    import json as _json
+
+    def _post_build(meta, tool_content, _fn_args):
+        try:
+            data = _json.loads(tool_content) if isinstance(tool_content, str) else tool_content
+        except (ValueError, TypeError) as e:
+            logger.debug('[Swarm] await_agents result not JSON, keeping default badge: %s', e)
+            return
+        if not isinstance(data, dict):
+            return
+        if data.get('status') == 'error':
+            meta['badge'] = '❌ no swarm'
+            return
+        completed = data.get('completed') or []
+        still_running = data.get('still_running') or []
+        n_done = len(completed)
+        n_total = n_done + len(still_running)
+        timed_out = bool(data.get('timed_out'))
+        if timed_out:
+            # Amber warning badge — partial result, the wait was cut short.
+            meta['badge'] = f'{icon} timed out · {n_done}/{n_total} done'
+            meta['awaitTimedOut'] = True
+        elif n_total:
+            meta['badge'] = f'✓ {n_done}/{n_total} done'
+        else:
+            # Nothing was waited on (all already finished, or swarm idle).
+            meta['badge'] = '✓ done'
+        if still_running:
+            meta['awaitStillRunning'] = still_running
+
+    return _post_build
 
 
 @tool_registry.tool_set(CONV_REF_TOOL_NAMES, category='conversations',
@@ -231,53 +323,4 @@ def _handle_conv_ref_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cf
     )
 
 
-# ═══ emit_to_user handler (terminal — breaks orchestrator loop) ═══════
 
-@tool_registry.tool_set(EMIT_TO_USER_TOOL_NAMES, category='emit',
-                        description='End turn by referencing an existing tool result')
-def _handle_emit_to_user(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
-    """Handle emit_to_user — reference the most recent tool result for the user.
-
-    Auto-infers the last tool round from toolRounds. The model only needs
-    to provide a comment.
-    """
-    comment = fn_args.get('comment', '')
-
-    # Auto-infer: find the last completed tool round (exclude this emit round itself)
-    tool_rounds = task.get('toolRounds', [])
-    ref_round = None
-    ref_tool_name = None
-    for sr in reversed(tool_rounds):
-        if sr.get('roundNum') != rn and sr.get('toolName') != 'emit_to_user':
-            ref_round = sr
-            ref_tool_name = sr.get('toolName', '?')
-            break
-
-    if ref_round is None:
-        error_msg = 'Error: no prior tool round found to reference.'
-        logger.warning('[Tool:emit_to_user] No prior tool round found, task=%s', task.get('id', '?')[:8])
-        meta = _build_simple_meta(
-            fn_name, error_msg, source='Emit',
-            title='❌ emit_to_user: no prior tool round',
-            badge='❌ error',
-        )
-        _finalize_tool_round(task, rn, round_entry, [meta])
-        return tc_id, error_msg, False
-
-    tool_round = ref_round.get('roundNum')
-
-    logger.info('[Tool:emit_to_user] Terminal emit: tool_round=%d (%s), comment=%.200s, task=%s',
-                tool_round, ref_tool_name, comment, task.get('id', '?')[:8])
-
-    round_entry['_emit_to_user'] = True
-    round_entry['_emit_tool_round'] = tool_round
-    round_entry['_emit_comment'] = comment
-
-    meta = _build_simple_meta(
-        fn_name, comment, source='Emit',
-        title=f'📤 Emit: {ref_tool_name}',
-        snippet=comment[:120],
-        badge=f'📤 {ref_tool_name}',
-    )
-    _finalize_tool_round(task, rn, round_entry, [meta])
-    return tc_id, comment, False

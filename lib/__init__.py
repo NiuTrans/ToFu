@@ -15,6 +15,7 @@ __all__ = [
     'PPTX_TRANSLATE_ENABLED',
     'DEBUG_MODE',
     'OPTIMIZER_ENABLED',
+    'ARTIFACTS_ENABLED',
     'FETCH_TOP_N', 'FETCH_TIMEOUT',
     'FETCH_MAX_CHARS_SEARCH', 'FETCH_MAX_CHARS_DIRECT',
     'FETCH_MAX_CHARS_PDF', 'FETCH_MAX_BYTES',
@@ -42,11 +43,8 @@ _SERVER_CONFIG_PATH = _config_path('server_config.json')
 def _load_server_config():
     """Read data/config/server_config.json, return dict or {} on any error.
 
-    This is called ONCE at import time. Auto-migrates from legacy
-    ~/.chatui/ path on first run (handled by lib.config_dir import).
-
-    The legacy ``~/.chatui/`` dir name is preserved for back-compat;
-    new installs use ``<project>/data/config/`` exclusively.
+    Called ONCE at import time. All persistent config lives in-tree under
+    ``<project>/data/config/``; see ``lib.config_dir``.
     """
     try:
         if os.path.isfile(_SERVER_CONFIG_PATH):
@@ -200,6 +198,11 @@ CACHE_EXTENDED_TTL = _resolve_feature_flag('CACHE_EXTENDED_TTL', 'cache_extended
 # users can disable it in Settings if they don't want autonomous changes
 # (e.g. auto-applied block_search_domain).
 OPTIMIZER_ENABLED = _resolve_feature_flag('OPTIMIZER_ENABLED', 'optimizer_enabled', True)
+# Renderable chat artifacts (md/html/svg) — see lib/artifacts/.  Default
+# ON; set ``ARTIFACTS_ENABLED=0`` (env) or ``artifacts_enabled: false``
+# in features.json to disable producers + chip rendering.  Routes stay
+# registered for read-only access to existing rows.
+ARTIFACTS_ENABLED = _resolve_feature_flag('ARTIFACTS_ENABLED', 'artifacts_enabled', True)
 
 # ── Fetch / search settings ──
 # Priority: ENV VAR > server_config.json search section > hardcoded default
@@ -328,6 +331,7 @@ def reload_config():
     _mod.DEBUG_MODE = _resolve_feature_flag('DEBUG_MODE', 'debug_mode', False)
     _mod.CACHE_EXTENDED_TTL = _resolve_feature_flag('CACHE_EXTENDED_TTL', 'cache_extended_ttl', True)
     _mod.OPTIMIZER_ENABLED = _resolve_feature_flag('OPTIMIZER_ENABLED', 'optimizer_enabled', True)
+    _mod.ARTIFACTS_ENABLED = _resolve_feature_flag('ARTIFACTS_ENABLED', 'artifacts_enabled', True)
 
     # Machine translation provider
     _mod.MT_PROVIDER_CONFIG = _resolve_mt_provider_config()

@@ -157,22 +157,13 @@
   let _state = null;  // { convId, archiveId, listData, activeArchive, activeMessages }
 
   async function _fetchList(convId) {
-    const r = await fetch(`api/conversations/${encodeURIComponent(convId)}/compactions`, {
-      headers: { 'Accept': 'application/json' },
-    });
-    if (!r.ok) throw new Error(`compactions list failed: HTTP ${r.status}`);
-    return r.json();
+    return await Api.compactions.list(convId);
   }
 
   async function _fetchPayload(convId, archiveId) {
     const key = `${convId}:${archiveId}`;
     if (_payloadCache.has(key)) return _payloadCache.get(key);
-    const r = await fetch(
-      `api/conversations/${encodeURIComponent(convId)}/compactions/${archiveId}`,
-      { headers: { 'Accept': 'application/json' } }
-    );
-    if (!r.ok) throw new Error(`compaction payload failed: HTTP ${r.status}`);
-    const j = await r.json();
+    const j = await Api.compactions.get(convId, archiveId);
     _payloadCache.set(key, j);
     return j;
   }
@@ -564,6 +555,12 @@
       if (!target._compactions.some(c => c.archiveId === marker.archiveId)) {
         target._compactions.push(marker);
       }
+    }
+    // After re-hydrating markers from the server, refresh the gauge so
+    // its ticks reflect this conversation's history (the bar reads the
+    // same _compactions[] arrays we just populated above).
+    if (typeof window.updateContextBar === 'function') {
+      window.updateContextBar();
     }
   };
 })();

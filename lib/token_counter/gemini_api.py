@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from lib.log import get_logger
+from lib.http_client import http_post
 
 from .base import TokenCounter
 from .config import API_TIMEOUT
@@ -27,7 +28,7 @@ from .config import API_TIMEOUT
 logger = get_logger(__name__)
 
 
-def _resolve_url(base_url: str, model: str) -> Optional[str]:
+def _resolve_gemini_count_url(base_url: str, model: str) -> Optional[str]:
     if not base_url or not model:
         return None
     b = base_url.rstrip('/')
@@ -46,7 +47,7 @@ def _resolve_url(base_url: str, model: str) -> Optional[str]:
     return None
 
 
-def _build_body(messages, *, system=None) -> dict:
+def _build_gemini_count_body(messages, *, system=None) -> dict:
     contents = []
     for msg in messages or ():
         role = msg.get('role')
@@ -94,18 +95,18 @@ class GeminiAPICounter(TokenCounter):
               **kwargs) -> Optional[int]:
         if not api_base_url or not api_key:
             return None
-        url = _resolve_url(api_base_url, model)
+        url = _resolve_gemini_count_url(api_base_url, model)
         if not url:
             return None
 
         try:
-            import requests
-            from lib.proxy import proxies_for as _proxies_for
+            import requests  # noqa: F401  — availability probe (raises ImportError if absent)
+            from lib.proxy import proxies_for as _proxies_for  # noqa: F401
         except ImportError as e:
             logger.warning('[TokenCounter] requests / lib.proxy import failed: %s', e)
             return None
 
-        body = _build_body(messages, system=system)
+        body = _build_gemini_count_body(messages, system=system)
         # Google uses ?key= for auth on Google AI; Bearer on Vertex.
         # Send both — server picks what it supports.
         sep = '&' if '?' in url else '?'
@@ -115,9 +116,8 @@ class GeminiAPICounter(TokenCounter):
             'Content-Type': 'application/json',
         }
         try:
-            r = requests.post(url_with_key, json=body, headers=headers,
+            r = http_post(url_with_key, json=body, headers=headers,
                               timeout=(10, API_TIMEOUT),
-                              proxies=_proxies_for(url),
                               verify=True)
             if r.status_code != 200:
                 logger.warning('[TokenCounter] Gemini countTokens HTTP %d: %.200s',

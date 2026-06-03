@@ -5,8 +5,6 @@ dispatcher, routing them to the appropriate command or pipeline handler.
 """
 
 import json
-import threading
-import time
 
 from lib.feishu._state import ALLOWED_USERS, get_user_lock
 from lib.feishu.commands import MENU_MAP, dispatch_command
@@ -15,29 +13,24 @@ from lib.feishu.messaging import send_text
 from lib.feishu.pipeline import run_task_pipeline
 
 from lib.log import get_logger
+from lib.ttl_cache import TTLCache
 
 logger = get_logger(__name__)
 
 __all__ = ['handle_message_event', 'handle_menu_event']
 
-# Message deduplication — Feishu may send duplicates on retries
-_processed_msgs = {}
-_processed_lock = threading.Lock()
-_DEDUP_TTL = 300  # seconds
+# Message deduplication — Feishu may send duplicates on retries.
+# 5-minute TTL matches the original implementation; size-bounded so a
+# burst of unique messages never blows up memory.
+_processed_msgs = TTLCache(ttl=300, max_size=10000, name='feishu_dedup')
 
 
 def _is_duplicate(msg_id: str) -> bool:
     """Check if we've already processed this message (dedup)."""
-    now = time.time()
-    with _processed_lock:
-        # Garbage-collect old entries
-        expired = [k for k, v in _processed_msgs.items() if now - v > _DEDUP_TTL]
-        for k in expired:
-            del _processed_msgs[k]
-        if msg_id in _processed_msgs:
-            return True
-        _processed_msgs[msg_id] = now
-        return False
+    if _processed_msgs.has(msg_id):
+        return True
+    _processed_msgs.set(msg_id, True)
+    return False
 
 
 def _check_allowed(open_id: str) -> bool:

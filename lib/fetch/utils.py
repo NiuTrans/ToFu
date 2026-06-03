@@ -90,7 +90,7 @@ _HEADERS = {
                   '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br',
+    'Accept-Encoding': 'gzip, deflate',
     'Connection': 'keep-alive',
 }
 
@@ -113,7 +113,7 @@ _retry_strategy = Retry(
 
 _session = requests.Session()
 _session.headers.update(_HEADERS)
-_adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=_retry_strategy)
+_adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100, max_retries=_retry_strategy)
 _session.mount('https://', _adapter)
 _session.mount('http://', _adapter)
 
@@ -337,9 +337,10 @@ def _is_bot_protection(html_text):
         'ray id:', 'performance &amp; security by',
         'performance & security by cloudflare',
         'checking if the site connection is secure',
+        'not a robot', 'verifying that you are',
         # Chinese variants
         '正在进行安全验证', '验证您不是自动程序', '安全服务防护',
-        '人机验证', '正在检查您的浏览器',
+        '人机验证', '正在检查您的浏览器', '正在检查浏览器',
     )
     matched = sum(1 for s in indicators if s in lower)
     if matched >= 1:
@@ -372,10 +373,16 @@ _BOT_TEXT_PATTERNS = (
     'attention required', 'ddos protection by',
     'just a moment', 'access denied',
     'cf-browser-verification',
+    # ── JS-wall / robot-check / redirect stubs. Only matched against ≤600-char
+    #    extractions (see _is_bot_extracted_text), so these short phrases carry
+    #    very low false-positive risk — real articles extract far longer. ──
+    'not a robot', 'verifying that you are', 'verify that you',
+    'javascript is disabled', 'enable javascript', 'requires javascript',
+    "required part of this site", 'does not redirect automatically',
     # ── Chinese variants (Cloudflare / bot-protection localized) ──
     '正在进行安全验证', '安全验证', '验证您不是自动程序',
     '安全检查', '请完成安全验证', '请稍候', '正在检查您的浏览器',
-    '安全服务防护', 'ddos防护', '人机验证',
+    '正在检查浏览器', '安全服务防护', 'ddos防护', '人机验证',
 )
 
 

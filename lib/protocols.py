@@ -6,7 +6,7 @@ concrete implementations.
 
 Key boundaries addressed:
   • **LLMService** — used by trading_autopilot, swarm, tasks_pkg, trading.intel
-    instead of importing ``lib.llm_dispatch`` / ``lib.llm_client`` directly.
+    instead of importing ``lib.llm_dispatch`` / ``lib.llm`` directly.
 
   • **FetchService** — used by tasks_pkg.executor, trading.intel instead of
     importing ``lib.fetch`` directly.
@@ -331,7 +331,7 @@ class ToolHandler(Protocol):
 class BodyBuilder(Protocol):
     """Protocol for LLM request body construction.
 
-    Satisfied by ``lib.llm_client.build_body``.
+    Satisfied by ``lib.llm.build_body``.
     Decouples swarm agents and orchestrators from the concrete
     model-aware body construction logic.
     """

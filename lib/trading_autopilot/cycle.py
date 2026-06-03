@@ -397,10 +397,10 @@ def build_autopilot_streaming_body(
                        trading data access.  Passed through to ``_gather_context``.
         body_builder:  Optional :class:`~lib.protocols.BodyBuilder` for LLM
                        request body construction.  Defaults to
-                       ``lib.llm_client.build_body`` when ``None``.
+                       ``lib.llm.build_body`` when ``None``.
     """
     if body_builder is None:
-        from lib.llm_client import build_body
+        from lib.llm import build_body
         _build_body = build_body
     else:
         _build_body = body_builder
@@ -465,7 +465,8 @@ def _store_cycle_result(db, cycle_id, cycle_number, content, structured,
     # Sanitize confidence_score — LLM may return non-numeric values
     try:
         conf_score = float(structured.get('confidence_score', 0)) if structured else 0
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as _e_audit:
+        logger.debug('[cycle] _store_cycle_result caught %s: %s', type(_e_audit).__name__, _e_audit)
         conf_score = 0
     db.execute('''
         INSERT INTO trading_autopilot_cycles
@@ -489,11 +490,13 @@ def _store_cycle_result(db, cycle_id, cycle_number, content, structured,
             # Sanitize numeric fields — LLM may return strings like "全部持仓"
             try:
                 amount = float(rec.get('amount') or 0)
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as _e_audit:
+                logger.debug('[cycle] _store_cycle_result caught %s: %s', type(_e_audit).__name__, _e_audit)
                 amount = 0
             try:
                 confidence = float(rec.get('confidence') or 0)
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as _e_audit:
+                logger.debug('[cycle] _store_cycle_result caught %s: %s', type(_e_audit).__name__, _e_audit)
                 confidence = 0
             db.execute('''
                 INSERT INTO trading_autopilot_recommendations

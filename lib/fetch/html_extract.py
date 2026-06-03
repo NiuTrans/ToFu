@@ -7,6 +7,7 @@ and specialized code-hosting blob extraction (GitHub / GitLab / Bitbucket).
 
 import json
 import re
+import threading
 from datetime import timedelta
 from urllib.parse import urljoin, urlparse
 
@@ -16,6 +17,19 @@ from lib.fetch.utils import _get_bs4
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+# lxml 6.1.1 / libxml2 2.14.6 segfault when multiple threads enter
+# `lxml.html.text_content()` simultaneously (observed via faulthandler:
+# Current thread + 2+ other threads all inside text_content). trafilatura
+# calls text_content() heavily inside delete_by_link_density() →
+# prune_unwanted_sections() → extract(). With the search orchestrator
+# running a 16-worker fetch pool and up to 5 concurrent batch queries
+# (~80 concurrent extractions), the lxml thread-unsafety reliably crashes
+# the server. We serialize extract() globally — cheap CPU work, ~tens of
+# ms per page; the pool is dominated by network I/O so throughput is
+# unaffected. The BS4 fallback uses Python's html.parser (GIL-safe) and
+# does NOT need this lock.
+_TRAFILATURA_LOCK = threading.Lock()
 
 __all__ = [
     'extract_html_publish_date',
@@ -288,11 +302,15 @@ def extract_html_text(html, max_chars, url=''):
         return code
 
     # ── Phase 1: Try trafilatura for main text extraction ──
+    # Serialized via _TRAFILATURA_LOCK — see module-level note on lxml
+    # text_content() thread-unsafety crashing the server.
     main_text = None
     try:
-        main_text = trafilatura.extract(html, include_comments=False, include_tables=True,
-                                        no_fallback=False, favor_recall=True, deduplicate=True,
-                                        include_links=True)  # ★ include_links!
+        with _TRAFILATURA_LOCK:
+            main_text = trafilatura.extract(html, include_comments=False, include_tables=True,
+                                            no_fallback=False, favor_recall=True, deduplicate=True,
+                                            include_links=True,        # ★ include_links!
+                                            include_formatting=True)   # ★ keep headings/lists/emphasis as markdown
     except Exception as e:
         logger.warning('Trafilatura failed: %s', e, exc_info=True)
 

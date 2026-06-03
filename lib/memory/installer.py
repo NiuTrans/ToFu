@@ -20,7 +20,7 @@ Security policy
   \u2014 the installer surfaces them as ``install_hint`` so the user can
   inspect / run them manually.
 * All edits commit through :func:`shutil.copytree` to the project's
-  ``.chatui/skills/`` tree.  No filesystem writes outside that tree.
+  ``.tofu/skills/`` tree.  No filesystem writes outside that tree.
 """
 
 from __future__ import annotations
@@ -128,7 +128,8 @@ def _find_skill_root(start_dir: str) -> str | None:
     for _ in range(3):
         try:
             entries = [e for e in os.listdir(cur) if not e.startswith('.')]
-        except OSError:
+        except OSError as _e_audit:
+            logger.debug('[installer] _find_skill_root caught %s: %s', type(_e_audit).__name__, _e_audit)
             break
         # If exactly one sub-directory and no SKILL.md here, descend.
         sub_dirs = [e for e in entries if os.path.isdir(os.path.join(cur, e))]
@@ -180,8 +181,7 @@ def _detect_install_hints(skill_root: str) -> list[dict[str, str]]:
     packages or modify ``~/.bashrc``.
     """
     hints = []
-    for fname in ('install.sh', 'install-cc.sh', 'install-openclaw.sh',
-                  'install.py'):
+    for fname in ('install.sh', 'install-cc.sh', 'install-openclaw.sh'):
         full = os.path.join(skill_root, fname)
         if os.path.isfile(full):
             hints.append({
@@ -234,7 +234,7 @@ def install_skill_package(
         os.path.basename(source) if isinstance(source, str) else '<uploaded>')
     logger.info('[SkillInstaller] Installing %s (scope=%s)', log_label, scope)
 
-    with tempfile.TemporaryDirectory(prefix='chatui-skill-') as tmp:
+    with tempfile.TemporaryDirectory(prefix='tofu-skill-') as tmp:
         # \u2500\u2500 Step 1: materialise the package into ``tmp/extracted/`` \u2500\u2500
         extracted = os.path.join(tmp, 'extracted')
         os.makedirs(extracted, exist_ok=True)

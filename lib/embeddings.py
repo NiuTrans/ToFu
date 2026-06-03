@@ -16,7 +16,6 @@ Usage:
 
 import math
 
-import requests
 
 from lib.log import get_logger
 
@@ -30,7 +29,7 @@ __all__ = [
 ]
 
 # Proxy bypass via centralized lib/proxy — respects Settings UI config.
-from lib.proxy import proxies_for as _proxies_for
+from lib.http_client import http_post
 
 # text-embedding-v4 API limit: input length must be in [1, 8192] tokens.
 # For mixed-language text (Chinese ≈ 1-2 tokens/char, English ≈ 4 chars/token),
@@ -146,9 +145,8 @@ def embed_texts(
         }
 
         try:
-            resp = requests.post(
-                embed_url, headers=headers, json=body,
-                proxies=_proxies_for(embed_url), timeout=timeout,
+            resp = http_post(
+                embed_url, headers=headers, json=body, timeout=timeout,
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -173,9 +171,8 @@ def embed_texts(
                 if slot2 and slot2.extra_headers:
                     headers2.update(slot2.extra_headers)
                 try:
-                    resp2 = requests.post(
-                        embed_url2, headers=headers2, json=body,
-                        proxies=_proxies_for(embed_url2), timeout=timeout,
+                    resp2 = http_post(
+                        embed_url2, headers=headers2, json=body, timeout=timeout,
                     )
                     if resp2.status_code == 200:
                         data = resp2.json()
@@ -217,9 +214,8 @@ def embed_texts(
                 }
                 if slot2 and slot2.extra_headers:
                     headers2.update(slot2.extra_headers)
-                resp2 = requests.post(
-                    embed_url2, headers=headers2, json=body,
-                    proxies=_proxies_for(embed_url2), timeout=timeout,
+                resp2 = http_post(
+                    embed_url2, headers=headers2, json=body, timeout=timeout,
                 )
                 if resp2.status_code == 200:
                     data2 = resp2.json()

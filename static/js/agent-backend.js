@@ -7,7 +7,7 @@
    ═══════════════════════════════════════════ */
 let activeAgentBackend = 'builtin';       // 'builtin' | 'claude-code' | 'codex'
 let _agentBackendCapabilities = null;     // BackendCapabilities from server
-let _agentBackendCache = null;            // Cached /api/agent-backends/status result
+let _agentBackendCache = null;            // Cached /api/v1/agent-backends/status result
 
 /**
  * Fetch backend status from server and cache it.
@@ -15,10 +15,8 @@ let _agentBackendCache = null;            // Cached /api/agent-backends/status r
  */
 async function _fetchAgentBackends() {
   try {
-    const resp = await fetch(apiUrl('/api/agent-backends/status'));
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
-    _agentBackendCache = data.backends || [];
+    const data = await Api.agentBackends.status();
+    _agentBackendCache = (data && data.backends) || [];
     return _agentBackendCache;
   } catch (e) {
     console.error('[AgentBackends] Failed to fetch status:', e);

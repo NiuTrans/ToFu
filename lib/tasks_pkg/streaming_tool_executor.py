@@ -165,15 +165,16 @@ class StreamingToolAccumulator:
         # Note: we do NOT filter empty-args tool calls here.  During streaming
         # we can't tell phantom calls (model started a slot, never sent args)
         # from legitimate no-arg tools.  The post-stream
-        # filter in llm_client.py handles phantom detection using same-name
+        # filter in lib/llm/stream.py handles phantom detection using same-name
         # comparison.  A stray tool_start event for a phantom is harmless — it
         # just won't get a matching tool_done.
 
         # ── Parse arguments ──
         try:
             fn_args = json.loads(fn_args_raw) if fn_args_raw.strip() else {}
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as _e_audit:
             # Can't parse → still emit tool_start with empty args for UI feedback
+            logger.debug('[streaming_tool_executor] on_tool_call_ready caught %s: %s', type(_e_audit).__name__, _e_audit)
             fn_args = {}
 
         # ── Emit tool_start SSE event immediately ──
@@ -216,6 +217,7 @@ class StreamingToolAccumulator:
         self._tool_round_num, round_entry, event_payload = _build_tool_round_entry(
             fn_name, fn_args, tc_id, tc_args_str,
             self._tool_round_num, self._project_enabled,
+            conv_id=self._task.get('convId') or self._task.get('id'),
         )
         rn = round_entry['roundNum']
 
@@ -288,6 +290,8 @@ class StreamingToolAccumulator:
                                 parts[idx] = f'=== Search: {q} ===\n{fmt}' if len(query_list) > 1 else fmt
                                 results_per_q[idx] = r
                             except Exception as e:
+                                logger.debug('[%s] StreamingToolExec: batch search query %r failed: %s',
+                                             self._tid, query_list[idx][:80], e)
                                 parts[idx] = f'Search failed for "{query_list[idx]}": {e}'
                                 results_per_q[idx] = []
                     # Merge display_results across all queries (same as _handle_web_search_batch)
@@ -382,6 +386,8 @@ class StreamingToolAccumulator:
                                         'fetchedChars': 0,
                                     }
                             except Exception as e:
+                                logger.debug('[%s] StreamingToolExec: batch fetch %r failed: %s',
+                                             self._tid, u, e)
                                 parts[idx] = f"Failed to fetch {u}: {e}"
                                 display_results[idx] = {
                                     'title': f'Page: {_short_url(u)}',
@@ -559,13 +565,22 @@ class StreamingToolAccumulator:
                     #   then re-run the same rg from scratch → wasted
                     #   60s + a fresh full scan.  We now align, so the
                     #   pre-execution's result gets injected.
+                    #
+                    #   Grace window: _run_grep_subprocess kills the
+                    #   subprocess *at* io_timeout and then spends up to
+                    #   ~5s collecting partial output.  If we wait for
+                    #   exactly io_timeout we race the kill-and-collect
+                    #   phase and abandon the in-flight result, only for
+                    #   the serial pipeline to re-execute the same query
+                    #   for another full io_timeout.  Add a 10s slack so
+                    #   the partial-results banner gets cached instead.
                     _wait_timeout = 60
                     if fn_name in ('grep_search', 'read_files',
                                    'find_files', 'list_dir'):
                         try:
                             from lib.project_mod.read_tools import _get_io_timeout
                             _wait_timeout = _get_io_timeout(
-                                self._project_path or '.', default=60)
+                                self._project_path or '.', default=60) + 10
                         except Exception as _e:
                             logger.debug('[%s] StreamingToolExec: cross-DC '
                                          'timeout probe unavailable: %s',

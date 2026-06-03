@@ -1,0 +1,47 @@
+{
+  // ──────────────────────────────────────────────────────────────
+  //  Frontend type-check harness for Tofu's vanilla-JS frontend.
+  //
+  //  This does NOT introduce a build step. `tsc --noEmit` only reads
+  //  the existing static/js/*.js files (which share one global window
+  //  scope — no import/export) and reports cross-file misuse:
+  //  undefined symbols, typos in global names, wrong argument counts.
+  //
+  //  Started LENIENT on purpose: strict/noImplicitAny are OFF so the
+  //  first runs surface genuine bugs, not a flood of missing-annotation
+  //  noise. Tightening happens later via a per-file ratchet (mirroring
+  //  tests/test_frontend_api_isolation.py), once the real-bug backlog
+  //  is at zero.
+  // ──────────────────────────────────────────────────────────────
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+
+    // Check plain .js — no .ts files in the app frontend.
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+
+    // Lenient phase 1: only report what TS can prove is wrong.
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+
+    // Useful real-bug signals, cheap to satisfy.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "skipLibCheck": true,
+    "types": []
+  },
+  "include": [
+    "static/js/globals.d.ts",
+    "static/js/**/*.js"
+  ],
+  "exclude": [
+    "node_modules",
+    "static/js/bundle-*.js",
+    "clients/**"
+  ]
+}

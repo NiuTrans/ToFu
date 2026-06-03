@@ -18,10 +18,8 @@ function toggleTimerPanel(e) {
 // ── Refresh panel data from API ──
 async function _refreshTimerPanel() {
   try {
-    const resp = await fetch(apiUrl("/api/timer/list"));
-    if (!resp.ok) return;
-    const data = await resp.json();
-    if (!data.ok) return;
+    const data = await Api.timer.list();
+    if (!data || !data.ok) return;
 
     const timers = data.timers || [];
     const activeCount = data.active_count || 0;
@@ -98,13 +96,12 @@ async function _refreshTimerPanel() {
 // ── Actions ──
 async function _triggerTimer(timerId) {
   try {
-    const resp = await fetch(apiUrl(`/api/timer/${timerId}/trigger`), { method: "POST" });
-    const data = await resp.json();
-    if (data.ok) {
+    const data = await Api.timer.trigger(timerId);
+    if (data && data.ok) {
       debugLog(`⏱️ Timer ${timerId} triggered! Execution: ${data.execution_task_id}`, "success");
       _refreshTimerPanel();
     } else {
-      debugLog(`⏱️ Trigger failed: ${data.error}`, "error");
+      debugLog(`⏱️ Trigger failed: ${data && data.error}`, "error");
     }
   } catch (e) {
     debugLog(`⏱️ Trigger error: ${e.message}`, "error");
@@ -113,7 +110,7 @@ async function _triggerTimer(timerId) {
 
 async function _cancelTimer(timerId) {
   try {
-    await fetch(apiUrl(`/api/timer/${timerId}/cancel`), { method: "POST" });
+    await Api.timer.cancel(timerId);
     debugLog(`⏱️ Timer ${timerId} cancelled.`, "info");
     _refreshTimerPanel();
   } catch (e) {
@@ -123,9 +120,8 @@ async function _cancelTimer(timerId) {
 
 async function _viewTimerLog(timerId) {
   try {
-    const resp = await fetch(apiUrl(`/api/timer/${timerId}/status?limit=20`));
-    const data = await resp.json();
-    if (!data.ok || !data.poll_log || data.poll_log.length === 0) {
+    const data = await Api.timer.status(timerId, 20);
+    if (!data || !data.ok || !data.poll_log || data.poll_log.length === 0) {
       debugLog("⏱️ No poll log entries yet.", "info");
       return;
     }
@@ -160,10 +156,8 @@ async function _refreshTimerBadge() {
     return;
   }
   try {
-    const resp = await fetch(apiUrl("/api/timer/list"));
-    if (!resp.ok) return;
-    const data = await resp.json();
-    if (!data.ok) return;
+    const data = await Api.timer.list();
+    if (!data || !data.ok) return;
     const activeCount = data.active_count || 0;
     const badge = document.getElementById("timerBadge");
     const countEl = document.getElementById("timerCount");

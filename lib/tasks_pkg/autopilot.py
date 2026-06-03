@@ -1,0 +1,777 @@
+"""Autopilot mode — virtual user that auto-replies when the LLM stops.
+
+When the model would normally hand control back to the user (either by
+calling ``ask_human`` or by emitting a final assistant message with
+``finish_reason='stop'``), Autopilot runs a one-shot LLM as the *user*
+and feeds its reply back to the orchestrator as a brand-new turn.
+
+Design constraints (locked in by the user, do not relax silently):
+
+  • **Runs BEFORE the ``done`` SSE event.**  The hook fires inside
+    ``_finalize_and_emit_done`` after the post-loop work but *before*
+    ``append_event(done_evt)`` / ``persist_task_result``.  This lets
+    the ``done`` event carry ``autopilotNextTaskId`` +
+    ``autopilotVuMessage`` so the frontend attaches to the follow-up
+    task directly instead of polling ``/api/chat/active`` after the
+    SSE stream has already closed.  (Earlier design ran autopilot
+    *after* persist; the SSE pipe was closed by the time the VU
+    finished, so the synthetic user msg was invisible until manual
+    refresh.)
+
+  • **Independent of endpoint mode.**  Autopilot and endpoint mode are
+    mutually exclusive — both share the same termination boundary
+    ("the model stopped") so running them together would double-loop.
+    The frontend hides one toggle when the other is on; this module
+    additionally bails out when ``task['_endpoint_managed']`` is set.
+
+  • **Reuse the conversation's main model.**  No separate VU model.
+
+  • **Same tools as the worker.**  The VU runs through the full
+    orchestrator (``_run_single_turn``) so it has access to every tool
+    the parent task has — read_files, search, project edits, browser,
+    memory, MCP, etc.  This lets the simulated user investigate before
+    composing its reply (e.g. "let me check the file the assistant
+    referenced before answering").  Inherited from
+    ``task['config']`` verbatim — same tool list as
+    ``_assemble_tool_list`` would build for the parent.
+
+  • **Role override via a trailing directive turn**, mirroring how
+    endpoint-mode's planner/critic announce their role.  We do NOT
+    role-swap the conversation history: the LLM sees the real
+    conversation and a final user-turn that says "for THIS turn play
+    the simulated user".  Prefix-cache-friendly and avoids the
+    swapped-history confusion with the orchestrator's injected
+    system prompt.
+
+  • **Full conversation passed through.**  We do NOT trim history
+    here; the orchestrator's compaction layer (run_compaction_pipeline)
+    handles bounding.  This keeps tool_calls / tool_result pairs
+    contiguous and removes one place where context choices can drift
+    between the worker and the simulated user.
+
+  • **No turn cap, no state-change watchdog.**  The only graceful stop
+    signal is the VU itself emitting ``[VU: TASK_DONE]``.  Other stops
+    are: real-user abort, real-user sending a new message (handled
+    automatically by ``abort_running_tasks_for_conv``), an error path,
+    or the queue having a real queued message waiting (deferred to).
+
+  • **Empty VU output does NOT stop the loop.**  An empty reply is
+    treated as a valid "yeah, keep going" — the orchestrator just
+    starts a fresh turn with that empty user message.  This is the
+    user's explicit choice — see the design discussion in
+    docs/ARCHITECTURE.md if rebooting decisions.
+
+The "don't stop on empty output" rule means the only correctness escape
+hatch is the real user clicking Stop or sending a new message.  Both are
+already wired through ``task['aborted']`` and the freshness guard in
+``manager._conv_latest_task``, so we don't need extra plumbing here.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+import uuid
+
+from lib.agent_core.events import EventType, build_event
+from lib.log import audit_log, get_logger
+
+logger = get_logger(__name__)
+
+
+_VU_DONE_SENTINEL = '[VU: TASK_DONE]'
+
+
+_VU_ROLE_PROMPT = (
+    'You are simulating the user in a chat with an AI assistant.\n'
+    'Reply briefly, in the first person, as if you were the user.\n\n'
+    'Decision rules:\n'
+    '- For code / engineering tasks: pick the most robust long-term '
+    'solution. Do not optimize for cost, implementation speed, or '
+    'backward compatibility. Prefer fixing root causes over patches.\n'
+    '- For open-ended discussion: use your own judgment, stay concrete, '
+    'pick a direction instead of asking more questions.\n'
+    '- If the assistant has clearly finished the task and is just '
+    'signing off (no question pending, no proposal awaiting review), '
+    f'reply EXACTLY: {_VU_DONE_SENTINEL}\n'
+    '- Never invent product requirements the real user never mentioned.\n'
+    '- Keep replies to 1-3 sentences unless the assistant explicitly '
+    'asked for detail.\n'
+    '- Reply in the same language the assistant used.\n'
+    '- Output ONLY the reply text — no quotation marks, no role labels, '
+    f'no preamble. The {_VU_DONE_SENTINEL} sentinel must appear on its '
+    'own when used.\n\n'
+    'You MAY use any of the tools available to you (read_files, '
+    'search, etc.) to investigate before answering — for example, to '
+    'check a file the assistant referenced or to look up a fact.  Tool '
+    'use is optional; if you already know how to reply, just reply.'
+)
+
+
+def is_autopilot_enabled(task: dict) -> bool:
+    """True iff autopilot is on AND endpoint mode is not also on.
+
+    The mutual-exclusion check is defense in depth — the frontend
+    already gates one toggle on the other.
+    """
+    cfg = task.get('config') or {}
+    if not cfg.get('autopilot'):
+        return False
+    if cfg.get('endpointMode') or task.get('_endpoint_managed'):
+        return False
+    return True
+
+
+def _summarize_vu_tool_event(ev: dict) -> str:
+    """Build a short, user-readable label for a VU tool event.
+
+    Used for the parent-stream ``autopilot_thinking`` phase chip so the
+    user sees what the VU is doing in real time (e.g. "read_files
+    lib/foo.py", "web_search 'flask blueprint'").  Best-effort: any
+    parse failure falls back to the bare tool name.
+    """
+    name = ev.get('toolName') or ''
+    args = ev.get('toolArgs')
+    detail = ''
+    try:
+        if isinstance(args, str):
+            args = json.loads(args)
+        if isinstance(args, dict):
+            for key in ('path', 'url', 'query', 'pattern',
+                        'file_path', 'command', 'name'):
+                v = args.get(key)
+                if isinstance(v, str) and v:
+                    detail = v
+                    break
+            # read_files batch: pull first path
+            if not detail and isinstance(args.get('reads'), list):
+                first = args['reads'][0] if args['reads'] else None
+                if isinstance(first, dict) and isinstance(first.get('path'), str):
+                    detail = first['path']
+    except (ValueError, TypeError, KeyError) as e:
+        logger.debug('[Autopilot] tool-event summary parse failed: %s', e)
+    if name and detail:
+        # Truncate long paths/queries for the chip
+        detail = detail if len(detail) <= 80 else detail[:77] + '…'
+        return f'{name} · {detail}'
+    return name or 'tool'
+
+
+_VU_FORWARD_TYPES = frozenset({
+    'delta', 'phase',
+    'tool_start', 'tool_result', 'tool_progress', 'tool_complete',
+    'tool_compacted',
+    'stdin_request', 'stdin_resolved',
+    'write_approval_request',
+    'human_guidance_request', 'human_guidance_response',
+})
+
+
+class _VUEventForwarder(list):
+    """List subclass that forwards the VU sub-task's events to the parent.
+
+    The orchestrator drives all SSE updates by calling
+    ``manager.append_event(task, ev)`` which does
+    ``task['events'].append(ev)`` under the task's events_lock.  By
+    swapping ``sub_task['events']`` with this subclass we get a hook on
+    every event the VU sub-task emits, without monkey-patching
+    ``append_event`` globally.
+
+    For each VU event we still append it to the underlying list (so the
+    sub-task's own SSE stream stays intact for any reader that ever
+    connects to it), and additionally forward two flavours of derived
+    events onto the PARENT task's stream:
+
+      1. ``autopilot_vu_event`` — wraps the original VU sub-task event
+         (delta / tool_start / tool_result / tool_progress / tool_complete /
+         tool_compacted / stdin_* / write_approval_request /
+         human_guidance_*) so the frontend can render the VU's reply +
+         tool calls into the synthetic-user bubble *as they happen*,
+         instead of materializing the whole bubble after the VU
+         finishes.  The wrapper carries ``vuMsgId`` so the frontend can
+         target the right message.
+
+      2. ``phase: autopilot_thinking`` chip — kept for backward compat
+         with the existing parent-stream chip ("Autopilot
+         investigating · read_files lib/foo.py") that lives next to the
+         worker bubble while the VU runs.
+    """
+
+    def __init__(self, parent_task, vu_msg_id):
+        super().__init__()
+        self._parent = parent_task
+        self._vu_msg_id = vu_msg_id
+
+    def append(self, ev):
+        super().append(ev)
+        try:
+            self._forward_to_parent(ev)
+        except Exception as e:
+            logger.debug('[Autopilot] event forward failed (non-fatal): %s', e)
+
+    def _forward_to_parent(self, ev):
+        from lib.tasks_pkg.manager import append_event as _ap_event
+        et = (ev or {}).get('type')
+
+        # Forward the inner event verbatim, wrapped so the frontend
+        # routes it into the VU bubble (by vuMsgId) instead of the
+        # parent's worker bubble.  We re-emit the parent-stream phase
+        # chip below as well; the two are not mutually exclusive (one
+        # paints the VU bubble, the other annotates the parent's chip).
+        if et in _VU_FORWARD_TYPES:
+            _ap_event(self._parent, build_event(
+                EventType.AUTOPILOT_VU_EVENT,
+                vuMsgId=self._vu_msg_id,
+                inner=ev,
+            ))
+
+        if et == 'tool_start':
+            label = _summarize_vu_tool_event(ev)
+            _ap_event(self._parent, build_event(
+                EventType.PHASE,
+                phase='autopilot_thinking',
+                detail=f'Autopilot investigating · {label}',
+            ))
+        elif et == 'tool_result':
+            _ap_event(self._parent, build_event(
+                EventType.PHASE,
+                phase='autopilot_thinking',
+                detail='Autopilot is generating the next user reply…',
+            ))
+
+
+def run_virtual_user(task: dict, vu_msg_id: str | None = None) -> dict | None:
+    """Run the VU LLM (with full tools) and return its reply + investigation.
+
+    The VU runs as a fresh sub-task through the orchestrator's
+    ``_run_single_turn``, inheriting the parent task's config so the
+    same tools (read_files, search, project edits, memory, MCP, …)
+    are available.  The trailing directive user-turn announces the
+    "simulated user" role for THIS turn only — the conversation
+    history itself is not role-swapped.
+
+    Returns ``{'text': str, 'rounds': list}`` on success, where
+    ``rounds`` is the VU sub-task's tool round history (suitable for
+    attaching to the persisted synthetic user message so the user can
+    see what Autopilot probed).  Returns ``None`` when the loop should
+    stop — either because the VU emitted ``[VU: TASK_DONE]``, the
+    sub-task failed, or the parent task was aborted while the VU was
+    thinking.  An empty ``text`` is a valid "keep going" reply.
+    """
+    tid = task['id'][:8]
+    if task.get('aborted'):
+        logger.info('[Autopilot %s] Skip — task aborted', tid)
+        return None
+
+    parent_messages = task.get('messages') or []
+    if not parent_messages:
+        logger.warning('[Autopilot %s] No messages — stopping', tid)
+        return None
+
+    # Append the role-override directive as a trailing user turn —
+    # same pattern as endpoint_review._run_planner_turn / _run_critic_turn.
+    # We pass the parent's full message list verbatim so the VU sees the
+    # entire conversation (including tool_calls / tool_result pairs);
+    # the orchestrator's compaction layer handles context bounding.
+    vu_messages = [dict(m) for m in parent_messages]
+    vu_messages.append({
+        'role': 'user',
+        'content': (
+            '=== Your role for THIS turn: Simulated User ===\n'
+            f'{_VU_ROLE_PROMPT}\n'
+            '=== End simulated-user role ===\n\n'
+            'Based on the conversation above, produce the simulated '
+            'user\'s reply now.  Investigate first with tools if you '
+            'want, then output the reply text only.'
+        ),
+        '_isVuDirective': True,
+    })
+
+    # Build a fresh sub-task that inherits the parent's config so
+    # _assemble_tool_list constructs the same tool list the worker had.
+    # ``_inline_messages=True`` keeps it out of the conv DB sync path,
+    # ``convId=''`` keeps it out of the latest-task registry, and
+    # ``_endpoint_managed=True`` suppresses the orchestrator's done
+    # event + autopilot recursion.
+    from lib.tasks_pkg import create_task
+    from lib.tasks_pkg.orchestrator import _run_single_turn
+
+    sub_cfg = dict(task.get('config') or {})
+    # Strip checkpoint/continue flags so the sub-task starts clean.
+    for stale_key in (
+        'excludeLast', 'toolHistory', 'contentPrefix',
+        'checkpointToolRounds', 'checkpointUsage', 'checkpointApiRounds',
+        'checkpointModifiedFiles', 'checkpointModifiedFileList',
+    ):
+        sub_cfg.pop(stale_key, None)
+    # Endpoint mode is gated by is_autopilot_enabled but be defensive —
+    # the sub-task must never re-enter endpoint mode.
+    sub_cfg['endpointMode'] = False
+    # Autopilot must NOT recurse (the parent's hook already runs us).
+    sub_cfg['autopilot'] = False
+    # Disable ask_human for the simulated user — the VU IS the user, so
+    # asking another human makes no sense and would block forever (the
+    # in-handler autopilot fallback is gated on cfg.autopilot which we
+    # just turned off above).
+    sub_cfg['humanGuidanceEnabled'] = False
+
+    sub_task = create_task('', vu_messages, sub_cfg)
+    sub_task['_inline_messages'] = True
+    sub_task['_vu_subtask'] = True
+    sub_task['_autopilotParent'] = task.get('id', '')
+
+    # Swap in a forwarding event list so the VU sub-task's events
+    # surface live on the parent stream:
+    #   • inner events (delta / tool_start / tool_result / tool_progress
+    #     / tool_complete / tool_compacted / stdin_* /
+    #     write_approval_request / human_guidance_*) are wrapped as
+    #     `autopilot_vu_event` and routed by the frontend into the VU
+    #     bubble identified by `vuMsgId` — so the user sees the VU's
+    #     tool calls and reply STREAM in, not "pop in" once the VU
+    #     finishes.
+    #   • a parallel `phase: autopilot_thinking` chip continues to
+    #     annotate the parent's worker bubble for users who skim past.
+    sub_task['events'] = _VUEventForwarder(task, vu_msg_id or '')
+
+    # Mirror parent abort onto the sub-task so user-clicked Stop while
+    # the VU is mid-tool-loop tears the sub-task down too.  Single
+    # threaded poll is fine — the sub-task is short-lived and the
+    # orchestrator already polls task['aborted'] each round.
+    _stop_mirror = threading.Event()
+
+    def _mirror_abort():
+        while not _stop_mirror.is_set():
+            if task.get('aborted') and not sub_task.get('aborted'):
+                sub_task['aborted'] = True
+                sub_task['_abort_timestamp'] = time.time()
+                sub_task['_abort_reason'] = 'parent_aborted'
+                logger.info('[Autopilot %s] Mirroring parent abort onto '
+                            'VU sub-task %s', tid, sub_task['id'][:8])
+                return
+            _stop_mirror.wait(0.5)
+
+    _mirror_thread = threading.Thread(
+        target=_mirror_abort,
+        name=f'autopilot-abort-mirror-{tid}',
+        daemon=True,
+    )
+    _mirror_thread.start()
+
+    try:
+        result = _run_single_turn(sub_task)
+    except Exception as e:
+        logger.warning('[Autopilot %s] VU sub-task raised: %s — '
+                       'stopping autopilot for this conv', tid, e,
+                       exc_info=True)
+        return None
+    finally:
+        _stop_mirror.set()
+
+    if task.get('aborted'):
+        logger.info('[Autopilot %s] Aborted during VU sub-task — stopping', tid)
+        return None
+
+    err = result.get('error')
+    if err:
+        logger.warning('[Autopilot %s] VU sub-task error: %.200s — '
+                       'stopping autopilot for this conv', tid, err)
+        return None
+
+    text = (result.get('content') or '').strip()
+    rounds = list(sub_task.get('toolRounds') or [])
+    if _VU_DONE_SENTINEL in text:
+        logger.info('[Autopilot %s] VU emitted TASK_DONE — stopping loop', tid)
+        audit_log('autopilot_stop',
+                  task_id=task.get('id', ''),
+                  conv_id=task.get('convId', ''),
+                  reason='vu_task_done')
+        return None
+
+    logger.info('[Autopilot %s] VU reply: %.200s%s (used %d tool round(s))',
+                tid, text, ' …' if len(text) > 200 else '', len(rounds))
+    return {'text': text, 'rounds': rounds}
+
+
+# ──────────────────────────────────────────────────────────────────
+#  Follow-up scheduling — append a synthetic user msg + start a task
+# ──────────────────────────────────────────────────────────────────
+
+def _has_pending_real_message(conv_id: str) -> bool:
+    """True if a real user message is queued — autopilot must defer."""
+    if not conv_id:
+        return False
+    try:
+        from lib.message_queue import get_queue_depth
+        return get_queue_depth(conv_id) > 0
+    except Exception as e:
+        logger.debug('[Autopilot] queue depth probe failed (non-fatal): %s', e)
+        return False
+
+
+def _successor_already_running(task: dict, conv_id: str) -> bool:
+    """True if another task has already taken over for this conversation.
+
+    ``persist_task_result`` runs ``_dispatch_queued_message`` before our
+    hook fires, so a queued real-user message will already have spawned
+    its own follow-up task.  Spawning a VU follow-up on top of that
+    would (a) abort the queued task via ``abort_running_tasks_for_conv``
+    and (b) clobber the user's actual question.  Detect this by looking
+    at the latest-task registry.
+    """
+    if not conv_id:
+        return False
+    try:
+        from lib.tasks_pkg.manager import (
+            _conv_latest_task,
+            _conv_latest_task_lock,
+        )
+        with _conv_latest_task_lock:
+            latest = _conv_latest_task.get(conv_id)
+        return bool(latest) and latest != task.get('id')
+    except Exception as e:
+        logger.debug('[Autopilot] latest-task probe failed (non-fatal): %s', e)
+        return False
+
+
+def _append_vu_message_to_conv(conv_id: str, vu_msg_id: str,
+                                text: str,
+                                rounds: list | None = None) -> dict | None:
+    """Append the VU's reply as a user message in the conversation DB.
+
+    Called ONLY after the VU has successfully produced a reply (i.e.
+    after ``run_virtual_user`` returned non-``None``).  This is a
+    deliberate design choice:
+
+      • We DO NOT pre-write an empty placeholder before the VU runs.
+        Doing so used to leave orphan empty rows in the DB whenever
+        the cleanup path was missed (server crash, abort race, etc.)
+        — visible to the user as "an empty VU bubble at the bottom"
+        even when autopilot never actually took over.
+
+      • The frontend lazily creates the VU bubble in memory when it
+        receives the first ``autopilot_vu_event`` carrying actual
+        content (``delta`` with text or ``tool_start``).  No DB write
+        happens until success — so a VU that bails out (``[VU:
+        TASK_DONE]``, abort, real user msg) leaves NO trace on disk.
+
+    ``_msgId`` is the caller-minted id that the frontend used to route
+    streaming updates; persisting it here lets a page reload right
+    AFTER autopilot completes find the same message id and reconcile.
+    """
+    try:
+        from lib.database import (
+            DOMAIN_CHAT,
+            db_execute_with_retry,
+            get_thread_db,
+            json_dumps_pg,
+        )
+    except Exception as e:
+        logger.warning('[Autopilot] DB import failed: %s', e)
+        return None
+
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT messages FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)
+        ).fetchone()
+        if not row:
+            logger.warning('[Autopilot] conv=%s not found — cannot append VU msg',
+                           conv_id[:8])
+            return None
+        try:
+            messages = json.loads(row[0] or '[]')
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning('[Autopilot] conv=%s messages parse failed: %s',
+                           conv_id[:8], e)
+            return None
+
+        vu_msg = {
+            'role': 'user',
+            'content': text,
+            'timestamp': int(time.time() * 1000),
+            '_msgId': vu_msg_id,
+            '_isVirtualUser': True,
+        }
+        if rounds:
+            vu_msg['toolRounds'] = rounds
+        messages.append(vu_msg)
+
+        now_ms = int(time.time() * 1000)
+        try:
+            from routes.conversations import build_search_text
+            search_text = build_search_text(messages)
+        except Exception as e:
+            logger.debug('[Autopilot] build_search_text failed: %s', e)
+            search_text = ''
+
+        db_execute_with_retry(
+            db,
+            '''UPDATE conversations
+                  SET messages=?, updated_at=?, msg_count=?, search_text=?
+                  WHERE id=? AND user_id=1''',
+            (json_dumps_pg(messages), now_ms, len(messages), search_text,
+             conv_id),
+        )
+        logger.info('[Autopilot] conv=%s ✅ Appended VU msg %s (%d chars, %d rounds)',
+                    conv_id[:8], vu_msg_id[:12], len(text), len(rounds or []))
+        return vu_msg
+    except Exception as e:
+        logger.error('[Autopilot] conv=%s append failed: %s',
+                     conv_id[:8], e, exc_info=True)
+        return None
+
+
+def _start_followup_task(task: dict, conv_id: str) -> str | None:
+    """Build api_messages from the conversation and spawn a new task.
+
+    Mirrors what ``_start_task_for_conv`` does, but inlined to avoid
+    importing from ``routes`` (orchestrator must not pull route-layer
+    code at module scope — circular).
+    """
+    from lib.tasks_pkg import create_task
+    from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
+    from lib.tasks_pkg.manager import abort_running_tasks_for_conv
+
+    cfg = dict(task.get('config') or {})
+    # Strip checkpoint / continue flags so the follow-up runs fresh.
+    for stale_key in (
+        'excludeLast', 'toolHistory', 'contentPrefix',
+        'checkpointToolRounds', 'checkpointUsage', 'checkpointApiRounds',
+        'checkpointModifiedFiles', 'checkpointModifiedFileList',
+    ):
+        cfg.pop(stale_key, None)
+
+    api_messages = build_api_messages_from_db(conv_id, cfg)
+    if not api_messages:
+        logger.warning('[Autopilot] conv=%s build_api_messages returned '
+                       'empty — cannot start follow-up', conv_id[:8])
+        return None
+
+    # Belt-and-braces: any other still-running task for this conv is
+    # superseded by this autopilot follow-up, same as a real user send.
+    abort_running_tasks_for_conv(conv_id)
+
+    new_task = create_task(conv_id, api_messages, cfg)
+    new_task_id = new_task['id']
+    new_task['_autopilotParent'] = task.get('id')
+
+    logger.info('[Autopilot] Spawning follow-up task %s for conv=%s '
+                '(parent=%s)', new_task_id[:8], conv_id[:8],
+                task.get('id', '?')[:8])
+    audit_log('autopilot_followup',
+              parent_task_id=task.get('id', ''),
+              new_task_id=new_task_id,
+              conv_id=conv_id)
+
+    try:
+        from lib.tasks_pkg import spawn_task as _spawn_task
+        _spawn_task(new_task)
+    except Exception as e:
+        logger.error('[Autopilot] Failed to start follow-up thread: %s',
+                     e, exc_info=True)
+        from lib.error_envelope import make_envelope as _make_env
+        new_task['status'] = 'error'
+        new_task['error'] = _make_env(
+            'internal',
+            detail='Autopilot failed to spawn follow-up thread.',
+            model=cfg.get('model', ''),
+            context='autopilot',
+            source='autopilot',
+            raw=str(e),
+        )
+        return None
+
+    # Update conversation settings.activeTaskId so reload still finds the
+    # live task.  Best-effort — failure here doesn't break the loop.
+    try:
+        from lib.database import (
+            DOMAIN_CHAT,
+            db_execute_with_retry,
+            get_thread_db,
+        )
+        db = get_thread_db(DOMAIN_CHAT)
+        srow = db.execute(
+            'SELECT settings FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)
+        ).fetchone()
+        if srow:
+            try:
+                settings = json.loads(srow[0] or '{}')
+            except (json.JSONDecodeError, TypeError) as _e_audit:
+                logger.debug('[autopilot] _start_followup_task caught %s: %s', type(_e_audit).__name__, _e_audit)
+                settings = {}
+            settings['activeTaskId'] = new_task_id
+            db_execute_with_retry(
+                db,
+                'UPDATE conversations SET settings=? WHERE id=? AND user_id=1',
+                (json.dumps(settings, ensure_ascii=False), conv_id),
+            )
+    except Exception as e:
+        logger.debug('[Autopilot] activeTaskId update skipped: %s', e)
+
+    try:
+        from routes.common import _invalidate_meta_cache
+        _invalidate_meta_cache()
+    except Exception as e:
+        logger.debug('[Autopilot] meta cache invalidation skipped: %s', e)
+
+    return new_task_id
+
+
+def maybe_run_autopilot(task: dict) -> dict | None:
+    """End-of-turn hook: run the VU and spawn a follow-up task if eligible.
+
+    Called from ``_finalize_and_emit_done`` BEFORE ``append_event(done_evt)``
+    so the returned info can be embedded in the same ``done`` SSE event
+    that finishes the current turn.  This eliminates the polling race
+    where the SSE stream closed before the VU had time to spawn the
+    follow-up task — the synthetic user message is now delivered
+    in-band on the same connection.
+
+    Returns ``{'next_task_id': str, 'vu_msg': dict}`` when a follow-up
+    was spawned, ``None`` otherwise (no autopilot, no eligible context,
+    VU emitted ``[VU: TASK_DONE]``, real user message queued, or any
+    failure path).  The orchestrator inlines the dict into ``done_evt``
+    as ``autopilotNextTaskId`` + ``autopilotVuMessage``.
+    """
+    tid = task['id'][:8]
+
+    if not is_autopilot_enabled(task):
+        # Log at debug level so silencing is invisible in normal mode
+        # but findable when someone wonders "why didn't it take over?".
+        cfg = task.get('config') or {}
+        logger.debug('[Autopilot %s] Skip — not enabled '
+                     '(autopilot=%s, endpointMode=%s, _endpoint_managed=%s)',
+                     tid, cfg.get('autopilot'), cfg.get('endpointMode'),
+                     task.get('_endpoint_managed'))
+        return None
+
+    conv_id = task.get('convId') or ''
+    if not conv_id or task.get('_inline_messages'):
+        logger.debug('[Autopilot %s] Skip — no DB-backed conversation', tid)
+        return None
+    if task.get('aborted'):
+        logger.info('[Autopilot %s] Skip — task aborted before VU could run', tid)
+        return None
+    if task.get('error'):
+        logger.info('[Autopilot %s] Skip — task ended in error: %.120s',
+                    tid, str(task.get('error')))
+        return None
+    if task.get('finishReason') == 'tool_rounds_exhausted':
+        logger.info('[Autopilot %s] Skip — tool rounds exhausted', tid)
+        return None
+
+    if _has_pending_real_message(conv_id):
+        logger.info('[Autopilot %s] Skip — real user message queued '
+                    '(it takes priority)', tid)
+        return None
+    # ``_successor_already_running`` is largely redundant in the new
+    # ordering (queue dispatch happens AFTER us via persist_task_result),
+    # but keep it as defense-in-depth for endpoint-mode / branch flows
+    # that may have already advanced the latest-task registry for this
+    # conversation.
+    if _successor_already_running(task, conv_id):
+        logger.info('[Autopilot %s] Skip — another task already took over '
+                    'for conv=%s', tid, conv_id[:8])
+        return None
+
+    from lib.tasks_pkg.manager import append_event
+
+    # Mint the VU message id up front BUT do NOT write anything to the
+    # conv DB yet, and do NOT emit a `autopilot_vu_start` event.  The
+    # frontend will lazily create the VU bubble in memory the first
+    # time it receives an `autopilot_vu_event` carrying real activity
+    # (delta with text, or tool_start).  Pure phase events do NOT
+    # trigger creation — we don't want an empty bubble flickering on
+    # screen for several seconds while the VU is still warming up.
+    #
+    # Failure paths (TASK_DONE / abort / queued real user msg) leave
+    # NO trace on disk, fixing the "ghost empty VU at the bottom"
+    # bug where placeholder rows survived cleanup.
+    vu_msg_id = str(uuid.uuid4())
+
+    # Surface the parent-bubble phase chip so the user has SOME signal
+    # that autopilot is running, even before the VU produces output.
+    try:
+        append_event(task, build_event(
+            EventType.PHASE,
+            phase='autopilot_thinking',
+            detail='Autopilot is generating the next user reply…',
+        ))
+    except Exception as e:
+        logger.debug('[Autopilot %s] phase emit failed: %s', tid, e)
+
+    vu_result = run_virtual_user(task, vu_msg_id=vu_msg_id)
+    if vu_result is None:
+        # VU emitted [VU: TASK_DONE], errored, or task was aborted.
+        # Tell the frontend to discard any in-memory bubble it may
+        # have lazily created from inner stream events; nothing was
+        # ever persisted.
+        try:
+            append_event(task, build_event(
+                EventType.AUTOPILOT_VU_CANCEL,
+                vuMsgId=vu_msg_id,
+            ))
+        except Exception as e:
+            logger.debug('[Autopilot %s] vu_cancel emit failed: %s', tid, e)
+        return None
+    vu_text = vu_result['text']
+    vu_rounds = vu_result.get('rounds') or []
+
+    # Race-close: a real user may have submitted a message while the VU
+    # LLM call was running.  If so, defer to that real message instead
+    # of clobbering it with a synthetic VU turn.
+    if _has_pending_real_message(conv_id):
+        logger.info('[Autopilot %s] Real user message arrived during VU '
+                    'call — deferring to queue', tid)
+        try:
+            append_event(task, build_event(EventType.AUTOPILOT_VU_CANCEL,
+                                 vuMsgId=vu_msg_id))
+        except Exception as e:
+            logger.debug('[Autopilot %s] vu_cancel emit failed: %s', tid, e)
+        return None
+    if task.get('aborted'):
+        logger.info('[Autopilot %s] Aborted while VU was running — stopping', tid)
+        try:
+            append_event(task, build_event(EventType.AUTOPILOT_VU_CANCEL,
+                                 vuMsgId=vu_msg_id))
+        except Exception as e:
+            logger.debug('[Autopilot %s] vu_cancel emit failed: %s', tid, e)
+        return None
+
+    # VU produced a reply — NOW commit it to the conv DB.
+    vu_msg = _append_vu_message_to_conv(
+        conv_id, vu_msg_id, vu_text, rounds=vu_rounds,
+    )
+    if vu_msg is None:
+        return None
+
+    # Tell the frontend the VU bubble is fully baked.  Carries the
+    # final content + rounds so a client that lazily built the bubble
+    # from streaming deltas — or one that missed them entirely (cold
+    # replay, late connect) — can reconcile in one shot.
+    try:
+        append_event(task, build_event(
+            EventType.AUTOPILOT_VU_DONE,
+            vuMsgId=vu_msg_id,
+            vuMessage=vu_msg,
+        ))
+    except Exception as e:
+        logger.debug('[Autopilot %s] vu_done emit failed: %s', tid, e)
+
+    next_task_id = _start_followup_task(task, conv_id)
+    if next_task_id is None:
+        return None
+
+    # Tell ``_dispatch_queued_message`` (which runs slightly after us
+    # inside ``persist_task_result``) that autopilot already spawned a
+    # successor for this conversation.  Otherwise a real user message
+    # that landed in the tiny window between our post-VU queue re-check
+    # and now would race-spawn its own task and abort our follow-up.
+    # The queued message will be picked up when the autopilot follow-up
+    # itself completes.
+    task['_autopilot_spawned_followup'] = next_task_id
+
+    return {'next_task_id': next_task_id, 'vu_msg': vu_msg}

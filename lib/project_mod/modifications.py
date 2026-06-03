@@ -69,7 +69,8 @@ def _atomic_json_write(filepath, data):
         # Clean up temp file on any failure (including KeyboardInterrupt)
         try:
             os.unlink(tmp_path)
-        except OSError:
+        except OSError as _e_audit:
+            logger.debug('[modifications] _atomic_json_write caught %s: %s', type(_e_audit).__name__, _e_audit)
             pass
         raise
 
@@ -327,7 +328,8 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
         if mod.get('existed', True) and original_content is not None:
             from lib import file_history as fh
             v = fh.track_edit(base_path, path, message_id=task_id,
-                              pre_content=original_content)
+                              pre_content=original_content,
+                              task_id=task_id)
             if v is not None:
                 mod['fhVersion'] = v
     except Exception as e:

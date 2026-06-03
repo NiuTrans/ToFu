@@ -28,9 +28,18 @@ data/
 /sundries/
 /tools/
 
-# ── SWE-bench workdir (large, causes FUSE timeouts) ──
+# ── Academic / personal scratch content (NOT part of the app — must never
+#    be published to the public mirror). overleaf_cache holds fetched
+#    Overleaf projects (real unpublished papers/theses); paper/ holds a
+#    paper draft; thesis_references.bib is a personal bib file. ──
+/overleaf_cache/
+/paper/
+/thesis_references.bib
+
+# ── Eval / bench workdirs (large, causes FUSE timeouts) ──
 swebench_workdir/
 swebench_rerun_workdir/
+abtest_workdir/
 
 # ── Test coverage ──
 .coverage
@@ -46,6 +55,10 @@ logs/
 
 # ── JS bundle (auto-generated at startup) ──
 static/js/bundle-*.js
+
+# ── Frontend type-check harness (tsc --checkJs) ──
+node_modules/
+*.tsbuildinfo
 
 # ── Linting ──
 .ruff_cache/
@@ -79,3 +92,14 @@ docs/RATE_LIMITING_DOS_AUDIT_REPORT.md
 uploads/images/*
 !uploads/images/.gitkeep
 uploads/pptx/
+
+# ── Model-generated posters (output of generate_image into project) ──
+static/posters/
+
+# ── PyInstaller / desktop build artifacts ──
+build/
+dist/
+*.spec.bak
+installer_output/
+static/icons/tofu.ico
+static/icons/tofu.icns

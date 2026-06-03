@@ -772,8 +772,13 @@
     }).then(function (resp) { return resp.json(); })
     .then(function (data) {
       if (data.error) {
-        toast('启动失败: ' + data.error, 'error');
-        _appendFetchLog('❌ ' + data.error);
+        var _msg = (typeof errorEnvelopeMessage === 'function')
+          ? (errorEnvelopeMessage(data.error)
+             || (typeof data.error === 'string' ? data.error : JSON.stringify(data.error)))
+          : (typeof data.error === 'string' ? data.error
+             : (data.error && data.error.message) || 'Unknown error');
+        toast('启动失败: ' + _msg, 'error');
+        _appendFetchLog('❌ ' + _msg);
         _stopFetchElapsed();
         return;
       }
@@ -1086,7 +1091,12 @@
     .then(function (resp) { return resp.json(); })
     .then(function (data) {
       if (data.error) {
-        toast('模拟启动失败: ' + data.error, 'error');
+        var _msg = (typeof errorEnvelopeMessage === 'function')
+          ? (errorEnvelopeMessage(data.error)
+             || (typeof data.error === 'string' ? data.error : JSON.stringify(data.error)))
+          : (typeof data.error === 'string' ? data.error
+             : (data.error && data.error.message) || 'Unknown error');
+        toast('模拟启动失败: ' + _msg, 'error');
         _resetRunBtn();
         return;
       }

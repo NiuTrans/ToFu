@@ -57,9 +57,13 @@ __all__ = [
 #  discussion before implementation).
 # ═══════════════════════════════════════════════════════════════════════
 
-PREFETCH_BM25_TOP_N       = 80     # coarse-stage candidate pool (wide recall; cheap-LLM filters)
+PREFETCH_BM25_TOP_N       = 40     # coarse-stage candidate pool — BM25's top-40 reliably
+                                   # contains the true positives; 80 just doubled the
+                                   # reranker payload (~50KB) for a step that drops most of it.
 PREFETCH_MAX_INJECTED     = 5      # hard cap on memories injected
-PREFETCH_MAX_BYTES        = 8_000  # hard cap on injected body bytes
+PREFETCH_MAX_BYTES        = 12_000 # hard cap on injected body bytes — sized so
+                                   # PREFETCH_MAX_INJECTED median-length bodies (~2KB) fit
+                                   # as FULL bodies instead of being truncated to titles.
 PREFETCH_RECENT_TURNS_K   = 3      # number of user+assistant pairs used for query
 PREFETCH_MIN_CANDIDATES   = 2      # below this, skip cheap-LLM step
 PREFETCH_BODY_PREVIEW_LEN = 500    # chars of body shown to cheap model
@@ -85,11 +89,16 @@ _MAX_QUERY_CHARS = 4_000   # total bytes of recent conversational surface
 
 
 def _msg_plain_text(msg: dict) -> str:
-    """Return a message's user-visible text, stripping tool/image blocks."""
+    """Return a message's user-visible text, stripping tool/image blocks.
+
+    Also strips any ``<system-reminder>...</system-reminder>`` blocks —
+    those are out-of-band injections (CLAUDE.md context, prior prefetch,
+    cache hints) that shouldn't drive the relevance query.
+    """
     content = msg.get('content', '')
     if isinstance(content, str):
-        return content
-    if isinstance(content, list):
+        text = content
+    elif isinstance(content, list):
         parts: list[str] = []
         for block in content:
             if not isinstance(block, dict):
@@ -98,27 +107,60 @@ def _msg_plain_text(msg: dict) -> str:
             if btype in ('text', 'output_text'):
                 parts.append(block.get('text', '') or '')
             # Skip image / tool_use / tool_result / thinking / input_json / …
-        return '\n'.join(p for p in parts if p)
+        text = '\n'.join(p for p in parts if p)
+    else:
+        return ''
+    # Strip <system-reminder>...</system-reminder> blocks (DOTALL).
+    text = re.sub(r'<system-reminder>.*?</system-reminder>', '',
+                  text, flags=re.DOTALL)
+    return text
+
+
+def _extract_current_user_request(messages: list,
+                                  cap: int = _MAX_QUERY_CHARS // 2) -> str:
+    """Return ONLY the last user message's plain text (no role prefix).
+
+    Used to anchor the cheap-LLM filter on "what the user just asked",
+    distinct from the prior conversational background.
+    """
+    for msg in reversed(messages):
+        if msg.get('role') != 'user':
+            continue
+        text = _msg_plain_text(msg).strip()
+        if not text:
+            continue
+        if len(text) > cap:
+            return text[:cap] + '…'
+        return text
     return ''
 
 
-def _build_recent_turns_text(messages: list, k: int = PREFETCH_RECENT_TURNS_K) -> str:
+def _build_recent_turns_text(messages: list, k: int = PREFETCH_RECENT_TURNS_K,
+                             exclude_last_user: bool = False) -> str:
     """Collect up to K most recent user+assistant turns as plain text.
 
     Excludes system messages, tool messages, tool calls, thinking blocks,
     and image attachments.  Produces a compact ``[role] text`` transcript
     capped at _MAX_QUERY_CHARS total.
+
+    Args:
+        exclude_last_user: When True, the most recent user message is
+            skipped — used by the cheap-LLM rerank step where the last
+            user request is shown in its own dedicated section so the
+            model can anchor on it rather than blend it into history.
     """
     pairs: list[tuple[str, str]] = []
+    skipped_last_user = not exclude_last_user
     # Walk newest-first; collect text for 'user' and 'assistant' roles.
     for msg in reversed(messages):
         role = msg.get('role', '')
         if role not in ('user', 'assistant'):
             continue
-        # Skip assistant messages that were purely tool_call deliveries
-        # (no visible text) — those don't add query signal.
         text = _msg_plain_text(msg).strip()
         if not text:
+            continue
+        if not skipped_last_user and role == 'user':
+            skipped_last_user = True
             continue
         pairs.append((role, text))
         # Roughly: 2 messages = 1 "round", so stop after 2*K entries.
@@ -131,7 +173,6 @@ def _build_recent_turns_text(messages: list, k: int = PREFETCH_RECENT_TURNS_K) -
     for role, text in pairs:
         line = f'[{role}] {text}'
         if total + len(line) > _MAX_QUERY_CHARS:
-            # Truncate the last line rather than skip it entirely.
             remain = _MAX_QUERY_CHARS - total
             if remain > 100:
                 buf.append(line[:remain] + '…')
@@ -200,19 +241,31 @@ def _bm25_top_n(memories: list[dict], query: str,
 _RERANK_SYSTEM_PROMPT = """\
 You are a memory-relevance filter.
 
-The user is about to start (or continue) a task. You have a pool of CANDIDATE \
-memories (past lessons, bug patterns, project conventions, API quirks) \
-pre-selected by keyword search. Most are false positives — your job is to \
-pick the small subset that are DIRECTLY useful for what the user is doing \
-right now.
+You will be given:
+  - ## Current user request — the message the user just sent. ANCHOR on this.
+  - ## Recent context — earlier turns for background only.
+  - ## Active environment — the project and tools available this turn.
+  - ## Candidate memories — past lessons / conventions / bug patterns
+    pre-selected by keyword search. MOST ARE FALSE POSITIVES.
 
-Err heavily on the side of precision:
-- If a memory only shares surface keywords but doesn't warn about or help \
-  with the current task, skip it.
-- If a memory describes a trap the user is about to walk into, KEEP it.
-- If a memory captures a project-specific convention relevant to the task, \
-  KEEP it.
-- Prefer 0–3 highly-relevant memories over 5 loosely-related ones.
+Your job: pick the small subset that DIRECTLY help with the Current user \
+request. The keyword filter is noisy — surface overlap is not enough.
+
+Decision rules (apply in order):
+  1. If you cannot name the concrete step of the Current user request that \
+     a memory affects, DROP it.
+  2. If a memory is about a tool / subsystem not listed in Active \
+     environment, DROP it (e.g. browser memory when no browser tool is on, \
+     trading memory when the project isn't trading).
+  3. If a memory is for a different project than the one in Active \
+     environment, DROP it unless its content is explicitly project-agnostic.
+  4. If a memory only shares surface keywords (same words, different topic), \
+     DROP it.
+  5. KEEP if the memory describes a trap the user is about to walk into, \
+     or a project convention the next action must follow.
+
+Default to FEWER. Prefer 0–2 highly-relevant memories over 5 loosely-related \
+ones. Returning an empty list is the correct answer when nothing fits.
 
 Return ONLY a JSON object of the form:
   {"ids": [3, 7], "reason": "brief justification"}
@@ -333,7 +386,8 @@ def _parse_rerank_response(content: str, max_idx: int) -> list[int]:
     obj = None
     try:
         obj = json.loads(cleaned)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as _e_audit:
+        logger.debug('[prefetch] _parse_rerank_response caught %s: %s', type(_e_audit).__name__, _e_audit)
         obj = None
 
     # Path 2: scan for the first BALANCED {...} substring (brace counter
@@ -345,7 +399,8 @@ def _parse_rerank_response(content: str, max_idx: int) -> list[int]:
         if candidate is not None:
             try:
                 obj = json.loads(candidate)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as _e_audit:
+                logger.debug('[prefetch] _parse_rerank_response caught %s: %s', type(_e_audit).__name__, _e_audit)
                 obj = None
 
     ids: Any = None
@@ -376,7 +431,8 @@ def _parse_rerank_response(content: str, max_idx: int) -> list[int]:
     for raw in ids:
         try:
             n = int(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as _e_audit:
+            logger.debug('[prefetch] _parse_rerank_response caught %s: %s', type(_e_audit).__name__, _e_audit)
             continue
         # Model uses 1-based ranks → convert to 0-based
         n -= 1
@@ -385,9 +441,35 @@ def _parse_rerank_response(content: str, max_idx: int) -> list[int]:
     return result[:PREFETCH_MAX_INJECTED]
 
 
+def _format_active_environment(project_path: str | None,
+                               active_tools: list[str] | None) -> str:
+    """Format the project + active-tools block shown to the cheap model.
+
+    Project is reduced to its basename so memories don't get matched on
+    incidental path components (e.g. shared `/mnt/.../user/...` prefixes).
+    Tools are listed verbatim — `[]` is meaningful (means "no tools this
+    turn", which is itself a strong filter signal).
+    """
+    import os as _os
+    proj_name = ''
+    if project_path:
+        try:
+            proj_name = _os.path.basename(_os.path.normpath(project_path))
+        except Exception as e:
+            logger.debug('[MemPrefetch] basename(%s) failed: %s',
+                         project_path, e)
+            proj_name = project_path
+    tools = list(active_tools or [])
+    return (f'project: {proj_name or "(none)"}\n'
+            f'tools: {tools}')
+
+
 def _call_cheap_reranker(memories: list[dict],
                          candidate_indices: list[int],
                          recent_turns: str,
+                         current_request: str = '',
+                         project_path: str | None = None,
+                         active_tools: list[str] | None = None,
                          ) -> tuple[list[int], dict[str, Any]]:
     """Run the cheap-model filter.  Returns (selected_indices, diagnostics).
 
@@ -396,6 +478,12 @@ def _call_cheap_reranker(memories: list[dict],
     handling here — if dispatch_chat raises, we let it propagate so the
     caller/orchestrator sees it rather than silently injecting a noisy
     BM25 top-K fallback.
+
+    The cheap model is given four sections:
+      - ## Current user request — anchor for relevance
+      - ## Recent context       — prior turns (may be empty on round 0)
+      - ## Active environment   — project basename + active_tools list
+      - ## Candidate memories   — numbered list of name/desc/tags/preview
     """
     t0 = time.time()
     diag: dict[str, Any] = {'elapsed_ms': 0}
@@ -409,10 +497,17 @@ def _call_cheap_reranker(memories: list[dict],
     from lib.llm_dispatch import dispatch_chat
 
     cand_text = _format_candidates_for_rerank(memories, candidate_indices)
-    user_content = (
-        f'## Recent conversation (most recent last)\n\n{recent_turns}\n\n'
+    env_text = _format_active_environment(project_path, active_tools)
+    sections: list[str] = []
+    if current_request:
+        sections.append(f'## Current user request\n\n{current_request}')
+    if recent_turns:
+        sections.append(f'## Recent context (background only)\n\n{recent_turns}')
+    sections.append(f'## Active environment\n\n{env_text}')
+    sections.append(
         f'## Candidate memories ({len(candidate_indices)} items)\n\n{cand_text}'
     )
+    user_content = '\n\n'.join(sections)
 
     # No timeout, no try/except — exceptions propagate to the caller.
     content, usage = dispatch_chat(
@@ -548,17 +643,24 @@ def inject_relevant_memories(messages: list,
 def run_memory_prefetch(messages: list,
                         project_path: str | None,
                         task: dict | None = None,
-                        emit_event=None) -> list[dict]:
+                        emit_event=None,
+                        active_tools: list[str] | None = None) -> list[dict]:
     """Run the full BM25 → cheap-LLM → inject pipeline.
 
     Args:
         messages:     The message list for the current task; its last user
                       message will receive the <relevant_memories> block.
                       Mutated in-place.
-        project_path: Project path for scoping project memories.
+        project_path: Project path for scoping project memories. Also passed
+                      to the cheap-LLM filter (as a basename) so memories
+                      tagged for unrelated projects are dropped.
         task:         The current task dict (for logging/audit).
         emit_event:   Callable(event_dict).  Used to emit SSE events.
                       Pass None to suppress frontend notifications.
+        active_tools: Names of tools available this turn (e.g. ``['read_files',
+                      'web_search']``).  Lets the cheap-LLM filter drop
+                      memories about subsystems the user can't currently use.
+                      Pass None or [] when unknown.
 
     Returns:
         The list of memory dicts that were injected (empty list if none).
@@ -576,14 +678,15 @@ def run_memory_prefetch(messages: list,
         payload = {'phase': phase, **kw}
         if emit_event:
             try:
-                emit_event({'type': 'memory_prefetch', **payload})
+                from lib.agent_core.events import EventType, build_event
+                emit_event(build_event(EventType.MEMORY_PREFETCH, **payload))
             except Exception as e:  # pragma: no cover
                 logger.debug('[MemPrefetch] emit_event failed: %s', e)
-        if task is not None and phase in _TERMINAL_PHASES:
+        if task is not None:
             try:
                 task['_memoryPrefetch'] = dict(payload)
-            except Exception:
-                pass
+            except (TypeError, AttributeError) as e:
+                logger.debug('[MemPrefetch] could not stash payload on task: %s', e)
 
     t_start = time.time()
     tid = (task or {}).get('id', '?')[:8]
@@ -601,10 +704,17 @@ def run_memory_prefetch(messages: list,
         return []
 
     # ── Query construction
+    #   For BM25 we keep the full last-K transcript (current request + prior
+    #   turns) — wider lexical surface helps recall on the coarse stage.
+    #   For the cheap-LLM rerank we split current_request out into its own
+    #   section so the model can anchor on it.
     recent_turns = _build_recent_turns_text(messages)
     if not recent_turns.strip():
         _emit('skipped', reason='empty_query')
         return []
+    current_request = _extract_current_user_request(messages)
+    rerank_recent_turns = _build_recent_turns_text(messages,
+                                                   exclude_last_user=True)
 
     _emit('started',
           total_memories=len(memories),
@@ -634,7 +744,11 @@ def run_memory_prefetch(messages: list,
     # raises, we let it propagate — better to surface the failure than
     # silently fall back to a noisy BM25 top-K injection.
     selected_idx, diag = _call_cheap_reranker(
-        memories, candidate_indices, recent_turns)
+        memories, candidate_indices, rerank_recent_turns,
+        current_request=current_request,
+        project_path=project_path,
+        active_tools=active_tools,
+    )
     rerank_ms = diag.get('elapsed_ms', 0)
 
     # ── Stage 3: Inject

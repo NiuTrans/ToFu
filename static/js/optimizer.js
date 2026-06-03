@@ -9,9 +9,14 @@ let _optimizerPollTimer = null;
 let _optimizerLastRefresh = 0;
 
 function toggleOptimizerPanel(e) {
-  if (e) e.stopPropagation();
   const panel = document.getElementById("optimizerPanel");
   if (!panel) return;
+  // The panel is a DOM descendant of the badge, so clicks anywhere inside
+  // the panel bubble up here. Without this guard, clicking a row, button,
+  // or the "older proposals" header would flip _optimizerPanelOpen back to
+  // false and close the popup.
+  if (e && panel.contains(e.target)) return;
+  if (e) e.stopPropagation();
   _optimizerPanelOpen = !_optimizerPanelOpen;
   panel.classList.toggle("visible", _optimizerPanelOpen);
   if (_optimizerPanelOpen) _refreshOptimizerPanel();
@@ -47,6 +52,23 @@ function _optSeverityColor(sev) {
   return "#60a5fa";
 }
 
+// Map the backend's English status_reason strings (from
+// lib/optimizer/applier.py and routes/optimizer.py) to translated text.
+// Falls back to the raw string for unrecognised reasons.
+function _optStatusReasonText(reason) {
+  if (!reason) return "";
+  if (reason === "not in auto-apply whitelist") return t('optimizer.reason.notInWhitelist');
+  if (reason === "dry_run") return t('optimizer.reason.dryRun');
+  if (reason.indexOf("unknown action_type:") === 0) {
+    const type = reason.slice("unknown action_type:".length).trim();
+    return t('optimizer.reason.unknownAction', { type: type });
+  }
+  if (reason.indexOf("manual approve blocked") === 0) {
+    return t('optimizer.reason.manualApproveBlocked');
+  }
+  return reason;
+}
+
 function _optRenderAction(p) {
   const args = p.action_args || {};
   const type = p.action_type || "other";
@@ -78,10 +100,8 @@ async function _refreshOptimizerPanel() {
       if (content) content.innerHTML = '<div class="optimizer-panel-empty">' + t('optimizer.disabled') + '</div>';
       return;
     }
-    const resp = await fetch(apiUrl("/api/optimizer/proposals?limit=60"));
-    if (!resp.ok) return;
-    const data = await resp.json();
-    if (!data.ok) return;
+    const data = await Api.optimizer.proposals(60);
+    if (!data || !data.ok) return;
     _optimizerLastRefresh = Date.now();
 
     const proposals = data.proposals || [];
@@ -175,7 +195,8 @@ function _renderOptimizerRow(p) {
   const sev = p.severity || "low";
   const conf = typeof p.confidence === "number" ? Math.round(p.confidence * 100) : 50;
   const rationale = (p.rationale || "").slice(0, 260);
-  const reason = p.status_reason ? `<div class="opt-row-reason">${escapeHtml(p.status_reason.slice(0, 200))}</div>` : "";
+  const reasonText = _optStatusReasonText((p.status_reason || "").slice(0, 200));
+  const reason = reasonText ? `<div class="opt-row-reason">${escapeHtml(reasonText)}</div>` : "";
 
   let actions = "";
   if (p.status === "pending_review") {
@@ -205,12 +226,11 @@ function _renderOptimizerRow(p) {
 
 async function _optApprove(id) {
   try {
-    const resp = await fetch(apiUrl(`/api/optimizer/proposals/${id}/approve`), { method: "POST" });
-    const data = await resp.json();
-    if (data.ok) {
+    const data = await Api.optimizer.approve(id);
+    if (data && data.ok) {
       debugLog(`🧭 Optimizer: proposal ${id.slice(0, 12)} approved & applied`, "success");
     } else {
-      debugLog(`🧭 Approve failed: ${data.error || "unknown"}`, "error");
+      debugLog(`🧭 Approve failed: ${(data && data.error) || "unknown"}`, "error");
     }
   } catch (e) {
     debugLog(`🧭 Approve error: ${e.message}`, "error");
@@ -221,14 +241,9 @@ async function _optApprove(id) {
 async function _optReject(id) {
   const reason = prompt(t('optimizer.rejectPrompt'), "");
   try {
-    const resp = await fetch(apiUrl(`/api/optimizer/proposals/${id}/reject`), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reason: reason || "" }),
-    });
-    const data = await resp.json();
-    if (data.ok) debugLog(`🧭 Optimizer: proposal ${id.slice(0, 12)} rejected`, "info");
-    else debugLog(`🧭 Reject failed: ${data.error || "unknown"}`, "error");
+    const data = await Api.optimizer.reject(id, reason || "");
+    if (data && data.ok) debugLog(`🧭 Optimizer: proposal ${id.slice(0, 12)} rejected`, "info");
+    else debugLog(`🧭 Reject failed: ${(data && data.error) || "unknown"}`, "error");
   } catch (e) {
     debugLog(`🧭 Reject error: ${e.message}`, "error");
   }
@@ -238,10 +253,9 @@ async function _optReject(id) {
 async function _optRevert(id) {
   if (!confirm(t('optimizer.revertConfirm'))) return;
   try {
-    const resp = await fetch(apiUrl(`/api/optimizer/proposals/${id}/revert`), { method: "POST" });
-    const data = await resp.json();
-    if (data.ok) debugLog(`🧭 Optimizer: proposal ${id.slice(0, 12)} reverted`, "success");
-    else debugLog(`🧭 Revert failed: ${data.error || "unknown"}`, "error");
+    const data = await Api.optimizer.revert(id);
+    if (data && data.ok) debugLog(`🧭 Optimizer: proposal ${id.slice(0, 12)} reverted`, "success");
+    else debugLog(`🧭 Revert failed: ${(data && data.error) || "unknown"}`, "error");
   } catch (e) {
     debugLog(`🧭 Revert error: ${e.message}`, "error");
   }
@@ -252,20 +266,15 @@ async function _optimizerRunNow() {
   const btn = event && event.target;
   if (btn) { btn.disabled = true; btn.textContent = t('optimizer.running'); }
   try {
-    const resp = await fetch(apiUrl("/api/optimizer/run-now"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dry_run: false, window_hours: 24 }),
-    });
-    const data = await resp.json();
-    if (data.ok) {
+    const data = await Api.optimizer.runNow({ dry_run: false, window_hours: 24 });
+    if (data && data.ok) {
       const s = data.summary || {};
       debugLog(
         `🧭 Optimizer: produced=${(s.proposals || []).length} applied=${(s.applied || []).length} pending=${(s.pending_review || []).length} reverts=${(s.reverts || []).length}`,
         "success"
       );
     } else {
-      debugLog(`🧭 Run failed: ${data.error || "unknown"}`, "error");
+      debugLog(`🧭 Run failed: ${(data && data.error) || "unknown"}`, "error");
     }
   } catch (e) {
     debugLog(`🧭 Run error: ${e.message}`, "error");

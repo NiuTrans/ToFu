@@ -272,14 +272,14 @@ ADVANCED_BROWSER_TOOL_RIGHT_CLICK_MENU = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tabId": {"type": "integer", "description": "Tab ID from browser_list_tabs"},
+                "tab_id": {"type": "integer", "description": "Tab ID from browser_list_tabs"},
                 "target_selector": {"type": "string", "description": "CSS selector of the element to right-click"},
                 "menu_item_text": {"type": "string", "description": "Text of the menu item to click (case-insensitive partial match)"},
                 "submenu_item_text": {"type": "string", "description": "(Optional) Text of submenu item to click"},
                 "menu_wait": {"type": "number", "description": "Seconds to wait for menu to appear (default: 0.5)"},
                 "timeout": {"type": "number", "description": "Total timeout in seconds (default: 5.0)"},
             },
-            "required": ["tabId", "target_selector", "menu_item_text"]
+            "required": ["tab_id", "target_selector", "menu_item_text"]
         }
     }
 }
@@ -296,12 +296,12 @@ ADVANCED_BROWSER_TOOL_HOVER_CLICK = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tabId": {"type": "integer", "description": "Tab ID from browser_list_tabs"},
+                "tab_id": {"type": "integer", "description": "Tab ID from browser_list_tabs"},
                 "hover_selector": {"type": "string", "description": "CSS selector of the element to hover over"},
                 "click_selector": {"type": "string", "description": "CSS selector of the menu item to click"},
                 "hover_wait": {"type": "number", "description": "Seconds to wait after hover for menu to appear (default: 0.3)"},
             },
-            "required": ["tabId", "hover_selector", "click_selector"]
+            "required": ["tab_id", "hover_selector", "click_selector"]
         }
     }
 }
@@ -319,7 +319,7 @@ ADVANCED_BROWSER_TOOL_FILL_FORM = {
         "parameters": {
             "type": "object",
             "properties": {
-                "tabId": {"type": "integer", "description": "Tab ID from browser_list_tabs"},
+                "tab_id": {"type": "integer", "description": "Tab ID from browser_list_tabs"},
                 "fields": {
                     "type": "array",
                     "items": {
@@ -336,7 +336,7 @@ ADVANCED_BROWSER_TOOL_FILL_FORM = {
                 "submit_selector": {"type": "string", "description": "(Optional) CSS selector of submit button"},
                 "field_delay": {"type": "number", "description": "Delay between fields in seconds (default: 0.2)"},
             },
-            "required": ["tabId", "fields"]
+            "required": ["tab_id", "fields"]
         }
     }
 }

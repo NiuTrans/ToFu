@@ -211,7 +211,7 @@ def filter_web_content(raw_text: str, *, url: str = '', query: str = '',
         # Instead, return a short placeholder so the conversation isn't
         # interrupted.  Rule-based extraction already ran (raw_text IS the
         # extracted text); we just can't pass it through the LLM.
-        from lib.llm_client import ContentFilterError
+        from lib.llm import ContentFilterError
         if isinstance(e, ContentFilterError):
             logger.info('[ContentFilter] SKIP (content policy 450) after %.1fs — '
                         'url=%s raw_chars=%d. Using rule-based extraction only.',

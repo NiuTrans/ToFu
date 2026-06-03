@@ -75,7 +75,7 @@ function _igCollectHistory(conv) {
 /**
  * Classify an error response from the image gen API into a structured _igError.
  *
- * @param {Object} data — response JSON from /api/images/generate
+ * @param {Object} data — response JSON from /api/v1/images/generate
  * @param {number} httpStatus — HTTP status code
  * @returns {{title: string, text: string, detail: string, errorType: string, isTimeout: boolean, isRateLimit: boolean, isContentBlocked: boolean}}
  */
@@ -262,6 +262,7 @@ async function generateImageDirect() {
     userMsg.images = sourceImages;
     userMsg._isImageEdit = true;
   }
+  _ensureMsgId(userMsg);
   conv.messages.push(userMsg);
 
   // ── Set title from prompt on first user message ──
@@ -341,14 +342,8 @@ async function generateImageDirect() {
       _igToast(`Sending ${historyCount} prior turn${historyCount > 1 ? 's' : ''} for multi-turn editing`, 'info');
     }
 
-    const resp = await fetch(apiUrl('/api/images/generate'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: _igAbortController.signal,
-      body: JSON.stringify(reqBody),
-    });
+    const data = await Api.images.generate(reqBody, { signal: _igAbortController.signal });
     clearTimeout(abortTimer);
-    const data = await resp.json();
     clearInterval(timerInterval);
     const loadingEl = document.getElementById(loadingId);
 
@@ -379,6 +374,7 @@ async function generateImageDirect() {
                      response_text: data.text || '',
                      history_turns: data.history_resolved || 0 },
       };
+      _ensureMsgId(assistantMsg);
       conv.messages.push(assistantMsg);
       if (conv.id === activeConvId) renderChat(conv, true);
       saveConversations(conv.id);
@@ -386,7 +382,7 @@ async function generateImageDirect() {
 
     } else {
       // ── API returned an error — classify and save with structured error type ──
-      const errInfo = _igClassifyError(data, resp.status);
+      const errInfo = _igClassifyError(data, data._status);
       if (loadingEl) loadingEl.remove();
 
       // Show a toast for specific error types
@@ -399,6 +395,7 @@ async function generateImageDirect() {
       const errMsg = { role: 'assistant', content: `Image generation failed: ${errInfo.text}`,
                        timestamp: Date.now(), _isImageGen: true,
                        _igError: errInfo };
+      _ensureMsgId(errMsg);
       conv.messages.push(errMsg);
       if (conv.id === activeConvId) renderChat(conv, true);
       saveConversations(conv.id);
@@ -425,6 +422,7 @@ async function generateImageDirect() {
     const errMsg = { role: 'assistant', content: `${isAbort ? 'Image generation timed out' : 'Image generation network error'}: ${errText}`,
                      timestamp: Date.now(), _isImageGen: true,
                      _igError: { title: errTitle, text: errText, detail: '', errorType: isAbort ? 'timeout' : 'network', isTimeout: isAbort, isRateLimit: false, isContentBlocked: false } };
+    _ensureMsgId(errMsg);
     conv.messages.push(errMsg);
     if (conv.id === activeConvId) renderChat(conv, true);
     saveConversations(conv.id);
@@ -510,12 +508,7 @@ async function _igRetryBatchSlot(msgIdx, slotIdx, prompt, model) {
     const body = { prompt, model: useModel, aspect_ratio: _igSelectedAspect, resolution: _igSelectedResolution };
     if (igHistory.length > 0) body.history = igHistory;
 
-    const resp = await fetch(apiUrl('/api/images/generate'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await resp.json();
+    const data = await Api.images.generate(body);
     clearInterval(timer);
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
 
@@ -549,7 +542,7 @@ async function _igRetryBatchSlot(msgIdx, slotIdx, prompt, model) {
       };
       _igToast(`Slot ${slotIdx + 1} retry succeeded`, 'success');
     } else {
-      const errInfo = _igClassifyError(data, resp.status);
+      const errInfo = _igClassifyError(data, data._status);
       slotEl.innerHTML = _igBatchErrorSlotHtml(errInfo, useModel, msgIdx, slotIdx, prompt);
       msg._igResults[slotIdx].error = errInfo.text;
       msg._igResults[slotIdx].errorType = errInfo.errorType;
@@ -647,6 +640,7 @@ async function _igGenerateBatch(prompt, count) {
 
   // ── Add user prompt as a message ──
   const userMsg = { role: 'user', content: prompt, timestamp: Date.now(), _isImageGen: true };
+  _ensureMsgId(userMsg);
   conv.messages.push(userMsg);
 
   // ── Set title from prompt on first user message ──
@@ -684,6 +678,7 @@ async function _igGenerateBatch(prompt, count) {
     _isImageGen: true,
     _igBatchPending: true,  // flag: batch still in progress
   };
+  _ensureMsgId(assistantMsg);
   const msgIdx = conv.messages.length;
   conv.messages.push(assistantMsg);
 
@@ -744,13 +739,7 @@ async function _igGenerateBatch(prompt, count) {
     };
     if (igHistory.length > 0) body.history = igHistory;
 
-    return fetch(apiUrl('/api/images/generate'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: _igAbortControllers[i]?.signal,
-    }).then(async resp => {
-      const data = await resp.json();
+    return Api.images.generate(body, { signal: _igAbortControllers[i]?.signal }).then(async data => {
       clearInterval(slotTimers[i]);
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       const slotEl = document.getElementById(`${batchId}-slot-${i}`);
@@ -787,7 +776,7 @@ async function _igGenerateBatch(prompt, count) {
           file_size: data.file_size || 0, elapsed, response_text: data.text || '', error: '',
         };
       } else {
-        const errInfo = _igClassifyError(data, resp.status);
+        const errInfo = _igClassifyError(data, data._status);
         if (slotEl) {
           slotEl.setAttribute('data-slot-idx', i);
           slotEl.setAttribute('data-msg-idx', msgIdx);
@@ -898,9 +887,8 @@ const _escapeHtmlBasic = escapeHtml;
 
 async function _loadIgModels() {
   try {
-    const resp = await fetch(apiUrl('/api/images/models'));
-    const data = await resp.json();
-    const models = data.models || [];
+    const data = await Api.images.models();
+    const models = (data && data.models) || [];
     if (models.length === 0) return;
 
     const dropdown = document.getElementById('igModelDropdown');
@@ -998,8 +986,21 @@ function _openImageFullscreen(src) {
   document.querySelectorAll(".imagegen-fullscreen").forEach((el) => el.remove());
   const overlay = document.createElement("div");
   overlay.className = "imagegen-fullscreen";
-  overlay.onclick = () => overlay.remove();
-  overlay.innerHTML = `<img src="${src}" />`;
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  const img = document.createElement("img");
+  img.src = src;
+  img.onload = function() {
+    // For tall images (aspect ratio > 1.3:1 height:width), allow scrolling
+    // instead of shrinking via max-height — avoids the "shows less than
+    // the inline version" effect for paper figures.
+    if (this.naturalHeight > this.naturalWidth * 1.3) {
+      this.style.maxHeight = 'none';
+      overlay.style.overflowY = 'auto';
+      overlay.style.alignItems = 'flex-start';
+      overlay.style.padding = '20px 0';
+    }
+  };
+  overlay.appendChild(img);
   document.body.appendChild(overlay);
   const handler = (e) => {
     if (e.key === "Escape") {

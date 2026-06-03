@@ -241,3 +241,133 @@ class TestFilterChangesByTargets:
         f = _filter_changes_by_targets(self.CHANGES, {'src/main.py'}, '/tmp')
         assert len(f) == 1
         assert f[0]['rel_path'] == 'src/main.py'
+
+
+# ═══════════════════════════════════════════════════════════
+#  Unicode-escape normalization in apply_diff / insert_content
+#  Regression: model emits a real glyph (⏰, em-dash …) where the file
+#  holds the literal escape text (\u23f0, \u2014) — or vice-versa — and
+#  json.loads collapses the model's escape into a glyph at the arg
+#  boundary, so a literal compare never matches. The matcher decodes
+#  \uXXXX / \UXXXXXXXX / \xXX on both sides as a final fallback tier.
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestUnicodeEscapeNormalization:
+    import os as _os
+    import tempfile as _tempfile
+
+    def _setup(self):
+        import os
+        import tempfile
+        from lib.project_mod import config as cfg
+        d = tempfile.mkdtemp()
+        cfg._roots['esc_test'] = {'path': d}
+        return d
+
+    def _write(self, d, name, text):
+        import os
+        p = os.path.join(d, name)
+        with open(p, 'w') as f:
+            f.write(text)
+        return p
+
+    def test_decode_helper(self):
+        from lib.project_mod.write_tools import _decode_unicode_escapes
+        assert _decode_unicode_escapes(r'a \u23f0 b \u2014 c') == 'a \u23f0 b \u2014 c'
+        # Non-escape text untouched; \n left alone (only numeric escapes decoded)
+        assert _decode_unicode_escapes(r'plain \n text') == r'plain \n text'
+
+    def test_apply_diff_glyph_search_escape_file(self):
+        from lib.project_mod.write_tools import _apply_one_diff
+        d = self._setup()
+        self._write(d, 'a.py', "x = 1\nmsg = '\\u23f0 timed out'\ny = 2\n")
+        r = _apply_one_diff(d, 'a.py', "msg = '\u23f0 timed out'", "msg = '[timed out]'")
+        assert r['ok'], r.get('error')
+        with open(self._os.path.join(d, 'a.py')) as f:
+            assert f.read() == "x = 1\nmsg = '[timed out]'\ny = 2\n"
+
+    def test_apply_diff_escape_search_glyph_file(self):
+        from lib.project_mod.write_tools import _apply_one_diff
+        d = self._setup()
+        self._write(d, 'b.py', "x = 1\nmsg = '\u23f0 timed out'\ny = 2\n")
+        r = _apply_one_diff(d, 'b.py', "msg = '\\u23f0 timed out'", "msg = '[ok]'")
+        assert r['ok'], r.get('error')
+        with open(self._os.path.join(d, 'b.py')) as f:
+            assert f.read() == "x = 1\nmsg = '[ok]'\ny = 2\n"
+
+    def test_insert_content_glyph_anchor_escape_file(self):
+        from lib.project_mod.write_tools import _insert_one
+        d = self._setup()
+        self._write(d, 'c.py', "a = 1\nmsg = '\\u2014 dash'\nb = 2\n")
+        r = _insert_one(d, 'c.py', "msg = '\u2014 dash'", "inserted = True", position='after')
+        assert r['ok'], r.get('error')
+        with open(self._os.path.join(d, 'c.py')) as f:
+            body = f.read()
+        assert 'inserted = True' in body
+        # The literal-escape line is preserved verbatim, not rewritten.
+        assert "msg = '\\u2014 dash'" in body
+
+    def test_absent_text_still_fails(self):
+        from lib.project_mod.write_tools import _apply_one_diff
+        d = self._setup()
+        self._write(d, 'e.py', "nothing relevant here\n")
+        r = _apply_one_diff(d, 'e.py', "totally absent line", "x")
+        assert not r['ok']
+        assert 'not found' in r['error']
+
+    def test_plain_ascii_unaffected(self):
+        from lib.project_mod.write_tools import _apply_one_diff
+        d = self._setup()
+        self._write(d, 'f.py', "def foo():\n    return 1\n")
+        r = _apply_one_diff(d, 'f.py', "    return 1", "    return 2")
+        assert r['ok'], r.get('error')
+        with open(self._os.path.join(d, 'f.py')) as f:
+            assert f.read() == "def foo():\n    return 2\n"
+
+
+
+# ═══════════════════════════════════════════════════════════
+#  Large-file size gate vs. bounded range reads
+#  Regression: a whole-file read of a >MAX_FILE_SIZE file is rejected
+#  ("File too large"), but a bounded start_line/end_line read must still
+#  succeed — its output is capped by the range, not the total size.
+#  Rejecting it created a deadlock with the read-before-edit gate (the
+#  only gate-satisfying tool, read_files, was itself blocked).
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestLargeFileRangeRead:
+    def _make_big_file(self):
+        import os
+        import tempfile
+        from lib.project_mod.config import MAX_FILE_SIZE
+        d = tempfile.mkdtemp()
+        # One line per row, comfortably over the size cap.
+        nlines = (MAX_FILE_SIZE // 10) + 5000
+        lines = [f'line-{i:08d}\n' for i in range(nlines)]
+        with open(os.path.join(d, 'big.txt'), 'w') as f:
+            f.writelines(lines)
+        assert os.path.getsize(os.path.join(d, 'big.txt')) > MAX_FILE_SIZE
+        return d
+
+    def test_whole_file_read_still_blocked(self):
+        from lib.project_mod.read_tools import _read_project_file
+        d = self._make_big_file()
+        r = _read_project_file(d, 'big.txt')
+        assert 'File too large' in r
+
+    def test_bounded_range_read_succeeds(self):
+        from lib.project_mod.read_tools import _read_project_file
+        d = self._make_big_file()
+        r = _read_project_file(d, 'big.txt', 96, 96)
+        assert 'File too large' not in r
+        assert 'lines 96-96' in r
+        assert 'line-00000095' in r  # line 96 is index 95
+
+    def test_start_line_only_succeeds(self):
+        from lib.project_mod.read_tools import _read_project_file
+        d = self._make_big_file()
+        r = _read_project_file(d, 'big.txt', 96)
+        assert 'File too large' not in r
+        assert 'line-00000095' in r

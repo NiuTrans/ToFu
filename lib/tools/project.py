@@ -36,7 +36,13 @@ PROJECT_TOOL_GREP = {
             "``count_only`` (like grep -c).\n\n"
             "Use simple, short patterns for best results — e.g. 'handleRequest' instead "
             "of 'def handle_.*request'. If unsure of naming, search for a core keyword "
-            "substring. Regex is supported but rarely needed.\n\n"
+            "substring.\n\n"
+            "**Regex flavor**: ripgrep / Rust regex (PCRE-like), NOT GNU grep BRE. "
+            "Alternation is ``A|B`` (no backslash). ``.`` is the any-char metachar — "
+            "escape as ``\\.`` to match a literal dot. Anchors ``^`` / ``$`` work per-line.\n\n"
+            "``path`` accepts a SINGLE relative path (or omit for project root). To "
+            "search multiple roots in one call, use the ``searches`` batch array with "
+            "one entry per path — that's strictly faster than sequential calls.\n\n"
             "For MULTIPLE searches, provide a 'searches' array — each entry has the same "
             "fields as the top-level parameters. Batch mode runs them together and cuts "
             "round trips."
@@ -126,6 +132,7 @@ PROJECT_TOOL_WRITE_FILE = {
         "parameters": {
             "type": "object",
             "properties": {
+                "description": {"type": "string", "description": "Brief description of what was changed (generated FIRST, before writing content)"},
                 "path": {"type": "string", "description": "Relative file path from project root"},
                 "content": {"type": "string", "description": "Complete file content to write"},
                 "content_ref": {
@@ -141,10 +148,9 @@ PROJECT_TOOL_WRITE_FILE = {
                         "end": {"type": "integer", "description": "End character index for partial content (optional, default end)"}
                     },
                     "required": ["tool_round"]
-                },
-                "description": {"type": "string", "description": "Brief description of what was changed (shown to user)"}
+                }
             },
-            "required": ["path"]
+            "required": ["description", "path"]
         }
     }
 }
@@ -154,44 +160,75 @@ PROJECT_TOOL_APPLY_DIFF = {
     "function": {
         "name": "apply_diff",
         "description": (
-            "Apply targeted search-and-replace edit(s) to file(s). The 'search' string "
+            "Apply a single search-and-replace edit to a file. The 'search' string "
             "must match EXACTLY (including whitespace/indentation) in the file. Use "
             "read_files first to get the exact content.\n\n"
+            "**Read-before-edit is enforced.** apply_diff is REJECTED when the target "
+            "file has not been read (or written) earlier in the conversation. A "
+            "sibling ``read_files`` issued in the SAME parallel batch as this "
+            "apply_diff does NOT satisfy the gate — its result is not visible to this "
+            "tool call. To edit a file you have not yet read: issue read_files this "
+            "turn, then issue apply_diff in the NEXT turn.\n\n"
             "**Use apply_diff for small, targeted edits.** For new files or whole-file "
             "rewrites use write_file; for purely additive changes (adding a new function "
             "next to existing code without modifying it) prefer insert_content.\n\n"
-            "**Batch your edits.** For a single edit, provide path/search/replace at the "
-            "top level. For MULTIPLE edits (same or different files), provide an 'edits' "
-            "array — edits are applied sequentially so later edits see earlier changes. "
-            "Batched edits cut round trips dramatically — ~5x faster than separate calls."
+            "For MULTIPLE edits in one call, use **apply_diffs** instead."
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "description": {"type": "string", "description": "Brief description of the change (generated FIRST, before writing search/replace)"},
                 "path": {"type": "string", "description": "Relative file path from project root"},
                 "search": {"type": "string", "description": "Exact text to find in the file (must match precisely)"},
                 "replace": {"type": "string", "description": "Replacement text"},
-                "description": {"type": "string", "description": "Brief description of the change"},
                 "replace_all": {
                     "type": "boolean",
                     "description": "If true, replace ALL occurrences of 'search' in the file (not just the first). Default false — errors when multiple matches exist to prevent accidental mass edits."
-                },
+                }
+            },
+            "required": ["description", "path", "search", "replace"]
+        }
+    }
+}
+
+PROJECT_TOOL_APPLY_DIFFS = {
+    "type": "function",
+    "function": {
+        "name": "apply_diffs",
+        "description": (
+            "Apply multiple search-and-replace edits in one call. Edits are applied "
+            "sequentially so later edits see earlier changes. Much faster than "
+            "multiple separate apply_diff calls.\n\n"
+            "**Read-before-edit is enforced.** Every target file must have been read "
+            "(or written) earlier in the conversation. A sibling ``read_files`` issued "
+            "in the SAME parallel batch does NOT satisfy the gate.\n\n"
+            "**Failure semantics**: if one edit fails (search not found, ambiguous "
+            "match), the remaining edits STILL RUN — failures do not halt the batch "
+            "and successful edits already applied are NOT rolled back. The summary "
+            "reads ``Applied X/(X+Y) edits`` with per-edit OK/FAIL lines. After a "
+            "partial failure, re-read the affected files before retrying."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
                 "edits": {
                     "type": "array",
-                    "description": "Array of edit operations (for batch mode). Each entry has path, search, replace, and optional description.",
+                    "description": "Array of edit operations. Each entry has description, path, search, replace.",
                     "items": {
                         "type": "object",
                         "properties": {
+                            "description": {"type": "string", "description": "Brief description of this edit (generated FIRST, before writing search/replace)"},
                             "path": {"type": "string", "description": "Relative file path"},
                             "search": {"type": "string", "description": "Exact text to find"},
                             "replace": {"type": "string", "description": "Replacement text"},
-                            "replace_all": {"type": "boolean", "description": "Replace ALL occurrences (default false)"},
-                            "description": {"type": "string", "description": "Brief description of this edit"}
+                            "replace_all": {"type": "boolean", "description": "Replace ALL occurrences (default false)"}
                         },
-                        "required": ["path", "search", "replace"]
+                        "required": ["description", "path", "search", "replace"]
                     }
-                }
-            }
+                },
+                "description": {"type": "string", "description": "Brief description of the overall change"}
+            },
+            "required": ["edits"]
         }
     }
 }
@@ -204,6 +241,11 @@ PROJECT_TOOL_INSERT_CONTENT = {
             "Insert new content before or after an anchor string in a file. Unlike "
             "apply_diff (search-and-replace), this tool ADDS content without removing "
             "the anchor.\n\n"
+            "**Read-before-edit is enforced.** insert_content is REJECTED when the "
+            "target file has not been read (or written) earlier in the conversation. "
+            "A sibling ``read_files`` issued in the SAME parallel batch does NOT "
+            "satisfy the gate. To edit a file you have not yet read: issue read_files "
+            "this turn, then issue insert_content in the NEXT turn.\n\n"
             "**Prefer insert_content over apply_diff when the change is purely "
             "additive** (adding new lines without modifying existing ones). Examples: "
             "adding an import, appending a new function/method/block before or after "
@@ -212,14 +254,12 @@ PROJECT_TOOL_INSERT_CONTENT = {
             "The 'anchor' string must match EXACTLY once in the file (like apply_diff's "
             "search). If it matches multiple locations, the tool errors — make the "
             "anchor more specific.\n\n"
-            "For a SINGLE insertion, provide path/anchor/content/position at the top "
-            "level. For MULTIPLE insertions (same or different files), provide an "
-            "'edits' array — edits are applied sequentially so later edits see earlier "
-            "changes."
+            "For MULTIPLE insertions in one call, use **insert_contents** instead."
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "description": {"type": "string", "description": "Brief description of the insertion (generated FIRST, before writing anchor/content)"},
                 "path": {"type": "string", "description": "Relative file path from project root"},
                 "anchor": {
                     "type": "string",
@@ -230,27 +270,55 @@ PROJECT_TOOL_INSERT_CONTENT = {
                     "type": "string",
                     "enum": ["before", "after"],
                     "description": "Insert before or after the anchor. Default: 'after'"
-                },
-                "description": {"type": "string", "description": "Brief description of the insertion"},
+                }
+            },
+            "required": ["description", "path", "anchor", "content"]
+        }
+    }
+}
+
+PROJECT_TOOL_INSERT_CONTENTS = {
+    "type": "function",
+    "function": {
+        "name": "insert_contents",
+        "description": (
+            "Insert content at multiple locations in one call. Each insertion adds "
+            "content before or after an anchor string. Insertions are applied "
+            "sequentially so later ones see earlier changes. Much faster than "
+            "multiple separate insert_content calls.\n\n"
+            "**Read-before-edit is enforced.** Every target file must have been read "
+            "(or written) earlier in the conversation. A sibling ``read_files`` issued "
+            "in the SAME parallel batch does NOT satisfy the gate.\n\n"
+            "**Failure semantics**: if one insertion fails (anchor not found, ambiguous "
+            "match), the remaining insertions STILL RUN — failures do not halt the "
+            "batch and successful insertions are NOT rolled back. The summary reads "
+            "``Inserted X/(X+Y) edits`` with per-edit OK/FAIL lines. After a partial "
+            "failure, re-read the affected files before retrying."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
                 "edits": {
                     "type": "array",
-                    "description": "Array of insertion operations (for batch mode). Each entry has path, anchor, content, position, and optional description.",
+                    "description": "Array of insertion operations. Each entry has description, path, anchor, content, and position.",
                     "items": {
                         "type": "object",
                         "properties": {
+                            "description": {"type": "string", "description": "Brief description of this insertion (generated FIRST, before writing anchor/content)"},
                             "path": {"type": "string", "description": "Relative file path"},
                             "anchor": {"type": "string", "description": "Exact text to locate the insertion point"},
                             "content": {"type": "string", "description": "New content to insert"},
                             "position": {
                                 "type": "string", "enum": ["before", "after"],
                                 "description": "Insert before or after the anchor. Default: 'after'"
-                            },
-                            "description": {"type": "string", "description": "Brief description of this insertion"}
+                            }
                         },
-                        "required": ["path", "anchor", "content"]
+                        "required": ["description", "path", "anchor", "content"]
                     }
-                }
-            }
+                },
+                "description": {"type": "string", "description": "Brief description of the overall insertion"}
+            },
+            "required": ["edits"]
         }
     }
 }
@@ -270,13 +338,14 @@ PROJECT_TOOL_RUN_COMMAND = {
             "  • Building / testing (`npm test`, `pytest`, `cargo build`) — use run_command\n"
             "  • Installing packages (`pip install`, `npm install`) — use run_command\n"
             "  • Git operations (`git status`, `git log`, `git push`) — use run_command\n"
-            "  • Any natural Unix pipeline (`foo | grep | wc`) — use run_command\n\n"
+            "  • Pipelines whose source is NOT a recursive search (`make 2>&1 | tail -50`, `pytest -k foo | grep PASS`) — use run_command\n\n"
             "**Do NOT use run_command for these — use the dedicated tools instead:**\n"
             "  • Reading files → use **read_files** (line numbers, batch reads, auto image/PDF/Office support)\n"
-            "  • Searching file content → use **grep_search** (5x faster, ignores noise dirs, batch mode)\n"
+            "  • Searching file content → use **grep_search** (5x+ faster than `grep -r`, auto-respects .gitignore, batch mode)\n"
             "  • Finding files by name → use **find_files** (max_results, ignored-dir filter)\n"
             "  • Editing files → use **apply_diff / insert_content / write_file**\n"
-            "Reaching for `cat` / `grep` / `find` / `sed` / `awk` is almost always a smell — there is a dedicated tool that's faster, safer, and easier for the user to review."
+            "Reaching for `cat` / `grep` / `find` / `sed` / `awk` is almost always a smell — there is a dedicated tool that's faster, safer, and easier for the user to review.\n"
+            "**Pipelines do NOT excuse this** — `grep -rn 'foo' lib/ | head -20` is the WORST case: on a FUSE-mounted or large tree, the recursive `grep -rn` walks every untracked dir (caches, .project_sessions, vendor) and can take >120s, while `grep_search(pattern='foo', path='lib', max_results=20)` finishes in <1s. Use grep_search and pass `max_results` instead of piping to `head`."
         ),
         "parameters": {
             "type": "object",
@@ -371,9 +440,16 @@ READ_FILES_TOOL = {
             "Prefer reading the WHOLE file (omit start_line / end_line) for files "
             "under 500 lines. Files under ~40 KB auto-expand to whole-file regardless "
             "of range, so don't worry about over-requesting.\n\n"
+            "**Large files (>512 KB):** a whole-file read is refused with 'File too "
+            "large', but a bounded ``start_line``/``end_line`` range ALWAYS works (the "
+            "range caps the output, not the file size). Use grep_search to locate the "
+            "line, then read that range. This is also the way to satisfy the "
+            "read-before-edit gate before apply_diff on a large file.\n\n"
             "**Batch your reads.** When you need multiple files, put them all in one "
             "call — maximum 20 entries per batch. Each entry: ``{path, start_line?, "
             "end_line?}``. Batched reads cut round trips dramatically.\n\n"
+            "For a SINGLE file you may instead pass top-level ``path`` (plus optional "
+            "``start_line`` / ``end_line``) without the ``reads`` wrapper.\n\n"
             "**Prefer this over ``run_command cat/head/tail/sed``.** Dedicated reading "
             "is faster, includes line numbers, and lets the UI display the file nicely.\n\n"
             "**Supports BOTH relative project paths AND absolute paths:**\n"
@@ -393,7 +469,7 @@ READ_FILES_TOOL = {
             "properties": {
                 "reads": {
                     "type": "array",
-                    "description": "Array of file-read specs",
+                    "description": "Array of file-read specs (batch mode). Each entry: {path, start_line?, end_line?}.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -410,9 +486,18 @@ READ_FILES_TOOL = {
                         },
                         "required": ["path"]
                     }
-                }
-            },
-            "required": ["reads"]
+                },
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Single-file shorthand — file path (relative or absolute, ~ expansion "
+                        "supported). Use INSTEAD of 'reads' when reading just one file. "
+                        "Ignored when 'reads' is provided."
+                    )
+                },
+                "start_line": {"type": "integer", "description": "Start line (1-based, optional) — only with top-level 'path'."},
+                "end_line": {"type": "integer", "description": "End line (inclusive, optional) — only with top-level 'path'."}
+            }
         }
     }
 }
@@ -432,18 +517,22 @@ READ_FILES_TOOL = {
 PROJECT_TOOLS = [
     PROJECT_TOOL_LIST_DIR,
     PROJECT_TOOL_GREP, PROJECT_TOOL_FIND,
-    PROJECT_TOOL_WRITE_FILE, PROJECT_TOOL_APPLY_DIFF, PROJECT_TOOL_INSERT_CONTENT,
+    PROJECT_TOOL_WRITE_FILE, PROJECT_TOOL_APPLY_DIFF, PROJECT_TOOL_APPLY_DIFFS,
+    PROJECT_TOOL_INSERT_CONTENT, PROJECT_TOOL_INSERT_CONTENTS,
     PROJECT_TOOL_CREATE_PROJECT, PROJECT_TOOL_RUN_COMMAND,
 ]
 PROJECT_TOOL_NAMES = {
     'list_dir', 'grep_search', 'find_files',
-    'write_file', 'apply_diff', 'insert_content', 'create_project', 'run_command',
+    'write_file', 'apply_diff', 'apply_diffs',
+    'insert_content', 'insert_contents',
+    'create_project', 'run_command',
 }
 
 __all__ = [
     'PROJECT_TOOL_LIST_DIR', 'READ_FILES_TOOL',
     'PROJECT_TOOL_GREP', 'PROJECT_TOOL_FIND',
-    'PROJECT_TOOL_WRITE_FILE', 'PROJECT_TOOL_APPLY_DIFF', 'PROJECT_TOOL_INSERT_CONTENT',
+    'PROJECT_TOOL_WRITE_FILE', 'PROJECT_TOOL_APPLY_DIFF', 'PROJECT_TOOL_APPLY_DIFFS',
+    'PROJECT_TOOL_INSERT_CONTENT', 'PROJECT_TOOL_INSERT_CONTENTS',
     'PROJECT_TOOL_CREATE_PROJECT', 'PROJECT_TOOL_RUN_COMMAND',
     'PROJECT_TOOLS', 'PROJECT_TOOL_NAMES',
 ]

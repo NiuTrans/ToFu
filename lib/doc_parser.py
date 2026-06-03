@@ -131,7 +131,8 @@ def _extract_docx(file_bytes: bytes, limit: int) -> dict:
             try:
                 level = int(style_name.replace('heading', '').strip())
                 level = min(max(level, 1), 6)
-            except ValueError:
+            except ValueError as _e_audit:
+                logger.debug('[doc_parser] _extract_docx caught %s: %s', type(_e_audit).__name__, _e_audit)
                 level = 2
             line = f"{'#' * level} {text}"
         elif style_name in ('title',):
@@ -465,7 +466,11 @@ def _extract_xls_legacy(file_bytes: bytes, limit: int) -> dict:
                     try:
                         dt = xlrd.xldate_as_datetime(cell.value, wb.datemode)
                         cells.append(dt.strftime('%Y-%m-%d %H:%M:%S').rstrip(' 00:00:00'))
-                    except Exception:
+                    except (ValueError, TypeError, OverflowError) as e:
+                        # xlrd raises XLDateError (a ValueError subclass) for
+                        # malformed dates; ValueError covers it portably.
+                        logger.debug('[DocParser] xldate convert failed for %r: %s',
+                                     cell.value, e)
                         cells.append(str(cell.value))
                 elif cell.ctype == xlrd.XL_CELL_NUMBER:
                     # Show integers without .0
@@ -676,7 +681,8 @@ def _extract_plaintext(file_bytes: bytes, filename: str, limit: int) -> dict:
             if encoding not in ('utf-8', 'utf-8-sig'):
                 logger.debug('[DocParser] Decoded %s with %s', filename, encoding)
             break
-        except (UnicodeDecodeError, LookupError):
+        except (UnicodeDecodeError, LookupError) as _e_audit:
+            logger.debug('[doc_parser] _extract_plaintext caught %s: %s', type(_e_audit).__name__, _e_audit)
             continue
 
     if text is None:

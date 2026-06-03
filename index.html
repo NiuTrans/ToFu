@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Tofu</title>
+<meta name="description" content="Tofu — a self-hosted AI assistant with chat, web search, document translation, and agentic tools.">
 <!-- PWA: Add to Home Screen support -->
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -16,7 +17,7 @@
 <link rel="stylesheet" href="static/vendor/google-fonts-local.css">
 <link rel="stylesheet" href="static/vendor/github-dark.min.css">
 <link rel="stylesheet" href="static/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="static/styles.css?v=0.10.0">
+<link rel="stylesheet" href="static/styles.css">
 <script>
   // Prevent flash of wrong theme — apply before render (default: tofu)
   (function(){var t=localStorage.getItem('claude_ui_theme')||'tofu';document.documentElement.setAttribute('data-theme',t);})();
@@ -153,7 +154,7 @@
 </aside>
 <main class="main">
   <div class="topbar">
-    <button class="toggle-sidebar-btn" onclick="toggleSidebar()">
+    <button class="toggle-sidebar-btn" onclick="toggleSidebar()" aria-label="Toggle sidebar">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
     <span class="topbar-title" id="topbarTitle">New Chat</span>
@@ -182,7 +183,7 @@
       </div>
     </span>
 
-    <span class="model-badge" id="modelBadge">aws.claude-opus-4.7</span>
+    <span class="model-badge" id="modelBadge">aws.claude-opus-4.8</span>
     <span class="backend-indicator" id="backendIndicator" style="display:none"></span>
     <!-- Agent Backend Selector (dropdown) -->
     <div class="agent-backend-selector" id="agentBackendSelector">
@@ -217,6 +218,7 @@
         </button>
       </div>
     </div>
+    <button class="action-btn update-btn" id="updateBtn" onclick="openUpdateDialog()" title="Check for updates"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M21 21v-5h-5"/></svg></button>
     <button class="action-btn theme-cycle-btn" id="themeCycleBtn" onclick="cycleTheme()" title="Switch theme"><span>🌙</span></button>
     <button class="action-btn" id="debugToggle" onclick="toggleDebug()" title="Debug" style="width:28px;height:28px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12V19"/><path d="M18.4 6.6a9 9 0 0 0-12.8 0"/><circle cx="12" cy="8" r="2"/><path d="M20 15.5a9 9 0 0 1-18 0"/><path d="m2 12 2 .5M22 12l-2 .5M7 20l1-1.5M17 20l-1-1.5"/></svg></button>
   </div>
@@ -304,10 +306,18 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               Copy
             </button>
-            <button class="paper-report-btn" onclick="_exportPaperReport()" title="Export Markdown">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-              Export
-            </button>
+            <div class="paper-report-export" id="paperReportExportMenu">
+              <button class="paper-report-btn" onclick="_togglePaperReportExportMenu(event)" title="Export">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="paper-report-export-dropdown" id="paperReportExportDropdown">
+                <button class="paper-report-export-item" onclick="_exportPaperReport('md')">Markdown (.md)</button>
+                <button class="paper-report-export-item" onclick="_exportPaperReport('html')">Standalone HTML</button>
+                <button class="paper-report-export-item" onclick="_exportPaperReport('pdf')">Print / Save as PDF</button>
+              </div>
+            </div>
           </div>
           <div class="paper-report-content" id="paperReportContent">
             <div class="paper-report-empty">
@@ -499,6 +509,12 @@
                     <span class="submenu-item-check">✓</span>
                     <span class="tool-badge" id="endpointBadge" style="display:none"></span>
                   </div>
+                  <div class="submenu-item" id="autopilotToggle" onclick="toggleAutopilot();updateSubmenuCounts()" title="Autopilot — virtual user auto-replies">
+                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 10v6m11-11h-6m-10 0H1m17.66-6.34l-4.24 4.24m-5.66 5.66l-4.24 4.24m12.14 0l-4.24-4.24m-5.66-5.66L4.34 4.34"/></svg></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.autopilot">自动驾驶</span><span class="submenu-item-desc" data-i18n="toolbar.autopilotDesc">虚拟用户自动回复，直到任务完成</span></span>
+                    <span class="submenu-item-check">✓</span>
+                    <span class="tool-badge" id="autopilotBadge" style="display:none"></span>
+                  </div>
                 </div>
               </div>
               <!-- ★ Standalone buttons -->
@@ -629,6 +645,29 @@
         <button class="settings-tab" data-tab="skills" onclick="switchSettingsTab('skills')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
           <span data-i18n="settings.tabSkills">Skills</span>
+        </button>
+        <!-- Relay admin tabs — visible only when auth_mode=multi-user
+             AND the current user has the admin scope. The render
+             logic in static/js/relay-admin.js hides them otherwise. -->
+        <button class="settings-tab relay-admin-tab" data-tab="relayUsers"
+                style="display:none" onclick="switchSettingsTab('relayUsers')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span data-i18n="settings.tabRelayUsers">用户</span>
+        </button>
+        <button class="settings-tab relay-admin-tab" data-tab="relayPricing"
+                style="display:none" onclick="switchSettingsTab('relayPricing')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          <span data-i18n="settings.tabRelayPricing">定价</span>
+        </button>
+        <button class="settings-tab relay-admin-tab" data-tab="relayCodes"
+                style="display:none" onclick="switchSettingsTab('relayCodes')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          <span data-i18n="settings.tabRelayCodes">兑换码</span>
+        </button>
+        <button class="settings-tab relay-admin-tab" data-tab="relayPayments"
+                style="display:none" onclick="switchSettingsTab('relayPayments')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
+          <span data-i18n="settings.tabRelayPayments">支付</span>
         </button>
         <button class="settings-tab" data-tab="advanced" onclick="switchSettingsTab('advanced')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
@@ -801,6 +840,7 @@
             <div class="settings-section-title" data-i18n="settings.providersTitle">API 服务商 & 模型</div>
             <div class="stg-section-actions">
               <button class="stg-btn-add stg-refresh-btn" onclick="_showAutoSetupModal()" data-i18n="settings.autoSetup">🚀 自动配置</button>
+              <button class="stg-btn-add stg-refresh-btn" onclick="addLocalProvider()" data-i18n="settings.localProvider" title="自托管 vLLM / SGLang / Ollama 等多端点部署">🖥️ 本地部署模型</button>
               <button class="stg-btn-add stg-refresh-btn" onclick="_showTemplateMenu(this)" data-i18n="settings.fromTemplate">⚡ 从模板添加</button>
               <button class="stg-btn-add stg-refresh-btn" onclick="addProvider()" data-i18n="settings.customProvider">+ 自定义服务商</button>
             </div>
@@ -1352,6 +1392,35 @@
 
 
         <!-- ═══ Advanced Tab ═══ -->
+
+        <!-- ═══ Relay Admin: Users Tab ═══ -->
+        <div class="settings-tab-panel" id="settingsTab_relayUsers">
+          <div class="settings-section-title">用户管理</div>
+          <p class="settings-desc">管理使用本中转站的用户、调整余额、暂停账号、查看历史。</p>
+          <div id="relayUsersBlock"><em style="opacity:0.5">加载中…</em></div>
+        </div>
+
+        <!-- ═══ Relay Admin: Pricing Tab ═══ -->
+        <div class="settings-tab-panel" id="settingsTab_relayPricing">
+          <div class="settings-section-title">定价表</div>
+          <p class="settings-desc">每千 token 的微币(µ)单价。修改保存到 <code>data/config/pricing.json</code>，对未来请求立即生效。1 credit = 1,000,000 µ ≈ US $0.001。</p>
+          <div id="relayPricingBlock"><em style="opacity:0.5">加载中…</em></div>
+        </div>
+
+        <!-- ═══ Relay Admin: Redeem Codes Tab ═══ -->
+        <div class="settings-tab-panel" id="settingsTab_relayCodes">
+          <div class="settings-section-title">兑换码</div>
+          <p class="settings-desc">批量生成单次有效的兑换码,客户在 <code>/dashboard</code> 输入即可获得对应余额。</p>
+          <div id="relayCodesBlock"><em style="opacity:0.5">加载中…</em></div>
+        </div>
+
+        <!-- ═══ Relay Admin: Payments Tab ═══ -->
+        <div class="settings-tab-panel" id="settingsTab_relayPayments">
+          <div class="settings-section-title">支付记录</div>
+          <p class="settings-desc">所有 Stripe / Alipay 完成的充值。Webhook 处理是幂等的——同一笔重复回调不会被重复入账。</p>
+          <div id="relayPaymentsBlock"><em style="opacity:0.5">加载中…</em></div>
+        </div>
+
         <div class="settings-tab-panel" id="settingsTab_advanced">
           <div class="settings-section-title" data-i18n="settings.importExport">导入 / 导出</div>
           <p class="settings-desc" data-i18n="settings.importExportDesc">将所有服务器端配置导出为 JSON，或从文件导入。</p>
@@ -1392,6 +1461,19 @@
         <button class="btn btn-secondary" onclick="closeSettings()" data-i18n="settings.cancel">取消</button>
         <button class="btn btn-primary" onclick="saveSettings()" data-i18n="settings.save">保存</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Update Modal — self-update via git pull -->
+<div class="modal-overlay" id="updateModal" onclick="if(event.target===this)closeUpdateModal()">
+  <div class="modal update-modal">
+    <div class="update-modal-header">
+      <h3 data-i18n="update.title">软件更新</h3>
+      <button class="modal-close-btn" onclick="closeUpdateModal()" aria-label="Close">&times;</button>
+    </div>
+    <div class="update-modal-body" id="updateModalBody">
+      <p class="upd-loading" data-i18n="update.checking">正在检查更新…</p>
     </div>
   </div>
 </div>
@@ -1460,27 +1542,27 @@
   <div class="preview-body" id="previewBody"></div>
 </div>
 
-<!-- Project Modal (★ Simplified multi-path design) -->
+<!-- Project Modal — card-based multi-path design -->
 <div class="modal-overlay" id="projectModal" onclick="if(event.target===this)closeProjectModal()">
   <div class="modal project-modal">
     <h3>Project Co-Pilot</h3>
+    <p class="pm-subtitle">Point the assistant at one or more folders on the server. The first folder is the primary project root.</p>
 
-    <!-- ★ Unified multi-path input -->
-    <label style="margin-bottom:8px;display:block">Project Folders</label>
-    <div class="mp-folder-tags" id="mpFolderTags">
-      <!-- folder pills rendered here by JS -->
+    <!-- Project folders -->
+    <div class="pm-section">
+      <div class="pm-section-label"><span>Project Folders</span></div>
+      <div class="mp-folder-tags" id="mpFolderTags"></div>
+      <div class="mp-add-row">
+        <input type="text" id="mpPathInput" class="mp-path-input" placeholder="/home/user/myproject" onkeydown="if(event.key==='Enter'){event.preventDefault();mpAddFolder();}">
+        <button class="btn-icon" onclick="toggleFolderBrowser()" title="Browse folders" id="browseFolderBtn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        </button>
+        <button class="btn btn-sm btn-primary" onclick="mpAddFolder()">Add</button>
+      </div>
     </div>
-    <div class="mp-add-row">
-      <input type="text" id="mpPathInput" class="mp-path-input" placeholder="/home/user/myproject" onkeydown="if(event.key==='Enter'){event.preventDefault();mpAddFolder();}">
-      <button class="btn-icon" onclick="toggleFolderBrowser()" title="Browse folders" id="browseFolderBtn">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-      </button>
-      <button class="btn btn-sm btn-primary" onclick="mpAddFolder()">Add</button>
-    </div>
-    <p style="font-size:11px;color:var(--text-tertiary);margin:6px 0 4px">Add one or more server folders. The first folder is the primary project root.</p>
 
-    <!-- ★ Recent Project Paths -->
-    <div id="recentProjectPaths" class="recent-paths" style="display:none">
+    <!-- Recent Project Paths -->
+    <div id="recentProjectPaths" class="pm-section recent-paths" hidden>
       <div class="recent-paths-header">
         <span class="recent-paths-title">Recent Projects</span>
         <button class="recent-paths-clear" onclick="clearRecentProjects()" title="Clear all">✕</button>
@@ -1488,8 +1570,8 @@
       <div class="recent-paths-list" id="recentPathsList"></div>
     </div>
 
-    <!-- ★ Folder Browser Panel -->
-    <div id="folderBrowser" class="folder-browser" style="display:none">
+    <!-- Folder Browser Panel -->
+    <div id="folderBrowser" class="folder-browser" hidden>
       <div class="folder-browser-header">
         <button class="folder-nav-btn" onclick="browseParent()" id="browseBackBtn" title="Go up" disabled>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
@@ -1501,10 +1583,10 @@
         </button>
       </div>
       <div class="folder-browser-list" id="browseList">
-        <div style="color:var(--text-tertiary);padding:20px;text-align:center;font-size:12px">Browse server directories</div>
+        <div class="folder-browser-empty">Browse server directories</div>
       </div>
       <div class="folder-browser-footer">
-        <button class="btn btn-sm btn-secondary" onclick="document.getElementById('folderBrowser').style.display='none'">Close</button>
+        <button class="btn btn-sm btn-secondary" onclick="document.getElementById('folderBrowser').hidden=true">Close</button>
         <button class="btn btn-sm btn-primary" onclick="selectBrowsedFolder()">Use This Path</button>
       </div>
     </div>
@@ -1816,36 +1898,96 @@
 </div>
 
 <!-- html2canvas: lazy-loaded on first Export click (199KB, avoids DevTools freeze) -->
-<script defer src="static/js/i18n.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/idb-cache.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/export-images.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/branch.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/compaction-viewer.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/i18n.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/idb-cache.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- core/ subpackage (split 2026-05-28 from monolithic core.js — see lib/js_bundler.py).
+     These MUST load AFTER core.js so the slim shell's `let`/`const` decls run first. -->
+<script defer src="static/js/core/folders.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/cost.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/debug_panel.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/escape_html.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/safe_html.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/error_envelope.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/cross_tab_sync.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/conversations.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/cache_stats.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/markdown.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/health_stream_timer.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/toast.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/api.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/export-images.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/branch.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/compaction-viewer.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/artifacts.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- ui/ subpackage (split 2026-05-28 from monolithic ui.js — see lib/js_bundler.py) -->
+<script defer src="static/js/ui/conversation_list.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/streaming_render.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/chat_render.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/popups.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/finish_info.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/tool_rounds.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/message_actions.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/edit_message.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/turn_nav.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/streaming_ui.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/sse_pipeline.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/conv_view.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- Feature modules (extracted from main.js) -->
-<script defer src="static/js/log-clean.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/translation.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/log-clean.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/translation.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 
-<script defer src="static/js/upload.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/image-gen.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/paper-reader.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/project.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/memory.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/skills.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/scheduler.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/optimizer.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/timer.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/myday.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/agent-backend.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/main.js?v=0.10.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/upload.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/image-gen.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/paper-reader.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/project.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/memory.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/skills.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/scheduler.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/optimizer.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/update.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/timer.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/myday.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- settings/ subpackage (split 2026-05-28 from monolithic settings.js — see lib/js_bundler.py).
+     These MUST load AFTER settings.js so the head's `var` decls (_serverConfig etc.) run first. -->
+<script defer src="static/js/settings/branding.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/provider_templates.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/auto_setup.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/local_endpoints.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/core_panel.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/provider_render.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/key_stats.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/balance.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/template_actions.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/model_edit.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/access_matrix.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/visibility_defaults.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/other_tabs.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/save_export.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/oauth.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/mcp.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/relay-admin.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/agent-backend.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- main/ subpackage (split 2026-05-28 from monolithic main.js — see lib/js_bundler.py).
+     These MUST load before main.js so its boot IIFE can call their symbols. -->
+<script defer src="static/js/main/main_conv_lifecycle.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main/main_translating_bubble.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main/main_send_pipeline.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main/main_regen_continue.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main/main_toolbar_ui.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main/main_folders_mobile.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main/main_input_handling.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main/main_init_tasks.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- context-bar.js loads after main.js (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
+<script defer src="static/js/context-bar.js?v=0.11.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script>
 // Feature flags — show/hide optional modules
 var _featureFlags = {};
 (async function loadFeatureFlags() {
   try {
-    const resp = await fetch('api/features');
+    const resp = await fetch('api/v1/features');
     if (!resp.ok) return;
     const flags = await resp.json();
     _featureFlags = flags;

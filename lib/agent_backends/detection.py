@@ -4,7 +4,7 @@ Checks for the presence and authentication status of external CLI agents
 (Claude Code, Codex) by probing the filesystem and running version commands.
 
 Used by the backend registry to populate availability status in the
-``/api/agent-backends/status`` API response.
+``/api/v1/agent-backends/status`` API response.
 """
 
 from __future__ import annotations

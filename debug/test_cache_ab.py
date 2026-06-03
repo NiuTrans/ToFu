@@ -24,7 +24,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.llm_client import build_body, stream_chat, is_claude
+from lib.llm import build_body, stream_chat, is_claude
 from lib.model_info import is_claude
 
 # ═══════════════════════════════════════════════════════════
@@ -259,8 +259,8 @@ TOOL_RESULTS = {
         'lib/llm_client.py:765:def add_cache_breakpoints(body, log_prefix=\'\'):\n'
         'lib/llm_client.py:1190:    add_cache_breakpoints(body, log_prefix)\n'
         'lib/tasks_pkg/cache_tracking.py:26:  add_cache_breakpoints() places breakpoints to cover the growing prefix.\n'
-        'lib/tasks_pkg/cache_tracking.py:45:  from lib.llm_client import add_cache_breakpoints\n'
-        'tests/test_cc_alignment.py:668:    from lib.llm_client import add_cache_breakpoints\n'
+        'lib/tasks_pkg/cache_tracking.py:45:  from lib.llm import add_cache_breakpoints\n'
+        'tests/test_cc_alignment.py:668:    from lib.llm import add_cache_breakpoints\n'
         'debug/test_cache_bp4_live.py:31:    add_cache_breakpoints,\n'
     ),
     'web_search': (
@@ -307,7 +307,7 @@ TOOL_RESULTS = {
 
 def _add_cache_breakpoints_OLD(body, log_prefix=''):
     """OLD version: scan from msg[-2] — the buggy behavior."""
-    from lib.llm_client import is_claude as _is_claude
+    from lib.llm import is_claude as _is_claude
     model = body.get('model', '')
     if not _is_claude(model):
         return
@@ -382,7 +382,7 @@ def _add_cache_breakpoints_OLD(body, log_prefix=''):
 
 def _monkeypatch_old_bp4(enable: bool):
     """Temporarily replace add_cache_breakpoints with the OLD version."""
-    import lib.llm_client as _mod
+    import lib.llm as _mod
     if enable:
         _mod._original_add_cache_breakpoints = _mod.add_cache_breakpoints
         _mod.add_cache_breakpoints = _add_cache_breakpoints_OLD

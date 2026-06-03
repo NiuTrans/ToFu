@@ -33,10 +33,9 @@ cheap model call instead of a forked agent.
 ### 2. Per-Turn Attachments (`attachments.py`)
 **Claude Code:** `attachments.ts` (3997L) — 40+ attachment types injected every turn.
 
-**ChatUI:** 3 attachment types implemented:
+**ChatUI:** 2 attachment types implemented:
 - Session memory injection
 - Recently modified files reminder (fires 5+ rounds after last write)
-- Tool discovery delta (announces newly discovered deferred tools)
 
 **Adaptation:** Injected into last user message (not separate `user` messages) because
 our API format doesn't support the same message sequencing as Claude Code's native API.
@@ -70,12 +69,15 @@ Integrated into `tool_dispatch.py` execute pipeline.
 `should_defer`, `max_result_chars`, `search_hint`, `category` per tool.
 Backward-compatible exports: `get_write_tools()`, `get_idempotent_tools()`, etc.
 
-### 7. Dynamic Tool Deferral (in `deferral.py`)
-**Claude Code:** `tst-auto` mode — defers tools when MCP tool tokens exceed X% of context.
-
-**ChatUI:** Phase 2 added to `partition_tools()`: after static deferral, estimates core
-tool token count and defers non-essential tools if >10% of context window.
-`_NEVER_DEFER` protects core tools (read_files, write_file, etc.).
+### 7. Tool Deferral — Removed (was `lib/tools/deferral.py`)
+The deferral framework (`partition_tools` + `tool_search` pseudo-tool +
+`DEFERRED_TOOL_HINTS` side dictionary) was removed. ChatUI's frontend
+toggles already gate per-feature tool inclusion (browser, scheduler,
+image-gen, desktop, swarm, MCP), so the partition step had nothing to do
+in practice. Phase 1 static deferral was already disabled by user-toggle
+policy; Phase 2 dynamic threshold could only ever fire on MCP tool
+blowup — a problem better solved inside `lib/mcp/` than via a
+cross-cutting framework.
 
 ### 8. Partial Compaction (`partial_compact.py`)
 **Claude Code:** `from`/`up_to` directional partial compaction around a pivot.
@@ -197,7 +199,6 @@ All new features covered by `tests/test_new_features.py` (63 tests):
 | `cache_tracking.py` | 11 | Hash functions, break detection, cache prefix |
 | `tool_hooks.py` | 10 | Pre/post hooks, built-ins, error handling |
 | `tool_spec.py` | 11 | Registration, backward compat, defaults |
-| `deferral.py` (dynamic) | 5 | Static + dynamic threshold, token estimation |
 | `partial_compact.py` | 2 | Edge cases (too few messages) |
 | Cache-aware microcompact | 1 | Integration: prefix skip |
 
@@ -221,4 +222,3 @@ All new features covered by `tests/test_new_features.py` (63 tests):
 - `lib/tasks_pkg/compaction.py` — Cache-aware microcompact, session memory seed
 - `lib/tasks_pkg/tool_dispatch.py` — Pre/post hook execution in pipeline
 - `lib/tasks_pkg/system_context.py` — Session memory injection
-- `lib/tools/deferral.py` — Dynamic threshold-based tool deferral

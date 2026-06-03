@@ -54,7 +54,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.llm_client import build_body, stream_chat
+from lib.llm import build_body, stream_chat
 from lib.model_info import is_claude
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -181,7 +181,7 @@ def _run_round(model, messages, tools, round_num, label, dry_run=False):
 
     if dry_run:
         # Show the breakpoint placement without calling API
-        from lib.llm_client import add_cache_breakpoints
+        from lib.llm import add_cache_breakpoints
         body_copy = copy.deepcopy(body)
         add_cache_breakpoints(body_copy, f'[{label}:R{round_num}]')
 

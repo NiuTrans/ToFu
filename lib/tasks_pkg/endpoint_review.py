@@ -29,9 +29,9 @@ Anti-analysis-spiral (2026-04-26 rewrite):
   plan calls surface cleanly in logs and audit records.
 """
 
-import os
 import re
 
+from lib.env_compat import getenv_compat
 from lib.log import audit_log, get_logger
 
 logger = get_logger(__name__)
@@ -42,9 +42,11 @@ from lib.tasks_pkg.orchestrator import _run_single_turn
 
 # Kill-switch: when '0', CONTINUE_PLANNER is downgraded to CONTINUE_WORKER
 # so the redesign can be hot-disabled without a code rollback.
-# Defaults to enabled ('1').
+# Defaults to enabled ('1').  Reads ``TOFU_ENDPOINT_REPLAN``
+# (documented in CLAUDE.md §9).
 def _replan_enabled() -> bool:
-    return os.environ.get('CHATUI_ENDPOINT_REPLAN', '1').strip() != '0'
+    return getenv_compat('TOFU_ENDPOINT_REPLAN',
+                         default='1').strip() != '0'
 
 
 # ══════════════════════════════════════════════════════════
@@ -57,7 +59,9 @@ def _replan_enabled() -> bool:
 STATE_CHANGING_TOOLS = frozenset({
     'write_file',
     'apply_diff',
+    'apply_diffs',
     'insert_content',
+    'insert_contents',
     'run_command',
     'create_project',
     'generate_image',
@@ -331,7 +335,7 @@ def _parse_verdict(text: str) -> tuple:
         to CONTINUE_WORKER.  PLAN_DEFECT gates the expensive planner
         branch so the critic cannot silently escape into an analysis
         spiral.
-      * CHATUI_ENDPOINT_REPLAN=0 kill-switch → planner downgraded to worker.
+      * TOFU_ENDPOINT_REPLAN=0 kill-switch → planner downgraded to worker.
     """
     match = None
     # Find the LAST VERDICT match (in case the critic emits more than one)
@@ -453,7 +457,7 @@ def _parse_verdict(text: str) -> tuple:
     # ── Kill-switch: downgrade planner→worker when replan disabled ──
     if next_phase == 'planner' and not _replan_enabled():
         logger.info('[Critic] Replan disabled — CONTINUE_PLANNER downgraded to '
-                    'CONTINUE_WORKER (CHATUI_ENDPOINT_REPLAN=0)')
+                    'CONTINUE_WORKER (TOFU_ENDPOINT_REPLAN=0)')
         next_phase = 'worker'
 
     return feedback, next_phase, plan_defect_reason

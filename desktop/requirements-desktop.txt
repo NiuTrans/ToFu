@@ -1,0 +1,5 @@
+# Desktop packaging dependencies (on top of requirements.txt)
+pyinstaller>=6.0
+pystray>=0.19
+Pillow>=10.0
+psycopg2-binary>=2.9

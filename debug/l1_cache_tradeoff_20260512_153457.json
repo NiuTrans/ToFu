@@ -1,0 +1,141 @@
+{
+  "timestamp": "2026-05-12 07:37:59 UTC",
+  "arm_a": {
+    "label": "STATUS_QUO (cache-prefix skip)",
+    "rounds": [
+      {
+        "arm": "STATUS_QUO",
+        "round_num": 1,
+        "msg_count": 579,
+        "tool_msg_count": 265,
+        "big_tool_count": 18,
+        "api_input_chars": 271673,
+        "prompt_tokens": 0,
+        "cache_read": 0,
+        "cache_write": 237974,
+        "output_tokens": 256,
+        "elapsed": 14.623855113983154,
+        "status": "WRITE",
+        "error": "",
+        "cost_usd": 1.4937375
+      },
+      {
+        "arm": "STATUS_QUO",
+        "round_num": 2,
+        "msg_count": 581,
+        "tool_msg_count": 265,
+        "big_tool_count": 18,
+        "api_input_chars": 271933,
+        "prompt_tokens": 0,
+        "cache_read": 0,
+        "cache_write": 238068,
+        "output_tokens": 256,
+        "elapsed": 27.747817993164062,
+        "status": "WRITE",
+        "error": "",
+        "cost_usd": 1.494325
+      },
+      {
+        "arm": "STATUS_QUO",
+        "round_num": 3,
+        "msg_count": 583,
+        "tool_msg_count": 265,
+        "big_tool_count": 18,
+        "api_input_chars": 272201,
+        "prompt_tokens": 0,
+        "cache_read": 237974,
+        "cache_write": 200,
+        "output_tokens": 256,
+        "elapsed": 15.85904312133789,
+        "status": "HIT",
+        "error": "",
+        "cost_usd": 0.126637
+      },
+      {
+        "arm": "STATUS_QUO",
+        "round_num": 4,
+        "msg_count": 585,
+        "tool_msg_count": 265,
+        "big_tool_count": 18,
+        "api_input_chars": 272469,
+        "prompt_tokens": 0,
+        "cache_read": 238068,
+        "cache_write": 212,
+        "output_tokens": 93,
+        "elapsed": 23.012557983398438,
+        "status": "HIT",
+        "error": "",
+        "cost_usd": 0.122684
+      }
+    ]
+  },
+  "arm_b": {
+    "label": "AGGRESSIVE (no cache-prefix skip)",
+    "rounds": [
+      {
+        "arm": "AGGRESSIVE",
+        "round_num": 1,
+        "msg_count": 579,
+        "tool_msg_count": 265,
+        "big_tool_count": 18,
+        "api_input_chars": 271673,
+        "prompt_tokens": 0,
+        "cache_read": 237936,
+        "cache_write": 38,
+        "output_tokens": 256,
+        "elapsed": 13.864446878433228,
+        "status": "HIT",
+        "error": "",
+        "cost_usd": 0.1256055
+      },
+      {
+        "arm": "AGGRESSIVE",
+        "round_num": 2,
+        "msg_count": 581,
+        "tool_msg_count": 265,
+        "big_tool_count": 18,
+        "api_input_chars": 271933,
+        "prompt_tokens": 0,
+        "cache_read": 237936,
+        "cache_write": 154,
+        "output_tokens": 152,
+        "elapsed": 13.549929141998291,
+        "status": "HIT",
+        "error": "",
+        "cost_usd": 0.12373050000000001
+      },
+      {
+        "arm": "AGGRESSIVE",
+        "round_num": 3,
+        "msg_count": 583,
+        "tool_msg_count": 265,
+        "big_tool_count": 18,
+        "api_input_chars": 272201,
+        "prompt_tokens": 0,
+        "cache_read": 237974,
+        "cache_write": 231,
+        "output_tokens": 256,
+        "elapsed": 16.047197103500366,
+        "status": "HIT",
+        "error": "",
+        "cost_usd": 0.12683075
+      },
+      {
+        "arm": "AGGRESSIVE",
+        "round_num": 4,
+        "msg_count": 585,
+        "tool_msg_count": 265,
+        "big_tool_count": 18,
+        "api_input_chars": 272469,
+        "prompt_tokens": 0,
+        "cache_read": 238090,
+        "cache_write": 217,
+        "output_tokens": 152,
+        "elapsed": 26.51197385787964,
+        "status": "HIT",
+        "error": "",
+        "cost_usd": 0.12420125
+      }
+    ]
+  }
+}

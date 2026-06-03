@@ -4,10 +4,12 @@ import json
 import threading
 from datetime import datetime, timedelta
 
-from flask import Blueprint, jsonify, request
+from flask import jsonify, request
 
 from lib.database import DOMAIN_TRADING, get_db
 from lib.log import get_logger
+from lib.api_response import api_not_found, api_ok
+from lib.request_parser import parse_body
 from lib.rate_limiter import rate_limit
 
 logger = get_logger(__name__)
@@ -67,7 +69,8 @@ def _parse_llm_json(raw_content: str) -> dict:
 
     return {}
 
-trading_intel_bp = Blueprint('trading_intel', __name__)
+from routes.api_v1.trading.intel import api_v1_trading_intel_bp as trading_intel_bp  # noqa: E402
+# (alias kept for back-compat with `from routes.trading_intel import trading_intel_bp` callers)
 
 # ── Shared intel state (singleton) ──
 _intel_state = {'last_crawl': None, 'next_crawl': None, 'status': 'idle',
@@ -348,7 +351,7 @@ def start_intel_worker(app):
 
 # ── Route handlers ──
 
-@trading_intel_bp.route('/api/trading/intel', methods=['GET'])
+@trading_intel_bp.route('/api/v1/trading/intel', methods=['GET'])
 def trading_intel_list():
     db = get_db(DOMAIN_TRADING)
     category = request.args.get('category', '')
@@ -426,7 +429,7 @@ def trading_intel_list():
     })
 
 
-@trading_intel_bp.route('/api/trading/intel/status', methods=['GET'])
+@trading_intel_bp.route('/api/v1/trading/intel/status', methods=['GET'])
 def trading_intel_status():
     """Return current intel crawl status for frontend polling."""
     db = get_db(DOMAIN_TRADING)
@@ -437,17 +440,15 @@ def trading_intel_status():
     return jsonify(state)
 
 
-@trading_intel_bp.route('/api/trading/intel/crawl', methods=['POST'])
-@trading_intel_bp.route('/api/trading/intel/refresh', methods=['POST'])
+@trading_intel_bp.route('/api/v1/trading/intel/crawl', methods=['POST'])
+@trading_intel_bp.route('/api/v1/trading/intel/refresh', methods=['POST'])
 @rate_limit(limit=2, per=3600)  # 2 requests per hour
 def trading_intel_trigger_crawl():
     def _run():
         _do_intel_crawl()
     threading.Thread(target=_run, daemon=True).start()
-    return jsonify({'ok': True, 'message': '情报爬取已触发'})
-
-
-@trading_intel_bp.route('/api/trading/intel/coverage', methods=['GET'])
+    return api_ok({'message': '情报爬取已触发'})
+@trading_intel_bp.route('/api/v1/trading/intel/coverage', methods=['GET'])
 def trading_intel_coverage():
     db = get_db(DOMAIN_TRADING)
     total_days = int(request.args.get('days', '90'))
@@ -505,16 +506,14 @@ def trading_intel_coverage():
     return jsonify({'categories': categories, 'coverage': raw_coverage, 'total_days': total_days})
 
 
-@trading_intel_bp.route('/api/trading/intel/backfill', methods=['POST'])
+@trading_intel_bp.route('/api/v1/trading/intel/backfill', methods=['POST'])
 @rate_limit(limit=1, per=3600)  # 1 request per hour (very resource-intensive)
 def trading_intel_backfill():
     def _run():
         _do_intel_backfill()
     threading.Thread(target=_run, daemon=True).start()
-    return jsonify({'ok': True, 'message': '已触发3个月数据回填'})
-
-
-@trading_intel_bp.route('/api/trading/intel/<int:iid>/preview', methods=['GET'])
+    return api_ok({'message': '已触发3个月数据回填'})
+@trading_intel_bp.route('/api/v1/trading/intel/<int:iid>/preview', methods=['GET'])
 @rate_limit(limit=30, per=60)  # 30 requests per minute
 def trading_intel_preview(iid):
     """Fetch full content of an intel article for preview.
@@ -526,7 +525,7 @@ def trading_intel_preview(iid):
     db = get_db(DOMAIN_TRADING)
     item = db.execute('SELECT * FROM trading_intel_cache WHERE id=?', (iid,)).fetchone()
     if not item:
-        return jsonify({'error': 'Not found'}), 404
+        return api_not_found('Not found')
     item = dict(item)
 
     # Return cached content if we already have rich content (not just the snippet)
@@ -601,14 +600,14 @@ def trading_intel_preview(iid):
         })
 
 
-@trading_intel_bp.route('/api/trading/intel/<int:iid>/analyze', methods=['POST'])
+@trading_intel_bp.route('/api/v1/trading/intel/<int:iid>/analyze', methods=['POST'])
 @rate_limit(limit=10, per=60)  # 10 requests per minute
 def trading_intel_analyze_item(iid):
     """Deep-analyze a single intel article."""
     db = get_db(DOMAIN_TRADING)
     item = db.execute('SELECT * FROM trading_intel_cache WHERE id=?', (iid,)).fetchone()
     if not item:
-        return jsonify({'error': 'Not found'}), 404
+        return api_not_found('Not found')
     item = dict(item)
 
     full_content = item.get('raw_content', '')
@@ -664,14 +663,12 @@ def trading_intel_analyze_item(iid):
     db.execute('UPDATE trading_intel_cache SET analysis=?, analyzed_at=?, relevance_score=? WHERE id=?',
                (json.dumps(analysis_json, ensure_ascii=False), now, relevance, iid))
     db.commit()
-    return jsonify({'ok': True, 'analysis': analysis_json, 'relevance_score': relevance})
-
-
-@trading_intel_bp.route('/api/trading/intel/batch-analyze', methods=['POST'])
+    return api_ok({'analysis': analysis_json, 'relevance_score': relevance})
+@trading_intel_bp.route('/api/v1/trading/intel/batch-analyze', methods=['POST'])
 def trading_intel_batch_analyze():
     """Batch-analyze unanalyzed articles."""
     db = get_db(DOMAIN_TRADING)
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     batch_size = min(int(data.get('batch_size', 10)), 30)
     category = data.get('category', '')
 
@@ -694,8 +691,7 @@ def trading_intel_batch_analyze():
     unanalyzed = [dict(r) for r in unanalyzed]
 
     if not unanalyzed:
-        return jsonify({'ok': True, 'analyzed': 0, 'message': '所有文章已分析完毕'})
-
+        return api_ok({'analyzed': 0, 'message': '所有文章已分析完毕'})
     # ── Build all sub-batch prompts ──
     from lib.llm_dispatch import smart_chat_batch
 

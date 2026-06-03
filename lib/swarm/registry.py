@@ -208,19 +208,13 @@ MODEL_TIERS: dict[str, str] = _TierProxy()  # type: ignore[assignment]
 # ═══════════════════════════════════════════════════════════
 
 AGENT_ROLES: dict[str, dict[str, Any]] = {
-    'planner': {
-        'system_prompt_suffix': (
-            'You are the planning specialist for a multi-agent swarm. '
-            'Decompose complex tasks into clear, independent subtasks. '
-            'For each subtask specify: role, objective, dependencies, and '
-            'expected output format. Optimise for parallelism — minimise '
-            'unnecessary sequential dependencies.'
-        ),
-        'tools_hint': [],           # planning uses no external tools
-        'model_hint': 'heavy',      # planning benefits from strong reasoning
-    },
-
     'researcher': {
+        'when_to_use': (
+            'Open-ended research questions and information gathering — '
+            'web searches, doc lookups, comparing libraries, surveying APIs. '
+            'Choose this role when the answer requires reading multiple '
+            'web pages or external sources.'
+        ),
         'system_prompt_suffix': (
             'You are a research specialist. Focus on gathering, verifying, '
             'and synthesizing information from available sources. '
@@ -233,18 +227,29 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
     },
 
     'coder': {
+        'when_to_use': (
+            'Multi-file code investigations or modifications — find usages of X, '
+            'audit a refactor, write a unit test, run a command and report. '
+            'Use coder when the task touches code in the project.'
+        ),
         'system_prompt_suffix': (
             'You are a coding specialist. Focus on reading, writing, '
             'and modifying code. Use project tools (read_files, write_file, '
             'grep_search, run_command, apply_diff) effectively. '
             'Follow existing code conventions. Test your changes.'
         ),
-        'tools_hint': ['read_files', 'write_file', 'apply_diff', 'grep_search',
-                       'find_files', 'list_dir', 'run_command'],
+        'tools_hint': ['read_files', 'write_file', 'apply_diff', 'apply_diffs',
+                       'insert_content', 'insert_contents',
+                       'grep_search', 'find_files', 'list_dir', 'run_command'],
         'model_hint': 'heavy',      # code generation benefits from strong models
     },
 
     'analyst': {
+        'when_to_use': (
+            'Quantitative analysis of data already on disk — log parsing, '
+            'metric extraction, finding patterns in CSV / JSON / structured '
+            'output. Choose this when the answer is numbers / tables.'
+        ),
         'system_prompt_suffix': (
             'You are a data analysis specialist. Focus on understanding '
             'data, finding patterns, and providing clear insights. '
@@ -256,6 +261,12 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
     },
 
     'browser': {
+        'when_to_use': (
+            'Tasks that require interacting with already-open browser tabs '
+            '— click buttons, fill forms, scrape JS-rendered pages, take '
+            'screenshots. Use this when web_search / fetch_url cannot reach '
+            'the content because it needs interaction.'
+        ),
         'system_prompt_suffix': (
             'You are a browser automation specialist. Use browser tools '
             'to navigate, read, click, and extract information from web pages. '
@@ -272,6 +283,12 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
     },
 
     'reviewer': {
+        'when_to_use': (
+            'Get a fresh, independent read on code or design — security '
+            'review, bug hunting, code-style audit. Choose this for "second '
+            'opinion" tasks where you want eyes that have not seen your '
+            'analysis. Outputs a concrete punch list.'
+        ),
         'system_prompt_suffix': (
             'You are a code/content reviewer. Carefully analyze the given '
             'code or content for bugs, style issues, security concerns, '
@@ -282,6 +299,11 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
     },
 
     'writer': {
+        'when_to_use': (
+            'Compose a long-form document — release notes, README sections, '
+            'design docs, migration guides — from raw inputs you already have. '
+            'Choose this when the task is mostly prose generation.'
+        ),
         'system_prompt_suffix': (
             'You are a technical writer. Focus on creating clear, '
             'well-structured documentation, summaries, and explanations. '
@@ -292,6 +314,11 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
     },
 
     'general': {
+        'when_to_use': (
+            'Mixed / unclear tasks where no single specialist role fits — '
+            'a sub-task that needs a couple of different tool families '
+            'together. Default fallback when in doubt.'
+        ),
         'system_prompt_suffix': (
             'You are a versatile assistant. Accomplish the given task '
             'using whatever tools and approaches are most appropriate.'
@@ -316,6 +343,23 @@ def get_role_config(role: str) -> dict[str, Any]:
     return AGENT_ROLES.get(role, AGENT_ROLES['general'])
 
 
+def format_role_catalogue() -> str:
+    """Return a multi-line "role: when_to_use" listing for prompt injection.
+
+    This is what the master LLM reads in the ``spawn_agents`` tool
+    description.  Mirrors Claude Code's ``Available agent types and the
+    tools they have access to:`` block in ``AgentTool/prompt.ts`` —
+    without an explicit role catalogue the model has no idea which
+    role to pick and either falls back to ``general`` or doesn't spawn
+    at all.
+    """
+    lines = []
+    for role, cfg in AGENT_ROLES.items():
+        when = cfg.get('when_to_use', '').strip().replace('\n', ' ')
+        lines.append(f'  - {role}: {when}')
+    return '\n'.join(lines)
+
+
 def get_role_system_suffix(role: str) -> str:
     """Get the system prompt suffix for a role."""
     return get_role_config(role).get('system_prompt_suffix', '')
@@ -337,9 +381,17 @@ def get_tools_for_role(role: str) -> list[str]:
 def scope_tools_for_role(role: str, all_tools: list) -> list:
     """Filter a full tool list to only those appropriate for *role*.
 
-    If the role has an empty ``tools_hint`` (e.g. ``general``), all tools
-    are returned.  Otherwise, only tools whose ``function.name`` appears
-    in the hint list are included.
+    Two filters are applied:
+
+      1. **Role-specific allow-list** — tools whose ``function.name`` appears
+         in the role's ``tools_hint``.  When the hint is empty (e.g.
+         ``general``), all tools pass this filter.  A safety fallback expands
+         to all tools if scoping produced fewer than 2 — keeps mis-configured
+         roles from becoming useless.
+      2. **Sub-agent deny-list** — swarm-control tools (``spawn_agents``,
+         ``await_agents``, ``get_agent_result``) and ``ask_human`` are ALWAYS
+         stripped, regardless of role.  Sub-agents must not be able to spawn
+         further sub-agents or block on user interaction.
 
     Args:
         role: Agent role name (e.g. ``'coder'``, ``'researcher'``).
@@ -348,19 +400,28 @@ def scope_tools_for_role(role: str, all_tools: list) -> list:
     Returns:
         Filtered list of tool dicts.
     """
+    # Local import — registry is loaded before tools.py finishes (circular
+    # import avoidance). Loading here is cheap (tools.py is just constants).
+    from lib.swarm.tools import SUB_AGENT_DENYLIST
+
     hints = get_tools_for_role(role)
-    if not hints:
-        return list(all_tools)  # general / planner → all tools
 
-    hint_set = set(hints)
-    scoped = [
-        tool for tool in all_tools
-        if isinstance(tool, dict)
-        and tool.get('function', {}).get('name', '') in hint_set
+    if hints:
+        hint_set = set(hints)
+        scoped = [
+            tool for tool in all_tools
+            if isinstance(tool, dict)
+            and tool.get('function', {}).get('name', '') in hint_set
+        ]
+        # Safety fallback: empty / near-empty scoping expands to all tools
+        if len(scoped) < 2 and len(all_tools) > 2:
+            scoped = list(all_tools)
+    else:
+        scoped = list(all_tools)  # general role → all tools
+
+    # Always strip sub-agent denylist (swarm-control + ask_human).
+    return [
+        tool for tool in scoped
+        if not (isinstance(tool, dict)
+                and tool.get('function', {}).get('name', '') in SUB_AGENT_DENYLIST)
     ]
-
-    # Safety fallback: if scoping produced too few tools, include all
-    if len(scoped) < 2 and len(all_tools) > 2:
-        return list(all_tools)
-
-    return scoped

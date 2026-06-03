@@ -78,12 +78,17 @@ def _build_ddg_api_parser(query):
     return _parse
 
 
-def search_ddg_html(query, max_results=6):
+def search_ddg_html(query, max_results=6, freshness=''):
     """Scrape DDG lite HTML. Returns list of {title, snippet, url, source}."""
+    params = {'q': query}
+    # DDG HTML supports df= param: d (past day), w (past week), m (past month), y (past year)
+    _FRESHNESS_MAP = {'day': 'd', 'week': 'w', 'month': 'm', 'year': 'y'}
+    if freshness and freshness in _FRESHNESS_MAP:
+        params['df'] = _FRESHNESS_MAP[freshness]
     return http_search_get(
         name='DDG-HTML',
         url='https://html.duckduckgo.com/html/',
-        params={'q': query},
+        params=params,
         query=query,
         parser=_parse_ddg_html,
         max_results=max_results,
@@ -91,7 +96,7 @@ def search_ddg_html(query, max_results=6):
     )
 
 
-def search_ddg_api(query, max_results=4):
+def search_ddg_api(query, max_results=4, freshness=''):
     """Query DDG Instant Answer API for definitions/abstracts."""
     return http_search_get(
         name='DDG-API',

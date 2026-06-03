@@ -43,6 +43,21 @@ PreToolHook = Callable[[str, dict, dict], Optional['HookResult']]
 # Return None to keep result unchanged, or str to replace result
 PostToolHook = Callable[[str, dict, str, dict], str | None]
 
+# UserPromptSubmit hook: (prompt_text, task) → str | None
+# Return None to keep prompt unchanged, or str to replace it.
+# Inspired by Claude Agent SDK's UserPromptSubmit hook — fires once per
+# user turn, BEFORE the prompt enters the agent loop.  Use cases: PII
+# redaction, prompt rewriting, safety filters, telemetry.
+UserPromptSubmitHook = Callable[[str, dict], Optional[str]]
+
+# PreCompact hook: (messages, task) → None
+# Fires before compaction modifies `messages` in place.  Hooks may
+# inspect / archive the transcript but MUST NOT mutate `messages` —
+# compaction is on the hot path and we don't want hook-induced
+# transcript corruption.  Use cases: external archival, transcript
+# snapshotting, audit trail.  Inspired by Claude Agent SDK's PreCompact.
+PreCompactHook = Callable[[list, dict], None]
+
 
 class HookResult:
     """Result from a pre-tool hook."""
@@ -63,6 +78,8 @@ class HookResult:
 
 _pre_hooks: list[PreToolHook] = []
 _post_hooks: list[PostToolHook] = []
+_user_prompt_hooks: list[UserPromptSubmitHook] = []
+_pre_compact_hooks: list[PreCompactHook] = []
 
 
 def register_pre_hook(hook: PreToolHook):
@@ -77,22 +94,55 @@ def register_post_hook(hook: PostToolHook):
     logger.debug('[Hooks] Registered post-tool hook: %s', hook.__name__)
 
 
+def register_user_prompt_hook(hook: UserPromptSubmitHook):
+    """Register a UserPromptSubmit hook (fires once per user turn)."""
+    _user_prompt_hooks.append(hook)
+    logger.debug('[Hooks] Registered user-prompt hook: %s', hook.__name__)
+
+
+def register_pre_compact_hook(hook: PreCompactHook):
+    """Register a PreCompact hook (fires before compaction modifies messages)."""
+    _pre_compact_hooks.append(hook)
+    logger.debug('[Hooks] Registered pre-compact hook: %s', hook.__name__)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Hook execution
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run_pre_hooks(tool_name: str, args: dict, task: dict) -> HookResult | None:
-    """Run all pre-tool hooks.  Returns first blocking/modifying result, or None."""
+    """Run all pre-tool hooks.
+
+    Returns the first blocking result encountered (action='block').  For
+    'modify' results, the args dict is mutated IN PLACE so every downstream
+    consumer (parallel pool, serial dispatch, executor) sees the rewrite.
+    Returns None if no hook blocks.
+    """
     for hook in _pre_hooks:
         try:
             result = hook(tool_name, args, task)
-            if result and result.action in ('block', 'modify'):
-                logger.info('[Hooks] Pre-hook %s returned %s for %s: %s',
-                            hook.__name__, result.action, tool_name, result.message)
-                return result
         except Exception as e:
             logger.warning('[Hooks] Pre-hook %s failed for %s: %s',
                            hook.__name__, tool_name, e, exc_info=True)
+            continue
+        if not result:
+            continue
+        if result.action == 'block':
+            logger.info('[Hooks] Pre-hook %s BLOCKED %s: %s',
+                        hook.__name__, tool_name, result.message)
+            return result
+        if result.action == 'modify' and isinstance(result.modified_args, dict):
+            # In-place mutation so every downstream tuple-bound reference
+            # sees the rewrite without us having to thread a new dict.
+            _orig_keys = set(args.keys())
+            args.clear()
+            args.update(result.modified_args)
+            _new_keys = set(args.keys())
+            logger.info('[Hooks] Pre-hook %s MODIFIED %s args (added=%s removed=%s)',
+                        hook.__name__, tool_name,
+                        sorted(_new_keys - _orig_keys),
+                        sorted(_orig_keys - _new_keys))
+            # Don't return — let later hooks see the modified args.
     return None
 
 
@@ -110,6 +160,47 @@ def run_post_hooks(tool_name: str, args: dict, result_content: str,
             logger.warning('[Hooks] Post-hook %s failed for %s: %s',
                            hook.__name__, tool_name, e, exc_info=True)
     return result_content
+
+
+def run_user_prompt_hooks(prompt: str, task: dict) -> str:
+    """Run all UserPromptSubmit hooks.  Returns the (possibly rewritten) prompt.
+
+    Hooks run sequentially; each sees the previous hook's output.  A hook
+    that returns None passes the prompt through unchanged.  Exceptions are
+    logged and swallowed so a buggy hook never breaks the agent loop.
+    """
+    if not _user_prompt_hooks:
+        return prompt
+    current = prompt
+    for hook in _user_prompt_hooks:
+        try:
+            rewritten = hook(current, task)
+            if rewritten is not None and rewritten != current:
+                logger.info('[Hooks] UserPromptSubmit %s rewrote prompt (%d → %d chars)',
+                            hook.__name__, len(current), len(rewritten))
+                current = rewritten
+        except Exception as e:
+            logger.warning('[Hooks] UserPromptSubmit %s failed: %s',
+                           hook.__name__, e, exc_info=True)
+    return current
+
+
+def run_pre_compact_hooks(messages: list, task: dict) -> None:
+    """Run all PreCompact hooks BEFORE compaction modifies messages.
+
+    Hooks should treat ``messages`` as read-only.  If a hook needs to keep
+    a snapshot, it should ``copy.deepcopy()`` the list.  This entry point
+    exists so external systems (audit log, archival, exporters) can capture
+    the full transcript before lossy compaction destroys it.
+    """
+    if not _pre_compact_hooks:
+        return
+    for hook in _pre_compact_hooks:
+        try:
+            hook(messages, task)
+        except Exception as e:
+            logger.warning('[Hooks] PreCompact %s failed: %s',
+                           hook.__name__, e, exc_info=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -165,3 +256,14 @@ def _run_command_safety_hook(tool_name: str, args: dict,
 # Register built-in hooks
 register_post_hook(_empty_result_marker_hook)
 register_pre_hook(_run_command_safety_hook)
+
+
+__all__ = [
+    'HookResult',
+    'PreToolHook', 'PostToolHook',
+    'UserPromptSubmitHook', 'PreCompactHook',
+    'register_pre_hook', 'register_post_hook',
+    'register_user_prompt_hook', 'register_pre_compact_hook',
+    'run_pre_hooks', 'run_post_hooks',
+    'run_user_prompt_hooks', 'run_pre_compact_hooks',
+]

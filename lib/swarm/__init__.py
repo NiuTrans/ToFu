@@ -1,33 +1,41 @@
-"""lib/swarm — Agent Swarm: orchestrator-worker multi-agent system.
+"""lib/swarm — Agent Swarm: async multi-agent system.
 
-Architecture (streaming reactive pattern):
-  ┌─────────────────────────────────────────────────────────────┐
-  │ Main Orchestrator (existing)                                │
-  │   └─ spawn_agents tool call                                 │
-  │       └─ MasterOrchestrator (reactive streaming loop)       │
-  │           ├─ StreamingScheduler (DAG-based, no wave barrier)│
-  │           │   ├─ Agent A completes → notifies master        │
-  │           │   ├─ Agent B completes → notifies master        │
-  │           │   └─ Agents start as deps resolve, not waves    │
-  │           ├─ Master LLM reviews incrementally               │
-  │           │   └─ spawn_more_agents if needed                │
-  │           ├─ New agents injected into live scheduler         │
-  │           ├─ ArtifactStore (shared data between agents)     │
-  │           └─ Final synthesis                                │
-  └─────────────────────────────────────────────────────────────┘
+Architecture (async fire-and-forget pattern):
 
-Key features:
-  • Streaming DAG scheduling — agents start as soon as deps finish
-  • Reactive master — reviews results as they arrive, spawns follow-up
-  • Shared artifact store — agents share data via key-value store
-  • Auto-retry — configurable retry for failed agents
-  • Cycle detection — prevents deadlock from circular dependencies
-  • Rate limiting — shared semaphore for API backpressure
-  • Session TTL — auto-cleanup of stale swarm sessions
+  ┌────────────────────────────────────────────────────────────────────┐
+  │ Main agent loop (lib/tasks_pkg/orchestrator.py)                    │
+  │                                                                    │
+  │  round N:                                                          │
+  │   tool_call: spawn_agents(...)  ─────────┐                         │
+  │   ◄─ returns handle (immediately)        │                         │
+  │   ... continues other tools ...          │                         │
+  │                                          │                         │
+  │  round N+1 (between-round hook):         │                         │
+  │   inbox drained → <swarm-update> user msg│                         │
+  └─────────────────┬────────────────────────┘                         │
+                    │                                                  │
+                    ▼                                                  │
+  ┌────────────────────────────────────────────────────────────────────┐
+  │ MasterOrchestrator.run_in_background() (daemon thread)             │
+  │   └─ StreamingScheduler                                            │
+  │      ├─ SubAgent (per spec) → on_complete → enqueue swarm-update   │
+  │      └─ ArtifactStore (shared key-value store between agents)      │
+  │                                                                    │
+  │ When all done: clear session, drop handle.                         │
+  └────────────────────────────────────────────────────────────────────┘
+
+Sub-agent results NEVER come back as a synchronous tool result.  The main
+agent sees them as ``<swarm-update>`` user messages on subsequent turns,
+or by calling ``await_agents`` / ``get_agent_result`` explicitly.
+
+What this package does NOT do anymore (removed in async migration):
+  • There is no internal "mini master" reviewing results.
+  • There is no synthesis step — the main agent IS the synthesizer.
+  • Sub-agents cannot call ``spawn_agents`` / ``await_agents`` /
+    ``get_agent_result`` / ``ask_human``  — see ``SUB_AGENT_DENYLIST``.
 """
 
 # Core protocol types
-# Execution engine
 from lib.swarm.agent import SubAgent
 
 # Artifact storage (canonical location: artifact_store.py)
@@ -42,12 +50,7 @@ from lib.swarm.integration import (
     execute_swarm_tool,
     get_active_session,
 )
-from lib.swarm.master import (
-    MasterOrchestrator,
-    resolve_execution_order,
-    run_swarm_task,
-    spawn_sub_agent,
-)
+from lib.swarm.master import MasterOrchestrator
 from lib.swarm.protocol import (
     AgentMessage,
     SubAgentResult,
@@ -55,6 +58,7 @@ from lib.swarm.protocol import (
     SubTaskSpec,
     SwarmEvent,
     SwarmEventType,
+    resolve_execution_order,
 )
 from lib.swarm.rate_limiter import RateLimiter
 
@@ -77,15 +81,16 @@ from lib.swarm.scheduler import AsyncStreamingScheduler, StreamingScheduler
 # Tool definitions
 from lib.swarm.tools import (
     ARTIFACT_TOOLS,
-    CHECK_AGENTS_TOOL,
+    AWAIT_AGENTS_TOOL,
+    GET_AGENT_RESULT_TOOL,
     LIST_ARTIFACTS_TOOL,
     MASTER_TOOLS,
-    REACTIVE_MASTER_TOOLS,
     READ_ARTIFACT_TOOL,
     SPAWN_AGENTS_TOOL,
-    SPAWN_MORE_AGENTS_TOOL,
     STORE_ARTIFACT_TOOL,
-    SWARM_DONE_TOOL,
+    SUB_AGENT_DENYLIST,
+    SUB_AGENT_TOOLS,
+    SWARM_CONTROL_TOOL_NAMES,
     SWARM_TOOL_NAMES,
 )
 
@@ -95,10 +100,10 @@ __all__ = [
     'ArtifactStore', 'ArtifactBackend', 'InMemoryBackend',
     'SwarmEvent', 'SwarmEventType', 'AgentMessage',
     'compress_result', 'format_sub_results_for_master',
+    'resolve_execution_order',
     # Execution
     'SubAgent', 'MasterOrchestrator', 'StreamingScheduler',
     'AsyncStreamingScheduler', 'RateLimiter',
-    'resolve_execution_order', 'run_swarm_task', 'spawn_sub_agent',
     # Integration
     'execute_swarm_tool', 'get_active_session',
     # Registry
@@ -107,9 +112,8 @@ __all__ = [
     'get_role_system_suffix', 'get_role_config',
     'resolve_model_for_tier', 'configure_model_tiers',
     # Tool defs
-    'SPAWN_AGENTS_TOOL', 'CHECK_AGENTS_TOOL',
-    'SPAWN_MORE_AGENTS_TOOL', 'SWARM_DONE_TOOL',
+    'SPAWN_AGENTS_TOOL', 'AWAIT_AGENTS_TOOL', 'GET_AGENT_RESULT_TOOL',
     'STORE_ARTIFACT_TOOL', 'READ_ARTIFACT_TOOL', 'LIST_ARTIFACTS_TOOL',
-    'MASTER_TOOLS', 'REACTIVE_MASTER_TOOLS', 'ARTIFACT_TOOLS',
-    'SWARM_TOOL_NAMES',
+    'MASTER_TOOLS', 'SUB_AGENT_TOOLS', 'ARTIFACT_TOOLS',
+    'SWARM_TOOL_NAMES', 'SWARM_CONTROL_TOOL_NAMES', 'SUB_AGENT_DENYLIST',
 ]

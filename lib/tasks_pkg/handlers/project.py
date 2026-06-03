@@ -16,9 +16,147 @@ from lib.tasks_pkg.handlers.code_exec import (
     _make_run_command_progress_cb,
     _make_stdin_callback,
 )
+from lib.tasks_pkg.handlers._read_gate import (
+    check_read_before_edit,
+    partition_batch_edits,
+)
 from lib.tools import PROJECT_TOOL_NAMES, build_project_tool_meta
 
 logger = get_logger(__name__)
+
+
+# ── Per-feature size cap for write_file artifacts ─────────────────────
+# Smaller than the lib.artifacts hard cap (8 MiB) so write_file specifically
+# rejects giant blobs early, before reading the file back from disk.
+_WRITE_ARTIFACT_MAX_BYTES = 1 * 1024 * 1024  # 1 MiB
+
+
+def _maybe_promote_write_to_artifact(task, fn_name, fn_args, project_path, meta):
+    """Detect renderable writes (md/html/svg) and persist + emit artifact event.
+
+    Mutates ``meta`` in place to attach ``artifactId`` so the chat-side
+    tool round can render an "Open in panel" chip.
+
+    This is best-effort: any failure (DB unavailable, read race, oversize)
+    logs and degrades to "no artifact, just the normal tool round".
+    """
+    if fn_name not in ('write_file', 'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents'):
+        return
+    rel_path = (fn_args.get('path') or '').strip()
+    if not rel_path:
+        return
+
+    # Feature-flag gate — read live from lib at call time so a hot
+    # config reload disables / re-enables without a restart.
+    try:
+        import lib as _lib_mod
+        if not getattr(_lib_mod, 'ARTIFACTS_ENABLED', True):
+            return
+    except Exception as e:
+        logger.debug('[Artifacts] feature flag check failed (non-fatal): %s', e)
+
+    try:
+        from lib.artifacts import (
+            ArtifactSizeError,
+            create_artifact,
+            detect_format,
+            emit_artifact_event,
+            is_renderable_path,
+        )
+    except Exception as e:  # pragma: no cover — defensive import guard
+        logger.debug('[Artifacts] subsystem unavailable: %s', e)
+        return
+
+    if not is_renderable_path(rel_path):
+        return
+
+    fmt = detect_format(rel_path)
+    if fmt is None:
+        return
+
+    # Routine project doc edits (README.md, CHANGELOG.md, etc.) shouldn't
+    # spawn artifact chips — only HTML/SVG outputs are "report-shaped"
+    # enough to deserve the side panel.  Inline ```markdown fences are
+    # still promoted by Producer B (lib/artifacts/scanner.py).
+    if fmt == 'markdown':
+        return
+
+    # Resolve the on-disk target so we capture the canonical bytes (post
+    # write).  ``apply_diff`` / ``insert_content`` lacks a `content` arg —
+    # we always read from disk.
+    try:
+        from lib.project_mod.write_tools import _resolve_write_path
+        target = _resolve_write_path(project_path, rel_path)
+    except Exception as e:
+        # _resolve_write_path raises ValueError when an absolute path
+        # falls outside any registered root.  Either way, we can't safely
+        # promote it.
+        logger.debug('[Artifacts] cannot resolve write path %s: %s', rel_path, e)
+        return
+
+    try:
+        size = os.path.getsize(target)
+    except OSError as e:
+        logger.debug('[Artifacts] stat after write failed for %s: %s', rel_path, e)
+        return
+
+    if size > _WRITE_ARTIFACT_MAX_BYTES:
+        logger.info(
+            '[Artifacts] skip oversize write_file artifact path=%s size=%d cap=%d',
+            rel_path, size, _WRITE_ARTIFACT_MAX_BYTES,
+        )
+        return
+
+    try:
+        with open(target, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+    except OSError as e:
+        logger.warning('[Artifacts] read-back failed for %s: %s', rel_path, e)
+        return
+
+    conv_id = task.get('convId') or ''
+    if not conv_id:
+        logger.debug('[Artifacts] task without convId, skipping')
+        return
+
+    msg_id = task.get('_assistantMsgId') or task.get('msgId') or ''
+    title = os.path.basename(rel_path) or rel_path
+    src_ref = {'path': rel_path, 'tool': fn_name}
+
+    try:
+        artifact_meta = create_artifact(
+            conv_id=conv_id,
+            content=content,
+            format=fmt,
+            source='write_file',
+            source_ref=src_ref,
+            task_id=task.get('id', ''),
+            msg_id=msg_id,
+            title=title,
+        )
+    except ArtifactSizeError as e:
+        logger.info('[Artifacts] write_file size cap rejection: %s', e)
+        return
+    except Exception as e:
+        logger.warning('[Artifacts] create_artifact failed for %s: %s',
+                       rel_path, e, exc_info=True)
+        return
+
+    try:
+        emit_artifact_event(task, artifact_meta)
+    except Exception as e:
+        logger.warning('[Artifacts] emit_artifact_event failed for id=%s: %s',
+                       artifact_meta.get('id', '?')[:8], e, exc_info=True)
+
+    # Annotate the chat-side meta so the tool round can render the chip.
+    meta['artifactId']     = artifact_meta['id']
+    meta['artifactFormat'] = artifact_meta['format']
+    meta['artifactTitle']  = artifact_meta['title']
+    meta['artifactSize']   = artifact_meta['size_bytes']
+    logger.debug(
+        '[Artifacts] promoted write_file path=%s id=%s fmt=%s size=%d',
+        rel_path, artifact_meta['id'][:8], artifact_meta['format'], size,
+    )
 
 
 # Register read_files independently — it's a global tool that works with or
@@ -51,6 +189,62 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                     'path=%s task=%s',
                     ref.get('tool_round'), len(resolved),
                     fn_args.get('path', '?'), task.get('id', '?')[:8])
+
+    # ── Read-before-edit gate ──
+    # apply_diff / insert_content built from guessed content are the dominant
+    # source of "Search text not found" failures. Refuse them unless the
+    # target file was read (or written) earlier in the conversation. See
+    # lib/tasks_pkg/handlers/_read_gate.py for the policy.
+    #
+    # Single-edit tools (apply_diff / insert_content) are refused wholesale.
+    # Batch tools (apply_diffs / insert_contents) are gated per-path: only the
+    # edits whose target file is unread are skipped, the rest run, and the
+    # result names the skipped file(s).
+    _gate_skip_note = None
+    if fn_name in ('apply_diff', 'insert_content') and project_path:
+        try:
+            _gate_err = check_read_before_edit(task, fn_name, fn_args, project_path)
+        except Exception as _ge:
+            logger.warning('[ReadGate] check failed for %s (allowing through): %s',
+                           fn_name, _ge, exc_info=True)
+            _gate_err = None
+        if _gate_err:
+            meta = build_project_tool_meta(fn_name, fn_args, _gate_err)
+            meta['badge'] = 'read first'
+            _finalize_tool_round(task, rn, round_entry, [meta])
+            return tc_id, _gate_err, False
+    elif fn_name in ('apply_diffs', 'insert_contents') and project_path:
+        try:
+            _skip_idx, _unread_raw = partition_batch_edits(task, fn_name, fn_args, project_path)
+        except Exception as _ge:
+            logger.warning('[ReadGate] partition failed for %s (allowing through): %s',
+                           fn_name, _ge, exc_info=True)
+            _skip_idx, _unread_raw = [], []
+        if _skip_idx:
+            edits = fn_args.get('edits') or []
+            _skip_set = set(_skip_idx)
+            # All edits target unread files → full refusal (nothing to run).
+            if len(_skip_set) >= len(edits):
+                from lib.tasks_pkg.handlers._read_gate import _format_refusal
+                _gate_err = _format_refusal(fn_name, _unread_raw)
+                meta = build_project_tool_meta(fn_name, fn_args, _gate_err)
+                meta['badge'] = 'read first'
+                _finalize_tool_round(task, rn, round_entry, [meta])
+                logger.info('[ReadGate] Refused all %d edit(s) of %s for unread file(s) %s (task=%s)',
+                            len(edits), fn_name, ', '.join(_unread_raw), task.get('id', '?')[:8])
+                return tc_id, _gate_err, False
+            # Partial: drop the unread-target edits, keep the rest.
+            fn_args['edits'] = [e for i, e in enumerate(edits) if i not in _skip_set]
+            _gate_skip_note = (
+                f'Read-before-edit gate: skipped {len(_skip_set)} edit(s) targeting '
+                f'unread file(s): {", ".join(_unread_raw)}. The remaining '
+                f'{len(fn_args["edits"])} edit(s) were applied. read_files those '
+                f'path(s) this turn, then re-issue the skipped edit(s) NEXT turn '
+                f'(a sibling read_files in the same parallel batch does not count).'
+            )
+            logger.info('[ReadGate] Partial %s: skipped %d/%d edit(s) for unread file(s) %s (task=%s)',
+                        fn_name, len(_skip_set), len(edits), ', '.join(_unread_raw),
+                        task.get('id', '?')[:8])
 
     from lib.project_mod import execute_tool
     # read_files is globally available — when no project is attached, absolute
@@ -128,6 +322,18 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             extra={'url': ''},
         )
 
+    if _gate_skip_note:
+        meta['badge'] = 'partial: read first'
+
+    # ── Promote renderable writes to a chat artifact ──
+    # Best-effort: failure here MUST NOT fail the tool round itself.
+    if fn_name in ('write_file', 'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents') and project_path:
+        try:
+            _maybe_promote_write_to_artifact(task, fn_name, fn_args, project_path, meta)
+        except Exception as e:
+            logger.debug('[Artifacts] promotion path failed (non-fatal): %s',
+                         e, exc_info=True)
+
     # For run_command: inject fileChanges from tracked modifications
     if fn_name == 'run_command' and project_path:
         try:
@@ -151,6 +357,12 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 meta['fileChanges'] = file_changes
         except Exception as e:
             logger.debug('[Executor] run_command fileChanges enrichment failed: %s', e)
+
+    # Prepend the read-gate skip note so the model sees which path(s) were
+    # dropped. Done AFTER meta is built so the per-edit summaries parse the
+    # unmodified batch header ("Applied N/M edits").
+    if _gate_skip_note and isinstance(tool_content, str):
+        tool_content = f'{_gate_skip_note}\n\n{tool_content}'
 
     _finalize_tool_round(task, rn, round_entry, [meta])
     return tc_id, tool_content, False

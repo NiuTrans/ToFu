@@ -94,7 +94,8 @@ def handle_mcp_tool(
         from lib.tasks_pkg.tool_display import _mcp_arg_suffix
         fresh_suffix = _mcp_arg_suffix(fn_args) or arg_suffix
 
-        is_error = isinstance(tool_content, str) and tool_content.startswith('❌')
+        is_error = isinstance(tool_content, str) and tool_content.startswith(
+            ('❌', 'MCP Error', 'MCP tool error', 'MCP server not connected'))
         meta['badge'] = f'{icon} {server_name}' if not is_error else f'❌ {server_name}'
         base_title = f'{icon} {server_name}/{tool_name}'
         meta['title'] = f'{base_title} — {fresh_suffix}' if fresh_suffix else base_title

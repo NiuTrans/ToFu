@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 import threading
 import time
 from typing import Any
@@ -33,6 +34,112 @@ from lib.mcp.types import (
 )
 
 logger = get_logger(__name__)
+
+
+# ── Connect-failure diagnostics ──────────────────────────
+
+# How many bytes of child-process stderr to keep for failure diagnosis.
+# Just enough to surface a Python traceback or a "module not found" line
+# without flooding the UI / log file.
+_MCP_STDERR_TAIL_BYTES = 8192
+
+
+def _unwrap_exception_group(exc: BaseException) -> BaseException:
+    """Return the deepest non-group leaf exception in a (possibly nested)
+    ``BaseExceptionGroup`` chain.
+
+    anyio / mcp wrap the real failure in 2-3 levels of
+    ``ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)``,
+    which is useless to show users. We walk ``.exceptions`` to find the
+    first concrete leaf and return it. If no leaf is found (degenerate
+    case), the original exception is returned unchanged.
+    """
+    try:
+        Group = BaseExceptionGroup  # type: ignore[name-defined]
+    except NameError:  # pragma: no cover — Python < 3.11
+        return exc
+
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while isinstance(cur, Group):
+        if id(cur) in seen:
+            break
+        seen.add(id(cur))
+        subs = list(getattr(cur, 'exceptions', ()) or ())
+        if not subs:
+            break
+        # Prefer the first non-group sub; otherwise descend into the first group.
+        leaf = next((s for s in subs if not isinstance(s, Group)), None)
+        cur = leaf if leaf is not None else subs[0]
+    return cur if cur is not None else exc
+
+
+def _read_stderr_tail(f, max_bytes: int = _MCP_STDERR_TAIL_BYTES) -> str:
+    """Read the last ``max_bytes`` bytes of a binary tempfile, decoded as UTF-8.
+
+    Returns '' on any failure — diagnostics must never raise.
+    """
+    if f is None:
+        return ''
+    try:
+        f.flush()
+    except OSError as e:
+        logger.debug('[MCP] stderr tempfile flush failed: %s', e)
+    try:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - max_bytes))
+        data = f.read()
+    except OSError as e:
+        logger.debug('[MCP] Could not read stderr tail: %s', e)
+        return ''
+    if not data:
+        return ''
+    # `errors='replace'` makes decode infallible for utf-8, but keep a
+    # narrow guard for the rare LookupError if stdlib codec is missing.
+    try:
+        text = data.decode('utf-8', errors='replace')
+    except (UnicodeDecodeError, LookupError) as e:
+        logger.debug('[MCP] stderr tail decode failed: %s', e)
+        return ''
+    # Trim partial leading line if we sliced mid-line.
+    if size > max_bytes and '\n' in text:
+        text = text.split('\n', 1)[1]
+    return text.strip()
+
+
+class MCPConnectError(RuntimeError):
+    """Connection failure for a single MCP server with a user-facing message
+    that includes the actionable root cause and the child process's stderr
+    tail (when stdio transport).
+
+    ``str(e)`` yields the formatted user-facing message; ``.cause`` holds
+    the original (unwrapped) leaf exception, ``.stderr_tail`` holds the
+    captured stderr (may be empty).
+    """
+
+    def __init__(self, server_name: str, cause: BaseException, stderr_tail: str = ''):
+        self.server_name = server_name
+        self.cause = cause
+        self.stderr_tail = stderr_tail or ''
+        super().__init__(self._format())
+
+    def _format(self) -> str:
+        cause_msg = (str(self.cause) or type(self.cause).__name__).strip()
+        # MCP's "Connection closed" is too terse — clarify it.
+        if cause_msg == 'Connection closed':
+            cause_msg = (
+                'Connection closed by server during initialize '
+                '(the launcher started but exited before completing the MCP handshake)'
+            )
+        msg = f'MCP server {self.server_name!r}: {cause_msg}'
+        if self.stderr_tail:
+            tail = self.stderr_tail
+            # Cap at 1500 chars when surfaced to the UI — full tail is in logs.
+            if len(tail) > 1500:
+                tail = '…' + tail[-1500:]
+            msg += f'\n\nServer stderr (tail):\n{tail}'
+        return msg
 
 
 # ── Launcher install hints ───────────────────────────────
@@ -95,13 +202,15 @@ def _coerce_one(value: Any, schema: dict[str, Any]) -> Any:
         if s and (s.lstrip('-').isdigit()):
             try:
                 return int(s)
-            except ValueError:
+            except ValueError as _e_audit:
+                logger.debug('[client] _coerce_one caught %s: %s', type(_e_audit).__name__, _e_audit)
                 return value
     elif t == 'number' and isinstance(value, str):
         s = value.strip()
         try:
             return float(s)
-        except ValueError:
+        except ValueError as _e_audit:
+            logger.debug('[client] _coerce_one caught %s: %s', type(_e_audit).__name__, _e_audit)
             return value
     elif t == 'boolean' and isinstance(value, str):
         s = value.strip().lower()
@@ -147,8 +256,32 @@ def _coerce_args_to_schema(
 
 
 def _launcher_install_hint(command: str) -> str:
-    """Return an actionable install hint for a missing launcher binary."""
+    """Return an actionable install hint for a missing launcher binary.
+
+    If the project ships a sibling source tree under ``vendor/<base>/``
+    (e.g. internal exports bundle ``vendor/xuecheng-mcp/``), prefer a
+    ``pip install`` hint that points straight at it instead of the
+    generic "install via your package manager" fallback. The bundled
+    repos are usually private and not publishable on PyPI, so users have
+    no other source.
+    """
     base = command.rsplit('/', 1)[-1]
+
+    # Project-bundled MCP servers — try ``vendor/<base>/`` relative to the
+    # repo root. Walk up from this file: lib/mcp/client.py → repo root.
+    try:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        vendor_path = os.path.join(repo_root, 'vendor', base)
+        if os.path.isfile(os.path.join(vendor_path, 'pyproject.toml')):
+            return (
+                f'This project bundles {base!r} under {vendor_path!r}, but the '
+                f'launcher script is not on PATH for the running interpreter. '
+                f'Install it with: `pip install {vendor_path}` (run inside the '
+                f'same conda env that started the server), then restart Tofu.'
+            )
+    except Exception as e:
+        logger.debug('[MCP] vendor/ probe for %s failed: %s', base, e)
+
     return _LAUNCHER_HINTS.get(base,
         f'Install {command!r} via your package manager, or make sure it is on PATH.'
     )
@@ -179,6 +312,7 @@ class _MCPServerHandle:
         '_ready_future',     # asyncio.Future[list[Tool]] — resolved when init+list_tools done
         '_closed_future',    # asyncio.Future[None] — resolved when owner task exits
         '_owner_task',       # asyncio.Task — the owner coroutine handle
+        '_stderr_file',      # tempfile.SpooledTemporaryFile capturing child stderr (stdio transport only)
     )
 
     def __init__(self, name: str, config: dict):
@@ -192,6 +326,7 @@ class _MCPServerHandle:
         self._ready_future = None
         self._closed_future = None
         self._owner_task = None
+        self._stderr_file = None
 
 
 class MCPBridge:
@@ -268,6 +403,13 @@ class MCPBridge:
             try:
                 tools = self.connect_server(name, srv_cfg)
                 result[name] = [t.name for t in tools]
+            except MCPConnectError as e:
+                # Already-formatted root cause + stderr tail. Log the
+                # one-line summary at error level; the full chained
+                # traceback only at debug.
+                logger.error('[MCP] Failed to connect server %s: %s', name, e)
+                logger.debug('[MCP] Full traceback for %s:', name,
+                             exc_info=(type(e.cause), e.cause, e.cause.__traceback__))
             except Exception as e:
                 logger.error('[MCP] Failed to connect server %s: %s', name, e, exc_info=True)
         return result
@@ -292,7 +434,7 @@ class MCPBridge:
         # Tear down any existing server with the same name BEFORE taking
         # the lock for the new registration. The disconnect itself hits
         # the async loop; holding self._lock across it would freeze every
-        # concurrent GET /api/mcp/catalog for the duration.
+        # concurrent GET /api/v1/mcp/catalog for the duration.
         had_old = False
         with self._lock:
             had_old = name in self._servers
@@ -358,11 +500,18 @@ class MCPBridge:
                 timeout=MCP_CONNECT_TIMEOUT * 2 + 5,
             )
         except asyncio.TimeoutError:
-            # Readiness stalled — tell the owner to shut down and re-raise.
+            # Readiness stalled — tell the owner to shut down and re-raise
+            # as a MCPConnectError so the route can surface a user-facing
+            # message including any captured stderr.
             handle._shutdown_event.set()
-            raise TimeoutError(
-                f'MCP server {name!r}: connection handshake did not complete '
-                f'within {MCP_CONNECT_TIMEOUT * 2 + 5}s'
+            stderr_tail = _read_stderr_tail(handle._stderr_file)
+            raise MCPConnectError(
+                name,
+                TimeoutError(
+                    f'connection handshake did not complete within '
+                    f'{MCP_CONNECT_TIMEOUT * 2 + 5}s'
+                ),
+                stderr_tail,
             )
         return handle, tools
 
@@ -439,8 +588,21 @@ class MCPBridge:
                         args=args,
                         env=env,
                     )
+
+                    # Capture the child's stderr to a real on-disk tempfile so
+                    # that if the launcher dies during the MCP handshake, we
+                    # can surface the actual error (Python traceback, "module
+                    # not found", auth failure, etc.) to the user instead of
+                    # a useless "Connection closed". A real file (with
+                    # ``fileno()``) is required: mcp.client.stdio passes
+                    # ``errlog`` straight to ``anyio.open_process(stderr=...)``,
+                    # which only accepts an fd-backed file or integer fd.
+                    # The file is unlinked from disk on close (mode w+b,
+                    # delete=True) so it never accumulates.
+                    stderr_buf = tempfile.TemporaryFile(mode='w+b')
+                    handle._stderr_file = stderr_buf
                     read, write = await stack.enter_async_context(
-                        stdio_client(params)
+                        stdio_client(params, errlog=stderr_buf)
                     )
 
                 # Create and initialize session
@@ -492,19 +654,41 @@ class MCPBridge:
                     logger.debug('[MCP] Owner %s cancelled — proceeding to cleanup', name)
                 # AsyncExitStack.__aexit__ fires here — same task that
                 # opened the stack. No cancel-scope mismatch possible.
-        except Exception as e:
+        except BaseException as e:
+            # anyio / mcp wrap the real failure in nested ExceptionGroups —
+            # unwrap before forwarding so callers see the actual cause
+            # (e.g. ``McpError: Connection closed``, ``FileNotFoundError``)
+            # instead of the unhelpful "unhandled errors in a TaskGroup".
+            root = _unwrap_exception_group(e)
+            stderr_tail = _read_stderr_tail(handle._stderr_file)
+            if stderr_tail:
+                logger.warning(
+                    '[MCP] Server %s stderr tail (%d chars):\n%s',
+                    name, len(stderr_tail), stderr_tail,
+                )
+            wrapped = MCPConnectError(name, root, stderr_tail)
             # Propagate failure to whoever is awaiting readiness.
             if handle._ready_future and not handle._ready_future.done():
-                handle._ready_future.set_exception(e)
+                handle._ready_future.set_exception(wrapped)
             else:
                 # Already ready — this was a runtime failure during the
                 # shutdown-wait phase. Log with context so we can diagnose.
-                logger.warning('[MCP] Owner %s exited with error: %s', name, e)
+                logger.warning('[MCP] Owner %s exited with error: %s', name, wrapped)
+            # Re-raise CancelledError so the event loop can finish its job.
+            if isinstance(e, asyncio.CancelledError):
+                raise
         finally:
             # Always resolve the closed_future so callers awaiting a
             # clean shutdown are unblocked.
             if handle._closed_future and not handle._closed_future.done():
                 handle._closed_future.set_result(None)
+            # Release the stderr capture buffer.
+            if handle._stderr_file is not None:
+                try:
+                    handle._stderr_file.close()
+                except OSError as e:
+                    logger.debug('[MCP] stderr_file close failed: %s', e)
+                handle._stderr_file = None
 
     def _disconnect_one(self, name: str) -> None:
         """Sync: request shutdown for a single server and wait (bounded).
@@ -711,6 +895,10 @@ class MCPBridge:
         info = self._tool_index.get(namespaced_name)
         if info is not None:
             arguments = _coerce_args_to_schema(arguments, info['input_schema'])
+            # Use the server's actual registered tool name. ``parse_namespaced_name``
+            # only sees the post-dedupe view, but the MCP server itself was
+            # registered with the original (possibly stuttering) name.
+            tool_name = info['tool_name']
 
         timeout = handle.config.get('timeout', MCP_CALL_TIMEOUT)
         logger.info('[MCP:Call] %s.%s(args=%s) timeout=%ds',

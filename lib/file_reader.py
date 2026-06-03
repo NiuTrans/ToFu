@@ -308,7 +308,8 @@ def _read_text(path: str, filename: str, file_size: int) -> str:
             with open(path, encoding=encoding) as f:
                 text = f.read(MAX_TEXT_CHARS + 100)
             break
-        except (UnicodeDecodeError, LookupError):
+        except (UnicodeDecodeError, LookupError) as _e_audit:
+            logger.debug('[file_reader] _read_text caught %s: %s', type(_e_audit).__name__, _e_audit)
             continue
 
     if text is None:

@@ -13,7 +13,7 @@ except ImportError:
     # Warning already logged by _common.py — silent here to avoid duplicate noise
 
 from lib.log import get_logger
-from lib.pdf_parser._common import HAS_PYMUPDF4LLM, MAX_PDF_BYTES
+from lib.pdf_parser._common import HAS_PYMUPDF4LLM, MAX_PDF_BYTES, PYMUPDF_LOCK
 from lib.pdf_parser.math import postprocess_math_blocks
 from lib.pdf_parser.postprocess import cleanup_markdown, strip_manuscript_line_numbers
 
@@ -119,44 +119,45 @@ def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '',
     if HAS_PYMUPDF4LLM and mode != 'fast':
         try:
             import pymupdf4llm
-            md_doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-            try:
-                n = len(md_doc)
-                _safe_progress(progress_callback, 0, n)
-                parts = []
-                total = 0
-                truncated = False
-                for pi in range(n):
-                    chunks = pymupdf4llm.to_markdown(
-                        md_doc,
-                        pages=[pi],
-                        page_chunks=True,
-                        show_progress=False,
-                        table_strategy="lines",
-                    )
-                    page_md = ''
-                    if chunks:
-                        c0 = chunks[0]
-                        page_md = c0.get('text', '') if isinstance(c0, dict) else str(c0)
-                    page_md = strip_manuscript_line_numbers(page_md)
-                    page_md = postprocess_math_blocks(page_md)
-                    page_md = cleanup_markdown(page_md)
-                    plen = len(page_md)
-                    if total + plen > limit:
-                        remaining = limit - total
-                        if remaining > 200:
-                            parts.append(page_md[:remaining])
-                        parts.append(f'\n[…truncated at {total + remaining:,} chars, '
-                                     f'page {pi + 1}/{n}]')
-                        total += remaining
-                        truncated = True
+            with PYMUPDF_LOCK:
+                md_doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+                try:
+                    n = len(md_doc)
+                    _safe_progress(progress_callback, 0, n)
+                    parts = []
+                    total = 0
+                    truncated = False
+                    for pi in range(n):
+                        chunks = pymupdf4llm.to_markdown(
+                            md_doc,
+                            pages=[pi],
+                            page_chunks=True,
+                            show_progress=False,
+                            table_strategy="lines",
+                        )
+                        page_md = ''
+                        if chunks:
+                            c0 = chunks[0]
+                            page_md = c0.get('text', '') if isinstance(c0, dict) else str(c0)
+                        page_md = strip_manuscript_line_numbers(page_md)
+                        page_md = postprocess_math_blocks(page_md)
+                        page_md = cleanup_markdown(page_md)
+                        plen = len(page_md)
+                        if total + plen > limit:
+                            remaining = limit - total
+                            if remaining > 200:
+                                parts.append(page_md[:remaining])
+                            parts.append(f'\n[…truncated at {total + remaining:,} chars, '
+                                         f'page {pi + 1}/{n}]')
+                            total += remaining
+                            truncated = True
+                            _safe_progress(progress_callback, pi + 1, n)
+                            break
+                        parts.append(page_md)
+                        total += plen
                         _safe_progress(progress_callback, pi + 1, n)
-                        break
-                    parts.append(page_md)
-                    total += plen
-                    _safe_progress(progress_callback, pi + 1, n)
-            finally:
-                md_doc.close()
+                finally:
+                    md_doc.close()
 
             text = '\n\n---\n\n'.join(parts)
             logger.debug('pymupdf4llm OK: %d pages, %s chars '
@@ -169,23 +170,24 @@ def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '',
 
     # ── Strategy 2: pymupdf raw get_text ──
     try:
-        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-        try:
-            n = len(doc)
-            _safe_progress(progress_callback, 0, n)
-            parts = []
-            total = 0
-            for pi, page in enumerate(doc):
-                raw = page.get_text()
-                plen = len(raw)
-                total += plen
-                parts.append(raw)
-                _safe_progress(progress_callback, pi + 1, n)
-                if limit < 999_999_999 and total > limit:
-                    parts.append(f'\n[…truncated at {total:,} chars]')
-                    break
-        finally:
-            doc.close()
+        with PYMUPDF_LOCK:
+            doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+            try:
+                n = len(doc)
+                _safe_progress(progress_callback, 0, n)
+                parts = []
+                total = 0
+                for pi, page in enumerate(doc):
+                    raw = page.get_text()
+                    plen = len(raw)
+                    total += plen
+                    parts.append(raw)
+                    _safe_progress(progress_callback, pi + 1, n)
+                    if limit < 999_999_999 and total > limit:
+                        parts.append(f'\n[…truncated at {total:,} chars]')
+                        break
+            finally:
+                doc.close()
         if not parts:
             return '[PDF: no extractable text]'
         full = re.sub(r'\n{3,}', '\n\n', '\n\n'.join(parts))

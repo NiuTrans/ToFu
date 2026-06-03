@@ -5,7 +5,7 @@ Tests:
   - lib.file_reader._compress_image — image compression (with in-memory PNG)
   - lib.model_info — model detection via model_info module + _clamp_max_tokens edges
   - lib.tasks_pkg.executor — ToolRegistry after handler extraction
-  - Backward-compat imports (orchestrator._repair_json, llm_client.is_claude, etc.)
+  - Re-exported helpers (orchestrator._repair_json, lib.llm.is_claude, etc.)
 
 Run:  pytest tests/test_refactored_utils.py -m unit -v
 """
@@ -102,8 +102,8 @@ class TestBackwardCompatImports:
         assert _repair_json is repair_json
 
     def test_model_detection_from_llm_client(self):
-        """All model detection functions still importable from llm_client."""
-        from lib.llm_client import (
+        """All model detection functions importable from lib.llm."""
+        from lib.llm import (
             is_claude,
             is_doubao,
             is_gemini,
@@ -117,8 +117,8 @@ class TestBackwardCompatImports:
         assert is_claude('claude-4')
         assert is_gpt('gpt-4o')
 
-    def test_clamp_max_tokens_from_llm_client(self):
-        from lib.llm_client import _clamp_max_tokens
+    def test_clamp_max_tokens_from_lib_llm(self):
+        from lib.llm import _clamp_max_tokens
         assert _clamp_max_tokens('qwen-turbo', 100000) == 16384
 
     def test_model_info_direct_import(self):
@@ -237,7 +237,7 @@ class TestToolRegistryPostRefactor:
         tools = {name for name, _, _ in tool_registry.list_tools()}
         # Core tools that must be present
         expected = {
-            'web_search', 'fetch_url', 'tool_search', 'ask_human',
+            'web_search', 'fetch_url', 'ask_human',
             '__code_exec__',
         }
         for t in expected:

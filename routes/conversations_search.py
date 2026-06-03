@@ -18,7 +18,7 @@ from routes.conversations import conversations_bp
 logger = get_logger(__name__)
 
 
-@conversations_bp.route('/api/conversations/search', methods=['GET'])
+@conversations_bp.route('/api/v1/conversations/search', methods=['GET'])
 def search_convs():
     """Server-side full-text search through conversation messages.
 

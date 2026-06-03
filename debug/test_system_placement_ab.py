@@ -63,7 +63,7 @@ from dataclasses import dataclass, field
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.log import get_logger
-from lib.llm_client import build_body, stream_chat, add_cache_breakpoints
+from lib.llm import build_body, stream_chat, add_cache_breakpoints
 from lib.model_info import is_claude
 
 logger = get_logger(__name__)
@@ -210,7 +210,7 @@ TOOL_RESULTS = {
         'grep "add_cache_breakpoints" — 12 matches:\n\n'
         'lib/llm_client.py:904:def add_cache_breakpoints(body, log_prefix=\'\'):\n'
         'lib/llm_client.py:1386:    add_cache_breakpoints(body, log_prefix)\n'
-        'tests/test_cache_breakpoints.py:112:  from lib.llm_client import add_cache_breakpoints\n'
+        'tests/test_cache_breakpoints.py:112:  from lib.llm import add_cache_breakpoints\n'
     ),
     'run_command': (
         "$ wc -l lib/llm_client.py\n1965 lib/llm_client.py\n"

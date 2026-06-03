@@ -11,10 +11,13 @@ Modules:
 """
 
 __all__ = [
+    # spawn (eager)
+    'spawn_task',
     # manager (eager)
     'tasks', 'tasks_lock',
     'create_task', 'append_event', 'persist_task_result', 'cleanup_old_tasks',
-    'stream_llm_response', 'abort_running_tasks_for_conv',
+    'stream_llm_response',
+    'abort_running_tasks_for_conv',
     'recover_stale_tasks_on_startup',
     # approval (lazy)
     'request_write_approval', 'resolve_write_approval',
@@ -34,6 +37,55 @@ __all__ = [
     'run_endpoint_task',
     'run_task_sync',
 ]
+
+
+# ── Task spawning: unified entry point ──
+import asyncio
+import threading
+from lib.log import get_logger as _get_logger
+_spawn_logger = _get_logger('lib.tasks_pkg.spawn')
+
+
+def spawn_task(task: dict) -> None:
+    """Spawn a task using the best available mechanism.
+
+    If an asyncio event loop is running (Quart/Hypercorn), spawns the task
+    via asyncio.to_thread so the event loop can track its lifecycle. Falls
+    back to a plain daemon thread otherwise (e.g. tests, Feishu bot).
+
+    This is the SINGLE entry point for starting tasks. All call sites
+    (chat_send, branch, message_queue, autopilot, agent_backends) should
+    use this instead of threading.Thread(target=run_task, ...).
+    """
+    from lib.tasks_pkg.orchestrator import run_task
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError as e:
+        # No running loop (sync context, tests, Feishu bot) — fall back to thread.
+        _spawn_logger.debug('[Spawn] no running asyncio loop, using thread: %s', e)
+        loop = None
+
+    if loop and loop.is_running():
+        # We're inside the Quart event loop — use asyncio.to_thread
+        # so the orchestrator runs in the default ThreadPoolExecutor
+        # but is tracked as an asyncio Task (cancellable, awaitable).
+        async def _async_wrapper():
+            try:
+                await asyncio.to_thread(run_task, task)
+            except Exception as e:
+                _spawn_logger.error('[Spawn] Task %s failed: %s',
+                                    task.get('id', '?')[:8], e, exc_info=True)
+
+        asyncio.ensure_future(_async_wrapper())
+    else:
+        # No event loop — fall back to daemon thread
+        threading.Thread(
+            target=run_task, args=(task,),
+            name=f'run_task-{task.get("id", "?")[:8]}',
+            daemon=True,
+        ).start()
+
 
 # ── Eagerly import only the lightweight manager (used by routes at import time) ──
 from lib.tasks_pkg.manager import (

@@ -20,17 +20,17 @@ CREATE_MEMORY_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "Generated FIRST. ONE dense ~120-char sentence that front-loads the concrete search triggers (symptom, the symbol/file name, the fix or rule). This is the primary signal for both search_memories and per-turn prefetch ranking — vague summaries like 'fixes a bug' are useless. Don't pad to a fixed length; pack signal."
+                },
                 "name": {
                     "type": "string",
                     "description": "Short descriptive name for the memory"
                 },
-                "description": {
-                    "type": "string",
-                    "description": "One-line description of what this memory captures"
-                },
                 "body": {
                     "type": "string",
-                    "description": "The full memory content in Markdown — instructions, patterns, conventions, code examples"
+                    "description": "The full memory content as skimmable Markdown, not a conversation recap. Suggested skeleton: '## Symptom/Why' (what goes wrong, how to recognise it) → '## Fix/What' (the concrete change with file:line and code/commands) → '## Guardrail' (the rule for next time + any covering test)."
                 },
                 "tags": {
                     "type": "array",
@@ -43,7 +43,7 @@ CREATE_MEMORY_TOOL = {
                     "description": "Where to store the memory: 'global' (all projects) or 'project' (current project only). Default: 'project'"
                 }
             },
-            "required": ["name", "description", "body"]
+            "required": ["description", "name", "body"]
         }
     }
 }
@@ -60,6 +60,10 @@ UPDATE_MEMORY_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "Generated FIRST. New ONE dense ~120-char sentence front-loading search triggers (symptom, symbol/file, fix/rule) — the primary ranking signal for search and prefetch."
+                },
                 "memory_id": {
                     "type": "string",
                     "description": "The ID of the memory to update (from list_all_memories or the memory's filename without .md)"
@@ -67,10 +71,6 @@ UPDATE_MEMORY_TOOL = {
                 "name": {
                     "type": "string",
                     "description": "New name for the memory (optional)"
-                },
-                "description": {
-                    "type": "string",
-                    "description": "New one-line description (optional)"
                 },
                 "body": {
                     "type": "string",
@@ -126,13 +126,13 @@ MERGE_MEMORY_TOOL = {
                     "items": {"type": "string"},
                     "description": "List of memory IDs to merge (at least 2)"
                 },
+                "description": {
+                    "type": "string",
+                    "description": "Generated FIRST. ONE dense ~120-char sentence front-loading the merged memory's search triggers (symptom, symbol/file, fix/rule) — the primary ranking signal for search and prefetch."
+                },
                 "name": {
                     "type": "string",
                     "description": "Name for the merged memory"
-                },
-                "description": {
-                    "type": "string",
-                    "description": "One-line description for the merged memory"
                 },
                 "body": {
                     "type": "string",
@@ -149,7 +149,7 @@ MERGE_MEMORY_TOOL = {
                     "description": "Where to store the merged memory: 'global' or 'project'. Default: 'project'"
                 }
             },
-            "required": ["memory_ids", "name", "description", "body"]
+            "required": ["memory_ids", "description", "name", "body"]
         }
     }
 }

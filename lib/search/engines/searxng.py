@@ -82,7 +82,7 @@ def _searxng_parse_json(data, max_results=6):
     return results
 
 
-def search_searxng(query, max_results=6):
+def search_searxng(query, max_results=6, freshness=''):
     """Query public SearXNG instances with automatic failover.
 
     Tries JSON API first (fast, structured), falls back to HTML scraping.
@@ -98,12 +98,19 @@ def search_searxng(query, max_results=6):
     random.shuffle(shuffled)
     _TIMEOUT = 2  # seconds — if SearXNG can't respond in 2s, it won't
     _MAX_INSTANCES = 2  # try at most 2 instances (was 3)
+    # SearXNG supports time_range param: day, week, month, year
+    _FRESHNESS_MAP = {'day': 'day', 'week': 'week', 'month': 'month', 'year': 'year'}
+    time_range = _FRESHNESS_MAP.get(freshness, '')
+
     for inst in shuffled[:_MAX_INSTANCES]:
         try:
             # Try JSON first (don't follow redirects — detect 302→homepage)
+            json_params = {'q': query, 'format': 'json', 'engines': 'google,bing,duckduckgo'}
+            if time_range:
+                json_params['time_range'] = time_range
             resp = requests.get(
                 f'{inst}/search',
-                params={'q': query, 'format': 'json', 'engines': 'google,bing,duckduckgo'},
+                params=json_params,
                 headers=HEADERS, timeout=_TIMEOUT, allow_redirects=False,
             )
 
@@ -127,9 +134,12 @@ def search_searxng(query, max_results=6):
 
             # JSON blocked (403) or empty — try HTML on same instance
             if resp.status_code == 403 or not json_results:
+                html_params = {'q': query}
+                if time_range:
+                    html_params['time_range'] = time_range
                 resp = requests.get(
                     f'{inst}/search',
-                    params={'q': query},
+                    params=html_params,
                     headers=HEADERS, timeout=_TIMEOUT, allow_redirects=False,
                 )
                 # Detect redirect again

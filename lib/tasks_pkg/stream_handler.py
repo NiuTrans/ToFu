@@ -6,10 +6,50 @@ logic that inspects each LLM round's result and decides whether to retry
 tool execution.
 """
 
-from lib.log import get_logger
+import random
+import threading
+import time
+
+from lib.log import audit_log, get_logger
 from lib.tasks_pkg.manager import append_event
 
 logger = get_logger(__name__)
+
+
+# ── One-time §10.1 audit when per-phase scope is in effect ──
+# The premature-retry counter used to be local to ``run_task``'s round
+# loop (i.e. ``per_round`` scope — counter reset on every iteration of
+# the while loop).  The counter is now lifted to the task dict and
+# survives across rounds within the same Worker / Planner phase.  This
+# is a §10.1 hyperparameter-adjacent change (it tightens the effective
+# retry budget against pathological gateways) and the user signed off
+# in writing.  Emit one audit entry the first time the new path is
+# exercised so the change is traceable in audit.log.
+_AUDIT_LOCK = threading.Lock()
+_AUDIT_LOGGED = False
+
+
+def _maybe_audit_phase_scope() -> None:
+    global _AUDIT_LOGGED
+    if _AUDIT_LOGGED:
+        return
+    with _AUDIT_LOCK:
+        if _AUDIT_LOGGED:
+            return
+        _AUDIT_LOGGED = True
+        try:
+            audit_log(
+                'config_change',
+                param='premature_retry_scope',
+                old='per_round',
+                new='per_phase',
+                approved_by='user',
+                reason='retry counter now survives across rounds within '
+                       'the same Worker / Planner phase, resets only at '
+                       'phase boundaries (CONTINUE_PLANNER, new task)',
+            )
+        except Exception as e:
+            logger.debug('[stream_handler] phase-scope audit_log failed: %s', e)
 
 # Retry caps for abnormal stream termination.
 #
@@ -23,15 +63,54 @@ logger = get_logger(__name__)
 #
 #   ── Zero-byte stream anomaly ─────────────────────────────────────
 #   Gateway/proxy opens the SSE connection, returns zero tokens, and
-#   closes within a few seconds.  No work is wasted — each retry is
-#   essentially free.  These are transient upstream hiccups (e.g. AWS
-#   Bedrock behind a gateway occasionally 0-byte'ing requests).
-#   With a ~30% per-call failure rate in a bad window, cap=2 gives
-#   ~3% "all fail" probability (user-visible error); cap=16 drops it
-#   to effectively 0.  Retries go through append_event 'phase:retrying'
+#   closes within a few seconds.  No output tokens were generated, but
+#   prompt-cache reads ARE billed — for a turn with 30 KB cached, 16
+#   back-to-back retries means ~480 KB of cache-read traffic.  Caps are
+#   therefore finite, and retries are paced with exponential backoff
+#   (see ``_zero_byte_backoff_seconds``) so we don't hammer a poisoned
+#   upstream pool that is overwhelmingly likely to zero-byte the next
+#   request milliseconds later.  Recurring trigger: ``aws.claude-opus-4.7``
+#   via sankuai gateway.  Retries go through append_event 'phase:retrying'
 #   so the UI shows a spinner with attempt count.
 _PREMATURE_RETRY_MAX_CLASSIC = 2
 _PREMATURE_RETRY_MAX_ZERO_BYTE = 16
+# Empty-stop retry budget (model emitted thinking / a few chunks but no
+# content, then closed cleanly with finish_reason=stop). Observed on
+# GLM-5.1, MiniMax M2.5/M2.7, and occasionally Claude.  Each retry is
+# moderately expensive (cache reads + new thinking), so the cap is low.
+_EMPTY_STOP_RETRY_MAX = 2
+
+# Exponential-backoff schedule for zero-byte retries.
+# 0.5s, 1s, 2s, 4s, 8s, 8s, 8s, ...  + uniform jitter [0, 0.5s).
+_ZERO_BYTE_BACKOFF_BASE_S = 0.5
+_ZERO_BYTE_BACKOFF_MAX_S = 8.0
+
+
+def _zero_byte_backoff_seconds(attempt: int) -> float:
+    """Return the sleep (seconds) before the Nth zero-byte retry.
+
+    ``attempt`` is 1-based: the 1st retry sleeps ~0.5s, 2nd ~1s, 3rd ~2s, etc.
+    """
+    base = min(
+        _ZERO_BYTE_BACKOFF_BASE_S * (2 ** max(0, attempt - 1)),
+        _ZERO_BYTE_BACKOFF_MAX_S,
+    )
+    return base + random.uniform(0.0, 0.5)
+
+
+def _interruptible_sleep(seconds: float, task) -> None:
+    """Sleep up to ``seconds``, polling ``task['aborted']`` every 100 ms.
+
+    Lets a user abort (or task supersession) interrupt the backoff promptly.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        if task.get('aborted'):
+            return
+        time.sleep(min(0.1, remaining))
 
 
 def analyse_stream_result(
@@ -44,6 +123,25 @@ def analyse_stream_result(
     and determines whether the main loop should **break**, **continue**
     (retry after premature close), or **proceed** to tool execution.
 
+    Per-phase counter scope
+    -----------------------
+    The premature-retry counter survives across rounds within the same
+    Worker / Planner phase: each ``analyse_stream_result`` call reads
+    ``task['_premature_retry_count_phase']`` as the source of truth (when
+    present) and writes the updated value back.  The legacy
+    ``_premature_retry_count`` argument is kept for back-compat (paper
+    reports / swarm agents pass a local counter); when the task dict
+    has the phase counter set, that overrides the argument.
+
+    Per-retry slot rotation
+    -----------------------
+    On each zero-byte retry decision, the analyser also signals to the
+    next dispatch call to AVOID the pair ``(slot.key_name, slot.model)``
+    that just zero-byte'd.  The signal is written to
+    ``task['_force_rotate_pair']`` and consumed (cleared) by
+    ``stream_llm_response`` on the next call.  Mirrors the
+    ``gateway-5xx-treated-as-429`` pattern.
+
     Parameters
     ----------
     assistant_msg : dict
@@ -52,7 +150,8 @@ def analyse_stream_result(
         The finish reason reported by the LLM for this round.
     task : dict
         Live task dict (read for ``aborted``, ``error``, ``content``; mutated
-        on premature-close to set ``error``).
+        on premature-close to set ``error`` AND set the per-phase counter
+        and force-rotate signal).
     tid : str
         Short task ID for logging.
     model : str
@@ -61,6 +160,9 @@ def analyse_stream_result(
         Zero-based loop iteration index.
     _premature_retry_count : int
         How many premature-close retries have already been attempted.
+        Treated as a fallback when ``task['_premature_retry_count_phase']``
+        is not yet initialised — caller code in the orchestrator that
+        sets the phase counter on the task dict overrides this argument.
     messages : list[dict]
         Conversation message list (kept for API compatibility; no longer
         mutated — retries re-use the same messages transparently).
@@ -80,6 +182,15 @@ def analyse_stream_result(
         - ``premature_retry_count`` : int — updated retry counter
         - ``last_finish_reason`` : str | None — possibly updated finish reason
     """
+    # ── Per-phase counter override ──
+    # If the orchestrator has set ``task['_premature_retry_count_phase']``,
+    # use it as the source of truth so the cap survives across rounds
+    # within one phase.  Otherwise fall back to the legacy local counter
+    # passed in by the caller.
+    if '_premature_retry_count_phase' in task:
+        _premature_retry_count = int(task.get('_premature_retry_count_phase') or 0)
+        _maybe_audit_phase_scope()
+
     result = {
         'action': 'proceed',
         'loop_exit_reason': None,
@@ -129,31 +240,81 @@ def analyse_stream_result(
         _stream_elapsed_ms = (usage or {}).get('stream_elapsed_ms', 0)
         _stream_anomaly = (usage or {}).get('_stream_anomaly', False)
         _empty_stop = (usage or {}).get('_empty_stop', False)
+        # Real SSE chunk count from the LLM client. Zero == gateway opened
+        # the stream but never delivered a single token (true zero-byte).
+        # Falls back to None when older clients haven't propagated it.
+        _chunks_received = (usage or {}).get('_chunks_received')
 
         # Determine if this round looks like an abnormal termination:
         #   - (A) No content + substantial thinking  (classic premature close)
         #   - (B) Stream anomaly flag + no content + at least 1 prior round
         #         (proxy killed connection before model could produce anything)
+        # ── Zero-byte gateway anomaly (computed first, allowed on round 0) ──
+        # The gateway opened the SSE connection and closed it before any
+        # meaningful token came through.  No work was done, no tokens
+        # were spent — retrying is essentially free, so we admit this
+        # case on EVERY round including round 0.  This is the recurring
+        # ``aws.claude-opus-4.7`` via sankuai gateway pattern documented
+        # in the ``stream-retry-cap-split-by-signature`` memory.
+        #
+        # Detection: prefer the real ``_chunks_received`` from the LLM
+        # client (0 = no SSE chunks at all → gateway hang, retry is
+        # free regardless of how long we waited).  Fall back to the
+        # legacy thinking-length + elapsed-time heuristic when the
+        # client field isn't present.  The legacy bound originally
+        # used ``< 15s`` but production logs show ~36 % of true
+        # zero-byte gateway hangs took 15–40 s before the upstream
+        # closed the socket, so we widen the bound to 60 s — still
+        # less than the 5-minute read timeout, and still cheap to redo
+        # because no tokens were actually generated.
+        if _chunks_received is not None:
+            _is_zero_byte = (
+                not round_content.strip()
+                and not round_thinking.strip()
+                and _stream_anomaly
+                and (
+                    _chunks_received == 0
+                    # Stub response: gateway returned protocol framing
+                    # (role + stop chunks) but model generated nothing.
+                    # prompt_tokens/completion_tokens are nonsensical.
+                    # Same cost to retry as true zero-byte.
+                    or (_empty_stop
+                        and _chunks_received <= 5
+                        and _stream_elapsed_ms < 60000)
+                )
+            )
+        else:
+            _is_zero_byte = (
+                not round_content.strip()
+                and _stream_anomaly
+                and len(round_thinking) < 100
+                and _stream_elapsed_ms < 60000
+            )
+
+        # ── Classic premature close: substantial thinking, then cut off ──
         _is_classic_premature = (not round_content.strip()
                                  and len(round_thinking) > 1000)
+
+        # ── Other stream-anomaly empty (later rounds only) ──
+        # Without the zero-byte signature we can't be sure the round is
+        # cheap to redo, so we keep the historical ``round_num > 0``
+        # guard to avoid retrying a legitimate empty first-round stop.
         _is_anomaly_empty = (not round_content.strip()
                              and _stream_anomaly
-                             and round_num > 0)
-        _is_abnormal = _is_classic_premature or _is_anomaly_empty
+                             and round_num > 0
+                             and not _is_zero_byte)
+
+        _is_abnormal = (_is_classic_premature or _is_anomaly_empty
+                        or _is_zero_byte)
         _abnormal_type = ('premature_close' if _is_classic_premature
+                          else 'zero_byte' if _is_zero_byte
                           else 'stream_anomaly' if _is_anomaly_empty
                           else None)
 
-        # ── Split retry budget by failure signature ──
-        # Zero-byte anomaly: gateway cut the stream before model emitted
-        # anything (elapsed < 15s, thinking < 100 chars).  Each retry is
-        # ~free, so use the large cap.  Otherwise (classic premature
-        # close with substantial thinking), use the low cap.
-        _is_zero_byte = (
-            _is_anomaly_empty
-            and len(round_thinking) < 100
-            and _stream_elapsed_ms < 15000
-        )
+        # ── Retry budget split by failure signature ──
+        # Zero-byte: gateway never delivered output, retry is ~free,
+        # use the large cap.  Anything else (classic close, late-round
+        # anomaly): tokens were already spent, use the low cap.
         _retry_cap = (_PREMATURE_RETRY_MAX_ZERO_BYTE if _is_zero_byte
                       else _PREMATURE_RETRY_MAX_CLASSIC)
         _retry_bucket = 'zero_byte' if _is_zero_byte else 'classic'
@@ -161,17 +322,50 @@ def analyse_stream_result(
         if _is_abnormal and _premature_retry_count < _retry_cap:
             _premature_retry_count += 1
             result['premature_retry_count'] = _premature_retry_count
+            # Persist the per-phase counter back so the next round of
+            # this phase sees the bumped value.
+            if '_premature_retry_count_phase' in task:
+                task['_premature_retry_count_phase'] = _premature_retry_count
+            # Pace zero-byte retries with exponential backoff + jitter so we
+            # don't hammer a poisoned upstream pool.  Classic premature-close
+            # has its own (low) cap and large per-attempt cost, so we don't
+            # add backoff there.
+            _backoff_s = (_zero_byte_backoff_seconds(_premature_retry_count)
+                          if _is_zero_byte else 0.0)
+
+            # ── Force slot rotation on zero-byte retries ──
+            # Zero-byte gateway hangs cluster per-pool — production logs
+            # show 34/34 anomalies hit one slot in a 2-minute window.
+            # Signal the next dispatch to avoid re-using the slot that
+            # just zero-byte'd.  ``stream_llm_response`` reads this and
+            # passes ``avoid_pairs`` to ``dispatch_stream``, then clears
+            # the signal.  Best-effort — when ``_dispatch`` metadata is
+            # absent (older gateway path), we fall through without the
+            # rotation hint and the existing 429-style cooldown still
+            # naturally rotates slots.
+            if _is_zero_byte:
+                _disp = (usage or {}).get('_dispatch') or {}
+                _key = _disp.get('key')
+                _mod = _disp.get('model') or model
+                if _key:
+                    task['_force_rotate_pair'] = (_key, _mod)
+                    logger.info(
+                        '[%s] zero-byte retry: force-rotating away from '
+                        'slot %s:%s for next dispatch attempt',
+                        tid, _key, _mod,
+                    )
             logger.warning(
                 '[%s] ⚠️ ABNORMAL STOP detected at round %d (type=%s bucket=%s): '
                 'thinking=%dchars content=%dchars, no tool_calls. '
                 'stream_anomaly=%s empty_stop=%s '
                 'M-TraceId=%s resp_trace=%s elapsed=%.1fs model=%s '
-                'Retrying (%d/%d)… The stream was likely cut off by proxy/gateway.',
+                'Retrying (%d/%d) after %.1fs backoff… '
+                'The stream was likely cut off by proxy/gateway.',
                 tid, round_num, _abnormal_type, _retry_bucket,
                 len(round_thinking), len(round_content),
                 _stream_anomaly, _empty_stop,
                 _trace_id, _resp_trace or 'none', _stream_elapsed_ms / 1000,
-                model, _premature_retry_count, _retry_cap,
+                model, _premature_retry_count, _retry_cap, _backoff_s,
             )
             # ★ Transparent retry: re-call LLM with the SAME messages.
             #   No fake assistant+user turns injected — the model starts fresh
@@ -182,7 +376,8 @@ def analyse_stream_result(
             if _is_zero_byte:
                 _phase_detail = (
                     f'⚠️ 网关空流异常（0字节，{_stream_elapsed_ms / 1000:.1f}s），'
-                    f'正在自动重试 ({_premature_retry_count}/{_retry_cap})…'
+                    f'退避 {_backoff_s:.1f}s 后重试 '
+                    f'({_premature_retry_count}/{_retry_cap})…'
                 )
             else:
                 _phase_detail = (
@@ -195,8 +390,11 @@ def analyse_stream_result(
                 'attempt': _premature_retry_count,
                 'max': _retry_cap,
                 'bucket': _retry_bucket,
+                'backoff_s': round(_backoff_s, 2),
                 'detail': _phase_detail,
             })
+            if _backoff_s > 0:
+                _interruptible_sleep(_backoff_s, task)
             result['action'] = 'continue'
             return result
 
@@ -206,11 +404,18 @@ def analyse_stream_result(
             result['action'] = 'break'
             result['last_finish_reason'] = _fr
             result['loop_exit_reason'] = f'{_fr}_retries_exhausted_round_{round_num}'
-            task['error'] = (
-                f'⚠️ 生成被网关/代理异常中断，重试已用完（{_premature_retry_count}/'
-                f'{_retry_cap}）。回复内容可能不完整。'
-                f' (type: {_abnormal_type}, bucket: {_retry_bucket}, '
-                f'M-TraceId: {_trace_id})'
+            from lib.error_envelope import make_envelope as _make_env
+            task['error'] = _make_env(
+                _fr,
+                detail=(f'Retries exhausted ({_premature_retry_count}/{_retry_cap}). '
+                        f'type={_abnormal_type} bucket={_retry_bucket} '
+                        f'M-TraceId={_trace_id}'),
+                model=model,
+                context=f'round-{round_num}',
+                source='llm-stream',
+                raw=(f'abnormal_type={_abnormal_type} bucket={_retry_bucket} '
+                     f'attempts={_premature_retry_count}/{_retry_cap} '
+                     f'thinking={len(round_thinking)}chars content={len(round_content)}chars'),
             )
             logger.error(
                 '[%s] ⚠️ ABNORMAL STOP retries exhausted at round %d '
@@ -228,6 +433,49 @@ def analyse_stream_result(
             )
             return result
 
+        # ── Empty-stop retry (model said finish_reason=stop with no
+        #    content). Observed on GLM-5.1 (thinking-only response),
+        #    MiniMax M2.5/M2.7, and Claude.  Cheap to retry once or
+        #    twice; budget is shared with classic premature-close so
+        #    a misbehaving turn can never burn more than 2 retries
+        #    across both buckets. ──
+        _is_empty_stop = (
+            _empty_stop
+            and not round_content.strip()
+            and not _is_zero_byte
+        )
+        if (_is_empty_stop
+                and _premature_retry_count < _EMPTY_STOP_RETRY_MAX):
+            _premature_retry_count += 1
+            result['premature_retry_count'] = _premature_retry_count
+            if '_premature_retry_count_phase' in task:
+                task['_premature_retry_count_phase'] = _premature_retry_count
+            _backoff_s = 0.5 + random.uniform(0.0, 0.5)
+            logger.warning(
+                '[%s] ⚠️ EMPTY_STOP detected at round %d: '
+                'finish=stop content=0 thinking=%dchars '
+                'M-TraceId=%s elapsed=%.1fs model=%s '
+                'Retrying (%d/%d) after %.1fs backoff…',
+                tid, round_num, len(round_thinking),
+                _trace_id, _stream_elapsed_ms / 1000, model,
+                _premature_retry_count, _EMPTY_STOP_RETRY_MAX, _backoff_s,
+            )
+            append_event(task, {
+                'type': 'phase',
+                'phase': 'retrying',
+                'attempt': _premature_retry_count,
+                'max': _EMPTY_STOP_RETRY_MAX,
+                'bucket': 'empty_stop',
+                'backoff_s': round(_backoff_s, 2),
+                'detail': (
+                    f'⚠️ 模型空回复（{len(round_thinking)}字符思考但无正文），'
+                    f'重试中 ({_premature_retry_count}/{_EMPTY_STOP_RETRY_MAX})…'
+                ),
+            })
+            _interruptible_sleep(_backoff_s, task)
+            result['action'] = 'continue'
+            return result
+
         # ── Stream anomaly — with or without content ──
         # If the LLM client flagged a stream anomaly (_missing_done,
         # _missing_finish_reason, _empty_stop), the response is likely
@@ -241,9 +489,16 @@ def analyse_stream_result(
                 f'stream_anomaly_{"partial" if _has_content else "empty"}'
                 f'_round_{round_num}'
             )
-            task['error'] = (
-                f'⚠️ API流异常终止（缺失finish标记），回复内容可能不完整。'
-                f' (M-TraceId: {_trace_id})'
+            from lib.error_envelope import make_envelope as _make_env
+            task['error'] = _make_env(
+                'abnormal_stop',
+                detail=f'Stream ended without finish marker (M-TraceId: {_trace_id})',
+                model=model,
+                context=f'round-{round_num}',
+                source='llm-stream',
+                raw=(f'has_content={_has_content} content={len(round_content)}chars '
+                     f'stream_anomaly={_stream_anomaly} empty_stop={_empty_stop} '
+                     f'M-TraceId={_trace_id}'),
             )
             logger.warning(
                 '[%s] ⚠️ Stream anomaly at round %d '
@@ -262,7 +517,7 @@ def analyse_stream_result(
         result['loop_exit_reason'] = f'no_tool_calls_round_{round_num}'
 
         # ★ Fix: API reported finish_reason=tool_calls but all tool calls
-        #   were filtered out (phantom/spurious filter in llm_client), or
+        #   were filtered out (phantom/spurious filter in lib/llm/stream.py), or
         #   the gateway reported tool_calls but the stream contained none.
         #   Normalize to 'stop' so the post-loop check in _finalize doesn't
         #   misinterpret this as "loop ended unexpectedly with pending tools".

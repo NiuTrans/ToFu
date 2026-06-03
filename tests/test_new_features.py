@@ -6,8 +6,7 @@ Covers:
   3. Cache Break Detection — hash tracking, cache-aware microcompact
   4. Pre/Post Tool Hooks — registration, execution, blocking
   5. Unified ToolSpec — registration, backward-compat exports
-  6. Dynamic Tool Deferral — threshold-based auto-deferral
-  7. Partial Compaction — directional compaction
+  6. Partial Compaction — directional compaction
 """
 
 import copy
@@ -73,29 +72,6 @@ class TestAttachments:
         original = copy.deepcopy(messages)
         inject_attachments(messages, [])
         assert messages == original
-
-    def test_tool_discovery_delta_detects_new(self):
-        from lib.tasks_pkg.attachments import _attachment_state, _get_tool_discovery_delta
-        conv_id = 'test-delta-1'
-        _attachment_state.pop(conv_id, None)
-
-        task = {'_discovered_tool_names': {'browser_click', 'browser_type'}}
-        result = _get_tool_discovery_delta(task, conv_id)
-        assert result is not None
-        assert 'browser_click' in result
-
-        # Second call with same tools → no delta
-        result2 = _get_tool_discovery_delta(task, conv_id)
-        assert result2 is None
-
-    def test_tool_discovery_delta_empty_discovered(self):
-        from lib.tasks_pkg.attachments import _attachment_state, _get_tool_discovery_delta
-        conv_id = 'test-delta-2'
-        _attachment_state.pop(conv_id, None)
-
-        task = {}
-        assert _get_tool_discovery_delta(task, conv_id) is None
-
 
 
 
@@ -243,7 +219,7 @@ class TestCacheTracking:
         to an early message, under-caching the conversation tail.
         See: debug/CACHE_BP4_AB_REPORT.md
         """
-        from lib.llm_client import add_cache_breakpoints
+        from lib.llm import add_cache_breakpoints
         # Simulate a multi-round tool conversation:
         # system, user, asst+tc, tool, asst+tc, tool(latest)
         body = {
@@ -402,76 +378,8 @@ class TestToolHooks:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  6. Dynamic Tool Deferral
+#  6. (removed) Dynamic Tool Deferral — deferral subsystem deleted
 # ═══════════════════════════════════════════════════════════════════════════════
-
-@pytest.mark.unit
-class TestDynamicDeferral:
-    """Tests for the dynamic deferral in lib/tools/deferral.py."""
-
-    def test_static_deferral_still_works(self):
-        """With default (large) context window, all user-selected tools stay in core.
-
-        Phase 1 static deferral was removed — user-selected tools are never
-        silently deferred.  Only dynamic threshold-based deferral (Phase 2)
-        can move tools out when total tool tokens exceed the threshold.
-        """
-        from lib.tools.deferral import partition_tools
-        tools = [
-            {'function': {'name': 'read_files', 'parameters': {}}},
-            {'function': {'name': 'browser_type', 'parameters': {
-                'big_schema': 'x' * 1000
-            }}},
-        ]
-        core, deferred = partition_tools(tools)
-        core_names = {t['function']['name'] for t in core}
-        # With default 200k context window, 2 small tools should all stay in core
-        assert 'read_files' in core_names
-        assert 'browser_type' in core_names
-
-    def test_dynamic_deferral_small_context(self):
-        """With a very small context window, more tools get deferred."""
-        from lib.tools.deferral import partition_tools
-        tools = [
-            {'function': {'name': 'read_files', 'parameters': {'p': 'x' * 500}}},
-            {'function': {'name': 'write_file', 'parameters': {'p': 'x' * 500}}},
-            {'function': {'name': 'grep_search', 'parameters': {'p': 'x' * 500}}},
-            {'function': {'name': 'find_files', 'parameters': {'p': 'x' * 500}}},
-            {'function': {'name': 'run_command', 'parameters': {'p': 'x' * 500}}},
-            {'function': {'name': 'web_search', 'parameters': {'p': 'x' * 500}}},
-            {'function': {'name': 'create_memory', 'parameters': {'p': 'x' * 500}}},
-            {'function': {'name': 'check_error_logs', 'parameters': {'p': 'x' * 500}}},
-        ]
-        # With a tiny context window, some tools should be auto-deferred
-        core, deferred = partition_tools(tools, context_window=1000)
-
-        # Core tools should always be kept
-        core_names = {t['function']['name'] for t in core}
-        assert 'read_files' in core_names
-        assert 'write_file' in core_names
-
-    def test_dynamic_deferral_large_context(self):
-        """With a huge context window, nothing extra gets deferred."""
-        from lib.tools.deferral import partition_tools
-        tools = [
-            {'function': {'name': 'read_files', 'parameters': {}}},
-            {'function': {'name': 'create_memory', 'parameters': {}}},
-        ]
-        core, deferred = partition_tools(tools, context_window=1_000_000)
-        core_names = {t['function']['name'] for t in core}
-        assert 'create_memory' in core_names  # Not deferred with huge window
-
-    def test_estimate_tool_tokens(self):
-        from lib.tools.deferral import _estimate_tool_tokens
-        tools = [{'function': {'name': 'test', 'parameters': {'x': 'y' * 400}}}]
-        tokens = _estimate_tool_tokens(tools)
-        assert tokens > 100
-
-    def test_partition_empty(self):
-        from lib.tools.deferral import partition_tools
-        core, deferred = partition_tools([])
-        assert core == []
-        assert deferred == []
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

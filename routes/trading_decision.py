@@ -21,14 +21,17 @@ import re
 import time
 from datetime import datetime
 
-from flask import Blueprint, jsonify, request
+from flask import jsonify, request
 
 from lib.database import DOMAIN_TRADING, get_db
 from lib.log import get_logger
+from lib.api_response import api_bad_request, api_not_found, api_ok
+from lib.request_parser import parse_body
 
 logger = get_logger(__name__)
 
-trading_decision_bp = Blueprint('trading_decision', __name__)
+from routes.api_v1.trading.decision import api_v1_trading_decision_bp as trading_decision_bp  # noqa: E402
+# (alias kept for back-compat with `from routes.trading_decision import trading_decision_bp` callers)
 
 
 def _auto_save_strategies(db, content):
@@ -108,7 +111,7 @@ def _extract_and_queue_trades(db, content):
 
 # ── Route handlers ──
 
-@trading_decision_bp.route('/api/trading/briefing', methods=['GET'])
+@trading_decision_bp.route('/api/v1/trading/briefing', methods=['GET'])
 def asset_briefing_get():
     """Get today's cached briefing."""
     db = get_db(DOMAIN_TRADING)
@@ -120,27 +123,25 @@ def asset_briefing_get():
     return jsonify({'briefing': None, 'date': today})
 
 
-@trading_decision_bp.route('/api/trading/decisions', methods=['GET'])
+@trading_decision_bp.route('/api/v1/trading/decisions', methods=['GET'])
 def trading_decisions_list():
     db = get_db(DOMAIN_TRADING)
     rows = db.execute('SELECT * FROM trading_decision_history ORDER BY created_at DESC LIMIT 50').fetchall()
     return jsonify({'decisions': [dict(r) for r in rows]})
 
 
-@trading_decision_bp.route('/api/trading/decisions/<int:did>/results', methods=['POST'])
+@trading_decision_bp.route('/api/v1/trading/decisions/<int:did>/results', methods=['POST'])
 def trading_decisions_record_results(did):
     """Record actual results for a past decision."""
     db = get_db(DOMAIN_TRADING)
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     db.execute('UPDATE trading_decision_history SET actual_result=? WHERE id=?',
                (data.get('actual_result', ''), did))
     db.commit()
-    return jsonify({'ok': True})
-
-
+    return api_ok()
 # ── Trade Queue ──
 
-@trading_decision_bp.route('/api/trading/trades', methods=['GET'])
+@trading_decision_bp.route('/api/v1/trading/trades', methods=['GET'])
 def trading_trades_list():
     db = get_db(DOMAIN_TRADING)
     status = request.args.get('status', '')
@@ -151,10 +152,10 @@ def trading_trades_list():
     return jsonify({'trades': [dict(r) for r in rows]})
 
 
-@trading_decision_bp.route('/api/trading/trades/execute', methods=['POST'])
+@trading_decision_bp.route('/api/v1/trading/trades/execute', methods=['POST'])
 def trading_trades_execute():
     """Execute trades."""
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     trade_ids = data.get('trade_ids', [])
 
     raw_trades = data.get('trades', [])
@@ -173,7 +174,7 @@ def trading_trades_execute():
         trade_ids = [r['id'] for r in rows]
 
     if not trade_ids:
-        return jsonify({'error': 'No trades selected'}), 400
+        return api_bad_request('No trades selected')
 
     db = get_db(DOMAIN_TRADING)
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -225,9 +226,7 @@ def trading_trades_execute():
             errors.append(f'Trade {tid}: {str(e)}')
 
     db.commit()
-    return jsonify({'ok': True, 'executed': executed, 'errors': errors})
-
-
+    return api_ok({'executed': executed, 'errors': errors})
 def _rollback_trade(db, trade, now):
     """Rollback a single executed trade. Returns True on success."""
     trade = dict(trade) if not isinstance(trade, dict) else trade
@@ -259,13 +258,13 @@ def _rollback_trade(db, trade, now):
                ('rolled_back', now, trade['id']))
 
 
-@trading_decision_bp.route('/api/trading/trades/rollback', methods=['POST'])
+@trading_decision_bp.route('/api/v1/trading/trades/rollback', methods=['POST'])
 def trading_trades_rollback():
     """Rollback executed trades."""
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     trade_ids = data.get('trade_ids', [])
     if not trade_ids:
-        return jsonify({'error': 'No trades selected'}), 400
+        return api_bad_request('No trades selected')
 
     db = get_db(DOMAIN_TRADING)
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -285,29 +284,25 @@ def trading_trades_rollback():
             errors.append(f'Trade {tid}: {str(e)}')
 
     db.commit()
-    return jsonify({'ok': True, 'rolled_back': rolled_back, 'errors': errors})
-
-
-@trading_decision_bp.route('/api/trading/trades/<int:tid>', methods=['DELETE'])
+    return api_ok({'rolled_back': rolled_back, 'errors': errors})
+@trading_decision_bp.route('/api/v1/trading/trades/<int:tid>', methods=['DELETE'])
 def trading_trades_dismiss(tid):
     db = get_db(DOMAIN_TRADING)
     db.execute('UPDATE trading_trade_queue SET status=? WHERE id=? AND status=?', ('dismissed', tid, 'pending'))
     db.commit()
-    return jsonify({'ok': True})
-
-
-@trading_decision_bp.route('/api/trading/trades/rollback-batch', methods=['POST'])
+    return api_ok()
+@trading_decision_bp.route('/api/v1/trading/trades/rollback-batch', methods=['POST'])
 def trading_trades_rollback_batch():
     """Rollback all executed trades for a batch_id (decision rollback)."""
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     batch_id = data.get('batch_id', '')
     if not batch_id:
-        return jsonify({'error': 'batch_id required'}), 400
+        return api_bad_request('batch_id required')
 
     db = get_db(DOMAIN_TRADING)
     trades = db.execute('SELECT * FROM trading_trade_queue WHERE batch_id=? AND status=?', (batch_id, 'executed')).fetchall()
     if not trades:
-        return jsonify({'error': 'No executed trades found for this batch'}), 404
+        return api_not_found('No executed trades found for this batch')
 
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     rolled_back = []
@@ -322,10 +317,8 @@ def trading_trades_rollback_batch():
 
     db.execute('UPDATE trading_decision_history SET status=? WHERE batch_id=?', ('rolled_back', batch_id))
     db.commit()
-    return jsonify({'ok': True, 'rolled_back': rolled_back, 'errors': errors})
-
-
-@trading_decision_bp.route('/api/trading/fees/<code>', methods=['GET'])
+    return api_ok({'rolled_back': rolled_back, 'errors': errors})
+@trading_decision_bp.route('/api/v1/trading/fees/<code>', methods=['GET'])
 def trading_fees_get(code):
     from lib.trading import fetch_trading_fees
     fees = fetch_trading_fees(code)

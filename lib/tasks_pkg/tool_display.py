@@ -5,6 +5,7 @@ orchestration logic.  The public entry-point is :func:`_build_tool_round_entry`;
 the per-tool ``_tool_display_*`` helpers are internal to this module.
 """
 
+import os
 from urllib.parse import urlparse
 
 from lib.log import get_logger
@@ -20,7 +21,6 @@ from lib.tools import (
     BROWSER_TOOL_NAMES,
     CODE_EXEC_TOOL_NAMES,
     CONV_REF_TOOL_NAMES,
-    EMIT_TO_USER_TOOL_NAMES,
     IMAGE_GEN_TOOL_NAMES,
     PROJECT_TOOL_NAMES,
 )
@@ -81,7 +81,8 @@ def _short_url(url, max_len=60):
     """
     try:
         p = urlparse(url)
-    except Exception:
+    except ValueError as e:
+        logger.debug('[ToolDisplay] urlparse failed for %r: %s', url[:80], e)
         return url[:max_len]
     host = p.netloc or ''
     path = (p.path or '').rstrip('/')
@@ -140,8 +141,56 @@ def _tool_display_code_exec(fn_name, fn_args, tc_id, tc_args_str):
     return display, {'toolName': 'code_exec'}
 
 
+def _persisted_read_labels(fn_args):
+    """When a read_files call targets spilled-to-disk tool results, return a
+    friendly display string (e.g. ``Read web search result — "…"``) instead
+    of the opaque persisted filename. Returns '' when no path is a known
+    persisted result so the caller keeps the default rendering.
+    """
+    if not isinstance(fn_args, dict):
+        return ''
+    reads = fn_args.get('reads')
+    if isinstance(reads, str):
+        import json
+        try:
+            reads = json.loads(reads)
+        except (ValueError, TypeError) as e:
+            logger.debug('[ToolDisplay] read_files reads=str not JSON: %s', e)
+            reads = None
+    paths = []
+    if isinstance(reads, list):
+        for r in reads:
+            if isinstance(r, dict) and r.get('path'):
+                paths.append(r['path'])
+            elif isinstance(r, str) and r:
+                paths.append(r)
+    elif fn_args.get('path'):
+        paths.append(fn_args['path'])
+    if not paths:
+        return ''
+
+    from lib.tasks_pkg.persist_registry import (
+        describe_filename, friendly_label, lookup,
+    )
+    labels = []
+    for p in paths:
+        hit = lookup(p) or describe_filename(p)
+        if hit is None:
+            return ''  # not a persisted result — keep default rendering
+        labels.append(friendly_label(*hit))
+
+    n = len(labels)
+    shown = '; '.join(labels[:4])
+    suffix = f' +{n - 4} more' if n > 4 else ''
+    return f'Read {n} saved result{"s" if n != 1 else ""}: {shown}{suffix}'
+
+
 def _tool_display_project(fn_name, fn_args, tc_id, tc_args_str):
     """Build display info for project tool calls."""
+    if fn_name == 'read_files':
+        friendly = _persisted_read_labels(fn_args)
+        if friendly:
+            return friendly, {'toolName': fn_name}
     from lib.project_mod import project_tool_display
     display = project_tool_display(fn_name, fn_args)
     return display, {'toolName': fn_name}
@@ -155,21 +204,25 @@ def _tool_display_browser(fn_name, fn_args, tc_id, tc_args_str):
 
 
 def _tool_display_memory(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for memory management tool calls."""
+    """Build display info for memory management tool calls.
+
+    No emoji prefix — the frontend renders a per-tool SVG icon (see
+    ``_webToolSvg`` in ``static/js/ui/tool_rounds.js``).
+    """
     if fn_name == 'create_memory':
-        display = f"💡 Saving memory: {fn_args.get('name', '?')}"
+        display = f"Saving memory: {fn_args.get('name', '?')}"
     elif fn_name == 'update_memory':
-        display = f"✏️ Updating memory: {fn_args.get('memory_id', '?')}"
+        display = f"Updating memory: {fn_args.get('memory_id', '?')}"
     elif fn_name == 'delete_memory':
-        display = f"🗑️ Deleting memory: {fn_args.get('memory_id', '?')}"
+        display = f"Deleting memory: {fn_args.get('memory_id', '?')}"
     elif fn_name == 'merge_memories':
         ids = fn_args.get('memory_ids', [])
-        display = f"🔀 Merging {len(ids)} memories → {fn_args.get('name', '?')}"
+        display = f"Merging {len(ids)} memories → {fn_args.get('name', '?')}"
     elif fn_name == 'search_memories':
         query = fn_args.get('query', '')
-        display = f"🔍 Searching memories: {query[:80]}" if query else "🔍 Searching memories"
+        display = f"Searching memories: {query[:80]}" if query else "Searching memories"
     else:
-        display = f"💡 {fn_name}"
+        display = fn_name
     return display, {'toolName': fn_name}
 
 
@@ -192,13 +245,40 @@ def _tool_display_desktop(fn_name, fn_args, tc_id, tc_args_str):
 
 
 def _tool_display_swarm(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for swarm tool calls."""
+    """Build display info for swarm tool calls.
+
+    Only ``spawn_agents`` is rendered as the full swarm panel
+    (``_swarm: True`` upgrades the round into a dashboard with agent
+    cards).  ``await_agents`` / ``get_agent_result`` are async-flow
+    bookkeeping calls — they get a compact mini-card via the regular
+    tool-round renderer (no ``_swarm`` flag), so the user sees them
+    inline alongside other tools rather than as a second swarm panel.
+    """
     if fn_name == 'spawn_agents':
         n_agents = len(fn_args.get('agents', [])) if isinstance(fn_args, dict) else 0
-        display = f"Spawning {n_agents} agent{'s' if n_agents != 1 else ''}…" if n_agents else "Spawning agents…"
-    else:
-        display = fn_name.replace('_', ' ').title()
-    return display, {'toolName': fn_name, '_swarm': True}
+        display = (f"⚡ Spawning {n_agents} agent{'s' if n_agents != 1 else ''}…"
+                   if n_agents else "⚡ Spawning agents…")
+        return display, {'toolName': 'spawn_agents', '_swarm': True}
+
+    if fn_name == 'await_agents':
+        ids = fn_args.get('ids') if isinstance(fn_args, dict) else None
+        mode = (fn_args.get('mode', 'any') if isinstance(fn_args, dict) else 'any')
+        if ids and isinstance(ids, list) and len(ids) > 0:
+            label = f'⏳ Awaiting {len(ids)} agent{"s" if len(ids) != 1 else ""} ({mode})'
+        else:
+            label = f'⏳ Awaiting all running agents ({mode})'
+        return label, {'toolName': 'await_agents'}
+
+    if fn_name == 'get_agent_result':
+        agent_id = (fn_args.get('agent_id', '') if isinstance(fn_args, dict) else '')
+        label = f'📥 Fetching result for {agent_id[:12]}' if agent_id else '📥 Fetching agent result'
+        return label, {'toolName': 'get_agent_result'}
+
+    # Artifact tools fall through to the generic renderer in the dispatch
+    # table — they don't get _swarm: True either, so they appear as regular
+    # tool rounds rather than separate swarm panels.
+    display = fn_name.replace('_', ' ').title()
+    return display, {'toolName': fn_name}
 
 
 def _tool_display_compact(fn_name, fn_args, tc_id, tc_args_str):
@@ -207,9 +287,22 @@ def _tool_display_compact(fn_name, fn_args, tc_id, tc_args_str):
 
 
 def _tool_display_image_gen(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for image generation tool calls."""
-    prompt = fn_args.get('prompt', '…')[:80]
-    return f'🎨 Generating: {prompt}', {'toolName': 'generate_image'}
+    """Build display info for image generation tool calls.
+
+    ★ No hard 80-char cap on the prompt — the frontend word-wraps the
+    title line and users explicitly requested "do not truncate". A very
+    generous soft cap (2000 chars) still protects against a pathological
+    prompt bloating every SSE event. The full prompt is also exposed via
+    ``imagePrompt`` so the frontend footer can render it untruncated.
+    """
+    _FULL_LIMIT = 2000
+    prompt = fn_args.get('prompt', '…') or '…'
+    if len(prompt) > _FULL_LIMIT:
+        prompt = prompt[:_FULL_LIMIT - 1] + '…'
+    return f'🎨 Generating: {prompt}', {
+        'toolName': 'generate_image',
+        'imagePrompt': prompt,
+    }
 
 
 
@@ -229,18 +322,6 @@ def _tool_display_human_guidance(fn_name, fn_args, tc_id, tc_args_str):
     response_type = fn_args.get('response_type', 'free_text')
     icon = '🗳️' if response_type == 'choice' else '🙋'
     return f'{icon} {question}', {'toolName': 'ask_human'}
-
-
-def _tool_display_emit_to_user(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for emit_to_user tool calls."""
-    comment = fn_args.get('comment', '…')[:80]
-    return f'📤 Emit: {comment}', {'toolName': 'emit_to_user'}
-
-
-def _tool_display_tool_search(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for tool_search (deferred tool discovery) calls."""
-    query = fn_args.get('query', '…')[:80]
-    return f'🔍 Searching tools: {query}', {'toolName': 'tool_search'}
 
 
 # Keys from fn_args that identify the *resource* the call is operating on
@@ -307,7 +388,8 @@ def _resolve_project_name(pid: str) -> str:
     try:
         from lib.mcp.project_names import get_project_name
         return get_project_name(pid) or ''
-    except Exception:
+    except ImportError as e:
+        logger.debug('[ToolDisplay] mcp.project_names unavailable: %s', e)
         return ''
 
 
@@ -338,7 +420,8 @@ def _resolve_doc_title(content_id: str) -> str:
     try:
         from lib.mcp.project_names import get_doc_title
         return get_doc_title(content_id) or ''
-    except Exception:
+    except ImportError as e:
+        logger.debug('[ToolDisplay] mcp.project_names get_doc_title unavailable: %s', e)
         return ''
 
 
@@ -587,13 +670,6 @@ def _build_display_dispatch_table():
     # Human guidance tool
     table['ask_human'] = _tool_display_human_guidance
 
-    # Emit-to-user terminal tool
-    for name in EMIT_TO_USER_TOOL_NAMES:
-        table[name] = _tool_display_emit_to_user
-
-    # Deferred tool discovery
-    table['tool_search'] = _tool_display_tool_search
-
     return table
 
 
@@ -601,14 +677,185 @@ def _build_display_dispatch_table():
 _TOOL_DISPLAY_DISPATCH = _build_display_dispatch_table()
 
 
+# ── Filesystem tools whose display lines should carry a workspace-root pill
+#    in multi-root workspaces.  Mirrors PROJECT_TOOL_NAMES + read_files
+#    (which is global, not in PROJECT_TOOL_NAMES).  Non-filesystem tools
+#    (web_search, fetch_url, browser_*, mcp__*, …) are intentionally excluded
+#    — the rootname pill is only meaningful for paths the user could
+#    distinguish between project roots.
+_FS_TOOLS_FOR_ROOT_PILL = frozenset({
+    'read_files', 'list_dir', 'grep_search', 'find_files',
+    'write_file', 'apply_diff', 'apply_diffs',
+    'insert_content', 'insert_contents',
+    'create_project', 'run_command',
+})
+
+
+def _split_rootname_prefix(path_str):
+    """Parse ``rootname:rel/path`` → (rootname, rest).  Returns ('', path)
+    when no prefix is present.  Mirrors the rules used by
+    ``resolve_namespaced_path`` and the frontend's ``_splitRoot`` helper:
+    skips absolute paths, Windows drive letters (single ASCII char), and
+    anything where a ``/`` precedes the ``:``.
+    """
+    if not path_str or not isinstance(path_str, str):
+        return '', path_str or ''
+    if path_str.startswith('/') or path_str.startswith('~'):
+        return '', path_str
+    if os.path.isabs(path_str):
+        return '', path_str
+    ci = path_str.find(':')
+    if ci <= 0 or ci >= 40:
+        return '', path_str
+    si = path_str.find('/')
+    if si != -1 and si < ci:
+        return '', path_str
+    head = path_str[:ci]
+    # Windows drive letter heuristic
+    if len(head) == 1 and head.isalpha():
+        return '', path_str
+    if not head or '\\' in head:
+        return '', path_str
+    return head, path_str[ci + 1:] or '.'
+
+
+def _extract_first_path_arg(fn_name, fn_args):
+    """Return the first path-like value from fn_args for a filesystem tool,
+    or '' when none is present.  Handles batch shapes (``reads`` /
+    ``edits`` / ``searches``) by inspecting the first entry that has a
+    ``path``.  ``run_command`` is keyed off ``working_dir`` (the cwd).
+    """
+    if not isinstance(fn_args, dict):
+        return ''
+    if fn_name == 'run_command':
+        return fn_args.get('working_dir') or ''
+    if fn_name == 'read_files':
+        reads = fn_args.get('reads')
+        if isinstance(reads, list):
+            for r in reads:
+                if isinstance(r, dict) and r.get('path'):
+                    return r['path']
+                if isinstance(r, str) and r:
+                    return r
+        if fn_args.get('path'):
+            return fn_args['path']
+        return ''
+    if fn_name in ('apply_diff', 'insert_content'):
+        return fn_args.get('path') or ''
+    if fn_name in ('apply_diffs', 'insert_contents'):
+        edits = fn_args.get('edits')
+        if isinstance(edits, list):
+            for e in edits:
+                if isinstance(e, dict) and e.get('path'):
+                    return e['path']
+        return ''
+    if fn_name == 'grep_search' or fn_name == 'find_files':
+        searches = fn_args.get('searches')
+        if isinstance(searches, list):
+            for s in searches:
+                if isinstance(s, dict) and s.get('path'):
+                    return s['path']
+        return fn_args.get('path') or ''
+    return fn_args.get('path') or ''
+
+
+def _resolve_tool_root_name(fn_name, fn_args, conv_id=None):
+    """Determine the workspace-root name a filesystem tool call targets.
+
+    Returns the rootname string, or '' when:
+      - the tool is not a filesystem tool we want to label,
+      - no roots are registered (single-root setup pre-init),
+      - or only a single root exists (single-root workspace — rendering
+        is unchanged in that case).
+
+    Uses ``rootname:`` prefix when present; otherwise resolves to the
+    primary root for the conversation (or the global primary).
+    """
+    if fn_name not in _FS_TOOLS_FOR_ROOT_PILL:
+        return ''
+    try:
+        from lib.project_mod.config import (
+            _conv_primary,
+            _conv_roots,
+            _lock,
+            _roots,
+            _state,
+        )
+    except Exception as e:
+        logger.debug('[ToolDisplay] root-name lookup unavailable: %s', e)
+        return ''
+
+    # Pick the registry that scopes this conv (falls back to global).
+    #
+    # ★ Multi-root detection must consider BOTH registries. The conv-scoped
+    #   map can lag the global one (e.g. user opens a new conv while the
+    #   global registry already has 4 roots; conv_map starts empty or
+    #   single-entry). Suppressing the prefix when EITHER registry alone
+    #   is single-entry produced the visible inconsistency on this conv —
+    #   identical paths got the prefix on some rounds, lost it on others,
+    #   purely based on which side of the registry was checked. Treat the
+    #   workspace as multi-root if EITHER registry says so.
+    with _lock:
+        conv_map = _conv_roots.get(conv_id) if conv_id else None
+        global_count = len(_roots)
+        conv_count = len(conv_map) if conv_map else 0
+        if max(global_count, conv_count) <= 1:
+            return ''
+        # Prefer conv-scoped registry for resolution; fall back to global
+        # if conv-scoped is empty or has only the primary in it.
+        registry = conv_map if (conv_map and conv_count > 1) else _roots
+        # Snapshot what we need under the lock.
+        registry_items = [(rn, rs.get('path', '')) for rn, rs in registry.items()]
+        primary_path = ''
+        if conv_id:
+            primary_path = _conv_primary.get(conv_id, '') or ''
+        if not primary_path:
+            primary_path = _state.get('path') or ''
+
+    raw_path = _extract_first_path_arg(fn_name, fn_args)
+    head, _rest = _split_rootname_prefix(raw_path)
+    if head:
+        # Match registry name (case-insensitive fallback).
+        names = [rn for rn, _ in registry_items]
+        if head in names:
+            return head
+        for rn in names:
+            if rn.lower() == head.lower():
+                return rn
+        # Unknown root prefix — surface what the model wrote so the user
+        # can see the typo / stale name in the UI.
+        return head
+
+    # No prefix — fall back to the primary root's name.
+    if primary_path:
+        try:
+            abs_primary = os.path.abspath(primary_path)
+        except (OSError, ValueError) as e:
+            logger.debug('[ToolDisplay] abspath(%r) failed: %s', primary_path, e)
+            abs_primary = primary_path
+        for rn, rp in registry_items:
+            try:
+                if os.path.abspath(rp) == abs_primary:
+                    return rn
+            except (OSError, ValueError) as e:
+                logger.debug('[ToolDisplay] abspath(%r) failed: %s', rp, e)
+                if rp == primary_path:
+                    return rn
+    return ''
+
+
 def _build_tool_round_entry(fn_name, fn_args, tc_id, tc_args_str, tool_round_num,
-                             project_enabled):
+                             project_enabled, conv_id=None):
     """Build a tool-round entry and tool_start event payload for a tool call.
 
     Uses a module-level dispatch table (``_TOOL_DISPLAY_DISPATCH``) instead of
     rebuilding a dict on every call.  The only runtime override is for
     CODE_EXEC_TOOL_NAMES when ``project_enabled`` is False — those get
     redirected to ``_tool_display_code_exec``.
+
+    When ``conv_id`` is supplied and the tool is a filesystem tool in a
+    multi-root workspace, attaches ``_toolRoot`` to both the round entry
+    and the SSE event so the frontend can render a ``rootname:`` pill.
 
     Returns (new_tool_round_num, round_entry, event_payload).
     """
@@ -652,5 +899,19 @@ def _build_tool_round_entry(fn_name, fn_args, tc_id, tc_args_str, tool_round_num
     for k, v in extra.items():
         if not k.startswith('_display_'):
             event[k] = v
+
+    # ── Multi-root workspace pill: attach the workspace-root name the
+    #    tool call resolves to, so the frontend can render a
+    #    ``rootname:`` prefix on the tool-call line. Only meaningful for
+    #    filesystem tools, and only when more than one root is registered.
+    try:
+        root_name = _resolve_tool_root_name(fn_name, fn_args, conv_id=conv_id)
+    except Exception as e:
+        logger.debug('[ToolDisplay] _resolve_tool_root_name failed for %s: %s',
+                     fn_name, e)
+        root_name = ''
+    if root_name:
+        round_entry['_toolRoot'] = root_name
+        event['_toolRoot'] = root_name
 
     return tool_round_num, round_entry, event

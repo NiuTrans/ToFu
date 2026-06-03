@@ -159,6 +159,36 @@ def _build_apply_diff(meta, fn_name, fn_args, tool_content, path):
                            f'{ok_n}/{total_n} edits' + (f'  {desc}' if desc else ''))
         meta['badge'] = f'{ok_n}/{total_n} edits'
         meta['writeOk'] = ok_n == total_n
+        # Per-edit summaries for collapsible frontend display.
+        # When the output is NOT a real batch result (no "Applied X/Y"
+        # header — e.g. a read-gate refusal or a hard error), there are no
+        # per-edit result lines; every edit must default to 'fail' rather
+        # than 'ok' so the frontend doesn't render green checks for edits
+        # that never ran.
+        edit_lines = [l for l in tool_content.split('\n') if l.startswith('[')]
+        default_status = 'ok' if m else 'fail'
+        summaries = []
+        for i, edit in enumerate(edits):
+            if not isinstance(edit, dict):
+                continue
+            # An edit with no corresponding result line did not succeed.
+            status = default_status if i < len(edit_lines) else 'fail'
+            detail = ''
+            if i < len(edit_lines):
+                line = edit_lines[i]
+                if '] FAIL' in line:
+                    status = 'fail'
+                    detail = line.split('FAIL', 1)[-1].strip().lstrip(': ')
+                elif '] OK' in line:
+                    status = 'ok'
+                    detail = line.split('OK', 1)[-1].strip().lstrip(': ')
+            summaries.append({
+                'path': edit.get('path', '?'),
+                'description': edit.get('description', ''),
+                'status': status,
+                'detail': detail[:120],
+            })
+        meta['editSummaries'] = summaries
     else:
         desc = fn_args.get('description', '')
         ok = tool_content.lower().startswith('applied diff')
@@ -214,6 +244,34 @@ def _build_insert_content(meta, fn_name, fn_args, tool_content, path):
         meta['snippet'] = label + (f'  {desc}' if desc else '')
         meta['badge'] = f'{ok_n}/{total_n} inserted'
         meta['writeOk'] = ok_n == total_n
+        # Per-edit summaries for collapsible frontend display.
+        # See _build_apply_diff: default to 'fail' when the output is not a
+        # real batch result (no "Inserted X/Y" header) or an edit has no
+        # corresponding per-edit result line, so the frontend never renders
+        # green checks for insertions that never ran.
+        edit_lines = [l for l in tool_content.split('\n') if l.startswith('[')]
+        default_status = 'ok' if m else 'fail'
+        summaries = []
+        for i, edit in enumerate(edits):
+            if not isinstance(edit, dict):
+                continue
+            status = default_status if i < len(edit_lines) else 'fail'
+            detail = ''
+            if i < len(edit_lines):
+                line = edit_lines[i]
+                if '] FAIL' in line:
+                    status = 'fail'
+                    detail = line.split('FAIL', 1)[-1].strip().lstrip(': ')
+                elif '] OK' in line:
+                    status = 'ok'
+                    detail = line.split('OK', 1)[-1].strip().lstrip(': ')
+            summaries.append({
+                'path': edit.get('path', '?'),
+                'description': edit.get('description', ''),
+                'status': status,
+                'detail': detail[:120],
+            })
+        meta['editSummaries'] = summaries
     else:
         desc = fn_args.get('description', '')
         ok = tool_content.lower().startswith('inserted ')
@@ -244,14 +302,16 @@ def _build_default(meta, fn_name, fn_args, tool_content, path):
 def _build_mcp_tool(meta, fn_name, fn_args, tool_content, path):
     from lib.mcp.types import parse_namespaced_name
     parsed = parse_namespaced_name(fn_name)
+    is_error = isinstance(tool_content, str) and tool_content.startswith(
+        ('❌', 'MCP Error', 'MCP tool error', 'MCP server not connected'))
     if parsed:
         server_name, tool_name = parsed
         meta['title'] = f'🔌 {server_name}/{tool_name}'
         meta['source'] = f'MCP:{server_name}'
-        meta['badge'] = f'🔌 {server_name}'
+        meta['badge'] = f'❌ {server_name}' if is_error else f'🔌 {server_name}'
     else:
         meta['title'] = f'🔌 {fn_name}'
-        meta['badge'] = '🔌 MCP'
+        meta['badge'] = '❌ MCP' if is_error else '🔌 MCP'
     meta['snippet'] = tool_content[:120].replace('\n', ' ')
 
 
@@ -267,8 +327,10 @@ _META_BUILDERS = {
     'find_files':   _build_find_files,
     'write_file':   _build_write_file,
     'apply_diff':   _build_apply_diff,
+    'apply_diffs':  _build_apply_diff,
     'run_command':  _build_run_command,
     'insert_content': _build_insert_content,
+    'insert_contents': _build_insert_content,
     'create_project': _build_create_project,
 }
 

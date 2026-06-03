@@ -53,7 +53,7 @@ lib/
 ├── _pkg_utils.py            ← Shared façade utilities (build_facade, safe_import, …)
 ├── protocols.py             ← Protocol interfaces for all module boundaries
 ├── log.py                   ← Centralized logging (get_logger, log_context, audit_log, …)
-├── llm_client.py            ← LLM API communication (body building, SSE parsing) [HOT_PATH]
+├── llm/                     ← LLM API package: body / stream / cache / chat / diagnostics [HOT_PATH]
 ├── search.py                ← Web search execution [HOT_PATH]
 │
 ├── tasks_pkg/               ← Task orchestration system
@@ -160,7 +160,7 @@ Client POST /api/chat/start
  │  2. _inject_system_contexts()  ← system_context.py    │
  │  3. _prefetch_user_urls()      ← executor.py          │
  │  4. ┌─ TOOL LOOP ───────────────────────────────────┐ │
- │     │ a. build_body()          ← llm_client.py       │ │
+ │     │ a. build_body()          ← lib/llm/body.py     │ │
  │     │ b. stream_llm_response() ← manager.py          │ │
  │     │ c. parse_tool_calls()    ← tool_dispatch.py    │ │
  │     │ d. execute_tool_pipeline()                      │ │
@@ -304,7 +304,7 @@ the modules known at time of writing:
 | `lib/tasks_pkg/tool_dispatch.py`   | Tool argument parsing + parallel execution           |
 | `lib/tasks_pkg/compaction.py`      | Context compaction — called during long conversations|
 | `lib/tasks_pkg/model_config.py`    | Model config lookup — called per LLM request         |
-| `lib/llm_client.py`                | LLM API communication — called per LLM request      |
+| `lib/llm/` (package)               | LLM API communication — called per LLM request      |
 | `lib/search.py`                    | Search execution — called per search tool invocation |
 | `lib/fetch/core.py`                | Content fetching — called per fetch_url tool call    |
 | `lib/swarm/artifact_store.py`      | Inter-agent artifact I/O — called per agent step     |
@@ -604,7 +604,7 @@ without pulling in transitive dependencies.
 | `TradingDataProvider` | `get_latest_price()`, `fetch_asset_info()`, `fetch_price_history()`, `build_intel_context()` | `lib.trading` module functions | trading_autopilot |
 | `TaskEventSink`    | `append_event()`                           | `lib.tasks_pkg.manager.append_event`| executor, tool_dispatch                  |
 | `ToolHandler`      | `__call__(task, tc, fn_name, …)`           | Each `@tool_registry.handler()` fn  | ToolRegistry dispatch                    |
-| `BodyBuilder`      | `__call__(model, messages, …)`             | `lib.llm_client.build_body`         | swarm agents, orchestrators              |
+| `BodyBuilder`      | `__call__(model, messages, …)`             | `lib.llm.build_body`                | swarm agents, orchestrators              |
 
 All protocols are `@runtime_checkable` — you can use `isinstance()` checks
 in defensive code.
@@ -649,7 +649,7 @@ def _prefetch_user_urls(
 
 ```python
 # lib/tasks_pkg/orchestrator.py
-from lib.llm_client import build_body as _build_body_impl
+from lib.llm import build_body as _build_body_impl
 from lib.protocols import BodyBuilder
 
 build_body: BodyBuilder = _build_body_impl  # explicit protocol binding

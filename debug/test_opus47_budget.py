@@ -15,7 +15,7 @@ os.environ.setdefault('LLM_DEBUG_RAW_SSE', 'opus')
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from lib import LLM_API_KEYS, LLM_BASE_URL  # noqa: E402
-from lib.llm_client import _RawSSEDumper  # noqa: E402
+from lib.llm import _RawSSEDumper  # noqa: E402
 
 MESSAGES = [{
     'role': 'user',

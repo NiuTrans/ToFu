@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 #  Schema Version Cache — Skip redundant DDL on subsequent startups
 # ═══════════════════════════════════════════════════════════════════════
 
-_SCHEMA_VERSION = 17  # Increment when tables/columns/indexes change
+_SCHEMA_VERSION = 21  # Increment when tables/columns/indexes change
 
 
 def _column_exists(conn, table, column):
@@ -160,6 +160,37 @@ def _init_chat_schema(conn):
         )
     ''')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_task_events_ts ON task_events(ts_ms)')
+
+    # ── chat_artifacts: renderable reports promoted out of chat (md/html/svg) ──
+    # First-class storage for "report-shaped" outputs so they survive
+    # compaction, can be re-opened in the right-side panel by stable URL,
+    # and can be versioned / pinned independently of the conversation row.
+    # See docs/ARCHITECTURE.md §Artifacts subsystem.
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS chat_artifacts (
+            id              TEXT    PRIMARY KEY,
+            conv_id         TEXT    NOT NULL,
+            task_id         TEXT    NOT NULL DEFAULT '',
+            msg_id          TEXT    NOT NULL DEFAULT '',
+            source          TEXT    NOT NULL,
+            source_ref      TEXT    NOT NULL DEFAULT '{}',
+            format          TEXT    NOT NULL,
+            title           TEXT    NOT NULL DEFAULT '',
+            content         TEXT    NOT NULL,
+            content_sha256  TEXT    NOT NULL,
+            size_bytes      INTEGER NOT NULL DEFAULT 0,
+            version         INTEGER NOT NULL DEFAULT 1,
+            parent_id       TEXT    NOT NULL DEFAULT '',
+            pinned          INTEGER NOT NULL DEFAULT 0,
+            meta            TEXT    NOT NULL DEFAULT '{}',
+            created_at      INTEGER NOT NULL,
+            deleted_at      INTEGER NOT NULL DEFAULT 0
+        )
+    ''')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_chat_artifact_conv ON chat_artifacts(conv_id, created_at DESC)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_chat_artifact_msg ON chat_artifacts(conv_id, msg_id)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_chat_artifact_sha ON chat_artifacts(conv_id, content_sha256)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_chat_artifact_task ON chat_artifacts(task_id)')
 
     cur.execute('''
         CREATE TABLE IF NOT EXISTS transcript_archive (
@@ -341,6 +372,20 @@ def _init_chat_schema(conn):
     cur.execute('CREATE INDEX IF NOT EXISTS idx_daily_cost_user_date ON daily_cost_cache(user_id, date)')
 
     cur.execute('CREATE INDEX IF NOT EXISTS idx_paper_lib_user ON paper_library(user_id, updated_at DESC)')
+
+    # ── Paper translations: persistent cache for Babel-mode whole-paper
+    # translations (server-owned task; mirrors paper_reports). lang is the
+    # target language code ('zh', 'en', 'ja', …).
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS paper_translations (
+            paper_hash TEXT NOT NULL,
+            lang TEXT NOT NULL,
+            text TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (paper_hash, lang)
+        )
+    ''')
 
     # Seed default user
     cur.execute("""
@@ -893,6 +938,125 @@ def _init_system_schema(conn):
     cur.execute('CREATE INDEX IF NOT EXISTS idx_opt_actlog_applied ON optimizer_action_log(applied_at DESC)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_opt_actlog_expires ON optimizer_action_log(expires_at)')
 
+    # ── Rate-limit event log (PR3c / C7 step 2) ──
+    # See the matching block in _schema_pg.py for design notes.
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS rate_limit_events (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            endpoint TEXT    NOT NULL,
+            ip       TEXT    NOT NULL,
+            ts_ms    INTEGER NOT NULL
+        )
+    ''')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_rate_limit_lookup ON rate_limit_events(endpoint, ip, ts_ms)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_rate_limit_ts ON rate_limit_events(ts_ms)')
+
+    # ─────────────────────────────────────────────────────────────────
+    #  Billing / multi-tenant tables
+    # ─────────────────────────────────────────────────────────────────
+    # All amounts are stored in MICRO-CREDITS (1 credit = 1,000,000 micro)
+    # to keep the math integer-only. 1 credit roughly equals US $0.001
+    # — i.e. one US dollar = 1,000 credits = 1,000,000,000 micro. This
+    # buys ~10⁹ resolution per dollar which is plenty for token billing.
+    # Conversion to display currency happens only at presentation layer.
+    # ``tenant_users`` is the multi-tenant relay user table. The existing
+    # ``users`` table from the chat schema is a single-row stub for the
+    # local UI's session — different shape, different purpose. Naming
+    # collision avoided here on purpose.
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS tenant_users (
+            id TEXT PRIMARY KEY,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL DEFAULT '',
+            display_name TEXT NOT NULL DEFAULT '',
+            role TEXT NOT NULL DEFAULT 'user',
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at INTEGER NOT NULL,
+            last_login_at INTEGER NOT NULL DEFAULT 0,
+            email_verified INTEGER NOT NULL DEFAULT 0,
+            metadata TEXT NOT NULL DEFAULT '{}'
+        )
+    ''')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_tenant_users_email ON tenant_users(email)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_tenant_users_role ON tenant_users(role)')
+
+    # The ledger is the SOURCE OF TRUTH for every credit movement.
+    # Append-only — never UPDATE or DELETE rows. The wallet balance is a
+    # denormalized cache derived from SUM(amount) over this table.
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS billing_ledger (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            ts INTEGER NOT NULL,
+            amount_micro INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            ref_type TEXT NOT NULL DEFAULT '',
+            ref_id TEXT NOT NULL DEFAULT '',
+            balance_after_micro INTEGER NOT NULL,
+            note TEXT NOT NULL DEFAULT ''
+        )
+    ''')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_ledger_user_ts ON billing_ledger(user_id, ts DESC)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_ledger_ref ON billing_ledger(ref_type, ref_id)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_ledger_kind ON billing_ledger(kind)')
+
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS billing_wallets (
+            user_id TEXT PRIMARY KEY,
+            balance_micro INTEGER NOT NULL DEFAULT 0,
+            currency TEXT NOT NULL DEFAULT 'CREDIT',
+            low_balance_alert_micro INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL
+        )
+    ''')
+
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS billing_redeem_codes (
+            code TEXT PRIMARY KEY,
+            amount_micro INTEGER NOT NULL,
+            batch TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL DEFAULT 0,
+            redeemed_by TEXT NOT NULL DEFAULT '',
+            redeemed_at INTEGER NOT NULL DEFAULT 0,
+            note TEXT NOT NULL DEFAULT ''
+        )
+    ''')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_redeem_batch ON billing_redeem_codes(batch)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_redeem_redeemed ON billing_redeem_codes(redeemed_by)')
+
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS billing_payments (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            provider_id TEXT NOT NULL DEFAULT '',
+            amount_minor INTEGER NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'USD',
+            credit_micro INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at INTEGER NOT NULL,
+            settled_at INTEGER NOT NULL DEFAULT 0,
+            raw TEXT NOT NULL DEFAULT '{}'
+        )
+    ''')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_payments_user ON billing_payments(user_id)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_payments_provider ON billing_payments(provider, provider_id)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_payments_status ON billing_payments(status)')
+
+    # Migration for existing api_keys store: add user_id column so a
+    # multi-tenant deployment can attribute every key to a wallet.
+    # Personal/private installs leave it empty — middleware treats
+    # an empty user_id as "the local single-user account".
+    if not _column_exists(conn, 'rate_limit_events', 'placeholder'):
+        # The api_keys table doesn't live in SQLite — it's still a JSON
+        # store at data/config/api_keys.json. The user_id field is added
+        # to that JSON shape directly in lib/api_keys.py. Nothing to do
+        # here; this comment prevents a future maintainer from re-adding
+        # ALTER TABLE api_keys.
+        pass
+
     conn._conn.commit()
 
 
@@ -945,5 +1109,5 @@ def init_db(_new_connection):
         if conn is not None:
             try:
                 conn.close()
-            except Exception:
-                pass
+            except Exception as ce:
+                logger.debug('[DB] Schema init conn close failed: %s', ce)

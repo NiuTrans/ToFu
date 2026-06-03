@@ -34,11 +34,26 @@ def safe_json(raw, default=None, label=''):
         return default
 
 
+def _loads_first_obj(s: str):
+    """json.loads with fallback to raw_decode for trailing-garbage ("Extra data") cases."""
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError as e:
+        if 'Extra data' not in str(e):
+            raise
+        obj, _ = json.JSONDecoder().raw_decode(s)
+        if isinstance(obj, dict):
+            logger.debug('repair_json: extracted first JSON object, discarded trailing %d chars', len(s) - _)
+            return obj
+        raise
+
+
 def repair_json(raw: str) -> dict:
     """Best-effort repair of common LLM JSON malformations.
 
     Handles: trailing commas, unterminated strings, missing closing braces/brackets,
-    invalid backslash escape sequences (e.g. ``\\U``, ``\\m``, ``\\.``).
+    invalid backslash escape sequences (e.g. ``\\U``, ``\\m``, ``\\.``),
+    trailing garbage after a complete JSON object ("Extra data").
     Raises json.JSONDecodeError if repair fails.
     """
     s = raw.strip()
@@ -51,7 +66,7 @@ def repair_json(raw: str) -> dict:
 
     # 2. Try parsing after comma fix
     try:
-        return json.loads(s)
+        return _loads_first_obj(s)
     except json.JSONDecodeError:
         logger.debug('repair_json: initial parse failed, attempting repair on %d-char input', len(s))
 
@@ -71,7 +86,7 @@ def repair_json(raw: str) -> dict:
     s_esc = re.sub(r'"(?:[^"\\]|\\.)*"', _fix_escapes, s)
     if s_esc != s:
         try:
-            return json.loads(s_esc)
+            return _loads_first_obj(s_esc)
         except json.JSONDecodeError:
             logger.debug('repair_json: escape-fix parse failed, continuing repair')
         s = s_esc  # keep the escape fix for subsequent repairs
@@ -90,7 +105,7 @@ def repair_json(raw: str) -> dict:
     # 5. Strip trailing commas again (may appear after quote closure)
     s = re.sub(r',\s*([}\]])', r'\1', s)
 
-    return json.loads(s)  # let it raise if still broken
+    return _loads_first_obj(s)  # let it raise if still broken
 
 
 # Backward-compat alias: old code used the underscore-prefixed name

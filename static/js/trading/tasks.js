@@ -98,9 +98,15 @@
         .then(function (data) {
           if (!data || stopped) return;
           
-          // ★ FIX: Check for error response body (e.g. {error: "Task not found"})
+          // ★ FIX: Check for error response body (e.g. {error: "Task not found"} OR
+          //   typed envelope dict from routes/trading_simulator.py).
           if (data.error && !data.status) {
-            _stop('server error: ' + data.error);
+            var _emsg = (typeof errorEnvelopeMessage === 'function')
+              ? (errorEnvelopeMessage(data.error)
+                 || (typeof data.error === 'string' ? data.error : JSON.stringify(data.error)))
+              : (typeof data.error === 'string' ? data.error
+                 : (data.error && data.error.message) || 'unknown');
+            _stop('server error: ' + _emsg);
             if (cbs.onError) cbs.onError(data.error);
             return;
           }

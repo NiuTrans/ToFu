@@ -41,7 +41,7 @@ __all__ = [
 ]
 
 # Proxy bypass via centralized lib/proxy — respects Settings UI config.
-from lib.proxy import proxies_for as _proxies_for
+from lib.http_client import http_get, http_post
 
 # Image-gen API base — fallback only; prefer slot-derived base from dispatch.
 # This is used when no provider-specific base_url is available from the slot.
@@ -187,7 +187,7 @@ def _generate_openai(
     }
 
     t0 = time.time()
-    resp = requests.post(url, headers=headers, json=body, proxies=_proxies_for(url), timeout=timeout)
+    resp = http_post(url, headers=headers, json=body, timeout=timeout)
     elapsed = time.time() - t0
 
     if resp.status_code == 429:
@@ -421,8 +421,7 @@ def _generate_chat_completions(
     body['modalities'] = ['text', 'image']
 
     t0 = time.time()
-    resp = requests.post(url, headers=headers, json=body,
-                         proxies=_proxies_for(url), timeout=timeout)
+    resp = http_post(url, headers=headers, json=body, timeout=timeout)
     elapsed = time.time() - t0
 
     if resp.status_code == 429:
@@ -576,7 +575,7 @@ def _generate_gemini(
     t0 = time.time()
 
     # ── Step 1: Submit ──
-    resp = requests.post(submit_url, headers=headers, json=body, proxies=_proxies_for(submit_url), timeout=timeout)
+    resp = http_post(submit_url, headers=headers, json=body, timeout=timeout)
     submit_elapsed = time.time() - t0
 
     if resp.status_code == 429:
@@ -607,7 +606,7 @@ def _generate_gemini(
     while time.time() - poll_start < _POLL_MAX_WAIT:
         time.sleep(_POLL_INTERVAL)
         try:
-            poll_resp = requests.get(poll_url, headers=poll_headers, proxies=_proxies_for(poll_url), timeout=30)
+            poll_resp = http_get(poll_url, headers=poll_headers, timeout=30)
             if poll_resp.status_code != 200:
                 logger.warning('[ImageGen] Poll HTTP %d for task=%s', poll_resp.status_code, task_id)
                 continue
@@ -742,7 +741,7 @@ def _download_image(url: str, default_mime: str = 'image/png') -> tuple:
     try:
         import base64 as _b64
         logger.info('[ImageGen] Downloading image from URL: %.120s', url)
-        img_resp = requests.get(url, proxies=_proxies_for(url), timeout=30)
+        img_resp = http_get(url, timeout=30)
         img_resp.raise_for_status()
         image_b64 = _b64.b64encode(img_resp.content).decode('ascii')
         ct = img_resp.headers.get('Content-Type', '')

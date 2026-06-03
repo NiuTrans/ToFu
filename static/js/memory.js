@@ -73,11 +73,8 @@ async function refreshMemoryList(scope) {
   list.innerHTML = '<div class="memory-loading"><div class="memory-loading-dot"></div><div class="memory-loading-dot"></div><div class="memory-loading-dot"></div><span>加载中...</span></div>';
 
   try {
-    const url = apiUrl(`/api/memory?scope=${scope}`);
-    console.log("[Memory] Fetching:", url);
-    const r = await fetch(url);
-    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    const d = await r.json();
+    const d = await Api.memory.list(scope);
+    if (!d) throw new Error("empty response");
     console.log("[Memory] Got", (d.memories || d.skills || []).length, "memories");
     _memoryCache = d.memories || d.skills || [];
     _updateMemoryStats(_memoryCache);
@@ -291,8 +288,8 @@ async function toggleMemoryEnabled(id) {
   _updateMemoryStats(_memoryCache);
 
   try {
-    const r = await fetch(apiUrl(`/api/memory/${id}/toggle`), { method: "POST" });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const r = await Api.memory.toggle(id);
+    if (!r || !r.ok) throw new Error(`HTTP ${r ? r.status : 'no response'}`);
     const updated = await r.json();
     // Sync server truth back to cache
     if (cacheItem) Object.assign(cacheItem, updated);
@@ -318,8 +315,8 @@ async function deleteMemory(id) {
     card.style.transform = 'scale(.96)';
   }
   try {
-    const r = await fetch(apiUrl(`/api/memory/${id}`), { method: "DELETE" });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const r = await Api.memory.remove(id);
+    if (!r || !r.ok) throw new Error(`HTTP ${r ? r.status : 'no response'}`);
     // Remove from cache and DOM
     _memoryCache = _memoryCache.filter(m => m.id !== id);
     if (card) card.remove();
@@ -343,12 +340,8 @@ async function createMemoryFromModal() {
   const status = document.getElementById("memoryModalStatus");
   if (!name || !body) { status.textContent = "名称和内容为必填项"; return; }
   try {
-    const r = await fetch(apiUrl("/api/memory"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, description: desc, body, scope, tags }),
-    });
-    if (r.ok) {
+    const r = await Api.memory.create({ name, description: desc, body, scope, tags });
+    if (r && r.ok) {
       const newMem = await r.json();
       ["memoryNewName","memoryNewDesc","memoryNewBody","memoryNewTags"].forEach(id => { document.getElementById(id).value = ""; });
       document.getElementById("memoryAddSection").style.display = "none";
@@ -453,14 +446,11 @@ async function _uploadSkillPackage(file) {
   fd.append("scope", scope);
 
   try {
-    const r = await fetch(apiUrl("/api/memory/install"), {
-      method: "POST",
-      body: fd,
-    });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      _showInstallToast(`安装失败: ${d.error || r.statusText}`, true);
-      debugLog("Skill install failed: " + (d.error || r.statusText), "error");
+    const r = await Api.memory.install(fd);
+    const d = (r ? await r.json().catch(() => ({})) : {});
+    if (!r || !r.ok) {
+      _showInstallToast(`安装失败: ${d.error || (r && r.statusText) || 'no response'}`, true);
+      debugLog("Skill install failed: " + (d.error || (r && r.statusText) || 'no response'), "error");
       return;
     }
 

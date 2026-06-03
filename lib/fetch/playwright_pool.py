@@ -103,6 +103,7 @@ class PlaywrightPool:
         self._ready = False       # 浏览器是否就绪
         self._started = False
         self._last_fail_ts = 0     # 上次启动失败时间戳 (防止无限重启)
+        self._missing_binary = False  # last launch failed because chromium not installed
 
     # ── 专用线程的主循环 ──
     def _worker_loop(self, task_q):
@@ -126,27 +127,28 @@ class PlaywrightPool:
             try:
                 browser = pw.chromium.launch(headless=True, args=_launch_args)
             except Exception as _launch_err:
-                # ── Auto-install: if the executable doesn't exist, try installing ──
-                if 'Executable doesn\'t exist' in str(_launch_err) or 'executable' in str(_launch_err).lower():
-                    logger.info('Playwright browser not installed — attempting auto-install...')
-                    import subprocess
-                    import sys as _sys
-                    try:
-                        subprocess.run(
-                            [_sys.executable, '-m', 'playwright', 'install', 'chromium'],
-                            timeout=120, capture_output=True, check=True,
-                        )
-                        logger.info('Playwright chromium installed successfully, retrying launch...')
-                        browser = pw.chromium.launch(headless=True, args=_launch_args)
-                    except Exception as _install_err:
-                        logger.warning('Playwright auto-install failed: %s', _install_err, exc_info=True)
-                        raise _launch_err from _install_err
-                else:
-                    raise
+                # Missing binary is a config state, not a runtime bug — install.sh
+                # Step 8 (`python -m playwright install chromium`) handles it for
+                # full installs, and users on `--skip-playwright` opted out. We
+                # don't auto-install at request time because a ~50s subprocess
+                # would silently stall user-visible fetches. Surface a one-line
+                # remediation hint and propagate so _ensure_thread()'s cooldown
+                # kicks in.
+                self._missing_binary = (
+                    'Executable doesn\'t exist' in str(_launch_err)
+                    or 'executable' in str(_launch_err).lower()
+                )
+                raise
             logger.info('Playwright browser launched (dedicated thread)')
             self._ready = True
         except Exception as e:
-            logger.warning('Playwright launch failed: %s', e, exc_info=True)
+            if getattr(self, '_missing_binary', False):
+                logger.info(
+                    'Playwright chromium binary missing — SPA-render fallback disabled. '
+                    'Run `python -m playwright install chromium` (or re-run install.sh) to enable it.'
+                )
+            else:
+                logger.warning('Playwright launch failed: %s', e, exc_info=True)
             self._ready = False
             # 排空已经在等的任务
             while True:
@@ -167,8 +169,32 @@ class PlaywrightPool:
                 break
             if item is None:          # 收到 sentinel → 退出
                 break
-            (url, timeout, max_chars), result_q = item
-            result = self._do_fetch(browser, url, timeout, max_chars)
+            payload, result_q = item
+            # ── Task discriminator ────────────────────────────────────
+            # Legacy fetches arrive as ((url, timeout, max_chars), q).
+            # Newer task kinds arrive as ((kind:str, payload:dict), q).
+            # Distinguish by the FIRST element type so older callers
+            # keep working without changes.
+            try:
+                if (isinstance(payload, tuple)
+                        and len(payload) == 2
+                        and isinstance(payload[0], str)):
+                    kind, kpayload = payload
+                    if kind == 'pdf_render':
+                        result = self._do_pdf_render(browser, kpayload)
+                    else:
+                        logger.warning(
+                            '[Pool] unknown task kind=%r — returning None', kind,
+                        )
+                        result = None
+                else:
+                    url, timeout, max_chars = payload
+                    result = self._do_fetch(browser, url, timeout, max_chars)
+            except Exception as e:
+                logger.warning(
+                    '[Pool] worker task crashed: %s', e, exc_info=True,
+                )
+                result = {'error': str(e)}
             result_q.put(result)
 
         # 清理
@@ -180,6 +206,54 @@ class PlaywrightPool:
             pw.stop()
         except Exception as e:
             logger.debug('[Fetch] playwright stop failed: %s', e, exc_info=True)
+
+    def _do_pdf_render(self, browser, payload):
+        """PDF-render a self-contained HTML document.  Returns bytes or
+        an error dict.  Runs on the Playwright worker thread.
+
+        See lib/artifacts/pdf_export.py for the caller; payload shape is
+        ``{'html': <full document str>, 'title': <str>}``.
+        """
+        html = (payload or {}).get('html') or ''
+        title = (payload or {}).get('title') or ''
+        if not html:
+            return {'error': 'empty html'}
+
+        context = None
+        t0 = time.time()
+        try:
+            context = browser.new_context(
+                java_script_enabled=False,  # never run model JS in the pool
+                ignore_https_errors=True,
+            )
+            page = context.new_page()
+            # Block all network — the document is fully self-contained
+            # and we want predictable, isolated rendering.
+            page.route('**/*', lambda route: route.abort())
+            page.set_content(html, wait_until='domcontentloaded', timeout=15_000)
+            pdf_bytes = page.pdf(
+                format='A4',
+                print_background=True,
+                margin={'top': '14mm', 'bottom': '14mm',
+                        'left': '14mm', 'right': '14mm'},
+            )
+            elapsed = time.time() - t0
+            logger.info(
+                '[Pool:pdf] rendered title=%r bytes=%d elapsed=%.2fs',
+                title[:60], len(pdf_bytes), elapsed,
+            )
+            return pdf_bytes
+        except Exception as e:
+            logger.warning(
+                '[Pool:pdf] render failed title=%r: %s', title[:60], e, exc_info=True,
+            )
+            return {'error': str(e)}
+        finally:
+            if context:
+                try:
+                    context.close()
+                except Exception as e:
+                    logger.debug('[Pool:pdf] context close failed: %s', e)
 
     def _do_fetch(self, browser, url, timeout, max_chars):
         """在专用线程内执行：打开页面 → 渲染 → 提取文本。"""
@@ -321,7 +395,12 @@ class PlaywrightPool:
                     break
                 time.sleep(0.1)
             if not self._ready:
-                logger.error('Playwright thread failed to start browser')
+                if self._missing_binary:
+                    # Already explained at INFO above — don't escalate to ERROR
+                    # since the user opted into this state (skipped installer).
+                    pass
+                else:
+                    logger.error('Playwright thread failed to start browser')
                 self._last_fail_ts = time.time()
             else:
                 self._last_fail_ts = 0

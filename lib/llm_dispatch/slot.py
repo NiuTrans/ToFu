@@ -15,8 +15,45 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
+# Single source of truth for the legal ``Slot.thinking_format`` values.
+# Every code path that builds, persists, or validates a thinking-format
+# string MUST consult this set — preventing silent typos like
+# ``chat_template_kwarg`` (missing the trailing ``s``) from degrading
+# to auto-detect.
+#
+# Adding a new dialect = one entry here + one branch in
+# ``lib/llm/body.py::build_body`` and ``lib/llm_dispatch/api.py::_readjust_thinking_params``.
+#
+#   ''                       auto-detect from model name + brand
+#   'enable_thinking'        cloud Qwen / LongCat / Gemini cloud / ERNIE
+#   'thinking_type'          Doubao / GLM / Kimi / Claude
+#   'chat_template_kwargs'   sglang / vLLM self-hosted dual-mode
+#   'none'                   send no thinking parameters
+THINKING_FORMATS = frozenset({
+    '', 'enable_thinking', 'thinking_type', 'chat_template_kwargs', 'none',
+})
+
+
+def _is_valid_thinking_format(value: str) -> bool:
+    """True for a built-in format OR a registered tofu.providers plugin dialect.
+
+    Defers to :func:`lib.llm_dispatch.provider_registry.is_valid_thinking_format`
+    so plugin dialects are accepted, but falls back to the built-in set if that
+    module can't be imported (keeps Slot construction robust during early
+    bootstrap before the registry is wired).
+    """
+    try:
+        from lib.llm_dispatch.provider_registry import is_valid_thinking_format
+        return is_valid_thinking_format(value)
+    except Exception as e:
+        logger.debug('[Slot] provider_registry unavailable, using built-in '
+                     'THINKING_FORMATS only: %s', e)
+        return value in THINKING_FORMATS
+
+
 __all__ = [
     'Slot',
+    'THINKING_FORMATS',
 ]
 
 
@@ -32,6 +69,16 @@ class Slot:
         # Defensive copy — prevent shared-reference bugs when
         # multiple Slots are built from the same caps set.
         self.capabilities = set(self.capabilities)
+        # Reject typos at construction. We deliberately do NOT silently
+        # coerce — a typo'd dialect would otherwise degrade to
+        # auto-detect with zero feedback (the bug that motivated this
+        # check; see commit history for the qwen35-0p8b stream_anomaly
+        # incident).
+        if not _is_valid_thinking_format(self.thinking_format):
+            raise ValueError(
+                'thinking_format=%r is not one of %s (nor a registered '
+                'tofu.providers plugin dialect)' % (
+                    self.thinking_format, sorted(THINKING_FORMATS)))
 
     # ── Provider routing ──
     base_url: str = ''              # provider-specific base URL (empty = use global default)
@@ -42,6 +89,9 @@ class Slot:
                                     # 'enable_thinking' = {enable_thinking: bool} (LongCat, Qwen, Gemini)
                                     # 'thinking_type' = {thinking: {type: enabled/disabled}} (Doubao, Claude)
                                     # 'none' = no thinking parameters sent
+    protocol: str = ''              # per-provider wire protocol:
+                                    # '' / 'openai' = OpenAI Chat Completions (default)
+                                    # 'anthropic' = Anthropic Messages API (POST /v1/messages)
     stream_only: bool = False       # True if model only supports stream=True (e.g. qwq-plus, deepseek-reasoner)
 
     # ── Rate limiting ──
@@ -52,13 +102,16 @@ class Slot:
     # ── Performance tracking (EMA = exponential moving average) ──
     latency_ema: float = 2000.0     # ms — lower is better, seeded from benchmark
     ttft_ema: float = 1000.0        # ms — time-to-first-token (streaming)
+    throughput_ema: float = 0.0     # tokens/sec — output generation speed (0 = unknown)
     ema_alpha: float = 0.3          # EMA smoothing factor (higher = more reactive)
+    last_success_time: float = 0.0  # epoch seconds; 0 = never
 
     # ── Error tracking ──
     consecutive_errors: int = 0
     total_requests: int = 0
     total_errors: int = 0
     last_error_time: float = 0.0
+    last_error_msg: str = ''
 
     # ── Inflight tracking ──
     inflight: int = 0               # currently executing requests
@@ -116,11 +169,20 @@ class Slot:
             self.inflight += 1
             self.total_requests += 1
 
-    def record_success(self, latency_ms, ttft_ms=None):
-        """Call after a successful response."""
+    def record_success(self, latency_ms, ttft_ms=None,
+                       output_tokens: int = 0):
+        """Call after a successful response.
+
+        Args:
+            latency_ms: end-to-end response time (ms).
+            ttft_ms: time-to-first-token (ms) for streaming. None for non-streaming.
+            output_tokens: completion tokens (used to update throughput EMA).
+                Pass 0 (default) when token count isn't available.
+        """
         with self._lock:
             self.inflight = max(0, self.inflight - 1)
             self.consecutive_errors = 0
+            self.last_success_time = time.time()
 
             # Update EMA
             self.latency_ema = (self.ema_alpha * latency_ms +
@@ -128,6 +190,22 @@ class Slot:
             if ttft_ms is not None:
                 self.ttft_ema = (self.ema_alpha * ttft_ms +
                                  (1 - self.ema_alpha) * self.ttft_ema)
+
+            # Update throughput EMA. Use generation duration (post-TTFT) when
+            # streaming, else total latency. Skip on tiny / missing data so a
+            # single 1-token completion doesn't drag the average to ~0.
+            if output_tokens and output_tokens > 1 and latency_ms > 0:
+                if ttft_ms is not None and ttft_ms < latency_ms:
+                    gen_ms = max(1.0, latency_ms - ttft_ms)
+                else:
+                    gen_ms = latency_ms
+                tps = output_tokens / (gen_ms / 1000.0)
+                if 0 < tps < 10000:  # sanity bound
+                    if self.throughput_ema <= 0:
+                        self.throughput_ema = tps
+                    else:
+                        self.throughput_ema = (self.ema_alpha * tps +
+                                               (1 - self.ema_alpha) * self.throughput_ema)
 
         # Daily success/failure tracker (outside lock — it has its own lock).
         # Rate-limit failures don't get here, so every record_success is a
@@ -137,6 +215,28 @@ class Slot:
             record_outcome(self.provider_id, self.key_name, success=True)
         except Exception as e:
             logger.debug('[Slot] key_stats record_outcome(success) failed: %s', e)
+
+    def record_truncation(self, error: str = ''):
+        """Call when a response was syntactically successful (HTTP 200, parseable)
+        but the body was unusable — truncated mid-output, or empty when content
+        was expected. The dispatcher should treat this as a soft failure: bump
+        consecutive_errors so ``score()`` deprioritizes the slot for a while,
+        but skip the rate-limit / quota-exhaustion / key-stats paths since the
+        key itself is healthy.
+        """
+        with self._lock:
+            self.consecutive_errors += 1
+            self.total_errors += 1
+            self.last_error_time = time.time()
+            if error:
+                self.last_error_msg = ('[truncation] ' + str(error))[:200]
+            if self.consecutive_errors >= 3:
+                cooldown = min(300, 5 * (2 ** (self.consecutive_errors - 3)))
+                self.cooldown_until = time.time() + cooldown
+                logger.warning('  ⚠️ Slot %s:%s cooled down %ds '
+                               'after %d consecutive truncations/empty outputs',
+                               self.key_name, self.model, cooldown,
+                               self.consecutive_errors)
 
     def record_error(self, is_rate_limit=False, error: str = '',
                      is_quota_exhausted: bool = False):
@@ -158,6 +258,8 @@ class Slot:
             self.consecutive_errors += 1
             self.total_errors += 1
             self.last_error_time = time.time()
+            if error:
+                self.last_error_msg = str(error)[:200]
 
             if is_quota_exhausted:
                 # Persistent billing/balance problem — long cooldown so this

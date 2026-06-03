@@ -18,7 +18,7 @@ import requests
 from lib.log import get_logger
 from lib.oauth.pkce import generate_pkce_codes
 from lib.oauth.token_store import load_token, save_token
-from lib.proxy import proxies_for
+from lib.http_client import http_post
 
 logger = get_logger(__name__)
 
@@ -104,11 +104,10 @@ def codex_exchange_code(code: str, pkce_verifier: str) -> dict | None:
 
     try:
         token_url = CODEX_OAUTH_CONFIG['token_url']
-        resp = requests.post(
+        resp = http_post(
             token_url,
             data=payload,
             headers={'Content-Type': 'application/x-www-form-urlencoded'},
-            proxies=proxies_for(token_url),
             timeout=30,
         )
 
@@ -180,11 +179,10 @@ def codex_refresh_token(refresh_tok: str = None) -> dict | None:
     for attempt in range(3):
         try:
             token_url = CODEX_OAUTH_CONFIG['token_url']
-            resp = requests.post(
+            resp = http_post(
                 token_url,
                 data=payload,
                 headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                proxies=proxies_for(token_url),
                 timeout=30,
             )
 

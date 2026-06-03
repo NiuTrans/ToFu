@@ -2,7 +2,6 @@
 
 import json
 import re
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -12,6 +11,7 @@ from lib.trading._common import (
     classify_asset_code,
     stock_secid,
 )
+from lib.ttl_cache import TTLCache
 
 logger = get_logger(__name__)
 
@@ -28,26 +28,28 @@ __all__ = [
 ]
 
 # ── In-memory NAV cache (L1) ────────────────────────────
-# {symbol: {'nav': float, 'date': str, 'name': str, 'ts': float, 'source': str}}
-_nav_cache = {}
-_nav_lock = threading.Lock()
-_NAV_CACHE_TTL = 1800  # 30 min for L1 memory cache
+# Backed by lib.ttl_cache.TTLCache. Each entry is the dict
+# ``{nav, date, name, source}`` (we no longer carry an explicit 'ts'
+# field — the cache tracks freshness internally).
+_nav_cache = TTLCache(ttl=1800, name='trading.nav.l1')  # 30 min for L1
+
 
 def _nav_from_memory(code):
     """L1: check in-memory cache."""
-    with _nav_lock:
-        entry = _nav_cache.get(code)
-    if entry and (time.time() - entry['ts']) < _NAV_CACHE_TTL:
-        return entry
-    return None
+    entry = _nav_cache.get(code)
+    if entry is None:
+        return None
+    # Add a synthesised 'ts' field for callers that still read it
+    # (the layered fallback logic logs ts for debugging).
+    return {**entry, 'ts': time.time()}
+
 
 def _nav_to_memory(code, nav, nav_date, name='', source='api'):
     """Store in L1 memory cache."""
-    with _nav_lock:
-        _nav_cache[code] = {
-            'nav': nav, 'date': nav_date, 'name': name,
-            'ts': time.time(), 'source': source,
-        }
+    _nav_cache.set(code, {
+        'nav': nav, 'date': nav_date, 'name': name,
+        'source': source,
+    })
 
 def _nav_from_db(code):
     """L2: check DB nav cache (survives restarts, 24h TTL)."""
@@ -325,9 +327,9 @@ def _prewarm_price_cache(codes, *, client=None):
         client = _get_default_client()
     if not codes:
         return
-    # Only fetch codes not already in memory cache
-    with _nav_lock:
-        missing = [c for c in set(codes) if c not in _nav_cache]
+    # Only fetch codes not already in the L1 memory cache.
+    # TTLCache.__contains__ is thread-safe and lazily evicts expired entries.
+    missing = [c for c in set(codes) if c not in _nav_cache]
     if not missing:
         return
     if not client.check_network():

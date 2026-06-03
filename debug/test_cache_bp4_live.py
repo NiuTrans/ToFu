@@ -27,7 +27,7 @@ import time
 # Add project root to sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.llm_client import (
+from lib.llm import (
     add_cache_breakpoints,
     build_body,
     stream_chat,
@@ -296,7 +296,7 @@ FAKE_TOOL_RESULTS = {
         'lib/llm_client.py:765:def add_cache_breakpoints(body, log_prefix=\'\'):\n'
         'lib/llm_client.py:1190:    add_cache_breakpoints(body, log_prefix)\n'
         'lib/tasks_pkg/cache_tracking.py:26:  to cover the growing prefix.\n'
-        'tests/test_cc_alignment.py:668:    from lib.llm_client import add_cache_breakpoints\n'
+        'tests/test_cc_alignment.py:668:    from lib.llm import add_cache_breakpoints\n'
     ),
     'web_search': lambda args: (
         "Search results for: " + args.get('query', '?') + "\n\n"

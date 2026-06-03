@@ -502,7 +502,7 @@ def build_brain_streaming_body(
         {'role': 'user', 'content': prompt},
     ]
 
-    from lib.llm_client import build_body
+    from lib.llm import build_body
     body = build_body(
         _lib.LLM_MODEL, messages,
         max_tokens=16384, temperature=0.3,

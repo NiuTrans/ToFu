@@ -6,22 +6,25 @@ guidance prompt). They share no state with the rest of ``chat.py``
 beyond the public ``chat_bp`` Blueprint.
 """
 
-from flask import jsonify, request
 
 from lib.log import get_logger
-from routes.chat import chat_bp
+from lib.api_response import api_bad_request, api_internal_error, api_not_found, api_ok
+from lib.request_parser import parse_body
+from routes.api_v1.chat import api_v1_chat_bp  # noqa: E402
+from routes.api_v1.auth import require_scope
 
 logger = get_logger(__name__)
 
 
-@chat_bp.route('/api/chat/stdin_response', methods=['POST'])
+@api_v1_chat_bp.route('/api/v1/chat/stdin-response', methods=['POST'], endpoint='ui_chat_stdin_response')
+@require_scope('chat')
 def chat_stdin_response():
     """Provide stdin input to a subprocess waiting for user input.
 
     Body: { "stdinId": "stdin_...", "input": "user's text", "eof": false }
     If ``eof`` is true, stdin is closed (no input is sent).
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     stdin_id = data.get('stdinId', '')
     is_eof = data.get('eof', False)
     input_text = data.get('input', '')
@@ -30,7 +33,7 @@ def chat_stdin_response():
                 stdin_id, is_eof, len(input_text))
     if not stdin_id:
         logger.warning('[Stdin] Rejected — missing stdinId')
-        return jsonify({'error': 'No stdinId'}), 400
+        return api_bad_request('No stdinId')
 
     from lib.tasks_pkg import resolve_stdin
     # EOF → resolve with None to signal stdin close
@@ -40,22 +43,21 @@ def chat_stdin_response():
     except Exception as e:
         logger.error('[Stdin] Exception resolving %s: %s',
                      stdin_id, e, exc_info=True)
-        return jsonify({'error': 'Internal server error'}), 500
+        return api_internal_error('Internal server error')
     if not ok:
         logger.warning('[Stdin] Request not found or expired: stdinId=%s',
                        stdin_id)
-        return jsonify({'error': 'Stdin request not found or expired'}), 404
+        return api_not_found('Stdin request not found or expired')
     logger.info('[Stdin] Successfully resolved %s', stdin_id)
-    return jsonify({'ok': True, 'stdinId': stdin_id})
-
-
-@chat_bp.route('/api/chat/human_response', methods=['POST'])
+    return api_ok({'stdinId': stdin_id})
+@api_v1_chat_bp.route('/api/v1/chat/human-response', methods=['POST'], endpoint='ui_chat_human_response')
+@require_scope('chat')
 def chat_human_response():
     """Resolve a human guidance request — the user has answered a question.
 
     Body: { "guidanceId": "hg_...", "response": "user's answer text" }
     """
-    data = request.get_json(silent=True) or {}
+    data = parse_body()
     guidance_id = data.get('guidanceId', '')
     response_text = data.get('response', '')
     logger.info('[HumanGuidance] /api/chat/human_response received: '
@@ -63,11 +65,11 @@ def chat_human_response():
                 guidance_id, len(response_text))
     if not guidance_id:
         logger.warning('[HumanGuidance] Rejected — missing guidanceId')
-        return jsonify({'error': 'No guidanceId'}), 400
+        return api_bad_request('No guidanceId')
     if not response_text:
         logger.warning('[HumanGuidance] Rejected — empty response for '
                        'guidanceId=%s', guidance_id)
-        return jsonify({'error': 'No response text'}), 400
+        return api_bad_request('No response text')
 
     from lib.tasks_pkg import resolve_human_guidance
     try:
@@ -75,11 +77,11 @@ def chat_human_response():
     except Exception as e:
         logger.error('[HumanGuidance] Exception resolving %s: %s',
                      guidance_id, e, exc_info=True)
-        return jsonify({'error': 'Internal server error'}), 500
+        return api_internal_error('Internal server error')
     if not ok:
         logger.warning('[HumanGuidance] Guidance request not found or '
                        'expired: guidanceId=%s', guidance_id)
-        return jsonify({'error': 'Guidance request not found or expired'}), 404
+        return api_not_found('Guidance request not found or expired')
     logger.info('[HumanGuidance] Successfully resolved %s (response_len=%d)',
                 guidance_id, len(response_text))
-    return jsonify({'ok': True, 'guidanceId': guidance_id})
+    return api_ok({'guidanceId': guidance_id})

@@ -2,6 +2,7 @@
 
 import time as _time
 
+from lib.agent_core.events import EventType, build_event
 from lib.log import get_logger
 from lib.scheduler.cron import describe_cron, next_cron_run
 from lib.scheduler.manager import get_scheduler
@@ -397,15 +398,15 @@ def _execute_timer_create(fn_args):
                 'ts': int(_time.time() * 1000),
             }
             _attach_poll_to_round(_started_poll)
-            append_event(parent_task, {
-                'type': 'timer_poll_check',
-                'roundNum': round_num,
-                'timerId': timer_id,
-                'pollNum': 0,
-                'decision': 'started',
-                'reason': f'Timer created — polling every {poll_interval}s (max {max_polls})',
-                'checkCommand': (timer.get('check_command', '') or '')[:100],
-            })
+            append_event(parent_task, build_event(
+                EventType.TIMER_POLL_CHECK,
+                roundNum=round_num,
+                timerId=timer_id,
+                pollNum=0,
+                decision='started',
+                reason=f'Timer created — polling every {poll_interval}s (max {max_polls})',
+                checkCommand=(timer.get('check_command', '') or '')[:100],
+            ))
 
         poll_count = 0
         while True:
@@ -455,14 +456,14 @@ def _execute_timer_create(fn_args):
                         'ts': int(_time.time() * 1000),
                     }
                     _attach_poll_to_round(_err_poll)
-                    append_event(parent_task, {
-                        'type': 'timer_poll_check',
-                        'roundNum': round_num,
-                        'timerId': timer_id,
-                        'pollNum': poll_count,
-                        'decision': 'error',
-                        'reason': f'Poll error: {str(e)[:100]}',
-                    })
+                    append_event(parent_task, build_event(
+                        EventType.TIMER_POLL_CHECK,
+                        roundNum=round_num,
+                        timerId=timer_id,
+                        pollNum=poll_count,
+                        decision='error',
+                        reason=f'Poll error: {str(e)[:100]}',
+                    ))
                 continue
 
             # Skipped polls (unchanged command output) — no LLM call,
@@ -483,14 +484,14 @@ def _execute_timer_create(fn_args):
                             sr['_timerLastSkipPollNum'] = poll_count
                             sr['_timerTimerId'] = timer_id
                             break
-                    append_event(parent_task, {
-                        'type': 'timer_poll_check',
-                        'roundNum': round_num,
-                        'timerId': timer_id,
-                        'pollNum': poll_count,
-                        'decision': 'skipped',
-                        'reason': 'check_command output unchanged — LLM call skipped',
-                    })
+                    append_event(parent_task, build_event(
+                        EventType.TIMER_POLL_CHECK,
+                        roundNum=round_num,
+                        timerId=timer_id,
+                        pollNum=poll_count,
+                        decision='skipped',
+                        reason='check_command output unchanged — LLM call skipped',
+                    ))
                 continue
 
             decision = 'ready' if ready else 'wait'
@@ -518,15 +519,15 @@ def _execute_timer_create(fn_args):
                             sr['_timerTriggered'] = True
                             sr['status'] = 'done'
                             break
-                append_event(parent_task, {
-                    'type': 'timer_poll_check',
-                    'roundNum': round_num,
-                    'timerId': timer_id,
-                    'pollNum': poll_count,
-                    'decision': decision,
-                    'reason': reason[:200],
-                    'tokensUsed': tokens_used,
-                })
+                append_event(parent_task, build_event(
+                    EventType.TIMER_POLL_CHECK,
+                    roundNum=round_num,
+                    timerId=timer_id,
+                    pollNum=poll_count,
+                    decision=decision,
+                    reason=reason[:200],
+                    tokensUsed=tokens_used,
+                ))
 
             if ready:
                 logger.info('[Timer:%s] Conditions met at poll #%d - returning result',

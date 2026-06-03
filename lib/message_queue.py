@@ -39,11 +39,11 @@ def _ensure_table():
         db.execute('CREATE INDEX IF NOT EXISTS idx_mq_conv ON message_queue(conv_id, position)')
         db.commit()
     except Exception as e:
-        logger.debug('[Queue] _ensure_table: %s', e)
+        logger.warning('[Queue] _ensure_table failed (queue will be unusable): %s', e, exc_info=True)
         try:
             db.rollback()
-        except Exception:
-            pass
+        except Exception as re:
+            logger.debug('[Queue] rollback after _ensure_table failure: %s', re)
 
 # Auto-create table on module load (safe for existing DBs)
 _table_ensured = False
@@ -279,7 +279,8 @@ def dispatch_next_queued(conv_id: str) -> str | None:
                 logger.warning('[Queue] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
                 messages = []
 
-            messages.append(pre_built_user_msg)
+            from routes.chat import _append_user_msg_idempotent
+            _append_user_msg_idempotent(messages, pre_built_user_msg)
 
             from lib.database import json_dumps_pg
             now_ms = int(time.time() * 1000)
@@ -367,7 +368,8 @@ def dispatch_next_queued(conv_id: str) -> str | None:
                 logger.warning('[Queue] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
                 messages = []
 
-            messages.append(user_msg)
+            from routes.chat import _append_user_msg_idempotent
+            _append_user_msg_idempotent(messages, user_msg)
 
             from lib.database import json_dumps_pg
             now_ms = int(time.time() * 1000)
@@ -389,7 +391,7 @@ def dispatch_next_queued(conv_id: str) -> str | None:
             logger.warning('[Queue] No API messages after building for conv=%s', conv_id[:8])
             return None
 
-        from lib.tasks_pkg import create_task, run_task
+        from lib.tasks_pkg import create_task
 
         task = create_task(conv_id, api_messages, config)
         task_id = task['id']
@@ -415,11 +417,20 @@ def dispatch_next_queued(conv_id: str) -> str | None:
                     task_id[:8], conv_id[:8], _cfg_model, remaining)
 
         try:
-            threading.Thread(target=run_task, args=(task,), daemon=True).start()
-        except Exception:
+            from lib.tasks_pkg import spawn_task
+            spawn_task(task)
+        except Exception as _spawn_err:
             logger.exception('[Queue] Failed to start thread for dispatched task %s', task_id[:8])
+            from lib.error_envelope import make_envelope as _make_env
             task['status'] = 'error'
-            task['error'] = 'Server failed to start queued task thread'
+            task['error'] = _make_env(
+                'internal',
+                detail='Server failed to start queued task thread.',
+                model=config.get('model', ''),
+                context='queue-dispatch',
+                source='message-queue',
+                raw=str(_spawn_err),
+            )
             return None
 
         # Invalidate meta cache so frontend sees the new task

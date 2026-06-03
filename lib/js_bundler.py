@@ -23,9 +23,57 @@ _BUNDLE_FILES = [
     'i18n.js',         # MUST be first — t() is used by all other modules
     'idb-cache.js',
     'core.js',
+    # ── core/ subpackage (split 2026-05-28 from monolithic core.js) ──
+    # 11 files extracted from core.js (3877 LOC). The slim core.js shell
+    # above declares foundational module state (apiUrl, BASE_PATH, TAB_ID,
+    # conversations, _folders, config, serverModel, getActiveConv,
+    # generateId, _ensureMsgId, scrollToBottom, ...) BEFORE these load,
+    # so each extracted file can reference them at module-load time.
+    # Symbols share window scope; no exports/imports needed.
+    # See `.tofu/skills/frontend-core-decomposition.md` for rationale.
+    'core/folders.js',
+    'core/cost.js',
+    'core/debug_panel.js',
+    'core/escape_html.js',
+    'core/safe_html.js',   # after escape_html.js (uses escapeHtml), before ui/ consumers
+    'core/error_envelope.js',
+    'core/cross_tab_sync.js',
+    'core/conversations.js',
+    'core/cache_stats.js',
+    'core/markdown.js',
+    'core/health_stream_timer.js',
+    'core/toast.js',
+    # Unified API client — owns every backend HTTP call. Depends on
+    # apiUrl() from core.js, consumed by every feature module below.
+    'api.js',
+    'push.js',         # after core.js (uses apiUrl), before ui.js (uses pushSubscribe)
     'export-images.js',
     'branch.js',
-    'ui.js',
+    # Artifacts panel — depends on core.js (renderMarkdown, escapeHtml,
+    # apiUrl) but is consumed by ui.js's chip-rendering path, so it
+    # MUST come before ui.js.
+    'artifacts.js',
+    # ── ui/ subpackage (split 2026-05-28 from monolithic ui.js) ──
+    # The 11 files below were extracted from ui.js (8917 LOC). Concatenated
+    # in load order — symbols share window scope so no exports needed.
+    # IMPORTANT: this list MUST stay in dependency order.
+    # See `.tofu/skills/ui-decomposition.md` for the rationale.
+    'ui/conversation_list.js',
+    'ui/streaming_render.js',
+    'ui/chat_render.js',
+    'ui/popups.js',
+    'ui/finish_info.js',
+    'ui/tool_rounds.js',
+    'ui/message_actions.js',
+    'ui/edit_message.js',
+    'ui/turn_nav.js',
+    'ui/streaming_ui.js',
+    'ui/sse_pipeline.js',
+    # Unified chatInner controller — depends on renderMessage,
+    # _surgicalTruncateDOM, _convRenderFingerprint, renderChat from
+    # the ui/ subpackage plus _ensureMsgId from core.js, so it MUST
+    # come after ui/. Consumed by main.js and downstream feature modules.
+    'conv_view.js',
     # Feature modules (order-independent, but keep stable for cache)
     'log-clean.js',
     'translation.js',
@@ -36,16 +84,60 @@ _BUNDLE_FILES = [
     'memory.js',
     'skills.js',
     'scheduler.js',
+    'optimizer.js',
+    'update.js',
     'timer.js',
     'myday.js',
+    # settings.js is now a slim head (var _serverConfig = null;
+    # var _keyStatsCache = {...}; var _keyStatsLoading = false;) followed
+    # by a pointer comment. It MUST come BEFORE the settings/ subpackage
+    # so the head's `var` initialisers run first — extracted files in
+    # settings/ assume those globals exist + start as null/empty.
     'settings.js',
+    # ── settings/ subpackage (split 2026-05-28 from monolithic settings.js) ──
+    # The 15 files below were extracted from settings.js (4755 LOC).
+    # Concatenated in load order; symbols share window scope.
+    # See `.tofu/skills/frontend-settings-decomposition.md`.
+    'settings/branding.js',
+    'settings/provider_templates.js',
+    'settings/auto_setup.js',
+    'settings/local_endpoints.js',
+    'settings/core_panel.js',
+    'settings/provider_render.js',
+    'settings/key_stats.js',
+    'settings/balance.js',
+    'settings/template_actions.js',
+    'settings/model_edit.js',
+    'settings/access_matrix.js',
+    'settings/visibility_defaults.js',
+    'settings/other_tabs.js',
+    'settings/save_export.js',
+    'settings/oauth.js',
+    'settings/mcp.js',
     # Agent backend selection (depends on apiUrl/debugLog from core+ui;
     # must come BEFORE main.js because main.js references its functions
     # like _saveConvToolState ↔ _applyAgentBackendUI bidirectionally,
     # but only at runtime — not at module-load).
     'agent-backend.js',
-    # Orchestrator (MUST be last)
+    'relay-admin.js',
+    # ── main/ subpackage (split 2026-05-28 from monolithic main.js) ──
+    # The 8 files below were extracted from main.js. They must come BEFORE
+    # main.js so the boot IIFE in main.js can reference their symbols.
+    # See `.tofu/skills/frontend-main-decomposition.md` for the rationale.
+    'main/main_conv_lifecycle.js',
+    'main/main_translating_bubble.js',
+    'main/main_send_pipeline.js',
+    'main/main_regen_continue.js',
+    'main/main_toolbar_ui.js',
+    'main/main_folders_mobile.js',
+    'main/main_input_handling.js',
+    'main/main_init_tasks.js',
+    # Orchestrator (MUST be last) — boot IIFE that wires the app
     'main.js',
+    # Post-orchestrator UI widgets (depend on conversations/activeConvId/config
+    # globals declared in core.js + main.js, so they MUST come after main.js).
+    'compaction-viewer.js',
+    'context-bar.js',
 ]
 
 # Global state

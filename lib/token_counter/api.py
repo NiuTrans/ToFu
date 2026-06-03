@@ -1,7 +1,7 @@
 """Public façade for the token_counter package.
 
-End users (compaction pipeline, tool deferral, UI /api/tokens/count,
-etc.) should import from ``lib.token_counter`` and never touch
+End users (compaction pipeline, UI /api/tokens/count, etc.) should
+import from ``lib.token_counter`` and never touch
 individual backend files.
 
 Public entry points:

@@ -21,12 +21,7 @@ block in the system message.  CLAUDE.md / project-intelligence content is
 with ``_isMeta: True`` wrapped in ``<system-reminder>`` tags (mirroring
 Claude Code's ``prependUserContext`` in ``utils/api.ts:449``).  A/B-validated
 to save 18% cost / +49% cache hit — see
-``.chatui/skills/claudemd-placement-ab-test-results.md``.
-
-Historical note: a ``CHATUI_CC_SYSPROMPT`` env-var kill switch used to toggle
-a legacy layout where project context was prepended into the system message.
-It was removed on 2026-05-07 after an empty-string env-var value silently
-flipped the layout in production — see the commit that touched this line.
+``.tofu/skills/claudemd-placement-ab-test-results.md``.
 """
 
 import hashlib
@@ -198,7 +193,7 @@ def _insert_user_context_message(messages, body: str) -> None:
     system message), BEFORE the first real user message.  Matches Claude
     Code's ``prependUserContext`` behavior — see ``utils/api.ts:449``.
 
-    Marked with ``_isMeta: True`` so chatui's debug panel / token
+    Marked with ``_isMeta: True`` so the debug panel / token
     counter / persistence layers can recognize it as synthetic.
 
     Idempotency: skip if any existing user message already contains the
@@ -327,7 +322,7 @@ def _inject_system_contexts(messages, project_path, project_enabled,
     if project_enabled:
         def _load_project():
             from lib.project_mod import get_context_for_prompt
-            return get_context_for_prompt(project_path)
+            return get_context_for_prompt(project_path, conv_id=_cid or None)
 
         if _cid:
             proj_ctx = _get_cached_or_compute(
@@ -345,7 +340,11 @@ def _inject_system_contexts(messages, project_path, project_enabled,
     # ★ 1. Static Claude-Code block — append as separate cache-stable block.
     #      Injected ONCE; marker guards against endpoint-mode re-entry.
     if _CC_STATIC_MARKER not in _existing:
-        _cwd = project_path or ''
+        # When project mode is OFF, suppress the working-directory bullet
+        # entirely — leaking the server's cwd in the system prompt has caused
+        # the model to chase ghost paths (the path is the server's runtime
+        # location, not anything the user provided).
+        _cwd = project_path if project_enabled else ''
         try:
             import os as _os
             _is_git = bool(_cwd and _os.path.isdir(_os.path.join(_cwd, '.git')))
@@ -354,20 +353,33 @@ def _inject_system_contexts(messages, project_path, project_enabled,
             _is_git = False
 
         # Extra-roots (multi-root workspace) — reuse project_mod snapshot.
+        # Same suppression rule: if there's no primary cwd to anchor them
+        # against (project mode off), don't expose extras either.
         _extra_roots = []
-        try:
-            from lib.project_mod.config import _roots, _lock
-            with _lock:
-                for _rn, _rs in _roots.items():
+        if project_enabled:
+            try:
+                # Source from the per-conv registry (when known) so the
+                # advertised roots match what resolve_namespaced_path will
+                # accept at tool-call time.  Reading the global _roots here
+                # leaks concurrent tasks' roots into this conv's prompt and
+                # causes "Unknown workspace root" refusals — see
+                # get_context_for_prompt's conv_id docstring.
+                from lib.project_mod.config import get_conv_roots
+                for _rn, _rs in get_conv_roots(_cid or None).items():
                     if _rs.get('path') and _rs['path'] != _cwd:
                         _extra_roots.append(f"{_rn} → {_rs['path']}")
-        except Exception as e:
-            logger.debug('[SysPrompt] extra-roots probe failed: %s', e)
+            except Exception as e:
+                logger.debug('[SysPrompt] extra-roots probe failed: %s', e)
 
         _static_block = system_prompt_cc.build_static_prompt(
             cwd=_cwd, is_git=_is_git, model=model,
             extra_roots=_extra_roots or None,
             has_real_tools=has_real_tools,
+            # SWE-bench-shaped guidance (code-hygiene bullets, git/CI
+            # examples, file_path:line_number style) only ships when
+            # project mode is on. For chat-only / paper-Q&A / translation
+            # turns, the prompt becomes a generic-assistant prompt.
+            is_code_context=project_enabled,
         )
         _append_to_system_message(messages, _static_block,
                                    as_separate_block=True)
@@ -396,7 +408,10 @@ def _inject_system_contexts(messages, project_path, project_enabled,
     # ★ 3. Compact memory accumulation instructions + memory count hint
     #   Both the HOW-TO-USE instructions and the dynamic count hint
     #   ("You have N accumulated memories...") go into the system message.
-    if has_real_tools:
+    #   Suppressed when the user disables Memory — keeps the toggle's
+    #   "off → no proactive memory plumbing" semantics consistent with the
+    #   per-turn prefetch gate in orchestrator.py.
+    if has_real_tools and memory_enabled:
         if '<memory_accumulation>' in _existing:
             logger.debug('[Inject] Memory instructions already present, skipping '
                          'append (conv=%s)', _cid[:8] if _cid else '?')
@@ -428,34 +443,101 @@ def _inject_system_contexts(messages, project_path, project_enabled,
                 as_separate_block=True)
             _existing = _system_text(messages)
 
-    # ★ 4. Swarm system prompt injection (only when swarm is enabled)
-    if swarm_enabled and project_enabled and '<parallel_execution>' not in _existing:
-        swarm_prompt = """
+    # ★ 4. Swarm system prompt injection — gated ONLY on swarm_enabled.
+    #   Decoupled from project_enabled because a bare-conversation research
+    #   swarm is a valid use case (mirrors the read_files decoupling done
+    #   on 2026-04-20: see read-files-tool-always-on-decoupled memory).
+    if swarm_enabled and '<parallel_execution>' not in _existing:
+        from lib.swarm.registry import format_role_catalogue
+        swarm_prompt = f"""
 <parallel_execution>
-You have a **parallel execution** system via `spawn_agents`. It dramatically speeds up complex tasks by running multiple sub-tasks simultaneously.
+You have an **async parallel execution** system: `spawn_agents`, `await_agents`, `get_agent_result`. **Read this carefully — these are first-class tools, not advanced extras.**
 
-**ALWAYS use `spawn_agents` when:**
-- A task has 2+ parts that can be worked on independently
-- You need to research/analyze/modify multiple files or topics
-- Any decomposition would speed things up vs doing everything sequentially
+## When you SHOULD reach for spawn_agents
 
-**Do NOT use it for:**
-- Trivial single-step questions
-- Tasks that are inherently sequential with no parallelizable parts
+These cases come up *constantly* and are exactly the situation spawn_agents is for:
 
-**How:**
-Call `spawn_agents` with a list of sub-tasks. Each sub-task only needs an `objective` (what to do) and optional `context`. Don't overthink it — just split and ship.
+- The user's question naturally splits into 2+ independent investigations (e.g. "is this branch ready to ship?" → git audit + test audit + flag audit).
+- You're about to do multiple unrelated greps / file reads / web searches that do not feed into each other.
+- A research task spans multiple URLs / docs / repos that are independent.
+- A refactor or audit touches multiple unrelated subsystems.
+- You want a "second opinion" on code or design — spawn a `reviewer` so it doesn't see your analysis.
+- You're about to import a lot of low-value tool output (huge greps, big files) into your own context — fork that work so only the conclusion comes back.
 
-```json
-{"agents": [
-  {"objective": "Find all usages of deprecated API X in lib/ and routes/", "context": "Looking for function calls like X.do_thing()"},
-  {"objective": "Research the new API Y replacement patterns from the docs", "context": "See https://docs.example.com/migration"},
-  {"objective": "Write unit tests for the migration in tests/test_migration.py", "context": "Test both old→new conversion and edge cases"}
-]}
+## When NOT to spawn
+
+- Trivial single-step questions (one tool call would do it).
+- Tasks that are inherently sequential — each step needs the previous answer.
+- Reading a single file you already know the path of.
+- A grep you can do in one call.
+
+## Available roles
+
+When you spawn, set `role` to one of these (default `general`):
+
+{format_role_catalogue()}
+
+## Mechanics
+
+- `spawn_agents` is **fire-and-forget**: returns a handle immediately, your turn ends. Sub-agent results land on later turns as `<swarm-update>` user messages.
+- To run N agents in parallel, send a **single `spawn_agents` call with N entries in `agents`**. Do NOT issue several spawn_agents calls in a row — that just queues them up serially in the protocol and defeats the parallelism.
+- **Never poll**, never sleep, never call back to "check status". Updates land automatically.
+- **Never fabricate** sub-agent results before their `<swarm-update>` arrives. If the user asks mid-wait, give status, not a guess: "the audit is still running, should land shortly."
+- **Never read `output_file`** unless the user explicitly asks for a progress check. Trust the notification.
+- If you genuinely have nothing else useful to do while waiting, call `await_agents(mode='any')` to block on the next completion (capped at 120 s). If you have other work or the user is talking to you, prefer doing that over awaiting.
+- `await_agents` returns `{{completed:[...], still_running:[...], timed_out, note}}`. When `timed_out` is true it did NOT fail — the cap elapsed before your `mode` condition was met; `note` tells you how many finished and which are still running (they keep running in the background). Agents listed in `completed` are handed to you right here, so you will NOT get a duplicate `<swarm-update>` for them later.
+- If a `<preview>` was too short, call `get_agent_result(id)` for the full body. This also consumes that agent's pending `<swarm-update>`, so you won't see it twice.
+- Sub-agents cannot spawn further sub-agents and cannot ask the user. Don't write objectives that assume they can.
+
+## Writing the objective
+
+Treat the sub-agent like a smart colleague who just walked in — it has none of your conversation context. Brief it with:
+
+- What you're trying to accomplish AND why.
+- The context it needs to do the job (file paths, URLs, constraints, prior findings).
+- The output format you expect ("report a punch list, under 200 words").
+
+Vague terse prompts produce shallow generic work. **Don't write "based on your findings, fix the bug"** — that pushes synthesis onto the sub-agent. You synthesise in your own next turn.
+
+## `<swarm-update>` shape
+
+When a sub-agent finishes you'll see something like this prepended to your next turn:
+
+```
+<swarm-update>
+  <agent-id>a1</agent-id>
+  <role>researcher</role>
+  <status>completed</status>
+  <elapsed-seconds>12.4</elapsed-seconds>
+  <preview>...up to 200 chars of the final answer...</preview>
+  <output-file>data/swarm/&lt;task_id&gt;/a1.log</output-file>
+  <remaining running="2" pending="0"/>
+</swarm-update>
 ```
 
-Sub-tasks run in parallel with full tool access. Results come back together. You then synthesize a final answer.
-Use `depends_on: [0]` only when a task truly needs another's output (rare — prefer maximum parallelism).
+## Worked example
+
+User: "Is this branch ready to ship?"
+
+Your round N (a single tool call, three parallel agents):
+
+```
+spawn_agents({{agents:[
+  {{"objective":"Audit git status: uncommitted, commits ahead of main",       "role":"coder"}},
+  {{"objective":"Audit tests: coverage of recent changes, all passing",        "role":"coder"}},
+  {{"objective":"Check whether new feature flags appear in build_flags.yaml",  "role":"reviewer"}}
+]}})
+```
+
+Tool result: `{{status:"async_launched", agents:[a1, a2, a3]}}`. You reply: "Three audits running — git status, tests, and feature flags."
+
+(Round ends. You DO NOT predict the findings.)
+
+Round N+1, user (impatient): "tests bit?" — Reply: "Test audit is still running, should land shortly." (NO fabricated answer.)
+
+Round N+2, two `<swarm-update>` blocks arrive (a1 + a3 completed, a2 still running). You now have partial findings; report them honestly and note a2 is still pending. Or, if the user is waiting on you, call `await_agents(mode='any', ids=['a2'])` to block on the last one.
+
+Round N+3, a2's update lands. Synthesise the full picture for the user.
 </parallel_execution>
 """
         _append_to_system_message(messages,

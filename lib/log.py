@@ -43,6 +43,7 @@ Log file layout:
     logs/audit.log   — Structured JSON audit trail  (configured here in lib/log.py via audit_log())
 """
 
+import asyncio as _asyncio
 import functools
 import json
 import logging
@@ -114,7 +115,7 @@ def get_logger(name: str) -> logging.Logger:
     """Get a named logger for a module.
 
     Args:
-        name: Usually __name__, e.g. 'lib.llm_client' or 'routes.chat'.
+        name: Usually __name__, e.g. 'lib.llm' or 'routes.chat'.
 
     Returns:
         A logging.Logger instance that inherits root config from server.py.
@@ -255,62 +256,84 @@ def log_route(logger: logging.Logger, log_request_body: bool = False,
         log_response_body: If True, log response body at DEBUG level (truncated).
         sensitive_fields: Field names to redact from logged request bodies.
     """
-    def decorator(fn):
-        @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
+    def _entry():
+        """Resolve request context + log entry; return (method, path, rid_tag)."""
+        try:
+            from flask import request as flask_req
+            method = flask_req.method
+            path = flask_req.path
+            rid = req_id()
+            rid_tag = f'[rid:{rid}] ' if rid else ''
+        except RuntimeError as e:
+            # Expected when called outside Flask request context
+            logger.debug('log_route outside request context: %s', e, exc_info=True)
+            method, path, rid_tag = '?', '?', ''
+
+        logger.debug('%s→ [Route] %s %s', rid_tag, method, path)
+
+        if log_request_body:
             try:
                 from flask import request as flask_req
-                method = flask_req.method
-                path = flask_req.path
-                rid = req_id()
-                rid_tag = f'[rid:{rid}] ' if rid else ''
-            except RuntimeError as e:
-                # Expected when called outside Flask request context
-                logger.debug('log_route outside request context: %s', e, exc_info=True)
-                method, path, rid_tag = '?', '?', ''
+                body = flask_req.get_json(silent=True)
+                if body and isinstance(body, dict):
+                    safe_body = {k: ('***' if k in sensitive_fields else v) for k, v in body.items()}
+                    logger.debug('%s  Request body: %s', rid_tag, json.dumps(safe_body, ensure_ascii=False, default=str)[:2000])
+            except Exception:
+                logger.debug('Failed to log request body', exc_info=True)
 
-            logger.debug('%s→ [Route] %s %s', rid_tag, method, path)
+        return method, path, rid_tag
 
-            if log_request_body:
+    def _log_result(result, elapsed, method, path, rid_tag):
+        status = 200
+        if hasattr(result, 'status_code'):
+            status = result.status_code
+        elif isinstance(result, tuple) and len(result) >= 2:
+            status = result[1]
+
+        if status >= 500:
+            logger.error('%s✗ [Route] %s %s — %d in %.3fs',
+                        rid_tag, method, path, status, elapsed)
+        elif status >= 400:
+            logger.warning('%s⚠ [Route] %s %s — %d in %.3fs',
+                          rid_tag, method, path, status, elapsed)
+        else:
+            logger.debug('%s← [Route] %s %s — %d in %.3fs',
+                       rid_tag, method, path, status, elapsed)
+
+        if log_response_body:
+            try:
+                resp_data = result.get_data(as_text=True) if hasattr(result, 'get_data') else str(result)
+                logger.debug('%s  Response body: %.2000s', rid_tag, resp_data)
+            except Exception:
+                logger.debug('Failed to log response body', exc_info=True)
+
+    def decorator(fn):
+        # Dual-mode: async handlers MUST stay coroutine functions so Quart
+        # awaits them; we await the result before extracting its status.
+        if _asyncio.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def awrapper(*args, **kwargs):
+                method, path, rid_tag = _entry()
+                start = time.monotonic()
                 try:
-                    body = flask_req.get_json(silent=True)
-                    if body and isinstance(body, dict):
-                        safe_body = {k: ('***' if k in sensitive_fields else v) for k, v in body.items()}
-                        logger.debug('%s  Request body: %s', rid_tag, json.dumps(safe_body, ensure_ascii=False, default=str)[:2000])
-                except Exception:
-                    logger.debug('Failed to log request body', exc_info=True)
+                    result = await fn(*args, **kwargs)
+                    _log_result(result, time.monotonic() - start, method, path, rid_tag)
+                    return result
+                except Exception as exc:
+                    elapsed = time.monotonic() - start
+                    logger.error('%s✗ [Route] %s %s — EXCEPTION after %.3fs: %s',
+                                rid_tag, method, path, elapsed, exc, exc_info=True)
+                    raise
+            return awrapper
 
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            method, path, rid_tag = _entry()
             start = time.monotonic()
             try:
                 result = fn(*args, **kwargs)
-                elapsed = time.monotonic() - start
-
-                # Extract status code from Flask response
-                status = 200
-                if hasattr(result, 'status_code'):
-                    status = result.status_code
-                elif isinstance(result, tuple) and len(result) >= 2:
-                    status = result[1]
-
-                if status >= 500:
-                    logger.error('%s✗ [Route] %s %s — %d in %.3fs',
-                                rid_tag, method, path, status, elapsed)
-                elif status >= 400:
-                    logger.warning('%s⚠ [Route] %s %s — %d in %.3fs',
-                                  rid_tag, method, path, status, elapsed)
-                else:
-                    logger.debug('%s← [Route] %s %s — %d in %.3fs',
-                               rid_tag, method, path, status, elapsed)
-
-                if log_response_body:
-                    try:
-                        resp_data = result.get_data(as_text=True) if hasattr(result, 'get_data') else str(result)
-                        logger.debug('%s  Response body: %.2000s', rid_tag, resp_data)
-                    except Exception:
-                        logger.debug('Failed to log response body', exc_info=True)
-
+                _log_result(result, time.monotonic() - start, method, path, rid_tag)
                 return result
-
             except Exception as exc:
                 elapsed = time.monotonic() - start
                 logger.error('%s✗ [Route] %s %s — EXCEPTION after %.3fs: %s',

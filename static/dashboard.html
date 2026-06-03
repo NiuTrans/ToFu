@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Tofu Relay — Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0e1117;
+    --panel: #1a1f2c;
+    --panel-2: #232a3a;
+    --border: #2a3142;
+    --text: #e6e8eb;
+    --text-dim: #9aa3af;
+    --accent: #5cb38a;
+    --accent-2: #7ab8e8;
+    --warn: #e0a800;
+    --danger: #e25;
+    --radius: 8px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                              Roboto, "Helvetica Neue", Arial, sans-serif;
+                font-size: 14px; line-height: 1.5; }
+  a { color: var(--accent-2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px; display: flex; align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  header .nav { display: flex; gap: 18px; }
+  header .nav a {
+    color: var(--text-dim); padding: 4px 0;
+    border-bottom: 2px solid transparent;
+  }
+  header .nav a.active { color: var(--text); border-bottom-color: var(--accent); }
+  main { max-width: 1080px; margin: 24px auto; padding: 0 24px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px; margin-bottom: 16px;
+  }
+  .card h2 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+  .card .desc { color: var(--text-dim); font-size: 13px; margin: 0 0 12px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+
+  .balance {
+    font-size: 36px; font-weight: 600; color: var(--accent);
+    line-height: 1.1; margin: 8px 0;
+  }
+  .balance .unit { font-size: 14px; color: var(--text-dim);
+                    margin-left: 6px; font-weight: 400; }
+  .meta-row { color: var(--text-dim); font-size: 12px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px 6px; text-align: left;
+           border-bottom: 1px solid var(--border); }
+  th { color: var(--text-dim); font-weight: 500; font-size: 12px;
+        text-transform: uppercase; letter-spacing: 0.05em; }
+  tr:hover td { background: var(--panel-2); }
+
+  .btn {
+    background: var(--accent); color: #061712; border: 0;
+    padding: 8px 14px; border-radius: 6px; cursor: pointer;
+    font-size: 13px; font-weight: 500;
+  }
+  .btn:hover { filter: brightness(1.1); }
+  .btn.secondary { background: var(--panel-2); color: var(--text);
+                    border: 1px solid var(--border); }
+  .btn.danger { background: transparent; color: var(--danger);
+                 border: 1px solid var(--danger); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  input, select {
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 7px 10px; font-size: 13px; font-family: inherit;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  label { display: block; color: var(--text-dim); font-size: 12px;
+          margin-bottom: 4px; }
+
+  .pill {
+    display: inline-block; padding: 1px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 500; background: var(--panel-2);
+    color: var(--text-dim); border: 1px solid var(--border);
+  }
+  .pill.credit { color: var(--accent); border-color: var(--accent); }
+  .pill.debit  { color: var(--warn);   border-color: var(--warn); }
+
+  .toast {
+    position: fixed; bottom: 24px; right: 24px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 12px 16px; max-width: 320px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5); z-index: 99;
+  }
+  .toast.success { border-left: 3px solid var(--accent); }
+  .toast.error   { border-left: 3px solid var(--danger); }
+  .empty { color: var(--text-dim); font-style: italic; padding: 20px 0;
+           text-align: center; }
+
+  .kbd {
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 6px; font-family: ui-monospace,
+    SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
+  }
+  pre.token-reveal {
+    background: #061712; color: var(--accent);
+    border: 1px solid var(--accent); border-radius: 6px;
+    padding: 12px 14px; overflow: auto; word-break: break-all;
+    white-space: pre-wrap; font-size: 13px;
+  }
+  .nav-tabs { display: flex; gap: 4px; padding-bottom: 12px;
+               border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+  .nav-tabs button {
+    background: transparent; color: var(--text-dim); border: 0;
+    padding: 8px 14px; border-radius: 6px 6px 0 0; cursor: pointer;
+    font-size: 13px;
+  }
+  .nav-tabs button.active { background: var(--panel); color: var(--text); }
+  .pane { display: none; }
+  .pane.active { display: block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🫧 Tofu Relay</h1>
+  <nav class="nav">
+    <a href="#wallet"  class="active" onclick="switchPane('wallet')">Wallet</a>
+    <a href="#keys"    onclick="switchPane('keys')">API Keys</a>
+    <a href="#usage"   onclick="switchPane('usage')">Usage</a>
+    <a href="#docs"    onclick="switchPane('docs')">Docs</a>
+    <a href="#account" onclick="switchPane('account')">Account</a>
+  </nav>
+</header>
+
+<main>
+  <!-- ── Wallet pane ─────────────────────────────────────────────── -->
+  <section id="pane-wallet" class="pane active">
+    <div class="grid">
+      <div class="card">
+        <h2>Balance</h2>
+        <p class="desc">Credits available for API calls. 1 credit ≈ US $0.001
+          at the canonical conversion. Cost per request varies by model — see
+          the <a href="#docs" onclick="switchPane('docs')">pricing page</a>.</p>
+        <div class="balance">
+          <span id="balance-display">—</span>
+          <span class="unit" id="balance-currency">credits</span>
+        </div>
+        <div class="meta-row" id="balance-meta"></div>
+      </div>
+
+      <div class="card">
+        <h2>Redeem code</h2>
+        <p class="desc">Have a top-up code? Paste it below. Each code can be
+          redeemed once.</p>
+        <div style="display: flex; gap: 8px; margin-top: 12px;">
+          <input type="text" id="redeem-code" placeholder="TOFU-XXXX-XXXX-XXXX"
+                  style="flex: 1; font-family: ui-monospace, monospace;">
+          <button class="btn" onclick="doRedeem()">Redeem</button>
+        </div>
+        <div id="redeem-result"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Recent ledger entries</h2>
+      <p class="desc">Newest first. Every credit movement is recorded — your
+        own ledger is the audit trail of record.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Kind</th>
+            <th>Amount</th>
+            <th>Balance after</th>
+            <th>Reference</th>
+            <th>Note</th>
+          </tr>
+        </thead>
+        <tbody id="ledger-body">
+          <tr><td colspan="6" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── Keys pane ──────────────────────────────────────────────── -->
+  <section id="pane-keys" class="pane">
+    <div class="card">
+      <h2>Issue an API key</h2>
+      <p class="desc">Use this key as a Bearer token from any OpenAI/Anthropic
+        SDK pointed at this relay's base URL.</p>
+      <div style="display: grid; grid-template-columns: 2fr 1fr 1fr auto; gap: 8px;">
+        <div><label>Name</label>
+          <input type="text" id="new-key-name" placeholder="prod-bot" maxlength="80">
+        </div>
+        <div><label>RPM limit</label>
+          <input type="number" id="new-key-rpm" value="60" min="0" max="100000">
+        </div>
+        <div><label>TPD limit</label>
+          <input type="number" id="new-key-tpd" value="0" min="0" placeholder="0=∞">
+        </div>
+        <div style="align-self: end;">
+          <button class="btn" onclick="doCreateKey()">Create</button>
+        </div>
+      </div>
+      <div id="key-reveal" style="margin-top: 14px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>Existing keys</h2>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Prefix</th><th>Scopes</th>
+              <th>Created</th><th>Last used</th><th></th></tr>
+        </thead>
+        <tbody id="keys-body">
+          <tr><td colspan="6" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── Usage pane ────────────────────────────────────────────── -->
+  <section id="pane-usage" class="pane">
+    <div class="card">
+      <h2>Daily usage</h2>
+      <p class="desc">Last 30 days, aggregated across your keys.</p>
+      <div id="usage-chart" style="height: 200px; position: relative;
+          background: var(--bg); border-radius: 6px; padding: 12px;">
+        <div class="empty" style="line-height: 176px;">Loading…</div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>By model</h2>
+      <table>
+        <thead><tr><th>Model</th><th>Requests</th><th>Tokens</th><th>Spent</th></tr></thead>
+        <tbody id="by-model-body">
+          <tr><td colspan="4" class="empty">No data yet.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── Docs pane ─────────────────────────────────────────────── -->
+  <section id="pane-docs" class="pane">
+    <div class="card">
+      <h2>How to call this relay</h2>
+      <p>Point any OpenAI- or Anthropic-compatible SDK at this base URL with
+        your Tofu API key as the bearer token:</p>
+      <pre class="token-reveal" id="base-url-snippet">
+# OpenAI Python SDK
+from openai import OpenAI
+client = OpenAI(
+    base_url="LOADING…/v1",
+    api_key="tofu_live_..."
+)
+resp = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "hi"}],
+)
+print(resp.choices[0].message.content)
+</pre>
+      <p>Full OpenAPI spec:
+        <a href="/api/docs" target="_blank">Swagger UI</a> ·
+        <a href="/api/redoc" target="_blank">ReDoc</a> ·
+        <a href="/api/openapi.json" target="_blank">openapi.json</a></p>
+    </div>
+    <div class="card">
+      <h2>Pricing</h2>
+      <p class="desc">Token prices in micro-credits per million tokens.
+        1 credit = 1,000,000 µ. Final bill = base × (1 + margin).</p>
+      <table>
+        <thead><tr><th>Model</th><th>Input ($/Mtok)</th>
+                   <th>Output ($/Mtok)</th><th>Cache hit</th></tr></thead>
+        <tbody id="pricing-body">
+          <tr><td colspan="4" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── Account pane ──────────────────────────────────────────── -->
+  <section id="pane-account" class="pane">
+    <div class="card">
+      <h2>Account</h2>
+      <table>
+        <tbody id="account-body">
+          <tr><td colspan="2" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+      <div style="margin-top: 16px;">
+        <button class="btn secondary" onclick="logout()">Sign out</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Need help?</h2>
+      <p>This relay is operated by the Tofu instance owner. For account
+        adjustments (refund, suspension, increased limits) contact the
+        operator directly. Tofu is open-source —
+        <a href="https://github.com/tofu/tofu" target="_blank">source</a>.</p>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+// ── tiny fetch helper ─────────────────────────────────────────────
+async function api(path, opts) {
+  const r = await fetch(path, Object.assign({
+    credentials: 'same-origin',
+    headers: {'Content-Type': 'application/json'},
+  }, opts || {}));
+  let body = null;
+  try { body = await r.json(); } catch (_) { /* not JSON */ }
+  if (!r.ok) {
+    const msg = (body && (body.error || body.message)) || ('HTTP ' + r.status);
+    throw new Error(msg);
+  }
+  return body;
+}
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function toast(msg, kind) {
+  const t = document.getElementById('toast');
+  t.innerHTML = `<div class="toast ${kind || ''}">${esc(msg)}</div>`;
+  setTimeout(() => { t.innerHTML = ''; }, 4000);
+}
+function fmtCredits(micro) {
+  return (micro / 1_000_000).toFixed(4);
+}
+function fmtTime(ts) {
+  if (!ts) return '—';
+  return new Date(ts * 1000).toLocaleString();
+}
+function switchPane(name) {
+  document.querySelectorAll('.pane').forEach(p =>
+    p.classList.toggle('active', p.id === 'pane-' + name));
+  document.querySelectorAll('header .nav a').forEach(a =>
+    a.classList.toggle('active', a.getAttribute('href') === '#' + name));
+  if (name === 'usage') refreshUsage();
+  if (name === 'docs')  refreshPricing();
+}
+
+// ── pane: wallet ──────────────────────────────────────────────────
+async function refreshWallet() {
+  try {
+    const w = await api('/api/v1/billing/wallet');
+    document.getElementById('balance-display').textContent =
+      fmtCredits(w.balance_micro);
+    document.getElementById('balance-currency').textContent =
+      (w.currency || 'CREDIT').toLowerCase() + 's';
+    document.getElementById('balance-meta').textContent =
+      'Last updated: ' + fmtTime(w.updated_at);
+  } catch (e) {
+    document.getElementById('balance-display').textContent = '—';
+    document.getElementById('balance-meta').textContent =
+      'Failed to load: ' + e.message;
+  }
+  try {
+    const led = await api('/api/v1/billing/ledger?limit=20');
+    const body = document.getElementById('ledger-body');
+    if (!led.entries.length) {
+      body.innerHTML =
+        '<tr><td colspan="6" class="empty">No transactions yet.</td></tr>';
+      return;
+    }
+    body.innerHTML = led.entries.map(e => `
+      <tr>
+        <td>${esc(fmtTime(e.ts))}</td>
+        <td><span class="pill ${e.amount_micro > 0 ? 'credit' : 'debit'}">
+          ${esc(e.kind)}</span></td>
+        <td>${e.amount_micro > 0 ? '+' : ''}${esc(fmtCredits(e.amount_micro))}</td>
+        <td>${esc(fmtCredits(e.balance_after_micro))}</td>
+        <td><span class="kbd">${esc(e.ref_type ? e.ref_type + ':' : '')}${esc(e.ref_id || '—')}</span></td>
+        <td>${esc(e.note || '')}</td>
+      </tr>
+    `).join('');
+  } catch (e) {
+    document.getElementById('ledger-body').innerHTML =
+      `<tr><td colspan="6" class="empty">Error: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+async function doRedeem() {
+  const code = document.getElementById('redeem-code').value.trim();
+  if (!code) { toast('Enter a code', 'error'); return; }
+  try {
+    const r = await api('/api/v1/billing/redeem', {
+      method: 'POST', body: JSON.stringify({code}),
+    });
+    document.getElementById('redeem-result').innerHTML =
+      `<div style="margin-top:12px;color:var(--accent)">
+        ✓ Added ${esc(fmtCredits(r.redeemed.amount_micro))} credits.</div>`;
+    document.getElementById('redeem-code').value = '';
+    refreshWallet();
+  } catch (e) {
+    document.getElementById('redeem-result').innerHTML =
+      `<div style="margin-top:12px;color:var(--danger)">✗ ${esc(e.message)}</div>`;
+  }
+}
+
+// ── pane: keys ────────────────────────────────────────────────────
+async function refreshKeys() {
+  try {
+    const r = await api('/api/v1/keys');
+    const body = document.getElementById('keys-body');
+    if (!r.keys || !r.keys.length) {
+      body.innerHTML =
+        '<tr><td colspan="6" class="empty">No keys yet.</td></tr>';
+      return;
+    }
+    body.innerHTML = r.keys.map(k => `
+      <tr>
+        <td>${esc(k.name)}</td>
+        <td><span class="kbd">${esc(k.prefix || '—')}</span></td>
+        <td>${(k.scopes || []).slice(0,3).map(s =>
+          '<span class="pill">'+esc(s)+'</span>').join(' ')}</td>
+        <td>${esc(fmtTime(k.created_at))}</td>
+        <td>${esc(fmtTime(k.last_used_at))}</td>
+        <td><button class="btn danger" onclick="doRevokeKey('${esc(k.id)}')">Revoke</button></td>
+      </tr>
+    `).join('');
+  } catch (e) {
+    document.getElementById('keys-body').innerHTML =
+      `<tr><td colspan="6" class="empty">Error: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+async function doCreateKey() {
+  const name = document.getElementById('new-key-name').value.trim();
+  const rpm = parseInt(document.getElementById('new-key-rpm').value || '60', 10);
+  const tpd = parseInt(document.getElementById('new-key-tpd').value || '0', 10);
+  if (!name) { toast('Name required', 'error'); return; }
+  try {
+    const r = await api('/api/v1/keys', {
+      method: 'POST',
+      body: JSON.stringify({
+        name, rate_limit_rpm: rpm, rate_limit_tpd: tpd,
+        scopes: ['chat', 'tasks', 'conversations'],
+      }),
+    });
+    document.getElementById('key-reveal').innerHTML =
+      `<div class="desc" style="color: var(--accent)">
+        ✓ Key created. Copy the token now — it cannot be recovered.
+       </div>
+       <pre class="token-reveal">${esc(r.token)}</pre>`;
+    document.getElementById('new-key-name').value = '';
+    refreshKeys();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function doRevokeKey(id) {
+  if (!confirm('Revoke this key? Any client using it will start receiving 401.')) return;
+  try {
+    await api('/api/v1/keys/' + encodeURIComponent(id), {method: 'DELETE'});
+    refreshKeys();
+    toast('Key revoked', 'success');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+// ── pane: usage ────────────────────────────────────────────────────
+async function refreshUsage() {
+  try {
+    const u = await api('/api/v1/usage?days=30');
+    const data = (u && u.daily) || [];
+    const chart = document.getElementById('usage-chart');
+    if (!data.length) {
+      chart.innerHTML = '<div class="empty" style="line-height:176px">No usage data yet.</div>';
+    } else {
+      const max = Math.max(...data.map(d => d.requests || 0), 1);
+      chart.innerHTML = data.map(d => {
+        const h = Math.max(2, (d.requests || 0) * 100 / max);
+        return `<div title="${esc(d.day)}: ${d.requests || 0} req"
+          style="display:inline-block; width:${100/data.length}%;
+          height:${h}%; background:var(--accent); opacity:0.6;
+          margin-right:1px; vertical-align:bottom;"></div>`;
+      }).join('');
+    }
+    const byModel = (u && u.by_model) || {};
+    const rows = Object.entries(byModel)
+      .sort((a, b) => (b[1].tokens || 0) - (a[1].tokens || 0));
+    const tbody = document.getElementById('by-model-body');
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="4" class="empty">No data yet.</td></tr>';
+    } else {
+      tbody.innerHTML = rows.map(([m, v]) =>
+        `<tr><td>${esc(m)}</td><td>${v.requests || 0}</td>
+              <td>${(v.tokens || 0).toLocaleString()}</td>
+              <td>—</td></tr>`).join('');
+    }
+  } catch (e) {
+    document.getElementById('usage-chart').innerHTML =
+      `<div class="empty" style="line-height:176px">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── pane: docs / pricing ──────────────────────────────────────────
+async function refreshPricing() {
+  try {
+    const p = await api('/api/v1/billing/pricing');
+    const rows = Object.entries(p.models || {});
+    const tbody = document.getElementById('pricing-body');
+    tbody.innerHTML = rows.map(([m, v]) => {
+      const inp = (v.input_per_mtok_micro || 0) / 1_000_000;
+      const out = (v.output_per_mtok_micro || 0) / 1_000_000;
+      const cache = (v.cache_read_per_mtok_micro || 0) / 1_000_000;
+      return `<tr><td>${esc(m)}</td>
+        <td>${inp.toFixed(3)} credits</td>
+        <td>${out.toFixed(3)} credits</td>
+        <td>${cache > 0 ? cache.toFixed(3) + ' credits' : '—'}</td></tr>`;
+    }).join('') || '<tr><td colspan="4" class="empty">No models yet.</td></tr>';
+  } catch (e) {
+    document.getElementById('pricing-body').innerHTML =
+      `<tr><td colspan="4" class="empty">Error: ${esc(e.message)}</td></tr>`;
+  }
+  // Fill the curl/Python snippet with this server's actual base URL.
+  const base = location.origin;
+  const snippet = document.getElementById('base-url-snippet');
+  if (snippet) snippet.textContent = snippet.textContent
+    .replace('LOADING…', base);
+}
+
+// ── pane: account ─────────────────────────────────────────────────
+async function refreshAccount() {
+  try {
+    const me = await api('/api/v1/keys/whoami');
+    const rows = [];
+    rows.push(['Authenticated', me.authenticated ? 'yes' : 'no']);
+    if (me.authenticated) {
+      rows.push(['Name', me.name || '—']);
+      rows.push(['Key ID', me.key_id || '—']);
+      rows.push(['Scopes', (me.scopes || []).join(', ') || '—']);
+      rows.push(['RPM limit', me.rate_limit_rpm || '∞']);
+      rows.push(['TPD limit', me.rate_limit_tpd || '∞']);
+    }
+    document.getElementById('account-body').innerHTML = rows.map(([k, v]) =>
+      `<tr><th style="width:30%">${esc(k)}</th><td>${esc(v)}</td></tr>`).join('');
+  } catch (e) {
+    document.getElementById('account-body').innerHTML =
+      `<tr><td colspan="2" class="empty">Error: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+async function logout() {
+  // Clear the cookie and bounce to /login if it exists; otherwise just
+  // wipe local creds and reload.
+  document.cookie = 'tofu_session=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+  location.reload();
+}
+
+// ── boot ──────────────────────────────────────────────────────────
+const initial = (location.hash || '#wallet').slice(1);
+switchPane(initial);
+refreshWallet();
+refreshKeys();
+refreshAccount();
+</script>
+</body>
+</html>

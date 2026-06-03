@@ -5,8 +5,18 @@ document.addEventListener('DOMContentLoaded', () => {
   const statusText = document.getElementById('statusText');
   const serverInput = document.getElementById('serverUrl');
   const saveBtn = document.getElementById('saveBtn');
+  const secretInput = document.getElementById('bridgeSecret');
+  const saveSecretBtn = document.getElementById('saveSecretBtn');
   const toggleBtn = document.getElementById('toggleBtn');
   const statsDiv = document.getElementById('stats');
+
+  // Load current secret state (we never echo the actual value into the
+  // popup — only show whether one is set, like a password reset flow).
+  chrome.storage.local.get(['bridgeSecret'], (data) => {
+    if (data.bridgeSecret) {
+      secretInput.placeholder = '••••••••  (configured — leave blank to keep)';
+    }
+  });
 
   function updateStatus() {
     chrome.runtime.sendMessage({ type: 'getStatus' }, (resp) => {
@@ -50,6 +60,16 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.runtime.sendMessage({ type: 'setServer', url }, () => {
       saveBtn.textContent = '✓ Saved';
       setTimeout(() => { saveBtn.textContent = 'Save'; }, 1500);
+      setTimeout(updateStatus, 500);
+    });
+  });
+
+  saveSecretBtn.addEventListener('click', () => {
+    const secret = secretInput.value;
+    chrome.runtime.sendMessage({ type: 'setBridgeSecret', secret }, () => {
+      saveSecretBtn.textContent = '✓ Saved';
+      secretInput.value = '';
+      setTimeout(() => { saveSecretBtn.textContent = 'Save'; }, 1500);
       setTimeout(updateStatus, 500);
     });
   });

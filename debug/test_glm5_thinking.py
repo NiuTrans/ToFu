@@ -361,7 +361,7 @@ def main():
         print(f'The following variants successfully disabled thinking:')
         for r in working:
             print(f'  ✅ {r["name"]}')
-        print(f'\n→ Update lib/llm_client.py build_body() GLM branch accordingly.')
+        print(f'\n→ Update lib/llm/body.py build_body() GLM branch accordingly.')
     else:
         print('⚠️ No variant successfully disabled thinking!')
         print('   GLM-5.1 may not support disabling thinking via API params.')

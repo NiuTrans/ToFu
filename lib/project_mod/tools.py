@@ -76,27 +76,87 @@ _PROGRESS_RE = re.compile(
     r'^(.*?)\s*\d+%\|[^|]*\|\s*\d+/\d+\s*\[[^\]]*\](.*)$'
 )
 
-# ★ Pre-compiled regex & env for run_command — avoids per-call overhead
+# ★ Pre-compiled regex for run_command
 _FS_HEAVY_RE = re.compile(r'\b(du|find|locate|tree|wc\s+-|cloc|sloccount|ncdu|fd)\b')
 _DANGEROUS_RE = re.compile('|'.join(f'(?:{p})' for p in DANGEROUS_PATTERNS))
-_CMD_ENV = None  # lazy-built on first use (os.environ may not be final at import time)
 
-def _get_cmd_env():
-    """Return a pre-built env dict for subprocess calls (lazy singleton).
 
-    Sets PYTHONUNBUFFERED=1 on all platforms.
-    Sets TERM=dumb on Unix to suppress terminal escape codes.
+def _get_cmd_env(cwd=None):
+    """Return an env dict for subprocess calls spawned by run_command.
+
+    Subprocesses inherit the server's full environment (PATH, PYTHONPATH,
+    CONDA_PREFIX, etc.) so ``python`` / ``pip`` / installed CLIs resolve
+    exactly the way they would in the shell that started the server.
+    Tofu users who launched via the standard install land in the Tofu
+    conda env (the marker re-execs server.py into it); headless-API users
+    who launched from their own venv keep their own env. Either way, no
+    GUI knobs, no per-workspace markers — what the user sees is what the
+    agent gets.
+
+    Adds two cosmetic tweaks for cleaner captured output:
+      - PYTHONUNBUFFERED=1   so child python prints flush immediately
+      - TERM=dumb (Unix)     so tools skip ANSI cursor/color escapes
+
+    Workspace isolation (Nov 2026):
+      Each task spawns ``run_command`` calls in its own working directory
+      (project root or per-task workspace). When the agent runs ``pip
+      install``, ``python`` etc., we MUST NOT let those leak into:
+        - ``~/.local/`` (user site-packages — shared across all tasks)
+        - server's conda env (the host running tofu)
+        - other tasks' workspaces
+      So we set:
+        - ``PYTHONNOUSERSITE=1``  → pip never writes to ~/.local
+        - ``PIP_USER=0``           → pip never auto-falls-back to --user
+        - Strip ``LD_LIBRARY_PATH`` from sglang/conda envs (server-only)
+        - Strip ``CONDA_DEFAULT_ENV`` etc. so the subprocess doesn't see
+          the server's conda activation
+        - If the workspace has a ``.venv/`` (created by tofu-experiment's
+          harness), prepend its ``bin/`` to PATH and set ``VIRTUAL_ENV``.
     """
-    global _CMD_ENV
-    if _CMD_ENV is None:
-        from lib.compat import IS_WINDOWS
-        _CMD_ENV = os.environ.copy()
-        _CMD_ENV['PYTHONUNBUFFERED'] = '1'
-        # TERM=dumb suppresses progress bars and colors in child processes.
-        # On Windows, TERM is not meaningful — cmd.exe ignores it.
-        if not IS_WINDOWS:
-            _CMD_ENV['TERM'] = 'dumb'
-    return _CMD_ENV
+    env = os.environ.copy()
+    env['PYTHONUNBUFFERED'] = '1'
+    if os.name != 'nt':
+        env.setdefault('TERM', 'dumb')
+
+    # ── Block user-site-packages (~/.local/) writes & reads ──
+    env['PYTHONNOUSERSITE'] = '1'
+    env['PIP_USER'] = '0'
+    env.pop('PIP_TARGET', None)  # don't redirect pip elsewhere
+
+    # ── Strip server-process-only env vars that pollute subprocess ──
+    # These come from the conda env that launched the tofu server.
+    # The agent's subprocess in a workspace MUST NOT inherit them or
+    # `python` / `pip` will resolve to the wrong env.
+    for key in ('CONDA_DEFAULT_ENV', 'CONDA_PROMPT_MODIFIER',
+                'CONDA_SHLVL', 'CONDA_EXE', '_CE_CONDA', '_CE_M'):
+        env.pop(key, None)
+    # LD_LIBRARY_PATH from server (sglang env) breaks Python ABI in
+    # workspace conda envs (different libpython.so). Strip it.
+    env.pop('LD_LIBRARY_PATH', None)
+    # Server's PYTHONPATH (spark-3.0 jars etc.) interferes with workspace
+    # source imports. Reset.
+    env.pop('PYTHONPATH', None)
+
+    # ── Per-workspace venv activation ──
+    # tofu-experiment creates {workspace}/.venv/ for each (instance, tool).
+    # When we run a command in that workspace, prefer its venv binaries.
+    if cwd:
+        venv_bin = os.path.join(cwd, '.venv', 'bin')
+        if os.path.isdir(venv_bin):
+            env['VIRTUAL_ENV'] = os.path.join(cwd, '.venv')
+            # Prepend venv/bin to PATH (rest of PATH stays intact for
+            # access to system tools like git/grep/sed).
+            current_path = env.get('PATH', '/usr/bin:/bin')
+            env['PATH'] = f'{venv_bin}:{current_path}'
+            # Also ensure subprocess sees workspace source on PYTHONPATH
+            # (for C-extension repos where pip install -e . fails).
+            src_dir = os.path.join(cwd, 'src')
+            if os.path.isdir(src_dir):
+                env['PYTHONPATH'] = f'{src_dir}:{cwd}'
+            else:
+                env['PYTHONPATH'] = cwd
+
+    return env
 
 
 def _extract_progress_label(line):
@@ -147,13 +207,16 @@ def _extract_device_ids(lines):
     return sorted(ids)
 
 
-def _format_device_range(ids):
-    """Format device IDs as a compact range string.
+def _format_cuda_device_range(ids):
+    """Format CUDA device IDs as a compact range string with ``cuda:`` prefix.
 
     Examples:
         [0,1,2,3,4,5,6,7] → 'cuda:0-7'
         [0,2,5] → 'cuda:0,2,5'
         [3] → 'cuda:3'
+
+    See ``lib/log_clean.py::_format_device_range`` for the un-prefixed
+    variant used by the log-clean banner.
     """
     if not ids:
         return ''
@@ -326,7 +389,7 @@ def _clean_command_output(output):
                 result.append(group[0])
                 device_ids = _extract_device_ids(group)
                 if len(device_ids) > 1:
-                    dev_range = _format_device_range(device_ids)
+                    dev_range = _format_cuda_device_range(device_ids)
                     result.append(
                         f'  … (×{len(device_ids)} devices on '
                         f'{dev_range}) …')
@@ -798,7 +861,7 @@ def _snapshot_project_files(base_path):
                 dirnames.clear()
                 continue
             # Prune ignored dirs in-place — exclude per-project ignore + DB engine dirs
-            # Note: dot-dirs like .chatui/.project_sessions are still walked
+            # Note: dot-dirs like .tofu/.project_sessions are still walked
             # so that destructive commands targeting them are tracked.
             dirnames[:] = [
                 d for d in dirnames
@@ -982,6 +1045,20 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     except Exception as e:
         logger.debug('[run_command] Cross-DC check skipped: %s', e)
 
+    # ★ Non-silent grep hardening: when the user runs a recursive `grep -r ...`
+    # in a non-pipeline form, inject `-I` (skip binary) and `--exclude-dir=` for
+    # each entry in IGNORE_DIRS so cross-DC FUSE mounts don't time out.  Real
+    # grep still does the work — output format and regex flavor are unchanged.
+    # The injected flags appear in the `$ ...` echo so the change is visible.
+    # Disable with TOFU_RUN_HARDEN_GREP=0.
+    hardened = _maybe_harden_grep_command(command) if not stdin_callback else command
+    if hardened != command:
+        logger.info('[run_command] Hardened grep: %s → %s',
+                    command[:120], hardened[:160])
+        _safe_on_chunk(on_chunk, 'stderr',
+                       '[run_command] auto-added grep flags for FUSE/binary safety\n')
+        command = hardened
+
     shell_prefix = SHELL_PREFIX
     full_command = f'{shell_prefix} {command}' if shell_prefix else command
 
@@ -1036,7 +1113,7 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
             stdin=subprocess.DEVNULL,
             text=False,  # binary mode for non-blocking I/O
             cwd=base,
-            env=_get_cmd_env(),
+            env=_get_cmd_env(base),
             start_new_session=True,  # own process group for clean kill
         )
     except (FileNotFoundError, NotADirectoryError) as e:
@@ -1056,7 +1133,8 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
         task['_subprocess_pgid'] = None
         try:
             task['_subprocess_pgid'] = os.getpgid(proc.pid)
-        except OSError:
+        except OSError as _e_audit:
+            logger.debug('[tools] _run_command_simple caught %s: %s', type(_e_audit).__name__, _e_audit)
             pass
 
     # Set stdout/stderr to non-blocking.  On platforms where this fails
@@ -1082,7 +1160,8 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
         ):
             try:
                 rest = fd.read()
-            except (BlockingIOError, OSError, ValueError):
+            except (BlockingIOError, OSError, ValueError) as _e_audit:
+                logger.debug('[tools] _drain_after_kill caught %s: %s', type(_e_audit).__name__, _e_audit)
                 rest = None
             if rest:
                 bucket.append(rest)
@@ -1110,6 +1189,7 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
                 aborted = True
                 break
 
+
             retcode = proc.poll()
 
             # ── drain available output ──
@@ -1118,13 +1198,15 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
                 readable = safe_select_pipes(
                     [proc.stdout, proc.stderr], timeout=0.2
                 )
-            except (ValueError, OSError):
+            except (ValueError, OSError) as _e_audit:
+                logger.debug('[tools] _run_command_simple caught %s: %s', type(_e_audit).__name__, _e_audit)
                 readable = []
 
             for fd in readable:
                 try:
                     chunk = fd.read(65536)
-                except (BlockingIOError, OSError):
+                except (BlockingIOError, OSError) as _e_audit:
+                    logger.debug('[tools] _run_command_simple caught %s: %s', type(_e_audit).__name__, _e_audit)
                     chunk = None
                 if chunk:
                     got_output = True
@@ -1145,7 +1227,8 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
                 ):
                     try:
                         rest = fd.read()
-                    except (BlockingIOError, OSError):
+                    except (BlockingIOError, OSError) as _e_audit:
+                        logger.debug('[tools] _run_command_simple caught %s: %s', type(_e_audit).__name__, _e_audit)
                         rest = None
                     if rest:
                         bucket.append(rest)
@@ -1156,8 +1239,8 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
         logger.error('run_command loop error: %s', e, exc_info=True)
         try:
             _kill_process_tree(proc)
-        except Exception:
-            pass
+        except Exception as ke:
+            logger.debug('run_command: _kill_process_tree during cleanup failed: %s', ke)
         # Clean up task ref
         if task is not None:
             task.pop('_subprocess_pid', None)
@@ -1169,7 +1252,8 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
         for fd in (proc.stdout, proc.stderr):
             try:
                 fd.close()
-            except (OSError, AttributeError):
+            except (OSError, AttributeError) as _e_audit:
+                logger.debug('[tools] _run_command_simple caught %s: %s', type(_e_audit).__name__, _e_audit)
                 pass
 
     # Clean up task ref
@@ -1211,6 +1295,150 @@ def _kill_process_tree(proc):
             proc.wait(timeout=2)
         except Exception as e2:
             logger.warning('[run_command] Direct kill also failed for pid=%d: %s', pid, e2)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Non-silent `grep -r` hardening for run_command
+# ─────────────────────────────────────────────────────────────────────────
+# Real grep is kept (no rewrite to rg).  We only inject flags the user did
+# not already pass:
+#   -I                       — skip binary files
+#   --exclude-dir=<name>     — one per IGNORE_DIRS entry (mirrors grep_search)
+#   --color=never            — keeps output stable for downstream pipes
+# Activated only when:
+#   - the command's first token is a bare grep family binary (grep / egrep /
+#     fgrep, with optional path prefix like /usr/bin/grep)
+#   - the user passed `-r` / `-R` / `--recursive` (non-recursive grep doesn't
+#     suffer from the FUSE timeout problem and the injected exclude-dir flags
+#     would be useless)
+#   - the command contains no unquoted shell metachars that imply a pipeline
+#     (`|`, `;`, `&`, `<`, `>`, backtick, `$(`) — we never modify pipelines.
+#   - shlex.split parses cleanly — malformed quoting bails to no-op.
+# Kill switch: TOFU_RUN_HARDEN_GREP=0.
+
+_GREP_HARDEN_BINARIES = frozenset({'grep', 'egrep', 'fgrep'})
+# Detect unquoted shell metachars that indicate a pipeline / redirection.
+# A simple scan over single/double quote state suffices — we don't need to
+# fully parse the shell.
+def _has_unquoted_shell_metachars(cmd):
+    in_single = False
+    in_double = False
+    i = 0
+    while i < len(cmd):
+        ch = cmd[i]
+        if ch == '\\' and not in_single and i + 1 < len(cmd):
+            i += 2
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif not in_single and not in_double:
+            if ch in '|;&<>`':
+                return True
+            if ch == '$' and i + 1 < len(cmd) and cmd[i + 1] == '(':
+                return True
+        i += 1
+    return False
+
+
+def _maybe_harden_grep_command(command):
+    """Return a possibly-augmented copy of ``command`` for grep -r invocations.
+
+    See the block comment above for activation conditions.  On any uncertainty
+    (parse error, pipeline detected, env-var off, non-grep command, no -r) we
+    return the input unchanged.
+    """
+    if os.environ.get('TOFU_RUN_HARDEN_GREP', '1') == '0':
+        return command
+    if not command or _has_unquoted_shell_metachars(command):
+        return command
+    try:
+        import shlex
+        tokens = shlex.split(command, posix=True)
+    except ValueError as _e_audit:
+        logger.debug('[tools] _maybe_harden_grep_command caught %s: %s', type(_e_audit).__name__, _e_audit)
+        return command
+    if not tokens:
+        return command
+    head = tokens[0]
+    head_base = os.path.basename(head)
+    if head_base not in _GREP_HARDEN_BINARIES:
+        return command
+
+    # Look at the flag tokens (everything starting with '-' before a non-flag
+    # token that isn't an argument to a flag).  We only need to know what's
+    # already specified — we don't try to re-interpret the user's command.
+    has_recursive = False
+    has_I = False
+    has_color = False
+    has_exclude_dirs = set()
+    for tok in tokens[1:]:
+        if not tok.startswith('-'):
+            continue
+        if tok in ('-r', '-R', '--recursive', '--dereference-recursive'):
+            has_recursive = True
+            continue
+        # Combined short flags like `-rni` — scan each char.
+        if tok.startswith('-') and not tok.startswith('--') and len(tok) > 1:
+            for ch in tok[1:]:
+                if ch in ('r', 'R'):
+                    has_recursive = True
+                if ch == 'I':
+                    has_I = True
+        if tok == '-I':
+            has_I = True
+        if tok.startswith('--color'):
+            has_color = True
+        if tok.startswith('--exclude-dir'):
+            # Form: --exclude-dir=foo  or  --exclude-dir foo  (latter is the
+            # next token; we don't bother tracking it precisely — we only use
+            # this set to skip duplicate injections).
+            if '=' in tok:
+                has_exclude_dirs.add(tok.split('=', 1)[1].strip("'\""))
+
+    if not has_recursive:
+        # Without -r grep doesn't walk a tree; the timeout class doesn't apply.
+        return command
+
+    inject = []
+    if not has_I:
+        inject.append('-I')
+    if not has_color:
+        inject.append('--color=never')
+    for d in sorted(IGNORE_DIRS):
+        if d in has_exclude_dirs:
+            continue
+        inject.append(f'--exclude-dir={d}')
+
+    if not inject:
+        return command
+
+    # Insert injected flags right after the grep binary token.  We do this on
+    # the original command STRING (not the shlex-split tokens) to preserve the
+    # user's exact quoting of pattern + paths.
+    # Find the end of the head token in the original string.
+    stripped = command.lstrip()
+    leading_ws = command[:len(command) - len(stripped)]
+    # head token may be quoted; find its end by walking with the same quote
+    # tracker used for metachar detection.
+    end = 0
+    in_single = in_double = False
+    while end < len(stripped):
+        ch = stripped[end]
+        if ch == '\\' and not in_single and end + 1 < len(stripped):
+            end += 2
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif not in_single and not in_double and ch.isspace():
+            break
+        end += 1
+    head_str = stripped[:end]
+    rest_str = stripped[end:]
+    return f'{leading_ws}{head_str} {" ".join(inject)}{rest_str}'
 
 
 # Commands that read stdin as a data source (piped input) rather than for
@@ -1286,7 +1514,8 @@ def _is_any_child_reading_stdin(parent_pid, stdin_pipe_ino):
                 try:
                     with open(f'/proc/{pid}/comm') as f:
                         comm = f.read().strip()
-                except OSError:
+                except OSError as _e_audit:
+                    logger.debug('[tools] _is_any_child_reading_stdin caught %s: %s', type(_e_audit).__name__, _e_audit)
                     comm = '?'
 
                 # Skip known non-interactive commands that read stdin as
@@ -1300,8 +1529,9 @@ def _is_any_child_reading_stdin(parent_pid, stdin_pipe_ino):
                     continue
 
                 return (pid, comm)
-        except (OSError, ValueError, IndexError):
+        except (OSError, ValueError, IndexError) as _e_audit:
             # Process may have exited between checks — harmless
+            logger.debug('[tools] _is_any_child_reading_stdin caught %s: %s', type(_e_audit).__name__, _e_audit)
             continue
 
     # If we found non-interactive readers but no interactive ones,
@@ -1332,7 +1562,8 @@ def _collect_descendants(parent_pid):
             # PPID is field 4 (after the comm field which is in parens)
             ppid = int(stat_line.split(')')[-1].split()[1])
             children_map.setdefault(ppid, []).append(pid)
-        except (OSError, ValueError, IndexError):
+        except (OSError, ValueError, IndexError) as _e_audit:
+            logger.debug('[tools] _collect_descendants caught %s: %s', type(_e_audit).__name__, _e_audit)
             pass  # Expected: process may exit between readdir and stat
 
     # BFS from parent_pid
@@ -1363,7 +1594,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=base,
-            env=_get_cmd_env(),
+            env=_get_cmd_env(base),
             text=False,  # binary mode for non-blocking I/O
         )
     except (FileNotFoundError, NotADirectoryError) as e:
@@ -1392,7 +1623,8 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
     # Get the inode of our stdin pipe so we can match it in /proc
     try:
         stdin_pipe_ino = os.fstat(proc.stdin.fileno()).st_ino
-    except OSError:
+    except OSError as _e_audit:
+        logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
         stdin_pipe_ino = None
 
     stdout_chunks = []
@@ -1423,8 +1655,9 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                 readable = safe_select_pipes(
                     [proc.stdout, proc.stderr], timeout=0.2
                 )
-            except (ValueError, OSError):
+            except (ValueError, OSError) as _e_audit:
                 # fd already closed
+                logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
                 readable = []
 
             for fd in readable:
@@ -1440,7 +1673,8 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                             stderr_chunks.append(chunk)
                             _safe_on_chunk(on_chunk, 'stderr',
                                            chunk.decode('utf-8', errors='replace'))
-                except (BlockingIOError, OSError):
+                except (BlockingIOError, OSError) as _e_audit:
+                    logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
                     pass
 
             if retcode is not None and not got_output:
@@ -1451,7 +1685,8 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                         stdout_chunks.append(rest_out)
                         _safe_on_chunk(on_chunk, 'stdout',
                                        rest_out.decode('utf-8', errors='replace'))
-                except (BlockingIOError, OSError):
+                except (BlockingIOError, OSError) as _e_audit:
+                    logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
                     pass
                 try:
                     rest_err = proc.stderr.read()
@@ -1459,7 +1694,8 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                         stderr_chunks.append(rest_err)
                         _safe_on_chunk(on_chunk, 'stderr',
                                        rest_err.decode('utf-8', errors='replace'))
-                except (BlockingIOError, OSError):
+                except (BlockingIOError, OSError) as _e_audit:
+                    logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
                     pass
                 break
 
@@ -1478,7 +1714,8 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                                 'reading stdin — closing pipe to send EOF')
                     try:
                         proc.stdin.close()
-                    except OSError:
+                    except OSError as _e_audit:
+                        logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
                         pass
                     stdin_closed = True
                     continue
@@ -1501,7 +1738,8 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                         logger.info('run_command: stdin_callback returned None, closing stdin')
                         try:
                             proc.stdin.close()
-                        except OSError:
+                        except OSError as _e_audit:
+                            logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
                             pass
                         stdin_closed = True
                     else:
@@ -1522,7 +1760,8 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
         logger.error('run_command interactive loop error: %s', e, exc_info=True)
         try:
             proc.kill()
-        except OSError:
+        except OSError as _e_audit:
+            logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
             pass
         return (f'$ {command}\n\n'
                 f'Error during interactive execution: {e}\n'
@@ -1532,7 +1771,8 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
         for fd in (proc.stdin, proc.stdout, proc.stderr):
             try:
                 fd.close()
-            except (OSError, AttributeError):
+            except (OSError, AttributeError) as _e_audit:
+                logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
                 pass
         try:
             proc.wait(timeout=5)
@@ -1644,7 +1884,13 @@ def _resolve_base(base_path, rel_path, conv_id=None):
     if rel_path and ':' in rel_path and not os.path.isabs(rel_path):
         # Check it's not a Windows drive letter like C:\...
         colon_idx = rel_path.index(':')
-        if colon_idx > 0 and colon_idx < 40:  # reasonable name length
+        # Reject prefixes that can't be a workspace root name: JSON/array
+        # punctuation or whitespace before the colon means rel_path is a
+        # serialized blob (e.g. a stringified reads array '[{"path": ...]'),
+        # not 'rootname:path'.  Treating it as a root produced misleading
+        # "Unknown workspace root '[{\"path\"'" errors.
+        _looks_like_root = not any(c in rel_path[:colon_idx] for c in '[]{}"\'\t\n ')
+        if colon_idx > 0 and colon_idx < 40 and _looks_like_root:  # reasonable name length
             from lib.project_mod.config import resolve_namespaced_path
             try:
                 return resolve_namespaced_path(rel_path, conv_id=conv_id)
@@ -1671,7 +1917,7 @@ def _resolve_base(base_path, rel_path, conv_id=None):
                 #   DATA-LOSS bug: the write tools fall back to the primary
                 #   root and silently overwrite whatever file with the same
                 #   relative name exists there.  See the
-                #   chatui_create_project_frontend_sync_bug memo.
+                #   create_project_frontend_sync_bug memo.
                 #
                 #   Instead, raise a sentinel that path-taking tools surface
                 #   as an explicit error to the model.  The only legitimate
@@ -1777,9 +2023,34 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
             if 'path' in spec:
                 reads = [spec]
                 logger.info('[Tools] read_files: auto-wrapped flat args into reads array '
-                            '(path=%s) — model likely missing "reads" wrapper', spec['path'][:120])
+                            '(path=%s) — model likely missing "reads" wrapper',
+                            str(spec['path'])[:120])
             else:
                 reads = []
+        # ★ Recovery: some models serialize the WHOLE reads array as a JSON
+        #   string into a scalar 'path' (e.g. path='[{"path": "a.py", ...}]').
+        #   The stringified blob then looks like a 'rootname:path' spec and
+        #   produced misleading "Unknown workspace root" errors.  Detect a
+        #   path that is actually a JSON array/object and parse it back.
+        if isinstance(reads, list):
+            for _idx, _spec in enumerate(reads):
+                _p = _spec.get('path') if isinstance(_spec, dict) else _spec
+                if isinstance(_p, str) and _p.lstrip()[:1] in ('[', '{'):
+                    import json as _json
+                    try:
+                        _parsed = _json.loads(_p)
+                    except (ValueError, TypeError) as _je:
+                        logger.debug('[Tools] read_files: path looks like JSON but '
+                                     'failed to parse (%s): %.120s', _je, _p)
+                        continue
+                    if isinstance(_parsed, dict):
+                        _parsed = [_parsed]
+                    if isinstance(_parsed, list) and _parsed:
+                        logger.warning('[Tools] read_files: recovered stringified reads '
+                                       'array from scalar path (%d spec(s)) — model '
+                                       'serialized the array into "path"', len(_parsed))
+                        reads = _parsed
+                        break
         if not isinstance(reads, list):
             return (
                 'Error: read_files expects "reads" to be an array of '
@@ -1913,6 +2184,7 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
         try:
             bp, rp = _rb(base_path, fn_args.get('path', ''))
         except ValueError as _rve:
+            logger.debug('[tools] execute_tool caught %s: %s', type(_rve).__name__, _rve)
             return f"write_file: {_rve}"
         result = tool_write_file(bp, rp,
                                  fn_args.get('content', ''),
@@ -1924,14 +2196,10 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
         else:
             return f"Write failed: {result['error']}"
     elif fn_name == 'apply_diff':
-        # ★ Batch mode: if 'edits' array is present, apply all edits in sequence
-        edits = fn_args.get('edits')
-        if edits and isinstance(edits, list):
-            return tool_apply_diffs(base_path, edits, conv_id=conv_id, task_id=task_id)
-        # ★ Single-edit mode (backward compatible)
         try:
             bp, rp = _rb(base_path, fn_args.get('path', ''))
         except ValueError as _rve:
+            logger.debug('[tools] execute_tool caught %s: %s', type(_rve).__name__, _rve)
             return f"apply_diff: {_rve}"
         result = tool_apply_diff(bp, rp,
                                  fn_args.get('search', ''),
@@ -1948,15 +2216,16 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
             return msg
         else:
             return f"Diff failed: {result['error']}"
-    elif fn_name == 'insert_content':
-        # ★ Batch mode: if 'edits' array is present, apply all insertions in sequence
+    elif fn_name == 'apply_diffs':
         edits = fn_args.get('edits')
-        if edits and isinstance(edits, list):
-            return tool_insert_contents(base_path, edits, conv_id=conv_id, task_id=task_id)
-        # ★ Single insertion mode
+        if not edits or not isinstance(edits, list):
+            return 'apply_diffs: "edits" array is required.'
+        return tool_apply_diffs(base_path, edits, conv_id=conv_id, task_id=task_id)
+    elif fn_name == 'insert_content':
         try:
             bp, rp = _rb(base_path, fn_args.get('path', ''))
         except ValueError as _rve:
+            logger.debug('[tools] execute_tool caught %s: %s', type(_rve).__name__, _rve)
             return f"insert_content: {_rve}"
         result = tool_insert_content(bp, rp,
                                      fn_args.get('anchor', ''),
@@ -1971,6 +2240,11 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
                     f"({result['oldLines']}L → {result['newLines']}L)")
         else:
             return f"Insert failed: {result['error']}"
+    elif fn_name == 'insert_contents':
+        edits = fn_args.get('edits')
+        if not edits or not isinstance(edits, list):
+            return 'insert_contents: "edits" array is required.'
+        return tool_insert_contents(base_path, edits, conv_id=conv_id, task_id=task_id)
     elif fn_name == 'run_command':
         # ★ Multi-root: resolve working_dir if model specifies one
         cwd = base_path
@@ -2053,7 +2327,8 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
                             # Try to decode as text; keep as bytes if binary
                             try:
                                 ch['original_content'] = raw.decode('utf-8')
-                            except (UnicodeDecodeError, ValueError):
+                            except (UnicodeDecodeError, ValueError) as _e_audit:
+                                logger.debug('[tools] execute_tool caught %s: %s', type(_e_audit).__name__, _e_audit)
                                 ch['original_content'] = raw
                 recorded = _record_run_command_changes(
                     cwd, changes, conv_id=conv_id, task_id=task_id)
@@ -2088,6 +2363,20 @@ def project_tool_display(fn_name, fn_args):
         return f'{fn_name}({fn_args})'
     if fn_name == 'read_files':
         reads = fn_args.get('reads')
+        # Defensive: some models emit ``reads`` as a JSON *string*
+        # ('[{"path": ...}]') instead of an array. Without coercion the
+        # loop below iterates the string character-by-character and renders
+        # a garbled "Read 24 files: ; < p a +20 more" line. The execution
+        # path is already protected (validate_then_repair coerces it), but
+        # the streaming early-announce path builds this display BEFORE that
+        # repair runs, so coerce here too.
+        if isinstance(reads, str):
+            import json
+            try:
+                reads = json.loads(reads)
+            except (ValueError, TypeError) as e:
+                logger.debug('[ToolDisplay] read_files reads=str not JSON: %s', e)
+                reads = None
         if reads is None and 'path' in fn_args:
             # Flat-args compat (same shim as execute_tool)
             reads = [fn_args]
@@ -2189,6 +2478,10 @@ def project_tool_display(fn_name, fn_args):
         desc = fn_args.get('description', '')
         return f'Write {p}' + (f' — {desc}' if desc else '')
     elif fn_name == 'apply_diff':
+        p = fn_args.get('path', '?')
+        desc = fn_args.get('description', '')
+        return f'Patch {p}' + (f' — {desc}' if desc else '')
+    elif fn_name == 'apply_diffs':
         edits = fn_args.get('edits')
         if edits and isinstance(edits, list):
             paths = list(dict.fromkeys(e.get('path', '?') for e in edits if isinstance(e, dict)))
@@ -2201,10 +2494,13 @@ def project_tool_display(fn_name, fn_args):
             else:
                 label = f'Patch {len(paths)} files ({n} edits)'
             return label + (f' — {desc}' if desc else '')
+        return 'Patch (empty)'
+    elif fn_name == 'insert_content':
         p = fn_args.get('path', '?')
         desc = fn_args.get('description', '')
-        return f'Patch {p}' + (f' — {desc}' if desc else '')
-    elif fn_name == 'insert_content':
+        pos = fn_args.get('position', 'after')
+        return f'Insert into {p} ({pos})' + (f' — {desc}' if desc else '')
+    elif fn_name == 'insert_contents':
         edits = fn_args.get('edits')
         if edits and isinstance(edits, list):
             paths = list(dict.fromkeys(e.get('path', '?') for e in edits if isinstance(e, dict)))
@@ -2217,10 +2513,7 @@ def project_tool_display(fn_name, fn_args):
             else:
                 label = f'Insert into {len(paths)} files ({n} insertions)'
             return label + (f' — {desc}' if desc else '')
-        p = fn_args.get('path', '?')
-        desc = fn_args.get('description', '')
-        pos = fn_args.get('position', 'after')
-        return f'Insert into {p} ({pos})' + (f' — {desc}' if desc else '')
+        return 'Insert (empty)'
     elif fn_name == 'run_command':
         cmd = fn_args.get('command', '?')
         return cmd  # Full command without $ prefix — frontend adds it

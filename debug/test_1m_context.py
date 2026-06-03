@@ -349,7 +349,7 @@ def main():
         print("  Gateway supports 1M context window natively.")
     elif any_header_needed:
         print("  ⚠️  结论: 部分/全部模型需要 anthropic-beta header")
-        print("  建议在 llm_client.py 的 _headers() 中添加:")
+        print("  建议在 lib/llm/_transport.py 的 headers() 中添加:")
         print("    'anthropic-beta': 'context-1m-2025-05-14'")
     else:
         print("  ⚠️  结论: 测试结果不明确, 请查看上面的详细错误信息")

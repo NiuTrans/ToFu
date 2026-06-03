@@ -44,34 +44,24 @@ _BACKEND = 'sqlite'  # default, upgraded to 'pg' below if possible
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# SQLite path (used as fallback). Default file is now ``data/tofu.db``;
-# legacy ``data/chatui.db`` is auto-picked up if present (see below).
+# SQLite path (used as fallback): ``data/tofu.db``.
 from lib.env_compat import getenv_compat  # noqa: E402
 
 _DB_DIR = os.path.join(BASE_DIR, 'data')
 _DEFAULT_DB_FILE = os.path.join(_DB_DIR, 'tofu.db')
-_LEGACY_DB_FILE = os.path.join(_DB_DIR, 'chatui.db')
-_explicit_db_path = getenv_compat('TOFU_DB_PATH', 'CHATUI_DB_PATH', default='')
-if _explicit_db_path:
-    DB_PATH = _explicit_db_path
-elif (not os.path.exists(_DEFAULT_DB_FILE)) and os.path.exists(_LEGACY_DB_FILE):
-    # Backward compat: existing installs have data/chatui.db. Keep using it
-    # in place — don't move/rename underneath the user (could break a
-    # running PG cluster's metadata path on some FUSE setups).
-    DB_PATH = _LEGACY_DB_FILE
-else:
-    DB_PATH = _DEFAULT_DB_FILE
+_explicit_db_path = getenv_compat('TOFU_DB_PATH', default='')
+DB_PATH = _explicit_db_path or _DEFAULT_DB_FILE
 
 # PostgreSQL config
-PG_HOST = getenv_compat('TOFU_PG_HOST', 'CHATUI_PG_HOST', default='127.0.0.1')
-PG_PORT = int(getenv_compat('TOFU_PG_PORT', 'CHATUI_PG_PORT', default='15432'))
-# Default DB name stays 'chatui' for now — renaming the live PG database
-# requires a manual migration (CREATE DATABASE tofu + pg_dump|restore) and
-# we don't want to silently make existing deployments lose their data.
-# New users get DB name 'chatui' by default; set TOFU_PG_DBNAME to override.
-PG_DBNAME = getenv_compat('TOFU_PG_DBNAME', 'CHATUI_PG_DBNAME', default='chatui')
-PG_USER = getenv_compat('TOFU_PG_USER', 'CHATUI_PG_USER', default='')
-PG_PASSWORD = getenv_compat('TOFU_PG_PASSWORD', 'CHATUI_PG_PASSWORD', default='')
+PG_HOST = getenv_compat('TOFU_PG_HOST', default='127.0.0.1')
+PG_PORT = int(getenv_compat('TOFU_PG_PORT', default='15432'))
+# Default DB name is now ``tofu``. Live deployments still using the old
+# ``chatui`` DB must run ``pg_dump chatui | psql tofu`` (or set
+# ``TOFU_PG_DBNAME=chatui`` to keep the existing database in place
+# until the dump/restore happens).
+PG_DBNAME = getenv_compat('TOFU_PG_DBNAME', default='tofu')
+PG_USER = getenv_compat('TOFU_PG_USER', default='')
+PG_PASSWORD = getenv_compat('TOFU_PG_PASSWORD', default='')
 
 PG_DSN = f"host={PG_HOST} port={PG_PORT} dbname={PG_DBNAME}"
 if PG_USER:
@@ -100,8 +90,8 @@ _MAX_CONN_AGE_S = 600
 
 # Maximum total application-side connections (semaphore-guarded)
 # Tunable via env vars for high-concurrency deployments (1000+ users)
-_MAX_TOTAL_CONNS = int(getenv_compat('TOFU_DB_MAX_CONNS', 'CHATUI_DB_MAX_CONNS', default='200'))
-_CONN_ACQUIRE_TIMEOUT_S = int(getenv_compat('TOFU_DB_ACQUIRE_TIMEOUT', 'CHATUI_DB_ACQUIRE_TIMEOUT', default='30'))
+_MAX_TOTAL_CONNS = int(getenv_compat('TOFU_DB_MAX_CONNS', default='200'))
+_CONN_ACQUIRE_TIMEOUT_S = int(getenv_compat('TOFU_DB_ACQUIRE_TIMEOUT', default='30'))
 _conn_semaphore = threading.BoundedSemaphore(_MAX_TOTAL_CONNS)
 _conn_count = 0
 _conn_count_lock = threading.Lock()
@@ -111,7 +101,7 @@ _conn_count_lock = threading.Lock()
 # re-run ``_ensure_pg_running`` ONCE and retry the connect. Multiple
 # concurrent broken connections are coalesced behind this lock/cooldown
 # so we don't stampede ``pg_ctl start``. Override via
-# ``CHATUI_PG_REBOOT_COOLDOWN_S`` env var.
+# ``TOFU_PG_REBOOT_COOLDOWN_S`` env var.
 #
 # Recognised "PG is dead / needs a restart" error signatures:
 #
@@ -141,7 +131,7 @@ _PG_ZOMBIE_SIGNATURES = (
     'could not open shared memory segment',
 )
 
-_PG_REBOOT_COOLDOWN_S = int(getenv_compat('TOFU_PG_REBOOT_COOLDOWN_S', 'CHATUI_PG_REBOOT_COOLDOWN_S', default='60'))
+_PG_REBOOT_COOLDOWN_S = int(getenv_compat('TOFU_PG_REBOOT_COOLDOWN_S', default='60'))
 # Exponential backoff: consecutive FAILED reboot attempts escalate the
 # cooldown so a persistent issue (e.g. WAL corruption, another host
 # stomping on our pgdata) doesn't spam pg_ctl start / postgresql.log
@@ -238,7 +228,8 @@ def _force_stop_zombie_pg():
         if os.path.exists(pidfile):
             os.remove(pidfile)
             logger.info('[DB] Removed stale postmaster.pid after zombie-stop')
-    except FileNotFoundError:
+    except FileNotFoundError as _e_audit:
+        logger.debug('[_core] _force_stop_zombie_pg caught %s: %s', type(_e_audit).__name__, _e_audit)
         pass
     except Exception as e:
         logger.warning('[DB] Could not remove postmaster.pid after zombie-stop: %s', e)
@@ -572,12 +563,12 @@ strip_null_bytes_deep = _strip_null_bytes_noop
 # ═══════════════════════════════════════════════════════════════════════
 
 # SQLite busy timeout — higher values reduce "database is locked" under concurrency
-_BUSY_TIMEOUT_MS = int(getenv_compat('TOFU_SQLITE_BUSY_TIMEOUT_MS', 'CHATUI_SQLITE_BUSY_TIMEOUT_MS', default='30000'))
+_BUSY_TIMEOUT_MS = int(getenv_compat('TOFU_SQLITE_BUSY_TIMEOUT_MS', default='30000'))
 
 # SQLite connection pool (connections are cheap but file-handle churn adds up at 1000 users)
 _sqlite_pool = []
 _sqlite_pool_lock = threading.Lock()
-_SQLITE_POOL_MAX = int(getenv_compat('TOFU_SQLITE_POOL_MAX', 'CHATUI_SQLITE_POOL_MAX', default='20'))
+_SQLITE_POOL_MAX = int(getenv_compat('TOFU_SQLITE_POOL_MAX', default='20'))
 
 
 def _new_sqlite_connection():
@@ -594,7 +585,12 @@ def _new_sqlite_connection():
     conn.execute('PRAGMA synchronous=NORMAL')
     conn.execute('PRAGMA foreign_keys=ON')
     conn.execute('PRAGMA cache_size=-8000')
-    conn.execute('PRAGMA mmap_size=268435456')
+    # mmap is disabled: when the DB lives on a FUSE mount (beegfs-fuse, NFS,
+    # etc.) and the backend hiccups, already-mapped pages can become invalid
+    # and the next access raises SIGBUS, killing the whole process. Plain
+    # pread() returns EIO and is recoverable. See logs/faulthandler.log
+    # entries from 2026-05-28 for prior crashes traced to FUSE I/O.
+    conn.execute('PRAGMA mmap_size=0')
     # Reduce WAL checkpoint frequency — fewer I/O stalls under write-heavy load
     conn.execute('PRAGMA wal_autocheckpoint=1000')
 
@@ -800,7 +796,7 @@ def _column_exists(conn, table, column):
 
 _conn_pool = []
 _conn_pool_lock = threading.Lock()
-_CONN_POOL_MAX = int(getenv_compat('TOFU_DB_POOL_MAX', 'CHATUI_DB_POOL_MAX', default='50'))
+_CONN_POOL_MAX = int(getenv_compat('TOFU_DB_POOL_MAX', default='50'))
 
 
 def _pool_get():
@@ -873,8 +869,8 @@ def _pool_put(conn):
             logger.debug('[DB] Rollback failed on SQLite pool return: %s', e)
             try:
                 conn.close()
-            except Exception:
-                pass
+            except Exception as ce:
+                logger.debug('[DB] Close after rollback failure: %s', ce)
             return
         with _sqlite_pool_lock:
             if len(_sqlite_pool) < _SQLITE_POOL_MAX:
@@ -1145,7 +1141,8 @@ def heal_toast_corruption():
         return
     try:
         from lib.log import audit_log  # local import — avoid circulars
-    except Exception:  # pragma: no cover
+    except Exception as e:  # pragma: no cover
+        logger.debug('[DB:heal] audit_log unavailable: %s', e)
         audit_log = None
 
     conn = None
@@ -1300,8 +1297,8 @@ def warmup_db():
         if conn is not None:
             try:
                 conn.close()
-            except Exception:
-                pass
+            except Exception as ce:
+                logger.debug('[DB] Warmup conn close failed: %s', ce)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1324,8 +1321,8 @@ def shutdown_pool():
                 try:
                     conn.close()
                     drained += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug('[DB] PG conn close during shutdown failed: %s', e)
         logger.info('[DB] PG connection pool drained (%d connections)', drained)
     else:
         with _sqlite_pool_lock:
@@ -1335,8 +1332,8 @@ def shutdown_pool():
                 try:
                     conn.close()
                     drained += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug('[DB] SQLite conn close during shutdown failed: %s', e)
         if drained:
             logger.info('[DB] SQLite connection pool drained (%d connections)', drained)
         else:
@@ -1352,7 +1349,7 @@ def stop_local_pg_if_owned():
     accidentally stop the PG server used by the long-running Flask app.
 
     Controlled by env var ``TOFU_STOP_PG_ON_EXIT`` (legacy:
-    ``CHATUI_STOP_PG_ON_EXIT``; default ``1``):
+    ``TOFU_STOP_PG_ON_EXIT``; default ``1``):
       - ``1`` / unset: stop local PG when server.py exits
       - ``0``: leave PG running (faster dev-restart cycles, but requires
         manual ``pg_ctl stop`` before switching hosts on shared FUSE pgdata)
@@ -1361,7 +1358,7 @@ def stop_local_pg_if_owned():
     """
     if _BACKEND != 'pg':
         return
-    _stop_on_exit = getenv_compat('TOFU_STOP_PG_ON_EXIT', 'CHATUI_STOP_PG_ON_EXIT',
+    _stop_on_exit = getenv_compat('TOFU_STOP_PG_ON_EXIT',
                                   default='1').lower() \
         not in ('0', 'false', 'no', 'off')
     try:
@@ -1419,7 +1416,7 @@ def init_db():
 # ═══════════════════════════════════════════════════════════════════════
 
 # Force SQLite via env var (for testing or explicit preference)
-_FORCE_SQLITE = getenv_compat('TOFU_DB_BACKEND', 'CHATUI_DB_BACKEND', default='').lower() == 'sqlite'
+_FORCE_SQLITE = getenv_compat('TOFU_DB_BACKEND', default='').lower() == 'sqlite'
 
 db_available = False
 pg_available = False

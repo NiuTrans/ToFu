@@ -19,7 +19,7 @@ os.environ.pop('LLM_DEBUG_RAW_SSE', None)
 _TMP = tempfile.mkdtemp(prefix='raw_sse_e2e_')
 os.chdir(_TMP)
 
-from lib import llm_client  # noqa: E402
+from lib.llm import stream as _llm_stream  # noqa: E402
 
 
 class _FakeResp:
@@ -60,9 +60,9 @@ def test_empty_stop_triggers_anomaly_dump():
         captured['body'] = json
         return _FakeResp(canned)
 
-    # Patch requests.post in llm_client module
-    orig_post = llm_client.requests.post
-    llm_client.requests.post = fake_post
+    # Patch requests.post in lib.llm.stream module
+    orig_post = _llm_stream.requests.post
+    _llm_stream.requests.post = fake_post
     try:
         body = {
             'model': 'aws.claude-opus-4.7',
@@ -71,11 +71,11 @@ def test_empty_stop_triggers_anomaly_dump():
             'stream': True,
             'messages': [{'role': 'user', 'content': 'hi'}],
         }
-        msg, finish_reason, usage = llm_client._stream_chat_once(
+        msg, finish_reason, usage = _llm_stream._stream_chat_once(
             body, log_prefix='[test]', api_key='fake', base_url='http://x',
         )
     finally:
-        llm_client.requests.post = orig_post
+        _llm_stream.requests.post = orig_post
 
     # Sanity on what the function returned
     assert finish_reason == 'stop', f'finish_reason={finish_reason}'

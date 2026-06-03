@@ -6,7 +6,7 @@ conversations by 2.5× and caused the ``conv=mo4fr5xeup9ogp`` compaction
 failure (see 2026-05-04 post-mortem).
 
 Per-provider support matrix (see
-``~/.chatui/skills/token-counter-api-support-matrix.md`` for full
+``<project>/.tofu/skills/token-counter-api-support-matrix.md`` for full
 details and verification dates):
 
   ==============  ==============================  ==================
@@ -35,22 +35,22 @@ one line in the resolver.
 
 Environment variables:
 
-  CHATUI_TOKEN_COUNTER
+  TOFU_TOKEN_COUNTER
       Forced mode. ``auto`` (default), ``api``, ``anthropic_api``,
       ``gemini_api``, ``tiktoken``, ``deepseek``, ``hf``,
       ``usage_cache``, ``heuristic``.
 
-  CHATUI_TOKEN_COUNTER_API_TIMEOUT
+  TOFU_TOKEN_COUNTER_API_TIMEOUT
       Timeout (sec) for the network tiers. Default 10.
 
-  CHATUI_TOKEN_COUNTER_API_THRESHOLD
+  TOFU_TOKEN_COUNTER_API_THRESHOLD
       Skip network tiers when cheap estimate is below this fraction
       of the model's context limit. Default 0.50.
 
-  CHATUI_TOKEN_COUNTER_CACHE_TTL
+  TOFU_TOKEN_COUNTER_CACHE_TTL
       Seconds a recorded ``usage`` stays authoritative. Default 3600.
 
-  CHATUI_TOKEN_COUNTER_HF_AUTOFETCH
+  TOFU_TOKEN_COUNTER_HF_AUTOFETCH
       When ``1``, allow HF ``AutoTokenizer.from_pretrained()`` to
       download the tokenizer on first use (otherwise requires a
       locally-cached copy). Default off.
@@ -60,7 +60,7 @@ Public API (imported from ``lib.token_counter``):
   :func:`count_tokens`   Full-request counter (messages + system + tools).
   :func:`count_text`     Fast single-string count.
   :func:`record_usage`   Feed the last response's usage into the cache.
-                         Called from ``lib/llm_client.py`` after every
+                         Called from ``lib/llm/stream.py`` after every
                          successful stream.
   :func:`invalidate`     Drop the usage cache for a conv (after compact).
 """

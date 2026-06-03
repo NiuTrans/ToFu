@@ -110,9 +110,7 @@ class BuiltinBackend(AgentBackend):
         It creates a task, starts ``run_task()`` in a thread, then polls
         the task's event queue and reverse-maps SSE events to NormalizedEvents.
         """
-        import threading
-
-        from lib.tasks_pkg import create_task, run_task
+        from lib.tasks_pkg import create_task, spawn_task
 
         # Create a sub-task for the orchestrator
         builtin_task = create_task(
@@ -121,9 +119,8 @@ class BuiltinBackend(AgentBackend):
             task.get('config', {}),
         )
 
-        # Start orchestrator thread
-        thread = threading.Thread(target=run_task, args=(builtin_task,), daemon=True)
-        thread.start()
+        # Start orchestrator
+        spawn_task(builtin_task)
 
         # Poll events and translate to NormalizedEvents
         cursor = 0

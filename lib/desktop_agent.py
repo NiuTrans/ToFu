@@ -455,15 +455,28 @@ def dispatch_command(cmd_type, params, permissions):
 #  Polling Loop (runs on your local machine)
 # ══════════════════════════════════════════════════════════
 
-def run_agent(server_url, permissions, poll_interval=1.0):
-    """Main agent loop — polls server for commands, executes locally, returns results."""
+def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret=''):
+    """Main agent loop — polls server for commands, executes locally, returns results.
+
+    Args:
+        server_url: Tofu server base URL.
+        permissions: dict with allow_write / allow_exec / allow_gui flags.
+        poll_interval: seconds between polls.
+        bridge_secret: optional X-Bridge-Secret value. Required when the
+            server has TOFU_BRIDGE_SECRET configured. Pass empty string to
+            disable (LAN-only deployments).
+    """
 
     endpoint = f'{server_url.rstrip("/")}/api/desktop/poll'
     result_queue = []
+    headers = {}
+    if bridge_secret:
+        headers['X-Bridge-Secret'] = bridge_secret
 
     logger.info('Desktop Agent starting...')
     logger.info('   Server: %s', server_url)
     logger.info('   Permissions: %s', json.dumps(permissions))
+    logger.info('   Bridge secret: %s', 'configured' if bridge_secret else 'none (LAN-only)')
     available_cmds = ', '.join(sorted(COMMANDS.keys()))
     logger.info('   Available commands: %s', available_cmds)
     logger.info('   Poll interval: %ss', poll_interval)
@@ -477,12 +490,19 @@ def run_agent(server_url, permissions, poll_interval=1.0):
             resp = requests.post(
                 endpoint,
                 json={'results': result_queue},
+                headers=headers,
                 timeout=15,
                 proxies={'no_proxy': '*'}  # localhost — always bypass env proxy
             )
             result_queue = []  # clear sent results
             consecutive_errors = 0
 
+            if resp.status_code == 401:
+                logger.error('Server returned 401 — bridge auth failed. '
+                             'Set --bridge-secret (or TOFU_BRIDGE_SECRET env var) '
+                             'to match the server.')
+                time.sleep(poll_interval * 10)
+                continue
             if resp.status_code != 200:
                 logger.info('Server returned %s', resp.status_code)
                 time.sleep(poll_interval * 3)
@@ -566,6 +586,10 @@ Examples:
     parser.add_argument('--allow-gui', action='store_true', help='Allow GUI automation (mouse, keyboard, screenshot)')
     parser.add_argument('--allow-all', action='store_true', help='Enable all permissions')
     parser.add_argument('--poll-interval', type=float, default=1.0, help='Polling interval in seconds')
+    parser.add_argument('--bridge-secret', default='',
+                        help='X-Bridge-Secret value matching server TOFU_BRIDGE_SECRET '
+                             '(required when the server enforces bridge auth). '
+                             'Falls back to TOFU_BRIDGE_SECRET env var.')
 
     args = parser.parse_args()
 
@@ -575,4 +599,8 @@ Examples:
         'allow_gui': args.allow_gui or args.allow_all,
     }
 
-    run_agent(args.server, permissions, args.poll_interval)
+    bridge_secret = (args.bridge_secret
+                     or os.environ.get('TOFU_BRIDGE_SECRET')
+                     or '').strip()
+
+    run_agent(args.server, permissions, args.poll_interval, bridge_secret=bridge_secret)
