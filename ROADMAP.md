@@ -62,6 +62,7 @@ can be objectively verified.
 | `docs/SECURITY_AUDIT_REPORT.md` | Security findings and remediation status |
 | `docs/RATE_LIMITING_DOS_AUDIT_REPORT.md` | Rate-limit audit and future recommendations |
 | `docs/agentic-development-experience.md` | Agent-loop architecture + backlog |
+| `docs/FOLLOWUPS_ASYNC_MIGRATION.md` | Follow-up backlog from the native-async migration + review sweep |
 | `docs/omc-claude-code-backport-analysis.md` | Claude Code feature comparison / backport ideas |
 | `CHANGELOG.md` | Released versions |
 | `CLAUDE.md` | Project intelligence & mandatory rules for AI assistants |

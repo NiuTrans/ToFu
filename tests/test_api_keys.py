@@ -97,6 +97,27 @@ class ApiKeysTest(unittest.TestCase):
         row, _ = create_key(name='b', scopes=['chat', 'nonsense'])
         self.assertEqual(row['scopes'], ['chat'])
 
+    def test_update_key_cannot_grant_admin(self):
+        # A non-admin (tofu_live_) key must never gain 'admin' via PATCH;
+        # privilege tier is fixed at mint time and tied to the prefix.
+        from lib.api_keys import create_key, get_key_by_id, update_key
+        row, plaintext = create_key(name='b', scopes=['chat'])
+        self.assertTrue(plaintext.startswith('tofu_live_'))
+        update_key(row['id'], scopes=['chat', 'tasks', 'admin'])
+        updated = get_key_by_id(row['id'])
+        self.assertNotIn('admin', updated['scopes'])
+        self.assertEqual(sorted(updated['scopes']), ['chat', 'tasks'])
+
+    def test_update_key_preserves_admin(self):
+        # An admin key keeps admin even if a scopes update omits it
+        # (tier is immutable through update_key).
+        from lib.api_keys import create_key, get_key_by_id, update_key
+        row, _ = create_key(name='a', scopes=[], admin=True)
+        update_key(row['id'], scopes=['chat'])
+        updated = get_key_by_id(row['id'])
+        self.assertIn('admin', updated['scopes'])
+        self.assertIn('chat', updated['scopes'])
+
     def test_persistence_round_trip(self):
         from lib.api_keys import create_key, validate_token
         row, plaintext = create_key(name='persistent', scopes=['chat'])

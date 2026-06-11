@@ -489,8 +489,6 @@ async function continueAssistant() {
         tmEl.className = "stream-elapsed-timer";
         hdr.appendChild(tmEl);
       }
-      const relEl = msgEl.querySelector(".message-reltime");
-      if (relEl) relEl.remove();
       const bodyEl = msgEl.querySelector(".message-body");
       if (bodyEl) {
         bodyEl.id = "streaming-body";

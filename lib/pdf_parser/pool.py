@@ -44,7 +44,8 @@ def _max_workers() -> int:
     if n <= 0:
         try:
             cpu = len(os.sched_getaffinity(0))  # type: ignore[attr-defined]
-        except (AttributeError, OSError):
+        except (AttributeError, OSError) as e:
+            logger.debug('[PDF Pool] sched_getaffinity unavailable, using cpu_count: %s', e)
             cpu = os.cpu_count() or 2
         n = max(1, min(4, cpu))
     return n
@@ -113,7 +114,8 @@ def parse_pdf_pooled(pdf_bytes: bytes, *, timeout: float = None, **kwargs) -> di
     if timeout is None:
         try:
             timeout = float(os.environ.get('TOFU_PDF_PARSE_TIMEOUT', '300') or '300')
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            logger.debug('[PDF Pool] Invalid TOFU_PDF_PARSE_TIMEOUT, defaulting to 300s: %s', e)
             timeout = 300.0
     try:
         pool = _get_pool()

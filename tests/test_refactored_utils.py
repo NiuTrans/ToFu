@@ -76,11 +76,57 @@ class TestRepairJson:
         result = repair_json(raw)
         assert 'msg' in result
 
+    def test_raw_control_characters_in_string(self):
+        """Literal newlines/tabs inside a JSON string value (common in
+        weak-model ``write_file`` content) must repair, not crash."""
+        from lib.utils import repair_json
+        raw = '{"path": "x.py", "content": "line1\nline2\ttabbed"}'
+        result = repair_json(raw)
+        assert result == {'path': 'x.py', 'content': 'line1\nline2\ttabbed'}
+
+    def test_control_chars_with_truncation(self):
+        """Control chars AND a missing closing quote/brace repair together."""
+        from lib.utils import repair_json
+        result = repair_json('{"q": "multi\nline\nquery')
+        assert result['q'] == 'multi\nline\nquery'
+
     def test_json_decode_error_raised_on_hopeless(self):
         """Truly broken input should raise JSONDecodeError."""
         from lib.utils import repair_json
         with pytest.raises(json.JSONDecodeError):
             repair_json('not json at all {{{{')
+
+    def test_missing_colon_delimiter(self):
+        """Parser-guided recovery of a missing ':' (top read_files failure mode)."""
+        from lib.utils import repair_json
+        result = repair_json('{"reads": [{"path" "/a/b.py"}]}')
+        assert result == {'reads': [{'path': '/a/b.py'}]}
+
+    def test_missing_comma_delimiter(self):
+        """Parser-guided recovery of a missing ',' between object members."""
+        from lib.utils import repair_json
+        result = repair_json('{"reads": [{"path": "/a/b.py" "start_line": 1}]}')
+        assert result == {'reads': [{'path': '/a/b.py', 'start_line': 1}]}
+
+    def test_single_quoted_payload(self):
+        """ast.literal_eval recovery of a single-quoted (non-JSON) payload."""
+        from lib.utils import repair_json
+        result = repair_json("{'reads': [{'path': '/a/b.py'}]}")
+        assert result == {'reads': [{'path': '/a/b.py'}]}
+
+    def test_python_dict_repr(self):
+        """ast.literal_eval recovery of a full Python-dict repr."""
+        from lib.utils import repair_json
+        result = repair_json(
+            "{'reads': [{'path': '/mnt/x/y.py', 'start_line': 10, 'end_line': 20}]}")
+        assert result == {'reads': [{'path': '/mnt/x/y.py', 'start_line': 10, 'end_line': 20}]}
+
+    def test_ambiguous_inner_quote_still_raises(self):
+        """An unescaped inner quote is genuinely ambiguous — must NOT be
+        silently 'repaired' into wrong data; it must still raise."""
+        from lib.utils import repair_json
+        with pytest.raises(json.JSONDecodeError):
+            repair_json('{"reads": [{"path": "/a/b/some"weird.py"}]}')
 
     def test_backward_compat_alias(self):
         """_repair_json is an alias for repair_json."""
@@ -213,15 +259,32 @@ class TestCompressImage:
 
     def test_only_one_definition_exists(self):
         """Ensure _compress_image is only defined in lib/file_reader.py."""
-        import subprocess
-        result = subprocess.run(
-            ['grep', '-rn', '--include=*.py', 'def _compress_image', 'lib/', 'routes/'],
-            capture_output=True, text=True,
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-        lines = [l for l in result.stdout.strip().split('\n') if l]
-        assert len(lines) == 1, f"Expected 1 definition, found {len(lines)}: {lines}"
-        assert 'lib/file_reader.py' in lines[0]
+        # Walk lib/ and routes/ in pure Python rather than shelling out to
+        # `grep -rn`: on slow FUSE mounts a recursive grep that descends into
+        # scratch/cache subdirs can take >90s and time the test out.
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        needle = 'def _compress_image'
+        # Prune dirs that hold huge generated trees (session shadow-git repos,
+        # caches): walking them on a FUSE mount can take >90s. Notably
+        # lib/.project_sessions/*/shadow.git/objects holds 600k+ files.
+        _skip = {'__pycache__', '.project_sessions', '.git', '.tofu',
+                 'node_modules', '.ruff_cache', '.pytest_cache'}
+        hits = []
+        for sub in ('lib', 'routes'):
+            for dirpath, dirnames, filenames in os.walk(os.path.join(root, sub)):
+                dirnames[:] = [d for d in dirnames if d not in _skip]
+                for fn in filenames:
+                    if not fn.endswith('.py'):
+                        continue
+                    fpath = os.path.join(dirpath, fn)
+                    try:
+                        with open(fpath, encoding='utf-8') as f:
+                            if any(needle in line for line in f):
+                                hits.append(os.path.relpath(fpath, root))
+                    except (OSError, UnicodeDecodeError):
+                        continue
+        assert len(hits) == 1, f"Expected 1 definition, found {len(hits)}: {hits}"
+        assert hits[0].replace(os.sep, '/') == 'lib/file_reader.py'
 
 
 # ═══════════════════════════════════════════════════════════

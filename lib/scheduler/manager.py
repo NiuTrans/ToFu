@@ -252,6 +252,25 @@ class ScheduledTaskManager:
                 logger.error('[Scheduler] Prompt task failed: cmd=%s: %s', str(command)[:100], e, exc_info=True)
                 return False, 'Prompt execution error (see logs)'
 
+        elif task_type == 'pg_backup':
+            # Scheduled PostgreSQL logical backup (pg_dumpall → data/pg_backups/).
+            # ``command`` is informational only. PG-only; no-op on SQLite.
+            try:
+                from lib.database import backup_pg_database
+                summary = backup_pg_database()
+                if summary.get('ok'):
+                    return True, (f"backup ok: {summary.get('path')} "
+                                  f"({summary.get('size_mb')} MB, "
+                                  f"pruned {summary.get('pruned', 0)})")
+                reason = summary.get('reason', 'unknown')
+                # 'not_pg' / 'pg_unavailable' are expected on SQLite — success.
+                if reason in ('not_pg', 'pg_unavailable'):
+                    return True, f'skipped ({reason})'
+                return False, f'backup failed: {reason}'
+            except Exception as e:
+                logger.error('[Scheduler] pg_backup task failed: %s', e, exc_info=True)
+                return False, 'PG backup error (see logs)'
+
         elif task_type == 'optimizer':
             # Daily Optimizer: runs lib.optimizer.run_once() in-process.
             # ``command`` is informational only (the handler ignores it so
@@ -524,6 +543,45 @@ class ScheduledTaskManager:
             logger.debug('[Scheduler] Could not auto-register Daily Optimizer '
                          '(will retry after schema ready): %s', e)
 
+    def _ensure_default_pg_backup_task(self):
+        """Idempotently register the daily PostgreSQL backup cron task.
+
+        Runs ``lib.database.backup_pg_database()`` nightly at 02:00 local
+        (pg_dumpall → data/pg_backups/, with retention pruning). This is the
+        durability safety net: the 2026-06-04 WAL-corruption incident was
+        only recoverable because a manual dump happened to exist — this makes
+        a recent dump always available. Matched by exact name so subsequent
+        boots never create duplicates. No-op on the SQLite backend (the
+        handler returns a benign 'skipped').
+        """
+        try:
+            db = self._get_db()
+            row = db.execute(
+                "SELECT id FROM scheduled_tasks WHERE name=?",
+                ['PostgreSQL Backup']).fetchone()
+            if row:
+                logger.debug('[Scheduler] PostgreSQL Backup task already present '
+                             '— skipping auto-registration')
+                return
+            task = self.create_task(
+                name='PostgreSQL Backup',
+                schedule='0 2 * * *',
+                command='lib.database.backup_pg_database()',  # informational
+                task_type='pg_backup',
+                description='Nightly pg_dumpall logical backup to data/pg_backups/ '
+                            'with retention pruning (TOFU_PG_BACKUP_RETENTION_DAYS, '
+                            'default 7). Durability safety net for crash recovery. '
+                            'Auto-registered by lib.scheduler.manager.',
+                notify_on_failure=True,
+                notify_on_success=False,
+                max_runtime=1800,
+            )
+            logger.info('[Scheduler] Auto-registered PostgreSQL Backup task id=%s',
+                        task.get('id'))
+        except Exception as e:
+            logger.debug('[Scheduler] Could not auto-register PostgreSQL Backup '
+                         '(will retry after schema ready): %s', e)
+
     def start(self):
         """Start the background scheduler thread."""
         if self._running:
@@ -559,6 +617,17 @@ class ScheduledTaskManager:
                     else:
                         logger.error('[Scheduler] Error in scheduler check loop: %s',
                                      e, exc_info=True)
+                finally:
+                    # Release this long-lived thread's thread-local DB
+                    # connection(s) back to the shared pool before the 30s
+                    # idle sleep — otherwise the scheduler thread pins one
+                    # connection per domain for the whole process lifetime
+                    # (a connection-semaphore leak under high concurrency).
+                    try:
+                        from lib.database import close_thread_db
+                        close_thread_db()
+                    except Exception as _ce:
+                        logger.debug('[Scheduler] close_thread_db failed: %s', _ce)
                 time.sleep(30)  # Check every 30 seconds
 
         self._thread = threading.Thread(target=_loop, daemon=True)
@@ -628,6 +697,12 @@ def start_scheduler_worker():
             mgr._ensure_default_optimizer_task()
         except Exception as e:
             logger.debug('[Scheduler] default-task bootstrap failed: %s', e)
+
+        # Register the daily PostgreSQL backup task (durability safety net).
+        try:
+            mgr._ensure_default_pg_backup_task()
+        except Exception as e:
+            logger.debug('[Scheduler] pg-backup-task bootstrap failed: %s', e)
 
         try:
             from lib.scheduler.timer import resume_active_timers

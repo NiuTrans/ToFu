@@ -30,7 +30,9 @@ from lib.proxy import (
     register_no_proxy_url,
 )
 
-from .discovery import discover_models, is_local_endpoint, normalize_base_url
+from .discovery import (
+    discover_models, is_local_endpoint, is_raw_ip_host, normalize_base_url,
+)
 
 logger = get_logger(__name__)
 
@@ -120,6 +122,109 @@ def _clear_endpoint_cooldowns(prov_id: str, endpoint_url: str) -> int:
                 slot.consecutive_errors = 0
                 n += 1
     return n
+
+
+def _ephemeral_slots_by_endpoint() -> dict:
+    """Group live ephemeral/BYO slots by their (base_url, api_key).
+
+    Ephemeral slots are injected straight into the dispatcher (not present
+    in server_config.json), so the config-driven provider sweep can't see
+    them. Returns ``{base_url: api_key}`` for every slot whose provider_id
+    is tagged ``ephemeral:…``. Only self-hosted / raw-IP endpoints are
+    included — cloud BYO endpoints have their own SLA and polling them
+    would leak host names + waste round-trips.
+    """
+    disp = _get_dispatcher()
+    if not disp:
+        return {}
+    out: dict = {}
+    for slot in list(disp.slots):
+        if not (slot.provider_id or '').startswith('ephemeral:'):
+            continue
+        base_url = (slot.base_url or '').rstrip('/')
+        if not base_url:
+            continue
+        if not is_local_endpoint(base_url) and not is_raw_ip_host(base_url):
+            continue
+        # First slot's key wins; a homogeneous endpoint shares one key.
+        out.setdefault(base_url, slot.api_key or '')
+    return out
+
+
+def _cooldown_ephemeral_endpoint(endpoint_url: str, seconds: int) -> int:
+    """Cool down all ephemeral slots whose base_url matches *endpoint_url*."""
+    disp = _get_dispatcher()
+    if not disp:
+        return 0
+    deadline = time.time() + seconds
+    target = endpoint_url.rstrip('/')
+    n = 0
+    for slot in list(disp.slots):
+        if not (slot.provider_id or '').startswith('ephemeral:'):
+            continue
+        if (slot.base_url or '').rstrip('/') != target:
+            continue
+        with slot._lock:
+            if slot.cooldown_until < deadline:
+                slot.cooldown_until = deadline
+                n += 1
+    return n
+
+
+def _clear_ephemeral_endpoint(endpoint_url: str) -> int:
+    """Clear cooldown on ephemeral slots whose base_url matches *endpoint_url*."""
+    disp = _get_dispatcher()
+    if not disp:
+        return 0
+    target = endpoint_url.rstrip('/')
+    n = 0
+    now = time.time()
+    for slot in list(disp.slots):
+        if not (slot.provider_id or '').startswith('ephemeral:'):
+            continue
+        if (slot.base_url or '').rstrip('/') != target:
+            continue
+        with slot._lock:
+            if slot.cooldown_until > now:
+                slot.cooldown_until = 0.0
+                slot.consecutive_errors = 0
+                n += 1
+    return n
+
+
+def _check_ephemeral_endpoints() -> dict:
+    """Health-check live ephemeral/BYO self-hosted endpoints.
+
+    Mirrors the provider sweep but for slots injected via
+    ``mint_ephemeral_slot``. Cools down slots whose endpoint is dead so
+    the dispatcher routes around them, and clears the cooldown when the
+    box recovers. No model re-discovery — ephemeral slots carry a fixed
+    caller-declared model_id. Returns ``{endpoints_ok, cooldowns}``.
+    """
+    endpoints = _ephemeral_slots_by_endpoint()
+    if not endpoints:
+        return {'endpoints_ok': 0, 'cooldowns': 0}
+    n_ok = 0
+    n_cool = 0
+    for endpoint, api_key in endpoints.items():
+        result = _check_endpoint(endpoint, api_key)
+        if result['ok']:
+            n_ok += 1
+            cleared = _clear_ephemeral_endpoint(endpoint)
+            if cleared:
+                logger.info('[HealthLocal] ephemeral %s recovered — '
+                            'cleared %d cooldown(s)', endpoint, cleared)
+                audit_log('local_endpoint_recovered', provider_id='ephemeral',
+                          endpoint=endpoint)
+        else:
+            cooled = _cooldown_ephemeral_endpoint(endpoint, COOLDOWN_ON_DEAD)
+            if cooled:
+                n_cool += cooled
+                logger.warning('[HealthLocal] ephemeral %s %s — cooled %d slot(s)',
+                               endpoint, result['status'], cooled)
+                audit_log('local_endpoint_down', provider_id='ephemeral',
+                          endpoint=endpoint, reason=result['status'])
+    return {'endpoints_ok': n_ok, 'cooldowns': n_cool}
 
 
 def _persist_provider_models(prov_id: str, models: list[dict]) -> bool:
@@ -230,7 +335,12 @@ def check_once() -> dict:
                 break
 
     if not locals_:
-        return {'providers': 0, 'endpoints_ok': 0, 'cooldowns': 0, 'resynced': 0}
+        # No config-driven local providers, but ephemeral/BYO slots may
+        # still need health-checking — sweep them before returning.
+        eph = _check_ephemeral_endpoints()
+        return {'providers': 0,
+                'endpoints_ok': eph['endpoints_ok'],
+                'cooldowns': eph['cooldowns'], 'resynced': 0}
 
     n_endpoints_ok = 0
     n_cooldown = 0
@@ -347,10 +457,15 @@ def check_once() -> dict:
     if rebuilt:
         _rebuild_dispatcher_slots()
 
+    # Ephemeral/BYO self-hosted slots aren't in server_config — sweep them
+    # in the same cycle so they get the same cool-on-dead / clear-on-recover
+    # treatment as configured local providers.
+    eph = _check_ephemeral_endpoints()
+
     return {
         'providers': len(locals_),
-        'endpoints_ok': n_endpoints_ok,
-        'cooldowns': n_cooldown,
+        'endpoints_ok': n_endpoints_ok + eph['endpoints_ok'],
+        'cooldowns': n_cooldown + eph['cooldowns'],
         'resynced': n_resynced,
     }
 

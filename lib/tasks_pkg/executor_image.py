@@ -578,6 +578,15 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
                 logger.warning('[Tool:generate_image] Failed to resolve source_image: %.80s', source_image[:80])
 
         is_edit = bool(source_images)
+        # Keep a render-friendly reference to the source image for the edit
+        # card's before→after strip — only when it's a URL the browser can
+        # load directly (skip data-URIs / server paths to avoid meta bloat).
+        source_display_url = (
+            source_image
+            if (is_edit and source_image.startswith(('/api/images/', 'http://', 'https://')))
+            else ''
+        )
+        image_mode = 'edit' if is_edit else 'generate'
 
         # ── Emit progress event ──
         round_entry['status'] = 'running'
@@ -586,6 +595,8 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
             'toolName': 'generate_image',
             'imagePrompt': prompt[:100],
             'imageAspectRatio': aspect_ratio, 'imageResolution': resolution,
+            'imageMode': image_mode,
+            'imageSourceUrl': source_display_url,
             'badge': badge_text,
         }]
         append_event(task, build_event(EventType.TOOL_RESULT, roundNum=rn,
@@ -609,6 +620,8 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
                 'toolName': 'generate_image',
                 'imagePrompt': prompt[:100],
                 'imageAspectRatio': aspect_ratio, 'imageResolution': resolution,
+                'imageMode': image_mode,
+                'imageSourceUrl': source_display_url,
                 'badge': badge_429,
             }]
             append_event(task, build_event(EventType.TOOL_RESULT, roundNum=rn,
@@ -655,14 +668,19 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
             # ── SVG conversion (optional) ──
             svg_saved_url = ''
             svg_project_path = ''
+            svg_failed = False
             if svg_convert and image_b64:
                 svg_saved_url, svg_project_path = _convert_to_svg(
                     saved_url, project_save_rel, project_save_base or project_path,
                     conv_id=task.get('convId'), task_id=task.get('id'),
                 )
+                # Requested SVG but nothing came back → surface it, don't hide it.
+                svg_failed = not (svg_saved_url or svg_project_path)
 
             _429_retries = result.get('_429_count', 0)
             _badge_suffix = ' (429×%d)' % _429_retries if _429_retries else ''
+            if svg_failed:
+                _badge_suffix += ' ⚠ svg failed'
             meta = {
                 'toolName': 'generate_image',
                 'imageDataUri': data_uri,
@@ -671,8 +689,11 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
                 'imageResolution': resolution,
                 'imageModel': model_used,
                 'imageText': text_response,
+                'imageMode': image_mode,
                 'badge': f'✓ {model_used}{_badge_suffix}',
             }
+            if source_display_url:
+                meta['imageSourceUrl'] = source_display_url
             if saved_url:
                 meta['imageSavedUrl'] = saved_url
             if project_save_path:
@@ -705,6 +726,11 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
                 fallback_parts.append(f'SVG version saved to project path: {svg_project_path}')
             elif svg_saved_url:
                 fallback_parts.append(f'SVG version saved to: {svg_saved_url}')
+            elif svg_failed:
+                fallback_parts.append(
+                    'Note: SVG conversion was requested (svg=true) but failed — only the '
+                    'PNG was saved. See server logs ([Tool:generate_image] SVG …) for details.'
+                )
 
             # ── Build downsized copy for the chat LLM wire ──
             # The full-res data_uri stays in meta.imageDataUri (frontend render +
@@ -737,6 +763,8 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
                 'imagePrompt': prompt,
                 'imageError': error_msg,
                 'imageAspectRatio': aspect_ratio, 'imageResolution': resolution,
+                'imageMode': image_mode,
+                'imageSourceUrl': source_display_url,
                 'badge': '❌ failed',
             }
             _finalize_tool_round(task, rn, round_entry, [meta])

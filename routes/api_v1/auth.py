@@ -149,6 +149,48 @@ def _is_public(path: str) -> bool:
     return any(path.startswith(p) for p in _PUBLIC_PREFIXES)
 
 
+# Open mode hands every request a synthetic full-admin context. That is
+# safe ONLY for a loopback-bound personal install. If the server is bound
+# to a routable interface (0.0.0.0, Docker port-map, a tunnel) while in
+# open mode, a remote client would otherwise reach the admin API with no
+# credential. We therefore restrict the synthetic grant to loopback peers
+# unless the operator explicitly opts in.
+_OPEN_MODE_ALLOW_REMOTE = (
+    os.environ.get('TOFU_OPEN_MODE_ALLOW_REMOTE', '').strip().lower()
+    in ('1', 'true', 'yes', 'on'))
+
+
+def _remote_is_loopback() -> bool:
+    """True when the request peer is the local host (127.0.0.0/8, ::1).
+
+    Uses ``request.remote_addr`` — the direct socket peer, NOT any
+    ``X-Forwarded-For`` header (which a remote client can spoof). A
+    reverse proxy on the same host still presents 127.0.0.1, so a
+    loopback-only proxy deployment keeps working; a proxy on another box
+    correctly reads as non-loopback.
+    """
+    import ipaddress
+    addr = (request.remote_addr or '').strip()
+    if not addr:
+        # No peer info (some ASGI test harnesses): fail closed.
+        return False
+    # Quart's in-process test client reports the literal '<local>' — an
+    # in-process call IS the local host. Hypercorn uses real socket addrs.
+    if addr == '<local>':
+        return True
+    # Strip IPv6 zone id if present (e.g. 'fe80::1%eth0').
+    addr = addr.split('%', 1)[0]
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    if ip.is_loopback:
+        return True
+    # IPv4-mapped IPv6 loopback (::ffff:127.0.0.1).
+    mapped = getattr(ip, 'ipv4_mapped', None)
+    return bool(mapped and mapped.is_loopback)
+
+
 def _is_api_path(path: str) -> bool:
     """Path participates in the headless contract (rate limits + 401 envelope).
 
@@ -220,13 +262,14 @@ def _legacy_tunnel_token_passes() -> bool:
     tt = os.environ.get('TUNNEL_TOKEN', '')
     if not tt:
         return False
+    import hmac
     cookie_val = request.cookies.get('_tunnel_auth') or ''
     expected = hashlib.sha256(tt.encode()).hexdigest()[:32]
-    if cookie_val == expected:
+    if hmac.compare_digest(cookie_val, expected):
         return True
-    if request.headers.get('X-Tunnel-Token', '') == tt:
+    if hmac.compare_digest(request.headers.get('X-Tunnel-Token', ''), tt):
         return True
-    if request.args.get('token', '') == tt:
+    if hmac.compare_digest(request.args.get('token', ''), tt):
         return True
     return False
 
@@ -263,10 +306,27 @@ async def auth_before_request():
             ctx_open = validate_token(token)
             if ctx_open is not None:
                 touch_key(ctx_open.key_id)
+        # Synthetic full-admin grant is loopback-only by default. A
+        # remote peer in open mode does NOT get the free admin context;
+        # it must present a valid credential (resolved above) or it
+        # falls through to the private-mode rejection path below. This
+        # closes the "bind 0.0.0.0 + open mode = unauthenticated admin"
+        # foot-gun. Operators who front the server with their own auth
+        # can opt back in via TOFU_OPEN_MODE_ALLOW_REMOTE=1.
         if ctx_open is None:
-            ctx_open = local_admin_context()
-        g.auth_ctx = ctx_open
-        return None
+            if _OPEN_MODE_ALLOW_REMOTE or _remote_is_loopback():
+                ctx_open = local_admin_context()
+            else:
+                # Remote, unauthenticated, open mode → behave like
+                # private mode for this request (fall through).
+                _auth_log.warning(
+                    'Auth: open-mode synthetic admin refused for non-loopback '
+                    'peer %s on %s (set TOFU_OPEN_MODE_ALLOW_REMOTE=1 to allow)',
+                    request.remote_addr, path)
+        if ctx_open is not None:
+            g.auth_ctx = ctx_open
+            return None
+        # else: fall through to the credential-required gate below.
 
     is_public = path in _PUBLIC_EXACT
 

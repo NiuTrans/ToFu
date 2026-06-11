@@ -209,9 +209,13 @@ class TestBuildBody:
     def test_unknown_model_no_clamping(self):
         from lib.llm import build_body
 
+        # An unknown model is not subject to the per-model output-ceiling
+        # clamp (_clamp_max_tokens). 500000 stays well under the 1M default
+        # context window, so the context-window clamp
+        # (_clamp_completion_to_context_window) leaves it untouched too.
         body = build_body("unknown-model-xyz", self.DUMMY_MSGS,
-                         max_tokens=999999, stream=False)
-        assert body["max_tokens"] == 999999
+                         max_tokens=500000, stream=False)
+        assert body["max_tokens"] == 500000
         assert "thinking" not in body
         assert "enable_thinking" not in body
 
@@ -503,9 +507,13 @@ class TestByoProviderThinkingFormat:
 
     def test_create_default_is_empty(self, monkeypatch, tmp_path):
         byo = self._isolate(monkeypatch, tmp_path)
+        # Use a private IP literal (like the sibling tests) so the SSRF egress
+        # guard in _validate_base_url passes without a live DNS lookup — CI
+        # runners have no outbound DNS, and a real hostname here would raise
+        # EgressDenied('DNS resolution failed').
         row = byo.create_provider(
             owner_key_id='k_test', name='cloud',
-            base_url='https://api.example.com/v1', api_key='', models=[],
+            base_url='http://10.0.0.1:8080/v1', api_key='', models=[],
         )
         assert row['thinking_format'] == ''
 

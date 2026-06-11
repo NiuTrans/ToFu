@@ -92,6 +92,7 @@ _FIELDS: list[tuple[str, str, type, Any, Optional[tuple], str]] = [
     # ── Project / paths ───────────────────────────────────────────
     ('projectPath',           'project_path',          str,   '',     None, 'Primary project directory.'),
     ('projectPaths',          'project_paths',         list,  None,   None, 'Multi-root project paths.'),
+    ('readOnlyPaths',         'read_only_paths',       list,  None,   None, 'Subset of project paths registered read-only (no writes/edits).'),
 
     # ── Caller-supplied overrides ─────────────────────────────────
     ('tools',                 'tools',                 list,  None,   None,
@@ -116,6 +117,15 @@ _FIELDS: list[tuple[str, str, type, Any, Optional[tuple], str]] = [
     ('maxBudgetUsd',          'max_budget_usd',        float, 0.0,    None,
         'Hard $ ceiling on accumulated token cost; 0 = no budget gate. '
         'Inspired by Claude Agent SDK\'s max_budget_usd.'),
+    ('disableModelFallback',  'disable_model_fallback', bool, False,  None,
+        'Opt OUT of automatic model fallback for THIS request. The server '
+        'admin configures a global fallback model (Settings → model '
+        'defaults); when the primary model errors, the round is silently '
+        're-run on that fallback model. Headless callers who pin a model '
+        '(reproducible runs, benchmarks, evals) usually do NOT want this '
+        'silent switch — set true to surface the primary error instead '
+        '(error envelope context="fallback-disabled"). Default false = '
+        'inherit the server behaviour.'),
 
     # ── Misc / advanced ───────────────────────────────────────────
     ('autoApply',             'auto_apply',            bool,  True,   None, 'Apply edits without prompting.'),
@@ -208,6 +218,7 @@ class TofuOptions:
     # Project / paths
     project_path: str = ''
     project_paths: Optional[list] = None
+    read_only_paths: Optional[list] = None
 
     # Caller-supplied overrides
     tools: Optional[list] = None
@@ -222,6 +233,7 @@ class TofuOptions:
 
     # Safety / limits
     max_budget_usd: float = 0.0
+    disable_model_fallback: bool = False
 
     # Misc / advanced
     auto_apply: bool = True

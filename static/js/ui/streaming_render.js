@@ -521,13 +521,6 @@ function _forceScrollToBottom(container, forceActualHeights) {
 
   container.scrollTop = container.scrollHeight;
 
-  if (forceActualHeights && inner) {
-    // Re-enable content-visibility:auto.  The browser caches the actual
-    // heights it just computed (via "auto" in contain-intrinsic-size),
-    // so scrollHeight stays correct and the scroll position doesn't shift.
-    inner.classList.remove('cv-off');
-  }
-
   // Safety net for async content (images, KaTeX, code highlights).
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
@@ -537,6 +530,16 @@ function _forceScrollToBottom(container, forceActualHeights) {
   setTimeout(() => {
     container.scrollTop = container.scrollHeight;
     container.style.scrollBehavior = '';
+    if (forceActualHeights && inner) {
+      // Re-enable content-visibility:auto only AFTER scroll has fully settled.
+      // Keeping cv-off across the rAF + 150ms passes means every tool-round slot
+      // ([data-prn]) stays rendered during the switch instead of flashing empty
+      // (collapsing to its 32px contain-intrinsic-size placeholder) as the browser
+      // re-evaluates off-screen slots against a still-moving scroll position.
+      // The browser cached real heights (via "auto" contain-intrinsic-size) while
+      // cv-off was on, so scrollHeight stays correct when auto-skip resumes here.
+      inner.classList.remove('cv-off');
+    }
   }, 150);
 }
 

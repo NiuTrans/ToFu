@@ -327,7 +327,7 @@ def _install_requirements() -> dict:
     return {'ok': True, 'detail': (cp.stdout or '')[-300:]}
 
 
-def apply_update() -> dict:
+def apply_update(progress=None) -> dict:
     """Run ``git fetch`` + ``git pull --ff-only``. Returns a result dict.
 
     Refuses (without mutating anything) when:
@@ -339,6 +339,14 @@ def apply_update() -> dict:
     the update is self-contained — the outcome does NOT depend on the
     launcher (bootstrap.py) nor on a crash-and-recover restart.
 
+    Args:
+        progress: Optional callable ``fn(stage, status, detail='')`` invoked
+            as the update advances so a UI can render live progress instead
+            of staring at a frozen modal. ``stage`` is one of
+            ``fetch`` / ``pull`` / ``deps``; ``status`` is
+            ``active`` / ``done`` / ``skip`` / ``error``. Never lets a
+            callback exception break the update.
+
     Returns::
 
         {'ok': bool, 'old_version': str, 'new_version': str,
@@ -346,6 +354,14 @@ def apply_update() -> dict:
          'detail': str, 'deps_changed': bool, 'deps_installed': bool,
          'deps_detail': str}
     """
+    def _emit(stage: str, status: str, detail: str = ''):
+        if not progress:
+            return
+        try:
+            progress(stage, status, detail)
+        except Exception as e:
+            logger.debug('[Update] progress callback failed: %s', e)
+
     old = current_version()
     result = {'ok': False, 'old_version': old, 'new_version': old,
               'changed': False, 'needs_restart': False,
@@ -357,6 +373,7 @@ def apply_update() -> dict:
         result['error'] = ('Not a git checkout — in-place update requires '
                            'git. Re-run install.sh to update.')
         logger.warning('[Update] apply refused: git unavailable')
+        _emit('fetch', 'error', result['error'])
         return result
 
     status = working_tree_status()
@@ -368,20 +385,25 @@ def apply_update() -> dict:
         result['detail'] = f'{len(status["blocking"])} changed file(s): {sample}'
         logger.warning('[Update] apply refused: dirty tree (%d blocking) — %s',
                        len(status['blocking']), sample)
+        _emit('fetch', 'error', result['detail'])
         return result
 
     before_sha = _head_sha()
 
     with log_context('self_update.git_pull', logger=logger):
         try:
+            _emit('fetch', 'active')
             fetch_cp = _run_git(['fetch', UPDATE_REMOTE, UPDATE_BRANCH],
                                 timeout=_GIT_TIMEOUT)
             if fetch_cp.returncode != 0:
                 result['error'] = 'git fetch failed.'
                 result['detail'] = (fetch_cp.stderr or fetch_cp.stdout)[:500]
                 logger.error('[Update] git fetch failed: %s', result['detail'])
+                _emit('fetch', 'error', result['detail'])
                 return result
+            _emit('fetch', 'done')
 
+            _emit('pull', 'active')
             pull_cp = _run_git(
                 ['pull', '--ff-only', UPDATE_REMOTE, UPDATE_BRANCH],
                 timeout=_GIT_TIMEOUT)
@@ -390,16 +412,19 @@ def apply_update() -> dict:
                                    'have diverged).')
                 result['detail'] = (pull_cp.stderr or pull_cp.stdout)[:500]
                 logger.error('[Update] git pull failed: %s', result['detail'])
+                _emit('pull', 'error', result['detail'])
                 return result
 
             out = (pull_cp.stdout or '').strip()
             result['detail'] = out[:500]
             result['changed'] = 'Already up to date' not in out
+            _emit('pull', 'done')
         except (FileNotFoundError, subprocess.TimeoutExpired,
                 subprocess.SubprocessError) as e:
             result['error'] = 'git command error during update.'
             result['detail'] = str(e)[:500]
             logger.error('[Update] git pull errored: %s', e, exc_info=True)
+            _emit('pull', 'error', result['detail'])
             return result
 
     # Re-read VERSION from disk (it may have just changed on a real pull).
@@ -425,6 +450,7 @@ def apply_update() -> dict:
         after_sha = _head_sha()
         result['deps_changed'] = _requirements_changed(before_sha, after_sha)
         if result['deps_changed']:
+            _emit('deps', 'active')
             dep = _install_requirements()
             result['deps_installed'] = dep['ok']
             result['deps_detail'] = dep['detail']
@@ -434,6 +460,13 @@ def apply_update() -> dict:
                     'Code updated, but installing new dependencies failed. '
                     'Run "pip install -r requirements.txt" manually, then '
                     'restart.')
+                _emit('deps', 'error', dep['detail'])
+            else:
+                _emit('deps', 'done')
+        else:
+            _emit('deps', 'skip')
+    else:
+        _emit('deps', 'skip')
 
     audit_log('self_update',
               old_version=old, new_version=new,

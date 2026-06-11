@@ -26,13 +26,14 @@ logger = get_logger(__name__)
 
 from lib.tasks_pkg.approval import request_write_approval
 from lib.tasks_pkg.compaction import budget_tool_result, enforce_round_aggregate_budget, mark_empty_result
-from lib.tasks_pkg.executor import SWARM_TOOL_NAMES, _build_simple_meta, _execute_tool_one, _finalize_tool_round
+from lib.tasks_pkg.executor import SWARM_TOOL_NAMES, _build_simple_meta, _execute_tool_one, _finalize_tool_round, tool_registry
 from lib.tasks_pkg.manager import _strip_base64_for_snapshot, append_event
 from lib.tasks_pkg.tool_display import _build_tool_round_entry
 from lib.tasks_pkg.tool_hooks import run_post_hooks, run_pre_hooks
 from lib.token_counter import count_text
-from lib.tool_input_repair import validate_then_repair
+from lib.tool_input_repair import resolve_tool_name, schema_hint, validate_then_repair
 from lib.tools import PROJECT_TOOL_NAMES, build_project_tool_meta
+from lib.model_info import model_supports_vision
 
 
 # ── Harness self-repair UI surfacing ─────────────────────────────────
@@ -51,20 +52,29 @@ _REPAIR_PATTERN_LABELS = {
 }
 
 
-def _build_repair_summary(json_repaired: bool, repair_log) -> dict | None:
+def _build_repair_summary(json_repaired: bool, repair_log, tool_name_aliased: str | None = None,
+                          resolved_tool_name: str | None = None) -> dict | None:
     """Build a UI-facing repair descriptor, or None when nothing was fixed.
 
     Returns ``{'label': str, 'detail': str, 'patterns': [...]}`` describing
     the auto-corrections applied to a tool call's arguments.
+
+    ``tool_name_aliased`` / ``resolved_tool_name``: when the model called a
+    tool by a wrong-harness name (e.g. ``read_file``) that we rewrote to the
+    canonical Tofu tool (``read_files``), record it so the UI shows the fix.
     """
     parts = []
     patterns = []
+    if tool_name_aliased and resolved_tool_name:
+        parts.append(f'renamed tool {tool_name_aliased} → {resolved_tool_name}')
+        patterns.append('tool_name_alias')
     if json_repaired:
         parts.append('recovered malformed JSON')
     for entry in (repair_log or []):
         try:
             path, pattern = entry
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            logger.debug('[tool_dispatch] skipping malformed repair_log entry %r: %s', entry, e)
             continue
         patterns.append(pattern)
         label = _REPAIR_PATTERN_LABELS.get(pattern, pattern)
@@ -176,6 +186,27 @@ def _registry_tool_flags() -> tuple[frozenset, frozenset]:
 _WRITE_TOOLS, _IDEMPOTENT_TOOLS = _registry_tool_flags()
 
 
+
+def _execute_tool_one_pooled(*args, **kwargs):
+    """Run ``_execute_tool_one`` then release the worker's thread-local DB conn.
+
+    Parallel tools run on a per-round ``ThreadPoolExecutor`` whose threads are
+    reused across submissions and only torn down at pool shutdown. A tool that
+    touches the DB (memory, conversation, mcp handlers) would otherwise pin a
+    connection on its worker thread for the whole round; under high concurrency
+    that compounds across tasks and exhausts the connection semaphore. Release
+    at the worker boundary so the connection returns to the shared pool.
+    """
+    try:
+        return _execute_tool_one(*args, **kwargs)
+    finally:
+        try:
+            from lib.database import close_thread_db
+            close_thread_db()
+        except Exception as _ctd_err:
+            logger.debug('[tool_dispatch] pooled close_thread_db failed: %s', _ctd_err)
+
+
 def _make_cache_key(fn_name: str, fn_args: dict[str, Any]) -> str:
     """Build a deterministic cache key from tool name + arguments.
 
@@ -234,6 +265,29 @@ def _build_cache_hit_meta(
     tool handler would produce, so the UI shows the same preview regardless
     of whether the result was freshly executed or served from cache.
     """
+    # ── read_files image: preserve inline-render data URI ──
+    # Prefetched/cached read_files image results are __screenshot__ dicts
+    # (batches are collapsed to the first image upstream). str() on the dict
+    # would dump base64 into the snippet, so handle it explicitly.
+    if isinstance(cached_content, dict) and cached_content.get('__screenshot__'):
+        fmt = cached_content.get('format', 'png')
+        comp_size = cached_content.get('compressedSize', 0)
+        filename = os.path.basename(fn_args.get('path', '') or '')
+        data_uri = cached_content.get('dataUrl', '') or ''
+        source_label = 'Prefetch' if is_prefetch else 'Cache'
+        badge_suffix = '' if is_prefetch else ' (cached)'
+        meta = {
+            'toolName': fn_name,
+            'title': f'🖼️ {filename}' if filename else '🖼️ image',
+            'snippet': f'{filename or "image"} ({fmt}, {comp_size:,} bytes)',
+            'source': source_label, 'fetched': True,
+            'fetchedChars': comp_size, 'url': '',
+            'badge': f'🖼️ {fmt}{badge_suffix}',
+        }
+        if data_uri:
+            meta['imageDataUris'] = [{'uri': data_uri, 'format': fmt, 'filename': filename}]
+        return meta
+
     content_str = cached_content if isinstance(cached_content, str) else str(cached_content)
     chars = len(content_str)
     source_label = 'Prefetch' if is_prefetch else 'Cache'
@@ -434,6 +488,29 @@ def parse_tool_calls(
         if not fn_name.replace('_', '').replace('-', '').isalnum():
             logger.warning('[Task %s] Skipping malformed tool name (non-alphanumeric): %.80s', tid, fn_name)
             continue
+        # ── Tool-NAME repair (alias resolution) ──
+        # The model sometimes calls a tool by a name from another harness
+        # (read_file→read_files, bash→run_command, Grep→grep_search, …).
+        # Rewrite well-known synonyms to the canonical Tofu tool so the call
+        # executes instead of dying on a hard "Unknown tool" wall. Only
+        # confident 1:1 mappings are applied; anything unrecognized passes
+        # through and still surfaces the honest unknown-tool error.
+        if fn_name not in tool_registry:
+            _resolved, _alias_kind = resolve_tool_name(fn_name)
+            if _alias_kind and _resolved != fn_name:
+                logger.info('[Task %s] Aliased tool name %r → %r (%s)',
+                            tid, fn_name, _resolved, _alias_kind)
+                _tool_name_aliased = fn_name
+                fn_name = _resolved
+                # Rewrite the name in-place so the persisted assistant message
+                # carries the canonical tool name — otherwise replay/continue
+                # would re-trigger the same alias every turn and the stored
+                # tool_call name would mismatch the executed tool.
+                fn_obj['name'] = _resolved
+            else:
+                _tool_name_aliased = None
+        else:
+            _tool_name_aliased = None
         # Guard against phantom tool calls: valid name but empty arguments,
         # AND another tool call with the SAME name has real arguments.
         # This avoids dropping legitimate no-arg tools
@@ -473,14 +550,31 @@ def parse_tool_calls(
                     tid, task.get('convId', ''), fn_name, tc_id, round_num, e)
 
             except Exception as e:
+                # Capture the raw offending argument string so the failure is
+                # diagnosable after the fact. Without this, error.log records
+                # only the char offset ("Expecting ':' delimiter ... char 132")
+                # and the malformed text is discarded — making every
+                # structural-JSON failure impossible to reconstruct.
+                _raw_for_log = raw_args if isinstance(raw_args, str) else str(raw_args)
+                _err_pos = getattr(e, 'pos', None)
+                if isinstance(_err_pos, int):
+                    _lo = max(0, _err_pos - 40)
+                    _around = _raw_for_log[_lo:_err_pos + 40]
+                    _window = ' near=...%r...' % _around
+                else:
+                    _window = ''
                 logger.warning(
-                    '[Task %s] conv=%s Failed to parse tool args for tool=%s tc_id=%s at round %d: %s',
-                    tid, task.get('convId', ''), fn_name, tc_id, round_num, e, exc_info=True)
+                    '[Task %s] conv=%s Failed to parse tool args for tool=%s tc_id=%s at round %d: %s | '
+                    'raw_args(%d chars)=%.800r%s',
+                    tid, task.get('convId', ''), fn_name, tc_id, round_num, e,
+                    len(_raw_for_log), _raw_for_log, _window, exc_info=True)
 
                 fn_args = {}
+                _hint = schema_hint(fn_name)
                 _args_parse_error = (
                     f'ERROR: Your tool call for `{fn_name}` had malformed JSON '
                     f'arguments — {e}. Please retry with valid JSON.'
+                    + (f' {_hint}' if _hint else '')
                 )
 
         # ── Schema-driven shape repair (Awais open-model-harness patterns) ──
@@ -507,7 +601,10 @@ def parse_tool_calls(
                 )
 
         # ── Build a UI-facing repair summary (None when nothing was fixed) ──
-        _repair_summary = _build_repair_summary(_json_repaired, _repair_log)
+        _repair_summary = _build_repair_summary(
+            _json_repaired, _repair_log,
+            tool_name_aliased=_tool_name_aliased, resolved_tool_name=fn_name,
+        )
 
         # ── Check if this tool was already announced during streaming ──
         if tc_id in _early:
@@ -658,19 +755,19 @@ _SERIAL_BLOCKING_TOOLS: dict[str, dict] = {
 
 
 def _unpack_cache_entry(cached) -> tuple:
-    """Unpack a dedup cache entry into (content, is_search, source, display, engine_breakdown).
+    """Unpack a dedup cache entry into (content, is_search, source, display, engine_breakdown, vertical).
 
-    Handles all legacy tuple lengths (2–5) and bare values gracefully.
+    Handles all legacy tuple lengths (2–6) and bare values gracefully.
     """
     if not isinstance(cached, (tuple, list)):
         logger.debug('[Dedup] cache value is %s not tuple — wrapping', type(cached).__name__)
-        return (cached, False, 'dedup', None, None)
-    # Pad to length 5 with defaults
-    defaults = (None, False, 'dedup', None, None)
+        return (cached, False, 'dedup', None, None, None)
+    # Pad to length 6 with defaults
+    defaults = (None, False, 'dedup', None, None, None)
     padded = tuple(cached) + defaults[len(cached):]
-    if len(cached) < 2 or len(cached) > 5:
+    if len(cached) < 2 or len(cached) > 6:
         logger.warning('[Dedup] cache entry has unexpected length %d', len(cached))
-    return padded[:5]
+    return padded[:6]
 
 
 def execute_tool_pipeline(
@@ -762,7 +859,7 @@ def execute_tool_pipeline(
             cache_key = _make_cache_key(fn_name, fn_args)
             cached = _cache.get(cache_key)
             if cached is not None:
-                cached_content, cached_is_search, cached_source, cached_display, cached_engine_bkdn = \
+                cached_content, cached_is_search, cached_source, cached_display, cached_engine_bkdn, cached_vertical = \
                     _unpack_cache_entry(cached)
                 is_prefetch = cached_source == 'prefetch'
                 # Compute content length for logging without materializing
@@ -800,6 +897,27 @@ def execute_tool_pipeline(
                         if cached_engine_bkdn:
                             round_entry['engineBreakdown'] = cached_engine_bkdn
                             extra['engineBreakdown'] = cached_engine_bkdn
+                        if cached_vertical:
+                            # Batch web_search carries multiple verticals. The
+                            # streaming prefetch path wraps them as
+                            # {'batch': [...]}, and the dedup path may hand us a
+                            # bare list. Both must land in the plural `verticals`
+                            # field — the frontend renders that as an array;
+                            # `vertical` (singular) expects one {domain, items}
+                            # dict and would silently drop a list/wrapper
+                            # (showing the bare "vertical: auto" badge with no card).
+                            if isinstance(cached_vertical, dict) and 'batch' in cached_vertical:
+                                _verts = cached_vertical.get('batch') or []
+                            elif isinstance(cached_vertical, list):
+                                _verts = cached_vertical
+                            else:
+                                _verts = None
+                            if _verts is not None:
+                                round_entry['verticals'] = _verts
+                                extra['verticals'] = _verts
+                            else:
+                                round_entry['vertical'] = cached_vertical
+                                extra['vertical'] = cached_vertical
                         _finalize_tool_round(
                             task, rn, round_entry, cached_display,
                             query_override=round_entry.get('query', fn_name),
@@ -917,7 +1035,7 @@ def execute_tool_pipeline(
         try:
             futures = {
                 pool.submit(
-                    _execute_tool_one, task,
+                    _execute_tool_one_pooled, task,
                     tc, fn_name, tc_id, fn_args, rn, round_entry,
                     cfg, project_path, project_enabled,
                     all_tools=tool_list,
@@ -952,13 +1070,15 @@ def execute_tool_pipeline(
                                     # (e.g. batch "3 URLs" stays as 3 rows, not 1 generic row).
                                     _pi_display = None
                                     _pi_eng_bkdn = None
+                                    _pi_vert = None
                                     if fut_fn_name in ('web_search', 'fetch_url'):
                                         _pi_re = _pi[5]  # round_entry
                                         if _pi_re and _pi_re.get('results'):
                                             _pi_display = _pi_re['results']
                                         if _pi_re:
                                             _pi_eng_bkdn = _pi_re.get('engineBreakdown')
-                                    _cache[_pi_cache_key] = (tool_content, is_search, 'dedup', _pi_display, _pi_eng_bkdn)
+                                            _pi_vert = _pi_re.get('vertical') or _pi_re.get('verticals')
+                                    _cache[_pi_cache_key] = (tool_content, is_search, 'dedup', _pi_display, _pi_eng_bkdn, _pi_vert)
                                     break
                         # ── Invalidate project cache after write/exec ops ──
                         elif fut_fn_name in ('write_file', 'apply_diff', 'apply_diffs',
@@ -1039,6 +1159,39 @@ def execute_tool_pipeline(
 
         # Convert screenshot dict → image_url content block for vision models
         if isinstance(tool_content, dict) and tool_content.get('__screenshot__'):
+            _active_model = task.get('model', '') if task else ''
+            if _active_model and not model_supports_vision(_active_model):
+                # Text-only model: never build an image_url block (build_body
+                # would strip it later and leave a misleading "analyze it
+                # visually" text). Instead, return a truthful tool result AT
+                # the tool-call site so the model knows the image is unreadable
+                # and stops re-rendering / re-reading images.
+                tc_content_str = (
+                    '[Image not shown — the current model (%s) has no vision '
+                    'support, so this image cannot be analyzed. Do not retry '
+                    'reading images; rely on text, code, and test output '
+                    'instead.]' % _active_model)
+                messages.append({'role': 'tool', 'tool_call_id': tc_id,
+                                 'content': tc_content_str})
+                logger.info(
+                    '[Task %s] conv=%s text-only model %s — image tool result '
+                    'for tc=%s replaced with no-vision placeholder',
+                    tid, task.get('convId', '') if task else '', _active_model, tc_id)
+                if round_entry:
+                    round_entry['toolContent'] = tc_content_str
+                try:
+                    append_event(task, build_event(
+                        EventType.TOOL_COMPLETE,
+                        roundNum=rn,
+                        toolCallId=tc_id,
+                        toolName=fn_name,
+                        toolContent=tc_content_str,
+                    ))
+                except Exception as e:
+                    logger.warning(
+                        '[Task %s] tool_complete event error for tool=%s at round %d (non-fatal): %s',
+                        tid, fn_name, round_num, e, exc_info=True)
+                continue
             _append_screenshot_message(messages, tc_id, tool_content)
             # Emit tool_complete for screenshot with text fallback
             try:
@@ -1424,6 +1577,7 @@ def _handle_approval(
     append_event(task, build_event(
         EventType.WRITE_APPROVAL_REQUEST,
         roundNum=rn,
+        toolCallId=round_entry.get('toolCallId', ''),
         approvalId=approval_id,
         meta=approval_meta,
     ))

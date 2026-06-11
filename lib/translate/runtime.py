@@ -9,16 +9,13 @@ because callers in lib.tasks_pkg.manager and tests import them by name.
 New code should use the runtime directly.
 """
 
-import threading
 import time
 
-from lib.log import audit_log, get_logger
+from lib.log import get_logger
 from lib.task_runtime import TaskRuntime
 
-from .chunking import _split_text_for_translation
 from .commit import _commit_translation_to_db
-from .constants import _CHUNK_MAX_WORKERS, _CHUNK_THRESHOLD
-from .engine import _translate_one_chunk
+from .engine import _translate_freetext
 from .notranslate import _extract_notranslate_blocks, _reattach_notranslate_blocks
 from .prompt import _build_translate_prompt, _strip_notranslate_tags
 from .status import _format_status_message
@@ -39,15 +36,6 @@ _translate_runtime = TaskRuntime(
 #                            for new code; this name exists only for diff minimisation)
 _translate_tasks_lock = _translate_runtime._lock      # type: ignore[attr-defined]
 _translate_tasks = _translate_runtime._tasks          # type: ignore[attr-defined]
-
-
-# Audit log on import so any change to chunked-translate parallelism is
-# captured in the audit trail (matches the original module's behavior).
-audit_log('config_change',
-          param='translate_chunk_max_workers',
-          old=4, new=_CHUNK_MAX_WORKERS,
-          approved_by='user',
-          rationale='speed up agent translation by raising chunked-translate parallelism')
 
 
 def _cleanup_translate_tasks():
@@ -136,48 +124,15 @@ def _do_translate(task_id, text, target, source, conv_id, msg_idx, field, *, msg
                                  task_id[:8], e)
                 return
 
-        if input_len > _CHUNK_THRESHOLD:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            chunks = _split_text_for_translation(text, max_chunk=8000)
-            n_chunks = len(chunks)
-            logger.info('[Translate] Task %s: splitting %d chars into %d chunks (parallel)',
-                        task_id[:8], input_len, n_chunks)
-            translated_chunks = [None] * n_chunks
-            _model = 'unknown'
-            _done_count = [0]
-            _done_lock = threading.Lock()
-
-            def _translate_indexed(idx, chunk):
-                label = f':chunk{idx+1}/{n_chunks}'
-                c, u = _translate_one_chunk(chunk, system_prompt, label,
-                                            source=source, target=target,
-                                            status_cb=_on_status)
-                return idx, c, u
-
-            max_workers = min(n_chunks, _CHUNK_MAX_WORKERS)
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                futures = {pool.submit(_translate_indexed, i, ch): i for i, ch in enumerate(chunks)}
-                for future in as_completed(futures):
-                    idx, c, u = future.result()
-                    translated_chunks[idx] = c
-                    if isinstance(u, dict):
-                        _disp = u.get('_dispatch', {})
-                        _model = _disp.get('model', u.get('model', _model))
-                    with _done_lock:
-                        _done_count[0] += 1
-                    with _translate_tasks_lock:
-                        task['progress'] = f'{_done_count[0]}/{n_chunks}'
-            content = '\n\n'.join(translated_chunks)
-        else:
-            content, _usage = _translate_one_chunk(text, system_prompt,
-                                                   source=source, target=target,
-                                                   status_cb=_on_status,
-                                                   progress_cb=_on_progress)
-            _model = 'unknown'
-            if isinstance(_usage, dict):
-                _disp = _usage.get('_dispatch', {})
-                _model = _disp.get('model', _usage.get('model', 'unknown'))
-            content = content.strip()
+        content, _usage = _translate_freetext(text, system_prompt,
+                                              source=source, target=target,
+                                              status_cb=_on_status,
+                                              progress_cb=_on_progress)
+        _model = 'unknown'
+        if isinstance(_usage, dict):
+            _disp = _usage.get('_dispatch', {})
+            _model = _disp.get('model', _usage.get('model', 'unknown'))
+        content = content.strip()
 
         if nt_blocks:
             content = _reattach_notranslate_blocks(content, nt_blocks)

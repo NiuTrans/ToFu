@@ -289,7 +289,7 @@ async function _skillsCatalogInstall(skillId, btn) {
 }
 
 async function _skillsUninstall(memoryId) {
-  if (!confirm('确定要卸载技能包 "' + memoryId + '" 吗？整个目录会被删除。')) return;
+  if (!await showConfirm('确定要卸载技能包 "' + memoryId + '" 吗？整个目录会被删除。', { danger: true })) return;
   try {
     var r = await Api.memory.remove(memoryId);
     if (!r || !r.ok) {

@@ -9,7 +9,7 @@ Key boundaries addressed:
     instead of importing ``lib.llm_dispatch`` / ``lib.llm`` directly.
 
   • **FetchService** — used by tasks_pkg.executor, trading.intel instead of
-    importing ``lib.fetch`` directly.
+    importing ``tofu_search.fetch`` directly.
 
   • **TradingDataProvider** — used by trading_autopilot instead of importing
     ``lib.trading`` directly.
@@ -127,7 +127,7 @@ class FetchService(Protocol):
     """Protocol for web content fetching.
 
     Satisfied by:
-      - ``lib.fetch`` module-level functions (fetch_page_content, fetch_urls)
+      - ``tofu_search.fetch`` module-level functions (fetch_page_content, fetch_urls)
       - Any adapter wrapping a custom HTTP/browser fetch layer
       - Test mocks that return pre-canned page content
 

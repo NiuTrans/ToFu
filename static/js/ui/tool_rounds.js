@@ -135,7 +135,7 @@ function _getRoundIcon(round) {
   return round.toolName || "generic";
 }
 function _getRoundColor(round) {
-  if (_isRoundImageGen(round)) return "#e879f9";
+  if (_isRoundImageGen(round)) return _imageGenMode(round) === "edit" ? "#22d3ee" : "#e879f9";
   if (_isRoundProject(round)) return "#f59e0b";
   if (_isRoundBrowser(round)) return "#a78bfa";
   if (_isRoundFetch(round)) return "#34d399";
@@ -231,11 +231,23 @@ const _webToolSvg = {
 };
 
 const _imageGenSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>';
+/* Image EDITING icon — a wand/sparkle to visually separate "edit an existing
+ * image" from "generate from scratch" (the framed-photo icon above). */
+const _imageEditSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>';
+/* Chip-sized (12px) glyphs for the mode chips — Lucide "sparkles" (generate)
+ * and "wand" (edit). Inline SVG, not emoji, per the icon convention (§3.4). */
+const _imageGenChipSvg = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/></svg>';
+const _imageEditChipSvg = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>';
+/* Return 'edit' or 'generate' for an image-gen round (defaults to generate). */
+function _imageGenMode(round) {
+  const m = (round.results && round.results[0]) || {};
+  return m.imageMode === "edit" ? "edit" : "generate";
+}
 
 /* ── Get the correct SVG for any tool type ── */
 function _getToolSvg(round) {
   const icon = _getRoundIcon(round);
-  if (_isRoundImageGen(round)) return _imageGenSvg;
+  if (_isRoundImageGen(round)) return _imageGenMode(round) === "edit" ? _imageEditSvg : _imageGenSvg;
   if (_isRoundProject(round)) return _projToolSvg[icon] || _projToolSvg.file;
   if (_isRoundBrowser(round)) return _browserToolSvg[icon] || _browserToolSvg.tabs;
   return _webToolSvg[icon] || _webToolSvg[round.toolName] || _webToolSvg.generic;
@@ -349,12 +361,22 @@ function _renderToolRootPill(round) {
 function _renderToolRepairedBadge(round) {
   const rep = round && round._repaired;
   if (!rep) return "";
-  const label = escapeHtml(rep.label || "auto-fixed");
+  /* The repair changed the call's SHAPE, but that doesn't guarantee the
+   * call then SUCCEEDED. When the executed tool still failed (write tools
+   * set meta.writeOk === false), claiming "auto-fixed" is misleading — the
+   * coercion produced a still-broken call. Downgrade to "fix attempted"
+   * (amber) so the badge matches the red failure badge next to it. */
+  const meta = (round.results || [])[0] || {};
+  const stillFailed = meta.writeOk === false;
+  const label = escapeHtml(stillFailed ? "fix attempted" : (rep.label || "auto-fixed"));
   const tip = escapeHtml(
-    "Harness auto-corrected this call's arguments before running it" +
+    (stillFailed
+      ? "Harness coerced this call's malformed arguments, but the call still failed"
+      : "Harness auto-corrected this call's arguments before running it") +
     (rep.detail ? ":\n" + rep.detail : ".")
   );
-  return `<span class="ptool-badge ptool-badge-repaired" title="${tip}">🔧 ${label}</span>`;
+  const cls = stillFailed ? "ptool-badge-warn" : "ptool-badge-repaired";
+  return `<span class="ptool-badge ${cls}" title="${tip}">🔧 ${label}</span>`;
 }
 
 /**
@@ -479,6 +501,119 @@ function _renderInboxInjectRow(round) {
          <span class="sw-inbox-row-chev">▾</span>
        </summary>
        <div class="sw-inbox-row-body">${bodyHtml}</div>
+     </details>`;
+}
+
+/* ── Vertical-domain card: HF Papers / Semantic Scholar / arXiv / etc. ──
+ * Distinct from web results: renders one labeled card per domain that
+ * carried structured items, ranked by upvotes (HF) or citations (S2).
+ * Brand icons live under static/icons/ per CLAUDE.md §3.4. */
+function _renderVerticalIcon(domain) {
+  const d = (domain || "").toLowerCase();
+  // Generic SVG sigils per domain — keep emoji-free per project convention.
+  if (d === "academic")
+    return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1.5 3 3 6 3s6-1.5 6-3v-5"/></svg>';
+  if (d === "code")
+    return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>';
+  if (d === "finance")
+    return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="14 7 21 7 21 14"/></svg>';
+  if (d === "security")
+    return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z"/></svg>';
+  if (d === "network")
+    return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20"/></svg>';
+  return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><circle cx="11" cy="11" r="3"/></svg>';
+}
+
+function _renderVerticalCard(v) {
+  if (!v || typeof v !== "object") return "";
+  const items = Array.isArray(v.items) ? v.items : [];
+  if (!items.length) return "";
+  const domain = String(v.domain || "vertical");
+  const sources = Array.isArray(v.sources) ? v.sources : [];
+  const sourceLabel = sources.length
+    ? sources.map(s => s.source || s.type || "").filter(Boolean).join(" · ")
+    : "";
+  const queryLabel = v.query ? ` · ${escapeHtml(String(v.query).slice(0, 60))}` : "";
+  const rows = items.slice(0, 12).map(it => {
+    const title = escapeHtml(String(it.title || "(untitled)"));
+    const url = String(it.url || "");
+    const titleHtml = url
+      ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${title}</a>`
+      : `<span>${title}</span>`;
+    const meta = [];
+    if (it.upvotes != null && it.upvotes !== "")
+      meta.push(`<span class="vertical-meta-pill" title="Upvotes">▲ ${escapeHtml(String(it.upvotes))}</span>`);
+    if (it.citations != null && it.citations !== "")
+      meta.push(`<span class="vertical-meta-pill" title="Citations">⟲ ${escapeHtml(Number(it.citations).toLocaleString())}</span>`);
+    if (it.year)
+      meta.push(`<span class="vertical-meta-pill">${escapeHtml(String(it.year))}</span>`);
+    if (it.arxiv_id)
+      meta.push(`<span class="vertical-meta-pill">arXiv:${escapeHtml(String(it.arxiv_id))}</span>`);
+    if (it.source && !sourceLabel.includes(it.source))
+      meta.push(`<span class="vertical-meta-pill">${escapeHtml(String(it.source))}</span>`);
+    const metaHtml = meta.length ? `<div class="vertical-row-meta">${meta.join("")}</div>` : "";
+    const snippet = it.snippet ? `<div class="vertical-row-snippet">${escapeHtml(String(it.snippet))}</div>` : "";
+    return `<div class="vertical-row">
+       <div class="vertical-row-title">${titleHtml}</div>
+       ${metaHtml}
+       ${snippet}
+     </div>`;
+  }).join("");
+  const moreLabel = items.length > 12
+    ? `<div class="vertical-card-more">… +${items.length - 12} more</div>`
+    : "";
+  return `<div class="vertical-card vertical-domain-${escapeHtml(domain)}">
+       <div class="vertical-card-header">
+         <span class="vertical-card-icon">${_renderVerticalIcon(domain)}</span>
+         <span class="vertical-card-title">${escapeHtml(domain.charAt(0).toUpperCase() + domain.slice(1))} sources</span>
+         ${sourceLabel ? `<span class="vertical-card-sources">${escapeHtml(sourceLabel)}${queryLabel}</span>` : ""}
+         <span class="vertical-card-count">${items.length}</span>
+       </div>
+       <div class="vertical-card-body">${rows}${moreLabel}</div>
+     </div>`;
+}
+
+/* ★ Memory preview card — create_memory / update_memory / merge_memories.
+ *   Always collapsible (even a partial name/tags-only update), with a
+ *   dedicated themed card: a memory name, metadata chips (scope / id /
+ *   source-count / tags), the description as a muted lead-in, and the
+ *   Markdown-rendered body. Returns null when toolArgs can't be parsed so
+ *   the caller falls through to the plain tool row. */
+function _renderMemoryBlock(round, svg, q, compactionLabelHtml, rootPill, badgeHtml) {
+  let pe = null;
+  try { pe = typeof round.toolArgs === 'string' ? JSON.parse(round.toolArgs) : round.toolArgs; } catch (_) {}
+  if (!pe || typeof pe !== 'object') return null;
+
+  const name = typeof pe.name === 'string' ? pe.name.trim() : '';
+  const desc = typeof pe.description === 'string' ? pe.description.trim() : '';
+  const body = typeof pe.body === 'string' ? pe.body : '';
+  const scope = typeof pe.scope === 'string' ? pe.scope.trim() : '';
+  const tags = Array.isArray(pe.tags) ? pe.tags.filter((t) => typeof t === 'string' && t.trim()) : [];
+  const memId = typeof pe.memory_id === 'string' ? pe.memory_id.trim() : '';
+  const mergeIds = Array.isArray(pe.memory_ids) ? pe.memory_ids.filter(Boolean) : [];
+
+  const chips = [];
+  if (scope) chips.push(`<span class="ptool-memory-chip ptool-memory-chip-scope">${escapeHtml(scope)}</span>`);
+  if (memId) chips.push(`<span class="ptool-memory-chip ptool-memory-chip-id" title="memory id">${escapeHtml(memId)}</span>`);
+  if (mergeIds.length) chips.push(`<span class="ptool-memory-chip">${mergeIds.length} source${mergeIds.length !== 1 ? 's' : ''}</span>`);
+  tags.forEach((t) => chips.push(`<span class="ptool-memory-chip ptool-memory-chip-tag">#${escapeHtml(t.trim())}</span>`));
+
+  let inner = '';
+  if (name) inner += `<div class="ptool-memory-name">${escapeHtml(name)}</div>`;
+  if (chips.length) inner += `<div class="ptool-memory-chips">${chips.join('')}</div>`;
+  if (desc) inner += `<div class="ptool-memory-desc">${escapeHtml(desc)}</div>`;
+  if (body.trim()) inner += `<div class="ptool-memory-content md-content">${renderMarkdown(body)}</div>`;
+  if (!inner) inner = `<div class="ptool-memory-empty">No additional preview for this update.</div>`;
+
+  return `<details class="ptool-memory-block" data-rn="${round.roundNum}">
+       <summary class="ptool-line ptool-memory-header">
+         <span class="ptool-icon">${svg}</span>
+         ${compactionLabelHtml}
+         ${rootPill}
+         <span class="ptool-text">${q}</span>
+         ${badgeHtml}
+       </summary>
+       <div class="ptool-memory-body">${inner}</div>
      </details>`;
 }
 
@@ -799,14 +934,93 @@ function _renderUnifiedToolLine(round, isSearching) {
 
   // ★ Web search / fetch with results — collapsible result list inside panel
   if ((_isRoundSearch(round) || _isRoundFetch(round)) && results.length > 0) {
-    const items = results.map((r) => {
+    const _renderResultItem = (r) => {
       const fb = r.irrelevant
         ? `<span class="search-result-fetched" style="color:var(--text-muted);opacity:.6">✗ irrelevant</span>`
         : r.fetched
         ? `<span class="search-result-fetched${r.source === "PDF" ? " pdf" : ""}">✓ ${r.fetchedChars ? (r.fetchedChars > 1000 ? Math.round(r.fetchedChars / 1000) + "k" : r.fetchedChars) + " chars" : "fetched"}</span>`
         : "";
       return `<div class="search-result-item"><div class="search-result-title">${r.url ? `<a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a>` : `<span>${escapeHtml(r.title)}</span>`}<span class="search-result-source">${escapeHtml(r.source)}</span>${fb}</div>${r.snippet ? `<div class="search-result-snippet">${escapeHtml(r.snippet)}</div>` : ""}${r.url ? `<div class="search-result-url">${escapeHtml(r.url)}</div>` : ""}</div>`;
-    }).join("");
+    };
+    // ── Per-query grouping: when a batch search tagged each result with its
+    //    source query (`_q`), render a subheader per query so the user can
+    //    tell which web results came from which candidate term. Falls back
+    //    to a flat list when only one query (or no `_q` tags) is present. ──
+    let items;
+    const _queryOrder = [];
+    const _byQuery = new Map();
+    for (const r of results) {
+      const key = r._q || "";
+      if (!_byQuery.has(key)) { _byQuery.set(key, []); _queryOrder.push(key); }
+      _byQuery.get(key).push(r);
+    }
+    const _multiQuery = _queryOrder.filter(Boolean).length > 1;
+    if (_multiQuery) {
+      items = _queryOrder.map((key) => {
+        const group = _byQuery.get(key);
+        const groupItems = group.map(_renderResultItem).join("");
+        const header = key
+          ? `<div class="search-query-group-header"><span class="search-query-group-icon">🔍</span><span class="search-query-group-q">${escapeHtml(key)}</span><span class="search-query-group-count">${group.length}</span></div>`
+          : "";
+        return `<div class="search-query-group">${header}${groupItems}</div>`;
+      }).join("");
+    } else {
+      items = results.map(_renderResultItem).join("");
+    }
+    // ── Vertical card: HF Papers / Semantic Scholar / arXiv / etc. ──
+    let verticalHtml = "";
+    const verts = [];
+    // A single vertical is one {domain, sources, items} dict; batch
+    // web_search carries several. The streaming prefetch path may wrap
+    // them as {batch:[...]}, so unwrap that here — otherwise the card
+    // renders empty (no items) and the badge falls back to bare "auto".
+    const _pushVert = (v) => {
+      if (!v || typeof v !== "object") return;
+      if (Array.isArray(v.batch)) { v.batch.forEach(_pushVert); return; }
+      verts.push(v);
+    };
+    if (round.vertical) _pushVert(round.vertical);
+    if (Array.isArray(round.verticals)) round.verticals.forEach(_pushVert);
+    // Batch web_search emits one vertical record PER query — for a 5-query
+    // academic batch that's 5 near-identical "Academic" cards with heavily
+    // overlapping items. Merge cards that share a domain into one, dedup
+    // items by url/arxiv_id/title, and keep the highest upvote/citation
+    // count seen for each. Preserves first-seen order.
+    const _mergedVerts = (() => {
+      const byDomain = new Map();
+      for (const v of verts) {
+        const dom = String(v.domain || "vertical");
+        if (!byDomain.has(dom)) {
+          byDomain.set(dom, { domain: dom, sources: [], items: [], _seen: new Map() });
+        }
+        const acc = byDomain.get(dom);
+        for (const s of (Array.isArray(v.sources) ? v.sources : [])) {
+          const key = (s.source || s.type || "") + "|" + (s.identifier || "");
+          if (!acc.sources.some(x => ((x.source || x.type || "") + "|" + (x.identifier || "")) === key))
+            acc.sources.push(s);
+        }
+        for (const it of (Array.isArray(v.items) ? v.items : [])) {
+          const k = it.url || it.arxiv_id || it.title || JSON.stringify(it);
+          const prev = acc._seen.get(k);
+          if (!prev) { acc._seen.set(k, it); acc.items.push(it); }
+          else {
+            const num = (x) => (x == null || x === "" ? -1 : Number(x) || -1);
+            if (num(it.upvotes) > num(prev.upvotes)) prev.upvotes = it.upvotes;
+            if (num(it.citations) > num(prev.citations)) prev.citations = it.citations;
+          }
+        }
+      }
+      return [...byDomain.values()];
+    })();
+    // Sort each merged card's items by upvotes desc, then citations desc.
+    for (const v of _mergedVerts) {
+      const num = (x) => (x == null || x === "" ? -1 : Number(x) || -1);
+      v.items.sort((a, b) => (num(b.upvotes) - num(a.upvotes)) || (num(b.citations) - num(a.citations)));
+    }
+    for (const v of _mergedVerts) {
+      verticalHtml += _renderVerticalCard(v);
+    }
+
     // ── Engine breakdown: show raw per-engine URLs (before dedup/filter) ──
     let engineBkdnHtml = "";
     const eb = round.engineBreakdown;
@@ -831,16 +1045,52 @@ function _renderUnifiedToolLine(round, isSearching) {
          <div class="ptool-line ptool-results-header" onclick="if(event.target.closest('[data-tc-preview]'))return;event.stopPropagation();this.parentElement.classList.toggle('expanded')">
            <span class="ptool-icon">${svg}</span>
            <span class="ptool-text">${q}</span>
+           ${verts.length ? (()=>{const doms=[...new Set(verts.map(v=>v.domain||'').filter(Boolean))];return `<span class="ptool-badge vertical-badge" title="Vertical domain data">vertical: ${escapeHtml(doms.join(' · ') || 'auto')}</span>`;})() : ''}
            <span class="ptool-badge ptool-badge-info">${results.length} result${results.length !== 1 ? "s" : ""}</span>
            ${_tcPreviewBtn(round)}
            <span class="ptool-results-toggle">▼</span>
          </div>
-         <div class="ptool-results-content">${items}${engineBkdnHtml}</div>
+         <div class="ptool-results-content">${verticalHtml}${items}${engineBkdnHtml}</div>
        </div>`;
   }
 
-  // ★ Image generation: render inline image card
+  // ★ read_files image(s): render inline thumbnails when the backend
+  //   attached data URIs (meta.imageDataUris). Each descriptor carries a
+  //   full data: URL the browser can render directly.
+  if (round.toolName === "read_files" && Array.isArray(meta.imageDataUris) && meta.imageDataUris.length) {
+    const imgs = meta.imageDataUris.filter((d) => d && d.uri);
+    if (imgs.length) {
+      const cards = imgs.map((d) => {
+        const cap = escapeHtml(d.filename || d.format || "");
+        return `<div class="imagegen-card">
+             <img src="${escapeHtml(d.uri)}" alt="${cap}" loading="lazy"
+                  onclick="_openImageFullscreen(this.src)" />
+             ${cap ? `<div class="imagegen-card-footer"><span class="ig-prompt">${cap}</span></div>` : ""}
+           </div>`;
+      }).join("");
+      return `<div class="ptool-imagegen-block" data-rn="${round.roundNum}">
+           <div class="ptool-line ptool-imagegen-header">
+             <span class="ptool-icon">${svg}</span>
+             <span class="ptool-text">${q}</span>
+             ${meta.badge ? `<span class="ptool-badge ptool-badge-info">${escapeHtml(meta.badge)}</span>` : ""}
+             ${_tcPreviewBtn(round)}
+           </div>
+           ${cards}
+         </div>`;
+    }
+  }
+
+  // ★ Image generation / editing: render inline image card.
+  //   The two functions are visually distinguished by a mode theme:
+  //   • generate → magenta "Generated" theme + framed-photo icon
+  //   • edit     → cyan "Edited" theme + wand icon + before→after strip
   if (_isRoundImageGen(round)) {
+    const isEdit = meta.imageMode === "edit";
+    const modeCls = isEdit ? "ig-mode-edit" : "ig-mode-generate";
+    const modeChip = isEdit
+      ? `<span class="ig-mode-chip ig-mode-chip-edit" title="Edited an existing image">${_imageEditChipSvg}Edited</span>`
+      : `<span class="ig-mode-chip ig-mode-chip-gen" title="Generated from a text prompt">${_imageGenChipSvg}Generated</span>`;
+    const srcUrl = meta.imageSourceUrl || "";
     const imgUri = meta.imageDataUri || "";
     const imgErr = meta.imageError || "";
     const prompt = meta.imagePrompt || escapeHtml(round.query || "").replace(/^🎨\s*Generating[^:]*:\s*/i, "");
@@ -867,50 +1117,70 @@ function _renderUnifiedToolLine(round, isSearching) {
       const pathFooter = pathBadges
         ? `<div class="ig-path-bar">${pathBadges}</div>`
         : "";
-      return `<div class="ptool-imagegen-block" data-rn="${round.roundNum}">
+      // For edits with a loadable source, show a before→after strip so the
+      // transformation is obvious at a glance; otherwise a single result image.
+      const imageArea = (isEdit && srcUrl)
+        ? `<div class="ig-beforeafter">
+               <figure class="ig-ba-item">
+                 <img src="${escapeHtml(srcUrl)}" alt="source image" loading="lazy"
+                      onclick="event.stopPropagation();_openImageFullscreen(this.src)" />
+                 <figcaption>Before</figcaption>
+               </figure>
+               <span class="ig-ba-arrow" aria-hidden="true">→</span>
+               <figure class="ig-ba-item">
+                 <img src="${imgUri}" alt="${escapeHtml((prompt || "").slice(0, 100))}" loading="lazy"
+                      onclick="event.stopPropagation();_openImageFullscreen(this.src)" />
+                 <figcaption>After</figcaption>
+               </figure>
+             </div>`
+        : `<img src="${imgUri}" alt="${escapeHtml((prompt || "").slice(0, 100))}" loading="lazy"
+                  onclick="_openImageFullscreen(this.src)" />`;
+      return `<div class="ptool-imagegen-block ${modeCls}" data-rn="${round.roundNum}">
            <div class="ptool-line ptool-imagegen-header">
              <span class="ptool-icon">${svg}</span>
              <span class="ptool-text">${q}</span>
+             ${modeChip}
              ${paramsBadges}
              ${svgBadge}
              <span class="ptool-badge ptool-badge-ok">${escapeHtml(meta.badge || "✓ done")}</span>
              ${_tcPreviewBtn(round)}
            </div>
            <div class="imagegen-card">
-             <img src="${imgUri}" alt="${escapeHtml((prompt || "").slice(0, 100))}" loading="lazy"
-                  onclick="_openImageFullscreen(this.src)" />
+             ${imageArea}
              <div class="imagegen-card-footer">
                <span class="ig-prompt" title="${escapeHtml(prompt)}">${escapeHtml(prompt || "")}</span>
                <div class="ig-actions">
                  ${svgBtn}
                  <button class="ig-action-btn" onclick="event.stopPropagation();_downloadGenImage(this)" title="Download PNG">⬇</button>
-                 <button class="ig-action-btn" onclick="event.stopPropagation();_openImageFullscreen(this.closest('.imagegen-card').querySelector('img').src)" title="Fullscreen">⛶</button>
+                 <button class="ig-action-btn" onclick="event.stopPropagation();_openImageFullscreen(this.closest('.imagegen-card').querySelector('.ig-beforeafter .ig-ba-item:last-child img, img').src)" title="Fullscreen">⛶</button>
                </div>
              </div>
              ${pathFooter}
            </div>
          </div>`;
     } else if (imgErr) {
-      return `<div class="ptool-imagegen-block ptool-imagegen-error" data-rn="${round.roundNum}">
+      return `<div class="ptool-imagegen-block ptool-imagegen-error ${modeCls}" data-rn="${round.roundNum}">
            <div class="ptool-line">
              <span class="ptool-icon">${svg}</span>
              <span class="ptool-text">${q}</span>
+             ${modeChip}
              <span class="ptool-badge ptool-badge-err">failed</span>
              ${_tcPreviewBtn(round)}
            </div>
            <div class="imagegen-error">
-             <div class="ig-error-title">Image generation failed</div>
+             <div class="ig-error-title">${isEdit ? "Image editing failed" : "Image generation failed"}</div>
              <div class="ig-error-text">${escapeHtml(imgErr)}</div>
            </div>
          </div>`;
     }
-    // In-progress: no image yet, no error — show animated generating state
-    const progressBadge = meta.badge || "generating…";
+    // In-progress: no image yet, no error — show animated working state
+    const progressBadge = meta.badge || (isEdit ? "editing…" : "generating…");
     const progressCls = progressBadge.includes("rate limited") ? "ptool-badge-err" : "ptool-badge-warn";
-    return `<div class="ptool-imagegen-block ptool-imagegen-loading" data-rn="${round.roundNum}">
+    return `<div class="ptool-imagegen-block ptool-imagegen-loading ${modeCls}" data-rn="${round.roundNum}">
          <div class="ptool-line ptool-active">
            <span class="ptool-icon">${svg}</span>
            <span class="ptool-text">${q}</span>
+           ${modeChip}
            ${paramsBadges}
            <span class="ptool-badge ${progressCls}">${escapeHtml(progressBadge)}</span>
            <span class="ptool-spinner"></span>
@@ -926,6 +1196,10 @@ function _renderUnifiedToolLine(round, isSearching) {
       round.toolName === "apply_diffs" || round.toolName === "insert_content" ||
       round.toolName === "insert_contents";
     const ok = meta.writeOk !== false;
+    /* ★ A successful memory op (meta.memoryOk, set by the backend memory
+     * handler) reads as a "save" — show the solid green OK badge, same as
+     * a write tool, instead of the neutral yellow info badge. */
+    const isMemoryOk = meta.memoryOk === true;
     /* ★ await_agents timeout: amber warning badge so a partial result
      * (wait cut short by the hard cap) never looks like a clean "done".
      * Backend sets meta.awaitTimedOut in the await_agents post_build hook. */
@@ -935,6 +1209,8 @@ function _renderUnifiedToolLine(round, isSearching) {
       ? ok
         ? "ptool-badge-ok"
         : "ptool-badge-err"
+      : isMemoryOk
+      ? "ptool-badge-ok"
       : "ptool-badge-info";
     badgeHtml = `<span class="ptool-badge ${cls}">${escapeHtml(meta.badge)}</span>`;
   } else if (round.toolTokens) {
@@ -1007,6 +1283,18 @@ function _renderUnifiedToolLine(round, isSearching) {
         (reduction ? `<span class="ptool-compaction-delta">${reduction.trim()}</span>` : '') +
       `</span>`;
   }
+  // ★ create_memory / update_memory / merge_memories — collapsible,
+  //   Markdown-rendered preview of the saved memory body itself (mirrors the
+  //   apply_diff expand block). The opaque description-snippet "Preview" was
+  //   useless to users; expanding now shows the actual memory text, well-
+  //   rendered. The full body lives in round.toolArgs.body. update_memory may
+  //   omit body on a partial (name/tags-only) update — the body.trim() guard
+  //   below falls through to the normal row in that case.
+  if ((round.toolName === "create_memory" || round.toolName === "update_memory" || round.toolName === "merge_memories") && round.toolArgs) {
+    const memHtml = _renderMemoryBlock(round, svg, q, compactionLabelHtml, rootPill, badgeHtml);
+    if (memHtml) return memHtml;
+  }
+
   // ★ write_file — collapsible inline preview of the written content,
   //   mirroring the apply_diff expand-on-click block. The full content
   //   lives in round.toolArgs.content; render it as added lines so the
@@ -1062,7 +1350,13 @@ function _renderUnifiedToolLine(round, isSearching) {
   }
 
   // ★ Batch edit tools (apply_diffs / insert_contents) — collapsible per-edit list
-  if (meta.editSummaries && Array.isArray(meta.editSummaries) && meta.editSummaries.length > 1) {
+  //   Guard on toolName: editSummaries is only meaningful for the batch edit
+  //   tools. Without this guard, ANY round whose results[0] happens to carry
+  //   an editSummaries array (e.g. a tool_result leaked from a sub-agent's
+  //   apply_diffs grafted onto a same-roundNum run_command — see
+  //   sse_handlers_tool.js roundNum fallback) renders as a batch-edit block.
+  const _isBatchEditTool = round.toolName === "apply_diffs" || round.toolName === "insert_contents";
+  if (_isBatchEditTool && meta.editSummaries && Array.isArray(meta.editSummaries) && meta.editSummaries.length > 1) {
     const edits = meta.editSummaries;
     let parsedEdits = null;
     if (round.toolArgs) {
@@ -1071,6 +1365,11 @@ function _renderUnifiedToolLine(round, isSearching) {
         if (args.edits && Array.isArray(args.edits)) parsedEdits = args.edits;
       } catch (_) {}
     }
+    // The header already names the target file (e.g. "Patch /a/b/c.sh (2 edits)").
+    // Only repeat a per-row path when edits span DIFFERENT files, and then show
+    // just the basename — never the full absolute path, which would starve the
+    // description column down to one character per line.
+    const _multiFile = edits.some(e => (e.path || "") !== (edits[0].path || ""));
     let itemsHtml = "";
     edits.forEach((ed, i) => {
       const statusIcon = ed.status === "fail"
@@ -1079,7 +1378,11 @@ function _renderUnifiedToolLine(round, isSearching) {
       const statusCls = ed.status === "fail" ? "ptool-batch-fail" : "ptool-batch-ok";
       const rawDesc = ed.description ? _stripPathPrefixFromDesc(ed.description, ed.path) : "";
       const desc = rawDesc ? escapeHtml(rawDesc) : `Edit ${i + 1}`;
-      const pathLabel = escapeHtml(ed.path || "?");
+      const fullPath = ed.path || "";
+      const baseName = fullPath ? (fullPath.split("/").filter(Boolean).pop() || fullPath) : "";
+      const pathHtml = (_multiFile && baseName)
+        ? `<span class="ptool-batch-path" title="${escapeHtml(fullPath)}">${escapeHtml(baseName)}</span>`
+        : "";
       let diffHtml = "";
       if (ed.status !== "fail" && parsedEdits && parsedEdits[i]) {
         const pe = parsedEdits[i];
@@ -1093,8 +1396,9 @@ function _renderUnifiedToolLine(round, isSearching) {
       itemsHtml += `<details class="ptool-batch-done-edit ${statusCls}">
         <summary class="ptool-batch-done-summary">
           <span class="ptool-batch-status">${statusIcon}</span>
+          <span class="ptool-batch-idx">${i + 1}</span>
           <span class="ptool-batch-desc">${desc}</span>
-          <span class="ptool-batch-path">${pathLabel}</span>
+          ${pathHtml}
         </summary>
         ${diffHtml}
       </details>`;

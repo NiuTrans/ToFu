@@ -318,6 +318,8 @@ async function initActiveTasks() {
                 else if (td.effort) am.preset = td.effort;
                 if (td.fallbackModel) am.fallbackModel = td.fallbackModel;
                 if (td.fallbackFrom) am.fallbackFrom = td.fallbackFrom;
+                if (td.fallbackReason) am.fallbackReason = td.fallbackReason;
+                if (td.fallbackKind) am.fallbackKind = td.fallbackKind;
                 if (td.modifiedFiles) am.modifiedFiles = td.modifiedFiles;
               }
               /* ★ If server returned status='interrupted', the task was checkpointed

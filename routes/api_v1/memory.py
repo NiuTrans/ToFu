@@ -29,6 +29,7 @@ from flask import Blueprint, jsonify, request
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found,
 )
+from lib.http_client import http_get
 from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.request_parser import parse_body
@@ -320,7 +321,7 @@ def skill_catalog_install_v1():
     logger.info('[Memory.v1] Catalog install: %s (scope=%s) from %s',
                 skill_id, scope, url)
     try:
-        resp = requests.get(url, timeout=_CATALOG_DL_TIMEOUT, stream=True)
+        resp = http_get(url, timeout=_CATALOG_DL_TIMEOUT, stream=True)
         resp.raise_for_status()
     except requests.RequestException as e:
         logger.warning('[Memory.v1] Catalog download failed for %s: %s',

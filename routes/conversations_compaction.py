@@ -9,7 +9,7 @@ import json
 
 from flask import jsonify
 
-from lib.database import DOMAIN_CHAT, get_db
+from lib.database import DOMAIN_CHAT, async_fetchall, async_fetchone
 from lib.log import get_logger
 from lib.api_response import api_not_found
 from routes.common import _db_safe
@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 
 @conversations_bp.route('/api/v1/conversations/<conv_id>/compactions', methods=['GET'])
 @_db_safe
-def list_compactions(conv_id):
+async def list_compactions(conv_id):
     """List compaction archives for a conversation (metadata only).
 
     Returns one row per compaction event in chronological order — both
@@ -31,23 +31,21 @@ def list_compactions(conv_id):
     ``GET /api/conversations/<id>/compactions/<archive_id>`` only when
     the user expands the corresponding marker.
     """
-    db = get_db(DOMAIN_CHAT)
     try:
-        rows = db.execute(
+        rows = await async_fetchall(
             'SELECT id, conv_id, summary, created_at, trigger, task_id, '
             'round_num, model, tokens_before, tokens_after, msgs_before, '
             'msgs_after, reason, length(messages_json) AS payload_size '
             'FROM transcript_archive WHERE conv_id=? '
             'ORDER BY created_at ASC, id ASC',
-            (conv_id,),
-        ).fetchall()
+            (conv_id,), domain=DOMAIN_CHAT)
     except Exception as e:
         # Older installs that haven't migrated yet — fall back to the
         # legacy column set so the route doesn't 500.
         logger.warning('[Compactions] Full-schema query failed (%s) — '
                        'falling back to legacy columns', e)
         try:
-            rows = db.execute(
+            rows = await async_fetchall(
                 'SELECT id, conv_id, summary, created_at, '
                 "'' AS trigger, '' AS task_id, 0 AS round_num, '' AS model, "
                 "0 AS tokens_before, 0 AS tokens_after, 0 AS msgs_before, "
@@ -55,8 +53,7 @@ def list_compactions(conv_id):
                 'length(messages_json) AS payload_size '
                 'FROM transcript_archive WHERE conv_id=? '
                 'ORDER BY created_at ASC, id ASC',
-                (conv_id,),
-            ).fetchall()
+                (conv_id,), domain=DOMAIN_CHAT)
         except Exception as e2:
             logger.error('[Compactions] Legacy-fallback query failed: %s',
                          e2, exc_info=True)
@@ -89,7 +86,7 @@ def list_compactions(conv_id):
 @conversations_bp.route('/api/v1/conversations/<conv_id>/compactions/<int:archive_id>',
                         methods=['GET'])
 @_db_safe
-def get_compaction(conv_id, archive_id):
+async def get_compaction(conv_id, archive_id):
     """Lazy-load the full pre-compaction message list for one archive.
 
     Payload can be very large (multiple MB for image-heavy
@@ -99,22 +96,19 @@ def get_compaction(conv_id, archive_id):
     Returns:
         ``{archive: {...metadata...}, messages: [...]}``
     """
-    db = get_db(DOMAIN_CHAT)
-    r = db.execute(
+    r = await async_fetchone(
         'SELECT id, conv_id, messages_json, summary, created_at, '
         'trigger, task_id, round_num, model, tokens_before, tokens_after, '
         'msgs_before, msgs_after, reason '
         'FROM transcript_archive WHERE id=? AND conv_id=?',
-        (archive_id, conv_id),
-    ).fetchone()
+        (archive_id, conv_id), domain=DOMAIN_CHAT)
     if not r:
         # Try legacy schema (no metadata columns)
         try:
-            r = db.execute(
+            r = await async_fetchone(
                 'SELECT id, conv_id, messages_json, summary, created_at '
                 'FROM transcript_archive WHERE id=? AND conv_id=?',
-                (archive_id, conv_id),
-            ).fetchone()
+                (archive_id, conv_id), domain=DOMAIN_CHAT)
         except Exception as e:
             logger.debug('[Compaction] Legacy fetch fallback failed: %s', e)
             r = None

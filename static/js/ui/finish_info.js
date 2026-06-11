@@ -237,8 +237,13 @@ function renderFinishInfo(msg) {
     }
   }
   if (msg.fallbackModel) {
+    const _fbReason = msg.fallbackReason || msg.fallbackKind || "";
+    const _reasonLine = _fbReason
+      ? `\n失败原因 / Reason: ${_fbReason}`
+      : "";
+    const _tip = `原模型 ${msg.fallbackFrom || "?"} 失败，已回退到 ${msg.fallbackModel}${_reasonLine}`;
     parts.push(
-      `<span class="finish-tag warn" title="原模型 ${escapeHtml(msg.fallbackFrom || "?")} 失败，已回退到 ${escapeHtml(msg.fallbackModel)}">Fallback → Opus</span>`,
+      `<span class="finish-tag warn" title="${escapeHtml(_tip)}">Fallback → Opus</span>`,
     );
   }
   if (parts.length === 0) return "";

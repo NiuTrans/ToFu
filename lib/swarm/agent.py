@@ -791,7 +791,16 @@ class SubAgent:
         """
         from lib.tasks_pkg.executor import _execute_tool_one
 
-        # Build a minimal task dict for tool execution
+        # Build a minimal task dict for tool execution.
+        # ★ _suppressEvents: tool handlers call _finalize_tool_round →
+        #   append_event, which would otherwise push tool_start/tool_result
+        #   SSE events onto the PARENT's stream (task id is shared). Those
+        #   events carry this sub-agent's own small roundNum and an empty
+        #   toolCallId, so the frontend's roundNum fallback grafts them onto a
+        #   same-numbered parent round (e.g. a run_command rendered as an
+        #   apply_diffs batch block). The sub-agent's tool activity is already
+        #   surfaced via the master orchestrator's on_event (swarm_agent_*)
+        #   callbacks, so suppressing the leak here loses nothing.
         task_proxy = {
             'id': self.parent_task.get('id', 'unknown'),
             'convId': self.parent_task.get('convId', 'unknown'),
@@ -800,6 +809,7 @@ class SubAgent:
             'events_lock': self.parent_task.get('events_lock', threading.Lock()),
             'toolRounds': self.parent_task.get('toolRounds', []),
             'phase': self.parent_task.get('phase'),
+            '_suppressEvents': True,
         }
 
         tc_id = tool_call.get('id', str(uuid.uuid4())[:8])

@@ -34,16 +34,23 @@ class RateLimiter:
         self._rate_limit_until = 0.0  # monotonic timestamp
 
     def acquire(self):
-        """Acquire a slot, waiting if at capacity."""
+        """Acquire a slot, waiting if at capacity.
+
+        The rate-limit backoff is honoured BEFORE taking a semaphore permit so
+        a global 429 pause does not hold permits hostage: if every admitted
+        thread slept while occupying a slot, throughput would collapse to
+        ``max_concurrent / backoff`` instead of a coordinated pause.
+        """
         logger.debug('[RateLimiter] acquire: waiting for slot (active=%d)', self._active)
-        self._semaphore.acquire()
-        # Respect rate-limit backoff
-        wait_until = self._rate_limit_until
+        # Respect rate-limit backoff first, WITHOUT holding a permit.
+        with self._lock:
+            wait_until = self._rate_limit_until
         now = time.monotonic()
         if wait_until > now:
             wait_dur = wait_until - now
-            logger.debug('[RateLimiter] acquire: rate-limit backoff %.1fs before proceeding', wait_dur)
+            logger.debug('[RateLimiter] acquire: rate-limit backoff %.1fs before acquiring permit', wait_dur)
             time.sleep(wait_dur)
+        self._semaphore.acquire()
         with self._lock:
             self._active += 1
             logger.debug('[RateLimiter] acquire: slot acquired (active=%d)', self._active)
@@ -61,13 +68,14 @@ class RateLimiter:
         Sets a shared backoff timestamp with exponential increase + jitter.
         """
         now = time.monotonic()
-        current_wait = max(0, self._rate_limit_until - now)
-        if current_wait < self._backoff_base:
-            next_wait = self._backoff_base
-        else:
-            next_wait = min(current_wait * 2, self._backoff_max)
-        next_wait += random.uniform(0, 1)
-        self._rate_limit_until = now + next_wait
+        with self._lock:
+            current_wait = max(0, self._rate_limit_until - now)
+            if current_wait < self._backoff_base:
+                next_wait = self._backoff_base
+            else:
+                next_wait = min(current_wait * 2, self._backoff_max)
+            next_wait += random.uniform(0, 1)
+            self._rate_limit_until = now + next_wait
         logger.warning('[RateLimiter] Rate limit reported, backing off %.1fs', next_wait)
 
     @property

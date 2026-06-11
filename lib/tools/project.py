@@ -1,5 +1,7 @@
 """lib/tools/project.py — Project co-pilot tool definitions."""
 
+import copy
+
 PROJECT_TOOL_LIST_DIR = {
     "type": "function",
     "function": {
@@ -127,7 +129,13 @@ PROJECT_TOOL_WRITE_FILE = {
             "new config entry) where existing code is left intact\n\n"
             "IMPORTANT: Always read_files first to understand existing code before "
             "writing. Include ALL content — not just the changed parts. Otherwise the "
-            "rest of the file is lost."
+            "rest of the file is lost.\n\n"
+            "**Paths:** a relative path resolves under the current project. An "
+            "ABSOLUTE path (e.g. '/home/user/other-repo/src/main.py') also works "
+            "directly — its containing directory is auto-registered as a workspace "
+            "root on first write, so you do NOT need create_project first. Only "
+            "genuine system paths (/etc, /usr, $HOME itself, …) are refused. The "
+            "same applies to apply_diff / insert_content."
         ),
         "parameters": {
             "type": "object",
@@ -196,9 +204,9 @@ PROJECT_TOOL_APPLY_DIFFS = {
     "function": {
         "name": "apply_diffs",
         "description": (
-            "Apply multiple search-and-replace edits in one call. Edits are applied "
-            "sequentially so later edits see earlier changes. Much faster than "
-            "multiple separate apply_diff calls.\n\n"
+            "apply_diffs: Apply multiple search-and-replace edits in one call. Edits "
+            "are applied sequentially so later edits see earlier changes. Much faster "
+            "than multiple separate apply_diff calls.\n\n"
             "**Read-before-edit is enforced.** Every target file must have been read "
             "(or written) earlier in the conversation. A sibling ``read_files`` issued "
             "in the SAME parallel batch does NOT satisfy the gate.\n\n"
@@ -282,9 +290,9 @@ PROJECT_TOOL_INSERT_CONTENTS = {
     "function": {
         "name": "insert_contents",
         "description": (
-            "Insert content at multiple locations in one call. Each insertion adds "
-            "content before or after an anchor string. Insertions are applied "
-            "sequentially so later ones see earlier changes. Much faster than "
+            "insert_contents: Insert content at multiple locations in one call. Each "
+            "insertion adds content before or after an anchor string. Insertions are "
+            "applied sequentially so later ones see earlier changes. Much faster than "
             "multiple separate insert_content calls.\n\n"
             "**Read-before-edit is enforced.** Every target file must have been read "
             "(or written) earlier in the conversation. A sibling ``read_files`` issued "
@@ -374,14 +382,16 @@ PROJECT_TOOL_CREATE_PROJECT = {
         "name": "create_project",
         "description": (
             "create_project: Create a new, initially-empty project directory at the given path and register it "
-            "as an EXTRA workspace root so subsequent write_file / apply_diff / insert_content / "
-            "run_command / read_files calls can target it.\n\n"
-            "Use this BEFORE trying to write any file that lives OUTSIDE the currently-open "
-            "project — e.g. when the user asks you to 'generate a new repository at /some/path' "
-            "or 'scaffold a project under ~/projects/foo while referencing the current repo'.\n\n"
+            "as an EXTRA workspace root, and (optionally) give it a short root name.\n\n"
+            "NOTE: You usually do NOT need this just to write files outside the current "
+            "project — write_file / apply_diff / insert_content already accept absolute "
+            "paths and auto-register the target directory on first write. Use "
+            "create_project only when you want to (a) pre-create an empty directory "
+            "before writing into it, or (b) assign an explicit short 'name:' prefix for "
+            "a non-primary root. Example: 'scaffold a project under ~/projects/foo'.\n\n"
             "After this call, address files in the new project either as:\n"
-            "  • '<rootName>:<rel/path>'  (multi-root prefix — preferred)\n"
-            "  • absolute path under the new directory\n\n"
+            "  • an absolute path under the new directory (simplest), or\n"
+            "  • the '<rootName>:<rel/path>' prefix shorthand\n\n"
             "The currently-open project is NOT replaced — it remains the primary root and can "
             "still be read for reference. System paths (e.g. /etc, /usr, /bin, $HOME itself) "
             "are rejected for safety."
@@ -514,6 +524,59 @@ READ_FILES_TOOL = {
 # information is available via reading conversation history (which the
 # model already does).  Per-round undo/redo of file changes still works
 # end-to-end through the file-history store.
+_MULTIROOT_PATH_HINT = (
+    " In a multi-root workspace, target a non-primary root with either an "
+    "ABSOLUTE path (simplest) or the 'rootname:' prefix (e.g. "
+    "'otherroot:src/foo.py'); a bare relative path resolves under the PRIMARY "
+    "root."
+)
+
+
+def _augment_path_descriptions(schema):
+    """Recursively append the multi-root prefix hint to every ``path`` field.
+
+    Walks an OpenAI-style JSON-schema ``properties`` tree in place, appending
+    :data:`_MULTIROOT_PATH_HINT` to the ``description`` of any property literally
+    named ``path`` (top-level or nested inside ``items``) that doesn't already
+    mention the ``rootname:`` convention. Caller must pass a copy — this mutates.
+    """
+    if not isinstance(schema, dict):
+        return
+    props = schema.get('properties')
+    if isinstance(props, dict):
+        for key, sub in props.items():
+            if not isinstance(sub, dict):
+                continue
+            if key == 'path':
+                desc = sub.get('description', '') or ''
+                if 'rootname:' not in desc:
+                    sub['description'] = desc + _MULTIROOT_PATH_HINT
+            # Recurse into nested object/array property schemas.
+            _augment_path_descriptions(sub)
+    items = schema.get('items')
+    if isinstance(items, dict):
+        _augment_path_descriptions(items)
+
+
+def with_multiroot_hint(tools):
+    """Return a deep copy of *tools* with the multi-root prefix hint on path fields.
+
+    Called by the tool-assembly registry ONLY when more than one workspace root
+    is active, so single-root sessions keep the byte-identical (prompt-cache
+    friendly) schema. Each tool's ``path`` parameter gains a sentence telling the
+    model to use the ``rootname:`` prefix for non-primary roots — placed where the
+    model actually chooses the argument value, complementing the system-prompt
+    multi-root table.
+    """
+    out = []
+    for tool in tools:
+        t = copy.deepcopy(tool)
+        params = t.get('function', {}).get('parameters')
+        _augment_path_descriptions(params)
+        out.append(t)
+    return out
+
+
 PROJECT_TOOLS = [
     PROJECT_TOOL_LIST_DIR,
     PROJECT_TOOL_GREP, PROJECT_TOOL_FIND,
@@ -534,5 +597,5 @@ __all__ = [
     'PROJECT_TOOL_WRITE_FILE', 'PROJECT_TOOL_APPLY_DIFF', 'PROJECT_TOOL_APPLY_DIFFS',
     'PROJECT_TOOL_INSERT_CONTENT', 'PROJECT_TOOL_INSERT_CONTENTS',
     'PROJECT_TOOL_CREATE_PROJECT', 'PROJECT_TOOL_RUN_COMMAND',
-    'PROJECT_TOOLS', 'PROJECT_TOOL_NAMES',
+    'PROJECT_TOOLS', 'PROJECT_TOOL_NAMES', 'with_multiroot_hint',
 ]

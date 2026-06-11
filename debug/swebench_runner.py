@@ -262,6 +262,12 @@ class InferenceResult:
     num_turns: int = 0
     error: str = ''
     raw_output: str = ''   # for debugging
+    # Proxy-meter ground truth for CLI backends (CC): when the cc-proxy
+    # recorded this run, token totals are REPLACED with the proxy's, which
+    # include the CLI's internal microcompact calls its self-report omits.
+    proxy_metered: bool = False
+    proxy_n_calls: int = 0
+    cli_reported_tokens: int = 0
 
 
 @dataclass
@@ -469,18 +475,59 @@ def get_conda_env_path(repo: str, version: str) -> Path:
     return CONDA_ENV_PREFIX / get_conda_env_name(repo, version)
 
 
+def _clean_subprocess_path(env_bin: Path) -> str:
+    """PATH with ``env_bin`` first and the RUNNER's own env bin removed.
+
+    The runner process runs under whatever Python launched it (typically the
+    tofu server's conda env). Its bin dir is on the inherited PATH. If we only
+    PREPEND the target swe_* env's bin and that env is missing/half-built
+    (no ``bin/python``), a bare ``python`` / ``pip`` in ``cmd`` silently falls
+    through to the runner's env and ``pip install -e .`` writes an
+    ``__editable__*.pth`` into THAT env's site-packages — the contamination
+    root cause. Dropping the runner env's bin from the child PATH makes the
+    fall-through impossible.
+    """
+    runner_bin = str(Path(sys.executable).resolve().parent)
+    parts = [str(env_bin)]
+    for p in os.environ.get('PATH', '').split(os.pathsep):
+        if not p:
+            continue
+        try:
+            same = os.path.realpath(p) == os.path.realpath(runner_bin)
+        except OSError:
+            same = (p == runner_bin)
+        if same:
+            continue
+        parts.append(p)
+    return os.pathsep.join(parts)
+
+
 def _conda_run(env_path: Path, cmd: str, cwd: str = None, timeout: int = 600) -> subprocess.CompletedProcess:
     """Run a command inside a conda environment by activating it directly.
     
     Uses process groups so timeout kills ALL child processes (not just the shell).
     Without this, shell=True + subprocess.run leaves orphaned grandchildren.
+
+    Hardened against runner-env contamination: refuse to run if the target env
+    has no ``bin/python`` (a bare python/pip would otherwise fall through to
+    the runner's own env), and exclude the runner env's bin from the child PATH.
     """
     env_bin = env_path / 'bin'
+    if not (env_bin / 'python').exists():
+        raise RuntimeError(
+            f'_conda_run: target env has no bin/python: {env_path} — refusing to '
+            f'run "{cmd[:80]}" because a bare python/pip would fall through to '
+            f'the runner env and pollute it.'
+        )
     env = {**os.environ}
-    env['PATH'] = f'{env_bin}:{env.get("PATH", "")}'
+    env['PATH'] = _clean_subprocess_path(env_bin)
     env['CONDA_PREFIX'] = str(env_path)
     env['VIRTUAL_ENV'] = str(env_path)
     env['PYTHONDONTWRITEBYTECODE'] = '1'
+    env['PYTHONNOUSERSITE'] = '1'   # never read/write ~/.local
+    env.pop('PYTHONPATH', None)     # don't leak the runner's import path
+    env.pop('CONDA_PREFIX_1', None)
+    env.pop('CONDA_PREFIX_2', None)
     
     proc = subprocess.Popen(
         cmd, shell=True,
@@ -777,6 +824,15 @@ def run_tofu_inference(inst: SWEInstance, workspace: Path,
                                 result.output_tokens      += _ru.get('completion_tokens', 0) or 0
                                 result.cache_read_tokens  += _cr
                                 result.cache_write_tokens += _cw_a
+                            # Fold compaction's own LLM usage (not in apiRounds).
+                            _cu = _data.get('compactionUsage') or {}
+                            if isinstance(_cu, dict) and _cu:
+                                _cu_in = (_cu.get('prompt_tokens', 0) or _cu.get('input_tokens', 0) or 0)
+                                _cu_cr = (_cu.get('cache_read_tokens', 0) or 0)
+                                result.input_tokens       += max(_cu_in - _cu_cr, 0)
+                                result.output_tokens      += (_cu.get('completion_tokens', 0) or _cu.get('output_tokens', 0) or 0)
+                                result.cache_read_tokens  += _cu_cr
+                                result.cache_write_tokens += (_cu.get('cache_write_tokens', 0) or 0)
                             result.cost_usd = _compute_cost(result, mcfg)
                             log.warning('[%s] %s safety-timeout partial harvest: '
                                         '%d turns, %d in / %d out tokens, $%.3f',
@@ -859,6 +915,25 @@ def run_tofu_inference(inst: SWEInstance, workspace: Path,
                         result.cache_read_tokens  += _cr
                         result.cache_write_tokens += _cw_anthro
 
+                # ★ Add compaction's OWN LLM usage. The server runs L2
+                #   smart-summary (and, for compaction-experiment configs,
+                #   advanced-host summarizers) as SEPARATE LLM calls that are
+                #   NOT in apiRounds. Without this they're invisible and the
+                #   summary-based configs look artificially cheaper. The
+                #   server folds these into compactionUsage (see
+                #   orchestrator finalize + chat_poll whitelist).
+                _cu = data.get('compactionUsage') or {}
+                if isinstance(_cu, dict) and _cu:
+                    _cu_in = (_cu.get('prompt_tokens', 0) or _cu.get('input_tokens', 0) or 0)
+                    _cu_cr = (_cu.get('cache_read_tokens', 0) or 0)
+                    result.input_tokens       += max(_cu_in - _cu_cr, 0)
+                    result.output_tokens      += (_cu.get('completion_tokens', 0) or _cu.get('output_tokens', 0) or 0)
+                    result.cache_read_tokens  += _cu_cr
+                    result.cache_write_tokens += (_cu.get('cache_write_tokens', 0) or 0)
+                    log.info('[%s] +compaction usage: %d calls, in=%s out=%s',
+                             tool_name, _cu.get('n_calls', 0),
+                             _cu_in, _cu.get('completion_tokens', 0) or _cu.get('output_tokens', 0))
+
                 result.cost_usd = _compute_cost(result, mcfg)
 
                 # Save full poll response for debugging
@@ -932,6 +1007,12 @@ def ensure_cc_proxy_alive() -> bool:
 
     env = os.environ.copy()
     env['HOST'] = '127.0.0.1'  # Override conda's HOST
+    # Meter EVERY request the proxy sees (incl. CC's internal microcompact
+    # calls that CC's own result-usage omits). Default to a stable path so
+    # the runner can aggregate per-run by timestamp window.
+    if not env.get('CC_PROXY_USAGE_LOG'):
+        env['CC_PROXY_USAGE_LOG'] = os.environ.get(
+            'CC_PROXY_USAGE_LOG', '/tmp/cc_proxy_usage.jsonl')
     _cc_proxy_proc = subprocess.Popen(
         [sys.executable, 'start_proxy.py'],
         cwd=str(proxy_dir),
@@ -980,6 +1061,52 @@ def _is_cc_retryable_error(stdout: str, stderr: str) -> bool:
     return False
 
 
+def _aggregate_proxy_usage(t_start: float, t_end: float,
+                           label: str = '') -> Optional[dict]:
+    """Sum cc-proxy usage lines for one run (label match else [t0,t_end]
+    window). The proxy logs EVERY request incl. CC-internal microcompact —
+    the CLI's own result-usage omits those. Returns None when no lines
+    match (metering off / crash) so the caller keeps CLI self-report."""
+    path = os.environ.get('CC_PROXY_USAGE_LOG', '/tmp/cc_proxy_usage.jsonl')
+    if not path or not os.path.exists(path):
+        return None
+    tot = {'input_tokens': 0, 'output_tokens': 0, 'cache_read_tokens': 0,
+           'cache_write_tokens': 0, 'n_calls': 0}
+    try:
+        with open(path, encoding='utf-8') as f:
+            lines = f.readlines()
+    except Exception as e:
+        log.warning('[ProxyUsage] read failed: %s', e)
+        return None
+    def _add(d):
+        tot['n_calls'] += 1
+        for k in ('input_tokens', 'output_tokens',
+                  'cache_read_tokens', 'cache_write_tokens'):
+            v = d.get(k)
+            if isinstance(v, (int, float)):
+                tot[k] += v
+    label_hit = False
+    parsed = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            d = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        parsed.append(d)
+        if label and d.get('label') == label:
+            _add(d); label_hit = True
+    if label_hit:
+        return tot
+    for d in parsed:
+        ts = d.get('ts')
+        if isinstance(ts, (int, float)) and t_start <= ts <= t_end:
+            _add(d)
+    return tot if tot['n_calls'] else None
+
+
 def run_cc_inference(inst: SWEInstance, workspace: Path,
                     mcfg: ModelConfig = None) -> InferenceResult:
     """Run Claude Code CLI on an instance. Retries on 429/connection errors."""
@@ -1017,6 +1144,12 @@ def run_cc_inference(inst: SWEInstance, workspace: Path,
             # uses our fast wrapper instead of scanning the network filesystem
             cc_env = os.environ.copy()
             cc_env['PATH'] = '/tmp/safe_bin:' + cc_env.get('PATH', '')
+            # Tag every CC request with a run label so the proxy meter
+            # attributes usage to THIS run by exact match (not the racy
+            # time-window fallback) under concurrency. Claude Code CLI
+            # forwards ANTHROPIC_CUSTOM_HEADERS verbatim on each request.
+            cc_env['ANTHROPIC_CUSTOM_HEADERS'] = (
+                f'X-Run-Label: {inst.instance_id}:{tool_name}')
             proc = subprocess.run(
                 [
                     'claude', '-p',
@@ -1061,6 +1194,25 @@ def run_cc_inference(inst: SWEInstance, workspace: Path,
                     result.raw_output = proc.stdout[:50000]  # save full output for detail file
                 except (json.JSONDecodeError, KeyError, TypeError):
                     result.raw_output = proc.stdout[:20000]
+
+            # ── Ground-truth override from the cc-proxy meter ──
+            # CC's own result-usage OMITS its internal microcompact summary
+            # calls; the proxy saw them. Prefer proxy totals when present so
+            # CC's cost is complete (matches the Tofu-side compaction fix).
+            _pm = _aggregate_proxy_usage(t0, time.time(),
+                                         label=f'{inst.instance_id}:{tool_name}')
+            if _pm:
+                result.cli_reported_tokens = result.input_tokens + result.output_tokens
+                result.input_tokens = _pm['input_tokens']
+                result.output_tokens = _pm['output_tokens']
+                result.cache_read_tokens = _pm['cache_read_tokens']
+                result.cache_write_tokens = _pm['cache_write_tokens']
+                result.proxy_metered = True
+                result.proxy_n_calls = _pm['n_calls']
+                log.info('[CC] %s proxy-metered usage (%d calls): in=%d out=%d '
+                         'vs CLI-self in+out=%d', inst.instance_id, _pm['n_calls'],
+                         result.input_tokens, result.output_tokens,
+                         result.cli_reported_tokens)
 
             result.cost_usd = _compute_cost(result, mcfg)
             break  # success — exit retry loop
@@ -1805,6 +1957,10 @@ def _save_per_run_detail(
             'error': inf_result.error,
             'patch_size': len(inf_result.model_patch),
             'raw_output': inf_result.raw_output,  # full CC JSON or Tofu poll response
+            # Cost-accounting provenance (compaction-aware metering):
+            'proxy_metered': getattr(inf_result, 'proxy_metered', False),
+            'proxy_n_calls': getattr(inf_result, 'proxy_n_calls', 0),
+            'cli_reported_tokens': getattr(inf_result, 'cli_reported_tokens', 0),
         },
         # Eval details
         'eval': None,

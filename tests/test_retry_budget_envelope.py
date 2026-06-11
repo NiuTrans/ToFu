@@ -197,11 +197,12 @@ def test_zero_byte_writes_force_rotate_pair():
     assert task.get('_force_rotate_pair') == ('sankuai_key_0', 'aws.claude-opus-4.7')
 
 
-def test_classic_premature_close_does_not_force_rotate():
-    """Force-rotate is zero-byte-only: a classic premature close (model
-    produced thinking, then was cut) doesn't get the slot-rotation
-    treatment because the slot already produced output — likely not the
-    pool's fault."""
+def test_classic_premature_close_retries_without_rotate():
+    """A classic premature close (model produced thinking, then was cut
+    mid-stream) retries on the SAME slot — strict_model is on and the
+    slot already produced output, so it's likely a transient transport
+    hiccup worth retrying as-is. It does NOT write a force-rotate signal
+    (that's zero-byte-only). The retry is admitted (action=continue)."""
     task = _fresh_task(phase_counter=0)
     decision = analyse_stream_result(
         assistant_msg={
@@ -225,6 +226,31 @@ def test_classic_premature_close_does_not_force_rotate():
     )
     assert decision['action'] == 'continue'
     assert '_force_rotate_pair' not in task
+
+
+def test_classic_premature_close_retries_up_to_16():
+    """Classic premature-close now keeps retrying (cap 16) instead of
+    failing the task after 2 — a single dropped connection shouldn't
+    zero out a whole SWE-bench instance. At count=15 it still retries;
+    at count=16 it's exhausted."""
+    from lib.tasks_pkg.stream_handler import _PREMATURE_RETRY_MAX_CLASSIC
+    assert _PREMATURE_RETRY_MAX_CLASSIC == 16
+
+    def _run(count):
+        task = _fresh_task(phase_counter=count)
+        return analyse_stream_result(
+            assistant_msg={'role': 'assistant', 'content': '',
+                           'reasoning_content': 'x' * 2000},
+            last_finish_reason='stop', task=task, tid='budget',
+            model='aws.claude-opus-4.7', round_num=1,
+            _premature_retry_count=count, messages=[],
+            usage={'_stream_anomaly': False, 'trace_id': 'M-CLASSIC',
+                   'stream_elapsed_ms': 30000},
+        )
+
+    assert _run(15)['action'] == 'continue'   # under cap → retry
+    assert _run(16)['action'] == 'break'       # at cap → exhausted
+    assert _run(16)['last_finish_reason'] == 'premature_close'
 
 
 def test_zero_byte_without_dispatch_metadata_skips_rotate():

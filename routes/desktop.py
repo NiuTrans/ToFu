@@ -9,8 +9,6 @@ Mirrors the architecture of routes/browser.py:
 import hmac
 import json
 import threading
-import time
-import uuid
 
 from flask import Blueprint, jsonify, request
 
@@ -86,86 +84,23 @@ def _bridge_unauthorized():
     }), 401
 
 # ══════════════════════════════════════════════════════════
-#  Command Queue (mirrors lib/browser.py pattern)
+#  Command Queue (moved to lib/desktop/bridge.py, 2026-06)
 # ══════════════════════════════════════════════════════════
-
-_commands = {}
-_commands_lock = threading.Lock()
-_last_poll_time = 0
-
-
-def send_desktop_command(cmd_type, params=None, timeout=30):
-    """Queue a command for the desktop agent. Blocks until result or timeout."""
-    cmd_id = str(uuid.uuid4())
-    event = threading.Event()
-    cmd = {
-        'id': cmd_id,
-        'type': cmd_type,
-        'params': params or {},
-        'created_at': time.time(),
-        'event': event,
-        'result': None,
-        'error': None,
-    }
-
-    with _commands_lock:
-        _commands[cmd_id] = cmd
-
-    event.wait(timeout=timeout)
-
-    with _commands_lock:
-        cmd = _commands.pop(cmd_id, cmd)
-
-    if not event.is_set():
-        return None, 'Desktop agent timeout — is the agent running?'
-
-    return cmd.get('result'), cmd.get('error')
-
-
-def is_desktop_agent_connected():
-    """Check if the desktop agent has polled recently."""
-    return time.time() - _last_poll_time < 15
-
-
-def format_desktop_result(cmd_type, result):
-    """Format a desktop agent result for the LLM tool response."""
-    if result is None:
-        return '(no output)'
-    if isinstance(result, str):
-        return result
-    if isinstance(result, dict):
-        # Screenshot results come as { "image_base64": "...", "width": ..., "height": ... }
-        if 'image_base64' in result:
-            w = result.get('width', '?')
-            h = result.get('height', '?')
-            return f'Screenshot captured ({w}x{h})'
-        # System info, process list, etc.
-        parts = []
-        for k, v in result.items():
-            if isinstance(v, list) and len(v) > 20:
-                parts.append(f'{k}: [{len(v)} items]')
-            else:
-                parts.append(f'{k}: {v}')
-        return '\n'.join(parts)
-    if isinstance(result, list):
-        if len(result) == 0:
-            return '(empty list)'
-        # File listings
-        lines = []
-        for item in result[:200]:
-            if isinstance(item, dict):
-                name = item.get('name', str(item))
-                is_dir = item.get('is_dir', False)
-                size = item.get('size', '')
-                prefix = '[DIR] ' if is_dir else '[FILE] '
-                suffix = f'  ({size} bytes)' if size and not is_dir else ''
-                lines.append(f'{prefix}{name}{suffix}')
-            else:
-                lines.append(str(item))
-        if len(result) > 200:
-            lines.append(f'... and {len(result) - 200} more items')
-        return '\n'.join(lines)
-    return str(result)
+# The queue + RPC helpers moved DOWN into lib so tool handlers can drive the
+# agent without importing the routes package (lib→routes circular break).
+# Re-exported here for back-compat: external callers still do
+# ``from routes.desktop import send_desktop_command, format_desktop_result,
+# is_desktop_agent_connected``.
+from lib.desktop import (  # noqa: F401,E402
+    command_queue as _commands,
+    format_desktop_result,
+    is_desktop_agent_connected,
+    pending_commands_count,
+    record_poll,
+    resolve_results,
+    send_desktop_command,
+    take_pending_commands,
+)
 
 
 # ══════════════════════════════════════════════════════════
@@ -174,48 +109,18 @@ def format_desktop_result(cmd_type, result):
 
 @desktop_bp.route('/api/desktop/poll', methods=['POST'])
 def desktop_poll():
-    global _last_poll_time
     if not _check_bridge_auth('desktop'):
         return _bridge_unauthorized()
-    _last_poll_time = time.time()
+    record_poll()
 
     # 1) Resolve any results from the agent
     body = parse_body()
-    results = body.get('results', [])
-    resolved = 0
-
-    for r in results:
-        cmd_id = r.get('id', '')
-        if not cmd_id:
-            continue
-        with _commands_lock:
-            cmd = _commands.get(cmd_id)
-        if cmd:
-            cmd['result'] = r.get('result')
-            cmd['error'] = r.get('error')
-            cmd['event'].set()
-            resolved += 1
-
+    resolved = resolve_results(body.get('results', []))
     if resolved:
         logger.info('[Desktop] resolved %d command results', resolved)
 
     # 2) Collect pending commands for the agent
-    pending = []
-    now = time.time()
-    with _commands_lock:
-        for cmd_id, cmd in list(_commands.items()):
-            if cmd['event'].is_set():
-                continue  # already resolved
-            if now - cmd['created_at'] > 90:
-                cmd['error'] = 'Command expired (stale cleanup)'
-                cmd['event'].set()
-                continue
-            pending.append({
-                'id': cmd_id,
-                'type': cmd['type'],
-                'params': cmd['params'],
-            })
-
+    pending = take_pending_commands()
     if pending:
         logger.info('[Desktop] sending %d commands to agent: %s',
                     len(pending), [c['type'] for c in pending])
@@ -223,8 +128,8 @@ def desktop_poll():
 
 
 # Status endpoint moved to routes/api_v1/desktop.py — read state via the
-# module-level `_commands`, `_last_poll_time`, and `is_desktop_agent_connected`
-# helpers above.
+# lib.desktop helpers (last_poll_time / pending_commands_count /
+# is_desktop_agent_connected).
 
 
 # ══════════════════════════════════════════════════════════

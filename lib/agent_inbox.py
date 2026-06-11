@@ -276,6 +276,20 @@ def clear(task_id: str) -> int:
     return n
 
 
+def untombstone(key: str) -> None:
+    """Remove *key* from the tombstone set so its inbox can be re-created.
+
+    Called when a fresh ``spawn_agents`` wave starts on a conversation whose
+    previous swarm was explicitly aborted (which tombstoned the slot). Without
+    this, the new wave's ``enqueue`` calls would be silently dropped because
+    the slot is still tombstoned from the abort.
+    """
+    if not key:
+        return
+    with _lock:
+        _tombstones.discard(key)
+
+
 def reset_for_test(task_id: str = '') -> None:
     """Wipe all state (or just one task_id's state). Test-only helper.
 

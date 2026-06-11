@@ -50,7 +50,7 @@ IGNORE_FILES = {
 MAX_FILE_SIZE    = 512 * 1024
 MAX_SCAN_FILES   = 5000
 MAX_TREE_ENTRIES = 500
-MAX_READ_CHARS   = 100_000
+MAX_READ_CHARS   = 1_000_000     # ★ whole-file read cap lifted; MAX_FILE_SIZE (512KB) is the real bound
 MAX_GREP_RESULTS = 50
 LINE_COUNT_LIMIT = 50_000        # ★ skip line counting for files above this
 SESSIONS_DIR     = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -160,13 +160,22 @@ _conv_roots: _collections.OrderedDict = _collections.OrderedDict()
 _conv_primary: dict[str, str] = {}
 
 
-def _make_root_state(abs_path):
-    """Create a fresh per-root state dict."""
+def _make_root_state(abs_path, access='rw'):
+    """Create a fresh per-root state dict.
+
+    ``access`` is the per-root write policy: ``'rw'`` (default, writable) or
+    ``'ro'`` (read-only — reads/greps/find are allowed, but every write,
+    edit, create_project, and destructive run_command targeting this root is
+    refused). It lives on the root_state so it travels with the root through
+    both the global ``_roots`` registry and the per-conv ``_conv_roots`` one
+    — the same isolation seam every other multi-root attribute uses.
+    """
     return {
         'path': abs_path, 'tree': None,
         'fileCount': 0, 'dirCount': 0, 'totalSize': 0,
         'languages': {}, 'scannedAt': 0,
         'scanning': False, 'scanProgress': '', 'scanDetail': '',
+        'access': 'ro' if access == 'ro' else 'rw',
     }
 
 def get_roots():
@@ -210,7 +219,17 @@ def get_root_path(name, conv_id=None):
         return r['path'] if r else None
 
 
-def set_conv_roots(conv_id, primary_path, extras=None):
+def _normalise_readonly_set(readonly_paths):
+    """Return a set of abspath'd, expanduser'd read-only root paths."""
+    out = set()
+    for p in (readonly_paths or []):
+        if not p:
+            continue
+        out.add(os.path.abspath(os.path.expanduser(p)))
+    return out
+
+
+def set_conv_roots(conv_id, primary_path, extras=None, readonly_paths=None):
     """Register the root layout for a conversation (scoped registry).
 
     This is the per-conv equivalent of ``set_project`` + ``add_project_root``.
@@ -221,10 +240,14 @@ def set_conv_roots(conv_id, primary_path, extras=None):
         conv_id:      Conversation identifier (required for scoping).
         primary_path: Absolute path of the primary root.
         extras:       Optional iterable of absolute paths for extra roots.
+        readonly_paths: Optional iterable of absolute paths (any of which may
+            be the primary or an extra) that must be registered read-only.
+            A root whose abspath is in this set gets ``access='ro'``.
     """
     if not conv_id or not primary_path:
         return
     abs_primary = os.path.abspath(os.path.expanduser(primary_path))
+    ro_set = _normalise_readonly_set(readonly_paths)
     extras_list = []
     for p in (extras or []):
         ap = os.path.abspath(os.path.expanduser(p))
@@ -234,7 +257,8 @@ def set_conv_roots(conv_id, primary_path, extras=None):
         conv_map: dict = {}
         # Primary name = basename of abs path (matches set_project naming).
         prim_name = os.path.basename(abs_primary) or 'root'
-        conv_map[prim_name] = _make_root_state(abs_primary)
+        conv_map[prim_name] = _make_root_state(
+            abs_primary, access='ro' if abs_primary in ro_set else 'rw')
         used_names = {prim_name}
         for ep in extras_list:
             name = os.path.basename(ep) or 'root'
@@ -244,7 +268,8 @@ def set_conv_roots(conv_id, primary_path, extras=None):
                 name = f'{orig}_{counter}'
                 counter += 1
             used_names.add(name)
-            conv_map[name] = _make_root_state(ep)
+            conv_map[name] = _make_root_state(
+                ep, access='ro' if ep in ro_set else 'rw')
         # LRU eviction: drop oldest if over cap.  Re-insertion moves an
         # existing conv to the end (most-recent).
         if conv_id in _conv_roots:
@@ -270,9 +295,40 @@ def clear_conv_state(conv_id):
         _conv_primary.pop(conv_id, None)
 
 
-def ensure_project_state_for_conv(conv_id, path, extras=None):
+def ensure_project_state_for_conv(conv_id, path, extras=None, readonly_paths=None):
     """Convenience alias for :func:`set_conv_roots` (kept for test stability)."""
-    set_conv_roots(conv_id, path, extras=extras)
+    set_conv_roots(conv_id, path, extras=extras, readonly_paths=readonly_paths)
+
+
+def is_readonly_path(abs_target, conv_id=None):
+    """Return True if *abs_target* resolves inside a root marked read-only.
+
+    Resolution mirrors the path resolver's scoping: when ``conv_id`` is given
+    and that conv has a registered root set, the conv-local registry is
+    consulted (strict isolation); otherwise the global ``_roots`` registry is
+    used. The target is matched against the DEEPEST containing root (so an
+    ``rw`` sub-root nested under an ``ro`` parent wins, and vice-versa).
+
+    A target inside no registered root returns False — it is not read-only,
+    and the write path's auto-register / sandbox logic handles it as before.
+    """
+    if not abs_target:
+        return False
+    target = os.path.realpath(os.path.abspath(os.path.expanduser(abs_target)))
+    with _lock:
+        if conv_id and conv_id in _conv_roots:
+            roots = list(_conv_roots[conv_id].values())
+        else:
+            roots = list(_roots.values())
+    best = None
+    best_len = -1
+    for rs in roots:
+        rp = os.path.realpath(rs['path'])
+        if target == rp or target.startswith(rp + os.sep):
+            if len(rp) > best_len:
+                best = rs
+                best_len = len(rp)
+    return bool(best) and best.get('access') == 'ro'
 
 
 def resolve_namespaced_path(rel_path, conv_id=None):
@@ -339,6 +395,18 @@ class _ScanAborted(Exception):
     pass
 
 
+class ReadOnlyRootError(ValueError):
+    """Raised when a write/edit/create targets a root marked read-only.
+
+    Subclasses ``ValueError`` so the existing ``except ValueError`` handlers
+    in the write tools surface the message straight to the model as a tool
+    result (same path as ``UnknownWorkspaceRootError`` and the system-path
+    rejections in ``_resolve_write_path``). The model then knows to write
+    elsewhere instead of retrying the same blocked target.
+    """
+    pass
+
+
 class UnknownWorkspaceRootError(ValueError):
     """Raised when a ``rootname:rel/path`` spec references an unregistered root.
 
@@ -364,8 +432,15 @@ def get_state():
             if rs['path'] != primary:
                 extra.append({'path': rs['path'], 'name': rn,
                               'fileCount': rs['fileCount'],
-                              'scanning': rs['scanning']})
+                              'scanning': rs['scanning'],
+                              'readOnly': rs.get('access') == 'ro'})
         s['extraRoots'] = extra
+        # ★ Primary root's own access flag (the primary may itself be RO).
+        if primary:
+            for rs in _roots.values():
+                if rs['path'] == primary:
+                    s['readOnly'] = rs.get('access') == 'ro'
+                    break
         # ★ Cross-DC latency indicator
         try:
             from lib.cross_dc import get_cluster_for_path, get_latency_class, get_latency_s

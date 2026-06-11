@@ -48,6 +48,22 @@ def strip_thinking(ctx: CompactionContext) -> int:
     messages = ctx.messages
     tokens_saved = 0
 
+    # ── DeepSeek-V4 thinking mode guard ──
+    # DeepSeek V4 (pro/flash) in thinking mode rejects an assistant turn
+    # whose reasoning_content was emptied with HTTP 400 ("The
+    # reasoning_content in the thinking mode must be passed back to the
+    # API."). Blanking it here would make the very next round 400 and force
+    # an off-DeepSeek fallback. Skip the strip for these models.
+    _task = ctx.task or {}
+    _model = _task.get('model') or (_task.get('config') or {}).get('model') or ''
+    if _model:
+        from lib.model_info import model_requires_reasoning_content_replay
+        if model_requires_reasoning_content_replay(_model):
+            logger.debug('[L1-think] conv=%s  skipping reasoning_content strip '
+                         '(model=%s requires reasoning replay in thinking mode)',
+                         _log_id(ctx.conv_id), _model)
+            return 0
+
     assistant_indices = [
         i for i, m in enumerate(messages)
         if m.get('role') == 'assistant' and m.get('reasoning_content')

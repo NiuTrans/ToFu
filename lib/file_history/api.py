@@ -17,12 +17,14 @@ import uuid
 from lib.log import get_logger
 
 from lib.file_history.store import (
+    COMPACT_CHECK_EVERY,
     append_snapshot_record,
     backup_blob_path,
     ensure_store,
     find_snapshot,
     iter_snapshots,
     load_tracked,
+    maybe_compact_store,
     read_blob,
     save_tracked,
     stage_backup,
@@ -32,6 +34,11 @@ from lib.file_history.store import (
 logger = get_logger(__name__)
 
 _DISABLED_WARNED = False
+
+# Per-project count of snapshots appended this process, used as a cheap
+# modulo gate for ``maybe_compact_store`` (avoids scanning the whole log
+# every round just to decide whether compaction is due).
+_SNAP_COUNTERS: dict[str, int] = {}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -201,6 +208,19 @@ def make_snapshot(base_path: str, *,
                     snap_id[:8], (task_id or '-')[:12],
                     (conv_id or '-')[:8], len(files),
                     ' external' if external else '')
+        # Cheap modulo gate: only every COMPACT_CHECK_EVERY appends do we
+        # pay for the full-log scan inside compact_store. The counter is
+        # seeded from the on-disk log length the first time we see a project
+        # so a long-lived store still compacts promptly after a restart.
+        key = os.path.abspath(base_path)
+        n = _SNAP_COUNTERS.get(key)
+        if n is None:
+            n = sum(1 for _ in iter_snapshots(base_path))
+        else:
+            n += 1
+        _SNAP_COUNTERS[key] = n
+        if n % COMPACT_CHECK_EVERY == 0:
+            maybe_compact_store(base_path, n)
         return snap_id
     except Exception as e:
         logger.warning('[FileHistory] make_snapshot failed task=%s: %s',

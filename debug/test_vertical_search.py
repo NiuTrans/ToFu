@@ -78,6 +78,18 @@ def test_intent_detection():
         ('TSLA price', 'stock', 'TSLA'),
     ]
 
+    # hf_papers / semantic_scholar: phrase-based, so check domain only
+    domain_only_cases = [
+        ('hf daily papers', 'hf_papers'),
+        ('huggingface papers', 'hf_papers'),
+        ('trending papers this week', 'hf_papers'),
+        ('daily papers on diffusion models', 'hf_papers'),
+        ('papers related to Mamba', 'semantic_scholar'),
+        ('papers similar to attention is all you need', 'semantic_scholar'),
+        ('what cites 2312.00752', 'semantic_scholar'),
+        ('papers citing the transformer paper', 'semantic_scholar'),
+    ]
+
     negative_cases = [
         'how to fix CVE errors in general',
         'what is arxiv for',
@@ -120,6 +132,14 @@ def test_intent_detection():
             fail += 1
             print(f'  FAIL [+]: {query!r} => {result} (expected {expected_domain}/{expected_id})')
 
+    for query, expected_domain in domain_only_cases:
+        result = detect_vertical_intent(query)
+        if result and result[0] == expected_domain:
+            ok += 1
+        else:
+            fail += 1
+            print(f'  FAIL [d]: {query!r} => {result} (expected domain {expected_domain})')
+
     for query in negative_cases:
         result = detect_vertical_intent(query)
         if result is None:
@@ -149,6 +169,8 @@ def test_live_apis():
         ('npm', 'express', 'express'),               # Express package
         ('github', 'facebook/react', 'Stars'),       # React repo
         ('ip', '8.8.8.8', 'Google'),                 # Google DNS
+        ('hf_papers', 'diffusion', 'Hugging Face'),  # HF keyword search
+        ('semantic_scholar', 'mamba state space model', 'Semantic Scholar'),  # S2 related
     ]
 
     ok = 0

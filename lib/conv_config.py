@@ -215,6 +215,7 @@ def resolve_conv_config(
         ),
         'projectPath': ov.get('projectPath') or conv.get('projectPath') or '',
         'projectPaths': list(conv.get('projectPaths') or []),
+        'readOnlyPaths': list(conv.get('readOnlyPaths') or []),
         'autoApply': _coerce_bool(ov.get('autoApply'), False),
         'browserEnabled': _pick(
             _coerce_bool(ov.get('browserEnabled')),
@@ -303,6 +304,7 @@ def resolve_conv_settings(
         'humanGuidanceEnabled': _coerce_bool(conv.get('humanGuidanceEnabled')),
         'projectPath': conv.get('projectPath') or '',
         'projectPaths': list(conv.get('projectPaths') or []),
+        'readOnlyPaths': list(conv.get('readOnlyPaths') or []),
         'autoTranslate': (
             _coerce_bool(conv.get('autoTranslate'),
                           _coerce_bool(ov.get('autoTranslate'), False))

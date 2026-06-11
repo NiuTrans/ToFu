@@ -22,12 +22,16 @@ import threading
 import time
 from typing import Any
 
-from lib.log import get_logger, log_context
+from lib.log import audit_log, get_logger, log_context
 from lib.mcp.config import load_mcp_config
 from lib.mcp.types import (
+    MCP_BREAKER_BASE_BACKOFF,
+    MCP_BREAKER_MAX_BACKOFF,
     MCP_CALL_TIMEOUT,
     MCP_CONNECT_TIMEOUT,
+    MCP_KEEPALIVE_INTERVAL,
     MCP_MAX_RESULT_CHARS,
+    MCP_PING_TIMEOUT,
     MCPToolInfo,
     make_namespaced_name,
     parse_namespaced_name,
@@ -72,6 +76,35 @@ def _unwrap_exception_group(exc: BaseException) -> BaseException:
         leaf = next((s for s in subs if not isinstance(s, Group)), None)
         cur = leaf if leaf is not None else subs[0]
     return cur if cur is not None else exc
+
+
+def _is_transport_dead_error(exc: BaseException) -> bool:
+    """Heuristically decide whether ``exc`` means the MCP transport is gone.
+
+    Used by the reactive reconnect path: a tool call that fails because the
+    underlying stdio pipe / SSE stream died (subprocess crashed, peer closed,
+    broken pipe) is retryable after a fresh reconnect, whereas a genuine
+    tool-level error (bad args, server-side exception) is not — reconnecting
+    would just loop. We match on the concrete leaf exception type/text.
+
+    Conservative by design: when unsure we return False, so we never mask a
+    real tool error behind an endless reconnect cycle.
+    """
+    leaf = _unwrap_exception_group(exc)
+    # anyio stream-lifecycle errors are the canonical "pipe is gone" signals.
+    name = type(leaf).__name__
+    if name in (
+        'ClosedResourceError', 'BrokenResourceError', 'EndOfStream',
+        'BrokenPipeError', 'ConnectionResetError', 'ConnectionError',
+    ):
+        return True
+    text = (str(leaf) or '').lower()
+    needles = (
+        'connection closed', 'broken pipe', 'closed resource',
+        'connection reset', 'end of stream', 'transport closed',
+        'session is closed', 'peer closed',
+    )
+    return any(n in text for n in needles)
 
 
 def _read_stderr_tail(f, max_bytes: int = _MCP_STDERR_TAIL_BYTES) -> str:
@@ -165,6 +198,63 @@ _LAUNCHER_HINTS = {
         'Python 3 is missing from PATH — very unusual. Check your shell PATH.'
     ),
 }
+
+
+def _ensure_writable_caches(env: dict[str, str]) -> None:
+    """Redirect launcher caches AND data dirs to a project-local dir when
+    ``$HOME`` is read-only.
+
+    On locked-down / shared deployments the home dir (and hence
+    ``$HOME/.cache`` and ``$HOME/.local/share``) is often not writable —
+    sometimes not even traversable (no execute bit) — for the running user.
+    ``uv`` / ``uvx`` then fail in two successive places, exiting before the
+    MCP handshake so every stdio server reports "Connection closed":
+
+      1. cache:  "Failed to initialize cache at ``~/.cache/uv``: Permission
+         denied" — fixed by ``UV_CACHE_DIR`` / ``XDG_CACHE_HOME``.
+      2. data:   "failed to read directory ``~/.local/share/uv/python``:
+         Permission denied" — fixed by ``XDG_DATA_HOME`` and the explicit
+         ``UV_*_DIR`` vars below (redirecting the managed-Python + tool dirs).
+
+    Every cache/data-controlling env var is pointed (only when the caller
+    has not set it already) at a writable directory under the repo's
+    ``data/`` tree, which is guaranteed writable by the rest of Tofu. Because
+    that tree usually lives on a different filesystem than ``$HOME``,
+    ``UV_LINK_MODE=copy`` is also set so uv does not abort/warn when it cannot
+    hardlink across filesystems. No-op when the chosen directory cannot be
+    created.
+    """
+    cache_root = os.environ.get('TOFU_MCP_CACHE_DIR') or os.path.join(
+        os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')),
+        'data', 'mcp-cache',
+    )
+    share_root = os.path.join(cache_root, 'share')
+    try:
+        os.makedirs(cache_root, exist_ok=True)
+        os.makedirs(share_root, exist_ok=True)
+    except OSError as e:
+        logger.warning('[MCP] cannot create launcher cache dir %s: %s', cache_root, e)
+        return
+
+    # uv / uvx, npm / npx, generic XDG, and pip caches + data dirs.
+    defaults = {
+        # ── caches ──
+        'UV_CACHE_DIR': os.path.join(cache_root, 'uv'),
+        'XDG_CACHE_HOME': cache_root,
+        'npm_config_cache': os.path.join(cache_root, 'npm'),
+        'PIP_CACHE_DIR': os.path.join(cache_root, 'pip'),
+        # ── data dirs (managed Python, installed tools) ──
+        'XDG_DATA_HOME': share_root,
+        'UV_PYTHON_INSTALL_DIR': os.path.join(share_root, 'uv', 'python'),
+        'UV_TOOL_DIR': os.path.join(share_root, 'uv', 'tools'),
+        'UV_TOOL_BIN_DIR': os.path.join(cache_root, 'bin'),
+        # ── cross-filesystem safety ──
+        # data/ is typically a different mount than $HOME, so hardlinking the
+        # cache into the venv fails; copy mode avoids the error/warning.
+        'UV_LINK_MODE': 'copy',
+    }
+    for key, path in defaults.items():
+        env.setdefault(key, path)
 
 
 def _coerce_one(value: Any, schema: dict[str, Any]) -> Any:
@@ -348,10 +438,32 @@ class MCPBridge:
         self._tool_index: dict[str, MCPToolInfo] = {}  # namespaced_name → info
         self._lock = threading.Lock()
 
+        # Per-server reconnect serialization: prevents the reactive
+        # (call_tool) and proactive (keepalive) recovery paths from
+        # reconnecting the same server concurrently.
+        self._reconnect_locks: dict[str, threading.Lock] = {}
+
         # Dedicated asyncio event loop for MCP sessions
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
         self._started = False
+
+        # Background keepalive (proactive health-check + reconnect) loop.
+        self._keepalive_task: asyncio.Task | None = None
+        self._keepalive_stop: asyncio.Event | None = None
+
+        # Per-server circuit breaker: name → (consecutive_failures, next_retry_ts).
+        # Set after a reconnect attempt FAILS; gates the keepalive loop so a
+        # permanently-broken server isn't respawned every sweep. Protected by
+        # ``self._lock``. Cleared on any successful (re)connect.
+        self._breaker: dict[str, tuple[int, float]] = {}
+
+        # Last-known good config per server. Retained so the keepalive loop
+        # can keep retrying a server whose live handle was torn down by a
+        # FAILED reconnect (connect_server pops the old handle before it
+        # re-registers, so a crash-on-start server would otherwise vanish
+        # from ``self._servers`` and never be retried). Protected by ``self._lock``.
+        self._configs: dict[str, dict] = {}
 
     # ── Event loop management ─────────────────────────────
 
@@ -468,7 +580,121 @@ class MCPBridge:
         logger.info('[MCP] Server %s connected — %d tools discovered: %s',
                     name, len(tools),
                     ', '.join(t.name for t in tools))
+        # A successful (re)connect clears any circuit-breaker backoff and
+        # records the working config for future retries.
+        with self._lock:
+            self._configs[name] = dict(srv_cfg)
+            if self._breaker.pop(name, None) is not None:
+                logger.info('[MCP] Circuit breaker reset for %s (reconnected)', name)
+        self._start_keepalive()
         return tools
+
+    # ── Circuit breaker ──────────────────────────────────
+
+    def _breaker_blocks(self, name: str) -> bool:
+        """True if ``name`` is in backoff and its next-retry time hasn't arrived.
+
+        Read-only check used by the keepalive sweep to skip servers that are
+        currently being backed off after repeated reconnect failures.
+        """
+        with self._lock:
+            entry = self._breaker.get(name)
+        if entry is None:
+            return False
+        _, next_retry_ts = entry
+        return time.time() < next_retry_ts
+
+    def get_breaker_state(self, name: str) -> dict[str, Any] | None:
+        """Return the circuit-breaker status for ``name`` for UI surfacing.
+
+        Returns ``None`` when the server has no recorded reconnect failures
+        (healthy / never failed). Otherwise a dict::
+
+            {
+              'failures': int,        # consecutive failed reconnects
+              'retry_in': float,      # seconds until next retry (>=0)
+              'next_retry_ts': float, # absolute epoch seconds
+            }
+
+        ``retry_in`` is clamped to 0 when the backoff window has already
+        elapsed (a retry is due on the next keepalive sweep).
+        """
+        with self._lock:
+            entry = self._breaker.get(name)
+        if entry is None:
+            return None
+        failures, next_retry_ts = entry
+        return {
+            'failures': failures,
+            'retry_in': max(0.0, next_retry_ts - time.time()),
+            'next_retry_ts': next_retry_ts,
+        }
+
+    def _breaker_record_failure(self, name: str) -> float:
+        """Record a failed reconnect and return the backoff delay applied.
+
+        Bumps the consecutive-failure count and schedules the next allowed
+        retry at ``min(BASE * 2**(failures-1), MAX)`` seconds from now.
+        """
+        with self._lock:
+            failures = self._breaker.get(name, (0, 0.0))[0] + 1
+            delay = min(
+                MCP_BREAKER_BASE_BACKOFF * (2 ** (failures - 1)),
+                MCP_BREAKER_MAX_BACKOFF,
+            )
+            self._breaker[name] = (failures, time.time() + delay)
+        return delay
+
+    def _reconnect_server(self, name: str) -> _MCPServerHandle:
+        """Tear down and re-establish a single server using its stored config.
+
+        Used by both recovery paths (reactive call_tool retry + proactive
+        keepalive). Serialized per-server via ``_reconnect_locks`` so two
+        callers racing on the same dropped server don't spawn duplicate
+        subprocesses. Returns the fresh handle.
+
+        Raises if the config is unknown or the reconnect itself fails — the
+        caller decides how to surface that.
+        """
+        with self._lock:
+            old = self._servers.get(name)
+            # Prefer the live handle's config; fall back to the last-known-good
+            # config so a server torn down by a previous FAILED reconnect can
+            # still be retried.
+            srv_cfg = dict(old.config) if old is not None else self._configs.get(name)
+            srv_cfg = dict(srv_cfg) if srv_cfg is not None else None
+            rlock = self._reconnect_locks.setdefault(name, threading.Lock())
+        if srv_cfg is None:
+            raise ValueError(f'cannot reconnect unknown MCP server: {name}')
+
+        with rlock:
+            # Re-check under the per-server lock: a racing caller may have
+            # already reconnected while we waited. If the live handle has a
+            # session and differs from the one we saw, reuse it.
+            with self._lock:
+                cur = self._servers.get(name)
+            if cur is not None and cur is not old and cur.session is not None:
+                logger.info('[MCP] %s already reconnected by another caller', name)
+                return cur
+            audit_log('mcp_reconnect', server=name)
+            logger.info('[MCP] Reconnecting server %s', name)
+            try:
+                self.connect_server(name, srv_cfg)
+            except Exception:
+                # Record the failure so the circuit breaker backs off the
+                # next keepalive sweep (connect_server clears the breaker on
+                # success, so this only sticks for genuinely failing servers).
+                delay = self._breaker_record_failure(name)
+                with self._lock:
+                    failures = self._breaker.get(name, (0, 0.0))[0]
+                logger.warning(
+                    '[MCP] Reconnect of %s failed (consecutive=%d) — '
+                    'backing off %.0fs before next attempt',
+                    name, failures, delay,
+                )
+                raise
+            with self._lock:
+                return self._servers[name]
 
     async def _async_start_owner(self, name: str, srv_cfg: dict):
         """Async: spawn the owner task for a server and await readiness.
@@ -579,6 +805,10 @@ class MCPBridge:
                         env['NODE_OPTIONS'] = (
                             f'{existing_opts} --use-env-proxy'.strip()
                         )
+                    # Redirect launcher caches (uv/uvx, npm/npx, pip) to a
+                    # writable project-local dir when $HOME/.cache is read-only
+                    # — otherwise uvx dies before the MCP handshake.
+                    _ensure_writable_caches(env)
                     extra_env = srv_cfg.get('env', {})
                     if extra_env:
                         env.update(extra_env)
@@ -690,11 +920,19 @@ class MCPBridge:
                     logger.debug('[MCP] stderr_file close failed: %s', e)
                 handle._stderr_file = None
 
-    def _disconnect_one(self, name: str) -> None:
+    def _disconnect_one(self, name: str, forget: bool = False) -> None:
         """Sync: request shutdown for a single server and wait (bounded).
 
         Safe to call from any thread. Runs entirely via ``_run_async``
         indirection so the event loop is touched from the loop thread only.
+
+        Args:
+            name: server id to disconnect.
+            forget: when True (explicit user disconnect / removal), also drop
+                the circuit-breaker state and stored config so the keepalive
+                loop stops retrying it. The reconnect teardown path leaves
+                this False so a transient reconnect doesn't erase recovery
+                state.
         """
         with self._lock:
             handle = self._servers.pop(name, None)
@@ -705,6 +943,9 @@ class MCPBridge:
                          if v['server_name'] == name]
             for k in to_remove:
                 del self._tool_index[k]
+            if forget:
+                self._breaker.pop(name, None)
+                self._configs.pop(name, None)
         if handle is None:
             return
 
@@ -748,6 +989,21 @@ class MCPBridge:
 
     def disconnect_all(self) -> None:
         """Gracefully disconnect all MCP servers."""
+        # Stop the keepalive loop first so it can't race with teardown by
+        # reconnecting a server we're about to drop. Set the stop event AND
+        # cancel the task: the task may be parked in ``wait_for(stop.wait())``
+        # or mid-sweep, and we're about to stop the loop out from under it.
+        loop = self._loop
+        task = self._keepalive_task
+        if loop is not None and loop.is_running():
+            def _stop_keepalive():
+                if self._keepalive_stop is not None:
+                    self._keepalive_stop.set()
+                if task is not None and not task.done():
+                    task.cancel()
+            loop.call_soon_threadsafe(_stop_keepalive)
+        self._keepalive_task = None
+
         with self._lock:
             names = list(self._servers.keys())
         for name in names:
@@ -761,6 +1017,8 @@ class MCPBridge:
             # in case a caller mutated _servers out from under us.
             self._servers.clear()
             self._tool_index.clear()
+            self._breaker.clear()
+            self._configs.clear()
             self._started = False
 
         # Shut down the event loop
@@ -911,6 +1169,36 @@ class MCPBridge:
             )
         except Exception as e:
             elapsed = time.time() - t0
+            # If the call failed because the transport is dead (subprocess
+            # crashed / idle-dropped), transparently reconnect once and
+            # retry — the user should never have to manually reconnect.
+            if _is_transport_dead_error(e):
+                logger.warning(
+                    '[MCP:Call] %s.%s hit dead transport after %.1fs (%s) — '
+                    'reconnecting and retrying once',
+                    server_name, tool_name, elapsed, e,
+                )
+                try:
+                    new_handle = self._reconnect_server(server_name)
+                except Exception as re:
+                    logger.error('[MCP:Call] reconnect of %s failed: %s',
+                                 server_name, re, exc_info=True)
+                    raise e from re
+                try:
+                    result = self._run_async(
+                        self._async_call_tool(new_handle, tool_name, arguments, timeout)
+                    )
+                    elapsed = time.time() - t0
+                    logger.info(
+                        '[MCP:Call] %s.%s succeeded after reconnect+retry '
+                        '(%d chars in %.1fs)',
+                        server_name, tool_name, len(result), elapsed,
+                    )
+                    return result
+                except Exception as e2:
+                    logger.error('[MCP:Call] %s.%s still failing after reconnect: %s',
+                                 server_name, tool_name, e2, exc_info=True)
+                    raise
             logger.error('[MCP:Call] %s.%s failed after %.1fs: %s',
                          server_name, tool_name, elapsed, e, exc_info=True)
             raise
@@ -949,6 +1237,104 @@ class MCPBridge:
             text = text[:MCP_MAX_RESULT_CHARS] + f'\n\n[Truncated: {len(text):,} chars total, showing first {MCP_MAX_RESULT_CHARS:,}]'
 
         return text
+
+    # ── Keepalive: proactive health-check + auto-reconnect ──
+
+    def _start_keepalive(self) -> None:
+        """Launch the background keepalive loop on the MCP event loop.
+
+        Idempotent and a no-op when disabled
+        (``TOFU_MCP_KEEPALIVE_INTERVAL=0``). Called after the first
+        successful connect so idle deployments don't spin a loop for
+        nothing.
+        """
+        if MCP_KEEPALIVE_INTERVAL <= 0:
+            return
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+        if self._keepalive_task is not None and not self._keepalive_task.done():
+            return
+
+        def _spawn():
+            self._keepalive_stop = asyncio.Event()
+            self._keepalive_task = loop.create_task(
+                self._keepalive_loop(), name='mcp-keepalive')
+
+        loop.call_soon_threadsafe(_spawn)
+        logger.info('[MCP] Keepalive loop armed (interval=%ds, ping_timeout=%ds)',
+                    MCP_KEEPALIVE_INTERVAL, MCP_PING_TIMEOUT)
+
+    async def _keepalive_loop(self) -> None:
+        """Ping every connected server periodically; reconnect dead ones.
+
+        Runs on the MCP event-loop thread. Pings are protocol-level
+        (``ClientSession.send_ping``); a ping that errors or times out means
+        the transport is gone, so we trigger a reconnect. The reconnect runs
+        in a worker thread (``run_in_executor``) because ``_reconnect_server``
+        is a sync method that re-enters this very loop via
+        ``run_coroutine_threadsafe`` — calling it inline would deadlock.
+
+        A per-server circuit breaker (``_breaker``) gates reconnects: after a
+        reconnect FAILS, that server is skipped until its exponentially
+        growing backoff elapses, so a permanently-broken server isn't
+        respawned every sweep. Servers whose handle was torn down by a failed
+        reconnect are still revisited via the breaker keys + stored config, so
+        they self-heal if the server eventually recovers.
+        """
+        stop = self._keepalive_stop
+        while stop is not None and not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=MCP_KEEPALIVE_INTERVAL)
+                break  # stop was set → exit loop
+            except asyncio.TimeoutError:
+                pass  # normal: interval elapsed, run a health sweep
+
+            # Candidate set = live servers ∪ servers in backoff (the latter
+            # may have no live handle after a failed reconnect).
+            with self._lock:
+                live = dict(self._servers)
+                candidates = set(live) | set(self._breaker)
+            loop = asyncio.get_running_loop()
+
+            for name in candidates:
+                # Skip servers whose backoff window hasn't elapsed.
+                if self._breaker_blocks(name):
+                    continue
+
+                handle = live.get(name)
+                session = handle.session if handle is not None else None
+
+                if session is not None:
+                    # Live server: health-check it. A healthy ping is the
+                    # common case → continue without touching the breaker.
+                    try:
+                        await asyncio.wait_for(session.send_ping(),
+                                               timeout=MCP_PING_TIMEOUT)
+                        continue
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.warning(
+                            '[MCP] Keepalive ping to %s failed (%s) — reconnecting',
+                            name, _unwrap_exception_group(e),
+                        )
+                else:
+                    # No live session but the breaker is tracking it (failed
+                    # reconnect previously, backoff now elapsed) → retry.
+                    logger.info('[MCP] Keepalive retrying backed-off server %s', name)
+
+                try:
+                    await loop.run_in_executor(None, self._reconnect_server, name)
+                    logger.info('[MCP] Keepalive reconnected %s', name)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as re:
+                    # _reconnect_server already recorded the breaker failure +
+                    # logged the backoff; keep this terse to avoid double noise.
+                    logger.debug('[MCP] Keepalive reconnect of %s still failing: %s',
+                                 name, _unwrap_exception_group(re))
+        logger.debug('[MCP] Keepalive loop exited')
 
     @staticmethod
     def _extract_text(result) -> str:

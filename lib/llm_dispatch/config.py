@@ -356,6 +356,7 @@ DEFAULT_SLOT_CONFIGS = {
 
     # ── GLM (Zhipu AI) ──
     'glm-5.1':                       {'caps': {'text', 'thinking'},                'rpm': 60,  'latency': 3000, 'cost': 0.004},
+    'glm-5.1-huawei':                {'caps': {'text', 'thinking'},                'rpm': 60,  'latency': 3000, 'cost': 0.004},
     'glm-5':                         {'caps': {'text', 'thinking'},                'rpm': 60,  'latency': 3000, 'cost': 0.004},
     'glm-4.7':                       {'caps': {'text', 'thinking', 'cheap'},      'rpm': 60,  'latency': 2000, 'cost': 0.002},
     'glm-4.5-air':                   {'caps': {'text', 'cheap'},                   'rpm': 120, 'latency': 1500, 'cost': 0.001},
@@ -437,6 +438,8 @@ MODEL_ALIAS_GROUPS = [
     {'deepseek-v3.2-tencent', 'deepseek-v3.2-baidu', 'deepseek-v3.2-huawei', 'deepseek-v3.2-doubao'},
     # DeepSeek V4 Flash — direct DeepSeek API + Meituan gateway Huawei-cloud mirror
     {'deepseek-v4-flash', 'deepseek-v4-flash-huawei'},
+    # GLM-5.1 — Meituan gateway default + Huawei-cloud mirror
+    {'glm-5.1', 'glm-5.1-huawei'},
 ]
 
 MODEL_ALIASES: dict[str, set[str]] = {}

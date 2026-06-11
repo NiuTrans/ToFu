@@ -13,11 +13,21 @@ Repair patterns, applied in this order (ordering is load-bearing):
    → delete the key entirely.
 2. ``stringified_json`` — ``'["a","b"]'`` or ``'{"x":1}'`` arriving as a
    plain string where an array/object is expected → ``json.loads`` it.
+   If strict parsing fails but the string clearly intended to be JSON
+   (leading ``[`` / ``{``), fall back to ``lib.utils.repair_json`` so a
+   slightly-malformed inner blob (trailing comma, truncation, unterminated
+   string, missing closer) is recovered the same way the outer arguments
+   blob is. Only substituted when the recovered value matches the expected
+   shape — genuinely-ambiguous payloads still fall through to an honest
+   tool-level error.
 3. ``stringified_primitive`` — ``"42"`` / ``"true"`` where an integer or
    boolean is expected → coerce. Catches the recurring trap logged in
    memory ``llm-string-coercion-traps``.
 4. ``bare_string_to_array`` — ``"foo"`` where ``["foo"]`` is expected
-   → wrap in a single-element array.
+   → wrap in a single-element array. A string that LOOKS like JSON
+   (starts with ``[`` / ``{``) but failed pattern 2's parse is left
+   untouched — wrapping malformed JSON only hides the error one layer
+   deeper, so the tool returns an honest error instead.
 5. ``empty_placeholder_unwrap`` — ``{"a": "x"}`` where ``["x"]`` is
    expected → take ``list(d.values())``.
 6. ``leaked_tool_call_syntax`` — the model emitted Anthropic native
@@ -127,6 +137,139 @@ def _required_keys(tool_name: str) -> set[str]:
 
 
 # ══════════════════════════════════════════
+#  Tool-NAME repair (alias resolution)
+# ══════════════════════════════════════════
+#
+# Open models routinely emit a tool name borrowed from a *different* harness
+# (Claude Code, OpenAI function-calling demos, plain Unix) instead of Tofu's
+# canonical name. Each such call previously hit a hard "Unknown tool" wall and
+# wasted a full round (top offender in the log audit: ``read_file`` 73×/day,
+# plus ``bash``, ``read_text``, ``write_files``, ``grep_file``, ``cat`` …).
+#
+# This map rewrites the well-known wrong names to the canonical Tofu tool the
+# model obviously intended. Only 1:1, unambiguous synonyms belong here — never
+# map to a tool whose argument schema differs in a way the model can't satisfy.
+# Keys are matched case-insensitively (see :func:`resolve_tool_name`), so the
+# Claude-Code CamelCase variants (``Read``/``Grep``/``Edit`` …) are covered by
+# the same lowercase entries.
+_TOOL_NAME_ALIASES: dict[str, str] = {
+    # ── file reading ──
+    'read_file': 'read_files',
+    'read': 'read_files',
+    'read_text': 'read_files',
+    'read_text_file': 'read_files',
+    'readfile': 'read_files',
+    'cat': 'read_files',
+    'open_file': 'read_files',
+    'view_file': 'read_files',
+    'view': 'read_files',
+    # ── directory listing ──
+    'ls': 'list_dir',
+    'list_directory': 'list_dir',
+    'list_files': 'list_dir',
+    'listdir': 'list_dir',
+    'dir': 'list_dir',
+    # ── content search ──
+    'grep': 'grep_search',
+    'grep_file': 'grep_search',
+    'search': 'grep_search',
+    'search_text': 'grep_search',
+    'ripgrep': 'grep_search',
+    'rg': 'grep_search',
+    # ── filename search ──
+    'find': 'find_files',
+    'find_file': 'find_files',
+    'glob': 'find_files',
+    'search_files': 'find_files',
+    # ── writing ──
+    'write': 'write_file',
+    'writefile': 'write_file',
+    'write_files': 'write_file',
+    'create_file': 'write_file',
+    'save_file': 'write_file',
+    # ── editing ──
+    'edit': 'apply_diff',
+    'edit_file': 'apply_diff',
+    'str_replace': 'apply_diff',
+    'str_replace_editor': 'apply_diff',
+    'search_replace': 'apply_diff',
+    'replace': 'apply_diff',
+    'edits': 'apply_diffs',
+    'insert': 'insert_content',
+    # ── shell ──
+    'bash': 'run_command',
+    'shell': 'run_command',
+    'sh': 'run_command',
+    'exec': 'run_command',
+    'execute': 'run_command',
+    'execute_command': 'run_command',
+    'terminal': 'run_command',
+    'command': 'run_command',
+    # ── fetch / search ──
+    'fetch': 'fetch_url',
+    'fetch_page': 'fetch_url',
+    'browse': 'fetch_url',
+    'open_url': 'fetch_url',
+    'websearch': 'web_search',
+    'google': 'web_search',
+}
+
+
+def resolve_tool_name(name: str, known: set[str] | None = None) -> tuple[str, str | None]:
+    """Map a possibly-wrong tool name to a canonical Tofu tool name.
+
+    Resolution order (first match wins):
+
+    1. **Exact** — ``name`` is already a real tool → returned untouched
+       (``alias_kind=None``). This is the overwhelmingly common path and
+       must stay byte-cheap.
+    2. **Static alias** — ``name.lower()`` is in :data:`_TOOL_NAME_ALIASES`
+       *and* the target is a known tool → rewrite (``alias_kind='alias'``).
+    3. **Case-insensitive** — a single known tool equals ``name`` ignoring
+       case (catches Claude-Code ``Read``/``Grep`` and stray capitalisation)
+       → rewrite (``alias_kind='casefold'``).
+
+    Args:
+        name: The tool name the model emitted.
+        known: Set of valid tool names for this session (exact + MCP +
+            swarm + memory tools). When ``None``, falls back to the
+            schema-indexed built-in tools. Passing the live registry set
+            lets dynamically-registered tools (MCP, swarm) win the exact
+            check so we never alias over a real tool.
+
+    Returns:
+        ``(resolved_name, alias_kind)``. ``alias_kind`` is ``None`` when no
+        rewrite happened (exact match or no confident mapping), else the
+        kind of rewrite applied (for telemetry / UI badge).
+    """
+    if not name or not isinstance(name, str):
+        return name, None
+
+    valid = known if known is not None else set(_schemas().keys())
+
+    # 1. Already valid — do nothing (hot path).
+    if name in valid:
+        return name, None
+
+    # 2. Static alias table (case-insensitive key), but only if the target
+    #    actually exists in this session — never invent a tool.
+    target = _TOOL_NAME_ALIASES.get(name.lower())
+    if target and target in valid:
+        return target, 'alias'
+
+    # 3. Case-insensitive match against a real tool (e.g. 'Grep' → no static
+    #    entry needed if 'grep_search' weren't aliased; 'Read_Files' → ...).
+    low = name.lower()
+    ci_matches = [t for t in valid if t.lower() == low]
+    if len(ci_matches) == 1:
+        return ci_matches[0], 'casefold'
+
+    # No confident mapping — leave untouched so the caller surfaces an
+    # honest "unknown tool" error the model can correct.
+    return name, None
+
+
+# ══════════════════════════════════════════
 #  Repair primitives — pure, total, side-effect-free
 # ══════════════════════════════════════════
 
@@ -140,6 +283,20 @@ def _try_parse_json(s: str) -> tuple[bool, Any]:
     except (ValueError, TypeError) as _e_audit:
         logger.debug('[tool_input_repair] _try_parse_json caught %s: %s', type(_e_audit).__name__, _e_audit)
         return False, None
+
+
+def _lenient_json(s: str) -> Any:
+    """Best-effort recovery of a malformed JSON string.
+
+    Reuses ``lib.utils.repair_json`` — the same battle-tested repairer the
+    dispatcher applies to the *outer* arguments blob — so a malformed
+    *inner* stringified value (truncated array, trailing comma,
+    unterminated string, missing closer) gets identical treatment. Imported
+    lazily to keep this module dependency-light. Raises on unrecoverable
+    input; callers guard with try/except.
+    """
+    from lib.utils import repair_json
+    return repair_json(s)
 
 
 def _coerce_primitive(value: str, target: str) -> tuple[bool, Any]:
@@ -237,6 +394,23 @@ def _repair_one_value(
         ok, parsed = _try_parse_json(value)
         if ok and _json_type_of(parsed) == expected:
             return True, parsed, 'stringified_json'
+        # Strict parse failed but the string clearly INTENDED to be JSON
+        # (leading '[' / '{'). Apply the same lenient recovery used on the
+        # outer arguments blob (trailing commas, unterminated strings,
+        # truncated/missing closers). This rescues a malformed *inner*
+        # stringified array — e.g. read_files ``reads`` arriving as
+        # ``'[{"path": "x", "end_line": 320'`` — that strict json.loads
+        # rejects. Only substitute when the recovered value matches the
+        # expected shape, so a genuinely-unrecoverable payload still falls
+        # through to an honest tool-level error.
+        if value.lstrip()[:1] in ('[', '{'):
+            try:
+                recovered = _lenient_json(value)
+            except Exception as _e_audit:
+                logger.debug('[tool_input_repair] lenient JSON recovery failed: %s', _e_audit)
+            else:
+                if _json_type_of(recovered) == expected:
+                    return True, recovered, 'stringified_json'
 
     # 3. stringified_primitive — string that coerces to int/number/bool
     if isinstance(value, str) and expected in ('integer', 'number', 'boolean'):
@@ -248,6 +422,15 @@ def _repair_one_value(
     #    expected. Must run AFTER stringified_json: if pattern 2 already
     #    parsed the string, we wouldn't reach here.
     if isinstance(value, str) and expected == 'array':
+        # A string that clearly INTENDED to be JSON (starts with '[' or
+        # '{') but failed pattern 2's json.loads is *malformed JSON*, not a
+        # bare scalar. Wrapping it into ``['[{...]']`` manufactures a
+        # superficially-valid array that fails one layer deeper with a vague
+        # "Invalid edit entry" — and falsely stamps an "auto-fixed" badge.
+        # Leave it untouched so the tool returns an honest, actionable error
+        # and the model can re-emit a real array next turn.
+        if value.lstrip()[:1] in ('[', '{'):
+            return False, value, None
         return True, [value], 'bare_string_to_array'
 
     # 5. empty_placeholder_unwrap — dict where array is expected
@@ -341,6 +524,31 @@ def validate_then_repair(
     return repaired, log
 
 
+def schema_hint(tool_name: str) -> str:
+    """Return a compact one-line description of a tool's expected arg shape.
+
+    Used to make the malformed-JSON retry message actionable: instead of a
+    bare "retry with valid JSON", the model is shown which keys are required
+    and their JSON types, e.g. ``read_files expects JSON like
+    {"reads": [array], ...} (required: ). All keys: reads(array),
+    path(string), ...``. Returns ``''`` when the tool has no indexed schema
+    so the caller can fall back to the generic message.
+    """
+    expected = _expected_types(tool_name)
+    if not expected:
+        return ''
+    required = _required_keys(tool_name)
+    parts = []
+    for key, t in expected.items():
+        mark = '*' if key in required else ''
+        parts.append(f'{key}{mark}({t})')
+    req_list = ', '.join(sorted(required)) if required else 'none'
+    return (
+        f'`{tool_name}` expects a JSON object — keys: {", ".join(parts)} '
+        f'(* = required: {req_list}).'
+    )
+
+
 def report_invalid(tool_name: str, fn_args: Any, *, reason: str, model: str = '') -> None:
     """Emit ``tool_input_invalid`` audit when arguments couldn't be repaired.
 
@@ -357,4 +565,4 @@ def report_invalid(tool_name: str, fn_args: Any, *, reason: str, model: str = ''
     )
 
 
-__all__ = ['validate_then_repair', 'report_invalid', 'RepairLog']
+__all__ = ['validate_then_repair', 'report_invalid', 'resolve_tool_name', 'schema_hint', 'RepairLog']

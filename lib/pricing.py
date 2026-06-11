@@ -177,6 +177,7 @@ MODEL_PRICING = {
     'M2-her':                    {'input': 0.30, 'output': 1.20, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'MiniMax M2-her'},
     # ── GLM (Zhipu AI) — converted from CNY at 7.24 ──
     'glm-5.1':                   {'input': 3.45, 'output': 13.81, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-5.1'},
+    'glm-5.1-huawei':            {'input': 3.45, 'output': 13.81, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-5.1 (Huawei)'},
     'glm-5':                     {'input': 3.45, 'output': 13.81, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-5'},
     'glm-5v-turbo':              {'input': 0.69, 'output': 3.04, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-5V Turbo'},
     'glm-4.7':                   {'input': 0.69, 'output': 0.69, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-4.7'},
@@ -422,12 +423,13 @@ def _do_update_pricing():
     db = None
     try:
         from lib.database import DOMAIN_SYSTEM, get_thread_db
+        from lib.database._core_schema import PRICING_CACHE, upsert
         db = get_thread_db(DOMAIN_SYSTEM)
-        db.execute(
-            'INSERT OR REPLACE INTO pricing_cache (key, value, updated_at) VALUES (?, ?, ?)',
-            ('pricing', json.dumps(data_copy), now_ms),
-        )
-        db.commit()
+        # Backend-agnostic UPSERT (replaces INSERT OR REPLACE + _PK_MAP regex
+        # translation). conflict_cols defaults to the PK ('key').
+        upsert(db, PRICING_CACHE,
+               {'key': 'pricing', 'value': json.dumps(data_copy), 'updated_at': now_ms},
+               commit=True)
     except Exception as e:
         logger.warning('[Pricing] failed to persist pricing to DB: %s', e, exc_info=True)
 

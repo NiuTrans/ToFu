@@ -11,7 +11,7 @@ import re
 import time
 
 import lib as _lib
-from lib.database import db_execute_with_retry, get_thread_db
+from lib.database import get_thread_db
 from lib.llm_dispatch.api import dispatch_stream
 from lib.log import get_logger
 
@@ -250,12 +250,11 @@ def _run_report_task(task, messages, images):
         if enriched:
             try:
                 db2 = get_thread_db()
-                db_execute_with_retry(
-                    db2,
-                    "INSERT OR REPLACE INTO paper_reports (paper_hash, lang, report, model, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (phash, lang, enriched, model or _lib.LLM_MODEL, int(time.time())),
-                )
+                from lib.database._core_schema import PAPER_REPORTS, upsert
+                upsert(db2, PAPER_REPORTS, {
+                    'paper_hash': phash, 'lang': lang, 'report': enriched,
+                    'model': model or _lib.LLM_MODEL, 'created_at': int(time.time()),
+                }, retry=True)
                 logger.info('[Paper:Report] Persisted — hash=%s lang=%s %d chars (%d imgs)',
                             phash, lang, len(enriched), len(images))
             except Exception as e:

@@ -391,17 +391,8 @@ function branchCloseOrDelete(msgIdx, branchIdx) {
   }
 }
 
-function deleteBranch(msgIdx, branchIdx) {
-  // Preserve scroll before confirm dialog (native dialog can cause reflow)
-  const container = document.getElementById("chatContainer");
-  const savedScrollTop = container ? container.scrollTop : 0;
-  if (!confirm("删除这个分支？")) {
-    // Restore scroll if user cancelled
-    if (container) container.scrollTop = savedScrollTop;
-    return;
-  }
-  // Restore scroll immediately after confirm dialog closes
-  if (container) container.scrollTop = savedScrollTop;
+async function deleteBranch(msgIdx, branchIdx) {
+  if (!await showConfirm("删除这个分支？", { danger: true })) return;
   const conv = getActiveConv();
   if (!conv) return;
   const msg = conv.messages[msgIdx];
@@ -743,6 +734,8 @@ async function _branchStreamSSE(conv, msgIdx, branchIdx, branch, assistantMsg, t
         r.approvalId = null;
         if (ev.searchDiag) r.searchDiag = ev.searchDiag;
         if (ev.engineBreakdown) r.engineBreakdown = ev.engineBreakdown;
+        if (ev.vertical) r.vertical = ev.vertical;
+        if (ev.verticals) r.verticals = ev.verticals;
       }
       /* ★ Toast for create_memory */
       if (ev.results && ev.results.some(r => r.toolName === 'create_memory')) {
@@ -1138,7 +1131,7 @@ async function promptNewBranch(msgIdx, preTitle, selectedText, selectionRange) {
   if (!msg) return;
   // Branches are primarily for assistant messages, but allow user messages too
   if (msg.role === "user" && !selectedText) return;
-  const title = preTitle || prompt("分支名称：");
+  const title = preTitle || await showPrompt("分支名称：");
   if (!title?.trim()) return;
 
   // Server-authoritative branch creation: ID, icon, kind, validation,
@@ -1151,7 +1144,7 @@ async function promptNewBranch(msgIdx, preTitle, selectedText, selectionRange) {
     selectedText || '',
   );
   if (!created) {
-    alert('分支创建失败，请重试');
+    await showAlert('分支创建失败，请重试');
     return;
   }
   const branch = created.branch;

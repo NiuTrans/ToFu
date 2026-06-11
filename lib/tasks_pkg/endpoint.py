@@ -419,8 +419,8 @@ def _sync_endpoint_turns_to_conversation(task, endpoint_turns):
         # Append the accumulated endpoint turns
         new_messages = base_messages + endpoint_turns
 
+        from lib.conversations import build_search_text
         from lib.database import json_dumps_pg
-        from routes.conversations import build_search_text
         messages_json = json_dumps_pg(new_messages)
         search_text = build_search_text(new_messages)
         now_ms = int(time.time() * 1000)
@@ -428,17 +428,8 @@ def _sync_endpoint_turns_to_conversation(task, endpoint_turns):
             SET messages=?, updated_at=?, msg_count=?, search_text=?
             WHERE id=? AND user_id=1''',
             (messages_json, now_ms, len(new_messages), search_text, conv_id))
-        # Update FTS5 index
-        if search_text:
-            try:
-                db.execute(
-                    "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
-                    "SELECT rowid, ? FROM conversations WHERE id = ?",
-                    (search_text, conv_id)
-                )
-                db.commit()
-            except Exception as _fts_err:
-                logger.debug('[EndpointSync] FTS update failed (non-fatal): %s', _fts_err)
+        from lib.conversations import update_conversation_fts
+        update_conversation_fts(db, conv_id, search_text)
 
         logger.info('%s conv=%s ✅ Synced %d endpoint turns to conversation '
                     '(base=%d + endpoint=%d = %d total msgs)',
@@ -686,6 +677,8 @@ def run_endpoint_task(task):
     stop_reason = 'completed'
     fallback_model = None
     fallback_from  = None
+    fallback_reason = None
+    fallback_kind = None
     endpoint_turns = []      # accumulated endpoint turn messages for DB persistence
 
     logger.info('[Endpoint] Starting endpoint task %s — planner → worker → critic loop',
@@ -717,6 +710,8 @@ def run_endpoint_task(task):
         if planner_result.get('fallbackModel'):
             fallback_model = planner_result['fallbackModel']
             fallback_from  = planner_result.get('fallbackFrom', '')
+            fallback_reason = planner_result.get('fallbackReason') or fallback_reason
+            fallback_kind = planner_result.get('fallbackKind') or fallback_kind
 
         planner_content = planner_result.get('content', '')
         planner_error   = planner_result.get('error')
@@ -852,6 +847,8 @@ def run_endpoint_task(task):
             if turn_result.get('fallbackModel'):
                 fallback_model = turn_result['fallbackModel']
                 fallback_from  = turn_result.get('fallbackFrom', '')
+                fallback_reason = turn_result.get('fallbackReason') or fallback_reason
+                fallback_kind = turn_result.get('fallbackKind') or fallback_kind
 
             accumulated_content = turn_content
             _accumulate_usage(total_usage, turn_usage)
@@ -1303,13 +1300,15 @@ def run_endpoint_task(task):
         # ══════════════════════════════════════
         _finalize(task, accumulated_content, total_usage, iteration,
                   stop_reason, fallback_model, fallback_from,
-                  replan_count=replan_count)
+                  replan_count=replan_count,
+                  fallback_reason=fallback_reason, fallback_kind=fallback_kind)
 
     except _EarlyExit as _e_audit:
         logger.debug('[endpoint] run_endpoint_task caught %s: %s', type(_e_audit).__name__, _e_audit)
         _finalize(task, accumulated_content, total_usage, 0,
                   stop_reason, fallback_model, fallback_from,
-                  replan_count=0)
+                  replan_count=0,
+                  fallback_reason=fallback_reason, fallback_kind=fallback_kind)
 
     except Exception as e:
         logger.error('[Endpoint] run_endpoint_task FATAL error task=%s',
@@ -1344,7 +1343,8 @@ class _EarlyExit(Exception):
 
 
 def _finalize(task, accumulated_content, total_usage, iteration,
-              stop_reason, fallback_model, fallback_from, *, replan_count=0):
+              stop_reason, fallback_model, fallback_from, *, replan_count=0,
+              fallback_reason=None, fallback_kind=None):
     """Emit completion events and persist final task result."""
     tid = task['id'][:8]
 
@@ -1389,6 +1389,12 @@ def _finalize(task, accumulated_content, total_usage, iteration,
     if fallback_model:
         done_evt['fallbackModel'] = fallback_model
         done_evt['fallbackFrom']  = fallback_from or ''
+        if fallback_reason:
+            done_evt['fallbackReason'] = fallback_reason
+            task['_fallback_reason'] = fallback_reason
+        if fallback_kind:
+            done_evt['fallbackKind'] = fallback_kind
+            task['_fallback_kind'] = fallback_kind
     append_event(task, done_evt)
     persist_task_result(task)
 

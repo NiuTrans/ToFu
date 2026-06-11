@@ -127,27 +127,48 @@ def run_compaction_pipeline(messages: list, current_round: int,
     # (per-call tunable overlay), ``enable_paired_assistant_compact`` /
     # ``enable_assistant_compact`` (gated builtins).  Absent ⇒ defaults
     # ⇒ byte-identical to shipped behavior.
+    # ── Experiment isolation flags (REPLACEMENT-mode arms) ──
+    # An external-method arm (OpenCode/Hermes/OpenClaw/no-compaction) must
+    # run ONLY its own compaction, NOT chatui's default L1+L2 underneath —
+    # otherwise it's a confounded 'chatui + method' hybrid. These two
+    # flags let an arm opt out of the built-in layers:
+    #   disableDefaultL1   → skip the unconditional micro_compact default pass
+    #   disableForceCompact → skip chatui's L2 smart-summary force-compact
+    # Absent ⇒ both run (this IS the chatui 'tofu'/baseline arm). The
+    # arm's OWN steps/advanced_steps still run regardless of these flags.
+    _disable_l1 = False
+    _disable_force = False
     _l1_kwargs = {}
     if task:
         _comp_cfg = (task.get('config') or {}).get('compaction')
         if isinstance(_comp_cfg, dict):
+            _disable_l1 = bool(_comp_cfg.get('disableDefaultL1', False))
+            _disable_force = bool(_comp_cfg.get('disableForceCompact', False))
             for _k in ('steps', 'ignore_cache_prefix', 'constant_overrides',
                        'enable_paired_assistant_compact',
                        'enable_assistant_compact'):
                 if _k in _comp_cfg:
                     _l1_kwargs[_k] = _comp_cfg[_k]
-            if _l1_kwargs:
-                logger.info('[Pipeline] conv=%s  L1 strategy override: %s',
+            if _l1_kwargs or _disable_l1 or _disable_force:
+                logger.info('[Pipeline] conv=%s  compaction override: %s '
+                            'disableL1=%s disableForce=%s',
                             conv_id[:8] if conv_id else '?',
-                            sorted(_l1_kwargs))
-    saved = micro_compact(messages, conv_id=conv_id, task=task, **_l1_kwargs)
+                            sorted(_l1_kwargs), _disable_l1, _disable_force)
+    # L1 runs unless explicitly disabled. When an arm supplies its own
+    # ``steps`` we still go through micro_compact (it routes those steps);
+    # disableDefaultL1 is for arms that want NO L1 at all (no-compaction).
+    if _disable_l1 and 'steps' not in _l1_kwargs:
+        saved = 0
+    else:
+        saved = micro_compact(messages, conv_id=conv_id, task=task, **_l1_kwargs)
 
     if saved > 0:
         logger.debug('[Pipeline] L1 saved ~%d tokens, now %d messages',
                      saved, len(messages))
 
-    # Force compact if context near capacity
-    compacted = force_compact_if_needed(messages, task=task)
+    # Force compact if context near capacity (chatui L2) — unless the arm
+    # opted out to run its own summarizer as the sole context manager.
+    compacted = False if _disable_force else force_compact_if_needed(messages, task=task)
 
     # Post-compact: re-inject system contexts if compaction dropped them
     if compacted:

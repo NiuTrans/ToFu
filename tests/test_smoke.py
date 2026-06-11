@@ -39,11 +39,7 @@ class TestImportValidation:
     # Sub-packages with __init__.py façades
     _SUB_PACKAGES = [
         "lib",
-        "lib.fetch",
-        "lib.trading",
-        "lib.trading_autopilot",
-        "lib.trading_backtest_engine",
-        "lib.trading_strategy_engine",
+        "tofu_search.fetch",
         "lib.llm_dispatch",
         "lib.project_mod",
         "lib.scheduler",
@@ -65,7 +61,8 @@ class TestImportValidation:
         "lib.pricing",
         "lib.protocols",
         "lib.rate_limiter",
-        "lib.search",
+        "lib.search_bridge",
+        "tofu_search.search",
         "lib.memory",
     ]
 
@@ -151,6 +148,11 @@ class TestPythonSyntax:
     _SKIP_DIRS = {
         ".git", "__pycache__", "node_modules", "debug", "analysis_scripts",
         "offline_pkgs", "logs", ".project_sessions", ".tofu", "uploads",
+        # Generated / eval scratch trees — large and on slow FUSE mounts,
+        # not part of the project source. Walking them times the test out.
+        "swebench_workdir", "swebench_rerun_workdir", "abtest_workdir",
+        "outputs", "overleaf_cache", "paper", "tofu.egg-info",
+        ".ruff_cache", ".pytest_cache", "data", "venv", ".venv",
     }
 
     def _collect_py_files(self):

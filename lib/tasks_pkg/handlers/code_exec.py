@@ -80,6 +80,7 @@ def _make_run_command_progress_cb(task, rn, round_entry, command):
             append_event(task, {
                 'type': 'tool_progress',
                 'roundNum': rn,
+                'toolCallId': round_entry.get('toolCallId', ''),
                 'stream': s,
                 'chunk': t,
                 'toolName': round_entry.get('toolName') or 'run_command',
@@ -142,6 +143,7 @@ def _make_stdin_callback(task, rn, round_entry, command):
         append_event(task, {
             'type': 'stdin_request',
             'roundNum': rn,
+            'toolCallId': round_entry.get('toolCallId', ''),
             'stdinId': stdin_id,
             'prompt': prompt_hint,
             'command': command[:200],
@@ -156,6 +158,7 @@ def _make_stdin_callback(task, rn, round_entry, command):
             append_event(task, {
                 'type': 'stdin_resolved',
                 'roundNum': rn,
+                'toolCallId': round_entry.get('toolCallId', ''),
                 'stdinId': stdin_id,
             })
 

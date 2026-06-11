@@ -56,10 +56,13 @@ def _maybe_audit_phase_scope() -> None:
 # Two qualitatively different failure signatures get different budgets:
 #
 #   ── Classic premature close ──────────────────────────────────────
-#   Model produced substantial thinking (>1000 chars) then stream was
-#   cut off.  Each retry costs ~20-60s of tokens/work, so we keep the
-#   cap LOW to avoid burning tokens on a model that is genuinely
-#   struggling with the prompt.
+#   Model produced substantial thinking (>1000 chars) then the stream
+#   was cut off mid-generation. This is a transport-layer hiccup, not
+#   the model giving up — so we keep retrying (paced with exponential
+#   backoff, same schedule as zero-byte) rather than failing the whole
+#   task on a single dropped connection. Each retry re-bills the prompt
+#   cache + re-generates thinking, so there's still a finite cap as a
+#   runaway guard, but it's generous.
 #
 #   ── Zero-byte stream anomaly ─────────────────────────────────────
 #   Gateway/proxy opens the SSE connection, returns zero tokens, and
@@ -72,7 +75,7 @@ def _maybe_audit_phase_scope() -> None:
 #   request milliseconds later.  Recurring trigger: ``aws.claude-opus-4.7``
 #   via sankuai gateway.  Retries go through append_event 'phase:retrying'
 #   so the UI shows a spinner with attempt count.
-_PREMATURE_RETRY_MAX_CLASSIC = 2
+_PREMATURE_RETRY_MAX_CLASSIC = 16
 _PREMATURE_RETRY_MAX_ZERO_BYTE = 16
 # Empty-stop retry budget (model emitted thinking / a few chunks but no
 # content, then closed cleanly with finish_reason=stop). Observed on
@@ -326,12 +329,13 @@ def analyse_stream_result(
             # this phase sees the bumped value.
             if '_premature_retry_count_phase' in task:
                 task['_premature_retry_count_phase'] = _premature_retry_count
-            # Pace zero-byte retries with exponential backoff + jitter so we
-            # don't hammer a poisoned upstream pool.  Classic premature-close
-            # has its own (low) cap and large per-attempt cost, so we don't
-            # add backoff there.
+            # Pace abnormal-stop retries with exponential backoff + jitter so
+            # we don't hammer a poisoned upstream pool. Both zero-byte and
+            # classic premature-close use the same backoff schedule; the
+            # late-round stream-anomaly bucket keeps the historical no-backoff
+            # behaviour.
             _backoff_s = (_zero_byte_backoff_seconds(_premature_retry_count)
-                          if _is_zero_byte else 0.0)
+                          if (_is_zero_byte or _is_classic_premature) else 0.0)
 
             # ── Force slot rotation on zero-byte retries ──
             # Zero-byte gateway hangs cluster per-pool — production logs
@@ -342,7 +346,9 @@ def analyse_stream_result(
             # the signal.  Best-effort — when ``_dispatch`` metadata is
             # absent (older gateway path), we fall through without the
             # rotation hint and the existing 429-style cooldown still
-            # naturally rotates slots.
+            # naturally rotates slots. Classic premature-close keeps the
+            # SAME slot (strict_model is on; the slot already produced
+            # output, so it's likely transient and worth retrying as-is).
             if _is_zero_byte:
                 _disp = (usage or {}).get('_dispatch') or {}
                 _key = _disp.get('key')

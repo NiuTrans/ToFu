@@ -24,6 +24,15 @@ from unittest.mock import patch
 
 
 def _install_shim():
+    """Install the flask→quart shim. Returns a callable that undoes the
+    (global) ``Request.get_json`` patch, or None if nothing was patched.
+
+    The ``get_json`` patch mutates ``quart.wrappers.Request`` PROCESS-WIDE.
+    If it isn't reverted, every later test's native-async handler that does
+    ``await request.get_json()`` breaks (the converted conversation/search
+    endpoints persist empty bodies), so the caller MUST restore it on
+    teardown.
+    """
     import quart
     sys.modules['flask'] = quart
     for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
@@ -38,6 +47,11 @@ def _install_shim():
             return asyncio.run(_orig(self, *a, **kw))
         _QR.get_json = _sync
 
+        def _restore():
+            _QR.get_json = _orig
+        return _restore
+    return None
+
 
 def _new_loop_run(coro):
     loop = asyncio.new_event_loop()
@@ -51,7 +65,15 @@ class AgentPollRouteTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _install_shim()
+        _restore_get_json = _install_shim()
+        # Register the revert IMMEDIATELY (before anything below can raise).
+        # unittest skips tearDownClass when setUpClass raises, but
+        # addClassCleanup callbacks still run — so the process-wide
+        # Request.get_json patch is reverted even if Quart(__name__) or
+        # blueprint registration blows up. Otherwise the patch leaks and
+        # corrupts every later native-async handler in the run.
+        if _restore_get_json is not None:
+            cls.addClassCleanup(_restore_get_json)
         cls._tmp = tempfile.TemporaryDirectory()
         from lib import api_keys
         cls._orig_path = api_keys._STORE_PATH

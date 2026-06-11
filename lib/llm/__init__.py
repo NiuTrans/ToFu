@@ -40,6 +40,7 @@ from lib.llm.astream import async_stream_chat
 from lib.llm_errors import (  # noqa: F401
     AbortedError,
     ContentFilterError,
+    EndpointUnreachableError,
     InvalidImageError,
     ModelLimitError,
     PermissionError_,
@@ -108,6 +109,7 @@ __all__ = [
     # errors (re-exported)
     'AbortedError',
     'ContentFilterError',
+    'EndpointUnreachableError',
     'InvalidImageError',
     'ModelLimitError',
     'PermissionError_',

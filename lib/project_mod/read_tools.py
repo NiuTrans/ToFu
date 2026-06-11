@@ -183,6 +183,12 @@ def _read_absolute_file(path: str, start_line=None, end_line=None):
         For images: dict with ``__screenshot__`` protocol.
         For all other files: str with extracted text content.
     """
+    from lib.project_mod.abs_path_guard import AbsPathDenied, enforce_abs_read
+    try:
+        enforce_abs_read(path)
+    except AbsPathDenied as e:
+        return f'Error: {e}'
+
     from lib.file_reader import read_local_file as _read_local
     result = _read_local(path)
 
@@ -373,7 +379,7 @@ def tool_read_files(base, reads):
     parts = []
     image_results = {}  # index → dict for __screenshot__ results
     total_chars = 0
-    BATCH_CHAR_BUDGET = 200_000
+    BATCH_CHAR_BUDGET = 50 * 1024 * 1024  # ★ lifted; per-file size bounds are the real limit
     WHOLE_FILE_THRESHOLD = 40_000
     for i, spec in enumerate(reads):
         if not isinstance(spec, dict) or 'path' not in spec:

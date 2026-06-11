@@ -1509,6 +1509,8 @@ function _applyReportEvent(s, ev) {
         }
         if (ev.searchDiag) r.searchDiag = ev.searchDiag;
         if (ev.engineBreakdown) r.engineBreakdown = ev.engineBreakdown;
+        if (ev.vertical) r.vertical = ev.vertical;
+        if (ev.verticals) r.verticals = ev.verticals;
       }
       return true;
     }

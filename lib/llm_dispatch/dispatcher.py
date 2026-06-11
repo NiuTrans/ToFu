@@ -33,6 +33,9 @@ class LLMDispatcher:
         self.slots: list[Slot] = []
         self._initialized = False
         self._lock = threading.Lock()
+        # id → frozenset routing group, merged from config aliases + static
+        # MODEL_ALIAS_GROUPS. Rebuilt by _build_alias_index during slot build.
+        self._alias_index: dict[str, frozenset] = {}
 
     def initialize(self):
         """Build slot pool from env vars + benchmark data. Idempotent."""
@@ -232,7 +235,8 @@ class LLMDispatcher:
         key combination so the dispatcher load-balances across the fleet.
         """
         self._direct_models = set()
-        from lib.llm_dispatch.discovery import normalize_base_url
+        config_alias_groups: list[set] = []
+        from lib.llm_dispatch.discovery import normalize_base_url, should_bypass_proxy
         from lib.proxy import register_no_proxy_url
 
         for provider in providers:
@@ -269,9 +273,12 @@ class LLMDispatcher:
             # Self-hosted endpoints sit on private (or pseudo-private) IPs
             # that corp HTTP proxies can't reach. Pre-register them for
             # proxy bypass so the very first request out of the gate goes
-            # direct.  No-op for cloud providers.
-            if provider.get('brand') == 'local':
-                for url in endpoint_urls:
+            # direct. Covers brand=='local' AND any bare-IP endpoint (a
+            # raw-IP base URL is in practice always self-hosted, including
+            # internal-but-publicly-routable corp ranges like 33.x that
+            # is_local_endpoint can't classify). No-op for cloud providers.
+            for url in endpoint_urls:
+                if provider.get('brand') == 'local' or should_bypass_proxy(url):
                     register_no_proxy_url(url)
 
             # Local providers without keys are still valid (vLLM/SGLang/Ollama
@@ -328,6 +335,16 @@ class LLMDispatcher:
                 # leaving the model active for the other keys.
                 key_access = model_entry.get('key_access') or {}
                 base_aliases = model_entry.get('aliases', [])
+
+                # Record the declared interchangeable set for this entry
+                # ({model_id} ∪ every alias, including per-cell aliases) so the
+                # picker can route any member to any other member's slot.
+                entry_group = {model_id}
+                entry_group.update(a for a in base_aliases if a)
+                for _cell in key_access.values():
+                    entry_group.update(a for a in (_cell.get('aliases') or []) if a)
+                if len(entry_group) > 1:
+                    config_alias_groups.append(entry_group)
 
                 for key_idx, (key_name, api_key) in enumerate(keys):
                     cell = key_access.get(str(key_idx)) or {}
@@ -405,6 +422,8 @@ class LLMDispatcher:
                                 stream_only=slot_stream_only,
                             )
                             self.slots.append(slot)
+
+        self._build_alias_index(config_alias_groups)
 
         logger.info('[Dispatch] Built %d slots from %d saved providers '
                     '(%d direct models)',
@@ -514,6 +533,8 @@ class LLMDispatcher:
                 )
                 self.slots.append(slot)
 
+        self._build_alias_index([])
+
     def _load_benchmark_data(self):
         """Load benchmark_results.json to seed slot parameters and prune dead slots."""
         benchmark_file = os.path.join(
@@ -545,7 +566,6 @@ class LLMDispatcher:
 
         updated = 0
         dead_slots = []
-        matched_slots = set()   # track which slots have benchmark entries
 
         for slot in self.slots:
             entry_key = f'{slot.key_name}:{slot.model}'
@@ -559,8 +579,6 @@ class LLMDispatcher:
                             break
             if not entry:
                 continue
-
-            matched_slots.add(id(slot))
 
             # Check if probe showed this pair is *permanently* dead
             # Only prune on clear "invalid model" / HTTP 400 — NOT on
@@ -612,24 +630,62 @@ class LLMDispatcher:
                 self.slots.remove(s)
                 logger.debug('  [Dispatch] Removed dead slot: %s:%s', s.key_name, s.model)
 
-        # Remove alias-expanded slots not confirmed by benchmark.
-        # These were added speculatively from _MODEL_ALIAS_GROUPS but the
-        # benchmark never saw them for this specific key — so the deployment
-        # likely doesn't exist on this API gateway.
-        unconfirmed = []
-        if models_data:
-            direct = getattr(self, '_direct_models', set())
-            unconfirmed = [s for s in self.slots
-                           if s.model not in direct
-                           and id(s) not in matched_slots]
-            for s in unconfirmed:
-                self.slots.remove(s)
-                logger.debug('  [Dispatch] Removed unconfirmed alias slot: '
-                            '%s:%s', s.key_name, s.model)
+        logger.info('Loaded benchmark data: %d slots updated, %d dead removed',
+                    updated, len(dead_slots))
 
-        logger.info('Loaded benchmark data: %d slots updated, '
-              '%d dead removed, '
-              '%d unconfirmed aliases removed', updated, len(dead_slots), len(unconfirmed))
+    def _build_alias_index(self, config_groups: list[set]):
+        """Merge per-provider config alias groups with the static groups.
+
+        Each model entry's ``{model_id} \u222a aliases`` declares a set of ids
+        that route to the same logical model on a gateway. The hand-maintained
+        :data:`MODEL_ALIAS_GROUPS` adds cross-provider / cross-naming links
+        (e.g. a direct-API id, a gateway-prefixed id, and a Bedrock id that may
+        live in different provider entries). Both are merged by connected
+        components so the links compose transitively — declaring an alias in
+        config is enough; no static-table edit required.
+
+        Builds ``self._alias_index``: id \u2192 frozenset of every interchangeable id.
+        """
+        from .config import MODEL_ALIAS_GROUPS
+
+        # Union-find over all ids appearing in any group.
+        parent: dict[str, str] = {}
+
+        def _find(x: str) -> str:
+            parent.setdefault(x, x)
+            root = x
+            while parent[root] != root:
+                root = parent[root]
+            while parent[x] != root:
+                parent[x], x = root, parent[x]
+            return root
+
+        def _union(ids):
+            ids = [i for i in ids if i]
+            if not ids:
+                return
+            r0 = _find(ids[0])
+            for other in ids[1:]:
+                parent[_find(other)] = r0
+
+        for group in list(MODEL_ALIAS_GROUPS) + list(config_groups):
+            _union(list(group))
+
+        components: dict[str, set] = {}
+        for node in list(parent):
+            components.setdefault(_find(node), set()).add(node)
+
+        index: dict[str, frozenset] = {}
+        for members in components.values():
+            frozen = frozenset(members)
+            for member in members:
+                index[member] = frozen
+        self._alias_index = index
+
+    def _alias_set(self, model: str) -> set:
+        """Return the routing group for *model* (itself if it has no aliases)."""
+        group = self._alias_index.get(model)
+        return set(group) if group else {model}
 
     def pick_slot(self, capability='text', prefer_model=None,
                   exclude_models=None, exclude_keys=None,
@@ -768,7 +824,7 @@ class LLMDispatcher:
 
             if prefer_model:
                 # Use alias group so interchangeable deployments are all "preferred"
-                alias_set = MODEL_ALIASES.get(prefer_model, {prefer_model})
+                alias_set = self._alias_set(prefer_model)
                 preferred = [s for s in candidates if s.model in alias_set]
                 if preferred:
                     chosen = min(preferred, key=lambda s: s.score())
@@ -823,7 +879,7 @@ class LLMDispatcher:
 
             # If prefer_model, ensure it (or alias group members) are in the list
             if prefer_model:
-                alias_set = MODEL_ALIASES.get(prefer_model, {prefer_model})
+                alias_set = self._alias_set(prefer_model)
                 preferred = [s for s in candidates if s.model in alias_set]
                 others = [s for s in candidates if s.model not in alias_set]
                 result = preferred[:n]
@@ -895,6 +951,41 @@ class LLMDispatcher:
 
             best = min(candidates, key=lambda s: s.score())
             return best.api_key, best.key_name, best
+
+    def has_capable_slots(self, capability: str = 'text',
+                          exclude_models=None, exclude_keys=None,
+                          exclude_pairs=None) -> bool:
+        """True if at least one slot CAN serve ``capability`` ignoring
+        transient cooldown / rpm state.
+
+        Used by the dispatch retry loops to distinguish two ``pick_slot``
+        ``None`` outcomes that need OPPOSITE handling:
+          * slots exist but are all in 0.5s rate-limit cooldown → the
+            request should keep fast-polling (a 429-equivalent), NOT give
+            up — otherwise a fresh concurrent request that arrives while
+            every slot is cooling fails immediately on attempt 1.
+          * no slot has the capability at all (or all are permanently
+            excluded) → genuinely unservable, give up.
+
+        Only the durable disqualifiers (capability, hard exclusions,
+        chat-compatibility) are checked here; cooldown / inflight / rpm
+        are deliberately ignored."""
+        self.initialize()
+        ex_models = exclude_models or set()
+        ex_keys = exclude_keys or set()
+        ex_pairs = exclude_pairs or set()
+        with self._lock:
+            for s in self.slots:
+                if capability not in s.capabilities:
+                    continue
+                if s.model in ex_models or s.key_name in ex_keys:
+                    continue
+                if (s.key_name, s.model) in ex_pairs:
+                    continue
+                if not self._is_chat_compatible(s):
+                    continue
+                return True
+        return False
 
     def summarize_slots(self, capability: str = None) -> str:
         """Return a compact one-line summary of all slots for logging.

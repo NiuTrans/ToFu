@@ -111,18 +111,83 @@ _PROMPT_TOO_LONG_RE = re.compile(
 
 
 def _parse_reported_token_count(error_text: str) -> int | None:
-    """Extract the N in "prompt is too long: N tokens > M maximum"."""
+    """Extract the requested size N from an overflow error.
+
+    Handles both "prompt is too long: N tokens > M maximum" (N first) and
+    "maximum context length is M tokens … you requested N tokens" (M first)
+    by delegating to :func:`_parse_context_overflow` and returning N.
+    """
+    requested, _stated_max = _parse_context_overflow(error_text)
+    return requested
+
+
+# Gateway/provider-stated ceiling, e.g.
+#   "This model's maximum context length is 1048565 tokens"
+#   "... > 200000 maximum"
+_STATED_MAX_RE = re.compile(
+    r'(?:maximum\s+context\s+length\s+is|context\s+length\s+is|'
+    r'maximum\s+(?:is|of)|max(?:imum)?\s+tokens?\s+(?:is|of)?)\s*(\d[\d,]*)',
+    re.IGNORECASE,
+)
+_STATED_MAX_TRAILING_RE = re.compile(r'>\s*(\d[\d,]*)\s*(?:tokens?\s*)?(?:maximum|limit)',
+                                     re.IGNORECASE)
+# Explicitly-requested size, e.g. "you requested 1076791 tokens".
+_REQUESTED_RE = re.compile(r'(?:you\s+)?requested\s+(\d[\d,]*)', re.IGNORECASE)
+
+
+def _parse_context_overflow(error_text: str) -> tuple[int | None, int | None]:
+    """Parse an overflow error into ``(requested_tokens, stated_maximum)``.
+
+    Either element may be ``None`` if absent. ``stated_maximum`` is the
+    authoritative ceiling the gateway named (preferred for learning a shrunk
+    limit); ``requested_tokens`` is the size of the rejected prompt (a lower
+    bound used only when no maximum was stated).
+
+    Examples
+    --------
+    "prompt is too long: 210819 tokens > 200000 maximum"
+        → (210819, 200000)
+    "maximum context length is 1048565 tokens. However, you requested 1076791 tokens"
+        → (1076791, 1048565)
+    """
     if not error_text:
-        return None
-    try:
-        m = _PROMPT_TOO_LONG_RE.search(error_text)
-        if not m:
+        return None, None
+
+    def _coerce(s: str | None) -> int | None:
+        if not s:
             return None
-        n = int(m.group(1).replace(',', ''))
+        try:
+            n = int(s.replace(',', ''))
+        except (ValueError, AttributeError):
+            return None
         return n if 0 < n < 50_000_000 else None
-    except (ValueError, AttributeError) as _e_audit:
-        logger.debug('[_tokens] _parse_reported_token_count caught %s: %s', type(_e_audit).__name__, _e_audit)
-        return None
+
+    stated_max = None
+    try:
+        m = _STATED_MAX_RE.search(error_text)
+        if m:
+            stated_max = _coerce(m.group(1))
+        if stated_max is None:
+            m = _STATED_MAX_TRAILING_RE.search(error_text)
+            if m:
+                stated_max = _coerce(m.group(1))
+    except (ValueError, AttributeError) as e:
+        logger.debug('[_tokens] stated-max parse caught %s: %s', type(e).__name__, e)
+
+    requested = None
+    try:
+        m = _REQUESTED_RE.search(error_text)
+        if m:
+            requested = _coerce(m.group(1))
+        if requested is None:
+            # Fall back to the leading "N tokens" of the classic shape.
+            m = _PROMPT_TOO_LONG_RE.search(error_text)
+            if m:
+                requested = _coerce(m.group(1))
+    except (ValueError, AttributeError) as e:
+        logger.debug('[_tokens] requested parse caught %s: %s', type(e).__name__, e)
+
+    return requested, stated_max
 
 
 def _human_size(byte_count: int) -> str:
@@ -176,6 +241,13 @@ def _get_static_context_limit(task: dict | None = None) -> int:
             'o4':       200_000,
             'gemini':   1_000_000,
             'qwen':     128_000,
+            # DeepSeek V4 family (pro + flash) is a true 1M-context model.
+            # These MUST precede the generic 'deepseek' key below: lookup is
+            # substring-match in dict-insertion order, so the specific V4
+            # entries win while older deepseek-chat/v3.x/reasoner still fall
+            # through to the 128k default.
+            'deepseek-v4-pro':   1_000_000,
+            'deepseek-v4-flash': 1_000_000,
             'deepseek': 128_000,
             'doubao':   128_000,
             'minimax':  1_000_000,

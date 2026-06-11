@@ -385,5 +385,213 @@ class TestConvBuilderReconstructionParity:
         assert 'extra_content' not in asst['tool_calls'][0]
 
 
+# ═══════════════════════════════════════════════════════════
+#  Anthropic Messages API: signature CAPTURE + outbound replay
+# ═══════════════════════════════════════════════════════════
+#
+# Root cause of the "thinking but NO signature" lossy-continuation warning:
+# models that stream through the Anthropic Messages API (e.g.
+# aws.claude-opus-4.8) emit the opaque thinking-block signature as a
+# `signature_delta` event, which the SSE translator used to ignore. Without
+# capture there is nothing to persist, so Continue could never replay a
+# signed thinking block. These tests pin the capture + replay round-trip.
+
+import json as _json
+import time as _time
+
+from lib.llm.anthropic_outbound import (
+    AnthropicSSETranslator,
+    anthropic_response_to_openai,
+    openai_body_to_anthropic,
+)
+
+
+class TestAnthropicSignatureCapture:
+    def test_translator_surfaces_signature_delta(self):
+        tr = AnthropicSSETranslator(model='aws.claude-opus-4.8')
+        out = tr.translate(_json.dumps({
+            'type': 'content_block_delta', 'index': 0,
+            'delta': {'type': 'signature_delta', 'signature': 'ErcBSIG=='},
+        }))
+        assert out == [{'choices': [{'delta': {'thinking_signature': 'ErcBSIG=='}}]}]
+
+    def test_streaming_accumulator_captures_signature(self):
+        from lib.llm._sse_core import SSEAccumulator
+        from lib.llm.diagnostics import RawSSEDumper
+
+        body = {'model': 'aws.claude-opus-4.8', 'messages': []}
+        acc = SSEAccumulator(
+            body, 'trace', RawSSEDumper('aws.claude-opus-4.8', 'trace', body),
+            None, _time.time(),
+            anthropic_translator=AnthropicSSETranslator(model='aws.claude-opus-4.8'))
+        lines = [
+            {'type': 'content_block_start', 'index': 0,
+             'content_block': {'type': 'thinking', 'thinking': ''}},
+            {'type': 'content_block_delta', 'index': 0,
+             'delta': {'type': 'thinking_delta', 'thinking': 'Reasoning.'}},
+            {'type': 'content_block_delta', 'index': 0,
+             'delta': {'type': 'signature_delta', 'signature': 'ErcBSIG=='}},
+            {'type': 'content_block_stop', 'index': 0},
+            {'type': 'content_block_start', 'index': 1,
+             'content_block': {'type': 'tool_use', 'id': 'tu_1',
+                               'name': 'read_files', 'input': {}}},
+            {'type': 'content_block_delta', 'index': 1,
+             'delta': {'type': 'input_json_delta', 'partial_json': '{}'}},
+            {'type': 'content_block_stop', 'index': 1},
+            {'type': 'message_delta', 'delta': {'stop_reason': 'tool_use'},
+             'usage': {'output_tokens': 5}},
+            {'type': 'message_stop'},
+        ]
+        for ev in lines:
+            if acc.feed_line('data: ' + _json.dumps(ev)):
+                break
+        msg, finish, _usage = acc.finalize()
+        assert msg['reasoning_content'] == 'Reasoning.'
+        assert msg['thinking_signature'] == 'ErcBSIG=='
+        assert finish == 'tool_calls'
+        assert msg['tool_calls'][0]['function']['name'] == 'read_files'
+
+    def test_nonstreaming_captures_signature(self):
+        resp = {
+            'content': [
+                {'type': 'thinking', 'thinking': 'Hmm', 'signature': 'NONSTREAM'},
+                {'type': 'text', 'text': 'hi'},
+            ],
+            'stop_reason': 'end_turn',
+            'usage': {'input_tokens': 1, 'output_tokens': 1},
+        }
+        msg = anthropic_response_to_openai(resp)['choices'][0]['message']
+        assert msg['thinking_signature'] == 'NONSTREAM'
+
+
+class TestOpenAICompatReasoningDetails:
+    """The PRODUCTION path for aws.claude-opus-4.8: the sankuai gateway is
+    OpenAI-compat (no protocol=anthropic), and streams the Claude thinking
+    signature OpenRouter-style as `reasoning_details:[{type:thinking,
+    signature:...}]`. Capture it on the way in, rebuild it on replay."""
+
+    def _acc(self):
+        from lib.llm._sse_core import SSEAccumulator
+        from lib.llm.diagnostics import RawSSEDumper
+        body = {'model': 'aws.claude-opus-4.8', 'messages': []}
+        return SSEAccumulator(
+            body, 'tr', RawSSEDumper('aws.claude-opus-4.8', 'tr', body),
+            None, _time.time())
+
+    def test_capture_signature_from_reasoning_details(self):
+        acc = self._acc()
+        lines = [
+            {'choices': [{'delta': {'role': 'assistant', 'content': '',
+                                    'reasoning_content': 'Let me '}}]},
+            {'choices': [{'delta': {'content': '', 'reasoning_details': [
+                {'type': 'thinking', 'thinking': 'think.'}]}}]},
+            {'choices': [{'delta': {'role': 'assistant', 'content': '',
+                                    'reasoning_details': [
+                {'type': 'thinking', 'signature': 'EtIG_SIG_'}]}}]},
+            {'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': 'tu_1',
+                'type': 'function',
+                'function': {'name': 'read_files', 'arguments': '{}'}}]}}]},
+            {'choices': [{'delta': {}, 'finish_reason': 'tool_calls'}]},
+        ]
+        for ln in lines:
+            acc.feed_line('data: ' + _json.dumps(ln))
+        acc.feed_line('data: [DONE]')
+        msg, fr, _u = acc.finalize()
+        assert msg['reasoning_content'] == 'Let me think.'
+        assert msg['thinking_signature'] == 'EtIG_SIG_'
+        assert fr == 'tool_calls'
+
+    def test_reasoning_details_text_only_no_signature(self):
+        acc = self._acc()
+        acc.feed_line('data: ' + _json.dumps(
+            {'choices': [{'delta': {'reasoning_details': [
+                {'type': 'thinking', 'thinking': 'just text'}]}}]}))
+        acc.feed_line('data: [DONE]')
+        msg, _fr, _u = acc.finalize()
+        assert msg['reasoning_content'] == 'just text'
+        assert 'thinking_signature' not in msg
+
+    def test_build_body_rebuilds_reasoning_details(self):
+        from lib.llm.body import build_body
+        msgs = [
+            {'role': 'user', 'content': 'do X'},
+            {'role': 'assistant', 'reasoning_content': 'thought',
+             'thinking_signature': 'EtIG_SIG_',
+             'tool_calls': [{'id': 'tu_1', 'type': 'function',
+                             'function': {'name': 'read_files', 'arguments': '{}'}}]},
+            {'role': 'tool', 'tool_call_id': 'tu_1', 'content': 'body'},
+            {'role': 'user', 'content': 'continue'},
+        ]
+        b = build_body('aws.claude-opus-4.8', msgs, thinking_enabled=True)
+        asst = [m for m in b['messages'] if m.get('role') == 'assistant'][0]
+        assert asst['reasoning_details'] == [
+            {'type': 'thinking', 'thinking': 'thought', 'signature': 'EtIG_SIG_'}]
+
+    def test_build_body_no_rebuild_without_signature(self):
+        from lib.llm.body import build_body
+        msgs = [
+            {'role': 'user', 'content': 'do X'},
+            {'role': 'assistant', 'reasoning_content': 'thought',
+             'tool_calls': [{'id': 'tu_1', 'type': 'function',
+                             'function': {'name': 'read_files', 'arguments': '{}'}}]},
+            {'role': 'tool', 'tool_call_id': 'tu_1', 'content': 'body'},
+            {'role': 'user', 'content': 'continue'},
+        ]
+        b = build_body('aws.claude-opus-4.8', msgs, thinking_enabled=True)
+        asst = [m for m in b['messages'] if m.get('role') == 'assistant'][0]
+        assert 'reasoning_details' not in asst
+
+    def test_build_body_skips_non_claude(self):
+        from lib.llm.body import build_body
+        msgs = [
+            {'role': 'user', 'content': 'do X'},
+            {'role': 'assistant', 'reasoning_content': 'thought',
+             'thinking_signature': 'sig',
+             'tool_calls': [{'id': 'tu_1', 'type': 'function',
+                             'function': {'name': 'read_files', 'arguments': '{}'}}]},
+            {'role': 'tool', 'tool_call_id': 'tu_1', 'content': 'body'},
+            {'role': 'user', 'content': 'continue'},
+        ]
+        b = build_body('gpt-4o', msgs)
+        asst = [m for m in b['messages'] if m.get('role') == 'assistant'][0]
+        assert 'reasoning_details' not in asst
+
+
+class TestAnthropicOutboundReplay:
+    """openai_body_to_anthropic must re-emit a signed thinking block on the
+    replayed assistant turn (Continue), or drop it when no signature."""
+
+    def _assistant_turn(self, with_sig: bool) -> dict:
+        asst = {
+            'role': 'assistant',
+            'reasoning_content': 'I should read files',
+            'tool_calls': [{'id': 'tu_1', 'type': 'function',
+                            'function': {'name': 'read_files',
+                                         'arguments': '{"path":"a.py"}'}}],
+        }
+        if with_sig:
+            asst['thinking_signature'] = 'ErcBSIG=='
+        body = {'model': 'aws.claude-opus-4.8', 'max_tokens': 4096, 'messages': [
+            {'role': 'user', 'content': 'do X'},
+            asst,
+            {'role': 'tool', 'tool_call_id': 'tu_1', 'content': 'file body'},
+        ]}
+        out = openai_body_to_anthropic(body)
+        return [m for m in out['messages'] if m['role'] == 'assistant'][0]
+
+    def test_signed_thinking_block_replayed_first(self):
+        asst = self._assistant_turn(with_sig=True)
+        types = [b['type'] for b in asst['content']]
+        assert types == ['thinking', 'tool_use']
+        think = asst['content'][0]
+        assert think['thinking'] == 'I should read files'
+        assert think['signature'] == 'ErcBSIG=='
+
+    def test_unsigned_thinking_block_dropped(self):
+        asst = self._assistant_turn(with_sig=False)
+        types = [b['type'] for b in asst['content']]
+        assert types == ['tool_use']
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v', '-s'])

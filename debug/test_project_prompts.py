@@ -27,7 +27,8 @@ if ROOT not in sys.path:
 
 EXPECTED_TOOL_NAMES = [
     'list_dir', 'grep_search', 'find_files',
-    'write_file', 'apply_diff', 'insert_content',
+    'write_file', 'apply_diff', 'apply_diffs',
+    'insert_content', 'insert_contents',
     'create_project', 'run_command',
 ]
 

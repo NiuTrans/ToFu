@@ -92,9 +92,12 @@ def project_paths():
     if not paths or not isinstance(paths, list):
         return jsonify({'error': 'Provide a "paths" array with at least '
                                   'one directory'}), 400
+    readonly = data.get('readOnlyPaths') or []
+    if not isinstance(readonly, list):
+        readonly = []
     try:
         from lib.project_mod import set_project_paths
-        return api_ok({**set_project_paths(paths)})
+        return api_ok({**set_project_paths(paths, readonly_paths=readonly)})
     except Exception as e:
         logger.error('[Project.v1] paths failed for %s: %s', paths, e,
                      exc_info=True)

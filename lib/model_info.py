@@ -109,6 +109,11 @@ def is_gpt(model: str) -> bool:
     return 'gpt' in model.lower()
 
 
+def is_deepseek(model: str) -> bool:
+    """DeepSeek models (deepseek-v4-pro/-flash, deepseek-chat, deepseek-reasoner)."""
+    return 'deepseek' in model.lower()
+
+
 
 # ══════════════════════════════════════════════════════════
 #  Continue / Resume capability probes
@@ -161,6 +166,20 @@ def model_requires_thought_signature_on_tool_calls(model: str) -> bool:
     field on a subsequent request returns HTTP 400.
     """
     return is_gemini(model)
+
+
+def model_requires_reasoning_content_replay(model: str) -> bool:
+    """True if this model's API REJECTS an assistant turn whose
+    ``reasoning_content`` was emptied/stripped when thinking mode is on.
+
+    DeepSeek V4 (pro/flash) in thinking mode returns HTTP 400
+    (``The reasoning_content in the thinking mode must be passed back to
+    the API.``) if a prior assistant message that carried a tool_call has
+    its ``reasoning_content`` blanked.  Compaction's ``strip_thinking``
+    step must therefore skip these models so the reasoning trace stays on
+    the replayed turn.
+    """
+    return is_deepseek(model)
 
 
 def model_supports_assistant_prefill(model: str) -> bool:

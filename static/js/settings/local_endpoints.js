@@ -182,12 +182,12 @@ function _deleteLocalEndpoint(provIdx, epIdx) {
 }
 
 /** Clear ALL endpoint rows (with confirm). */
-function _clearLocalEndpoints(provIdx) {
+async function _clearLocalEndpoints(provIdx) {
   var p = _stgProviders[provIdx];
   if (!p || !p.endpoints) return;
   var n = p.endpoints.filter(function(u) { return u && u.trim(); }).length;
   if (n === 0) return;
-  if (!confirm('确定要清空全部 ' + n + ' 个端点 URL 吗？此操作不会立即保存到服务器。')) return;
+  if (!await showConfirm('确定要清空全部 ' + n + ' 个端点 URL 吗？此操作不会立即保存到服务器。', { danger: true })) return;
   p.endpoints = [''];
   _syncLocalBaseUrl(p);
   _renderProvidersTab();
@@ -496,7 +496,7 @@ async function _discoverLocalModels(provIdx) {
   if (!p) return;
   var urls = (p.endpoints && p.endpoints.length) ? p.endpoints : (p.base_url ? [p.base_url] : []);
   if (!urls.length) {
-    alert('请先在"端点 URL 列表"中添加至少一个 URL。');
+    showAlert('请先在"端点 URL 列表"中添加至少一个 URL。');
     return;
   }
   var statusEl = document.getElementById('stgLocalStatus_' + provIdx);

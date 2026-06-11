@@ -19,6 +19,7 @@ from lib.llm._sse_core import (
     prepare_request,
 )
 from lib.llm._transport import (
+    CONNECT_TIMEOUT,
     MAX_STREAM_RETRIES,
     abortable_sleep,
     retry_wait,
@@ -26,6 +27,7 @@ from lib.llm._transport import (
 from lib.llm_errors import (
     AbortedError,
     ContentFilterError,
+    EndpointUnreachableError,
     ModelLimitError,
     PermissionError_,
     PromptTooLongError,
@@ -69,7 +71,10 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
                     usage = {}
                 usage['_model_limit_learned'] = _limit_learned
             return msg, finish_reason, usage
-        except (RateLimitError, PermissionError_, AbortedError, ContentFilterError, PromptTooLongError):
+        except (RateLimitError, PermissionError_, AbortedError, ContentFilterError, PromptTooLongError, EndpointUnreachableError):
+            # EndpointUnreachableError: the host is down — retrying it on
+            # the SAME slot just burns another connect timeout. Escape to
+            # the dispatch layer, which cools this slot and fails over.
             raise
         except ModelLimitError as e:
             body['max_tokens'] = e.detected_limit
@@ -108,9 +113,20 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
         api_key=api_key, base_url=base_url, extra_headers=extra_headers,
         api_protocol=api_protocol)
 
-    resp = requests.post(plan.url, headers=plan.hdrs, json=plan.body,
-                         stream=True, timeout=(60, 300),
-                         proxies=proxies_for(plan.url))
+    try:
+        resp = requests.post(plan.url, headers=plan.hdrs, json=plan.body,
+                             stream=True, timeout=(CONNECT_TIMEOUT, 300),
+                             proxies=proxies_for(plan.url))
+    except requests.exceptions.ConnectionError as e:
+        # Connect-phase failure (ConnectTimeout / connection refused /
+        # SYN dropped) = the endpoint is down. Convert to
+        # EndpointUnreachableError so it escapes the same-key retry loop
+        # and the dispatch layer fails over to a healthy slot instead of
+        # burning CONNECT_TIMEOUT × MAX_STREAM_RETRIES on a dead host.
+        logger.warning('%s ✖ Endpoint unreachable (connect phase) %s: %s',
+                       log_prefix, plan.url, e)
+        raise EndpointUnreachableError(
+            'endpoint unreachable: %s' % e, base_url=plan.url) from e
 
     try:
         resp_trace = resp.headers.get('M-TraceId', '')

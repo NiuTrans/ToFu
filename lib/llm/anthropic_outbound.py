@@ -140,13 +140,21 @@ def _convert_tools(tools) -> list:
 
 
 def _assistant_blocks(msg: dict) -> list:
-    """Assistant message → Anthropic content blocks (text + tool_use).
+    """Assistant message → Anthropic content blocks (thinking + text + tool_use).
 
-    ``reasoning_content`` is intentionally dropped: replaying a thinking
-    block to the Anthropic API requires its opaque ``signature``, which we
-    don't carry, and sending one without it returns HTTP 400.
+    When the message carries both ``reasoning_content`` and its opaque
+    ``thinking_signature`` (captured from the stream and round-tripped on
+    Continue), the thinking block is re-emitted FIRST so the Messages API
+    can verify tool-use continuity. A ``reasoning_content`` without a
+    signature is dropped: sending a thinking block without its signature
+    returns HTTP 400, so a lossy "fresh reasoning" continuation is better.
     """
-    blocks = _convert_content_blocks(msg.get('content') or '')
+    blocks = []
+    th_text = msg.get('reasoning_content') or ''
+    th_sig = msg.get('thinking_signature') or ''
+    if th_text and th_sig:
+        blocks.append({'type': 'thinking', 'thinking': th_text, 'signature': th_sig})
+    blocks.extend(_convert_content_blocks(msg.get('content') or ''))
     for tc in msg.get('tool_calls') or []:
         fn = tc.get('function', {})
         try:
@@ -236,6 +244,7 @@ def _blocks_to_openai_message(content_blocks: list) -> dict:
     """Anthropic response content blocks → OpenAI assistant message dict."""
     text_parts = []
     thinking_parts = []
+    thinking_signature = ''
     tool_calls = []
     for block in content_blocks or []:
         if not isinstance(block, dict):
@@ -245,6 +254,8 @@ def _blocks_to_openai_message(content_blocks: list) -> dict:
             text_parts.append(block.get('text', ''))
         elif btype == 'thinking':
             thinking_parts.append(block.get('thinking', ''))
+            if block.get('signature'):
+                thinking_signature = block['signature']
         elif btype == 'tool_use':
             tool_calls.append({
                 'id': block.get('id', ''),
@@ -257,6 +268,8 @@ def _blocks_to_openai_message(content_blocks: list) -> dict:
     msg = {'role': 'assistant'}
     if thinking_parts:
         msg['reasoning_content'] = ''.join(thinking_parts)
+    if thinking_signature:
+        msg['thinking_signature'] = thinking_signature
     if tool_calls:
         msg['tool_calls'] = tool_calls
     msg['content'] = ''.join(text_parts)
@@ -345,6 +358,12 @@ class AnthropicSSETranslator:
                 return [{'choices': [{'delta': {'content': delta.get('text', '')}}]}]
             if dtype == 'thinking_delta':
                 return [{'choices': [{'delta': {'reasoning_content': delta.get('thinking', '')}}]}]
+            if dtype == 'signature_delta':
+                # Opaque signature for the thinking block — required when
+                # replaying the thinking block on a later tool-use turn,
+                # else the Messages API returns HTTP 400. Surface it as a
+                # synthetic OpenAI delta field the accumulator collects.
+                return [{'choices': [{'delta': {'thinking_signature': delta.get('signature', '')}}]}]
             if dtype == 'input_json_delta':
                 return [{'choices': [{'delta': {'tool_calls': [{
                     'index': idx,

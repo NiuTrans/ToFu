@@ -74,6 +74,17 @@ def is_predominantly_chinese(text: str) -> bool:
     return cjk_ratio(text) >= CHINESE_RATIO_THRESHOLD
 
 
+def is_predominantly_english(text: str) -> bool:
+    """True when ``latin_ratio(text) >= ENGLISH_RATIO_THRESHOLD``.
+
+    Mirror of :func:`is_predominantly_chinese` for the reverse direction:
+    used to decide "this text is already English, skip translating it to
+    English" — the language-agnostic generalisation of the old
+    Chinese-only ``has_chinese`` gate.
+    """
+    return latin_ratio(text) >= ENGLISH_RATIO_THRESHOLD
+
+
 def is_stale_partial_translation(source: str, translated: str) -> bool:
     """True when ``translated`` looks like a stale mid-stream partial.
 
@@ -137,6 +148,7 @@ __all__ = [
     'MIN_CHARS_FOR_DETECTION',
     'STALE_TRANSLATION_FRAC', 'STALE_TRANSLATION_MIN_SOURCE_CHARS',
     'cjk_ratio', 'latin_ratio', 'is_predominantly_chinese',
+    'is_predominantly_english',
     'is_stale_partial_translation', 'stale_translation_policy',
     'guess_language',
 ]

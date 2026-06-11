@@ -8,10 +8,10 @@
    exports / imports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
-function _deleteProvider(provIdx) {
+async function _deleteProvider(provIdx) {
   var p = _stgProviders[provIdx];
   if (!p) return;
-  if (!confirm('确定删除服务商“' + (p.name || p.id) + '”及其 ' + (p.models || []).length + ' 个模型吗？')) return;
+  if (!await showConfirm('确定删除服务商“' + (p.name || p.id) + '”及其 ' + (p.models || []).length + ' 个模型吗？', { danger: true })) return;
   _stgProviders.splice(provIdx, 1);
   _renderProvidersTab();
   _renderPresetsTab(_serverConfig);
@@ -197,7 +197,7 @@ function _normalizeModelsPricingTags(models) {
  * Add a pre-configured provider from a template.
  * Pre-fills base_url and models; user just needs to add their API key.
  */
-function addProviderFromTemplate(templateKey) {
+async function addProviderFromTemplate(templateKey) {
   var tpl = null;
   for (var i = 0; i < _PROVIDER_TEMPLATES.length; i++) {
     if (_PROVIDER_TEMPLATES[i].key === templateKey) { tpl = _PROVIDER_TEMPLATES[i]; break; }
@@ -207,7 +207,7 @@ function addProviderFromTemplate(templateKey) {
   // Check if this provider is already added
   for (var j = 0; j < _stgProviders.length; j++) {
     if (_stgProviders[j].base_url === tpl.base_url) {
-      if (!confirm(tpl.name + '（相同 API 地址）似乎已添加。要再添加一个吗？')) return;
+      if (!await showConfirm(tpl.name + '（相同 API 地址）似乎已添加。要再添加一个吗？')) return;
       break;
     }
   }
@@ -298,7 +298,7 @@ async function _syncFromTemplate(provIdx) {
   await _loadExternalProviderTemplates();
   var tpl = _findMatchingTemplate(p);
   if (!tpl) {
-    alert('找不到匹配的内置模板。');
+    showAlert('找不到匹配的内置模板。');
     return;
   }
   var existingIds = new Set((p.models || []).map(function(m) { return m.model_id; }));
@@ -381,7 +381,7 @@ async function _syncFromTemplate(provIdx) {
       userOnlyAliases.join('\n  • ');
   }
   msg += '\n\n记得点击「保存」按钮来保存更改。';
-  alert(msg);
+  showAlert(msg);
 }
 
 // ── Model Auto-Discovery ──
@@ -394,11 +394,11 @@ async function _discoverModels(provIdx) {
   var apiKey = (p.api_keys && p.api_keys[0]) || '';
 
   if (!baseUrl) {
-    alert('请先设置 API 地址 (Base URL) 再进行模型发现。');
+    showAlert('请先设置 API 地址 (Base URL) 再进行模型发现。');
     return;
   }
   if (!apiKey) {
-    alert('请先添加至少一个 API 密钥再进行模型发现。');
+    showAlert('请先添加至少一个 API 密钥再进行模型发现。');
     return;
   }
 
@@ -417,18 +417,18 @@ async function _discoverModels(provIdx) {
   try {
     var data = await Api.providers.discoverModels(baseUrl, apiKey, modelsPath || '');
     if (!data) {
-      alert('发现失败 (网络/超时)');
+      showAlert('发现失败 (网络/超时)');
       return;
     }
 
     if (!data.ok) {
-      alert('发现失败: ' + (data.error || '未知错误'));
+      showAlert('发现失败: ' + (data.error || '未知错误'));
       return;
     }
 
     var discovered = data.models || [];
     if (discovered.length === 0) {
-      alert('在 ' + baseUrl + ' 未找到模型');
+      showAlert('在 ' + baseUrl + ' 未找到模型');
       return;
     }
 
@@ -452,7 +452,7 @@ async function _discoverModels(provIdx) {
     var nCheap = discovered.filter(function(m) { return (m.capabilities || []).indexOf('cheap') >= 0; }).length;
     var msg = '✅ 发现 ' + discovered.length + ' 个模型（' + nCheap + ' 个标记为低价）。\n' +
               '新增 ' + added + ' 个模型' + (added < discovered.length ? '，' + (discovered.length - added) + ' 个已存在。' : '。');
-    alert(msg);
+    showAlert(msg);
 
     // Offer to persist discovered models into the hardcoded template
     var tpl = _findMatchingTemplate(p);
@@ -461,7 +461,7 @@ async function _discoverModels(provIdx) {
     }
 
   } catch (e) {
-    alert('发现出错: ' + e.message);
+    showAlert('发现出错: ' + e.message);
   } finally {
     if (btn) {
       btn.disabled = false;
@@ -477,7 +477,7 @@ async function _discoverModels(provIdx) {
  * Called after discovery finds new models for a template-matched provider.
  */
 async function _offerTemplateUpdate(templateKey, models) {
-  var ok = confirm(
+  var ok = await showConfirm(
     '是否将当前模型列表（' + models.length + ' 个）写入源码模板？\n\n' +
     '这样新部署时就自带最新模型，无需再次发现。'
   );
@@ -486,12 +486,12 @@ async function _offerTemplateUpdate(templateKey, models) {
   try {
     var data = await Api.providers.updateTemplate(templateKey, models);
     if (data && data.ok) {
-      alert('✅ 模板已更新：' + data.model_count + ' 个模型写入 ' + (data.updated_files || []).join(', ') + '。');
+      showAlert('✅ 模板已更新：' + data.model_count + ' 个模型写入 ' + (data.updated_files || []).join(', ') + '。');
     } else {
-      alert('模板更新失败: ' + (data.error || '未知错误'));
+      showAlert('模板更新失败: ' + (data.error || '未知错误'));
     }
   } catch (e) {
-    alert('模板更新出错: ' + e.message);
+    showAlert('模板更新出错: ' + e.message);
   }
 }
 

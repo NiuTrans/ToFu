@@ -52,7 +52,7 @@ def _do_translate_pptx(task_id, input_path, filename, target, source):
                                      source=source, target=target)
         return c
 
-    def _progress_cb(current, total, status_msg):
+    def _progress_cb(current, total, _status_msg):
         with _translate_tasks_lock:
             t = _translate_tasks.get(task_id)
             if t:

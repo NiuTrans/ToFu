@@ -157,32 +157,55 @@ def _persisted_read_labels(fn_args):
         except (ValueError, TypeError) as e:
             logger.debug('[ToolDisplay] read_files reads=str not JSON: %s', e)
             reads = None
-    paths = []
+    specs = []
     if isinstance(reads, list):
         for r in reads:
             if isinstance(r, dict) and r.get('path'):
-                paths.append(r['path'])
+                specs.append(r)
             elif isinstance(r, str) and r:
-                paths.append(r)
+                specs.append({'path': r})
     elif fn_args.get('path'):
-        paths.append(fn_args['path'])
-    if not paths:
+        specs.append(fn_args)
+    if not specs:
         return ''
 
     from lib.tasks_pkg.persist_registry import (
         describe_filename, friendly_label, lookup,
     )
     labels = []
-    for p in paths:
+    persisted_count = 0
+    for spec in specs:
+        p = spec.get('path') or ''
         hit = lookup(p) or describe_filename(p)
-        if hit is None:
-            return ''  # not a persisted result — keep default rendering
-        labels.append(friendly_label(*hit))
+        if hit is not None:
+            persisted_count += 1
+            labels.append(friendly_label(*hit))
+            continue
+        # Non-persisted (ordinary project file) in a mixed batch — keep the
+        # normal basename + line-range rendering so its path/range survives.
+        base = p.rsplit('/', 1)[-1] or p
+        sl, el = spec.get('start_line'), spec.get('end_line')
+        if sl is not None and el is not None:
+            labels.append(f'{base} L{sl}-{el}')
+        elif sl is not None:
+            labels.append(f'{base} L{sl}+')
+        else:
+            labels.append(base)
+
+    # Pure project read (nothing persisted) — defer to default rendering.
+    if persisted_count == 0:
+        return ''
 
     n = len(labels)
-    shown = '; '.join(labels[:4])
-    suffix = f' +{n - 4} more' if n > 4 else ''
-    return f'Read {n} saved result{"s" if n != 1 else ""}: {shown}{suffix}'
+    # When every path is a persisted spill, the friendly "saved results"
+    # header is accurate; a mixed batch also pulls in project files, so use
+    # the neutral "files" header there.
+    header = (f'Read {n} saved result{"s" if n != 1 else ""}'
+              if persisted_count == n else f'Read {n} file{"s" if n != 1 else ""}')
+    # One entry per line so the frontend (which turns \n → <br>) renders
+    # every label in full instead of eliding to the first few.
+    body = '\n'.join(f'• {lbl}' for lbl in labels)
+    return f'{header}:\n{body}'
 
 
 def _tool_display_project(fn_name, fn_args, tc_id, tc_args_str):
@@ -256,8 +279,16 @@ def _tool_display_swarm(fn_name, fn_args, tc_id, tc_args_str):
     """
     if fn_name == 'spawn_agents':
         n_agents = len(fn_args.get('agents', [])) if isinstance(fn_args, dict) else 0
-        display = (f"⚡ Spawning {n_agents} agent{'s' if n_agents != 1 else ''}…"
-                   if n_agents else "⚡ Spawning agents…")
+        # A spawn_agents call with NO agents launches nothing (the backend
+        # returns ``{"error": "no agents specified"}``). It must NOT be
+        # stamped ``_swarm: True`` — an empty swarm panel becomes an event
+        # magnet: the frontend's "first _swarm round" lookup grafts a LATER
+        # real swarm's agent events onto this orphan round, splitting one
+        # swarm across two panels (the "ghost panel" / "ticked but waiting"
+        # bug). Render it as an ordinary tool round instead.
+        if not n_agents:
+            return "⚡ Spawning agents…", {'toolName': 'spawn_agents'}
+        display = f"⚡ Spawning {n_agents} agent{'s' if n_agents != 1 else ''}…"
         return display, {'toolName': 'spawn_agents', '_swarm': True}
 
     if fn_name == 'await_agents':

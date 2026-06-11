@@ -84,25 +84,23 @@ def get_proxy_config() -> dict:
     }
 
 
-def set_proxy_config(http_proxy: str = '', https_proxy: str = '',
-                     no_proxy: str = ''):
+def set_proxy_config(http_proxy: str = '', https_proxy: str = ''):
     """Apply proxy address configuration at runtime.
 
     Updates ``os.environ`` so all ``requests`` calls pick up the new
     values immediately.
 
-    The ``no_proxy`` parameter is **deprecated** — bypass domains are now
-    managed solely by ``set_bypass_domains()``, which auto-syncs to the
-    ``no_proxy`` environment variable.  Any value passed here is ignored.
+    Bypass domains (the ``no_proxy`` env var) are managed solely by
+    ``set_bypass_domains()``, which auto-syncs to the ``no_proxy``
+    environment variable — this function only touches the proxy address.
 
-    Called by ``routes/common.py`` on Settings save and by ``server.py``
+    Called by ``routes/config.py`` on Settings save and by ``server.py``
     at startup when loading persisted config.
 
     Args:
         http_proxy:  HTTP proxy URL (e.g. ``http://10.0.0.1:8080``), or
                      empty string to clear (fall back to env).
         https_proxy: HTTPS proxy URL, or empty to clear.
-        no_proxy:    Deprecated — ignored (auto-managed by bypass domains).
     """
     global _proxy_config
     with _lock:

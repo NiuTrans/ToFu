@@ -18,9 +18,14 @@ uniform v1 path so SDK callers can pick whichever fits their workflow:
 
   * Feature-shaped poll (flat-result format the UI uses):
       GET  /api/v1/agents/translate/poll/{task_id}
-      POST /api/v1/agents/translate/poll/batch
+      POST /api/v1/agents/translate/poll/batch   (façade; body {taskIds:[…]})
       GET  /api/v1/agents/paper/report/poll?task_id=…&cursor=…
       GET  /api/v1/agents/paper/translate/poll?task_id=…&cursor=…
+
+  The bare ``/api/v1/translate/*`` routes (``…/poll/<id>`` and
+  ``…/poll-batch``) are the underlying implementation these façades
+  delegate to; new SDK callers should prefer the ``/agents/translate/*``
+  paths above.
 
 The cursor / SSE routes work for ANY TaskRuntime-backed task uniformly
 (see ``routes/api_v1/tasks.py``). The feature-shaped routes preserve
@@ -99,7 +104,7 @@ def paper_translate_start():
                               'text': {'type': 'string'},
                               'source_lang': {'type': 'string'},
                               'target_lang': {'type': 'string',
-                                               'default': 'zh'},
+                                               'default': 'English'},
                               'model': {'type': 'string'},
                           }}}}})
 def translate_start():
@@ -301,7 +306,7 @@ def _run_search(query: str, *, max_results: int, freshness: str,
     Pure function; no Flask dependencies, so the same body powers both
     the sync route and the async worker.
     """
-    from lib.search import perform_web_search
+    from tofu_search import perform_web_search
 
     t0 = time.time()
     with log_context('api_v1.search.perform', logger=logger):
@@ -456,7 +461,7 @@ def browser_fetch():
     except BadRequest as e:
         return api_bad_request(str(e), field=e.field or 'url')
     try:
-        from lib.fetch import fetch_page_content
+        from tofu_search import fetch_page_content
     except ImportError as e:
         return api_internal_error(e, context='Fetch pipeline unavailable',
                                   source='api_v1.agents.browser_fetch')

@@ -166,7 +166,7 @@ class TestFsKeepalive:
 @pytest.mark.unit
 class TestOptionalDependencyFlags:
     def test_fetch_utils_flags(self):
-        from lib.fetch.utils import HAS_FITZ, HAS_PIL, HAS_PLAYWRIGHT, HAS_TRAFILATURA
+        from tofu_search.fetch.utils import HAS_FITZ, HAS_PIL, HAS_PLAYWRIGHT, HAS_TRAFILATURA
         assert isinstance(HAS_TRAFILATURA, bool)
         assert isinstance(HAS_PLAYWRIGHT, bool)
         assert isinstance(HAS_FITZ, bool)

@@ -6,11 +6,12 @@ from __future__ import annotations
 from urllib.parse import urlparse
 
 import lib as _lib
-from lib.fetch import fetch_page_content
 from lib.log import get_logger
-from lib.search import format_search_for_tool_response, perform_web_search
-from lib.search.vertical import detect_vertical_intent, search_vertical
 from lib.tasks_pkg.executor import _finalize_tool_round, tool_registry
+from tofu_search import fetch_page_content, perform_web_search
+from tofu_search.search import format_search_for_tool_response
+from tofu_search.search.vertical import (detect_vertical_intent, search_vertical,
+                                          search_vertical_domain, list_domains)
 from lib.tasks_pkg.handlers._adapter import run_batch_concurrent
 from lib.tasks_pkg.manager import append_event
 
@@ -21,37 +22,73 @@ logger = get_logger(__name__)
 #  Helpers: single-query search and single-URL fetch
 # ══════════════════════════════════════════════════════════
 
-def _web_search_one(query: str, user_question: str, freshness: str = ''):
+def resolve_vertical(query: str, vertical: str = 'auto'):
+    """Resolve the vertical search plan for a query.
+
+    Args:
+        query: User-facing search query.
+        vertical: One of 'auto' / 'off' / a domain name from
+            :func:`tofu_search.search.vertical.list_domains`.
+
+    Returns:
+        A zero-arg callable that, when invoked, returns either a domain-level
+        record (``{'domain', 'sources', 'items', 'content'}``) or a legacy
+        type-level record (``{'domain', 'type', 'content', 'source'}``), or
+        ``None`` if no vertical applies.
+    """
+    v = (vertical or 'auto').strip().lower()
+    if v == 'off':
+        return None
+    if v == 'auto':
+        intent = detect_vertical_intent(query)
+        if not intent:
+            return None
+        t, identifier, params = intent
+        logger.info('[Search] Vertical auto-intent: type=%s ident=%s for query=%r',
+                    t, identifier, query[:60])
+        return lambda: search_vertical(t, identifier, params)
+    if v in list_domains():
+        logger.info('[Search] Vertical explicit domain=%s for query=%r', v, query[:60])
+        return lambda: search_vertical_domain(v, query)
+    logger.warning('[Search] Unknown vertical=%r — falling back to auto', vertical)
+    intent = detect_vertical_intent(query)
+    if not intent:
+        return None
+    t, identifier, params = intent
+    return lambda: search_vertical(t, identifier, params)
+
+
+def _web_search_one(query: str, user_question: str, freshness: str = '',
+                    vertical: str = 'auto'):
     """Run one web search — returns (results_list, search_diag, engine_breakdown, vertical_result).
 
-    Vertical domain search (if detected) runs concurrently with the main
-    web search pipeline so it adds zero latency.
+    Vertical domain search (when ``vertical`` resolves) runs concurrently
+    with the main web pipeline so it adds zero latency. ``vertical='auto'``
+    keeps the legacy phrase-detection path; an explicit domain forces a
+    fan-out across every sub-source in that domain.
     """
     from concurrent.futures import ThreadPoolExecutor as _TPE
 
-    # Detect vertical intent
     vertical_result = None
     vertical_future = None
-    intent = detect_vertical_intent(query)
-    if intent:
-        domain, identifier, params = intent
-        logger.info('[Search] Vertical intent detected: %s/%s for query=%r', domain, identifier, query[:60])
-        # Launch vertical API call in a separate thread so it overlaps with the web pipeline
+    _vertical_pool = None
+    plan = resolve_vertical(query, vertical)
+    if plan is not None:
         _vertical_pool = _TPE(max_workers=1)
-        vertical_future = _vertical_pool.submit(search_vertical, domain, identifier, params)
+        vertical_future = _vertical_pool.submit(plan)
 
     try:
         results = perform_web_search(query, user_question=user_question, freshness=freshness)
     except Exception as e:
         logger.error('[Executor] web_search failed for query=%r: %s', query, e, exc_info=True)
         results = []
-        # Collect vertical result even on web search failure
         if vertical_future:
             try:
                 vertical_result = vertical_future.result(timeout=10)
             except Exception as ve:
                 logger.warning('[Search] Vertical query also failed: %s', ve)
-            _vertical_pool.shutdown(wait=False)
+            if _vertical_pool:
+                _vertical_pool.shutdown(wait=False)
         return (
             results,
             {
@@ -63,13 +100,13 @@ def _web_search_one(query: str, user_question: str, freshness: str = ''):
             vertical_result,
         )
 
-    # Collect vertical result (should be done by now — web pipeline takes 5-15s)
     if vertical_future:
         try:
             vertical_result = vertical_future.result(timeout=5)
         except Exception as ve:
             logger.warning('[Search] Vertical query failed: %s', ve)
-        _vertical_pool.shutdown(wait=False)
+        if _vertical_pool:
+            _vertical_pool.shutdown(wait=False)
 
     return (
         results,
@@ -112,7 +149,7 @@ def _fetch_url_one(target_url: str, user_question: str, fetch_reason: str = ''):
     raw_chars = len(page_content) if page_content else 0
 
     if page_content and not is_pdf:
-        from lib.fetch.content_filter import IRRELEVANT_SENTINEL
+        from tofu_search.fetch.content_filter import IRRELEVANT_SENTINEL
         filtered = filter_web_content(
             page_content, url=target_url,
             query=fetch_reason, user_question=user_question,
@@ -169,6 +206,57 @@ def _format_search_display_for_results(results) -> list[dict]:
     return display_results
 
 
+def _vertical_to_sse_payload(vertical_result) -> dict | None:
+    """Normalize a vertical record into the structured field the frontend renders.
+
+    Domain-level records already carry ``items`` + ``sources``; legacy type-
+    level records get wrapped into the same shape so the frontend has a
+    single rendering branch.
+    """
+    if not vertical_result or not isinstance(vertical_result, dict):
+        return None
+    domain = vertical_result.get('domain') or 'vertical'
+    if 'items' in vertical_result and 'sources' in vertical_result:
+        return {
+            'domain': domain,
+            'sources': vertical_result.get('sources', []),
+            'items': vertical_result.get('items', []),
+        }
+    sub_type = vertical_result.get('type', '')
+    source = vertical_result.get('source', sub_type)
+    items = []
+    head = vertical_result.get('content', '').splitlines()[:1]
+    title = head[0].lstrip('# ').strip() if head else source or sub_type or 'Result'
+    items.append({
+        'title': title,
+        'snippet': '',
+        'url': '',
+        'type': sub_type,
+        'source': source,
+    })
+    return {
+        'domain': domain,
+        'sources': [{'type': sub_type, 'source': source,
+                     'identifier': vertical_result.get('identifier', '')}],
+        'items': items,
+    }
+
+
+def _vertical_header_for_llm(vertical_result) -> str:
+    """Render the markdown block prepended to the tool response for the LLM."""
+    if not vertical_result:
+        return ''
+    if 'sources' in vertical_result and isinstance(vertical_result.get('sources'), list):
+        names = [s.get('source') or s.get('type') or '?' for s in vertical_result['sources']]
+        label = ' + '.join(names)
+        return (f'═══ Vertical Search ({vertical_result.get("domain", "vertical")}: {label}) ═══\n\n'
+                f'{vertical_result.get("content", "")}\n\n'
+                f'═══ Web Search Results ═══\n\n')
+    return (f'═══ Vertical Search Result ({vertical_result.get("source", "vertical")}) ═══\n\n'
+            f'{vertical_result.get("content", "")}\n\n'
+            f'═══ Web Search Results ═══\n\n')
+
+
 # ══════════════════════════════════════════════════════════
 #  web_search — single + batch
 # ══════════════════════════════════════════════════════════
@@ -185,6 +273,7 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
     handler_t0 = _time.time()
     query = fn_args.get('query', '')
     freshness = fn_args.get('freshness', '')
+    vertical_param = fn_args.get('vertical', 'auto')
     user_question = task.get('lastUserQuery', '')
 
     # ── Fast-path: short-circuit empty/whitespace queries before hitting
@@ -200,7 +289,8 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
         append_event(task, {'type': 'tool_result', 'roundNum': rn, 'query': query, 'results': []})
         return tc_id, tool_content, False
 
-    results, search_diag, engine_breakdown, vertical_result = _web_search_one(query, user_question, freshness)
+    results, search_diag, engine_breakdown, vertical_result = _web_search_one(
+        query, user_question, freshness, vertical=vertical_param)
     display_results = _format_search_display_for_results(results)
 
     round_entry['results'] = display_results
@@ -212,22 +302,23 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
     if not display_results and search_diag:
         round_entry['searchDiag'] = search_diag
         event_payload['searchDiag'] = search_diag
+
+    vertical_payload = _vertical_to_sse_payload(vertical_result)
+    if vertical_payload:
+        round_entry['vertical'] = vertical_payload
+        event_payload['vertical'] = vertical_payload
     append_event(task, event_payload)
 
     tool_content = format_search_for_tool_response(results, search_diag=search_diag)
-
-    # Prepend vertical domain data if available
     if vertical_result:
-        vertical_header = (f'═══ Vertical Search Result ({vertical_result["source"]}) ═══\n\n'
-                           f'{vertical_result["content"]}\n\n'
-                           f'═══ Web Search Results ═══\n\n')
-        tool_content = vertical_header + tool_content
+        tool_content = _vertical_header_for_llm(vertical_result) + tool_content
 
     handler_elapsed = _time.time() - handler_t0
+    _vlabel = (vertical_payload.get('domain') if vertical_payload else 'none')
     logger.info('[Search] web_search handler TOTAL: %.1fs  query=%r  results=%d  content_chars=%d  vertical=%s',
                 handler_elapsed, query[:60], len(display_results),
                 sum(r.get('fetchedChars', 0) for r in display_results),
-                vertical_result['type'] if vertical_result else 'none')
+                _vlabel)
     if handler_elapsed > 30:
         logger.warning('[Search] ⚠ web_search handler SLOW: %.1fs (>30s)  query=%r',
                        handler_elapsed, query[:60])
@@ -246,48 +337,59 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
     handler_t0 = _time.time()
     user_question = task.get('lastUserQuery', '')
     freshness = fn_args.get('freshness', '')
+    batch_vertical = fn_args.get('vertical', 'auto')
     MAX_BATCH = 5
 
-    query_specs = []  # list of (query_str, freshness_str)
+    query_specs = []  # list of (query_str, freshness_str, vertical_str)
     for spec in queries[:MAX_BATCH]:
         if isinstance(spec, dict):
             q = spec.get('query', '')
             f = spec.get('freshness', '') or freshness
+            v = spec.get('vertical') or batch_vertical
             if isinstance(q, str) and q.strip():
-                query_specs.append((q.strip(), f))
+                query_specs.append((q.strip(), f, v))
         elif isinstance(spec, str) and spec.strip():
-            query_specs.append((spec.strip(), freshness))
+            query_specs.append((spec.strip(), freshness, batch_vertical))
     if not query_specs:
         tool_content = 'Error: "queries" must contain at least one {query} entry.'
         _finalize_tool_round(task, rn, round_entry, [{'type': 'error', 'content': tool_content}])
         return tc_id, tool_content, False
 
-    query_list = [q for q, _ in query_specs]
+    query_list = [q for q, _, _ in query_specs]
     n = len(query_list)
 
     def _worker(spec):
-        q, f = spec
-        results, search_diag, engine_breakdown, vertical_result = _web_search_one(q, user_question, f)
+        q, f, v = spec
+        results, search_diag, engine_breakdown, vertical_result = _web_search_one(
+            q, user_question, f, vertical=v)
         formatted = format_search_for_tool_response(results, search_diag=search_diag)
         if vertical_result:
-            vertical_header = (f'══ Vertical ({vertical_result["source"]}) ══\n\n'
-                               f'{vertical_result["content"]}\n\n'
-                               f'══ Web Results ══\n\n')
-            formatted = vertical_header + formatted
-        return (q, results, search_diag, engine_breakdown, formatted)
+            formatted = _vertical_header_for_llm(vertical_result) + formatted
+        return (q, results, search_diag, engine_breakdown, formatted, vertical_result)
 
     ordered = run_batch_concurrent(query_specs, _worker, max_workers=5, tag='Search')
 
     all_display_results = []
     all_formatted = []
+    all_verticals = []
     for idx, item in enumerate(ordered):
         q = query_list[idx]
         if item is None:
             all_formatted.append(f'Search failed for "{q}": internal error (see logs)')
             continue
-        _q, results, _diag, _breakdown, formatted = item
+        _q, results, _diag, _breakdown, formatted, vertical_result = item
         display_results = _format_search_display_for_results(results)
+        # Tag each result with its source query so the frontend can group
+        # results under per-query subheaders (batch mode flattens them).
+        for dr in display_results:
+            dr['_q'] = q
         all_display_results.extend(display_results)
+        if vertical_result:
+            v_payload = _vertical_to_sse_payload(vertical_result)
+            if v_payload:
+                v_payload = dict(v_payload)
+                v_payload['query'] = q
+                all_verticals.append(v_payload)
         if n > 1:
             all_formatted.append(f'=== Search: {q} ===\n{formatted}')
         else:
@@ -304,6 +406,9 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
         'results': all_display_results,
         '_batchQueries': query_list,
     }
+    if all_verticals:
+        round_entry['verticals'] = all_verticals
+        event_payload['verticals'] = all_verticals
     append_event(task, event_payload)
 
     tool_content = '\n\n'.join(all_formatted)
@@ -445,4 +550,4 @@ def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, r
 
 
 # Lazy import for content filter (used in _fetch_url_one)
-from lib.fetch.content_filter import filter_web_content  # noqa: E402
+from tofu_search.fetch.content_filter import filter_web_content  # noqa: E402

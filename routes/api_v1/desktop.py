@@ -35,13 +35,15 @@ api_v1_desktop_bp = Blueprint('api_v1_desktop', __name__)
     tags=['capabilities'],
 )
 async def desktop_status():
-    from routes.desktop import _commands, _last_poll_time, is_desktop_agent_connected
+    from lib.desktop import (
+        is_desktop_agent_connected,
+        last_poll_time,
+        pending_commands_count,
+    )
     return jsonify({
         'connected': is_desktop_agent_connected(),
-        'last_poll': _last_poll_time,
-        'pending_commands': sum(
-            1 for c in _commands.values() if not c['event'].is_set()
-        ),
+        'last_poll': last_poll_time(),
+        'pending_commands': pending_commands_count(),
     })
 
 

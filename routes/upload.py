@@ -110,7 +110,7 @@ def _safe_image_fetch(url: str, *, timeout: int = 30) -> tuple[bytes, str]:
     The request streams (``stream=True``) and aborts as soon as the size cap
     is reached, so an attacker cannot OOM the server with a huge body.
     """
-    import requests as _requests
+    from lib.http_client import http_get
 
     parsed = urlparse(url)
     if parsed.scheme not in ('http', 'https'):
@@ -136,11 +136,8 @@ def _safe_image_fetch(url: str, *, timeout: int = 30) -> tuple[bytes, str]:
                     f'(loopback/private/link-local/reserved)'
                 )
 
-    from lib.proxy import proxies_for as _proxies_for
-
     max_bytes = _image_fetch_max_bytes()
-    resp = _requests.get(url, proxies=_proxies_for(url),
-                         timeout=timeout, stream=True)
+    resp = http_get(url, timeout=timeout, stream=True)
     try:
         resp.raise_for_status()
         # Honor Content-Length if the server is honest; still re-check while

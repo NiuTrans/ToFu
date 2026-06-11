@@ -117,6 +117,12 @@ function openSettings() {
     kthCb.checked = config.keepToolHistory !== false; // default true
   }
 
+  // Auto-generate conversation title toggle — defaults to false (manual)
+  var agtCb = document.getElementById('settingAutoGenerateTitle');
+  if (agtCb) {
+    agtCb.checked = !!config.autoGenerateTitle;
+  }
+
   // Input send mode — defaults to 'enter'
   var ismSel = document.getElementById('settingInputSendMode');
   if (ismSel) {

@@ -3,6 +3,7 @@
 Provides small, dependency-free helpers that multiple modules need.
 """
 
+import ast
 import json
 import re
 
@@ -35,17 +36,66 @@ def safe_json(raw, default=None, label=''):
 
 
 def _loads_first_obj(s: str):
-    """json.loads with fallback to raw_decode for trailing-garbage ("Extra data") cases."""
+    """json.loads with fallback to raw_decode for trailing-garbage ("Extra data") cases.
+
+    ``strict=False`` tolerates raw control characters (literal newlines / tabs)
+    inside string values — a common malformation when weaker models emit
+    multi-line ``write_file`` content without escaping the newlines. Strict
+    parsing rejects these with ``Invalid control character at: ...`` and the
+    whole tool call would otherwise be dropped.
+    """
     try:
-        return json.loads(s)
+        return json.loads(s, strict=False)
     except json.JSONDecodeError as e:
         if 'Extra data' not in str(e):
             raise
-        obj, _ = json.JSONDecoder().raw_decode(s)
+        obj, _ = json.JSONDecoder(strict=False).raw_decode(s)
         if isinstance(obj, dict):
             logger.debug('repair_json: extracted first JSON object, discarded trailing %d chars', len(s) - _)
             return obj
         raise
+
+
+def _parser_guided_delimiter_fix(s: str, max_fixes: int = 8):
+    """Recover ``Expecting ':'/',' delimiter`` errors by inserting the missing char.
+
+    The stdlib JSON parser reports the EXACT byte offset where a structural
+    delimiter is missing. We insert the demanded character at ``e.pos`` and
+    re-parse, repeating up to *max_fixes* times. This is far safer than a
+    regex guess: the parser itself certifies the result by parsing cleanly.
+
+    Only the two delimiter errors are acted on — any other JSONDecodeError
+    (unescaped inner quote, bad property name, …) is re-raised so we never
+    paper over a genuinely-ambiguous payload. Returns the parsed object or
+    raises the last JSONDecodeError.
+    """
+    cur = s
+    for _ in range(max_fixes):
+        try:
+            return json.loads(cur, strict=False)
+        except json.JSONDecodeError as e:
+            msg = str(e)
+            if "Expecting ':' delimiter" in msg:
+                cur = cur[:e.pos] + ':' + cur[e.pos:]
+            elif "Expecting ',' delimiter" in msg:
+                cur = cur[:e.pos] + ',' + cur[e.pos:]
+            else:
+                raise
+    return json.loads(cur, strict=False)
+
+
+def _python_literal_fix(s: str) -> dict:
+    """Recover single-quoted / Python-dict-repr payloads via ``ast.literal_eval``.
+
+    Weaker models sometimes emit a Python ``dict`` repr instead of JSON
+    (single quotes, ``True``/``False``/``None``). ``ast.literal_eval`` parses
+    these safely (no code execution) — only literals are evaluated. Result is
+    accepted ONLY when it's a dict, mirroring the JSON tool-arg contract.
+    """
+    val = ast.literal_eval(s)
+    if isinstance(val, dict):
+        return val
+    raise json.JSONDecodeError('ast.literal_eval did not yield a dict', s, 0)
 
 
 def repair_json(raw: str) -> dict:
@@ -53,7 +103,10 @@ def repair_json(raw: str) -> dict:
 
     Handles: trailing commas, unterminated strings, missing closing braces/brackets,
     invalid backslash escape sequences (e.g. ``\\U``, ``\\m``, ``\\.``),
-    trailing garbage after a complete JSON object ("Extra data").
+    raw control characters inside string values (literal newlines/tabs),
+    trailing garbage after a complete JSON object ("Extra data"),
+    structural delimiter errors (missing ``:`` / ``,`` — parser-guided),
+    and Python-dict-repr / single-quoted payloads (via ``ast.literal_eval``).
     Raises json.JSONDecodeError if repair fails.
     """
     s = raw.strip()
@@ -104,6 +157,29 @@ def repair_json(raw: str) -> dict:
 
     # 5. Strip trailing commas again (may appear after quote closure)
     s = re.sub(r',\s*([}\]])', r'\1', s)
+
+    try:
+        return _loads_first_obj(s)
+    except json.JSONDecodeError as e:
+        logger.debug('repair_json: structural-balance parse failed, trying delimiter/literal fixes: %s', e)
+
+    # 6. Structural delimiter recovery — insert the exact ':'/',' the parser
+    #    demands at its reported offset, then re-validate. Top failure mode in
+    #    the log audit (10/13 read_files calls): "Expecting ',' delimiter".
+    try:
+        obj = _parser_guided_delimiter_fix(s)
+        logger.debug('repair_json: recovered via parser-guided delimiter insertion')
+        return obj
+    except (json.JSONDecodeError, ValueError):
+        logger.debug('repair_json: delimiter fix failed, trying python-literal fallback')
+
+    # 7. Python-dict-repr / single-quoted payload — ast.literal_eval (no exec).
+    try:
+        obj = _python_literal_fix(s)
+        logger.debug('repair_json: recovered via ast.literal_eval (python-dict repr)')
+        return obj
+    except (ValueError, SyntaxError, json.JSONDecodeError):
+        logger.debug('repair_json: python-literal fallback failed')
 
     return _loads_first_obj(s)  # let it raise if still broken
 

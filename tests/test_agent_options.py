@@ -144,6 +144,7 @@ class TestToCfg(unittest.TestCase):
             'humanGuidanceEnabled', 'schedulerEnabled', 'mcpEnabled',
             'codeExecEnabled', 'desktopEnabled',
             'agentBackend', 'autoApply', 'keepToolHistory',
+            'disableModelFallback',
         ]:
             self.assertIn(key, d, f'orchestrator-read key missing: {key}')
 

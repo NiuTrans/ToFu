@@ -123,12 +123,42 @@ def _get_cmd_env(cwd=None):
     env['PIP_USER'] = '0'
     env.pop('PIP_TARGET', None)  # don't redirect pip elsewhere
 
+    # ── Hard guard against polluting the SERVER's own environment ──
+    # The #1 contamination incident: a benchmarked agent (or any user) runs
+    # ``pip install -e .`` in a workspace; if no per-workspace virtualenv is
+    # active, pip falls through to the conda env that launched the tofu
+    # server and writes an editable ``__editable__*.pth`` / ``.egg-link``
+    # straight into the SERVER's site-packages — silently hijacking
+    # ``import pytest`` / ``import sphinx`` / ``import matplotlib`` for the
+    # whole env (see scrub_envs.py and the swebench-env-isolation memories).
+    #
+    # ``PIP_REQUIRE_VIRTUALENV=1`` makes pip REFUSE to install unless a real
+    # virtualenv (one with a ``pyvenv.cfg`` → ``sys.prefix != base_prefix``)
+    # is active. A conda env is NOT a virtualenv by this test, so the tofu
+    # env is protected, while a per-task ``.venv/`` (activated below) is
+    # allowed. This converts a silent cross-env corruption into a loud,
+    # local "Could not find an activated virtualenv (required)" error in the
+    # agent's own command output — which is the correct, recoverable signal.
+    #
+    # Protect by default; a self-hosted user who genuinely wants the agent to
+    # install into the server's own (conda/base) environment can opt out by
+    # launching the server with ``TOFU_ALLOW_GLOBAL_PIP=1``.
+    if os.environ.get('TOFU_ALLOW_GLOBAL_PIP', '').strip().lower() not in (
+            '1', 'true', 'yes', 'on'):
+        env['PIP_REQUIRE_VIRTUALENV'] = '1'
+    else:
+        env.pop('PIP_REQUIRE_VIRTUALENV', None)
+
     # ── Strip server-process-only env vars that pollute subprocess ──
     # These come from the conda env that launched the tofu server.
     # The agent's subprocess in a workspace MUST NOT inherit them or
-    # `python` / `pip` will resolve to the wrong env.
+    # `python` / `pip` will resolve to the wrong env. CONDA_PREFIX is the
+    # critical one: pip/python use it to locate the install target, so
+    # leaving it set points writes back at the server's env even after the
+    # other CONDA_* markers are gone.
     for key in ('CONDA_DEFAULT_ENV', 'CONDA_PROMPT_MODIFIER',
-                'CONDA_SHLVL', 'CONDA_EXE', '_CE_CONDA', '_CE_M'):
+                'CONDA_SHLVL', 'CONDA_EXE', '_CE_CONDA', '_CE_M',
+                'CONDA_PREFIX', 'CONDA_PREFIX_1', 'CONDA_PREFIX_2'):
         env.pop(key, None)
     # LD_LIBRARY_PATH from server (sglang env) breaks Python ABI in
     # workspace conda envs (different libpython.so). Strip it.
@@ -1949,14 +1979,20 @@ def _resolve_base(base_path, rel_path, conv_id=None):
     # not a substitute for proper 'rootname:' prefix usage.
     if base_path and rel_path and rel_path not in ('.', '', '/'):
         from lib.project_mod.config import _lock as _cfg_lock
-        from lib.project_mod.config import _roots
+        from lib.project_mod.config import get_conv_roots
         with _cfg_lock:
-            if len(_roots) > 1:
+            # ★ Source roots from the SAME conv-scoped registry the namespaced
+            #   resolver uses (get_conv_roots falls back to global _roots when
+            #   the conv has none).  Reading the global _roots here would let a
+            #   concurrent conversation's root leak in and misroute a write —
+            #   the same clobber-risk class as the prompt root-table leak.
+            roots_view = get_conv_roots(conv_id)
+            if len(roots_view) > 1:
                 primary_target = os.path.join(base_path, rel_path)
                 if not os.path.exists(primary_target):
                     # File doesn't exist under primary — check other roots
                     candidate_roots = []
-                    for rn, rs in _roots.items():
+                    for rn, rs in roots_view.items():
                         if rs['path'] == base_path:
                             continue
                         other_target = os.path.join(rs['path'], rel_path)
@@ -1964,7 +2000,9 @@ def _resolve_base(base_path, rel_path, conv_id=None):
                             candidate_roots.append((rn, rs['path']))
                     if len(candidate_roots) == 1:
                         rn, rp = candidate_roots[0]
-                        logger.warning(
+                        # Successful single-candidate resolution is NOT an error
+                        # — log at INFO so it stays out of error.log.
+                        logger.info(
                             '[Tools] ★ Cross-root auto-route: %s not found under primary %s '
                             'but exists under [%s] %s — routing there. '
                             'Model should use \'%s:%s\' prefix to be explicit.',
@@ -1994,6 +2032,22 @@ def _resolve_base_safe(base_path, rel_path, conv_id=None):
     except ValueError as e:
         logger.debug('[Tools] _resolve_base_safe rejected %r: %s', rel_path, e)
         return None, str(e)
+
+def _edits_not_array_msg(tool_name, edits, shape):
+    """Actionable error when a batch tool's ``edits`` isn't a JSON array.
+
+    The recurring failure mode is a model emitting the whole array as one
+    escaped JSON *string* (frequently with unescaped inner quotes, so the
+    harness can't auto-parse it). Naming that case explicitly stops the
+    model retrying the same broken shape — see conv mpyv4vq9qod3dr.
+    """
+    if isinstance(edits, str):
+        return (f'{tool_name}: "edits" arrived as a string, not an array. '
+                f'Send it as a real JSON array of objects (each {shape}) — '
+                f'do NOT stringify the array into one blob, and make sure '
+                f'inner quotes are escaped.')
+    return f'{tool_name}: "edits" array is required (each entry {shape}).'
+
 
 def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwargs):
     # ★ Multi-root: resolve 'rootname:relative/path' for path-based tools.
@@ -2219,7 +2273,7 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
     elif fn_name == 'apply_diffs':
         edits = fn_args.get('edits')
         if not edits or not isinstance(edits, list):
-            return 'apply_diffs: "edits" array is required.'
+            return _edits_not_array_msg('apply_diffs', edits, '{path, search, replace}')
         return tool_apply_diffs(base_path, edits, conv_id=conv_id, task_id=task_id)
     elif fn_name == 'insert_content':
         try:
@@ -2243,7 +2297,7 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
     elif fn_name == 'insert_contents':
         edits = fn_args.get('edits')
         if not edits or not isinstance(edits, list):
-            return 'insert_contents: "edits" array is required.'
+            return _edits_not_array_msg('insert_contents', edits, '{path, anchor, content}')
         return tool_insert_contents(base_path, edits, conv_id=conv_id, task_id=task_id)
     elif fn_name == 'run_command':
         # ★ Multi-root: resolve working_dir if model specifies one
@@ -2255,6 +2309,19 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
 
         command_str = fn_args.get('command', '')
         destructive = _is_destructive_command(command_str)
+
+        # ★ Read-only root guard: refuse a destructive command whose working
+        #   directory lives inside a root marked read-only. Read-only commands
+        #   (grep/ls/cat/…) still run — only writes are blocked. This mirrors
+        #   the write-tool guard so every mutation path honours RO uniformly.
+        if destructive:
+            from lib.project_mod.config import is_readonly_path
+            if is_readonly_path(cwd, conv_id=conv_id):
+                return (
+                    f"run_command refused: the working directory '{cwd}' is "
+                    f"inside a READ-ONLY workspace root. Commands that could "
+                    f"modify files are not allowed there. Run it in a writable "
+                    f"root, or use read-only commands only.")
 
         # ★ Pre-compute write targets to decide if snapshotting is useful.
         # If we can't determine specific targets (opaque commands like

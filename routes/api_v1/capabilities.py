@@ -165,7 +165,14 @@ def _config_schema() -> dict:
             'endpointMode': {'type': 'boolean',
                               'description': 'Planner→Worker→Critic loop'},
             'autopilot': {'type': 'boolean'},
-            'fallbackModel': {'type': 'string'},
+            'disableModelFallback': {
+                'type': 'boolean', 'default': False,
+                'description': 'Opt OUT of automatic model fallback for this '
+                               'request. The fallback TARGET model is a global '
+                               'server setting (admin-only); this flag only '
+                               'lets a caller suppress the silent switch so a '
+                               'primary-model error surfaces instead '
+                               '(error envelope context="fallback-disabled").'},
             'systemPrompt': {'type': 'string'},
             'tools': {'type': 'array', 'items': {'type': 'object'}},
         },
@@ -198,13 +205,21 @@ def _backends() -> list[str]:
 def _features() -> dict:
     try:
         import lib as _lib  # type: ignore
-        return {
-            'trading_enabled': bool(getattr(_lib, 'TRADING_ENABLED', False)),
+        feats = {
             'optimizer_enabled': bool(getattr(_lib, 'OPTIMIZER_ENABLED', False)),
             'artifacts_enabled': bool(getattr(_lib, 'ARTIFACTS_ENABLED', False)),
             'pptx_translate_enabled': bool(
                 getattr(_lib, 'PPTX_TRANSLATE_ENABLED', False)),
         }
+        # Registered plugin flags (e.g. trading_enabled when tofu-trading is
+        # installed) are added dynamically so core names no optional feature.
+        try:
+            from lib.feature_registry import registered_flags
+            for f in registered_flags():
+                feats[f.json_key] = bool(getattr(_lib, f.env_key, f.default))
+        except Exception as _pe:
+            logger.debug('[capabilities] plugin flags unavailable: %s', _pe)
+        return feats
     except Exception as e:
         logger.debug('[capabilities] features lookup failed: %s', e)
         return {}

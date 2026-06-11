@@ -10,9 +10,11 @@ import re
 import time
 import uuid
 
+import requests
 
 import lib as _lib
 from lib.llm._transport import (
+    CONNECT_TIMEOUT,
     MAX_STREAM_RETRIES,
     chat_url,
     headers,
@@ -22,6 +24,7 @@ from lib.llm.body import build_body
 from lib.llm.cache import add_cache_breakpoints
 from lib.llm_errors import (
     ContentFilterError,
+    EndpointUnreachableError,
     InvalidImageError,
     PermissionError_,
     PromptTooLongError,
@@ -131,8 +134,18 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
             hdrs['M-TraceId'] = trace_id
             if log_prefix:
                 logger.debug('%s M-TraceId=%s', log_prefix, trace_id)
-            resp = http_post(url, headers=hdrs, json=body,
-                                 timeout=(30, timeout))
+            try:
+                resp = http_post(url, headers=hdrs, json=body,
+                                     timeout=(CONNECT_TIMEOUT, timeout))
+            except requests.exceptions.ConnectionError as ce:
+                # Connect-phase failure = endpoint down. Escape to the
+                # dispatch layer for failover instead of burning the
+                # same-key retry loop on a dead host.
+                logger.warning('%s ✖ Endpoint unreachable (connect phase) %s: %s',
+                               log_prefix, url, ce)
+                raise EndpointUnreachableError(
+                    'endpoint unreachable: %s' % ce,
+                    base_url=base_url or '') from ce
             resp_trace = resp.headers.get('M-TraceId', '')
             if resp_trace and resp_trace != trace_id:
                 logger.debug('%s resp M-TraceId=%s', log_prefix, resp_trace)
@@ -165,7 +178,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                 _classify_http_error(resp.status_code, err_msg, model,
                                      log_prefix, max_tokens=max_tokens)
             break
-        except (RateLimitError, PermissionError_, ContentFilterError, PromptTooLongError, StreamOnlyError, InvalidImageError):
+        except (RateLimitError, PermissionError_, ContentFilterError, PromptTooLongError, StreamOnlyError, InvalidImageError, EndpointUnreachableError):
             raise
         except _RETRYABLE as e:
             if attempt < retries:

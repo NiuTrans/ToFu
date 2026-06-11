@@ -15,6 +15,11 @@
 
 var _updateState = null;   // last /update/check payload
 var _updateBusy = false;
+var _updateTaskId = null;  // current apply task; push frames keyed on it
+var _updateStageEls = null;// {fetch, pull, deps} → <li> step elements
+
+// Ordered stages of an apply run, rendered as the live stepper.
+var _UPDATE_STAGES = ['fetch', 'pull', 'deps'];
 
 /** Silent background check — called once at boot. Populates the badge. */
 async function _updateBootCheck() {
@@ -44,19 +49,36 @@ function _renderUpdateBadge() {
 /** Open the update dialog. Re-checks live so the dialog is never stale. */
 async function openUpdateDialog() {
   const modal = document.getElementById('updateModal');
-  const body = document.getElementById('updateModalBody');
-  if (!modal || !body) return;
+  if (!modal) return;
   modal.classList.add('open');
-  body.innerHTML = '<p class="upd-loading">' + escapeHtml(t('update.checking')) + '</p>';
+  _runUpdateCheck();
+}
+
+/** Run the version check with a visible spinner + bounded timeout.
+ *  The check hits GitHub's tags API server-side; on a slow/blocked
+ *  network we must NOT sit on a bare label forever — show a spinner,
+ *  cap the wait, and offer an explicit retry. */
+async function _runUpdateCheck() {
+  const body = document.getElementById('updateModalBody');
+  if (!body) return;
+  body.innerHTML =
+    '<div class="upd-checking-wrap"><span class="upd-big-spin"></span><span>' +
+    escapeHtml(t('update.checking')) + '</span></div>';
 
   let r = null;
   try {
-    r = await Api.update.check();
+    // Bounded wait — the default 30s feels frozen. 12s is plenty for a
+    // reachable GitHub; beyond that we surface a retry instead of hanging.
+    r = await Api.update.check({ timeout: 12000 });
   } catch (e) {
     if (typeof debugLog === 'function') debugLog('[Update] check failed: ' + (e && e.message), 'error');
   }
   if (!r || !r.ok) {
-    body.innerHTML = '<p class="upd-error">' + escapeHtml(t('update.checkFailed')) + '</p>';
+    body.innerHTML =
+      '<div class="upd-checking-wrap"><p class="upd-error">' +
+      escapeHtml(t('update.checkFailed')) + '</p>' +
+      '<button class="upd-retry-btn" onclick="_runUpdateCheck()">' +
+      escapeHtml(t('update.retry')) + '</button></div>';
     return;
   }
   _updateState = r;
@@ -64,77 +86,213 @@ async function openUpdateDialog() {
   _renderUpdateDialogBody(r);
 }
 
+/** current → latest version hero card. */
+function _updateHeroHtml(r) {
+  const upToDate = !r.update_available;
+  const cur = 'v' + escapeHtml(r.current || '?');
+  const latest = r.latest ? 'v' + escapeHtml(r.latest) : '—';
+  const arrow = '<span class="upd-arrow"><svg width="20" height="20" viewBox="0 0 24 24" ' +
+    'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+    'stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/>' +
+    '<polyline points="12 5 19 12 12 19"/></svg></span>';
+  return '<div class="upd-hero' + (upToDate ? ' up-to-date' : '') + '">' +
+    '<div class="upd-ver"><span class="upd-ver-label">' + escapeHtml(t('update.current')) +
+    '</span><span class="upd-ver-num">' + cur + '</span></div>' +
+    arrow +
+    '<div class="upd-ver latest"><span class="upd-ver-label">' + escapeHtml(t('update.latest')) +
+    '</span><span class="upd-ver-num">' + latest + '</span></div>' +
+  '</div>';
+}
+
 function _renderUpdateDialogBody(r) {
   const body = document.getElementById('updateModalBody');
   if (!body) return;
 
-  const rows = [];
-  rows.push('<div class="upd-row"><span class="upd-label">' + escapeHtml(t('update.current')) +
-            '</span><span class="upd-val">v' + escapeHtml(r.current || '?') + '</span></div>');
-  rows.push('<div class="upd-row"><span class="upd-label">' + escapeHtml(t('update.latest')) +
-            '</span><span class="upd-val">' + (r.latest ? 'v' + escapeHtml(r.latest) : '—') + '</span></div>');
-
   let actionHtml = '';
   if (!r.git_available) {
     // Not a git checkout — in-place update isn't possible.
-    actionHtml = '<p class="upd-warn">' + escapeHtml(t('update.noGit')) + '</p>';
+    actionHtml = '<div class="upd-badge warn"><span class="upd-badge-icon">⚠️</span><span>' +
+      escapeHtml(t('update.noGit')) + '</span></div>';
   } else if (!r.update_available) {
-    actionHtml = '<p class="upd-uptodate">' + escapeHtml(t('update.upToDate')) + '</p>';
+    actionHtml = '<div class="upd-badge ok"><span class="upd-badge-icon">' +
+      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">' +
+      '<polyline points="20 6 9 17 4 12"/></svg></span><span>' +
+      escapeHtml(t('update.upToDate').replace(/^✅\s*/, '')) + '</span></div>';
   } else if (r.dirty) {
     // Genuine tracked-source edits block the pull. List a few, never auto-stash.
     const sample = (r.blocking || []).slice(0, 8).map(escapeHtml).join('<br>');
     actionHtml =
-      '<p class="upd-warn">' + escapeHtml(t('update.dirty')) + '</p>' +
+      '<div class="upd-badge warn"><span class="upd-badge-icon">⚠️</span><span>' +
+      escapeHtml(t('update.dirty').replace(/^⚠️\s*/, '')) + '</span></div>' +
       (sample ? '<pre class="upd-files">' + sample + '</pre>' : '');
   } else {
     actionHtml =
       '<p class="upd-ready">' + escapeHtml(t('update.ready')) + '</p>' +
       '<button class="upd-apply-btn" id="updateApplyBtn" onclick="applyUpdate()">' +
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+      'stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/>' +
+      '<polyline points="7 10 12 15 17 10"/><path d="M5 21h14"/></svg>' +
       escapeHtml(t('update.applyBtn')) + '</button>';
   }
 
   body.innerHTML =
-    '<div class="upd-rows">' + rows.join('') + '</div>' +
+    _updateHeroHtml(r) +
     '<div class="upd-action" id="updateActionArea">' + actionHtml + '</div>';
 }
 
-/** Run git pull. On success that changed files, prompt for restart. */
+/** Render the live stepper (one row per stage) into the action area. */
+function _renderUpdateStepper() {
+  const area = document.getElementById('updateActionArea');
+  if (!area) return;
+  const labels = {
+    fetch: t('update.step.fetch'),
+    pull: t('update.step.pull'),
+    deps: t('update.step.deps'),
+  };
+  const items = _UPDATE_STAGES.map(function (stage) {
+    return '<li class="upd-step" data-stage="' + stage + '">' +
+      '<span class="upd-step-dot"></span>' +
+      '<span class="upd-step-label">' + escapeHtml(labels[stage]) + '</span>' +
+      '<span class="upd-step-detail"></span></li>';
+  }).join('');
+  area.innerHTML = '<ul class="upd-stepper">' + items + '</ul>';
+  _updateStageEls = {};
+  _UPDATE_STAGES.forEach(function (stage) {
+    _updateStageEls[stage] = area.querySelector('.upd-step[data-stage="' + stage + '"]');
+  });
+}
+
+/** Apply a {stage,status,detail} frame to the stepper. */
+function _applyStageFrame(frame) {
+  if (!_updateStageEls) return;
+  const el = _updateStageEls[frame.stage];
+  if (!el) return;
+  el.classList.remove('is-active', 'is-done', 'is-error');
+  if (frame.status === 'active') {
+    el.classList.add('is-active');
+  } else if (frame.status === 'done') {
+    el.classList.add('is-done');
+  } else if (frame.status === 'skip') {
+    el.classList.add('is-done');
+    const lbl = el.querySelector('.upd-step-label');
+    if (lbl) lbl.textContent = t('update.step.depsSkip');
+  } else if (frame.status === 'error') {
+    el.classList.add('is-error');
+  }
+  const det = el.querySelector('.upd-step-detail');
+  if (det && frame.detail && frame.status !== 'error') det.textContent = frame.detail;
+}
+
+/** Kick off the update. The backend runs it in a background thread and
+ *  streams stage progress over the 'update' push channel; we render a live
+ *  stepper and act on the terminal 'done' frame. This keeps the modal
+ *  responsive no matter how long git pull / pip install takes. */
 async function applyUpdate() {
   if (_updateBusy) return;
   _updateBusy = true;
-  const area = document.getElementById('updateActionArea');
-  const btn = document.getElementById('updateApplyBtn');
-  if (btn) { btn.disabled = true; btn.textContent = t('update.applying'); }
+
+  // Swap the action area to the live stepper immediately so the UI never
+  // appears frozen between the click and the first push frame.
+  _renderUpdateStepper();
+  if (_updateStageEls && _updateStageEls.fetch) {
+    _updateStageEls.fetch.classList.add('is-active');
+  }
 
   let r = null;
   try {
     r = await Api.update.apply();
   } catch (e) {
-    // 409 (dirty / no-git / deps-failed) and 5xx surface here as ApiError.
-    const b = (e && e.body) || {};
-    const msg = b.error || (e && e.message) || t('update.applyFailed');
-    // Special case: code WAS pulled but `pip install` failed (changed=true).
-    // Offer a restart anyway — the running interpreter's missing imports
-    // are recoverable via the launcher — but make the dep failure explicit.
-    if (b.changed && b.deps_changed && !b.deps_installed) {
-      _renderDepsFailed(b);
-    } else if (area) {
-      area.innerHTML = '<p class="upd-error">' + escapeHtml(String(msg)) + '</p>';
-    }
-    if (typeof debugLog === 'function') debugLog('[Update] apply failed: ' + msg, 'error');
+    const msg = (e && e.message) || t('update.applyStartFailed');
+    _showUpdateError(msg);
+    if (typeof debugLog === 'function') debugLog('[Update] apply start failed: ' + msg, 'error');
     _updateBusy = false;
     return;
   }
 
-  _updateBusy = false;
-  if (!r || !r.ok) {
-    const msg = (r && r.error) || t('update.applyFailed');
-    if (area) area.innerHTML = '<p class="upd-error">' + escapeHtml(String(msg)) + '</p>';
+  if (!r || !r.taskId) {
+    _showUpdateError(t('update.applyStartFailed'));
+    _updateBusy = false;
+    return;
+  }
+
+  _updateTaskId = r.taskId;
+  _subscribeUpdateProgress(r.taskId);
+}
+
+/** Subscribe to the apply task's push channel; route stage + done frames. */
+function _subscribeUpdateProgress(taskId) {
+  if (typeof pushSubscribe !== 'function') {
+    // No WebSocket layer — without it we can't observe progress. Tell the
+    // user the update is running server-side and to refresh shortly.
+    _showUpdateError(t('update.applyStartFailed'));
+    _updateBusy = false;
+    return;
+  }
+  // Safety net: if no frame ever lands (server died / channel wedged),
+  // surface a timeout instead of an eternal spinner.
+  let watchdog = setTimeout(function () {
+    _finishUpdateSub(taskId);
+    _showUpdateError(t('update.applyTimeout'));
+    _updateBusy = false;
+  }, 15 * 60 * 1000);
+
+  const handler = function (frame) {
+    if (!frame || frame.taskId !== taskId) return;
+    clearTimeout(watchdog);
+    watchdog = setTimeout(function () {
+      _finishUpdateSub(taskId);
+      _showUpdateError(t('update.applyTimeout'));
+      _updateBusy = false;
+    }, 15 * 60 * 1000);
+
+    if (frame.type === 'stage') {
+      _applyStageFrame(frame);
+      return;
+    }
+    if (frame.type === 'done') {
+      clearTimeout(watchdog);
+      _finishUpdateSub(taskId);
+      _updateBusy = false;
+      _onUpdateDone(frame);
+    }
+  };
+  _updateActiveHandler = handler;
+  pushSubscribe('update', taskId, handler);
+}
+
+var _updateActiveHandler = null;
+function _finishUpdateSub(taskId) {
+  if (typeof pushUnsubscribe === 'function' && _updateActiveHandler) {
+    pushUnsubscribe('update', taskId, _updateActiveHandler);
+  }
+  _updateActiveHandler = null;
+}
+
+/** Terminal 'done' frame — mirror the apply_update() result dict. */
+function _onUpdateDone(r) {
+  const area = document.getElementById('updateActionArea');
+  if (!r.ok) {
+    // Code WAS pulled but pip install failed → still offer a restart.
+    if (r.changed && r.deps_changed && !r.deps_installed) {
+      _renderDepsFailed(r);
+    } else {
+      _showUpdateError(r.error || t('update.applyFailed'));
+    }
+    if (typeof debugLog === 'function') {
+      debugLog('[Update] apply failed: ' + (r.error || ''), 'error');
+    }
     return;
   }
 
   if (!r.changed) {
-    if (area) area.innerHTML = '<p class="upd-uptodate">' + escapeHtml(t('update.upToDate')) + '</p>';
+    if (area) {
+      area.innerHTML = '<div class="upd-badge ok"><span class="upd-badge-icon">' +
+        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+        'stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">' +
+        '<polyline points="20 6 9 17 4 12"/></svg></span><span>' +
+        escapeHtml(t('update.upToDate').replace(/^✅\s*/, '')) + '</span></div>';
+    }
     return;
   }
 
@@ -147,9 +305,18 @@ async function applyUpdate() {
       '<p class="upd-ready">' + escapeHtml(t('update.pulled').replace('%s', 'v' + (r.new_version || ''))) + '</p>' +
       depsNote +
       '<button class="upd-apply-btn" id="updateRestartBtn" onclick="restartServer()">' +
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+      'stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/>' +
+      '<path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>' +
       escapeHtml(t('update.restartBtn')) + '</button>' +
       '<p class="upd-hint">' + escapeHtml(t('update.restartHint')) + '</p>';
   }
+}
+
+/** Render a terminal error message in the action area. */
+function _showUpdateError(msg) {
+  const area = document.getElementById('updateActionArea');
+  if (area) area.innerHTML = '<p class="upd-error">' + escapeHtml(String(msg)) + '</p>';
 }
 
 /** Code was pulled but pip install failed — explain + still allow restart. */
@@ -165,9 +332,16 @@ function _renderDepsFailed(b) {
     '<p class="upd-hint">' + escapeHtml(t('update.restartHint')) + '</p>';
 }
 
-/** Explicit restart — re-execs the server, then waits for it to come back. */
-async function restartServer() {
-  const btn = document.getElementById('updateRestartBtn');
+/** Explicit restart — re-execs the server, then waits for it to come back.
+ *  Invoked from the post-pull "Restart now" button AND the always-available
+ *  footer button (no git pull needed). The backend re-execs in place via
+ *  os.execv, so there is no kill-then-relaunch gap. */
+async function restartServer(opts) {
+  // The footer button is available with no pending update — confirm first so
+  // a stray click never interrupts running tasks.
+  if (opts && opts.confirm && !await showConfirm(t('update.restartConfirm'), { danger: true })) return;
+  const btn = document.getElementById('updateRestartBtn')
+    || document.getElementById('updateRestartNowBtn');
   if (btn) { btn.disabled = true; btn.textContent = t('update.restarting'); }
   try {
     await Api.update.restart();

@@ -9,6 +9,7 @@ gunicorn / uWSGI with N>1 workers.  See PR3c notes and
 ``docs/RATE_LIMITING_DOS_AUDIT_REPORT.md``.
 """
 
+import asyncio
 from functools import wraps
 
 from flask import request
@@ -22,16 +23,22 @@ logger = get_logger(__name__)
 def rate_limit(limit=10, per=60):
     """Decorator to rate-limit a Flask endpoint.
 
+    Dual-mode: emits an ``async def`` wrapper for coroutine handlers and a sync
+    wrapper otherwise. A sync passthrough around an ``async def`` view makes
+    ``asyncio.iscoroutinefunction(wrapper)`` False, so Quart runs it in the
+    thread pool and serializes the returned coroutine OBJECT as the response
+    (broken / never-awaited). See CLAUDE.md async-migration-dual-mode-decorators.
+
     Args:
         limit (int): Max number of requests allowed.
         per (int): Time window in seconds.
     """
     def decorator(f):
-        @wraps(f)
-        def wrapper(*args, **kwargs):
+        def _check():
+            """Run the rate-limit check. Returns a 429 response tuple if the
+            caller should be rejected, else None (proceed)."""
             ip = request.remote_addr or 'unknown'
             endpoint = request.path
-
             store = get_store()
             allowed, count = store.record_and_check(endpoint, ip, limit, per)
             if not allowed:
@@ -44,7 +51,22 @@ def rate_limit(limit=10, per=60):
                 except Exception as _aerr:
                     logger.debug('[RateLimit] audit_log failed: %s', _aerr)
                 return {"error": "Too many requests"}, 429
+            return None
 
+        if asyncio.iscoroutinefunction(f):
+            @wraps(f)
+            async def async_wrapper(*args, **kwargs):
+                rejection = _check()
+                if rejection is not None:
+                    return rejection
+                return await f(*args, **kwargs)
+            return async_wrapper
+
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            rejection = _check()
+            if rejection is not None:
+                return rejection
             return f(*args, **kwargs)
         return wrapper
     return decorator

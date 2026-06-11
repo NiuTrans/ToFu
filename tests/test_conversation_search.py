@@ -463,3 +463,57 @@ class TestSearchEndpoint:
         data = resp.get_json()
         ids = [r["id"] for r in data]
         assert conv_id in ids, f"Substring match not found. Results: {data}"
+
+
+
+@pytest.mark.api
+class TestUpsertRetryCrossConnectionVisibility:
+    """Regression pin for the retry=True durability bug (2026-06-10).
+
+    `upsert(..., retry=True)` routes through db_execute_with_retry. A bug where
+    the retry branch forwarded the default `commit=False` left the write
+    UNCOMMITTED: visible to the writing thread-local sync connection (same txn)
+    but INVISIBLE to any OTHER connection — notably the async read pool
+    (lib/database/aio.async_fetchall borrows a separate pooled connection).
+    This surfaced as conversation-search returning 0 hits for freshly-seeded
+    rows. The fix makes retry=True always commit. This test fails if that ever
+    regresses: it seeds via upsert(retry=True) on the sync connection and reads
+    back via async_fetchall on a DIFFERENT connection.
+    """
+
+    def test_retry_upsert_is_visible_to_async_pool(self, flask_client):
+        import asyncio
+
+        from lib.database import DOMAIN_CHAT, async_fetchall, get_thread_db
+        from lib.database._core_schema import CONVERSATIONS, upsert
+
+        conv_id = f'__retry_visibility_probe_{int(time.time()*1000)}__'
+        marker = 'zzqretryvisibilityprobe'
+        db = get_thread_db(DOMAIN_CHAT)
+        now = int(time.time() * 1000)
+        try:
+            # Seed via the exact path the converted call-sites use.
+            upsert(db, CONVERSATIONS, {
+                'id': conv_id, 'user_id': 1, 'title': 'retry-probe',
+                'messages': '[]', 'created_at': now, 'updated_at': now,
+                'settings': '{}', 'msg_count': 1,
+                'search_text': f'hello {marker} world',
+            }, insert_cols=['id', 'user_id', 'title', 'messages', 'created_at',
+                            'updated_at', 'settings', 'msg_count', 'search_text'],
+               retry=True)
+
+            # Read back on a SEPARATE (async-pool) connection. If retry=True did
+            # not commit, this returns nothing even though the sync conn sees it.
+            async def _read():
+                return await async_fetchall(
+                    'SELECT id FROM conversations WHERE user_id=? '
+                    'AND lower(search_text) LIKE ? LIMIT 50',
+                    (1, f'%{marker}%'), domain=DOMAIN_CHAT)
+
+            rows = asyncio.run(_read())
+            assert any(r['id'] == conv_id for r in rows), (
+                'upsert(retry=True) write not visible to async_fetchall — '
+                'retry path is not committing (durability regression)')
+        finally:
+            db.execute('DELETE FROM conversations WHERE id=?', (conv_id,))
+            db.commit()

@@ -37,7 +37,7 @@ def fetch_url_via_browser(url, max_chars=50000, timeout=25, client_id=None):
         html = result.get('html', '')
         if html and len(html) > 200:
             try:
-                from lib.fetch.html_extract import extract_html_text
+                from tofu_search.fetch.html_extract import extract_html_text
                 extracted = extract_html_text(html, max_chars, url=url)
                 if extracted and len(extracted) > 50:
                     title = result.get('title', '')

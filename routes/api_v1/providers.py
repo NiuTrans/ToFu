@@ -28,7 +28,7 @@ from lib.api_response import (
 )
 from lib.byo_providers import (
     create_provider, delete_provider, get_provider, get_public,
-    list_providers, redact, update_provider,
+    list_providers, redact, sanitise_extra_headers, update_provider,
 )
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
@@ -44,65 +44,11 @@ logger = get_logger(__name__)
 api_v1_providers_bp = Blueprint('api_v1_providers', __name__)
 
 
-# ── Header allowlist (security) ─────────────────────────────────────
-
-
-# Headers a caller may NOT supply via `extra_headers`. They'd let a
-# request impersonate Tofu's own outbound auth, leak cookies, or mask
-# the request as a different SDK to upstream rate-limit policies.
-# Names compared case-insensitively.
-_FORBIDDEN_EXTRA_HEADERS = frozenset({
-    'authorization',
-    'x-api-key',
-    'cookie',
-    'set-cookie',
-    'host',
-    'content-length',
-    'transfer-encoding',
-    'proxy-authorization',
-})
-
-_MAX_EXTRA_HEADERS = 16
-_MAX_HEADER_VALUE_LEN = 2048
-
-
-def sanitise_extra_headers(raw) -> tuple[dict, str | None]:
-    """Validate and normalise an ``extra_headers`` dict.
-
-    Returns ``(clean_dict, error_message_or_None)``. On error the
-    clean_dict may be partially populated; callers must check the
-    error first.
-
-    Rules:
-      * Must be a dict with string keys and string values.
-      * Header name not in :data:`_FORBIDDEN_EXTRA_HEADERS`.
-      * Max :data:`_MAX_EXTRA_HEADERS` entries.
-      * Each value <= :data:`_MAX_HEADER_VALUE_LEN` chars.
-    """
-    if raw is None or raw == {}:
-        return {}, None
-    if not isinstance(raw, dict):
-        return {}, '`extra_headers` must be an object'
-    if len(raw) > _MAX_EXTRA_HEADERS:
-        return {}, (f'`extra_headers` has too many entries '
-                     f'(max {_MAX_EXTRA_HEADERS})')
-    out: dict = {}
-    for k, v in raw.items():
-        if not isinstance(k, str) or not k.strip():
-            return out, '`extra_headers` keys must be non-empty strings'
-        if k.lower() in _FORBIDDEN_EXTRA_HEADERS:
-            return out, (f'`extra_headers[{k!r}]` is reserved; '
-                          f'forbidden names: '
-                          f'{sorted(_FORBIDDEN_EXTRA_HEADERS)}')
-        if not isinstance(v, (str, int, float, bool)):
-            return out, (f'`extra_headers[{k!r}]` must be a scalar '
-                          f'(string/number/bool)')
-        sv = str(v)
-        if len(sv) > _MAX_HEADER_VALUE_LEN:
-            return out, (f'`extra_headers[{k!r}]` value too long '
-                          f'(max {_MAX_HEADER_VALUE_LEN})')
-        out[k.strip()] = sv
-    return out, None
+# ``sanitise_extra_headers`` (+ the forbidden-header allowlist and size
+# caps) moved to ``lib.byo_providers`` so non-route code (the shared BYO
+# resolver in ``lib.byo_resolve``) can reuse it without importing a
+# ``routes.*`` module. Re-exported here for back-compat with callers /
+# tests that import it from this module.
 
 
 # ── Routes ──────────────────────────────────────────────────────────

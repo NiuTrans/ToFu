@@ -7,10 +7,10 @@ display schema expected by the frontend's ``renderToolRoundsHTML``.
 import json
 
 import lib as _lib
-from lib.fetch import fetch_page_content
 from lib.log import get_logger
-from lib.search import format_search_for_tool_response, perform_web_search
 from lib.tasks_pkg.handlers._adapter import run_batch_concurrent
+from tofu_search import fetch_page_content, perform_web_search
+from tofu_search.search import format_search_for_tool_response
 
 logger = get_logger(__name__)
 

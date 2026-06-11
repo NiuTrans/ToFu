@@ -369,3 +369,172 @@ def summarize_oldest_turn(ctx: CompactionContext) -> int:
                 '(~%d net tokens saved)',
                 _log_id(ctx.conv_id), max(0, saved))
     return max(0, saved)
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  OpenCode-inspired transform steps (LLM-free)
+#
+#  Two ideas borrowed from sst/opencode's compaction.ts, expressed as
+#  registered transform steps:
+#    * prune_with_hysteresis — only prune cold tool output when there is a
+#      WORTHWHILE amount to reclaim (PRUNE_MINIMUM), and always protect a
+#      token-budget tail (PRUNE_PROTECT). The hysteresis avoids the
+#      compact→re-read→recompact churn loop a per-result threshold causes.
+#    * adaptive_hot_tail — replace the fixed MICRO_HOT_TAIL count with a
+#      token-budget boundary that walks back over tool-pairs, so the hot
+#      window self-tunes to the model's context size.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Defaults mirror opencode's PRUNE_PROTECT (40k) / PRUNE_MINIMUM (20k) in
+# spirit but scaled to our smaller per-step budgets; overridable via
+# constant_overrides for experiment arms.
+_PRUNE_PROTECT_TOKENS_DEFAULT = 12_000
+_PRUNE_MINIMUM_TOKENS_DEFAULT = 4_000
+
+
+def _tool_text_len(msg: dict) -> int:
+    t = _content_str(msg)
+    return len(t) if t else 0
+
+
+@register_step('prune_with_hysteresis')
+def prune_with_hysteresis(ctx: CompactionContext) -> int:
+    """Prune cold tool output, but only when worthwhile (OpenCode-style).
+
+    Two-stage gate (the hysteresis):
+      1. Protect a token-budget tail: walk backward over tool results
+         accumulating their estimated tokens until ``PRUNE_PROTECT``
+         tokens are covered — those are never pruned (cheaper + simpler
+         than a fixed count, and adapts to result sizes).
+      2. Only prune the remaining (older) tool results if the total
+         reclaimable estimate exceeds ``PRUNE_MINIMUM``. If there's little
+         to gain, do nothing — this is what prevents the
+         compact→re-read→recompact churn loop that a per-result threshold
+         causes (re-reading a file re-creates a big result that would be
+         re-pruned next round for tiny gains).
+
+    Tunables (via ``constant_overrides``):
+      * ``PRUNE_PROTECT_TOKENS`` (default 12000)
+      * ``PRUNE_MINIMUM_TOKENS``  (default 4000)
+    """
+    _c = ctx.constants
+    messages = ctx.messages
+    protect = int(getattr(_c, 'PRUNE_PROTECT_TOKENS', _PRUNE_PROTECT_TOKENS_DEFAULT))
+    minimum = int(getattr(_c, 'PRUNE_MINIMUM_TOKENS', _PRUNE_MINIMUM_TOKENS_DEFAULT))
+
+    tool_indices = [i for i, m in enumerate(messages) if m.get('role') == 'tool']
+    if not tool_indices:
+        return 0
+
+    # Stage 1: protect a token-budget tail (walk newest→oldest).
+    protected: set[int] = set()
+    acc = 0
+    for idx in reversed(tool_indices):
+        if acc >= protect:
+            break
+        protected.add(idx)
+        acc += _tool_text_len(messages[idx]) // 4
+
+    prunable = [i for i in tool_indices if i not in protected
+                and not ctx.is_in_cache_prefix(i)]
+
+    # Estimate reclaimable tokens across prunable cold results.
+    reclaimable = 0
+    candidates = []
+    for idx in prunable:
+        msg = messages[idx]
+        text = _content_str(msg)
+        if text is None or _already_compacted(text):
+            continue
+        if len(text) <= _c.MICRO_COMPACT_THRESHOLD:
+            continue
+        reclaimable += len(text) // 4
+        candidates.append((idx, len(text)))
+
+    # Stage 2: hysteresis — only act if the gain clears the minimum.
+    if reclaimable < minimum:
+        logger.debug('[OC-prune] conv=%s  reclaimable=%d < minimum=%d — '
+                     'skipping (avoids churn)',
+                     _log_id(ctx.conv_id), reclaimable, minimum)
+        return 0
+
+    pruned = 0
+    tokens_saved = 0
+    for idx, old_len in candidates:
+        msg = messages[idx]
+        tool_name = msg.get('name', 'tool')
+        placeholder = (f'[{tool_name} output pruned — was {old_len:,} chars '
+                       f'— re-call tool if needed]')
+        msg['content'] = placeholder
+        tokens_saved += (old_len - len(placeholder)) // 4
+        pruned += 1
+        ctx.stamp(msg, old_len, len(placeholder))
+
+    if pruned > 0:
+        logger.info('[OC-prune] conv=%s  pruned %d cold tool results past the '
+                    '%d-token protected tail (~%d tokens saved; minimum=%d met)',
+                    _log_id(ctx.conv_id), pruned, protect, tokens_saved, minimum)
+    return tokens_saved
+
+
+_ADAPTIVE_TAIL_BUDGET_DEFAULT = 24_000
+
+
+@register_step('adaptive_hot_tail')
+def adaptive_hot_tail(ctx: CompactionContext) -> int:
+    """Token-budget hot tail instead of a fixed MICRO_HOT_TAIL count.
+
+    Walks backward over ALL messages accumulating estimated tokens until
+    ``ADAPTIVE_TAIL_BUDGET`` is covered; every cold tool result before
+    that boundary (and outside the cache prefix) is compacted with the
+    same placeholder style as the generic compactor.
+
+    This is a drop-in alternative to ``compact_tool_results`` for arms
+    that want the hot window to scale with content size rather than a
+    fixed message count. Use ONE of them in a given arm, not both.
+
+    Tunable: ``ADAPTIVE_TAIL_BUDGET`` (default 24000) via ``constant_overrides``.
+    """
+    _c = ctx.constants
+    messages = ctx.messages
+    budget = int(getattr(_c, 'ADAPTIVE_TAIL_BUDGET', _ADAPTIVE_TAIL_BUDGET_DEFAULT))
+
+    # Find the boundary index: everything at boundary..end is "hot".
+    acc = 0
+    boundary = len(messages)
+    for idx in range(len(messages) - 1, -1, -1):
+        if acc >= budget:
+            boundary = idx + 1
+            break
+        t = _content_str(messages[idx])
+        acc += (len(t) // 4) if t else 0
+        boundary = idx
+
+    compacted = 0
+    tokens_saved = 0
+    for idx in range(boundary):
+        if ctx.is_in_cache_prefix(idx):
+            continue
+        msg = messages[idx]
+        if msg.get('role') != 'tool':
+            continue
+        text = _content_str(msg)
+        if text is None or _already_compacted(text):
+            continue
+        if len(text) <= _c.MICRO_COMPACT_THRESHOLD:
+            continue
+        tool_name = msg.get('name', 'tool')
+        old_len = len(text)
+        placeholder = (f'[{tool_name} result compacted — was {old_len:,} chars '
+                       f'— re-call tool if full content needed]')
+        msg['content'] = placeholder
+        tokens_saved += (old_len - len(placeholder)) // 4
+        compacted += 1
+        ctx.stamp(msg, old_len, len(placeholder))
+
+    if compacted > 0:
+        logger.info('[OC-adaptive] conv=%s  compacted %d cold tool results '
+                    'outside %d-token hot tail (~%d tokens saved)',
+                    _log_id(ctx.conv_id), compacted, budget, tokens_saved)
+    return tokens_saved

@@ -7,25 +7,20 @@ Split from the original monolithic common.py:
   routes/translate.py      — Translation (sync + async)
 """
 
-import hashlib
-import json
 import os
 import re
-import threading
 import time
 from functools import wraps
 
 import sqlite3
-from flask import Blueprint, Response, abort, jsonify, make_response, request, send_from_directory
+from flask import Blueprint, Response, jsonify, make_response, request, send_from_directory
 
 import lib as _lib  # module ref for hot-reload
-from lib.config_dir import config_path as _config_path
 from lib.css_bundler import get_styles_link_tag as _get_styles_link_tag
 from lib.js_bundler import get_bundle_script_tag as _get_bundle_tag
 from lib.log import get_logger
 from lib.api_response import api_bad_request, api_internal_error, api_ok
 from lib.request_parser import parse_body
-from lib.utils import safe_json as _safe_json
 
 logger = get_logger(__name__)
 
@@ -35,26 +30,47 @@ logger = get_logger(__name__)
 # ══════════════════════════════════════════════════════
 
 def _db_safe(fn):
-    """Decorator that catches DB OperationalError and returns JSON 503."""
+    """Decorator that catches DB OperationalError and returns JSON 503.
+
+    Dual-mode: emits an ``async def`` wrapper for coroutine handlers and a sync
+    wrapper otherwise. A sync passthrough wrapper around an ``async def`` view
+    would make ``asyncio.iscoroutinefunction(wrapper)`` False, so Quart would
+    run it in the thread pool and try to serialize the returned coroutine
+    OBJECT as the response (broken / never-awaited). See CLAUDE.md and the
+    async-migration-dual-mode-decorators convention.
+    """
+    import asyncio
     _db_errors = (sqlite3.OperationalError,)
+
+    def _handle(e):
+        err_msg = str(e)
+        if 'database is locked' in err_msg:
+            logger.warning('[%s] DB locked during %s %s — returning 503: %s',
+                           fn.__name__, request.method, request.path, e)
+            return jsonify({
+                'error': 'database_busy',
+                'message': 'Database temporarily busy, please retry.',
+                'retryAfter': 2,
+            }), 503
+        logger.error('[%s] DB error during %s %s: %s',
+                     fn.__name__, request.method, request.path, e, exc_info=True)
+        raise e
+
+    if asyncio.iscoroutinefunction(fn):
+        @wraps(fn)
+        async def async_wrapper(*args, **kwargs):
+            try:
+                return await fn(*args, **kwargs)
+            except _db_errors as e:
+                return _handle(e)
+        return async_wrapper
 
     @wraps(fn)
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
         except _db_errors as e:
-            err_msg = str(e)
-            if 'database is locked' in err_msg:
-                logger.warning('[%s] DB locked during %s %s — returning 503: %s',
-                               fn.__name__, request.method, request.path, e)
-                return jsonify({
-                    'error': 'database_busy',
-                    'message': 'Database temporarily busy, please retry.',
-                    'retryAfter': 2,
-                }), 503
-            logger.error('[%s] DB error during %s %s: %s',
-                         fn.__name__, request.method, request.path, e, exc_info=True)
-            raise
+            return _handle(e)
     return wrapper
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -65,48 +81,14 @@ common_bp = Blueprint('common', __name__)
 from routes.api_v1.common import api_v1_common_bp  # noqa: E402
 
 # ── In-memory cache for conversation metadata ──
-_meta_cache_lock = threading.Lock()
-_meta_cache = {'data': None, 'etag': None, 'ts': 0, 'ttl': 120}
-# ★ TTL set to 120s (was 5s). _invalidate_meta_cache() is called on every
-# mutation (create/update/delete), so the TTL is a safety net, not the primary
-# freshness mechanism. This eliminates redundant DB queries during idle periods
-# and reduces round-trips through VS Code port forwarding.
-
-def _invalidate_meta_cache():
-    """Call after any conversation mutation (save / delete)."""
-    with _meta_cache_lock:
-        _meta_cache['ts'] = 0
-
-def _refresh_meta_cache_if_stale(db):
-    """Return (json_bytes, etag). Re-query DB only if TTL expired."""
-    now = time.monotonic()
-    with _meta_cache_lock:
-        if _meta_cache['data'] is not None and (now - _meta_cache['ts']) < _meta_cache['ttl']:
-            return _meta_cache['data'], _meta_cache['etag']
-
-    rows = db.execute(
-        '''SELECT id, title, created_at, updated_at, settings, msg_count
-           FROM conversations WHERE user_id=? ORDER BY updated_at DESC''',
-        (DEFAULT_USER_ID,)
-    ).fetchall()
-    convs = []
-    for r in rows:
-        settings = _safe_json(r['settings'], default=None, label='settings')
-        convs.append({
-            'id': r['id'], 'title': r['title'],
-            'messageCount': r['msg_count'] or 0,
-            'createdAt': r['created_at'], 'created_at': r['created_at'],
-            'updatedAt': r['updated_at'], 'updated_at': r['updated_at'],
-            'settings': settings,
-        })
-    payload = json.dumps(convs, ensure_ascii=False).encode('utf-8')
-    etag = hashlib.md5(payload).hexdigest()[:16]
-
-    with _meta_cache_lock:
-        _meta_cache['data'] = payload
-        _meta_cache['etag'] = etag
-        _meta_cache['ts'] = time.monotonic()
-    return payload, etag
+# The implementation moved to lib/conversations/meta_cache.py (2026-06) to
+# break the lib→routes circular import: lib-layer mutators invalidate the
+# cache directly from lib now. These aliases keep the legacy private names
+# working for route modules that still import them from here.
+from lib.conversations.meta_cache import (  # noqa: E402,F401  — re-exported for route modules (conversations.py, chat.py)
+    invalidate_meta_cache as _invalidate_meta_cache,
+    refresh_meta_cache_if_stale as _refresh_meta_cache_if_stale,
+)
 
 
 # ══════════════════════════════════════════════════════
@@ -219,43 +201,8 @@ def dispatch_quota():
         logger.warning('[dispatch/quota] Failed to get dispatcher info: %s', e)
         return jsonify({'models': {}, 'total_requests_5h': 0, 'total_requests_all': 0})
 
-    # Aggregate by model
-    models = {}
-    total_5h = 0
-    total_all = 0
-    for s in slots:
-        m = s['model']
-        r5h = s.get('requests_5h', 0)
-        r_all = s.get('total_requests', 0)
-        total_5h += r5h
-        total_all += r_all
-        if m not in models:
-            models[m] = {
-                'requests_5h': 0,
-                'total_requests': 0,
-                'slots': 0,
-                'rpm_current': 0,
-                'rpm_limit': 0,
-                'avg_latency_ms': 0,
-                'inflight': 0,
-                'provider_id': s.get('provider_id', ''),
-            }
-        entry = models[m]
-        entry['requests_5h'] += r5h
-        entry['total_requests'] += r_all
-        entry['slots'] += 1
-        entry['rpm_current'] += s.get('rpm_current', 0)
-        entry['rpm_limit'] += s.get('rpm_limit', 0)
-        entry['inflight'] += s.get('inflight', 0)
-        entry['avg_latency_ms'] = round(
-            (entry['avg_latency_ms'] * (entry['slots'] - 1) + s.get('latency_ema_ms', 0))
-            / entry['slots'], 1)
-
-    return jsonify({
-        'models': models,
-        'total_requests_5h': total_5h,
-        'total_requests_all': total_all,
-    })
+    from lib.dispatch_stats import aggregate_quota_by_model
+    return jsonify(aggregate_quota_by_model(slots))
 
 
 # ══════════════════════════════════════════════════════
@@ -303,85 +250,8 @@ def dispatch_endpoint_metrics():
         logger.warning('[dispatch/endpoint-metrics] Failed: %s', e, exc_info=True)
         return jsonify({'endpoints': {}, 'ts': time.time()})
 
-    buckets = {}
-    for s in slots:
-        url = (s.get('base_url') or '').rstrip('/')
-        if not url:
-            continue
-        b = buckets.setdefault(url, {
-            'slots': 0, 'models': set(), 'providers': set(),
-            'rpm_current': 0, 'rpm_limit': 0, 'inflight': 0,
-            'total_requests': 0, 'total_errors': 0,
-            '_ttft_num': 0.0, '_ttft_den': 0,
-            '_lat_num': 0.0, '_lat_den': 0,
-            '_tp_num': 0.0, '_tp_den': 0,
-            'last_success_ts': 0.0,
-            'last_error_ts': 0.0,
-            'last_error_msg': '',
-            'available': False,
-            'consecutive_errors': 0,
-        })
-        b['slots'] += 1
-        if s.get('model'): b['models'].add(s['model'])
-        if s.get('provider_id'): b['providers'].add(s['provider_id'])
-        b['rpm_current'] += s.get('rpm_current', 0) or 0
-        b['rpm_limit'] += s.get('rpm_limit', 0) or 0
-        b['inflight'] += s.get('inflight', 0) or 0
-        b['total_requests'] += s.get('total_requests', 0) or 0
-        b['total_errors'] += s.get('total_errors', 0) or 0
-        # Weight per-slot EMAs by request count so heavily-used slots dominate
-        n = s.get('total_requests', 0) or 0
-        w = max(1, n)  # at least 1 so cold slots still contribute
-        ttft = s.get('ttft_ema_ms') or 0
-        lat = s.get('latency_ema_ms') or 0
-        tps = s.get('throughput_ema_tps') or 0
-        if ttft > 0 and n > 0:
-            b['_ttft_num'] += ttft * w; b['_ttft_den'] += w
-        if lat > 0 and n > 0:
-            b['_lat_num'] += lat * w; b['_lat_den'] += w
-        if tps > 0 and n > 0:
-            b['_tp_num'] += tps * w; b['_tp_den'] += w
-        ts_s = s.get('last_success_time') or 0
-        if ts_s > b['last_success_ts']: b['last_success_ts'] = ts_s
-        ts_e = s.get('last_error_time') or 0
-        if ts_e > b['last_error_ts']:
-            b['last_error_ts'] = ts_e
-            b['last_error_msg'] = s.get('last_error_msg') or ''
-        if s.get('available'):
-            b['available'] = True
-        ce = s.get('consecutive_errors', 0) or 0
-        if ce > b['consecutive_errors']:
-            b['consecutive_errors'] = ce
-
-    # Finalize: serialize sets, compute success rate + averages
-    out = {}
-    for url, b in buckets.items():
-        sr = None
-        if b['total_requests'] >= 3:
-            sr = max(0.0, 1.0 - b['total_errors'] / b['total_requests'])
-        out[url] = {
-            'slots': b['slots'],
-            'models': sorted(b['models']),
-            'providers': sorted(b['providers']),
-            'rpm_current': b['rpm_current'],
-            'rpm_limit': b['rpm_limit'],
-            'inflight': b['inflight'],
-            'total_requests': b['total_requests'],
-            'total_errors': b['total_errors'],
-            'success_rate': round(sr, 3) if sr is not None else None,
-            'ttft_ms': round(b['_ttft_num'] / b['_ttft_den'], 1)
-                       if b['_ttft_den'] else None,
-            'latency_ms': round(b['_lat_num'] / b['_lat_den'], 1)
-                          if b['_lat_den'] else None,
-            'throughput_tps': round(b['_tp_num'] / b['_tp_den'], 1)
-                              if b['_tp_den'] else None,
-            'last_success_ts': b['last_success_ts'],
-            'last_error_ts': b['last_error_ts'],
-            'last_error_msg': b['last_error_msg'],
-            'available': b['available'],
-            'consecutive_errors': b['consecutive_errors'],
-        }
-    return jsonify({'endpoints': out, 'ts': time.time()})
+    from lib.dispatch_stats import aggregate_endpoint_metrics
+    return jsonify(aggregate_endpoint_metrics(slots))
 
 
 @api_v1_common_bp.route('/api/v1/dispatch/key-stats', methods=['GET'])
@@ -413,21 +283,8 @@ def dispatch_key_stats():
         return jsonify({'day': '', 'providers': {},
                         'min_attempts': 5, 'min_success_rate': 0.5})
 
-    providers = {}
-    for pk, row in (snapshot.get('keys') or {}).items():
-        if '::' in pk:
-            prov_id, key_name = pk.split('::', 1)
-        else:
-            prov_id, key_name = 'default', pk
-        providers.setdefault(prov_id, {})[key_name] = row
-
-    return jsonify({
-        'day': snapshot.get('day', ''),
-        'min_attempts': snapshot.get('min_attempts', 5),
-        'min_success_rate': snapshot.get('min_success_rate', 0.5),
-        'max_consecutive_429': snapshot.get('max_consecutive_429', 100),
-        'providers': providers,
-    })
+    from lib.dispatch_stats import group_key_stats_by_provider
+    return jsonify(group_key_stats_by_provider(snapshot))
 
 
 @api_v1_common_bp.route('/api/v1/dispatch/key-override', methods=['POST'])
@@ -559,13 +416,6 @@ def index_page():
     resp.headers['Cache-Control'] = 'private, no-cache'
     return resp
 
-@common_bp.route('/trading.html')
-def trading_page():
-    if not _lib.TRADING_ENABLED:
-        abort(404)
-    return send_from_directory(BASE_DIR, 'trading.html')
-
-
 @common_bp.route('/login')
 @common_bp.route('/login/')
 @common_bp.route('/signup')
@@ -601,137 +451,30 @@ def dashboard_page():
 
 @api_v1_common_bp.route('/api/v1/features')
 def features():
-    return jsonify({
-        'trading_enabled': _lib.TRADING_ENABLED,
+    out = {
         'pptx_translate_enabled': getattr(_lib, 'PPTX_TRANSLATE_ENABLED', False),
         'cache_extended_ttl': getattr(_lib, 'CACHE_EXTENDED_TTL', False),
         'debug_mode': getattr(_lib, 'DEBUG_MODE', False),
         'optimizer_enabled': getattr(_lib, 'OPTIMIZER_ENABLED', True),
         'artifacts_enabled': getattr(_lib, 'ARTIFACTS_ENABLED', True),
-    })
+    }
+    # Registered plugin flags (e.g. trading_enabled) added dynamically.
+    try:
+        from lib.feature_registry import registered_flags
+        for f in registered_flags():
+            out[f.json_key] = bool(getattr(_lib, f.env_key, f.default))
+    except Exception as e:
+        logger.debug('[features] plugin flags unavailable: %s', e)
+    return jsonify(out)
 
 
 @api_v1_common_bp.route('/api/v1/features', methods=['POST'])
 def save_features():
-    data = parse_body()
-    features_path = _config_path('features.json')
-    existing = {}
-    try:
-        if os.path.isfile(features_path):
-            with open(features_path) as f:
-                existing = json.load(f)
-    except Exception as e:
-        logger.warning('[Features] Failed to read features.json: %s', e)
-
-    changed = []
-    if 'trading_enabled' in data:
-        new_val = bool(data['trading_enabled'])
-        old_val = existing.get('trading_enabled', None)
-        existing['trading_enabled'] = new_val
-        if old_val != new_val:
-            changed.append('trading_enabled')
-            logger.info('[Features] trading_enabled: %s → %s', old_val, new_val)
-    if 'pptx_translate_enabled' in data:
-        new_val = bool(data['pptx_translate_enabled'])
-        old_val = existing.get('pptx_translate_enabled', None)
-        existing['pptx_translate_enabled'] = new_val
-        if old_val != new_val:
-            changed.append('pptx_translate_enabled')
-            logger.info('[Features] pptx_translate_enabled: %s → %s', old_val, new_val)
-    if 'cache_extended_ttl' in data:
-        new_val = bool(data['cache_extended_ttl'])
-        old_val = existing.get('cache_extended_ttl', None)
-        existing['cache_extended_ttl'] = new_val
-        if old_val != new_val:
-            changed.append('cache_extended_ttl')
-            logger.info('[Features] cache_extended_ttl: %s → %s', old_val, new_val)
-    if 'debug_mode' in data:
-        new_val = bool(data['debug_mode'])
-        old_val = existing.get('debug_mode', None)
-        existing['debug_mode'] = new_val
-        if old_val != new_val:
-            changed.append('debug_mode')
-            logger.info('[Features] debug_mode: %s → %s', old_val, new_val)
-    if 'optimizer_enabled' in data:
-        new_val = bool(data['optimizer_enabled'])
-        old_val = existing.get('optimizer_enabled', None)
-        existing['optimizer_enabled'] = new_val
-        if old_val != new_val:
-            changed.append('optimizer_enabled')
-            logger.info('[Features] optimizer_enabled: %s → %s', old_val, new_val)
-    try:
-        os.makedirs(os.path.dirname(features_path), exist_ok=True)
-        with open(features_path, 'w') as f:
-            json.dump(existing, f, indent=2)
-    except Exception as e:
-        logger.error('[Features] Failed to write features.json: %s', e, exc_info=True)
+    from lib.features_store import apply_feature_updates
+    result = apply_feature_updates(parse_body())
+    if result.get('error'):
         return api_internal_error('internal_error')
-
-    # ── Audit trail for each flag that actually changed ──
-    if changed:
-        try:
-            from lib.log import audit_log as _audit
-            for _param in changed:
-                _audit('feature_flag_change',
-                       param=_param,
-                       new=bool(existing.get(_param, False)))
-        except Exception as _aerr:
-            logger.debug('[Features] audit_log feature_flag_change failed: %s', _aerr)
-
-    # Hot-reload TRADING_ENABLED on the lib module
-    needs_restart = False
-    if 'trading_enabled' in changed:
-        _lib.TRADING_ENABLED = existing.get('trading_enabled', False)
-        # Blueprint registration is import-time only (`routes/__init__.py`).
-        # If trading is being enabled on a server that booted with it OFF, the
-        # /api/trading/* routes will not exist until restart. Tell the truth.
-        try:
-            from routes import TRADING_ROUTES_REGISTERED
-        except ImportError as e:
-            logger.debug('[Features] TRADING_ROUTES_REGISTERED unavailable: %s', e)
-            TRADING_ROUTES_REGISTERED = False
-        if _lib.TRADING_ENABLED and not TRADING_ROUTES_REGISTERED:
-            needs_restart = True
-            logger.info('[Features] TRADING_ENABLED → True but routes not '
-                        'registered at boot — needs_restart=True')
-        else:
-            logger.info('[Features] Hot-reloaded TRADING_ENABLED → %s '
-                        '(routes_registered=%s)',
-                        _lib.TRADING_ENABLED, TRADING_ROUTES_REGISTERED)
-    if 'pptx_translate_enabled' in changed:
-        _lib.PPTX_TRANSLATE_ENABLED = existing.get('pptx_translate_enabled', False)
-        logger.info('[Features] Hot-reloaded PPTX_TRANSLATE_ENABLED → %s',
-                    _lib.PPTX_TRANSLATE_ENABLED)
-    # Hot-reload CACHE_EXTENDED_TTL — takes effect on next LLM request
-    if 'cache_extended_ttl' in changed:
-        _lib.CACHE_EXTENDED_TTL = existing.get('cache_extended_ttl', True)
-        logger.info('[Features] Hot-reloaded CACHE_EXTENDED_TTL → %s', _lib.CACHE_EXTENDED_TTL)
-    # Hot-reload DEBUG_MODE — takes effect on next page load (client-side flag)
-    if 'debug_mode' in changed:
-        _lib.DEBUG_MODE = existing.get('debug_mode', False)
-        logger.info('[Features] Hot-reloaded DEBUG_MODE → %s', _lib.DEBUG_MODE)
-    # Hot-reload OPTIMIZER_ENABLED. Also toggles the underlying scheduled
-    # task's enabled flag so the cron tick won't fire `run_once` when off.
-    if 'optimizer_enabled' in changed:
-        _lib.OPTIMIZER_ENABLED = existing.get('optimizer_enabled', True)
-        logger.info('[Features] Hot-reloaded OPTIMIZER_ENABLED → %s',
-                    _lib.OPTIMIZER_ENABLED)
-        try:
-            from lib.scheduler import get_scheduler
-            mgr = get_scheduler()
-            db = mgr._get_db()
-            rows = db.execute(
-                "SELECT id FROM scheduled_tasks WHERE task_type=? AND name=?",
-                ['optimizer', 'Daily Optimizer']).fetchall()
-            for r in rows:
-                tid = r['id'] if isinstance(r, dict) else r[0]
-                mgr.toggle_task(tid, enabled=_lib.OPTIMIZER_ENABLED)
-        except Exception as _te:
-            logger.warning('[Features] Could not toggle Daily Optimizer task: %s',
-                           _te, exc_info=True)
-
-    return api_ok({'saved': existing,
-                    'needs_restart': needs_restart, 'changed': changed})
+    return api_ok(result)
 @common_bp.route('/api/client-error', methods=['POST'])
 def client_error():
     data = parse_body()
@@ -759,12 +502,13 @@ def client_error():
     return api_ok()
 @common_bp.route('/api/health')
 def health_check():
-    from lib.database import db_available
+    from lib.database import _BACKEND, db_available
     from lib.version import __version__
     result = {'ok': True, 'ts': int(time.time() * 1000), 'db_ok': db_available, 'version': __version__}
 
-    # SQLite — no connection pool stats needed
-    result['db_engine'] = 'sqlite'
+    # Report the active backend ('pg' or 'sqlite') — NOT a hardcoded value,
+    # which previously mislabeled every PostgreSQL deployment as sqlite.
+    result['db_engine'] = 'postgresql' if _BACKEND == 'pg' else 'sqlite'
 
     # Quick DB connectivity check
     if db_available:

@@ -309,6 +309,48 @@ def _strip_trailing_assistant_for_claude(messages: list, model: str = ''):
                     messages[-1].get('role') if messages else 'empty')
 
 
+def _inject_claude_reasoning_details(messages: list, model: str) -> None:
+    """Rebuild OpenRouter-style ``reasoning_details`` on replayed Claude turns.
+
+    The sankuai OpenAI-compat gateway streams a Claude thinking block as
+    ``reasoning_content`` text + a separate ``reasoning_details`` chunk
+    carrying the opaque ``signature``.  On a follow-up request (Continue, or
+    just the next tool-loop turn) the gateway requires that signed thinking
+    block to be replayed inside ``reasoning_details`` — the flat
+    ``thinking_signature`` field alone is ignored, and a thinking block with
+    no signature is rejected (HTTP 400).  So whenever an assistant message
+    carries BOTH ``reasoning_content`` and ``thinking_signature``, synthesise
+    the ``reasoning_details`` array the gateway expects.
+
+    Only runs for Claude (the only family using this wire shape). Mutates
+    messages in-place. Idempotent: skips messages that already carry a
+    populated ``reasoning_details``.
+    """
+    if not is_claude(model):
+        return
+
+    _patched = 0
+    for msg in messages:
+        if msg.get('role') != 'assistant':
+            continue
+        if msg.get('reasoning_details'):
+            continue
+        th_text = msg.get('reasoning_content') or ''
+        th_sig = msg.get('thinking_signature') or ''
+        if not (th_text and th_sig):
+            continue
+        msg['reasoning_details'] = [{
+            'type': 'thinking',
+            'thinking': th_text,
+            'signature': th_sig,
+        }]
+        _patched += 1
+
+    if _patched:
+        logger.info('[build_body] Rebuilt reasoning_details (signed thinking block) '
+                    'on %d replayed Claude assistant turn(s)', _patched)
+
+
 # Dummy signature value recognized by Gemini to skip validation.
 # Used when tool_calls originate from a non-Gemini model (cross-model fallback).
 _GEMINI_SKIP_SIGNATURE = 'skip_thought_signature_validator'
@@ -361,6 +403,62 @@ def _inject_gemini_thought_signatures(messages: list, model: str) -> None:
                     'compatibility', _patched)
 
 
+# ── Context-window completion clamp ──
+# _clamp_max_tokens() caps the completion budget against the model's
+# *output* ceiling only; it is blind to the input size. When both the
+# prompt and the requested completion budget are large, their sum can
+# exceed the model's *total* context window and upstream rejects with
+# HTTP 400 (PromptTooLongError) — e.g. "210328 tokens requested >
+# 202752 maximum (82328 input + 128000 completion)".
+_COMPLETION_INPUT_MARGIN = 0.10  # headroom over the (under-counting) estimate
+_COMPLETION_MIN_FLOOR = 1024     # never hand the API an unusably tiny budget
+
+
+def _clamp_completion_to_context_window(model, messages, max_tokens,
+                                        provider_id=''):
+    """Trim ``max_tokens`` so estimated input + completion fits the window.
+
+    Returns a (possibly reduced) completion budget that leaves room for the
+    estimated input tokens within the model's context window, plus a small
+    margin for estimation error. Floored at ``_COMPLETION_MIN_FLOOR`` — if
+    even that doesn't fit, the prompt itself is over-budget and the request
+    will (correctly) raise PromptTooLongError, handing recovery to the
+    reactive-compaction path rather than silently truncating here.
+
+    Never raises: on any failure it returns ``max_tokens`` unchanged so a
+    clamp helper can never block a request.
+    """
+    if not messages or not max_tokens or max_tokens <= 0:
+        return max_tokens
+    try:
+        from lib.tasks_pkg.compaction._tokens import resolve_model_context_limit
+        from lib.token_counter.heuristic import cheap_estimate
+    except Exception as e:
+        logger.debug('[build_body] context-window clamp unavailable: %s', e)
+        return max_tokens
+    try:
+        window = resolve_model_context_limit(model, provider_id)
+        if not window or window <= 0:
+            return max_tokens
+        input_tokens = cheap_estimate(messages)
+        # cheap_estimate can under-count non-CJK text; pad it before
+        # subtracting so we stay under the hard ceiling despite estimate error.
+        reserved_input = int(input_tokens * (1 + _COMPLETION_INPUT_MARGIN)) + 512
+        room = window - reserved_input
+        if room < max_tokens:
+            new_max = max(room, _COMPLETION_MIN_FLOOR)
+            if new_max < max_tokens:
+                logger.warning(
+                    '[build_body] Clamping max_tokens %d → %d to fit context '
+                    'window (model=%s window=%d est_input=%d reserved=%d)',
+                    max_tokens, new_max, model, window, input_tokens,
+                    reserved_input)
+            return new_max
+    except Exception as e:
+        logger.warning('[build_body] context-window clamp failed: %s', e)
+    return max_tokens
+
+
 def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
                thinking_enabled=False, preset='medium', effort=None,
                thinking_depth=None, tools=None, response_format=None,
@@ -403,6 +501,8 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
     logger.debug('build_body: model=%s effort=%s thinking_enabled=%s (thinking_depth=%s effort=%s preset=%s)',
                  model, _effort, thinking_enabled, thinking_depth, effort, preset)
     max_tokens = _clamp_max_tokens(model, max_tokens)
+    max_tokens = _clamp_completion_to_context_window(
+        model, messages, max_tokens, provider_id=provider_id)
 
     clean_messages = _strip_non_api_fields(messages)
 
@@ -457,6 +557,7 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
 
     _fix_empty_user_messages(clean_messages)
     _inject_gemini_thought_signatures(clean_messages, model)
+    _inject_claude_reasoning_details(clean_messages, model)
 
     body = {
         'model': model,

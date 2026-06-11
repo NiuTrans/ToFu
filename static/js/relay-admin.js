@@ -125,7 +125,7 @@
     const email = document.getElementById('newUserEmail').value.trim();
     const password = document.getElementById('newUserPassword').value;
     const role = document.getElementById('newUserRole').value;
-    if (!email || !password) { alert('需要邮箱和密码'); return; }
+    if (!email || !password) { showAlert('需要邮箱和密码'); return; }
     try {
       await _api('/api/v1/users', {
         method: 'POST',
@@ -134,16 +134,16 @@
       document.getElementById('newUserEmail').value = '';
       document.getElementById('newUserPassword').value = '';
       refreshUsers();
-    } catch (e) { alert('创建失败:' + e.message); }
+    } catch (e) { showAlert('创建失败:' + e.message); }
   }
   window.relayAdminCreateUser = relayAdminCreateUser;
 
   async function relayAdminTopup(userId) {
-    const amt = prompt('充值金额(credits,正数):', '100');
+    const amt = await showPrompt('充值金额(credits,正数):', { defaultValue: '100' });
     if (!amt) return;
     const credits = parseFloat(amt);
-    if (!isFinite(credits) || credits <= 0) { alert('无效金额'); return; }
-    const note = prompt('备注(可选):', '管理员充值');
+    if (!isFinite(credits) || credits <= 0) { showAlert('无效金额'); return; }
+    const note = await showPrompt('备注(可选):', { defaultValue: '管理员充值' });
     try {
       await _api('/api/v1/billing/deposit', {
         method: 'POST',
@@ -155,20 +155,20 @@
         }),
       });
       refreshUsers();
-    } catch (e) { alert('充值失败:' + e.message); }
+    } catch (e) { showAlert('充值失败:' + e.message); }
   }
   window.relayAdminTopup = relayAdminTopup;
 
   async function relayAdminToggleStatus(userId, currentStatus) {
     const next = currentStatus === 'active' ? 'suspended' : 'active';
-    if (!confirm(`将该用户改为 ${next}?`)) return;
+    if (!await showConfirm(`将该用户改为 ${next}?`)) return;
     try {
       await _api('/api/v1/users/' + encodeURIComponent(userId), {
         method: 'PATCH',
         body: JSON.stringify({status: next}),
       });
       refreshUsers();
-    } catch (e) { alert('更新失败:' + e.message); }
+    } catch (e) { showAlert('更新失败:' + e.message); }
   }
   window.relayAdminToggleStatus = relayAdminToggleStatus;
 
@@ -254,7 +254,7 @@
     const batch = document.getElementById('codeBatchName').value.trim();
     if (!isFinite(count) || count < 1 ||
         !isFinite(amount) || amount <= 0) {
-      alert('参数无效'); return;
+      showAlert('参数无效'); return;
     }
     try {
       const r = await _api('/api/v1/billing/redeem-codes', {
@@ -274,7 +274,7 @@
           <pre style="font-family:monospace;font-size:12px;background:#000;color:#9f9;padding:8px;border-radius:4px;max-height:200px;overflow:auto;">${_esc(text)}</pre>
         </div>`;
       refreshCodes();
-    } catch (e) { alert('生成失败:' + e.message); }
+    } catch (e) { showAlert('生成失败:' + e.message); }
   }
   window.relayAdminMintCodes = relayAdminMintCodes;
 

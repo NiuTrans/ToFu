@@ -60,6 +60,7 @@ class _ContentWithDisplayResults(str):
         instance.display_results = display_results
         instance.search_diag = None
         instance.engine_breakdown = None
+        instance.vertical = None
         return instance
 
 # ── Read-only tools safe to pre-execute during streaming ──
@@ -264,61 +265,119 @@ class StreamingToolAccumulator:
                                     conv_id=_conv_id)
 
             elif fn_name == 'web_search':
-                from lib.search import format_search_for_tool_response, perform_web_search
+                from tofu_search import perform_web_search
+                from tofu_search.search import format_search_for_tool_response
+                from lib.tasks_pkg.handlers.search import (
+                    resolve_vertical, _vertical_to_sse_payload, _vertical_header_for_llm,
+                )
                 # ★ Batch mode: run concurrent searches (lightweight, no SSE events)
                 queries = fn_args.get('queries')
+                batch_vertical = fn_args.get('vertical', 'auto')
                 if queries and isinstance(queries, list):
                     from concurrent.futures import ThreadPoolExecutor as _TP, as_completed as _ac
                     user_q = self._task.get('lastUserQuery', '')
-                    query_list = [
-                        (s.get('query') if isinstance(s, dict) else s)
-                        for s in queries[:5]
-                        if (isinstance(s, dict) and s.get('query')) or (isinstance(s, str) and s.strip())
-                    ]
-                    def _do_search(q):
-                        r = perform_web_search(q, user_question=user_q)
+                    batch_freshness = fn_args.get('freshness', '')
+                    specs = []
+                    for s in queries[:5]:
+                        if isinstance(s, dict) and s.get('query'):
+                            specs.append((s['query'],
+                                          s.get('vertical') or batch_vertical,
+                                          s.get('freshness', '') or batch_freshness))
+                        elif isinstance(s, str) and s.strip():
+                            specs.append((s.strip(), batch_vertical, batch_freshness))
+
+                    def _do_search(spec):
+                        q, v, f = spec
+                        plan = resolve_vertical(q, v)
+                        v_fut = None
+                        if plan is not None:
+                            from concurrent.futures import ThreadPoolExecutor as _TP1
+                            _vp = _TP1(max_workers=1)
+                            v_fut = _vp.submit(plan)
+                        r = perform_web_search(q, user_question=user_q, freshness=f)
                         sd = getattr(r, '_search_diag', None)
-                        return q, r, format_search_for_tool_response(r, search_diag=sd)
-                    parts = [None] * len(query_list)
-                    results_per_q = [None] * len(query_list)
-                    with _TP(max_workers=min(len(query_list), 5)) as pool:
-                        futs = {pool.submit(_do_search, q): i for i, q in enumerate(query_list)}
+                        fmt = format_search_for_tool_response(r, search_diag=sd)
+                        v_rec = None
+                        if v_fut is not None:
+                            try:
+                                v_rec = v_fut.result(timeout=5)
+                            except Exception as ve:
+                                logger.warning('[%s] StreamingToolExec: vertical(%s) failed: %s',
+                                               self._tid, v, ve)
+                        if v_rec:
+                            fmt = _vertical_header_for_llm(v_rec) + fmt
+                        return q, r, fmt, v_rec
+
+                    parts = [None] * len(specs)
+                    results_per_q = [None] * len(specs)
+                    verticals = []
+                    with _TP(max_workers=min(len(specs), 5)) as pool:
+                        futs = {pool.submit(_do_search, sp): i for i, sp in enumerate(specs)}
                         for f in _ac(futs):
                             idx = futs[f]
                             try:
-                                q, r, fmt = f.result()
-                                parts[idx] = f'=== Search: {q} ===\n{fmt}' if len(query_list) > 1 else fmt
+                                q, r, fmt, v_rec = f.result()
+                                parts[idx] = f'=== Search: {q} ===\n{fmt}' if len(specs) > 1 else fmt
                                 results_per_q[idx] = r
+                                if v_rec:
+                                    payload = _vertical_to_sse_payload(v_rec)
+                                    if payload:
+                                        payload = dict(payload)
+                                        payload['query'] = q
+                                        verticals.append(payload)
                             except Exception as e:
                                 logger.debug('[%s] StreamingToolExec: batch search query %r failed: %s',
-                                             self._tid, query_list[idx][:80], e)
-                                parts[idx] = f'Search failed for "{query_list[idx]}": {e}'
+                                             self._tid, specs[idx][0][:80], e)
+                                parts[idx] = f'Search failed for "{specs[idx][0]}": {e}'
                                 results_per_q[idx] = []
-                    # Merge display_results across all queries (same as _handle_web_search_batch)
                     all_display_results = []
-                    for r in results_per_q:
+                    for idx, r in enumerate(results_per_q):
                         if not r:
                             continue
+                        src_q = specs[idx][0] if idx < len(specs) else ''
                         for item in r:
                             dr = {k: v for k, v in item.items() if k != 'full_content'}
                             if item.get('full_content'):
                                 dr['fetched'] = True
                                 dr['fetchedChars'] = len(item['full_content'])
+                            # Tag with source query for per-query grouping in UI
+                            dr['_q'] = src_q
                             all_display_results.append(dr)
                     formatted = _ContentWithDisplayResults(
                         '\n\n'.join(p for p in parts if p),
                         all_display_results,
                     )
+                    if verticals:
+                        formatted.vertical = {'batch': verticals}
                     return formatted
+
+                # ── Single query ──
                 query = fn_args.get('query', '')
+                vertical_param = fn_args.get('vertical', 'auto')
+                freshness = fn_args.get('freshness', '')
                 user_question = self._task.get('lastUserQuery', '')
+                plan = resolve_vertical(query, vertical_param)
+                v_fut = None
+                if plan is not None:
+                    from concurrent.futures import ThreadPoolExecutor as _TP1
+                    _vp = _TP1(max_workers=1)
+                    v_fut = _vp.submit(plan)
                 results = perform_web_search(query,
-                                             user_question=user_question)
+                                             user_question=user_question,
+                                             freshness=freshness)
                 search_diag = getattr(results, '_search_diag', None)
                 engine_breakdown = getattr(results, '_engine_breakdown', None)
-                formatted = format_search_for_tool_response(results,
-                                                            search_diag=search_diag)
-                # Build display results for the frontend (same as search handler)
+                formatted_text = format_search_for_tool_response(results,
+                                                                 search_diag=search_diag)
+                v_rec = None
+                if v_fut is not None:
+                    try:
+                        v_rec = v_fut.result(timeout=5)
+                    except Exception as ve:
+                        logger.warning('[%s] StreamingToolExec: vertical(%s) failed: %s',
+                                       self._tid, vertical_param, ve)
+                if v_rec:
+                    formatted_text = _vertical_header_for_llm(v_rec) + formatted_text
                 display_results = []
                 for r in results:
                     dr = {k: v for k, v in r.items() if k != 'full_content'}
@@ -326,17 +385,17 @@ class StreamingToolAccumulator:
                         dr['fetched'] = True
                         dr['fetchedChars'] = len(r['full_content'])
                     display_results.append(dr)
-                # Attach display_results + searchDiag + engineBreakdown as
-                # attributes so inject_into_cache stores them alongside the content
-                formatted = _ContentWithDisplayResults(formatted, display_results)
+                formatted = _ContentWithDisplayResults(formatted_text, display_results)
                 if not display_results and search_diag:
                     formatted.search_diag = search_diag
                 if engine_breakdown:
                     formatted.engine_breakdown = engine_breakdown
+                if v_rec:
+                    formatted.vertical = _vertical_to_sse_payload(v_rec)
                 return formatted
 
             elif fn_name == 'fetch_url':
-                from lib.fetch import fetch_page_content
+                from tofu_search import fetch_page_content
                 # ★ Batch mode: run concurrent fetches (lightweight, no SSE events)
                 urls = fn_args.get('urls')
                 if urls and isinstance(urls, list):
@@ -516,11 +575,12 @@ class StreamingToolAccumulator:
                     elapsed = time.time() - t0
                     is_search = fn_name in ('web_search',)
                     cache_key = _make_cache_key(fn_name, fn_args)
-                    # Extract display_results + engine_breakdown if available (web_search)
+                    # Extract display_results + engine_breakdown + vertical (web_search)
                     _disp = getattr(content, 'display_results', None)
                     _eng_bkdn = getattr(content, 'engine_breakdown', None)
+                    _vert = getattr(content, 'vertical', None)
                     cache_val, content_len = self._prepare_cache_value(content, fn_name)
-                    cache[cache_key] = (cache_val, is_search, 'prefetch', _disp, _eng_bkdn)
+                    cache[cache_key] = (cache_val, is_search, 'prefetch', _disp, _eng_bkdn, _vert)
                     injected += 1
                     logger.info('[%s] StreamingToolExec: injected %s into '
                                 'dedup cache (%.1fs, %d chars%s)',
@@ -589,11 +649,11 @@ class StreamingToolAccumulator:
                     elapsed = time.time() - t0
                     is_search = fn_name in ('web_search',)
                     cache_key = _make_cache_key(fn_name, fn_args)
-                    # Extract display_results + engine_breakdown if available (web_search)
                     _disp = getattr(content, 'display_results', None)
                     _eng_bkdn = getattr(content, 'engine_breakdown', None)
+                    _vert = getattr(content, 'vertical', None)
                     cache_val, content_len = self._prepare_cache_value(content, fn_name)
-                    cache[cache_key] = (cache_val, is_search, 'prefetch', _disp, _eng_bkdn)
+                    cache[cache_key] = (cache_val, is_search, 'prefetch', _disp, _eng_bkdn, _vert)
                     injected += 1
                     logger.info('[%s] StreamingToolExec: waited and injected '
                                 '%s into dedup cache (%.1fs, %d chars%s)',

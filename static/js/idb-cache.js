@@ -186,6 +186,7 @@ var ConvCache = (function () {
       endpointEnabled: conv.endpointEnabled, imageGenMode: conv.imageGenMode,
       humanGuidanceEnabled: conv.humanGuidanceEnabled,
       projectPath: conv.projectPath, projectPaths: conv.projectPaths,
+      readOnlyPaths: conv.readOnlyPaths,
       autoTranslate: conv.autoTranslate,
       pinned: conv.pinned, pinnedAt: conv.pinnedAt,
       folderId: conv.folderId,

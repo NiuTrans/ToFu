@@ -805,9 +805,17 @@ function _buildSwarmPanelHTML(round) {
         thinking: "Thinking…", tool_use: "Using tools", writing: "Writing…",
         searching: "Searching…", coding: "Coding…", analyzing: "Analyzing…",
         done: "Complete", completed: "Complete", failed: "Failed", error: "Error",
-        pending: "Queued", running: "Working…",
+        pending: "Queued", running: "Working…", waiting: "Queued", queued: "Queued",
       };
-      const phaseLabel = phaseMap[phase] || phase || "Queued";
+      /* Status wins for a terminated agent: if status is done/failed but the
+         phase got stranded at a spawn-time value (e.g. "waiting" because the
+         per-agent events were routed to another panel), show the terminal
+         label rather than a contradictory "waiting"/"Queued" pill next to a
+         done checkmark (status/phase desync). */
+      let phaseLabel;
+      if (a.status === "done" || a.status === "completed") phaseLabel = "Complete";
+      else if (a.status === "failed" || a.status === "error") phaseLabel = "Failed";
+      else phaseLabel = phaseMap[phase] || phase || "Queued";
 
       /* ── Agent elapsed ── */
       let agentTimer = "";
@@ -1171,7 +1179,13 @@ function finishStream(convId) {
      * reconciliation can move it off conv.messages[length-1]. */
     const _fsApCarrier = _findAutopilotPendingCarrier(conv);
     const _fsAutopilotInbound = !!_fsApCarrier;
-    if (_fsHasQueued) {
+    const _fsLastMsg = conv.messages[conv.messages.length - 1];
+    const _fsIsServerOffline = _fsLastMsg && _fsLastMsg.finishReason === 'server_offline';
+    if (_fsIsServerOffline) {
+      console.info(`[finishStream] 📡 Skipping syncConversationToServer — ` +
+        `finishReason=server_offline for conv=${convId.slice(0,8)}; ` +
+        `backend has the complete content, frontend only has a truncated snapshot`);
+    } else if (_fsHasQueued) {
       console.info(`[finishStream] 🚧 Skipping syncConversationToServer — ` +
         `queue has ${pendingMessageQueue.get(convId).length} item(s) for conv=${convId.slice(0,8)}; ` +
         `backend owns the next DB write via dispatch_next_queued()`);
@@ -1186,6 +1200,13 @@ function finishStream(convId) {
      *   on success, but it may be guarded/skipped in some edge cases.  This ensures
      *   the cache always has the latest post-stream content for instant reload. */
     ConvCache.put(conv);
+    /* ★ Auto-generate a descriptive title once the first turn completes.
+     *   The helper guards itself (skips if user-edited, already attempted, or
+     *   the conversation lacks a user+assistant pair), so this is a safe
+     *   fire-and-forget call on every stream finish. */
+    if (typeof _maybeAutoGenerateTitle === 'function' && !hasError) {
+      _maybeAutoGenerateTitle(convId);
+    }
   } else {
     console.error(`[finishStream] conv not found for id=${convId.slice(0,8)} — cannot save!`);
   }

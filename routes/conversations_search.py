@@ -10,7 +10,7 @@ import time
 
 from flask import jsonify, request
 
-from lib.database import DOMAIN_CHAT, get_db
+from lib.database import DOMAIN_CHAT, async_fetchall
 from lib.log import get_logger
 from routes.common import DEFAULT_USER_ID
 from routes.conversations import conversations_bp
@@ -19,7 +19,7 @@ logger = get_logger(__name__)
 
 
 @conversations_bp.route('/api/v1/conversations/search', methods=['GET'])
-def search_convs():
+async def search_convs():
     """Server-side full-text search through conversation messages.
 
     Two-phase approach:
@@ -34,26 +34,30 @@ def search_convs():
         return jsonify([])
 
     t0 = time.monotonic()
-    db = get_db(DOMAIN_CHAT)
 
     MAX_RESULTS = 50
     SNIPPET_RADIUS = 40
 
-    # ── Phase 1: FTS5 MATCH search ──
-    # Sanitize query for FTS5: remove special chars, add * for prefix matching
+    # ── Phase 1: FTS5 MATCH search (SQLite only) ──
+    # The ``conversations_fts`` virtual table + ``MATCH`` operator are SQLite
+    # FTS5 features; on PostgreSQL that SQL is a hard syntax error (no such
+    # table/operator). Previously this query ran unconditionally and threw on
+    # every PG search — silently swallowed, leaving only the portable Phase-2
+    # LIKE scan. Gate it on the active backend so PG skips straight to Phase 2
+    # (correct + no error-log noise) and SQLite keeps its fast inverted-index path.
+    from lib.database import _BACKEND
     _fts_words = re.sub(r'[^\w\s]', '', query, flags=re.UNICODE).split()
     _fts_query = ' '.join(f'{w}*' for w in _fts_words if w)
 
     result_ids = []
-    if _fts_query:
+    if _fts_query and _BACKEND != 'pg':
         try:
-            rows = db.execute(
+            rows = await async_fetchall(
                 """SELECT c.id FROM conversations c
                    JOIN conversations_fts f ON f.rowid = c.rowid
                    WHERE c.user_id=? AND f.search_text MATCH ?
                    ORDER BY c.updated_at DESC LIMIT ?""",
-                (DEFAULT_USER_ID, _fts_query, MAX_RESULTS)
-            ).fetchall()
+                (DEFAULT_USER_ID, _fts_query, MAX_RESULTS), domain=DOMAIN_CHAT)
             result_ids = [r['id'] for r in rows]
         except Exception as e:
             logger.debug('[search_convs] FTS5 query failed (will fallback): %s', e)
@@ -65,20 +69,19 @@ def search_convs():
         try:
             if result_ids:
                 placeholders = ','.join(['?'] * len(result_ids))
-                rows = db.execute(
+                rows = await async_fetchall(
                     f"""SELECT id FROM conversations
                         WHERE user_id=? AND lower(search_text) LIKE ?
                           AND id NOT IN ({placeholders})
                         ORDER BY updated_at DESC LIMIT ?""",
-                    (DEFAULT_USER_ID, _like_pattern, *result_ids, remaining)
-                ).fetchall()
+                    (DEFAULT_USER_ID, _like_pattern, *result_ids, remaining),
+                    domain=DOMAIN_CHAT)
             else:
-                rows = db.execute(
+                rows = await async_fetchall(
                     """SELECT id FROM conversations
                        WHERE user_id=? AND lower(search_text) LIKE ?
                        ORDER BY updated_at DESC LIMIT ?""",
-                    (DEFAULT_USER_ID, _like_pattern, remaining)
-                ).fetchall()
+                    (DEFAULT_USER_ID, _like_pattern, remaining), domain=DOMAIN_CHAT)
             result_ids.extend(r['id'] for r in rows)
         except Exception as e:
             logger.warning('[search_convs] LIKE fallback failed: %s', e)
@@ -90,10 +93,9 @@ def search_convs():
 
     # ── Extract snippets in Python (portable — no PG substring/position) ──
     placeholders = ','.join(['?'] * len(result_ids))
-    snippet_rows = db.execute(
+    snippet_rows = await async_fetchall(
         f"SELECT id, search_text FROM conversations WHERE id IN ({placeholders})",
-        tuple(result_ids)
-    ).fetchall()
+        tuple(result_ids), domain=DOMAIN_CHAT)
 
     snippet_map = {}
     for r in snippet_rows:

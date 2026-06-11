@@ -124,9 +124,9 @@ function _reattachLiveOfflineTask(conv, task) {
     `[NetworkRecovery] ▶ Live re-attach — conv=${conv.id.slice(0,8)} ` +
     `task=${task.id.slice(0,8)} still RUNNING on server; resuming SSE in place`
   );
-  // Drop the frontend-only offline verdict so connectToTask's stale-tail
-  // guard reuses THIS message instead of spawning a ghost placeholder.
-  if (am.finishReason === 'server_offline') delete am.finishReason;
+  // Drop the frontend-only offline/interrupted verdict so connectToTask's
+  // stale-tail guard reuses THIS message instead of spawning a ghost placeholder.
+  if (am.finishReason === 'server_offline' || am.finishReason === 'interrupted') delete am.finishReason;
   if (am.error && errorEnvelopeKind(am.error) === 'server_offline') delete am.error;
   // Align the message + conv with the live task id (guard checks _taskId).
   am._taskId = task.id;
@@ -154,13 +154,25 @@ async function _recoverOfflineConversations(trigger) {
   if (now - _lastOfflineRecoveryAttempt < _OFFLINE_RECOVERY_COOLDOWN) return 0;
   _lastOfflineRecoveryAttempt = now;
 
-  // Find all conversations with server_offline finishReason
+  // Find conversations needing recovery:
+  //  • server_offline → connection drop; reattach-if-running else static-adopt.
+  //  • interrupted    → a still-running task can be transiently mislabeled
+  //    'interrupted' by the racy "task not in memory" poll check
+  //    (routes/chat.py). Treat it as a reattach candidate, but ONLY act when
+  //    Api.chat.active() confirms the task is still running — otherwise it is a
+  //    genuine crash checkpoint whose recovery path is Case B, so we leave it
+  //    untouched (tracked via _interruptedOnlyIds and skipped before static-adopt).
   const offlineConvs = [];
+  const _interruptedOnlyIds = new Set();
   for (const conv of conversations) {
     if (conv._needsLoad) continue;
     const last = conv.messages[conv.messages.length - 1];
-    if (last && last.role === 'assistant' && last.finishReason === 'server_offline') {
+    if (!last || last.role !== 'assistant') continue;
+    if (last.finishReason === 'server_offline') {
       offlineConvs.push(conv);
+    } else if (last.finishReason === 'interrupted') {
+      offlineConvs.push(conv);
+      _interruptedOnlyIds.add(conv.id);
     }
   }
   if (offlineConvs.length === 0) return 0;
@@ -207,6 +219,9 @@ async function _recoverOfflineConversations(trigger) {
         return;
       }
     }
+    // Interrupted convs with no live task stay as-is — their recovery is the
+    // crash-checkpoint path (Case B), not the server_offline static adopt.
+    if (_interruptedOnlyIds.has(conv.id)) return;
     try {
       const data = await Api.conversations.get(conv.id, { signal: AbortSignal.timeout(10000) });
       if (!data) return;

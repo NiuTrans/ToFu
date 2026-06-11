@@ -31,6 +31,22 @@ logger = get_logger(__name__)
 _WRITE_ARTIFACT_MAX_BYTES = 1 * 1024 * 1024  # 1 MiB
 
 
+def _screenshot_to_descriptor(img, filename=''):
+    """Turn a ``__screenshot__`` dict into a frontend-render descriptor.
+
+    Returns a dict ``{uri, format, filename}`` where ``uri`` is the full
+    ``data:<mime>;base64,...`` string the browser can drop straight into an
+    ``<img src>``. ``uri`` is empty when the dict lacks a usable data URL.
+    """
+    if not isinstance(img, dict):
+        return {'uri': '', 'format': '', 'filename': filename}
+    return {
+        'uri': img.get('dataUrl', '') or '',
+        'format': img.get('format', 'png'),
+        'filename': filename,
+    }
+
+
 def _maybe_promote_write_to_artifact(task, fn_name, fn_args, project_path, meta):
     """Detect renderable writes (md/html/svg) and persist + emit artifact event.
 
@@ -247,42 +263,57 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                         task.get('id', '?')[:8])
 
     from lib.project_mod import execute_tool
-    # read_files is globally available — when no project is attached, absolute
-    # paths still work (routed inside tool_read_files via lib.file_reader);
-    # project-relative paths error out with a helpful message.
-    if fn_name == 'read_files' and not project_path:
-        tool_content = execute_tool(fn_name, fn_args, '.', conv_id=task['convId'], task_id=task['id'])
-    else:
-        _progress_cb = None
-        _extra_kw = {}
-        if fn_name == 'run_command':
-            _cmd = fn_args.get('command', '') or ''
-            _stdin_cb = _make_stdin_callback(task, rn, round_entry, _cmd)
-            _progress_cb = _make_run_command_progress_cb(task, rn, round_entry, _cmd)
-            _extra_kw = {
-                'stdin_callback': _stdin_cb,
-                'on_chunk': _progress_cb,
-                'task': task,  # enable cooperative abort of subprocesses
-            }
-        try:
-            tool_content = (execute_tool(fn_name, fn_args, project_path,
-                                         conv_id=task['convId'], task_id=task['id'],
-                                         **_extra_kw)
-                            if project_path else 'Error: No project path.')
-        finally:
-            # Flush any buffered run_command output tail.
-            if _progress_cb is not None:
-                try:
-                    _progress_cb.flush()
-                except Exception as e:
-                    logger.debug('[run_command] progress flush failed: %s', e)
+    from lib.project_mod.abs_path_guard import (
+        reset_restricted, set_restricted, task_is_remote,
+    )
+    # Remote API callers (agents:run / chat keys, compat adapters) must not
+    # use absolute / ~ paths to read or write outside a registered workspace
+    # root. Cookie-auth UI and the local CLI are unaffected (task_is_remote
+    # is False for them). See lib/project_mod/abs_path_guard.py.
+    _abs_token = set_restricted(task_is_remote(task))
+    try:
+        # read_files is globally available — when no project is attached,
+        # absolute paths still work (routed inside tool_read_files via
+        # lib.file_reader); project-relative paths error out helpfully.
+        if fn_name == 'read_files' and not project_path:
+            tool_content = execute_tool(fn_name, fn_args, '.', conv_id=task['convId'], task_id=task['id'])
+        else:
+            _progress_cb = None
+            _extra_kw = {}
+            if fn_name == 'run_command':
+                _cmd = fn_args.get('command', '') or ''
+                _stdin_cb = _make_stdin_callback(task, rn, round_entry, _cmd)
+                _progress_cb = _make_run_command_progress_cb(task, rn, round_entry, _cmd)
+                _extra_kw = {
+                    'stdin_callback': _stdin_cb,
+                    'on_chunk': _progress_cb,
+                    'task': task,  # enable cooperative abort of subprocesses
+                }
+            try:
+                tool_content = (execute_tool(fn_name, fn_args, project_path,
+                                             conv_id=task['convId'], task_id=task['id'],
+                                             **_extra_kw)
+                                if project_path else 'Error: No project path.')
+            finally:
+                # Flush any buffered run_command output tail.
+                if _progress_cb is not None:
+                    try:
+                        _progress_cb.flush()
+                    except Exception as e:
+                        logger.debug('[run_command] progress flush failed: %s', e)
+    finally:
+        reset_restricted(_abs_token)
 
     # read_files with absolute image paths returns a batch dict with __batch_images__
+    _img_descriptors = None  # frontend-render image list (all images in a batch)
     is_batch_image = isinstance(tool_content, dict) and tool_content.get('__batch_images__')
     if is_batch_image:
         # Extract the first image for VLM upload, keep text content
         _images = tool_content['__batch_images__']
         _text = tool_content.get('_text_content', '')
+        # Capture every image's data URI for inline rendering before we
+        # collapse to a single dict (only the first goes to the VLM wire).
+        _img_descriptors = [_screenshot_to_descriptor(img) for img in _images.values()]
         # Use the first image as the primary screenshot result
         first_img = next(iter(_images.values()))
         tool_content = first_img
@@ -302,12 +333,17 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         size_info = f'{comp_size:,} bytes'
         if tool_content.get('compressionApplied') and orig_size:
             size_info = f'{orig_size:,} → {comp_size:,} bytes (compressed)'
+        if _img_descriptors is None:
+            _img_descriptors = [_screenshot_to_descriptor(tool_content, filename)]
         meta = {
             'toolName': fn_name, 'title': f'🖼️ {filename}',
             'snippet': f'{filename} ({fmt}, {size_info})',
             'source': 'Project', 'fetched': True,
             'fetchedChars': comp_size, 'url': '',
             'badge': f'🖼️ {fmt}',
+            # Inline-render payload — frontend (tool_rounds.js) draws an
+            # <img> per descriptor. Each carries a full data: URL.
+            'imageDataUris': [d for d in _img_descriptors if d.get('uri')],
         }
         _finalize_tool_round(task, rn, round_entry, [meta])
         return tc_id, tool_content, False

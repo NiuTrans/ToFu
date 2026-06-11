@@ -80,7 +80,69 @@ __all__ = [
     'touch_provider',
     'resolve_model_string',
     'redact',
+    'sanitise_extra_headers',
 ]
+
+
+# ── extra_headers allowlist (security) ──────────────────────────────
+
+# Headers a caller may NOT supply via ``extra_headers`` on a BYO
+# provider (registered or inline). They'd let a request impersonate
+# Tofu's own outbound auth, leak cookies, or mask the request as a
+# different SDK to upstream rate-limit policies. Compared
+# case-insensitively.
+_FORBIDDEN_EXTRA_HEADERS = frozenset({
+    'authorization',
+    'x-api-key',
+    'cookie',
+    'set-cookie',
+    'host',
+    'content-length',
+    'transfer-encoding',
+    'proxy-authorization',
+})
+
+_MAX_EXTRA_HEADERS = 16
+_MAX_HEADER_VALUE_LEN = 2048
+
+
+def sanitise_extra_headers(raw) -> tuple[dict, 'Optional[str]']:
+    """Validate and normalise an ``extra_headers`` dict.
+
+    Returns ``(clean_dict, error_message_or_None)``. On error the
+    clean_dict may be partially populated; callers must check the
+    error first.
+
+    Rules:
+      * Must be a dict with string keys and scalar values.
+      * Header name not in :data:`_FORBIDDEN_EXTRA_HEADERS`.
+      * Max :data:`_MAX_EXTRA_HEADERS` entries.
+      * Each value <= :data:`_MAX_HEADER_VALUE_LEN` chars.
+    """
+    if raw is None or raw == {}:
+        return {}, None
+    if not isinstance(raw, dict):
+        return {}, '`extra_headers` must be an object'
+    if len(raw) > _MAX_EXTRA_HEADERS:
+        return {}, (f'`extra_headers` has too many entries '
+                     f'(max {_MAX_EXTRA_HEADERS})')
+    out: dict = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not k.strip():
+            return out, '`extra_headers` keys must be non-empty strings'
+        if k.lower() in _FORBIDDEN_EXTRA_HEADERS:
+            return out, (f'`extra_headers[{k!r}]` is reserved; '
+                          f'forbidden names: '
+                          f'{sorted(_FORBIDDEN_EXTRA_HEADERS)}')
+        if not isinstance(v, (str, int, float, bool)):
+            return out, (f'`extra_headers[{k!r}]` must be a scalar '
+                          f'(string/number/bool)')
+        sv = str(v)
+        if len(sv) > _MAX_HEADER_VALUE_LEN:
+            return out, (f'`extra_headers[{k!r}]` value too long '
+                          f'(max {_MAX_HEADER_VALUE_LEN})')
+        out[k.strip()] = sv
+    return out, None
 
 
 _STORE_PATH = config_path('byo_providers.json')
@@ -198,6 +260,15 @@ def _validate_base_url(url: str) -> str:
         raise ValueError('base_url is required')
     if not (url.startswith('http://') or url.startswith('https://')):
         raise ValueError('base_url must start with http:// or https://')
+    # SSRF egress guard: reject cloud-metadata / link-local / reserved
+    # targets (and, when the operator opts in, loopback / private). This
+    # is the registration-time check; discovery.py re-checks at use time
+    # because DNS can change between registration and the actual request.
+    from lib.byo_egress import EgressDenied, validate_egress_url
+    try:
+        validate_egress_url(url)
+    except EgressDenied as e:
+        raise ValueError(str(e)) from e
     return url
 
 

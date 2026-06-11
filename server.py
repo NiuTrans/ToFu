@@ -20,7 +20,6 @@ import sys
 import json
 import logging
 import time
-import hashlib
 import signal
 import faulthandler
 
@@ -32,6 +31,12 @@ import faulthandler
 # even when stderr is the controlling terminal of a process that's about
 # to die. all_threads=True captures every Python thread, not just the
 # crashing one — essential for diagnosing concurrent-fetch races.
+#
+# Dual-sink strategy: write to BOTH the FUSE-backed logs/ (durable across
+# box restarts, but may be truncated by the very FUSE stall that caused the
+# crash) AND a tmpfs mirror in /dev/shm (immune to FUSE stalls, but lost on
+# box reboot). On crash, check /dev/shm first for the clean copy.
+_fault_log = None
 try:
     _FAULT_LOG_PATH = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), 'logs', 'faulthandler.log')
@@ -39,10 +44,55 @@ try:
     _fault_log = open(_FAULT_LOG_PATH, 'a', buffering=1)  # line-buffered
     _fault_log.write('\n=== faulthandler armed pid=%d at %s ===\n'
                      % (os.getpid(), time.strftime('%Y-%m-%d %H:%M:%S')))
-    faulthandler.enable(file=_fault_log, all_threads=True)
 except OSError:
-    # Fall back to stderr if logs/ is unwritable — better than no handler.
-    faulthandler.enable(all_threads=True)
+    pass
+
+# Prefer tmpfs for the live faulthandler sink (survives FUSE stalls intact);
+# fall back to the FUSE log, then stderr.
+_fault_shm_log = None
+try:
+    _FAULT_SHM_PATH = '/dev/shm/tofu_faulthandler_%d.log' % os.getpid()
+    _fault_shm_log = open(_FAULT_SHM_PATH, 'w', buffering=1)
+    _fault_shm_log.write('=== faulthandler armed pid=%d at %s ===\n'
+                         % (os.getpid(), time.strftime('%Y-%m-%d %H:%M:%S')))
+    faulthandler.enable(file=_fault_shm_log, all_threads=True)
+except OSError:
+    _fault_shm_log = None
+
+if _fault_shm_log is None:
+    # tmpfs unavailable — use the FUSE log (better than nothing)
+    if _fault_log is not None:
+        faulthandler.enable(file=_fault_log, all_threads=True)
+    else:
+        faulthandler.enable(all_threads=True)
+
+# ── Pin mapped pages into RAM (FUSE SIGBUS mitigation) ──
+# All .so files (C extensions, libpython, libc) are dlopen'd via mmap with
+# demand-paged code segments. When those files live on a FUSE mount, a
+# transient stall during a lazy page-in delivers SIGBUS (unrecoverable).
+# MCL_CURRENT pins already-mapped pages; MCL_FUTURE pins every future mmap
+# at load time, collapsing the dangerous demand-fault window to zero.
+try:
+    import ctypes as _ctypes
+    _MCL_CURRENT, _MCL_FUTURE = 1, 2
+    _libc = _ctypes.CDLL('libc.so.6', use_errno=True)
+    if _libc.mlockall(_MCL_CURRENT | _MCL_FUTURE) != 0:
+        import errno as _errno
+        _mlk_err = _ctypes.get_errno()
+        # ENOMEM (12) = memlock rlimit too low — common in containers
+        if _mlk_err == _errno.ENOMEM:
+            os.write(2, b'[boot] mlockall skipped: memlock rlimit too low\n')
+        else:
+            os.write(2, (b'[boot] mlockall failed errno=%d\n' % _mlk_err))
+    else:
+        os.write(2, b'[boot] mlockall(MCL_CURRENT|MCL_FUTURE) OK '
+                    b'\xe2\x80\x94 pages pinned\n')
+except Exception as _mlk_exc:
+    try:
+        os.write(2, (b'[boot] mlockall unavailable: %s\n'
+                     % str(_mlk_exc).encode(errors='replace')))
+    except OSError:
+        pass
 
 # ── Record process start time (same as server.py) ──
 _PROC_T0 = time.time()
@@ -56,6 +106,13 @@ except OSError:
 # This must happen before any third-party imports.
 _PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _PROJ_DIR)
+
+# ── Dev fallback: locate a local tofu-search checkout when it isn't
+# pip-installed (production installs it via requirements.txt). Set
+# TOFU_SEARCH_PATH to the repo root of a sibling tofu-search clone.
+_TOFU_SEARCH_PATH = os.environ.get('TOFU_SEARCH_PATH', '')
+if _TOFU_SEARCH_PATH and os.path.isdir(_TOFU_SEARCH_PATH):
+    sys.path.insert(0, _TOFU_SEARCH_PATH)
 
 
 def _tofu_maybe_reexec_into_env():
@@ -180,7 +237,6 @@ def _install_flask_shim():
                 # We're in a thread with an event loop running elsewhere.
                 # Use the Quart-provided mechanism to run coroutines from
                 # sync code within a request context.
-                import concurrent.futures
                 future = asyncio.run_coroutine_threadsafe(coro, loop)
                 return future.result(timeout=30)
             else:
@@ -237,6 +293,12 @@ def _install_flask_shim():
     def _sync_safe_get_json(self, *args, **kwargs):
         return _run_coro_sync(_orig_get_json(self, *args, **kwargs))
 
+    # Stash the genuine async original ON the wrapper so async handlers can
+    # recover it regardless of how many times the shim is (re)installed or
+    # which module object holds it (test harnesses sometimes exec server.py as
+    # a second module). Always unwrap to the FIRST genuine coroutine fn.
+    _genuine_get_json = getattr(_orig_get_json, '_genuine_async_get_json', _orig_get_json)
+    _sync_safe_get_json._genuine_async_get_json = _genuine_get_json
     _QuartRequest.get_json = _sync_safe_get_json
 
     # Patch async properties: form, files, data, json
@@ -282,9 +344,8 @@ _install_flask_shim()
 
 
 # ── Now safe to import Quart (which the routes will see as 'flask') ──
-import quart
-from quart import Quart, request, make_response, redirect, jsonify, g
-import io
+import quart  # noqa: F401  — kept so quart.* monkeypatches in _install_flask_shim resolve
+from quart import Quart, request
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Logging (reuse server.py's architecture)
@@ -627,6 +688,11 @@ async def _clear_req_id(exc):
 app.teardown_appcontext(close_db)
 
 
+# ── Install the tofu-search bridge (LLM + browser + auth seams) ──
+# Must run before any search/fetch call; idempotent, re-synced on config reload.
+from lib.search_bridge import install_search_bridge
+install_search_bridge()
+
 # ── Register all Blueprints ──
 from routes import register_all
 register_all(app)
@@ -851,8 +917,9 @@ def _validate_imports():
     _CRITICAL_IMPORTS = [
         'lib.tasks_pkg.orchestrator',
         'lib.tasks_pkg.executor',
-        'lib.fetch',
-        'lib.search',
+        'tofu_search.fetch',
+        'tofu_search.search',
+        'lib.search_bridge',
         'lib.llm',
     ]
     _boot('Validating critical imports…')
@@ -869,19 +936,85 @@ def _validate_imports():
         raise ImportError('Missing dependencies:\n' + '\n'.join(msgs))
     _boot('All critical imports validated.')
 
+    # ── Eager-load heavy C extensions so mlockall pins their pages ──
+    # These are the .so modules seen in past SIGBUS faulthandler dumps.
+    # Loading them now (under mlockall MCL_FUTURE) ensures their code
+    # pages are resident before any request arrives — the demand-fault
+    # window that causes Bus errors on FUSE is eliminated.
+    _NATIVE_PRELOADS = [
+        'PIL._imaging',
+        'lxml.etree',
+        'greenlet._greenlet',
+        'yaml._yaml',
+        'numpy.core._multiarray_umath',
+        'markupsafe._speedups',
+        'charset_normalizer.md',
+    ]
+    # These are optional — may not be installed in all environments
+    _NATIVE_PRELOADS_OPTIONAL = [
+        'pymupdf._extra',
+        'psycopg2._psycopg',
+    ]
+    _boot('Eager-loading native extensions (FUSE SIGBUS mitigation)…')
+    for _mod in _NATIVE_PRELOADS:
+        try:
+            __import__(_mod)
+        except ImportError as _ie:
+            _server_log.warning('Native preload failed (required): %s — %s', _mod, _ie)
+    for _mod in _NATIVE_PRELOADS_OPTIONAL:
+        try:
+            __import__(_mod)
+        except ImportError:
+            pass  # optional — not all deployments have these
+    _boot('Native extensions preloaded.')
+
 
 def _start_background_workers():
-    """Launch background threads (same as server.py)."""
-    from lib import TRADING_ENABLED
-    if not TRADING_ENABLED:
-        return
-    try:
-        from routes.trading_intel import start_intel_worker
-        start_intel_worker(app)
-        from routes.trading_autopilot import start_autopilot_worker
-        start_autopilot_worker()
-    except Exception as e:
-        _server_log.error('Failed to start background workers: %s', e, exc_info=True)
+    """Launch optional background threads.
+
+    Feature background workers (e.g. the trading intel + autopilot threads)
+    now start via the ``tofu.startup`` entry-point group, run from
+    ``routes.register_all`` after blueprints are mounted. Core no longer
+    imports any optional feature here.
+    """
+    return
+
+
+def _detect_reverse_proxy():
+    """Detect whether we're running behind an HTTPS-terminating reverse proxy.
+
+    Cloud IDEs / notebook platforms (VS Code port forwarding, GitHub
+    Codespaces, Gitpod, JupyterHub-fronted environments like Meituan
+    Codelab) expose the server on a public ``https://`` URL while talking
+    to our backend over plain HTTP. If we also enable TLS on our side the
+    proxy's plain-HTTP request hits our TLS listener and the connection is
+    reset — the browser/proxy reports ``socket hang up``.
+
+    Detection is signal-based, not host-name based, so it survives exports
+    to any host: we look for env vars these platforms inject into the
+    launch environment. Returns ``(behind_proxy: bool, proxy_name: str)``;
+    ``proxy_name`` is ``''`` when nothing is detected.
+    """
+    # Ordered most-specific → most-generic so the friendliest name wins.
+    if os.environ.get('VSCODE_PROXY_URI'):
+        return True, 'VS Code'
+    if os.environ.get('CODESPACES'):
+        return True, 'Codespaces'
+    if os.environ.get('GITPOD_WORKSPACE_URL'):
+        return True, 'Gitpod'
+    # JupyterHub-fronted platforms (Meituan Codelab, Binder, generic
+    # JupyterHub) always terminate HTTPS at the hub and proxy plain HTTP
+    # to single-user servers. JUPYTERHUB_* is set by the hub spawner;
+    # JUPYTER_SERVER_URL / JPY_* cover bare notebook/lab proxying.
+    if (os.environ.get('JUPYTERHUB_USER')
+            or os.environ.get('JUPYTERHUB_SERVICE_PREFIX')
+            or os.environ.get('JUPYTERHUB_API_URL')):
+        return True, 'JupyterHub'
+    # Codelab-specific belt-and-suspenders: the hub injects CODELAB_API_URL
+    # even in shells where JUPYTERHUB_* was not exported.
+    if os.environ.get('CODELAB_API_URL'):
+        return True, 'Codelab'
+    return False, ''
 
 
 def _find_free_port(start=15000, end=15100):
@@ -1110,29 +1243,24 @@ if __name__ == '__main__':
     _force_tls = (getenv_compat('TOFU_TLS') or '').strip() == '1'
     _force_no_tls = (args.no_tls
                      or (getenv_compat('TOFU_TLS') or '').strip() == '0')
-    # Auto-detect VS Code port forwarding / proxy environments.
+    # Auto-detect cloud-IDE / notebook reverse-proxy environments.
     # These proxies provide their own HTTPS+HTTP/2 on the public URL and
     # connect to our backend over plain HTTP. Adding TLS on our side causes
     # "socket hang up" because the proxy doesn't expect a TLS handshake.
+    _behind_proxy, _proxy_name = _detect_reverse_proxy()
     _vscode_proxy = os.environ.get('VSCODE_PROXY_URI', '')
-    _behind_proxy = bool(_vscode_proxy
-                         or os.environ.get('CODESPACES', '')
-                         or os.environ.get('GITPOD_WORKSPACE_URL', ''))
 
     if _force_no_tls:
         _tls_cert, _tls_key = None, None
         _boot('TLS disabled (--no-tls or TOFU_TLS=0).')
     elif _behind_proxy and not _force_tls:
         _tls_cert, _tls_key = None, None
-        _proxy_name = 'VS Code' if _vscode_proxy else 'cloud IDE'
         _boot('TLS auto-disabled — %s proxy detected (provides its own HTTPS). '
-              'Force with TOFU_TLS=1.', _proxy_name)
+              'Force with TOFU_TLS=1.', _proxy_name or 'cloud IDE')
     else:
         _tls_cert, _tls_key = _ensure_tls_certs(args.certfile, args.keyfile)
 
     # ── Init DB + validate imports in app context ──
-    import asyncio
-
     async def _startup():
         async with app.app_context():
             _init_database()
@@ -1197,7 +1325,6 @@ if __name__ == '__main__':
     mcp_config, feishu_ok = asyncio.run(_startup())
 
     # ── Banner ──
-    from lib import TRADING_ENABLED as _trading_on
     from lib.version import __version__ as _ver
     _mcp_count = len(mcp_config)
     _has_tls = bool(_tls_cert and _tls_key)
@@ -1220,12 +1347,10 @@ if __name__ == '__main__':
     _banner_lines.extend([
         f'  {_proto}://{host}:{port}',
         f'  Protocol: {_h2_status}',
-        f'  Server: Hypercorn (ASGI)',
+        '  Server: Hypercorn (ASGI)',
     ])
     if _has_tls and not args.certfile:
         _banner_lines.append('  🔐  Self-signed cert (accept once in browser)')
-    if _trading_on:
-        _banner_lines.append('  Trading Advisor:  /trading.html')
     if feishu_ok:
         _banner_lines.append('  💬  Feishu Bot: ON')
     if _mcp_count > 0:

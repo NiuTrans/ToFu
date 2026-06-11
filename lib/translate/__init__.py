@@ -17,9 +17,7 @@ layout is implementation detail.
 from .constants import (
     DEFAULT_USER_ID,
     _TRANSLATE_TASK_TTL,
-    _CHUNK_THRESHOLD,
     _SYNC_TRANSLATE_MAX_CHARS,
-    _CHUNK_MAX_WORKERS,
 )
 
 # Prompt + notranslate block handling
@@ -38,12 +36,11 @@ from .notranslate import (
     _NT_PLACEHOLDER_LOOSE_RE,
 )
 
-# Chunking + dedup
-from .chunking import _split_text_for_translation
+# Dedup
 from .dedup import _dedup_repetition_loop, _dedup_inline_loop
 
-# Engine (one-chunk LLM/MT dispatcher + retry loop)
-from .engine import _translate_one_chunk
+# Engine (one-chunk LLM/MT dispatcher + retry loop, + chunked free-text wrapper)
+from .engine import _translate_one_chunk, _translate_freetext, _chunk_freetext
 
 # Status formatter (used by routes/chat.py auto-translate flow)
 from .status import _format_status_message
@@ -74,18 +71,17 @@ from .pptx import (
 
 __all__ = [
     # constants
-    'DEFAULT_USER_ID', '_TRANSLATE_TASK_TTL', '_CHUNK_THRESHOLD',
-    '_SYNC_TRANSLATE_MAX_CHARS', '_CHUNK_MAX_WORKERS',
+    'DEFAULT_USER_ID', '_TRANSLATE_TASK_TTL',
+    '_SYNC_TRANSLATE_MAX_CHARS',
     # prompt + notranslate
     '_build_translate_prompt', '_wrap_for_translation', '_strip_notranslate_tags',
     '_extract_notranslate_blocks', '_reattach_notranslate_blocks',
     '_NOTRANSLATE_RE', '_NOTRANSLATE_ALIAS_RE',
     '_NT_PLACEHOLDER_FMT', '_NT_PLACEHOLDER_RE', '_NT_PLACEHOLDER_LOOSE_RE',
-    # chunking + dedup
-    '_split_text_for_translation',
+    # dedup
     '_dedup_repetition_loop', '_dedup_inline_loop',
     # engine
-    '_translate_one_chunk',
+    '_translate_one_chunk', '_translate_freetext', '_chunk_freetext',
     # status
     '_format_status_message',
     # runtime

@@ -16,7 +16,23 @@ from lib.tasks_pkg import cleanup_old_tasks, create_task, tasks, tasks_lock
 
 import re
 
-from lib.database import db_execute_with_retry, get_thread_db, json_dumps_pg
+from lib.database import get_thread_db
+# Back-compat aliases — the implementations moved to lib/chat/messages.py
+# (2026-06) to break the lib→routes circular import. Internal callers below
+# and external importers (lib.message_queue) keep using these private names.
+from lib.chat import (  # noqa: F401
+    append_user_msg_idempotent as _append_user_msg_idempotent,
+    auto_translate_user as _auto_translate_user,
+    build_tool_history_round as _build_tool_history_round,
+    build_user_msg_from_payload as _build_user_msg_from_payload,
+    extract_db_meta as _extract_db_meta,
+    extract_task_meta as _extract_task_meta,
+    get_send_translate_status,
+    load_or_create_conv as _load_or_create_conv,
+    persist_conv_messages as _persist_conv_messages,
+    resolve_conv_refs as _resolve_conv_refs,
+    scan_continue_checkpoint as _scan_continue_checkpoint,
+)
 from routes.common import DEFAULT_USER_ID, _invalidate_meta_cache
 
 logger = get_logger(__name__)
@@ -24,58 +40,6 @@ logger = get_logger(__name__)
 chat_bp = Blueprint('chat', __name__)
 # v1 blueprint for the JSON routes (the carve-out /api/chat/stream/<id> stays on chat_bp).
 from routes.api_v1.chat import api_v1_chat_bp  # noqa: E402
-
-
-def _extract_db_meta(row):
-    """Extract metadata dict from a DB task_results row."""
-    meta = {}
-    if row['metadata']:
-        try:
-            meta = json.loads(row['metadata'])
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning('[Chat] Failed to parse task metadata JSON (task_id=%s): %s', row['task_id'], e, exc_info=True)
-    return meta
-
-
-def _extract_task_meta(task):
-    """Extract metadata fields from an in-memory task dict.
-
-    MUST stay in sync with ``_extract_db_meta`` (DB-row equivalent) and
-    with the ``meta`` dict built in ``manager.persist_task_result``.  Any
-    field added here must also appear in:
-      * persist_task_result ’s ``meta`` dict (so it lands in task_results)
-      * the chat_poll DB-path field loop (so /api/chat/poll returns it)
-      * the cold-replay synth-done in chat_stream (so Last-Event-ID
-        replay after server restart returns the same shape)
-    Asymmetry between these four paths historically caused "my apiRounds
-    disappeared after I came back" / "modifiedFiles missing on reload".
-    """
-    meta = {}
-    if task.get('finishReason'):
-        meta['finishReason'] = task['finishReason']
-    if task.get('usage'):
-        meta['usage'] = task['usage']
-    if task.get('preset'):
-        meta['preset'] = task['preset']
-    if task.get('model'):
-        meta['model'] = task['model']
-    if task.get('provider_id'):
-        meta['provider_id'] = task['provider_id']
-    if task.get('thinkingDepth'):
-        meta['thinkingDepth'] = task['thinkingDepth']
-    if task.get('toolSummary'):
-        meta['toolSummary'] = task['toolSummary']
-    if task.get('apiRounds'):
-        meta['apiRounds'] = task['apiRounds']
-    if task.get('modifiedFiles'):
-        meta['modifiedFiles'] = task['modifiedFiles']
-    if task.get('modifiedFileList'):
-        meta['modifiedFileList'] = task['modifiedFileList']
-    if task.get('_fallback_model'):
-        meta['fallbackModel'] = task['_fallback_model']
-    if task.get('_fallback_from'):
-        meta['fallbackFrom'] = task['_fallback_from']
-    return meta
 
 
 @api_v1_chat_bp.route('/api/v1/chat/active', methods=['GET'], endpoint='ui_chat_active')
@@ -180,27 +144,6 @@ def chat_start():
 #  Atomic send: user message creation + task start
 # ══════════════════════════════════════════════════════════
 
-# Max time (seconds) for the synchronous auto-translate during /api/chat/send.
-# Must stay comfortably below the frontend's safety abort timer
-# (`_sendTimeout` in static/js/main.js — currently 90 s) so the user sees a
-# clean fallback ("sending original text") rather than a generic AbortError.
-_TRANSLATE_SEND_TIMEOUT = 45
-
-
-# ══════════════════════════════════════════════════════════
-#  Send-path translate status (per-conv)
-#
-#  The atomic /api/chat/send handler translates synchronously, blocking the
-#  HTTP response until the translate either succeeds or hits
-#  _TRANSLATE_SEND_TIMEOUT. If the backend is retrying (429, empty output),
-#  the user sees only the frontend "Translating…" bubble with no progress
-#  clue. We expose a tiny poll endpoint — /api/chat/send-translate-status —
-#  so the frontend can display the current retry reason underneath the
-#  bubble while the send call is in flight.
-# ══════════════════════════════════════════════════════════
-_send_translate_status = {}           # conv_id -> {statusMessage, statusKind, updatedAt}
-_send_translate_status_lock = threading.Lock()
-
 # ══════════════════════════════════════════════════════════
 #  Per-conv abort marker for in-flight /api/chat/send.
 #
@@ -234,36 +177,6 @@ def _was_aborted_after(conv_id, since_ts):
     return ts is not None and ts >= since_ts
 
 
-def _set_send_translate_status(conv_id, event):
-    """Record a status event for an in-flight send-path translate.
-
-    Called from the _translate_one_chunk status callback. ``event`` is a
-    dict carrying ``kind``, ``attempt``, ``elapsed``, ``detail`` — see
-    ``routes/translate._format_status_message``.
-    """
-    if not conv_id:
-        return
-    try:
-        from routes.translate import _format_status_message
-        msg = _format_status_message(event)
-    except Exception as e:
-        logger.debug('[Send] _format_status_message failed: %s', e)
-        msg = event.get('kind', '')
-    with _send_translate_status_lock:
-        _send_translate_status[conv_id] = {
-            'statusMessage': msg,
-            'statusKind': event.get('kind', ''),
-            'updatedAt': time.time(),
-        }
-
-
-def _clear_send_translate_status(conv_id):
-    if not conv_id:
-        return
-    with _send_translate_status_lock:
-        _send_translate_status.pop(conv_id, None)
-
-
 @api_v1_chat_bp.route('/api/v1/chat/translate-status/<conv_id>', methods=['GET'], endpoint='ui_chat_send_translate_status')
 @require_scope('chat')
 def chat_send_translate_status(conv_id):
@@ -272,396 +185,7 @@ def chat_send_translate_status(conv_id):
     Returns ``{statusMessage, statusKind, updatedAt}`` or ``{}`` if no
     translate is currently in flight (or hasn't yet hit its first retry).
     """
-    with _send_translate_status_lock:
-        st = _send_translate_status.get(conv_id)
-    return jsonify(st or {})
-
-
-def _auto_translate_user(text, config, conv_id=None):
-    """Translate Chinese user text to English if autoTranslate is on.
-
-    Capped at ``_TRANSLATE_SEND_TIMEOUT`` seconds to prevent the synchronous
-    HTTP handler from blocking long enough to trigger the frontend's abort.
-
-    When ``conv_id`` is provided, transient retry statuses are published
-    to ``_send_translate_status[conv_id]`` so the frontend can poll for
-    them and surface them below the "Translating…" bubble.
-
-    Returns:
-        (translated_text, original_text_or_None, model_or_None)
-    """
-    auto_translate = config.get('autoTranslate', False)
-    if not auto_translate or not text:
-        return text, None, None
-
-    has_chinese = bool(re.search(r'[\u4e00-\u9fff\u3400-\u4dbf]', text))
-    if not has_chinese:
-        return text, None, None
-
-    import concurrent.futures
-
-    def _status_cb(event):
-        """Forward chunk-level status events into the per-conv dict."""
-        _set_send_translate_status(conv_id, event)
-
-    def _do_translate():
-        from routes.translate import (
-            _build_translate_prompt,
-            _translate_one_chunk,
-            _extract_notranslate_blocks,
-            _reattach_notranslate_blocks,
-            _strip_notranslate_tags,
-        )
-        system_prompt = _build_translate_prompt('English', 'Chinese')
-        # ── Extract <notranslate>/<nt> blocks so the LLM doesn't see the tags ──
-        # Without this, the tags leak into the translated English `content`
-        # (and stay visible in the "译文" display).
-        inner_text, nt_blocks = _extract_notranslate_blocks(text)
-        if nt_blocks and not inner_text.strip():
-            # Whole message was inside <notranslate> — nothing to translate.
-            return _strip_notranslate_tags(text), {'model': 'skipped',
-                                                   '_dispatch': {'model': 'skipped'}}
-        translate_target = inner_text if nt_blocks else text
-        # Tighter inner deadline than the outer wait — leaves a small
-        # margin for status publication and pool teardown so the HTTP
-        # response arrives well before the frontend safety abort.
-        translated, _u = _translate_one_chunk(
-            translate_target, system_prompt, chunk_label=':send',
-            source='Chinese', target='English',
-            status_cb=_status_cb if conv_id else None,
-            overall_deadline=max(5.0, _TRANSLATE_SEND_TIMEOUT - 5),
-        )
-        if nt_blocks and translated:
-            translated = _reattach_notranslate_blocks(translated, nt_blocks)
-        return translated, _u
-
-    # Build the executor manually — a `with` block calls shutdown(wait=True)
-    # on exit, which would block the HTTP request until the worker actually
-    # finishes (up to _translate_one_chunk's internal 10-min retry deadline)
-    # and defeat the whole point of the timeout. We tear it down with
-    # wait=False / cancel_futures=True so the request returns as soon as the
-    # timeout hits, even if the worker thread is mid-LLM-call.
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = None
-    timed_out = False
-    started_at = time.time()
-    # Heartbeat: if the inner translate hasn't surfaced its own status yet,
-    # publish a "still translating" event every few seconds so the polling
-    # frontend doesn't show a static "Translating…" with no clue.
-    _heartbeat_stop = threading.Event()
-
-    def _heartbeat():
-        while not _heartbeat_stop.wait(4.0):
-            try:
-                _set_send_translate_status(conv_id, {
-                    'kind': 'in_progress',
-                    'attempt': 0,
-                    'elapsed': time.time() - started_at,
-                    'detail': '',
-                })
-            except Exception as e:
-                logger.debug('[Send] heartbeat status publish failed conv=%s: %s',
-                             (conv_id or '?')[:8], e)
-
-    _hb_thread = threading.Thread(target=_heartbeat, daemon=True)
-    if conv_id:
-        _hb_thread.start()
-
-    try:
-        future = pool.submit(_do_translate)
-        try:
-            result, _usage = future.result(timeout=_TRANSLATE_SEND_TIMEOUT)
-        except concurrent.futures.TimeoutError:
-            timed_out = True
-            elapsed = time.time() - started_at
-            logger.warning('[Send] Auto-translate timed out after %.1fs, '
-                           'sending original text (conv=%s, %d chars)',
-                           elapsed, (conv_id or '?')[:8], len(text))
-            # Surface the timeout to the frontend BEFORE we clear the
-            # status dict in `finally` — the poll loop will pick it up
-            # on the very next tick and the user sees a concrete reason.
-            _set_send_translate_status(conv_id, {
-                'kind': 'timed_out',
-                'attempt': 1,
-                'elapsed': elapsed,
-                'detail': f'no result after {_TRANSLATE_SEND_TIMEOUT}s',
-            })
-            # Do NOT block on shutdown — the worker may still be mid-LLM
-            # call. cancel_futures requires Python 3.9+; we already require it.
-            pool.shutdown(wait=False, cancel_futures=True)
-            return text, None, None
-        if result and result.strip():
-            _model = None
-            if isinstance(_usage, dict):
-                _disp = _usage.get('_dispatch', {})
-                _model = _disp.get('model', _usage.get('model'))
-            # Strip any <notranslate>/<nt> tags that the LLM may have leaked
-            # through (defense in depth — _reattach above already handles the
-            # common case, but the LLM sometimes echoes the tags literally).
-            from routes.translate import _strip_notranslate_tags
-            clean = _strip_notranslate_tags(result.strip()).strip()
-            logger.info('[Send] Auto-translated user message: %d→%d chars model=%s nt_stripped=%s',
-                        len(text), len(clean), _model, clean != result.strip())
-            return clean, text, _model
-    except Exception as e:
-        logger.warning('[Send] Auto-translate failed: %s', e, exc_info=True)
-    finally:
-        _heartbeat_stop.set()
-        # Tear down the pool. When we timed out we already shut it down
-        # non-blocking above. On the success / generic-error paths the
-        # future is finished, so a regular shutdown(wait=False) returns
-        # immediately and the worker thread is collected by the GC.
-        if not timed_out:
-            try:
-                pool.shutdown(wait=False)
-            except Exception as e:
-                logger.debug('[Send] translate pool shutdown failed: %s', e)
-        # Always clear the per-conv status on exit — no stale retry hint
-        # should leak into a subsequent poll after the send returns.
-        _clear_send_translate_status(conv_id)
-
-    return text, None, None
-
-
-def _resolve_conv_refs(conv_refs):
-    """Resolve a list of conversation references into formatted text.
-
-    Each ref is ``{id, title}``.  Loads the conversation from DB and formats
-    it using ``lib/conv_ref.get_conversation`` (which handles tool details,
-    PDFs, truncation, etc.).
-
-    Args:
-        conv_refs: List of dicts with ``id`` and ``title`` keys.
-
-    Returns:
-        List of ``{id, title, text}`` dicts, one per resolved ref.
-    """
-    if not conv_refs:
-        return []
-    from lib.conv_ref import get_conversation
-    results = []
-    for cr in conv_refs:
-        ref_id = cr.get('id', '')
-        ref_title = cr.get('title', '')
-        if not ref_id:
-            continue
-        try:
-            text = get_conversation(
-                conversation_id=ref_id,
-                include_tool_details=False,
-            )
-            results.append({'id': ref_id, 'title': ref_title, 'text': text})
-        except Exception as e:
-            logger.warning('[Send] Failed to resolve conv ref %s: %s', ref_id[:12], e)
-            results.append({'id': ref_id, 'title': ref_title,
-                            'text': f'[Error loading conversation: {e}]'})
-    logger.info('[Send] Resolved %d conv refs', len(results))
-    return results
-
-
-def _build_user_msg_from_payload(payload, config, conv_id=None):
-    """Build a user message dict from frontend payload + optional auto-translate.
-
-    Args:
-        payload: dict with text, images, pdfTexts, replyQuotes, convRefs, convRefTexts, timestamp
-        config: task config dict (reads autoTranslate)
-        conv_id: optional — when provided, transient translate retry
-            statuses are exposed via /api/chat/send-translate-status/<conv_id>
-            so the frontend can display retry reasons under the "Translating…"
-            bubble.
-
-    Returns:
-        user_msg dict ready to append to conv.messages
-    """
-    text = payload.get('text', '')
-    timestamp = payload.get('timestamp') or int(time.time() * 1000)
-
-    translated_text, original_text, translate_model = _auto_translate_user(text, config, conv_id=conv_id)
-
-    user_msg = {
-        'role': 'user',
-        'content': translated_text,
-        'timestamp': timestamp,
-    }
-    if original_text:
-        user_msg['originalContent'] = original_text
-        user_msg['_translateDone'] = True
-        if translate_model:
-            user_msg['_translateModel'] = translate_model
-    if payload.get('images'):
-        user_msg['images'] = payload['images']
-    if payload.get('pdfTexts'):
-        user_msg['pdfTexts'] = payload['pdfTexts']
-    if payload.get('replyQuotes'):
-        user_msg['replyQuotes'] = payload['replyQuotes']
-    if payload.get('convRefs'):
-        user_msg['convRefs'] = payload['convRefs']
-    # Resolve convRefTexts server-side from convRefs if not already provided
-    conv_ref_texts = payload.get('convRefTexts')
-    if not conv_ref_texts and payload.get('convRefs'):
-        conv_ref_texts = _resolve_conv_refs(payload['convRefs'])
-    if conv_ref_texts:
-        user_msg['convRefTexts'] = conv_ref_texts
-
-    return user_msg
-
-
-def _append_user_msg_idempotent(messages, user_msg):
-    """Append ``user_msg`` to ``messages`` unless the tail is already it.
-
-    Root-cause guard for the duplicate-user-message bug: the frontend pushes
-    an optimistic user message into the in-memory conversation, and a racing
-    sync (the "rescue local-only conv" PUT from loadConversationsFromServer,
-    another browser tab, or a /chat/send network retry) can plant that
-    optimistic copy as the conversation's last row BEFORE this handler runs.
-    A blind ``messages.append`` would then produce two user rows for one send.
-
-    The optimistic copy and the server-built ``user_msg`` share the SAME
-    ``timestamp`` (the frontend's payload timestamp flows through
-    ``_build_user_msg_from_payload``), so we treat a trailing user message
-    with a matching timestamp as "the same logical message" and reconcile it
-    in place instead of appending a duplicate.  The server copy wins because
-    it carries the authoritative translation fields (``content`` =
-    translated, ``originalContent``, ``_translateDone``, ``_translateModel``).
-
-    Args:
-        messages: The conversation message list (mutated in place).
-        user_msg: The freshly-built server-side user message dict.
-
-    Returns:
-        True if a new row was appended; False if an existing tail row was
-        reconciled (duplicate prevented).
-    """
-    if messages:
-        tail = messages[-1]
-        if (isinstance(tail, dict)
-                and tail.get('role') == 'user'
-                and tail.get('timestamp') == user_msg.get('timestamp')):
-            # Same logical message already present (optimistic copy planted by
-            # a racing sync). Overwrite it with the authoritative server copy,
-            # preserving any stable _msgId already assigned to the tail.
-            preserved_id = tail.get('_msgId')
-            tail.clear()
-            tail.update(user_msg)
-            if preserved_id and '_msgId' not in tail:
-                tail['_msgId'] = preserved_id
-            logger.info('[Send] Reconciled duplicate optimistic user msg in place '
-                        '(ts=%s) — prevented duplicate row', user_msg.get('timestamp'))
-            return False
-    messages.append(user_msg)
-    return True
-
-
-def _load_or_create_conv(db, conv_id, config, payload):
-    """Load existing conversation messages or create a new one.
-
-    Returns:
-        (messages_list, is_new, title) or raises.
-    """
-    row = db.execute(
-        'SELECT messages, title, settings FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
-
-    if row:
-        try:
-            messages = json.loads(row['messages'] or '[]')
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning('[Send] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
-            messages = []
-        return messages, False, row['title']
-
-    # New conversation — create it
-    title = (payload.get('text') or 'New Chat')[:60]
-    # Strip <notranslate>/<nt> tags from title
-    title = re.sub(r'</?(?:notranslate|nt)>', '', title, flags=re.IGNORECASE)
-    now_ms = int(time.time() * 1000)
-    settings = {}
-    if config.get('projectPath'):
-        settings['projectPath'] = config['projectPath']
-    if payload.get('folderId'):
-        settings['folderId'] = payload['folderId']
-
-    db_execute_with_retry(db, '''
-        INSERT INTO conversations (id, user_id, title, messages, created_at, updated_at, settings, msg_count, search_text)
-        VALUES (?, ?, ?, '[]', ?, ?, ?, 0, '')
-    ''', (conv_id, DEFAULT_USER_ID, title, now_ms, now_ms,
-          json.dumps(settings, ensure_ascii=False)))
-
-    return [], True, title
-
-
-def _persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
-    """Write messages + metadata to the conversation row.
-
-    Backfills stable per-message ``_msgId`` UUIDs before writing.  Every
-    code path that mutates ``messages`` and persists the array (send,
-    regenerate, edit, continue, chat_continue) goes through this helper,
-    so this is the single point of truth for id assignment on the chat
-    write side \u2014 mirroring ``_assign_message_ids`` calls in
-    ``manager.py`` for the partial/result sync paths.  Without this,
-    newly appended messages on those flows would have no ``_msgId``,
-    forcing PATCH /messages/by-id to silently fall back to index lookup.
-    """
-    # Lazy import to avoid the routes \u2192 lib.tasks_pkg.manager cycle.
-    from lib.tasks_pkg.manager import _assign_message_ids
-    _assign_message_ids(messages)
-    now_ms = int(time.time() * 1000)
-    messages_json = json_dumps_pg(messages)
-
-    from routes.conversations import build_search_text
-    search_text = build_search_text(messages)
-
-    # Build settings update
-    settings_update = {}
-    if settings_patch:
-        settings_update.update(settings_patch)
-
-    # Always inject lastMsgRole/lastMsgTimestamp
-    if messages:
-        last = messages[-1]
-        settings_update['lastMsgRole'] = last.get('role')
-        settings_update['lastMsgTimestamp'] = last.get('timestamp')
-
-    # Merge with existing settings AND preserve original created_at
-    existing = db.execute(
-        'SELECT settings, created_at FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
-    if existing:
-        try:
-            settings = json.loads(existing['settings'] or '{}')
-        except (json.JSONDecodeError, TypeError) as _e_audit:
-            logger.debug('[chat] _persist_conv_messages caught %s: %s', type(_e_audit).__name__, _e_audit)
-            settings = {}
-        settings.update(settings_update)
-        # ★ Preserve original created_at — INSERT OR REPLACE would overwrite
-        #   it with now_ms, causing all conversations to lose their real
-        #   creation timestamp on every message send/regenerate/edit.
-        created_at = existing['created_at'] or now_ms
-    else:
-        settings = settings_update
-        created_at = now_ms
-
-    settings_json = json.dumps(settings, ensure_ascii=False)
-
-    db_execute_with_retry(db, '''
-        INSERT OR REPLACE INTO conversations (id, user_id, title, messages, created_at, updated_at,
-                                   settings, msg_count, search_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (conv_id, DEFAULT_USER_ID, title, messages_json, created_at, now_ms,
-          settings_json, len(messages), search_text))
-    # Update FTS5 index
-    if search_text:
-        try:
-            db.execute(
-                "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
-                "SELECT rowid, ? FROM conversations WHERE id = ?",
-                (search_text, conv_id)
-            )
-            db.commit()
-        except Exception as e:
-            logger.debug('[_persist_conv_messages] FTS update failed (non-fatal): %s', e)
+    return jsonify(get_send_translate_status(conv_id) or {})
 
 
 def _start_task_for_conv(conv_id, config, data=None):
@@ -679,6 +203,21 @@ def _start_task_for_conv(conv_id, config, data=None):
     from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
     from lib.tasks_pkg import abort_running_tasks_for_conv
 
+    # ★ CRITICAL: abort any stale running tasks for this conversation BEFORE
+    #   building the new API messages. Without this, the old task's background
+    #   thread may still be running (abort is cooperative) and its persist/sync
+    #   writes can land BETWEEN the regen truncation and our DB read here —
+    #   resurrecting the just-truncated assistant turn (the "U1 A1 U1 A2"
+    #   doubled-context bug). Aborting first stamps `_abort_reason` so the
+    #   freshness guard in _sync_result_to_conversation rejects those late
+    #   writes; building messages afterwards reads a settled DB state.
+    _aborted_count = abort_running_tasks_for_conv(conv_id)
+    if _aborted_count:
+        logger.info('[Chat] conv=%s Auto-aborted %d stale task(s) before new task',
+                    conv_id[:8], _aborted_count)
+
+    cleanup_old_tasks()
+
     # ``excludeLast`` is honored so /api/chat/continue can rebuild messages
     # without the assistant message that is about to be regenerated.
     _exclude_last = bool(config.get('excludeLast', False))
@@ -687,17 +226,6 @@ def _start_task_for_conv(conv_id, config, data=None):
         return None, (jsonify({'error': 'Conversation not found after save'}), 500)
     if not api_messages:
         return None, (jsonify({'error': 'No messages to process'}), 400)
-
-    # ★ CRITICAL: abort any stale running tasks for this conversation BEFORE
-    #   creating the new one. Without this, the old task's background thread
-    #   may still be running (abort is cooperative) and its persist/sync
-    #   writes will overwrite the new task's content in the DB.
-    _aborted_count = abort_running_tasks_for_conv(conv_id)
-    if _aborted_count:
-        logger.info('[Chat] conv=%s Auto-aborted %d stale task(s) before new task',
-                    conv_id[:8], _aborted_count)
-
-    cleanup_old_tasks()
 
     # External backend support
     backend_name = config.get('agentBackend', 'builtin')
@@ -728,14 +256,24 @@ def _start_task_for_conv(conv_id, config, data=None):
         task['config'] = config
 
     if is_endpoint:
+        # ★ Flagged cutover (default OFF): TOFU_ENDPOINT_VIA_FLOW=1 routes
+        #   endpoint mode through the unified FlowExecutor engine instead of
+        #   the live lib/tasks_pkg/endpoint.py. Same task contract + SSE
+        #   schema (via EndpointEventAdapter). The live path stays the
+        #   default until the engine path is validated on real tasks.
+        from lib.orchestration_endpoint_runner import (
+            endpoint_via_flow_enabled, run_endpoint_via_flow,
+        )
         from lib.tasks_pkg.endpoint import run_endpoint_task
+        _endpoint_entry = (run_endpoint_via_flow if endpoint_via_flow_enabled()
+                           else run_endpoint_task)
         task['endpoint_mode'] = True
         task['_endpoint_phase'] = 'planning'
         task['_endpoint_iteration'] = 0
-        logger.info('[Chat] Starting ENDPOINT task %s for conv %s model=%s',
-                    task_id[:8], conv_id[:8], _cfg_model)
+        logger.info('[Chat] Starting ENDPOINT task %s for conv %s model=%s via=%s',
+                    task_id[:8], conv_id[:8], _cfg_model, _endpoint_entry.__name__)
         try:
-            threading.Thread(target=run_endpoint_task, args=(task,), daemon=True).start()
+            threading.Thread(target=_endpoint_entry, args=(task,), daemon=True).start()
         except Exception as _spawn_err:
             logger.exception('[Chat] Failed to start endpoint thread for task %s conv=%s',
                              task_id[:8], conv_id[:8])
@@ -1107,20 +645,32 @@ def chat_regenerate():
         text = user_msg.get('content', '')
         auto_translate = config.get('autoTranslate', False)
         if auto_translate and text:
-            has_chinese = bool(re.search(r'[\u4e00-\u9fff\u3400-\u4dbf]', text))
+            # Translate ANY non-English input to English (English is the
+            # model's strongest language). The actual "is this already
+            # English / what is the source language" decision lives inside
+            # _auto_translate_user (it honours config.translateSourceLang and
+            # falls back to a heuristic only when the source is unknown), so
+            # we don't pre-gate on a Latin-script check here — that would
+            # wrongly skip German/Spanish/etc. which are also Latin-script.
             # If the message already has originalContent and _translateDone, skip re-translation
             # (user didn't edit the text, just regenerating)
             already_translated = (user_msg.get('originalContent')
                                   and user_msg.get('_translateDone')
                                   and edited_content is None)
-            if has_chinese and not already_translated:
-                translated, original, model = _auto_translate_user(text, config, conv_id=conv_id)
+            if not already_translated:
+                translated, original, model, fail_reason = _auto_translate_user(
+                    text, config, conv_id=conv_id)
                 if original:
                     user_msg['content'] = translated
                     user_msg['originalContent'] = original
                     user_msg['_translateDone'] = True
+                    user_msg.pop('_translateFailed', None)
                     if model:
                         user_msg['_translateModel'] = model
+                elif fail_reason:
+                    # Translation attempted but failed/timed out — original text
+                    # was sent. Flag it so the frontend shows a non-silent notice.
+                    user_msg['_translateFailed'] = fail_reason
 
         # 4. Update title if this is the only user message
         user_msgs = [m for m in messages if m.get('role') == 'user']
@@ -1182,150 +732,9 @@ def chat_regenerate():
 
 # ══════════════════════════════════════════════════════════
 #  Continue: checkpoint-based resumption of an assistant turn
+#  (_build_tool_history_round + _scan_continue_checkpoint moved to
+#   lib/chat/turn_builder.py; re-exported at the top of this module)
 # ══════════════════════════════════════════════════════════
-
-def _build_tool_history_round(batch):
-    """Server-side port of ``_buildToolHistoryRound()`` (static/js/main.js).
-
-    Takes a batch of raw ``toolRounds`` entries (all from the same LLM round)
-    and converts them into the ``toolHistory[i]`` shape consumed by
-    ``lib/tasks_pkg/message_builder.inject_tool_history``.
-    """
-    round_out: dict = {
-        'assistantContent': '',
-        'toolCalls': [],
-        'toolResults': [],
-    }
-    for r in batch:
-        if not round_out['assistantContent'] and r.get('assistantContent'):
-            round_out['assistantContent'] = r.get('assistantContent')
-        if not round_out.get('thinking') and r.get('thinking'):
-            round_out['thinking'] = r.get('thinking')
-        if not round_out.get('thinkingSignature') and r.get('thinkingSignature'):
-            round_out['thinkingSignature'] = r.get('thinkingSignature')
-        tc = {
-            'id': r.get('toolCallId'),
-            'name': r.get('toolName'),
-            'arguments': r.get('toolArgs') or '{}',
-        }
-        if r.get('extraContent'):
-            tc['extraContent'] = r.get('extraContent')
-        round_out['toolCalls'].append(tc)
-        round_out['toolResults'].append({
-            'tool_call_id': r.get('toolCallId'),
-            'content': r.get('toolContent') or '',
-        })
-    return round_out
-
-
-def _scan_continue_checkpoint(assistant_msg):
-    """Scan the last assistant message's ``toolRounds`` for the latest recoverable
-    checkpoint.  Mirrors ``continueAssistant()`` (static/js/main.js:2214-2410).
-
-    Returns:
-        dict with keys:
-          kept_rounds (list), discarded_rounds (int),
-          tool_history (list), preserved_content (str),
-          preserved_thinking_chars (int),
-          discarded_content (int), discarded_thinking (int),
-          original_content_len (int), original_thinking_len (int)
-        OR ``None`` if no recoverable checkpoint (caller falls back to
-        full regeneration / pop-and-resend).
-    """
-    all_rounds = assistant_msg.get('toolRounds') or []
-    if not all_rounds:
-        return None
-    has_tool_call_ids = any(r.get('toolCallId') for r in all_rounds)
-    if not has_tool_call_ids:
-        return None
-
-    has_llm_round = any(r.get('llmRound') is not None for r in all_rounds)
-    batches: dict = {}
-    batch_key = 0
-    last_complete_idx = -1
-
-    for i, r in enumerate(all_rounds):
-        if not r.get('toolCallId'):
-            continue
-        if r.get('status') != 'done':
-            break
-        # Attempt to reconstruct toolContent from results metadata if missing
-        # (parity with the JS scan — happens after DB round-trip when backend
-        # checkpoint was written before toolContent was available).
-        if r.get('toolContent') is None:
-            results = r.get('results') or []
-            reconstructed = ''
-            if results:
-                parts = []
-                for res in results:
-                    if not isinstance(res, dict):
-                        continue
-                    parts.append(res.get('snippet') or res.get('title') or res.get('content') or '')
-                reconstructed = '\n'.join(p for p in parts if p)
-            if not reconstructed:
-                break
-            r['toolContent'] = reconstructed or '[tool result not available]'
-        if has_llm_round:
-            batch_key = r.get('llmRound')
-        else:
-            prev = all_rounds[i - 1] if i > 0 else None
-            if prev and prev.get('toolCallId') and r.get('roundNum', 0) > prev.get('roundNum', -999) + 1:
-                batch_key += 1
-        batches.setdefault(batch_key, []).append(r)
-        last_complete_idx = i
-
-    if last_complete_idx < 0:
-        return None
-
-    tool_history = [_build_tool_history_round(batch) for batch in batches.values()]
-    kept_rounds = all_rounds[:last_complete_idx + 1]
-    discarded_rounds = len(all_rounds) - len(kept_rounds)
-
-    preserved_content_parts = [r.get('assistantContent') or '' for r in kept_rounds]
-    preserved_content = '\n\n'.join(p for p in preserved_content_parts if p)
-    original_content = assistant_msg.get('content') or ''
-    # Fallback: if assistantContent was never populated on rounds (legacy DB rows),
-    # reuse the full prior content so the visible text is preserved.
-    if not preserved_content and kept_rounds and original_content:
-        preserved_content = original_content
-    discarded_content = max(0, len(original_content) - len(preserved_content))
-    # The prose tail dropped on rollback — surfaced to the UI as a display-only
-    # "Earlier Response" block (priorContent), mirroring discarded_thinking_text.
-    # Cannot be replayed on the wire (the model regenerates from the tool-result
-    # checkpoint), so it is stripped by _strip_non_api_fields before any LLM call.
-    if discarded_content > 0:
-        discarded_content_text = (
-            original_content[len(preserved_content):].lstrip('\n')
-            if original_content.startswith(preserved_content)
-            else original_content
-        )
-    else:
-        discarded_content_text = ''
-
-    preserved_thinking_chars = sum(len(r.get('thinking') or '') for r in kept_rounds)
-    original_thinking = assistant_msg.get('thinking') or ''
-    discarded_thinking = max(0, len(original_thinking) - preserved_thinking_chars)
-    # Capture the message-level thinking text whenever it is not fully covered
-    # by per-round thinking — this is the trailing reasoning the model emitted
-    # after the last completed tool batch.  We can never replay it on the wire
-    # (Anthropic rejects orphan thinking blocks; OpenAI-compat strips reasoning
-    # server-side), but it is still useful to surface to the user as a
-    # display-only "earlier thinking" block on the rolled-back turn.
-    discarded_thinking_text = original_thinking if discarded_thinking > 0 else ''
-
-    return {
-        'kept_rounds': kept_rounds,
-        'discarded_rounds': discarded_rounds,
-        'tool_history': tool_history,
-        'preserved_content': preserved_content,
-        'preserved_thinking_chars': preserved_thinking_chars,
-        'discarded_content': discarded_content,
-        'discarded_content_text': discarded_content_text,
-        'discarded_thinking': discarded_thinking,
-        'discarded_thinking_text': discarded_thinking_text,
-        'original_content_len': len(original_content),
-        'original_thinking_len': len(original_thinking),
-    }
 
 
 @api_v1_chat_bp.route('/api/v1/chat/continue', methods=['POST'], endpoint='ui_chat_continue')
@@ -1526,187 +935,16 @@ def chat_continue():
 
 
 def _start_external_backend(data, messages, backend_name):
-    """Start a task using an external CLI agent backend (Claude Code, Codex, etc.).
+    """Thin HTTP wrapper over ``lib.chat.external_backend.run_external_backend``.
 
-    Validates backend availability/auth, creates a task, then spawns a thread
-    that calls ``backend.start_turn()`` and pipes NormalizedEvents through
-    ``normalized_to_sse()`` into ``append_event()``.
-
-    The existing SSE streaming (``chat_stream``) and polling (``chat_poll``)
-    work unchanged — they read from the same ``task['events']`` queue.
+    The engine (validation + SSE-bridge worker thread) lives in lib and
+    returns a plain result dict; here we map it to a Flask response.
     """
-    from lib.agent_backends import get_backend
-    from lib.agent_backends.sse_bridge import SSEBridgeState
-    from lib.tasks_pkg.manager import append_event, persist_task_result
-
-    backend = get_backend(backend_name)
-    if backend is None:
-        return api_bad_request(f'Unknown backend: {backend_name}')
-    if not backend.is_available():
-        return jsonify({
-            'error': f'{backend.display_name} CLI is not installed. '
-                     f'Install it first, then try again.',
-        }), 400
-    if not backend.is_authenticated():
-        return jsonify({
-            'error': f'{backend.display_name} is not authenticated. '
-                     f'Run the CLI and log in first.',
-        }), 401
-
-    task = create_task(data.get('convId', ''), messages, data.get('config', {}))
-    task['_backend'] = backend_name
-
-    # Extract the last user message text
-    user_message = ''
-    for m in reversed(messages):
-        if m.get('role') == 'user':
-            content = m.get('content', '')
-            if isinstance(content, list):
-                content = ' '.join(
-                    b.get('text', '') for b in content
-                    if isinstance(b, dict) and b.get('type') == 'text'
-                )
-            user_message = content or ''
-            break
-
-    project_path = data.get('config', {}).get('projectPath')
-    conv_id = data.get('convId', '')
-    session_id = backend.get_session_id(conv_id) if conv_id else None
-
-    logger.info('[Chat] Starting EXTERNAL task %s for conv %s backend=%s project=%s session=%s',
-                task['id'], conv_id, backend_name,
-                project_path or 'none', session_id[:16] if session_id else 'none')
-
-    def _run_external():
-        bridge = SSEBridgeState()
-
-        try:
-            accumulated_content = ''
-            accumulated_thinking = ''
-
-            for event in backend.start_turn(
-                task, user_message,
-                project_path=project_path,
-                session_id=session_id,
-            ):
-                # Accumulate text for persistence
-                if event.kind == 'text_delta':
-                    accumulated_content += event.text
-                    with task.get('content_lock', threading.Lock()):
-                        task['content'] = accumulated_content
-                elif event.kind == 'thinking_delta':
-                    accumulated_thinking += event.text
-                    task['thinking'] = accumulated_thinking
-
-                # ── Track toolRounds on the task dict for persistence ──
-                if event.kind == 'tool_start':
-                    # Translate first so bridge assigns roundNum
-                    sse_event = bridge.translate(event)
-                    if sse_event:
-                        # Build search round entry (mirrors tool_display.py)
-                        rn = sse_event.get('roundNum', 0)
-                        round_entry = {
-                            'roundNum': rn,
-                            'query': sse_event.get('query', ''),
-                            'results': None,
-                            'status': 'searching',
-                            'toolName': sse_event.get('toolName', event.tool_name or 'tool'),
-                            'toolCallId': sse_event.get('toolCallId', event.tool_id or ''),
-                            'toolArgs': sse_event.get('toolArgs', ''),
-                        }
-                        task['toolRounds'].append(round_entry)
-                        append_event(task, sse_event)
-                    continue
-
-                if event.kind == 'tool_complete':
-                    sse_event = bridge.translate(event)
-                    if sse_event:
-                        # Update the matching search round
-                        rn = sse_event.get('roundNum', 0)
-                        for sr in task.get('toolRounds', []):
-                            if sr.get('roundNum') == rn:
-                                sr['results'] = sse_event.get('results', [])
-                                sr['status'] = 'done'
-                                if sse_event.get('engineBreakdown'):
-                                    sr['engineBreakdown'] = sse_event['engineBreakdown']
-                                break
-                        append_event(task, sse_event)
-                    continue
-
-                # Translate all other events normally
-                sse_event = bridge.translate(event)
-                if sse_event:
-                    append_event(task, sse_event)
-
-                # Store session ID from done event
-                if event.session_id:
-                    task['_external_session_id'] = event.session_id
-
-                # Store usage from done event
-                if event.kind == 'done' and event.usage:
-                    task['usage'] = event.usage
-                if event.kind == 'done' and event.finish_reason:
-                    task['finishReason'] = event.finish_reason
-
-            task['status'] = 'done'
-            task['model'] = backend_name  # Show backend name as "model"
-
-            # Ensure done event was emitted
-            has_done = any(
-                e.get('type') == 'done'
-                for e in task.get('events', [])
-            )
-            if not has_done:
-                done_evt = {'type': 'done', 'finishReason': task.get('finishReason', 'stop')}
-                if task.get('usage'):
-                    done_evt['usage'] = task['usage']
-                append_event(task, done_evt)
-
-            # Persist to DB
-            try:
-                persist_task_result(task)
-            except Exception as e:
-                logger.warning('[Chat] Failed to persist external task result: %s', e)
-
-            logger.info('[Chat] External task %s completed — backend=%s content=%dchars toolRounds=%d',
-                        task['id'][:8], backend_name, len(accumulated_content),
-                        len(task.get('toolRounds', [])))
-
-        except Exception as e:
-            logger.error('[Chat] External task %s failed: %s',
-                         task['id'][:8], e, exc_info=True)
-            from lib.error_envelope import from_exception as _err_from_exc
-            envelope = _err_from_exc(
-                e, model=data.get('config', {}).get('model', ''),
-                context=f'external-backend:{backend_name}',
-                source='routes.chat',
-            )
-            task['error'] = envelope
-            task['status'] = 'done'
-            append_event(task, {'type': 'done', 'error': envelope, 'finishReason': 'error'})
-            try:
-                persist_task_result(task)
-            except Exception as e:
-                logger.warning('[Chat] persist_task_result failed for task %s: %s', task['id'][:8], e)
-
-    try:
-        threading.Thread(target=_run_external, daemon=True).start()
-    except Exception as _spawn_err:
-        logger.exception('[Chat] Failed to start external backend thread for task %s',
-                         task['id'])
-        from lib.error_envelope import make_envelope as _make_env
-        task['status'] = 'error'
-        task['error'] = _make_env(
-            'internal',
-            detail='Server failed to start backend thread.',
-            model=data.get('config', {}).get('model', ''),
-            context=f'external-backend:{backend_name}',
-            source='routes.chat',
-            raw=str(_spawn_err),
-        )
-        return api_internal_error('Failed to start task')
-
-    return jsonify({'taskId': task['id']})
+    from lib.chat.external_backend import run_external_backend
+    result = run_external_backend(data, messages, backend_name)
+    if 'error' in result:
+        return jsonify({'error': result['error']}), result.get('status', 400)
+    return jsonify(result)
 
 
 @chat_bp.route('/api/chat/stream/<task_id>', methods=['GET'])
@@ -1756,7 +994,7 @@ async def chat_stream(task_id):
                         try:
                             db_local = get_db(DOMAIN_CHAT)
                             row_local = db_local.execute(
-                                'SELECT content,thinking,error,status,tool_rounds,metadata '
+                                'SELECT conv_id,content,thinking,error,status,tool_rounds,metadata '
                                 'FROM task_results WHERE task_id=?',
                                 (task_id,)
                             ).fetchone()
@@ -1772,6 +1010,11 @@ async def chat_stream(task_id):
                                         state_local['toolRounds'] = json.loads(row_local['tool_rounds'])
                                     except (json.JSONDecodeError, TypeError) as _e:
                                         logger.debug('[Chat] cold-replay tool_rounds parse failed: %s', _e)
+                                else:
+                                    from lib.tasks_pkg import load_tool_rounds_from_conversation
+                                    _tr = load_tool_rounds_from_conversation(row_local['conv_id'])
+                                    if _tr:
+                                        state_local['toolRounds'] = _tr
                                 if row_local['error']:
                                     from lib.error_envelope import from_json as _err_from_json
                                     state_local['error'] = _err_from_json(row_local['error'])
@@ -1787,7 +1030,8 @@ async def chat_stream(task_id):
                                         for k in ('finishReason', 'usage', 'preset', 'toolSummary',
                                                   'model', 'provider_id', 'thinkingDepth',
                                                   'apiRounds', 'modifiedFiles', 'modifiedFileList',
-                                                  'fallbackModel', 'fallbackFrom'):
+                                                  'fallbackModel', 'fallbackFrom',
+                                                  'fallbackReason', 'fallbackKind'):
                                             if m.get(k):
                                                 done_evt_local[k] = m[k]
                                     except (json.JSONDecodeError, TypeError) as _e_audit:
@@ -1810,7 +1054,7 @@ async def chat_stream(task_id):
         db = get_db(DOMAIN_CHAT)
         row = await asyncio.to_thread(
             lambda: db.execute(
-                'SELECT content,thinking,error,status,tool_rounds,metadata FROM task_results WHERE task_id=?',
+                'SELECT conv_id,content,thinking,error,status,tool_rounds,metadata FROM task_results WHERE task_id=?',
                 (task_id,)
             ).fetchone())
         if row:
@@ -1826,6 +1070,11 @@ async def chat_stream(task_id):
                     state['toolRounds'] = json.loads(row['tool_rounds'])
                 except (json.JSONDecodeError, TypeError) as e:
                     logger.warning('[Chat] Failed to parse tool_rounds for task %s: %s', task_id, e, exc_info=True)
+            else:
+                from lib.tasks_pkg import load_tool_rounds_from_conversation
+                _tr = await asyncio.to_thread(load_tool_rounds_from_conversation, row['conv_id'])
+                if _tr:
+                    state['toolRounds'] = _tr
             meta = _extract_db_meta(row)
             # Field lists MUST stay aligned with _extract_task_meta and
             # the chat_poll DB-path loop. See _extract_task_meta docstring.
@@ -1843,6 +1092,10 @@ async def chat_stream(task_id):
             if meta.get('fallbackModel'):
                 done_evt['fallbackModel'] = meta['fallbackModel']
                 done_evt['fallbackFrom'] = meta.get('fallbackFrom', '')
+                if meta.get('fallbackReason'):
+                    done_evt['fallbackReason'] = meta['fallbackReason']
+                if meta.get('fallbackKind'):
+                    done_evt['fallbackKind'] = meta['fallbackKind']
             if row['error']:
                 from lib.error_envelope import from_json as _err_from_json
                 done_evt['error'] = _err_from_json(row['error'])
@@ -1889,6 +1142,21 @@ async def chat_stream(task_id):
 
     _stream_start = time.time()
     _events_sent = 0
+    def _task_terminal():
+        """True iff the task is finished AND not mid-autopilot-decision.
+
+        ``task['status']`` flips to 'done' (orchestrator _run_loop tail)
+        BEFORE the autopilot end-of-turn hook runs its multi-second VU LLM
+        call; the baton-carrying ``done`` event is only appended AFTER.
+        Synthesizing a late ``done`` during that window closes the SSE
+        stream without the ``autopilotNextTaskId``/``autopilotVuMessage``
+        handoff, stranding the already-spawned follow-up — the conv goes
+        idle (sidebar dot off, pause→send, translation fires) until a
+        manual refresh.  Treat the decision window as still-running so the
+        loop keeps the stream open until the real done event arrives.
+        """
+        return task['status'] != 'running' and not task.get('_autopilot_deciding')
+
     async def generate():
         nonlocal _events_sent
         for _ in range(4):
@@ -1918,7 +1186,7 @@ async def chat_stream(task_id):
                     return
             # Advance cursor past replayed events for live streaming loop
             cursor = resume_from + len(missed_evts)
-            if task['status'] != 'running' and not missed_evts:
+            if _task_terminal() and not missed_evts:
                 late_done = {'type': 'done'}
                 late_meta = _extract_task_meta(task)
                 late_done.update(late_meta)
@@ -1969,7 +1237,7 @@ async def chat_stream(task_id):
             #   _lastEventId will be null → fresh connection with full state.
             yield f'data: {json.dumps(state, ensure_ascii=False)}\n\n'
 
-            if task['status'] != 'running':
+            if _task_terminal():
                 done_evt = {'type': 'done'}
                 done_evt.update(meta)
                 if task['error']:
@@ -2019,7 +1287,7 @@ async def chat_stream(task_id):
                                task_id[:8], _events_sent, time.time() - _stream_start,
                                _done_fr, _done_err_summary)
                     return
-            if task['status'] != 'running' and not new_evts:
+            if _task_terminal() and not new_evts:
                 late_done = {'type': 'done'}
                 late_meta = _extract_task_meta(task)
                 late_done.update(late_meta)
@@ -2232,15 +1500,23 @@ def chat_poll(task_id):
             logger.warning('[Chat] Poll %s ⚠️ RETURNING EMPTY RESULT — task is done but has no content or thinking! '
                           'finishReason=%s model=%s',
                           task_id[:8], finish_reason, model)
+        # ★ While the autopilot end-of-turn hook is deciding (running the
+        #   multi-second VU LLM call), the task is already status='done' but
+        #   the follow-up baton isn't stamped yet.  Report 'running' so a poll
+        #   in this window doesn't finalize the stream without the handoff.
+        _reported_status = task['status']
+        if task.get('_autopilot_deciding') and _reported_status == 'done':
+            _reported_status = 'running'
         r = {
-            'id': task['id'], 'status': task['status'],
+            'id': task['id'], 'status': _reported_status,
             'content': task['content'], 'thinking': task['thinking'],
         }
         # Field list MUST mirror chat_poll's DB-path loop and
         # _extract_task_meta. See _extract_task_meta docstring.
         for key in ('error', 'toolRounds', 'finishReason', 'usage', 'preset',
                      'toolSummary', 'phase', 'modifiedFiles', 'modifiedFileList',
-                     'model', 'provider_id', 'thinkingDepth', 'apiRounds'):
+                     'model', 'provider_id', 'thinkingDepth', 'apiRounds',
+                     'compactionUsage'):
             if task.get(key):
                 r[key] = task[key]
         if task.get('id'):
@@ -2249,9 +1525,20 @@ def chat_poll(task_id):
             r['fallbackModel'] = task['_fallback_model']
         if task.get('_fallback_from'):
             r['fallbackFrom'] = task['_fallback_from']
+        if task.get('_fallback_reason'):
+            r['fallbackReason'] = task['_fallback_reason']
+        if task.get('_fallback_kind'):
+            r['fallbackKind'] = task['_fallback_kind']
         # ★ Memory prefetch indicator (persists through poll fallback + reload)
         if task.get('_memoryPrefetch'):
             r['memoryPrefetch'] = task['_memoryPrefetch']
+        # ★ Autopilot follow-up baton — mirror the SSE done event so a client
+        #   on the poll fallback path attaches to the spawned follow-up task
+        #   instead of stranding it (see lib/tasks_pkg/orchestrator.py).
+        _ap_followup = task.get('_autopilot_followup')
+        if _ap_followup:
+            r['autopilotNextTaskId'] = _ap_followup['next_task_id']
+            r['autopilotVuMessage'] = _ap_followup['vu_msg']
         # ★ Include endpoint turns for endpoint mode tasks so _pollFallback
         #   can reconstruct the full multi-turn conversation
         if task.get('endpoint_mode') and task.get('_endpoint_turns'):
@@ -2262,7 +1549,7 @@ def chat_poll(task_id):
     logger.debug('[Chat] Poll %s — not in memory, checking DB', task_id[:8])
     db = get_db(DOMAIN_CHAT)
     row = db.execute(
-        'SELECT task_id,content,thinking,error,status,tool_rounds,metadata FROM task_results WHERE task_id=?',
+        'SELECT task_id,conv_id,content,thinking,error,status,tool_rounds,metadata FROM task_results WHERE task_id=?',
         (task_id,)
     ).fetchone()
     if row:
@@ -2303,6 +1590,11 @@ def chat_poll(task_id):
                 r['toolRounds'] = json.loads(row['tool_rounds'])
             except (json.JSONDecodeError, TypeError) as e:
                 logger.warning('[Chat] Failed to parse tool_rounds in poll for task %s: %s', task_id, e, exc_info=True)
+        else:
+            from lib.tasks_pkg import load_tool_rounds_from_conversation
+            _tr = load_tool_rounds_from_conversation(row['conv_id'])
+            if _tr:
+                r['toolRounds'] = _tr
         # Field list MUST mirror chat_poll's in-memory loop and
         # _extract_task_meta. provider_id was previously dropped here
         # even though persist_task_result writes it into meta_json,
@@ -2315,6 +1607,10 @@ def chat_poll(task_id):
         if _db_meta.get('fallbackModel'):
             r['fallbackModel'] = _db_meta['fallbackModel']
             r['fallbackFrom'] = _db_meta.get('fallbackFrom', '')
+            if _db_meta.get('fallbackReason'):
+                r['fallbackReason'] = _db_meta['fallbackReason']
+            if _db_meta.get('fallbackKind'):
+                r['fallbackKind'] = _db_meta['fallbackKind']
         return jsonify(r)
 
     logger.warning('[Chat] Poll %s — NOT FOUND in memory or DB! Task may have been cleaned up. '

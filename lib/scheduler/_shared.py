@@ -135,7 +135,7 @@ def inject_and_run_task(
         messages.append(assistant_msg)
 
         # 4. Write messages back to DB ───────────────────────────────
-        from routes.conversations import build_search_text
+        from lib.conversations import build_search_text
 
         messages_json = json_dumps_pg(messages)
         search_text = build_search_text(messages)
@@ -147,17 +147,8 @@ def inject_and_run_task(
             (messages_json, now_ms, len(messages),
              search_text, conv_id)
         )
-        # Update FTS5 index
-        if search_text:
-            try:
-                db.execute(
-                    "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
-                    "SELECT rowid, ? FROM conversations WHERE id = ?",
-                    (search_text, conv_id)
-                )
-                db.commit()
-            except Exception as _fts_err:
-                logger.debug('[Scheduler] FTS update failed (non-fatal): %s', _fts_err)
+        from lib.conversations import update_conversation_fts
+        update_conversation_fts(db, conv_id, search_text)
 
         # 5. Build config ────────────────────────────────────────────
         if isinstance(tools_config_json, str):

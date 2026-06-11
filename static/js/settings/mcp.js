@@ -18,6 +18,8 @@ var _mcpActiveCategory = 'all';
 var _mcpSearchQuery = '';
 var _mcpInstallTarget = null;  // CatalogEntry being installed
 var _mcpInstallIsReinstall = false;  // true = editing existing (stored env will be honoured)
+var _mcpBreakerRefreshTimer = null;  // single-shot re-fetch while a breaker is counting down
+var _mcpBreakerTickTimer = null;     // 1s interval that ticks the live "retry in N" countdowns
 
 /**
  * Load MCP tab data — fetch catalog with install/connect status.
@@ -91,6 +93,36 @@ function _mcpFilteredCatalog() {
   });
 }
 
+/**
+ * Format a number of seconds-until-retry into a short human label.
+ * `secs <= 0` → "retrying…"; under a minute → "retry in Ns"; else
+ * "retry in N min" (rounded up).
+ */
+function _mcpRetryLabel(secs) {
+  secs = Math.max(0, Math.round(secs || 0));
+  if (secs <= 0) return t('mcp.retryNow');
+  if (secs < 60) return t('mcp.retryInSec').replace('{n}', secs);
+  return t('mcp.retryInMin').replace('{n}', Math.ceil(secs / 60));
+}
+
+/**
+ * Build the inner HTML for a live countdown span. The span carries the
+ * absolute retry deadline (epoch ms) in ``data-retry-at`` so a 1s ticker
+ * (`_mcpTickBreakers`) can recompute the remaining time and update the
+ * text in place — no full grid re-render. Returns '' for no breaker.
+ *
+ * `breaker` shape (from the backend): {failures, retry_in, next_retry_ts}.
+ * We derive the deadline from `retry_in` relative to *now* rather than
+ * trusting `next_retry_ts` (server/client clocks may differ).
+ */
+function _mcpBreakerCountdownSpan(breaker) {
+  if (!breaker) return '';
+  var secs = Math.max(0, breaker.retry_in || 0);
+  var deadline = Date.now() + secs * 1000;
+  return '<span class="mcp-breaker-countdown" data-retry-at="' + deadline + '">' +
+    escapeHtml(_mcpRetryLabel(secs)) + '</span>';
+}
+
 /** Render the main catalog grid. */
 function _renderMcpCatalog() {
   var grid = document.getElementById('mcpCatalogGrid');
@@ -111,12 +143,24 @@ function _renderMcpCatalog() {
   items.forEach(function(e) {
     var installed = e.installed;
     var connected = e.connected;
-    var stateClass = connected ? ' connected' : installed ? ' installed' : '';
+    // A breaker is "active" only when the server is installed but not
+    // currently connected and its automatic reconnect is failing.
+    var breaker = (!connected && installed) ? e.breaker : null;
+    var stateClass = connected ? ' connected'
+      : breaker ? ' installed reconnecting'
+      : installed ? ' installed' : '';
     html += '<div class="mcp-app-card' + stateClass + '">';
     html += '<div class="mcp-app-icon">' + (e.icon || '🔌') + '</div>';
     html += '<div class="mcp-app-name"><span class="mcp-app-name-text">' + escapeHtml(e.name) + '</span>';
-    if (connected) html += '<span class="mcp-app-status on"><span class="dot"></span>ON</span>';
-    else if (installed) html += '<span class="mcp-app-status off">IDLE</span>';
+    if (connected) {
+      html += '<span class="mcp-app-status on"><span class="dot"></span>ON</span>';
+    } else if (breaker) {
+      html += '<span class="mcp-app-status reconnecting" title="' +
+        escapeHtml(t('mcp.reconnecting') + ' · ' + t('mcp.retryFailCount').replace('{n}', breaker.failures || 0)) +
+        '">⟳ ' + _mcpBreakerCountdownSpan(breaker) + '</span>';
+    } else if (installed) {
+      html += '<span class="mcp-app-status off">IDLE</span>';
+    }
     html += '</div>';
     html += '<div class="mcp-app-desc">' + escapeHtml(e.description || '') + '</div>';
     // Footer: repo link (left) + tools count / action buttons (right)
@@ -136,6 +180,11 @@ function _renderMcpCatalog() {
       }
       html += '<button class="btn btn-secondary btn-xs" onclick="_mcpUninstall(\'' + escapeHtml(e.id) + '\')" title="断开连接，但保留已填写的凭据，方便下次一键重新启用">卸载</button>';
     } else if (installed) {
+      if (breaker) {
+        html += '<span class="mcp-app-reconnecting-note" title="' +
+          escapeHtml(t('mcp.reconnecting')) + '">⟳ ' +
+          _mcpBreakerCountdownSpan(breaker) + '</span>';
+      }
       html += '<button class="btn btn-primary btn-xs" onclick="_mcpOpenInstallModal(\'' + escapeHtml(e.id) + '\', true)" title="编辑凭据并重新连接（已有凭据会回填为默认；留空则沿用）">连接</button>';
       html += '<button class="btn btn-secondary btn-xs" onclick="_mcpPurge(\'' + escapeHtml(e.id) + '\')" title="彻底删除配置，包括已保存的凭据">清除凭据</button>';
     } else {
@@ -156,6 +205,85 @@ function _renderMcpCatalog() {
     html += '</div>';  // card
   });
   grid.innerHTML = html;
+  _mcpScheduleBreakerRefresh();
+}
+
+/**
+ * While any installed-but-disconnected server has an active circuit
+ * breaker, schedule a single re-fetch so the "retry in N" countdown stays
+ * fresh and the card flips to ON automatically once auto-reconnect
+ * succeeds. Self-cancelling: re-poll cadence is capped at 15s and the
+ * timer stops as soon as no breaker remains or the grid leaves the DOM
+ * (settings panel closed / tab switched).
+ */
+function _mcpScheduleBreakerRefresh() {
+  if (_mcpBreakerRefreshTimer) {
+    clearTimeout(_mcpBreakerRefreshTimer);
+    _mcpBreakerRefreshTimer = null;
+  }
+  var active = _mcpCatalog.filter(function(e) {
+    return e.installed && !e.connected && e.breaker;
+  });
+  if (active.length === 0) { _mcpStopBreakerTick(); return; }
+
+  // Re-poll a bit after the soonest retry is due (so the next fetch sees
+  // the post-attempt state), clamped to [3s, 15s] to avoid hammering.
+  var soonest = Math.min.apply(null, active.map(function(e) {
+    return Math.max(0, e.breaker.retry_in || 0);
+  }));
+  var delayMs = Math.min(15000, Math.max(3000, (soonest + 1) * 1000));
+
+  _mcpBreakerRefreshTimer = setTimeout(function() {
+    _mcpBreakerRefreshTimer = null;
+    var grid = document.getElementById('mcpCatalogGrid');
+    // Bail if the MCP tab is no longer visible — no point polling a
+    // detached / hidden grid.
+    if (!grid || !grid.isConnected || grid.offsetParent === null) return;
+    _populateMcpTab();
+  }, delayMs);
+
+  // Start the per-second countdown ticker so the "retry in N" text
+  // decrements smoothly between server re-polls (a frozen number looks
+  // broken). The ticker only touches the small countdown spans, never
+  // re-renders the grid.
+  _mcpStartBreakerTick();
+}
+
+/**
+ * Update every live breaker-countdown span from its ``data-retry-at``
+ * deadline. Runs once per second. Self-stops when no spans remain or the
+ * grid is no longer visible (settings closed / tab switched), so it never
+ * leaks a timer.
+ */
+function _mcpTickBreakers() {
+  var grid = document.getElementById('mcpCatalogGrid');
+  if (!grid || !grid.isConnected || grid.offsetParent === null) {
+    _mcpStopBreakerTick();
+    return;
+  }
+  var spans = grid.querySelectorAll('.mcp-breaker-countdown');
+  if (spans.length === 0) {
+    _mcpStopBreakerTick();
+    return;
+  }
+  var now = Date.now();
+  for (var i = 0; i < spans.length; i++) {
+    var deadline = parseInt(spans[i].getAttribute('data-retry-at'), 10) || 0;
+    var label = _mcpRetryLabel((deadline - now) / 1000);
+    if (spans[i].textContent !== label) spans[i].textContent = label;
+  }
+}
+
+function _mcpStartBreakerTick() {
+  if (_mcpBreakerTickTimer) return;  // already ticking
+  _mcpBreakerTickTimer = setInterval(_mcpTickBreakers, 1000);
+}
+
+function _mcpStopBreakerTick() {
+  if (_mcpBreakerTickTimer) {
+    clearInterval(_mcpBreakerTickTimer);
+    _mcpBreakerTickTimer = null;
+  }
 }
 
 /** Update "installed" badge and "connect all" button in the header. */
@@ -197,6 +325,23 @@ function _renderMcpInstalled() {
  * surfaced via the grid's own connect/disconnect animation and the
  * app-level debugLog, same as the "Connect All" button.
  */
+/**
+ * Extract a human-readable failure reason from an error thrown by the
+ * Api layer. catalogInstall now lets HTTP 500s throw an ApiError whose
+ * `.body` carries the backend's rich `{error, stderr_tail}` payload —
+ * we prefer that over the generic "HTTP 500 on ..." message so the user
+ * sees the actual connection failure (e.g. a launcher traceback tail).
+ */
+function _mcpErrDetail(e) {
+  var body = e && e.body;
+  if (body && typeof body === 'object') {
+    var msg = body.error || e.message || '未知错误';
+    if (body.stderr_tail) msg += '\n\n服务器输出:\n' + body.stderr_tail;
+    return msg;
+  }
+  return (e && e.message) || '未知错误（无法连接到服务器）';
+}
+
 async function _mcpQuickInstall(serverId) {
   var entry = _mcpCatalog.find(function(e) { return e.id === serverId; });
   if (!entry) return;
@@ -210,13 +355,15 @@ async function _mcpQuickInstall(serverId) {
       // Installation failed — fall back to opening the modal so the user
       // can inspect the default values and/or override them. This is the
       // safety net for "hope binary not on PATH" kinds of errors.
-      debugLog('[MCP] Quick install failed (' + (data.error || 'unknown') + '); opening install modal for ' + serverId, 'warning');
-      alert('一键安装失败: ' + (data.error || '未知错误') + '\n\n将打开高级设置，可手动调整参数后重试。');
+      var _err = (data && data.error) || '未知错误（无法连接到服务器）';
+      debugLog('[MCP] Quick install failed (' + _err + '); opening install modal for ' + serverId, 'warning');
+      showAlert('一键安装失败: ' + _err + '\n\n将打开高级设置，可手动调整参数后重试。');
       _mcpOpenInstallModal(serverId);
     }
   } catch (e) {
-    debugLog('[MCP] Quick install error for ' + serverId + ': ' + e.message, 'error');
-    alert('一键安装失败: ' + e.message + '\n\n将打开高级设置，可手动调整参数后重试。');
+    var _detail = _mcpErrDetail(e);
+    debugLog('[MCP] Quick install error for ' + serverId + ': ' + _detail, 'error');
+    showAlert('一键安装失败: ' + _detail + '\n\n将打开高级设置，可手动调整参数后重试。');
     _mcpOpenInstallModal(serverId);
   }
 }
@@ -337,13 +484,13 @@ async function _mcpDoInstall() {
       }, 1200);
     } else {
       status.className = 'mcp-install-status error';
-      status.textContent = '✕ ' + (data.error || '安装失败');
+      status.textContent = '✕ ' + ((data && data.error) || '安装失败（无法连接到服务器）');
       btn.disabled = false;
       btn.textContent = '重试';
     }
   } catch (e) {
     status.className = 'mcp-install-status error';
-    status.textContent = '✕ ' + e.message;
+    status.textContent = '✕ ' + _mcpErrDetail(e);
     btn.disabled = false;
     btn.textContent = '重试';
   }
@@ -355,15 +502,15 @@ async function _mcpDoInstall() {
 async function _mcpUninstall(serverId) {
   var entry = _mcpCatalog.find(function(e) { return e.id === serverId; });
   var name = entry ? entry.name : serverId;
-  if (!confirm('卸载 ' + name + '？\n\n将断开连接并禁用，但会保留已填写的凭据；下次点击“连接”可一键重新启用，无需再填一遍。\n\n如需彻底清除凭据，请先卸载，再在空闲卡片上点“清除凭据”。')) return;
+  if (!await showConfirm('卸载 ' + name + '？\n\n将断开连接并禁用，但会保留已填写的凭据；下次点击“连接”可一键重新启用，无需再填一遍。\n\n如需彻底清除凭据，请先卸载，再在空闲卡片上点“清除凭据”。')) return;
 
   try {
     var data = await Api.mcp.catalogUninstall(serverId, false);
-    if (!data || !data.ok) { alert('卸载失败: ' + ((data && data.error) || '未知错误')); return; }
+    if (!data || !data.ok) { showAlert('卸载失败: ' + ((data && data.error) || '未知错误')); return; }
     debugLog('[MCP] Uninstalled ' + serverId + (data.purged ? ' (purged)' : ' (soft, env kept)'), 'info');
     await _populateMcpTab();
   } catch (e) {
-    alert('卸载失败: ' + e.message);
+    showAlert('卸载失败: ' + e.message);
   }
 }
 
@@ -371,15 +518,15 @@ async function _mcpUninstall(serverId) {
 async function _mcpPurge(serverId) {
   var entry = _mcpCatalog.find(function(e) { return e.id === serverId; });
   var name = entry ? entry.name : serverId;
-  if (!confirm('清除 ' + name + ' 的全部配置和已保存的凭据？\n\n此操作不可恢复，重新启用时需要再次填写所有凭据。')) return;
+  if (!await showConfirm('清除 ' + name + ' 的全部配置和已保存的凭据？\n\n此操作不可恢复，重新启用时需要再次填写所有凭据。', { danger: true })) return;
 
   try {
     var data = await Api.mcp.catalogUninstall(serverId, true);
-    if (!data || !data.ok) { alert('清除失败: ' + ((data && data.error) || '未知错误')); return; }
+    if (!data || !data.ok) { showAlert('清除失败: ' + ((data && data.error) || '未知错误')); return; }
     debugLog('[MCP] Purged ' + serverId, 'info');
     await _populateMcpTab();
   } catch (e) {
-    alert('清除失败: ' + e.message);
+    showAlert('清除失败: ' + e.message);
   }
 }
 
@@ -388,13 +535,13 @@ async function _mcpConnectAll() {
   if (btn) { btn.disabled = true; btn.textContent = '连接中…'; }
   try {
     var data = await Api.mcp.connectAll();
-    if (!data || !data.ok) { alert('连接失败: ' + ((data && data.error) || '未知错误')); return; }
+    if (!data || !data.ok) { showAlert('连接失败: ' + ((data && data.error) || '未知错误')); return; }
     var total = data.total_tools || 0;
     var count = Object.keys(data.servers || {}).length;
     debugLog('[MCP] Connected all: ' + count + ' server(s), ' + total + ' tools', 'success');
     await _populateMcpTab();
   } catch (e) {
-    alert('连接失败: ' + e.message);
+    showAlert('连接失败: ' + e.message);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '全部连接'; }
   }
@@ -403,11 +550,11 @@ async function _mcpConnectAll() {
 async function _mcpReconnect(serverId) {
   try {
     var data = await Api.mcp.connectOne(serverId);
-    if (!data || !data.ok) { alert('连接失败: ' + ((data && data.error) || '未知错误')); return; }
+    if (!data || !data.ok) { showAlert('连接失败: ' + ((data && data.error) || '未知错误')); return; }
     debugLog('[MCP] Reconnected ' + serverId + ': ' + (data.tools_count || 0) + ' tools', 'success');
     await _populateMcpTab();
   } catch (e) {
-    alert('连接失败: ' + e.message);
+    showAlert('连接失败: ' + e.message);
   }
 }
 
@@ -424,7 +571,7 @@ function _mcpTransportChanged() {
 async function _mcpSaveServer() {
   var name = (document.getElementById('mcpNewName') || {}).value || '';
   name = name.trim();
-  if (!name) { alert('请输入服务器名称'); return; }
+  if (!name) { showAlert('请输入服务器名称'); return; }
 
   var transport = (document.getElementById('mcpNewTransport') || {}).value || 'stdio';
   var payload = { name: name, transport: transport, enabled: true };
@@ -433,10 +580,10 @@ async function _mcpSaveServer() {
     payload.command = (document.getElementById('mcpNewCommand') || {}).value || '';
     var argsText = (document.getElementById('mcpNewArgs') || {}).value || '';
     payload.args = argsText.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
-    if (!payload.command) { alert('请输入命令 (command)'); return; }
+    if (!payload.command) { showAlert('请输入命令 (command)'); return; }
   } else {
     payload.url = (document.getElementById('mcpNewUrl') || {}).value || '';
-    if (!payload.url) { alert('请输入 SSE URL'); return; }
+    if (!payload.url) { showAlert('请输入 SSE URL'); return; }
   }
 
   // Parse env vars
@@ -456,7 +603,7 @@ async function _mcpSaveServer() {
 
   try {
     var data = await Api.mcp.serverCreate(payload);
-    if (!data || !data.ok) { alert('保存失败: ' + ((data && data.error) || '未知错误')); return; }
+    if (!data || !data.ok) { showAlert('保存失败: ' + ((data && data.error) || '未知错误')); return; }
 
     // Auto-connect
     await Api.mcp.connectOne(name);
@@ -464,6 +611,6 @@ async function _mcpSaveServer() {
     debugLog('[MCP] Server "' + name + '" saved & connected', 'success');
     await _populateMcpTab();
   } catch (e) {
-    alert('保存失败: ' + e.message);
+    showAlert('保存失败: ' + e.message);
   }
 }

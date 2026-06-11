@@ -21,18 +21,24 @@ import os
 import sys
 import threading
 import time
+import uuid
 
 from flask import Blueprint
 
-from lib.api_response import api_error, api_internal_error, api_ok
+from lib.api_response import api_internal_error, api_ok
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
+from lib.push import push_event
 
 from .auth import require_auth, require_scope
 
 logger = get_logger(__name__)
 
 api_v1_update_bp = Blueprint('api_v1_update', __name__)
+
+# Push channel for live self-update progress (mirrors the 'translate' /
+# 'paper' pattern). Frontend subscribes via pushSubscribe('update', taskId).
+UPDATE_CHANNEL = 'update'
 
 
 @api_v1_update_bp.route('/api/v1/update/check', methods=['GET'])
@@ -76,25 +82,42 @@ def update_check():
     tags=['system'],
 )
 def update_apply():
-    from lib.self_update import apply_update
-    try:
-        result = apply_update()
-    except Exception as e:
-        logger.error('[Update] apply failed: %s', e, exc_info=True)
-        return api_internal_error(e, context='update_apply',
-                                  source='api_v1.update.apply')
-    if not result.get('ok'):
-        # Two failure shapes, both client-actionable → 409 Conflict:
-        #   * refused (dirty tree / no git): changed=False, nothing happened.
-        #   * pulled but deps install failed: changed=True, code IS updated;
-        #     the body's deps_* fields let the UI tell the user to fix deps.
-        return api_error(result.get('error') or 'Update could not be applied.',
-                         status=409, detail=result.get('detail', ''),
-                         **{k: result[k] for k in
-                            ('old_version', 'new_version', 'changed',
-                             'needs_restart', 'deps_changed',
-                             'deps_installed', 'deps_detail') if k in result})
-    return api_ok(result)
+    """Launch the update in a background thread; stream progress via push.
+
+    The pull + ``pip install`` can take minutes — far longer than a sane
+    HTTP timeout. Rather than block the request (which makes the modal look
+    frozen and risks a client-side abort killing a legitimate install), we
+    spawn a daemon worker that emits per-stage events on the ``update`` push
+    channel and a terminal ``done`` frame carrying the full result dict.
+    The route returns a ``taskId`` immediately; the frontend subscribes to
+    ``pushSubscribe('update', taskId)`` and renders a live stepper.
+    """
+    task_id = uuid.uuid4().hex
+
+    def _progress(stage: str, status: str, detail: str = ''):
+        push_event(UPDATE_CHANNEL, task_id, {
+            'type': 'stage', 'stage': stage, 'status': status,
+            'detail': (detail or '')[:300],
+        })
+
+    def _worker():
+        from lib.self_update import apply_update
+        try:
+            result = apply_update(progress=_progress)
+        except Exception as e:
+            logger.error('[Update] apply failed: %s', e, exc_info=True)
+            push_event(UPDATE_CHANNEL, task_id, {
+                'type': 'done', 'ok': False,
+                'error': 'Update failed unexpectedly. Check the server log.',
+                'detail': str(e)[:300],
+            })
+            return
+        push_event(UPDATE_CHANNEL, task_id, {'type': 'done', **result})
+
+    threading.Thread(target=_worker, name=f'tofu-update-{task_id[:8]}',
+                     daemon=True).start()
+    logger.info('[Update] apply started in background (task=%s)', task_id[:8])
+    return api_ok({'taskId': task_id, 'started': True})
 
 
 def _deferred_reexec(delay: float = 0.6):

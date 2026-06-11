@@ -19,13 +19,20 @@ import threading
 #  Layer 1 — Micro-compaction
 # ═══════════════════════════════════════════════════════════════════════════════
 
-MICRO_HOT_TAIL = 60
+MICRO_HOT_TAIL = 40
 """Number of most-recent tool results to keep uncompressed.
 Everything older is archived to DB and replaced with a placeholder.
 
 2026-04-19: Raised 30 → 60 to reduce compaction aggressiveness. Most
 SWE-bench-style tasks complete in 20-40 tool calls; doubling the hot
-tail keeps them fully uncompressed. Normal chats rarely exceed 60 either."""
+tail keeps them fully uncompressed. Normal chats rarely exceed 60 either.
+
+2026-06-07: Lowered 60 → 40. The dspro 8-arm compaction A/B
+(maps_workdir_pro8b) showed OpenCode's more active cold-output pruning
+cut input tokens ~10% at the lowest cost/solve with no resolve-rate
+regression vs the 60-keep `tofu` arm. Keeping the count-based hot tail
+(not token-based) but tightening it to 40 captures most of that saving
+while still covering the 20-40-tool-call body of typical SWE-bench runs."""
 
 MICRO_COMPACT_THRESHOLD = 2000
 """Minimum character count before a tool result is worth compacting.

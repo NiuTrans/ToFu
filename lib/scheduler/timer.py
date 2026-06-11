@@ -626,6 +626,17 @@ def start_timer_loop(timer_id: str) -> None:
         max_polls = timer['max_polls']
 
         while True:
+            # Release any thread-local DB connection acquired in the PREVIOUS
+            # iteration before we sleep again — a long-lived (or unlimited)
+            # timer would otherwise pin a connection across every poll_interval
+            # sleep, leaking a connection-semaphore slot for its whole life.
+            # Placed at loop top so every continue/break path is covered.
+            try:
+                from lib.database import close_thread_db
+                close_thread_db()
+            except Exception as _ce:
+                logger.debug('[Timer:%s] close_thread_db failed: %s', tid, _ce)
+
             # Check if still active
             with _timers_lock:
                 if tid not in _active_timers:
@@ -692,6 +703,12 @@ def start_timer_loop(timer_id: str) -> None:
         # Clean up registry
         with _timers_lock:
             _active_timers.pop(tid, None)
+        # Final release of this thread's DB connection back to the pool.
+        try:
+            from lib.database import close_thread_db
+            close_thread_db()
+        except Exception as _ce:
+            logger.debug('[Timer:%s] close_thread_db failed at loop end: %s', tid, _ce)
 
     # Register and start
     t = threading.Thread(target=_loop, daemon=True, name=f'timer-poll-{timer_id}')

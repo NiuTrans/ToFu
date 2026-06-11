@@ -126,6 +126,34 @@ def stream(
     )
 
 
+def _ensure_flask_quart_shim() -> None:
+    """Make ``import flask`` resolve to Quart, the same way ``server.py`` does.
+
+    ``capabilities()`` reaches into ``routes`` (for the single source of
+    truth on the schema), and importing ``routes`` triggers
+    ``routes/push.py``'s ``@push_bp.websocket`` decorator — which only exists
+    on a Quart ``Blueprint``. Outside the running server (e.g. an embedder
+    calling ``tofu.capabilities()`` standalone) the shim isn't installed yet,
+    so we install it on demand. No-op when Quart is absent or already shimmed.
+    """
+    import sys
+    if getattr(sys.modules.get('flask'), '__name__', '') == 'quart':
+        return
+    try:
+        import quart
+    except ImportError:
+        return
+    sys.modules['flask'] = quart
+    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
+        mod = sys.modules.get(f'quart.{attr}')
+        if mod is None:
+            try:
+                mod = __import__(f'quart.{attr}', fromlist=[attr])
+            except ImportError:
+                continue
+        sys.modules[f'flask.{attr}'] = mod
+
+
 def capabilities() -> dict:
     """Return this deployment's runtime registry (models / tools / agents /
     presets / backends / config schema / event contract).
@@ -133,6 +161,7 @@ def capabilities() -> dict:
     Same payload as ``GET /api/v1/capabilities`` (minus the HTTP envelope),
     built from the same helpers so there is no second source of truth.
     """
+    _ensure_flask_quart_shim()
     from routes.api_v1.capabilities import (
         _agents_summary, _backends, _config_schema, _events_contract,
         _features, _models_summary, _presets, _tools_summary,

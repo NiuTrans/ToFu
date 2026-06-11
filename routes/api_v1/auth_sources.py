@@ -1,0 +1,183 @@
+"""routes/api_v1/auth_sources.py — Authenticated-fetch source management.
+
+These endpoints let the user connect login-walled sites (Xiaohongshu / RED,
+…) so the server-side fetch pipeline can read them by replaying the user's
+logged-in browser session (cookies + optional proxy) through Playwright.
+See ``lib/auth_sources.py`` for the storage model and ``lib/fetch/core.py``
+for how a matched source short-circuits the anonymous fetch path.
+
+Routes:
+  GET    /api/v1/auth-sources                 — list configured sources (redacted)
+  POST   /api/v1/auth-sources                 — create/update one (cookies/proxy/label)
+  POST   /api/v1/auth-sources/<domain>/toggle — enable/disable
+  DELETE /api/v1/auth-sources/<domain>        — delete (defaults reset, not removed)
+  POST   /api/v1/auth-sources/<domain>/login  — interactive headful login (auto-capture cookies)
+
+The interactive-login route launches a *non-headless* Playwright browser on
+the SERVER host, navigates to the site's login page, and waits (bounded) for
+the user to log in; on success it captures ``storage_state`` cookies and
+persists them. This only works where the server has a display — the manual
+cookie-paste path (POST with ``cookie_header``) is the universal fallback.
+"""
+
+from __future__ import annotations
+
+from flask import Blueprint, jsonify
+
+from lib.api_response import api_bad_request, api_internal_error, api_ok
+from lib.log import get_logger
+from lib.openapi import api_meta
+from lib.request_parser import parse_body
+
+from .auth import require_auth
+
+logger = get_logger(__name__)
+
+api_v1_auth_sources_bp = Blueprint('api_v1_auth_sources', __name__)
+
+# Site-specific login landing pages for the interactive-capture flow.
+_LOGIN_URLS = {
+    'xiaohongshu.com': 'https://www.xiaohongshu.com/explore',
+}
+
+
+@api_v1_auth_sources_bp.route('/api/v1/auth-sources', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='List authenticated-fetch sources',
+    description=(
+        'Returns ``{sources: [...]}``. Each entry is redacted: cookie '
+        'values and proxy credentials are never echoed — only '
+        '``cookie_count`` / ``has_cookies`` / ``has_proxy`` / ``proxy_hint`` '
+        'plus ``domain`` / ``label`` / ``enabled`` / ``updated_at``.'
+    ),
+    tags=['capabilities'],
+)
+def list_auth_sources():
+    from lib.auth_sources import list_sources
+    return api_ok({'sources': list_sources()})
+
+
+@api_v1_auth_sources_bp.route('/api/v1/auth-sources', methods=['POST'])
+@require_auth
+@api_meta(
+    summary='Create or update an authenticated-fetch source',
+    description=(
+        'Body: ``{domain, label?, enabled?, cookie_header?, proxy?, '
+        'aliases?}``. ``cookie_header`` is a raw devtools ``Cookie:`` '
+        'string and replaces the stored cookies. Returns the redacted row.'
+    ),
+    tags=['capabilities'],
+)
+def upsert_auth_source():
+    from lib.auth_sources import upsert_source
+
+    data = parse_body()
+    domain = (data.get('domain') or '').strip()
+    if not domain:
+        return api_bad_request('domain is required', field='domain')
+    try:
+        row = upsert_source(
+            domain,
+            label=data.get('label'),
+            enabled=data.get('enabled'),
+            cookie_header=data.get('cookie_header'),
+            proxy=data.get('proxy'),
+            aliases=data.get('aliases'),
+        )
+    except ValueError as e:
+        return api_bad_request(str(e), field='domain')
+    return api_ok({'source': row})
+
+
+@api_v1_auth_sources_bp.route('/api/v1/auth-sources/<domain>/toggle', methods=['POST'])
+@require_auth
+@api_meta(summary='Enable/disable an authenticated-fetch source', tags=['capabilities'])
+def toggle_auth_source(domain):
+    from lib.auth_sources import set_enabled
+
+    data = parse_body()
+    enabled = bool(data.get('enabled', True))
+    if not set_enabled(domain, enabled):
+        return jsonify({'ok': False, 'error': f'Unknown source: {domain}'}), 404
+    return api_ok({'domain': domain, 'enabled': enabled})
+
+
+@api_v1_auth_sources_bp.route('/api/v1/auth-sources/<domain>', methods=['DELETE'])
+@require_auth
+@api_meta(
+    summary='Delete an authenticated-fetch source',
+    description='Default-catalog domains are reset (disabled + cookies cleared) rather than removed.',
+    tags=['capabilities'],
+)
+def delete_auth_source(domain):
+    from lib.auth_sources import delete_source
+    if not delete_source(domain):
+        return jsonify({'ok': False, 'error': f'Unknown source: {domain}'}), 404
+    return api_ok({'domain': domain})
+
+
+@api_v1_auth_sources_bp.route('/api/v1/auth-sources/<domain>/login', methods=['POST'])
+@require_auth
+@api_meta(
+    summary='Interactive login to auto-capture cookies (headful browser)',
+    description=(
+        'Launches a non-headless browser on the SERVER host pointed at the '
+        "site's login page and waits (bounded) for the user to sign in, "
+        'then captures + stores the session cookies. Requires the server '
+        'to have a display + a non-headless-capable Playwright. Returns '
+        '``503`` when interactive login is unavailable — fall back to '
+        'pasting a cookie header via POST /api/v1/auth-sources.'
+    ),
+    tags=['capabilities'],
+)
+def interactive_login(domain):
+    from lib.auth_sources import normalize_domain
+
+    dom = normalize_domain(domain)
+    if not dom:
+        return api_bad_request('domain is required', field='domain')
+    login_url = _LOGIN_URLS.get(dom, f'https://{dom}/')
+    data = parse_body()
+    timeout_s = int(data.get('timeout') or 180)
+    timeout_s = max(30, min(timeout_s, 600))
+
+    try:
+        from tofu_search.fetch.interactive_login import capture_login_cookies
+    except Exception as e:
+        logger.error('[AuthSrc.v1] interactive login module unavailable: %s', e, exc_info=True)
+        return api_internal_error(e, source='api_v1.auth_sources.login')
+
+    try:
+        result = capture_login_cookies(dom, login_url, timeout_s=timeout_s)
+    except Exception as e:
+        logger.error('[AuthSrc.v1] interactive login crashed for %s: %s', dom, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.auth_sources.login')
+
+    if not result.get('ok'):
+        # Unavailable (no display / headless-only) → 503 so the UI can
+        # cleanly fall back to the manual paste path.
+        code = 503 if result.get('reason') == 'unavailable' else 400
+        return jsonify({'ok': False, 'error': result.get('error', 'login failed'),
+                        'reason': result.get('reason', '')}), code
+
+    # tofu-search's capture_login_cookies RETURNS the cookies (it has no
+    # knowledge of chatui's auth-source store); persist them here.
+    source_row = None
+    cookies = result.get('cookies') or []
+    if cookies:
+        try:
+            from lib.auth_sources import upsert_source
+            source_row = upsert_source(dom, enabled=True, cookies=cookies)
+        except Exception as e:
+            logger.error('[AuthSrc.v1] failed to persist captured cookies for %s: %s',
+                         dom, e, exc_info=True)
+            return api_internal_error(e, source='api_v1.auth_sources.login')
+
+    logger.info('[AuthSrc.v1] interactive login captured %d cookie(s) for %s',
+                result.get('cookie_count', 0), dom)
+    return api_ok({'domain': dom, 'cookie_count': result.get('cookie_count', 0),
+                   'source': source_row})
+
+
+__all__ = ['api_v1_auth_sources_bp']

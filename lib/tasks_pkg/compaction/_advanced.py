@@ -50,6 +50,20 @@ def _make_summarize_fn(conv_id: str, task: dict | None):
     instruction, max_tokens) -> str`` (empty string on failure — a step
     must tolerate a degraded summary, never crash)."""
 
+    # Pin the summarizer to the AGENT'S OWN model (the model running the
+    # task), not capability='cheap' dispatcher roulette. Two reasons:
+    #   1. Self-consistency: the summary is produced by the same model the
+    #      arm is benchmarking, so summarization cost/quality is attributed
+    #      to that arm — no silent cross-model contamination (e.g. a
+    #      deepseek arm having its summaries written by Opus).
+    #   2. Faithfulness: the real systems (OpenCode/Hermes/OpenClaw) drive
+    #      compaction with the session model by default.
+    # An explicit ``compaction.summaryModel`` override is honored if set.
+    _cfg = (task or {}).get('config') or {}
+    _summary_model = _cfg.get('compaction', {}).get('summaryModel') \
+        if isinstance(_cfg.get('compaction'), dict) else None
+    _agent_model = _summary_model or _cfg.get('model') or ''
+
     def _summarize(text: str, *, instruction: str = '',
                    max_tokens: int = 512) -> str:
         from lib.llm_dispatch import dispatch_chat
@@ -64,11 +78,21 @@ def _make_summarize_fn(conv_id: str, task: dict | None):
                     {'role': 'system', 'content': sys_prompt},
                     {'role': 'user', 'content': text[:200_000]},
                 ],
+                model=_agent_model or None,
                 max_tokens=max_tokens,
                 temperature=0,
-                capability='cheap',
+                capability='cheap' if not _agent_model else 'text',
                 log_prefix=tag,
             )
+            # Count this summarizer call's tokens toward compaction cost so
+            # the summary-based arms (OpenCode/Hermes/OpenClaw) don't appear
+            # artificially cheaper than the prune-only ones.
+            try:
+                from lib.tasks_pkg.compaction._compaction_usage import (
+                    record_compaction_usage)
+                record_compaction_usage(conv_id, usage, kind='advanced')
+            except Exception as _ru_e:
+                logger.debug('%s record_compaction_usage failed: %s', tag, _ru_e)
             return (content or '').strip()
         except Exception as e:
             logger.warning('%s summarize failed (degraded, returning empty): '

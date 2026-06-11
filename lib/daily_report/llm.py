@@ -94,7 +94,74 @@ def _extract_json_result(text):
                         logger.debug('Extracted JSON parse failed: %s', e)
                     break
 
+    # Last resort: the output was truncated mid-generation (e.g. hit the
+    # token ceiling), so no balanced close exists. Repair the fragment by
+    # dropping any trailing partial token and closing every still-open
+    # string / array / object, then re-parse to salvage complete entries.
+    repaired = _repair_truncated_json(s)
+    if repaired is not None:
+        unpacked = _unpack(repaired)
+        if unpacked:
+            logger.warning('[DailyReport] Salvaged truncated JSON output')
+            return unpacked
+
     return [], [], []
+
+
+def _repair_truncated_json(s):
+    """Best-effort repair of JSON truncated mid-generation.
+
+    Walks the fragment tracking the bracket/string stack, trims back to the
+    last complete value, then appends the missing closers. Returns the parsed
+    object on success, or ``None`` if it can't be salvaged.
+    """
+    start = min((i for i in (s.find('{'), s.find('[')) if i != -1), default=-1)
+    if start == -1:
+        return None
+
+    stack = []
+    in_string = False
+    escape_next = False
+    last_safe = -1  # index just after the last char that left us at a stable point
+
+    for i in range(start, len(s)):
+        ch = s[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if in_string:
+            if ch == '\\':
+                escape_next = True
+            elif ch == '"':
+                in_string = False
+                last_safe = i + 1
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in '{[':
+            stack.append('}' if ch == '{' else ']')
+        elif ch in '}]':
+            if stack:
+                stack.pop()
+            last_safe = i + 1
+        elif ch in '0123456789truefalsenul.-+eE':
+            last_safe = i + 1
+        elif ch in ' \t\r\n,:':
+            if ch in ' \t\r\n':
+                last_safe = max(last_safe, i)
+
+    if last_safe <= start:
+        return None
+
+    fragment = s[start:last_safe].rstrip().rstrip(',')
+    closers = ''.join(reversed(stack))
+    candidate = fragment + closers
+
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as e:
+        logger.debug('Truncated-JSON repair failed: %s', e)
+        return None
 
 
 def _run_llm_analysis(user_prompt, conv_count):
@@ -112,7 +179,7 @@ def _run_llm_analysis(user_prompt, conv_count):
 
         content, usage = smart_chat(
             messages,
-            max_tokens=min(4096, 400 * conv_count),
+            max_tokens=128000,
             temperature=0.3,
             capability='text',
             log_prefix='[DailyReport]',

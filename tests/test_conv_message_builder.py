@@ -325,6 +325,112 @@ class TestTransformMessages:
         assert 'Text only' in result[0]['content']
         assert 'More text' in result[0]['content']
 
+    # ── Duplicate same-timestamp user-row collapse (doubled-context bug) ──
+
+    def test_dedup_duplicate_user_same_timestamp_adjacent(self):
+        """Optimistic + server copy of one send turn (same ts) must NOT double.
+
+        Reproduces the confirmed DB corruption from the interrupt+regen
+        report: a send-path race plants the optimistic frontend copy AND the
+        server-translated copy as two adjacent user rows sharing a timestamp.
+        Without the dedup pass, _merge_consecutive_same_role concatenates them
+        into one doubled-text user turn ("U1\\n\\nU1" → the "U1 A1 U1 A2" bug).
+        """
+        raw = [
+            {'role': 'user', 'content': '你好', 'timestamp': 1000,
+             '_msgId': 'tmp_abc'},
+            {'role': 'user', 'content': 'Hello', 'timestamp': 1000,
+             'originalContent': '你好', '_translateDone': True,
+             '_msgId': 'uuid-1'},
+            {'role': 'assistant', 'content': 'Hi there'},
+        ]
+        result = _transform_messages(raw, {})
+        # Exactly one user message (the server copy wins) + assistant
+        assert len(result) == 2
+        assert result[0] == {'role': 'user', 'content': 'Hello'}
+        assert result[1]['role'] == 'assistant'
+        # The optimistic Chinese copy must NOT have been concatenated in.
+        assert '你好' not in result[0]['content']
+
+    def test_dedup_server_copy_wins_translation(self):
+        """The surviving row is the LAST (server-translated) one."""
+        raw = [
+            {'role': 'user', 'content': '原文', 'timestamp': 2000},
+            {'role': 'user', 'content': 'translated text', 'timestamp': 2000,
+             'originalContent': '原文', '_translateDone': True},
+        ]
+        result = _transform_messages(raw, {})
+        assert len(result) == 1
+        assert result[0]['content'] == 'translated text'
+
+    def test_dedup_three_user_copies_same_timestamp(self):
+        """Even 3 same-ts user rows collapse to the last one."""
+        raw = [
+            {'role': 'user', 'content': 'a', 'timestamp': 5},
+            {'role': 'user', 'content': 'b', 'timestamp': 5},
+            {'role': 'user', 'content': 'c', 'timestamp': 5},
+            {'role': 'assistant', 'content': 'reply'},
+        ]
+        result = _transform_messages(raw, {})
+        assert len(result) == 2
+        assert result[0]['content'] == 'c'
+
+    def test_dedup_different_timestamps_preserved(self):
+        """Two genuine consecutive user turns (different ts) must NOT collapse.
+
+        E.g. the user sends a second message while a task is running and both
+        get appended via the queue — they are distinct turns and should merge
+        (concatenate) per the existing same-role behaviour, not be dropped.
+        """
+        raw = [
+            {'role': 'user', 'content': 'first', 'timestamp': 100},
+            {'role': 'user', 'content': 'second', 'timestamp': 200},
+        ]
+        result = _transform_messages(raw, {})
+        assert len(result) == 1
+        assert 'first' in result[0]['content']
+        assert 'second' in result[0]['content']
+
+    def test_dedup_missing_timestamp_not_collapsed(self):
+        """User rows without a timestamp are never treated as duplicates."""
+        raw = [
+            {'role': 'user', 'content': 'one'},
+            {'role': 'user', 'content': 'two'},
+        ]
+        result = _transform_messages(raw, {})
+        # Both survive (merged), since we can't prove they are the same turn.
+        assert len(result) == 1
+        assert 'one' in result[0]['content']
+        assert 'two' in result[0]['content']
+
+    def test_dedup_endpoint_review_not_collapsed(self):
+        """Endpoint critic-review user rows legitimately repeat — never drop."""
+        raw = [
+            {'role': 'user', 'content': 'Q', 'timestamp': 7},
+            {'role': 'assistant', 'content': 'A'},
+            {'role': 'user', 'content': 'critic feedback', 'timestamp': 7,
+             '_isEndpointReview': True},
+        ]
+        result = _transform_messages(raw, {})
+        # The review row is filtered by the endpoint skip-filter, not the
+        # dedup pass — assert the dedup didn't mistakenly drop the real Q.
+        assert any(m['role'] == 'user' and m['content'] == 'Q' for m in result)
+
+    def test_dedup_regen_doubled_context_end_to_end(self):
+        """Full reproduction: [U_tmp, U_srv, A1] → single U1 then A1 (no double)."""
+        raw = [
+            {'role': 'user', 'content': 'question', 'timestamp': 42,
+             '_msgId': 'tmp_x'},
+            {'role': 'user', 'content': 'question', 'timestamp': 42,
+             '_msgId': 'uuid-x'},
+            {'role': 'assistant', 'content': 'first answer'},
+        ]
+        result = _transform_messages(raw, {})
+        users = [m for m in result if m['role'] == 'user']
+        assert len(users) == 1
+        # The merged-doubled "question\n\nquestion" must not appear.
+        assert users[0]['content'] == 'question'
+
 
 class TestBuildBranchApiMessages:
     """Test build_branch_api_messages — server-side branch message building."""

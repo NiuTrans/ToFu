@@ -310,7 +310,8 @@ def _persist_day_cost(date_str, day_data):
         date_str: 'YYYY-MM-DD'.
         day_data: {'cost': float, 'conversations': {conv_id: {...}}}.
     """
-    from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db, json_dumps_pg
+    from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
+    from lib.database._core_schema import DAILY_COST_CACHE, upsert
 
     try:
         db = get_thread_db(DOMAIN_CHAT)
@@ -318,15 +319,16 @@ def _persist_day_cost(date_str, day_data):
         # (strips \u0000 / lone surrogates that would otherwise be rejected).
         # SQLite treats this as plain TEXT, so behavior is identical.
         convs_json = json_dumps_pg(day_data.get('conversations', {}))
-        db_execute_with_retry(
-            db,
-            'INSERT OR REPLACE INTO daily_cost_cache '
-            '(user_id, date, cost, conversations_json, computed_at) '
-            'VALUES (?, ?, ?, ?, ?)',
-            (DEFAULT_USER_ID, date_str, float(day_data.get('cost', 0.0)),
-             convs_json, int(time.time() * 1000))
-        )
-        db.commit()
+        # Backend-agnostic composite-PK (user_id, date) UPSERT. retry=True
+        # preserves the contention/connection-loss retry of the former
+        # db_execute_with_retry call (it commits internally too).
+        upsert(db, DAILY_COST_CACHE, {
+            'user_id': DEFAULT_USER_ID,
+            'date': date_str,
+            'cost': float(day_data.get('cost', 0.0)),
+            'conversations_json': convs_json,
+            'computed_at': int(time.time() * 1000),
+        }, retry=True, commit=True)
     except Exception as e:
         logger.warning('[DailyReport] Persist day cost %s failed: %s',
                        date_str, e)

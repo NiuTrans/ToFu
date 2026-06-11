@@ -123,6 +123,14 @@ def tool_create_project(path, name=None, overwrite=False, conv_id=None, task_id=
         return {'ok': False, 'action': 'create_project', 'path': abs_path,
                 'error': 'No primary project is set. Open a project before calling create_project.'}
 
+    # ── Read-only guard: refuse to scaffold inside a read-only root ──
+    from lib.project_mod.config import is_readonly_path
+    if is_readonly_path(abs_path, conv_id=conv_id):
+        return {'ok': False, 'action': 'create_project', 'path': abs_path,
+                'error': (f'Refusing to create a project at {abs_path}: it is '
+                          f'inside a READ-ONLY workspace root. Choose a '
+                          f'writable location.')}
+
     # ── Create or verify directory ──
     already_existed = os.path.exists(abs_path)
     if already_existed:
@@ -208,35 +216,106 @@ def tool_create_project(path, name=None, overwrite=False, conv_id=None, task_id=
 #  Absolute-path write safety
 # ═══════════════════════════════════════════════════════
 
-def _resolve_write_path(base, rel_path):
+def _nearest_existing_dir(abs_path):
+    """Return the deepest already-existing ancestor directory of *abs_path*.
+
+    Walks up from the file's parent until an existing directory is found.
+    Returns None only in the degenerate case where even the filesystem
+    root doesn't exist (shouldn't happen on a sane system).
+    """
+    d = os.path.dirname(abs_path)
+    while d and not os.path.isdir(d):
+        parent = os.path.dirname(d)
+        if parent == d:  # reached the root without finding anything
+            return None
+        d = parent
+    return d or None
+
+
+def _enforce_not_readonly(target, conv_id=None):
+    """Raise :class:`ReadOnlyRootError` if *target* sits in a read-only root.
+
+    The single guard every write/edit tool passes through (via
+    ``_resolve_write_path``).  Resolution is conv-scoped so a concurrent
+    task's root policy never leaks in.
+    """
+    from lib.project_mod.config import ReadOnlyRootError, is_readonly_path
+    if is_readonly_path(target, conv_id=conv_id):
+        raise ReadOnlyRootError(
+            f'Refusing to write to {target}: it is inside a READ-ONLY '
+            f'workspace root. This root was attached for reference only — '
+            f'reads/greps are allowed but edits are not. Write to a '
+            f'writable root instead (or ask the user to make this root '
+            f'writable).')
+
+
+def _resolve_write_path(base, rel_path, conv_id=None):
     """Return the on-disk target for a write/edit tool, accepting either
-    a project-relative path or an absolute path under a *registered* root.
+    a project-relative path or an absolute path.
 
     Symmetrically mirrors ``read_files`` which also accepts absolute paths.
-    The key safety constraint: an absolute path must resolve INSIDE some
-    entry of ``_roots`` (the set of paths the user has explicitly opened
-    or created via ``create_project``).  Absolute paths outside every
-    registered root are rejected — preventing the model from silently
-    writing to ``/etc/passwd`` or similar just because it ignored the
-    ``rootname:`` convention.
+    Resolution rules for an absolute path:
+
+      1. If it already resolves INSIDE some registered root, use it directly.
+      2. Otherwise, as long as the destination is NOT a forbidden system
+         path (``/etc``, ``/usr``, ``$HOME`` itself, …), auto-register the
+         deepest existing ancestor directory as an extra workspace root and
+         allow the write.  This makes absolute-path writes "just work" the
+         same way absolute-path reads already do — without forcing the model
+         to call ``create_project`` first.
+      3. Forbidden system paths are still rejected outright.
 
     Raises ``ValueError`` on rejection so callers can surface the error
     consistently with the existing ``_safe_path`` code path.
     """
     if rel_path and (rel_path.startswith('/') or rel_path.startswith('~')):
         abs_path = os.path.abspath(os.path.expanduser(rel_path))
-        # Check containment against every registered root.
+        # Restricted (remote API) callers may only write inside an already
+        # registered root — never auto-register a new one from tool input.
+        # Enforced before the root scan + auto-register below so a remote
+        # principal can neither escape the sandbox nor expand it.
+        from lib.project_mod.abs_path_guard import enforce_abs_write
+        enforce_abs_write(abs_path)
+        # 1) Already under a registered root → use directly.
         with _lock:
             roots_snapshot = [rs['path'] for rs in _roots.values()]
         for root_path in roots_snapshot:
             norm_root = os.path.abspath(root_path).rstrip(os.sep) or root_path
             if abs_path == norm_root or abs_path.startswith(norm_root + os.sep):
+                _enforce_not_readonly(abs_path, conv_id=conv_id)
                 return abs_path
+
+        # 3) Refuse system paths (same policy as create_project).
+        if _is_forbidden_create_path(abs_path) or _is_forbidden_create_path(os.path.dirname(abs_path)):
+            raise ValueError(
+                f'Refusing to write to system path {abs_path}. '
+                f'Choose a user-writable location.'
+            )
+
+        # 2) Auto-register the nearest existing ancestor as an extra root.
+        anchor = _nearest_existing_dir(abs_path)
+        if anchor and not _is_forbidden_create_path(anchor):
+            try:
+                add_project_root(anchor)
+                logger.info('[WriteTools] Auto-registered workspace root %s for '
+                            'absolute-path write to %s', anchor, abs_path)
+                _enforce_not_readonly(abs_path, conv_id=conv_id)
+                return abs_path
+            except Exception as e:
+                logger.warning('[WriteTools] Auto-register of %s failed: %s', anchor, e)
+                raise ValueError(
+                    f'Cannot write to {abs_path}: failed to register a workspace '
+                    f'root for it ({e}).'
+                ) from e
+
         raise ValueError(
-            f'Absolute path {abs_path} is outside all registered workspace roots. '
-            f'Call create_project(path=...) first, or use a "rootname:relative" prefix.'
+            f'Absolute path {abs_path} could not be resolved to a writable '
+            f'workspace location. Use a "rootname:relative" prefix or call '
+            f'create_project(path=...).'
         )
-    return _safe_path(base, rel_path)
+    target = _safe_path(base, rel_path)
+    _enforce_not_readonly(target, conv_id=conv_id)
+    return target
 
 
 # Match \uXXXX, \UXXXXXXXX and \xXX escape sequences (literal backslash form).
@@ -257,7 +336,8 @@ def _decode_unicode_escapes(s):
     def _repl(m):
         try:
             return chr(int(m.group(0)[2:], 16))
-        except (ValueError, OverflowError):
+        except (ValueError, OverflowError) as e:
+            logger.debug('[write_tools] undecodable unicode escape %r: %s', m.group(0), e)
             return m.group(0)
     return _UNICODE_ESCAPE_RE.sub(_repl, s)
 
@@ -377,7 +457,7 @@ def tool_write_file(base, rel_path, content, description='', conv_id=None, task_
         useful for writing into directories created by ``create_project``.
     """
     try:
-        target = _resolve_write_path(base, rel_path)
+        target = _resolve_write_path(base, rel_path, conv_id=conv_id)
     except ValueError as e:
         logger.debug('[Tools] write_file path rejected %s: %s', rel_path, e, exc_info=True)
         return {'ok': False, 'error': str(e), 'action': 'write_file', 'path': rel_path}
@@ -440,7 +520,7 @@ def _apply_one_diff(base, rel_path, search, replace, description='', conv_id=Non
     Accepts project-relative paths and absolute paths under registered roots.
     """
     try:
-        target = _resolve_write_path(base, rel_path)
+        target = _resolve_write_path(base, rel_path, conv_id=conv_id)
     except ValueError as e:
         logger.debug('[Tools] apply_diff path rejected %s: %s', rel_path, e, exc_info=True)
         return {'ok': False, 'error': str(e), 'action': 'apply_diff', 'path': rel_path}
@@ -619,6 +699,24 @@ def tool_apply_diff(base, rel_path, search, replace, description='', conv_id=Non
     return _apply_one_diff(base, rel_path, search, replace, description, conv_id, replace_all=replace_all, task_id=task_id)
 
 
+def _invalid_edit_entry_msg(i, edit):
+    """Build an actionable FAIL line for a batch edit that isn't an object.
+
+    The common cause is a model emitting the whole ``edits`` array as one
+    escaped JSON *string* (often with unescaped inner quotes, so it can't be
+    auto-parsed) — the harness then wraps that string into a single-element
+    list, and each element is a str, not a dict. Tell the model exactly that
+    so it re-emits a real array of objects instead of retrying blind.
+    """
+    if isinstance(edit, str):
+        return (f'[{i}] FAIL Invalid edit entry: got a string, expected an '
+                f'object with {{path, search, replace}}. The "edits" array '
+                f'must be real JSON objects, not a single stringified-JSON '
+                f'blob — re-send each edit as its own object.')
+    return (f'[{i}] FAIL Invalid edit entry: expected an object with '
+            f'{{path, search, replace}}, got {type(edit).__name__}.')
+
+
 def tool_apply_diffs(base_path, edits, conv_id=None, task_id=None):
     """Apply multiple search-and-replace edits in one batch."""
     if not edits:
@@ -637,7 +735,7 @@ def tool_apply_diffs(base_path, edits, conv_id=None, task_id=None):
 
     for i, edit in enumerate(edits, 1):
         if not isinstance(edit, dict):
-            results.append(f'[{i}] FAIL Invalid edit entry')
+            results.append(_invalid_edit_entry_msg(i, edit))
             fail_count += 1
             continue
 
@@ -703,7 +801,7 @@ def _insert_one(base, rel_path, anchor, content, position='after', description='
         dict with ok, action, path, error (on failure), or ok + line info (on success).
     """
     try:
-        target = _resolve_write_path(base, rel_path)
+        target = _resolve_write_path(base, rel_path, conv_id=conv_id)
     except ValueError as e:
         logger.debug('[Tools] insert_content path rejected %s: %s', rel_path, e, exc_info=True)
         return {'ok': False, 'error': str(e), 'action': 'insert_content', 'path': rel_path}
@@ -931,7 +1029,7 @@ def tool_insert_contents(base_path, edits, conv_id=None, task_id=None):
 
     for i, edit in enumerate(edits, 1):
         if not isinstance(edit, dict):
-            results.append(f'[{i}] FAIL Invalid edit entry')
+            results.append(_invalid_edit_entry_msg(i, edit))
             fail_count += 1
             continue
 

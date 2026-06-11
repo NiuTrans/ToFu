@@ -84,7 +84,7 @@ def _handle_browser_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 break
         user_question = task.get('lastUserQuery', '')
         try:
-            from lib.fetch.content_filter import IRRELEVANT_SENTINEL, filter_web_content
+            from tofu_search.fetch.content_filter import IRRELEVANT_SENTINEL, filter_web_content
             raw_chars = len(display_text)
             filtered = filter_web_content(
                 display_text, url=tab_url,

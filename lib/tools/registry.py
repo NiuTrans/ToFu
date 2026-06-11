@@ -93,6 +93,21 @@ class ToolContext:
         return (self.task_id or '')[:8]
 
     @property
+    def multiroot_active(self) -> bool:
+        """True when more than one workspace root is configured for this task.
+
+        Read from ``cfg['projectPaths']`` (the full root list the frontend
+        sends; element 0 is the primary, the rest are extras). Used to decide
+        whether path-taking tool schemas should carry the ``rootname:`` prefix
+        hint — single-root sessions keep the cache-stable default schema.
+        """
+        paths = self.cfg.get('projectPaths') or []
+        if not isinstance(paths, (list, tuple)):
+            return False
+        distinct = {p for p in paths if p}
+        return len(distinct) > 1
+
+    @property
     def has_conv_ref(self) -> bool:
         """True if any message carries a ``[REFERENCED_CONVERSATION`` marker.
 
@@ -344,12 +359,18 @@ def _build_read_files(ctx: ToolContext) -> list[dict]:
     # paths (images, PDFs, Office docs, text), so the model can read local
     # content even with no project attached.
     from lib.tools import READ_FILES_TOOL
+    if ctx.project_enabled and ctx.multiroot_active:
+        from lib.tools.project import with_multiroot_hint
+        return with_multiroot_hint([READ_FILES_TOOL])
     return [READ_FILES_TOOL]
 
 
 def _build_project_or_code_exec(ctx: ToolContext) -> list[dict]:
     from lib.tools import CODE_EXEC_TOOL, PROJECT_TOOLS
     if ctx.project_enabled:
+        if ctx.multiroot_active:
+            from lib.tools.project import with_multiroot_hint
+            return with_multiroot_hint(PROJECT_TOOLS)
         return list(PROJECT_TOOLS)
     if ctx.code_exec_enabled:
         return [CODE_EXEC_TOOL]
@@ -375,7 +396,7 @@ def _build_browser(ctx: ToolContext) -> list[dict]:
 def _build_desktop(ctx: ToolContext) -> list[dict]:
     if not ctx.desktop_enabled:
         return []
-    from routes.desktop import is_desktop_agent_connected
+    from lib.desktop import is_desktop_agent_connected
     if is_desktop_agent_connected():
         from lib.desktop_tools import DESKTOP_TOOLS
         logger.debug('[Task %s] 🖥️ Desktop agent connected — %d desktop tools '

@@ -24,6 +24,15 @@ def _install_shim():
         qs = f'quart.{attr}'
         if qs in sys.modules:
             sys.modules[f'flask.{attr}'] = sys.modules[qs]
+    # Newer Flask sansio (3.1+) reads config['PROVIDE_AUTOMATIC_OPTIONS']
+    # in add_url_rule, but the installed Quart dropped it from
+    # default_config → bare Quart(__name__) raises KeyError on
+    # construction. server.py patches this at import time; replicate it
+    # here so this module builds its own app standalone.
+    from quart import Quart
+    if 'PROVIDE_AUTOMATIC_OPTIONS' not in Quart.default_config:
+        Quart.default_config = {**Quart.default_config,
+                                'PROVIDE_AUTOMATIC_OPTIONS': True}
     from quart.wrappers import Request as _QR
     import inspect
     if inspect.iscoroutinefunction(_QR.get_json):

@@ -14,7 +14,7 @@ import time
 
 from lib.compat import IS_LINUX, IS_MACOS, IS_WINDOWS
 from lib.env_compat import getenv_compat
-from lib.log import get_logger
+from lib.log import get_logger, log_context
 
 logger = get_logger(__name__)
 
@@ -202,6 +202,154 @@ def _release_startup_lock():
             os.close(fd)
         except OSError as e:
             logger.debug('[DB] Close of startup lock fd failed: %s', e)
+
+
+# Cached flock-enforcement verdict for the pgdata mount, set once per process
+# by _probe_flock_enforced(): True = real advisory locks, False = silent no-op
+# / unsupported, None = not yet probed.
+_flock_enforced = None
+_flock_probe_mu = threading.Lock()
+
+
+def _probe_flock_enforced(pgdata):
+    """Actively verify the pgdata mount truly ENFORCES POSIX advisory locks.
+
+    The plain ``flock(LOCK_EX)`` call in ``_try_acquire_startup_lock`` only
+    catches filesystems that FAIL locking with an errno (ENOLCK/EOPNOTSUPP).
+    The dangerous case is a filesystem that silently treats every flock as a
+    NO-OP: the call "succeeds", so two hosts both believe they hold the lock
+    and start postmasters on the same pgdata → WAL/pg_subtrans corruption.
+
+    This probe opens the SAME file twice (two independent open-file
+    descriptions) and confirms that holding LOCK_EX on the first BLOCKS a
+    LOCK_EX|LOCK_NB on the second. On a real locking FS the second call raises
+    EWOULDBLOCK; a no-op FS grants both. Result is cached for the process.
+
+    Returns:
+        True  — advisory locks are genuinely enforced on this mount.
+        False — locks are a silent no-op or unsupported (cross-host guard is
+                NOT reliable here).
+        None  — could not determine (probe itself errored unexpectedly); the
+                caller should treat this conservatively, like False, for
+                warning/refusal purposes.
+    """
+    global _flock_enforced
+    with _flock_probe_mu:
+        if _flock_enforced is not None:
+            return _flock_enforced
+        if IS_WINDOWS:
+            _flock_enforced = False
+            return False
+        try:
+            import fcntl
+        except ImportError:
+            _flock_enforced = False
+            return False
+
+        probe_path = os.path.join(pgdata, '.tofu_flock_probe')
+        fd1 = fd2 = None
+        try:
+            os.makedirs(pgdata, exist_ok=True)
+            fd1 = os.open(probe_path, os.O_CREAT | os.O_RDWR, 0o644)
+            fd2 = os.open(probe_path, os.O_CREAT | os.O_RDWR, 0o644)
+            fcntl.flock(fd1, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fcntl.flock(fd2, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as e:
+                import errno as _errno
+                if getattr(e, 'errno', None) in (_errno.EWOULDBLOCK, _errno.EAGAIN):
+                    _flock_enforced = True  # second lock correctly blocked
+                else:
+                    # Unexpected errno — be conservative and call it unenforced.
+                    logger.debug('[DB] flock probe second-lock errno=%s: %s',
+                                 getattr(e, 'errno', None), e)
+                    _flock_enforced = False
+            else:
+                # Second LOCK_EX succeeded while the first was held → no-op FS.
+                _flock_enforced = False
+            return _flock_enforced
+        except OSError as e:
+            logger.warning('[DB] flock-enforcement probe could not run on %s: %s '
+                           '— cannot confirm cross-host locking', pgdata, e)
+            _flock_enforced = None
+            return None
+        finally:
+            for _fd in (fd1, fd2):
+                if _fd is not None:
+                    try:
+                        fcntl.flock(_fd, fcntl.LOCK_UN)
+                    except OSError as _e:
+                        logger.debug('[DB] flock probe unlock failed: %s', _e)
+                    try:
+                        os.close(_fd)
+                    except OSError as _e:
+                        logger.debug('[DB] flock probe close failed: %s', _e)
+            try:
+                os.remove(probe_path)
+            except OSError as _e:
+                logger.debug('[DB] flock probe cleanup failed: %s', _e)
+
+
+def _flock_required():
+    """Policy: should PG be REFUSED when advisory locks aren't enforced?
+
+    Driven by env ``TOFU_PG_REQUIRE_FLOCK`` (legacy ``CHATUI_PG_REQUIRE_FLOCK``
+    also honored). Truthy (1/true/yes/refuse) → refuse PG on a non-locking
+    shared mount rather than risk a double-start. Default false → warn loudly
+    but proceed (single-host deployments must not be regressed).
+    """
+    raw = (getenv_compat('TOFU_PG_REQUIRE_FLOCK',
+                         default=getenv_compat('CHATUI_PG_REQUIRE_FLOCK', default=''))
+           or '')
+    return raw.strip().lower() in ('1', 'true', 'yes', 'on', 'refuse', 'require')
+
+
+def _verify_flock_support_or_warn(pgdata):
+    """Probe flock enforcement once and surface the result loudly.
+
+    Returns:
+        True  — safe to proceed (locks enforced, OR not enforced but policy
+                allows proceeding with a loud warning).
+        False — caller MUST refuse to bootstrap/start PG (locks not enforced
+                AND TOFU_PG_REQUIRE_FLOCK demands enforcement).
+    """
+    enforced = _probe_flock_enforced(pgdata)
+    if enforced is True:
+        logger.info('[DB] Advisory-lock enforcement verified on pgdata mount %s '
+                    '— cross-host startup interlock is reliable.', pgdata)
+        return True
+
+    state = 'a SILENT NO-OP' if enforced is False else 'UNVERIFIABLE'
+    if _flock_required():
+        logger.critical(
+            '[DB] REFUSING PostgreSQL: advisory locks on pgdata mount %s are %s, '
+            'so the cross-host startup interlock CANNOT prevent two hosts from '
+            'starting postmasters on the same data dir (WAL/pg_subtrans '
+            'corruption). TOFU_PG_REQUIRE_FLOCK is set — falling back to SQLite. '
+            'Mount pgdata on a filesystem with working POSIX advisory locks '
+            '(ext4/xfs/NFSv4/most FUSE) to use PG here.', pgdata, state)
+        try:
+            from lib.log import audit_log as _audit
+            _audit('pg_flock_unenforced_refused', pgdata=pgdata,
+                   enforced=enforced, host=_get_local_ip())
+        except Exception as _e:
+            logger.debug('[DB] audit_log for pg_flock_unenforced_refused failed: %s', _e)
+        return False
+
+    logger.warning(
+        '[DB] ⚠️  Advisory locks on pgdata mount %s are %s. The cross-host '
+        'startup interlock degrades to heuristics here: if you run TWO tofu '
+        'hosts against this SAME pgdata, a double postmaster start can corrupt '
+        'WAL/pg_subtrans. This is safe for a SINGLE-host deployment. To make '
+        'this fatal instead, set TOFU_PG_REQUIRE_FLOCK=1. To fix, mount pgdata '
+        'on a filesystem with working POSIX advisory locks.', pgdata, state)
+    try:
+        from lib.log import audit_log as _audit
+        _audit('pg_flock_unenforced_warning', pgdata=pgdata,
+               enforced=enforced, host=_get_local_ip())
+    except Exception as _e:
+        logger.debug('[DB] audit_log for pg_flock_unenforced_warning failed: %s', _e)
+    return True
 
 
 def _heartbeat_path(pgdata):
@@ -427,6 +575,54 @@ def _read_pg_host_from_pidfile(pgdata):
     return None
 
 
+def _pidfile_pid_is_live_local_postgres(pgdata):
+    """Return True if postmaster.pid names a PID that is a live local postgres.
+
+    This is the IP-independent ground truth for "is OUR machine already
+    running PG on this pgdata". The `.pg_owner_host` marker is derived from
+    `_get_local_ip()`, which flaps when the container's IP is reassigned
+    (cloud-IDE network changes) — making a host mistake its OWN postmaster
+    for a remote one. A PID liveness + name check does not depend on the IP,
+    so we use it as a hard guard before deleting the pidfile or starting a
+    second postmaster (concurrent access to one pgdata corrupts pg_subtrans).
+
+    Returns False if the pidfile is absent/unparseable, the PID is dead, or
+    the PID belongs to a non-postgres process (genuinely stale pidfile).
+    """
+    pidfile = os.path.join(pgdata, 'postmaster.pid')
+    try:
+        with open(pidfile) as f:
+            pid = int(f.readline().strip())
+    except (FileNotFoundError, ValueError) as e:
+        logger.debug('[DB] pidfile liveness: cannot read PID from %s: %s', pidfile, e)
+        return False
+    except OSError as e:
+        logger.debug('[DB] pidfile liveness: stat/read error on %s: %s', pidfile, e)
+        return False
+    try:
+        from lib.compat import is_process_alive, is_process_named
+        if not is_process_alive(pid):
+            return False
+        try:
+            named = is_process_named(pid, 'postgres')
+        except Exception as e:
+            # Can't introspect the name (no /proc perms etc.) — be SAFE and
+            # assume it IS our live postgres rather than risk a double-start.
+            logger.warning('[DB] pidfile liveness: PID %d alive but name check '
+                           'failed (%s) — assuming live postgres to avoid double-start', pid, e)
+            return True
+        if named:
+            logger.info('[DB] pidfile liveness: PID %d is a LIVE local postgres '
+                        '— this host already owns pgdata=%s', pid, pgdata)
+            return True
+        logger.info('[DB] pidfile liveness: PID %d alive but not postgres — stale pidfile', pid)
+        return False
+    except Exception as e:
+        logger.warning('[DB] pidfile liveness check failed (%s) — assuming live '
+                       'postgres to avoid double-start', e)
+        return True
+
+
 def _get_local_ip():
     """Get this machine's IP address (non-loopback)."""
     import socket
@@ -490,6 +686,20 @@ def _pg_already_running_on_another_machine(pgdata, pg_port):
 
     logger.info('[DB] postmaster.pid: PID=%d, owner_host=%s, local_ip=%s, is_remote=%s',
                 pid, owner_host, local_ip, is_remote_owner)
+
+    # IP-independent ground truth: if the pidfile PID is a live local
+    # postgres, THIS host already owns pgdata — regardless of what the
+    # `.pg_owner_host` IP marker says. _get_local_ip() flaps when the
+    # container IP is reassigned, which previously made a host mistake its
+    # OWN postmaster for a remote one, delete the pidfile, and start a
+    # SECOND postmaster on the same pgdata → pg_subtrans corruption. Trust
+    # the PID over the IP.
+    if is_remote_owner and _pidfile_pid_is_live_local_postgres(pgdata):
+        logger.warning('[DB] postmaster.pid PID=%d is a LIVE local postgres but '
+                       'owner_host=%s != local_ip=%s — IP flap detected. Treating '
+                       'as OURS (not remote) to avoid a double-start.',
+                       pid, owner_host, local_ip)
+        return False, None
 
     if is_remote_owner:
         # Use a real psycopg2 connect probe — pg_isready can give false
@@ -577,6 +787,432 @@ def _fix_unix_socket_conf(pgdata):
             logger.info('[DB] Patched postgresql.conf: disabled unix_socket_directories (%s)', reason)
     except Exception as e:
         logger.warning('[DB] Could not patch unix_socket_directories in postgresql.conf: %s', e)
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  Managed PostgreSQL tuning block
+#
+#  Historically the durability + sizing settings (max_connections,
+#  wal_level, fsync, …) were appended to postgresql.conf MANUALLY, once,
+#  under a "# ── ChatUI Custom Config ──" header. Nothing in the codebase
+#  maintained them, so:
+#    • bumping the app-side TOFU_DB_MAX_CONNS did NOT raise PG's own
+#      max_connections ceiling (a 1000-user deployment would still hit
+#      PG "too many clients" at 200);
+#    • durability settings could silently drift between deployments.
+#
+#  This function makes the config code-managed: every owned-PG startup
+#  rewrites a single delimited block (idempotently). PG reads the LAST
+#  occurrence of a setting in the file, so appending our block also
+#  overrides any older manual entries above it.
+# ─────────────────────────────────────────────────────────────────────
+
+_MANAGED_BLOCK_BEGIN = '# ── Tofu managed config (auto-generated; do not edit) BEGIN ──'
+_MANAGED_BLOCK_END = '# ── Tofu managed config END ──'
+
+# PG server-side max_connections. Provisioned ABOVE the app-side semaphore
+# ceiling (_MAX_TOTAL_CONNS, default 1000) so the application — not PG's
+# hard FATAL limit — is always the binding constraint. The extra headroom
+# absorbs superuser/maintenance/replication connections. Override via env.
+_MANAGED_PG_MAX_CONNECTIONS = int(
+    getenv_compat('TOFU_PG_MAX_CONNECTIONS', default='1100'))
+
+
+def _build_managed_pg_config():
+    """Return the body (settings only) of the managed postgresql.conf block.
+
+    Durability is deliberately kept SAFE (fsync + synchronous_commit on,
+    full_page_writes on) — the cluster lives on a shared FUSE mount where a
+    torn page on crash would corrupt the whole cluster, exactly the failure
+    that produced the 'lost conversations' incident. ``wal_level=replica``
+    (up from the old ``minimal``) is what makes PITR / base-backup-based
+    recovery possible, so a future corrupt primary is recoverable to a
+    point-in-time instead of needing a data-losing ``pg_resetwal -f``.
+    """
+    return [
+        f'max_connections = {_MANAGED_PG_MAX_CONNECTIONS}',
+        'superuser_reserved_connections = 10',
+        # Server-side backstop for leaked transactions: PG kills any backend
+        # left 'idle in transaction' past this. Matched to the app-side idle
+        # reaper (TOFU_DB_IDLE_RELEASE_S, default 120s) so a connection parked
+        # mid-transaction by a long-lived worker is reclaimed even though the
+        # app-side reaper deliberately skips non-IDLE connections.
+        'idle_in_transaction_session_timeout = 120s',
+        # ── Durability (do NOT relax on a FUSE-mounted cluster) ──
+        'fsync = on',
+        'synchronous_commit = on',
+        'full_page_writes = on',
+        # ── WAL: replica level enables base-backup + PITR recovery ──
+        'wal_level = replica',
+        'max_wal_senders = 10',
+        'wal_compression = on',
+        'max_wal_size = 2GB',
+        'min_wal_size = 160MB',
+        'checkpoint_completion_target = 0.9',
+        # ── Memory sizing for a ~1000-connection workload ──
+        'shared_buffers = 512MB',
+        'effective_cache_size = 2GB',
+        'work_mem = 8MB',
+        'maintenance_work_mem = 128MB',
+    ]
+
+
+def _ensure_managed_pg_config(pgdata):
+    """Idempotently write the managed tuning block into postgresql.conf.
+
+    Returns:
+        bool: True if the on-disk config CHANGED (caller should restart PG
+        for ``max_connections`` / ``wal_level`` — which need a restart — to
+        take effect), False if it was already up to date or on error.
+    """
+    conf_path = os.path.join(pgdata, 'postgresql.conf')
+    if not os.path.isfile(conf_path):
+        return False
+
+    settings = _build_managed_pg_config()
+    block_lines = [_MANAGED_BLOCK_BEGIN, *settings, _MANAGED_BLOCK_END]
+    new_block = '\n'.join(block_lines) + '\n'
+
+    try:
+        with open(conf_path, encoding='utf-8') as f:
+            content = f.read()
+
+        import re
+        # Strip any prior managed block (between the BEGIN/END markers).
+        pattern = re.compile(
+            re.escape(_MANAGED_BLOCK_BEGIN) + r'.*?' + re.escape(_MANAGED_BLOCK_END) + r'\n?',
+            re.DOTALL)
+        stripped = pattern.sub('', content)
+
+        desired = stripped.rstrip('\n') + '\n\n' + new_block
+        if desired == content:
+            logger.debug('[DB] Managed PG config already current — no change')
+            return False
+
+        # Write atomically (temp file + replace) so a crash mid-write can't
+        # leave a truncated postgresql.conf that bricks startup.
+        tmp_path = conf_path + '.tofu.tmp'
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            f.write(desired)
+        os.replace(tmp_path, conf_path)
+        logger.info('[DB] Wrote managed PG config block '
+                    '(max_connections=%d, wal_level=replica, fsync=on) — '
+                    'restart required for connection/WAL settings',
+                    _MANAGED_PG_MAX_CONNECTIONS)
+        return True
+    except Exception as e:
+        logger.warning('[DB] Could not write managed PG config block: %s', e)
+        return False
+
+
+def _restart_local_pg(pgdata, base_dir):
+    """Restart the locally-owned PG with ``pg_ctl restart -m fast``.
+
+    Used after _ensure_managed_pg_config reports a change to a restart-only
+    setting (max_connections / wal_level). Best-effort: on failure the
+    running PG keeps its previous (still-valid) config.
+
+    Returns:
+        bool: True on a successful restart.
+    """
+    log_path = os.path.join(base_dir, 'logs', 'postgresql.log')
+    try:
+        result = subprocess.run(
+            [_find_pg_binary('pg_ctl'), '-D', pgdata, '-l', log_path,
+             'restart', '-m', 'fast', '-w', '-t', '30'],
+            capture_output=True, text=True, timeout=45
+        )
+        if result.returncode != 0:
+            logger.error('[DB] pg_ctl restart (for managed config) failed: %s',
+                         (result.stderr or '').strip()[:300])
+            return False
+        logger.info('[DB] Restarted local PG to apply managed config')
+        return True
+    except Exception as e:
+        logger.error('[DB] pg_ctl restart raised: %s', e, exc_info=True)
+        return False
+
+
+def backup_pg_database(retention_days=None):
+    """Dump the live PG cluster to a timestamped SQL file under data/pg_backups/.
+
+    This is the single biggest durability win for the 'lost conversations on
+    crash' problem: the only reason the 2026-06-04 WAL-corruption incident was
+    recoverable at all is that a manual ``pg_dumpall`` happened to exist. This
+    makes that dump SCHEDULED (see the 'PostgreSQL Backup' task auto-registered
+    in lib/scheduler/manager.py) so a corrupt primary can always be restored
+    from a recent logical dump instead of a data-losing ``pg_resetwal -f``.
+
+    PG-only; on SQLite the on-disk .db file already IS the durable artifact, so
+    this is a silent no-op there.
+
+    Args:
+        retention_days: Delete dumps older than this many days. Defaults to
+            env ``TOFU_PG_BACKUP_RETENTION_DAYS`` or 7.
+
+    Returns:
+        dict summary {ok, path, size_mb, pruned} — ok=False with a 'reason'
+        when the dump was skipped or failed.
+    """
+    from lib.database._core import BASE_DIR, _BACKEND, PG_PORT, PG_USER
+
+    if _BACKEND != 'pg':
+        return {'ok': False, 'reason': 'not_pg'}
+    if PG_PORT == 0:
+        return {'ok': False, 'reason': 'pg_unavailable'}
+
+    if retention_days is None:
+        try:
+            retention_days = int(getenv_compat('TOFU_PG_BACKUP_RETENTION_DAYS',
+                                                default='7'))
+        except (TypeError, ValueError) as e:
+            logger.debug('[DB-Backup] Invalid TOFU_PG_BACKUP_RETENTION_DAYS, defaulting to 7: %s', e)
+            retention_days = 7
+
+    pg_dumpall = shutil.which('pg_dumpall') or _find_pg_binary('pg_dumpall')
+    if not pg_dumpall or not os.path.isabs(pg_dumpall):
+        # _find_pg_binary returns the bare name when not found.
+        if not shutil.which('pg_dumpall'):
+            logger.warning('[DB-Backup] pg_dumpall not found on PATH — skipping backup')
+            return {'ok': False, 'reason': 'pg_dumpall_missing'}
+
+    backup_dir = os.path.join(BASE_DIR, 'data', 'pg_backups')
+    try:
+        os.makedirs(backup_dir, exist_ok=True)
+    except OSError as e:
+        logger.error('[DB-Backup] Cannot create backup dir %s: %s', backup_dir, e)
+        return {'ok': False, 'reason': f'mkdir_failed: {e}'}
+
+    stamp = time.strftime('%Y%m%d_%H%M%S')
+    out_path = os.path.join(backup_dir, f'pg_dumpall_{stamp}.sql')
+    user = PG_USER or _get_username()
+
+    try:
+        with log_context('pg_backup', logger=logger):
+            result = subprocess.run(
+                [pg_dumpall, '-h', '127.0.0.1', '-p', str(PG_PORT), '-U', user,
+                 '--clean', '--if-exists', '-f', out_path],
+                capture_output=True, text=True,
+                env={**os.environ, 'PGCONNECT_TIMEOUT': '10', 'PGGSSENCMODE': 'disable'},
+            )
+        if result.returncode != 0:
+            logger.error('[DB-Backup] pg_dumpall failed (rc=%d): %s',
+                         result.returncode, (result.stderr or '').strip()[:500])
+            try:
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+            except OSError as e:
+                logger.debug('[DB-Backup] could not remove partial dump %s: %s', out_path, e)
+            return {'ok': False, 'reason': f'dump_failed_rc{result.returncode}'}
+    except Exception as e:
+        logger.error('[DB-Backup] pg_dumpall invocation failed: %s', e, exc_info=True)
+        return {'ok': False, 'reason': f'exception: {e}'}
+
+    try:
+        size_mb = os.path.getsize(out_path) / (1024 * 1024)
+    except OSError as e:
+        logger.debug('[DB-Backup] could not stat dump %s: %s', out_path, e)
+        size_mb = 0.0
+    logger.info('[DB-Backup] Wrote %s (%.1f MB)', out_path, size_mb)
+
+    # ── Prune old dumps past the retention window ──
+    pruned = 0
+    if retention_days > 0:
+        cutoff = time.time() - retention_days * 86400
+        try:
+            for fn in os.listdir(backup_dir):
+                if not (fn.startswith('pg_dumpall_') and fn.endswith('.sql')):
+                    continue
+                fpath = os.path.join(backup_dir, fn)
+                try:
+                    if os.path.getmtime(fpath) < cutoff:
+                        os.remove(fpath)
+                        pruned += 1
+                except OSError as e:
+                    logger.debug('[DB-Backup] Could not prune %s: %s', fpath, e)
+        except OSError as e:
+            logger.debug('[DB-Backup] Prune scan failed: %s', e)
+    if pruned:
+        logger.info('[DB-Backup] Pruned %d dump(s) older than %d days',
+                    pruned, retention_days)
+
+    try:
+        from lib.log import audit_log
+        audit_log('pg_backup', path=out_path, size_mb=round(size_mb, 1),
+                  pruned=pruned, retention_days=retention_days)
+    except Exception as _ae:
+        logger.debug('[DB-Backup] audit_log failed: %s', _ae)
+
+    return {'ok': True, 'path': out_path, 'size_mb': round(size_mb, 1),
+            'pruned': pruned}
+
+
+def _latest_pg_backup(base_dir):
+    """Return the path to the most recent data/pg_backups/pg_dumpall_*.sql, or None."""
+    backup_dir = os.path.join(base_dir, 'data', 'pg_backups')
+    try:
+        candidates = [
+            os.path.join(backup_dir, fn) for fn in os.listdir(backup_dir)
+            if fn.startswith('pg_dumpall_') and fn.endswith('.sql')
+        ]
+    except OSError as e:
+        logger.debug('[DB-Backup] no backup dir %s: %s', backup_dir, e)
+        return None
+    candidates = [p for p in candidates if os.path.getsize(p) > 0]
+    if not candidates:
+        return None
+    return max(candidates, key=os.path.getmtime)
+
+
+def _quarantine_corrupt_pgdata(pgdata):
+    """Move a corrupt pgdata aside to pgdata.corrupt.<ts> so a fresh initdb can run.
+
+    Returns the quarantine path on success, or None on failure (in which case
+    the caller must NOT proceed to initdb over live data).
+    """
+    quarantine = f'{pgdata}.corrupt.{time.strftime("%Y%m%d_%H%M%S")}'
+    try:
+        os.rename(pgdata, quarantine)
+        logger.warning('[DB-SelfHeal] Quarantined corrupt cluster: %s → %s',
+                       pgdata, quarantine)
+        return quarantine
+    except OSError as e:
+        logger.error('[DB-SelfHeal] Could not quarantine corrupt pgdata %s: %s',
+                     pgdata, e)
+        return None
+
+
+def _try_self_heal_corrupt_pg(pgdata, base_dir, pg_host, pg_port, pg_user,
+                              pg_password, pg_dbname):
+    """Automatically recover a PG cluster that exists but refuses to start.
+
+    Triggered from _ensure_pg_running when every normal start path failed but
+    a real cluster is present on disk (the 2026-06-04 'WAL redo PANIC →
+    lost conversations' class of failure). Fully automatic — the user never
+    has to run pg_resetwal / psql by hand.
+
+    Two-stage strategy (least destructive first):
+      1. ``pg_resetwal -f`` on the existing pgdata, then retry start. This is
+         the standard escape from a WAL-redo PANIC and preserves all heap data
+         (only un-checkpointed WAL is discarded). A pre-reset filesystem copy
+         of pg_wal is NOT kept, but the whole cluster is quarantined in stage 2
+         only if this fails, so stage-1 operates in place.
+      2. If reset fails (or the reset cluster still won't start), quarantine
+         the corrupt pgdata, ``initdb`` a fresh cluster, and restore the latest
+         ``data/pg_backups/`` logical dump into it. Data written since the last
+         nightly backup is lost, but the service comes back automatically with
+         the bulk of history instead of a 2-row SQLite.
+
+    Disabled by TOFU_PG_SELF_HEAL=0 (then we fall back to the loud-fail path).
+
+    Returns:
+        dict {PG_HOST, PG_PORT, PG_DSN} on success, or None.
+    """
+    if getenv_compat('TOFU_PG_SELF_HEAL', default='1').lower() in ('0', 'false', 'no'):
+        logger.warning('[DB-SelfHeal] Disabled via TOFU_PG_SELF_HEAL — skipping '
+                       'automatic recovery')
+        return None
+    if not _pg_binaries_present():
+        return None
+
+    from lib.log import audit_log
+
+    def _build_dsn(host, port):
+        dsn = f"host={host} port={port} dbname={pg_dbname}"
+        if pg_user:
+            dsn += f" user={pg_user}"
+        if pg_password:
+            dsn += f" password={pg_password}"
+        return dsn
+
+    # Take an exclusive backup of the corrupt cluster dir first (cheap, just a
+    # filesystem copy) so a botched self-heal can never destroy the only copy.
+    logger.warning('[DB-SelfHeal] PG cluster at %s exists but will not start — '
+                   'attempting automatic recovery', pgdata)
+    audit_log('pg_self_heal_start', pgdata=pgdata)
+
+    # ── Stage 1: pg_resetwal -f, then retry start ──
+    pg_resetwal = _find_pg_binary('pg_resetwal')
+    if shutil.which(pg_resetwal) or os.path.isfile(pg_resetwal):
+        try:
+            result = subprocess.run(
+                [pg_resetwal, '-f', '-D', pgdata],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode == 0:
+                logger.warning('[DB-SelfHeal] Stage 1: pg_resetwal -f succeeded — '
+                               'retrying start')
+                conf_port = _read_our_pg_port(pgdata) or pg_port
+                log_path = os.path.join(base_dir, 'logs', 'postgresql.log')
+                try:
+                    start = subprocess.run(
+                        [_find_pg_binary('pg_ctl'), '-D', pgdata, '-l', log_path,
+                         'start', '-w', '-t', '30'],
+                        capture_output=True, text=True, timeout=45)
+                    if start.returncode == 0 and _verify_pg_after_start(
+                            conf_port, pgdata, pg_user, total_wait_s=12):
+                        logger.warning('[DB-SelfHeal] Stage 1 recovery SUCCESS — '
+                                       'PG started after pg_resetwal')
+                        _ensure_database_exists('127.0.0.1', conf_port, pg_dbname,
+                                                pg_user, pgdata)
+                        _write_owner_host(pgdata)
+                        _mark_pg_owned_locally(pgdata)
+                        audit_log('pg_self_heal_success', stage='resetwal',
+                                  port=conf_port)
+                        return {'PG_HOST': '127.0.0.1', 'PG_PORT': conf_port,
+                                'PG_DSN': _build_dsn('127.0.0.1', conf_port)}
+                    logger.error('[DB-SelfHeal] Stage 1: PG still will not start '
+                                 'after pg_resetwal (rc=%d): %s',
+                                 start.returncode, (start.stderr or '').strip()[:300])
+                    _stop_local_pg_quietly(pgdata)
+                except Exception as e:
+                    logger.error('[DB-SelfHeal] Stage 1 start attempt raised: %s', e)
+            else:
+                logger.error('[DB-SelfHeal] Stage 1: pg_resetwal failed (rc=%d): %s',
+                             result.returncode, (result.stderr or '').strip()[:300])
+        except Exception as e:
+            logger.error('[DB-SelfHeal] Stage 1 pg_resetwal raised: %s', e)
+
+    # ── Stage 2: quarantine + fresh initdb + restore latest backup ──
+    latest = _latest_pg_backup(base_dir)
+    if not latest:
+        logger.critical('[DB-SelfHeal] Stage 2 impossible: no logical backup in '
+                        'data/pg_backups/ to restore from. Leaving corrupt cluster '
+                        'in place for manual recovery (pg_resetwal already tried). '
+                        'A nightly backup would have made this automatic.')
+        audit_log('pg_self_heal_failed', reason='no_backup')
+        return None
+
+    logger.warning('[DB-SelfHeal] Stage 2: rebuilding from latest backup %s', latest)
+    quarantine = _quarantine_corrupt_pgdata(pgdata)
+    if not quarantine:
+        return None
+
+    # Stage the dump where _bootstrap_pg's restore step looks for it, so we
+    # reuse the well-tested initdb → createdb → restore path verbatim.
+    staged_dump = os.path.join(base_dir, 'data', 'pg_backup.sql')
+    try:
+        shutil.copy2(latest, staged_dump)
+    except OSError as e:
+        logger.error('[DB-SelfHeal] Could not stage backup for restore: %s', e)
+        return None
+
+    result = _bootstrap_pg(pgdata, base_dir, pg_host, pg_port, pg_user,
+                           pg_password, pg_dbname)
+    if result:
+        logger.warning('[DB-SelfHeal] Stage 2 recovery SUCCESS — fresh cluster '
+                       'restored from %s (corrupt cluster preserved at %s)',
+                       latest, quarantine)
+        audit_log('pg_self_heal_success', stage='restore_backup',
+                  backup=latest, quarantine=quarantine)
+        return result
+
+    logger.critical('[DB-SelfHeal] Stage 2 FAILED — fresh initdb+restore did not '
+                    'come up. Corrupt cluster preserved at %s, backup at %s.',
+                    quarantine, latest)
+    audit_log('pg_self_heal_failed', reason='restore_failed',
+              quarantine=quarantine, backup=latest)
+    return None
 
 
 def _read_our_pg_port(pgdata):
@@ -914,12 +1550,14 @@ def _bootstrap_pg(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password, pg_d
             f.write(f'port = {free_port}\n')
             f.write("listen_addresses = '*'\n")
             f.write("unix_socket_directories = ''\n")
-            f.write("max_connections = 500\n")
-            f.write("idle_in_transaction_session_timeout = 300s\n")
         logger.info('[DB] Configured PG port=%d in postgresql.conf', free_port)
     except Exception as e:
         logger.error('[DB] Cannot write postgresql.conf: %s', e)
         return None
+
+    # Apply the managed tuning block (max_connections / durability / WAL).
+    # Written BEFORE the first start, so no restart is needed here.
+    _ensure_managed_pg_config(pgdata)
 
     # Start PG — but first acquire the cross-host startup lock so we
     # don't race another tofu host that shares this pgdata.
@@ -1156,7 +1794,23 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
     if is_explicit_external:
         target_host = explicit_host or pg_host
         target_port = int(explicit_port) if explicit_port else pg_port
-        logger.info('[DB] Using explicit PG target from env: %s:%d', target_host, target_port)
+        # A local explicit port (e.g. TOFU_PG_PORT pointing at 127.0.0.1)
+        # almost always names OUR OWN pgdata started by a previous server.py —
+        # NOT a truly external/unmanaged PG. If that cluster is OURS and we
+        # have the binaries to manage it, an unreachable target just means
+        # "our local PG is currently down" (e.g. the user clicked Restart,
+        # which stops PG, and the new server raced ahead of it). In that case
+        # we must START it ourselves rather than give up and fall back to a
+        # near-empty SQLite. Only a genuinely external target (remote host, or
+        # a local port whose pgdata isn't ours) is strictly connect-or-fail.
+        target_is_local = target_host in ('localhost', '127.0.0.1', '::1')
+        target_is_ours = (
+            target_is_local
+            and _read_our_pg_port(pgdata) == target_port
+            and _pg_binaries_present()
+        )
+        logger.info('[DB] Using explicit PG target from env: %s:%d (manageable_local=%s)',
+                    target_host, target_port, target_is_ours)
         # Try psycopg2 directly (no pg_isready binary needed — works in CI)
         try:
             import psycopg2
@@ -1164,15 +1818,30 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
             conn = psycopg2.connect(test_dsn, connect_timeout=5)
             conn.close()
             logger.info('[DB] Explicit PG target %s:%d is reachable', target_host, target_port)
+            # Manage our own cluster's tuning so the connection / WAL settings
+            # stay in sync (otherwise PG keeps its initdb defaults — e.g.
+            # max_connections=200 — below the app-side TOFU_DB_MAX_CONNS
+            # ceiling, producing 'too many clients' FATALs).
+            if target_is_local and _read_our_pg_port(pgdata) == target_port:
+                _mark_pg_owned_locally(pgdata)
+                if _ensure_managed_pg_config(pgdata):
+                    _restart_local_pg(pgdata, base_dir)
             return {'PG_HOST': target_host, 'PG_PORT': target_port,
                     'PG_DSN': test_dsn}
         except ImportError:
             logger.error('[DB] psycopg2 not installed — cannot connect to explicit PG')
             return None
         except Exception as e:
-            logger.error('[DB] Explicit PG target %s:%d not reachable: %s',
-                        target_host, target_port, e)
-            return None
+            if target_is_ours:
+                logger.warning('[DB] Explicit local PG target %s:%d is down (%s) — '
+                               'it names OUR pgdata, so attempting to START it '
+                               'locally instead of falling back to SQLite.',
+                               target_host, target_port, e)
+                # Fall through to the local start/bootstrap path below (Step 2+).
+            else:
+                logger.error('[DB] Explicit PG target %s:%d not reachable: %s',
+                            target_host, target_port, e)
+                return None
 
     # ── Step 2: Read OUR port from OUR postgresql.conf ──
     our_port = _read_our_pg_port(pgdata)
@@ -1197,6 +1866,10 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
                     # certainly started by a previous server.py on this
                     # host. Take ownership so shutdown_pool stops it.
                     _mark_pg_owned_locally(pgdata)
+                    # Re-apply managed tuning; restart only if it changed a
+                    # restart-only setting (max_connections / wal_level).
+                    if _ensure_managed_pg_config(pgdata):
+                        _restart_local_pg(pgdata, base_dir)
                     return {'PG_HOST': _local, 'PG_PORT': pg_port,
                             'PG_DSN': _build_dsn(_local, pg_port)}
                 else:
@@ -1312,6 +1985,13 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
                 # with a clearer log if incompatible.
 
     # ── Step 4/5: Start PG locally or bootstrap ──
+    # Before any local start/takeover, verify the pgdata mount truly enforces
+    # advisory locks. A silent-no-op filesystem makes the cross-host startup
+    # interlock useless (two hosts both "acquire" and double-start → WAL
+    # corruption). Warn loudly, or refuse entirely if TOFU_PG_REQUIRE_FLOCK.
+    if not _verify_flock_support_or_warn(pgdata):
+        return None
+
     if not os.path.isdir(pgdata):
         logger.info('[DB] No pgdata directory — bootstrapping new PostgreSQL instance')
         result = _bootstrap_pg(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password, pg_dbname)
@@ -1338,6 +2018,26 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
     if os.path.exists(pidfile):
         owner_host = _read_pg_host_from_pidfile(pgdata)
         local_ip = _get_local_ip()
+        # IP-independent guard FIRST: if the pidfile PID is a live local
+        # postgres, this host already owns the cluster. _get_local_ip() can
+        # flap (container IP reassignment), which previously caused a host to
+        # see its OWN postmaster as "remote", delete the pidfile, and start a
+        # SECOND postmaster on the same pgdata → pg_subtrans corruption.
+        # Reuse the running instance instead of taking over.
+        if _pidfile_pid_is_live_local_postgres(pgdata):
+            conf_port = _read_our_pg_port(pgdata) or pg_port
+            if _verify_pg_data_directory('127.0.0.1', conf_port, pgdata, pg_user):
+                logger.warning('[DB] Step 4: postmaster.pid is a LIVE local postgres '
+                               '(owner_host marker=%s, local_ip=%s) — reusing it '
+                               'instead of taking over (IP-flap safe).',
+                               owner_host, local_ip)
+                _ensure_database_exists('127.0.0.1', conf_port, pg_dbname, pg_user, pgdata)
+                _write_owner_host(pgdata)
+                _mark_pg_owned_locally(pgdata)
+                return {'PG_HOST': '127.0.0.1', 'PG_PORT': conf_port,
+                        'PG_DSN': _build_dsn('127.0.0.1', conf_port)}
+            logger.warning('[DB] Step 4: pidfile PID is live postgres but data_directory '
+                           'verify on 127.0.0.1:%d failed — proceeding with caution.', conf_port)
         if owner_host and owner_host not in (local_ip, 'localhost', '127.0.0.1'):
             # Heartbeat is the authoritative signal: only defer if another
             # tofu is actively running there. Bare TCP-alive postmaster
@@ -1386,6 +2086,25 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
         else:
             logger.warning('[DB] Removing stale postmaster.pid before starting PG '
                           '(owner: %s, us: %s)', owner_host, local_ip)
+        # Cross-host HARD interlock — the real anti-corruption barrier.
+        #
+        # We are about to delete a postmaster.pid and start our own
+        # postmaster. Removing the pidfile defeats PostgreSQL's OWN
+        # single-postmaster guard, so THIS is the catastrophic step: if
+        # every IP/PID/heartbeat heuristic above was wrong and the "dead"
+        # owner is actually a LIVE peer on another host, deleting its
+        # pidfile and starting a second postmaster on the shared FUSE
+        # pgdata corrupts WAL / pg_subtrans. A live peer holds this flock
+        # for its entire lifetime, so we acquire it BEFORE the deletion:
+        # if another host holds it, two postmasters physically cannot
+        # coexist — we refuse to take over and fall back. (The later
+        # pg_ctl-start acquisition is idempotent — a no-op once held here.)
+        if not _try_acquire_startup_lock(pgdata):
+            logger.warning('[DB] Refusing to remove postmaster.pid / take over: '
+                           'another host holds the cross-host startup lock on '
+                           'pgdata=%s — a live peer owns this PG. Falling back '
+                           '(SQLite / retry next cycle).', pgdata)
+            return None
         try:
             os.remove(pidfile)
         except FileNotFoundError:
@@ -1397,9 +2116,11 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
                              '— PG may still be running): %s', e)
             else:
                 logger.error('[DB] Cannot remove stale pidfile: %s', e)
+            _release_startup_lock()
             return None
         except Exception as e:
             logger.error('[DB] Cannot remove stale pidfile: %s', e)
+            _release_startup_lock()
             return None
 
     _fix_unix_socket_conf(pgdata)
@@ -1419,12 +2140,15 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
                 _ensure_database_exists('127.0.0.1', conf_port, pg_dbname, pg_user, pgdata)
                 _write_owner_host(pgdata)
                 _mark_pg_owned_locally(pgdata)
+                if _ensure_managed_pg_config(pgdata):
+                    _restart_local_pg(pgdata, base_dir)
                 return {'PG_HOST': '127.0.0.1', 'PG_PORT': conf_port,
                         'PG_DSN': _build_dsn('127.0.0.1', conf_port)}
             # Not ours — reassign to a different port
             free_port = _find_free_port(start=conf_port + 1)
             if free_port is None:
                 logger.error('[DB] No free port found — cannot start PG')
+                _release_startup_lock()
                 return None
             logger.info('[DB] Port %d is occupied by another PG — reassigning to %d',
                        conf_port, free_port)
@@ -1443,6 +2167,7 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
                 logger.info('[DB] Updated postgresql.conf: port = %d', free_port)
             except Exception as _e:
                 logger.error('[DB] Failed to update postgresql.conf port: %s', _e)
+                _release_startup_lock()
                 return None
     except Exception as _e:
         logger.debug('[DB] Port availability check failed: %s', _e)
@@ -1473,10 +2198,15 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
                 logger.error('[DB] PG started (rc=0) but failed post-start '
                              'verification — likely WAL corruption or concurrent '
                              'start by another host. Stopping local PG and '
-                             'falling back. See logs/postgresql.log.')
+                             'attempting automatic self-heal. See logs/postgresql.log.')
                 _stop_local_pg_quietly(pgdata)
+                # Automatic corruption recovery (pg_resetwal → restore-from-backup)
+                # BEFORE giving up. We still hold the cross-host startup lock, so
+                # no peer can race us during recovery. Released after either way.
+                healed = _try_self_heal_corrupt_pg(
+                    pgdata, base_dir, pg_host, pg_port, pg_user, pg_password, pg_dbname)
                 _release_startup_lock()
-                return None
+                return healed
             _ensure_database_exists('127.0.0.1', pg_port, pg_dbname, pg_user, pgdata)
             _write_owner_host(pgdata)
             _mark_pg_owned_locally(pgdata)

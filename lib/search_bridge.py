@@ -1,0 +1,233 @@
+"""lib/search_bridge.py — Wire chatui behavior into tofu-search's seams.
+
+tofu-search is a standalone library with no knowledge of chatui's LLM
+dispatcher, browser extension, or auth-source store. It exposes three seams
+(an LLM callable + two providers) that a host fills in. This module installs
+chatui's implementations so the migrated search/fetch pipeline behaves
+*exactly* as the in-tree ``lib/search`` + ``lib/fetch`` did before extraction:
+
+  * **LLM filter** → chatui's ``dispatch_chat`` (model routing, key pools,
+    ``capability='cheap'``, ``FETCH_FILTER_MODEL`` override, the
+    ``§§IRRELEVANT§§`` stop token, and the HTTP-450 ``ContentFilterError``
+    placeholder text).
+  * **Browser fallback** → ``lib.browser`` extension (fetch + DDG-HTML search).
+  * **Authenticated fetch** → ``lib.auth_sources`` (cookies/proxy lookup).
+
+Call :func:`install_search_bridge` once at startup (after config load). It is
+idempotent and degrades gracefully if any sub-system is unavailable.
+"""
+
+import os
+import re
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
+
+import lib as _lib
+
+import tofu_search
+from lib.log import get_logger
+
+logger = get_logger(__name__)
+
+__all__ = ['install_search_bridge', 'sync_search_config']
+
+# Module-level filter knobs mirror the old lib/fetch/content_filter.py.
+_FILTER_MODEL = os.environ.get('FETCH_FILTER_MODEL', '')   # empty ⇒ dispatcher default
+_IRRELEVANT_STOP = '§§IRRELEVANT§§'
+
+_installed = False
+
+
+# ═══════════════════════════════════════════════════════
+#  LLM seam — chatui dispatch_chat
+# ═══════════════════════════════════════════════════════
+
+def _chatui_llm(messages, **kwargs):
+    """tofu-search llm_function adapter backed by chatui's dispatch_chat.
+
+    Receives OpenAI-format messages + kwargs (``stop``, ``temperature``,
+    ``timeout``) from tofu-search's content filter. Returns the assistant
+    text. On an HTTP-450 content-policy rejection we return the SAME
+    placeholder the old filter produced (the filter treats a returned string
+    as success, so this preserves the "don't re-feed 450 text to the main
+    model" behavior without re-raising).
+    """
+    from lib.llm import ContentFilterError
+    from lib.llm_dispatch.api import dispatch_chat
+
+    extra = {}
+    stop = kwargs.get('stop')
+    if stop:
+        extra['stop'] = stop
+
+    try:
+        content, _usage = dispatch_chat(
+            messages,
+            temperature=kwargs.get('temperature', 0),
+            thinking_enabled=False,
+            capability='cheap',
+            prefer_model=_FILTER_MODEL or None,
+            max_retries=2,
+            log_prefix='[ContentFilter]',
+            timeout=kwargs.get('timeout'),
+            extra=extra or None,
+        )
+        return content or ''
+    except ContentFilterError:
+        # The raw page text itself tripped the gateway's content policy.
+        # Returning it verbatim would re-trigger 450 in the main chat call,
+        # so emit a short placeholder instead (matches legacy behavior).
+        url = ''
+        for m in messages:
+            mc = m.get('content') or ''
+            hit = re.search(r'Source URL:\s*(\S+)', mc)
+            if hit:
+                url = hit.group(1)
+                break
+        logger.info('[ContentFilter] SKIP (content policy 450) url=%s — placeholder returned', url[:100])
+        return (f'[Page content from {url} was filtered by content policy. '
+                f'The page could not be processed by the LLM content filter.]')
+
+
+# ═══════════════════════════════════════════════════════
+#  Browser seam — lib.browser extension
+# ═══════════════════════════════════════════════════════
+
+class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
+    """Routes tofu-search browser fallbacks through chatui's extension."""
+
+    def is_connected(self) -> bool:
+        try:
+            from lib.browser import is_extension_connected
+            return bool(is_extension_connected())
+        except Exception as e:
+            logger.debug('[Bridge] is_extension_connected failed: %s', e)
+            return False
+
+    def fetch_url(self, url, *, max_chars=None, timeout=15):
+        try:
+            from lib.browser import fetch_url_via_browser
+            return fetch_url_via_browser(url, max_chars=max_chars or 50000,
+                                         timeout=max(timeout, 25))
+        except Exception as e:
+            logger.warning('[Bridge] browser fetch_url failed for %s: %s', url[:80], e)
+            return None
+
+    def search(self, query, *, max_results=8):
+        """Reproduce the old browser DDG-HTML search-and-parse fallback."""
+        try:
+            from lib.browser import is_extension_connected, send_browser_command
+        except Exception as e:
+            logger.debug('[Bridge] browser search import failed: %s', e)
+            return []
+        if not is_extension_connected():
+            return []
+        from tofu_search.search._common import clean_text
+        search_url = 'https://html.duckduckgo.com/html/?q=' + quote_plus(query)
+        try:
+            result, error = send_browser_command('fetch_url', {
+                'url': search_url, 'maxChars': 200000, 'timeoutMs': 20000,
+            }, timeout=25)
+            if error or not isinstance(result, dict):
+                logger.warning('[Bridge] browser search fetch failed: %s', str(error)[:200])
+                return []
+            html = result.get('html', '') or result.get('text', '')
+            if not html or len(html) < 100:
+                return []
+            results = []
+            blocks = html.split('class="result results_links')
+            link_re = re.compile(r'<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>', re.DOTALL)
+            snip_re = re.compile(r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>', re.DOTALL)
+            for block in blocks[1:]:
+                if len(results) >= max_results:
+                    break
+                lm = link_re.search(block)
+                if not lm:
+                    continue
+                raw_url = lm.group(1)
+                title = re.sub(r'<[^>]+>', '', lm.group(2)).strip()
+                snippet = ''
+                sm = snip_re.search(block)
+                if sm:
+                    snippet = re.sub(r'<[^>]+>', '', sm.group(1)).strip()
+                if '/y.js?' in raw_url and 'ad_' in raw_url:
+                    continue
+                url = raw_url
+                if 'uddg=' in raw_url:
+                    try:
+                        url = unquote(parse_qs(urlparse(raw_url).query).get('uddg', [raw_url])[0])
+                    except Exception as _parse_err:
+                        logger.debug('[Bridge] DDG uddg URL parse failed: %s', _parse_err)
+                if url.startswith('http'):
+                    results.append({
+                        'title': clean_text(title)[:200],
+                        'snippet': clean_text(snippet)[:500],
+                        'url': url,
+                        'source': 'DuckDuckGo (via browser)',
+                    })
+            logger.info('[Bridge] browser DDG parse got %d results', len(results))
+            return results
+        except Exception as e:
+            logger.error('[Bridge] browser search failed: %s', e, exc_info=True)
+            return []
+
+
+# ═══════════════════════════════════════════════════════
+#  Auth-source seam — lib.auth_sources
+# ═══════════════════════════════════════════════════════
+
+class _ChatuiAuthSourceProvider(tofu_search.AuthSourceProvider):
+    """Routes tofu-search authenticated fetch through chatui's auth store."""
+
+    def match_source(self, url):
+        try:
+            from lib.auth_sources import match_source
+            return match_source(url)
+        except Exception as e:
+            logger.debug('[Bridge] auth match_source failed for %s: %s', url[:80], e)
+            return None
+
+    def get_source(self, domain):
+        try:
+            from lib.auth_sources import get_source
+            return get_source(domain)
+        except Exception as e:
+            logger.debug('[Bridge] auth get_source failed for %s: %s', domain, e)
+            return None
+
+
+# ═══════════════════════════════════════════════════════
+#  Config sync + install
+# ═══════════════════════════════════════════════════════
+
+def sync_search_config():
+    """Push chatui's live FETCH_* settings into tofu-search's global config."""
+    tofu_search.configure(
+        llm_function=_chatui_llm,
+        fetch_top_n=_lib.FETCH_TOP_N,
+        fetch_timeout=_lib.FETCH_TIMEOUT,
+        fetch_max_chars_search=_lib.FETCH_MAX_CHARS_SEARCH,
+        fetch_max_chars_direct=_lib.FETCH_MAX_CHARS_DIRECT,
+        fetch_max_chars_pdf=_lib.FETCH_MAX_CHARS_PDF,
+        fetch_max_bytes=_lib.FETCH_MAX_BYTES,
+        skip_domains=set(_lib.SKIP_DOMAINS),
+        filter_enabled=getattr(_lib, 'LLM_CONTENT_FILTER_ENABLED', True),
+        filter_min_chars=int(os.environ.get('FETCH_FILTER_MIN_CHARS', '3000')),
+        filter_timeout=int(os.environ.get('FETCH_FILTER_TIMEOUT', '300')),
+    )
+
+
+def install_search_bridge():
+    """Install chatui's LLM + provider implementations into tofu-search.
+
+    Idempotent — safe to call multiple times (e.g. on config reload).
+    """
+    global _installed
+    sync_search_config()
+    if not _installed:
+        tofu_search.register_browser_provider(_ChatuiBrowserProvider())
+        tofu_search.register_auth_source_provider(_ChatuiAuthSourceProvider())
+        _installed = True
+        logger.info('[Bridge] tofu-search bridge installed '
+                    '(LLM=dispatch_chat, browser=extension, auth=auth_sources)')
+    else:
+        logger.debug('[Bridge] tofu-search config re-synced')

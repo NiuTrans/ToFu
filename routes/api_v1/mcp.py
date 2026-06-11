@@ -42,7 +42,9 @@ api_v1_mcp_bp = Blueprint('api_v1_mcp', __name__)
         'Returns ``{servers: [...]}`` with connection status, tool count, '
         'and (when connected) the upstream server\'s reported version. '
         'The ``env`` block is intentionally stripped from each entry; '
-        'use ``stored_env_keys`` to learn which keys have stored values.'
+        'use ``stored_env_keys`` to learn which keys have stored values. '
+        'When a server\'s automatic reconnect is failing, ``breaker`` is '
+        '``{failures, retry_in, next_retry_ts}`` (else ``null``).'
     ),
     tags=['mcp'],
 )
@@ -69,6 +71,10 @@ def list_servers_v1():
                     server_version = s.get('server_version', '') or ''
                     server_impl_name = s.get('server_impl_name', '') or ''
                     break
+        # Circuit-breaker status: present only for servers whose automatic
+        # reconnect is currently failing+backing off, so the UI can show
+        # "retrying in N min" instead of a bare "disconnected".
+        breaker = bridge.get_breaker_state(name)
         servers.append({
             'name': name,
             'config': {k: v for k, v in srv_cfg.items() if k != 'env'},
@@ -79,6 +85,7 @@ def list_servers_v1():
             'tool_names': tool_names,
             'server_version': server_version,
             'server_impl_name': server_impl_name,
+            'breaker': breaker,
         })
     return api_ok({'servers': servers})
 
@@ -121,7 +128,7 @@ def delete_server_v1(name):
     bridge = get_bridge()
     if name in {s['name'] for s in bridge.list_servers()}:
         try:
-            bridge._disconnect_one(name)
+            bridge._disconnect_one(name, forget=True)
             logger.info('[MCP.v1] disconnected %s before removal', name)
         except Exception as e:
             logger.warning('[MCP.v1] disconnect %s failed: %s', name, e)
@@ -206,7 +213,7 @@ def disconnect_servers_v1():
 
     if target:
         try:
-            bridge._disconnect_one(target)
+            bridge._disconnect_one(target, forget=True)
             logger.info('[MCP.v1] disconnected %s', target)
             return jsonify({'ok': True,
                             'message': f'Disconnected from "{target}"'})
@@ -306,6 +313,7 @@ def get_catalog_v1():
             'server_version': server_version,
             'server_impl_name': server_impl_name,
             'stored_env_keys': stored_env_keys,
+            'breaker': bridge.get_breaker_state(sid),
         })
     return api_ok({'catalog': entries})
 
@@ -418,7 +426,7 @@ def uninstall_from_catalog_v1():
     bridge = get_bridge()
     if server_id in {s['name'] for s in bridge.list_servers()}:
         try:
-            bridge._disconnect_one(server_id)
+            bridge._disconnect_one(server_id, forget=True)
             logger.info('[MCP.v1] disconnected %s before uninstall '
                         '(purge=%s)', server_id, purge)
         except Exception as e:

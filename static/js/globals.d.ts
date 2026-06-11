@@ -37,3 +37,26 @@ declare var updateContextBar: any;    // static/js/context-bar.js — window.upd
 declare var attachCompactionMarkersToConversation: any;  // compaction-viewer.js — window.*
 declare var _featureFlags: any;       // index.html inline (var _featureFlags = {})
 declare var _markScriptsLoaded: any;  // index.html inline (window._markScriptsLoaded)
+declare var Artifacts: any;           // static/js/artifacts.js — window.Artifacts
+declare var ConvView: any;            // static/js/conv_view.js — window.ConvView
+declare var TradingApp: any;          // static/js/trading/state.js — window.TradingApp
+declare var flashGaugeForArchive: any;   // static/js/context-bar.js — window.*
+declare var _resolveContextLimit: any;   // static/js/context-bar.js — window.*
+declare var openCompactionViewer: any;   // static/js/compaction-viewer.js — window.*
+declare var closeCompactionViewer: any;  // static/js/compaction-viewer.js — window.*
+declare var refreshRelayAdminTabs: any;  // static/js/relay-admin.js — window.*
+declare var relayAdminCreateUser: any;   // static/js/relay-admin.js — window.*
+declare var relayAdminMintCodes: any;    // static/js/relay-admin.js — window.*
+declare var relayAdminToggleStatus: any; // static/js/relay-admin.js — window.*
+declare var relayAdminTopup: any;        // static/js/relay-admin.js — window.*
+declare var _streamRenderNoHighlight: any; // static/js/ui/streaming_ui.js — window.*
+declare var _swTimerTicker: any;         // static/js/ui/streaming_ui.js — window.*
+declare var _TOFU_DEV_ASSERT: any;       // static/js/ui/turn_nav.js — window.*
+declare var _vlmParseEntry: any;         // static/js/upload.js — window.*
+declare var _uploadShrinkPolicy: any;    // static/js/main/main_toolbar_ui.js — window.*
+declare var _contextPolicy: any;         // static/js/main/main_toolbar_ui.js — window.*
+declare var _translationPolicy: any;     // static/js/main/main_toolbar_ui.js — window.*
+declare var _browserClientId: any;       // static/js/main/main_toolbar_ui.js — window.*
+declare var __sse_test__: any;           // static/js/ui/sse_pipeline.js — window.*
+declare var __swarmPushWired: any;       // static/js/ui/swarm_push.js — window.*
+declare var __translatePushWired: any;   // static/js/translation.js — window.*

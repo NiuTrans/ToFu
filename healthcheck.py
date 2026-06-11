@@ -127,10 +127,10 @@ tl_checks = [
     ("lib.memory",        ["list_memories", "create_memory", "update_memory", "delete_memory", "toggle_memory"]),
     ("lib.browser",       ["wait_for_commands", "mark_poll", "resolve_batch",
                            "resolve_command", "is_extension_connected", "send_browser_command"]),
-    ("lib.search",        ["perform_web_search"]),
+    # search/fetch were extracted into the standalone tofu_search package
+    # (consumed via lib/search_bridge.py); the public entrypoint lives there.
+    ("tofu_search",       ["perform_web_search"]),
     ("lib.pricing",       ["get_pricing_data"]),
-    ("lib.trading",          ["fetch_asset_info", "get_latest_price", "search_asset"]),
-    ("lib.trading_autopilot", ["get_autopilot_state", "set_autopilot_enabled", "run_autopilot_cycle"]),
     ("lib.tasks_pkg",     ["tasks", "tasks_lock", "create_task", "cleanup_old_tasks", "run_task"]),
     ("lib.project_mod",   ["set_project", "clear_project", "get_state", "get_project_path",
                            "get_recent_projects", "save_recent_project", "clear_recent_projects",
@@ -222,36 +222,31 @@ if lazy_errors == 0:
 section("4. Database Schema")
 
 required_tables = [
-    'users', 'conversations', 'task_results', 'pricing',
-    'recent_projects', 'trading_holdings', 'trading_transactions',
-    'trading_intel_cache', 'trading_strategies',
+    'users', 'conversations', 'task_results', 'pricing_cache',
+    'recent_projects',
 ]
 
-# Schema definitions moved from lib/database.py → lib/database/_schema_{pg,sqlite}.py.
-# We check BOTH backends: every required table must be defined in both files.
-_schema_files = ['lib/database/_schema_pg.py', 'lib/database/_schema_sqlite.py']
-_schema_sources = {}
-for _sf in _schema_files:
-    try:
-        with open(_sf) as f:
-            _schema_sources[_sf] = f.read()
-    except Exception as e:
-        logger.warning('Failed to read %s: %s', _sf, e, exc_info=True)
-        fail(f"Cannot read {_sf}: {e}")
+# Core tables are now declared ONCE, declaratively, on lib/database/_core_schema.py's
+# private SQLAlchemy MetaData (define_table → ddl_for compiles the per-backend
+# CREATE TABLE at install time). The old per-backend literal DDL strings in
+# _schema_{pg,sqlite}.py are gone, so check the declarative registry — the real
+# source of truth — instead of grepping for "CREATE TABLE IF NOT EXISTS <name>".
+# Optional-domain tables (e.g. trading_*) live in their plugin package now and
+# are intentionally NOT required here.
+try:
+    from lib.database import _core_schema
+    _defined_tables = set(_core_schema.metadata.tables.keys())
+except Exception as e:
+    logger.warning('Failed to load _core_schema: %s', e, exc_info=True)
+    fail(f"Cannot import lib.database._core_schema: {e}")
+    _defined_tables = None
 
-if _schema_sources:
+if _defined_tables is not None:
     for table in required_tables:
-        # PG uses CREATE TABLE IF NOT EXISTS; SQLite also uses that form.
-        # The trading_* tables may be gated by TRADING_ENABLED at runtime but
-        # their DDL should still appear in the schema files.
-        missing_in = [
-            sf for sf, src in _schema_sources.items()
-            if f"CREATE TABLE IF NOT EXISTS {table}" not in src
-        ]
-        if not missing_in:
-            ok(f"Table '{table}' defined in both backends")
+        if table in _defined_tables:
+            ok(f"Table '{table}' defined in _core_schema")
         else:
-            fail(f"Table '{table}' NOT found in: {missing_in}")
+            fail(f"Table '{table}' NOT defined in _core_schema metadata")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -299,7 +294,7 @@ else:
 # ═══════════════════════════════════════════════════════════════════════
 section("6. HTML Asset References")
 
-html_files = ['index.html', 'trading.html']
+html_files = ['index.html']
 src_href_re = re.compile(r'(?:src|href)=["\'](?!data:|#|javascript:|mailto:|https?://|//)(.*?)["\']')
 
 for html_file in html_files:

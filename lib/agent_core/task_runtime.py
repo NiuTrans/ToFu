@@ -278,6 +278,18 @@ class TaskRuntime:
                              self.kind, task_id[:8], e, exc_info=True)
                 self.finish(task_id, error=e,
                             error_context=f'{self.kind}:worker_crash')
+            finally:
+                # Workers run on the shared asyncio.to_thread executor pool;
+                # those threads are long-lived and never die, so a thread-local
+                # DB connection acquired during the task would be pinned forever
+                # and exhaust the connection semaphore under load. Return it to
+                # the pool now that this unit of work is done.
+                try:
+                    from lib.database import close_thread_db
+                    close_thread_db()
+                except Exception as _ctd_err:
+                    logger.debug('[TaskRuntime:%s] close_thread_db failed task=%s: %s',
+                                 self.kind, task_id[:8], _ctd_err)
 
         try:
             loop = asyncio.get_running_loop()

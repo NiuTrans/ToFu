@@ -46,11 +46,14 @@ to ``brand=='local'`` providers in
 
 from __future__ import annotations
 
+import os
 import secrets
+import socket
 import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse
 
 from lib.log import audit_log, get_logger
 
@@ -66,6 +69,51 @@ __all__ = [
     'dispose_ephemeral_slot',
     'count_ephemeral_slots',
 ]
+
+
+# ── Pre-flight reachability probe ──
+# A self-hosted / raw-IP BYO endpoint that is down would otherwise only be
+# discovered on the FIRST chat request, which then eats the full connect
+# timeout before the dispatcher can react. A cheap TCP-connect probe at mint
+# time surfaces "endpoint unreachable" immediately as a clean 400, so the
+# caller gets a clear error instead of a 60s stall. Disabled with
+# TOFU_EPHEMERAL_PREFLIGHT=0; timeout via TOFU_EPHEMERAL_PREFLIGHT_TIMEOUT.
+def _preflight_enabled() -> bool:
+    return os.environ.get('TOFU_EPHEMERAL_PREFLIGHT', '1').strip().lower() \
+        not in ('0', 'false', 'no', 'off', '')
+
+
+def _preflight_timeout() -> float:
+    try:
+        t = float(os.environ.get('TOFU_EPHEMERAL_PREFLIGHT_TIMEOUT', '3'))
+        return t if t > 0 else 3.0
+    except (ValueError, TypeError):
+        return 3.0
+
+
+def _probe_reachable(base_url: str) -> tuple[bool, str]:
+    """Best-effort TCP-connect probe to *base_url*'s host:port.
+
+    Returns ``(ok, detail)``. ``ok=True`` when the socket connects within
+    the timeout (the server is listening). We deliberately use a raw TCP
+    connect rather than an HTTP GET so the probe is independent of auth,
+    the ``/models`` path, and HTTP semantics — it answers exactly one
+    question: "is something accepting connections on that port?".
+    """
+    try:
+        parsed = urlparse(base_url)
+        host = parsed.hostname or ''
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    except Exception as e:
+        return False, 'unparseable url: %s' % e
+    if not host:
+        return False, 'no host in url'
+    timeout = _preflight_timeout()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, 'ok'
+    except (OSError, socket.timeout) as e:
+        return False, '%s: %s' % (type(e).__name__, e)
 
 
 # Per-process ceiling. Each ephemeral slot is cheap (a Slot dataclass +
@@ -108,6 +156,16 @@ def _normalise_base_url(url: str) -> str:
         raise ValueError('base_url is empty')
     if not (url.startswith('http://') or url.startswith('https://')):
         raise ValueError('base_url must start with http:// or https://')
+    # Use-time SSRF egress guard. Every BYO completion (native chat,
+    # agent/run, OpenAI/Anthropic compat, inline-provider blocks) mints a
+    # slot through here before any request, so this single check covers
+    # the whole proxy surface — and runs at USE time, defeating a DNS
+    # rebind that passed the registration-time check in byo_providers.
+    from lib.byo_egress import EgressDenied, validate_egress_url
+    try:
+        validate_egress_url(url)
+    except EgressDenied as e:
+        raise ValueError(str(e)) from e
     return url
 
 
@@ -173,17 +231,39 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
                 f'Ephemeral slot pool full ({_MAX_EPHEMERAL_SLOTS}); '
                 'a caller is likely leaking handles')
 
-    # Pre-register no_proxy for private / pseudo-private hosts. Mirrors
-    # the treatment given to brand=='local' providers in
-    # _build_slots_from_providers (the local-endpoints memory documents
-    # why this is critical for hosts like 33.x.x.x).
+    # Pre-register no_proxy for self-hosted hosts. Mirrors the treatment
+    # given to brand=='local' providers in _build_slots_from_providers
+    # (the local-endpoints memory documents why this is critical for
+    # hosts like 33.x.x.x). We use should_bypass_proxy (not just
+    # is_local_endpoint) so bare-IP endpoints on internal-but-publicly-
+    # routable corp ranges (33.x) are covered without TOFU_LOCAL_CIDRS.
+    _is_self_hosted = False
     try:
-        from lib.llm_dispatch.discovery import is_local_endpoint
+        from lib.llm_dispatch.discovery import should_bypass_proxy
         from lib.proxy import register_no_proxy_url
-        if is_local_endpoint(base_url):
+        _is_self_hosted = should_bypass_proxy(base_url)
+        if _is_self_hosted:
             register_no_proxy_url(base_url)
     except Exception as e:
         logger.debug('[Ephemeral] no_proxy registration probe failed: %s', e)
+
+    # ★ Pre-flight reachability probe. Only for self-hosted / raw-IP
+    #   endpoints — those are the boxes that go down without an SLA and
+    #   whose first request would otherwise stall on the connect timeout.
+    #   Cloud BYO endpoints (addressed by domain) are assumed reachable;
+    #   probing them just adds a round-trip. A failed probe raises
+    #   ValueError → the HTTP callers (byo_resolve / api_v1.chat) already
+    #   map mint ValueError to a clean 400, so the user sees "endpoint
+    #   unreachable" instead of a 60s hang.
+    if _is_self_hosted and _preflight_enabled():
+        ok, detail = _probe_reachable(base_url)
+        if not ok:
+            logger.warning('[Ephemeral] pre-flight probe FAILED for %s: %s',
+                           base_url, detail)
+            raise ValueError(
+                'endpoint unreachable at %s (%s); the model server may be '
+                'down or the port not listening' % (base_url, detail))
+        logger.debug('[Ephemeral] pre-flight probe ok for %s', base_url)
 
     caps, rpm, latency, cost = _seed_caps_and_pricing(model_id)
     if capabilities:

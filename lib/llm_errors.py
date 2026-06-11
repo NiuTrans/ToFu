@@ -120,6 +120,41 @@ class StreamOnlyError(Exception):
         self.model = model
 
 
+class EndpointUnreachableError(Exception):
+    """The model endpoint could not be reached at the connect phase.
+
+    Raised when the TCP/TLS handshake to ``base_url`` times out or is
+    refused (the host is down, the port isn't listening, or a firewall
+    drops the SYN). Deliberately does NOT subclass ``ConnectionError`` so
+    it is NOT swallowed by the same-key ``_RETRYABLE`` retry loop in
+    ``stream_chat`` / ``chat`` / ``async_stream_chat`` — retrying a dead
+    host on the same slot is futile and just burns the connect timeout
+    over and over. Instead it escapes straight to the dispatch layer,
+    which cools the slot down and fails over to a healthy one.
+
+    Attributes:
+        base_url: The endpoint that was unreachable (for the dispatch
+            layer to cool down the matching slots + clear logging).
+    """
+    def __init__(self, message='', *, base_url=''):
+        super().__init__(message)
+        self.base_url = base_url or ''
+
+
+def _is_connect_phase_error(exc: Exception) -> bool:
+    """True if *exc* is a ``requests`` connect-phase failure (host unreachable).
+
+    ``requests.exceptions.ConnectionError`` (and its ``ConnectTimeout``
+    subclass) is raised when the socket can't be established at all — a
+    distinct signal from a mid-stream reset (``ChunkedEncodingError``,
+    raised later during body iteration) or a ``ReadTimeout`` (server
+    accepted but is slow). Only the connect-phase case means "this
+    endpoint is down; fail over".
+    """
+    from requests.exceptions import ConnectionError as _ReqConnError
+    return isinstance(exc, _ReqConnError)
+
+
 # ══════════════════════════════════════════════════════════
 #  Pattern tables
 # ══════════════════════════════════════════════════════════

@@ -19,6 +19,7 @@ __all__ = [
     'stream_llm_response',
     'abort_running_tasks_for_conv',
     'recover_stale_tasks_on_startup',
+    'load_tool_rounds_from_conversation',
     # approval (lazy)
     'request_write_approval', 'resolve_write_approval',
     # human guidance (lazy)
@@ -93,6 +94,7 @@ from lib.tasks_pkg.manager import (
     append_event,
     cleanup_old_tasks,
     create_task,
+    load_tool_rounds_from_conversation,
     persist_task_result,
     recover_stale_tasks_on_startup,
     stream_llm_response,

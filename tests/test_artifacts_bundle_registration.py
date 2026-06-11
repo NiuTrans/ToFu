@@ -46,6 +46,94 @@ def test_artifacts_script_tag_in_index_html():
     ), 'index.html must include a <script> tag for static/js/artifacts.js'
 
 
+def test_stale_manifest_entry_does_not_kill_bundle(monkeypatch):
+    """A missing file in _BUNDLE_FILES must degrade gracefully.
+
+    Regression for the 2026-06-03 production incident where a renamed JS
+    file left a stale entry (``api-keys.js``) in _BUNDLE_FILES; the old
+    build_bundle() returned None for ANY missing file, forcing the
+    dev-fallback path and shipping a blank UI. The bundler must now skip
+    the missing file (loud warning) and still produce a bundle from the
+    rest. Only an entirely-empty manifest is fatal.
+    """
+    from lib import js_bundler
+
+    monkeypatch.setattr(
+        js_bundler, '_BUNDLE_FILES',
+        ['i18n.js', '__definitely_missing_file__.js', 'core.js'],
+    )
+    # Reset module bundle state so build_bundle() actually rebuilds.
+    monkeypatch.setattr(js_bundler, '_bundle_filename', None)
+    monkeypatch.setattr(js_bundler, '_bundle_mtime', 0)
+
+    name = js_bundler.build_bundle()
+    assert name and name.startswith('bundle-'), (
+        'bundle must still build when one manifest entry is missing'
+    )
+
+
+def test_empty_manifest_is_fatal(monkeypatch):
+    """When NO source file resolves, build_bundle() returns None so the
+    caller falls back to serving individual <script> tags."""
+    from lib import js_bundler
+
+    monkeypatch.setattr(js_bundler, '_BUNDLE_FILES', ['__missing_a__.js'])
+    monkeypatch.setattr(js_bundler, '_bundle_filename', None)
+    monkeypatch.setattr(js_bundler, '_bundle_mtime', 0)
+    assert js_bundler.build_bundle() is None
+
+
+def test_sse_pipeline_siblings_registered():
+    """The two files split out of ui/sse_pipeline.js (2026-06) must be in
+    _BUNDLE_FILES AND in index.html, loaded AFTER sse_pipeline.js.
+
+    The generic ``test_bundle_audit_parity`` regex (``[a-z0-9_.-]+``) does
+    NOT match ``ui/`` subdir paths, so subpackage files are invisible to it.
+    This explicit check guards the split against the silent-no-op trap.
+    """
+    from lib.js_bundler import _BUNDLE_FILES
+
+    for sib in ('ui/sse_poll_fallback.js', 'ui/send_button.js'):
+        assert sib in _BUNDLE_FILES, (
+            f'{sib} (split from ui/sse_pipeline.js) must be in _BUNDLE_FILES.'
+        )
+        assert _BUNDLE_FILES.index('ui/sse_pipeline.js') < _BUNDLE_FILES.index(sib), (
+            f'{sib} must load AFTER ui/sse_pipeline.js.'
+        )
+
+    with open(os.path.join(PROJECT_ROOT, 'index.html'), encoding='utf-8') as f:
+        html = f.read()
+    for sib in ('ui/sse_poll_fallback.js', 'ui/send_button.js'):
+        assert re.search(
+            r'<script[^>]+src="static/js/' + re.escape(sib) + r'[^"]*"', html
+        ), f'index.html must include a <script> tag for static/js/{sib} (dev fallback).'
+
+
+def test_sse_handler_files_registered():
+    """The property-only handlers extracted from dispatchSSEEvent (2026-06)
+    must be in _BUNDLE_FILES AND index.html, loaded BEFORE sse_pipeline.js
+    (the dispatcher calls _handleToolStart/_handleSwarmPhase/etc.)."""
+    from lib.js_bundler import _BUNDLE_FILES
+
+    _handlers = ('ui/sse_handlers_tool.js', 'ui/sse_handlers_swarm.js',
+                 'ui/sse_handlers_io.js', 'ui/sse_handlers_misc.js',
+                 'ui/sse_handlers_lifecycle.js')
+    for h in _handlers:
+        assert h in _BUNDLE_FILES, (
+            f'{h} (extracted from dispatchSSEEvent) must be in _BUNDLE_FILES.'
+        )
+        assert _BUNDLE_FILES.index(h) < _BUNDLE_FILES.index('ui/sse_pipeline.js'), (
+            f'{h} must load BEFORE ui/sse_pipeline.js (dispatcher calls it).'
+        )
+
+    with open(os.path.join(PROJECT_ROOT, 'index.html'), encoding='utf-8') as f:
+        html = f.read()
+    for h in _handlers:
+        assert re.search(
+            r'<script[^>]+src="static/js/' + re.escape(h) + r'[^"]*"', html
+        ), f'index.html must include a <script> tag for static/js/{h}.'
+
+
 def test_bundle_audit_parity():
     """Every static/js/<name>.js referenced in index.html must appear in
     _BUNDLE_FILES — guards against the trap CLAUDE.md §3.2.1 documents."""

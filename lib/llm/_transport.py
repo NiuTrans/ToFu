@@ -2,6 +2,7 @@
 """Shared transport layer: retry config, HTTP helpers, sleep utilities."""
 
 import asyncio
+import os
 import random
 import time
 
@@ -10,6 +11,19 @@ from lib.llm_errors import AbortedError
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+# ── Connect-phase timeout (seconds) ──
+# How long to wait for the TCP/TLS handshake to the model endpoint before
+# declaring it unreachable. Kept short (default 10s) so a dead self-hosted
+# box fails over to a healthy slot fast instead of burning a full minute
+# per attempt. The READ timeout stays large (300s) — generation is slow.
+# Override per-deployment with TOFU_LLM_CONNECT_TIMEOUT.
+try:
+    CONNECT_TIMEOUT = float(os.environ.get('TOFU_LLM_CONNECT_TIMEOUT', '10'))
+    if CONNECT_TIMEOUT <= 0:
+        CONNECT_TIMEOUT = 10.0
+except (ValueError, TypeError):
+    CONNECT_TIMEOUT = 10.0
 
 # ── Retry config for transient API errors (streaming & non-streaming) ──
 MAX_STREAM_RETRIES = 4          # retry up to 4 times (5 attempts total)

@@ -2,9 +2,12 @@
 
 Each module is self-contained and registers its own routes.
 Shared helpers: lib/database/, lib/llm/ (package), lib/__init__.py (config).
-"""
 
-import lib as _lib
+Optional feature bundles (e.g. the trading subsystem, now the standalone
+``tofu-trading`` package) are NOT imported here — they mount via the
+``tofu.blueprints`` / ``tofu.startup`` entry-point groups discovered in
+``register_all`` (see ``routes/plugin_registry.py``).
+"""
 
 from .browser import browser_bp
 from .chat import chat_bp
@@ -58,46 +61,6 @@ ALL_BLUEPRINTS = [
     legacy_redirects_bp,
 ]
 
-# ── Trading blueprints (conditionally loaded) ──
-# NOTE: blueprint registration happens at *import time*, so flipping
-# `TRADING_ENABLED` later via Settings UI cannot retroactively register the
-# trading routes. ``TRADING_ROUTES_REGISTERED`` snapshots the registration
-# decision so save_features() can correctly tell the user "needs_restart"
-# when they enable trading on a server that booted with it disabled.
-TRADING_ROUTES_REGISTERED = bool(_lib.TRADING_ENABLED)
-
-if TRADING_ROUTES_REGISTERED:
-    # Importing each trading module triggers its handler decorators to
-    # register on the corresponding api_v1 blueprint. We then add those
-    # v1 blueprints to ALL_BLUEPRINTS — they are NOT in ALL_V1_BLUEPRINTS
-    # by default because trading is conditional on TRADING_ENABLED.
-    from . import trading_autopilot  # noqa: F401
-    from . import trading_brain      # noqa: F401
-    from . import trading_decision   # noqa: F401
-    from . import trading_holdings   # noqa: F401
-    from . import trading_intel      # noqa: F401
-    from . import trading_simulator  # noqa: F401
-    from . import trading_tasks      # noqa: F401
-
-    from .api_v1.trading.autopilot import api_v1_trading_autopilot_bp
-    from .api_v1.trading.brain     import api_v1_trading_brain_bp
-    from .api_v1.trading.decision  import api_v1_trading_decision_bp
-    from .api_v1.trading.holdings  import api_v1_trading_holdings_bp
-    from .api_v1.trading.intel     import api_v1_trading_intel_bp
-    from .api_v1.trading.simulator import api_v1_trading_simulator_bp
-    from .api_v1.trading.tasks     import api_v1_trading_tasks_bp
-
-    TRADING_BLUEPRINTS = [
-        api_v1_trading_holdings_bp,
-        api_v1_trading_intel_bp,
-        api_v1_trading_decision_bp,
-        api_v1_trading_autopilot_bp,
-        api_v1_trading_tasks_bp,
-        api_v1_trading_brain_bp,
-        api_v1_trading_simulator_bp,
-    ]
-    ALL_BLUEPRINTS.extend(TRADING_BLUEPRINTS)
-
 
 def register_all(app):
     """Register all blueprints on the Flask app."""
@@ -106,6 +69,21 @@ def register_all(app):
 
     for bp in ALL_BLUEPRINTS:
         app.register_blueprint(bp)
+
+    # ── Plugin blueprints (tofu.blueprints entry-point group) ──
+    # External feature packages (e.g. the tofu-trading subsystem) mount their
+    # Blueprints here. Discovery is fail-soft and returns [] when no plugin is
+    # installed, so this is a no-op for a vanilla core install. The name guard
+    # is defensive against a plugin shipping a duplicate blueprint name.
+    from .plugin_registry import discover_blueprint_plugins, run_startup_hooks
+    _already = {bp.name for bp in ALL_BLUEPRINTS}
+    for bp in discover_blueprint_plugins():
+        if bp.name in _already:
+            _log.warning('[BlueprintRegistry] plugin blueprint %r already '
+                         'registered in-tree — skipping', bp.name)
+            continue
+        app.register_blueprint(bp)
+        _already.add(bp.name)
 
     # ── Start daily report background scheduler ──
     try:
@@ -121,11 +99,11 @@ def register_all(app):
     except Exception as e:
         _log.warning('Scheduler worker start deferred (DB unavailable): %s', e)
 
-    # ── Post-registration init hooks ──
-    if _lib.TRADING_ENABLED:
-        with app.app_context():
-            try:
-                from .trading_brain import init_brain
-                init_brain()
-            except Exception as e:
-                _log.debug('Brain init deferred: %s', e)
+    # ── Plugin startup hooks (tofu.startup entry-point group) ──
+    # Background workers / schedulers / post-registration init that an optional
+    # feature needs (e.g. the trading intel + autopilot workers, brain
+    # cycle-count restore). No-op when no plugin is installed.
+    try:
+        run_startup_hooks(app)
+    except Exception as e:
+        _log.warning('Plugin startup hooks deferred: %s', e)

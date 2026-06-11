@@ -386,6 +386,191 @@ def test_chat_streams_via_http_endpoints():
     _ok('HTTP /api/chat/poll/<id> end-to-end works against runtime-backed store')
 
 
+def test_aborted_task_does_not_resurrect_truncated_turn():
+    """Regen-after-interrupt guard: an aborted task whose conv was truncated
+    down to a trailing user message must NOT append a new assistant slot.
+
+    Reproduces the "U1 A1 U1 A2" doubled-context bug: user interrupts A1 and
+    clicks Regen on U1. The regen handler truncates the conv to [U1] and the
+    old task is aborted, but it can reach _sync_result_to_conversation BEFORE
+    the new task registers as _conv_latest_task (so the freshness guard above
+    it doesn't fire). Blindly appending the stale A1 here resurrects it. The
+    guard must drop the write instead.
+    """
+    import json as _json
+    from lib.database import (DOMAIN_CHAT, get_thread_db, db_execute_with_retry,
+                              json_dumps_pg)
+    from lib.tasks_pkg.manager import (create_task, _sync_result_to_conversation,
+                                       _conv_latest_task, _conv_latest_task_lock)
+
+    conv_id = 'cv-resurrect-guard'
+    db = get_thread_db(DOMAIN_CHAT)
+    now_ms = int(time.time() * 1000)
+    # Conversation truncated to a single trailing USER message (post-regen state)
+    truncated = [{'role': 'user', 'content': 'U1', 'timestamp': 111}]
+    from lib.database._core_schema import CONVERSATIONS, upsert
+    upsert(db, CONVERSATIONS, {
+        'id': conv_id, 'user_id': 1, 'title': 'guard-test',
+        'messages': json_dumps_pg(truncated), 'msg_count': len(truncated),
+        'created_at': now_ms, 'updated_at': now_ms,
+    }, insert_cols=['id', 'user_id', 'title', 'messages', 'msg_count',
+                    'created_at', 'updated_at'], retry=True)
+    db.commit()
+
+    try:
+        # Old task that was aborted by the regen sweep, carrying stale A1 content.
+        task = create_task(conv_id, [{'role': 'user', 'content': 'U1'}], {})
+        task['content'] = 'A1 stale interrupted content'
+        task['aborted'] = True
+        task['_abort_reason'] = 'superseded_by_new_task'
+        # Critical: this task is STILL the latest (new task not yet created),
+        # so the freshness guard does NOT catch it — only the new no-resurrect
+        # guard can.
+        with _conv_latest_task_lock:
+            _conv_latest_task[conv_id] = task['id']
+
+        _sync_result_to_conversation(task, {})
+
+        row = db.execute('SELECT messages FROM conversations WHERE id=? AND user_id=1',
+                         (conv_id,)).fetchone()
+        msgs = _json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        # The stale assistant must NOT have been appended — still just [U1].
+        assert len(msgs) == 1, f'Expected 1 msg (no resurrection), got {len(msgs)}: {msgs}'
+        assert msgs[0]['role'] == 'user'
+        assert all(m['role'] != 'assistant' for m in msgs)
+    finally:
+        with _conv_latest_task_lock:
+            _conv_latest_task.pop(conv_id, None)
+        db_execute_with_retry(db, 'DELETE FROM conversations WHERE id=? AND user_id=1', (conv_id,))
+        db.commit()
+    _ok('aborted task does not resurrect a truncated turn (no-resurrect guard)')
+
+
+def test_active_task_still_fills_trailing_assistant_slot():
+    """Sanity: a NON-aborted latest task still fills the trailing assistant
+    slot normally (guard must not over-fire on the happy path)."""
+    import json as _json
+    from lib.database import (DOMAIN_CHAT, get_thread_db, db_execute_with_retry,
+                              json_dumps_pg)
+    from lib.tasks_pkg.manager import (create_task, _sync_result_to_conversation,
+                                       _conv_latest_task, _conv_latest_task_lock)
+
+    conv_id = 'cv-happy-fill'
+    db = get_thread_db(DOMAIN_CHAT)
+    now_ms = int(time.time() * 1000)
+    # Normal in-flight state: trailing empty assistant placeholder.
+    state = [{'role': 'user', 'content': 'U1', 'timestamp': 1},
+             {'role': 'assistant', 'content': '', 'timestamp': 2}]
+    from lib.database._core_schema import CONVERSATIONS, upsert
+    upsert(db, CONVERSATIONS, {
+        'id': conv_id, 'user_id': 1, 'title': 'happy',
+        'messages': json_dumps_pg(state), 'msg_count': len(state),
+        'created_at': now_ms, 'updated_at': now_ms,
+    }, insert_cols=['id', 'user_id', 'title', 'messages', 'msg_count',
+                    'created_at', 'updated_at'], retry=True)
+    db.commit()
+
+    try:
+        task = create_task(conv_id, [{'role': 'user', 'content': 'U1'}], {})
+        task['content'] = 'real answer'
+        # latest + not aborted → must fill the assistant slot
+        _sync_result_to_conversation(task, {})
+
+        row = db.execute('SELECT messages FROM conversations WHERE id=? AND user_id=1',
+                         (conv_id,)).fetchone()
+        msgs = _json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        assert len(msgs) == 2
+        assert msgs[1]['role'] == 'assistant'
+        assert msgs[1]['content'] == 'real answer'
+    finally:
+        db_execute_with_retry(db, 'DELETE FROM conversations WHERE id=? AND user_id=1', (conv_id,))
+        db.commit()
+    _ok('active (non-aborted) task fills trailing assistant slot (guard not over-firing)')
+
+
+def test_db_backed_task_omits_tool_rounds_blob_but_recovers_from_conv():
+    """persist_task_result must NOT duplicate the toolRounds blob into
+    task_results for a DB-backed conversation (it lives in conversations.messages),
+    yet the poll/recovery readers must still surface toolRounds via the
+    conversation fallback."""
+    import json as _json
+    from lib.database import (DOMAIN_CHAT, get_thread_db, db_execute_with_retry,
+                              json_dumps_pg)
+    from lib.tasks_pkg.manager import (create_task, persist_task_result,
+                                       load_tool_rounds_from_conversation,
+                                       _conv_latest_task, _conv_latest_task_lock)
+
+    conv_id = 'cv-tr-dedup'
+    db = get_thread_db(DOMAIN_CHAT)
+    now_ms = int(time.time() * 1000)
+    state = [{'role': 'user', 'content': 'U1', 'timestamp': 1},
+             {'role': 'assistant', 'content': '', 'timestamp': 2}]
+    from lib.database._core_schema import CONVERSATIONS, upsert
+    upsert(db, CONVERSATIONS, {
+        'id': conv_id, 'user_id': 1, 'title': 'dedup',
+        'messages': json_dumps_pg(state), 'msg_count': len(state),
+        'created_at': now_ms, 'updated_at': now_ms,
+    }, insert_cols=['id', 'user_id', 'title', 'messages', 'msg_count',
+                    'created_at', 'updated_at'], retry=True)
+    db.commit()
+    try:
+        task = create_task(conv_id, [{'role': 'user', 'content': 'U1'}], {})
+        task['content'] = 'answer'
+        rounds = [{'status': 'done', 'toolName': 'grep_search',
+                   'toolContent': 'X' * 5000}]
+        task['toolRounds'] = rounds
+        with _conv_latest_task_lock:
+            _conv_latest_task[conv_id] = task['id']
+        persist_task_result(task)
+
+        # task_results.tool_rounds must be NULL (blob not duplicated)
+        row = db.execute('SELECT tool_rounds FROM task_results WHERE task_id=?',
+                         (task['id'],)).fetchone()
+        assert row is not None, 'task_results row missing'
+        assert row['tool_rounds'] is None, \
+            f'expected NULL tool_rounds, got {type(row["tool_rounds"])}'
+
+        # But the conversation fallback recovers the full rounds
+        recovered = load_tool_rounds_from_conversation(conv_id)
+        assert recovered and recovered[0].get('toolContent') == 'X' * 5000, \
+            'conversation fallback did not return full toolRounds'
+    finally:
+        with _conv_latest_task_lock:
+            _conv_latest_task.pop(conv_id, None)
+        db_execute_with_retry(db, 'DELETE FROM task_results WHERE conv_id=?', (conv_id,))
+        db_execute_with_retry(db, 'DELETE FROM conversations WHERE id=? AND user_id=1', (conv_id,))
+        db.commit()
+    _ok('DB-backed task omits tool_rounds blob; conversation fallback recovers it')
+
+
+def test_inline_task_keeps_tool_rounds_blob():
+    """Inline-message tasks (eval harness / v1 / compat APIs) have no
+    conversation row, so task_results is their sole store — the blob MUST be
+    persisted in full."""
+    import json as _json
+    from lib.database import (DOMAIN_CHAT, get_thread_db, db_execute_with_retry)
+    from lib.tasks_pkg.manager import create_task, persist_task_result
+
+    conv_id = 'cv-inline-blob'
+    db = get_thread_db(DOMAIN_CHAT)
+    try:
+        task = create_task(conv_id, [{'role': 'user', 'content': 'U1'}], {})
+        task['_inline_messages'] = True
+        task['content'] = 'answer'
+        task['toolRounds'] = [{'status': 'done', 'toolName': 'web_search',
+                               'toolContent': 'Y' * 3000}]
+        persist_task_result(task)
+        row = db.execute('SELECT tool_rounds FROM task_results WHERE task_id=?',
+                         (task['id'],)).fetchone()
+        assert row is not None and row['tool_rounds'], 'inline task lost its blob'
+        parsed = _json.loads(row['tool_rounds'])
+        assert parsed[0]['toolContent'] == 'Y' * 3000
+    finally:
+        db_execute_with_retry(db, 'DELETE FROM task_results WHERE conv_id=?', (conv_id,))
+        db.commit()
+    _ok('inline-message task keeps full tool_rounds blob in task_results')
+
+
 def main():
     print()
     print(_color('═══ chat manager.py Migration Tests ═══', '36'))
@@ -402,11 +587,15 @@ def main():
         test_append_event_thread_safe,
         test_append_event_legacy_dict_fallback,
         test_abort_running_tasks_for_conv,
+        test_aborted_task_does_not_resurrect_truncated_turn,
+        test_active_task_still_fills_trailing_assistant_slot,
         test_cleanup_old_tasks_purges_finished,
         test_cleanup_old_tasks_keeps_running_past_ttl,
         test_cross_talk_iteration,
         test_push_channel_integration,
         test_routes_chat_imports_still_work,
+        test_db_backed_task_omits_tool_rounds_blob_but_recovers_from_conv,
+        test_inline_task_keeps_tool_rounds_blob,
         test_chat_streams_via_http_endpoints,
     ]
     for fn in tests:

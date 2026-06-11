@@ -20,6 +20,7 @@ from lib.llm._sse_core import (
     prepare_request,
 )
 from lib.llm._transport import (
+    CONNECT_TIMEOUT,
     MAX_STREAM_RETRIES,
     async_abortable_sleep,
     retry_wait,
@@ -27,6 +28,7 @@ from lib.llm._transport import (
 from lib.llm_errors import (
     AbortedError,
     ContentFilterError,
+    EndpointUnreachableError,
     ModelLimitError,
     PermissionError_,
     PromptTooLongError,
@@ -81,7 +83,10 @@ async def async_stream_chat(body, *, on_thinking=None, on_content=None,
                 usage['_model_limit_learned'] = _limit_learned
             return msg, finish_reason, usage
         except (RateLimitError, PermissionError_, AbortedError,
-                ContentFilterError, PromptTooLongError):
+                ContentFilterError, PromptTooLongError,
+                EndpointUnreachableError):
+            # EndpointUnreachableError escapes to the dispatch layer so a
+            # dead host fails over instead of being retried on the same slot.
             raise
         except ModelLimitError as e:
             body['max_tokens'] = e.detected_limit
@@ -129,7 +134,7 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
 
     async with httpx.AsyncClient(
         proxy=proxy_url,
-        timeout=httpx.Timeout(connect=60, read=300, write=60, pool=60),
+        timeout=httpx.Timeout(connect=CONNECT_TIMEOUT, read=300, write=60, pool=60),
         follow_redirects=True,
     ) as client:
         try:
@@ -162,10 +167,22 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
                 acc.fire_final_tool_callback()
                 return acc.finalize(resp_trace=resp_trace)
 
-        except httpx.TimeoutException as e:
-            raise RetryableAPIError(f'httpx timeout: {e}') from e
+        except httpx.ConnectTimeout as e:
+            # Connect-phase timeout = endpoint down → fail over (dispatch).
+            logger.warning('%s ✖ Endpoint unreachable (connect timeout) %s: %s',
+                           log_prefix, plan.url, e)
+            raise EndpointUnreachableError(
+                'endpoint unreachable: %s' % e, base_url=plan.url) from e
         except httpx.ConnectError as e:
-            raise RetryableAPIError(f'httpx connect error: {e}') from e
+            # Connection refused / SYN dropped = endpoint down → fail over.
+            logger.warning('%s ✖ Endpoint unreachable (connect error) %s: %s',
+                           log_prefix, plan.url, e)
+            raise EndpointUnreachableError(
+                'endpoint unreachable: %s' % e, base_url=plan.url) from e
+        except httpx.TimeoutException as e:
+            # Read/write/pool timeout — server accepted but is slow.
+            # Retryable on the same slot (transient), unlike connect-phase.
+            raise RetryableAPIError(f'httpx timeout: {e}') from e
         except httpx.RemoteProtocolError as e:
             raise RetryableAPIError(f'httpx protocol error: {e}') from e
         finally:

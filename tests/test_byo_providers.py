@@ -103,7 +103,7 @@ class ByoProviderStoreTest(unittest.TestCase):
         )
         row = create_provider(
             owner_key_id='k', name='n',
-            base_url='http://h:8080/v1', api_key='', models=[],
+            base_url='http://127.0.0.1:8080/v1', api_key='', models=[],
         )
         ok = update_provider(row['id'], 'k', name='renamed', disabled=True)
         self.assertTrue(ok)
@@ -138,13 +138,13 @@ class ByoProviderStoreTest(unittest.TestCase):
         for i in range(_MAX_PROVIDERS_PER_KEY):
             create_provider(
                 owner_key_id='k_quota', name=f'n{i}',
-                base_url=f'http://h:{8000 + i}/v1',
+                base_url=f'http://127.0.0.1:{8000 + i}/v1',
                 api_key='', models=[],
             )
         with self.assertRaises(RuntimeError):
             create_provider(
                 owner_key_id='k_quota', name='overflow',
-                base_url='http://h:9999/v1', api_key='', models=[],
+                base_url='http://127.0.0.1:9999/v1', api_key='', models=[],
             )
 
     # ── resolve_model_string ────────────────────────────────────────
@@ -160,7 +160,7 @@ class ByoProviderStoreTest(unittest.TestCase):
         from lib.byo_providers import create_provider, resolve_model_string
         row = create_provider(
             owner_key_id='k_alice', name='c',
-            base_url='http://h:8080/v1', api_key='sk-x',
+            base_url='http://127.0.0.1:8080/v1', api_key='sk-x',
             models=[{'model_id': 'deepseek-v4-pro'}],
         )
         rm = resolve_model_string(f'deepseek-v4-pro@{row["id"]}', 'k_alice')
@@ -174,7 +174,7 @@ class ByoProviderStoreTest(unittest.TestCase):
         from lib.byo_providers import create_provider, resolve_model_string
         row = create_provider(
             owner_key_id='k_alice', name='c',
-            base_url='http://h:8080/v1', api_key='', models=[],
+            base_url='http://127.0.0.1:8080/v1', api_key='', models=[],
         )
         # Bob can't pin to Alice's provider
         rm = resolve_model_string(f'foo@{row["id"]}', 'k_bob')
@@ -186,7 +186,7 @@ class ByoProviderStoreTest(unittest.TestCase):
         )
         row = create_provider(
             owner_key_id='k', name='c',
-            base_url='http://h:8080/v1', api_key='', models=[],
+            base_url='http://127.0.0.1:8080/v1', api_key='', models=[],
         )
         update_provider(row['id'], 'k', disabled=True)
         self.assertIsNone(resolve_model_string(f'foo@{row["id"]}', 'k'))

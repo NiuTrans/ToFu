@@ -41,10 +41,10 @@ def _mk_asst(text: str = '', tool_calls=None, reasoning: str = '') -> dict:
 # ── Fixtures: each returns (messages, kwargs) ──────────────────────────
 
 def _fx_tool_results_cold():
-    """61 tool results so the oldest fall outside MICRO_HOT_TAIL=60 and
-    get compacted (each > MICRO_COMPACT_THRESHOLD=2000 chars)."""
+    """41 tool results so the oldest falls outside MICRO_HOT_TAIL=40 and
+    gets compacted (each > MICRO_COMPACT_THRESHOLD=2000 chars)."""
     msgs = [{'role': 'user', 'content': 'go'}]
-    for i in range(61):
+    for i in range(41):
         msgs.append(_mk_asst(text=f'step {i}',
                              tool_calls=[{'id': f't{i}',
                                           'function': {'name': 'grep_search',

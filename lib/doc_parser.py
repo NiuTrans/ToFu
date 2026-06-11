@@ -37,6 +37,14 @@ _ALL_SUPPORTED = _DOCX_EXTS | _PPTX_EXTS | _XLSX_EXTS | _PLAIN_TEXT_EXTS
 # Max chars to extract
 _MAX_CHARS = 2_000_000
 
+# ── .xlsx scan bounds ──
+# Guard against grossly-inflated worksheet dimensions (common with embedded
+# images / drawing anchors): cap the rows and columns we iterate, and bail out
+# of long runs of fully-empty rows instead of walking to a phantom max_row.
+_XLSX_MAX_ROWS = 1000
+_XLSX_MAX_COLS = 200
+_XLSX_MAX_EMPTY_RUN = 50
+
 
 def is_supported_document(filename: str) -> bool:
     """Check if a filename has a supported document extension."""
@@ -291,19 +299,51 @@ def _extract_xlsx(file_bytes: bytes, limit: int) -> dict:
 
     parts = []
     total_chars = 0
+    n_sheets = len(wb.sheetnames)
 
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
         sheet_parts = [f'## Sheet: {sheet_name}']
+
+        # Worksheet dimensions are often grossly inflated — embedded images,
+        # drawing anchors, or stray formatting can push max_row/max_column to
+        # tens of thousands even when the real data is a handful of cells.
+        # Iterating the full reported range would emit millions of empty
+        # cells (slow + useless output), so bound the scan up front and trim
+        # trailing-empty cells / skip empty rows as we go.
+        col_cap = min(ws.max_column or _XLSX_MAX_COLS, _XLSX_MAX_COLS)
+
         rows_data = []
-        for row in ws.iter_rows(values_only=True):
-            cells = [str(c) if c is not None else '' for c in row]
-            rows_data.append('| ' + ' | '.join(cells) + ' |')
-            if len(rows_data) > 1000:
-                warnings.append(f'Sheet "{sheet_name}" truncated at 1000 rows')
+        n_real_cols = 0
+        empty_run = 0
+        truncated_rows = False
+        for row in ws.iter_rows(values_only=True, max_col=col_cap):
+            cells = list(row)
+            while cells and cells[-1] is None:
+                cells.pop()
+            if not cells:
+                empty_run += 1
+                if empty_run > _XLSX_MAX_EMPTY_RUN:
+                    break
+                continue
+            empty_run = 0
+            n_real_cols = max(n_real_cols, len(cells))
+            rows_data.append(
+                '| ' + ' | '.join(
+                    (str(c).replace('|', '\\|') if c is not None else '') for c in cells
+                ) + ' |'
+            )
+            if len(rows_data) >= _XLSX_MAX_ROWS:
+                truncated_rows = True
                 break
+
+        if truncated_rows:
+            warnings.append(f'Sheet "{sheet_name}" truncated at {_XLSX_MAX_ROWS} rows')
+        if (ws.max_column or 0) > _XLSX_MAX_COLS:
+            warnings.append(f'Sheet "{sheet_name}" truncated at {_XLSX_MAX_COLS} columns')
+
         if rows_data:
-            ncols = max(len(list(ws.iter_rows(values_only=True, max_row=1))[0]) if ws.max_row else 1, 1)
+            ncols = max(n_real_cols, 1)
             header = rows_data[0]
             separator = '| ' + ' | '.join(['---'] * ncols) + ' |'
             table_md = header + '\n' + separator
@@ -321,7 +361,7 @@ def _extract_xlsx(file_bytes: bytes, limit: int) -> dict:
     wb.close()
     text = '\n\n---\n\n'.join(parts)
     logger.info('[DocParser] Extracted .xlsx: %d sheets, %s chars',
-                len(wb.sheetnames), f'{len(text):,}')
+                n_sheets, f'{len(text):,}')
 
     return {
         'text': text,

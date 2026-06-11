@@ -326,6 +326,58 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
         'tools_hint': [],            # all tools available
         'model_hint': 'standard',
     },
+
+    # ── Endpoint-mode roles (used by the FlowExecutor endpoint path) ──
+    # These mirror lib/tasks_pkg/endpoint's planner/worker/critic prompts so
+    # build_endpoint_definition's role nodes run with the right behavior
+    # instead of silently falling back to 'general'. Empty tools_hint = all
+    # tools (planner/worker/critic all need full tool access in endpoint mode).
+    'planner': {
+        'when_to_use': (
+            'Endpoint-mode planning step — rewrite the user request into a '
+            'structured brief + checklist + acceptance criteria for the worker.'
+        ),
+        'system_prompt_suffix': (
+            'You are the PLANNER. Rewrite the request into a structured brief '
+            'with a Goal, a concrete Checklist of steps, and Acceptance '
+            'Criteria. Produce a plan the worker can execute directly; do not '
+            'do the work yourself.'
+        ),
+        'tools_hint': [],
+        'model_hint': 'heavy',
+    },
+
+    'worker': {
+        'when_to_use': (
+            'Endpoint-mode execution step — carry out the planner\'s checklist '
+            'with full tools, accumulating progress across loop iterations.'
+        ),
+        'system_prompt_suffix': (
+            'You are the WORKER. Execute the plan against the checklist. Your '
+            'FIRST tool call MUST be state-changing — act, do not merely '
+            'analyze. Address any reviewer feedback directly and build on your '
+            'previous attempt rather than restarting.'
+        ),
+        'tools_hint': [],
+        'model_hint': 'heavy',
+    },
+
+    'critic': {
+        'when_to_use': (
+            'Endpoint-mode review step — verify the worker output against the '
+            'checklist and emit a structured verdict.'
+        ),
+        'system_prompt_suffix': (
+            'You are the CRITIC. Review the worker output against the plan\'s '
+            'checklist and acceptance criteria. Mark each item ✅ or ❌. End '
+            'with exactly one verdict tag: [VERDICT: STOP] when all criteria '
+            'are met, [VERDICT: CONTINUE_WORKER] when the worker must keep '
+            'going, or [PLAN_DEFECT: <reason>] + [VERDICT: CONTINUE_PLANNER] '
+            'only for a genuine structural plan flaw (not worker execution).'
+        ),
+        'tools_hint': ['read_files', 'grep_search', 'find_files', 'list_dir'],
+        'model_hint': 'heavy',
+    },
 }
 
 

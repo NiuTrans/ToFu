@@ -75,11 +75,12 @@ from flask import Blueprint, Response
 from lib.api_response import (
     api_bad_request, api_internal_error, api_not_found, api_ok,
 )
-from lib.byo_providers import resolve_model_string, touch_provider
-from lib.idempotency import idempotent_post
-from lib.llm_dispatch.ephemeral import (
-    EphemeralSlotHandle, dispose_ephemeral_slot, mint_ephemeral_slot,
+from lib.billing.request_flow import (
+    estimate_prompt_tokens, release_reservation, reserve_for_task, settle_task,
 )
+from lib.byo_resolve import dispose_after_terminal, resolve_model_and_provider
+from lib.idempotency import idempotent_post
+from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import (
@@ -88,7 +89,6 @@ from lib.request_parser import (
 from lib.trajectory import AVAILABLE_FORMATS, flatten
 
 from .auth import current_auth, require_scope
-from .providers import sanitise_extra_headers
 
 logger = get_logger(__name__)
 
@@ -221,100 +221,6 @@ def _build_cfg(model_id: str, raw_config: dict | None,
     return cfg
 
 
-# ── Model resolution ────────────────────────────────────────────────
-
-
-def _resolve_model_and_provider(model_str: str, provider_block: dict | None,
-                                  owner_key_id: str
-                                  ) -> tuple[str, EphemeralSlotHandle | None,
-                                              dict | None, str | None,
-                                              int | None]:
-    """Map ``(model, provider)`` → ``(model_id, handle, byo_row, error, status)``.
-
-    Status is the HTTP code we should map an error to (400 vs 404).
-    None on success.
-
-    Resolution order (first match wins):
-
-    1. ``provider`` block present — inline BYO. ``model`` MUST be a
-       plain alias with no ``@prov_xxx`` suffix.
-    2. ``model="name@prov_xxx"`` — registered BYO provider lookup.
-    3. plain ``model`` — falls through to global slot pool, no
-       ephemeral handle.
-    """
-    has_block = isinstance(provider_block, dict) and provider_block
-    has_suffix = isinstance(model_str, str) and '@' in model_str
-
-    # Both at once is ambiguous.
-    if has_block and has_suffix:
-        return '', None, None, (
-            'cannot combine `model="name@prov_xxx"` with an inline '
-            '`provider` block; pick one'), 400
-
-    # 1. Inline provider block
-    if has_block:
-        if not isinstance(model_str, str) or not model_str.strip():
-            return '', None, None, (
-                '`model` is required when `provider` is supplied'), 400
-        url = (provider_block.get('base_url') or '').strip()
-        if not url:
-            return '', None, None, (
-                '`provider.base_url` is required'), 400
-        headers, hdr_err = sanitise_extra_headers(
-            provider_block.get('extra_headers') or {})
-        if hdr_err:
-            return '', None, None, hdr_err, 400
-        try:
-            handle = mint_ephemeral_slot(
-                base_url=url,
-                api_key=provider_block.get('api_key') or '',
-                model_id=model_str.strip(),
-                owner=owner_key_id or 'agent_run',
-                extra_headers=headers,
-                thinking_format=(provider_block.get('thinking_format')
-                                 or ''),
-            )
-        except (ValueError, RuntimeError) as e:
-            logger.warning('[agent.run] inline-provider mint failed url=%s: %s',
-                           url, e)
-            return '', None, None, str(e), 400
-        return model_str.strip(), handle, None, None, None
-
-    # 2/3. String form
-    if isinstance(model_str, str) and model_str.strip():
-        rm = resolve_model_string(model_str, owner_key_id)
-        if rm is None:
-            return '', None, None, (
-                f'model string {model_str!r} references an unknown '
-                f'or disabled BYO provider; check the @prov_xxx '
-                f'suffix'), 404
-        if rm.provider is None:
-            return rm.model_id, None, None, None, None
-        prov = rm.provider
-        try:
-            handle = mint_ephemeral_slot(
-                base_url=prov['base_url'],
-                api_key=prov.get('api_key') or '',
-                model_id=rm.model_id,
-                owner=f'{owner_key_id}:{prov["id"]}',
-                extra_headers=prov.get('extra_headers') or {},
-                # Carry the persisted dialect so the dispatcher uses
-                # the right body shape for this engine. Without this,
-                # a registered self-hosted sglang Qwen3 would silently
-                # downgrade to top-level enable_thinking and the engine
-                # would ignore it.
-                thinking_format=prov.get('thinking_format') or '',
-            )
-        except (ValueError, RuntimeError) as e:
-            logger.warning('[agent.run] BYO provider mint failed prov=%s: %s',
-                           prov.get('id'), e)
-            return '', None, None, str(e), 400
-        touch_provider(prov['id'])
-        return rm.model_id, handle, prov, None, None
-
-    return '', None, None, '`model` is required', 400
-
-
 # ── Streaming + blocking response shapes ────────────────────────────
 
 
@@ -328,33 +234,27 @@ def _wait_for_terminal(task, *, timeout_s: float):
         poll = min(poll * 1.2, 1.5)
 
 
-def _dispose_after_terminal(task: dict, handle: EphemeralSlotHandle) -> None:
-    """Dispose the ephemeral slot once the task reaches a terminal state.
-
-    Runs in a daemon thread so SSE responses can return immediately
-    while the slot lives long enough for the orchestrator to make its
-    last LLM call. Bounded by a 1-hour ceiling so a stuck task can't
-    leak the slot forever.
-    """
-    deadline = time.time() + 3600
-    while task.get('status') not in ('done', 'error', 'aborted'):
-        if time.time() >= deadline:
-            logger.warning('[agent.run] ephemeral handle %s: task %s '
-                            'still running after 1h, force-disposing',
-                            handle.handle_id, task.get('id', '?')[:8])
-            break
-        time.sleep(0.5)
-    dispose_ephemeral_slot(handle)
-
-
-def _stream_generator(task, model: str, completion_id: str):
+def _stream_generator(task, model: str, completion_id: str,
+                      *, billing_user_id: str = ''):
     """SSE generator. Mirrors routes/api_v1/chat::_stream_generator
     but emits an ``agent.run.chunk`` object so consumers can tell the
     surface apart from compat-OpenAI streams.
+
+    When ``billing_user_id`` is set (multi-user installs), the actual
+    token usage is settled exactly once before the terminal ``[DONE]``
+    line — mirroring the blocking path so stream mode is never free.
     """
     cursor = 0
     last_heartbeat = time.time()
     emitted_role = False
+    _billed = False
+
+    def _settle_once():
+        nonlocal _billed
+        if billing_user_id and not _billed:
+            settle_task(task, user_id=billing_user_id, model=model)
+            _billed = True
+
     while True:
         with task['events_lock']:
             new_events = list(task['events'][cursor:])
@@ -380,12 +280,14 @@ def _stream_generator(task, model: str, completion_id: str):
                     chunk['delta']['reasoning_content'] = ev['thinking']
             yield f'data: {json.dumps(chunk, ensure_ascii=False)}\n\n'
             if etype in ('done', 'error', 'aborted'):
+                _settle_once()
                 yield 'data: [DONE]\n\n'
                 return
         if task.get('status') in ('done', 'error', 'aborted') and not new_events:
             yield (f'data: '
                     f'{json.dumps({"object":"agent.run.chunk","event":task.get("status"),"task_id":task.get("id")})}'
                     '\n\n')
+            _settle_once()
             yield 'data: [DONE]\n\n'
             return
         now = time.time()
@@ -420,6 +322,11 @@ def _final_response(task: dict, *, model: str, requested_id: str,
         'usage': task.get('usage') or {},
         'n_tool_rounds': len(rounds),
     }
+    # Compaction's own LLM usage (L2 + advanced-host summarizers), already
+    # folded into `usage` above; surfaced separately so callers can break
+    # out the compaction-overhead share of total cost.
+    if task.get('compactionUsage'):
+        out['compaction_usage'] = task['compactionUsage']
     if last_round and isinstance(last_round, dict) and last_round.get('tool_calls'):
         out['tool_calls'] = last_round['tool_calls']
     if task.get('error'):
@@ -536,7 +443,7 @@ def agent_run():
     provider_block = optional_dict(body, 'provider')
     if not model_str:
         return api_bad_request('`model` is required', field='model')
-    model_id, handle, byo_prov, err, err_status = _resolve_model_and_provider(
+    model_id, handle, byo_prov, err, err_status = resolve_model_and_provider(
         model_str, provider_block, owner_key_id)
     if err:
         if err_status == 404:
@@ -585,9 +492,39 @@ def agent_run():
     if owner_key_id:
         task['_api_key_id'] = owner_key_id
 
+    # ── Billing: pre-flight reserve (multi-user installs only) ──
+    # Mirrors routes/api_v1/chat.py. Personal / open installs have an
+    # empty user_id and short-circuit to a no-op. The headline BYOM
+    # endpoint must bill identically to /chat/completions — stream and
+    # block alike (see _settle_once in _stream_generator + settle below).
+    billing_user_id = (auth.user_id
+                       if auth and getattr(auth, 'user_id', '') else '')
+    reservation_micro = 0
+    if billing_user_id:
+        from lib.billing import InsufficientFunds
+        try:
+            est_completion = int(cfg.get('maxTokens')
+                                 or body.get('max_tokens') or 1024)
+            reservation_micro = reserve_for_task(
+                task, user_id=billing_user_id, model=model_id,
+                prompt_tokens=estimate_prompt_tokens(messages_in),
+                max_completion_tokens=est_completion)
+        except InsufficientFunds as e:
+            if handle:
+                dispose_ephemeral_slot(handle)
+            from lib.api_response import api_error
+            return api_error(
+                f'Insufficient credits. '
+                f'Estimated cost {e.needed_micro / 1_000_000:.4f} credits, '
+                f'balance {e.balance_micro / 1_000_000:.4f}.',
+                status=402, error_kind='insufficient_funds',
+                balance_micro=e.balance_micro, needed_micro=e.needed_micro)
+
     try:
         spawn_task(task)
     except Exception as e:
+        release_reservation(task, user_id=billing_user_id,
+                            reservation_micro=reservation_micro)
         if handle:
             dispose_ephemeral_slot(handle)
         logger.exception('[agent.run] spawn_task failed')
@@ -597,7 +534,7 @@ def agent_run():
     # stream and blocking response modes uniformly).
     if handle:
         threading.Thread(
-            target=_dispose_after_terminal, args=(task, handle),
+            target=dispose_after_terminal, args=(task, handle),
             name=f'ephemeral-dispose-{handle.handle_id}',
             daemon=True,
         ).start()
@@ -606,7 +543,8 @@ def agent_run():
     if stream:
         completion_id = requested_id or f'run-{uuid.uuid4().hex[:24]}'
         return Response(
-            _stream_generator(task, model_id, completion_id),
+            _stream_generator(task, model_id, completion_id,
+                              billing_user_id=billing_user_id),
             mimetype='text/event-stream',
             headers={
                 'Content-Type': 'text/event-stream; charset=utf-8',
@@ -621,9 +559,13 @@ def agent_run():
     except RuntimeError as e:
         return api_internal_error(str(e), context='api_v1.agent_run')
 
-    return api_ok(_final_response(
+    out = _final_response(
         task, model=model_id, requested_id=requested_id,
-        trajectory_fmt=trajectory_fmt, byo_provider=byo_prov))
+        trajectory_fmt=trajectory_fmt, byo_provider=byo_prov)
+    billing = settle_task(task, user_id=billing_user_id, model=model_id)
+    if billing:
+        out['billing'] = billing
+    return api_ok(out)
 
 
 __all__ = ['api_v1_agent_run_bp']

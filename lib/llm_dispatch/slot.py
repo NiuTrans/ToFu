@@ -169,6 +169,20 @@ class Slot:
             self.inflight += 1
             self.total_requests += 1
 
+
+    def release(self):
+        """Release a reserved inflight slot WITHOUT recording success/failure.
+
+        Used when a request terminates for a payload-level reason (content
+        filter, oversized prompt, invalid image, user abort) that reflects
+        neither slot health nor a successful completion — so neither
+        ``record_success`` nor ``record_error`` is appropriate, but the
+        inflight reservation taken by ``record_request`` must still be
+        returned or the slot's ``score()`` is permanently inflated.
+        """
+        with self._lock:
+            self.inflight = max(0, self.inflight - 1)
+
     def record_success(self, latency_ms, ttft_ms=None,
                        output_tokens: int = 0):
         """Call after a successful response.

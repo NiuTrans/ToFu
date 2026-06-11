@@ -95,25 +95,34 @@ def append_persistent_event(task_id, event_id, event):
     etype = (event or {}).get('type', '')
     now = time.time()
 
-    # We use INSERT OR IGNORE because the (task_id, event_id) PK guarantees
-    # idempotency on retry — but a real duplicate (caller minted the same
-    # seq twice for different events) WOULD silently drop data.  We detect
-    # that by checking ``rowcount`` and warning, so cold-replay holes are
-    # observable in logs/error.log instead of being invisible.
+    # ON CONFLICT (task_id, event_id) DO NOTHING because the composite PK
+    # guarantees idempotency on retry — but a real duplicate (caller minted
+    # the same seq twice for different events) WOULD silently drop data.  We
+    # detect that by checking ``rowcount`` and warning, so cold-replay holes
+    # are observable in logs/error.log instead of being invisible.
+    #
+    # NOTE: retry=False is REQUIRED here — upsert(retry=True) routes through
+    # db_execute_with_retry which returns None, destroying the cur.rowcount
+    # the collision canary below depends on.  DO-NOTHING rowcount semantics
+    # (insert→1, duplicate→0) are verified identical on PG and sqlite3.
     try:
-        cur = db.execute(
-            'INSERT OR IGNORE INTO task_events (task_id, event_id, ts_ms, type, payload) VALUES (?,?,?,?,?)',
-            (task_id, event_id, int(now * 1000), etype or 'unknown',
-             _row_payload_to_json(event)),
+        from lib.database._core_schema import TASK_EVENTS, upsert
+        cur = upsert(
+            db, TASK_EVENTS,
+            {'task_id': task_id, 'event_id': event_id, 'ts_ms': int(now * 1000),
+             'type': etype or 'unknown', 'payload': _row_payload_to_json(event)},
+            conflict_cols=['task_id', 'event_id'],
+            insert_cols=['task_id', 'event_id', 'ts_ms', 'type', 'payload'],
+            update_cols=[],  # DO NOTHING — append-only event log
+            commit=True, retry=False,
         )
-        db.commit()
         rc = getattr(cur, 'rowcount', 1)
         if rc == 0:
             # Either an exact retry (harmless — same row already there) or
             # two distinct events colliding on event_id (DATA LOSS).  We can't
             # cheaply distinguish, but a non-zero rate is the canary.
             logger.warning('[EventLog] event_id collision on task=%s event_id=%d type=%s — '
-                           'INSERT OR IGNORE dropped the row.  If this is not a retry, the '
+                           'ON CONFLICT DO NOTHING dropped the row.  If this is not a retry, the '
                            'caller minted a duplicate seq and cold replay will be missing this '
                            'event.', task_id[:8], int(event_id), etype or 'unknown')
     except Exception as e:

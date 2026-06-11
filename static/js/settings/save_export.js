@@ -46,6 +46,12 @@ function saveSettings() {
     config.keepToolHistory = kthCb.checked;
   }
 
+  // Auto-generate conversation title toggle
+  var agtCb = document.getElementById('settingAutoGenerateTitle');
+  if (agtCb) {
+    config.autoGenerateTitle = agtCb.checked;
+  }
+
   // Input send mode
   var ismSel = document.getElementById('settingInputSendMode');
   if (ismSel) {
@@ -173,8 +179,7 @@ async function _saveServerConfig() {
   payload.search.max_chars_direct = parseInt(document.getElementById('settingMaxCharsDirect')?.value) || 200000;
   payload.search.max_chars_pdf = parseInt(document.getElementById('settingMaxCharsPdf')?.value) || 0;
   payload.search.max_bytes = parseInt(document.getElementById('settingMaxBytes')?.value) || 20971520;
-  var sd = document.getElementById('settingSkipDomains');
-  if (sd) payload.search.skip_domains = sd.value.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
+  if (typeof ChipInput !== 'undefined') payload.search.skip_domains = ChipInput.getValues('settingSkipDomains');
 
   // Network — proxy address config (no_proxy is auto-managed by bypass domains)
   payload.proxy_config = {
@@ -183,9 +188,8 @@ async function _saveServerConfig() {
   };
 
   // Network — unified bypass domains (feeds both proxies_for() and no_proxy env)
-  var pb = document.getElementById('settingProxyBypass');
-  if (pb) {
-    payload.proxy_bypass_domains = pb.value.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
+  if (typeof ChipInput !== 'undefined') {
+    payload.proxy_bypass_domains = ChipInput.getValues('settingProxyBypass');
   }
 
   // Feishu bot config

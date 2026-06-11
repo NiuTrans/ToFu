@@ -739,6 +739,13 @@ function _resetToolsToDefaults() {
       return;
     }
     /* pin button removed — pinning replaced by folders */
+    // ★ Rename conversation button — inline title edit dialog
+    const rename = e.target.closest(".conv-rename");
+    if (rename) {
+      e.stopPropagation();
+      if (rename.dataset.convId) _promptRenameConversation(rename.dataset.convId);
+      return;
+    }
     // ★ @ reference button — add conversation reference chip
     const ref = e.target.closest(".conv-ref");
     if (ref) {

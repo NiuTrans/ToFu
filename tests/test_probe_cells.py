@@ -69,11 +69,14 @@ class ProbeMultiAttemptTest(unittest.TestCase):
     """`_probe_cell_multi` filters out FALSE 429s via retries."""
 
     def setUp(self):
-        import routes.config as cfg
-        self.cfg = cfg
+        # The cell-probe engine moved to lib/provider_probe.py (2026-06).
+        # probe_cell_multi calls probe_one_cell THROUGH that module's global,
+        # so patches must target lib.provider_probe, not the routes re-export.
+        import lib.provider_probe as pp
+        self.pp = pp
 
     def _multi(self, statuses, attempts=3):
-        """Patch _probe_one_cell to yield the given status sequence."""
+        """Patch probe_one_cell to yield the given status sequence."""
         seq = iter(statuses)
 
         def fake(*a, **kw):
@@ -82,9 +85,10 @@ class ProbeMultiAttemptTest(unittest.TestCase):
             except StopIteration:
                 return statuses[-1], 'detail'
 
-        with mock.patch.object(self.cfg, '_probe_one_cell', side_effect=fake), \
-                mock.patch.object(self.cfg._time, 'sleep', lambda *_a, **_k: None):
-            return self.cfg._probe_cell_multi('u', 'k', 'm', {}, 5, attempts=attempts)
+        with mock.patch.object(self.pp, 'probe_one_cell', side_effect=fake), \
+                mock.patch.object(self.pp, '_time') as _t:
+            _t.sleep = lambda *_a, **_k: None
+            return self.pp.probe_cell_multi('u', 'k', 'm', {}, 5, attempts=attempts)
 
     def test_transient_429_then_ok_counts_as_ok(self):
         # First attempt false-429, second ok → reachable.
@@ -105,9 +109,10 @@ class ProbeMultiAttemptTest(unittest.TestCase):
             calls['n'] += 1
             return 'not_found', 'HTTP 404'
 
-        with mock.patch.object(self.cfg, '_probe_one_cell', side_effect=fake), \
-                mock.patch.object(self.cfg._time, 'sleep', lambda *_a, **_k: None):
-            status, _ = self.cfg._probe_cell_multi('u', 'k', 'm', {}, 5, attempts=3)
+        with mock.patch.object(self.pp, 'probe_one_cell', side_effect=fake), \
+                mock.patch.object(self.pp, '_time') as _t:
+            _t.sleep = lambda *_a, **_k: None
+            status, _ = self.pp.probe_cell_multi('u', 'k', 'm', {}, 5, attempts=3)
         self.assertEqual(status, 'not_found')
         self.assertEqual(calls['n'], 1)
 

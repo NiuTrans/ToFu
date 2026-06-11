@@ -101,39 +101,56 @@ def get_context_for_prompt(base_path=None, conv_id=None):
                 break
         primary_name = primary_name or os.path.basename(path)
 
+        # Per-root access flags (read-only = reference-only attachment).
+        primary_ro = False
+        for _rn, _rs in _roots_snapshot.items():
+            if _rs.get('path') == path:
+                primary_ro = _rs.get('access') == 'ro'
+                break
+        any_ro = primary_ro or any(rs.get('access') == 'ro'
+                                   for rs in extra_roots.values())
+
+        first_extra_path = next(iter(extra_roots.values()))['path']
         ctx += f"\n{'='*50}\n"
         ctx += f"MULTI-ROOT WORKSPACE — {1 + len(extra_roots)} roots active\n"
         ctx += f"{'='*50}\n"
         ctx += (
-            f"MANDATORY: You MUST use 'rootname:path' prefix for ALL file operations\n"
-            f"targeting non-primary roots. This applies to BOTH reading AND writing\n"
-            f"(including creating new files). Without the prefix, paths resolve under\n"
-            f"the PRIMARY root ({primary_name}).\n\n"
-            f"CREATING NEW FILES: When creating a new file in a non-primary root,\n"
-            f"you MUST use the rootname prefix. There is no auto-detection for new files\n"
-            f"(the file doesn't exist yet to check). Forgetting the prefix will create\n"
-            f"the file in the wrong project.\n\n"
-            f"Root prefix table:\n"
-            f"  {primary_name}: → {path} (PRIMARY — default when no prefix)\n"
+            f"This session spans several project roots:\n"
+            f"  {path}  (PRIMARY{', READ-ONLY' if primary_ro else ''})\n"
         )
         for rn, rs in extra_roots.items():
-            ctx += f"  {rn}: → {rs['path']}\n"
+            _ro = '  (READ-ONLY)' if rs.get('access') == 'ro' else ''
+            ctx += f"  {rs['path']}{_ro}\n"
+        if any_ro:
+            ctx += (
+                "\nREAD-ONLY roots are attached for reference only: you may "
+                "read / grep / list them, but write_file, apply_diff, "
+                "insert_content, create_project, and file-modifying "
+                "run_command targeting a read-only root will be REFUSED. "
+                "Make your edits in a writable root.\n"
+            )
         ctx += (
-            f"\nExamples:\n"
-            f"  read_files([{{path: '{primary_name}:src/main.py'}}])   — read from primary\n"
+            f"\nHow to address a file in any root — two equivalent ways:\n\n"
+            f"  1. ABSOLUTE path (simplest, most reliable — works for reads AND writes,\n"
+            f"     including creating new files):\n"
+            f"       read_files([{{path: '{first_extra_path}/src/main.py'}}])\n"
+            f"       write_file(path='{first_extra_path}/src/new_file.py', ...)\n\n"
+            f"  2. 'rootname:rel' shorthand (optional convenience — the names below):\n"
+            f"       Root names:  {primary_name}: → {path} (PRIMARY)\n"
         )
+        for rn, rs in extra_roots.items():
+            ctx += f"                    {rn}: → {rs['path']}\n"
         first_extra = next(iter(extra_roots))
         ctx += (
-            f"  read_files([{{path: '{first_extra}:src/main.py'}}])   — read from extra root\n"
-            f"  write_file(path='{first_extra}:config.yaml', ...)     — write to extra root\n"
-            f"  write_file(path='{first_extra}:src/new_file.py', ...) — CREATE in extra root\n"
-            f"  run_command(command='npm test', working_dir='{first_extra}:')  — run in extra root\n"
-            f"  grep_search(pattern='TODO', path='{first_extra}:src') — search in extra root\n"
-            f"  apply_diff(edits=[{{path: '{first_extra}:file.py', ...}}])  — batch edit in extra root\n"
+            f"       write_file(path='{first_extra}:src/new_file.py', ...)\n"
+            f"       run_command(command='npm test', working_dir='{first_extra}:')\n\n"
+            f"A BARE relative path (no '/' prefix, no 'rootname:') resolves under the\n"
+            f"PRIMARY root ({primary_name}). To create or edit a file in another root,\n"
+            f"give its absolute path or the 'rootname:' prefix — a bare relative path\n"
+            f"will land in the PRIMARY root.\n\n"
+            f"Tip: if you read a file by its absolute path, write it back with the SAME\n"
+            f"absolute path — no need to translate it into a 'rootname:' prefix.\n"
         )
-        ctx += "\n"
-        for rn, rs in extra_roots.items():
-            ctx += f"[{rn}] {rs['path']}\n\n"
 
     # ═══════════════════════════════════════════════════════
     #  CLAUDE.md / Project Intelligence auto-detection

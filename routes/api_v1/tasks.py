@@ -49,7 +49,6 @@ def _registries() -> dict:
         ('routes.paper', '_report_runtime'),
         ('routes.paper', '_translate_runtime'),
         ('routes.translate', '_translate_runtime'),
-        ('routes.trading_simulator', '_runtime'),
         ('routes.api_v1.agents', '_search_runtime'),
     ):
         try:
@@ -60,6 +59,15 @@ def _registries() -> dict:
         except Exception as e:
             logger.debug('[api_v1.tasks] %s.%s unavailable: %s',
                          mod_path, attr, e)
+    # Plugin task runtimes (e.g. trading-sim) via the tofu.task_runtimes
+    # entry-point group — no core file names an optional feature.
+    try:
+        from routes.plugin_registry import discover_task_runtime_plugins
+        for rt in discover_task_runtime_plugins():
+            if rt is not None:
+                out[rt.kind] = rt
+    except Exception as e:
+        logger.debug('[api_v1.tasks] plugin task-runtime discovery failed: %s', e)
     return out
 
 

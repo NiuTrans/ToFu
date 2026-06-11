@@ -230,18 +230,23 @@ def _load_unlocked():
 
 
 def _save_unlocked():
-    """Persist cache to disk. Caller must hold _lock."""
+    """Persist cache to disk. Caller must hold _lock.
+
+    Uses ``json_store.write_json_atomic`` which writes to a UNIQUE
+    ``mkstemp`` temp file before ``os.replace``.  A fixed ``<path>.tmp``
+    name (the previous implementation) raced across processes sharing the
+    config dir: two concurrent ``_save_unlocked`` calls wrote the same
+    ``key_stats.json.tmp``, and the first ``os.replace`` consumed it so the
+    second failed with ``No such file or directory: …key_stats.json.tmp``.
+    """
+    payload = {
+        'day': _cache['day'],
+        'stats': _cache['stats'],
+        'overrides': _cache['overrides'],
+    }
     try:
-        os.makedirs(os.path.dirname(_STATS_PATH), exist_ok=True)
-        tmp = _STATS_PATH + '.tmp'
-        payload = {
-            'day': _cache['day'],
-            'stats': _cache['stats'],
-            'overrides': _cache['overrides'],
-        }
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, _STATS_PATH)
+        from lib.json_store import write_json_atomic
+        write_json_atomic(_STATS_PATH, payload)
     except OSError as e:
         logger.warning('[KeyStats] Failed to persist %s: %s', _STATS_PATH, e)
 

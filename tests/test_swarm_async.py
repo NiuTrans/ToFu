@@ -305,6 +305,77 @@ class TestAwaitAgents(unittest.TestCase):
         self.assertEqual(len(result['completed']), 1)
         self.assertEqual(result['completed'][0]['agent_id'], 'a1')
 
+    def test_await_no_ids_includes_early_finishers(self):
+        """Regression: await_agents() with NO ids must report agents that
+        finished BEFORE the call. Previously the no-ids branch built its
+        wait-set from only running/pending agents and force-emptied
+        already_done, so an early finisher vanished — mode='all' returned
+        k/N < total while the swarm panel showed N/N green."""
+        import threading
+        release = threading.Event()
+
+        class _MixedAgent(_FakeAgent):
+            def run(self):
+                # 'fast' returns at once; 'slow' waits for release.
+                if self.spec.id == 'slow':
+                    release.wait(timeout=5)
+                return self.result
+
+        with patch('lib.swarm.master._build_sub_agent',
+                   side_effect=lambda spec, **kw: _MixedAgent(spec)):
+            execute_swarm_tool(
+                'spawn_agents',
+                {'agents': [
+                    {'id': 'fast', 'objective': 'F'},
+                    {'id': 'slow', 'objective': 'S'},
+                ]},
+                task={'id': self.task_id},
+            )
+            # Wait until 'fast' has completed (its card is green) while
+            # 'slow' is still blocked.
+            self.assertTrue(_wait_until(
+                lambda: agent_inbox.peek(self.task_id) >= 1))
+            release.set()  # now let 'slow' finish too
+            raw = execute_swarm_tool(
+                'await_agents',
+                {'mode': 'all', 'timeout_seconds': 5},
+                task={'id': self.task_id},
+            )
+        result = json.loads(raw)
+        self.assertEqual(result['status'], 'ok')
+        self.assertFalse(result['timed_out'])
+        ids_seen = {p['agent_id'] for p in result['completed']}
+        self.assertEqual(ids_seen, {'fast', 'slow'},
+                         'no-ids await must include the early finisher')
+
+    def test_await_no_ids_when_all_already_done(self):
+        """Regression: await_agents() with no ids, called after ALL agents
+        already finished, must return them (not an empty 0/N 'finished'
+        note)."""
+        with _patch_factory():
+            execute_swarm_tool(
+                'spawn_agents',
+                {'agents': [
+                    {'id': 'p', 'objective': 'P'},
+                    {'id': 'q', 'objective': 'Q'},
+                ]},
+                task={'id': self.task_id},
+            )
+            self.assertTrue(_wait_until(
+                lambda: agent_inbox.peek(self.task_id) >= 2))
+            time.sleep(0.1)  # let the driver thread terminate
+            raw = execute_swarm_tool(
+                'await_agents',
+                {'mode': 'all', 'timeout_seconds': 5},
+                task={'id': self.task_id},
+            )
+        result = json.loads(raw)
+        self.assertEqual(result['status'], 'ok')
+        self.assertFalse(result['timed_out'])
+        self.assertEqual({p['agent_id'] for p in result['completed']},
+                         {'p', 'q'},
+                         'all-done no-ids await must return every agent')
+
     def test_await_unknown_id_returns_unknown_field(self):
         """B1: await_agents with unknown id returns it in 'unknown'."""
         with _patch_factory():
@@ -824,6 +895,305 @@ class TestParentConfigPropagation(unittest.TestCase):
             'client-XYZ',
             'browserClientId did not propagate to sub-agent parent_task_proxy',
         )
+
+
+class TestConvScopedSession(unittest.TestCase):
+    """Option A: a swarm spawned on one turn is reachable from LATER turns
+    in the SAME conversation (each turn has a fresh task_id but shares the
+    conv id). This is the fix for the 'continue → await → no active swarm'
+    bug where a session was torn down at the spawning turn's end."""
+
+    def setUp(self):
+        self.conv_id = 'cscope-' + str(id(self))
+        self.spawn_task = self.conv_id + '-t1'
+        self.cont_task = self.conv_id + '-t2'
+        for k in (self.conv_id, self.spawn_task, self.cont_task):
+            _reset_global_state(k)
+
+    def tearDown(self):
+        import lib.swarm.integration as integ
+        with integ._sessions_lock:
+            integ._active_sessions.pop(self.conv_id, None)
+            for a in (self.spawn_task, self.cont_task):
+                integ._key_aliases.pop(a, None)
+        for k in (self.conv_id, self.spawn_task, self.cont_task):
+            _reset_global_state(k)
+
+    def test_session_keyed_by_conv_id(self):
+        """The session is registered under the conv id, not the task id."""
+        from lib.swarm.integration import get_active_session
+        with _patch_factory():
+            execute_swarm_tool(
+                'spawn_agents',
+                {'agents': [{'id': 'a1', 'objective': 'O'}]},
+                task={'id': self.spawn_task, 'convId': self.conv_id},
+            )
+        self.assertIsNotNone(get_active_session(self.conv_id),
+                             'session must be reachable by conv id')
+        # And reachable via the spawning task id (alias).
+        self.assertIsNotNone(get_active_session(self.spawn_task),
+                             'session must be reachable by spawning task id alias')
+
+    def test_await_resolves_from_later_turn_same_conv(self):
+        """The crux: a 'continue' turn (fresh task_id, same conv) must reach
+        the live swarm and get results — NOT 'no active swarm session'."""
+        with _patch_factory({'a1': {'final_answer': 'done already'}}):
+            execute_swarm_tool(
+                'spawn_agents',
+                {'agents': [{'id': 'a1', 'objective': 'O'}]},
+                task={'id': self.spawn_task, 'convId': self.conv_id},
+            )
+            self.assertTrue(_wait_until(
+                lambda: agent_inbox.peek(self.conv_id) >= 1))
+            # New turn: different task id, same conv.
+            raw = execute_swarm_tool(
+                'await_agents',
+                {'ids': ['a1'], 'mode': 'all', 'timeout_seconds': 5},
+                task={'id': self.cont_task, 'convId': self.conv_id},
+            )
+        result = json.loads(raw)
+        self.assertEqual(result['status'], 'ok')
+        self.assertEqual({p['agent_id'] for p in result['completed']}, {'a1'})
+
+    def test_get_result_resolves_from_later_turn_same_conv(self):
+        with _patch_factory({'a1': {'final_answer': 'Z' * 500}}):
+            execute_swarm_tool(
+                'spawn_agents',
+                {'agents': [{'id': 'a1', 'objective': 'O'}]},
+                task={'id': self.spawn_task, 'convId': self.conv_id},
+            )
+            self.assertTrue(_wait_until(
+                lambda: agent_inbox.peek(self.conv_id) >= 1))
+            raw = execute_swarm_tool(
+                'get_agent_result', {'agent_id': 'a1'},
+                task={'id': self.cont_task, 'convId': self.conv_id},
+            )
+        payload = json.loads(raw)
+        self.assertEqual(payload['status'], 'ok')
+        self.assertTrue(payload['found'])
+        self.assertEqual(len(payload['final_answer']), 500)
+
+
+class TestTeardownDecoupledFromTurn(unittest.TestCase):
+    """Option A: ``run_task`` finalization must NOT abort a still-running
+    swarm on a normal turn end — only on explicit user abort. Verified at
+    the integration level by simulating the orchestrator teardown branch."""
+
+    def setUp(self):
+        self.conv_id = 'tteardown-' + str(id(self))
+        self.task_id = self.conv_id + '-t1'
+        for k in (self.conv_id, self.task_id):
+            _reset_global_state(k)
+
+    def tearDown(self):
+        import lib.swarm.integration as integ
+        with integ._sessions_lock:
+            integ._active_sessions.pop(self.conv_id, None)
+            integ._key_aliases.pop(self.task_id, None)
+        for k in (self.conv_id, self.task_id):
+            _reset_global_state(k)
+
+    def _spawn_live(self, block):
+        """Spawn a swarm whose single agent blocks until *block* is set, so
+        the session stays live (is_terminated False) during the test."""
+        class _SlowAgent(_FakeAgent):
+            def run(self):
+                block.wait(timeout=5)
+                return self.result
+
+        return patch('lib.swarm.master._build_sub_agent',
+                     side_effect=lambda spec, **kw: _SlowAgent(spec))
+
+    def test_normal_turn_end_detaches_not_aborts(self):
+        """Replicates the orchestrator teardown branch with aborted=False:
+        a live swarm must survive (still registered, not aborted)."""
+        import threading
+        from lib.swarm.integration import (get_active_session, swarm_key_for,
+                                            _remove_session)
+        block = threading.Event()
+        with self._spawn_live(block):
+            execute_swarm_tool(
+                'spawn_agents',
+                {'agents': [{'id': 'slow', 'objective': 'O'}]},
+                task={'id': self.task_id, 'convId': self.conv_id},
+            )
+            # Simulate orchestrator finalization on a NORMAL turn end.
+            task = {'id': self.task_id, 'convId': self.conv_id, 'aborted': False}
+            key = swarm_key_for(task)
+            sess = get_active_session(key)
+            self.assertIsNotNone(sess)
+            user_aborted = bool(task.get('aborted'))
+            if sess is not None and (user_aborted or sess.is_terminated):
+                sess.abort(); _remove_session(key)
+            # Normal end → DETACH, do nothing.
+            self.assertIsNotNone(get_active_session(self.conv_id),
+                                 'normal turn end must NOT remove a live swarm')
+            self.assertFalse(sess._aborted,
+                             'normal turn end must NOT abort a live swarm')
+            block.set()
+
+    def test_user_abort_tears_down(self):
+        """With aborted=True the teardown branch DOES abort + remove."""
+        import threading
+        from lib.swarm.integration import (get_active_session, swarm_key_for,
+                                            _remove_session)
+        from lib.agent_inbox import clear as _clear_inbox
+        block = threading.Event()
+        with self._spawn_live(block):
+            execute_swarm_tool(
+                'spawn_agents',
+                {'agents': [{'id': 'slow', 'objective': 'O'}]},
+                task={'id': self.task_id, 'convId': self.conv_id},
+            )
+            task = {'id': self.task_id, 'convId': self.conv_id, 'aborted': True}
+            key = swarm_key_for(task)
+            sess = get_active_session(key)
+            self.assertIsNotNone(sess)
+            user_aborted = bool(task.get('aborted'))
+            if sess is not None and (user_aborted or sess.is_terminated):
+                sess.abort(); _remove_session(key); _clear_inbox(key)
+            block.set()
+        self.assertIsNone(get_active_session(self.conv_id),
+                          'user abort must remove the swarm session')
+        self.assertTrue(sess._aborted, 'user abort must signal abort')
+
+
+class TestAwaitDiskFallback(unittest.TestCase):
+    """Option A: await_agents with explicit ids and NO live session must
+    recover results from the durable on-disk transcripts instead of a hard
+    'no active swarm' error."""
+
+    def setUp(self):
+        self.task_id = 'tawaitdisk-' + str(id(self))
+        _reset_global_state(self.task_id)
+
+    def tearDown(self):
+        _reset_global_state(self.task_id)
+
+    def test_await_ids_fall_back_to_disk(self):
+        import os
+        from lib.swarm.integration import _remove_session, _resolve_output_dir
+        out_dir = _resolve_output_dir(self.task_id)
+        os.makedirs(out_dir, exist_ok=True)
+        log_path = os.path.join(out_dir, 'gonea.log')
+        with open(log_path, 'w', encoding='utf-8') as fp:
+            fp.write('DISK AWAIT ANSWER ' * 10)
+        try:
+            _remove_session(self.task_id)
+            raw = execute_swarm_tool(
+                'await_agents',
+                {'ids': ['gonea'], 'mode': 'all', 'timeout_seconds': 1},
+                task={'id': self.task_id},
+            )
+            result = json.loads(raw)
+            self.assertEqual(result['status'], 'ok')
+            self.assertEqual(result.get('source'), 'disk')
+            ids = {c['agent_id'] for c in result['completed']}
+            self.assertIn('gonea', ids)
+            self.assertIn('DISK AWAIT ANSWER',
+                          result['completed'][0]['final_answer'])
+        finally:
+            try:
+                os.remove(log_path)
+            except OSError:
+                pass
+
+    def test_await_no_ids_no_session_still_errors(self):
+        """Without ids there's nothing to scope to on disk → keep the
+        existing 'no active swarm' error."""
+        from lib.swarm.integration import _remove_session
+        _remove_session(self.task_id)
+        raw = execute_swarm_tool(
+            'await_agents', {'mode': 'all', 'timeout_seconds': 1},
+            task={'id': self.task_id},
+        )
+        self.assertEqual(json.loads(raw)['status'], 'error')
+
+
+# ═════════════════════════════════════════════════════════
+#  Phase 2 — auto-continue guardrails (_maybe_autocontinue)
+# ═════════════════════════════════════════════════════════
+
+class TestAutoContinueGuardrails(unittest.TestCase):
+    """The settle hook must wake the main agent only under safe conditions:
+    enabled, conversation idle, inbox non-empty, latch free, chain < ceiling.
+    We patch the actual turn-start so no DB/LLM is touched and count calls."""
+
+    def setUp(self):
+        self.key = 'tac-' + str(id(self))
+        agent_inbox.reset_for_test(self.key)
+        import lib.swarm.integration as integ
+        self.integ = integ
+        with integ._autocontinue_lock:
+            integ._autocontinue_chain.pop(self.key, None)
+            integ._autocontinue_inflight.discard(self.key)
+
+    def tearDown(self):
+        agent_inbox.reset_for_test(self.key)
+        with self.integ._autocontinue_lock:
+            self.integ._autocontinue_chain.pop(self.key, None)
+            self.integ._autocontinue_inflight.discard(self.key)
+
+    def _enqueue(self):
+        agent_inbox.enqueue(self.key, '<swarm-update>x</swarm-update>',
+                            priority='later', mode='swarm-update', agent_id='a1')
+
+    def test_fires_when_idle_with_pending(self):
+        self._enqueue()
+        with patch.object(self.integ, '_key_is_live', return_value=False), \
+             patch.object(self.integ, '_start_autocontinue_turn',
+                          return_value=True) as start:
+            self.integ._maybe_autocontinue(self.key)
+        start.assert_called_once_with(self.key)
+        self.assertEqual(self.integ._autocontinue_chain.get(self.key), 1)
+
+    def test_skips_when_conversation_live(self):
+        self._enqueue()
+        with patch.object(self.integ, '_key_is_live', return_value=True), \
+             patch.object(self.integ, '_start_autocontinue_turn',
+                          return_value=True) as start:
+            self.integ._maybe_autocontinue(self.key)
+        start.assert_not_called()
+
+    def test_skips_when_inbox_empty(self):
+        with patch.object(self.integ, '_key_is_live', return_value=False), \
+             patch.object(self.integ, '_start_autocontinue_turn',
+                          return_value=True) as start:
+            self.integ._maybe_autocontinue(self.key)
+        start.assert_not_called()
+
+    def test_chain_ceiling_blocks_runaway(self):
+        self._enqueue()
+        with self.integ._autocontinue_lock:
+            self.integ._autocontinue_chain[self.key] = self.integ.SWARM_AUTOCONTINUE_MAX_CHAIN
+        with patch.object(self.integ, '_key_is_live', return_value=False), \
+             patch.object(self.integ, '_start_autocontinue_turn',
+                          return_value=True) as start:
+            self.integ._maybe_autocontinue(self.key)
+        start.assert_not_called()
+
+    def test_failed_start_releases_chain_increment(self):
+        self._enqueue()
+        with patch.object(self.integ, '_key_is_live', return_value=False), \
+             patch.object(self.integ, '_start_autocontinue_turn',
+                          return_value=False):
+            self.integ._maybe_autocontinue(self.key)
+        # increment was rolled back so a later settle can retry
+        self.assertEqual(self.integ._autocontinue_chain.get(self.key, 0), 0)
+
+    def test_disabled_flag_is_a_noop(self):
+        self._enqueue()
+        with patch.object(self.integ, 'SWARM_AUTOCONTINUE_ENABLED', False), \
+             patch.object(self.integ, '_start_autocontinue_turn',
+                          return_value=True) as start:
+            self.integ._maybe_autocontinue(self.key)
+        start.assert_not_called()
+
+    def test_reset_chain_clears_counter(self):
+        with self.integ._autocontinue_lock:
+            self.integ._autocontinue_chain[self.key] = 2
+        self.integ.reset_autocontinue_chain(self.key)
+        self.assertNotIn(self.key, self.integ._autocontinue_chain)
 
 
 if __name__ == '__main__':

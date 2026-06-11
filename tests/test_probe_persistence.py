@@ -21,17 +21,20 @@ class ProbePersistenceTest(unittest.TestCase):
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        import routes.config as cfg
-        self.cfg = cfg
+        # The cell-probe engine moved to lib/provider_probe.py (2026-06);
+        # run_cell_probe_task resolves probe_one_cell / probe_cache_path
+        # through that module, so patch/redirect there.
+        import lib.provider_probe as pp
+        self.cfg = pp
         # Redirect the probe-cache path into the temp dir.
-        self._orig_cache_path = cfg._probe_cache_path
-        cfg._probe_cache_path = lambda pid: os.path.join(self._tmp.name, pid + '.json')
+        self._orig_cache_path = pp.probe_cache_path
+        pp.probe_cache_path = lambda pid: os.path.join(self._tmp.name, pid + '.json')
 
     def tearDown(self):
-        self.cfg._probe_cache_path = self._orig_cache_path
+        self.cfg.probe_cache_path = self._orig_cache_path
         self._tmp.cleanup()
 
-    def _fake_probe(self, base_url, api_key, model_id, extra_headers, timeout):
+    def _fake_probe(self, base_url, api_key, model_id, extra_headers, timeout, protocol='openai'):
         # mx-dead is unreachable for everyone; everything else is ok.
         if model_id == 'mx-dead':
             return 'not_found', 'HTTP 404'
@@ -56,8 +59,8 @@ class ProbePersistenceTest(unittest.TestCase):
             (1, 'sk-bbb', 'modelX', 'modelX'),
             (1, 'sk-bbb', 'modelX', 'mx-dead'),
         ]
-        with mock.patch.object(cfg, '_probe_one_cell', side_effect=self._fake_probe):
-            cfg._run_cell_probe_task(task, work, timeout=5)
+        with mock.patch.object(cfg, 'probe_one_cell', side_effect=self._fake_probe):
+            cfg.run_cell_probe_task(task, work, timeout=5)
 
         self.assertEqual(task['status'], 'done')
         self.assertEqual(task['done_count'], 4)
@@ -66,15 +69,15 @@ class ProbePersistenceTest(unittest.TestCase):
         self.assertEqual(task['summary']['ok'], 2)
 
         # The mx-dead cells are recommend_disable; the modelX cells are not.
-        dead0 = task['cells'][cfg._probe_cell_key(0, 'mx-dead')]
+        dead0 = task['cells'][cfg.probe_cell_key(0, 'mx-dead')]
         self.assertTrue(dead0['recommend_disable'])
         self.assertEqual(dead0['root_model_id'], 'modelX')
-        ok0 = task['cells'][cfg._probe_cell_key(0, 'modelX')]
+        ok0 = task['cells'][cfg.probe_cell_key(0, 'modelX')]
         self.assertFalse(ok0['recommend_disable'])
 
         # Persisted snapshot exists on disk and matches.
         from lib.json_store import read_json
-        disk = read_json(cfg._probe_cache_path('mt'), default=None)
+        disk = read_json(cfg.probe_cache_path('mt'), default=None)
         self.assertIsInstance(disk, dict)
         self.assertEqual(disk['status'], 'done')
         self.assertEqual(len(disk['cells']), 4)
@@ -89,7 +92,7 @@ class ProbePersistenceTest(unittest.TestCase):
             '_abort': False, '_base_url': 'https://gw/v1',
             '_extra_headers': {'X-Secret': 'shh'},
         }
-        snap = cfg._public_probe_snapshot(task)
+        snap = cfg.public_probe_snapshot(task)
         # No private (underscore) fields leak into the public snapshot.
         self.assertNotIn('_base_url', snap)
         self.assertNotIn('_extra_headers', snap)

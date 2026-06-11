@@ -227,6 +227,17 @@ def _transform_messages(
                 and not last.get('toolRounds')):
             src = src[:-1]
 
+    # ── Pre-process: drop duplicate user rows (same logical message) ──
+    # A send-path race (optimistic frontend copy + server-translated copy
+    # planted by a racing PUT) or a stale-task resurrection can leave TWO
+    # user rows for one logical turn — they share the same ``timestamp`` and
+    # the same (or translated-vs-original) content. _merge_consecutive_same_role
+    # would CONCATENATE them, doubling the visible user text in context (the
+    # "U1 A1 U1 A2" doubled-context bug). Collapse them here, keyed on
+    # timestamp, mirroring lib.chat.messages.append_user_msg_idempotent's
+    # contract (server copy wins).
+    src = _dedup_duplicate_user_messages(src)
+
     # ── Pre-process: collapse historical endpoint sessions ──
     # Historical (completed) endpoint sessions are replaced with just their
     # last worker output so follow-up messages have proper context.
@@ -570,6 +581,66 @@ def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
         out.extend(tool_results)
 
     return out
+
+
+def _dedup_duplicate_user_messages(src: list[dict]) -> list[dict]:
+    """Drop duplicate user rows that represent the SAME logical send turn.
+
+    Root cause this defends against: during the synchronous send-path
+    auto-translate window, a racing conversation sync (the "rescue
+    local-only conv" PUT, another browser tab, or a /chat/send retry) can
+    plant the optimistic frontend copy of a user message into the DB while
+    the server is still building/translating its own authoritative copy.
+    Both rows share the SAME ``timestamp`` (the frontend payload timestamp
+    flows through ``build_user_msg_from_payload``). A stale aborted task
+    can similarly resurrect a just-truncated user turn.
+
+    ``append_user_msg_idempotent`` reconciles this at the *write* site, but
+    a row already corrupted before that fix shipped — or planted by a writer
+    that bypasses the helper — still lives in the DB. Without this pass,
+    ``_merge_consecutive_same_role`` would *concatenate* the two user rows
+    (or carry both across an empty assistant), doubling the user's text in
+    the LLM context.
+
+    Strategy: keep only the LAST user row in any run of consecutive user
+    rows that share a ``timestamp`` (the server-translated copy is appended
+    after the optimistic one, so the last wins — it carries the
+    authoritative ``content`` + translation fields). Endpoint-mode user rows
+    (``_isEndpointReview``) are never collapsed — they legitimately repeat.
+
+    Args:
+        src: Raw conversation messages (mutated copy returned, input untouched).
+
+    Returns:
+        A new list with duplicate same-timestamp user rows collapsed.
+    """
+    if not src:
+        return src
+
+    result: list[dict] = []
+    dropped = 0
+    for msg in src:
+        if (isinstance(msg, dict)
+                and msg.get('role') == 'user'
+                and not msg.get('_isEndpointReview')
+                and result):
+            prev = result[-1]
+            if (isinstance(prev, dict)
+                    and prev.get('role') == 'user'
+                    and not prev.get('_isEndpointReview')
+                    and msg.get('timestamp') is not None
+                    and prev.get('timestamp') == msg.get('timestamp')):
+                # Same logical turn — server copy (this one) supersedes the
+                # optimistic copy already in `result`. Replace in place.
+                result[-1] = msg
+                dropped += 1
+                continue
+        result.append(msg)
+
+    if dropped:
+        logger.warning('[MsgBuilder] Collapsed %d duplicate same-timestamp user '
+                       'row(s) — prevented doubled user turn in context', dropped)
+    return result
 
 
 def _collapse_historical_endpoint_sessions(src: list[dict]) -> list[dict]:

@@ -136,13 +136,30 @@ available via `config`.
     "agentBackend": "builtin",
     "endpointMode": false,
     "swarmEnabled": false,
-    "mcpEnabled": true
+    "mcpEnabled": true,
+    "disableModelFallback": false
   },
   "conversation_id": "my-headless-job-001",             // optional
   "idempotency_key": "uuid-or-anything-stable",          // optional, replays cached response
   "timeout_s": 600
 }
 ```
+
+> **⚠️ Automatic model fallback (important for pinned-model callers).**
+> The server admin can configure a global *fallback model* (Settings →
+> model defaults). When set, a transient error on your requested model
+> causes Tofu to **silently re-run that round on the fallback model** —
+> so a request pinned to `model: "X"` can return output from a different
+> model. The done event / task snapshot expose this via
+> `fallbackModel` / `fallbackFrom` / `fallbackReason`, so always inspect
+> them if model identity matters. For reproducible runs, benchmarks, or
+> evals where you must measure ONLY the requested model, set
+> `config.disableModelFallback: true`: the round then surfaces the
+> primary error (envelope `context: "fallback-disabled"`) instead of
+> switching. The fallback *target* itself is admin-only; this flag is
+> the per-request opt-out. Whether a deployment has a fallback model is
+> not exposed in `/capabilities` (it's a server secret), so treat the
+> opt-out as the safe default for deterministic pipelines.
 
 **Sync response** (`stream:false`):
 
@@ -654,6 +671,15 @@ values:
 The enum is the single source of truth in
 [`lib/error_envelope.py`](../lib/error_envelope.py) (`KINDS`); a drift
 test keeps it honest.
+
+> The envelope's `context` field is a free-form diagnostic tag (not a
+> closed enum). One value worth recognising: `context:
+> "fallback-disabled"` means the primary model errored and automatic
+> fallback was suppressed because this request set
+> `config.disableModelFallback: true`. The error you see is the real
+> primary-model error — branch on `kind` / `retryable` as usual and
+> retry on the SAME model rather than expecting a fallback to have
+> masked it.
 
 ---
 

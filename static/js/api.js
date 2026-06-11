@@ -49,7 +49,10 @@
   function _base() {
     if (typeof apiUrl === 'function') return apiUrl('');
     const p = (global.location && global.location.pathname) || '';
-    return p.replace(/\/(index\.html)?$/, '');
+    // Strip a trailing index.html / trading.html (the trading SPA loads
+    // api.js standalone, without core.js's apiUrl()) so the base resolves
+    // to the deployment prefix, not the HTML file path.
+    return p.replace(/\/(index\.html|trading\.html)?$/, '');
   }
 
   function _resolve(path) {
@@ -219,6 +222,35 @@
     },
   };
 
+  // orchestrations --------------------------------------------------
+  const orchestrations = {
+    list:     async ()        => (await get('/api/v1/orchestrations', { onError: 'null' })) || [],
+    get:      (id)            => get(`/api/v1/orchestrations/${encodeURIComponent(id)}`, { onError: 'null' }),
+    create:   (def)           => post('/api/v1/orchestrations', def, { parse: 'response' }),
+    update:   (id, def)       => put(`/api/v1/orchestrations/${encodeURIComponent(id)}`, def, { parse: 'response' }),
+    remove:   async (id)      => {
+      const r = await del(`/api/v1/orchestrations/${encodeURIComponent(id)}`, { parse: 'response', onError: 'null' });
+      return !!(r && r.ok);
+    },
+    validate: (def)           => post('/api/v1/orchestrations/validate', def, { onError: 'null' }),
+    layout:   (def)           => post('/api/v1/orchestrations/layout', { definition: def }, { onError: 'null' }),
+    compose:  (requirement, current, history) =>
+                  post('/api/v1/orchestrations/compose',
+                       { requirement, current: current || null, history: history || [] },
+                       { onError: 'null' }),
+    builtin:  (name)          => get(`/api/v1/orchestrations/builtin/${encodeURIComponent(name)}`, { onError: 'null' }),
+    plan:     (def)           => post('/api/v1/orchestrations/plan', { definition: def }, { onError: 'null' }),
+    run:      (def, input)    => post('/api/v1/orchestrations/run', { definition: def, input: input || '' }, { onError: 'null' }),
+    runPoll:  (taskId, cursor) => get(`/api/v1/orchestrations/run/poll/${encodeURIComponent(taskId)}?cursor=${cursor || 0}`, { onError: 'null' }),
+    runAbort: (taskId)        => post(`/api/v1/orchestrations/run/abort/${encodeURIComponent(taskId)}`, {}, { onError: 'null' }),
+    humanApprove: (requestId, approved) =>
+                  post('/api/v1/orchestrations/run/human-approve',
+                       { requestId, approved: !!approved }, { onError: 'null' }),
+    humanInput: (requestId, response) =>
+                  post('/api/v1/orchestrations/run/human-input',
+                       { requestId, response: response || '' }, { onError: 'null' }),
+  };
+
   // memory ----------------------------------------------------------
   const memory = {
     list:           (scope)     => get('/api/v1/memory', { query: { scope: scope || 'all' } }),
@@ -291,6 +323,17 @@
     put: (convId, body) =>
       request(`/api/v1/conversations/${encodeURIComponent(convId)}`,
               { method: 'PUT', json: body, parse: 'response', onError: 'null' }),
+    // Manual rename — title-only PATCH. Returns parsed {ok, title} or null.
+    setTitle: (convId, title) =>
+      patch(`/api/v1/conversations/${encodeURIComponent(convId)}/title`,
+            { title }, { onError: 'null' }),
+    // LLM-generated title. Returns parsed {ok, title} or null on failure.
+    // `lang` ('zh'|'en') forces the title language to match the UI; defaults
+    // to the current interface language.
+    generateTitle: (convId, lang) =>
+      post(`/api/v1/conversations/${encodeURIComponent(convId)}/generate-title`,
+           { lang: lang || (typeof _i18nLang !== 'undefined' ? _i18nLang : 'zh') },
+           { onError: 'null' }),
     getDebugMessages: (convId, systemPrompt) =>
       get(`/api/v1/conversations/${encodeURIComponent(convId)}/debug-messages`,
           { query: { systemPrompt: systemPrompt || '' }, onError: 'null' }),
@@ -445,12 +488,14 @@
 
   // update (self-update via git pull) -------------------------------
   // check:   GET  — compare local VERSION vs latest GitHub release tag
-  // apply:   POST — git pull --ff-only (409 on dirty tree / no git)
+  // apply:   POST — launches git pull + pip install in a background thread,
+  //                 returns {taskId} immediately. Progress streams over the
+  //                 'update' push channel; terminal result is the 'done' frame.
   // restart: POST — re-exec the server process (explicit, admin-only)
   const update = {
-    check:   ()  => get('/api/v1/update/check', { onError: 'null' }),
-    apply:   ()  => post('/api/v1/update/apply', {}, { timeout: 180000 }),
-    restart: ()  => post('/api/v1/update/restart', {}, { onError: 'null' }),
+    check:   (opts) => get('/api/v1/update/check', Object.assign({ onError: 'null' }, opts || {})),
+    apply:   ()     => post('/api/v1/update/apply', {}),
+    restart: ()     => post('/api/v1/update/restart', {}, { onError: 'null' }),
   };
 
   // health / status -------------------------------------------------
@@ -555,8 +600,12 @@
     catalogList:      ()                           =>
       request('/api/v1/mcp/catalog',
               { method: 'GET', parse: 'response', onError: 'null' }),
+    // NOTE: no onError:'null' here — a failed connect returns HTTP 500
+    // with a rich {error, stderr_tail} body; we want that to throw an
+    // ApiError (carrying .body) so the UI can show the real reason
+    // instead of a generic "无法连接" after the call silently nulls out.
     catalogInstall:   (id, env)                    =>
-      post('/api/v1/mcp/catalog/install', { id, env: env || {} }, { onError: 'null' }),
+      post('/api/v1/mcp/catalog/install', { id, env: env || {} }),
     catalogUninstall: (id, purge)                  =>
       post('/api/v1/mcp/catalog/uninstall',
            { id, ...(purge ? { purge: true } : {}) }, { onError: 'null' }),
@@ -572,6 +621,59 @@
     status: () => get('/api/v1/browser/status'),
   };
 
+  // authSources (login-walled fetch sources: Xiaohongshu, …) ---------
+  const authSources = {
+    list:   ()              => get('/api/v1/auth-sources', { onError: 'null' }),
+    upsert: (body)          => post('/api/v1/auth-sources', body),
+    toggle: (domain, on)    => post(`/api/v1/auth-sources/${encodeURIComponent(domain)}/toggle`, { enabled: !!on }, { onError: 'null' }),
+    remove: (domain)        => del(`/api/v1/auth-sources/${encodeURIComponent(domain)}`, { parse: 'response', onError: 'null' }),
+    // Interactive headful login — long-running; no client timeout.
+    login:  (domain, timeout) => post(`/api/v1/auth-sources/${encodeURIComponent(domain)}/login`, { timeout: timeout || 180 }, { timeout: 0 }),
+  };
+
+  // trading (AI investment assistant SPA — trading.html) ------------
+  // The trading page is a standalone SPA that loads api.js directly. All
+  // its endpoints live under /api/v1/trading. `call()` preserves the exact
+  // legacy contract of the old TradingApp.api(): always parse JSON, and on
+  // a non-2xx throw Error(body.error || 'HTTP <status>'). `raw()` hands back
+  // the Response for the SSE stream + progress-poll sites that read the body
+  // incrementally or branch on resp.status.
+  const _TRADING_BASE = '/api/v1/trading';
+  const trading = {
+    base: () => _resolve(_TRADING_BASE),
+    call: async (path, opts) => {
+      opts = opts || {};
+      const resp = await request(_TRADING_BASE + path, Object.assign({
+        method: opts.method || 'GET',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {}),
+        body: opts.body,
+        timeout: opts.timeout,
+        signal: opts.signal,
+        parse: 'response',
+      }, {}));
+      if (!resp.ok) {
+        let err = {};
+        try { err = await resp.json(); } catch (_) { /* non-JSON error body */ }
+        throw new Error((err && err.error) || ('HTTP ' + resp.status));
+      }
+      return await resp.json();
+    },
+    // Raw Response for streaming / progress-poll endpoints. Caller pipes
+    // resp.body.getReader() (SSE) or reads resp.json() and branches on
+    // resp.status itself. timeout defaults to 0 (no client-side abort).
+    raw: (path, opts) => {
+      opts = opts || {};
+      return request(_TRADING_BASE + path, {
+        method: opts.method || 'GET',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {}),
+        body: opts.body,
+        timeout: opts.timeout === undefined ? 0 : opts.timeout,
+        signal: opts.signal,
+        parse: 'response',
+      });
+    },
+  };
+
   // project ---------------------------------------------------------
   // Project Co-Pilot panel — set/clear active project, list recent paths,
   // rescan / undo, browse the filesystem, apply code edits, approve writes.
@@ -579,9 +681,11 @@
   // callers can read .ok and parse error envelopes.
   const project = {
     status:        ()         => get('/api/v1/project/status', { onError: 'null' }),
-    setPaths:      (folders)  =>
+    setPaths:      (folders, readOnlyPaths)  =>
       request('/api/v1/project/paths',
-              { method: 'PUT', json: { paths: folders }, parse: 'response' }),
+              { method: 'PUT',
+                json: { paths: folders, readOnlyPaths: readOnlyPaths || [] },
+                parse: 'response' }),
     setPath:       (path)     =>
       request('/api/v1/project/set',
               { method: 'POST', json: { path }, parse: 'response' }),
@@ -778,10 +882,10 @@
     ApiError,
     _resolve,         // exposed for SSE/WS path building
     // domains
-    folders, memory, timer, scheduler, optimizer, agentBackends, compactions,
+    folders, orchestrations, memory, timer, scheduler, optimizer, agentBackends, compactions,
     conversations, text, translate, chat, images, pdf, doc, artifacts,
     health, pricing, clientError, serverConfig, browser, project, daily, paper,
-    features, providers, dispatch, oauth, mcp, update,
+    features, providers, dispatch, oauth, mcp, update, trading, authSources,
   };
 
   global.Api = Api;

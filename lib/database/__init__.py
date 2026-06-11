@@ -43,6 +43,7 @@ from lib.database._core import (  # noqa: F401
     # Connection management
     get_db,
     get_thread_db,
+    close_thread_db,
     # Schema init
     init_db,
     # JSON serialization
@@ -61,6 +62,20 @@ from lib.database._core import (  # noqa: F401
     # Graceful shutdown
     shutdown_pool,
 )
+from lib.database._bootstrap import (  # noqa: F401
+    # Scheduled logical backup (pg_dumpall) — PG-only, no-op on SQLite
+    backup_pg_database,
+)
+from lib.database.aio import (  # noqa: F401
+    # Async facade (Stage-2 native-async migration) — leak-safe await-able DB
+    async_execute,
+    async_executescript,
+    async_fetchall,
+    async_fetchone,
+    async_transaction,
+    run_pooled,
+    shutdown_async_db,
+)
 
 __all__ = [
     '_BACKEND',
@@ -70,7 +85,7 @@ __all__ = [
     'translate_sql',
     'DictRow', 'PgCursor', 'PgConnection',
     'strip_null_bytes_deep', 'json_dumps_pg',
-    'get_db', 'get_thread_db', 'close_db',
+    'get_db', 'get_thread_db', 'close_thread_db', 'close_db',
     'db_execute_with_retry',
     'warmup_db',
     'heal_toast_corruption',
@@ -79,4 +94,8 @@ __all__ = [
     'db_available', 'pg_available',
     '_tune_connection',
     'shutdown_pool',
+    'backup_pg_database',
+    # Async facade
+    'async_execute', 'async_fetchone', 'async_fetchall',
+    'async_executescript', 'async_transaction', 'run_pooled', 'shutdown_async_db',
 ]

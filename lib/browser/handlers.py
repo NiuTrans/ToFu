@@ -75,7 +75,7 @@ def _handle_read_tab(fn_args):
             extract_method = 'innerText'
             if raw_html and len(raw_html) > 200:
                 try:
-                    from lib.fetch.html_extract import extract_html_text
+                    from tofu_search.fetch.html_extract import extract_html_text
                     text = extract_html_text(raw_html, 80000, url=url)
                     if text and len(text) > 50:
                         extract_method = 'html→extract'

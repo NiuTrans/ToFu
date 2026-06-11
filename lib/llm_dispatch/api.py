@@ -8,6 +8,7 @@ Usage:
     from lib.llm_dispatch import dispatch_chat, dispatch_stream, smart_chat
 """
 
+import os
 import threading
 import time
 from collections import defaultdict
@@ -17,6 +18,44 @@ from lib.log import get_logger
 from .factory import get_dispatcher
 
 logger = get_logger(__name__)
+
+# How long (seconds) to cool a slot whose endpoint was unreachable at the
+# connect phase, so the picker routes around the dead host instead of
+# retrying it every cycle. The local health checker clears this early when
+# the box recovers. Env-tunable for deployments with flaky self-hosted boxes.
+try:
+    _UNREACHABLE_COOLDOWN = float(os.environ.get('TOFU_UNREACHABLE_COOLDOWN', '30'))
+    if _UNREACHABLE_COOLDOWN <= 0:
+        _UNREACHABLE_COOLDOWN = 30.0
+except (ValueError, TypeError):
+    _UNREACHABLE_COOLDOWN = 30.0
+
+
+def _raise_dispatch_exhausted(last_err, *, max_retries, capability,
+                              prefer_model=None, what='dispatch'):
+    """Raise the terminal error when a dispatch loop runs out of slots.
+
+    When the exhausting failure was an endpoint-unreachable error, every
+    candidate slot was a dead host — re-raise a single clear message
+    naming the model instead of letting an opaque urllib3 ``MaxRetryError``
+    bubble to the user. Otherwise propagate ``last_err`` unchanged (or a
+    generic RuntimeError when there was no captured error).
+    """
+    from lib.llm_errors import EndpointUnreachableError
+    if isinstance(last_err, EndpointUnreachableError):
+        _target = prefer_model or capability
+        _url = getattr(last_err, 'base_url', '') or ''
+        msg = ('All endpoints for %s are unreachable — the model server(s) '
+               'appear to be down or not accepting connections. '
+               'Check that the endpoint is running and reachable.'
+               % (('model %r' % _target) if prefer_model else
+                  ('capability %r' % capability)))
+        if _url:
+            msg += ' (last tried: %s)' % _url
+        raise EndpointUnreachableError(msg, base_url=_url) from last_err
+    raise last_err or RuntimeError(
+        'All %d %s attempts failed for capability=%s'
+        % (max_retries, what, capability))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -119,6 +158,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
         (content_text: str, usage_dict: dict)
     """
     from lib.llm import ContentFilterError, InvalidImageError, PermissionError_, PromptTooLongError, RateLimitError, StreamOnlyError, chat
+    from lib.llm_errors import EndpointUnreachableError
 
     # 2026-05-05 config-surface change (CLAUDE.md §10): per-cycle 429
     # severity downgraded from WARNING → INFO (routine backpressure; the
@@ -200,13 +240,21 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
             exclude_pairs=exclude_pairs if total_attempts > 0 else None,
             strict_model=strict_model)
         if slot is None:
-            # All slots in cooldown / excluded — wait briefly and retry
-            if _429_count > 0:
+            # All slots in cooldown / excluded — wait briefly and retry.
+            # ★ Keep fast-polling when capable slots EXIST but are merely
+            #   cooling (429-equivalent), even if THIS call hasn't caught a
+            #   raw 429 yet — otherwise fresh concurrent requests bail on
+            #   attempt 1 under heavy contention. Give up only when no
+            #   capable slot exists at all. (Mirror of dispatch_stream.)
+            _slots_exist = dispatcher.has_capable_slots(
+                capability, exclude_models=exclude,
+                exclude_keys=exclude_keys, exclude_pairs=exclude_pairs)
+            if _429_count > 0 or _slots_exist:
                 time.sleep(0.3)
                 _429_count += 1
                 if _429_count % 20 == 0:
                     logger.info(
-                        '%s dispatch_chat: still cycling 429 (%d times), '
+                        '%s dispatch_chat: still cycling (slots cooling, %d times), '
                         'waiting for cooldown to expire…',
                         log_prefix, _429_count)
                 continue
@@ -344,18 +392,37 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                     log_prefix, slot.key_name, slot.model,
                     dispatcher.summarize_slots(capability))
 
+        except EndpointUnreachableError as e:
+            # ★ Endpoint host down (connect-phase failure). Cool the slot,
+            #   exclude this (key, model) pair, and fail over to another
+            #   slot — same handling as dispatch_stream.
+            slot.record_error(is_rate_limit=False, error=str(e)[:200])
+            slot.cooldown_until = time.time() + _UNREACHABLE_COOLDOWN
+            last_err = e
+            exclude_pairs.add((slot.key_name, slot.model))
+            hard_attempts += 1
+            logger.warning(
+                '%s Endpoint unreachable on %s:%s (%s) — cooled %ds + '
+                'excluded pair, failing over: %s',
+                log_prefix, slot.key_name, slot.model,
+                getattr(e, 'base_url', '') or '?', _UNREACHABLE_COOLDOWN,
+                str(e)[:160])
+
         except ContentFilterError as e:
             # HTTP 450 — content policy violation. No point retrying with
             # different model/key since the same content will be blocked.
+            slot.release()  # payload-level reject — not a slot-health signal
             logger.warning('%s Content filter (HTTP 450) — not retrying: %s', tag, str(e)[:200], exc_info=True)
             raise
 
         except PromptTooLongError:
+            slot.release()  # payload-level reject — not a slot-health signal
             logger.warning('%s Prompt/request too large — not retrying on other slots '
                            '(same payload = same rejection)', tag)
             raise   # ★ Escape to orchestrator for reactive compaction
 
         except InvalidImageError:
+            slot.release()  # payload-level reject — not a slot-health signal
             logger.warning('%s Image content error — not retrying on other slots '
                            '(same image = same rejection)', tag)
             raise   # ★ Same payload = same rejection on all keys
@@ -397,8 +464,9 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                 logger.debug('%s Error: %s — trying next slot', tag, str(e)[:200], exc_info=True)
             hard_attempts += 1
 
-    raise last_err or RuntimeError(
-        'All %d dispatch attempts failed for capability=%s' % (max_retries, capability))
+    _raise_dispatch_exhausted(last_err, max_retries=max_retries,
+                              capability=capability, prefer_model=prefer_model,
+                              what='dispatch')
 
 
 # ═══════════════════════════════════════════════════════════
@@ -542,6 +610,51 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
 #  Public API — dispatch_stream (streaming)
 # ═══════════════════════════════════════════════════════════
 
+def _adapt_stream_body_for_slot(slot, body_or_messages, is_body, *,
+                                tools, max_tokens, temperature,
+                                thinking_enabled, preset, effort):
+    """Build/adapt the request body for a specific dispatched slot.
+
+    Pure CPU (no I/O) — shared by the sync ``dispatch_stream`` loop and the
+    native-async ``async_dispatch_stream`` loop so the provider-specific body
+    quirks (max_tokens re-clamp, thinking-param readjust, Claude prefill
+    guard, Gemini thought-signature injection) live in ONE place.
+
+    Returns the body dict ready to hand to ``stream_chat`` / ``async_stream_chat``.
+    """
+    from lib.llm import build_body
+    if is_body:
+        body = dict(body_or_messages)
+        body['model'] = slot.model
+        if tools is not None:
+            body['tools'] = tools
+        if 'max_tokens' in body:
+            from lib.llm import _clamp_max_tokens
+            from lib.llm.body import _clamp_completion_to_context_window
+            body['max_tokens'] = _clamp_max_tokens(slot.model, body['max_tokens'])
+            body['max_tokens'] = _clamp_completion_to_context_window(
+                slot.model, body.get('messages'), body['max_tokens'],
+                provider_id=slot.provider_id or '')
+        _readjust_thinking_params(body, slot.model, slot.thinking_format or '')
+        from lib.llm import _downscale_oversized_images, _strip_trailing_assistant_for_claude, is_claude
+        if is_claude(slot.model) and body.get('messages'):
+            _strip_trailing_assistant_for_claude(body['messages'], slot.model)
+            _downscale_oversized_images(body['messages'], slot.model)
+        from lib.llm.body import _inject_gemini_thought_signatures
+        from lib.model_info import is_gemini as _is_gemini
+        if _is_gemini(slot.model) and body.get('messages'):
+            _inject_gemini_thought_signatures(body['messages'], slot.model)
+        return body
+    return build_body(
+        slot.model, body_or_messages,
+        max_tokens=max_tokens, temperature=temperature,
+        thinking_enabled=thinking_enabled, preset=effort or preset,
+        tools=tools, stream=True,
+        thinking_format=slot.thinking_format or '',
+        provider_id=slot.provider_id or '',
+    )
+
+
 def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     on_tool_call_ready=None,
                     abort_check=None, max_tokens=4096, temperature=0,
@@ -599,9 +712,9 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
         PermissionError_,
         PromptTooLongError,
         RateLimitError,
-        build_body,
         stream_chat,
     )
+    from lib.llm_errors import EndpointUnreachableError
 
     dispatcher = get_dispatcher()
     exclude = set(exclude_models) if exclude_models else set()
@@ -705,18 +818,30 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     log_prefix, _initial_avoid)
                 _initial_avoid = set()  # only relax once
                 continue
-            # All slots in cooldown / excluded — wait briefly and retry
-            if _429_count > 0:
+            # All slots in cooldown / excluded — wait briefly and retry.
+            # ★ Two cases produce slot=None and need OPPOSITE handling:
+            #   (a) capable slots EXIST but are all in transient 0.5s
+            #       rate-limit cooldown — this is a 429-equivalent; keep
+            #       fast-polling regardless of whether THIS call has yet
+            #       caught a raw 429. Under high concurrency a fresh
+            #       request routinely arrives while every slot is cooling
+            #       (from OTHER requests' 429s); bailing here on attempt 1
+            #       was the cause of spurious "All N attempts failed".
+            #   (b) no capable slot exists at all → genuinely unservable.
+            _slots_exist = dispatcher.has_capable_slots(
+                capability, exclude_models=exclude,
+                exclude_keys=exclude_keys, exclude_pairs=exclude_pairs)
+            if _429_count > 0 or _slots_exist:
                 time.sleep(0.3)
                 _429_count += 1
                 if _429_count % 20 == 0:
                     logger.info(
-                        '%s dispatch_stream: still cycling 429 (%d times, strict=%s), '
-                        'waiting for cooldown to expire…',
+                        '%s dispatch_stream: still cycling (slots cooling, %d times, '
+                        'strict=%s), waiting for cooldown to expire…',
                         log_prefix, _429_count, strict_model)
                 continue
             logger.warning(
-                '%s dispatch_stream: NO SLOT available on attempt %d/%d. '
+                '%s dispatch_stream: NO CAPABLE SLOT on attempt %d/%d. '
                 'exclude_models=%s exclude_keys=%s exclude_pairs=%s strict_model=%s. '
                 'Available slots: %s',
                 log_prefix, hard_attempts + 1, max_retries,
@@ -728,53 +853,12 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
         ttft_recorded = False
         tag = f'{log_prefix}[D:{slot.key_name}:{slot.model}]'
 
-        # Build body for this slot's model
-        if is_body:
-            body = dict(body_or_messages)
-            body['model'] = slot.model
-            # Allow callers to inject tools even on the pre-built path
-            # (uncommon, but keeps the API symmetric).
-            if tools is not None:
-                body['tools'] = tools
-            # ★ Re-clamp max_tokens for the new model — the pre-built body
-            #   may have been constructed for a model with a higher limit
-            #   (e.g. Claude 128000) but dispatch swapped to a lower-limit
-            #   model (e.g. gpt-4.1-mini 32768).
-            if 'max_tokens' in body:
-                from lib.llm import _clamp_max_tokens
-                body['max_tokens'] = _clamp_max_tokens(
-                    slot.model, body['max_tokens'])
-            # ★ Re-adjust thinking parameters when model family changes.
-            #   Pre-built body may carry thinking.type='adaptive' (Claude)
-            #   but dispatch swapped to Doubao/GLM which expects 'enabled'.
-            _readjust_thinking_params(body, slot.model,
-                                      slot.thinking_format or '')
-            # ★ Claude 4.6 prefill guard: if dispatch swapped the model
-            #   to Claude on a pre-built body from a non-Claude model,
-            #   ensure messages don't end with an assistant message.
-            from lib.llm import _downscale_oversized_images, _strip_trailing_assistant_for_claude, is_claude
-            if is_claude(slot.model) and body.get('messages'):
-                _strip_trailing_assistant_for_claude(body['messages'], slot.model)
-                # ★ Downscale oversized images for Claude (pre-built body path)
-                _downscale_oversized_images(body['messages'], slot.model)
-            # ★ Gemini cross-model fallback: inject dummy thought_signature
-            #   on tool_calls produced by non-Gemini models (pre-built body path)
-            from lib.llm.body import _inject_gemini_thought_signatures
-            from lib.model_info import is_gemini as _is_gemini
-            if _is_gemini(slot.model) and body.get('messages'):
-                _inject_gemini_thought_signatures(body['messages'], slot.model)
-        else:
-            body = build_body(
-                slot.model, body_or_messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                thinking_enabled=thinking_enabled,
-                preset=effort or preset,
-                tools=tools,
-                stream=True,
-                thinking_format=slot.thinking_format or '',
-                provider_id=slot.provider_id or '',
-            )
+        # Build body for this slot's model (shared helper — see
+        # _adapt_stream_body_for_slot for the provider-specific quirks).
+        body = _adapt_stream_body_for_slot(
+            slot, body_or_messages, is_body,
+            tools=tools, max_tokens=max_tokens, temperature=temperature,
+            thinking_enabled=thinking_enabled, preset=preset, effort=effort)
 
         # Wrap on_content to capture TTFT
         ttft_value = [None]  # mutable cell so closure can write
@@ -928,20 +1012,47 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     log_prefix, slot.key_name, slot.model,
                     dispatcher.summarize_slots(capability))
 
+        except EndpointUnreachableError as e:
+            # ★ The endpoint host is down (connect-phase failure). The
+            #   transport already escaped its same-key retry loop, so here
+            #   we cool the slot down and exclude this (key, model) pair,
+            #   then immediately pick another slot — this is the failover.
+            #   A whole-endpoint cooldown (not just 0.5s) keeps the picker
+            #   off the dead host while we route around it; the local
+            #   health checker clears the cooldown when the box recovers.
+            slot.record_error(is_rate_limit=False, error=str(e)[:200])
+            slot.cooldown_until = time.time() + _UNREACHABLE_COOLDOWN
+            last_err = e
+            exclude_pairs.add((slot.key_name, slot.model))
+            hard_attempts += 1
+            logger.warning(
+                '%s Endpoint unreachable on %s:%s (%s) — cooled %ds + '
+                'excluded pair, failing over: %s',
+                log_prefix, slot.key_name, slot.model,
+                getattr(e, 'base_url', '') or '?', _UNREACHABLE_COOLDOWN,
+                str(e)[:160])
+            if on_retry:
+                on_retry(attempt=hard_attempts,
+                         reason='Endpoint unreachable', status_code=0)
+
         except AbortedError:
+            slot.release()  # user abort — not a slot-health signal
             logger.debug('%s User aborted — stopping dispatch immediately', tag)
             raise   # ★ Don't retry on other slots, user wants to stop
 
         except ContentFilterError:
+            slot.release()  # payload-level reject — not a slot-health signal
             logger.warning('%s Content filter (HTTP 450) — not retrying', tag, exc_info=True)
             raise   # ★ Same content = same filter, no point retrying
 
         except PromptTooLongError:
+            slot.release()  # payload-level reject — not a slot-health signal
             logger.warning('%s Prompt/request too large — not retrying on other slots '
                            '(same payload = same rejection)', tag)
             raise   # ★ Escape to orchestrator for reactive compaction
 
         except InvalidImageError:
+            slot.release()  # payload-level reject — not a slot-health signal
             logger.warning('%s Image content error — not retrying on other slots '
                            '(same image = same rejection)', tag)
             raise   # ★ Same payload = same rejection on all keys
@@ -980,26 +1091,243 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             hard_attempts += 1
 
     # All retries exhausted or no slot available — raise the last error
-    raise last_err or RuntimeError(
-        'All %d dispatch_stream attempts failed for capability=%s' % (max_retries, capability))
+    _raise_dispatch_exhausted(last_err, max_retries=max_retries,
+                              capability=capability, prefer_model=prefer_model,
+                              what='dispatch_stream')
 
 
 # ═══════════════════════════════════════════════════════════
 #  Public API — async_dispatch_stream (async wrapper)
 # ═══════════════════════════════════════════════════════════
 
-async def async_dispatch_stream(body_or_messages, **kwargs):
-    """Async version of dispatch_stream.
+async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
+                                on_content=None, on_tool_call_ready=None,
+                                abort_check=None, max_tokens=4096, temperature=0,
+                                thinking_enabled=False, preset='low', effort=None,
+                                capability='text', prefer_model=None, tools=None,
+                                max_retries=3, log_prefix='', strict_model=False,
+                                on_retry=None, avoid_pairs=None,
+                                exclude_models=None):
+    """Native-async streaming dispatch — non-blocking on the event loop.
 
-    Runs the dispatch loop in a thread pool so the event loop isn't blocked
-    during the streaming HTTP call. Same signature and semantics as
-    dispatch_stream — all kwargs are forwarded directly.
+    Unlike the previous ``to_thread(dispatch_stream)`` stopgap, this drives the
+    genuinely-async ``async_stream_chat`` (httpx) transport, so the streaming
+    HTTP call runs ON the event loop without occupying a thread-pool worker.
+    Slot selection, retry/429 cycling, and exclusion logic mirror the sync
+    ``dispatch_stream`` loop; body adaptation is shared via
+    ``_adapt_stream_body_for_slot``.
 
-    This is the preferred entry point for async callers (orchestrator when
-    converted to native async, or any route handler that is async def).
+    Same signature and return shape as ``dispatch_stream``:
+        (msg: str, finish_reason: str, usage: dict)
+
+    This is the preferred entry point for async callers (the orchestrator once
+    converted to native async, or any ``async def`` route handler).
     """
-    import asyncio
-    return await asyncio.to_thread(dispatch_stream, body_or_messages, **kwargs)
+    from lib.llm import (
+        AbortedError,
+        ContentFilterError,
+        InvalidImageError,
+        PermissionError_,
+        PromptTooLongError,
+        RateLimitError,
+    )
+    from lib.llm._transport import async_abortable_sleep
+    from lib.llm.astream import async_stream_chat
+    from lib.llm_errors import EndpointUnreachableError
+
+    dispatcher = get_dispatcher()
+    exclude = set(exclude_models) if exclude_models else set()
+    _initial_exclude_models = set(exclude)
+    exclude_keys = set()
+    exclude_pairs = set()
+    _initial_avoid = set(avoid_pairs) if avoid_pairs else set()
+    if _initial_avoid:
+        exclude_pairs |= _initial_avoid
+    last_err = None
+    is_body = isinstance(body_or_messages, dict) and 'messages' in body_or_messages
+
+    hard_attempts = 0
+    _429_count = 0
+    _last_exclusion_reset = time.monotonic()
+    _EXCLUSION_RESET_INTERVAL = 60
+
+    while hard_attempts < max_retries:
+        if abort_check and abort_check():
+            raise AbortedError('Aborted during dispatch retry')
+
+        total_attempts = hard_attempts + _429_count
+
+        if _429_count > 0 and (time.monotonic() - _last_exclusion_reset) >= _EXCLUSION_RESET_INTERVAL:
+            if exclude or exclude_keys or exclude_pairs:
+                logger.info('%s async_dispatch_stream: resetting hard-error '
+                            'exclusions after %ds of 429 cycling (cycle #%d)',
+                            log_prefix, _EXCLUSION_RESET_INTERVAL, _429_count)
+                exclude.clear()
+                exclude |= _initial_exclude_models
+                exclude_keys.clear()
+                exclude_pairs.clear()
+            _last_exclusion_reset = time.monotonic()
+
+        _eff_exclude = exclude if (total_attempts > 0 or _initial_exclude_models) else None
+        slot = dispatcher.pick_and_reserve(
+            capability=capability, prefer_model=prefer_model,
+            exclude_models=_eff_exclude,
+            exclude_keys=exclude_keys if total_attempts > 0 else None,
+            exclude_pairs=exclude_pairs if total_attempts > 0 else None,
+            strict_model=strict_model)
+        if slot is None:
+            if _initial_avoid and _initial_avoid <= exclude_pairs:
+                exclude_pairs -= _initial_avoid
+                _initial_avoid = set()
+                continue
+            _slots_exist = dispatcher.has_capable_slots(
+                capability, exclude_models=exclude,
+                exclude_keys=exclude_keys, exclude_pairs=exclude_pairs)
+            if _429_count > 0 or _slots_exist:
+                await async_abortable_sleep(0.3, abort_check)
+                _429_count += 1
+                continue
+            logger.warning('%s async_dispatch_stream: NO CAPABLE SLOT on '
+                           'attempt %d/%d', log_prefix, hard_attempts + 1, max_retries)
+            break
+
+        t0 = time.time()
+        ttft_recorded = False
+        ttft_value = [None]
+        tag = f'{log_prefix}[aD:{slot.key_name}:{slot.model}]'
+
+        body = _adapt_stream_body_for_slot(
+            slot, body_or_messages, is_body,
+            tools=tools, max_tokens=max_tokens, temperature=temperature,
+            thinking_enabled=thinking_enabled, preset=preset, effort=effort)
+
+        def _on_content_wrapper(text):
+            nonlocal ttft_recorded
+            if not ttft_recorded:
+                ttft_value[0] = (time.time() - t0) * 1000
+                ttft_recorded = True
+            if on_content:
+                on_content(text)
+
+        try:
+            msg, finish, usage = await async_stream_chat(
+                body, api_key=slot.api_key,
+                base_url=slot.base_url or None,
+                extra_headers=slot.extra_headers or None,
+                on_thinking=on_thinking,
+                on_content=_on_content_wrapper,
+                on_tool_call_ready=on_tool_call_ready,
+                abort_check=abort_check, log_prefix=tag,
+                api_protocol=slot.protocol or 'openai')
+            latency = (time.time() - t0) * 1000
+            _out_tokens = 0
+            if isinstance(usage, dict):
+                _out_tokens = (usage.get('completion_tokens')
+                               or usage.get('output_tokens') or 0)
+                try:
+                    _out_tokens = int(_out_tokens)
+                except (ValueError, TypeError) as _e_audit:
+                    logger.debug('[api] async_dispatch_stream caught %s: %s',
+                                 type(_e_audit).__name__, _e_audit)
+                    _out_tokens = 0
+            slot.record_success(latency, ttft_ms=ttft_value[0],
+                                output_tokens=_out_tokens)
+            if isinstance(usage, dict):
+                usage['_dispatch'] = {
+                    'key': slot.key_name, 'model': slot.model,
+                    'key_tail': (slot.api_key or '')[-4:],
+                    'provider_id': slot.provider_id,
+                    'latency_ms': round(latency),
+                    'attempt': hard_attempts + 1,
+                    '429_retries': _429_count,
+                }
+            logger.debug('%s async_dispatch_stream OK: finish=%s model=%s '
+                         'latency=%.0fms', log_prefix, finish, slot.model, latency)
+            return msg, finish, usage
+
+        except RateLimitError as e:
+            _is_quota = bool(getattr(e, 'is_quota', False))
+            slot.record_error(is_rate_limit=True, is_quota_exhausted=_is_quota,
+                              error=str(e)[:200] if _is_quota else '')
+            last_err = e
+            if _is_quota:
+                exclude_keys.add(slot.key_name)
+                hard_attempts += 1
+                if on_retry:
+                    on_retry(attempt=hard_attempts, reason='Key balance exhausted',
+                             status_code=429)
+                continue
+            _429_count += 1
+            if on_retry:
+                on_retry(attempt=_429_count, reason='Rate limited (429)', status_code=429)
+            await async_abortable_sleep(0.3, abort_check)
+            continue
+
+        except PermissionError_ as e:
+            slot.record_error(is_rate_limit=False)
+            last_err = e
+            exclude_pairs.add((slot.key_name, slot.model))
+            hard_attempts += 1
+            logger.warning('%s Permission denied on %s:%s — excluding pair',
+                           log_prefix, slot.key_name, slot.model)
+
+        except EndpointUnreachableError as e:
+            # ★ Endpoint host down — cool the slot, exclude the pair, fail
+            #   over. Mirrors the sync dispatch_stream handler.
+            slot.record_error(is_rate_limit=False, error=str(e)[:200])
+            slot.cooldown_until = time.time() + _UNREACHABLE_COOLDOWN
+            last_err = e
+            exclude_pairs.add((slot.key_name, slot.model))
+            hard_attempts += 1
+            logger.warning(
+                '%s Endpoint unreachable on %s:%s (%s) — cooled %ds + '
+                'excluded pair, failing over',
+                log_prefix, slot.key_name, slot.model,
+                getattr(e, 'base_url', '') or '?', _UNREACHABLE_COOLDOWN)
+            if on_retry:
+                on_retry(attempt=hard_attempts,
+                         reason='Endpoint unreachable', status_code=0)
+
+        except AbortedError:
+            slot.release()
+            logger.debug('%s User aborted — stopping dispatch immediately', tag)
+            raise
+
+        except ContentFilterError:
+            slot.release()
+            logger.warning('%s Content filter (HTTP 450) — not retrying', tag, exc_info=True)
+            raise
+
+        except PromptTooLongError:
+            slot.release()
+            logger.warning('%s Prompt/request too large — not retrying', tag)
+            raise
+
+        except InvalidImageError:
+            slot.release()
+            logger.warning('%s Image content error — not retrying', tag)
+            raise
+
+        except Exception as e:
+            slot.record_error(is_rate_limit=False)
+            last_err = e
+            _is_timeout = 'timed out' in str(e).lower() or 'timeout' in type(e).__name__.lower()
+            if on_retry:
+                _status = getattr(e, 'status_code', 0) or 0
+                on_retry(attempt=hard_attempts + 1,
+                         reason='Request timed out' if _is_timeout else (f'HTTP {_status}' if _status else str(e)[:120]),
+                         status_code=_status)
+            if _is_timeout or strict_model:
+                exclude_pairs.add((slot.key_name, slot.model))
+            else:
+                exclude.add(slot.model)
+            logger.debug('%s async_dispatch_stream error: %s — next slot',
+                         tag, str(e)[:200], exc_info=True)
+            hard_attempts += 1
+
+    _raise_dispatch_exhausted(last_err, max_retries=max_retries,
+                              capability=capability, prefer_model=prefer_model,
+                              what='async_dispatch_stream')
 
 
 # ═══════════════════════════════════════════════════════════

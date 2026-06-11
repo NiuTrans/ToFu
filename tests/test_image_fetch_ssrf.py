@@ -110,9 +110,11 @@ class TestSchemeAndHostGuards:
         Err, _is_blocked, fetch = _import_helpers()
         monkeypatch.setenv('TOFU_IMAGE_FETCH_ALLOW_HOSTS', 'internal.example.com')
 
-        # The fetch should reach requests.get without an SSRF rejection.
-        # We mock the network call to confirm that's where it lands.
-        with patch('requests.get') as mock_get:
+        # _safe_image_fetch does a function-local `from lib.http_client
+        # import http_get` (which calls requests.request, NOT requests.get),
+        # so patch it at its source module — that's the binding the local
+        # import resolves at call time.
+        with patch('lib.http_client.http_get') as mock_get:
             mock_resp = mock_get.return_value
             mock_resp.raise_for_status.return_value = None
             mock_resp.headers = {'Content-Type': 'image/png', 'Content-Length': '10'}
@@ -135,7 +137,7 @@ class TestSizeCap:
         monkeypatch.setenv('TOFU_IMAGE_FETCH_ALLOW_HOSTS', 'cdn.example.com')
         monkeypatch.setenv('TOFU_IMAGE_FETCH_MAX_BYTES', '1024')
 
-        with patch('requests.get') as mock_get:
+        with patch('lib.http_client.http_get') as mock_get:
             mock_resp = mock_get.return_value
             mock_resp.raise_for_status.return_value = None
             mock_resp.headers = {'Content-Length': '999999999', 'Content-Type': 'image/png'}
@@ -148,7 +150,7 @@ class TestSizeCap:
         monkeypatch.setenv('TOFU_IMAGE_FETCH_ALLOW_HOSTS', 'cdn.example.com')
         monkeypatch.setenv('TOFU_IMAGE_FETCH_MAX_BYTES', '100')
 
-        with patch('requests.get') as mock_get:
+        with patch('lib.http_client.http_get') as mock_get:
             mock_resp = mock_get.return_value
             mock_resp.raise_for_status.return_value = None
             # No Content-Length header → forces the streaming path.
@@ -162,7 +164,7 @@ class TestSizeCap:
         monkeypatch.setenv('TOFU_IMAGE_FETCH_ALLOW_HOSTS', 'cdn.example.com')
         monkeypatch.setenv('TOFU_IMAGE_FETCH_MAX_BYTES', '1024')
 
-        with patch('requests.get') as mock_get:
+        with patch('lib.http_client.http_get') as mock_get:
             mock_resp = mock_get.return_value
             mock_resp.raise_for_status.return_value = None
             mock_resp.headers = {'Content-Length': '15', 'Content-Type': 'image/jpeg'}

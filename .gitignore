@@ -84,6 +84,11 @@ Thumbs.db
 **/.project_indexes/
 .chatui/
 
+# ── File-history store (per-project copy-backup undo data, auto-created
+#    by lib/file_history; round-by-round GC churns it, so it must never be
+#    version-tracked — see the 2026-06 "satus full of D" incident). ──
+.tofu/
+
 # ── Sensitive reports (moved to docs/ but should not be published) ──
 docs/SECURITY_AUDIT_REPORT.md
 docs/RATE_LIMITING_DOS_AUDIT_REPORT.md
@@ -103,3 +108,4 @@ dist/
 installer_output/
 static/icons/tofu.ico
 static/icons/tofu.icns
+.icon-backups/

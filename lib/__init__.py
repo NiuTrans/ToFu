@@ -11,7 +11,6 @@ __all__ = [
     'MINIMAX_MODEL',
     'DOUBAO_MODEL', 'CLAUDE_SONNET_MODEL',
     'IMAGE_GEN_MODEL', 'EMBEDDING_MODELS',
-    'TRADING_ENABLED',
     'PPTX_TRANSLATE_ENABLED',
     'DEBUG_MODE',
     'OPTIMIZER_ENABLED',
@@ -189,7 +188,6 @@ def _resolve_feature_flag(env_key, json_key, default):
         _logging.getLogger(__name__).debug('Could not read features.json for %s: %s', json_key, _e)
     return default
 
-TRADING_ENABLED = _resolve_feature_flag('TRADING_ENABLED', 'trading_enabled', False)
 PPTX_TRANSLATE_ENABLED = _resolve_feature_flag('PPTX_TRANSLATE_ENABLED', 'pptx_translate_enabled', False)
 DEBUG_MODE = _resolve_feature_flag('DEBUG_MODE', 'debug_mode', False)
 # Cache Extended TTL: 1h TTL for stable prefix (system+tools), 5m for tail
@@ -203,6 +201,28 @@ OPTIMIZER_ENABLED = _resolve_feature_flag('OPTIMIZER_ENABLED', 'optimizer_enable
 # in features.json to disable producers + chip rendering.  Routes stay
 # registered for read-only access to existing rows.
 ARTIFACTS_ENABLED = _resolve_feature_flag('ARTIFACTS_ENABLED', 'artifacts_enabled', True)
+
+# ── Plugin feature flags (tofu.flags entry-point group) ──
+# Optional features (e.g. the extracted trading subsystem) declare their own
+# boolean flag via the tofu.flags entry point. We resolve each here and expose
+# it as a module attribute under its env_key (e.g. TRADING_ENABLED) so existing
+# `getattr(lib, 'TRADING_ENABLED', False)` consumers keep working when the
+# plugin is installed, and harmlessly read False when it is not. Cheap: loading
+# a flag entry point only imports the plugin's tiny flags module, not its code.
+def _load_plugin_flags():
+    try:
+        from lib.feature_registry import discover_flag_plugins, registered_flags, mark_boot_enabled
+        discover_flag_plugins()
+        _mod = __import__('sys').modules[__name__]
+        for _flag in registered_flags():
+            _val = _resolve_feature_flag(_flag.env_key, _flag.json_key, _flag.default)
+            setattr(_mod, _flag.env_key, _val)
+            mark_boot_enabled(_flag.json_key, bool(_val))
+    except Exception as _e:
+        import logging as _logging
+        _logging.getLogger(__name__).debug('Plugin feature-flag discovery skipped: %s', _e)
+
+_load_plugin_flags()
 
 # ── Fetch / search settings ──
 # Priority: ENV VAR > server_config.json search section > hardcoded default
@@ -234,14 +254,14 @@ SKIP_DOMAINS = {
 if isinstance(_search_cfg.get('skip_domains'), list):
     SKIP_DOMAINS = set(_search_cfg['skip_domains'])
 
-# Apply saved llm_content_filter setting at startup (not just on hot-reload)
-if 'llm_content_filter' in _search_cfg:
-    try:
-        import lib.fetch.content_filter as _cf_mod
-        _cf_mod.FILTER_ENABLED = bool(_search_cfg['llm_content_filter'])
-    except Exception as _e:
-        import logging as _logging
-        _logging.getLogger(__name__).debug('Could not apply saved llm_content_filter: %s', _e)
+# Resolved LLM-content-filter toggle (env > saved config > default ON).
+# tofu-search's pipeline reads this via lib/search_bridge.sync_search_config();
+# the bridge is installed at server startup, after this module is imported.
+LLM_CONTENT_FILTER_ENABLED = (
+    os.environ.get('FETCH_LLM_FILTER', '1') == '1'
+    if os.environ.get('FETCH_LLM_FILTER') is not None
+    else bool(_search_cfg.get('llm_content_filter', True))
+)
 
 # ── Model pricing tables — now live in lib/pricing.py ──
 # Imported here for backward compatibility (all consumers use `from lib import MODEL_PRICING`)
@@ -324,14 +344,35 @@ def reload_config():
     _mod.FETCH_MAX_BYTES = _rcfg('FETCH_MAX_BYTES', 'max_bytes', 20*1024*1024)
     if 'skip_domains' in _search and isinstance(_search['skip_domains'], list):
         _mod.SKIP_DOMAINS = set(_search['skip_domains'])
+    # Re-resolve the content-filter toggle (env > saved > default ON).
+    _mod.LLM_CONTENT_FILTER_ENABLED = (
+        os.environ.get('FETCH_LLM_FILTER', '1') == '1'
+        if os.environ.get('FETCH_LLM_FILTER') is not None
+        else bool(_search.get('llm_content_filter', True))
+    )
+    # Push the refreshed fetch/search settings into tofu-search's global config.
+    try:
+        from lib.search_bridge import sync_search_config
+        sync_search_config()
+    except Exception as _be:
+        import logging as _logging
+        _logging.getLogger(__name__).debug('tofu-search config re-sync skipped: %s', _be)
 
     # Feature flags
-    _mod.TRADING_ENABLED = _resolve_feature_flag('TRADING_ENABLED', 'trading_enabled', False)
     _mod.PPTX_TRANSLATE_ENABLED = _resolve_feature_flag('PPTX_TRANSLATE_ENABLED', 'pptx_translate_enabled', False)
     _mod.DEBUG_MODE = _resolve_feature_flag('DEBUG_MODE', 'debug_mode', False)
     _mod.CACHE_EXTENDED_TTL = _resolve_feature_flag('CACHE_EXTENDED_TTL', 'cache_extended_ttl', True)
     _mod.OPTIMIZER_ENABLED = _resolve_feature_flag('OPTIMIZER_ENABLED', 'optimizer_enabled', True)
     _mod.ARTIFACTS_ENABLED = _resolve_feature_flag('ARTIFACTS_ENABLED', 'artifacts_enabled', True)
+    # Plugin flags (tofu.flags): re-resolve each registered flag in place.
+    try:
+        from lib.feature_registry import registered_flags as _rf
+        for _flag in _rf():
+            setattr(_mod, _flag.env_key,
+                    _resolve_feature_flag(_flag.env_key, _flag.json_key, _flag.default))
+    except Exception as _fe:
+        import logging as _logging
+        _logging.getLogger(__name__).debug('Plugin flag reload skipped: %s', _fe)
 
     # Machine translation provider
     _mod.MT_PROVIDER_CONFIG = _resolve_mt_provider_config()

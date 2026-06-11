@@ -24,7 +24,7 @@ from lib.branch_meta import classify_branch_title
 from lib.conv_config import resolve_conv_config, resolve_conv_settings
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
-from lib.request_parser import BadRequest, optional_dict, optional_str, parse_body, require_str
+from lib.request_parser import BadRequest, async_parse_body, optional_dict, optional_str, require_str
 
 from .auth import current_auth, require_scope
 
@@ -79,8 +79,8 @@ def _load_legacy_module():
         },
     }}},
 )
-def resolve_config_route():
-    body = parse_body()
+async def resolve_config_route():
+    body = await async_parse_body()
     conv_settings = optional_dict(body, 'conv_settings', default={}) or {}
     overrides = optional_dict(body, 'overrides', default={}) or {}
     server_defaults = optional_dict(body, 'server_defaults', default={}) or {}
@@ -115,8 +115,8 @@ def resolve_config_route():
         },
     }}},
 )
-def resolve_settings_route():
-    body = parse_body()
+async def resolve_settings_route():
+    body = await async_parse_body()
     conv_settings = optional_dict(body, 'conv_settings', default={}) or {}
     overrides = optional_dict(body, 'overrides', default={}) or {}
     return api_ok(resolve_conv_settings(
@@ -148,8 +148,8 @@ def resolve_settings_route():
         },
     }}},
 )
-def classify_branch():
-    body = parse_body()
+async def classify_branch():
+    body = await async_parse_body()
     try:
         title = require_str(body, 'title', max_len=200, allow_empty=True)
     except BadRequest as e:
@@ -193,17 +193,15 @@ def _generate_branch_id() -> str:
     summary='List branches under a message',
     tags=['conversations'], scope=_BRANCH_SCOPE,
 )
-def list_branches(conv_id, msg_idx):
+async def list_branches(conv_id, msg_idx):
     legacy = _load_branches_module()
     if legacy is None:
         return api_internal_error('Branches module unavailable')
-    from lib.database import DOMAIN_CHAT, get_db
+    from lib.database import DOMAIN_CHAT, async_fetchone
     from routes.common import DEFAULT_USER_ID, _db_safe  # noqa: F401
-    db = get_db(DOMAIN_CHAT)
-    row = db.execute(
+    row = await async_fetchone(
         'SELECT messages FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID),
-    ).fetchone()
+        (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
     if not row:
         return api_not_found('Conversation not found')
     try:
@@ -247,8 +245,8 @@ def list_branches(conv_id, msg_idx):
         },
     }}},
 )
-def create_branch(conv_id, msg_idx):
-    body = parse_body()
+async def create_branch(conv_id, msg_idx):
+    body = await async_parse_body()
     try:
         title = require_str(body, 'title', max_len=200).strip()
     except BadRequest as e:
@@ -260,15 +258,13 @@ def create_branch(conv_id, msg_idx):
     parent_selection = optional_str(body, 'parent_selection',
                                       default='', max_len=4000) or ''
 
-    from lib.database import DOMAIN_CHAT, get_db, json_dumps_pg
+    from lib.database import DOMAIN_CHAT, async_execute, async_fetchone, json_dumps_pg
     from routes.common import DEFAULT_USER_ID
 
-    db = get_db(DOMAIN_CHAT)
-    row = db.execute(
+    row = await async_fetchone(
         'SELECT messages, title, settings, created_at '
         'FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID),
-    ).fetchone()
+        (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
     if not row:
         return api_not_found('Conversation not found')
     try:
@@ -318,20 +314,25 @@ def create_branch(conv_id, msg_idx):
     created_at = row['created_at'] if 'created_at' in row.keys() else now_ms
 
     try:
-        db.execute(
-            'INSERT INTO conversations '
-            '(id, user_id, title, messages, settings, created_at, '
-            ' updated_at, search_text) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?, ?) '
-            'ON CONFLICT(id, user_id) DO UPDATE SET '
-            '  messages=excluded.messages, '
-            '  settings=excluded.settings, '
-            '  updated_at=excluded.updated_at, '
-            '  search_text=excluded.search_text',
-            (conv_id, DEFAULT_USER_ID, title_db, messages_json,
-             settings_json, created_at, now_ms, search_text),
-        )
-        db.commit()
+        # Build the dialect-correct upsert via Core (same backend-agnostic
+        # path as the sync upsert() helper) and run it on the async executor.
+        # 8-col insert (search_tsv omitted → PG trigger fills it); on conflict
+        # update only messages/settings/updated_at/search_text (NOT title /
+        # created_at — a branch must not rewrite those), matching the prior
+        # hand-rolled ON CONFLICT clause.
+        from lib.database._core_schema import CONVERSATIONS, upsert_sql
+        _branch_sql = upsert_sql(
+            CONVERSATIONS, conflict_cols=['id', 'user_id'],
+            insert_cols=['id', 'user_id', 'title', 'messages', 'settings',
+                         'created_at', 'updated_at', 'search_text'],
+            update_cols=['messages', 'settings', 'updated_at', 'search_text'])
+        await async_execute(
+            _branch_sql,
+            {'id': conv_id, 'user_id': DEFAULT_USER_ID, 'title': title_db,
+             'messages': messages_json, 'settings': settings_json,
+             'created_at': created_at, 'updated_at': now_ms,
+             'search_text': search_text},
+            domain=DOMAIN_CHAT)
     except Exception as e:
         logger.error('[api_v1.branches] persist failed conv=%s: %s',
                      conv_id[:8], e, exc_info=True)

@@ -201,7 +201,7 @@ def vlm_parse_pdf(pdf_bytes: bytes, *,
     done_pages = 0
     _done_lock = threading.Lock()
 
-    def _process_batch(idx, page_start, page_end, imgs, label, use_model):
+    def _process_batch(idx, imgs, label, use_model):
         md = _vlm_call_pages(imgs, label, use_model, max_tokens=max_tokens)
         md = re.sub(r'^```(?:markdown)?\s*\n', '', md)
         md = re.sub(r'\n```\s*$', '', md)
@@ -210,8 +210,7 @@ def vlm_parse_pdf(pdf_bytes: bytes, *,
     with ThreadPoolExecutor(max_workers=max_workers,
                             thread_name_prefix='vlm') as pool:
         future_map = {
-            pool.submit(_process_batch, idx, p_start, p_end, imgs,
-                        label, batch_model):
+            pool.submit(_process_batch, idx, imgs, label, batch_model):
                 (idx, p_start, p_end, label)
             for idx, p_start, p_end, imgs, label, batch_model in batches
         }

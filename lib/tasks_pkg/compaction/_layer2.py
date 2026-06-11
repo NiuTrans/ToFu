@@ -302,6 +302,15 @@ def _generate_query_aware_summary(messages: list, current_query: str,
         if content:
             in_tok = usage.get('prompt_tokens', 0)
             out_tok = usage.get('completion_tokens', 0)
+            # Count this summary call's tokens toward the conversation's
+            # compaction cost — otherwise the L2 (chatui 'tofu') summary is
+            # invisible in task['usage'] and the arm looks cheaper than it is.
+            try:
+                from lib.tasks_pkg.compaction._compaction_usage import (
+                    record_compaction_usage)
+                record_compaction_usage(conv_id, usage, kind='L2')
+            except Exception as _ru_e:
+                logger.debug('%s record_compaction_usage failed: %s', tag, _ru_e)
             content = re.sub(
                 r'<analysis>.*?</analysis>\s*',
                 '', content, flags=re.DOTALL,

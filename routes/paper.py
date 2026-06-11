@@ -37,6 +37,7 @@ runtime symbols (``_report_runtime``, ``_translate_runtime``, ``_new_*_task``,
 All those names are re-exported here.
 """
 
+import asyncio
 import base64
 import json
 import os
@@ -53,7 +54,13 @@ from lib.api_response import (
     api_not_found,
     api_ok,
 )
-from lib.database import db_execute_with_retry, get_db, get_thread_db
+from lib.database import (
+    DOMAIN_CHAT,
+    async_fetchall,
+    async_fetchone,
+    db_execute_with_retry,
+)
+from lib.http_client import http_get
 from lib.log import get_logger
 from lib.paper import (  # noqa: F401  — back-compat re-exports
     BASE_DIR,
@@ -109,7 +116,7 @@ from lib.paper import (  # noqa: F401  — back-compat re-exports
     _translate_tasks,
     _translate_tasks_lock,
 )
-from lib.request_parser import parse_body
+from lib.request_parser import async_parse_body
 from routes.common import DEFAULT_USER_ID
 
 logger = get_logger(__name__)
@@ -124,7 +131,7 @@ from routes.api_v1.paper import api_v1_paper_bp  # noqa: E402
 # ══════════════════════════════════════════════════════
 
 @paper_bp.route('/api/paper/chat', methods=['POST'])
-def paper_chat():
+async def paper_chat():
     """Streaming LLM chat for paper Q&A / translation.
 
     Body JSON:
@@ -133,7 +140,7 @@ def paper_chat():
     Returns:
         SSE stream of chat completion deltas.
     """
-    data = parse_body()
+    data = await async_parse_body()
     messages = data.get('messages', [])
     model = data.get('model') or None
 
@@ -155,7 +162,7 @@ def paper_chat():
 
 
 @api_v1_paper_bp.route('/api/v1/paper/extract-images', methods=['POST'])
-def extract_images():
+async def extract_images():
     """Extract figure/table images from a previously uploaded PDF.
 
     Body JSON:
@@ -167,7 +174,7 @@ def extract_images():
     Returns:
         { ok: true, paper_hash: str, images: [{url, caption, page, source, width, height}] }
     """
-    data = parse_body()
+    data = await async_parse_body()
     filename = os.path.basename((data.get('filename') or '').strip())
     if not filename:
         logger.warning('[Paper:Images] Request with no filename')
@@ -188,15 +195,25 @@ def extract_images():
     # Cache key — prefer client-provided hash (matches the report cache key),
     # fall back to filename-based hash.
     phash = _safe_hash_dir(data.get('paper_hash', '').strip()) or _paper_hash(filename)
-    images_out = _extract_paper_figures(
-        filepath, phash, max_images=max_images, max_image_width=max_image_width,
+    # Figure extraction is CPU/IO-heavy (pymupdf) — offload off the loop.
+    images_out = await asyncio.to_thread(
+        _extract_paper_figures, filepath, phash,
+        max_images=max_images, max_image_width=max_image_width,
     )
     return api_ok({'paper_hash': phash, 'images': images_out})
 
 
 @paper_bp.route('/api/paper/images/<phash>/<filename>')
 def serve_paper_image(phash, filename):
-    """Serve an extracted paper figure image."""
+    """Serve an extracted paper figure image.
+
+    SKIPPED from the native-async conversion: pure file-serving endpoint whose
+    only blocking call is ``send_file``, which the server.py Flask→Quart shim
+    replaces with a *sync-safe* wrapper. That wrapper, invoked from the event
+    loop, schedules the genuine coroutine via ``run_coroutine_threadsafe`` and
+    blocks on ``.result()`` — a deadlock inside an ``async def`` handler. Kept
+    sync (no DB / no body parse) so the shim runs it safely in an executor.
+    """
     phash_safe = _safe_hash_dir(phash)
     if not phash_safe:
         logger.debug('[Paper:Images] Invalid hash: %.40s', phash)
@@ -214,7 +231,7 @@ def serve_paper_image(phash, filename):
 
 
 @api_v1_paper_bp.route('/api/v1/paper/report/start', methods=['POST'])
-def start_report_task():
+async def start_report_task():
     """Start (or join) a background paper-report generation task.
 
     The task is keyed by (paper_hash, lang). If a task is already running,
@@ -232,7 +249,7 @@ def start_report_task():
         - Task started/joined: {ok: true, task_id: str, paper_hash: str,
                                 running: bool, existed: bool}
     """
-    data = parse_body()
+    data = await async_parse_body()
     paper_text = data.get('paper_text', '').strip()
     if not paper_text:
         logger.warning('[Paper:Report] Start request with no paper_text')
@@ -261,16 +278,15 @@ def start_report_task():
         # extract on-the-fly. Otherwise the report renders without figures.
         derived_fn = os.path.basename((data.get('filename') or '').strip())
         if derived_fn:
-            images = _ensure_paper_images(derived_fn, phash)
+            images = await asyncio.to_thread(_ensure_paper_images, derived_fn, phash)
 
     # DB cache check (unless force) — no task needed, report is already done
     if not force:
         try:
-            db = get_db()
-            row = db.execute(
+            row = await async_fetchone(
                 "SELECT report FROM paper_reports WHERE paper_hash = ? AND lang = ?",
-                (phash, lang),
-            ).fetchone()
+                (phash, lang), domain=DOMAIN_CHAT,
+            )
             if row and row['report']:
                 logger.info('[Paper:Report] DB cache hit — hash=%s lang=%s %d chars',
                             phash, lang, len(row['report']))
@@ -364,7 +380,7 @@ def start_report_task():
 
 
 @api_v1_paper_bp.route('/api/v1/paper/report/poll', methods=['GET'])
-def poll_report_task():
+async def poll_report_task():
     """Poll a report task for new events.
 
     Query params:
@@ -423,9 +439,9 @@ def poll_report_task():
 
 
 @api_v1_paper_bp.route('/api/v1/paper/report/abort', methods=['POST'])
-def abort_report_task():
+async def abort_report_task():
     """Abort a running report task (best-effort)."""
-    data = parse_body()
+    data = await async_parse_body()
     task_id = (data.get('task_id') or '').strip()
     if not task_id:
         return api_bad_request('task_id required')
@@ -438,7 +454,7 @@ def abort_report_task():
 
 
 @api_v1_paper_bp.route('/api/v1/paper/report/lookup', methods=['POST'])
-def lookup_report_task():
+async def lookup_report_task():
     """Find an existing running task by (paper_hash, lang).
 
     Used by the frontend on tab re-entry / mode re-enter to see whether a
@@ -448,7 +464,7 @@ def lookup_report_task():
     Body JSON: {paper_hash: str, lang: str}
     Returns: {ok: true, task_id: str, status: str} or {ok: false}
     """
-    data = parse_body()
+    data = await async_parse_body()
     phash = (data.get('paper_hash') or '').strip()
     lang = data.get('lang', 'en') or 'en'
     if not phash:
@@ -465,7 +481,7 @@ def lookup_report_task():
 
 
 @api_v1_paper_bp.route('/api/v1/paper/report/export', methods=['GET'])
-def export_report():
+async def export_report():
     """Download a stored report as Markdown or standalone HTML.
 
     Query string:
@@ -490,11 +506,10 @@ def export_report():
     inline_html = (fmt == 'pdf') or (request.args.get('inline') in ('1', 'true', 'yes'))
 
     try:
-        db = get_db()
-        row = db.execute(
+        row = await async_fetchone(
             'SELECT report FROM paper_reports WHERE paper_hash=? AND lang=?',
-            (phash, lang),
-        ).fetchone()
+            (phash, lang), domain=DOMAIN_CHAT,
+        )
     except Exception as e:
         logger.error('[Paper:Report:Export] Lookup failed: %s', e, exc_info=True)
         return api_internal_error('lookup failed')
@@ -508,11 +523,11 @@ def export_report():
     # Get the paper title for the export filename / page title
     title = 'Paper Report'
     try:
-        trow = db.execute(
+        trow = await async_fetchone(
             'SELECT title, arxiv_id FROM paper_library '
             'WHERE paper_hash=? AND user_id=? ORDER BY updated_at DESC LIMIT 1',
-            (phash, DEFAULT_USER_ID),
-        ).fetchone()
+            (phash, DEFAULT_USER_ID), domain=DOMAIN_CHAT,
+        )
         if trow:
             title = trow['title'] or (f'arXiv:{trow["arxiv_id"]}' if trow['arxiv_id'] else title)
     except Exception as e:
@@ -697,7 +712,7 @@ def export_report():
 
 
 @api_v1_paper_bp.route('/api/v1/paper/report/cache', methods=['POST'])
-def get_report_cache():
+async def get_report_cache():
     """Lookup cached report by paper hash.
 
     Body JSON:
@@ -707,7 +722,7 @@ def get_report_cache():
     Returns:
         { ok: true, report: str, paper_hash: str } or { ok: false }
     """
-    data = parse_body()
+    data = await async_parse_body()
     phash = data.get('paper_hash', '').strip()
     lang = data.get('lang', 'en') or 'en'
 
@@ -719,11 +734,10 @@ def get_report_cache():
         phash = _paper_hash(paper_text)
 
     try:
-        db = get_db()
-        row = db.execute(
+        row = await async_fetchone(
             "SELECT report FROM paper_reports WHERE paper_hash = ? AND lang = ?",
-            (phash, lang),
-        ).fetchone()
+            (phash, lang), domain=DOMAIN_CHAT,
+        )
         if row and row['report']:
             logger.debug('[Paper:Report:Cache] Hit — hash=%s lang=%s', phash, lang)
             # Server-side enrichment: load the manifest from disk (the client
@@ -739,7 +753,7 @@ def get_report_cache():
 
 
 @api_v1_paper_bp.route('/api/v1/paper/translate/start', methods=['POST'])
-def start_translate_task():
+async def start_translate_task():
     """Start (or join) a Babel-mode whole-paper translation task.
 
     Body JSON:
@@ -749,7 +763,7 @@ def start_translate_task():
         model: str (optional)
         force: bool (optional)
     """
-    data = parse_body()
+    data = await async_parse_body()
     paper_text = (data.get('paper_text') or '').strip()
     lang = (data.get('lang') or '').strip()
     if not paper_text:
@@ -763,11 +777,10 @@ def start_translate_task():
 
     if not force:
         try:
-            db = get_db()
-            row = db.execute(
+            row = await async_fetchone(
                 'SELECT text FROM paper_translations WHERE paper_hash=? AND lang=?',
-                (phash, lang),
-            ).fetchone()
+                (phash, lang), domain=DOMAIN_CHAT,
+            )
             if row and row['text']:
                 logger.info('[Paper:Translate] DB cache hit — hash=%s lang=%s %d chars',
                             phash, lang, len(row['text']))
@@ -796,7 +809,7 @@ def start_translate_task():
 
 
 @api_v1_paper_bp.route('/api/v1/paper/translate/poll', methods=['GET'])
-def poll_translate_task():
+async def poll_translate_task():
     """Poll a translation task for new events."""
     task_id = request.args.get('task_id', '').strip()
     try:
@@ -832,8 +845,8 @@ def poll_translate_task():
 
 
 @api_v1_paper_bp.route('/api/v1/paper/translate/abort', methods=['POST'])
-def abort_translate_task():
-    data = parse_body()
+async def abort_translate_task():
+    data = await async_parse_body()
     task_id = (data.get('task_id') or '').strip()
     if not task_id:
         return api_bad_request('task_id required')
@@ -846,8 +859,8 @@ def abort_translate_task():
 
 
 @api_v1_paper_bp.route('/api/v1/paper/translate/lookup', methods=['POST'])
-def lookup_translate_task():
-    data = parse_body()
+async def lookup_translate_task():
+    data = await async_parse_body()
     phash = (data.get('paper_hash') or '').strip()
     lang = (data.get('lang') or '').strip()
     if not phash or not lang:
@@ -860,8 +873,8 @@ def lookup_translate_task():
 
 
 @api_v1_paper_bp.route('/api/v1/paper/translate/cache', methods=['POST'])
-def get_translate_cache():
-    data = parse_body()
+async def get_translate_cache():
+    data = await async_parse_body()
     phash = (data.get('paper_hash') or '').strip()
     lang = (data.get('lang') or '').strip()
     if not phash:
@@ -872,11 +885,10 @@ def get_translate_cache():
     if not lang:
         return api_bad_request('lang required')
     try:
-        db = get_db()
-        row = db.execute(
+        row = await async_fetchone(
             'SELECT text FROM paper_translations WHERE paper_hash=? AND lang=?',
-            (phash, lang),
-        ).fetchone()
+            (phash, lang), domain=DOMAIN_CHAT,
+        )
         if row and row['text']:
             return api_ok({'text': row['text'], 'paper_hash': phash})
     except Exception as e:
@@ -885,7 +897,7 @@ def get_translate_cache():
 
 
 @api_v1_paper_bp.route('/api/v1/paper/fetch-arxiv', methods=['POST'])
-def fetch_arxiv():
+async def fetch_arxiv():
     """Download PDF from arXiv URL and serve it locally.
 
     Body JSON:
@@ -893,7 +905,7 @@ def fetch_arxiv():
     Returns:
         { ok: true, pdf_url: str, title: str, arxiv_id: str }
     """
-    data = parse_body()
+    data = await async_parse_body()
     url_input = data.get('url', '').strip()
     if not url_input:
         logger.warning('[Paper:arXiv] Fetch request with no URL')
@@ -918,11 +930,12 @@ def fetch_arxiv():
             'cached': True,
         })
 
-    try:
+    # Blocking network download + disk write — offload off the event loop.
+    def _download():
         logger.info('[Paper:arXiv] Downloading PDF: %s', pdf_url)
         t0 = time.time()
-        resp = _requests.get(pdf_url, timeout=60, stream=True,
-                             headers={'User-Agent': 'Mozilla/5.0 (compatible; TofuBot/1.0)'})
+        resp = http_get(pdf_url, timeout=60, stream=True,
+                        headers={'User-Agent': 'Mozilla/5.0 (compatible; TofuBot/1.0)'})
         resp.raise_for_status()
         content_type = resp.headers.get('Content-Type', '')
         if 'pdf' not in content_type and 'octet-stream' not in content_type:
@@ -932,10 +945,13 @@ def fetch_arxiv():
             for chunk in resp.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-        file_size = os.path.getsize(filepath)
+        size = os.path.getsize(filepath)
         elapsed = time.time() - t0
-        logger.info('[Paper:arXiv] Downloaded %s: %d bytes in %.1fs', arxiv_id, file_size, elapsed)
+        logger.info('[Paper:arXiv] Downloaded %s: %d bytes in %.1fs', arxiv_id, size, elapsed)
+        return size
 
+    try:
+        file_size = await asyncio.to_thread(_download)
         return jsonify({
             'ok': True,
             'pdf_url': f'/api/paper/pdf/{filename}',
@@ -952,7 +968,7 @@ def fetch_arxiv():
 
 
 @paper_bp.route('/api/paper/fetch-arxiv-stream', methods=['POST'])
-def fetch_arxiv_stream():
+async def fetch_arxiv_stream():
     """Download PDF from arXiv and parse it — SSE stream of progress events.
 
     Body JSON:
@@ -968,7 +984,7 @@ def fetch_arxiv_stream():
                parsed_text: str, total_pages: int, text_length: int, cached: bool}
         {stage: 'error', error: str}
     """
-    data = parse_body()
+    data = await async_parse_body()
     url_input = (data.get('url') or '').strip()
     if not url_input:
         logger.warning('[Paper:arXiv:Stream] Fetch request with no URL')
@@ -1011,8 +1027,8 @@ def fetch_arxiv_stream():
             else:
                 logger.info('[Paper:arXiv:Stream] Downloading PDF: %s', pdf_url)
                 t0 = time.time()
-                resp = _requests.get(pdf_url, timeout=60, stream=True,
-                                     headers={'User-Agent': 'Mozilla/5.0 (compatible; TofuBot/1.0)'})
+                resp = http_get(pdf_url, timeout=60, stream=True,
+                                headers={'User-Agent': 'Mozilla/5.0 (compatible; TofuBot/1.0)'})
                 resp.raise_for_status()
                 content_type = resp.headers.get('Content-Type', '')
                 if 'pdf' not in content_type and 'octet-stream' not in content_type:
@@ -1197,7 +1213,13 @@ def fetch_arxiv_stream():
 
 @paper_bp.route('/api/paper/pdf/<filename>')
 def serve_paper_pdf(filename):
-    """Serve a downloaded paper PDF."""
+    """Serve a downloaded paper PDF.
+
+    SKIPPED from the native-async conversion for the same reason as
+    ``serve_paper_image`` — its only blocking call is the sync-safe
+    ``send_file`` shim, which would deadlock the event loop if invoked from
+    an ``async def`` handler. No DB / no body parse here.
+    """
     filename = os.path.basename(filename)
     filepath = os.path.join(PAPER_DIR, filename)
     if not os.path.exists(filepath):
@@ -1207,7 +1229,7 @@ def serve_paper_pdf(filename):
 
 
 @api_v1_paper_bp.route('/api/v1/paper/reparse', methods=['POST'])
-def reparse_paper():
+async def reparse_paper():
     """Re-parse an already-stored paper PDF to recover its text.
 
     Used to recover library entries that were saved before server-side parsing
@@ -1220,7 +1242,7 @@ def reparse_paper():
     Returns:
         { ok: true, text: str, total_pages: int, text_length: int }
     """
-    data = parse_body()
+    data = await async_parse_body()
     filename = os.path.basename((data.get('filename') or '').strip())
     if not filename:
         logger.warning('[Paper:Reparse] No filename provided')
@@ -1231,7 +1253,8 @@ def reparse_paper():
         logger.warning('[Paper:Reparse] PDF not found: %s', filename)
         return api_not_found('PDF not found')
 
-    try:
+    # Blocking read + pymupdf parse — offload off the event loop.
+    def _reparse():
         with open(filepath, 'rb') as f:
             pdf_bytes = f.read()
         from lib.pdf_parser import parse_pdf as _parse_pdf
@@ -1243,6 +1266,10 @@ def reparse_paper():
         text_length = result.get('textLength', len(text))
         logger.info('[Paper:Reparse] %s — %d pages, %d chars in %.1fs',
                     filename, total_pages, text_length, elapsed)
+        return text, total_pages, text_length
+
+    try:
+        text, total_pages, text_length = await asyncio.to_thread(_reparse)
         return jsonify({
             'ok': True,
             'text': text,
@@ -1260,6 +1287,14 @@ def upload_paper():
 
     Single round-trip: save PDF → parse text → extract figures →
     return everything the frontend needs to populate library state.
+
+    SKIPPED from the native-async conversion: this multipart upload reads
+    ``request.files`` and calls ``file.save``. Under the server.py Flask→Quart
+    shim, ``request.files`` is a *sync-safe* property that drives Quart's async
+    body reader via ``run_coroutine_threadsafe(...).result()`` — safe from an
+    executor thread (sync handler) but a guaranteed deadlock if invoked from
+    the event loop inside an ``async def`` handler. Kept sync so the shim
+    parses the multipart body correctly.
 
     Returns:
         {
@@ -1343,19 +1378,18 @@ def upload_paper():
 # ══════════════════════════════════════════════════════
 
 @api_v1_paper_bp.route('/api/v1/paper/library', methods=['GET'])
-def list_library():
+async def list_library():
     """Return all papers on the current user's bookshelf, newest first.
 
     Each entry includes a ``hasReport`` flag computed from ``paper_reports``
     so the UI can show a "· report" badge without a second round-trip.
     """
     try:
-        db = get_db()
-        rows = db.execute(
+        rows = await async_fetchall(
             'SELECT ' + ', '.join(_PAPER_LIB_COLUMNS) +
             ' FROM paper_library WHERE user_id=? ORDER BY updated_at DESC',
-            (DEFAULT_USER_ID,),
-        ).fetchall()
+            (DEFAULT_USER_ID,), domain=DOMAIN_CHAT,
+        )
         papers = [_lib_row_to_dict(r) for r in rows]
 
         # Single-query JOIN-ish: collect hashes, ask paper_reports which exist
@@ -1364,11 +1398,11 @@ def list_library():
         if hashes:
             try:
                 placeholders = ','.join(['?'] * len(hashes))
-                rrows = db.execute(
+                rrows = await async_fetchall(
                     'SELECT DISTINCT paper_hash FROM paper_reports '
                     'WHERE paper_hash IN (' + placeholders + ')',
-                    tuple(hashes),
-                ).fetchall()
+                    tuple(hashes), domain=DOMAIN_CHAT,
+                )
                 reported = {r['paper_hash'] for r in rrows}
             except Exception as e:
                 logger.debug('[Paper:Library] hasReport lookup failed: %s', e)
@@ -1384,7 +1418,7 @@ def list_library():
 
 
 @api_v1_paper_bp.route('/api/v1/paper/library/<paper_id>', methods=['PUT'])
-def upsert_library_entry(paper_id):
+async def upsert_library_entry(paper_id):
     """Create or update a paper on the bookshelf.
 
     Body JSON mirrors the shape returned by ``GET /api/paper/library``:
@@ -1396,7 +1430,7 @@ def upsert_library_entry(paper_id):
         logger.warning('[Paper:Library] Upsert rejected bad id: %.60s', paper_id)
         return api_bad_request('invalid id')
 
-    data = parse_body()
+    data = await async_parse_body()
     now_ms = int(time.time() * 1000)
 
     qa = data.get('qaHistory') or []
@@ -1414,80 +1448,89 @@ def upsert_library_entry(paper_id):
         logger.debug('[Paper:Library] Non-numeric pageCount, defaulting to 0: %s', e)
         page_count = 0
 
-    try:
-        db = get_thread_db()
-        # Pull existing row so the client only has to send the small mutable
-        # state (qaHistory, babelCache, pageCount, title) — it doesn't need
-        # to re-ship parsed_text / images / paperHash on every save. The
-        # ingestion endpoints (/api/paper/upload, /api/paper/fetch-arxiv-stream)
-        # are the only places that originate those big columns.
-        existing = db.execute(
-            'SELECT title, pdf_url, pdf_filename, arxiv_id, paper_hash, '
-            '       parsed_text, images, page_count, created_at '
-            'FROM paper_library WHERE id=? AND user_id=?',
-            (paper_id, DEFAULT_USER_ID),
-        ).fetchone()
+    # The upsert mixes a SELECT-then-INSERT-OR-REPLACE on a sync helper
+    # (db_execute_with_retry) that takes a raw connection. The facade can't
+    # express the retry helper, so run the whole DB block on a borrowed pool
+    # connection in a worker thread (checkout→use→return). DOMAIN_CHAT is the
+    # default domain for the paper library tables (get_thread_db() default).
+    def _do_upsert():
+        from lib.database._core import _pool_get, _pool_put
+        db = _pool_get()
+        try:
+            # Pull existing row so the client only has to send the small mutable
+            # state (qaHistory, babelCache, pageCount, title) — it doesn't need
+            # to re-ship parsed_text / images / paperHash on every save. The
+            # ingestion endpoints (/api/paper/upload, /api/paper/fetch-arxiv-stream)
+            # are the only places that originate those big columns.
+            existing = db.execute(
+                'SELECT title, pdf_url, pdf_filename, arxiv_id, paper_hash, '
+                '       parsed_text, images, page_count, created_at '
+                'FROM paper_library WHERE id=? AND user_id=?',
+                (paper_id, DEFAULT_USER_ID),
+            ).fetchone()
 
-        def _take(client_key, exist_key, *, cap=None, sanitize=None, default=''):
-            """Use client value if provided AND non-empty, else preserve existing."""
-            v = data.get(client_key)
-            if v is None or v == '':
-                v = existing[exist_key] if existing else default
-            v = '' if v is None else str(v)
-            if sanitize:
-                v = sanitize(v)
-            if cap is not None:
-                v = v[:cap]
-            return v
+            def _take(client_key, exist_key, *, cap=None, sanitize=None, default=''):
+                """Use client value if provided AND non-empty, else preserve existing."""
+                v = data.get(client_key)
+                if v is None or v == '':
+                    v = existing[exist_key] if existing else default
+                v = '' if v is None else str(v)
+                if sanitize:
+                    v = sanitize(v)
+                if cap is not None:
+                    v = v[:cap]
+                return v
 
-        title = _take('title', 'title', cap=_LIB_TITLE_CAP)
-        pdf_url = _take('pdfUrl', 'pdf_url', cap=2000)
-        pdf_filename = _take('pdfFilename', 'pdf_filename', cap=500,
-                             sanitize=os.path.basename)
-        arxiv_id = _take('arxivId', 'arxiv_id', cap=64)
-        paper_hash = _take('paperHash', 'paper_hash', cap=64)
-        parsed_text = _take('parsedText', 'parsed_text', cap=_LIB_PARSED_TEXT_CAP)
+            title = _take('title', 'title', cap=_LIB_TITLE_CAP)
+            pdf_url = _take('pdfUrl', 'pdf_url', cap=2000)
+            pdf_filename = _take('pdfFilename', 'pdf_filename', cap=500,
+                                 sanitize=os.path.basename)
+            arxiv_id = _take('arxivId', 'arxiv_id', cap=64)
+            paper_hash = _take('paperHash', 'paper_hash', cap=64)
+            parsed_text = _take('parsedText', 'parsed_text', cap=_LIB_PARSED_TEXT_CAP)
 
-        # Images: accept client list on first write; fall back to disk
-        # manifest (server source of truth) so the row always reflects reality.
-        if isinstance(data.get('images'), list):
-            images = data['images'][:_LIB_IMAGES_CAP]
-        elif paper_hash:
-            images = _load_image_manifest(paper_hash)[:_LIB_IMAGES_CAP]
-        elif existing:
-            try:
-                images = json.loads(existing['images'] or '[]')[:_LIB_IMAGES_CAP]
-            except (json.JSONDecodeError, TypeError) as _e_audit:
-                logger.debug('[paper] upsert_library_entry caught %s: %s', type(_e_audit).__name__, _e_audit)
+            # Images: accept client list on first write; fall back to disk
+            # manifest (server source of truth) so the row always reflects reality.
+            if isinstance(data.get('images'), list):
+                images = data['images'][:_LIB_IMAGES_CAP]
+            elif paper_hash:
+                images = _load_image_manifest(paper_hash)[:_LIB_IMAGES_CAP]
+            elif existing:
+                try:
+                    images = json.loads(existing['images'] or '[]')[:_LIB_IMAGES_CAP]
+                except (json.JSONDecodeError, TypeError) as _e_audit:
+                    logger.debug('[paper] upsert_library_entry caught %s: %s', type(_e_audit).__name__, _e_audit)
+                    images = []
+            else:
                 images = []
-        else:
-            images = []
 
-        if existing and existing['created_at']:
-            created_at = int(existing['created_at'])
-        else:
-            created_at = int(data.get('createdAt') or now_ms)
-        if not page_count and existing:
-            page_count = int(existing['page_count'] or 0)
+            if existing and existing['created_at']:
+                created_at = int(existing['created_at'])
+            else:
+                created_at = int(data.get('createdAt') or now_ms)
+            _page_count = page_count
+            if not _page_count and existing:
+                _page_count = int(existing['page_count'] or 0)
 
-        db_execute_with_retry(
-            db,
-            'INSERT OR REPLACE INTO paper_library '
-            '(id, user_id, title, pdf_url, pdf_filename, arxiv_id, paper_hash, '
-            ' parsed_text, qa_history, images, babel_cache, page_count, '
-            ' created_at, updated_at) '
-            'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-            (
-                paper_id, DEFAULT_USER_ID, title, pdf_url, pdf_filename,
-                arxiv_id, paper_hash, parsed_text,
-                json.dumps(qa, ensure_ascii=False),
-                json.dumps(images, ensure_ascii=False),
-                json.dumps(babel, ensure_ascii=False),
-                page_count, created_at, now_ms,
-            ),
-        )
-        logger.info('[Paper:Library] Upserted %s — title=%.60s qa=%d imgs=%d',
-                    paper_id[:16], title, len(qa), len(images))
+            from lib.database._core_schema import PAPER_LIBRARY, upsert
+            upsert(db, PAPER_LIBRARY, {
+                'id': paper_id, 'user_id': DEFAULT_USER_ID, 'title': title,
+                'pdf_url': pdf_url, 'pdf_filename': pdf_filename,
+                'arxiv_id': arxiv_id, 'paper_hash': paper_hash,
+                'parsed_text': parsed_text,
+                'qa_history': json.dumps(qa, ensure_ascii=False),
+                'images': json.dumps(images, ensure_ascii=False),
+                'babel_cache': json.dumps(babel, ensure_ascii=False),
+                'page_count': _page_count, 'created_at': created_at,
+                'updated_at': now_ms,
+            }, retry=True)
+            logger.info('[Paper:Library] Upserted %s — title=%.60s qa=%d imgs=%d',
+                        paper_id[:16], title, len(qa), len(images))
+        finally:
+            _pool_put(db)
+
+    try:
+        await asyncio.to_thread(_do_upsert)
         return api_ok({'id': paper_id, 'updatedAt': now_ms})
     except Exception as e:
         logger.error('[Paper:Library] Upsert failed for %s: %s', paper_id[:16], e, exc_info=True)
@@ -1495,7 +1538,7 @@ def upsert_library_entry(paper_id):
 
 
 @api_v1_paper_bp.route('/api/v1/paper/library/<paper_id>', methods=['DELETE'])
-def delete_library_entry(paper_id):
+async def delete_library_entry(paper_id):
     """Remove a paper from the bookshelf.
 
     The underlying PDF file under uploads/papers is left in place — other
@@ -1505,14 +1548,24 @@ def delete_library_entry(paper_id):
     paper_id = (paper_id or '').strip()
     if not paper_id:
         return api_bad_request('invalid id')
+
+    # db_execute_with_retry takes a raw connection — run on a borrowed pool
+    # connection in a worker thread (DOMAIN_CHAT default for paper tables).
+    def _do_delete():
+        from lib.database._core import _pool_get, _pool_put
+        db = _pool_get()
+        try:
+            db_execute_with_retry(
+                db,
+                'DELETE FROM paper_library WHERE id=? AND user_id=?',
+                (paper_id, DEFAULT_USER_ID),
+            )
+            logger.info('[Paper:Library] Deleted %s', paper_id[:16])
+        finally:
+            _pool_put(db)
+
     try:
-        db = get_thread_db()
-        db_execute_with_retry(
-            db,
-            'DELETE FROM paper_library WHERE id=? AND user_id=?',
-            (paper_id, DEFAULT_USER_ID),
-        )
-        logger.info('[Paper:Library] Deleted %s', paper_id[:16])
+        await asyncio.to_thread(_do_delete)
         return api_ok()
     except Exception as e:
         logger.error('[Paper:Library] Delete failed for %s: %s', paper_id[:16], e, exc_info=True)

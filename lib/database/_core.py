@@ -30,6 +30,39 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
+# ── Per-namespace log leveling ──────────────────────────────────────────
+# The database layer logs genuine failures (SQL errors, failed commits,
+# self-heal deletes) so they reach app.log (INFO+) / error.log (WARNING+).
+# Set ``TOFU_DB_LOG_LEVEL=DEBUG`` to additionally surface the verbose
+# per-statement diagnostics (translated SQL, rollback noise) without
+# flipping the whole app to DEBUG. Accepts a standard level name
+# (DEBUG/INFO/WARNING/ERROR) or numeric value; invalid values are ignored.
+from lib.env_compat import getenv_compat  # noqa: E402
+_DB_LOG_LEVEL = getenv_compat('TOFU_DB_LOG_LEVEL', default='').strip().upper()
+if _DB_LOG_LEVEL:
+    import logging as _logging
+    _resolved = getattr(_logging, _DB_LOG_LEVEL, None)
+    if not isinstance(_resolved, int):
+        try:
+            _resolved = int(_DB_LOG_LEVEL)
+        except (ValueError, TypeError) as e:
+            logger.debug('[DB] TOFU_DB_LOG_LEVEL=%r not an int level: %s', _DB_LOG_LEVEL, e)
+            _resolved = None
+    if isinstance(_resolved, int):
+        _logging.getLogger('lib.database').setLevel(_resolved)
+        logger.info('[DB] lib.database log level set to %s via TOFU_DB_LOG_LEVEL', _DB_LOG_LEVEL)
+    else:
+        logger.warning('[DB] Ignoring invalid TOFU_DB_LOG_LEVEL=%r', _DB_LOG_LEVEL)
+
+# Slow-query threshold (milliseconds). Any statement whose execute() exceeds
+# this is logged at WARNING with the (truncated) SQL — invaluable for tracing
+# contention/lock waits. Set to 0 to disable. Default 2000 ms.
+try:
+    _SLOW_QUERY_MS = int(getenv_compat('TOFU_DB_SLOW_QUERY_MS', default='2000'))
+except (ValueError, TypeError) as e:
+    logger.debug('[DB] Invalid TOFU_DB_SLOW_QUERY_MS, defaulting to 2000ms: %s', e)
+    _SLOW_QUERY_MS = 2000
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Backend Detection
 # ═══════════════════════════════════════════════════════════════════════
@@ -87,10 +120,24 @@ _TCP_KEEPALIVES_INTERVAL_S = 10
 _TCP_KEEPALIVES_COUNT = 3
 _IDLE_CHECK_S = 30
 _MAX_CONN_AGE_S = 600
+# Auto-release a thread-local connection back to the pool once it has been
+# idle this long with NO open transaction. This is the call-site-agnostic
+# safety net for the recurring thread-local leak: instead of requiring every
+# long-lived worker (message_queue poller, billing janitor, daily_report,
+# paper/trading engines, …) to remember a close_thread_db() in a finally, the
+# reaper reclaims any parked connection automatically. The owning thread's
+# next get_thread_db() health-check reconnects transparently. Set to 0 to
+# disable. Override via TOFU_DB_IDLE_RELEASE_S.
+_IDLE_RELEASE_S = int(getenv_compat('TOFU_DB_IDLE_RELEASE_S', default='120'))
 
-# Maximum total application-side connections (semaphore-guarded)
-# Tunable via env vars for high-concurrency deployments (1000+ users)
-_MAX_TOTAL_CONNS = int(getenv_compat('TOFU_DB_MAX_CONNS', default='200'))
+# Maximum total application-side connections (semaphore-guarded).
+# Default 1000 to support 1000 concurrent DB users out of the box. The PG
+# server's own ``max_connections`` is provisioned higher than this (see
+# _MANAGED_PG_MAX_CONNECTIONS in lib/database/_bootstrap.py) so the app-side
+# semaphore — not PG's hard limit — is always the binding constraint, and an
+# overload surfaces as a clean queue/timeout instead of a PG "too many
+# clients" FATAL. Tunable via env for smaller / larger deployments.
+_MAX_TOTAL_CONNS = int(getenv_compat('TOFU_DB_MAX_CONNS', default='1000'))
 _CONN_ACQUIRE_TIMEOUT_S = int(getenv_compat('TOFU_DB_ACQUIRE_TIMEOUT', default='30'))
 _conn_semaphore = threading.BoundedSemaphore(_MAX_TOTAL_CONNS)
 _conn_count = 0
@@ -417,6 +464,7 @@ class _SqliteCursorWrapper:
         self.rowcount = 0
 
     def execute(self, sql, params=None):
+        _t0 = time.monotonic()
         try:
             if params:
                 self._cursor.execute(sql, params)
@@ -429,9 +477,15 @@ class _SqliteCursorWrapper:
             if _sql_upper.startswith(('INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP')):
                 self._conn._dirty = True
         except Exception as e:
-            logger.debug('[DB] SQL error: %s\n  SQL: %.200s\n  Params: %.200s',
+            logger.error('[DB] SQL execution failed (%s): %.120s', type(e).__name__, e)
+            logger.debug('[DB] SQL error detail: %s\n  SQL: %.200s\n  Params: %.200s',
                          e, sql, str(params)[:200] if params else 'None')
             raise
+        if _SLOW_QUERY_MS:
+            _elapsed_ms = (time.monotonic() - _t0) * 1000
+            if _elapsed_ms >= _SLOW_QUERY_MS:
+                logger.warning('[DB] Slow query %.0fms (threshold %dms): %.150s',
+                               _elapsed_ms, _SLOW_QUERY_MS, sql)
         return self
 
     def executemany(self, sql, params_list):
@@ -615,7 +669,25 @@ def _new_pg_connection():
             'or set TOFU_PG_HOST / TOFU_PG_PORT to an existing server.'
         )
 
-    acquired = _conn_semaphore.acquire(timeout=_CONN_ACQUIRE_TIMEOUT_S)
+    # Two-phase acquire: spend the bulk of the budget on a first attempt;
+    # if that fails, proactively reap connections held by threads that have
+    # already died (the reaper daemon only runs every 30s, so under a burst
+    # we may be waiting on slots that are reclaimable RIGHT NOW), then retry
+    # with the remaining budget. This converts a transient leak-induced
+    # timeout into a recoverable stall instead of a hard 500.
+    _first_wait = max(1.0, _CONN_ACQUIRE_TIMEOUT_S * 0.6)
+    acquired = _conn_semaphore.acquire(timeout=_first_wait)
+    if not acquired:
+        reclaimed = 0
+        try:
+            reclaimed = _reap_dead_thread_connections()
+        except Exception as _reap_err:
+            logger.debug('[DB] Inline reap during acquire failed: %s', _reap_err)
+        if reclaimed:
+            logger.warning('[DB] Semaphore pressure: reclaimed %d dead-thread '
+                           'connection(s) inline, retrying acquire', reclaimed)
+        _retry_wait = max(1.0, _CONN_ACQUIRE_TIMEOUT_S - _first_wait)
+        acquired = _conn_semaphore.acquire(timeout=_retry_wait)
     if not acquired:
         with _conn_count_lock:
             current = _conn_count
@@ -796,7 +868,7 @@ def _column_exists(conn, table, column):
 
 _conn_pool = []
 _conn_pool_lock = threading.Lock()
-_CONN_POOL_MAX = int(getenv_compat('TOFU_DB_POOL_MAX', default='50'))
+_CONN_POOL_MAX = int(getenv_compat('TOFU_DB_POOL_MAX', default='100'))
 
 
 def _pool_get():
@@ -918,40 +990,123 @@ _thread_conn_lock = threading.Lock()
 
 
 def _register_thread_conn(conn, domain):
-    """Register a thread-local connection for dead-thread reaping (PG only)."""
+    """Register a thread-local connection for dead-thread reaping (PG only).
+
+    Drops any prior registry entry for the SAME (thread, domain) first.
+    A long-lived worker thread (e.g. an ``asyncio.to_thread`` pool thread)
+    reconnects whenever its connection fails a health check; without this
+    de-dup the registry grows one stale tuple per reconnect, inflating the
+    ``tracked_threads`` metric far beyond the live connection count and
+    pinning dead PgConnection objects via strong references.
+    """
     if _BACKEND != 'pg':
         return
     import weakref
     thread = threading.current_thread()
     ref = weakref.ref(thread)
     with _thread_conn_lock:
+        _thread_conn_registry[:] = [
+            (r, c, d) for (r, c, d) in _thread_conn_registry
+            if not (r() is thread and d == domain)
+        ]
         _thread_conn_registry.append((ref, conn, domain))
 
 
 def _reap_dead_thread_connections():
-    """Close connections belonging to threads that have died (PG only)."""
+    """Close connections belonging to threads that have died (PG only).
+
+    Returns the number of connections reclaimed (0 on the SQLite backend).
+    """
     if _BACKEND != 'pg':
-        return
+        return 0
     reaped = 0
+    idle_released = 0
+    now = time.monotonic()
+    try:
+        import psycopg2.extensions as _pgext
+        _TX_IDLE = _pgext.TRANSACTION_STATUS_IDLE
+    except Exception as e:
+        logger.debug('[DB] psycopg2.extensions unavailable, assuming TX idle=0: %s', e)
+        _TX_IDLE = 0
     with _thread_conn_lock:
         alive = []
         for ref, conn, domain in _thread_conn_registry:
             thread = ref()
             if thread is None or not thread.is_alive():
+                # ALWAYS close the wrapper (not just when the underlying
+                # psycopg2 conn is still open). PgConnection.close() is what
+                # releases the semaphore slot, and it is idempotent + tolerates
+                # an already-closed psycopg2 conn. If PG already killed the
+                # connection (idle_in_transaction_session_timeout) the inner
+                # conn is .closed, but the slot is still held by this wrapper —
+                # skipping close() here is exactly what leaks the semaphore
+                # until the pool drains to zero while PG itself is idle.
                 try:
-                    if not conn._closed and not conn._conn.closed:
-                        conn._conn.rollback()
+                    if not conn._closed:
+                        try:
+                            if not conn._conn.closed:
+                                conn._conn.rollback()
+                        except Exception as _rb_err:
+                            logger.debug('[DB-Reaper] rollback during reap '
+                                         'failed (domain=%s): %s', domain, _rb_err)
                         conn.close()
                         reaped += 1
                 except Exception as e:
                     logger.debug('[DB-Reaper] Error closing dead-thread conn '
                                  '(domain=%s): %s', domain, e)
             else:
+                # Thread is still alive, but its underlying psycopg2 conn may
+                # already be DEAD — PG closes idle-in-transaction backends after
+                # idle_in_transaction_session_timeout. The wrapper still holds a
+                # semaphore slot that the live thread won't release until it next
+                # calls get_thread_db() (which may be never for a sleeping daemon
+                # poller). Closing an already-dead wrapper is safe (no in-flight
+                # query) and idempotent — the owning thread's next get_thread_db()
+                # health-check sees _closed and reconnects cleanly. Drop the stale
+                # entry; reconnect re-registers via _register_thread_conn's dedup.
+                try:
+                    if not conn._closed and conn._conn.closed:
+                        conn.close()
+                        reaped += 1
+                        continue
+                except Exception as e:
+                    logger.debug('[DB-Reaper] Error reclaiming dead conn on live '
+                                 'thread (domain=%s): %s', domain, e)
+
+                # ── Idle-release safety net (call-site-agnostic) ──────────
+                # A live thread parking an IDLE connection (no open
+                # transaction) past _IDLE_RELEASE_S is the recurring
+                # thread-local leak. Reclaim it WITHOUT touching the owning
+                # thread: close the wrapper (frees the semaphore slot) and
+                # drop the registry entry. The thread's next get_thread_db()
+                # health-check sees _closed and reconnects transparently.
+                # GUARD: only when status is IDLE — never reclaim a conn with
+                # an open/aborted transaction (that path is owned by PG's
+                # idle_in_transaction_session_timeout) so we can't lose a
+                # pending write or interrupt an in-flight query.
+                if _IDLE_RELEASE_S > 0:
+                    try:
+                        if (not conn._closed
+                                and not conn._conn.closed
+                                and (now - conn._last_used) >= _IDLE_RELEASE_S
+                                and conn._conn.get_transaction_status() == _TX_IDLE):
+                            conn.close()
+                            idle_released += 1
+                            continue
+                    except Exception as e:
+                        logger.debug('[DB-Reaper] Idle-release probe failed on '
+                                     'live thread (domain=%s): %s', domain, e)
+
                 alive.append((ref, conn, domain))
         _thread_conn_registry[:] = alive
     if reaped:
         logger.info('[DB-Reaper] Closed %d connection(s) from dead threads '
                     '(remaining tracked: %d)', reaped, len(alive))
+    if idle_released:
+        logger.info('[DB-Reaper] Auto-released %d idle connection(s) from live '
+                    'threads back to the pool (remaining tracked: %d)',
+                    idle_released, len(alive))
+    return reaped + idle_released
 
 
 _REAPER_INTERVAL_S = 30  # Check every 30s for dead threads (was 60s)
@@ -993,6 +1148,29 @@ def _log_pool_metrics():
                 _BACKEND, active, _MAX_TOTAL_CONNS, pooled, _CONN_POOL_MAX,
                 tracked_threads)
 
+    # ── Leak guard ──────────────────────────────────────────────────
+    # A connection LEAK shows up as tracked_threads ≫ active_conns: many
+    # worker threads each pin a thread-local connection they never release
+    # (the historical 539-tracked / 185-active signature). Genuine load,
+    # by contrast, keeps the two roughly in step. Surface the divergence
+    # loudly (WARNING + audit) so it's diagnosable from logs/error.log
+    # before the semaphore is exhausted — bumping TOFU_DB_MAX_CONNS only
+    # delays a real leak, it does not fix it.
+    if _BACKEND == 'pg' and tracked_threads >= max(50, _MAX_TOTAL_CONNS // 2) \
+            and tracked_threads > active * 3:
+        logger.warning('[DB-Pool] Possible connection leak: tracked_threads=%d '
+                       '≫ active_conns=%d (max=%d). Long-lived worker threads '
+                       'may be holding thread-local connections without calling '
+                       'close_thread_db() in a finally.',
+                       tracked_threads, active, _MAX_TOTAL_CONNS)
+        try:
+            from lib.log import audit_log
+            audit_log('db_conn_leak_suspected', tracked_threads=tracked_threads,
+                      active_conns=active, max_conns=_MAX_TOTAL_CONNS,
+                      pooled=pooled)
+        except Exception as _ae:
+            logger.debug('[DB-Pool] audit_log for leak guard failed: %s', _ae)
+
 
 def get_thread_db(domain=DOMAIN_CHAT):
     """Return a thread-local database connection."""
@@ -1015,6 +1193,50 @@ def get_thread_db(domain=DOMAIN_CHAT):
     logger.debug('[DB] New thread-local connection for domain=%s thread=%s (backend=%s)',
                  domain, threading.current_thread().name, _BACKEND)
     return db
+
+
+def _unregister_thread_conn(thread, domain=None):
+    """Drop registry entries for ``thread`` (optionally a single domain)."""
+    if _BACKEND != 'pg':
+        return
+    with _thread_conn_lock:
+        _thread_conn_registry[:] = [
+            (r, c, d) for (r, c, d) in _thread_conn_registry
+            if not (r() is thread and (domain is None or d == domain))
+        ]
+
+
+def close_thread_db(domain=None):
+    """Release this thread's thread-local DB connection(s) back to the pool.
+
+    Long-lived worker threads (the ``asyncio.to_thread`` default pool, daemon
+    task threads, etc.) otherwise pin one connection EACH for their whole
+    lifetime via ``get_thread_db``. Under high concurrency that exhausts the
+    connection semaphore even though the threads are idle between tasks. Call
+    this in a ``finally`` at the end of any unit of work (e.g. ``run_task``)
+    so the connection is returned to the shared pool for reuse instead of
+    being held until the thread dies.
+
+    Args:
+        domain: Specific domain to release, or ``None`` for all domains.
+    """
+    domains = (domain,) if domain else (DOMAIN_CHAT, DOMAIN_TRADING, DOMAIN_SYSTEM)
+    thread = threading.current_thread()
+    for d in domains:
+        attr = f'db_{d}'
+        db = getattr(_thread_local, attr, None)
+        if db is None:
+            continue
+        setattr(_thread_local, attr, None)
+        _unregister_thread_conn(thread, d)
+        try:
+            _pool_put(db)
+        except Exception as e:
+            logger.debug('[DB] close_thread_db: pool_put failed for domain=%s: %s', d, e)
+            try:
+                db.close()
+            except Exception as _ce:
+                logger.debug('[DB] close_thread_db: close fallback failed: %s', _ce)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1082,16 +1304,22 @@ def close_db(exception):
         key = f'_db_{domain}'
         db = g.pop(key, None)
         if db is not None:
+            _was_dirty = getattr(db, '_dirty', False)
             try:
                 if exception:
                     db.rollback()
-                elif getattr(db, '_dirty', False):
+                elif _was_dirty:
                     db.commit()
                 else:
                     # Clean reads: rollback to release any implicit transaction
                     db.rollback()
             except Exception as _rb_err:
-                logger.debug('[DB] Teardown rollback/commit failed: %s', _rb_err)
+                if _was_dirty and not exception:
+                    # A failed commit on a dirty connection = silent data loss.
+                    logger.error('[DB] Teardown COMMIT FAILED for domain=%s — pending writes may be lost: %s',
+                                 domain, _rb_err, exc_info=True)
+                else:
+                    logger.debug('[DB] Teardown rollback failed for domain=%s: %s', domain, _rb_err)
             _pool_put(db)
 
 
@@ -1401,8 +1629,22 @@ atexit.register(shutdown_pool)
 #  Schema Init (delegates to _schema module)
 # ═══════════════════════════════════════════════════════════════════════
 
+def _register_optional_domains():
+    """Wire optional DB-domain schema initializers before init_db() runs.
+
+    Optional DB domains (e.g. the ``trading`` tables, now owned by the
+    standalone ``tofu-trading`` package) register via the ``tofu.schema``
+    entry-point group. Core defines no optional domains itself.
+
+    Idempotent: safe to call on every ``init_db()``.
+    """
+    from lib.database.schema_registry import discover_schema_plugins
+    discover_schema_plugins()
+
+
 def init_db():
     """Initialize all database schemas using the active backend."""
+    _register_optional_domains()
     if _BACKEND == 'pg':
         from lib.database._schema_pg import init_db as _pg_schema_init
         _pg_schema_init(_new_pg_connection, _STATEMENT_TIMEOUT_MS)
@@ -1489,6 +1731,46 @@ else:
             _pg_ok = False
 
     if not _pg_ok:
+        # ── Fail-loud guard against silent data hiding ─────────────────
+        # If a real pgdata/ cluster EXISTS on disk (PG was used before, so it
+        # holds the user's conversations) but bootstrap just failed, falling
+        # back to a fresh/near-empty SQLite makes it look like "all data was
+        # lost" — the exact 2026-06-04 incident (corrupt WAL → PG won't boot →
+        # 3 servers silently served a 2-conversation SQLite). The PG data is
+        # actually intact; PG simply couldn't start. Surface this LOUDLY, and
+        # in strict mode (TOFU_DB_STRICT_PG=1) refuse to start rather than
+        # serve from the wrong, empty database.
+        _pgdata_exists = False
+        try:
+            _pgdata_exists = (
+                os.path.isfile(os.path.join(_PGDATA, 'PG_VERSION'))
+                or os.path.isfile(os.path.join(_PGDATA, 'postgresql.conf'))
+            )
+        except Exception as _pe:
+            logger.debug('[DB] pgdata existence probe failed: %s', _pe)
+        if _pgdata_exists:
+            logger.critical(
+                '[DB] PostgreSQL cluster EXISTS at %s but bootstrap FAILED — '
+                'NOT falling back transparently. Your conversations are most '
+                'likely intact inside PG (it just failed to start, e.g. WAL '
+                'corruption or a stale lock). Serving the SQLite fallback now '
+                'would show a near-empty DB and look like data loss. '
+                'Check logs/postgresql.log and recover PG before trusting the '
+                'SQLite contents. Set TOFU_DB_STRICT_PG=1 to refuse startup '
+                'in this situation instead of falling back.', _PGDATA)
+            try:
+                from lib.log import audit_log
+                audit_log('pg_bootstrap_failed_with_existing_cluster',
+                          pgdata=_PGDATA, fallback='sqlite')
+            except Exception as _ae:
+                logger.debug('[DB] audit_log for failed PG bootstrap failed: %s', _ae)
+            if getenv_compat('TOFU_DB_STRICT_PG', default='').lower() in ('1', 'true', 'yes'):
+                raise RuntimeError(
+                    f'PostgreSQL cluster at {_PGDATA} exists but failed to start, '
+                    'and TOFU_DB_STRICT_PG is set — refusing to fall back to an '
+                    'empty SQLite and risk masking the real data. Recover PG '
+                    '(see logs/postgresql.log) or unset TOFU_DB_STRICT_PG.')
+
         _BACKEND = 'sqlite'
         db_available = True
         pg_available = False
@@ -1511,12 +1793,10 @@ if _BACKEND == 'pg':
         _column_exists as _schema_column_exists,
         _init_chat_schema,
         _init_system_schema,
-        _init_trading_schema,
     )
 else:
     from lib.database._schema_sqlite import (  # noqa: E402, F401
         _column_exists as _schema_column_exists,
         _init_chat_schema,
         _init_system_schema,
-        _init_trading_schema,
     )

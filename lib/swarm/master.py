@@ -126,9 +126,23 @@ class MasterOrchestrator:
                  max_parallel: int = 8,
                  max_retries: int = 1,
                  output_dir: str = '',
-                 parent_config: dict | None = None):
+                 parent_config: dict | None = None,
+                 inbox_key: str = '',
+                 on_settled: Callable | None = None):
         self.task_id = task_id
         self.conv_id = conv_id
+        # Fired ONCE from the driver thread when the swarm terminates (all
+        # agents done / aborted). ``integration`` uses it to auto-continue the
+        # main agent when the spawning turn already ended but pending
+        # <swarm-update>s would otherwise sit unread in the inbox. Must never
+        # raise into the driver loop.
+        self.on_settled = on_settled
+        # The model-facing inbox is keyed by the STABLE swarm key (conv id
+        # when available) so <swarm-update>s enqueued by background agents
+        # survive into later turns of the same conversation. Defaults to
+        # conv_id, then task_id. ``integration._handle_spawn_agents`` passes
+        # this explicitly via ``swarm_key_for(task)``.
+        self.inbox_key = inbox_key or conv_id or task_id
         self.specs = list(specs)
         self.project_path = project_path
         self.model = model
@@ -268,9 +282,8 @@ class MasterOrchestrator:
                 'agentId':   spec.id,
                 'role':      spec.role,
                 'objective': spec.objective,
-                'model':     (self._agents.get(spec.id).model
-                              if self._agents.get(spec.id) else
-                              self._resolve_spec_model(spec)),
+                'model':     (getattr(self._agents.get(spec.id), 'model', '')
+                              or self._resolve_spec_model(spec)),
                 'status':    result.status,
                 'elapsed':   round(result.elapsed_seconds, 1),
                 'tokens':    result.total_tokens,
@@ -311,7 +324,7 @@ class MasterOrchestrator:
                 remaining_pending=pending,
                 error=(result.error_message or '') if result.status != SubAgentStatus.COMPLETED.value else '',
             )
-            inbox_enqueue(self.task_id, payload,
+            inbox_enqueue(self.inbox_key, payload,
                           priority='later',
                           mode='swarm-update',
                           agent_id=spec.id)
@@ -425,6 +438,18 @@ class MasterOrchestrator:
                         'totalTokens': total_tokens,
                     })
 
+                # ── Settle hook: may auto-continue the main agent ──
+                # Fires AFTER the terminal UI event so the panel reads as
+                # complete before a continuation turn (if any) starts. The
+                # callback decides whether to wake the main agent — it must
+                # not raise into the driver thread.
+                if self.on_settled:
+                    try:
+                        self.on_settled()
+                    except Exception as e:
+                        logger.error('%s on_settled hook failed: %s',
+                                     log_prefix, e, exc_info=True)
+
         self._driver_thread = threading.Thread(
             target=_driver, name=f'swarm-driver-{self.task_id}', daemon=True,
         )
@@ -476,14 +501,17 @@ class MasterOrchestrator:
 
             if ids:
                 requested = set(str(x) for x in ids)
-                already_done = requested & done_ids
-                to_wait = requested & (running_ids | pending_ids)
-                unknown = requested - done_ids - running_ids - pending_ids
             else:
-                requested = running_ids | pending_ids
-                already_done = set()  # only return fresh completions
-                to_wait = set(requested)
-                unknown = set()
+                # No ids → "every agent this session knows about". MUST
+                # include already-finished agents: otherwise an agent that
+                # completed BEFORE this await call is in neither already_done
+                # nor to_wait, so it can never be reported and mode='all'
+                # silently evaluates "all" over only the still-in-flight
+                # subset — yielding k/N < total while the panel shows N/N.
+                requested = done_ids | running_ids | pending_ids
+            already_done = requested & done_ids
+            to_wait = requested & (running_ids | pending_ids)
+            unknown = requested - done_ids - running_ids - pending_ids
 
         # ── Special case: nothing to wait for ──────────────────────────
         # Either the caller asked for ids that are all already done, or
@@ -513,7 +541,7 @@ class MasterOrchestrator:
         while True:
             with self._lock:
                 done_now = set(self._results_by_id.keys())
-                if mode == 'any' and (to_wait & done_now):
+                if mode == 'any' and (already_done or (to_wait & done_now)):
                     break
                 if mode == 'all' and to_wait.issubset(done_now):
                     break
@@ -600,7 +628,7 @@ class MasterOrchestrator:
         #    sees every completion exactly once — here, in the tool return.
         if completed_payloads:
             try:
-                inbox_consume(self.task_id,
+                inbox_consume(self.inbox_key,
                               [p['agent_id'] for p in completed_payloads])
             except Exception as e:
                 logger.warning('[Master:%s] inbox consume after await failed: %s',
@@ -632,7 +660,7 @@ class MasterOrchestrator:
                 # De-dup: the full answer is now in the tool return — drop the
                 # pending <swarm-update> for this agent so it isn't injected again.
                 try:
-                    inbox_consume(self.task_id, [agent_id])
+                    inbox_consume(self.inbox_key, [agent_id])
                 except Exception as e:
                     logger.warning('[Master:%s] inbox consume after get_agent_result '
                                    'failed: %s', self.task_id, e)

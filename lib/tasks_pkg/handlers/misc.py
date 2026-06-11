@@ -88,6 +88,7 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     append_event(task, {
         'type': 'human_guidance_request',
         'roundNum': rn,
+        'toolCallId': tc_id,
         'guidanceId': guidance_id,
         'question': question,
         'responseType': response_type,
@@ -186,6 +187,7 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
 def _handle_scheduler_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
     fn_args['_source_conv_id'] = task.get('convId', '')
     fn_args['_source_task_id'] = task.get('id', '')
+    fn_args['_tool_call_id'] = tc_id
     return simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,
         executor=execute_scheduler_tool,
@@ -195,7 +197,7 @@ def _handle_scheduler_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, c
 
 def _run_desktop(fn_name, fn_args):
     """Desktop tool executor — wraps send_desktop_command + format_desktop_result."""
-    from routes.desktop import format_desktop_result, send_desktop_command
+    from lib.desktop import format_desktop_result, send_desktop_command
     cmd_type = fn_name.replace('desktop_', '', 1)
     result, error = send_desktop_command(cmd_type, fn_args, timeout=30)
     if error:

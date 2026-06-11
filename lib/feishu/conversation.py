@@ -145,38 +145,39 @@ def sync_to_db(user_id: str) -> None:
                 return
 
         title = (web_msgs[0].get('content', '') or 'Feishu')[:80]
+        from lib.conversations import build_search_text
         from lib.database import json_dumps_pg
-        from routes.conversations import build_search_text
         messages_json = json_dumps_pg(web_msgs)
         search_text = build_search_text(web_msgs)
         now = int(time.time() * 1000)
 
-        db.execute(
-            '''INSERT OR REPLACE INTO conversations (id, user_id, title, messages, created_at, updated_at, msg_count, search_text)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-            (conv_id, db_user_id, title, messages_json, now, now, len(web_msgs), search_text)
-        )
-        # Update FTS5 index
-        if search_text:
-            try:
-                db.execute(
-                    "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
-                    "SELECT rowid, ? FROM conversations WHERE id = ?",
-                    (search_text, conv_id)
-                )
-            except Exception as _fts_err:
-                logger.debug('[Feishu] FTS update failed (non-fatal): %s', _fts_err)
-        db.commit()
+        from lib.database._core_schema import CONVERSATIONS, upsert
+        # 8-col partial: omit `settings` (DEFAULT '{}') and `search_tsv`
+        # (PG conversations_search_tsv_trg trigger derives it from search_text).
+        # retry=False + commit=True mirrors the prior plain db.execute()+commit().
+        upsert(db, CONVERSATIONS, {
+            'id': conv_id, 'user_id': db_user_id, 'title': title,
+            'messages': messages_json, 'created_at': now, 'updated_at': now,
+            'msg_count': len(web_msgs), 'search_text': search_text,
+        }, insert_cols=['id', 'user_id', 'title', 'messages', 'created_at',
+                        'updated_at', 'msg_count', 'search_text'],
+           retry=False, commit=True)
+        from lib.conversations import update_conversation_fts
+        update_conversation_fts(db, conv_id, search_text)
         logger.debug('[Feishu] Synced %d messages for user %s to DB conv %s',
                       len(web_msgs), user_id, conv_id[:12])
     except Exception as e:
         logger.warning('[Feishu] DB sync failed for user %s: %s', user_id, e, exc_info=True)
     finally:
         if db is not None:
+            # Feishu handlers run on long-lived bot/event threads. Release the
+            # thread-local connection back to the shared pool so it isn't
+            # pinned for the thread's whole life (connection-semaphore leak).
             try:
-                pass  # thread-local connection managed by get_thread_db; no manual close
+                from lib.database import DOMAIN_CHAT, close_thread_db
+                close_thread_db(DOMAIN_CHAT)
             except Exception as e:
-                logger.debug('[Feishu] sync_to_db cleanup note: %s', e, exc_info=True)
+                logger.debug('[Feishu] sync_to_db close_thread_db failed: %s', e, exc_info=True)
 
 
 # ── Model / Mode / Project getters ────────────────────────

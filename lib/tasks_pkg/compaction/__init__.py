@@ -165,6 +165,7 @@ from lib.tasks_pkg.compaction._steps import (  # noqa: E402,F401
 )
 import lib.tasks_pkg.compaction._builtin_steps  # noqa: E402,F401
 import lib.tasks_pkg.compaction._methods  # noqa: E402,F401 (experimental steps)
+import lib.tasks_pkg.compaction._faithful_methods  # noqa: E402,F401 (verified OpenCode/Hermes/OpenClaw)
 
 from lib.tasks_pkg.compaction._advanced import advanced_compact  # noqa: E402,F401
 
@@ -183,6 +184,7 @@ from lib.tasks_pkg.compaction._tokens import (  # noqa: E402,F401
     resolve_model_context_limit,
     _human_size,
     _parse_reported_token_count,
+    _parse_context_overflow,
     _PROMPT_TOO_LONG_RE,
     _should_force_compact,
 )

@@ -216,6 +216,7 @@ class SSEAccumulator:
 
         self.content = ''
         self.thinking_text = ''
+        self.thinking_signature = ''
         self.tool_calls_acc: dict = {}
         self.finish_reason = 'stop'
         self.usage: Optional[dict] = None
@@ -462,14 +463,32 @@ class SSEAccumulator:
               or delta.get('reasoning_content')
               or (delta.get('content', '')
                   if delta.get('role') == 'thinking' else ''))
-        if not td and delta.get('reasoning_details'):
-            rd_parts = delta['reasoning_details']
-            if isinstance(rd_parts, list):
-                td = ''.join(d.get('text', '') for d in rd_parts if isinstance(d, dict))
+        # OpenRouter-style ``reasoning_details`` carry both the thinking text
+        # and the opaque Claude signature, in separate chunks:
+        #   [{"type":"thinking","thinking":"…"}]    ← text delta
+        #   [{"type":"thinking","signature":"…"}]   ← signature (once per turn)
+        # The Meituan/sankuai OpenAI-compat gateway uses exactly this shape
+        # for Claude models, so harvest both keys here.
+        rd_parts = delta.get('reasoning_details')
+        if isinstance(rd_parts, list):
+            if not td:
+                td = ''.join(
+                    (d.get('thinking') or d.get('text') or '')
+                    for d in rd_parts if isinstance(d, dict))
+            for d in rd_parts:
+                if isinstance(d, dict) and d.get('signature'):
+                    self.thinking_signature += d['signature']
         if td:
             self.thinking_text += td
             if self.on_thinking:
                 self.on_thinking(td)
+
+        # Opaque thinking-block signature (Anthropic Messages API path).
+        # Surfaced by the AnthropicSSETranslator as a synthetic delta field;
+        # needed to replay the thinking block on a later tool-use turn.
+        _tsig = delta.get('thinking_signature')
+        if _tsig:
+            self.thinking_signature += _tsig
 
         # Content delta
         if 'content' in delta and delta.get('role') != 'thinking':
@@ -624,6 +643,8 @@ class SSEAccumulator:
         msg = {'role': 'assistant'}
         if thinking_text:
             msg['reasoning_content'] = thinking_text
+        if self.thinking_signature:
+            msg['thinking_signature'] = self.thinking_signature
         if tool_calls_acc:
             msg['tool_calls'] = [tool_calls_acc[i] for i in sorted(tool_calls_acc.keys())]
             if content:

@@ -121,14 +121,14 @@ def run():
         'model': 'gpt-4o',
         'usage': {'prompt_tokens': 100, 'completion_tokens': 50},
     }]
-    db.execute(
-        'INSERT OR REPLACE INTO conversations '
-        '(id, user_id, title, messages, created_at, updated_at, settings, msg_count, search_text) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        ('test-conv', 1, 'Test', json.dumps(conv_msgs),
-         jun15_ms, jun15_ms + 1000, '{}', 2, '')
-    )
-    db.commit()
+    from lib.database._core_schema import CONVERSATIONS, upsert
+    upsert(db, CONVERSATIONS, {
+        'id': 'test-conv', 'user_id': 1, 'title': 'Test',
+        'messages': json.dumps(conv_msgs), 'created_at': jun15_ms,
+        'updated_at': jun15_ms + 1000, 'settings': '{}', 'msg_count': 2,
+        'search_text': '',
+    }, insert_cols=['id', 'user_id', 'title', 'messages', 'created_at',
+                    'updated_at', 'settings', 'msg_count', 'search_text'], commit=True)
 
     # Invalidate cache and re-query
     invalidate_day_cost_cache()

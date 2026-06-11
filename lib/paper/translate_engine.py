@@ -10,7 +10,7 @@ import re
 import time
 
 import lib as _lib
-from lib.database import db_execute_with_retry, get_thread_db
+from lib.database import get_thread_db
 from lib.llm_dispatch.api import dispatch_stream
 from lib.log import get_logger
 
@@ -125,13 +125,11 @@ def _run_translate_task(task, paper_text):
 
         try:
             db = get_thread_db()
-            db_execute_with_retry(
-                db,
-                'INSERT OR REPLACE INTO paper_translations '
-                '(paper_hash, lang, text, model, created_at) VALUES (?,?,?,?,?)',
-                (task['paper_hash'], lang, full_text, model or _lib.LLM_MODEL,
-                 int(time.time())),
-            )
+            from lib.database._core_schema import PAPER_TRANSLATIONS, upsert
+            upsert(db, PAPER_TRANSLATIONS, {
+                'paper_hash': task['paper_hash'], 'lang': lang, 'text': full_text,
+                'model': model or _lib.LLM_MODEL, 'created_at': int(time.time()),
+            }, retry=True)
             logger.info('[Paper:Translate] Task %s done — %d chars persisted',
                         task['task_id'], len(full_text))
         except Exception as e:

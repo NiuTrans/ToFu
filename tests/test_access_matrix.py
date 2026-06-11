@@ -120,5 +120,64 @@ class AccessMatrixTest(unittest.TestCase):
         self.assertIn(('mt_key_1', 'modelX'), served)
 
 
+def _dispatcher(providers):
+    from lib.llm_dispatch.dispatcher import LLMDispatcher
+    d = LLMDispatcher()
+    d.slots = []
+    d._build_slots_from_providers(providers)
+    return d
+
+
+class AliasRoutingTest(unittest.TestCase):
+    """Config-declared aliases are first-class routing targets.
+
+    Requesting any member of an alias group must be able to pick a slot
+    belonging to any other member — even when only one key serves the root
+    id and another key serves only an alias.
+    """
+
+    def test_config_alias_routes_to_root_request(self):
+        # Root disabled on key#1, alias kept → requesting the ROOT id must be
+        # able to land on key#1's alias slot.
+        d = _dispatcher(_provider([
+            {'model_id': 'modelX', 'capabilities': ['text'], 'rpm': 40,
+             'aliases': ['mx-mirror'],
+             'key_access': {'1': {'disabled_ids': ['modelX']}}},
+        ]))
+        alias_set = d._alias_set('modelX')
+        self.assertIn('mx-mirror', alias_set)
+        self.assertIn('modelX', alias_set)
+        # Force key#0's root slot into cooldown so the only pick left is the
+        # key#1 alias slot; strict_model must still find it.
+        for s in d.slots:
+            if s.key_name == 'mt_key_0':
+                s.cooldown_until = __import__('time').time() + 1000
+        d._initialized = True
+        chosen = d.pick_slot(prefer_model='modelX', strict_model=True)
+        self.assertIsNotNone(chosen)
+        self.assertEqual(chosen.model, 'mx-mirror')
+        self.assertEqual(chosen.key_name, 'mt_key_1')
+
+    def test_alias_index_merges_with_static_groups(self):
+        # A config entry that names the gateway id 'aws.claude-opus-4.8' must
+        # transitively pull in the static-group members (claude-opus-4-8, the
+        # Bedrock id) AND the config-only alias.
+        d = _dispatcher(_provider([
+            {'model_id': 'aws.claude-opus-4.8', 'capabilities': ['text'],
+             'aliases': ['yuju-claude-opus-4.8-evaDaily']},
+        ]))
+        group = d._alias_set('aws.claude-opus-4.8')
+        self.assertIn('yuju-claude-opus-4.8-evaDaily', group)
+        self.assertIn('claude-opus-4-8', group)          # from static group
+        # And the reverse lookup from the config-only alias resolves the same.
+        self.assertEqual(d._alias_set('yuju-claude-opus-4.8-evaDaily'), group)
+
+    def test_model_without_aliases_resolves_to_itself(self):
+        d = _dispatcher(_provider([
+            {'model_id': 'soloModel', 'capabilities': ['text']},
+        ]))
+        self.assertEqual(d._alias_set('soloModel'), {'soloModel'})
+
+
 if __name__ == '__main__':
     unittest.main()

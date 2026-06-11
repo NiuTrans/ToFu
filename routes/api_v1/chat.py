@@ -28,6 +28,9 @@ from flask import Blueprint, Response
 from lib.api_response import (
     api_bad_request, api_internal_error, api_not_found, api_ok,
 )
+from lib.billing.request_flow import (
+    estimate_prompt_tokens, release_reservation, reserve_for_task, settle_task,
+)
 from lib.idempotency import idempotent_post
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
@@ -119,6 +122,14 @@ def _completion_response(task, *, model: str, requested_id: str = '') -> dict:
         # Closest OpenAI mapping: caller cancelled = no completion.
         finish = 'stop'
     usage = task.get('usage') or {}
+    _agent_in = int(usage.get('input_tokens') or usage.get('prompt_tokens') or 0)
+    _agent_out = int(usage.get('output_tokens') or usage.get('completion_tokens') or 0)
+    # Fold the input-translation round's tokens into the request totals so the
+    # translate cost is reported (and billed) rather than hidden. Surface the
+    # breakdown separately under ``translation_usage`` for transparency.
+    _tu = task.get('_translate_usage') or {}
+    _tr_in = int(_tu.get('input_tokens') or _tu.get('prompt_tokens') or 0)
+    _tr_out = int(_tu.get('output_tokens') or _tu.get('completion_tokens') or 0)
     body = {
         'id': requested_id or f'chatcmpl-{uuid.uuid4().hex[:24]}',
         'object': 'chat.completion',
@@ -130,17 +141,20 @@ def _completion_response(task, *, model: str, requested_id: str = '') -> dict:
             'finish_reason': finish,
         }],
         'usage': {
-            'prompt_tokens': int(usage.get('input_tokens') or
-                                  usage.get('prompt_tokens') or 0),
-            'completion_tokens': int(usage.get('output_tokens') or
-                                      usage.get('completion_tokens') or 0),
-            'total_tokens': int(usage.get('total_tokens') or
-                                 (int(usage.get('input_tokens') or 0) +
-                                  int(usage.get('output_tokens') or 0))),
+            'prompt_tokens': _agent_in + _tr_in,
+            'completion_tokens': _agent_out + _tr_out,
+            'total_tokens': _agent_in + _tr_in + _agent_out + _tr_out,
         },
         # Tofu-specific:
         'task_id': task.get('id'),
     }
+    if _tr_in or _tr_out:
+        body['translation_usage'] = {
+            'prompt_tokens': _tr_in,
+            'completion_tokens': _tr_out,
+            'total_tokens': _tr_in + _tr_out,
+            'model': (_tu.get('_dispatch') or {}).get('model') or _tu.get('model') or '',
+        }
     if task.get('error'):
         body['error'] = task['error']
     if raw_finish != finish:
@@ -156,40 +170,12 @@ def _sse_event(payload) -> str:
 def _settle_streaming_billing(task, *, user_id: str, model: str) -> None:
     """Post-stream billing finalize. Idempotent on ``ref_id=task_id``.
 
-    Stream-mode never enters the request handler's ``settle`` block,
-    so we run an equivalent path here once the SSE generator terminates.
-    Mirrors the non-stream choreography exactly so reserve/settle
-    semantics stay identical across response modes.
+    Stream-mode never enters the request handler's ``settle`` block, so
+    we run the shared settle path here once the SSE generator
+    terminates. Thin wrapper over :func:`lib.billing.request_flow.settle_task`
+    so stream and block modes share identical reserve/settle semantics.
     """
-    if not user_id:
-        return
-    try:
-        from lib.billing import (
-            compute_request_cost, debit, settle, InsufficientFunds,
-        )
-        usage = task.get('usage') or {}
-        cost = compute_request_cost(
-            model,
-            input_tokens=int(usage.get('input_tokens') or
-                              usage.get('prompt_tokens') or 0),
-            output_tokens=int(usage.get('output_tokens') or
-                               usage.get('completion_tokens') or 0),
-        )
-        reserved = int(task.get('_billing_reservation_micro') or 0)
-        if reserved > 0:
-            settle(user_id, reserved_micro=reserved,
-                   actual_micro=cost.micro, ref_id=task['id'],
-                   note=f'settle stream {model}')
-        elif cost.micro > 0:
-            try:
-                debit(user_id, cost.micro, kind='debit', ref_type='task',
-                      ref_id=task['id'],
-                      note=f'stream completion ({model})',
-                      allow_negative=True)
-            except InsufficientFunds as e:
-                logger.warning('[Billing] stream debit failed: %s', e)
-    except Exception as e:
-        logger.error('[Billing] stream settle error: %s', e, exc_info=True)
+    settle_task(task, user_id=user_id, model=model)
 
 
 def _stream_generator(task, model: str, requested_id: str,
@@ -400,10 +386,43 @@ def chat_completions():
               model=cfg.get('model', '?'),
               n_messages=len(messages), stream=stream)
 
+    # ── Auto-translate the user's input to English (any source language) ──
+    # English is the language the model performs best in. When the caller
+    # enables ``config.autoTranslate`` (optionally pinning the source language
+    # via ``config.translateSourceLang``), translate the LAST user message to
+    # English before the agent sees it. The translation's own token usage is
+    # captured and folded into the task usage below so the translate cost is
+    # billed/reported, not hidden.
+    _translate_usage = None
+    _translate_original = None
+    if cfg.get('autoTranslate'):
+        from lib.chat.turn_builder import translate_user_text_to_english
+        for _m in reversed(messages):
+            if _m.get('role') == 'user' and isinstance(_m.get('content'), str):
+                _translated, _orig, _tu, _fail = translate_user_text_to_english(
+                    _m['content'], cfg)
+                if _orig:
+                    _m['content'] = _translated
+                    _m['originalContent'] = _orig
+                    _translate_usage = _tu
+                    _translate_original = _orig
+                    audit_log('api_chat_input_translated',
+                              key_id=(auth.key_id if auth else ''),
+                              src_lang=cfg.get('translateSourceLang', '') or 'auto',
+                              orig_chars=len(_orig), en_chars=len(_translated))
+                elif _fail:
+                    logger.warning('[api_v1.chat] input translate failed (%s); '
+                                   'sending original text', _fail)
+                break
+
     from lib.tasks_pkg import create_task, spawn_task
     task = create_task(conversation_id, messages, cfg)
     task['_inline_messages'] = True
     task['_api_v1'] = True
+    if _translate_usage is not None:
+        # Stash the translate usage so the post-terminal usage-merge folds
+        # its tokens into the request total (cost accounting).
+        task['_translate_usage'] = _translate_usage
     if auth and auth.key_id:
         task['_api_key_id'] = auth.key_id
 
@@ -414,36 +433,19 @@ def chat_completions():
     # is held as a ledger entry under ``ref_id=task_id``; settle()
     # refunds the gap post-flight. Personal/private/open installs
     # (no ``user_id``) skip this entirely.
+    billing_user_id = (auth.user_id
+                       if auth and getattr(auth, 'user_id', '') else '')
     reservation_micro = 0
-    if auth and getattr(auth, 'user_id', ''):
+    if billing_user_id:
+        from lib.billing import InsufficientFunds
         try:
-            from lib.billing import (
-                estimate_request_cost, reserve, InsufficientFunds,
-            )
-            prompt_chars = 0
-            for m in messages:
-                c = m.get('content') or ''
-                if isinstance(c, str):
-                    prompt_chars += len(c)
-                elif isinstance(c, list):
-                    for part in c:
-                        if (isinstance(part, dict)
-                                and part.get('type') == 'text'):
-                            prompt_chars += len(part.get('text') or '')
-            est_prompt_tokens = max(1, prompt_chars // 4)
             est_completion = int(cfg.get('maxTokens')
-                                  or body.get('max_tokens')
-                                  or 1024)
-            reservation_micro = estimate_request_cost(
-                cfg.get('model', '') or '',
-                prompt_tokens=est_prompt_tokens,
-                max_completion_tokens=est_completion,
-                headroom=1.5)
-            if reservation_micro > 0:
-                reserve(auth.user_id, reservation_micro,
-                        ref_id=task['id'],
-                        note=f'reserve {cfg.get("model", "?")}')
-                task['_billing_reservation_micro'] = reservation_micro
+                                  or body.get('max_tokens') or 1024)
+            reservation_micro = reserve_for_task(
+                task, user_id=billing_user_id,
+                model=cfg.get('model', '') or '',
+                prompt_tokens=estimate_prompt_tokens(messages),
+                max_completion_tokens=est_completion)
         except InsufficientFunds as e:
             from lib.api_response import api_error
             return api_error(
@@ -454,10 +456,6 @@ def chat_completions():
                 error_kind='insufficient_funds',
                 balance_micro=e.balance_micro,
                 needed_micro=e.needed_micro)
-        except Exception as e:
-            logger.error('[Billing] pre-flight reserve failed: %s',
-                         e, exc_info=True)
-            reservation_micro = 0
 
     try:
         spawn_task(task)
@@ -467,15 +465,8 @@ def chat_completions():
         # the user isn't waiting 30 min for the janitor to recover the
         # funds. Best-effort: if the release itself fails, the janitor
         # is the safety net.
-        if reservation_micro > 0 and auth and getattr(auth, 'user_id', ''):
-            try:
-                from lib.billing import reserve_release
-                reserve_release(auth.user_id, reservation_micro,
-                                ref_id=task['id'],
-                                note='spawn_task failed; reserve released')
-            except Exception as _release_err:
-                logger.error('[Billing] release-on-spawn-fail: %s',
-                             _release_err, exc_info=True)
+        release_reservation(task, user_id=billing_user_id,
+                            reservation_micro=reservation_micro)
         if _byo_handle is not None:
             from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
             dispose_ephemeral_slot(_byo_handle)
@@ -511,9 +502,7 @@ def chat_completions():
     if stream:
         gen = _stream_generator(task, cfg.get('model', model or '?'),
                                  requested_id,
-                                 billing_user_id=(
-                                     auth.user_id if auth and
-                                     getattr(auth, 'user_id', '') else ''))
+                                 billing_user_id=billing_user_id)
         return Response(gen, mimetype='text/event-stream',
                          headers={
                              'Content-Type': 'text/event-stream; charset=utf-8',
@@ -549,49 +538,13 @@ def chat_completions():
     # zero cost), fall back to a direct ``debit()`` so we never
     # double-charge. Personal/private/open installs short-circuit
     # because ``user_id`` is empty.
-    try:
-        if auth and getattr(auth, 'user_id', ''):
-            from lib.billing import (
-                compute_request_cost, debit, settle, InsufficientFunds,
-            )
-            usage = body_out.get('usage') or {}
-            cost = compute_request_cost(
-                cfg.get('model', '') or '',
-                input_tokens=int(usage.get('prompt_tokens') or 0),
-                output_tokens=int(usage.get('completion_tokens') or 0),
-            )
-            reserved = int(task.get('_billing_reservation_micro') or 0)
-            if reserved > 0:
-                snap = settle(
-                    auth.user_id,
-                    reserved_micro=reserved,
-                    actual_micro=cost.micro,
-                    ref_id=task['id'],
-                    note=f'settle {cfg.get("model", "?")}')
-                body_out['billing'] = {
-                    'cost_micro': cost.micro,
-                    'reserved_micro': reserved,
-                    'balance_micro': snap.balance_micro,
-                    'matched_model': cost.matched_model,
-                }
-            elif cost.micro > 0:
-                try:
-                    snap = debit(
-                        auth.user_id, cost.micro,
-                        kind='debit', ref_type='task',
-                        ref_id=task['id'],
-                        note=f'chat completion ({cfg.get("model", "?")})',
-                        allow_negative=True,  # never reject after work
-                    )
-                    body_out['billing'] = {
-                        'cost_micro': cost.micro,
-                        'balance_micro': snap.balance_micro,
-                        'matched_model': cost.matched_model,
-                    }
-                except InsufficientFunds as e:
-                    logger.warning('[Billing] debit failed: %s', e)
-    except Exception as e:
-        logger.error('[Billing] settle/debit error: %s', e, exc_info=True)
+    # ``settle_task`` reads task['usage'] (input/output OR prompt/completion
+    # spellings), settles the reservation or debits directly, and is a
+    # no-op when billing_user_id is empty.
+    billing = settle_task(task, user_id=billing_user_id,
+                          model=cfg.get('model', '') or '')
+    if billing:
+        body_out['billing'] = billing
     return api_ok(body_out)
 
 

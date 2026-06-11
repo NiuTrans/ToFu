@@ -249,6 +249,7 @@ async function syncConversationToServer(conv, { allowTruncate = false } = {}) {
       humanGuidanceEnabled: conv.humanGuidanceEnabled || false,
       projectPath: conv.projectPath,
       projectPaths: conv.projectPaths || [],
+      readOnlyPaths: conv.readOnlyPaths || [],
       autoTranslate: conv.autoTranslate,
       pinned: conv.pinned || false,
       pinnedAt: conv.pinnedAt || 0,
@@ -360,6 +361,8 @@ function _applySettingsToConv(conv, settings) {
     conv.projectPath = settings.projectPath;
   if (settings.projectPaths !== undefined)
     conv.projectPaths = settings.projectPaths;
+  if (settings.readOnlyPaths !== undefined)
+    conv.readOnlyPaths = settings.readOnlyPaths;
   if (settings.autoTranslate !== undefined)
     conv.autoTranslate = settings.autoTranslate;
   if (settings.pinned !== undefined) conv.pinned = settings.pinned;

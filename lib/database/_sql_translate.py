@@ -41,8 +41,11 @@ _RE_CHANGES = re.compile(
     r"SELECT\s+changes\s*\(\s*\)",
     re.IGNORECASE
 )
+# Matches json_extract(col, '$.<path>') where <path> may be a single key,
+# a nested dotted path (a.b.c), or include array indices (a[0].b). The full
+# path body after '$.' / '$' is captured and translated to a PG jsonb path.
 _RE_JSON_EXTRACT = re.compile(
-    r"json_extract\s*\(\s*(\w+)\s*,\s*'\$\.(\w+)'\s*\)",
+    r"json_extract\s*\(\s*(\w+)\s*,\s*'\$\.?([^']+)'\s*\)",
     re.IGNORECASE
 )
 _RE_PRAGMA_TABLE_INFO = re.compile(
@@ -58,11 +61,17 @@ def _get_pk_columns(table_name):
     to emulate INSERT OR REPLACE behavior.
     """
     _PK_MAP = {
-        'conversations':              ['id', 'user_id'],
-        'task_results':               ['task_id'],
-        'task_events':                ['task_id', 'event_id'],
+        # conversations: MIGRATED to lib/database/_core_schema.upsert()
+        # (queries-on-Core) — all 7 INSERT OR REPLACE call-sites converted.
+        # task_results: MIGRATED to lib/database/_core_schema.upsert()
+        # (queries-on-Core) — no INSERT OR REPLACE call-sites remain.
+        # task_events: MIGRATED to lib/database/_core_schema.upsert() (DO NOTHING,
+        # queries-on-Core) — no INSERT OR REPLACE/IGNORE call-sites remain.
         'users':                      ['id'],
-        'pricing_cache':              ['key'],
+        'schema_meta':                ['key'],
+        # pricing_cache: MIGRATED to lib/database/_core_schema.upsert() — no
+        # INSERT OR REPLACE call-sites remain, so no translation entry needed.
+        # (First table on the queries-on-Core track; see the proof-of-concept.)
         'recent_projects':            ['path'],
         'trading_price_cache':        ['symbol'],
         'trading_config':             ['key'],
@@ -79,14 +88,14 @@ def _get_pk_columns(table_name):
         'proactive_poll_log':         ['id'],
         # Error tracking
         'error_resolutions':          ['fingerprint'],
-        # Paper reports
-        'paper_reports':              ['paper_hash', 'lang'],
-        # Paper translations (Babel-mode whole-paper translations)
-        'paper_translations':         ['paper_hash', 'lang'],
-        # Paper library (server-side bookshelf)
-        'paper_library':              ['id', 'user_id'],
-        # Daily cost cache (per-day aggregate of conversation usage costs)
-        'daily_cost_cache':           ['user_id', 'date'],
+        # paper_reports / paper_translations / paper_library: MIGRATED to
+        # lib/database/_core_schema.upsert() (queries-on-Core) — no INSERT OR
+        # REPLACE call-sites remain, so no translation entries needed.
+        # daily_cost_cache: MIGRATED to lib/database/_core_schema.upsert()
+        # (composite-PK queries-on-Core conversion) — no INSERT OR REPLACE
+        # call-sites remain, so no translation entry needed.
+        # Trading autopilot strategy-pair compatibility scores
+        'trading_strategy_compatibility': ['pair_key'],
     }
     return _PK_MAP.get(table_name)
 
@@ -158,11 +167,17 @@ def _translate_sql_uncached(sql):
                 translated = stripped.replace(m.group(0), replacement, 1)
                 translated += f' ON CONFLICT ({pk_str}) DO NOTHING'
         else:
-            # Unknown table — fall back to DO NOTHING
-            replacement = f'INSERT INTO {table_name} ({columns_str}) '
-            translated = stripped.replace(m.group(0), replacement, 1)
-            translated += ' ON CONFLICT DO NOTHING'
-            logger.debug('[DB] INSERT OR REPLACE for unknown table %s — using DO NOTHING', table_name)
+            # Unknown table — we cannot synthesize a correct ON CONFLICT target.
+            # Falling back to DO NOTHING would SILENTLY DROP the write (the row
+            # is neither inserted on conflict nor updated). That is a data-loss
+            # bug, so fail loudly instead: register the table's PK in _PK_MAP.
+            logger.error('[DB] INSERT OR REPLACE into unmapped table %r — no PK '
+                         'known, cannot translate to a safe upsert. Add it to '
+                         '_PK_MAP in lib/database/_sql_translate.py.', table_name)
+            raise ValueError(
+                f'INSERT OR REPLACE into table {table_name!r} not supported on '
+                f'PostgreSQL: no primary key registered in _PK_MAP. Add an entry '
+                f'so a correct ON CONFLICT target can be generated.')
 
         stripped = translated
 
@@ -188,8 +203,10 @@ def _translate_sql_uncached(sql):
     # json_array_length → jsonb_array_length
     stripped = _RE_JSON_ARRAY_LENGTH.sub('jsonb_array_length', stripped)
 
-    # json_extract(col, '$.key') → col::jsonb->>'key'
-    stripped = _RE_JSON_EXTRACT.sub(r"\1::jsonb->>'\2'", stripped)
+    # json_extract(col, '$.<path>') → PG jsonb accessor.
+    #   single key      $.name      → col::jsonb->>'name'
+    #   nested / array   $.a.b, $[0] → col::jsonb#>>'{a,b}' / '{0}'
+    stripped = _RE_JSON_EXTRACT.sub(_json_extract_repl, stripped)
 
     # INTEGER PRIMARY KEY AUTOINCREMENT → SERIAL PRIMARY KEY
     stripped = re.sub(
@@ -208,8 +225,52 @@ def _translate_sql_uncached(sql):
     return stripped, False
 
 
+def _json_extract_repl(m):
+    """Translate a matched ``json_extract(col, '$.<path>')`` to a PG accessor.
+
+    Single top-level key  → ``col::jsonb->>'key'`` (text extraction).
+    Nested / array path    → ``col::jsonb#>>'{a,b,0}'`` (text at path).
+
+    The SQLite path syntax ``$.a.b`` / ``$[0]`` / ``$.a[0].b`` is parsed into
+    path segments; numeric ``[i]`` indices become bare integers in the PG
+    path array (jsonb path arrays index arrays positionally).
+    """
+    col = m.group(1)
+    path_body = m.group(2)
+    # Split "a.b[0].c" → ['a', 'b', '0', 'c']
+    segments = []
+    for dot_part in path_body.split('.'):
+        if not dot_part:
+            continue
+        # Peel any [i] array indices off this dotted segment.
+        idx_split = re.split(r'\[(\d+)\]', dot_part)
+        for tok in idx_split:
+            tok = tok.strip()
+            if tok:
+                segments.append(tok)
+    if len(segments) <= 1:
+        key = segments[0] if segments else path_body
+        return f"{col}::jsonb->>'{key}'"
+    pg_path = ','.join(segments)
+    return f"{col}::jsonb#>>'{{{pg_path}}}'"
+
+
 def _translate_placeholders(sql):
-    """Replace ? with %s, avoiding replacements inside string literals."""
+    """Replace ``?`` with ``%s`` for psycopg2, avoiding string literals.
+
+    psycopg2 runs client-side ``%``-interpolation on the query string WHENEVER
+    parameters are bound. A literal ``%`` in the SQL (e.g. a ``LIKE '%foo%'``
+    pattern) is then mis-read as a format spec, raising ``IndexError: tuple
+    index out of range`` or, when the bytes happen to slip through, a
+    PostgreSQL ``near "%": syntax error``. To stay correct we MUST double every
+    literal ``%`` → ``%%`` so psycopg2 un-escapes it back to a single ``%``.
+
+    This doubling only applies when the statement actually contains a ``?``
+    placeholder: a paramless statement is sent verbatim (psycopg2 does no
+    interpolation without params), so its ``%`` must be left untouched —
+    doubling there would corrupt the literal.
+    """
+    has_placeholder = _has_qmark_placeholder(sql)
     result = []
     in_string = False
     i = 0
@@ -227,7 +288,29 @@ def _translate_placeholders(sql):
             result.append(ch)
         elif ch == '?' and not in_string:
             result.append('%s')
+        elif ch == '%' and has_placeholder:
+            # Escape literal % (inside OR outside string literals) so psycopg2's
+            # interpolation restores it. The %s we emit for ? is added above and
+            # never reaches this branch, so it is not double-escaped.
+            result.append('%%')
         else:
             result.append(ch)
         i += 1
     return ''.join(result)
+
+
+def _has_qmark_placeholder(sql):
+    """True if *sql* contains a ``?`` placeholder outside any string literal."""
+    in_string = False
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if ch == "'":
+            if in_string and i + 1 < len(sql) and sql[i + 1] == "'":
+                i += 2
+                continue
+            in_string = not in_string
+        elif ch == '?' and not in_string:
+            return True
+        i += 1
+    return False

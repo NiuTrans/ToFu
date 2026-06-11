@@ -8,10 +8,25 @@ Covers:
 * private hosts trigger no_proxy registration
 """
 
+import os
 import unittest
 
 
 class EphemeralSlotTest(unittest.TestCase):
+
+    def setUp(self):
+        # The lifecycle tests mint slots to fake private IPs that aren't
+        # listening. The mint-time reachability probe (added 2026-06) would
+        # reject those, so disable it here — these tests exercise pool
+        # mechanics, not reachability. A dedicated test below re-enables it.
+        self._prev_preflight = os.environ.get('TOFU_EPHEMERAL_PREFLIGHT')
+        os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = '0'
+
+    def tearDown(self):
+        if self._prev_preflight is None:
+            os.environ.pop('TOFU_EPHEMERAL_PREFLIGHT', None)
+        else:
+            os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = self._prev_preflight
 
     def _initial_count(self):
         from lib.llm_dispatch.factory import get_dispatcher
@@ -98,6 +113,25 @@ class EphemeralSlotTest(unittest.TestCase):
             self.assertIn('10.0.0.99', proxy._registered_hosts)
         finally:
             dispose_ephemeral_slot(h)
+
+    def test_preflight_rejects_unreachable_self_hosted(self):
+        # With the probe ENABLED (override setUp), a dead self-hosted /
+        # raw-IP endpoint must be rejected at mint with a ValueError so
+        # callers surface a clean 400 instead of stalling on the first
+        # request's connect timeout.
+        os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = '1'
+        os.environ['TOFU_EPHEMERAL_PREFLIGHT_TIMEOUT'] = '1'
+        from lib.llm_dispatch.ephemeral import (
+            count_ephemeral_slots, mint_ephemeral_slot,
+        )
+        n_before = count_ephemeral_slots()
+        # 127.0.0.1:1 — loopback, port 1 is never listening → fast refuse.
+        with self.assertRaises(ValueError):
+            mint_ephemeral_slot(
+                base_url='http://127.0.0.1:1/v1', api_key='',
+                model_id='m1', owner='preflight-test')
+        # No slot should have leaked into the pool on rejection.
+        self.assertEqual(count_ephemeral_slots(), n_before)
 
 
 if __name__ == '__main__':

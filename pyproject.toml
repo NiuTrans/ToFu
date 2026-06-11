@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tofu"
-version = "0.5.1"
+version = "0.11.0"
 description = "Tofu (豆腐) — Self-hosted AI assistant with Flask backend and vanilla JS frontend"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,6 +16,12 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "ruff",
+]
+# Optional trading subsystem — extracted into its own package. `pip install
+# tofu[trading]` pulls it in; it self-mounts via the tofu.blueprints /
+# tofu.schema / tofu.flags / tofu.startup entry-point groups.
+trading = [
+    "tofu-trading>=0.1,<0.2",
 ]
 
 [tool.setuptools.dynamic]
@@ -41,4 +47,5 @@ markers = [
     "api: API integration tests (requires PostgreSQL)",
     "visual: Visual E2E tests (requires live server + Chromium)",
     "slow: Long-running tests (opt-in)",
+    "live_llm: Hits the real LLM API (costs money, needs creds). Manual-only; gated by TOFU_PARITY_LIVE=1.",
 ]

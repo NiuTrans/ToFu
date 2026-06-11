@@ -37,6 +37,8 @@ __all__ = [
     'get_roots', 'get_root_path',
     # Per-conversation root registry (2026-05-05)
     'set_conv_roots', 'clear_conv_state', 'get_conv_roots',
+    # Read-only roots
+    'is_readonly_path', 'ReadOnlyRootError',
     # Tools
     'tool_list_dir', 'tool_read_files', 'tool_grep', 'tool_grep_batch',
     'tool_find_files', 'tool_find_files_batch',
@@ -72,7 +74,9 @@ from lib.project_mod.config import (
     _make_root_state,
     _roots,
     _state,
+    ReadOnlyRootError,
     clear_conv_state,
+    is_readonly_path,
     clear_recent_projects,
     get_conv_roots,
     get_project_path,

@@ -7,9 +7,9 @@ import json
 from typing import Any
 
 import lib as _lib  # module ref for hot-reload
-from lib.fetch import extract_urls_from_text, fetch_urls
-from lib.fetch.content_filter import filter_web_contents_batch
 from lib.log import get_logger
+from tofu_search import extract_urls_from_text, fetch_urls
+from tofu_search.fetch.content_filter import filter_web_contents_batch
 from lib.agent_core.events import EventType, build_event
 from lib.protocols import FetchService, ToolHandler
 from lib.swarm.tools import SWARM_TOOL_NAMES  # noqa: F401 — re-exported for tool_dispatch/tool_display
@@ -291,6 +291,7 @@ def _finalize_tool_round(
     event = build_event(
         EventType.TOOL_RESULT,
         roundNum=rn,
+        toolCallId=round_entry.get('toolCallId', ''),
         query=query_override or round_entry['query'],
         results=results,
     )
@@ -397,9 +398,30 @@ def _resolve_content_ref(
             start = content_ref.get('start')
             end = content_ref.get('end')
             if start is not None or end is not None:
-                content = content[start:end]
+                total = len(content)
+
+                def _coerce_idx(v, default):
+                    if v is None:
+                        return default
+                    try:
+                        i = int(v)
+                    except (ValueError, TypeError):
+                        logger.warning('[content_ref] Ignoring non-integer slice index %r '
+                                       'for tool_round=%d', v, round_num)
+                        return default
+                    if i < 0:  # clamp negative indices to 0 (no Python-style wraparound)
+                        i = 0
+                    return min(i, total)
+
+                s = _coerce_idx(start, 0)
+                e = _coerce_idx(end, total)
+                if e < s:
+                    logger.warning('[content_ref] tool_round=%d slice end (%s) < start (%s) — '
+                                   'returning empty slice', round_num, end, start)
+                    e = s
+                content = content[s:e]
                 logger.info('[content_ref] Resolved tool_round=%d with slice [%s:%s] → %d chars',
-                            round_num, start, end, len(content))
+                            round_num, s, e, len(content))
             else:
                 logger.info('[content_ref] Resolved tool_round=%d → %d chars (full content)',
                             round_num, len(content))
@@ -484,7 +506,7 @@ def _prefetch_user_urls(
     fetch_service : FetchService, optional
         Optional :class:`~lib.protocols.FetchService` for dependency injection.
         When provided, ``fetch_service.fetch_urls()`` is used instead of the
-        concrete ``lib.fetch.fetch_urls`` import.  Pass a mock for testing.
+        concrete ``tofu_search.fetch_urls`` import.  Pass a mock for testing.
         ``None`` (default) falls back to the concrete import.
 
     Returns

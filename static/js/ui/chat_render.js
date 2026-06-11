@@ -52,8 +52,8 @@ function _msgFingerprint(msg) {
 
 /* ── Tool-round freshness gradient ──
  *
- * The server compaction cliff (lib/tasks_pkg/compaction.py:MICRO_HOT_TAIL=60)
- * is correct for performance (most runs <60 tool calls) but invisible to
+ * The server compaction cliff (lib/tasks_pkg/compaction.py:MICRO_HOT_TAIL=40)
+ * is correct for performance (most runs <40 tool calls) but invisible to
  * the user.  A binary hot/cold cutoff also reads as "broken UI" in the
  * common case where everything is hot.
  *
@@ -293,36 +293,22 @@ function renderChat(conv, forceScroll) {
   _forceScrollToBottom(container, true);
 }
 
-/* ★ Format relative time for finished messages */
-function _fmtRelativeTime(ts) {
-  const now = Date.now();
-  const d = typeof ts === 'number' ? ts : new Date(ts).getTime();
-  if (isNaN(d)) return '';
-  const diffMs = now - d;
-  if (diffMs < 0 || diffMs < 30000) return ''; // future or <30s — skip
-  const s = Math.floor(diffMs / 1000);
-  if (s < 60) return `${s}${t('time.secondsAgo')}`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}${t('time.minutesAgo')}`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}${t('time.hoursAgo')}`;
-  const days = Math.floor(h / 24);
-  if (days < 30) return `${days}${t('time.daysAgo')}`;
-  return '';
+/* ★ Format precise date + time for finished messages */
+function _fmtAbsoluteDateTime(ts) {
+  const d = typeof ts === 'number' ? new Date(ts) : new Date(ts);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleString([], {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 function renderMessage(msg, idx) {
   const isUser = msg.role === "user" || msg.role === "optimizer";  // optimizer = endpoint review, render as user
-  const time = msg.timestamp
-    ? new Date(msg.timestamp).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      })
-    : "";
-  /* ★ Relative time for assistant messages — show "xx前" to indicate freshness */
-  let relTime = "";
-  if (!isUser && msg.timestamp) {
-    relTime = _fmtRelativeTime(msg.timestamp);
-  }
+  /* ★ Precise date + time for all messages */
+  const messageTime = msg.timestamp ? _fmtAbsoluteDateTime(msg.timestamp) : "";
   let body = "";
   if (msg.images?.length > 0) {
     const srcMap = { clip_render: "CLIP", vector_clip: "VEC", page_render: "SCAN", embedded: "RAW", pixmap_fallback: "PIX", pymupdf4llm: "FIG", figure_page_render: "FIG" };
@@ -397,6 +383,16 @@ function renderMessage(msg, idx) {
   if (msg._proactive) {
     const taskName = msg._proactiveTaskId ? `Task ${(msg._proactiveTaskId || "").slice(0, 8)}` : "Proactive Agent";
     body += `<div class="proactive-banner"><span class="pb-text"><span class="pb-name">${escapeHtml(taskName)}</span> — scheduled execution</span></div>`;
+  }
+  // ── Swarm auto-continue banner ──
+  // This assistant turn was started by the backend (not the user) to deliver
+  // sub-agent results that finished after the spawning turn ended. See
+  // lib/swarm/integration.py::_start_autocontinue_turn.
+  if (msg._swarmAutoContinue) {
+    const _acLabel = (typeof t === "function" && t("swarm.autoContinue") !== "swarm.autoContinue")
+      ? t("swarm.autoContinue")
+      : "Continued automatically after sub-agents finished";
+    body += `<div class="proactive-banner"><span class="pb-text">↻ <span class="pb-name">${escapeHtml(_acLabel)}</span></span></div>`;
   }
   // ── MCP login-hint + Memory Prefetch indicator (finished message) ──
   if (!isUser && msg._mcpLoginHint) {
@@ -665,6 +661,30 @@ function renderMessage(msg, idx) {
     const _userTrans = stripNoTranslateTags(msg.content || '');
     body += `<div class="bilingual-block bilingual-translated"><div class="bilingual-header" onclick="if(event.target.closest('.bilingual-copy-btn'))return;this.parentElement.classList.toggle('expanded')"><span class="bilingual-label"><span class="bilingual-type">原文</span><span class="bilingual-sep">/</span><span class="bilingual-type active">译文</span>${_tmUser}</span><button class="bilingual-copy-btn" onclick="event.stopPropagation();copyBilingualOriginal(this,'user',${idx})" title="Copy translation"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button><span class="bilingual-toggle">▼</span></div><div class="bilingual-body"><div class="md-content user-content">${escapeHtml(_userTrans)}</div></div></div>`;
   }
+  // ── Auto-translate failed notice (user messages) ──
+  // The send-path auto-translate was attempted but failed / timed out, so the
+  // ORIGINAL (untranslated) text was sent to the model. We surface a quiet,
+  // non-blocking notice instead of silently dropping the translation — click
+  // to retranslate just this message.
+  if (isUser && !msg._isEndpointReview && !msg.originalContent && msg._translateFailed) {
+    const _failKind = msg._translateFailed === 'timed_out' ? 'timed_out' : 'failed';
+    const _failKey = `translate.sendFailed.${_failKind}`;
+    const _failMsg = (typeof t === 'function' && t(_failKey) !== _failKey)
+      ? t(_failKey)
+      : (_failKind === 'timed_out'
+          ? 'Auto-translate timed out — original text was sent'
+          : 'Auto-translate failed — original text was sent');
+    const _retryTip = (typeof t === 'function' && t('translate.sendFailed.retry') !== 'translate.sendFailed.retry')
+      ? t('translate.sendFailed.retry') : 'Retry';
+    // Retry = re-run the turn: regenerateFromUser re-translates the original
+    // text AND regenerates the response (translateMessage rejects plain user
+    // messages and wouldn't change what the model already received).
+    body += `<div class="translate-failed-notice" onclick="event.stopPropagation();regenerateFromUser(${idx})" title="${escapeHtml(_failMsg)}">`
+      + `<svg class="tfn-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`
+      + `<span class="tfn-text">${escapeHtml(_failMsg)}</span>`
+      + `<span class="tfn-retry">${escapeHtml(_retryTip)}</span>`
+      + `</div>`;
+  }
   if (!isUser && msg.translatedContent && msg._showingTranslation !== false) {
     const _tmAsst = msg._translateModel ? `<span class="bilingual-model" title="${escapeHtml(msg._translateModel)}">${escapeHtml(msg._translateModel)}</span>` : '';
     // Defense in depth — strip any leaked <notranslate>/<nt> tags.
@@ -810,9 +830,9 @@ function renderMessage(msg, idx) {
     : msg._isVirtualUser ? "Autopilot"
     : "You";
 
-  /* relTime is a formatter output (digits + localized unit) — escape it
-   * by default via safeHtml (it carries no markup). */
-  const relTimeHtml = relTime ? safeHtml`<span class="message-reltime">${relTime}</span>` : '';
+  /* messageTime is a formatter output (digits + localized separators) —
+   * escape it by default via safeHtml (it carries no markup). */
+  const messageTimeHtml = messageTime ? safeHtml`<span class="message-time">${messageTime}</span>` : '';
   const mfpAttr = typeof idx === "number" ? raw(` data-mfp="${_msgFingerprint(msg)}"`) : "";
   const epWorkerCls = (!isUser && !msg._isEndpointPlanner && !msg._isEndpointReview) ? ' ep-worker-msg' : '';
   const epPlannerCls = msg._isEndpointPlanner ? ' ep-planner-msg' : '';
@@ -823,5 +843,5 @@ function renderMessage(msg, idx) {
    * SVG, badgeHtml, body, branchHtml, actionBtns, the class/attr
    * fragments) is already-trusted HTML, marked raw(). */
   const _classAttr = `${isUser ? ' user-msg' : ''}${msg._isEndpointReview ? ' ep-critic-msg' : ''}${epPlannerCls}${epWorkerCls}${vuCls}`;
-  return String(safeHtml`<div class="message${raw(_classAttr)}"${raw(idAttr)}${raw(msgIdAttr)}${raw(mfpAttr)}><div class="message-avatar">${raw(isUser ? userAvatar : avatarContent)}</div><div class="message-content"><div class="message-header"><span class="message-role">${isUser ? userLabel : roleName}</span>${raw(badgeHtml)}<span class="message-time">${time}</span>${raw(relTimeHtml)}</div><div class="message-body">${raw(body)}</div>${raw(branchHtml)}${raw(actionBtns)}</div></div>`);
+  return String(safeHtml`<div class="message${raw(_classAttr)}"${raw(idAttr)}${raw(msgIdAttr)}${raw(mfpAttr)}><div class="message-avatar">${raw(isUser ? userAvatar : avatarContent)}</div><div class="message-content"><div class="message-header"><span class="message-role">${isUser ? userLabel : roleName}</span>${raw(badgeHtml)}${raw(messageTimeHtml)}</div><div class="message-body">${raw(body)}</div>${raw(branchHtml)}${raw(actionBtns)}</div></div>`);
 }

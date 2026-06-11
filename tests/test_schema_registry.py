@@ -1,0 +1,71 @@
+"""tests/test_schema_registry.py — unit tests for lib/database/schema_registry.py.
+
+Pure in-memory: no DB connection, no init_db(). Verifies the registry's
+contract — optional-domain registration, the active_domains() cache key,
+run_registered ordering, and idempotent register/unregister.
+"""
+
+import pytest
+
+from lib.database import schema_registry as sr
+
+
+@pytest.fixture(autouse=True)
+def _clean_registry():
+    """Snapshot + restore the module-global registry around each test."""
+    saved = dict(sr._INITIALIZERS)
+    sr._INITIALIZERS.clear()
+    yield
+    sr._INITIALIZERS.clear()
+    sr._INITIALIZERS.update(saved)
+
+
+def test_register_and_active_domains_sorted():
+    sr.register_schema_initializer('trading', lambda conn: None)
+    sr.register_schema_initializer('alpha', lambda conn: None)
+    assert sr.active_domains() == ['alpha', 'trading']
+
+
+def test_duplicate_ignored_without_replace():
+    first = lambda conn: None
+    second = lambda conn: None
+    sr.register_schema_initializer('trading', first)
+    sr.register_schema_initializer('trading', second)  # ignored
+    assert sr._INITIALIZERS['trading'] is first
+    sr.register_schema_initializer('trading', second, replace=True)
+    assert sr._INITIALIZERS['trading'] is second
+
+
+def test_empty_domain_rejected():
+    sr.register_schema_initializer('', lambda conn: None)
+    assert sr.active_domains() == []
+
+
+def test_run_registered_runs_each_in_sorted_order():
+    calls = []
+    sr.register_schema_initializer('trading', lambda conn: calls.append('trading'))
+    sr.register_schema_initializer('alpha', lambda conn: calls.append('alpha'))
+    sr.run_registered(conn=object())
+    assert calls == ['alpha', 'trading']
+
+
+def test_run_registered_propagates_initializer_error():
+    def boom(conn):
+        raise RuntimeError('ddl failed')
+    sr.register_schema_initializer('bad', boom)
+    with pytest.raises(RuntimeError, match='ddl failed'):
+        sr.run_registered(conn=object())
+
+
+def test_unregister():
+    sr.register_schema_initializer('trading', lambda conn: None)
+    sr.unregister_schema_initializer('trading')
+    assert sr.active_domains() == []
+    # idempotent — removing a missing domain is a no-op
+    sr.unregister_schema_initializer('trading')
+
+
+def test_discover_is_fail_soft_with_no_plugins():
+    # No tofu.schema entry points installed in the test env → returns 0,
+    # never raises.
+    assert sr.discover_schema_plugins() == 0

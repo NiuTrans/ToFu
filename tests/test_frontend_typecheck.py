@@ -53,7 +53,7 @@ ROOT = os.path.normpath(os.path.join(HERE, '..'))
 # real bugs it found (dead renderMessages guards + duplicate i18n key).
 # This number may ONLY decrease. Lower it whenever you fix type errors.
 # Goal: 0, then enable `strict` in tsconfig.json for phase 2.
-BASELINE = 527
+BASELINE = 464
 
 # Bundle output is generated + gitignored; never count it.
 _BUNDLE_RE = re.compile(r'(^|/)bundle-[0-9a-f]+\.js')

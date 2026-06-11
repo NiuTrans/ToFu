@@ -37,12 +37,14 @@ from .agents import api_v1_agents_bp
 from .agent_backends import api_v1_agent_backends_bp
 from .agent_run import api_v1_agent_run_bp
 from .folders import api_v1_folders_bp
+from .orchestrations import api_v1_orchestrations_bp
 from .optimizer import api_v1_optimizer_bp
 from .scheduler import api_v1_scheduler_bp
 from .endpoint import api_v1_endpoint_bp
 from .swarm import api_v1_swarm_bp
 from .desktop import api_v1_desktop_bp
 from .browser import api_v1_browser_bp
+from .auth_sources import api_v1_auth_sources_bp
 from .memory import api_v1_memory_bp
 from .mcp import api_v1_mcp_bp
 from .daily_report import api_v1_daily_report_bp
@@ -74,12 +76,14 @@ ALL_V1_BLUEPRINTS = [
     api_v1_agent_backends_bp,
     api_v1_agent_run_bp,
     api_v1_folders_bp,
+    api_v1_orchestrations_bp,
     api_v1_optimizer_bp,
     api_v1_scheduler_bp,
     api_v1_endpoint_bp,
     api_v1_swarm_bp,
     api_v1_desktop_bp,
     api_v1_browser_bp,
+    api_v1_auth_sources_bp,
     api_v1_memory_bp,
     api_v1_mcp_bp,
     api_v1_daily_report_bp,

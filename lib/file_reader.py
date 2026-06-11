@@ -50,7 +50,7 @@ SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | PDF_EXTENSIONS | OFFICE_EXTENSIONS | T
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024   # 20 MB max for images
 MAX_FILE_BYTES = 50 * 1024 * 1024    # 50 MB max for documents
-MAX_TEXT_CHARS = 200_000             # max chars for text output
+MAX_TEXT_CHARS = 50 * 1024 * 1024    # ★ char cap lifted to the byte bound; MAX_FILE_BYTES is the real limit
 
 # MIME type detection from magic bytes
 _IMAGE_MAGICS = {

@@ -170,7 +170,7 @@ class TestPdfRenderSmoke:
         # Quick probe: try to launch Chromium briefly.  If that fails
         # (binary missing on this host), skip.
         try:
-            from lib.fetch.playwright_pool import _pw_pool
+            from tofu_search.fetch.playwright_pool import _pw_pool
             ok = _pw_pool._ensure_thread()
         except Exception as e:
             pytest.skip(f'playwright unavailable: {e}')

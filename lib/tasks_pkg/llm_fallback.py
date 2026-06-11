@@ -15,13 +15,27 @@ from lib.tasks_pkg.manager import append_event, stream_llm_response
 logger = get_logger(__name__)
 
 
-def _get_fallback_model() -> str:
+def _get_fallback_model(task: dict | None = None) -> str:
     """Return the configured fallback model, or empty string if disabled.
 
     Reads from ``lib.FALLBACK_MODEL`` which is backed by
     ``data/config/server_config.json`` → ``model_defaults.fallback_model``.
     Users can set this via Settings UI > 显示 > 模型默认.
+
+    A per-task opt-out (``task['config']['disableModelFallback'] == True``)
+    forces an empty string regardless of global config. This is essential
+    for controlled experiments: without it, a transient primary-model
+    error silently switches the round to the global fallback model
+    (e.g. Opus), cross-contaminating a benchmark that is supposed to
+    measure ONLY the requested model. With it, the round simply errors
+    and the caller/harness retries on the SAME model.
     """
+    if task is not None:
+        try:
+            if (task.get('config') or {}).get('disableModelFallback'):
+                return ''
+        except Exception as e:
+            logger.debug('disableModelFallback check failed: %s', e)
     import lib as _lib
     return getattr(_lib, 'FALLBACK_MODEL', '') or ''
 
@@ -159,7 +173,19 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
         Never caught — propagates directly to signal user abort.
     """
     tid = task['id'][:8]
-    _FALLBACK_MODEL = _get_fallback_model()
+    _FALLBACK_MODEL = _get_fallback_model(task)
+    # Distinguish "admin never configured a fallback" from "this request
+    # explicitly opted out" so the surfaced error envelope names the
+    # actual cause (context='fallback-disabled') instead of an opaque
+    # 'no-fallback'.  Headless callers who set disableModelFallback need
+    # this to understand why a transient primary error wasn't masked.
+    _fb_disabled_by_request = False
+    try:
+        _fb_disabled_by_request = bool((task.get('config') or {}).get('disableModelFallback'))
+    except Exception as _e:
+        logger.debug('[%s] disableModelFallback flag read failed: %s', tid, _e)
+    _no_fb_context = ('fallback-disabled' if _fb_disabled_by_request
+                      else 'no-fallback')
 
     # ── Primary model call ──
     try:
@@ -255,15 +281,16 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                 from lib.context_limits import learn_shrink_from_error
                 from lib.tasks_pkg.compaction import (
                     _get_context_limit,
-                    _parse_reported_token_count,
+                    _parse_context_overflow,
                 )
-                _reported = _parse_reported_token_count(str(e))
+                _reported, _stated_max = _parse_context_overflow(str(e))
                 _prior_limit = _get_context_limit(task)
                 _learned_info = learn_shrink_from_error(
                     task.get('provider_id') or '',
                     model,
                     _reported,
                     preset_limit=_prior_limit,
+                    stated_max=_stated_max,
                 )
                 if _learned_info:
                     append_event(task, {
@@ -412,7 +439,7 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             if tool_call_happened:
                 _user_err = format_llm_error_for_user(
                     e, model=model,
-                    context='no-fallback' if not _FALLBACK_MODEL else 'on-fallback-model',
+                    context=(_no_fb_context if not _FALLBACK_MODEL else 'on-fallback-model'),
                     source='llm-stream')
                 task['error'] = _user_err
                 logger.warning('[%s] 🛑 Fallback model error with prior tool calls — giving up: %s',
@@ -436,24 +463,36 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             try:
                 e._user_message = format_llm_error_for_user(  # type: ignore[attr-defined]
                     e, model=model,
-                    context='no-fallback' if not _FALLBACK_MODEL else 'on-fallback-model',
+                    context=(_no_fb_context if not _FALLBACK_MODEL else 'on-fallback-model'),
                     source='llm-stream')
             except Exception as _attr_err:
                 logger.debug('[%s] Could not attach _user_message: %s', tid, _attr_err)
             raise
 
         # ── Fallback: switch to configured fallback model ──
+        # Build a short, typed reason string from the original exception so
+        # the UI can show *why* the fallback fired (kind + detail) instead
+        # of an opaque "primary failed" message.
+        from lib.error_envelope import from_exception as _from_exc
+        _fb_envelope = _from_exc(
+            e, model=original_model,
+            context='fallback-trigger', source='llm-stream')
+        _fb_kind = _fb_envelope.get('kind', 'generic')
+        _fb_detail = (_fb_envelope.get('detail') or err_str).strip()
+        _fb_reason = f'{_fb_kind}: {_fb_detail}' if _fb_detail else _fb_kind
+
         # Notify via phase event (transient UI status, does NOT pollute
         # assistantMsg.content).  The done event already carries
-        # fallbackModel / fallbackFrom for the persistent badge.
-        _display_err = err_str[:120].rstrip()
+        # fallbackModel / fallbackFrom / fallbackReason for the persistent badge.
         append_event(task, {
             'type': 'phase',
             'phase': 'retrying',
-            'detail': f'⚠️ 模型 {original_model} 请求失败，已自动回退到 {_FALLBACK_MODEL} 继续生成…',
+            'detail': (f'⚠️ 模型 {original_model} 请求失败（{_fb_kind}）：'
+                       f'{_fb_detail[:120]} — 已自动回退到 {_FALLBACK_MODEL} 继续生成…'),
         })
         logger.warning('[%s] Model fallback: %s → %s (reason: %s)',
-                       tid, original_model, _FALLBACK_MODEL, _display_err, exc_info=True)
+                       tid, original_model, _FALLBACK_MODEL,
+                       _fb_reason[:200], exc_info=True)
 
         fallback_body = build_body(
             _FALLBACK_MODEL, messages,
@@ -495,6 +534,8 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
 
             task['_fallback_model'] = _FALLBACK_MODEL
             task['_fallback_from'] = original_model
+            task['_fallback_reason'] = _fb_reason[:300]
+            task['_fallback_kind'] = _fb_kind
             if usage:
                 for k, v in usage.items():
                     if isinstance(v, (int, float)):

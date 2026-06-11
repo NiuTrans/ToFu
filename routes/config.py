@@ -52,129 +52,16 @@ def _write_server_config(data):
 
 
 # ══════════════════════════════════════════════════════
-#  Pricing-Tier Tag Re-evaluation (cheap, and any future tiers)
+#  Provider defaults + pricing-tier tags
+#  → moved to lib/provider_defaults.py (2026-06). Re-exported with the
+#    legacy private names for the existing call sites in this module.
 # ══════════════════════════════════════════════════════
 
-def _reeval_cheap_tags(providers: list):
-    """Re-evaluate pricing-tier capability tags on all provider models.
-
-    Delegates to :func:`lib.llm_dispatch.config.reevaluate_pricing_tags`,
-    which is driven by the PRICING_TIERS table (currently just 'cheap' —
-    input < $3/1M AND output < $15/1M, strict).  New tiers added to that
-    table are auto-applied here with no further code changes.
-
-    The legacy name ``_reeval_cheap_tags`` is retained for continuity
-    with existing call sites; it now covers every managed tier tag.
-    """
-    from lib.llm_dispatch.config import reevaluate_pricing_tags
-
-    for prov in providers:
-        models = prov.get('models') or []
-        if not models:
-            continue
-        reevaluate_pricing_tags(models, log_prefix='provider=%s' % prov.get('id', '?'))
-
-
-# ══════════════════════════════════════════════════════
-#  Provider Defaults Builder
-# ══════════════════════════════════════════════════════
-
-def _build_default_providers():
-    """Build default provider config from environment/hardcoded values."""
-    import lib as _lib
-    from lib.llm_dispatch.config import (
-        DEFAULT_SLOT_CONFIGS,
-        MODEL_ALIAS_GROUPS,
-        MANAGED_TIER_TAGS,
-        get_pricing_tiers,
-    )
-
-    base_url = getattr(_lib, 'LLM_BASE_URL', '')
-    api_keys = list(getattr(_lib, 'LLM_API_KEYS', []))
-
-    def _auto_cheap(model_id, caps_set, cost):
-        # Apply every managed pricing-tier tag (cheap, plus any future tier).
-        if 'image_gen' in caps_set or 'embedding' in caps_set:
-            return caps_set
-        tiers = get_pricing_tiers(model_id, fallback_cost_per_1k=cost)
-        # Drop any stale managed tier tag not in the current desired set.
-        caps_set -= (MANAGED_TIER_TAGS - tiers)
-        caps_set |= tiers
-        return caps_set
-
-    def _build_chat_model_entry(model_id, think_default):
-        slot_cfg = DEFAULT_SLOT_CONFIGS.get(model_id, {})
-        caps_set = _auto_cheap(model_id, set(slot_cfg.get('caps', {'text'})), slot_cfg.get('cost', 0.01))
-        aliases = []
-        for group in MODEL_ALIAS_GROUPS:
-            if model_id in group:
-                aliases = sorted(a for a in group if a != model_id)
-                break
-        return {
-            'model_id': model_id, 'aliases': aliases, 'capabilities': sorted(caps_set),
-            'rpm': slot_cfg.get('rpm', 30), 'cost': slot_cfg.get('cost', 0.01),
-            'thinking_default': think_default,
-        }
-
-    preset_model_keys = [
-        ('opus', 'LLM_MODEL', True), ('qwen', 'QWEN_MODEL', True),
-        ('gemini', 'GEMINI_MODEL', True), ('gemini_flash', 'GEMINI_FLASH_PREVIEW_MODEL', True),
-        ('doubao', 'DOUBAO_MODEL', True), ('minimax', 'MINIMAX_MODEL', True),
-    ]
-    seen_model_ids = set()
-    models = []
-    presets = {}
-    for preset_key, env_key, think_default in preset_model_keys:
-        model_id = getattr(_lib, env_key, '')
-        if not model_id:
-            continue
-        if preset_key != 'opus':
-            presets[preset_key] = model_id
-        if model_id in seen_model_ids:
-            continue
-        seen_model_ids.add(model_id)
-        models.append(_build_chat_model_entry(model_id, think_default))
-
-    extra_model_keys = [
-        ('GEMINI_PRO_MODEL', True),
-        ('GEMINI_PRO_PREVIEW_MODEL', True),
-        ('CLAUDE_SONNET_MODEL', True),
-    ]
-    for env_key, think_default in extra_model_keys:
-        model_id = getattr(_lib, env_key, '')
-        if not model_id or model_id in seen_model_ids:
-            continue
-        seen_model_ids.add(model_id)
-        models.append(_build_chat_model_entry(model_id, think_default))
-
-    image_gen_id = getattr(_lib, 'IMAGE_GEN_MODEL', '')
-    if image_gen_id and image_gen_id not in seen_model_ids:
-        seen_model_ids.add(image_gen_id)
-        slot_cfg = DEFAULT_SLOT_CONFIGS.get(image_gen_id, {})
-        models.append({
-            'model_id': image_gen_id, 'aliases': [],
-            'capabilities': sorted(slot_cfg.get('caps', {'image_gen'})),
-            'rpm': slot_cfg.get('rpm', 10),
-            'cost': slot_cfg.get('cost', 0.015),
-            'thinking_default': False,
-        })
-
-    for emb_id in getattr(_lib, 'EMBEDDING_MODELS', []):
-        if emb_id in seen_model_ids:
-            continue
-        seen_model_ids.add(emb_id)
-        from lib.embeddings import AVAILABLE_EMBEDDING_MODELS
-        emb_info = AVAILABLE_EMBEDDING_MODELS.get(emb_id, {})
-        models.append({
-            'model_id': emb_id, 'aliases': [],
-            'capabilities': ['embedding'],
-            'rpm': emb_info.get('max_rpm', 60),
-            'cost': 0.001,
-            'thinking_default': False,
-        })
-
-    return [{'id': 'default', 'name': 'Default', 'base_url': base_url,
-             'api_keys': api_keys, 'enabled': True, 'models': models}], presets
+from lib.provider_defaults import (  # noqa: E402
+    build_default_providers as _build_default_providers,
+    reeval_cheap_tags as _reeval_cheap_tags,
+)
+from lib.provider_balance import normalize_balance as _normalize_balance  # noqa: E402
 
 
 # ══════════════════════════════════════════════════════
@@ -270,7 +157,6 @@ def get_server_config():
         for k, v in saved['models'].items():
             models[k] = v
 
-    import lib.fetch.content_filter as _cf_mod
     search_info = {
         'fetch_top_n': getattr(_lib, 'FETCH_TOP_N', 6),
         'fetch_timeout': getattr(_lib, 'FETCH_TIMEOUT', 15),
@@ -279,13 +165,15 @@ def get_server_config():
         'max_chars_pdf': getattr(_lib, 'FETCH_MAX_CHARS_PDF', 0),
         'max_bytes': getattr(_lib, 'FETCH_MAX_BYTES', 20 * 1024 * 1024),
         'skip_domains': sorted(getattr(_lib, 'SKIP_DOMAINS', set())),
-        'llm_content_filter': _cf_mod.FILTER_ENABLED,
+        'llm_content_filter': getattr(_lib, 'LLM_CONTENT_FILTER_ENABLED', True),
     }
     if 'search' in saved:
         search_info.update(saved['search'])
         # Apply saved llm_content_filter on config load (page refresh / startup)
         if 'llm_content_filter' in saved['search']:
-            _cf_mod.FILTER_ENABLED = bool(saved['search']['llm_content_filter'])
+            _lib.LLM_CONTENT_FILTER_ENABLED = bool(saved['search']['llm_content_filter'])
+            from lib.search_bridge import sync_search_config
+            sync_search_config()
 
     total_keys = sum(len(p.get('api_keys', [])) for p in providers)
     total_models = sum(len(p.get('models', [])) for p in providers)
@@ -513,6 +401,7 @@ def feishu_status():
 def check_provider_balance():
     """Proxy a balance/billing check to a provider's billing API."""
     import requests as _requests
+    from lib.http_client import http_get
 
     data = parse_body()
     balance_url = (data.get('balance_url') or '').strip()
@@ -529,7 +418,7 @@ def check_provider_balance():
     logger.info('[Balance] Checking balance at %.200s', balance_url)
 
     try:
-        resp = _requests.get(balance_url, headers=headers, timeout=15)
+        resp = http_get(balance_url, headers=headers, timeout=15)
         resp.raise_for_status()
         billing = resp.json()
     except _requests.Timeout:
@@ -542,97 +431,10 @@ def check_provider_balance():
         logger.warning('[Balance] Invalid JSON from %s: %s', balance_url, e)
         return api_error('Invalid JSON response', status=502)
 
-    result = _normalize_balance(billing, balance_url, headers, _requests)
+    result = _normalize_balance(billing, balance_url, headers)
 
     logger.info('[Balance] Result: %s', {k: v for k, v in result.items() if k != 'raw'})
     return api_ok({'balance': result})
-def _normalize_balance(billing, balance_url, headers, _requests):
-    """Normalize different provider balance formats into a unified structure.
-
-    Unified output fields (all optional):
-      - balance_usd: remaining balance in USD
-      - used_usd: total used in USD
-      - limit_usd: total limit/quota in USD
-      - currency: original currency if non-USD
-      - balance_local: remaining in original currency
-      - hard_limit_usd / total_usage_cents: legacy OpenAI format
-      - raw: original response if nothing else matched
-    """
-    result = {}
-
-    # ── Format 1: OpenAI /subscription style (hard_limit_usd) ──
-    if 'hard_limit_usd' in billing:
-        result['hard_limit_usd'] = billing['hard_limit_usd']
-        result['limit_usd'] = billing['hard_limit_usd']
-        result['soft_limit_usd'] = billing.get('soft_limit_usd')
-
-        if balance_url.endswith('/subscription'):
-            usage_url = balance_url.rsplit('/subscription', 1)[0] + '/usage'
-            try:
-                uresp = _requests.get(usage_url, headers=headers, timeout=15)
-                uresp.raise_for_status()
-                usage_data = uresp.json()
-                if 'total_usage' in usage_data:
-                    result['total_usage_cents'] = usage_data['total_usage']
-                    result['used_usd'] = usage_data['total_usage'] / 100
-                    result['balance_usd'] = result['limit_usd'] - result['used_usd']
-            except Exception as e:
-                logger.debug('[Balance] Usage fetch from %s failed (non-critical): %s', usage_url, e)
-        return result
-
-    # ── Format 2: DeepSeek /user/balance (balance_infos array) ──
-    if 'balance_infos' in billing:
-        infos = billing.get('balance_infos', [])
-        result['is_available'] = billing.get('is_available', True)
-        if infos:
-            # Prefer USD, fallback to first entry
-            info = infos[0]
-            for bi in infos:
-                if bi.get('currency', '').upper() == 'USD':
-                    info = bi
-                    break
-            currency = info.get('currency', 'CNY')
-            total = float(info.get('total_balance', 0))
-            granted = float(info.get('granted_balance', 0))
-            topped_up = float(info.get('topped_up_balance', 0))
-            result['currency'] = currency
-            result['balance_local'] = total
-            result['granted_balance'] = granted
-            result['topped_up_balance'] = topped_up
-            # Approximate USD if CNY
-            if currency.upper() == 'USD':
-                result['balance_usd'] = total
-            else:
-                result['balance_usd'] = round(total / 7.2, 2)  # approximate CNY→USD
-        return result
-
-    # ── Format 3: OpenRouter /credits (data.total_credits / total_usage) ──
-    credits_data = billing.get('data', billing)
-    if 'total_credits' in credits_data:
-        tc = float(credits_data.get('total_credits', 0))
-        tu = float(credits_data.get('total_usage', 0))
-        result['limit_usd'] = round(tc, 4)
-        result['used_usd'] = round(tu, 4)
-        result['balance_usd'] = round(tc - tu, 4)
-        return result
-
-    # ── Format 4: Generic — look for common field names ──
-    for key in ('balance', 'remaining', 'credits', 'available_balance'):
-        if key in billing:
-            val = billing[key]
-            if isinstance(val, (int, float)):
-                result['balance_usd'] = float(val)
-                return result
-            if isinstance(val, str):
-                try:
-                    result['balance_usd'] = float(val)
-                    return result
-                except (ValueError, TypeError) as e:
-                    logger.debug('[Config] balance_usd parse failed for key=%s: %s', key, e)
-
-    # ── Fallback: return raw data ──
-    result['raw'] = billing
-    return result
 
 
 @config_bp.route('/api/v1/providers/discover-models', methods=['POST'])
@@ -943,245 +745,26 @@ def probe_provider_bulk():
     })
 
 
-def _probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
-                    protocol='openai'):
-    """Send a minimal completion to test one (key, model) pair.
-
-    Returns one of: 'ok', 'rate_limited', 'unauthorized', 'not_found',
-    'unavailable', 'error' plus a short human-readable detail string.
-
-    A 200 OR an HTTP 400 both count as ``ok`` — a 400 means the gateway
-    accepted the (key, model) routing and only rejected the (deliberately
-    tiny) request shape, which still proves the pair is reachable.
-
-    ``protocol='anthropic'`` probes the Anthropic Messages API
-    (``POST /v1/messages`` with ``x-api-key`` + ``anthropic-version``)
-    instead of OpenAI Chat Completions. The status→verdict table is
-    identical for both protocols.
-    """
-    from lib.http_client import http_post
-
-    # ``max_tokens: 1`` is the floor — the probe only needs to learn whether
-    # the gateway accepts the (key, model) routing, never the completion
-    # itself, so output cost is held to a single token per attempt.
-    if protocol == 'anthropic':
-        from lib.llm.anthropic_outbound import (
-            anthropic_headers, anthropic_messages_url,
-        )
-        url = anthropic_messages_url(base_url)
-        headers = anthropic_headers(api_key, extra_headers)
-        payload = {
-            'model': model_id,
-            'messages': [{'role': 'user', 'content': '.'}],
-            'max_tokens': 1,
-        }
-    else:
-        url = base_url.rstrip('/') + '/chat/completions'
-        headers = {'Authorization': 'Bearer %s' % api_key} if api_key else {}
-        if extra_headers:
-            headers.update(extra_headers)
-        payload = {
-            'model': model_id,
-            'messages': [{'role': 'user', 'content': 'hi'}],
-            'max_tokens': 1,
-            'stream': False,
-        }
-    try:
-        resp = http_post(url, json=payload, headers=headers, timeout=timeout)
-    except Exception as e:
-        logger.warning('[CellProbe] %s @ %s network error: %s', model_id, base_url, e)
-        return 'unavailable', 'network: %s' % str(e)[:120]
-
-    code = resp.status_code
-    try:
-        body = resp.text[:400]
-    except Exception:
-        body = ''
-    lower = body.lower()
-
-    if code == 200 or code == 400:
-        return 'ok', 'HTTP %d' % code
-    if code == 429 or code == 402:
-        return 'rate_limited', 'HTTP %d %.120s' % (code, body)
-    if code in (401, 403):
-        return 'unauthorized', 'HTTP %d %.120s' % (code, body)
-    if code == 404 or 'model_not_found' in lower or 'does not exist' in lower or 'no such model' in lower:
-        return 'not_found', 'HTTP %d %.120s' % (code, body)
-    if code in (500, 502, 503, 504, 529):
-        return 'unavailable', 'HTTP %d %.120s' % (code, body)
-    return 'error', 'HTTP %d %.120s' % (code, body)
-
-
-# Verdicts that warrant a retry (could be a transient blip), versus ones
-# that are definitive on the first attempt (no point re-asking).
-_PROBE_TRANSIENT = {'rate_limited', 'unavailable', 'error'}
-_PROBE_DEFINITIVE = {'unauthorized', 'not_found'}
-
-
-def _probe_cell_multi(base_url, api_key, model_id, extra_headers, timeout,
-                      attempts=3, retry_delay=0.8, protocol='openai'):
-    """Probe a cell up to ``attempts`` times to filter out FALSE 429s.
-
-    Rationale: gateways routinely return a transient 429 / 5xx even for a
-    (key, model) pair the key is fully entitled to. Flagging it after one
-    shot would wrongly recommend disabling a working model. So:
-
-      * A single ``ok`` on ANY attempt wins immediately — the earlier
-        rate-limit was transient.
-      * ``unauthorized`` / ``not_found`` are definitive → return at once.
-      * Transient failures are retried after ``retry_delay`` seconds; if
-        every attempt fails we return the LAST transient verdict with an
-        ``(N/N attempts)`` note so the UI can show it was persistent.
-
-    Returns ``(status, detail)`` like :func:`_probe_one_cell`.
-    """
-    attempts = max(1, int(attempts))
-    last_status, last_detail = 'error', ''
-    for i in range(attempts):
-        status, detail = _probe_one_cell(base_url, api_key, model_id, extra_headers,
-                                         timeout, protocol)
-        if status == 'ok':
-            note = '' if i == 0 else ' (ok on attempt %d/%d)' % (i + 1, attempts)
-            return 'ok', detail + note
-        if status in _PROBE_DEFINITIVE:
-            return status, detail
-        last_status, last_detail = status, detail
-        if i < attempts - 1:
-            _time.sleep(retry_delay)
-    suffix = ' (%d/%d attempts failed)' % (attempts, attempts) if attempts > 1 else ''
-    return last_status, '%.120s%s' % (last_detail, suffix)
-
-
 # ══════════════════════════════════════════════════════
-#  Access-Matrix Cell Probe — server-owned background task
+#  Access-matrix cell-probe engine
+#  → moved to lib/provider_probe.py (2026-06). Re-exported here with the
+#    legacy private names used by the probe route handlers below + tests.
 # ══════════════════════════════════════════════════════
-#
-#  The probe sends a 1-token chat completion to every (key × concrete-id)
-#  cell of a provider. Because each alias on a gateway can route to a
-#  genuinely DIFFERENT upstream model, every alias is probed independently
-#  (it is its own matrix row), not merged with its root.
-#
-#  The probe is a long-running fan-out, so it runs in a background thread
-#  and its progress is **persisted to disk** under data/config/probe_cache/.
-#  Closing the Settings dialog (or even restarting the server) does NOT lose
-#  progress — the frontend re-attaches by provider id and keeps polling.
-#  Only an explicit "retest" (force=true) discards the saved result and
-#  starts over.
-
-import hashlib  # noqa: E402
 import threading  # noqa: E402
 import time as _time  # noqa: E402
-from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: E402
 
-from lib.json_store import read_json, write_json_atomic  # noqa: E402
-
-_CELL_PROBE_TASKS: dict = {}
-_CELL_PROBE_LOCK = threading.Lock()
-_PROBE_DISABLE_STATUSES = {'rate_limited', 'unauthorized', 'not_found', 'unavailable'}
-
-
-def _probe_cache_path(provider_id: str) -> str:
-    """Disk path for a provider's persisted probe snapshot."""
-    safe = hashlib.sha1((provider_id or '').encode('utf-8')).hexdigest()[:16]
-    return _config_path('probe_cache', '%s.json' % safe)
-
-
-def _probe_cell_key(key_idx, model_id) -> str:
-    return '%s::%s' % (key_idx, model_id)
-
-
-def _persist_probe_task(task: dict):
-    """Atomically write a public (key-free) snapshot of the task to disk."""
-    try:
-        write_json_atomic(_probe_cache_path(task['provider_id']),
-                          _public_probe_snapshot(task), fsync=False)
-    except Exception as e:
-        logger.warning('[CellProbe] persist failed for %s: %s',
-                       task.get('provider_id'), e)
-
-
-def _public_probe_snapshot(task: dict) -> dict:
-    """The serialisable, secret-free view of a probe task (for poll + disk)."""
-    return {
-        'provider_id': task['provider_id'],
-        'status': task['status'],
-        'started_at': task['started_at'],
-        'finished_at': task['finished_at'],
-        'total': task['total'],
-        'done_count': task['done_count'],
-        'attempts': task.get('attempts', 1),
-        'cells': task['cells'],
-        'summary': task['summary'],
-        'error': task['error'],
-    }
-
-
-def _run_cell_probe_task(task: dict, work: list, timeout: int):
-    """Background worker: fan out cell probes, updating + persisting progress."""
-    provider_id = task['provider_id']
-    base_url = task['_base_url']
-    extra_headers = task['_extra_headers']
-    protocol = task.get('_protocol', 'openai')
-    attempts = task.get('attempts', 3)
-    logger.info('[CellProbe] Started background probe for %s — %d cell(s), '
-                'up to %d attempt(s) each (protocol=%s)', provider_id, len(work),
-                attempts, protocol)
-
-    def _run(item):
-        key_idx, api_key, root, mid = item
-        # Multi-attempt so a FALSE 429 / transient 5xx doesn't wrongly flag a
-        # reachable cell. A single ok on any attempt wins.
-        status, detail = _probe_cell_multi(base_url, api_key, mid, extra_headers,
-                                           timeout, attempts=attempts,
-                                           protocol=protocol)
-        return {
-            'key_idx': key_idx,
-            'model_id': mid,
-            'root_model_id': root,
-            'status': status,
-            'detail': detail,
-            'recommend_disable': status in _PROBE_DISABLE_STATUSES,
-        }
-
-    last_persist = 0.0
-    try:
-        workers = min(8, len(work))
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='cell-probe') as pool:
-            futures = [pool.submit(_run, it) for it in work]
-            for fut in as_completed(futures):
-                if task.get('_abort'):
-                    logger.info('[CellProbe] %s aborted', provider_id)
-                    break
-                try:
-                    cell = fut.result()
-                except Exception as e:
-                    logger.error('[CellProbe] cell task raised: %s', e, exc_info=True)
-                    continue
-                with _CELL_PROBE_LOCK:
-                    task['cells'][_probe_cell_key(cell['key_idx'], cell['model_id'])] = cell
-                    task['done_count'] = len(task['cells'])
-                    n_disable = sum(1 for c in task['cells'].values() if c['recommend_disable'])
-                    task['summary'] = {'ok': task['done_count'] - n_disable, 'disable': n_disable}
-                # Throttle disk writes: at most every ~1.5s during the run.
-                now = _time.monotonic()
-                if now - last_persist > 1.5:
-                    last_persist = now
-                    _persist_probe_task(task)
-        with _CELL_PROBE_LOCK:
-            task['status'] = 'done'
-            task['finished_at'] = _time.time()
-        _persist_probe_task(task)
-        logger.info('[CellProbe] %s done: %d cells, %d flagged',
-                    provider_id, task['done_count'], task['summary']['disable'])
-    except Exception as e:
-        logger.error('[CellProbe] background worker crashed for %s: %s',
-                     provider_id, e, exc_info=True)
-        with _CELL_PROBE_LOCK:
-            task['status'] = 'error'
-            task['error'] = str(e)[:300]
-            task['finished_at'] = _time.time()
-        _persist_probe_task(task)
-
+from lib.json_store import read_json  # noqa: E402,F401  (used by probe handlers)
+from lib.provider_probe import (  # noqa: E402,F401
+    probe_one_cell as _probe_one_cell,
+    probe_cell_multi as _probe_cell_multi,
+    run_cell_probe_task as _run_cell_probe_task,
+    probe_cache_path as _probe_cache_path,
+    probe_cell_key as _probe_cell_key,
+    persist_probe_task as _persist_probe_task,
+    public_probe_snapshot as _public_probe_snapshot,
+    CELL_PROBE_TASKS as _CELL_PROBE_TASKS,
+    CELL_PROBE_LOCK as _CELL_PROBE_LOCK,
+)
 
 @config_bp.route('/api/v1/providers/probe-cells/start', methods=['POST'])
 def probe_provider_cells_start():
@@ -1417,9 +1000,10 @@ def save_server_config():
         existing['search'] = data['search']
         # LLM content filter is a separate module-level flag
         if 'llm_content_filter' in data['search']:
-            import lib.fetch.content_filter as _cf_mod
-            _cf_mod.FILTER_ENABLED = bool(data['search']['llm_content_filter'])
-            logger.info('[Config] LLM content filter → %s', _cf_mod.FILTER_ENABLED)
+            _lib.LLM_CONTENT_FILTER_ENABLED = bool(data['search']['llm_content_filter'])
+            from lib.search_bridge import sync_search_config
+            sync_search_config()
+            logger.info('[Config] LLM content filter → %s', _lib.LLM_CONTENT_FILTER_ENABLED)
         changes.append('search.*')
 
     if 'hidden_models' in data and isinstance(data['hidden_models'], list):

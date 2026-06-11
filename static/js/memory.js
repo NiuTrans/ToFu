@@ -306,7 +306,7 @@ async function toggleMemoryEnabled(id) {
   }
 }
 async function deleteMemory(id) {
-  if (!confirm("确定要删除这条 Memory 吗？")) return;
+  if (!await showConfirm("确定要删除这条 Memory 吗？", { danger: true })) return;
   const card = document.querySelector(`.memory-card[data-id="${id}"]`);
   // Animate out immediately
   if (card) {

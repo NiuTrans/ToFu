@@ -38,11 +38,13 @@ from lib.billing import (
     deposit, debit, get_wallet, list_entries, list_prices,
 )
 from lib.billing.users import get_user
-from lib.database import DOMAIN_SYSTEM, get_db
+from lib.database import (
+    DOMAIN_SYSTEM, async_execute, async_fetchall, async_fetchone,
+)
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import (
-    optional_int, optional_str, parse_body, require_int, require_str,
+    async_parse_body, optional_int, optional_str, require_int, require_str,
 )
 
 from .auth import current_auth, require_scope
@@ -52,7 +54,7 @@ logger = get_logger(__name__)
 api_v1_billing_bp = Blueprint('api_v1_billing', __name__)
 
 
-def _resolve_target_user(*, default_self: bool = True) -> str:
+def _resolve_target_user() -> str:
     """Pick the user_id this call should target.
 
     * Admin + ``?user_id=`` → that user.
@@ -95,7 +97,7 @@ def _wallet_payload(user_id: str) -> dict:
                        'Public so customer dashboards can render the rate '
                        'card before login.',
           tags=['billing'], public=True)
-def get_pricing():
+async def get_pricing():
     cfg = list_prices()
     return api_ok(
         currency=cfg.get('currency', 'USD'),
@@ -117,7 +119,7 @@ def get_pricing():
                        'user. Admins may pass ``?user_id=…`` to inspect '
                        'any user.',
           tags=['billing'])
-def get_wallet_route():
+async def get_wallet_route():
     try:
         user_id = _resolve_target_user()
     except PermissionError as e:
@@ -141,7 +143,7 @@ def get_wallet_route():
           description='Paginated, newest-first. Admins may pass '
                        '``?user_id=…``; everyone else gets their own.',
           tags=['billing'])
-def get_ledger_route():
+async def get_ledger_route():
     try:
         user_id = _resolve_target_user()
     except PermissionError as e:
@@ -176,7 +178,7 @@ def get_ledger_route():
                        'Codes are single-use; expired or already-redeemed '
                        'codes return 400.',
           tags=['billing'])
-def redeem_route():
+async def redeem_route():
     try:
         user_id = _resolve_target_user()
     except PermissionError as e:
@@ -185,15 +187,14 @@ def redeem_route():
         return api_bad_request(
             'No wallet for this principal — log in as a multi-user '
             'account first.', error_kind='no_wallet')
-    body = parse_body()
+    body = await async_parse_body()
     code = require_str(body, 'code', max_len=64).strip()
     if not code:
         return api_bad_request('code required', field='code')
-    db = get_db(DOMAIN_SYSTEM)
-    row = db.execute(
+    row = await async_fetchone(
         'SELECT amount_micro, expires_at, redeemed_by '
         '  FROM billing_redeem_codes WHERE code = ?',
-        (code,)).fetchone()
+        (code,), domain=DOMAIN_SYSTEM)
     if row is None:
         return api_not_found('No such code', error_kind='code_not_found')
     amount = int(row[0] if not hasattr(row, 'keys') else row['amount_micro'])
@@ -208,12 +209,11 @@ def redeem_route():
     deposit(user_id, amount, kind='redeem',
             ref_type='redeem_code', ref_id=code,
             note=f'redeemed code {code}')
-    db.execute(
+    await async_execute(
         'UPDATE billing_redeem_codes '
         '   SET redeemed_by = ?, redeemed_at = ? '
         ' WHERE code = ?',
-        (user_id, int(time.time()), code))
-    db.commit()
+        (user_id, int(time.time()), code), domain=DOMAIN_SYSTEM)
     audit_log('redeem_code_used', user_id=user_id, code=code,
               amount_micro=amount)
     return api_ok(
@@ -231,8 +231,8 @@ def redeem_route():
           description='Adds credits to a target user manually (audit-logged). '
                        'Use for refunds, promotional bonuses, etc.',
           tags=['billing'], scope='admin')
-def deposit_route():
-    body = parse_body()
+async def deposit_route():
+    body = await async_parse_body()
     user_id = require_str(body, 'user_id', max_len=64)
     amount_micro = require_int(body, 'amount_micro', min=1,
                                 max=10_000_000_000_000)
@@ -254,8 +254,8 @@ def deposit_route():
           description='Subtracts credits manually (audit-logged). Set '
                        '``allow_negative=true`` to push the balance below 0.',
           tags=['billing'], scope='admin')
-def debit_route():
-    body = parse_body()
+async def debit_route():
+    body = await async_parse_body()
     user_id = require_str(body, 'user_id', max_len=64)
     amount_micro = require_int(body, 'amount_micro', min=1,
                                 max=10_000_000_000_000)
@@ -290,8 +290,8 @@ def _gen_code(prefix: str = 'TOFU', length: int = 16) -> str:
                        '``amount_micro`` credits each. Returns the codes '
                        'as plaintext exactly once.',
           tags=['billing'], scope='admin')
-def mint_codes_route():
-    body = parse_body()
+async def mint_codes_route():
+    body = await async_parse_body()
     count = require_int(body, 'count', min=1, max=10_000)
     amount_micro = require_int(body, 'amount_micro', min=1,
                                 max=10_000_000_000_000)
@@ -304,20 +304,19 @@ def mint_codes_route():
     created_by = (ctx.key_id if ctx else '') or ''
     now = int(time.time())
     expires_at = now + expires_in_days * 86400 if expires_in_days else 0
-    db = get_db(DOMAIN_SYSTEM)
     codes = []
     for _ in range(count):
         # Loop until unique. Collision space is huge; loop almost never iterates.
         while True:
             code = _gen_code()
             try:
-                db.execute(
+                await async_execute(
                     'INSERT INTO billing_redeem_codes '
                     '  (code, amount_micro, batch, created_by, '
                     '   created_at, expires_at, note) '
                     'VALUES (?, ?, ?, ?, ?, ?, ?)',
                     (code, amount_micro, batch, created_by,
-                     now, expires_at, note))
+                     now, expires_at, note), domain=DOMAIN_SYSTEM)
                 break
             except Exception as e:
                 if 'UNIQUE' in str(e) or 'duplicate' in str(e).lower():
@@ -325,7 +324,6 @@ def mint_codes_route():
                 logger.error('[Billing] mint failed: %s', e, exc_info=True)
                 raise
         codes.append(code)
-    db.commit()
     audit_log('redeem_codes_minted', batch=batch, count=count,
               amount_micro=amount_micro, by=created_by)
     return api_created(
@@ -342,12 +340,11 @@ def mint_codes_route():
           description='Filter by ``?batch=…`` and/or ``?status=`` '
                        '(``unredeemed`` / ``redeemed`` / ``all``).',
           tags=['billing'], scope='admin')
-def list_codes_route():
+async def list_codes_route():
     batch = (request.args.get('batch') or '').strip()
     status = (request.args.get('status') or 'all').strip().lower()
     limit = max(1, min(int(request.args.get('limit') or 100), 1000))
     offset = max(0, int(request.args.get('offset') or 0))
-    db = get_db(DOMAIN_SYSTEM)
     where = []
     params: list = []
     if batch:
@@ -364,7 +361,7 @@ def list_codes_route():
         sql += ' WHERE ' + ' AND '.join(where)
     sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
     params.extend([limit, offset])
-    rows = db.execute(sql, tuple(params)).fetchall()
+    rows = await async_fetchall(sql, tuple(params), domain=DOMAIN_SYSTEM)
     out = []
     for r in rows:
         if hasattr(r, 'keys'):
@@ -399,7 +396,7 @@ def list_codes_route():
                        '``data/config/payments.json:stripe.webhook_secret``. '
                        'Idempotent on the Stripe event id.',
           tags=['billing'], public=True)
-def stripe_webhook_route():
+async def stripe_webhook_route():
     from lib.billing.payments import handle_stripe_webhook
     payload = request.get_data() or b''
     sig = request.headers.get('Stripe-Signature', '')
@@ -417,7 +414,7 @@ def stripe_webhook_route():
                        'literal string ``success`` on accept (Alipay '
                        'protocol convention).',
           tags=['billing'], public=True)
-def alipay_notify_route():
+async def alipay_notify_route():
     from lib.billing.payments import handle_alipay_notify
     from flask import Response as _Resp
     form = {k: request.form.get(k, '') for k in request.form.keys()}
@@ -432,7 +429,7 @@ def alipay_notify_route():
                        '``provider="stripe"`` requires the operator to '
                        'configure Stripe Checkout (returns 501 otherwise).',
           tags=['billing'])
-def create_checkout_route():
+async def create_checkout_route():
     try:
         user_id = _resolve_target_user()
     except PermissionError as e:
@@ -440,7 +437,7 @@ def create_checkout_route():
     if not user_id:
         return api_bad_request('No wallet for this principal',
                                 error_kind='no_wallet')
-    body = parse_body()
+    body = await async_parse_body()
     provider = require_str(body, 'provider', max_len=20)
     amount_minor = require_int(body, 'amount_minor', min=1, max=10_000_000_000)
     notify_url = optional_str(body, 'notify_url', default='', max_len=500)
@@ -475,7 +472,7 @@ def create_checkout_route():
           description='Self-only by default; admins may pass '
                        '``?user_id=…`` to inspect any user.',
           tags=['billing'])
-def list_payments_route():
+async def list_payments_route():
     try:
         user_id = _resolve_target_user()
     except PermissionError as e:

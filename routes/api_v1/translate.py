@@ -26,16 +26,13 @@ from lib.openapi import api_meta
 from lib.request_parser import parse_body
 from lib.translate import (
     _build_translate_prompt,
-    _CHUNK_MAX_WORKERS,
-    _CHUNK_THRESHOLD,
     _cleanup_translate_tasks,
     _do_translate,
     _extract_notranslate_blocks,
     _reattach_notranslate_blocks,
-    _split_text_for_translation,
     _strip_notranslate_tags,
     _SYNC_TRANSLATE_MAX_CHARS,
-    _translate_one_chunk,
+    _translate_freetext,
     _translate_runtime,
     _translate_tasks,
     _translate_tasks_lock,
@@ -46,6 +43,19 @@ from .auth import require_auth
 logger = get_logger(__name__)
 
 api_v1_translate_bp = Blueprint('api_v1_translate', __name__)
+
+
+def _lang_params(data: dict) -> tuple[str, str]:
+    """Extract (target, source) accepting both camelCase and snake_case.
+
+    The UI sends ``targetLang``/``sourceLang``; the v1 OpenAPI schema (and
+    the ``/api/v1/agents/translate`` façade) advertise ``target_lang``/
+    ``source_lang``. Honour both so the documented snake_case keys are not
+    silently dropped. camelCase wins when both are present (UI precedence).
+    """
+    target = data.get('targetLang') or data.get('target_lang') or 'English'
+    source = data.get('sourceLang') or data.get('source_lang') or ''
+    return target, source
 
 
 def _build_poll_payload(task):
@@ -73,8 +83,7 @@ def _build_poll_payload(task):
     summary='Translate text synchronously',
     description=(
         'Returns ``{translated, model}`` for texts up to '
-        f'{_SYNC_TRANSLATE_MAX_CHARS} chars. Longer texts get chunked '
-        'and translated in parallel. For very large inputs, use the '
+        f'{_SYNC_TRANSLATE_MAX_CHARS} chars. For longer inputs, use the '
         'async ``/api/v1/translate/start`` + ``poll`` flow.'
     ),
     tags=['translate'],
@@ -90,8 +99,7 @@ def translate_text_v1():
                      f'Use /api/v1/translate/start.',
             'useAsync': True,
         }), 413
-    target = data.get('targetLang', 'English')
-    source = data.get('sourceLang', '')
+    target, source = _lang_params(data)
     system_prompt = _build_translate_prompt(target, source)
     input_len = len(text)
 
@@ -105,30 +113,8 @@ def translate_text_v1():
                         data.get('text', '').strip())
                 })
 
-        if input_len > _CHUNK_THRESHOLD:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            chunks = _split_text_for_translation(text, max_chunk=8000)
-            n = len(chunks)
-            logger.info('[Translate.v1] sync: %d chars → %d chunks', input_len, n)
-            parts = [None] * n
-            _usage = {}
-
-            def _indexed(idx, chunk):
-                label = f':chunk{idx+1}/{n}'
-                c, u = _translate_one_chunk(chunk, system_prompt, label,
-                                            source=source, target=target)
-                return idx, c, u
-
-            with ThreadPoolExecutor(max_workers=min(n, _CHUNK_MAX_WORKERS)) as pool:
-                futs = {pool.submit(_indexed, i, ch): i for i, ch in enumerate(chunks)}
-                for f in as_completed(futs):
-                    idx, c, u = f.result()
-                    parts[idx] = c
-                    _usage = u
-            content = '\n\n'.join(parts)
-        else:
-            content, _usage = _translate_one_chunk(text, system_prompt,
-                                                   source=source, target=target)
+        content, _usage = _translate_freetext(text, system_prompt,
+                                              source=source, target=target)
 
         if not content or not content.strip():
             logger.error('[Translate.v1] empty result (%d chars, target=%s)',
@@ -163,8 +149,7 @@ def translate_start_v1():
     text = (data.get('text') or '').strip()
     if not text:
         return api_bad_request('No text')
-    target = data.get('targetLang', 'English')
-    source = data.get('sourceLang', '')
+    target, source = _lang_params(data)
     conv_id = data.get('convId', '')
     msg_idx = data.get('msgIdx')
     msg_id = (data.get('msgId') or '').strip() or None

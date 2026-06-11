@@ -49,6 +49,16 @@ MAX_BACKUP_SIZE_BYTES = 16 * 1024 * 1024
 #: bytes, ``compact_store`` may be called to trim oldest snapshots.
 SOFT_DISK_BUDGET_BYTES = 256 * 1024 * 1024
 
+#: Hard cap on the number of snapshot records kept in ``snapshots.jsonl``.
+#: Append-only logs never shrink on their own; once we exceed this many
+#: rows ``compact_store`` rewrites the log keeping only the newest
+#: ``MAX_SNAPSHOTS`` and GCs any backup blob no surviving snapshot pins.
+MAX_SNAPSHOTS = 2000
+
+#: ``make_snapshot`` calls ``maybe_compact_store`` every this-many
+#: snapshots (cheap modulo gate; the full size/row scan only runs then).
+COMPACT_CHECK_EVERY = 200
+
 
 # ═══════════════════════════════════════════════════════════════════
 #  Per-project lock (mirrors the per-repo RLock pattern)
@@ -503,3 +513,120 @@ def read_blob(base_path: str, rel_path: str, version: int) -> bytes | None:
         logger.warning('[FileHistory] read blob v%d for %s failed: %s',
                        version, rel_path, e)
         return None
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Store compaction (snapshots.jsonl rotation + orphan-blob GC)
+# ═══════════════════════════════════════════════════════════════════
+
+def _all_referenced_versions(snaps: Iterable[dict]) -> dict[str, set[int]]:
+    """Map ``rel_path -> {versions pinned by any of ``snaps``}``."""
+    refs: dict[str, set[int]] = {}
+    for snap in snaps:
+        for rel, v in (snap.get('files') or {}).items():
+            if isinstance(v, int) and v > 0:
+                refs.setdefault(rel, set()).add(v)
+    return refs
+
+
+def _gc_orphan_blobs(base_path: str, survivors: list[dict]) -> int:
+    """Delete backup blobs not pinned by any surviving snapshot.
+
+    Preserves, for every path: version 1 (so "rewind to start" stays
+    possible) and the ``latest_version`` recorded in ``tracked.json``
+    (the current on-disk state).  Returns the number of blobs removed.
+    Best-effort — never raises.
+    """
+    bdir = backups_dir(base_path)
+    if not os.path.isdir(bdir):
+        return 0
+    refs = _all_referenced_versions(survivors)
+    tracked = load_tracked(base_path)
+    # Map sha-prefix back to ref sets keyed by the hashed rel_path.
+    keep_by_hash: dict[str, set[int]] = {}
+    for rel, versions in refs.items():
+        keep_by_hash.setdefault(_hash_rel_path(rel), set()).update(versions)
+    for rel, info in tracked.items():
+        lv = int(info.get('latest_version') or 0)
+        if lv > 0:
+            keep_by_hash.setdefault(_hash_rel_path(rel), set()).add(lv)
+    removed = 0
+    for sub in os.listdir(bdir):
+        bucket = os.path.join(bdir, sub)
+        if not os.path.isdir(bucket):
+            continue
+        for name in os.listdir(bucket):
+            if '@v' not in name:
+                continue
+            h, _, vstr = name.rpartition('@v')
+            try:
+                v = int(vstr)
+            except ValueError as e:
+                logger.debug('[FileHistory] skipping non-versioned blob %r: %s', name, e)
+                continue
+            if v == 1:
+                continue  # always keep the earliest backup
+            if v in keep_by_hash.get(h, ()):  # pinned by a survivor / current
+                continue
+            with contextlib.suppress(OSError):
+                os.unlink(os.path.join(bucket, name))
+                removed += 1
+    return removed
+
+
+def compact_store(base_path: str) -> dict:
+    """Trim ``snapshots.jsonl`` to the newest ``MAX_SNAPSHOTS`` records and
+    GC any backup blob no surviving snapshot pins.
+
+    Returns ``{snapshots_before, snapshots_after, blobs_removed}``.
+    Caller must hold the project lock.  Best-effort: on any error the
+    store is left untouched and the error is logged.
+    """
+    result = {'snapshots_before': 0, 'snapshots_after': 0, 'blobs_removed': 0}
+    try:
+        snaps = list(iter_snapshots(base_path))
+    except Exception as e:
+        logger.warning('[FileHistory] compact_store: read failed: %s', e)
+        return result
+    result['snapshots_before'] = len(snaps)
+    if len(snaps) <= MAX_SNAPSHOTS:
+        result['snapshots_after'] = len(snaps)
+        return result
+
+    survivors = snaps[-MAX_SNAPSHOTS:]
+    p = snapshots_path(base_path)
+    dn = os.path.dirname(p)
+    try:
+        os.makedirs(dn, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=dn, prefix='.fh-snap-', suffix='.tmp')
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            for snap in survivors:
+                f.write(json.dumps(snap, ensure_ascii=False) + '\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
+    except OSError as e:
+        logger.warning('[FileHistory] compact_store: rewrite failed: %s', e)
+        with contextlib.suppress(OSError, NameError):
+            os.unlink(tmp)  # type: ignore[name-defined]
+        return result
+    result['snapshots_after'] = len(survivors)
+    result['blobs_removed'] = _gc_orphan_blobs(base_path, survivors)
+    logger.info('[FileHistory] compacted store: %d → %d snapshots, %d orphan blob(s) removed',
+                result['snapshots_before'], result['snapshots_after'],
+                result['blobs_removed'])
+    return result
+
+
+def maybe_compact_store(base_path: str, snapshot_count: int) -> None:
+    """Cheap gate: run :func:`compact_store` only every ``COMPACT_CHECK_EVERY``
+    snapshots.  ``snapshot_count`` is the freshly-appended record's index
+    in the log (1-based).  Caller must hold the project lock.  Never raises.
+    """
+    if snapshot_count <= 0 or snapshot_count % COMPACT_CHECK_EVERY != 0:
+        return
+    try:
+        compact_store(base_path)
+    except Exception as e:
+        logger.debug('[FileHistory] maybe_compact_store skipped: %s', e)

@@ -27,6 +27,7 @@ The `kind` enum is closed — callers must pick one of these values:
   - ``dispatch_exhausted``  every slot for this capability has been tried
   - ``timeout``             upstream / network read timeout
   - ``network``             connection error, DNS, proxy reset
+  - ``endpoint_unreachable`` model endpoint host down / not accepting connections
   - ``content_filter``      provider safety filter (HTTP 450, etc.)
   - ``invalid_image``       image content rejected
   - ``prompt_too_long``     context window overflow (after auto-compact)
@@ -63,7 +64,7 @@ logger = get_logger(__name__)
 # through to the UI as a generic error.
 KINDS = frozenset({
     'quota', 'ratelimit', 'permission', 'no_slot', 'dispatch_exhausted',
-    'timeout', 'network', 'content_filter', 'invalid_image',
+    'timeout', 'network', 'endpoint_unreachable', 'content_filter', 'invalid_image',
     'prompt_too_long', 'stream_only', 'model_limit',
     'tool_rounds_exhausted', 'tool_timeout',
     'premature_close', 'abnormal_stop', 'aborted', 'server_offline',
@@ -73,7 +74,7 @@ KINDS = frozenset({
 # Default severities — warnings are recoverable / user-actionable, errors
 # usually mean the task ended in a non-recoverable state.
 _WARNING_KINDS = frozenset({
-    'ratelimit', 'no_slot', 'timeout', 'network',
+    'ratelimit', 'no_slot', 'timeout', 'network', 'endpoint_unreachable',
     'tool_rounds_exhausted', 'tool_timeout',
     'premature_close', 'abnormal_stop',
     'aborted', 'server_offline',
@@ -82,7 +83,7 @@ _WARNING_KINDS = frozenset({
 # Kinds where retrying THE SAME REQUEST is genuinely likely to help
 # (transient).  The frontend uses this to gate a "Retry" button.
 _RETRYABLE_KINDS = frozenset({
-    'ratelimit', 'no_slot', 'timeout', 'network',
+    'ratelimit', 'no_slot', 'timeout', 'network', 'endpoint_unreachable',
     'premature_close', 'abnormal_stop', 'server_offline',
     'tool_timeout',
 })
@@ -119,6 +120,18 @@ _TIMEOUT_HINT_EN = ('• Retry shortly. If timeouts persist, switch to a faster 
 _NETWORK_HINT_CN = '• 检查本机网络 / 代理设置，然后重试。'
 _NETWORK_HINT_EN = '• Check your network / proxy settings, then retry.'
 
+_UNREACHABLE_HINT_CN = (
+    '• 模型服务端点无法连接（连接被拒绝或超时），通常说明该自建/BYO 服务已宕机、'
+    '端口未监听，或网络/防火墙不通。\n'
+    '• 确认模型服务正在运行且可达后重试；或在 「设置 → 模型默认」 切换到其他可用模型。'
+)
+_UNREACHABLE_HINT_EN = (
+    '• The model endpoint refused the connection or timed out — the self-hosted / '
+    'BYO server is likely down, the port is not listening, or a firewall is blocking it.\n'
+    '• Verify the model server is running and reachable, then retry; or switch to '
+    'another available model in "Settings → Model defaults".'
+)
+
 
 # ── Title / hint table indexed by kind ────────────────────────────────
 # Each entry is (cn_title, en_title, cn_hint, en_hint).  Hints can be
@@ -146,6 +159,9 @@ _TITLES: dict[str, tuple[str, str, str, str]] = {
     'network':            ('⚠️ 网络连接错误',
                             'Network connection error',
                             _NETWORK_HINT_CN, _NETWORK_HINT_EN),
+    'endpoint_unreachable': ('⚠️ 模型服务端点无法连接（服务可能已宕机）',
+                            'Model endpoint unreachable (server may be down)',
+                            _UNREACHABLE_HINT_CN, _UNREACHABLE_HINT_EN),
     'content_filter':     ('⚠️ 该回复被模型安全过滤器拦截',
                             'Response blocked by the model\'s safety filter',
                             '• 尝试换一种方式提问，或切换到其他模型。',
@@ -215,6 +231,7 @@ def _classify_exception(exc: BaseException) -> str:
         from lib.llm import (
             AbortedError as _Abort,
             ContentFilterError as _CF,
+            EndpointUnreachableError as _Unreach,
             InvalidImageError as _Img,
             ModelLimitError as _Mlim,
             PermissionError_ as _Perm,
@@ -224,10 +241,16 @@ def _classify_exception(exc: BaseException) -> str:
         )
     except Exception as _imp_err:
         logger.debug('lib.llm import failed in error classifier: %s', _imp_err)
-        _Abort = _CF = _Img = _Mlim = _Perm = _Plong = _RL = _SO = None  # type: ignore
+        _Abort = _CF = _Img = _Mlim = _Perm = _Plong = _RL = _SO = _Unreach = None  # type: ignore
 
     if _Abort is not None and isinstance(exc, _Abort):
         return 'aborted'
+    # Endpoint-unreachable must be checked BEFORE the string-based
+    # timeout/network heuristics below — its message contains both
+    # "unreachable" and "timed out"/"connect" substrings that would
+    # otherwise misclassify it as a transient read-timeout.
+    if _Unreach is not None and isinstance(exc, _Unreach):
+        return 'endpoint_unreachable'
     if _RL is not None and isinstance(exc, _RL):
         return 'quota' if getattr(exc, 'is_quota', False) else 'ratelimit'
     if _Perm is not None and isinstance(exc, _Perm):
@@ -250,6 +273,8 @@ def _classify_exception(exc: BaseException) -> str:
         return 'dispatch_exhausted'
     if 'no slot' in msg or 'no_slot' in msg:
         return 'no_slot'
+    if 'endpointunreachable' in tn or 'endpoint unreachable' in msg or 'are unreachable' in msg:
+        return 'endpoint_unreachable'
     if 'timed out' in msg or 'timeout' in tn or 'timeout' in msg:
         return 'timeout'
     if '429' in msg or 'rate limit' in msg or 'rate-limit' in msg or 'too many requests' in msg:

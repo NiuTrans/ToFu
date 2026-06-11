@@ -81,7 +81,7 @@ function _handleOAuthCode(provider, code, state) {
     .then(function(data) {
       if (data.error) {
         _updateOAuthCard(provider, { status: 'error' });
-        alert('Token 交换失败: ' + data.error);
+        showAlert('Token 交换失败: ' + data.error);
         return;
       }
       // Success!
@@ -95,7 +95,7 @@ function _handleOAuthCode(provider, code, state) {
     .catch(function(e) {
       console.error('[OAuth] Token exchange error:', e);
       _updateOAuthCard(provider, { status: 'error' });
-      alert('Token 交换失败: ' + e.message);
+      showAlert('Token 交换失败: ' + e.message);
     });
 }
 
@@ -199,7 +199,7 @@ function _oauthLogin(provider) {
     })
     .then(function(data) {
       if (data.error) {
-        alert('OAuth 登录失败: ' + data.error);
+        showAlert('OAuth 登录失败: ' + data.error);
         if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = provider === 'codex' ? '登录 ChatGPT' : '登录 Claude'; }
         return;
       }
@@ -266,13 +266,13 @@ function _oauthLogin(provider) {
     })
     .catch(function(e) {
       console.error('[OAuth] Login error:', e);
-      alert('OAuth 登录请求失败: ' + e.message);
+      showAlert('OAuth 登录请求失败: ' + e.message);
       if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = provider === 'codex' ? '登录 ChatGPT' : '登录 Claude'; }
     });
 }
 
-function _oauthLogout(provider) {
-  if (!confirm('确定要退出 ' + (provider === 'codex' ? 'ChatGPT' : 'Claude') + ' 订阅登录吗？')) return;
+async function _oauthLogout(provider) {
+  if (!await showConfirm('确定要退出 ' + (provider === 'codex' ? 'ChatGPT' : 'Claude') + ' 订阅登录吗？')) return;
 
   // Try POST first; if proxy returns 405, fall back to GET with query params
   function _doLogoutRequest(useGet) {
@@ -292,7 +292,7 @@ function _oauthLogout(provider) {
       _updateOAuthCard(provider, { status: 'not_started', authenticated: false });
     })
     .catch(function(e) {
-      alert('退出失败: ' + e.message);
+      showAlert('退出失败: ' + e.message);
     });
 }
 
@@ -300,7 +300,7 @@ function _oauthManualSubmit(provider) {
   var capP = provider === 'codex' ? 'Codex' : 'Claude';
   var input = document.getElementById('oauth' + capP + 'ManualUrl');
   if (!input || !input.value.trim()) {
-    alert('请粘贴授权码或回调 URL');
+    showAlert('请粘贴授权码或回调 URL');
     return;
   }
   var val = input.value.trim();
@@ -344,7 +344,7 @@ function _oauthManualSubmit(provider) {
     })
     .then(function(data) {
       if (data.error) {
-        alert('授权失败: ' + data.error);
+        showAlert('授权失败: ' + data.error);
       } else {
         _updateOAuthCard(provider, { status: 'success', authenticated: true, email: data.email || '' });
         var manualDiv = document.getElementById('oauth' + capP + 'Manual');
@@ -354,7 +354,7 @@ function _oauthManualSubmit(provider) {
       }
     })
     .catch(function(e) {
-      alert('提交失败: ' + e.message);
+      showAlert('提交失败: ' + e.message);
     });
 }
 

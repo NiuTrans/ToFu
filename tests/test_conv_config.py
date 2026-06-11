@@ -136,6 +136,21 @@ class ResolveConvConfigTest(unittest.TestCase):
         out['projectPaths'].append('/c')
         self.assertEqual(paths, ['/a', '/b'])
 
+    def test_read_only_paths_list_copy(self):
+        ro = ['/b']
+        out = resolve_conv_config(
+            conv_settings={'projectPaths': ['/a', '/b'], 'readOnlyPaths': ro},
+            overrides={}, is_active=False,
+        )
+        self.assertEqual(out['readOnlyPaths'], ['/b'])
+        out['readOnlyPaths'].append('/c')
+        self.assertEqual(ro, ['/b'])
+
+    def test_read_only_paths_default_empty(self):
+        out = resolve_conv_config(
+            conv_settings={}, overrides={}, is_active=True)
+        self.assertEqual(out['readOnlyPaths'], [])
+
     def test_all_expected_keys_present(self):
         out = resolve_conv_config(
             conv_settings={}, overrides={}, is_active=True)
@@ -144,7 +159,7 @@ class ResolveConvConfigTest(unittest.TestCase):
             'systemPrompt', 'thinkingDepth', 'temperature', 'searchMode',
             'fetchEnabled', 'codeExecEnabled', 'memoryEnabled',
             'schedulerEnabled', 'swarmEnabled', 'projectPath',
-            'projectPaths', 'autoApply', 'browserEnabled',
+            'projectPaths', 'readOnlyPaths', 'autoApply', 'browserEnabled',
             'desktopEnabled', 'imageGenEnabled', 'humanGuidanceEnabled',
             'endpointMode', 'autopilot', 'agentBackend',
             'autoTranslate', 'browserClientId', 'keepToolHistory',
@@ -220,7 +235,7 @@ class ResolveConvSettingsTest(unittest.TestCase):
             'desktopEnabled', 'memoryEnabled', 'schedulerEnabled',
             'swarmEnabled', 'endpointEnabled', 'autopilotEnabled',
             'imageGenEnabled', 'humanGuidanceEnabled', 'projectPath',
-            'projectPaths', 'autoTranslate', 'folderId',
+            'projectPaths', 'readOnlyPaths', 'autoTranslate', 'folderId',
         }
         self.assertEqual(set(out.keys()), expected)
 

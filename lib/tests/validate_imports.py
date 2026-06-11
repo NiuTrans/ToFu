@@ -21,11 +21,7 @@ if _PROJECT_ROOT not in sys.path:
 # Sub-packages (each has __init__.py with re-exports)
 _SUB_PACKAGES = [
     'lib',
-    'lib.fetch',
-    'lib.trading',
-    'lib.trading_autopilot',
-    'lib.trading_backtest_engine',
-    'lib.trading_strategy_engine',
+    'tofu_search.fetch',
     'lib.llm_dispatch',
     'lib.project_mod',
     'lib.scheduler',
@@ -44,16 +40,14 @@ _TOP_LEVEL_MODULES = [
     'lib.desktop_tools',
     'lib.embeddings',
     'lib.image_gen',
-    'lib.trading_risk',
-    'lib.trading_signals',
-    'lib.trading_tasks',
     'lib.llm',
     'lib.log',
     'lib.pdf_parser',
     'lib.pricing',
     'lib.protocols',
     'lib.rate_limiter',
-    'lib.search',
+    'lib.search_bridge',
+    'tofu_search.search',
     'lib.memory',
 ]
 

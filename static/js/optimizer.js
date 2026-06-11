@@ -239,7 +239,7 @@ async function _optApprove(id) {
 }
 
 async function _optReject(id) {
-  const reason = prompt(t('optimizer.rejectPrompt'), "");
+  const reason = await showPrompt(t('optimizer.rejectPrompt'), { defaultValue: "" });
   try {
     const data = await Api.optimizer.reject(id, reason || "");
     if (data && data.ok) debugLog(`🧭 Optimizer: proposal ${id.slice(0, 12)} rejected`, "info");
@@ -251,7 +251,7 @@ async function _optReject(id) {
 }
 
 async function _optRevert(id) {
-  if (!confirm(t('optimizer.revertConfirm'))) return;
+  if (!await showConfirm(t('optimizer.revertConfirm'), { danger: true })) return;
   try {
     const data = await Api.optimizer.revert(id);
     if (data && data.ok) debugLog(`🧭 Optimizer: proposal ${id.slice(0, 12)} reverted`, "success");

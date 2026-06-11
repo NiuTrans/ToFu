@@ -37,6 +37,10 @@
     "**/.chatui/**": true,
     "**/.migrate_backup/**": true,
     "**/swebench_workdir/**": true,
+    "**/swebench_rerun_workdir/**": true,
+    "**/abtest_workdir/**": true,
+    // Catch any future *_workdir eval/benchmark scratch dir (thousands of repo checkouts)
+    "**/*_workdir/**": true,
 
     // Generated bundles / artifacts
     "**/static/js/bundle-*.js": true,
@@ -67,6 +71,9 @@
     "**/.chatui": true,
     "**/.migrate_backup": true,
     "**/swebench_workdir": true,
+    "**/swebench_rerun_workdir": true,
+    "**/abtest_workdir": true,
+    "**/*_workdir": true,
     "**/static/js/bundle-*.js": true,
     "**/*.log": true,
     "**/*.db": true,
@@ -97,6 +104,9 @@
     "**/.chatui/**",
     "**/.migrate_backup/**",
     "**/swebench_workdir/**",
+    "**/swebench_rerun_workdir/**",
+    "**/abtest_workdir/**",
+    "**/*_workdir/**",
     "**/node_modules/**",
     "**/__pycache__/**",
     "**/.pytest_cache/**",
@@ -133,6 +143,9 @@
     "**/.migrate_backup": true,
     "**/data/pgdata": true,
     "**/swebench_workdir": true,
+    "**/swebench_rerun_workdir": true,
+    "**/abtest_workdir": true,
+    "**/*_workdir": true,
     "**/*.pyc": true
   },
 

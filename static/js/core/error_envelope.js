@@ -27,6 +27,7 @@ const ERROR_KIND_LABELS = {
   dispatch_exhausted:    'All keys exhausted',
   timeout:               'Timed out',
   network:               'Network error',
+  endpoint_unreachable:  'Endpoint unreachable',
   content_filter:        'Content filter',
   invalid_image:         'Image rejected',
   prompt_too_long:       'Prompt too long',

@@ -250,29 +250,28 @@ async function connectToTask(convId, taskId, retries = 0) {
   }
 }
 
-async function _trySSE(convId, taskId, stream, assistantMsg) {
-  let lastSave = Date.now(),
-    gotData = false;
-  let sseTimeout = setTimeout(() => {
-    if (!gotData) stream.controller.abort();
-  }, 30000);
-  let buf = streamBufs.get(convId);
-  /* ── Stable identity capture ──
-   * Pin the assistantMsg reference by its `_msgId` (minted by
-   * `_ensureMsgId` / server's `_assign_message_ids`).  Phase-2
-   * reconciliation or any concurrent push can replace
-   * `conv.messages[length-1]` mid-stream — without this re-resolve we
-   * accumulate into a detached object and the renderer never sees the
-   * data (the "Autopilot content invisible until stop+refresh" bug).
-   * If the message has no id yet, stamp one so subsequent rebinds work. */
-  if (assistantMsg && !assistantMsg._msgId && typeof _ensureMsgId === 'function') {
-    _ensureMsgId(assistantMsg);
-  }
-  const _pinnedMsgId = assistantMsg && assistantMsg._msgId;
-  /** Re-bind `assistantMsg` to whatever object currently lives in
-   *  conv.messages for `_pinnedMsgId`.  Returns the resolved object so
-   *  callers can use it locally even if the outer closure already cached
-   *  a stale ref.  Logs a `[StableId]` warning when a recovery happens. */
+/* ════════════════════════════════════════════════════════════════════
+   SSE event dispatcher — extracted from the _processSSELine closure
+   inside _trySSE (refactor 2026-06). The former closure-locals now live
+   on a mutable `ctx` object so this is a plain module-level function that
+   can be unit-tested (see tests/test_frontend_sse_dispatch.py via the
+   window.__sse_test__ seam). Body is byte-for-byte the original dispatch
+   logic; only the 7 reassigned locals were lifted to `ctx` (destructured
+   on entry, written back in `finally` so every early `return` propagates).
+
+   ctx = { convId, taskId, stream, assistantMsg, buf, epCriticPhase,
+           epCriticMsg, epCriticBuf, roundThinkingLen, lastEventId,
+           pinnedMsgId }
+   Returns truthy only for the `done` event (signals stream end). */
+function dispatchSSEEvent(line, ctx) {
+  let { assistantMsg, buf, pinnedMsgId: _pinnedMsgId } = ctx;
+  let _epCriticPhase = ctx.epCriticPhase;
+  let _epCriticMsg = ctx.epCriticMsg;
+  let _epCriticBuf = ctx.epCriticBuf;
+  let _roundThinkingLen = ctx.roundThinkingLen;
+  let _lastEventId = ctx.lastEventId;
+  const convId = ctx.convId, taskId = ctx.taskId, stream = ctx.stream;
+  try {
   function _rebindAssistant() {
     if (!_pinnedMsgId) return assistantMsg;
     const _conv = conversations.find(c => c.id === convId);
@@ -295,17 +294,15 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
     }
     return assistantMsg;
   }
-  /* ── Endpoint critic-phase guard ──
-   * When the critic is running, it streams delta/tool events through the same
-   * SSE pipe.  We must NOT accumulate those into the worker's assistantMsg.
-   * Instead, we accumulate into a separate criticBuf and show a dedicated
-   * streaming bubble for the critic's review.  */
-  let _epCriticPhase = false;
-  let _epCriticMsg = null;   // the critic message object in conv.messages
-  let _epCriticBuf = null;   // {content, thinking, toolRounds}
-  let _roundThinkingLen = 0; // thinking chars accumulated in current LLM call (reset on phase events)
-  let _lastEventId = null; // ★ Item 6: track SSE event ID for reconnection
-  function _processSSELine(line) {
+  /* Snapshot of the live dispatch state passed to the extracted
+   * property-only handlers (ui/sse_handlers_tool.js / _swarm.js). They
+   * mutate object PROPERTIES of assistantMsg/buf/_epCritic* (same refs we
+   * hold here) and never reassign the locals, so no write-back is needed. */
+  function _hctx() {
+    return { convId, taskId, stream, assistantMsg, buf,
+             epCriticPhase: _epCriticPhase, epCriticMsg: _epCriticMsg,
+             epCriticBuf: _epCriticBuf };
+  }
     // ★ Capture id: field for Last-Event-ID reconnection
     if (line.startsWith("id: ")) {
       _lastEventId = line.slice(4).trim();
@@ -665,1074 +662,45 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
       }
       twUpdate(convId);
     } else if (ev.type === "tool_start") {
-      if (_epCriticPhase) {
-        /* Critic's tool usage → accumulate into critic message */
-        if (_epCriticMsg) {
-          const r = {
-            roundNum: ev.roundNum, query: ev.query, results: null,
-            status: "searching", toolName: ev.toolName || null,
-            toolCallId: ev.toolCallId || null, toolArgs: ev.toolArgs || null,
-            llmRound: ev.llmRound ?? null, _swarm: false,
-          };
-          if (!_epCriticMsg.toolRounds) _epCriticMsg.toolRounds = [];
-          _epCriticMsg.toolRounds.push(r);
-          if (_epCriticBuf) _epCriticBuf.toolRounds = _epCriticMsg.toolRounds;
-        }
-        twUpdate(convId);
-      } else {
-        const r = {
-          roundNum: ev.roundNum,
-          query: ev.query,
-          results: null,
-          status: "searching",
-          toolName: ev.toolName || null,
-          toolCallId: ev.toolCallId || null,
-          toolArgs: ev.toolArgs || null,
-          llmRound: ev.llmRound ?? null,
-          _swarm: ev._swarm || false,
-        };
-        // ★ Preserve per-round assistantContent for Continue replay
-        if (ev.assistantContent) r.assistantContent = ev.assistantContent;
-        // ★ Harness self-repair descriptor — the backend auto-corrected this
-        //   call's malformed arguments; surfaced as an "auto-fixed" badge.
-        if (ev._repaired) r._repaired = ev._repaired;
-        if (!assistantMsg.toolRounds) assistantMsg.toolRounds = [];
-        assistantMsg.toolRounds.push(r);
-        /* ★ MCP login-hint: surface a prominent "Check your phone for the
-         *   approval push" banner whenever a login-style MCP call starts.
-         *   Meituan's `hope login` blocks the subprocess for up to ~5 min
-         *   waiting for the user to tap Approve on their mobile-office app
-         *   — without this banner the user has no idea the tool is
-         *   waiting on them and the task appears frozen.
-         *   Matches:
-         *     - mcp__hope__hope_login
-         *     - mcp__hope__hope_check_login (auto-login triggered when
-         *       HOPE_USERNAME is configured and no cached creds)
-         *     - generic *_login / *_check_login MCP tools
-         */
-        try {
-          const _toolN = String(ev.toolName || '');
-          if (/^mcp__/.test(_toolN) && /(hope_login|hope_check_login|_login$)/.test(_toolN)) {
-            let _un = '';
-            try {
-              const a = ev.toolArgs && (typeof ev.toolArgs === 'string' ? JSON.parse(ev.toolArgs) : ev.toolArgs);
-              _un = (a && (a.username || a.user)) || '';
-            } catch (_e) { /* best-effort username extraction */ }
-            assistantMsg._mcpLoginHint = {
-              phase: 'awaiting_approval',
-              toolName: _toolN,
-              roundNum: ev.roundNum,
-              username: _un,
-              updatedAt: Date.now(),
-            };
-            if (buf) buf._mcpLoginHint = assistantMsg._mcpLoginHint;
-          }
-        } catch (_e) { /* best-effort */ }
-        /* Track swarm round number so swarm_phase events can find it */
-        if (r._swarm) assistantMsg._swarmRoundNum = r.roundNum;
-        if (buf)
-          buf.toolRounds = assistantMsg.toolRounds;
-        twUpdate(convId);
-      }
+      _handleToolStart(ev, _hctx());
     } else if (ev.type === "human_guidance_request") {
-      /* ── Human Guidance: LLM is asking the user a question ── */
-      if (assistantMsg.toolRounds) {
-        const r = assistantMsg.toolRounds.find(
-          (r) => r.roundNum === ev.roundNum,
-        );
-        if (r) {
-          r.status = "awaiting_human";
-          r.guidanceId = ev.guidanceId;
-          r.guidanceQuestion = ev.question;
-          r.guidanceType = ev.responseType;
-          /* ★ Defensive: ev.options may arrive as a JSON string or object
-           *   from an upstream model that serialised it oddly. Normalise to
-           *   an array before assigning so _renderHumanGuidanceCard can map. */
-          let _ev_opts = ev.options;
-          if (typeof _ev_opts === 'string') {
-            try { _ev_opts = JSON.parse(_ev_opts); }
-            catch (_e) { _ev_opts = []; }
-          }
-          if (!Array.isArray(_ev_opts)) _ev_opts = [];
-          r.guidanceOptions = _ev_opts.map(o => ({...(o || {})}));
-        }
-      }
-      if (buf)
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
-      // ★ Update sidebar to show amber blinking dot for awaiting-human state
-      renderConversationList();
-      // ★ Auto-translate question & options (EN→CN) when autoTranslate is ON.
-      //   This mirrors the finishStream auto-translate flow for assistant messages.
-      //   Fire-and-forget: translates asynchronously, re-renders card when done.
-      const _hgConv = conversations.find(c => c.id === convId);
-      const _hgAutoTrans = _hgConv ? (_hgConv.autoTranslate !== undefined ? !!_hgConv.autoTranslate : true) : !!autoTranslate;
-      if (_hgAutoTrans && ev.question) {
-        _autoTranslateHumanGuidance(convId, ev.roundNum, ev.question, ev.responseType, ev.options || []);
-      }
+      _handleHumanGuidance(ev, _hctx());
     } else if (ev.type === "tool_progress") {
-      /* ── Streaming run_command output: append chunk to the round's
-       *    partial output buffer and re-render so the user sees it live. */
-      const _trMsg = _epCriticPhase ? _epCriticMsg : assistantMsg;
-      if (_trMsg && _trMsg.toolRounds) {
-        const r = _trMsg.toolRounds.find(rr => rr.roundNum === ev.roundNum);
-        if (r) {
-          // _partialOutput is the live, growing terminal buffer.
-          // It's replaced wholesale by meta.output once tool_result arrives.
-          if (typeof r._partialOutput !== "string") r._partialOutput = "";
-          r._partialOutput += (ev.chunk || "");
-        }
-      }
-      if (!_epCriticPhase && buf) {
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      } else if (_epCriticPhase && _epCriticBuf && _epCriticMsg) {
-        _epCriticBuf.toolRounds = _epCriticMsg.toolRounds || [];
-      }
-      twUpdate(convId);
-      // Auto-scroll the live terminal box(es) to the bottom so the newest
-      // output is always visible — DOM was just rerendered above.
-      try {
-        const _liveOut = document.querySelectorAll('.ptool-cmd-output-live');
-        if (_liveOut.length) {
-          /* Batch into one rAF: read all scrollHeights, then write all
-           * scrollTops, so we don't interleave layout reads with writes
-           * (forced synchronous reflow) once per element per SSE chunk. */
-          requestAnimationFrame(() => {
-            const _heights = [];
-            for (let i = 0; i < _liveOut.length; i++) _heights.push(_liveOut[i].scrollHeight);
-            for (let i = 0; i < _liveOut.length; i++) _liveOut[i].scrollTop = _heights[i];
-          });
-        }
-      } catch (_e) { /* best-effort */ }
+      _handleToolProgress(ev, _hctx());
     } else if (ev.type === "stdin_request") {
-      /* ── Stdin Request: subprocess is waiting for user keyboard input ── */
-      if (assistantMsg.toolRounds) {
-        const r = assistantMsg.toolRounds.find(
-          (r) => r.roundNum === ev.roundNum,
-        );
-        if (r) {
-          r.status = "awaiting_stdin";
-          r.stdinId = ev.stdinId;
-          r.stdinPrompt = ev.prompt;
-          r.stdinCommand = ev.command;
-        }
-      }
-      if (buf)
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      _handleStdinRequest(ev, _hctx());
     } else if (ev.type === "stdin_resolved") {
-      /* ── Stdin Resolved: user input was sent, command continues ── */
-      if (assistantMsg.toolRounds) {
-        const r = assistantMsg.toolRounds.find(
-          (r) => r.roundNum === ev.roundNum,
-        );
-        if (r) {
-          r.status = "searching";
-          r.stdinId = null;
-          r.stdinPrompt = null;
-        }
-      }
-      if (buf)
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      _handleStdinResolved(ev, _hctx());
     } else if (ev.type === "write_approval_request") {
-      if (_epCriticPhase) { /* skip approval during critic phase */ }
-      else if (assistantMsg.toolRounds) {
-        const r = assistantMsg.toolRounds.find(
-          (r) => r.roundNum === ev.roundNum,
-        );
-        if (r) {
-          r.status = "pending_approval";
-          r.approvalId = ev.approvalId;
-          r.approvalMeta = ev.meta;
-        }
-      }
-      if (!_epCriticPhase && buf)
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      _handleWriteApproval(ev, _hctx());
     } else if (ev.type === "tool_result") {
-      if (_epCriticPhase && _epCriticMsg) {
-        /* Critic's tool result → accumulate into critic message */
-        if (_epCriticMsg.toolRounds) {
-          const r = _epCriticMsg.toolRounds.find(r => r.roundNum === ev.roundNum);
-          if (r) { r.results = ev.results; r.status = "done"; if (ev.searchDiag) r.searchDiag = ev.searchDiag; if (ev.engineBreakdown) r.engineBreakdown = ev.engineBreakdown; }
-        }
-        if (_epCriticBuf) _epCriticBuf.toolRounds = _epCriticMsg.toolRounds || [];
-        twUpdate(convId);
-      } else if (assistantMsg.toolRounds) {
-        const r = assistantMsg.toolRounds.find(
-          (r) => r.roundNum === ev.roundNum,
-        );
-        if (r) {
-          r.results = ev.results;
-          r.status = "done";
-          r.approvalId = null;
-          r.approvalMeta = null;
-          r.guidanceId = null;
-          if (ev.searchDiag) r.searchDiag = ev.searchDiag;
-          if (ev.engineBreakdown) r.engineBreakdown = ev.engineBreakdown;
-          /* ★ Harness self-repair: when the backend auto-corrected this
-           *   call's args AFTER the (garbled) tool_start was already shown,
-           *   the tool_result carries the corrected display + descriptor.
-           *   Apply them so the live view stops showing the garbled line. */
-          if (ev._repaired) {
-            r._repaired = ev._repaired;
-            if (ev.query) r.query = ev.query;
-          }
-        }
-        /* ★ Clear the MCP login-hint banner once the login call returns.
-         *   Classification priority (each test uses STRUCTURED fields
-         *   first, text matching second, and always with word-boundaries
-         *   to avoid matching e.g. "denied": false inside a JSON dump):
-         *     1. Parse snippet as JSON → read `approved`/`denied`/`approval_timed_out`
-         *     2. Fallback regex on rendered text WITH word boundaries
-         *   Without this, the chip showed "Login denied" whenever the
-         *   result JSON contained the literal token `"denied"`, even
-         *   when approval actually succeeded. */
-        const _lh = assistantMsg._mcpLoginHint;
-        if (_lh && _lh.roundNum === ev.roundNum) {
-          const _res = Array.isArray(ev.results) ? ev.results[0] : null;
-          const _snippet = (_res && (_res.snippet || _res.title || '')) || '';
-          const _resultOk = !!(_res && _res.ok);
-          // Try to parse the structured result — MCP tools typically
-          // embed the tool's JSON response in snippet.
-          let _parsed = null;
-          if (_snippet) {
-            try {
-              // The snippet may be "{...}" or wrapped in markdown fences
-              const _trim = _snippet.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
-              _parsed = JSON.parse(_trim);
-            } catch (_e) { /* non-JSON snippet — fall through */ }
-          }
-          let _phase;
-          if (_parsed && typeof _parsed === 'object') {
-            /* Trust the tool's own structured verdict. hope_login returns
-             * {approved, denied, approval_timed_out, token_verified}. */
-            if (_parsed.approved === true) _phase = 'approved';
-            else if (_parsed.denied === true) _phase = 'denied';
-            else if (_parsed.approval_timed_out === true) _phase = 'timeout';
-            else if (_parsed.token_verified === false) _phase = 'denied'; // token missing → treat as failure
-            else _phase = _resultOk ? 'approved' : 'done';
-          } else {
-            /* Word-boundary regex fallback for non-JSON replies.
-             * \b prevents matching "denied" inside "\"denied\":false". */
-            const _deniedText = /\bdenied\b\s*$|\brejected\b|\bcancell?ed\b/i.test(_snippet);
-            const _timeoutText = /\btimed?\s*out\b|\bapproval\s+timeout\b/i.test(_snippet);
-            _phase = _resultOk ? 'approved'
-                  : _deniedText ? 'denied'
-                  : _timeoutText ? 'timeout'
-                  : 'done';
-          }
-          assistantMsg._mcpLoginHint = {
-            ..._lh,
-            phase: _phase,
-            /* Keep the snippet in full — the user wants to see the
-             * complete response, not a 200-char slice with ellipsis.
-             * The chip CSS is also updated to wrap instead of clip. */
-            snippet: _snippet,
-            updatedAt: Date.now(),
-          };
-          if (buf) buf._mcpLoginHint = assistantMsg._mcpLoginHint;
-          /* Auto-dismiss on success after 4s so the chip doesn't linger
-           * forever once the session is live. */
-          if (_phase === 'approved') {
-            setTimeout(() => {
-              if (assistantMsg._mcpLoginHint === buf?._mcpLoginHint) {
-                assistantMsg._mcpLoginHint = null;
-                if (buf) buf._mcpLoginHint = null;
-                twUpdate(convId);
-              }
-            }, 4000);
-          }
-        }
-      }
-      /* ★ After create_project: refresh project status so the new extra
-       * root appears in the sidebar AND gets persisted to conv.projectPaths.
-       * Without this the backend has the root registered but the frontend
-       * will overwrite it on the next set_project call (e.g. page refresh,
-       * conv switch), causing any subsequent 'name:path' writes to land
-       * under the primary root — see create_project frontend-sync bug. */
-      if (ev.results && ev.results.some(r => r.toolName === 'create_project')) {
-        try {
-          Api.project.status()
-            .then(data => {
-              if (!data) return;
-              if (typeof _applyProjectData === 'function') _applyProjectData(data);
-              const c = typeof getActiveConv === 'function' ? getActiveConv() : null;
-              if (c && data.path) {
-                const paths = [data.path];
-                if (Array.isArray(data.extraRoots)) {
-                  for (const r of data.extraRoots) {
-                    const pp = typeof r === 'string' ? r : r.path;
-                    if (pp && !paths.includes(pp)) paths.push(pp);
-                  }
-                }
-                c.projectPath = data.path;
-                c.projectPaths = paths;
-                if (typeof saveConversations === 'function') saveConversations(c.id);
-                if (typeof syncConversationToServer === 'function') syncConversationToServer(c);
-              }
-              if (typeof showToast === 'function') {
-                const cp = ev.results.find(r => r.toolName === 'create_project');
-                showToast('', 'New workspace root',
-                  (cp && (cp.snippet || cp.title)) || 'Registered an additional project root',
-                  4000);
-              }
-            })
-            .catch(() => {});
-        } catch (_) {}
-      }
-      /* ★ Toast for create_memory */
-      if (ev.results && ev.results.some(r => r.toolName === 'create_memory')) {
-        const sk = ev.results.find(r => r.toolName === 'create_memory');
-        const ok = sk.memoryOk === true || (sk.badge && sk.badge.includes('saved'));
-        if (typeof showToast === 'function') {
-          const sName = sk.memoryName || 'Memory';
-          const sScope = sk.memoryScope || 'project';
-          const title = ok ? `${sName}` : 'Memory Failed';
-          const body = ok
-            ? `Saved to ${sScope} scope — available in future sessions`
-            : (sk.snippet || sk.title || 'Unknown error');
-          showToast('', title, body, ok ? 5000 : 8000);
-        }
-      }
-      if (buf)
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
-      // ★ If this was an ask_human tool_result, refresh sidebar to clear amber dot
-      if (ev.results && ev.results.some(r2 => r2.toolName === 'ask_human')) {
-        renderConversationList();
-      }
+      _handleToolResult(ev, _hctx());
     } else if (ev.type === "tool_complete") {
-      // ★ Store raw tool content for continue context restoration
-      const _applyToolComplete = (r) => {
-        if (!r) return;
-        r.toolContent = ev.toolContent || null;
-        if (ev.toolTokens != null) r.toolTokens = ev.toolTokens;
-        // L0 may already be stamped server-side at emit time.
-        if (ev.compactionLayer) {
-          r.compactionLayer = ev.compactionLayer;
-          r.compactedFromChars = ev.compactedFromChars;
-          r.compactedToChars = ev.compactedToChars;
-        }
-      };
-      if (_epCriticPhase && _epCriticMsg) {
-        if (_epCriticMsg.toolRounds) {
-          _applyToolComplete(_epCriticMsg.toolRounds.find(r => r.roundNum === ev.roundNum && r.toolCallId === ev.toolCallId));
-        }
-        if (_epCriticBuf)
-          _epCriticBuf.toolRounds = _epCriticMsg.toolRounds || [];
-      } else if (assistantMsg.toolRounds) {
-        _applyToolComplete(assistantMsg.toolRounds.find(
-          (r) => r.roundNum === ev.roundNum && r.toolCallId === ev.toolCallId,
-        ));
-      }
-      // ★ Sync to buf and let the reactive pipeline (twUpdate → _syncToolRoundsDOM)
-      //   handle preview button rendering — no fragile direct DOM injection needed.
-      if (buf)
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
-
+      _handleToolComplete(ev, _hctx());
     } else if (ev.type === "tool_compacted") {
-      /* ★ Per-tool compaction event — emitted by lib/tasks_pkg/compaction.py
-       * micro_compact() (L1) and the aggregate-budget pass in
-       * tool_dispatch.py (L0). Tags the matching round so its chip can
-       * render the COMPACTED label in real time, even on already-
-       * completed tool rounds that compaction just rewrote.
-       *
-       * IMPORTANT: L1 compacts COLD rounds — i.e. tool calls from
-       * EARLIER assistant messages, not the in-flight one. Searching
-       * only `assistantMsg.toolRounds` (the current bubble) misses
-       * those entirely and the pill never renders. We have to walk
-       * every assistant message in the conversation and stamp the
-       * matching round wherever it lives.
-       *
-       * Toolcall IDs are conversation-unique (UUID-style), so a single
-       * find across the whole conv is safe and unambiguous. */
-      const _applyCompacted = (r) => {
-        if (!r) return false;
-        r.compactionLayer = ev.compactionLayer || r.compactionLayer || "L1";
-        if (ev.compactedFromChars != null) r.compactedFromChars = ev.compactedFromChars;
-        if (ev.compactedToChars != null) r.compactedToChars = ev.compactedToChars;
-        if (ev.toolTokens != null) r.toolTokens = ev.toolTokens;
-        return true;
-      };
-      let _stampedMsg = null;
-      // 1. Try the active critic bubble first (endpoint mode).
-      if (_epCriticPhase && _epCriticMsg && _epCriticMsg.toolRounds
-          && _applyCompacted(_epCriticMsg.toolRounds.find(r => r.toolCallId === ev.toolCallId))) {
-        _stampedMsg = _epCriticMsg;
-        if (_epCriticBuf) _epCriticBuf.toolRounds = _epCriticMsg.toolRounds || [];
-      }
-      // 2. Fall through to every assistant message in this conversation.
-      //    Most events match in the in-flight assistantMsg; cold-round
-      //    compactions match in older messages.
-      if (!_stampedMsg) {
-        const _conv = (typeof conversations !== 'undefined')
-          ? conversations.find(c => c && c.id === convId)
-          : null;
-        if (_conv && Array.isArray(_conv.messages)) {
-          for (let i = _conv.messages.length - 1; i >= 0; i--) {
-            const m = _conv.messages[i];
-            if (!m || m.role !== 'assistant' || !Array.isArray(m.toolRounds)) continue;
-            const r = m.toolRounds.find(rr => rr.toolCallId === ev.toolCallId);
-            if (_applyCompacted(r)) { _stampedMsg = m; break; }
-          }
-        }
-      }
-      if (buf && assistantMsg && Array.isArray(assistantMsg.toolRounds))
-        buf.toolRounds = assistantMsg.toolRounds;
-      twUpdate(convId);
-      /* If we stamped a round in an OLDER message (not the in-flight
-       * bubble), twUpdate alone won't re-render that message — it
-       * only refreshes the streaming bubble.  Trigger a full conv
-       * re-render so the COMPACTED pill on the older row materializes
-       * immediately.  Cheap: renderChat is fingerprint-guarded and
-       * the new compactedCount in _msgFingerprint forces re-render
-       * of just the message that changed. */
-      if (_stampedMsg && _stampedMsg !== assistantMsg
-          && convId === activeConvId
-          && typeof renderChat === 'function') {
-        const _conv = (typeof conversations !== 'undefined')
-          ? conversations.find(c => c && c.id === convId) : null;
-        if (_conv) renderChat(_conv, false);
-      }
-      /* ── Debug-panel alignment ──
-       * The debug panel renders the api-form messages snapshot the model
-       * just received. Compaction mutates a tool message's content
-       * mid-round; without patching the cached snapshot here, the panel
-       * keeps showing the pre-compaction blob (e.g. 100 KB grep dump)
-       * until the next ``messages_snapshot`` lands — which never arrives
-       * if the task ends or pauses. Patch the cached entry by toolCallId
-       * and re-render so the JSON tree matches what the model now sees. */
-      if (typeof _debugCache !== 'undefined'
-          && _debugCache[convId]
-          && Array.isArray(_debugCache[convId].messages)
-          && ev.compactedContent != null) {
-        const _cached = _debugCache[convId].messages;
-        for (let i = 0; i < _cached.length; i++) {
-          const _m = _cached[i];
-          if (_m && _m.role === 'tool' && _m.tool_call_id === ev.toolCallId) {
-            _m.content = ev.compactedContent;
-            _m._compactionLayer = ev.compactionLayer || 'L1';
-            _m._compactedFromChars = ev.compactedFromChars;
-            _m._compactedToChars = ev.compactedToChars;
-            _m._toolTokens = ev.toolTokens;
-            break;
-          }
-        }
-        if (convId === activeConvId
-            && typeof showMessagesInDebug === 'function') {
-          const _c = _debugCache[convId];
-          showMessagesInDebug(_c.messages, _c.label, true, convId, _c.tools);
-        }
-      }
-
+      _handleToolCompacted(ev, _hctx());
     } else if (ev.type === "round_usage") {
-      /* ── Per-round usage tick ──────────────────────────────────────────
-       * The orchestrator emits this immediately after EACH LLM round
-       * lands, carrying the raw usage dict + a pre-computed `tokensIn`
-       * (input tokens including cache, Anthropic/OpenAI conventions
-       * normalized server-side in lib/tasks_pkg/llm_fallback.py
-       * :_emit_round_usage).
-       *
-       * Stash the latest reading on the in-flight assistant msg as
-       * `_liveLastRoundUsage` so the context-health gauge reflects the
-       * size of the prompt JUST sent to the model — without waiting
-       * for the final `done` event to populate `apiRounds`.  This is
-       * what makes the bar move on every tool round, not just at the
-       * end of the user-visible turn.
-       *
-       * The reader is `static/js/context-bar.js:_lastUsageTokens`,
-       * which prefers `_liveLastRoundUsage` over `apiRounds[-1]` and
-       * falls back to `msg.usage / n` for older conversations. */
-      if (assistantMsg) {
-        assistantMsg._liveLastRoundUsage = {
-          round: ev.round,
-          model: ev.model,
-          tag: ev.tag,
-          tokensIn: ev.tokensIn,
-          tokensOut: ev.tokensOut,
-          usage: ev.usage,
-        };
-      }
-      if (typeof updateContextBar === 'function') updateContextBar();
-      return false;
-
+      _handleRoundUsage(ev, _hctx());
     } else if (ev.type === "artifact") {
-      /* ── Renderable artifact (md/html/svg) — see lib/artifacts/ ───────
-       * Producer A (write_file post-hook in lib/tasks_pkg/handlers/project.py)
-       * persists the bytes server-side and emits this metadata-only event.
-       * The actual content is fetched lazily via /api/artifacts/<id>/raw
-       * when the user clicks the chip.
-       *
-       * We stash the meta on assistantMsg._artifacts so the chip survives
-       * re-renders, and also into the global Artifacts cache so a click
-       * after compaction (which strips toolRounds) still finds it. */
-      if (typeof window.Artifacts !== "undefined" && window.Artifacts.attachToMessage) {
-        try {
-          window.Artifacts.attachToMessage(assistantMsg, {
-            id:             ev.id,
-            conv_id:        ev.conv_id || convId,
-            task_id:        ev.task_id || taskId,
-            msg_id:         ev.msg_id || (assistantMsg && assistantMsg._msgId) || "",
-            source:         ev.source || "",
-            source_ref:     ev.source_ref || {},
-            format:         ev.format || "",
-            title:          ev.title || "",
-            size_bytes:     ev.size_bytes || 0,
-            version:        ev.version || 1,
-            parent_id:      ev.parent_id || "",
-            pinned:         !!ev.pinned,
-            created_at:     ev.created_at || 0,
-            url:            ev.url || ("/api/v1/artifacts/" + (ev.id || "")),
-          });
-        } catch (e) {
-          console.debug("[Artifacts] attachToMessage failed:", e);
-        }
-      }
-      if (buf) {
-        buf._artifacts = (assistantMsg && assistantMsg._artifacts) || buf._artifacts || [];
-      }
-      twUpdate(convId);
-
+      _handleArtifact(ev, _hctx());
     } else if (ev.type === "compaction" || ev.type === "compaction_done") {
-      /* ── Compaction marker ────────────────────────────────────────────
-       * Emitted by lib/tasks_pkg/compaction.py when an archive row is
-       * inserted (transcript_archive). Each marker becomes an inline
-       * chip inside the assistant bubble; clicking it opens the right-
-       * side Compaction Viewer drawer (see static/js/compaction-viewer.js)
-       * which lazy-loads the pre-compaction message list.
-       *
-       * We store markers on the LIVE assistant message so they reappear
-       * after re-render without a DB round-trip. On reload, the drawer
-       * also pulls the authoritative list from
-       * GET /api/conversations/<id>/compactions. */
-      assistantMsg._compactions = assistantMsg._compactions || [];
-      if (ev.type === "compaction") {
-        const existing = assistantMsg._compactions.find(c => c.archiveId === ev.archiveId);
-        if (!existing) {
-          assistantMsg._compactions.push({
-            archiveId:     ev.archiveId,
-            convId:        ev.convId || convId,
-            trigger:       ev.trigger || 'force',
-            roundNum:      ev.roundNum || 0,
-            tokensBefore:  ev.tokensBefore || 0,
-            tokensAfter:   ev.tokensAfter || 0,
-            msgsBefore:    ev.msgsBefore || 0,
-            msgsAfter:     ev.msgsAfter || 0,
-            model:         ev.model || '',
-            reason:        ev.reason || '',
-            ts:            ev.ts || Math.floor(Date.now() / 1000),
-            status:        'in_progress',
-          });
-        }
-      } else {
-        // compaction_done — upgrade the matching marker with final numbers
-        const marker = assistantMsg._compactions.find(c => c.archiveId === ev.archiveId);
-        if (marker) {
-          marker.tokensAfter = ev.tokensAfter || marker.tokensAfter;
-          marker.msgsAfter   = ev.msgsAfter   || marker.msgsAfter;
-          marker.reductionPct = ev.reductionPct;
-          marker.status = 'done';
-        }
-      }
-      if (buf) buf._compactions = assistantMsg._compactions;
-      /* Bind the gauge to the compaction event the moment it fires.
-       * 'compaction' arrives before the LLM summary call and carries
-       * tokensBefore — the new tick on the donut materializes here.
-       * 'compaction_done' lands the final tokensAfter and we flash the
-       * matching tick so the eye is drawn from chip → gauge in one beat. */
-      if (typeof updateContextBar === 'function') updateContextBar();
-      if (ev.type === 'compaction_done' && typeof window.flashGaugeForArchive === 'function') {
-        window.flashGaugeForArchive(ev.archiveId);
-      }
-      twUpdate(convId);
-
+      _handleCompaction(ev, _hctx());
     } else if (ev.type === "memory_prefetch") {
-      /* ── Memory Prefetch indicator ────────────────────────────────────
-       * Phases emitted by lib/memory/prefetch.py:
-       *   started       — BM25 scoring about to run
-       *   bm25_done     — coarse stage complete; cheap-LLM next
-       *   rerank_started — cheap-model filter running
-       *   done          — memories injected (or none picked)
-       *   skipped       — no memories / empty query / bm25 empty
-       *   failed        — unexpected error
-       * We show a small chip inside the assistant bubble (above the tool panel)
-       * so the user can see that a cheap model is filtering memories in the
-       * background — otherwise the ~1-3s latency before the main model starts
-       * producing tokens would feel unexplained.
-       *
-       * In ADDITION, we mirror the translate-pattern: while the cheap-model
-       * filter is running we set conv._memoryPrefetching so the sidebar
-       * shows a status dot + tag (parallel to conv._translating). */
-      const prev = assistantMsg._memoryPrefetch || {};
-      assistantMsg._memoryPrefetch = {
-        ...prev,
-        phase: ev.phase,
-        totalMemories: ev.total_memories ?? prev.totalMemories,
-        candidates: ev.candidates ?? prev.candidates,
-        bm25Ms: ev.bm25_ms ?? prev.bm25Ms,
-        rerankMs: ev.rerank_ms ?? prev.rerankMs,
-        totalMs: ev.total_ms ?? prev.totalMs,
-        selected: ev.selected ?? prev.selected,
-        memories: ev.memories ?? prev.memories,
-        reason: ev.reason ?? prev.reason,
-        fellBack: ev.fell_back ?? prev.fellBack,
-        startedAt: prev.startedAt || Date.now(),
-      };
-      if (buf) buf._memoryPrefetch = assistantMsg._memoryPrefetch;
-
-      // Sidebar status mirror — only the cheap-LLM running phases mark the
-      // conversation as "filtering memories"; terminal phases clear it.
-      const _conv = (typeof conversations !== 'undefined')
-        ? conversations.find(c => c.id === convId) : null;
-      if (_conv) {
-        const RUNNING = new Set(['started', 'bm25_done', 'rerank_started']);
-        const TERMINAL = new Set(['done', 'skipped', 'failed']);
-        if (RUNNING.has(ev.phase)) {
-          _conv._memoryPrefetching = true;
-        } else if (TERMINAL.has(ev.phase)) {
-          _conv._memoryPrefetching = false;
-        }
-        // Re-render sidebar so the dot/tag updates immediately.
-        if (typeof renderConversationList === 'function') {
-          renderConversationList();
-        }
-      }
-      twUpdate(convId);
-
+      _handleMemoryPrefetch(ev, _hctx());
     } else if (ev.type === "project_external_edit") {
-      // ★ Git-shim: external edits captured outside Tofu round boundary.
-      //   Show a brief toast so the user knows we auto-committed their changes.
-      const files = ev.files || [];
-      const sha = (ev.sha || '').slice(0, 7);
-      try {
-        if (typeof showToast === 'function') {
-          const preview = files.slice(0, 3).join(', ') + (files.length > 3 ? ` +${files.length - 3} more` : '');
-          showToast(`📝 Captured ${files.length} external edit(s) — ${preview}${sha ? ' · ' + sha : ''}`, 'info');
-        }
-      } catch (e) { console.warn('[project_external_edit] toast failed', e); }
-      console.log('[project_external_edit]', { sha, files });
-
+      _handleProjectExternalEdit(ev, _hctx());
     } else if (ev.type === "timer_poll_check") {
-      /* ═══ Timer Watcher inline poll progress ═══
-         Each poll emits a sub-event attached to the timer_create tool round.
-         We store polls as _timerPolls[] on the round for collapsible rendering.
-         ★ decision='skipped' is a lightweight heartbeat for polls where
-           the check_command output was unchanged — we don't push it into
-           _timerPolls[] (would spam), just bump skip metadata so the UI
-           can render a subdued "N skipped — output unchanged" trailer. */
-      if (assistantMsg.toolRounds) {
-        const r = assistantMsg.toolRounds.find(r => r.roundNum === ev.roundNum);
-        if (r) {
-          r._timerTimerId = ev.timerId;
-          if (ev.decision === "skipped") {
-            r._timerSkipCount = (r._timerSkipCount || 0) + 1;
-            r._timerLastSkipTs = Date.now();
-            r._timerLastSkipPollNum = ev.pollNum;
-            // Keep the round in "searching" state while timer is polling
-            r.status = "searching";
-          } else {
-            if (!r._timerPolls) r._timerPolls = [];
-            // ★ Dedup: skip if this pollNum already exists (from state snapshot)
-            const _alreadyHas = r._timerPolls.some(p => p.pollNum === ev.pollNum && p.decision === ev.decision);
-            if (!_alreadyHas) {
-              r._timerPolls.push({
-                pollNum: ev.pollNum,
-                decision: ev.decision,
-                reason: ev.reason || "",
-                tokensUsed: ev.tokensUsed || 0,
-                timerId: ev.timerId || "",
-                ts: Date.now(),
-              });
-            }
-            // Keep the round in "searching" state while timer is polling
-            if (ev.decision === "ready") {
-              r.status = "done";
-              r._timerTriggered = true;
-            } else {
-              r.status = "searching";
-            }
-          }
-        }
-      }
-      if (buf)
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
-
-    /* ═══ Swarm mode events ═══ */
+      _handleTimerPollCheck(ev, _hctx());
     } else if (ev.type === "swarm_phase") {
-      /* Master-level swarm lifecycle: planning → spawning → wave_start → complete */
-      if (!assistantMsg.toolRounds) assistantMsg.toolRounds = [];
-      /* Async swarm: ``complete`` may fire AFTER assistantMsg has rotated
-         to a different turn (the user got intermediate messages while
-         agents kept running in the background).  Walk all assistant
-         messages in the active conversation as a fallback so the
-         original swarm panel still gets its terminal status update. */
-      const _findSwarmRound = () => {
-        const rn = assistantMsg._swarmRoundNum;
-        const inCurrent = (assistantMsg.toolRounds || []).find(
-          r => r._swarm && (rn ? r.roundNum === rn : true));
-        if (inCurrent) return inCurrent;
-        if (ev.phase !== "complete") return null;
-        /* Only complete events trigger the cross-message walk — spawning
-           events should always create or upgrade in the current turn. */
-        const conv = conversations.find(c => c && c.id === convId);
-        if (!conv) return null;
-        for (let i = conv.messages.length - 1; i >= 0; i--) {
-          const m = conv.messages[i];
-          if (!m || m.role !== "assistant" || !m.toolRounds) continue;
-          const sr = m.toolRounds.find(r => r._swarm && (r._swarmActive || r._asyncRunning));
-          if (sr) return sr;
-        }
-        return null;
-      };
-      if (ev.phase === "spawning" || ev.phase === "planning" || ev.phase === "spawn_more") {
-        /* Upgrade the existing tool_start round into a swarm panel */
-        let sr = _findSwarmRound();
-        const agentData = (ev.agents || []).map((a, i) => ({
-          id: a.agentId || a.id || `agent-${i}`,
-          role: a.role || "general",
-          model: a.model || "",
-          objective: a.objective || "",
-          context: a.context || "",
-          dependsOn: a.depends_on || a.dependsOn || [],
-          status: "pending",
-          phase: "waiting",
-          preview: "",
-          tools: [],
-        }));
-        if (sr) {
-          sr.query = "Agent Swarm";
-          sr._swarmActive = true;
-          sr._swarmStartTime = sr._swarmStartTime || Date.now();
-          if (ev.phase === "spawn_more" && agentData.length) {
-            /* Append new agents from spawn_more — don't replace existing ones */
-            if (!sr._swarmAgents) sr._swarmAgents = [];
-            const existingIds = new Set(sr._swarmAgents.map(a => a.id));
-            for (const ad of agentData) {
-              if (!existingIds.has(ad.id)) sr._swarmAgents.push(ad);
-            }
-          } else if (agentData.length) {
-            sr._swarmAgents = agentData;
-          }
-        } else {
-          sr = {
-            roundNum: (assistantMsg.toolRounds.length + 1),
-            query: "Agent Swarm",
-            results: null,
-            status: "searching",
-            toolName: "spawn_agents",
-            _swarm: true,
-            _swarmActive: true,
-            _swarmStartTime: Date.now(),
-            _swarmAgents: agentData,
-          };
-          assistantMsg.toolRounds.push(sr);
-          assistantMsg._swarmRoundNum = sr.roundNum;
-        }
-      } else if (ev.phase === "complete") {
-        /* Swarm finished — every agent terminated. Drop the async-
-           running badge so the panel reads as truly complete.       */
-        const sr = _findSwarmRound();
-        if (sr) {
-          sr.status = "done";
-          sr._swarmActive = false;
-          sr._asyncRunning = false;
-          // Freeze the wall-clock end so _buildSwarmPanelHTML doesn't keep
-          // sliding the header timer forward via Date.now() on later re-renders.
-          sr._swarmEndTime = Date.now();
-          const elapsed = sr._swarmStartTime ? ((sr._swarmEndTime - sr._swarmStartTime) / 1000).toFixed(1) + "s" : "";
-          sr._elapsed = elapsed;
-          sr._swarmStats = {
-            totalTokens: ev.totalTokens || 0,
-            totalCostUsd: ev.totalCost || 0,
-            agentCount: ev.agentCount || 0,
-            failedCount: ev.failedCount || 0,
-          };
-          /* Update agent data from final results */
-          if (ev.agents && sr._swarmAgents) {
-            for (const ea of ev.agents) {
-              const agent = sr._swarmAgents.find(a => a.id === ea.agentId || a.id === ea.id);
-              if (agent) {
-                agent.status = ea.status === "completed" ? "done" : (ea.status || "done");
-                if (ea.model) agent.model = ea.model;
-                if (ea.preview || ea.summary) agent.preview = ea.preview || ea.summary;
-                if (ea.elapsed) agent.elapsed = ea.elapsed;
-                if (ea.tokens) agent.tokens = ea.tokens;
-              }
-            }
-          }
-          for (const a of (sr._swarmAgents || [])) {
-            if (a.status === "pending" || a.status === "running") a.status = "done";
-          }
-        }
-      }
-      if (buf) buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
-
+      _handleSwarmPhase(ev, _hctx());
     } else if (ev.type === "swarm_agent_phase" || ev.type === "swarm_agent_progress" ||
                ev.type === "swarm_agent_complete" || ev.type === "swarm_agent_error" ||
                ev.type === "swarm_agent_tool_call") {
-      /* Per-agent updates may arrive AFTER the spawning assistantMsg has
-         rotated to a different turn (async swarm).  Look up the swarm
-         panel in the current msg first, then walk back through the
-         conv's assistant messages until we find the one that owns this
-         agent_id (or a still-active panel). */
-      const _findOwningSwarmRound = () => {
-        /* Strict ownership match: the panel must contain this agent_id.
-           Returning a panel that does NOT own the agent would silently
-           graft the agent onto the wrong panel (B11). */
-        const inCurrent = (assistantMsg.toolRounds || []).find(r => r._swarmActive || r._swarm);
-        if (inCurrent && (inCurrent._swarmAgents || []).some(a => a.id === ev.agentId)) {
-          return inCurrent;
-        }
-        const conv = conversations.find(c => c && c.id === convId);
-        if (conv) {
-          for (let i = conv.messages.length - 1; i >= 0; i--) {
-            const m = conv.messages[i];
-            if (!m || m.role !== "assistant" || !m.toolRounds) continue;
-            for (const r of m.toolRounds) {
-              if (!r._swarm) continue;
-              if ((r._swarmAgents || []).some(a => a.id === ev.agentId)) return r;
-            }
-          }
-        }
-        /* Genuinely new agent (e.g. spawn_more arrived before its phase
-           event) — only the swarm_agent_phase handler creates new agent
-           cards, and only on the CURRENT panel.  Return inCurrent for
-           that one branch so the create-on-the-fly path still works;
-           progress / complete / error events return null and become
-           no-ops, preventing accidental cross-panel writes. */
-        if (_swarm_evtype === "swarm_agent_phase") return inCurrent || null;
-        return null;
-      };
-      const _swarm_evtype = ev.type;
-
-      if (_swarm_evtype === "swarm_agent_phase") {
-      /* An individual agent changed phase (starting, thinking, tool_use, done, error) */
-      const sr = _findOwningSwarmRound();
-      if (sr) {
-        if (!sr._swarmAgents) sr._swarmAgents = [];
-        let agent = sr._swarmAgents.find(a => a.id === ev.agentId);
-        if (!agent && ev.agentId) {
-          /* ID not found — check if there's an existing agent with the same
-             objective that hasn't been matched yet (stale from spawning event).
-             This happens when the spawning event uses placeholder IDs that
-             differ from the actual agent IDs assigned by the scheduler. */
-          if (ev.objective) {
-            const objNorm = ev.objective.trim().toLowerCase();
-            agent = sr._swarmAgents.find(a =>
-              a.id !== ev.agentId &&
-              !a._idConfirmed &&
-              (a.status === "pending" || a.status === "running" || a.phase === "starting" || a.phase === "Queued" || !a.phase) &&
-              a.objective && (a.objective.trim().toLowerCase().startsWith(objNorm) || objNorm.startsWith(a.objective.trim().toLowerCase()))
-            );
-          }
-          if (agent) {
-            /* Re-map: update the stale placeholder ID to the real agent ID */
-            agent.id = ev.agentId;
-            agent._idConfirmed = true;
-          } else {
-            /* Genuinely new agent (e.g. from spawn_more) — add dynamically */
-            agent = { id: ev.agentId, role: ev.role || "agent", model: ev.model || "", objective: ev.objective || "",
-                      status: "running", phase: "starting", preview: "", tools: [], _idConfirmed: true };
-            sr._swarmAgents.push(agent);
-          }
-        }
-        if (agent) agent._idConfirmed = true;
-        if (agent) {
-          agent.status = ev.status || agent.status;
-          agent.phase = ev.phase || agent.phase;
-          if (ev.model) agent.model = ev.model;
-          if (ev.preview || ev.summary) agent.preview = ev.preview || ev.summary;
-          if (ev.objective) agent.objective = ev.objective;
-          if (ev.error) agent.preview = errorEnvelopeMessage(ev.error) || (typeof ev.error === 'string' ? ev.error : '');
-          if (ev.elapsed) agent.elapsed = ev.elapsed;
-          if (ev.tokens) agent.tokens = ev.tokens;
-          /* Stamp a frontend-side start time on first transition to a
-           * running phase so the agent card can show a live ticking
-           * timer (the backend only sends `elapsed` on completion). */
-          if (!agent._startedAt && (agent.status === "running" || agent.status === "thinking")) {
-            agent._startedAt = Date.now();
-          }
-        }
-      }
-      if (buf) buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
-
-      } else if (_swarm_evtype === "swarm_agent_progress") {
-      /* Agent progress: tool usage, partial results, etc. */
-      const sr = _findOwningSwarmRound();
-      if (sr && sr._swarmAgents) {
-        const agent = sr._swarmAgents.find(a => a.id === ev.agentId);
-        if (agent) {
-          agent.status = ev.status || "running";
-          agent.phase = ev.phase || agent.phase;
-          if (ev.preview) agent.preview = ev.preview;
-          if (ev.toolNames) {
-            agent.phase = "tool_use";
-            if (!agent.tools) agent.tools = [];
-            for (const tn of ev.toolNames) {
-              if (!agent.tools.includes(tn)) agent.tools.push(tn);
-            }
-            agent.preview = `Using ${ev.toolNames.join(", ")}`;
-          }
-        }
-      }
-      if (buf) buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
-
-      } else if (_swarm_evtype === "swarm_agent_complete") {
-      /* Individual agent finished */
-      const sr = _findOwningSwarmRound();
-      if (sr && sr._swarmAgents) {
-        let agent = sr._swarmAgents.find(a => a.id === ev.agentId);
-        /* Fallback: match by objective if ID doesn't match (ID remap) */
-        if (!agent && ev.objective) {
-          const objNorm = ev.objective.trim().toLowerCase();
-          agent = sr._swarmAgents.find(a =>
-            a.objective && (a.objective.trim().toLowerCase().startsWith(objNorm) || objNorm.startsWith(a.objective.trim().toLowerCase())) &&
-            a.status !== "done" && a.status !== "failed"
-          );
-          if (agent) agent.id = ev.agentId;
-        }
-        if (agent) {
-          agent.status = ev.status === "failed" ? "failed" : "done";
-          agent.phase = ev.status === "failed" ? "error" : "done";
-          if (ev.preview || ev.summary) agent.preview = ev.preview || ev.summary;
-          if (ev.elapsed) agent.elapsed = ev.elapsed;
-          if (ev.tokens) agent.tokens = ev.tokens;
-          if (typeof ev.modifiedFiles === "number") agent.modifiedFiles = ev.modifiedFiles;
-          if (ev.error) agent.preview = errorEnvelopeMessage(ev.error) || (typeof ev.error === 'string' ? ev.error : '');
-        }
-      }
-      if (buf) buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
-
-      } else if (_swarm_evtype === "swarm_agent_error") {
-      const sr = _findOwningSwarmRound();
-      if (sr && sr._swarmAgents) {
-        const agent = sr._swarmAgents.find(a => a.id === ev.agentId);
-        if (agent) {
-          agent.status = "failed";
-          agent.phase = "error";
-          agent.preview = errorEnvelopeMessage(ev.error) || (typeof ev.error === 'string' ? ev.error : '') || ev.content || "Agent failed";
-        }
-      }
-      if (buf) buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
-
-      } else if (_swarm_evtype === "swarm_agent_tool_call") {
-      /* Per-tool-call timeline entry from a sub-agent.
-       * callStatus: 'running' (start) | 'done' | 'failed'
-       * Keyed by callId so the start event creates the row and the
-       * finish event updates the same row in place. */
-      const sr = _findOwningSwarmRound();
-      if (sr && sr._swarmAgents && ev.callId) {
-        const agent = sr._swarmAgents.find(a => a.id === ev.agentId);
-        if (agent) {
-          if (!agent._toolCalls) agent._toolCalls = [];
-          let entry = agent._toolCalls.find(c => c.callId === ev.callId);
-          if (!entry) {
-            entry = { callId: ev.callId, toolName: ev.toolName || "?",
-                      argsBrief: ev.argsBrief || "", status: "running",
-                      startedAt: Date.now() };
-            agent._toolCalls.push(entry);
-            /* Keep only the last 30 calls per agent to bound memory
-             * for long-running agents — older calls drop off the
-             * timeline but the agent's own history is unaffected. */
-            if (agent._toolCalls.length > 30) {
-              agent._toolCalls.splice(0, agent._toolCalls.length - 30);
-            }
-          }
-          if (ev.callStatus) entry.status = ev.callStatus;
-          if (typeof ev.callElapsed === "number") entry.elapsed = ev.callElapsed;
-          if (ev.preview) entry.preview = ev.preview;
-          if (ev.error) entry.error = ev.error;
-          if (ev.toolName) entry.toolName = ev.toolName;
-          if (ev.argsBrief) entry.argsBrief = ev.argsBrief;
-        }
-      }
-      if (buf) buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
-      }  /* end inner _swarm_evtype dispatch */
-
+      _handleSwarmAgent(ev, _hctx());
     } else if (ev.type === "swarm_inbox_inject") {
-      /* ── Async swarm: <swarm-update> messages were just drained from the
-       *    inbox and prepended to the model's next round as user messages.
-       *    Stamp a chip on the assistant bubble so the human user sees
-       *    "the model just received N async updates from sub-agents on
-       *    this round" — same instant as the model itself sees them.    */
-      if (!assistantMsg._inboxInjects) assistantMsg._inboxInjects = [];
-      assistantMsg._inboxInjects.push({
-        round:    ev.round,
-        count:    ev.count || 0,
-        agentIds: Array.isArray(ev.agentIds) ? ev.agentIds.filter(Boolean) : [],
-        ts:       Date.now(),
-      });
-      /* ★ Also surface the injection as a chronological row inside the
-       *   ptool-panel — not just an ephemeral streaming-zone chip. This
-       *   makes "the model received these sub-agent results, here, in
-       *   order" visible in the unified tool timeline AND persisted to
-       *   DB (survives reload), honoring the frontend-visibility
-       *   principle. The row is a synthetic toolRound flagged
-       *   `_inboxInject`; _renderUnifiedToolLine renders it specially.
-       *   Dedup by round so SSE replay / poll fallback doesn't double it. */
-      if (!assistantMsg.toolRounds) assistantMsg.toolRounds = [];
-      const _injKey = "inbox:" + (ev.round || 0);
-      if (!assistantMsg.toolRounds.some(r => r._inboxInject && r._inboxKey === _injKey)) {
-        assistantMsg.toolRounds.push({
-          /* Collision-proof synthetic roundNum for the data-prn slot —
-             real tool rounds use small sequential numbers; 9e6+ never clashes. */
-          roundNum:   9000000 + assistantMsg.toolRounds.length,
-          status:     "done",
-          _inboxInject:  true,
-          _inboxKey:     _injKey,
-          inboxRound:    ev.round || 0,
-          inboxCount:    ev.count || 0,
-          inboxAgentIds: Array.isArray(ev.agentIds) ? ev.agentIds.filter(Boolean) : [],
-          inboxPreviews: Array.isArray(ev.previews) ? ev.previews : [],
-        });
-        if (buf) buf.toolRounds = assistantMsg.toolRounds;
-      }
-      /* Mark the most recent swarm panel (across the whole conv) as
-         still-active-async — the panel may have been flipped to
-         "complete" by a previous swarm_phase event, but if updates are
-         still landing we want the "N running async" badge to show until
-         the inbox actually stops.                                       */
-      const _markAsyncRunning = (sr) => {
-        if (sr && !sr._asyncRunning) sr._asyncRunning = true;
-      };
-      const _curLive = (assistantMsg.toolRounds || []).filter(r => r._swarm);
-      if (_curLive.length) {
-        _markAsyncRunning(_curLive[_curLive.length - 1]);
-      } else {
-        const conv = conversations.find(c => c && c.id === convId);
-        if (conv) {
-          for (let i = conv.messages.length - 1; i >= 0; i--) {
-            const m = conv.messages[i];
-            if (!m || m.role !== "assistant" || !m.toolRounds) continue;
-            const sr = m.toolRounds.find(r => r._swarm);
-            if (sr) { _markAsyncRunning(sr); break; }
-          }
-        }
-      }
-      if (buf) buf._inboxInjects = assistantMsg._inboxInjects;
-      twUpdate(convId);
-
+      _handleSwarmInboxInject(ev, _hctx());
     } else if (ev.type === "messages_snapshot") {
-      if (typeof showMessagesInDebug === "function")
-        showMessagesInDebug(
-          ev.messages,
-          ev.label || `Round ${ev.round} · ${ev.messageCount}条`,
-          true,
-          convId,
-          ev.tools || undefined,
-        );
-
-    /* ═══ Endpoint mode events ═══ */
+      _handleMessagesSnapshot(ev, _hctx());
     } else if (ev.type === "endpoint_iteration") {
       const isPlanning = ev.phase === "planning";
       const isReview = ev.phase === "reviewing";
@@ -2154,37 +1122,11 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
       }
 
     } else if (ev.type === "sse_timeout") {
-      /* SSE connection hit max duration — backend task is STILL RUNNING.
-         Show a toast and return false (not done). The stream will close,
-         _trySSE will detect !streamDone and return false, triggering _pollFallback. */
-      if (typeof showToast === 'function') {
-        showToast('', 'Connection Switched',
-          'Long-running task: SSE stream reached max duration. Switching to polling — your task is still running in the background.',
-          10000);
-      }
-      console.warn(
-        `[_trySSE] SSE timeout notice received — taskId=${taskId.slice(0,8)} conv=${convId.slice(0,8)} ` +
-        `contentSoFar=${assistantMsg.content?.length || 0}chars thinkingSoFar=${assistantMsg.thinking?.length || 0}chars ` +
-        `toolRounds=${assistantMsg.toolRounds?.length || 0} — backend continues, switching to poll fallback`
-      );
-      // Return false — NOT a done event. Task is still running.
+      _handleSseTimeout(ev, _hctx());
       return false;
-
-
     } else if (ev.type === "round_committed") {
-      /* ★ Async shadow-git commit landed AFTER the done event was emitted.
-         Backend moved commit_round out of the critical path (2026-05-07)
-         so queue dispatch isn't blocked by slow FUSE git.  Wire the sha
-         (and any git-derived modifiedFileList additions) onto the
-         assistant message so undo/diff UI still works. */
-      if (ev.gitSha) assistantMsg._gitSha = ev.gitSha;
-      if (ev.modifiedFileList) assistantMsg.modifiedFileList = ev.modifiedFileList;
-      if (typeof ev.modifiedFiles === 'number') assistantMsg.modifiedFiles = ev.modifiedFiles;
-      /* Re-render the message so its footer reflects the new file list /
-         undo button availability. */
-      try { if (typeof renderChat === 'function') renderChat(); } catch (_) {}
-      return false;  // not a done event
-
+      _handleRoundCommitted(ev, _hctx());
+      return false;
     } else if (ev.type === "done") {
       /* ★ DIAGNOSTIC: log task completion details for debugging silent completions */
       const _dContentLen = assistantMsg.content?.length || 0;
@@ -2227,6 +1169,8 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
       if (ev.toolSummary) assistantMsg.toolSummary = ev.toolSummary;
       if (ev.fallbackModel) assistantMsg.fallbackModel = ev.fallbackModel;
       if (ev.fallbackFrom) assistantMsg.fallbackFrom = ev.fallbackFrom;
+      if (ev.fallbackReason) assistantMsg.fallbackReason = ev.fallbackReason;
+      if (ev.fallbackKind) assistantMsg.fallbackKind = ev.fallbackKind;
       /* ★ Continue: merge modifiedFiles & modifiedFileList with existing */
       if (ev.modifiedFiles != null) {
         if (assistantMsg._continueModifiedFiles) {
@@ -2309,6 +1253,61 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
       return true;
     }
     return false;
+  } finally {
+    ctx.assistantMsg = assistantMsg;
+    ctx.buf = buf;
+    ctx.epCriticPhase = _epCriticPhase;
+    ctx.epCriticMsg = _epCriticMsg;
+    ctx.epCriticBuf = _epCriticBuf;
+    ctx.roundThinkingLen = _roundThinkingLen;
+    ctx.lastEventId = _lastEventId;
+  }
+}
+
+async function _trySSE(convId, taskId, stream, assistantMsg) {
+  let lastSave = Date.now(),
+    gotData = false;
+  let sseTimeout = setTimeout(() => {
+    if (!gotData) stream.controller.abort();
+  }, 30000);
+  let buf = streamBufs.get(convId);
+  /* ── Stable identity capture ──
+   * Pin the assistantMsg reference by its `_msgId` (minted by
+   * `_ensureMsgId` / server's `_assign_message_ids`).  Phase-2
+   * reconciliation or any concurrent push can replace
+   * `conv.messages[length-1]` mid-stream — without this re-resolve we
+   * accumulate into a detached object and the renderer never sees the
+   * data (the "Autopilot content invisible until stop+refresh" bug).
+   * If the message has no id yet, stamp one so subsequent rebinds work. */
+  if (assistantMsg && !assistantMsg._msgId && typeof _ensureMsgId === 'function') {
+    _ensureMsgId(assistantMsg);
+  }
+  const _pinnedMsgId = assistantMsg && assistantMsg._msgId;
+  let _lastEventId = null; // mirrors ctx.lastEventId for the reader loop below
+  /* ── Mutable SSE dispatch context ──
+   * The 7 values that the dispatcher reassigns (worker/critic targets,
+   * buffers, phase flags, thinking counter, last-event-id) live here so
+   * dispatchSSEEvent — now a module-level, unit-testable function — can
+   * mutate them across events. _trySSE reads them back after each line. */
+  const ctx = {
+    convId, taskId, stream,
+    assistantMsg,
+    buf,
+    epCriticPhase: false,
+    epCriticMsg: null,
+    epCriticBuf: null,
+    roundThinkingLen: 0,
+    lastEventId: null,
+    pinnedMsgId: _pinnedMsgId,
+  };
+  /* Thin local alias preserving the original call shape. After dispatch we
+   * sync the two locals the reader loop below still references directly. */
+  function _processSSELine(line) {
+    const _done = dispatchSSEEvent(line, ctx);
+    assistantMsg = ctx.assistantMsg;
+    buf = ctx.buf;
+    _lastEventId = ctx.lastEventId;
+    return _done;
   }
   try {
     // ★ Last-Event-ID resume: if we have a previous event id (from a
@@ -2442,453 +1441,28 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
   }
 }
 
-async function _pollFallback(convId, taskId, stream, assistantMsg) {
-  let lastSave = Date.now();
-  const buf = streamBufs.get(convId);
-  const _preExistingContent = assistantMsg.content?.length || 0;
-  const _preExistingThinking = assistantMsg.thinking?.length || 0;
-  console.warn(`[_pollFallback] START — conv=${convId.slice(0,8)} taskId=${taskId.slice(0,8)} preExistingContent=${_preExistingContent}chars preExistingThinking=${_preExistingThinking}chars`);
-  // Poll until the task finishes, the user aborts, or server is confirmed dead.
-  let _pollIter = 0;
-  let _consecutiveErrors = 0;     // ★ Circuit breaker: track consecutive network failures
-  const _MAX_CONSECUTIVE_ERRORS = 10; // ★ After 10 failures (~5s), do health check
-  let _rttEma = 300; // ★ Item 8: exponential moving average of poll RTT (ms), seed 300ms
-  while (true) {
-    if (stream.controller.signal.aborted) {
-      console.warn(`[_pollFallback] ABORTED at iteration ${_pollIter} — conv=${convId.slice(0,8)}`);
-      twStop(convId);
-      finishStream(convId);
-      return;
-    }
-    const _pollStart = Date.now();
-    try {
-      const resp = await Api.chat.poll(taskId);
-      if (!resp || !resp.ok) {
-        if (resp && resp.status === 404) {
-          console.error(`[_pollFallback] 404 NOT FOUND — taskId=${taskId.slice(0,8)} conv=${convId.slice(0,8)} ` +
-            `existingContent=${assistantMsg.content?.length||0}chars existingThinking=${assistantMsg.thinking?.length||0}chars — ` +
-            `${(assistantMsg.content || assistantMsg.thinking) ? 'PRESERVING existing accumulated data' : 'NO DATA to preserve, marking error'}`);
-          if (!assistantMsg.content && !assistantMsg.thinking)
-            assistantMsg.error = "Task not found";
-          twStop(convId);
-          finishStream(convId);
-          return;
-        }
-        throw new Error(`Poll HTTP ${resp.status}`);
-      }
-      _consecutiveErrors = 0; // ★ Reset on any successful response
-      const data = await resp.json();
+/* _pollFallback(...)  → moved to static/js/ui/sse_poll_fallback.js (split 2026-06)
+   updateSendButton()  → moved to static/js/ui/send_button.js (split 2026-06)
+   Both are window-scope (no _trySSE closure capture); registered in
+   _BUNDLE_FILES right after this file. */
 
-      /* ★ SyncFix: discard poll responses for a superseded/aborted task so we
-       *   don't resurrect old endpoint turns into conv.messages after the user
-       *   interrupted + edited. */
-      {
-        const _pollConv = conversations.find(c => c.id === convId);
-        if (_pollConv) {
-          const _aborted = stream && stream.controller && stream.controller.signal.aborted;
-          const _superseded = _pollConv.activeTaskId && _pollConv.activeTaskId !== taskId;
-          const _isLastAborted = _pollConv._lastAbortedTaskId === taskId;
-          if (_aborted || _superseded || _isLastAborted) {
-            console.info(`[SyncFix][_pollFallback] discarding stale poll taskId=${taskId.slice(0,8)} activeTaskId=${_pollConv.activeTaskId?.slice(0,8)||'null'} aborted=${!!_aborted} superseded=${!!_superseded} isLastAborted=${!!_isLastAborted}`);
-            twStop(convId);
-            finishStream(convId);
-            return;
-          }
-        }
-      }
-
-      /* ★ Endpoint mode: poll returns endpointTurns with the full multi-turn
-       *   structure.  Rebuild conv.messages from it instead of overwriting
-       *   a single assistantMsg with the current turn's content. */
-      if (data.endpointMode && data.endpointTurns && data.endpointTurns.length > 0) {
-        const conv = conversations.find(c => c.id === convId);
-        if (conv) {
-          // Find where original messages end (non-endpoint messages)
-          let baseEnd = 0;
-          for (let i = 0; i < conv.messages.length; i++) {
-            if (!conv.messages[i]._epIteration && !conv.messages[i]._isEndpointReview && !conv.messages[i]._isEndpointPlanner) {
-              baseEnd = i + 1;
-            }
-          }
-          const baseMsgs = conv.messages.slice(0, baseEnd);
-          const prevEpCount = conv._epPollTurnCount || 0;
-          const newEpCount = data.endpointTurns.length;
-
-          // Replace endpoint turns with the server's authoritative copy
-          conv.messages = baseMsgs.concat(data.endpointTurns);
-          conv._epPollTurnCount = newEpCount;
-
-          // Point assistantMsg to the last assistant message for metadata/finishStream
-          const lastAssist = [...conv.messages].reverse().find(m => m.role === "assistant");
-          if (lastAssist) {
-            assistantMsg = lastAssist;
-          }
-
-          // ★ DO NOT overwrite completed turn content with data.content!
-          // data.content is the IN-PROGRESS turn (not yet in endpointTurns).
-          // Completed turns in endpointTurns already have their full content.
-
-          console.info(`[_pollFallback] Endpoint sync — conv=${convId.slice(0,8)} ` +
-            `baseMsgs=${baseMsgs.length} endpointTurns=${newEpCount} ` +
-            `totalMsgs=${conv.messages.length} prevTurns=${prevEpCount}`);
-
-          // ★ Re-render the full conversation when new completed turns arrive
-          if (newEpCount !== prevEpCount && activeConvId === convId) {
-            renderChat(conv);
-          }
-        }
-      } else {
-        /* ★ Normal (non-endpoint) mode: update single assistantMsg.
-         *
-         * Regression-safe overwrite: a poll snapshot can briefly lag the
-         * delta-applied client state because the server appends to
-         * task['content'] under content_lock independently from append_event
-         * — a poll observed between those lock cycles can see fewer chars
-         * than the client already accumulated. Previously we logged the
-         * regression then OVERWROTE anyway, silently losing what the user
-         * already saw. Now we keep whichever side is longer and only log
-         * suspicious shrinkage. */
-        if (data.content != null) {
-          const oldLen = assistantMsg.content?.length || 0;
-          const newLen = data.content.length;
-          if (newLen >= oldLen) {
-            assistantMsg.content = data.content;
-            if (buf) buf.content = assistantMsg.content;
-          } else if (oldLen > 0 && newLen < oldLen * 0.5) {
-            console.warn(`[_pollFallback] CONTENT REGRESSION ignored — conv=${convId.slice(0,8)} ` +
-              `oldContentLen=${oldLen} newContentLen=${newLen} — keeping longer accumulated content (delta cycle vs poll cycle race).`);
-          }
-        }
-        if (data.thinking != null) {
-          const oldThinkLen = assistantMsg.thinking?.length || 0;
-          const newThinkLen = data.thinking.length;
-          if (newThinkLen >= oldThinkLen) {
-            assistantMsg.thinking = data.thinking;
-            if (buf) buf.thinking = assistantMsg.thinking;
-          } else if (oldThinkLen > 0 && newThinkLen < oldThinkLen * 0.5) {
-            console.warn(`[_pollFallback] THINKING REGRESSION ignored — conv=${convId.slice(0,8)} ` +
-              `oldThinkingLen=${oldThinkLen} newThinkingLen=${newThinkLen} — keeping longer accumulated thinking.`);
-          }
-        }
-      }
-      if (data.error) assistantMsg.error = data.error;
-      if (data.finishReason) assistantMsg.finishReason = data.finishReason;
-      if (data.usage) {
-        if (assistantMsg._continueUsage) {
-          // Merge usage: sum numeric fields
-          const cu = assistantMsg._continueUsage;
-          for (const k of Object.keys(data.usage)) {
-            const cv = cu[k], nv = data.usage[k];
-            data.usage[k] = typeof cv === 'number' && typeof nv === 'number' ? cv + nv : (nv ?? cv);
-          }
-        }
-        assistantMsg.usage = data.usage;
-        if (typeof updateContextBar === 'function') updateContextBar();
-      }
-      if (data.preset) assistantMsg.preset = data.preset;
-      else if (data.effort) assistantMsg.preset = data.effort;
-      if (data.model) assistantMsg.model = data.model;
-      if (data.thinkingDepth) assistantMsg.thinkingDepth = data.thinkingDepth;
-      if (data.toolSummary) assistantMsg.toolSummary = data.toolSummary;
-      if (data.fallbackModel) assistantMsg.fallbackModel = data.fallbackModel;
-      if (data.fallbackFrom) assistantMsg.fallbackFrom = data.fallbackFrom;
-      /* ★ Continue: merge modifiedFiles & modifiedFileList with checkpoint */
-      if (data.modifiedFiles != null) {
-        if (assistantMsg._continueModifiedFiles) {
-          assistantMsg.modifiedFiles = assistantMsg._continueModifiedFiles + data.modifiedFiles;
-          delete assistantMsg._continueModifiedFiles;
-        } else {
-          assistantMsg.modifiedFiles = data.modifiedFiles;
-        }
-      }
-      if (data.modifiedFileList) {
-        if (assistantMsg._continueModifiedFileList) {
-          const merged = new Map();
-          for (const f of assistantMsg._continueModifiedFileList) merged.set(f.path, f);
-          for (const f of data.modifiedFileList) merged.set(f.path, f);
-          assistantMsg.modifiedFileList = Array.from(merged.values());
-          delete assistantMsg._continueModifiedFileList;
-        } else {
-          assistantMsg.modifiedFileList = data.modifiedFileList;
-        }
-      }
-      if (data.taskId) assistantMsg._taskId = data.taskId;
-      /* ★ memory prefetch: recover indicator state from poll response */
-      if (data.memoryPrefetch) assistantMsg._memoryPrefetch = data.memoryPrefetch;
-      /* ★ git-shim: round commit sha for redo/diff references */
-      if (data.gitSha) assistantMsg._gitSha = data.gitSha;
-      /* ★ Persisted cost snapshot (server-side stamp). */
-      if (data.cost) assistantMsg.cost = data.cost;
-      if (data.apiRounds) {
-        const existingApiRounds = assistantMsg._continueApiRounds || [];
-        assistantMsg.apiRounds = existingApiRounds.concat(data.apiRounds);
-        // Carrier handed over — clear the checkpoint so the cleanup at
-        // task-finalization (delete _continueApiRounds below) is not the
-        // only cleanup site. SSE done path already does this in-place at
-        // the equivalent merge step (~line 2246).
-        delete assistantMsg._continueApiRounds;
-      }
-      if (data.toolRounds) {
-        const existingRounds = assistantMsg._continueToolRounds || [];
-        assistantMsg.toolRounds = existingRounds.concat(data.toolRounds);
-        if (buf) buf.toolRounds = assistantMsg.toolRounds;
-      }
-      if (buf) buf.phase = data.phase || null;
-      twUpdate(convId);
-      const now = Date.now();
-      if (now - lastSave > 3000) {
-        saveConversations(convId);
-        lastSave = now;
-      }
-      /* ★ No cache write during polling — server DB is always fresher */
-      if (data.status !== "running") {
-        /* ★ If status is 'interrupted', the server crashed mid-generation.
-           Mark finishReason so the UI shows the recovery indicator. */
-        if (data.status === 'interrupted' && !assistantMsg.finishReason) {
-          assistantMsg.finishReason = 'interrupted';
-          console.warn(`[_pollFallback] Task ${taskId.slice(0,8)} was interrupted (server crash recovery) — ` +
-            `recovered content=${assistantMsg.content?.length||0}chars thinking=${assistantMsg.thinking?.length||0}chars`);
-        }
-        /* ★ Clean up continue checkpoint markers (poll fallback) */
-        delete assistantMsg._continueToolRounds;
-        delete assistantMsg._continueContentPrefix;
-        delete assistantMsg._continueApiRounds;
-        delete assistantMsg._continueUsage;
-        delete assistantMsg._continueModifiedFiles;
-        delete assistantMsg._continueModifiedFileList;
-        twStop(convId);
-        finishStream(convId);
-        return;
-      }
-    } catch (e) {
-      if (e.name === "AbortError") {
-        twStop(convId);
-        finishStream(convId);
-        return;
-      }
-      _consecutiveErrors++;
-      debugLog(`Poll error (${_consecutiveErrors}/${_MAX_CONSECUTIVE_ERRORS}): ${e.message}`, "warn");
-      if (typeof _reportClientError === 'function') _reportClientError(`[poll] ${e.message}`);
-
-      // ★ Circuit breaker: after N consecutive failures, check server health.
-      //   For VSCode port forwarding drops, the outage may last 10-60s while
-      //   the tunnel re-establishes. We enter a "network recovery wait" mode
-      //   that waits up to 2 minutes before truly giving up.
-      if (_consecutiveErrors >= _MAX_CONSECUTIVE_ERRORS) {
-        console.error(`[_pollFallback] ⚠️ CIRCUIT BREAKER — ${_consecutiveErrors} consecutive poll failures for conv=${convId.slice(0,8)}`);
-        const alive = await _checkServerHealth();
-        if (!alive) {
-          // ★ Network Recovery Wait: instead of immediately giving up, wait
-          //   up to 2 minutes for the server to come back (VSCode reconnect).
-          //   During this wait, check health every 5 seconds.
-          const _RECOVERY_WAIT_MS = 120000; // 2 minutes
-          const _RECOVERY_POLL_MS = 5000;   // check every 5s
-          const _recoveryStart = Date.now();
-          let _recovered = false;
-          console.warn(`[_pollFallback] 🔄 Entering network recovery wait (up to ${_RECOVERY_WAIT_MS/1000}s) for conv=${convId.slice(0,8)}`);
-          showToast('🔄', 'Connection Lost',
-            'Server unreachable — waiting for reconnection… Task is still running on the server.', 8000);
-          while (Date.now() - _recoveryStart < _RECOVERY_WAIT_MS) {
-            if (stream.controller.signal.aborted) {
-              twStop(convId);
-              finishStream(convId);
-              return;
-            }
-            await new Promise(r => setTimeout(r, _RECOVERY_POLL_MS));
-            // Force a fresh health check (bypass cache)
-            _lastHealthCheck = 0;
-            const nowAlive = await _checkServerHealth();
-            if (nowAlive) {
-              console.warn(`[_pollFallback] ✅ Server is BACK after ${Math.round((Date.now() - _recoveryStart)/1000)}s — resuming poll for conv=${convId.slice(0,8)}`);
-              _recovered = true;
-              _consecutiveErrors = 0;
-              showToast('✅', 'Reconnected', 'Server connection restored — resuming…', 4000);
-              break;
-            }
-            console.debug(`[_pollFallback] Still waiting for server… ${Math.round((Date.now() - _recoveryStart)/1000)}s elapsed`);
-          }
-          if (!_recovered) {
-            console.error(`[_pollFallback] 💀 SERVER STILL DEAD after ${_RECOVERY_WAIT_MS/1000}s recovery wait — force-finishing for conv=${convId.slice(0,8)} ` +
-              `content=${assistantMsg.content?.length||0}chars thinking=${assistantMsg.thinking?.length||0}chars`);
-            assistantMsg.finishReason = 'server_offline';
-            assistantMsg.error = '⚠️ Server offline — response may be incomplete. This notice will clear automatically when the server comes back.';
-            saveConversations(convId);
-            twStop(convId);
-            finishStream(convId);
-            showToast('⚠️', 'Server Offline',
-              'Backend server did not reconnect within 2 minutes. Your partial response has been saved. It will recover automatically when the server comes back.',
-              12000);
-            // ★ Start periodic recovery polling so the result is auto-recovered later
-            _startOfflineRecoveryPolling();
-            return;
-          }
-          // If recovered, fall through and continue the poll loop
-        } else {
-          // Server is alive but poll failed (maybe task was cleaned up) — continue trying a bit more
-          _consecutiveErrors = Math.floor(_MAX_CONSECUTIVE_ERRORS / 2); // partial reset
-        }
-      }
-    }
-    // ★ Item 8: Measure RTT for adaptive delay
-    const _pollRtt = Date.now() - _pollStart;
-    _rttEma = Math.round(_rttEma * 0.7 + _pollRtt * 0.3); // EMA with α=0.3
-    _pollIter++;
-    // ★ RTT-adaptive poll interval: when the tunnel is fast (RTT < 100ms),
-    //   poll more aggressively (min 300ms sleep). When slow (RTT > 500ms),
-    //   back off to avoid wasting bandwidth. After the initial burst (first
-    //   4 polls), gradually ramp the base interval.
-    //   Effective interval = sleep + RTT ≈ target responsiveness.
-    const _baseDelay = _pollIter < 4 ? 300 : Math.min(300 + _pollIter * 100, 1500);
-    // Scale by RTT: fast tunnel → shorter sleep; slow tunnel → longer sleep
-    const _rttFactor = Math.max(0.5, Math.min(2.0, _rttEma / 200));
-    const _pollDelay = Math.round(Math.min(_baseDelay * _rttFactor, 2000));
-    await new Promise((r) => setTimeout(r, _pollDelay));
-  }
-  // Loop only exits via return (task done, abort, server dead, or 404) — no infinite hang.
-}
-
-function updateSendButton() {
-  const btn = document.getElementById("sendBtn");
-  const conv = getActiveConv();
-
-  // ── Detect branch streaming: if in branch mode, check branch-specific stream ──
-  let branchStreaming = false;
-  let branchStreamKey = null;
-  if (_activeBranch && conv) {
-    const bk = _branchKey(conv.id, _activeBranch.msgIdx, _activeBranch.branchIdx);
-    if (_branchStreams.has(bk)) {
-      branchStreaming = true;
-      branchStreamKey = bk;
-    }
-  }
-
-  // Also detect any branch stream for this conversation (even if not in branch mode)
-  let anyBranchStreaming = false;
-  if (conv && !branchStreaming) {
-    const prefix = conv.id + ":";
-    for (const k of _branchStreams.keys()) {
-      if (k.startsWith(prefix)) { anyBranchStreaming = true; break; }
-    }
-  }
-
-  const mainStreaming =
-    activeStreams.has(activeConvId) || (conv && conv.activeTaskId);
-  const translating = conv && conv._translating;
-  const streaming = branchStreaming || mainStreaming || anyBranchStreaming || translating;
-
-  if (streaming) {
-    const queueCount = (conv && pendingMessageQueue.has(conv.id)) ? pendingMessageQueue.get(conv.id).length : 0;
-    btn.className = "send-btn stop-btn";
-    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>`
-      + (queueCount > 0 ? `<span class="queue-badge">${queueCount}</span>` : '');
-    btn.onclick = () => {
-      // ── Priority 0: stop translation ──
-      if (translating && conv) {
-        console.log(`[stopBtn] Aborting translation — conv=${conv.id.slice(0,8)}`);
-        conv._translateAborted = true;
-        conv._translating = false;
-        // Abort the in-flight sync fetch if present
-        if (conv._translateAbortCtrl) {
-          conv._translateAbortCtrl.abort();
-          conv._translateAbortCtrl = null;
-        }
-        updateSendButton();
-        renderConversationList();
-        return;
-      }
-      // ── Priority 1: stop active branch stream ──
-      if (branchStreaming && branchStreamKey) {
-        const bs = _branchStreams.get(branchStreamKey);
-        if (bs) {
-          // ★ Pre-set finishReason before abort kills the SSE reader
-          const _bMsg = conv.messages[_activeBranch.msgIdx];
-          const _bBranch = _bMsg?.branches?.[_activeBranch.branchIdx];
-          if (_bBranch?.messages) {
-            const _bLast = _bBranch.messages[_bBranch.messages.length - 1];
-            if (_bLast?.role === 'assistant') _bLast.finishReason = 'aborted';
-          }
-          bs.controller.abort();
-          Api.chat.abortTask(bs.taskId);
-          // Clean up branch state
-          const msg = conv.messages[_activeBranch.msgIdx];
-          const branch = msg?.branches?.[_activeBranch.branchIdx];
-          if (branch) branch.activeTaskId = null;
-          _finishBranchStream(conv, _activeBranch.msgIdx, _activeBranch.branchIdx, branch, branchStreamKey);
-        }
-        return;
-      }
-      // ── Priority 2: stop any branch stream for this conv ──
-      if (anyBranchStreaming && conv) {
-        const prefix = conv.id + ":";
-        for (const [k, bs] of _branchStreams.entries()) {
-          if (k.startsWith(prefix)) {
-            // ★ Pre-set finishReason before abort kills the SSE reader
-            const _p2parts = k.split(":");
-            const _p2mi = parseInt(_p2parts[1]);
-            const _p2bi = parseInt(_p2parts[2]);
-            const _p2msg = conv.messages[_p2mi];
-            const _p2branch = _p2msg?.branches?.[_p2bi];
-            if (_p2branch?.messages) {
-              const _p2last = _p2branch.messages[_p2branch.messages.length - 1];
-              if (_p2last?.role === 'assistant') _p2last.finishReason = 'aborted';
-            }
-            bs.controller.abort();
-            Api.chat.abortTask(bs.taskId);
-            // Parse key to get msgIdx, branchIdx
-            const parts = k.split(":");
-            const mi = parseInt(parts[1]);
-            const bi = parseInt(parts[2]);
-            const msg = conv.messages[mi];
-            const branch = msg?.branches?.[bi];
-            if (branch) branch.activeTaskId = null;
-            _finishBranchStream(conv, mi, bi, branch, k);
-          }
-        }
-        return;
-      }
-      // ── Priority 3: stop main stream ──
-      const s = activeStreams.get(activeConvId);
-      if (s) {
-        console.log(`[stopBtn] Aborting main stream — conv=${activeConvId.slice(0,8)} task=${s.taskId?.slice(0,8)}`);
-        // ★ Pre-set finishReason before abort kills the SSE reader
-        if (conv) {
-          const _stopMsg = conv.messages[conv.messages.length - 1];
-          if (_stopMsg && _stopMsg.role === 'assistant') {
-            _stopMsg.finishReason = 'aborted';
-          }
-        }
-        // ★ FIX: Mark as user-initiated abort so _trySSE doesn't fall back
-        //   to polling when gotData=false (indistinguishable from SSE timeout).
-        s._userAbort = true;
-        s.controller.abort();
-        // ★ Record aborted task ID so sendMessage can inform the backend
-        //   even if the abort API call hasn't completed yet.
-        if (conv) conv._lastAbortedTaskId = s.taskId;
-        Api.chat.abortTask(s.taskId);
-        // ★ SyncFix: don't wait for finishStream to tear down the stream
-        //   buffer — a late delta event arriving between abort() and the
-        //   AbortError propagation would otherwise accumulate into a dead
-        //   buffer. twStop is idempotent and safe to call twice.
-        try { twStop(activeConvId); }
-        catch (_e) { console.warn('[stopBtn] twStop threw:', _e); }
-      } else if (conv && conv.activeTaskId) {
-        // ★ Record aborted task ID
-        const _abortingTaskId = conv.activeTaskId;
-        if (conv) conv._lastAbortedTaskId = _abortingTaskId;
-        Api.chat.abortTask(_abortingTaskId);
-        // ★ Pre-set finishReason for the no-stream abort path too
-        const _noStreamMsg = conv.messages[conv.messages.length - 1];
-        if (_noStreamMsg && _noStreamMsg.role === 'assistant') {
-          _noStreamMsg.finishReason = 'aborted';
-        }
-        conv.activeTaskId = null;
-        conv._activeTaskClearedAt = Date.now();
-        finishStream(activeConvId);
-      }
-    };
-  } else {
-    btn.className = "send-btn";
-    btn.innerHTML = `<span style="font-size:13px;font-weight:600;letter-spacing:.5px">⏎</span>`;
-    btn.onclick = sendMessage;
-  }
+/* ── Test seam ──
+ * Exposes the dispatcher + a ctx factory so tests/test_frontend_sse_dispatch.py
+ * can drive single SSE lines against a fresh ctx under jsdom. Pure additive —
+ * production code never reads window.__sse_test__. */
+if (typeof window !== 'undefined') {
+  window.__sse_test__ = {
+    dispatchSSEEvent,
+    makeCtx(o) {
+      o = o || {};
+      return {
+        convId: o.convId, taskId: o.taskId, stream: o.stream,
+        assistantMsg: o.assistantMsg || null,
+        buf: o.buf || null,
+        epCriticPhase: false, epCriticMsg: null, epCriticBuf: null,
+        roundThinkingLen: 0, lastEventId: null,
+        pinnedMsgId: (o.assistantMsg && o.assistantMsg._msgId) || null,
+      };
+    },
+  };
 }

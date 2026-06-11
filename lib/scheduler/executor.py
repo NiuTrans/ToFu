@@ -336,6 +336,7 @@ def _execute_timer_create(fn_args):
 
     parent_task = fn_args.get('_parent_task')
     round_num = fn_args.get('_tool_round_num')  # SSE roundNum for this tool call
+    tc_id = fn_args.get('_tool_call_id', '')  # SSE toolCallId for collision-proof matching
 
     # ── Capture parent task's tool config so the timer poll can rebuild tools ──
     _parent_cfg = parent_task.get('config', {}) if parent_task else {}
@@ -401,6 +402,7 @@ def _execute_timer_create(fn_args):
             append_event(parent_task, build_event(
                 EventType.TIMER_POLL_CHECK,
                 roundNum=round_num,
+                toolCallId=tc_id,
                 timerId=timer_id,
                 pollNum=0,
                 decision='started',
@@ -459,6 +461,7 @@ def _execute_timer_create(fn_args):
                     append_event(parent_task, build_event(
                         EventType.TIMER_POLL_CHECK,
                         roundNum=round_num,
+                        toolCallId=tc_id,
                         timerId=timer_id,
                         pollNum=poll_count,
                         decision='error',
@@ -487,6 +490,7 @@ def _execute_timer_create(fn_args):
                     append_event(parent_task, build_event(
                         EventType.TIMER_POLL_CHECK,
                         roundNum=round_num,
+                        toolCallId=tc_id,
                         timerId=timer_id,
                         pollNum=poll_count,
                         decision='skipped',
@@ -522,6 +526,7 @@ def _execute_timer_create(fn_args):
                 append_event(parent_task, build_event(
                     EventType.TIMER_POLL_CHECK,
                     roundNum=round_num,
+                    toolCallId=tc_id,
                     timerId=timer_id,
                     pollNum=poll_count,
                     decision=decision,

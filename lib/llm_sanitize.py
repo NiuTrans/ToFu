@@ -39,6 +39,10 @@ _API_MESSAGE_FIELDS = frozenset({
                                             # — needed on Continue replay so the
                                             # Anthropic proxy can re-attach a signed
                                             # thinking block to the assistant turn.
+    'reasoning_details',                    # OpenRouter-style reasoning array — the
+                                            # OpenAI-compat shape the example-corp gateway
+                                            # uses to round-trip a signed Claude
+                                            # thinking block (reconstructed in build_body).
     'cache_control',                        # Anthropic prompt caching
 })
 
@@ -268,8 +272,12 @@ def _fix_tool_call_adjacency(messages: list) -> list:
             i += 1
             continue
 
-        # Check the next N messages are tool results with matching IDs
-        n_expected = len(expected_ids)
+        # Check the next N messages are tool results with matching IDs.
+        # Bound the scan by the number of id-bearing tool_calls (NOT the
+        # deduplicated id set): duplicate/empty ids would shrink the set and
+        # stop the scan before all genuinely-adjacent tool results are
+        # consumed, causing already-adjacent results to be re-moved.
+        n_expected = sum(1 for tc in tcs if tc.get('id'))
         following_tool_ids = set()
         j = i + 1
         while j < len(result) and j - i - 1 < n_expected:

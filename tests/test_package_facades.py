@@ -9,49 +9,55 @@ import sites work, and that Flask route registration is complete.
 import pytest
 
 # ═══════════════════════════════════════════════════════════
-#  1. lib/search/
+#  1. tofu_search (extracted standalone search/fetch library)
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
 class TestSearchFacade:
     def test_package_import(self):
-        import lib.search  # noqa: F401
+        import tofu_search  # noqa: F401
+        import tofu_search.search  # noqa: F401
 
     def test_public_api(self):
-        from lib.search import format_search_for_tool_response, perform_web_search
+        from tofu_search import perform_web_search
+        from tofu_search.search import format_search_for_tool_response
         assert callable(perform_web_search)
         assert callable(format_search_for_tool_response)
 
     def test_optional_subs(self):
-        from lib.search import dedup_by_content, rerank_by_bm25, search_via_browser
+        from tofu_search.search.browser_fallback import search_via_browser
+        from tofu_search.search.dedup import dedup_by_content
+        from tofu_search.search.rerank import rerank_by_bm25
         assert callable(dedup_by_content)
         assert callable(rerank_by_bm25)
         assert callable(search_via_browser)
 
     def test_engines(self):
-        from lib.search.engines.bing import search_bing
-        from lib.search.engines.brave import search_brave
-        from lib.search.engines.ddg import search_ddg_api, search_ddg_html
-        from lib.search.engines.marginalia import search_marginalia
-        from lib.search.engines.searxng import search_searxng
+        from tofu_search.search.engines.bing import search_bing
+        from tofu_search.search.engines.brave import search_brave
+        from tofu_search.search.engines.ddg import search_ddg_api, search_ddg_html
+        from tofu_search.search.engines.marginalia import search_marginalia
+        from tofu_search.search.engines.searxng import search_searxng
         assert callable(search_ddg_html)
         assert callable(search_marginalia)
 
     def test_deepen(self):
-        from lib.search import deepen as deepen_mod
-        from lib.search.deepen import deepen_results, is_deepen_enabled
+        from tofu_search.search import deepen as deepen_mod  # noqa: F401
+        from tofu_search.search.deepen import deepen_results, is_deepen_enabled
         assert callable(deepen_results)
         assert callable(is_deepen_enabled)
 
     def test_common(self):
-        from lib.search._common import HEADERS, clean_text
+        from tofu_search.search._common import HEADERS, clean_text
         assert isinstance(HEADERS, dict)
         assert callable(clean_text)
 
     def test_all_has_public_names(self):
-        import lib.search
-        assert 'perform_web_search' in lib.search.__all__
-        assert 'format_search_for_tool_response' in lib.search.__all__
+        import tofu_search
+        from tofu_search.search import format_search_for_tool_response, perform_web_search
+        assert 'perform_web_search' in tofu_search.__all__
+        assert callable(perform_web_search)
+        assert callable(format_search_for_tool_response)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -206,8 +212,10 @@ class TestConsumerImports:
     """Verify that all real import sites across the codebase resolve correctly."""
 
     def test_executor_search(self):
-        from lib.search import format_search_for_tool_response, perform_web_search
+        from tofu_search import perform_web_search
+        from tofu_search.search import format_search_for_tool_response
         assert callable(perform_web_search)
+        assert callable(format_search_for_tool_response)
 
     def test_executor_browser(self):
         from lib.browser import execute_browser_tool
@@ -307,12 +315,25 @@ class TestFlaskRouteRegistration:
 class TestNoStaleFiles:
     def test_no_stale_monoliths(self):
         import os
-        for path in ['lib/search.py', 'lib/browser.py', 'lib/browser_advanced.py',
+        # lib/search + lib/fetch are gone: search/fetch were extracted into the
+        # standalone tofu_search package (consumed via lib/search_bridge.py).
+        # Neither the monolith files nor the old packages should remain — but a
+        # leftover dir containing ONLY a __pycache__ (stale .pyc, never shipped)
+        # doesn't count: the export strips __pycache__.
+        def _has_real_content(path):
+            if os.path.isfile(path):
+                return True
+            if os.path.isdir(path):
+                return any(name != '__pycache__' for name in os.listdir(path))
+            return False
+
+        for path in ['lib/search.py', 'lib/search', 'lib/fetch',
+                     'lib/browser.py', 'lib/browser_advanced.py',
                      'lib/pdf_parser.py', 'lib/skills.py']:
-            assert not os.path.isfile(path), f'Stale file still exists: {path}'
+            assert not _has_real_content(path), f'Stale path still exists: {path}'
 
     def test_packages_have_init(self):
         import os
-        for pkg in ['lib/search/__init__.py', 'lib/browser/__init__.py',
+        for pkg in ['lib/browser/__init__.py',
                      'lib/pdf_parser/__init__.py', 'lib/memory/__init__.py']:
             assert os.path.isfile(pkg), f'{pkg} not found'

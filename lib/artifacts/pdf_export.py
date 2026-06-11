@@ -11,7 +11,7 @@ strategy:
   3. SVG artifacts → embedded in a minimal HTML wrapper.
 
   4. The wrapped HTML is sent to a Playwright Chromium instance via the
-     existing ``lib.fetch.playwright_pool`` worker.  We add a new task
+     existing ``tofu_search.fetch.playwright_pool`` worker.  We add a new task
      kind ``'pdf_render'`` so we don't need a second pool / worker
      thread.
 
@@ -189,7 +189,7 @@ def render_artifact_pdf(artifact_id: str) -> bytes:
     )
 
     try:
-        from lib.fetch.playwright_pool import _pw_pool
+        from tofu_search.fetch.playwright_pool import _pw_pool
     except Exception as e:
         raise PdfRenderError(f'Playwright pool unavailable: {e}') from e
 

@@ -42,6 +42,9 @@ var _i18n = {
   'sidebar.moveToFolder': { zh: '移入文件夹', en: 'Move to folder' },
   'sidebar.duplicate': { zh: '复制为新对话', en: 'Duplicate conversation' },
   'sidebar.deleteConv': { zh: '删除对话', en: 'Delete conversation' },
+  'sidebar.renameConv': { zh: '重命名对话', en: 'Rename conversation' },
+  'sidebar.renameConvTitle': { zh: '重命名对话', en: 'Rename Conversation' },
+  'sidebar.renameConvPh': { zh: '输入对话标题', en: 'Enter conversation title' },
 
   // ══════════════════════════════════════
   //  Welcome Screen
@@ -186,6 +189,8 @@ var _i18n = {
   'settings.optimizerModuleDesc': { zh: '每晚 03:30 分析当日日志并自动提出改进建议（如屏蔽垃圾搜索域名）。关闭后不再运行分析，顶栏 OPTIMIZER 徽章隐藏。已应用的改动会保留直到手动撤销。', en: 'Every night at 03:30 local, analyses the day\'s logs and auto-proposes improvements (e.g. blocking spammy search domains). When off, analysis stops and the top-bar OPTIMIZER badge is hidden. Already-applied changes persist until manually reverted.' },
   'settings.keepToolHistory': { zh: '保留工具调用历史', en: 'Keep Tool Call History' },
   'settings.keepToolHistoryDesc': { zh: '多轮对话时保留完整的工具调用记录（搜索内容、网页抓取结果等），模型能看到之前搜过什么，避免重复调用。关闭可节省 token 但模型会丢失工具上下文', en: 'Preserve full tool call records (search results, fetched pages, etc.) across conversation turns. Model can see what was searched before, avoiding redundant calls. Disable to save tokens but model loses tool context' },
+  'settings.autoGenerateTitle': { zh: '自动生成对话标题', en: 'Auto-Generate Conversation Titles' },
+  'settings.autoGenerateTitleDesc': { zh: '首轮回复结束后用 AI 自动为对话生成标题。关闭后需要手动重命名对话（默认关闭）。', en: 'After the first reply, let AI generate a title for the conversation. When off, you rename conversations manually (off by default).' },
   'settings.inputSendMode': { zh: '输入框发送方式', en: 'Input Send Behavior' },
   'settings.inputSendModeDesc': { zh: '选择触发"发送消息"的按键。Shift+Enter 始终插入换行。', en: 'Choose which key sends the message. Shift+Enter always inserts a newline.' },
   'settings.inputSendModeEnter': { zh: 'Enter 发送 · Ctrl+Enter 换行', en: 'Enter send · Ctrl+Enter newline' },
@@ -209,10 +214,14 @@ var _i18n = {
   //  Self-update (topbar button)
   // ══════════════════════════════════════
   'update.title': { zh: '软件更新', en: 'Software Update' },
+  'update.subtitle': { zh: '让 Tofu 保持最新版本', en: 'Keep Tofu up to date' },
+  'update.btnLabel': { zh: '更新', en: 'Update' },
+  'update.btnNew': { zh: '有新版', en: 'New' },
   'update.checkTitle': { zh: '检查更新', en: 'Check for updates' },
   'update.availableTitle': { zh: '有可用更新：v%s', en: 'Update available: v%s' },
   'update.checking': { zh: '正在检查更新…', en: 'Checking for updates…' },
   'update.checkFailed': { zh: '无法检查更新，请稍后再试。', en: 'Could not check for updates. Please try again later.' },
+  'update.retry': { zh: '重试', en: 'Retry' },
   'update.current': { zh: '当前版本', en: 'Current' },
   'update.latest': { zh: '最新版本', en: 'Latest' },
   'update.upToDate': { zh: '✅ 已是最新版本。', en: '✅ You are up to date.' },
@@ -224,12 +233,22 @@ var _i18n = {
   'update.depsInstalled': { zh: '✅ 已安装新的依赖包。', en: '✅ New dependencies installed.' },
   'update.depsFailed': { zh: '⚠️ 已更新到 %s，但安装新依赖失败。请手动运行 pip install -r requirements.txt 后再重启。', en: '⚠️ Updated to %s, but installing new dependencies failed. Run "pip install -r requirements.txt" manually, then restart.' },
   'update.restartBtn': { zh: '立即重启', en: 'Restart now' },
+  'update.restartNow': { zh: '重启服务器', en: 'Restart server' },
+  'update.restartNowHint': { zh: '无需手动停止再启动，直接原地重启。', en: 'Restarts in place — no manual stop-then-start needed.' },
+  'update.restartConfirm': { zh: '确定要重启服务器吗？正在进行的任务会被中断。', en: 'Restart the server now? Any in-progress tasks will be interrupted.' },
   'update.restarting': { zh: '正在重启…', en: 'Restarting…' },
   'update.restartHint': { zh: '重启期间页面会短暂不可用，完成后会自动刷新。', en: 'The page will be briefly unavailable and will auto-refresh once back.' },
   'update.restartWait': { zh: '正在等待服务器恢复…', en: 'Waiting for the server to come back…' },
   'update.restartTimeout': { zh: '服务器重启耗时较长，请手动刷新页面。', en: 'Server is taking a while — please refresh manually.' },
   'update.dirty': { zh: '⚠️ 检测到对受版本控制的源码文件的本地改动，已阻止自动更新（不会自动暂存或覆盖）。请先提交或还原以下文件：', en: '⚠️ Local changes to tracked source files were detected — the update is blocked (we never auto-stash or overwrite). Commit or revert these first:' },
   'update.noGit': { zh: '当前不是 git 检出目录，无法原地更新。请重新运行 install.sh。', en: 'This is not a git checkout — in-place update is unavailable. Re-run install.sh.' },
+  'update.step.fetch': { zh: '拉取远端', en: 'Fetch from remote' },
+  'update.step.pull': { zh: '合并更新', en: 'Pull changes' },
+  'update.step.deps': { zh: '安装依赖', en: 'Install dependencies' },
+  'update.step.depsSkip': { zh: '无需更新依赖', en: 'No dependency changes' },
+  'update.applyStarting': { zh: '正在准备更新…', en: 'Preparing update…' },
+  'update.applyStartFailed': { zh: '无法启动更新，请稍后再试。', en: 'Could not start the update. Please try again.' },
+  'update.applyTimeout': { zh: '更新耗时异常，请检查服务器日志。', en: 'The update is taking unusually long — check the server log.' },
   'settings.loadingFailed': { zh: '加载服务器配置失败。请检查服务器是否正在运行。', en: 'Failed to load server config. Please check if the server is running.' },
   'settings.noProviders': { zh: '还没有配置服务商。点击"+ 自定义服务商"开始添加。', en: 'No providers configured. Click "+ Custom Provider" to start.' },
   'settings.keys': { zh: '个密钥', en: 'keys' },
@@ -431,6 +450,34 @@ var _i18n = {
   'settings.maxBytesHint': { zh: '字节，默认 20MB', en: 'bytes, default 20MB' },
   'settings.blockedDomains': { zh: '屏蔽域名', en: 'Blocked Domains' },
   'settings.blockedDomainsDesc': { zh: '抓取器不会访问的域名，每行一个。', en: 'Domains the fetcher will not visit, one per line.' },
+
+  // Authenticated fetch sources (login-walled: Xiaohongshu, …)
+  'settings.authSources': { zh: '需要登录的来源', en: 'Login-Required Sources' },
+  'settings.authSourcesDesc': { zh: '小红书等需要登录的站点。在你自己的浏览器中登录后粘贴 Cookie 即可连接；之后搜索与抓取链接将使用该会话读取内容。Cookie 仅保存在本地服务器，不会上传。', en: 'Sites that require a login (e.g. Xiaohongshu). Connect by logging in via your OWN browser and pasting the cookie; search and link fetching then use that session. Cookies are stored only on your local server and never uploaded.' },
+  'settings.authSourcesEmpty': { zh: '暂无可登录的来源。', en: 'No login-required sources yet.' },
+  'settings.authSourcesLoadFail': { zh: '加载失败', en: 'Failed to load' },
+  'common.remove': { zh: '移除', en: 'Remove' },
+  'common.saving': { zh: '保存中…', en: 'Saving…' },
+  'settings.authSrcConnected': { zh: '已连接', en: 'Connected' },
+  'settings.authSrcDisabled': { zh: '已连接（已停用）', en: 'Connected (disabled)' },
+  'settings.authSrcNotConnected': { zh: '未连接', en: 'Not connected' },
+  'settings.authSrcToggle': { zh: '启用 / 停用', en: 'Enable / disable' },
+  'settings.authSrcConnect': { zh: '连接', en: 'Connect' },
+  'settings.authSrcReconnect': { zh: '重新连接', en: 'Reconnect' },
+  'settings.authSrcDisconnectBtn': { zh: '断开', en: 'Disconnect' },
+  'settings.authSrcStep1': { zh: '在你自己的浏览器中打开该站点并登录', en: 'Open the site in YOUR browser and log in' },
+  'settings.authSrcStep1Generic': { zh: '在你自己的浏览器中登录该站点', en: 'Log in to the site in your own browser' },
+  'settings.authSrcOpenLogin': { zh: '打开登录页 ↗', en: 'Open login page ↗' },
+  'settings.authSrcStep2': { zh: '打开开发者工具 (F12) → Network，点任一请求，复制 Request Headers 里完整的 Cookie', en: 'Open DevTools (F12) → Network, click any request, copy the full Cookie from Request Headers' },
+  'settings.authSrcStep3': { zh: '粘贴到下方并保存', en: 'Paste it below and save' },
+  'settings.authSrcKeyCookie': { zh: '关键 Cookie：登录态由 <code>web_session</code> 携带，请确保它在内（连同 <code>a1</code> / <code>webId</code> 一起粘贴最稳妥，直接粘贴整段 Cookie 即可）。', en: 'Key cookie: the login session is carried by <code>web_session</code> — make sure it\'s included (pasting the whole Cookie string, with <code>a1</code> / <code>webId</code>, is safest).' },
+  'settings.authSrcCookiePh': { zh: 'web_session=...; a1=...', en: 'web_session=...; a1=...' },
+  'settings.authSrcProxyPh': { zh: '可选代理，例如 http://host:port', en: 'Optional proxy, e.g. http://host:port' },
+  'settings.authSrcCookieEmpty': { zh: '请粘贴 Cookie', en: 'Please paste a cookie' },
+  'settings.authSrcSaveConnect': { zh: '保存并连接', en: 'Save & connect' },
+  'settings.authSrcSaved': { zh: '已连接', en: 'Connected' },
+  'settings.authSrcSaveFail': { zh: '保存失败: ', en: 'Save failed: ' },
+  'settings.authSrcDisconnectConfirm': { zh: '断开并清除该来源的 Cookie？', en: 'Disconnect and clear this source\'s cookies?' },
 
   // ══════════════════════════════════════
   //  Settings — Translation Tab
@@ -792,6 +839,11 @@ var _i18n = {
   'translate.retry.truncated_final': { zh: '多次截断后返回部分结果', en: 'Output truncated after retries' },
   'translate.retry.mt_fallback': { zh: '机器翻译失败，已切换到大模型', en: 'MT provider failed, using LLM' },
   'translate.retry.timed_out': { zh: '翻译超时，已直接发送原文', en: 'Translation timed out, sent original text' },
+  // Send-path auto-translate failed: the ORIGINAL (untranslated) text was sent
+  // to the model. Shown as a quiet click-to-retry notice under the user bubble.
+  'translate.sendFailed.timed_out': { zh: '自动翻译超时，已按原文发送', en: 'Auto-translate timed out — sent original text' },
+  'translate.sendFailed.failed': { zh: '自动翻译失败，已按原文发送', en: 'Auto-translate failed — sent original text' },
+  'translate.sendFailed.retry': { zh: '重新翻译', en: 'Retranslate' },
 
   // ══════════════════════════════════════
   //  Time / Relative
@@ -955,6 +1007,11 @@ var _i18n = {
   'mcp.saveConnect': { zh: '保存并连接', en: 'Save & Connect' },
   'mcp.installConnect': { zh: '安装并连接', en: 'Install & Connect' },
   'mcp.cancel': { zh: '取消', en: 'Cancel' },
+  'mcp.reconnecting': { zh: '连接失败，自动重试中', en: 'Connection failed, auto-retrying' },
+  'mcp.retryInSec': { zh: '{n} 秒后重试', en: 'retry in {n}s' },
+  'mcp.retryInMin': { zh: '{n} 分钟后重试', en: 'retry in {n} min' },
+  'mcp.retryNow': { zh: '即将重试…', en: 'retrying…' },
+  'mcp.retryFailCount': { zh: '已失败 {n} 次', en: '{n} failed attempts' },
 
   // ══════════════════════════════════════
   //  Browser bridge modal
@@ -1003,6 +1060,10 @@ var _i18n = {
   'common.required': { zh: '必填', en: 'Required' },
   'common.officialApi': { zh: '官方 API', en: 'Official API' },
   'common.relayApi': { zh: '中转 API', en: 'Relay API' },
+  // ── Themed dialog (confirm/alert/prompt) default button labels ──
+  'dialog.confirm': { zh: '确定', en: 'OK' },
+  'dialog.cancel': { zh: '取消', en: 'Cancel' },
+  'dialog.ok': { zh: '好的', en: 'OK' },
 };
 
 /**

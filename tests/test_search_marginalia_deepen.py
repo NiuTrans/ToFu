@@ -12,16 +12,17 @@ deepen selection logic is exercised via its helpers + a monkeypatched
 
 import pytest
 
-from lib.search import deepen as deepen_mod
-from lib.search.deepen import (
+from tofu_search.search import deepen as deepen_mod
+from tofu_search.search.deepen import (
     _dedup_key,
     _harvest_links,
     _score_candidate,
     deepen_results,
     is_deepen_enabled,
 )
-from lib.search.engines.marginalia import _parse_marginalia, search_marginalia
-from lib.search.rerank import _tokenize
+from tofu_search.search.engines import marginalia as marginalia_mod
+from tofu_search.search.engines.marginalia import _parse_marginalia, search_marginalia
+from tofu_search.search.rerank import _tokenize
 
 
 class _FakeResp:
@@ -80,8 +81,7 @@ class TestMarginaliaParser:
             captured['params'] = params
             return []
 
-        monkeypatch.setattr('lib.search.engines.marginalia.http_search_get',
-                            _fake_http_search_get)
+        monkeypatch.setattr(marginalia_mod, 'http_search_get', _fake_http_search_get)
         search_marginalia('python asyncio', max_results=5)
         assert '/public/search/python%20asyncio' in captured['url']
         assert captured['params'] == {'count': 5}
@@ -156,7 +156,7 @@ class TestDeepenSelection:
             fetched.append(url)
             return 'FULL CONTENT for ' + url + ' ' * 60
 
-        monkeypatch.setattr('lib.search.deepen.fetch_page_content', _fake_fetch)
+        monkeypatch.setattr(deepen_mod, 'fetch_page_content', _fake_fetch)
 
         out = deepen_results('python asyncio', self._pages(), max_links=10)
         followed = set(fetched)
@@ -176,15 +176,13 @@ class TestDeepenSelection:
         assert all(r.get('full_content') for r in out)
 
     def test_max_links_cap(self, monkeypatch):
-        monkeypatch.setattr('lib.search.deepen.fetch_page_content',
-                            lambda url, **k: 'x' * 100)
+        monkeypatch.setattr(deepen_mod, 'fetch_page_content', lambda url, **k: 'x' * 100)
         out = deepen_results('python asyncio', self._pages(), max_links=1)
         assert len(out) == 1
 
     def test_drops_empty_fetches(self, monkeypatch):
         # fetch returns too-short / empty content → not included
-        monkeypatch.setattr('lib.search.deepen.fetch_page_content',
-                            lambda url, **k: '')
+        monkeypatch.setattr(deepen_mod, 'fetch_page_content', lambda url, **k: '')
         out = deepen_results('python asyncio', self._pages(), max_links=5)
         assert out == []
 
@@ -192,8 +190,7 @@ class TestDeepenSelection:
         assert deepen_results('q', []) == []
 
     def test_no_relevant_links(self, monkeypatch):
-        monkeypatch.setattr('lib.search.deepen.fetch_page_content',
-                            lambda url, **k: 'x' * 100)
+        monkeypatch.setattr(deepen_mod, 'fetch_page_content', lambda url, **k: 'x' * 100)
         pages = [{'url': 'https://s.com', 'full_content':
                   '--- Page Links ---\n- [Cooking](https://c.com/food)\n'}]
         assert deepen_results('quantum chromodynamics', pages) == []
@@ -234,7 +231,7 @@ class TestWiring:
     def test_marginalia_in_engine_specs(self):
         import inspect
 
-        import lib.search.orchestrator as o
+        from tofu_search.search import orchestrator as o
         src = inspect.getsource(o.perform_web_search)
         assert 'Marginalia' in src
         assert "'deepen'" in src or 'deepen' in inspect.signature(o.perform_web_search).parameters

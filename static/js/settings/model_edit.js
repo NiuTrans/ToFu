@@ -25,11 +25,11 @@ function _addModel(provIdx) {
   if (card) card.classList.add('expanded');
 }
 
-function _deleteModel(provIdx, modelIdx) {
+async function _deleteModel(provIdx, modelIdx) {
   var p = _stgProviders[provIdx];
   if (!p || !p.models || !p.models[modelIdx]) return;
   var mid = p.models[modelIdx].model_id;
-  if (!confirm('确定删除模型“' + (mid || '未命名') + '”吗？')) return;
+  if (!await showConfirm('确定删除模型“' + (mid || '未命名') + '”吗？', { danger: true })) return;
   p.models.splice(modelIdx, 1);
   // Clear presets pointing to this model
   for (var k in _stgPresets) {
@@ -168,12 +168,12 @@ function _saveModelEdit(provIdx, modelIdx) {
 
 // ── Alias CRUD (from model card chips) ──
 
-function _addAlias(provIdx, modelIdx) {
+async function _addAlias(provIdx, modelIdx) {
   var p = _stgProviders[provIdx];
   if (!p || !p.models) return;
   var m = p.models[modelIdx];
   if (!m) return;
-  var alias = prompt('输入别名（同一模型的替代 ID）:');
+  var alias = await showPrompt('输入别名（同一模型的替代 ID）:');
   if (!alias || !alias.trim()) return;
   if (!m.aliases) m.aliases = [];
   alias = alias.trim();

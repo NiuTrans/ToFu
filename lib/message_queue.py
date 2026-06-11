@@ -279,8 +279,8 @@ def dispatch_next_queued(conv_id: str) -> str | None:
                 logger.warning('[Queue] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
                 messages = []
 
-            from routes.chat import _append_user_msg_idempotent
-            _append_user_msg_idempotent(messages, pre_built_user_msg)
+            from lib.chat import append_user_msg_idempotent
+            append_user_msg_idempotent(messages, pre_built_user_msg)
 
             from lib.database import json_dumps_pg
             now_ms = int(time.time() * 1000)
@@ -303,9 +303,9 @@ def dispatch_next_queued(conv_id: str) -> str | None:
             _translate_model = None
             if auto_translate and has_chinese:
                 try:
-                    from routes.translate import _build_translate_prompt, _translate_one_chunk
+                    from lib.translate import _build_translate_prompt, _translate_freetext
                     system_prompt = _build_translate_prompt('English', 'Chinese')
-                    result, _usage = _translate_one_chunk(
+                    result, _usage = _translate_freetext(
                         text, system_prompt, chunk_label=':queue',
                         source='Chinese', target='English',
                     )
@@ -344,8 +344,8 @@ def dispatch_next_queued(conv_id: str) -> str | None:
             conv_ref_texts = payload.get('convRefTexts')
             if not conv_ref_texts and payload.get('convRefs'):
                 try:
-                    from routes.chat import _resolve_conv_refs
-                    conv_ref_texts = _resolve_conv_refs(payload['convRefs'])
+                    from lib.chat import resolve_conv_refs
+                    conv_ref_texts = resolve_conv_refs(payload['convRefs'])
                 except Exception as e:
                     logger.warning('[Queue] Failed to resolve conv refs for conv=%s: %s',
                                    conv_id[:8], e)
@@ -368,8 +368,8 @@ def dispatch_next_queued(conv_id: str) -> str | None:
                 logger.warning('[Queue] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
                 messages = []
 
-            from routes.chat import _append_user_msg_idempotent
-            _append_user_msg_idempotent(messages, user_msg)
+            from lib.chat import append_user_msg_idempotent
+            append_user_msg_idempotent(messages, user_msg)
 
             from lib.database import json_dumps_pg
             now_ms = int(time.time() * 1000)
@@ -435,8 +435,8 @@ def dispatch_next_queued(conv_id: str) -> str | None:
 
         # Invalidate meta cache so frontend sees the new task
         try:
-            from routes.common import _invalidate_meta_cache
-            _invalidate_meta_cache()
+            from lib.conversations import invalidate_meta_cache
+            invalidate_meta_cache()
         except Exception as e:
             logger.debug('[Queue] meta cache invalidation failed: %s', e)
 

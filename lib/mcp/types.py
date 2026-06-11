@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, TypedDict
 
 # ── Namespace separator for MCP tool names ──
@@ -17,6 +18,27 @@ MCP_CONFIG_FILENAME = 'mcp_servers.json'
 MCP_CONNECT_TIMEOUT = 30        # seconds to wait for server handshake
 MCP_CALL_TIMEOUT = 120          # seconds to wait for tool call response
 MCP_MAX_RESULT_CHARS = 200_000  # truncate tool results beyond this
+
+# ── Auto-recovery / keepalive ──
+# A background loop pings every connected server this often (seconds) and
+# transparently reconnects any whose transport has died — so idle-dropped
+# connections self-heal without user intervention. Set
+# TOFU_MCP_KEEPALIVE_INTERVAL=0 to disable the proactive loop (the reactive
+# reconnect-on-call path still applies). MCP_PING_TIMEOUT bounds each ping.
+MCP_KEEPALIVE_INTERVAL = int(os.environ.get('TOFU_MCP_KEEPALIVE_INTERVAL', '45'))
+MCP_PING_TIMEOUT = int(os.environ.get('TOFU_MCP_PING_TIMEOUT', '10'))
+
+# ── Circuit breaker (stop hammering a permanently-broken server) ──
+# Backoff applies only AFTER a reconnect attempt fails, so a transient drop
+# still heals on the very next keepalive sweep. Once reconnects keep failing,
+# the next attempt is gated by an exponentially growing delay:
+#   delay = min(BASE * 2**(consecutive_failures - 1), MAX)
+# A permanently-broken server therefore converges to one retry per MAX
+# seconds (default 10 min) instead of every sweep — but never gives up, so it
+# self-heals if the server eventually comes back. A successful reconnect (or
+# manual reconnect) resets the breaker.
+MCP_BREAKER_BASE_BACKOFF = int(os.environ.get('TOFU_MCP_BREAKER_BASE_BACKOFF', '30'))
+MCP_BREAKER_MAX_BACKOFF = int(os.environ.get('TOFU_MCP_BREAKER_MAX_BACKOFF', '600'))
 
 
 class MCPServerConfig(TypedDict, total=False):

@@ -172,6 +172,7 @@ class PgCursor:
             self._skipped = True
             return self
         params = _sanitize_params(params)
+        _t0 = time.monotonic()
         try:
             if params:
                 self._cursor.execute(translated, params)
@@ -184,13 +185,23 @@ class PgCursor:
             if _sql_upper.startswith(('INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP')):
                 self._conn._dirty = True
         except Exception as e:
-            logger.debug('[DB] SQL error: %s\n  Original: %.200s\n  Translated: %.200s\n  Params: %.200s',
+            # A SQL execution failure is a genuine, often data-affecting error.
+            # Log at ERROR so it reaches error.log; the full SQL/params stay at
+            # DEBUG (enable via TOFU_DB_LOG_LEVEL=DEBUG) to avoid leaking values.
+            logger.error('[DB] SQL execution failed (%s): %.120s', type(e).__name__, e)
+            logger.debug('[DB] SQL error detail: %s\n  Original: %.200s\n  Translated: %.200s\n  Params: %.200s',
                          e, sql, translated, str(params)[:200] if params else 'None')
             try:
                 self._conn._conn.rollback()
             except Exception as _rb_err:
                 logger.debug('[DB] Rollback after SQL error also failed: %s', _rb_err)
             raise
+        from lib.database._core import _SLOW_QUERY_MS
+        if _SLOW_QUERY_MS:
+            _elapsed_ms = (time.monotonic() - _t0) * 1000
+            if _elapsed_ms >= _SLOW_QUERY_MS:
+                logger.warning('[DB] Slow query %.0fms (threshold %dms): %.150s',
+                               _elapsed_ms, _SLOW_QUERY_MS, translated)
         return self
 
     def executemany(self, sql, params_list):
@@ -290,8 +301,8 @@ class PgConnection:
             try:
                 cur.execute(translated)
             except Exception as e:
-                logger.debug('[DB] executescript statement error: %s\n  Statement: %.300s',
-                             e, translated)
+                logger.error('[DB] executescript statement failed (%s): %.120s', type(e).__name__, e)
+                logger.debug('[DB] executescript statement detail: %.300s', translated)
                 raise
         self._conn.commit()
 

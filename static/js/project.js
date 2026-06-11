@@ -206,7 +206,7 @@ function _updateAutoApplyUI() {
 }
 
 // ★ Per-conversation project path helpers
-function _saveConvProjectPath(path, extraPaths) {
+function _saveConvProjectPath(path, extraPaths, readOnlyPaths) {
   const conv = getActiveConv();
   if (conv) {
     conv.projectPath = path || "";
@@ -217,6 +217,13 @@ function _saveConvProjectPath(path, extraPaths) {
       for (const ep of extraPaths) {
         if (ep && !conv.projectPaths.includes(ep)) conv.projectPaths.push(ep);
       }
+    }
+    // ★ Persist the read-only subset (parallel list, mirrors backend model).
+    //   Only keep entries that are actually among the configured paths.
+    if (Array.isArray(readOnlyPaths)) {
+      conv.readOnlyPaths = readOnlyPaths.filter(p => p && conv.projectPaths.includes(p));
+    } else {
+      conv.readOnlyPaths = [];
     }
     saveConversations(conv.id);
     syncConversationToServer(conv);
@@ -273,10 +280,13 @@ async function _restoreConvProject(conv) {
   }
   // Need to set/restore this project on server
   _clearProjectStateLocal();
+  const savedReadOnly = (Array.isArray(conv.readOnlyPaths) ? conv.readOnlyPaths : [])
+    .filter(p => allPaths.includes(p));
   try {
-    // ★ Use multi-path API when there are extra roots, single-path otherwise
-    const resp = hasExtras
-      ? await Api.project.setPaths(allPaths)
+    // ★ Use multi-path API when there are extra roots OR any read-only root
+    //   (read-only is only expressible through the multi-path endpoint).
+    const resp = (hasExtras || savedReadOnly.length)
+      ? await Api.project.setPaths(allPaths, savedReadOnly)
       : await Api.project.setPath(savedPath);
     const data = resp ? await resp.json().catch(() => ({})) : {};
     if (resp && resp.ok) {
@@ -310,17 +320,33 @@ async function _restoreConvProject(conv) {
 
 // ── Multi-path folder state for the modal ──
 let _mpFolders = []; // array of path strings being edited in the modal
+let _mpReadOnly = new Set(); // subset of _mpFolders the user marked read-only
 
 function _syncFoldersFromState() {
   // Build _mpFolders from projectState (single source of truth)
   _mpFolders = [];
-  if (projectState.path) _mpFolders.push(projectState.path);
+  _mpReadOnly = new Set();
+  if (projectState.path) {
+    _mpFolders.push(projectState.path);
+    if (projectState.readOnly) _mpReadOnly.add(projectState.path);
+  }
   if (projectState.extraRoots && projectState.extraRoots.length) {
     for (const r of projectState.extraRoots) {
       const p = typeof r === 'string' ? r : r.path;
-      if (p && !_mpFolders.includes(p)) _mpFolders.push(p);
+      if (p && !_mpFolders.includes(p)) {
+        _mpFolders.push(p);
+        if (r && typeof r === 'object' && r.readOnly) _mpReadOnly.add(p);
+      }
     }
   }
+}
+
+function _mpToggleReadOnly(index) {
+  const p = _mpFolders[index];
+  if (!p) return;
+  if (_mpReadOnly.has(p)) _mpReadOnly.delete(p);
+  else _mpReadOnly.add(p);
+  _mpRenderTags();
 }
 
 function openProjectModal() {
@@ -329,6 +355,10 @@ function openProjectModal() {
   _updateProjectModalStatus();
   renderRecentProjects();
   document.getElementById("projectModal").classList.add("open");
+  // Default mobile view to Browse on each open (no-op on desktop).
+  pmMobileTab("browse");
+  // Docked browser: populate it from the primary folder (or home) on open.
+  browseDirectory(_mpFolders.length ? _mpFolders[0] : "~");
   setTimeout(() => document.getElementById("mpPathInput").focus(), 100);
 }
 
@@ -336,18 +366,55 @@ function closeProjectModal() {
   document.getElementById("projectModal").classList.remove("open");
 }
 
+/* ── Mobile segmented tab toggle (Browse / Workspace) ──
+ * Desktop shows both panes side-by-side; on narrow screens the .pm-body
+ * is driven by a data-pm-view attribute so only one pane is visible at a
+ * time, giving each the full viewport height instead of two cramped halves. */
+function pmMobileTab(view) {
+  const modal = document.querySelector('#projectModal .pm-workbench');
+  if (!modal) return;
+  modal.setAttribute('data-pm-view', view);
+  modal.querySelectorAll('.pm-mtab').forEach((b) => {
+    b.classList.toggle('active', b.getAttribute('data-pm-tab') === view);
+  });
+}
+
 /* ── Multi-path tag rendering ── */
 function _mpRenderTags() {
   const container = document.getElementById("mpFolderTags");
+  const countEl = document.getElementById("mpFolderCount");
+  if (countEl) countEl.textContent = _mpFolders.length ? `${_mpFolders.length}` : '';
+  const mCountEl = document.getElementById("pmMobileCount");
+  if (mCountEl) mCountEl.textContent = _mpFolders.length ? `${_mpFolders.length}` : '';
   if (!_mpFolders.length) {
-    container.innerHTML = '<div class="mp-empty-hint">No folders added yet — type a path below or browse.</div>';
+    container.innerHTML = '<div class="mp-empty-hint">No folders yet — type a path or pick one from the browser.</div>';
     return;
   }
   container.innerHTML = _mpFolders.map((p, i) => {
-    const short = p.split('/').filter(Boolean).slice(-2).join('/') || p;
-    return `<div class="mp-tag" title="${escapeHtml(p)}">
-      <span class="mp-tag-path">${escapeHtml(short)}</span>
-      <button class="mp-tag-remove" onclick="_mpRemove(${i})" title="Remove">✕</button>
+    const parts = p.split('/').filter(Boolean);
+    const name = parts[parts.length - 1] || p;
+    const short = parts.length > 2 ? '…/' + parts.slice(-2).join('/') : p;
+    const isPrimary = i === 0;
+    const isRO = _mpReadOnly.has(p);
+    // Lock (read-only) / pencil (writable) toggle. Click flips the access
+    // policy for this root — sent to the backend as readOnlyPaths.
+    const lockIcon = isRO
+      ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>'
+      : '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+    return `<div class="mp-row${isPrimary ? ' mp-row-primary' : ''}${isRO ? ' mp-row-readonly' : ''}" title="${escapeHtml(p)}">
+      <span class="mp-row-icon">${isPrimary
+        ? '<svg width="15" height="15" viewBox="0 0 24 24" fill="#f59e0b" stroke="#f59e0b" stroke-width="1.5" stroke-linejoin="round"><polygon points="12 2 15 9 22 9 16.5 13.5 18.5 21 12 16.5 5.5 21 7.5 13.5 2 9 9 9"/></svg>'
+        : '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" opacity="0.55"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'}</span>
+      <span class="mp-row-text">
+        <span class="mp-row-name">${escapeHtml(name)}</span>
+        <span class="mp-row-path">${escapeHtml(short)}</span>
+      </span>
+      ${isPrimary ? '<span class="mp-row-badge">root</span>' : ''}
+      ${isRO ? '<span class="mp-row-badge mp-row-badge-ro">read-only</span>' : ''}
+      <button class="mp-row-lock${isRO ? ' active' : ''}" onclick="_mpToggleReadOnly(${i})" title="${isRO ? 'Read-only — click to allow edits' : 'Writable — click to make read-only'}">${lockIcon}</button>
+      <button class="mp-row-remove" onclick="_mpRemove(${i})" title="Remove">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>`;
   }).join('');
 }
@@ -368,7 +435,8 @@ function mpAddFolder() {
 }
 
 function _mpRemove(index) {
-  _mpFolders.splice(index, 1);
+  const removed = _mpFolders.splice(index, 1);
+  if (removed && removed[0]) _mpReadOnly.delete(removed[0]);
   _mpRenderTags();
 }
 
@@ -429,29 +497,32 @@ async function mpApplyFolders() {
   const folders = _mpFolders.slice();
   const primary = folders[0];
   const extras = folders.slice(1);
+  const readOnly = folders.filter(p => _mpReadOnly.has(p));
 
   // ── Optimistic apply: paint UI from typed paths and close the modal ──
   const _prevProjectState = { ...projectState, extraRoots: (projectState.extraRoots || []).slice() };
   _applyProjectData({
     path: primary,
-    extraRoots: extras.map(p => ({ path: p })),
+    readOnly: _mpReadOnly.has(primary),
+    extraRoots: extras.map(p => ({ path: p, readOnly: _mpReadOnly.has(p) })),
     crossDC: null,
   });
-  _saveConvProjectPath(primary, extras);
+  _saveConvProjectPath(primary, extras, readOnly);
   for (const p of folders) {
     if (p) saveRecentProject(p);
   }
   closeProjectModal();
   const nExtras = extras.length;
-  debugLog(`Project set: ${primary}` + (nExtras ? ` + ${nExtras} extra folder(s)` : ''), "success");
+  const nRO = readOnly.length;
+  debugLog(`Project set: ${primary}` + (nExtras ? ` + ${nExtras} extra folder(s)` : '') + (nRO ? ` (${nRO} read-only)` : ''), "success");
 
   // ── Reconcile with the server in the background ──
   try {
-    const resp = await Api.project.setPaths(folders);
+    const resp = await Api.project.setPaths(folders, readOnly);
     const data = resp ? await resp.json().catch(() => ({})) : {};
     if (!resp || !resp.ok) throw new Error(data.error || "Failed");
     _applyProjectData(data);
-    _saveConvProjectPath(data.path, _mpFolders.slice(1));
+    _saveConvProjectPath(data.path, _mpFolders.slice(1), readOnly);
   } catch (e) {
     // Revert the optimistic state and reopen the modal so the user can fix it.
     projectState = _prevProjectState;
@@ -481,10 +552,11 @@ async function clearProject() {
   await Api.project.clear().catch(e => debugLog(`[clearProject] ${e.message}`, 'warn'));
   _saveConvProjectPath("");
   _mpFolders = [];
+  _mpReadOnly = new Set();
   projectState = {
     active: false, path: "", fileCount: 0, dirCount: 0, totalSize: 0,
     languages: {}, scanning: false, scanProgress: "", scanDetail: "",
-    scannedAt: 0, extraRoots: [],
+    scannedAt: 0, extraRoots: [], readOnly: false,
   };
   _updateProjectUI();
   closeProjectModal();
@@ -518,14 +590,12 @@ async function renderRecentProjects() {
   listEl.innerHTML = list
     .map((item) => {
       const parts = item.path.split("/").filter(Boolean);
-      const name = parts.pop() || item.path;
-      const shortPath =
-        parts.length <= 2
-          ? item.path
-          : "…/" + parts.slice(-1).join("/") + "/" + name;
+      const name = parts[parts.length - 1] || item.path;
       return `<div class="recent-path-item" onclick="selectRecentProject('${escapeHtml(item.path)}')" title="${escapeHtml(item.path)}">
-         <span class="recent-path-name">${escapeHtml(name)}</span>
-         <span class="recent-path-full">${escapeHtml(shortPath)}</span>
+         <span class="recent-path-text">
+           <span class="recent-path-name">${escapeHtml(name)}</span>
+           <span class="recent-path-full">${escapeHtml(item.path)}</span>
+         </span>
          ${item.count > 1 ? `<span class="recent-path-count">×${item.count}</span>` : ""}
        </div>`;
     })
@@ -567,8 +637,9 @@ async function undoConvModifications(msgIdx) {
   if (!msg || msg.role !== "assistant" || !msg.modifiedFiles) return;
   const count = msg.modifiedFiles;
   if (
-    !confirm(
+    !await showConfirm(
       `确定要撤销本轮对话的 ${count} 处代码修改吗？\n此操作将恢复这些文件到修改前的状态。`,
+      { danger: true },
     )
   )
     return;
@@ -607,8 +678,9 @@ async function undoConvModifications(msgIdx) {
 async function undoAllModifications() {
   if (!projectState.active) return;
   if (
-    !confirm(
+    !await showConfirm(
       "确定要撤销所有代码修改吗？\n\n此操作将恢复所有被修改的文件到原始状态，包括所有对话中的修改。",
+      { danger: true },
     )
   )
     return;
@@ -663,6 +735,10 @@ function _applyProjectData(data) {
   if (Array.isArray(data.extraRoots)) {
     projectState.extraRoots = data.extraRoots;
   }
+  // ★ Primary root read-only flag (backend sends `readOnly` in get_state()).
+  if (data.readOnly !== undefined) {
+    projectState.readOnly = !!data.readOnly;
+  }
   // ★ Cross-DC indicator from backend
   if (data.crossDC) {
     projectState.crossDC = data.crossDC;
@@ -711,16 +787,24 @@ function _updateProjectUI() {
   // _syncFoldersFromState silently restores removed paths, making them
   // impossible to delete from the modal.
   const _barFolders = [];
-  if (projectState.path) _barFolders.push(projectState.path);
+  if (projectState.path) {
+    _barFolders.push({ path: projectState.path, readOnly: !!projectState.readOnly });
+  }
   if (projectState.extraRoots && projectState.extraRoots.length) {
     for (const r of projectState.extraRoots) {
       const p = typeof r === 'string' ? r : r.path;
-      if (p && !_barFolders.includes(p)) _barFolders.push(p);
+      const ro = typeof r === 'object' ? !!r.readOnly : false;
+      if (p && !_barFolders.some((b) => b.path === p)) {
+        _barFolders.push({ path: p, readOnly: ro });
+      }
     }
   }
-  const badges = _barFolders.map((p) => {
+  const _lockGlyph = '<svg class="folder-badge-lock" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
+  const badges = _barFolders.map(({ path: p, readOnly }) => {
     const short = p.split('/').filter(Boolean).pop() || p;
-    return `<span class="folder-badge" title="${escapeHtml(p)}">${escapeHtml(short)}</span>`;
+    const cls = 'folder-badge' + (readOnly ? ' folder-badge-ro' : '');
+    const tip = escapeHtml(p) + (readOnly ? ' (read-only)' : '');
+    return `<span class="${cls}" title="${tip}">${readOnly ? _lockGlyph : ''}${escapeHtml(short)}</span>`;
   });
   foldersEl.innerHTML = badges.join('');
 
@@ -766,14 +850,26 @@ async function loadProjectStatus() {
       const allPaths = (Array.isArray(conv.projectPaths) && conv.projectPaths.length)
         ? conv.projectPaths : [savedPath];
       const savedExtras = allPaths.slice(1);
+      const savedReadOnly = (Array.isArray(conv.readOnlyPaths) ? conv.readOnlyPaths : [])
+        .filter(p => allPaths.includes(p));
       const currentExtras = (data.extraRoots || []).map(r => typeof r === 'string' ? r : r.path);
       const extrasMatch = savedExtras.length === currentExtras.length &&
         savedExtras.every(p => currentExtras.includes(p));
-      if (!extrasMatch && savedExtras.length > 0) {
-        // Primary matches but extras don't — re-apply with all paths
-        debugLog("Restoring extra roots for conversation", "info");
+      // ★ Detect read-only drift: the server's RO set must match what the
+      //   conversation saved, else the locks vanish after a reload / server
+      //   restart. Build the server's current RO set from get_state().
+      const currentRO = [];
+      if (data.readOnly && data.path) currentRO.push(data.path);
+      for (const r of (data.extraRoots || [])) {
+        if (r && typeof r === 'object' && r.readOnly) currentRO.push(r.path);
+      }
+      const roMatch = savedReadOnly.length === currentRO.length &&
+        savedReadOnly.every(p => currentRO.includes(p));
+      if ((!extrasMatch && savedExtras.length > 0) || !roMatch) {
+        // Primary matches but extras or read-only policy don't — re-apply.
+        debugLog("Restoring extra roots / read-only policy for conversation", "info");
         try {
-          const fixResp = await Api.project.setPaths(allPaths);
+          const fixResp = await Api.project.setPaths(allPaths, savedReadOnly);
           const fixData = fixResp ? await fixResp.json().catch(() => ({})) : {};
           if (fixResp && fixResp.ok) _applyProjectData(fixData);
         } catch (e2) {
@@ -789,12 +885,15 @@ async function loadProjectStatus() {
       // Server has no project or a different one — restore from conv
       debugLog("Restoring project from conversation: " + savedPath, "info");
       try {
-        // ★ Use multi-path API when conversation has extra roots
+        // ★ Use multi-path API when conversation has extra roots OR any
+        //   read-only root (read-only is only expressible via setPaths).
         const allPaths = (Array.isArray(conv.projectPaths) && conv.projectPaths.length)
           ? conv.projectPaths : [savedPath];
+        const savedReadOnly = (Array.isArray(conv.readOnlyPaths) ? conv.readOnlyPaths : [])
+          .filter(p => allPaths.includes(p));
         const hasExtras = allPaths.length > 1;
-        const setResp = hasExtras
-          ? await Api.project.setPaths(allPaths)
+        const setResp = (hasExtras || savedReadOnly.length)
+          ? await Api.project.setPaths(allPaths, savedReadOnly)
           : await Api.project.setPath(savedPath);
         const setData = setResp ? await setResp.json().catch(() => ({})) : {};
         if (setResp && setResp.ok) {
@@ -838,33 +937,32 @@ function toggleFolderBrowser() {
 async function browseDirectory(path) {
   const listEl = document.getElementById("browseList");
   listEl.innerHTML =
-    '<div style="color:var(--text-tertiary);padding:16px;text-align:center;font-size:12px">Loading…</div>';
+    '<div class="fb-state"><div class="fb-state-spinner"></div><span>Loading…</span></div>';
   try {
     const data = await Api.project.browse(path, _browseState.showHidden);
     if (!data) {
-      listEl.innerHTML = '<div style="color:var(--error-text);padding:16px;text-align:center;font-size:12px">Browse failed</div>';
+      listEl.innerHTML = '<div class="fb-state fb-state-error"><span>Browse failed</span></div>';
       return;
     }
     if (data.error) {
       listEl.innerHTML =
-        '<div style="color:var(--error-text);padding:16px;text-align:center;font-size:12px">' +
+        '<div class="fb-state fb-state-error"><span>' +
         escapeHtml(data.error) +
-        "</div>";
+        "</span></div>";
       return;
     }
     _browseState.path = data.path;
     _browseState.dirs = data.dirs || [];
     _browseState.parent = data.parent;
 
-    document.getElementById("browsePath").textContent = data.path;
-    document.getElementById("browsePath").title = data.path;
+    _renderBreadcrumb(data.path);
     document.getElementById("browseBackBtn").disabled = !data.parent;
 
     if (_browseState.dirs.length === 0) {
       listEl.innerHTML =
-        '<div style="color:var(--text-tertiary);padding:16px;text-align:center;font-size:12px">No subdirectories' +
-        (data.filesCount ? " (" + data.filesCount + " files)" : "") +
-        "</div>";
+        '<div class="fb-state"><span>No subdirectories' +
+        (data.filesCount ? " · " + data.filesCount + " files" : "") +
+        "</span></div>";
       return;
     }
 
@@ -874,6 +972,7 @@ async function browseDirectory(path) {
           ? '<span class="folder-code-badge">code</span>'
           : "";
         var hidden = d.hidden ? " folder-hidden" : "";
+        var added = _mpFolders.includes(d.path) ? " folder-added" : "";
         var items =
           d.itemCount > 0
             ? '<span class="folder-item-count">' +
@@ -882,34 +981,64 @@ async function browseDirectory(path) {
             : "";
         var safePath = d.path.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
         var icon = d.hasCode
-          ? '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
-          : '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" opacity="0.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+          ? '<svg class="fi-folder" width="16" height="16" viewBox="0 0 24 24" fill="rgba(245,158,11,0.14)" stroke="#f59e0b" stroke-width="1.8" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
+          : '<svg class="fi-folder" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" opacity="0.55"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
         return (
-          '<div class="folder-item' +
-          hidden +
-          '" ondblclick="browseDirectory(\'' +
-          safePath +
-          "')\" onclick=\"selectFolderItem(this, '" +
-          safePath +
-          "')\">" +
-          '<span class="folder-icon">' +
-          icon +
-          "</span>" +
-          '<span class="folder-name">' +
-          escapeHtml(d.name) +
-          "</span>" +
-          badge +
-          items +
+          '<div class="folder-item' + hidden + added +
+          '" onclick="browseDirectory(\'' + safePath + '\')" title="Open ' + escapeHtml(d.name) + '">' +
+          '<span class="folder-icon">' + icon + "</span>" +
+          '<span class="folder-name">' + escapeHtml(d.name) + "</span>" +
+          badge + items +
+          '<button class="folder-add-btn" onclick="event.stopPropagation();mpAddBrowsedPath(\'' + safePath + '\')" title="Add to workspace">' +
+          '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>' +
+          '</button>' +
+          '<svg class="folder-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>' +
           "</div>"
         );
       })
       .join("");
   } catch (e) {
     listEl.innerHTML =
-      '<div style="color:var(--error-text);padding:16px;text-align:center;font-size:12px">' +
+      '<div class="fb-state fb-state-error"><span>' +
       escapeHtml(e.message) +
-      "</div>";
+      "</span></div>";
   }
+}
+
+/* Render a clickable breadcrumb trail (VS Code style) for the current path.
+   Each crumb navigates to that ancestor on click. */
+function _renderBreadcrumb(path) {
+  const el = document.getElementById("browseCrumbs");
+  if (!el) return;
+  const parts = path.split("/").filter(Boolean);
+  const isAbs = path.startsWith("/");
+  const crumbs = [];
+  // Root crumb: "/" for absolute paths, else the first segment.
+  const rootPath = isAbs ? "/" : (parts[0] || path);
+  crumbs.push(
+    '<button class="pm-crumb pm-crumb-root" onclick="browseDirectory(\'' +
+    rootPath.replace(/\\/g, "\\\\").replace(/'/g, "\\'") +
+    '\')" title="' + escapeHtml(rootPath) + '">' +
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>' +
+    '</button>'
+  );
+  let walk = isAbs ? "" : parts[0] || "";
+  const startIdx = isAbs ? 0 : 1;
+  for (let i = startIdx; i < parts.length; i++) {
+    walk = walk + "/" + parts[i];
+    const full = isAbs ? walk : walk.replace(/^\//, "");
+    const last = i === parts.length - 1;
+    const safe = full.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    crumbs.push('<span class="pm-crumb-sep">/</span>');
+    crumbs.push(
+      '<button class="pm-crumb' + (last ? ' pm-crumb-current' : '') +
+      '" onclick="browseDirectory(\'' + safe + '\')" title="' + escapeHtml(full) + '">' +
+      escapeHtml(parts[i]) + '</button>'
+    );
+  }
+  el.innerHTML = crumbs.join("");
+  // Scroll to the end so the deepest crumb is visible.
+  el.scrollLeft = el.scrollWidth;
 }
 
 function selectFolderItem(el, path) {
@@ -918,6 +1047,16 @@ function selectFolderItem(el, path) {
   });
   el.classList.add("selected");
   document.getElementById("mpPathInput").value = path;
+}
+
+/* Add a folder shown in the browser straight into the workspace list.
+   Re-renders the current directory so the row's "added" state updates. */
+function mpAddBrowsedPath(path) {
+  if (path && !_mpFolders.includes(path)) {
+    _mpFolders.push(path);
+    _mpRenderTags();
+    browseDirectory(_browseState.path);
+  }
 }
 
 function browseParent() {
@@ -933,16 +1072,17 @@ function toggleHiddenDirs() {
 }
 
 function selectBrowsedFolder() {
-  // In the new multi-path design, selecting from the folder browser
-  // adds the currently shown (or selected) path directly to the tag list
+  // Docked browser: add the current open directory to the workspace list.
+  // Single-click now navigates, so the footer button targets the dir the
+  // browser is currently showing. The browser stays open for more adds.
   const input = document.getElementById("mpPathInput");
   const path = input.value.trim() || _browseState.path;
   if (path && !_mpFolders.includes(path)) {
     _mpFolders.push(path);
     _mpRenderTags();
+    browseDirectory(_browseState.path);
   }
   input.value = "";
-  document.getElementById("folderBrowser").hidden = true;
 }
 
 // ══════════════════════════════════════════════════════

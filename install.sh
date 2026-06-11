@@ -713,6 +713,11 @@ CONDA_PKGS=(
     "psutil>=5.9"
     "playwright>=1.40"
     "pillow>=10.0"
+    # numpy + scipy — used by scripts/png_to_svg.py for background removal
+    # (flood-fill connected-components) in generate_image(svg=true). Without
+    # them the SVG bg-removal step silently degrades to a worse trace.
+    "numpy>=1.24"
+    "scipy>=1.10"
     "python-pptx>=0.6.21"
     # lxml ≥6 works with libxml2 2.14+ and icu 75 OR 78 — gives the solver
     # maximum freedom. It's ABI-compatible with lxml 5.x at the Python level.
@@ -751,6 +756,11 @@ CONDA_PKGS=(
 # and most users don't need it (pymupdf4llm covers the common case).
 PIP_ONLY_PKGS=(
     "pymupdf4llm>=0.0.17"
+    # vtracer — Rust-backed raster→vector tracer for generate_image(svg=true)
+    # (scripts/png_to_svg.py). Self-contained wheel: no Python deps, does not
+    # touch lxml/icu, so --no-deps is safe. Hard dep — the svg parameter on
+    # the generate_image tool is always advertised, so it must always work.
+    "vtracer>=0.6.11"
     "trafilatura>=1.6"
     "htmldate>=1.9.4"
     # trafilatura's pure-Python deps (from its pyproject.toml).
@@ -880,6 +890,8 @@ _IMPORT_CHECK_PKGS=(
     "psutil:psutil"
     "playwright:playwright"
     "PIL:pillow"
+    "numpy:numpy"
+    "scipy:scipy"
     "pptx:python-pptx"
     "lxml:lxml"
     "bs4:beautifulsoup4"
@@ -1188,6 +1200,25 @@ else
         warn "     conda install -c conda-forge --force-reinstall lxml"
         warn "If you see 'No module named X', run: pip install X"
         fail "Critical fetch-stack imports broken — see ${_TOFU_IMPORT_ERR}"
+    fi
+fi
+
+# ── Verify the PNG→SVG stack (generate_image svg=true) ──
+# vtracer (pip, Rust wheel) + numpy/scipy (conda) power scripts/png_to_svg.py.
+# The generate_image tool ALWAYS advertises the `svg` parameter, so these must
+# import. vtracer ships no Python deps, so a plain pip retry (no lxml
+# constraint needed) is the right self-heal.
+info "Verifying PNG→SVG stack (vtracer + numpy + scipy) imports correctly..."
+_SVG_IMPORT_PROBE='import vtracer, numpy, scipy; print("vtracer ok, numpy", numpy.__version__, "scipy", scipy.__version__)'
+if python -c "$_SVG_IMPORT_PROBE" 2>/dev/null; then
+    ok "PNG→SVG stack import check passed"
+else
+    warn "PNG→SVG stack import failed — retrying vtracer via pip"
+    if _safe_pip_install --upgrade vtracer && python -c "$_SVG_IMPORT_PROBE" 2>/dev/null; then
+        ok "PNG→SVG stack import check passed after retry"
+    else
+        warn "vtracer still not importable — generate_image(svg=true) will fail."
+        warn "Manual recovery: conda activate ${ENV_NAME} && pip install vtracer"
     fi
 fi
 

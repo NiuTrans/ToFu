@@ -21,6 +21,7 @@ roots cannot interfere with each other, and concurrent tasks on the
 *read-only* projection of the currently-active primary root for the
 sake of ``get_state()`` / UI badges; nothing writes through them.
 """
+import base64
 import hashlib
 import json
 import os
@@ -259,6 +260,33 @@ def _start_new_session(base_path):
     return session_dir
 
 
+def _encode_original(original_content, mod):
+    """Make ``original_content`` JSON-safe for the modifications record.
+
+    Binary pre-images (captured by run_command when a command touches a
+    non-UTF-8 file) arrive as ``bytes``, which ``json.dump`` cannot
+    serialise — that would poison both ``modifications.json`` persistence
+    and every ``get_state()``/jsonify response that mirrors this list.
+    base64-encode bytes into a str and flag it so undo can decode back.
+    """
+    if isinstance(original_content, bytes):
+        mod['originalContentB64'] = True
+        return base64.b64encode(original_content).decode('ascii')
+    return original_content
+
+
+def _decode_original(mod):
+    """Return a mod's original content as the right type for restore.
+
+    Inverse of :func:`_encode_original`: base64-decodes back to ``bytes``
+    when the record was flagged binary, else returns the stored str.
+    """
+    original = mod.get('originalContent')
+    if mod.get('originalContentB64') and isinstance(original, str):
+        return base64.b64decode(original)
+    return original
+
+
 def _record_modification(base_path, mod_type, path, original_content=None, reverse_patch=None, conv_id=None, task_id=None):
     """Record a modification for later undo, tagged with conv_id and task_id.
 
@@ -298,7 +326,7 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
 
     if mod_type == 'write_file':
         if original_content is not None:
-            mod['originalContent'] = original_content
+            mod['originalContent'] = _encode_original(original_content, mod)
             mod['existed'] = True
         else:
             mod['existed'] = False
@@ -313,7 +341,7 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
         # (didn't exist), original_content=<str|bytes> means file was deleted
         # or modified (save for restore).
         if original_content is not None:
-            mod['originalContent'] = original_content
+            mod['originalContent'] = _encode_original(original_content, mod)
             mod['existed'] = True
         else:
             mod['existed'] = False
@@ -421,10 +449,17 @@ def _undo_modifications_list(base_path, modifications):
                         logger.info('Undo: deleted created file %s', path)
                 else:
                     if 'originalContent' in mod and os.path.exists(target):
-                        with open(target, 'w', newline='') as f:
-                            f.write(mod['originalContent'])
-                            f.flush()
-                            os.fsync(f.fileno())
+                        original = _decode_original(mod)
+                        if isinstance(original, bytes):
+                            with open(target, 'wb') as f:
+                                f.write(original)
+                                f.flush()
+                                os.fsync(f.fileno())
+                        else:
+                            with open(target, 'w', newline='') as f:
+                                f.write(original)
+                                f.flush()
+                                os.fsync(f.fileno())
                         _nudge_vscode(target)
                         undone.append({'type': 'restore', 'path': path})
                         logger.info('Undo: restored original content for %s', path)
@@ -459,7 +494,7 @@ def _undo_modifications_list(base_path, modifications):
                 else:
                     # File was DELETED or MODIFIED → restore original content
                     if 'originalContent' in mod:
-                        original = mod['originalContent']
+                        original = _decode_original(mod)
                         parent_dir = os.path.dirname(target)
                         if parent_dir and not os.path.isdir(parent_dir):
                             os.makedirs(parent_dir, exist_ok=True)

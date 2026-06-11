@@ -6,11 +6,27 @@ import time
 import sqlite3
 from flask import Response, jsonify, request
 
-from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_db, json_dumps_pg
+from lib.database import (
+    DOMAIN_CHAT,
+    async_execute,
+    async_fetchall,
+    async_fetchone,
+    db_execute_with_retry,
+    json_dumps_pg,
+    run_pooled,
+)
 from lib.log import audit_log, get_logger
 from lib.api_response import api_bad_request, api_internal_error, api_not_found, api_ok
-from lib.request_parser import parse_body
+from lib.request_parser import async_parse_body, parse_body  # noqa: F401
 from lib.utils import safe_json as _safe_json
+from lib.conversations import build_search_text, update_conversation_fts  # noqa: F401  — build_search_text re-exported for back-compat callers
+from lib.database._core_schema import CONVERSATIONS, upsert
+
+# Columns written by the conversation upserts in this module. Omits `search_tsv`
+# (PG-only; the conversations_search_tsv_trg BEFORE-trigger derives it from
+# search_text) — so the partial insert lets the trigger own that column.
+_CONV_INSERT_COLS = ['id', 'user_id', 'title', 'messages', 'created_at',
+                     'updated_at', 'settings', 'msg_count', 'search_text']
 from routes.common import DEFAULT_USER_ID, _db_safe, _invalidate_meta_cache, _refresh_meta_cache_if_stale
 
 # Whitelisted keys for PATCH /messages/<idx> — only these fields can be mutated
@@ -29,54 +45,54 @@ from routes.api_v1 import api_v1_conversations_bp as conversations_bp  # noqa: E
 # (alias kept for back-compat with `from routes.conversations import conversations_bp` callers)
 
 
-def build_search_text(messages):
-    """Extract plain text from messages list for full-text search indexing.
+# ── Deferred response protocol for run_pooled blocking bodies ──────────
+# A *_blocking(db, ...) function runs in the DB executor thread where Quart's
+# (async-only) app context is absent, so it MUST NOT call jsonify / api_* —
+# those build a Response and need app context. Instead it returns a `_Defer`
+# describing the response, and the async wrapper calls `_finish(...)` on the
+# loop thread to materialize it (helper semantics — envelope, status — preserved).
+class _Defer:
+    __slots__ = ('helper', 'args', 'kwargs', 'status')
 
-    Concatenates all user/assistant content and thinking fields into a single
-    string, separated by newlines.  Tool calls, metadata, and JSON structure
-    are stripped — only human-readable text is kept.
+    def __init__(self, helper, *args, status=None, **kwargs):
+        self.helper = helper
+        self.args = args
+        self.kwargs = kwargs
+        self.status = status
 
-    Args:
-        messages: List of message dicts (or raw JSON string / None).
 
-    Returns:
-        Flattened plain-text string suitable for full-text search.
-    """
-    if isinstance(messages, str):
-        try:
-            messages = json.loads(messages)
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.debug('[Conversations] Failed to parse messages JSON: %s', e)
-            return ''
-    if not isinstance(messages, list):
-        return ''
-    parts = []
-    for msg in messages:
-        if not isinstance(msg, dict):
-            continue
-        role = msg.get('role', '')
-        if role not in ('user', 'assistant'):
-            continue
-        content = msg.get('content', '')
-        if isinstance(content, list):
-            # Multi-part content (text + images)
-            for item in content:
-                if isinstance(item, str):
-                    parts.append(item)
-                elif isinstance(item, dict):
-                    parts.append(item.get('text', ''))
-        elif isinstance(content, str) and content:
-            parts.append(content)
-        thinking = msg.get('thinking', '')
-        if isinstance(thinking, str) and thinking:
-            parts.append(thinking)
-        # Translated content (from translate feature) — must be indexed so
-        # users can search in the translated language (e.g. Chinese translation
-        # of an English assistant reply).
-        translated = msg.get('translatedContent', '')
-        if isinstance(translated, str) and translated:
-            parts.append(translated)
-    return '\n'.join(parts)
+def _finish(result):
+    """Materialize a ``_Defer`` (or pass through a plain Response/value) on the
+    loop thread, where Quart's app context exists."""
+    if isinstance(result, _Defer):
+        resp = result.helper(*result.args, **result.kwargs)
+        if result.status is not None:
+            return resp, result.status
+        return resp
+    return result
+
+
+# Thread-safe response builders for *_blocking bodies — they return a _Defer
+# (no Response constructed in the executor thread); _finish materializes them
+# on the loop thread. Use these INSTEAD of api_*/jsonify inside *_blocking fns.
+def _ok(*a, **k):
+    return _Defer(api_ok, *a, **k)
+
+
+def _nf(*a, **k):
+    return _Defer(api_not_found, *a, **k)
+
+
+def _br(*a, **k):
+    return _Defer(api_bad_request, *a, **k)
+
+
+def _ie(*a, **k):
+    return _Defer(api_internal_error, *a, **k)
+
+
+def _json(payload, status=None):
+    return _Defer(jsonify, payload, status=status)
 
 
 def _conv_row_to_dict(r):
@@ -92,7 +108,7 @@ def _conv_row_to_dict(r):
 
 @conversations_bp.route('/api/v1/conversations', methods=['GET'])
 @_db_safe
-def list_convs():
+async def list_convs():
     """List the user's conversations.
 
     Default: full conversations (id, title, messages, timestamps, settings).
@@ -100,24 +116,40 @@ def list_convs():
     cache so the sidebar can refresh cheaply. ``?prefetch=<conv_id>`` adds the
     full payload of one specific conv to the meta response, saving one round-trip
     on tab switch.
+
+    Native-async: the default full-list path uses the await-able DB facade.
+    The ``?meta=1`` path delegates to the sync meta-cache helper (which needs a
+    real pooled connection) via ``asyncio.to_thread`` so it never blocks the loop.
     """
+    import asyncio
     meta_only = request.args.get('meta') == '1'
     prefetch_id = request.args.get('prefetch', '').strip()
-    db = get_db(DOMAIN_CHAT)
     if meta_only:
-        payload, etag = _refresh_meta_cache_if_stale(db)
+        def _meta_branch():
+            # Runs off-loop: borrow a pooled conn, compute meta + optional
+            # prefetch, return plain data for the async handler to serialize.
+            from lib.database._core import _pool_get, _pool_put
+            db = _pool_get()
+            try:
+                payload, etag = _refresh_meta_cache_if_stale(db)
+                prefetch_data = None
+                if prefetch_id:
+                    try:
+                        r = db.execute(
+                            'SELECT id, title, messages, created_at, updated_at, settings FROM conversations WHERE id=? AND user_id=?',
+                            (prefetch_id, DEFAULT_USER_ID)
+                        ).fetchone()
+                        if r:
+                            prefetch_data = _conv_row_to_dict(r)
+                    except Exception as e:
+                        logger.warning('[Common] prefetch conv %s failed: %s', prefetch_id[:12], e)
+                return payload, etag, prefetch_data
+            finally:
+                _pool_put(db)
+
+        payload, etag, prefetch_data = await asyncio.to_thread(_meta_branch)
 
         if prefetch_id:
-            prefetch_data = None
-            try:
-                r = db.execute(
-                    'SELECT id, title, messages, created_at, updated_at, settings FROM conversations WHERE id=? AND user_id=?',
-                    (prefetch_id, DEFAULT_USER_ID)
-                ).fetchone()
-                if r:
-                    prefetch_data = _conv_row_to_dict(r)
-            except Exception as e:
-                logger.warning('[Common] prefetch conv %s failed: %s', prefetch_id[:12], e)
             combo = json.dumps({
                 'conversations': json.loads(payload),
                 'prefetched': prefetch_data,
@@ -133,23 +165,24 @@ def list_convs():
         resp.headers['Cache-Control'] = 'private, max-age=5'
         return resp
 
-    rows = db.execute(
+    rows = await async_fetchall(
         'SELECT id, title, messages, created_at, updated_at, settings FROM conversations WHERE user_id=? ORDER BY updated_at DESC',
-        (DEFAULT_USER_ID,)
-    ).fetchall()
+        (DEFAULT_USER_ID,), domain=DOMAIN_CHAT)
     convs = [_conv_row_to_dict(r) for r in rows]
     return jsonify(convs)
 
 
 @conversations_bp.route('/api/v1/conversations/<conv_id>', methods=['GET'])
 @_db_safe
-def get_conv(conv_id):
-    """Fetch a single conversation with full messages."""
-    db = get_db(DOMAIN_CHAT)
-    r = db.execute(
+async def get_conv(conv_id):
+    """Fetch a single conversation with full messages.
+
+    Native-async: uses the await-able DB facade (``async_fetchone``) so the
+    query runs on the dedicated DB executor without blocking the event loop.
+    """
+    r = await async_fetchone(
         'SELECT id, title, messages, created_at, updated_at, settings FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
+        (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
     if not r:
         return api_not_found('Not found')
     return jsonify(_conv_row_to_dict(r))
@@ -158,7 +191,7 @@ def get_conv(conv_id):
 
 @conversations_bp.route('/api/v1/conversations/<conv_id>/debug-messages', methods=['GET'])
 @_db_safe
-def debug_messages(conv_id):
+async def debug_messages(conv_id):
     """Return API-ready messages for the debug panel.
 
     Uses the server-side ``build_api_messages_from_db`` to produce the exact
@@ -168,13 +201,17 @@ def debug_messages(conv_id):
     Base64 image data is stripped via ``_strip_base64_for_snapshot`` so the
     response stays under a few hundred KB even for image-heavy convs — same
     treatment the live ``messages_snapshot`` SSE gets.
+
+    Native-async: the blocking ``build_api_messages_from_db`` (which uses its
+    own thread-local DB connection) runs off-loop via ``asyncio.to_thread``.
     """
+    import asyncio
     from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
     from lib.tasks_pkg.manager import _strip_base64_for_snapshot
     system_prompt = request.args.get('systemPrompt', '')
     config = {'systemPrompt': system_prompt}
     try:
-        messages = build_api_messages_from_db(conv_id, config)
+        messages = await asyncio.to_thread(build_api_messages_from_db, conv_id, config)
         if messages is None:
             return api_not_found('Not found')
         try:
@@ -189,13 +226,19 @@ def debug_messages(conv_id):
 
 
 @conversations_bp.route('/api/v1/conversations/<conv_id>/export', methods=['GET'])
-def export_conv(conv_id):
-    """Export a conversation as formatted plain-text for LLM injection."""
+async def export_conv(conv_id):
+    """Export a conversation as formatted plain-text for LLM injection.
+
+    Native-async: ``get_conversation`` does blocking DB reads, so it runs
+    off-loop via ``asyncio.to_thread``.
+    """
+    import asyncio
     from lib.conv_ref import get_conversation
     detail_param = (request.args.get('include_tool_details', '1')).lower()
     include_details = detail_param not in ('0', 'false', 'no')
     try:
-        result = get_conversation(
+        result = await asyncio.to_thread(
+            get_conversation,
             conversation_id=conv_id,
             include_tool_details=include_details,
         )
@@ -207,7 +250,7 @@ def export_conv(conv_id):
 
 @conversations_bp.route('/api/v1/conversations/<conv_id>', methods=['PUT'])
 @_db_safe
-def save_conv(conv_id):
+async def save_conv(conv_id):
     """Persist a conversation (full upsert).
 
     Body is ``{title, messages, createdAt?, updatedAt?, settings?, allowTruncate?}``.
@@ -216,8 +259,15 @@ def save_conv(conv_id):
     when guards fire (stale concurrent sync producing 0 or fewer messages than
     the server has) — the client retries with fresh state. ``allowTruncate=true``
     bypasses the regression guard for intentional truncation (regen / edit).
+
+    Native-async: body awaited, then the entire (unchanged) blocking DB body
+    runs off-loop via ``run_pooled`` which hands it a pooled connection.
     """
-    data = parse_body()
+    data = await async_parse_body()
+    return _finish(await run_pooled(lambda db: _save_conv_blocking(db, conv_id, data)))
+
+
+def _save_conv_blocking(db, conv_id, data):
     title = data.get('title', 'Untitled')
     raw_messages = data.get('messages', [])
     msg_count = len(raw_messages)
@@ -244,7 +294,6 @@ def save_conv(conv_id):
         settings_dict.pop('lastMsgRole', None)
         settings_dict.pop('lastMsgTimestamp', None)
     settings = json.dumps(settings_dict, ensure_ascii=False)
-    db = get_db(DOMAIN_CHAT)
 
     # ── Guard: prevent stale syncs from overwriting newer data ──
     # A frontend sync captured lightMsgs before an await; by the time the PUT
@@ -253,10 +302,10 @@ def save_conv(conv_id):
     # truncation (e.g. regen/edit sends allowTruncate=true).
     allow_truncate = data.get('allowTruncate', False)
     existing_row = db.execute(
-        'SELECT msg_count FROM conversations WHERE id=? AND user_id=?',
+        'SELECT msg_count, updated_at, title, search_text FROM conversations WHERE id=? AND user_id=?',
         (conv_id, DEFAULT_USER_ID)
     ).fetchone()
-    existing_count = existing_row[0] if existing_row else 0
+    existing_count = existing_row['msg_count'] if existing_row else 0
 
     if msg_count == 0 and existing_count > 0:
         # 2026-05-05: this guard fires during NORMAL concurrent syncs
@@ -266,8 +315,8 @@ def save_conv(conv_id):
                     'server has %d msgs but client sent 0 '
                     '(benign: stale concurrent sync).',
                     conv_id[:12], existing_count)
-        return jsonify({'ok': False, 'error': 'blocked_empty_overwrite',
-                        'serverMsgCount': existing_count}), 409
+        return _Defer(jsonify, {'ok': False, 'error': 'blocked_empty_overwrite',
+                        'serverMsgCount': existing_count}, status=409)
 
     if msg_count > 0 and msg_count < existing_count and not allow_truncate:
         # 2026-05-05: this guard fires during NORMAL concurrent syncs
@@ -280,9 +329,9 @@ def save_conv(conv_id):
                     'intentional truncation (regen/edit).',
                     conv_id[:12], existing_count, msg_count,
                     existing_count - msg_count)
-        return jsonify({'ok': False, 'error': 'blocked_msg_regression',
+        return _Defer(jsonify, {'ok': False, 'error': 'blocked_msg_regression',
                         'serverMsgCount': existing_count,
-                        'clientMsgCount': msg_count}), 409
+                        'clientMsgCount': msg_count}, status=409)
 
     # ── Guard: prevent stale streaming checkpoint from overwriting completed result ──
     # Root cause: VS Code port forwarding can reload the page at the exact moment
@@ -293,7 +342,11 @@ def save_conv(conv_id):
     # is sending one without finishReason AND with less content, block the overwrite.
     if msg_count > 0 and msg_count == existing_count and not allow_truncate:
         incoming_last = raw_messages[-1] if raw_messages else {}
-        if incoming_last.get('role') == 'assistant' and not incoming_last.get('finishReason'):
+        incoming_fr = incoming_last.get('finishReason') or ''
+        # Block if: (a) no finishReason (stale streaming snapshot), or
+        # (b) finishReason='server_offline' (frontend-only verdict after
+        #     connection loss — the backend has the complete content).
+        if incoming_last.get('role') == 'assistant' and (not incoming_fr or incoming_fr == 'server_offline'):
             try:
                 existing_msgs_row = db.execute(
                     'SELECT messages FROM conversations WHERE id=? AND user_id=?',
@@ -316,11 +369,11 @@ def save_conv(conv_id):
                                 conv_id[:12], existing_fr,
                                 len(existing_last.get('content') or ''),
                                 len(incoming_last.get('content') or ''))
-                            return jsonify({
+                            return _Defer(jsonify, {
                                 'ok': False,
                                 'error': 'blocked_stale_checkpoint',
                                 'serverMsgCount': existing_count,
-                            }), 409
+                            }, status=409)
             except (json.JSONDecodeError, TypeError) as e:
                 logger.debug('[save_conv] Content regression check parse error: %s', e)
 
@@ -459,28 +512,41 @@ def save_conv(conv_id):
                     conv_id[:12], msg_count, repr(title[:50]),
                     _preserved_total, _lost_total)
     search_text = build_search_text(raw_messages)
-    db_execute_with_retry(
-        db,
-        '''INSERT OR REPLACE INTO conversations (id, user_id, title, messages, created_at, updated_at, settings, msg_count, search_text)
-           VALUES (?,?,?,?,?,?,?,?,?)''',
-        (conv_id, DEFAULT_USER_ID, title, messages, created, updated, settings, msg_count, search_text)
-    )
-    # Update FTS5 index
-    if search_text:
-        try:
-            db.execute(
-                "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
-                "SELECT rowid, ? FROM conversations WHERE id = ?",
-                (search_text, conv_id)
-            )
-            db.commit()
-        except Exception as e:
-            logger.debug('[save_conv] FTS update failed (non-fatal): %s', e)
+
+    # ── Guard: don't bump updated_at on content-less re-saves ──
+    # The frontend's saveConversations() stamps updatedAt=Date.now() on every
+    # sync, and reconciliation paths (initActiveTasks / loadConversationsFromServer
+    # merge, e.g. after a DB migration) re-PUT untouched conversations. Without
+    # this guard those no-op syncs rewrite updated_at to "now", making the
+    # sidebar show ancient conversations as "just updated" and corrupting the
+    # real activity order. When the persisted content is identical (same
+    # msg_count, title, and search_text) we keep the server's existing
+    # updated_at instead of the client's bumped value. Genuine edits change
+    # search_text (or msg_count/title), so they still update the timestamp.
+    if (existing_row is not None
+            and msg_count == existing_count
+            and title == existing_row['title']
+            and search_text == (existing_row['search_text'] or '')):
+        _existing_updated = existing_row['updated_at']
+        if _existing_updated and _existing_updated < updated:
+            logger.debug('[save_conv] Conv %s — content unchanged, preserving '
+                         'updated_at=%s (ignoring client bump to %s)',
+                         conv_id[:12], _existing_updated, updated)
+            updated = _existing_updated
+
+    upsert(db, CONVERSATIONS, {
+        'id': conv_id, 'user_id': DEFAULT_USER_ID, 'title': title,
+        'messages': messages, 'created_at': created, 'updated_at': updated,
+        'settings': settings, 'msg_count': msg_count, 'search_text': search_text,
+    }, insert_cols=_CONV_INSERT_COLS, retry=True)
+    update_conversation_fts(db, conv_id, search_text)
     _invalidate_meta_cache()
-    return api_ok()
+    return _Defer(api_ok)
+
+
 @conversations_bp.route('/api/v1/conversations/<conv_id>/settings', methods=['PATCH'])
 @_db_safe
-def patch_conv_settings(conv_id):
+async def patch_conv_settings(conv_id):
     """Lightweight endpoint to merge new keys into a conversation's settings JSON.
 
     Unlike PUT (which requires full messages), this only touches the settings
@@ -488,34 +554,117 @@ def patch_conv_settings(conv_id):
 
     Body: { folderId?: str|null, pinned?: bool, ... }
     All keys in the body are merged into the existing settings dict.
+
+    Native-async: request body is awaited; the SELECT+UPDATE (which preserves
+    db_execute_with_retry's lock-retry semantics) runs off-loop on a pooled
+    connection via asyncio.to_thread.
     """
-    data = parse_body()
+    import asyncio
+    data = await async_parse_body()
     if not data:
         return api_bad_request('No settings provided')
 
-    db = get_db(DOMAIN_CHAT)
-    row = db.execute(
-        'SELECT settings FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
-    if not row:
+    def _work():
+        from lib.database._core import _pool_get, _pool_put
+        db = _pool_get()
+        try:
+            row = db.execute(
+                'SELECT settings FROM conversations WHERE id=? AND user_id=?',
+                (conv_id, DEFAULT_USER_ID)
+            ).fetchone()
+            if not row:
+                return None
+            settings = _safe_json(row['settings'], default={}, label='patch_settings')
+            settings.update(data)
+            settings_json = json.dumps(settings, ensure_ascii=False)
+            db_execute_with_retry(
+                db,
+                'UPDATE conversations SET settings=? WHERE id=? AND user_id=?',
+                (settings_json, conv_id, DEFAULT_USER_ID)
+            )
+            return True
+        finally:
+            _pool_put(db)
+
+    ok = await asyncio.to_thread(_work)
+    if ok is None:
         return api_not_found('Not found')
-
-    settings = _safe_json(row['settings'], default={}, label='patch_settings')
-    settings.update(data)
-    settings_json = json.dumps(settings, ensure_ascii=False)
-
-    db_execute_with_retry(
-        db,
-        'UPDATE conversations SET settings=? WHERE id=? AND user_id=?',
-        (settings_json, conv_id, DEFAULT_USER_ID)
-    )
     _invalidate_meta_cache()
     logger.info('[patch_settings] Conv %s — patched keys: %s', conv_id[:12], list(data.keys()))
     return api_ok()
+
+
+@conversations_bp.route('/api/v1/conversations/<conv_id>/title', methods=['PATCH'])
+@_db_safe
+async def rename_conv(conv_id):
+    """Rename a conversation (title column only).
+
+    Body: ``{title: str}``. Touches only the ``title`` column — safe to call
+    for shell conversations that haven't loaded messages. Returns the cleaned,
+    length-capped title that was persisted.
+    """
+    from lib.conversations.title_gen import TITLE_MAX_CHARS
+    data = await async_parse_body()
+    title = (data.get('title') or '').strip()
+    if not title:
+        return api_bad_request('title is empty', field='title')
+    if len(title) > TITLE_MAX_CHARS:
+        title = title[:TITLE_MAX_CHARS].rstrip()
+
+    row = await async_fetchone(
+        'SELECT id FROM conversations WHERE id=? AND user_id=?',
+        (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
+    if not row:
+        return api_not_found('Not found')
+
+    await async_execute(
+        'UPDATE conversations SET title=? WHERE id=? AND user_id=?',
+        (title, conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
+    _invalidate_meta_cache()
+    logger.info('[rename_conv] Conv %s — title=%.50s', conv_id[:12], title)
+    audit_log('conversation_renamed', conv_id=conv_id, title=title[:60])
+    return api_ok(title=title)
+
+
+@conversations_bp.route('/api/v1/conversations/<conv_id>/generate-title',
+                        methods=['POST'])
+@_db_safe
+async def generate_conv_title(conv_id):
+    """Generate a short descriptive title for a conversation via a cheap LLM.
+
+    Reads the conversation's messages, asks the cheap model for a title based
+    on the opening turn, persists it, and returns ``{title}``. The LLM call
+    runs off the event loop (``asyncio.to_thread``). Falls back to the
+    truncated-first-message heuristic on model failure — see
+    ``lib.conversations.title_gen``.
+    """
+    import asyncio
+    from lib.conversations.title_gen import generate_conversation_title
+
+    data = await async_parse_body()
+    lang = (data.get('lang') or '').strip() or None
+
+    row = await async_fetchone(
+        'SELECT messages FROM conversations WHERE id=? AND user_id=?',
+        (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
+    if not row:
+        return api_not_found('Not found')
+    messages = _safe_json(row['messages'], default=[], label='messages')
+    if not messages:
+        return api_bad_request('Conversation has no messages')
+
+    title = await asyncio.to_thread(generate_conversation_title, messages, lang)
+
+    await async_execute(
+        'UPDATE conversations SET title=? WHERE id=? AND user_id=?',
+        (title, conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
+    _invalidate_meta_cache()
+    logger.info('[generate_title] Conv %s — title=%.50s', conv_id[:12], title)
+    audit_log('conversation_title_generated', conv_id=conv_id, title=title[:60])
+    return api_ok(title=title)
 @conversations_bp.route('/api/v1/conversations/<conv_id>/messages/<int:msg_idx>', methods=['DELETE'])
 @_db_safe
-def delete_message(conv_id, msg_idx):
+async def delete_message(conv_id, msg_idx):
     """Delete a specific message (or a user+assistant turn) from a conversation.
 
     Query params:
@@ -525,27 +674,32 @@ def delete_message(conv_id, msg_idx):
 
     Returns:
         { ok: true, msgCount: int, deletedIndices: [int, ...] }
+
+    Native-async: request args read up front; the blocking DB body runs
+    off-loop via ``run_pooled``.
     """
     mode = request.args.get('mode', 'single')
     if mode not in ('single', 'turn'):
         return jsonify({'error': 'mode must be "single" or "turn"'}), 400
+    return _finish(await run_pooled(lambda db: _delete_message_blocking(db, conv_id, msg_idx, mode)))
 
-    db = get_db(DOMAIN_CHAT)
+
+def _delete_message_blocking(db, conv_id, msg_idx, mode):
     row = db.execute(
         'SELECT messages, title, settings FROM conversations WHERE id=? AND user_id=?',
         (conv_id, DEFAULT_USER_ID)
     ).fetchone()
     if not row:
-        return api_not_found('Not found')
+        return _nf('Not found')
 
     try:
         messages = json.loads(row['messages'] or '[]')
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning('[delete_message] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
-        return api_internal_error('Failed to parse conversation messages')
+        return _ie('Failed to parse conversation messages')
 
     if msg_idx < 0 or msg_idx >= len(messages):
-        return api_bad_request(f'Index {msg_idx} out of range (0..{len(messages) - 1})')
+        return _br(f'Index {msg_idx} out of range (0..{len(messages) - 1})')
 
     # Determine which indices to delete
     deleted_indices = [msg_idx]
@@ -588,24 +742,13 @@ def delete_message(conv_id, msg_idx):
     ).fetchone()
     created_at = existing['created_at'] if existing else now_ms
 
-    db_execute_with_retry(db, '''
-        INSERT OR REPLACE INTO conversations (id, user_id, title, messages, created_at, updated_at,
-                                   settings, msg_count, search_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (conv_id, DEFAULT_USER_ID, title, messages_json, created_at, now_ms,
-          settings_json, len(messages), search_text))
+    upsert(db, CONVERSATIONS, {
+        'id': conv_id, 'user_id': DEFAULT_USER_ID, 'title': title,
+        'messages': messages_json, 'created_at': created_at, 'updated_at': now_ms,
+        'settings': settings_json, 'msg_count': len(messages), 'search_text': search_text,
+    }, insert_cols=_CONV_INSERT_COLS, retry=True)
 
-    # Update FTS5 index
-    if search_text:
-        try:
-            db.execute(
-                "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
-                "SELECT rowid, ? FROM conversations WHERE id = ?",
-                (search_text, conv_id)
-            )
-            db.commit()
-        except Exception as e:
-            logger.debug('[delete_message] FTS update failed (non-fatal): %s', e)
+    update_conversation_fts(db, conv_id, search_text)
 
     _invalidate_meta_cache()
     # Invalidate persisted per-day cost cache — the deleted message may have
@@ -618,7 +761,7 @@ def delete_message(conv_id, msg_idx):
     logger.info('[delete_message] conv=%s deleted indices=%s mode=%s remaining=%d',
                 conv_id[:8], deleted_indices, mode, len(messages))
 
-    return jsonify({
+    return _json({
         'ok': True,
         'msgCount': len(messages),
         'deletedIndices': deleted_indices,
@@ -627,7 +770,7 @@ def delete_message(conv_id, msg_idx):
 
 @conversations_bp.route('/api/v1/conversations/<conv_id>/messages/<int:msg_idx>', methods=['PATCH'])
 @_db_safe
-def patch_message(conv_id, msg_idx):
+async def patch_message(conv_id, msg_idx):
     """Targeted single-message mutation for chatInner actions (edit-only,
     translation-visibility toggle, per-message metadata updates).
 
@@ -640,8 +783,11 @@ def patch_message(conv_id, msg_idx):
 
     Returns:
         {ok, msgCount, msg}
+
+    Native-async: body awaited + validated up front; blocking DB body runs
+    off-loop via ``run_pooled``.
     """
-    data = parse_body()
+    data = await async_parse_body()
     if not isinstance(data, dict) or not data:
         return api_bad_request('empty_patch')
 
@@ -652,28 +798,31 @@ def patch_message(conv_id, msg_idx):
                        conv_id[:8], msg_idx, unknown)
         return jsonify({'error': 'unsupported_keys', 'keys': unknown}), 400
 
-    db = get_db(DOMAIN_CHAT)
+    return _finish(await run_pooled(lambda db: _patch_message_blocking(db, conv_id, msg_idx, data)))
+
+
+def _patch_message_blocking(db, conv_id, msg_idx, data):
     row = db.execute(
         'SELECT messages, title, settings FROM conversations WHERE id=? AND user_id=?',
         (conv_id, DEFAULT_USER_ID)
     ).fetchone()
     if not row:
-        return api_not_found('Not found')
+        return _nf('Not found')
 
     try:
         messages = json.loads(row['messages'] or '[]')
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning('[patch_msg] conv=%s failed to parse messages: %s', conv_id[:8], e)
-        return api_internal_error('Failed to parse conversation messages')
+        return _ie('Failed to parse conversation messages')
 
     if msg_idx < 0 or msg_idx >= len(messages):
         logger.warning('[patch_msg] conv=%s idx=%d OUT OF RANGE (len=%d)',
                        conv_id[:8], msg_idx, len(messages))
-        return api_bad_request(f'Index {msg_idx} out of range (0..{len(messages) - 1})')
+        return _br(f'Index {msg_idx} out of range (0..{len(messages) - 1})')
 
     msg = messages[msg_idx]
     if not isinstance(msg, dict):
-        return api_internal_error('Target message is not a dict')
+        return _ie('Target message is not a dict')
 
     # Apply whitelisted merge. A literal None value deletes the key (lets
     # the frontend clear originalContent after a plain edit).
@@ -723,23 +872,13 @@ def patch_message(conv_id, msg_idx):
     created_at = existing['created_at'] if existing else now_ms
     title = row['title']
 
-    db_execute_with_retry(db, '''
-        INSERT OR REPLACE INTO conversations (id, user_id, title, messages, created_at, updated_at,
-                                   settings, msg_count, search_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (conv_id, DEFAULT_USER_ID, title, messages_json, created_at, now_ms,
-          settings_json, len(messages), search_text))
+    upsert(db, CONVERSATIONS, {
+        'id': conv_id, 'user_id': DEFAULT_USER_ID, 'title': title,
+        'messages': messages_json, 'created_at': created_at, 'updated_at': now_ms,
+        'settings': settings_json, 'msg_count': len(messages), 'search_text': search_text,
+    }, insert_cols=_CONV_INSERT_COLS, retry=True)
 
-    if search_text:
-        try:
-            db.execute(
-                "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
-                "SELECT rowid, ? FROM conversations WHERE id = ?",
-                (search_text, conv_id)
-            )
-            db.commit()
-        except Exception as e:
-            logger.debug('[patch_msg] FTS update failed (non-fatal): %s', e)
+    update_conversation_fts(db, conv_id, search_text)
 
     _invalidate_meta_cache()
     logger.info('[patch_msg] conv=%s idx=%d keys=%s preview=%.50s',
@@ -749,7 +888,7 @@ def patch_message(conv_id, msg_idx):
     except Exception as e:
         logger.debug('[patch_msg] audit_log failed (non-fatal): %s', e)
 
-    return jsonify({
+    return _json({
         'ok': True,
         'msgCount': len(messages),
         'msg': msg,
@@ -758,14 +897,16 @@ def patch_message(conv_id, msg_idx):
 
 @conversations_bp.route('/api/v1/conversations/<conv_id>/messages/by-id/<msg_id>', methods=['PATCH'])
 @_db_safe
-def patch_message_by_id(conv_id, msg_id):
+async def patch_message_by_id(conv_id, msg_id):
     """Same as patch_message but addresses the target by stable ``_msgId``.
 
     Index-free addressing — robust against concurrent inserts that would
     otherwise shift indices.  Returns 404 if no message with that id exists.
     The whitelist + persistence flow is identical to the index path.
+
+    Native-async: body awaited + validated up front; DB body off-loop.
     """
-    data = parse_body()
+    data = await async_parse_body()
     if not isinstance(data, dict) or not data:
         return api_bad_request('empty_patch')
 
@@ -775,19 +916,22 @@ def patch_message_by_id(conv_id, msg_id):
                        conv_id[:8], msg_id[:8], unknown)
         return jsonify({'error': 'unsupported_keys', 'keys': unknown}), 400
 
-    db = get_db(DOMAIN_CHAT)
+    return _finish(await run_pooled(lambda db: _patch_message_by_id_blocking(db, conv_id, msg_id, data)))
+
+
+def _patch_message_by_id_blocking(db, conv_id, msg_id, data):
     row = db.execute(
         'SELECT messages, title, settings FROM conversations WHERE id=? AND user_id=?',
         (conv_id, DEFAULT_USER_ID)
     ).fetchone()
     if not row:
-        return api_not_found('Not found')
+        return _nf('Not found')
 
     try:
         messages = json.loads(row['messages'] or '[]')
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning('[patch_msg_id] conv=%s failed to parse messages: %s', conv_id[:8], e)
-        return api_internal_error('Failed to parse conversation messages')
+        return _ie('Failed to parse conversation messages')
 
     target_idx = None
     for i, m in enumerate(messages):
@@ -797,11 +941,11 @@ def patch_message_by_id(conv_id, msg_id):
     if target_idx is None:
         logger.info('[patch_msg_id] conv=%s msgId=%s not found in %d messages',
                     conv_id[:8], msg_id[:8], len(messages))
-        return jsonify({'error': 'Message id not found', 'msgCount': len(messages)}), 404
+        return _json({'error': 'Message id not found', 'msgCount': len(messages)}, status=404)
 
     msg = messages[target_idx]
     if not isinstance(msg, dict):
-        return api_internal_error('Target message is not a dict')
+        return _ie('Target message is not a dict')
 
     applied_keys = []
     for key, value in data.items():
@@ -839,23 +983,13 @@ def patch_message_by_id(conv_id, msg_id):
     created_at = existing['created_at'] if existing else now_ms
     title = row['title']
 
-    db_execute_with_retry(db, '''
-        INSERT OR REPLACE INTO conversations (id, user_id, title, messages, created_at, updated_at,
-                                   settings, msg_count, search_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (conv_id, DEFAULT_USER_ID, title, messages_json, created_at, now_ms,
-          settings_json, len(messages), search_text))
+    upsert(db, CONVERSATIONS, {
+        'id': conv_id, 'user_id': DEFAULT_USER_ID, 'title': title,
+        'messages': messages_json, 'created_at': created_at, 'updated_at': now_ms,
+        'settings': settings_json, 'msg_count': len(messages), 'search_text': search_text,
+    }, insert_cols=_CONV_INSERT_COLS, retry=True)
 
-    if search_text:
-        try:
-            db.execute(
-                "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
-                "SELECT rowid, ? FROM conversations WHERE id = ?",
-                (search_text, conv_id)
-            )
-            db.commit()
-        except Exception as e:
-            logger.debug('[patch_msg_id] FTS update failed (non-fatal): %s', e)
+    update_conversation_fts(db, conv_id, search_text)
 
     _invalidate_meta_cache()
     logger.info('[patch_msg_id] conv=%s id=%s idx=%d keys=%s preview=%.50s',
@@ -865,7 +999,7 @@ def patch_message_by_id(conv_id, msg_id):
     except Exception as e:
         logger.debug('[patch_msg_id] audit_log failed (non-fatal): %s', e)
 
-    return jsonify({
+    return _json({
         'ok': True,
         'msgCount': len(messages),
         'msg': msg,
@@ -878,7 +1012,7 @@ def patch_message_by_id(conv_id, msg_id):
     methods=['DELETE'],
 )
 @_db_safe
-def delete_branch(conv_id, msg_idx, branch_idx):
+async def delete_branch(conv_id, msg_idx, branch_idx):
     """Delete a single branch entry from ``messages[msg_idx].branches``.
 
     The branch index is positional — after deletion, callers must re-index
@@ -886,36 +1020,41 @@ def delete_branch(conv_id, msg_idx, branch_idx):
 
     Returns:
         {ok, branchCount}
+
+    Native-async: blocking DB body runs off-loop via ``run_pooled``.
     """
-    db = get_db(DOMAIN_CHAT)
+    return _finish(await run_pooled(lambda db: _delete_branch_blocking(db, conv_id, msg_idx, branch_idx)))
+
+
+def _delete_branch_blocking(db, conv_id, msg_idx, branch_idx):
     row = db.execute(
         'SELECT messages, title, settings FROM conversations WHERE id=? AND user_id=?',
         (conv_id, DEFAULT_USER_ID)
     ).fetchone()
     if not row:
-        return api_not_found('Not found')
+        return _nf('Not found')
 
     try:
         messages = json.loads(row['messages'] or '[]')
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning('[delete_branch] conv=%s failed to parse messages: %s', conv_id[:8], e)
-        return api_internal_error('Failed to parse conversation messages')
+        return _ie('Failed to parse conversation messages')
 
     if msg_idx < 0 or msg_idx >= len(messages):
         logger.warning('[delete_branch] conv=%s msg_idx=%d OUT OF RANGE (len=%d)',
                        conv_id[:8], msg_idx, len(messages))
-        return api_bad_request(f'msg_idx {msg_idx} out of range')
+        return _br(f'msg_idx {msg_idx} out of range')
 
     msg = messages[msg_idx]
     branches = msg.get('branches') if isinstance(msg, dict) else None
     if not isinstance(branches, list):
         logger.warning('[delete_branch] conv=%s msg_idx=%d has no branches',
                        conv_id[:8], msg_idx)
-        return api_bad_request('Message has no branches')
+        return _br('Message has no branches')
     if branch_idx < 0 or branch_idx >= len(branches):
         logger.warning('[delete_branch] conv=%s msg_idx=%d branch_idx=%d OUT OF RANGE (len=%d)',
                        conv_id[:8], msg_idx, branch_idx, len(branches))
-        return api_bad_request(f'branch_idx {branch_idx} out of range (0..{len(branches) - 1})')
+        return _br(f'branch_idx {branch_idx} out of range (0..{len(branches) - 1})')
 
     branches.pop(branch_idx)
     if not branches:
@@ -941,23 +1080,13 @@ def delete_branch(conv_id, msg_idx, branch_idx):
     created_at = existing['created_at'] if existing else now_ms
     title = row['title']
 
-    db_execute_with_retry(db, '''
-        INSERT OR REPLACE INTO conversations (id, user_id, title, messages, created_at, updated_at,
-                                   settings, msg_count, search_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (conv_id, DEFAULT_USER_ID, title, messages_json, created_at, now_ms,
-          settings_json, len(messages), search_text))
+    upsert(db, CONVERSATIONS, {
+        'id': conv_id, 'user_id': DEFAULT_USER_ID, 'title': title,
+        'messages': messages_json, 'created_at': created_at, 'updated_at': now_ms,
+        'settings': settings_json, 'msg_count': len(messages), 'search_text': search_text,
+    }, insert_cols=_CONV_INSERT_COLS, retry=True)
 
-    if search_text:
-        try:
-            db.execute(
-                "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
-                "SELECT rowid, ? FROM conversations WHERE id = ?",
-                (search_text, conv_id)
-            )
-            db.commit()
-        except Exception as e:
-            logger.debug('[delete_branch] FTS update failed (non-fatal): %s', e)
+    update_conversation_fts(db, conv_id, search_text)
 
     _invalidate_meta_cache()
     logger.info('[delete_branch] conv=%s msg_idx=%d branch_idx=%d remaining=%d',
@@ -968,11 +1097,14 @@ def delete_branch(conv_id, msg_idx, branch_idx):
     except Exception as e:
         logger.debug('[delete_branch] audit_log failed (non-fatal): %s', e)
 
-    return api_ok({'branchCount': branch_count})
+    return _ok({'branchCount': branch_count})
 @conversations_bp.route('/api/v1/conversations/<conv_id>', methods=['DELETE'])
 @_db_safe
-def delete_conv(conv_id):
-    db = get_db(DOMAIN_CHAT)
+async def delete_conv(conv_id):
+    return _finish(await run_pooled(lambda db: _delete_conv_blocking(db, conv_id)))
+
+
+def _delete_conv_blocking(db, conv_id):
     c1 = db.execute('DELETE FROM conversations WHERE id=? AND user_id=?', (conv_id, DEFAULT_USER_ID))
     c2 = db.execute('DELETE FROM task_results WHERE conv_id=?', (conv_id,))
     c3 = db.execute('DELETE FROM transcript_archive WHERE conv_id=?', (conv_id,))
@@ -1002,7 +1134,9 @@ def delete_conv(conv_id):
         logger.debug('[delete_conv] day-cost cache invalidation skipped: %s', e)
     logger.info('[delete_conv] Deleted conv %s (rows: conv=%d, tasks=%d, transcripts=%d)',
                 conv_id[:12], c1.rowcount, c2.rowcount, c3.rowcount)
-    return api_ok()
+    return _ok()
+
+
 # ════════════════════════════════════════════════════════════════════════════
 #  Endpoints moved to companion modules
 # ════════════════════════════════════════════════════════════════════════════

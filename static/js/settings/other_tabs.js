@@ -22,8 +22,8 @@ function _populateSearchTab(cfg) {
   _setVal('settingMaxCharsDirect', s.max_chars_direct || 200000);
   _setVal('settingMaxCharsPdf', s.max_chars_pdf || 0);
   _setVal('settingMaxBytes', s.max_bytes || 20971520);
-  var sd = document.getElementById('settingSkipDomains');
-  if (sd) sd.value = (s.skip_domains || []).join('\n');
+  if (typeof ChipInput !== 'undefined') ChipInput.init('settingSkipDomains', s.skip_domains || []);
+  if (typeof _renderAuthSources === 'function') _renderAuthSources();
 }
 
 // ══════════════════════════════════════════════════════
@@ -53,8 +53,7 @@ function _populateNetworkTab(cfg) {
   }
 
   // ── Unified bypass domains (editable) ──
-  var pb = document.getElementById('settingProxyBypass');
-  if (pb) pb.value = (n.proxy_bypass_domains || []).join('\n');
+  if (typeof ChipInput !== 'undefined') ChipInput.init('settingProxyBypass', n.proxy_bypass_domains || []);
 
   // Show hint if env var PROXY_BYPASS_DOMAINS is set
   var hint = document.getElementById('proxyEnvHint');

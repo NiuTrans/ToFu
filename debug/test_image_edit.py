@@ -135,7 +135,7 @@ print('=' * 60)
 print('TEST 5: Test _resolve_source_image helper')
 print('=' * 60)
 
-from lib.tasks_pkg.executor import _resolve_source_image
+from lib.tasks_pkg.executor_image import _resolve_source_image
 
 # Test: data URI
 result = _resolve_source_image('data:image/png;base64,iVBORw0KGgo=')

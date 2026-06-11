@@ -96,7 +96,7 @@ def swarm_config():
         'available': True,
         'version': '1.0.0',
         'roles': list(AGENT_ROLES.keys()),
-        'max_concurrent_agents': 5,
+        'max_concurrent_agents': 8,
     })
 
 

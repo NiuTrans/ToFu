@@ -102,6 +102,10 @@ def create_task(conv_id, messages, config):
         'content_lock': threading.Lock(),
         'finishReason': None, 'usage': None, 'toolSummary': None,
         'phase': None,                # current phase for polling fallback
+        # ★ Timing anchor: when the task was created (route thread). Used by
+        #   run_task / stream_llm_response to log queue-wait, prep time, and
+        #   time-to-first-token so the "waiting" window can be analysed.
+        '_t_created': time.time(),
         'lastUserQuery': last_user_query,
         '_initial_msg_count': len(messages or []),  # cross-talk detection
         '_premature_retry_count_phase': 0,
@@ -239,7 +243,19 @@ def append_event(task, event):
 
     The runtime takes care of ``events`` append, the ``events_lock``, and
     pushing to the 'chat' WebSocket channel.
+
+    ★ Sub-agent proxy tasks (lib/swarm/agent.py::_dispatch_tool) set
+    ``_suppressEvents`` so their inner tool executions (which call
+    ``_finalize_tool_round`` → ``append_event``) never leak ``tool_start`` /
+    ``tool_result`` SSE events onto the PARENT's stream. Those events carry
+    the sub-agent's own small roundNum and an empty toolCallId, so the
+    frontend's roundNum fallback would graft them onto a same-numbered
+    parent round (e.g. a run_command). The sub-agent's progress is surfaced
+    separately via the master orchestrator's on_event callback
+    (swarm_agent_* events), not through this path.
     """
+    if task.get('_suppressEvents'):
+        return
     seq = _chat_runtime.append_event(task['id'], event)
     if seq is None:
         # Task not in runtime (registered via legacy direct dict insert in
@@ -280,6 +296,82 @@ def append_event(task, event):
     except Exception as e:
         logger.debug('[Manager] append_persistent_event failed (non-fatal): %s', e)
 
+def _tool_rounds_have_dedicated_home(task):
+    """True when the task's toolRounds are durably stored in conversations.messages.
+
+    Regular DB-backed chats persist toolRounds onto the last assistant message
+    via _sync_result_to_conversation / _sync_partial_to_conversation; endpoint
+    tasks persist them per-turn via _sync_endpoint_turns_to_conversation. For all
+    of these, task_results.tool_rounds is a redundant duplicate of a potentially
+    multi-MB blob — re-written on every ~10s checkpoint AND the final persist,
+    every byte fsync-bound on the (often FUSE-mounted) PG data dir.
+
+    Inline-message tasks (eval harness, /v1 + compat APIs, autopilot sub-tasks)
+    have NO conversation row, so task_results is their sole store and the blob
+    MUST be kept.
+    """
+    return bool(task.get('convId')) and not task.get('_inline_messages')
+
+
+def load_tool_rounds_from_conversation(conv_id):
+    """Return toolRounds from a conversation's last assistant message, or [].
+
+    Recovery-path fallback for readers of a task_results row whose tool_rounds
+    column was intentionally left NULL (see _tool_rounds_have_dedicated_home).
+    Returns [] when the conversation is missing/unparseable or carries no
+    assistant toolRounds.
+    """
+    if not conv_id:
+        return []
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT messages FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)
+        ).fetchone()
+        if not row or not row[0]:
+            return []
+        messages = json.loads(row[0])
+        for m in reversed(messages):
+            if m.get('role') == 'assistant' and m.get('toolRounds'):
+                return m['toolRounds']
+    except Exception as e:
+        logger.warning('[Recovery] load_tool_rounds_from_conversation failed conv=%s: %s',
+                       conv_id, e)
+    return []
+
+
+def build_result_meta(task):
+    """Build the persisted-result metadata dict from a finished task.
+
+    Extracted so the autopilot hook can sync the parent's final assistant
+    message to the conversation DB BEFORE it appends the virtual-user turn
+    and spawns the follow-up — otherwise the follow-up registers as the
+    conversation's latest task and the later persist_task_result sync is
+    dropped by the freshness guard, freezing the parent reply at its last
+    streaming checkpoint (truncated, finishReason=None).
+    """
+    meta = {}
+    if task.get('finishReason'): meta['finishReason'] = task['finishReason']
+    if task.get('usage'): meta['usage'] = task['usage']
+    if task.get('preset'): meta['preset'] = task['preset']
+    if task.get('toolSummary'): meta['toolSummary'] = task['toolSummary']
+    if task.get('_fallback_model'):
+        meta['fallbackModel'] = task['_fallback_model']
+        meta['fallbackFrom'] = task.get('_fallback_from', '')
+        if task.get('_fallback_reason'):
+            meta['fallbackReason'] = task['_fallback_reason']
+        if task.get('_fallback_kind'):
+            meta['fallbackKind'] = task['_fallback_kind']
+    if task.get('model'): meta['model'] = task['model']
+    if task.get('provider_id'): meta['provider_id'] = task['provider_id']
+    if task.get('thinkingDepth'): meta['thinkingDepth'] = task['thinkingDepth']
+    if task.get('apiRounds'): meta['apiRounds'] = task['apiRounds']
+    if task.get('modifiedFiles'): meta['modifiedFiles'] = task['modifiedFiles']
+    if task.get('modifiedFileList'): meta['modifiedFileList'] = task['modifiedFileList']
+    return meta
+
+
 def persist_task_result(task):
     content_len = len(task.get('content') or '')
     thinking_len = len(task.get('thinking') or '')
@@ -310,37 +402,34 @@ def persist_task_result(task):
                      finish_reason, model, provider, error or 'none')
 
     # Build meta BEFORE the try so it's always available for _sync_result_to_conversation
-    meta = {}
-    if task.get('finishReason'): meta['finishReason'] = task['finishReason']
-    if task.get('usage'): meta['usage'] = task['usage']
-    if task.get('preset'): meta['preset'] = task['preset']
-    if task.get('toolSummary'): meta['toolSummary'] = task['toolSummary']
-    if task.get('_fallback_model'): meta['fallbackModel'] = task['_fallback_model']; meta['fallbackFrom'] = task.get('_fallback_from', '')
-    if task.get('model'): meta['model'] = task['model']
-    if task.get('provider_id'): meta['provider_id'] = task['provider_id']
-    if task.get('thinkingDepth'): meta['thinkingDepth'] = task['thinkingDepth']
-    if task.get('apiRounds'): meta['apiRounds'] = task['apiRounds']
-    if task.get('modifiedFiles'): meta['modifiedFiles'] = task['modifiedFiles']
-    if task.get('modifiedFileList'): meta['modifiedFileList'] = task['modifiedFileList']
+    meta = build_result_meta(task)
 
     # ★ Merge checkpoint toolRounds for DB persistence (continue flow)
     _merged_tr = list(task.get('_checkpointToolRounds') or []) + (task.get('toolRounds') or [])
 
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        tr_json = json.dumps(_merged_tr, ensure_ascii=False)
+        # Only store the (potentially multi-MB) toolRounds blob when this task
+        # has no conversation row to hold it — see _tool_rounds_have_dedicated_home.
+        # For DB-backed/endpoint tasks the conversation is the durable store and
+        # recovery readers fall back to load_tool_rounds_from_conversation().
+        tr_json = None if _tool_rounds_have_dedicated_home(task) else json.dumps(_merged_tr, ensure_ascii=False)
         meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
         # Error envelope is JSON-serialised at the wire — task_results.error
         # is TEXT, but every consumer (SSE done, /api/chat/poll, conversation
         # message persistence) round-trips through lib.error_envelope so the
         # frontend only ever sees the typed dict.
         error_json = _err_to_json(task['error']) if task.get('error') is not None else None
-        db_execute_with_retry(db, '''INSERT OR REPLACE INTO task_results
-            (task_id,conv_id,content,thinking,error,status,tool_rounds,metadata,created_at,completed_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?)''',
-            (task['id'], task['convId'], task['content'], task['thinking'],
-             error_json, task['status'], tr_json, meta_json,
-             int(task['created_at']*1000), int(time.time()*1000)))
+        from lib.database._core_schema import TASK_RESULTS, upsert
+        upsert(db, TASK_RESULTS, {
+            'task_id': task['id'], 'conv_id': task['convId'],
+            'content': task['content'], 'thinking': task['thinking'],
+            'error': error_json, 'status': task['status'], 'tool_rounds': tr_json,
+            'metadata': meta_json, 'created_at': int(task['created_at']*1000),
+            'completed_at': int(time.time()*1000),
+        }, insert_cols=['task_id', 'conv_id', 'content', 'thinking', 'error',
+                        'status', 'tool_rounds', 'metadata', 'created_at',
+                        'completed_at'], retry=True)
         logger.debug('[Task %s] conv=%s Persisted to DB successfully', task_id_short, conv_id_short)
     except Exception:
         logger.error('[Task %s] conv=%s ❌ Persist FAILED — content (%d chars) and thinking (%d chars) may be lost!',
@@ -634,6 +723,25 @@ def _sync_result_to_conversation(task, meta):
         last_msg = messages[-1]
 
         if last_msg.get('role') != 'assistant':
+            # ── Guard: an aborted/superseded task must NOT append a new
+            #   assistant slot ──
+            # When the user clicks Stop → Regenerate, the regen handler
+            # truncates the conversation down to the user turn (tail is now
+            # role='user') and starts a fresh task. The old aborted task can
+            # reach this point AFTER that truncation but BEFORE the new task
+            # registers as `_conv_latest_task` (so the freshness guard above
+            # didn't catch it). Blindly appending the stale assistant content
+            # here resurrects the just-truncated turn → the "U1 A1 U1 A2"
+            # doubled-context bug. Aborted tasks may only FILL an existing
+            # trailing assistant slot, never create one.
+            if task.get('aborted') or task.get('_abort_reason'):
+                logger.info('%s conv=%s Last message is role=%s and this task is '
+                            'aborted (reason=%s) — dropping stale write instead of '
+                            'appending a new assistant (prevents truncated-turn '
+                            'resurrection)',
+                            pfx, conv_id, last_msg.get('role'),
+                            task.get('_abort_reason') or 'aborted')
+                return
             # No trailing assistant message — append one
             logger.info('%s conv=%s Last message is role=%s, appending new assistant message',
                        pfx, conv_id, last_msg.get('role'))
@@ -722,6 +830,10 @@ def _sync_result_to_conversation(task, meta):
         if meta.get('fallbackModel'):
             last_msg['fallbackModel'] = meta['fallbackModel']
             last_msg['fallbackFrom'] = meta.get('fallbackFrom', '')
+            if meta.get('fallbackReason'):
+                last_msg['fallbackReason'] = meta['fallbackReason']
+            if meta.get('fallbackKind'):
+                last_msg['fallbackKind'] = meta['fallbackKind']
         if meta.get('apiRounds'):
             last_msg['apiRounds'] = meta['apiRounds']
         if meta.get('modifiedFiles'):
@@ -821,7 +933,7 @@ def _sync_result_to_conversation(task, meta):
         # frontend sync.  If the row was updated since our SELECT, our
         # read-modify-write would clobber the frontend's data.
         # ── Also update search_text for fast conversation search ──
-        from routes.conversations import build_search_text
+        from lib.conversations import build_search_text
         search_text = build_search_text(messages)
         # ── Why use raw db.execute()+commit instead of db_execute_with_retry?
         #     The retry helper masks rowcount (its docstring says "returns
@@ -849,16 +961,9 @@ def _sync_result_to_conversation(task, meta):
         # FTS index is only updated when CAS succeeds.  Updating FTS for a
         # write we lost would leave search hits pointing at content we
         # never persisted — search results would surface dead data.
-        if _cas_succeeded and search_text:
-            try:
-                db.execute(
-                    "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
-                    "SELECT rowid, ? FROM conversations WHERE id = ?",
-                    (search_text, conv_id)
-                )
-                db.commit()
-            except Exception as _fts_err:
-                logger.debug('[Task] FTS update failed (non-fatal): %s', _fts_err)
+        if _cas_succeeded:
+            from lib.conversations import update_conversation_fts
+            update_conversation_fts(db, conv_id, search_text)
         if not _cas_succeeded:
             logger.info('%s conv=%s Optimistic lock missed — row was updated concurrently '
                        '(expected_updated_at=%s). '
@@ -873,8 +978,8 @@ def _sync_result_to_conversation(task, meta):
         # ── Invalidate meta cache so subsequent GET /api/conversations
         #    returns the cleared activeTaskId immediately ──
         try:
-            from routes.common import _invalidate_meta_cache
-            _invalidate_meta_cache()
+            from lib.conversations import invalidate_meta_cache
+            invalidate_meta_cache()
         except Exception as e:
             logger.debug('[Manager] meta cache invalidation skipped: %s', e)
 
@@ -975,7 +1080,7 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db):
 
         # ── Check for already-running translate task from the frontend ──
         # Import lazily to avoid circular imports
-        from routes.translate import _translate_tasks, _translate_tasks_lock
+        from lib.translate import _translate_tasks, _translate_tasks_lock
         with _translate_tasks_lock:
             for tid, tt in _translate_tasks.items():
                 if (tt.get('convId') == conv_id and
@@ -1003,7 +1108,7 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db):
 
         def _run_translate():
             try:
-                from routes.translate import _do_translate, _translate_tasks, _translate_tasks_lock
+                from lib.translate import _do_translate, _translate_tasks, _translate_tasks_lock
                 task_id = str(uuid.uuid4())[:12]
                 task = {
                     'id': task_id,
@@ -1093,7 +1198,10 @@ def checkpoint_task_partial(task):
 
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        tr_json = json.dumps(_merged_tr, ensure_ascii=False)
+        # See _tool_rounds_have_dedicated_home: skip the duplicate blob for
+        # tasks whose toolRounds are checkpointed into conversations.messages
+        # by _sync_partial_to_conversation on the same cadence.
+        tr_json = None if _tool_rounds_have_dedicated_home(task) else json.dumps(_merged_tr, ensure_ascii=False)
         meta = {}
         if task.get('model'): meta['model'] = task['model']
         if task.get('preset'): meta['preset'] = task['preset']
@@ -1101,12 +1209,16 @@ def checkpoint_task_partial(task):
         meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
         # Error envelope is JSON-serialised at the wire — see persist_task_result.
         _cp_error_json = _err_to_json(task['error']) if task.get('error') is not None else None
-        db_execute_with_retry(db, '''INSERT OR REPLACE INTO task_results
-            (task_id,conv_id,content,thinking,error,status,tool_rounds,metadata,created_at,completed_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?)''',
-            (task['id'], conv_id, task.get('content') or '', task.get('thinking') or '',
-             _cp_error_json, 'running', tr_json, meta_json,
-             int(task['created_at']*1000), int(time.time()*1000)))
+        from lib.database._core_schema import TASK_RESULTS, upsert
+        upsert(db, TASK_RESULTS, {
+            'task_id': task['id'], 'conv_id': conv_id,
+            'content': task.get('content') or '', 'thinking': task.get('thinking') or '',
+            'error': _cp_error_json, 'status': 'running', 'tool_rounds': tr_json,
+            'metadata': meta_json, 'created_at': int(task['created_at']*1000),
+            'completed_at': int(time.time()*1000),
+        }, insert_cols=['task_id', 'conv_id', 'content', 'thinking', 'error',
+                        'status', 'tool_rounds', 'metadata', 'created_at',
+                        'completed_at'], retry=True)
         logger.debug('[Checkpoint %s] conv=%s Saved partial: content=%dchars thinking=%dchars',
                      task_id_short, conv_id, content_len, thinking_len)
     except Exception as e:
@@ -1250,7 +1362,7 @@ def _sync_partial_to_conversation(task):
             if not mutated:
                 return
 
-            from routes.conversations import build_search_text
+            from lib.conversations import build_search_text
             messages_json = json_dumps_pg(messages)
             search_text = build_search_text(messages)
             now_ms = int(time.time() * 1000)
@@ -1272,16 +1384,8 @@ def _sync_partial_to_conversation(task):
             # making search hits point at content the messages column
             # never accepted.  See _sync_result_to_conversation for the
             # equivalent guard on the terminal sync path.
-            if search_text:
-                try:
-                    db.execute(
-                        "INSERT OR REPLACE INTO conversations_fts (rowid, search_text) "
-                        "SELECT rowid, ? FROM conversations WHERE id = ?",
-                        (search_text, conv_id)
-                    )
-                    db.commit()
-                except Exception as _fts_err:
-                    logger.debug('[Checkpoint] FTS update failed (non-fatal): %s', _fts_err)
+            from lib.conversations import update_conversation_fts
+            update_conversation_fts(db, conv_id, search_text)
             logger.debug('[Checkpoint] conv=%s Synced partial: content=%d→%d thinking=%d→%d tools=%d',
                          conv_id, existing_content_len, len(content),
                          existing_thinking_len, len(thinking), len(tool_rounds or []))
@@ -1431,7 +1535,7 @@ def recover_stale_tasks_on_startup():
 
             now_ms = int(time.time() * 1000)
             if messages_json:
-                from routes.conversations import build_search_text
+                from lib.conversations import build_search_text
                 messages_parsed = json.loads(messages_json)
                 search_text = build_search_text(messages_parsed)
                 db.execute(
@@ -1460,8 +1564,8 @@ def recover_stale_tasks_on_startup():
                         '%d conv(s) cleaned', len(stale_rows), cleared)
             # Invalidate meta cache so first frontend request gets clean data
             try:
-                from routes.common import _invalidate_meta_cache
-                _invalidate_meta_cache()
+                from lib.conversations import invalidate_meta_cache
+                invalidate_meta_cache()
             except Exception as e:
                 logger.debug('[Startup] meta cache invalidation skipped: %s', e)
         else:
@@ -1529,6 +1633,27 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
     model = body.get('model', '?')
     _last_stream_ckpt = time.time()
 
+    # ★ Timing: measure time-to-first-token (TTFT) for the FIRST LLM round
+    #   of this task only (the "waiting" window the user sees). Anchored to
+    #   '_t_prep_done' (set in run_task once context is assembled) and fired
+    #   once, on the first content/thinking delta. Guarded so tool-round
+    #   re-calls and tasks without the anchor don't re-log.
+    _t_request_start = time.time()
+
+    def _log_ttft_once():
+        if task.get('_ttft_done'):
+            return
+        task['_ttft_done'] = True
+        _prep_done = task.get('_t_prep_done')
+        _now = time.time()
+        if _prep_done:
+            logger.info('%s [Timing] TTFT=%.3fs (context-ready→first-token), '
+                        'request=%.3fs (build_body→first-token) model=%s',
+                        pfx, _now - _prep_done, _now - _t_request_start, model)
+        else:
+            logger.info('%s [Timing] first-token after %.3fs (request) model=%s',
+                        pfx, _now - _t_request_start, model)
+
     def _maybe_checkpoint_during_stream():
         """Called on every content/thinking delta — checkpoint if interval elapsed."""
         nonlocal _last_stream_ckpt
@@ -1541,12 +1666,14 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
                 logger.debug('%s streaming checkpoint failed (non-fatal): %s', pfx, e)
 
     def _on_thinking(td):
+        _log_ttft_once()
         with task['content_lock']:
             task['thinking'] += td
         append_event(task, build_event(EventType.DELTA, thinking=td))
         _maybe_checkpoint_during_stream()
 
     def _on_content(cd):
+        _log_ttft_once()
         with task['content_lock']:
             task['content'] += cd
         append_event(task, build_event(EventType.DELTA, content=cd))
@@ -1609,6 +1736,10 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
         on_retry=_on_retry,
         avoid_pairs=_avoid_pairs,
     )
+
+    # ★ Timing fallback: if the first round was tool-call-only (no content/
+    #   thinking deltas fired the TTFT hook), log it now using stream return.
+    _log_ttft_once()
 
     # ★ Propagate provider_id from dispatch metadata into task
     _dispatch = (usage or {}).get('_dispatch', {})

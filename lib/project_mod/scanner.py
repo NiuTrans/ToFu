@@ -21,7 +21,7 @@ from lib.project_mod.modifications import _start_new_session
 
 logger = get_logger(__name__)
 
-def ensure_project_state(path_str, extra_paths=None, conv_id=None):
+def ensure_project_state(path_str, extra_paths=None, conv_id=None, readonly_paths=None):
     """Ensure the server's project state matches the given path(s).
 
     Called from the task orchestrator before context injection.
@@ -65,7 +65,8 @@ def ensure_project_state(path_str, extra_paths=None, conv_id=None):
     if conv_id:
         try:
             from lib.project_mod.config import set_conv_roots
-            set_conv_roots(conv_id, abs_path, extras=abs_extras)
+            set_conv_roots(conv_id, abs_path, extras=abs_extras,
+                           readonly_paths=readonly_paths)
         except Exception as e:
             logger.warning('[Project] set_conv_roots failed conv=%s: %s',
                            conv_id[:12] if conv_id else '?', e)
@@ -81,11 +82,12 @@ def ensure_project_state(path_str, extra_paths=None, conv_id=None):
     # Register this path (+ extras) as the active project
     try:
         if abs_extras:
-            set_project_paths([abs_path] + abs_extras)
+            set_project_paths([abs_path] + abs_extras,
+                              readonly_paths=readonly_paths)
             logger.info('[Project] ensure_project_state: set %s + %d extras',
                         abs_path, len(abs_extras))
         else:
-            set_project(abs_path)
+            set_project(abs_path, readonly_paths=readonly_paths)
             logger.info('[Project] ensure_project_state: set %s', abs_path)
         return True
     except Exception as e:
@@ -94,15 +96,21 @@ def ensure_project_state(path_str, extra_paths=None, conv_id=None):
     return False
 
 
-def set_project(path_str):
+def set_project(path_str, readonly_paths=None):
     """Validate path and register it as the active project.
 
     No background scan is performed — the LLM relies entirely on tools
     (list_dir, grep_search, find_files, read_files) to explore the project.
+
+    ``readonly_paths`` (optional): abspath'd set of roots to mark read-only;
+    if the primary is in it, its root_state gets ``access='ro'``.
     """
+    from lib.project_mod.config import _normalise_readonly_set
     abs_path = os.path.abspath(os.path.expanduser(path_str))
     if not os.path.isdir(abs_path):
         raise ValueError(f'Directory not found: {abs_path}')
+    _ro_set = _normalise_readonly_set(readonly_paths)
+    _primary_access = 'ro' if abs_path in _ro_set else 'rw'
 
     # Start new modification session for undo (后悔药)
     _start_new_session(abs_path)
@@ -133,9 +141,12 @@ def set_project(path_str):
             # Stale entry with same name but different path — replace it.
             del _roots[name]
         if name not in _roots:
-            _roots[name] = _make_root_state(abs_path)
+            _roots[name] = _make_root_state(abs_path, access=_primary_access)
         _roots[name]['scanning'] = False
         _roots[name]['scannedAt'] = int(time.time() * 1000)
+        # Always refresh the primary's access flag — a re-set that only
+        # toggles RO must take effect even under the same_primary guard.
+        _roots[name]['access'] = _primary_access
     logger.info('[Project] set_project: %s → %s (same_primary=%s, old_roots=%s, '
                 'new_roots=%s)', old_path, abs_path, same_primary, old_roots,
                 list(_roots.keys()))
@@ -159,7 +170,7 @@ def set_project(path_str):
     return get_state()
 
 
-def set_project_paths(paths):
+def set_project_paths(paths, readonly_paths=None):
     """Set multiple project paths atomically.
 
     The first path becomes the primary project; remaining paths are added
@@ -168,11 +179,15 @@ def set_project_paths(paths):
 
     Args:
         paths: list of directory path strings (at least one required).
+        readonly_paths: optional list of paths (subset of ``paths``) to mark
+            read-only. Each matching root_state gets ``access='ro'``.
     Returns:
         dict with combined state (primary + roots).
     """
     if not paths:
         raise ValueError("At least one path is required")
+    from lib.project_mod.config import _normalise_readonly_set
+    _ro_set = _normalise_readonly_set(readonly_paths)
 
     # Normalise all paths up-front so comparisons are consistent
     abs_paths = []
@@ -193,7 +208,7 @@ def set_project_paths(paths):
     #    /api/project/set calls). This means we must explicitly prune any
     #    extras not in the new list below — otherwise the modal's "remove
     #    folder" action would silently no-op when the primary is untouched.
-    set_project(primary)
+    set_project(primary, readonly_paths=readonly_paths)
 
     # 2) Prune extras that the caller no longer wants. The new extras set
     #    is `extras`; anything currently registered that isn't primary and
@@ -214,7 +229,7 @@ def set_project_paths(paths):
     # 3) Add each extra root not already registered
     for ep in extras:
         try:
-            add_project_root(ep)
+            add_project_root(ep, access='ro' if ep in _ro_set else 'rw')
         except Exception as e:
             logger.debug('[Scanner] add_project_root failed for %s, skipping: %s', ep, e, exc_info=True)
 
@@ -222,12 +237,13 @@ def set_project_paths(paths):
     return get_state()
 
 
-def add_project_root(path_str, name=None):
+def add_project_root(path_str, name=None, access='rw'):
     """Add an additional root directory to the workspace (multi-root support).
 
     Args:
         path_str: Directory path to add
         name: Optional short name / namespace. Defaults to directory basename.
+        access: ``'rw'`` (default) or ``'ro'`` write policy for this root.
     Returns:
         dict with roots info
     """
@@ -236,6 +252,7 @@ def add_project_root(path_str, name=None):
         raise ValueError(f'Directory not found: {abs_path}')
 
     rname = name or os.path.basename(abs_path) or 'root'
+    _access = 'ro' if access == 'ro' else 'rw'
 
     # Deduplicate name if collision
     with _lock:
@@ -244,12 +261,13 @@ def add_project_root(path_str, name=None):
         orig_name = rname
         counter = 2
         while rname in _roots:
-            # If same path already registered, skip
+            # If same path already registered, refresh its access flag and skip
             if _roots[rname]['path'] == abs_path:
+                _roots[rname]['access'] = _access
                 return _get_roots_info()
             rname = f'{orig_name}_{counter}'
             counter += 1
-        _roots[rname] = _make_root_state(abs_path)
+        _roots[rname] = _make_root_state(abs_path, access=_access)
         _roots[rname]['scanning'] = False
         _roots[rname]['scannedAt'] = int(time.time() * 1000)
 
@@ -289,6 +307,7 @@ def _get_roots_info():
                 'totalSize': rs['totalSize'],
                 'scanning': rs['scanning'],
                 'isPrimary': rs['path'] == _state['path'],
+                'readOnly': rs.get('access') == 'ro',
             }
         return result
 

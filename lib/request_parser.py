@@ -96,6 +96,52 @@ def parse_body(*, force: bool = False) -> dict:
     return data
 
 
+async def async_parse_body(*, force: bool = False) -> dict:
+    """Async-native version of :func:`parse_body` for ``async def`` handlers.
+
+    A native-async handler runs ON the event loop, where the sync
+    ``parse_body`` shim's ``asyncio.run()`` fallback would raise
+    ``RuntimeError: asyncio.run() cannot be called from a running event
+    loop``. This awaits Quart's genuinely-async ``request.get_json()`` directly.
+
+    Same contract as ``parse_body``: always returns a dict; empty body → {};
+    top-level non-dict JSON → raises ``BadRequest``.
+    """
+    import inspect
+
+    from flask import request
+    from lib.log import get_logger
+    try:
+        # server.py's flask→quart shim monkey-patches Request.get_json to be
+        # SYNC-safe (returns the parsed VALUE, not a coroutine). Calling that in
+        # an async handler would strand an un-awaited coroutine and yield an
+        # empty body. The shim stashes the genuine async original on the patched
+        # method as ``_genuine_async_get_json``.
+        #
+        # NOTE: ``request`` is a LocalProxy — ``type(request)`` is the proxy
+        # class (no get_json), so we read the attribute off the BOUND method
+        # ``request.get_json`` (which the proxy forwards to the real Request),
+        # not off ``type(request)``.
+        _genuine = getattr(request.get_json, '_genuine_async_get_json', None)
+        if _genuine is not None:
+            data = await _genuine(request._get_current_object()
+                                  if hasattr(request, '_get_current_object') else request,
+                                  force=force, silent=True)
+        else:
+            result = request.get_json(force=force, silent=True)
+            data = await result if inspect.iscoroutine(result) else result
+    except Exception as e:
+        get_logger(__name__).debug(
+            '[request_parser] async_parse_body get_json raised %s: %s',
+            type(e).__name__, e)
+        return {}
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise BadRequest('Request body must be a JSON object')
+    return data
+
+
 # ── String accessors ───────────────────────────────────────────
 
 def require_str(body: dict, field: str, *,
@@ -273,7 +319,7 @@ def optional_dict(body: dict, field: str, *,
 
 
 __all__ = [
-    'BadRequest', 'parse_body',
+    'BadRequest', 'parse_body', 'async_parse_body',
     'require_str', 'optional_str',
     'require_int', 'optional_int',
     'require_bool', 'optional_bool',

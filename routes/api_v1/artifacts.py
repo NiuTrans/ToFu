@@ -31,7 +31,7 @@ from lib.artifacts import (
 )
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
-from lib.request_parser import parse_body
+from lib.request_parser import async_parse_body
 
 from .auth import require_auth
 
@@ -56,7 +56,7 @@ def _strip_meta(meta: dict) -> dict:
     ),
     tags=['artifacts'],
 )
-def list_artifacts_v1():
+async def list_artifacts_v1():
     conv = (request.args.get('conv') or '').strip()
     if conv:
         items = list_artifacts(conv)
@@ -79,7 +79,7 @@ def list_artifacts_v1():
 @api_v1_artifacts_bp.route('/api/v1/artifacts/<artifact_id>', methods=['GET'])
 @require_auth
 @api_meta(summary='Get artifact metadata', tags=['artifacts'])
-def get_artifact_v1(artifact_id):
+async def get_artifact_v1(artifact_id):
     try:
         meta = get_artifact_meta(artifact_id)
     except ArtifactNotFoundError:
@@ -95,7 +95,7 @@ def get_artifact_v1(artifact_id):
     description='Returns oldest \u2192 newest. 404 if artifact unknown.',
     tags=['artifacts'],
 )
-def list_versions_v1(artifact_id):
+async def list_versions_v1(artifact_id):
     chain = list_versions(artifact_id)
     if not chain:
         return api_not_found('not_found')
@@ -110,8 +110,8 @@ def list_versions_v1(artifact_id):
     description='Body: ``{pinned: bool}`` (default ``true``).',
     tags=['artifacts'],
 )
-def toggle_pin_v1(artifact_id):
-    body = parse_body()
+async def toggle_pin_v1(artifact_id):
+    body = await async_parse_body()
     pinned = bool(body.get('pinned', True))
     if not set_pinned(artifact_id, pinned):
         return api_not_found('not_found_or_failed')
@@ -126,7 +126,7 @@ def toggle_pin_v1(artifact_id):
                             methods=['DELETE'])
 @require_auth
 @api_meta(summary='Soft-delete an artifact', tags=['artifacts'])
-def delete_artifact_v1(artifact_id):
+async def delete_artifact_v1(artifact_id):
     if not delete_artifact(artifact_id):
         return api_not_found('not_found_or_failed')
     try:
@@ -148,22 +148,22 @@ def delete_artifact_v1(artifact_id):
     ),
     tags=['artifacts'],
 )
-def scan_conv_v1():
+async def scan_conv_v1():
     import json as _json
 
-    from lib.database import DOMAIN_CHAT, get_thread_db
+    from lib.database import DOMAIN_CHAT, async_fetchone
     from routes.common import DEFAULT_USER_ID
 
-    body = parse_body()
+    body = await async_parse_body()
     conv_id = (body.get('conv_id') or '').strip()
     if not conv_id:
         return api_bad_request('conv_id is required', field='conv_id')
 
-    db = get_thread_db(DOMAIN_CHAT)
-    row = db.execute(
+    row = await async_fetchone(
         'SELECT messages FROM conversations WHERE id=? AND user_id=?',
         (conv_id, DEFAULT_USER_ID),
-    ).fetchone()
+        domain=DOMAIN_CHAT,
+    )
     if not row:
         return api_not_found('conv_not_found')
     raw = row['messages']

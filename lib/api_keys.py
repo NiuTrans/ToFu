@@ -68,6 +68,7 @@ Public API
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import secrets
 import threading
@@ -328,17 +329,40 @@ _UPDATABLE = frozenset({'name', 'scopes', 'rate_limit_rpm',
 
 
 def update_key(key_id: str, **fields) -> bool:
+    """Update an existing key in place.
+
+    NOTE: the ``admin`` scope is NOT grantable through this path. A key's
+    privilege tier is fixed at mint time and reflected in its token prefix
+    (``tofu_admin_`` vs ``tofu_live_``); letting PATCH add ``admin`` would
+    leave a ``tofu_live_`` token silently wielding full privileges. Any
+    ``admin`` entry in an incoming ``scopes`` list is dropped here (a
+    warning is logged); the key keeps its existing admin-ness, which is
+    only ever set by :func:`create_key` with ``admin=True``. To change a
+    key's tier, revoke and re-mint.
+    """
     _ensure_loaded()
     with _cache_lock:
         for row in _cache:
             if row.get('id') != key_id:
                 continue
+            had_admin = _ADMIN_SCOPE in (row.get('scopes') or ())
             changed = {}
             for k, v in fields.items():
                 if k not in _UPDATABLE:
                     continue
                 if k == 'scopes':
-                    v = sorted(_normalise_scopes(v))
+                    new_scopes = set(_normalise_scopes(v))
+                    requested_admin = _ADMIN_SCOPE in new_scopes
+                    if requested_admin and not had_admin:
+                        logger.warning('[ApiKeys] refusing to grant admin '
+                                       'scope via update_key on %s; revoke '
+                                       'and re-mint to change tier', key_id)
+                    # Preserve the key's existing admin-ness, never flip it.
+                    if had_admin:
+                        new_scopes.add(_ADMIN_SCOPE)
+                    else:
+                        new_scopes.discard(_ADMIN_SCOPE)
+                    v = sorted(new_scopes)
                 if k in ('rate_limit_rpm', 'rate_limit_tpd'):
                     v = max(0, int(v or 0))
                 if k == 'disabled':
@@ -375,7 +399,9 @@ def validate_token(token: str) -> Optional[AuthContext]:
     now = time.time()
     with _cache_lock:
         for row in _cache:
-            if row.get('secret_hash') != h:
+            # Constant-time compare so a timing side-channel can't reveal
+            # how many leading hex chars of the stored hash matched.
+            if not hmac.compare_digest(str(row.get('secret_hash') or ''), h):
                 continue
             if row.get('disabled'):
                 logger.info('[ApiKeys] token rejected (disabled) %s',
@@ -434,6 +460,7 @@ def _clear_first_run_token(reason: str) -> None:
     try:
         os.unlink(_FIRST_RUN_TOKEN_FILE)
     except FileNotFoundError:
+        logger.debug('[Auth] .first_run_token already absent (%s)', reason)
         return
     except OSError as e:
         logger.debug('[Auth] could not remove .first_run_token: %s', e)
@@ -453,6 +480,7 @@ def _purge_stale_first_run_token() -> None:
         with open(_FIRST_RUN_TOKEN_FILE, 'r', encoding='utf-8') as fh:
             token = fh.read().strip()
     except FileNotFoundError:
+        logger.debug('[Auth] no .first_run_token to purge')
         return
     except OSError as e:
         logger.debug('[Auth] could not read .first_run_token: %s', e)

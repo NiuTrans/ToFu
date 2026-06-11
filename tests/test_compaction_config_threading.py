@@ -27,7 +27,7 @@ def _big(n: int, ch: str = 'x') -> str:
     return ch * n
 
 
-def _mk_conv(n_tool: int = 61, tool_chars: int = 3000):
+def _mk_conv(n_tool: int = 41, tool_chars: int = 3000):
     msgs = [{'role': 'user', 'content': 'go'}]
     for i in range(n_tool):
         msgs.append({'role': 'assistant', 'content': f's{i}',
@@ -123,7 +123,7 @@ def test_constant_overrides_no_global_leak():
     assert comp.MICRO_HOT_TAIL == orig_hot_tail, (
         'constant_overrides leaked into the global package namespace')
 
-    # Sanity: with default hot tail (60) and only 10 tools, nothing is cold.
+    # Sanity: with default hot tail (40) and only 10 tools, nothing is cold.
     msgs_default = _mk_conv(n_tool=10, tool_chars=3000)
     micro_compact(msgs_default, conv_id='')
     assert _count_compacted_tools(msgs_default) == 0
@@ -142,6 +142,69 @@ def test_pipeline_reads_compaction_config():
     run_compaction_pipeline(msgs, current_round=5, task=task)
     # strip_thinking only → no tool compaction via the config-selected arm.
     assert _count_compacted_tools(msgs) == 0
+
+
+def _mk_thinking_conv(n: int):
+    """Cold assistant turns each carrying reasoning_content + a tool call."""
+    msgs = [{'role': 'user', 'content': 'go'}]
+    for i in range(n):
+        msgs.append({'role': 'assistant', 'content': f's{i}',
+                     'reasoning_content': 'R' * 500,
+                     'tool_calls': [{'id': f't{i}',
+                                     'function': {'name': 'g', 'arguments': '{}'}}]})
+        msgs.append({'role': 'tool', 'name': 'g',
+                     'tool_call_id': f't{i}', 'content': 'x' * 100})
+    return msgs
+
+
+def _count_blanked_reasoning(msgs) -> int:
+    return sum(1 for m in msgs if m.get('role') == 'assistant'
+               and m.get('reasoning_content') == '')
+
+
+# ── 6. DeepSeek thinking mode: reasoning_content must NOT be stripped ───
+
+@pytest.mark.unit
+def test_strip_thinking_skips_deepseek():
+    """DeepSeek V4 thinking mode rejects an assistant turn whose
+    reasoning_content was emptied (HTTP 400). strip_thinking must skip it,
+    while still stripping for OpenAI-compatible models."""
+    import lib.tasks_pkg.compaction as comp
+    from lib.tasks_pkg.compaction import micro_compact
+
+    n = comp._THINKING_HOT_TAIL + 5  # ensure some cold thinking exists
+
+    ds = _mk_thinking_conv(n)
+    micro_compact(ds, conv_id='', task={'model': 'deepseek-v4-flash'})
+    assert _count_blanked_reasoning(ds) == 0, (
+        'DeepSeek reasoning_content must be preserved for thinking replay')
+
+    gpt = _mk_thinking_conv(n)
+    micro_compact(gpt, conv_id='', task={'model': 'gpt-4'})
+    assert _count_blanked_reasoning(gpt) > 0, (
+        'non-DeepSeek models should still strip cold reasoning_content')
+
+
+@pytest.mark.unit
+def test_disable_default_l1_and_force_compact_flags():
+    """REPLACEMENT-mode arms: disableDefaultL1 skips the built-in L1 pass,
+    disableForceCompact skips chatui L2 — so an external method runs alone."""
+    from lib.tasks_pkg.compaction import run_compaction_pipeline
+
+    # disableDefaultL1 with NO steps → no tool compaction happens at all.
+    msgs = _mk_conv()
+    task = {'convId': '', 'config': {'model': 'gpt-4',
+            'compaction': {'disableDefaultL1': True, 'disableForceCompact': True}}}
+    run_compaction_pipeline(msgs, current_round=5, task=task)
+    assert _count_compacted_tools(msgs) == 0, 'disableDefaultL1 must skip L1'
+
+    # disableDefaultL1 but WITH explicit steps → the arm's own steps still run.
+    msgs2 = _mk_conv()
+    task2 = {'convId': '', 'config': {'model': 'gpt-4',
+             'compaction': {'disableDefaultL1': True, 'disableForceCompact': True,
+                            'steps': ['compact_tool_results']}}}
+    run_compaction_pipeline(msgs2, current_round=5, task=task2)
+    assert _count_compacted_tools(msgs2) == 1, "arm's own steps must still run"
 
 
 @pytest.mark.unit

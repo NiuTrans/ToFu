@@ -9,6 +9,11 @@ flask-compress>=1.14
 requests>=2.31
 psutil>=5.9
 # sqlite3 is built into Python — no external package needed
+# tofu-search — standalone multi-engine web search + content fetch pipeline,
+# extracted from this repo's former lib/search + lib/fetch. chatui wires its
+# own LLM routing / browser-extension / auth-source behavior into tofu-search's
+# provider seams via lib/search_bridge.py at startup.
+tofu-search>=0.2.0
 trafilatura>=1.6
 # playwright is optional — powers the JS-rendered fallback in lib/fetch.
 # On Linux, Chromium needs X11/GTK shared libs (libatk, libgbm, libXcomposite, …).

@@ -20,12 +20,16 @@ import uuid
 
 from flask import Blueprint, Response
 
-from lib.api_response import api_bad_request, api_internal_error
+from lib.api_response import (
+    api_bad_request, api_internal_error, api_not_found,
+)
+from lib.byo_resolve import dispose_after_terminal, resolve_model_and_provider
 from lib.compat.openai import (
     build_openai_response, models_payload, stream_openai_chunks,
     translate_openai_request,
 )
 from lib.idempotency import idempotent_post
+from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.rate_limit_api import record_tokens
@@ -75,6 +79,24 @@ def chat_completions():
         return api_bad_request('messages is empty', field='messages')
 
     auth = current_auth()
+    owner = (auth.key_id if auth else '') or 'anonymous'
+
+    # ── BYO model resolution ──
+    # Resolve ``model="name@prov_xxx"`` (and an inline ``provider``
+    # block, if any) against the caller's registered BYO providers,
+    # mirroring /api/v1/chat. Without this, a model that /v1/models
+    # advertised with the @prov suffix could not actually be invoked
+    # through the OpenAI-compat adapter.
+    _byo_handle = None
+    _model_in = cfg.get('model') or ''
+    if _model_in:
+        _model_id, _byo_handle, _byo_prov, _err, _status = (
+            resolve_model_and_provider(_model_in, body.get('provider'), owner))
+        if _err:
+            return (api_not_found(_err) if _status == 404
+                    else api_bad_request(_err, field='model'))
+        cfg['model'] = _model_id  # strip the @suffix
+
     audit_log('compat_openai_chat',
               key_id=(auth.key_id if auth else ''),
               name=(auth.name if auth else ''),
@@ -92,9 +114,18 @@ def chat_completions():
     try:
         spawn_task(task)
     except Exception as e:
+        if _byo_handle is not None:
+            dispose_ephemeral_slot(_byo_handle)
         logger.exception('[compat:openai] spawn_task failed')
         return api_internal_error(e, context='compat:openai',
                                    source='routes.compat_openai')
+
+    if _byo_handle is not None:
+        import threading
+        threading.Thread(
+            target=dispose_after_terminal, args=(task, _byo_handle),
+            name=f'byo-dispose-{_byo_handle.handle_id}', daemon=True,
+        ).start()
 
     model = cfg.get('model', '?')
     requested_id = options.get('id') or ''

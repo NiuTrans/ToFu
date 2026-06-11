@@ -33,14 +33,28 @@ from lib.file_history.store import load_tracked  # noqa: E402
 os.environ.setdefault('TOFU_FILE_HISTORY', '1')
 
 
-def _commit_round_simulating_orchestrator(base, *, task_id, conv_id, mods):
+_READ_ONLY_TOOLS = frozenset({
+    'list_dir', 'read_files', 'grep_search', 'find_files',
+    'web_search', 'fetch_url',
+})
+
+
+def _commit_round_simulating_orchestrator(base, *, task_id, conv_id, mods,
+                                          tool_rounds=None):
     """Mirror lib/tasks_pkg/orchestrator.py:_run_commit_round_async.
 
     Returns the side-channel-attributed file list this task would have
-    reported (after the new attribution filter).
+    reported (after the attribution + drift-gate filters).
+
+    ``tool_rounds`` is the round's ``task['toolRounds']`` — used to
+    decide whether the round ran any write-capable tool.  Defaults to
+    one synthetic round per recorded mod (so writer tasks look
+    write-capable) when not supplied.
     """
     rel_paths = [m['path'] for m in mods if m.get('path')]
     tool_names = [m.get('type') or '' for m in mods]
+    if tool_rounds is None:
+        tool_rounds = [{'toolName': m.get('type') or 'write_file'} for m in mods]
 
     fh_changes = []
     tracked_index = {}
@@ -54,14 +68,23 @@ def _commit_round_simulating_orchestrator(base, *, task_id, conv_id, mods):
             fh_changes = fh.diff_name_status(base, prev_snap, snap_id) or []
             tracked_index = load_tracked(base) or {}
 
-    # Apply the new attribution filter (Fix 2).
+    round_can_write = any(
+        (r.get('toolName') or r.get('tool_name') or '') not in _READ_ONLY_TOOLS
+        and (r.get('toolName') or r.get('tool_name'))
+        for r in (tool_rounds or [])
+    )
+
+    # Apply the attribution filter (Fix 2) + drift gate.
     own = task_id
     filtered = []
     for entry in fh_changes:
         writer = (tracked_index.get(entry['path'], {})
                   .get('last_writer_task_id') or '')
-        if not writer or writer == own:
-            filtered.append(entry)
+        if writer and writer != own:
+            continue  # another concurrent task
+        if not writer and not round_can_write:
+            continue  # unattributed drift on a read-only round
+        filtered.append(entry)
     return [e['path'] for e in filtered]
 
 
@@ -171,6 +194,49 @@ def main() -> int:
                   f"(got {results['D'] or '[]'})")
         else:
             print(f"FAIL — Task-D misattributed c_only.py (got {results['D']})")
+            failed += 1
+
+        # ── Drift-gate scenario ──
+        # An UNATTRIBUTED edit (external/IDE drift or an un-stamped
+        # writer — last_writer_task_id == '') is staged, then a
+        # read-only round (Task-E ran only read_files/grep_search)
+        # commits.  The unattributed path must NOT be reported on that
+        # read-only round.  A subsequent write-capable round (Task-F)
+        # MUST still surface it (back-compat for legitimate
+        # run_command/code_exec/MCP side-channel edits).
+        # Each drift edit only shows up in ONE snapshot diff, so use a
+        # distinct file per round.
+        drift_e = 'drift_readonly.py'
+        with open(os.path.join(base, drift_e), 'w') as f:
+            f.write('# external edit, no task_id\n')
+        fh.track_edit(base, drift_e)  # no task_id → last_writer_task_id == ''
+        e_results = _commit_round_simulating_orchestrator(
+            base, task_id='task-E', conv_id='conv-E', mods=[],
+            tool_rounds=[{'toolName': 'read_files'},
+                         {'toolName': 'grep_search'}],
+        )
+        if drift_e not in e_results:
+            print(f"PASS — Task-E (read-only round) does NOT report "
+                  f"unattributed drift (got {e_results or '[]'})")
+        else:
+            print(f"FAIL — Task-E reported unattributed drift {drift_e} "
+                  f"(got {e_results})")
+            failed += 1
+
+        drift_f = 'drift_writecap.py'
+        with open(os.path.join(base, drift_f), 'w') as f:
+            f.write('# side-channel edit, no task_id\n')
+        fh.track_edit(base, drift_f)  # no task_id → last_writer_task_id == ''
+        f_results = _commit_round_simulating_orchestrator(
+            base, task_id='task-F', conv_id='conv-F', mods=[],
+            tool_rounds=[{'toolName': 'run_command'}],
+        )
+        if drift_f in f_results:
+            print(f"PASS — Task-F (write-capable round) still surfaces "
+                  f"unattributed drift (got {f_results})")
+        else:
+            print(f"FAIL — Task-F dropped legitimate side-channel drift "
+                  f"{drift_f} (got {f_results or '[]'})")
             failed += 1
 
     if failed:
