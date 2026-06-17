@@ -264,7 +264,8 @@ _CC_STATIC_MARKER = "IMPORTANT: You must NEVER generate or guess URLs"
 def _inject_system_contexts(messages, project_path, project_enabled,
                              memory_enabled, search_enabled, swarm_enabled,
                              has_real_tools, conv_id: str = '',
-                             task: dict = None, model: str = ''):
+                             task: dict = None, model: str = '',
+                             system_prompt_mode: str = 'append'):
     """Inject the Claude-Code-style system + user contexts into *messages*.
 
     Modifies the messages list directly. Final shape:
@@ -294,11 +295,32 @@ def _inject_system_contexts(messages, project_path, project_enabled,
 
     Args:
         model: Model ID for the ``# Environment`` section.
+        system_prompt_mode: ``'append'`` (default) injects the built-in
+            Claude-Code static block on top of any user system prompt;
+            ``'replace'`` suppresses the static block so the user's
+            system prompt is the sole base. CLAUDE.md / memory / swarm /
+            date are still injected in both modes (they track feature
+            toggles, not the base prose). A ``'replace'`` request with no
+            user system prompt falls back to ``'append'`` so the model is
+            never left with an empty base.
     """
     _cid = conv_id or ''
 
     # ── Idempotency probe: detect an already-injected system message ──
     _existing = _system_text(messages)
+
+    # ── Replace mode: the user's system prompt fully substitutes the
+    #    built-in static block. The user prompt arrives as messages[0]
+    #    (role=system) from the message builder. Only honour replace when
+    #    that prompt is actually non-empty — otherwise an empty 'replace'
+    #    would leave the model with no base prompt at all. Endpoint-mode
+    #    re-entry already has the static block, so the marker guard below
+    #    still wins there.
+    _replace_static = (
+        system_prompt_mode == 'replace'
+        and _CC_STATIC_MARKER not in _existing
+        and bool(_existing.strip())
+    )
 
     # ── Helper: try to get prefetched result, else compute synchronously ──
     def _get_prefetched(key, fallback_fn):
@@ -339,7 +361,12 @@ def _inject_system_contexts(messages, project_path, project_enabled,
 
     # ★ 1. Static Claude-Code block — append as separate cache-stable block.
     #      Injected ONCE; marker guards against endpoint-mode re-entry.
-    if _CC_STATIC_MARKER not in _existing:
+    #      Skipped entirely in replace mode (user prompt is the base).
+    if _replace_static:
+        logger.info('[Inject] conv=%s system_prompt_mode=replace — built-in '
+                    'static block suppressed (user prompt is the base)',
+                    (_cid or '?')[:8])
+    elif _CC_STATIC_MARKER not in _existing:
         # When project mode is OFF, suppress the working-directory bullet
         # entirely — leaking the server's cwd in the system prompt has caused
         # the model to chase ghost paths (the path is the server's runtime
@@ -544,8 +571,17 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
                                    _wrap_system_reminder(swarm_prompt),
                                    as_separate_block=True)
 
-    # Current date is already inlined by build_static_prompt()'s
-    # section_current_date — do NOT append it here or it duplicates.
+    # ★ 4.5 Current date.
+    #   In append mode the date is already inlined by build_static_prompt()'s
+    #   section_current_date — do NOT append it again or it duplicates.
+    #   In replace mode the static block is suppressed, so the date would be
+    #   missing entirely; inject it here as its own cache-stable block
+    #   (changes once per UTC day, like the static section).
+    if _replace_static:
+        _date_line = system_prompt_cc.section_current_date()
+        if _date_line not in _existing:
+            _append_to_system_message(messages, _date_line,
+                                       as_separate_block=True)
 
 
 

@@ -53,6 +53,20 @@ _FILE_WRITE_TOOLS = frozenset({
 })
 
 
+def _last_assistant_text(messages: list) -> str:
+    """Return the last substantive assistant text in a message list.
+
+    Fallback for a rehydrated completed agent whose stored result dict was
+    empty (older checkpoint) — mirrors SubAgent._extract_partial_answer.
+    """
+    for msg in reversed(messages or []):
+        if isinstance(msg, dict) and msg.get('role') == 'assistant':
+            content = msg.get('content')
+            if isinstance(content, str) and len(content.strip()) > 20:
+                return content.strip()
+    return ''
+
+
 def _count_file_writes(tool_log: list) -> int:
     """Count file-mutating tool calls in a sub-agent's ``tool_log``.
 
@@ -80,7 +94,8 @@ def _build_sub_agent(spec: SubTaskSpec, *,
                      abort_check: Callable | None,
                      project_path: str,
                      artifact_store: ArtifactStore | None,
-                     output_file: str = '') -> SubAgent:
+                     output_file: str = '',
+                     swarm_key: str = '') -> SubAgent:
     """Construct a SubAgent. Does not start execution."""
     logger.info('[Master:Spawn] id=%s role=%s model=%s objective=%.80s deps=%s',
                 spec.id, spec.role, model or '(default)',
@@ -100,6 +115,9 @@ def _build_sub_agent(spec: SubTaskSpec, *,
         # SubAgent itself writes streaming output to ``output_file`` when
         # the attribute is present. See lib/swarm/agent.py for the hook.
         agent.output_file = output_file
+    if swarm_key:
+        # Enables the SubAgent's round-boundary DB checkpoint (durable resume).
+        agent.swarm_key = swarm_key
     return agent
 
 
@@ -207,6 +225,13 @@ class MasterOrchestrator:
         self._driver_thread: threading.Thread | None = None
         self._terminated = False  # set when driver thread exits
 
+        # Rehydration: agent_id → persisted ``messages`` array. When set
+        # (by ``rehydrate_in_background``), ``_make_agent`` seeds the new
+        # SubAgent's conversation from this checkpoint instead of building a
+        # fresh initial-message list — that's what makes a resumed agent
+        # continue mid-conversation rather than restart from scratch.
+        self._resume_messages: dict[str, list] = {}
+
     # ── Model resolution (mirrors SubAgent._resolve_model) ──
 
     def _resolve_spec_model(self, spec: SubTaskSpec) -> str:
@@ -239,7 +264,16 @@ class MasterOrchestrator:
             project_path=self.project_path,
             artifact_store=self.artifact_store,
             output_file=out_path,
+            swarm_key=self.inbox_key,
         )
+        # ── Durable resume: seed the conversation from the checkpoint so the
+        #    agent continues from its last completed round instead of starting
+        #    over. The interrupted (uncheckpointed) round is naturally re-run.
+        resume = self._resume_messages.get(spec.id)
+        if resume:
+            agent.messages = list(resume)
+            logger.info('[Master:%s] Rehydrated agent %s from checkpoint (%d msgs)',
+                        self.task_id, spec.id, len(resume))
         with self._lock:
             self._agents[spec.id] = agent
         return agent
@@ -397,6 +431,15 @@ class MasterOrchestrator:
                 ],
             })
 
+        self._start_driver()
+
+    def _start_driver(self) -> None:
+        """Spawn the daemon driver thread that drains the scheduler.
+
+        Shared by ``run_in_background`` (fresh swarm) and
+        ``rehydrate_in_background`` (resumed swarm). Assumes
+        ``self._scheduler`` is already built and seeded with specs.
+        """
         def _driver():
             log_prefix = f'[Master:{self.task_id}]'
             t0 = time.time()
@@ -417,6 +460,17 @@ class MasterOrchestrator:
                     logger.debug('%s scheduler shutdown error: %s', log_prefix, e)
                 self._terminated = True
                 self._completion_event.set()
+
+                # Mark the durable session row terminated so startup
+                # rehydration won't try to resume a swarm that has finished.
+                # (Undelivered completed results are still rehydrated for
+                # their <swarm-update> — see persistence.load_resumable_sessions.)
+                try:
+                    from lib.swarm import persistence
+                    persistence.mark_session_terminated(self.inbox_key)
+                except Exception as _pe:
+                    logger.debug('%s mark_session_terminated failed: %s',
+                                 log_prefix, _pe)
 
                 with self._lock:
                     n = len(self._results)
@@ -454,6 +508,126 @@ class MasterOrchestrator:
             target=_driver, name=f'swarm-driver-{self.task_id}', daemon=True,
         )
         self._driver_thread.start()
+
+    # ── Rehydration entry point (startup resume) ─────
+
+    def rehydrate_in_background(self, persisted_agents: list[dict]) -> None:
+        """Resume a swarm from persisted per-agent checkpoints after a restart.
+
+        ``persisted_agents`` is the ``agents`` list from
+        ``persistence.load_resumable_sessions`` — each dict has agent_id,
+        status, messages, result, delivered. Behaviour by agent status:
+
+          * completed / failed / cancelled → preloaded into the results map
+            so ``await_agents`` / ``get_agent_result`` return them straight
+            away. A completed-but-undelivered one is re-enqueued as a
+            ``<swarm-update>`` so the main agent still sees it.
+          * pending / running / retrying → re-spawned. If a checkpoint has
+            messages, the new SubAgent's conversation is seeded from it
+            (round-level resume); otherwise it starts fresh from its spec.
+
+        Only the non-terminal specs are handed to the scheduler, so finished
+        agents are NOT re-executed.
+        """
+        if self._scheduler is not None:
+            logger.warning('[Master:%s] rehydrate called after start — ignoring',
+                           self.task_id)
+            return
+
+        by_id = {a['agent_id']: a for a in (persisted_agents or [])}
+
+        resume_specs: list[SubTaskSpec] = []
+        preloaded = 0
+        re_enqueued = 0
+
+        for spec in self.specs:
+            a = by_id.get(spec.id)
+            if a is None:
+                # No checkpoint at all → never started; run fresh.
+                resume_specs.append(spec)
+                continue
+            status = a.get('status', 'pending')
+            if status in ('completed', 'failed', 'cancelled'):
+                result = self._result_from_dict(a.get('result') or {})
+                # A completed agent with no stored result dict (older row) —
+                # fall back to its last message text as the final answer.
+                if not result.final_answer and a.get('messages'):
+                    result.final_answer = _last_assistant_text(a['messages'])
+                with self._lock:
+                    self._results.append((spec, result))
+                    self._results_by_id[spec.id] = (spec, result)
+                preloaded += 1
+                if status == 'completed' and not a.get('delivered'):
+                    self._reenqueue_swarm_update(spec, result)
+                    re_enqueued += 1
+            else:
+                # Non-terminal → resume. Seed messages if we have a checkpoint.
+                msgs = a.get('messages') or []
+                if msgs:
+                    self._resume_messages[spec.id] = msgs
+                resume_specs.append(spec)
+
+        logger.info('[Master:%s] Rehydrate — preloaded=%d (re-enqueued=%d) resume=%d',
+                    self.task_id, preloaded, re_enqueued, len(resume_specs))
+
+        self._scheduler = self._build_scheduler()
+        if resume_specs:
+            try:
+                self._scheduler.add_specs(resume_specs)
+            except ValueError as e:
+                logger.warning('[Master:%s] rehydrate add_specs cycle: %s',
+                               self.task_id, e)
+
+        if self.on_progress:
+            self.on_progress({
+                'type': 'swarm_phase', 'phase': 'spawning',
+                'content': (f'♻️ Resumed swarm after restart — '
+                            f'{len(resume_specs)} agent(s) continuing, '
+                            f'{preloaded} already done'),
+                'agents': [
+                    {'agentId': s.id, 'role': s.role, 'objective': s.objective,
+                     'model': self._resolve_spec_model(s),
+                     'depends_on': list(s.depends_on or [])}
+                    for s in resume_specs
+                ],
+            })
+
+        # Even with zero resume_specs we still start the driver: it fires the
+        # terminal swarm_phase:complete + on_settled (auto-continue) so the
+        # re-enqueued <swarm-update>s get delivered.
+        self._start_driver()
+
+    def _result_from_dict(self, d: dict) -> SubAgentResult:
+        """Reconstruct a SubAgentResult from a persisted to_dict() payload."""
+        r = SubAgentResult()
+        for k in r.__dataclass_fields__:
+            if k in d:
+                try:
+                    setattr(r, k, d[k])
+                except Exception as e:
+                    logger.debug('[Master:%s] result field %s restore failed: %s',
+                                 self.task_id, k, e)
+        if not r.status:
+            r.status = SubAgentStatus.COMPLETED.value
+        return r
+
+    def _reenqueue_swarm_update(self, spec: SubTaskSpec,
+                                result: SubAgentResult) -> None:
+        """Re-push an undelivered completed result to the model inbox."""
+        try:
+            output_file = (os.path.join(self.output_dir, f'{spec.id}.log')
+                           if self.output_dir else '')
+            payload = format_swarm_update(
+                agent_id=spec.id, role=spec.role, status=result.status,
+                elapsed_seconds=result.elapsed_seconds, tokens=result.total_tokens,
+                preview=result.final_answer or '', output_file=output_file,
+                error=result.error_message if result.status != SubAgentStatus.COMPLETED.value else '',
+            )
+            inbox_enqueue(self.inbox_key, payload, priority='later',
+                          mode='swarm-update', agent_id=spec.id)
+        except Exception as e:
+            logger.warning('[Master:%s] re-enqueue swarm-update for %s failed: %s',
+                           self.task_id, spec.id, e)
 
     # ── await_agents (blocking) ──────────────────────
 
@@ -512,6 +686,20 @@ class MasterOrchestrator:
             already_done = requested & done_ids
             to_wait = requested & (running_ids | pending_ids)
             unknown = requested - done_ids - running_ids - pending_ids
+
+        # Critical trace: WHAT this await is blocking on, plus a snapshot of
+        # the swarm state. When an await later reports timed_out, this ENTER
+        # line is the anchor that explains why (e.g. mode=all but agents are
+        # still running and their runtime exceeds the requested window).
+        logger.info(
+            '[Master:%s] await_agents ENTER mode=%s timeout=%.0fs ids=%s — '
+            'to_wait=%s already_done=%s unknown=%s '
+            '(snapshot: done=%d running=%d pending=%d, hard_cap=%ss)',
+            self.task_id, mode, timeout_seconds,
+            (sorted(str(x) for x in ids) if ids else 'ALL'),
+            sorted(to_wait), sorted(already_done), sorted(unknown),
+            len(done_ids), len(running_ids), len(pending_ids),
+            int(timeout_seconds))
 
         # ── Special case: nothing to wait for ──────────────────────────
         # Either the caller asked for ids that are all already done, or
@@ -622,17 +810,46 @@ class MasterOrchestrator:
         if note:
             out['note'] = note
 
+        # Critical trace: every await resolution leaves a line. A timeout is
+        # logged at WARNING (it's the symptom the user reports) and names the
+        # agents that out-ran the window so the cause is grep-able without a
+        # debugger; a clean satisfy is INFO.
+        if timed_out:
+            logger.warning(
+                '[Master:%s] await_agents TIMEOUT mode=%s — satisfied=%d/%d, '
+                'still_running=%s. Agents are NOT cancelled; they keep running '
+                'and will emit <swarm-update> later. If their runtime exceeds '
+                'the per-call cap, mode=all REPEATEDLY times out — prefer '
+                "mode='any' or await specific ids.",
+                self.task_id, mode, len(completed_payloads),
+                len(completed_payloads) + len(still_running),
+                still_running or 'none')
+        else:
+            logger.info(
+                '[Master:%s] await_agents EXIT mode=%s satisfied — completed=%s '
+                'still_running=%s',
+                self.task_id, mode,
+                [p['agent_id'] for p in completed_payloads] or 'none',
+                still_running or 'none')
+
         # ── De-dup channel: the agents we just returned synchronously must
         #    NOT also be injected as <swarm-update> user messages on the next
         #    round. Drop their (now-redundant) inbox items. The model still
         #    sees every completion exactly once — here, in the tool return.
         if completed_payloads:
+            _delivered_ids = [p['agent_id'] for p in completed_payloads]
             try:
-                inbox_consume(self.inbox_key,
-                              [p['agent_id'] for p in completed_payloads])
+                inbox_consume(self.inbox_key, _delivered_ids)
             except Exception as e:
                 logger.warning('[Master:%s] inbox consume after await failed: %s',
                                self.task_id, e)
+            # Persist the delivered flag so a restart doesn't re-notify these.
+            try:
+                from lib.swarm import persistence
+                persistence.mark_delivered(self.inbox_key, _delivered_ids)
+            except Exception as e:
+                logger.debug('[Master:%s] mark_delivered after await failed: %s',
+                             self.task_id, e)
         return out
 
     # ── get_agent_result ──────────────────────────────
@@ -664,6 +881,12 @@ class MasterOrchestrator:
                 except Exception as e:
                     logger.warning('[Master:%s] inbox consume after get_agent_result '
                                    'failed: %s', self.task_id, e)
+                try:
+                    from lib.swarm import persistence
+                    persistence.mark_delivered(self.inbox_key, [agent_id])
+                except Exception as e:
+                    logger.debug('[Master:%s] mark_delivered after get_agent_result '
+                                 'failed: %s', self.task_id, e)
                 return payload
             running_ids = (set(self._scheduler._running.keys())
                            if self._scheduler else set())

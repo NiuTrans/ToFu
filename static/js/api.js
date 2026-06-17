@@ -239,6 +239,7 @@
                        { requirement, current: current || null, history: history || [] },
                        { onError: 'null' }),
     builtin:  (name)          => get(`/api/v1/orchestrations/builtin/${encodeURIComponent(name)}`, { onError: 'null' }),
+    roleSchema: ()            => get('/api/v1/orchestrations/role-schema', { onError: 'null' }),
     plan:     (def)           => post('/api/v1/orchestrations/plan', { definition: def }, { onError: 'null' }),
     run:      (def, input)    => post('/api/v1/orchestrations/run', { definition: def, input: input || '' }, { onError: 'null' }),
     runPoll:  (taskId, cursor) => get(`/api/v1/orchestrations/run/poll/${encodeURIComponent(taskId)}?cursor=${cursor || 0}`, { onError: 'null' }),
@@ -249,6 +250,28 @@
     humanInput: (requestId, response) =>
                   post('/api/v1/orchestrations/run/human-input',
                        { requestId, response: response || '' }, { onError: 'null' }),
+    // Durable run instances (Task Mode) — see docs/proposals/TASK_MODE.md.
+    // taskCreate returns {ok, run_id}; taskEvents is the durable cursor
+    // replay that survives reload/restart (unlike runPoll above).
+    taskCreate:  (def, input, orchId) =>
+                  post('/api/v1/orchestrations/tasks',
+                       { definition: def || null, id: orchId || undefined,
+                         input: input || '' },
+                       { parse: 'response', onError: 'null' }),
+    taskList:    (status, orchId)  => {
+      const qs = new URLSearchParams();
+      if (status) qs.set('status', status);
+      if (orchId) qs.set('orch_id', orchId);
+      const q = qs.toString();
+      return get('/api/v1/orchestrations/tasks' + (q ? '?' + q : ''), { onError: 'null' });
+    },
+    taskGet:     (runId)           => get(`/api/v1/orchestrations/tasks/${encodeURIComponent(runId)}`, { onError: 'null' }),
+    taskEvents:  (runId, cursor)   => get(`/api/v1/orchestrations/tasks/${encodeURIComponent(runId)}/events?cursor=${cursor || 0}`, { onError: 'null' }),
+    taskAbort:   (runId)           => post(`/api/v1/orchestrations/tasks/${encodeURIComponent(runId)}/abort`, {}, { onError: 'null' }),
+    taskRemove:  async (runId)     => {
+      const r = await del(`/api/v1/orchestrations/tasks/${encodeURIComponent(runId)}`, { parse: 'response', onError: 'null' });
+      return !!(r && r.ok);
+    },
   };
 
   // memory ----------------------------------------------------------
@@ -429,10 +452,10 @@
   };
 
   // chat (task / streaming control plane) ---------------------------
-  // Stream lifecycle methods. Note: the SSE chat stream itself is still
-  // consumed via raw fetch in main.js / branch.js (we hand back the
-  // Response so callers can pipe `.body.getReader()`). Use stream() to
-  // build that fetch.
+  // Stream lifecycle methods. The SSE chat stream is consumed through
+  // chat.streamResponse() below (ui/sse_pipeline.js + branch.js) — it hands
+  // back the raw Response so callers can pipe `.body.getReader()`. No JS file
+  // calls fetch('/api/chat/stream/...') directly.
   const chat = {
     // Outbound message lifecycle.
     // send() / regenerate() return the raw Response so callers can inspect
@@ -459,6 +482,11 @@
                                        { parse: 'response', onError: 'null' }),
     queueClear:   (convId)      => del(`/api/v1/chat/queue/${encodeURIComponent(convId)}`,
                                        { parse: 'response', onError: 'null' }),
+    // Arm autopilot mid-stream — "take over from here" while a reply is
+    // streaming. Persists autopilotEnabled + flips the live task's config
+    // so the virtual user takes over at the next natural stop.
+    armAutopilot: (convId)      => post('/api/v1/chat/autopilot/arm', { convId },
+                                        { onError: 'null' }),
     // Active-tasks listing — used on init to reconnect SSE streams.
     active:       (opts)        => get('/api/v1/chat/active', Object.assign({ onError: 'null' }, opts || {})),
     activeResponse: (opts)      => request('/api/v1/chat/active', Object.assign({ method: 'GET', parse: 'response', onError: 'null' }, opts || {})),
@@ -466,10 +494,6 @@
     patchToolState: (convId, settings) =>
       request(`/api/v1/chat/tool-state/${encodeURIComponent(convId)}`,
               { method: 'PATCH', json: settings, parse: 'response', onError: 'null' }),
-    // Status of the auto-translate retry loop (poll endpoint).
-    sendTranslateStatus: (convId) =>
-      get(`/api/v1/chat/translate-status/${encodeURIComponent(convId)}`,
-          { onError: 'null' }),
     poll: (taskId, opts) =>
       request(`/api/v1/chat/poll/${encodeURIComponent(taskId)}`,
               Object.assign({ method: 'GET', parse: 'response', onError: 'null' }, opts || {})),
@@ -526,6 +550,11 @@
     update: (payload) =>
       request('/api/v1/server-config',
               { method: 'POST', json: payload, parse: 'response' }),
+    // Built-in (default) system prompt — used by the Settings system-prompt
+    // editor to pre-fill / reset. project & tools flags shape the preview.
+    defaultSystemPrompt: (project, tools) =>
+      get('/api/v1/system-prompt/default?project=' + (project ? '1' : '0')
+          + '&tools=' + (tools === false ? '0' : '1'), { onError: 'null' }),
   };
 
   // features (per-deployment toggles) ------------------------------
@@ -729,6 +758,8 @@
     fetchArxivStream: (url, opts)         =>
       request('/api/paper/fetch-arxiv-stream',
               Object.assign({ method: 'POST', json: { url }, parse: 'response', timeout: 0 }, opts || {})),
+    searchArxiv:    (query, maxResults)   =>
+      post('/api/v1/paper/search-arxiv', { query, max_results: maxResults || 10 }, { onError: 'null' }),
     chatStream:     (body, opts)          =>
       request('/api/paper/chat',
               Object.assign({ method: 'POST', json: body, parse: 'response', timeout: 0 }, opts || {})),

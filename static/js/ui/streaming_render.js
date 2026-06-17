@@ -59,9 +59,94 @@ function _surgicalRerenderMsg(convId, idx) {
 }
 
 /**
+ * Push the empty VU message into conv.messages and stand up the SHARED
+ * streaming substrate for it — the SAME `#streaming-msg` + `streamBufs` +
+ * elapsed-timer machinery the worker turn uses (mirrors the worker→critic
+ * handoff in dispatchSSEEvent).  This is what makes the autopilot reply
+ * render *identically to the agent*: incremental markdown, thinking block,
+ * tool rounds, and the live elapsed-time bar.
+ *
+ * The parent worker turn's `#streaming-msg` is finalized to a static bubble
+ * first (its finish bar is refreshed later when the parent `done` event
+ * lands — see the done handler's autopilot branch in sse_pipeline.js).
+ *
+ * @returns {{msg:Object, idx:number}} the VU message entry.
+ */
+function _beginVuStreaming(convId, conv, vuMsgId) {
+  const vuMsg = {
+    role: "user",
+    content: "",
+    thinking: "",
+    _msgId: vuMsgId,
+    _isVirtualUser: true,
+    _streamingVu: true,
+    timestamp: Date.now(),
+    toolRounds: [],
+  };
+
+  if (activeConvId === convId) {
+    /* Finalize the parent worker's streaming bubble so the VU can own the
+     * single `#streaming-body` element.  Walk back to the nearest non-VU
+     * assistant (the worker turn that just stopped). */
+    const sm = document.getElementById("streaming-msg");
+    if (sm) {
+      let parentAssistant = null;
+      for (let i = conv.messages.length - 1; i >= 0; i--) {
+        const m = conv.messages[i];
+        if (m && m.role === "assistant" && !m._isVirtualUser) { parentAssistant = m; break; }
+      }
+      if (parentAssistant && window.ConvView) {
+        /* Mark the parent so the worker turn's `done` handler knows to
+         * re-render its finish bar (usage / cost / finishReason arrive on
+         * `done`, AFTER this early finalize).  See sse_pipeline.js. */
+        parentAssistant._vuTookOverBubble = true;
+        window.ConvView.finalizeStreaming(convId, parentAssistant);
+      } else {
+        try { sm.remove(); } catch (e) { /* already detached */ }
+      }
+    }
+  }
+
+  conv.messages.push(vuMsg);
+  const idx = conv.messages.length - 1;
+
+  /* Fresh streaming buffer + elapsed timer for the VU turn. */
+  if (typeof twStart === "function") twStart(convId);
+
+  if (activeConvId === convId) {
+    const inner = document.getElementById("chatInner");
+    if (inner) {
+      inner.insertAdjacentHTML(
+        "beforeend",
+        _streamingBubbleHTML("autopilot", null, null, vuMsgId)
+      );
+      if (typeof buildTurnNav === "function") buildTurnNav(conv);
+      if (typeof scrollToBottom === "function"
+          && (typeof isNearBottom !== "function" || isNearBottom(80))) {
+        scrollToBottom();
+      }
+    }
+  }
+  return { msg: vuMsg, idx };
+}
+
+/**
+ * Push the accumulated VU buffer to the shared streaming UI (worker
+ * substrate).  Reads from `streamBufs.get(convId)` exactly like the
+ * worker delta path so the VU bubble renders with identical layout.
+ */
+function _flushVuStreaming(convId) {
+  if (activeConvId !== convId) return;
+  if (typeof twUpdate === "function") { twUpdate(convId); return; }
+}
+
+/**
  * Handle the four autopilot_vu_* SSE event types.  See `_processSSELine`
- * for the contract.  Mutates the conversation's local message state and
- * triggers a surgical re-render so the user sees streaming updates.
+ * for the contract.  The VU streams through the SAME substrate as the
+ * worker (`#streaming-msg` + `streamBufs` + `twUpdate`), so its reply is
+ * presented exactly like an agent turn (incremental markdown, thinking,
+ * tool rounds, elapsed-time bar) — just in the user lane with the
+ * Autopilot avatar/label.
  */
 function _handleAutopilotVuEvent(convId, ev) {
   const conv = conversations.find(c => c.id === convId);
@@ -75,9 +160,26 @@ function _handleAutopilotVuEvent(convId, ev) {
     return;
   }
 
+  if (ev.type === "autopilot_vu_start") {
+    /* Stand up the VU streaming bubble the moment autopilot kicks in, so
+     * the user sees an "Autopilot · composing…" bubble in the USER lane
+     * that then streams the reply live — identical to a worker turn.
+     * In-memory ONLY: nothing is persisted until autopilot_vu_done.  If
+     * the bubble already exists (reconnect / duplicate start) reuse it. */
+    if (_findVuMsgById(conv, vuMsgId)) return;
+    const entry = _beginVuStreaming(convId, conv, vuMsgId);
+    console.info(
+      `[Autopilot VU] ▶ began VU streaming bubble vuMsgId=${vuMsgId.slice(0,12)} ` +
+      `at idx=${entry.idx} for conv=${convId.slice(0,8)}`
+    );
+    try { if (typeof ConvCache !== "undefined") ConvCache.put(conv); }
+    catch (e) { /* non-fatal */ }
+    return;
+  }
+
   if (ev.type === "autopilot_vu_cancel") {
-    /* Remove the placeholder if it has no useful content yet — the VU
-     * bailed out (TASK_DONE / aborted / queued real-user msg). */
+    /* The VU bailed out (TASK_DONE / aborted / queued real-user msg).
+     * Remove the placeholder and tear down the streaming substrate. */
     const entry = _findVuMsgById(conv, vuMsgId);
     if (!entry) return;
     conv.messages.splice(entry.idx, 1);
@@ -85,24 +187,24 @@ function _handleAutopilotVuEvent(convId, ev) {
       `[Autopilot VU] ⛔ cancel — removed placeholder vuMsgId=${vuMsgId.slice(0,12)} ` +
       `for conv=${convId.slice(0,8)}`
     );
+    if (activeConvId === convId) {
+      const sm = document.getElementById("streaming-msg");
+      if (sm) { try { sm.remove(); } catch (e) { /* detached */ } }
+      if (typeof twStop === "function") twStop(convId);
+      if (typeof buildTurnNav === "function") buildTurnNav(conv);
+    }
     if (typeof saveConversations === "function") saveConversations(convId);
     try { if (typeof ConvCache !== "undefined") ConvCache.put(conv); }
     catch (e) { /* non-fatal */ }
-    if (activeConvId === convId) {
-      /* Remove just the VU bubble's DOM node, leave the rest alone
-       * (especially the parent's #streaming-msg). */
-      const el = document.getElementById("msg-" + entry.idx);
-      if (el) el.remove();
-      buildTurnNav(conv);
-    }
     return;
   }
 
   if (ev.type === "autopilot_vu_done") {
-    /* Replace the placeholder's fields with the authoritative final
-     * copy from the backend (content + toolRounds), and clear the
-     * streaming decoration so the bubble looks "settled". */
-    const entry = _findVuMsgById(conv, vuMsgId);
+    /* Replace the placeholder's fields with the authoritative final copy
+     * from the backend (content + toolRounds), clear the streaming
+     * decoration, and finalize the bubble (convert `#streaming-msg` →
+     * static) through the same path the worker uses. */
+    let entry = _findVuMsgById(conv, vuMsgId);
     if (!entry) {
       /* Shouldn't happen — the start event runs first.  Log + push as
        * a fresh tail message so the user still sees the VU reply. */
@@ -115,11 +217,15 @@ function _handleAutopilotVuEvent(convId, ev) {
       });
       delete fresh._streamingVu;
       conv.messages.push(fresh);
+      entry = { msg: fresh, idx: conv.messages.length - 1 };
     } else {
       const finalMsg = ev.vuMessage || {};
-      entry.msg.content = finalMsg.content || entry.msg.content || "";
+      const buf = (typeof streamBufs !== "undefined") ? streamBufs.get(convId) : null;
+      entry.msg.content = finalMsg.content || (buf && buf.content) || entry.msg.content || "";
       if (Array.isArray(finalMsg.toolRounds) && finalMsg.toolRounds.length) {
         entry.msg.toolRounds = finalMsg.toolRounds;
+      } else if (buf && Array.isArray(buf.toolRounds) && buf.toolRounds.length) {
+        entry.msg.toolRounds = buf.toolRounds;
       }
       delete entry.msg._streamingVu;
       console.info(
@@ -128,63 +234,57 @@ function _handleAutopilotVuEvent(convId, ev) {
         `for conv=${convId.slice(0,8)}`
       );
     }
+    if (activeConvId === convId) {
+      /* Convert the live `#streaming-msg` into the settled static bubble,
+       * then tear down the buffer + elapsed timer.  finalizeStreaming now
+       * accepts _isVirtualUser (see conv_view.js). */
+      if (window.ConvView) window.ConvView.finalizeStreaming(convId, entry.msg);
+      if (typeof twStop === "function") twStop(convId);
+    }
     if (typeof saveConversations === "function") saveConversations(convId);
     try { if (typeof ConvCache !== "undefined") ConvCache.put(conv); }
     catch (e) { /* non-fatal */ }
-    if (activeConvId === convId) {
-      const idx = conv.messages.findIndex(m => m && m._msgId === vuMsgId);
-      if (idx >= 0) _surgicalRerenderMsg(convId, idx);
-    }
     return;
   }
 
-  /* autopilot_vu_event — route the inner event into the VU bubble.
-   * LAZY CREATION: the VU bubble is NOT pre-created by the backend.
-   * We create it in-memory the first time a content-bearing event
-   * arrives (delta with text, or tool_start).  Phase-only events
-   * do NOT trigger creation so the user doesn't see an empty bubble
-   * while the VU is still warming up.  DB persistence only happens
-   * when the backend sends autopilot_vu_done (success path). */
+  /* autopilot_vu_event — route the inner event into the VU bubble's shared
+   * stream buffer.  The bubble is normally created EAGERLY by
+   * autopilot_vu_start, but we keep a LAZY-CREATION fallback here for
+   * resilience: if a content-bearing event arrives before / without a
+   * start event (dropped frame, cold replay), stand up the bubble now. */
   const inner = ev.inner || {};
   const itype = inner.type || "";
 
   let entry = _findVuMsgById(conv, vuMsgId);
   if (!entry) {
-    /* Decide whether this event is "content-bearing" enough to warrant
-     * creating the VU bubble.  Only delta-with-text and tool_start
-     * qualify.  Everything else (phase, tool_result for a round we
-     * don't have yet, etc.) is silently dropped — these are either
-     * redundant with the parent-stream chip or will arrive again after
-     * creation. */
     const _isContentBearing =
       (itype === "tool_start") ||
       (itype === "delta" && (inner.content || inner.thinking));
     if (!_isContentBearing) {
       return; // silently skip — nothing to show yet
     }
-    /* Create the VU bubble in-memory. */
-    const vuNew = {
-      role: "user",
-      content: "",
-      _msgId: vuMsgId,
-      _isVirtualUser: true,
-      _streamingVu: true,
-      toolRounds: [],
-    };
-    conv.messages.push(vuNew);
-    entry = { msg: vuNew, idx: conv.messages.length - 1 };
+    entry = _beginVuStreaming(convId, conv, vuMsgId);
     console.info(
-      `[Autopilot VU] ▶ lazy-created VU bubble vuMsgId=${vuMsgId.slice(0,12)} ` +
+      `[Autopilot VU] ▶ lazy-began VU streaming bubble vuMsgId=${vuMsgId.slice(0,12)} ` +
       `at idx=${entry.idx} on inner=${itype} for conv=${convId.slice(0,8)}`
     );
   }
   const vuMsg = entry.msg;
+  const buf = (typeof streamBufs !== "undefined") ? streamBufs.get(convId) : null;
+  if (!Array.isArray(vuMsg.toolRounds)) vuMsg.toolRounds = [];
 
   if (itype === "delta") {
     if (inner.content) vuMsg.content = (vuMsg.content || "") + inner.content;
     if (inner.thinking) vuMsg.thinking = (vuMsg.thinking || "") + inner.thinking;
+    if (buf) {
+      buf.content = vuMsg.content || "";
+      buf.thinking = vuMsg.thinking || "";
+      /* Mirror the worker's phase handling: content delta clears the
+       * phase; thinking-only delta shows the reasoning indicator. */
+      if (inner.content) buf.phase = null;
+      else if (inner.thinking) buf.phase = { phase: "thinking_active" };
+    }
   } else if (itype === "tool_start") {
-    if (!Array.isArray(vuMsg.toolRounds)) vuMsg.toolRounds = [];
     vuMsg.toolRounds.push({
       roundNum: inner.roundNum,
       query: inner.query,
@@ -196,60 +296,64 @@ function _handleAutopilotVuEvent(convId, ev) {
       llmRound: inner.llmRound != null ? inner.llmRound : null,
       _swarm: false,
     });
+    if (buf) {
+      buf.toolRounds = vuMsg.toolRounds;
+      buf.phase = { phase: "tool_exec", detail: inner.query || inner.toolName || "" };
+    }
   } else if (itype === "tool_result") {
-    if (Array.isArray(vuMsg.toolRounds)) {
-      const r = vuMsg.toolRounds.find(rr => rr.roundNum === inner.roundNum);
-      if (r) {
-        r.results = inner.results;
-        r.status = "done";
-        if (inner.searchDiag) r.searchDiag = inner.searchDiag;
-        if (inner.engineBreakdown) r.engineBreakdown = inner.engineBreakdown;
-      }
+    const r = vuMsg.toolRounds.find(rr => rr.roundNum === inner.roundNum);
+    if (r) {
+      r.results = inner.results;
+      r.status = "done";
+      if (inner.searchDiag) r.searchDiag = inner.searchDiag;
+      if (inner.engineBreakdown) r.engineBreakdown = inner.engineBreakdown;
     }
+    if (buf) buf.toolRounds = vuMsg.toolRounds;
   } else if (itype === "tool_progress") {
-    if (Array.isArray(vuMsg.toolRounds)) {
-      const r = vuMsg.toolRounds.find(rr => rr.roundNum === inner.roundNum);
-      if (r) {
-        if (typeof r._partialOutput !== "string") r._partialOutput = "";
-        r._partialOutput += (inner.chunk || "");
-      }
+    const r = vuMsg.toolRounds.find(rr => rr.roundNum === inner.roundNum);
+    if (r) {
+      if (typeof r._partialOutput !== "string") r._partialOutput = "";
+      r._partialOutput += (inner.chunk || "");
     }
+    if (buf) buf.toolRounds = vuMsg.toolRounds;
   } else if (itype === "tool_complete") {
-    if (Array.isArray(vuMsg.toolRounds)) {
-      const r = vuMsg.toolRounds.find(rr =>
-        rr.roundNum === inner.roundNum && rr.toolCallId === inner.toolCallId);
-      if (r) {
-        r.toolContent = inner.toolContent || null;
-        if (inner.toolTokens != null) r.toolTokens = inner.toolTokens;
-        if (inner.compactionLayer) {
-          r.compactionLayer = inner.compactionLayer;
-          r.compactedFromChars = inner.compactedFromChars;
-          r.compactedToChars = inner.compactedToChars;
-        }
+    const r = vuMsg.toolRounds.find(rr =>
+      rr.roundNum === inner.roundNum && rr.toolCallId === inner.toolCallId);
+    if (r) {
+      r.toolContent = inner.toolContent || null;
+      if (inner.toolTokens != null) r.toolTokens = inner.toolTokens;
+      if (inner.compactionLayer) {
+        r.compactionLayer = inner.compactionLayer;
+        r.compactedFromChars = inner.compactedFromChars;
+        r.compactedToChars = inner.compactedToChars;
       }
     }
+    if (buf) buf.toolRounds = vuMsg.toolRounds;
   } else if (itype === "tool_compacted") {
-    if (Array.isArray(vuMsg.toolRounds)) {
-      const r = vuMsg.toolRounds.find(rr => rr.toolCallId === inner.toolCallId);
-      if (r) {
-        r.compactionLayer = inner.compactionLayer || r.compactionLayer || "L1";
-        if (inner.compactedFromChars != null) r.compactedFromChars = inner.compactedFromChars;
-        if (inner.compactedToChars != null) r.compactedToChars = inner.compactedToChars;
-        if (inner.toolTokens != null) r.toolTokens = inner.toolTokens;
-      }
+    const r = vuMsg.toolRounds.find(rr => rr.toolCallId === inner.toolCallId);
+    if (r) {
+      r.compactionLayer = inner.compactionLayer || r.compactionLayer || "L1";
+      if (inner.compactedFromChars != null) r.compactedFromChars = inner.compactedFromChars;
+      if (inner.compactedToChars != null) r.compactedToChars = inner.compactedToChars;
+      if (inner.toolTokens != null) r.toolTokens = inner.toolTokens;
     }
+    if (buf) buf.toolRounds = vuMsg.toolRounds;
   } else if (itype === "phase") {
-    /* Phase events on the VU sub-task are not surfaced in the VU
-     * bubble itself — the parent already shows an
-     * `autopilot_thinking` chip on its worker bubble.  Skip the
-     * single-message re-render so we don't repaint the VU bubble for
-     * every phase tick. */
-    return;
+    /* Drive the same phase indicator the worker uses (tool_exec /
+     * llm_thinking / retrying / working show in the elapsed bar). */
+    if (buf) {
+      buf.phase = {
+        phase: inner.phase,
+        detail: inner.detail || "",
+        tools: inner.tools || [],
+        toolContext: inner.toolContext || "",
+        round: inner.round || 0,
+      };
+    }
   } else {
-    /* stdin_request / stdin_resolved / write_approval_request /
-     * human_guidance_request / human_guidance_response — the VU
-     * bubble doesn't host interactive widgets (the VU IS the user),
-     * so we just log and ignore. */
+    /* stdin_request / write_approval_request / human_guidance_request etc.
+     * — the VU bubble doesn't host interactive widgets (the VU IS the
+     * user), so log and ignore. */
     console.debug(
       `[Autopilot VU] inner type=${itype} not surfaced in VU bubble for ` +
       `conv=${convId.slice(0,8)} (vuMsgId=${vuMsgId.slice(0,12)})`
@@ -257,18 +361,17 @@ function _handleAutopilotVuEvent(convId, ev) {
     return;
   }
 
-  /* ★ Surgical single-message re-render — much cheaper than full
-   * renderChat() and avoids touching the parent's `#streaming-msg`. */
-  if (activeConvId === convId) {
-    _surgicalRerenderMsg(convId, entry.idx);
-  }
+  /* Render through the shared streaming substrate — identical to the
+   * worker delta path. */
+  _flushVuStreaming(convId);
 }
 
 /**
  * Build the HTML string for a streaming bubble (#streaming-msg).
- * @param {'worker'|'planner'|'critic'} role  — which phase / avatar
- * @param {string} [status]   — status text shown inside the pulse
- * @param {string} [timeStr]  — formatted time string (defaults to now)
+ * @param {'worker'|'planner'|'critic'|'autopilot'} role  - which phase / avatar
+ * @param {string} [status]   - status text shown inside the pulse
+ * @param {string} [timeStr]  - formatted time string (defaults to now)
+ * @param {string} [msgId]    - optional data-msg-id to stamp on the bubble
  * @returns {string} HTML string
  */
 function _streamingBubbleHTML(role, status, timeStr, msgId) {
@@ -276,11 +379,15 @@ function _streamingBubbleHTML(role, status, timeStr, msgId) {
     worker:  { avatar: (typeof _TOFU_WORKER_SVG  !== 'undefined') ? _TOFU_WORKER_SVG  : '✦', label: 'Agent',   cls: 'ep-worker-msg',  defaultStatus: 'Preparing...' },
     planner: { avatar: (typeof _TOFU_PLANNER_SVG !== 'undefined') ? _TOFU_PLANNER_SVG : '✦', label: 'Planner', cls: 'ep-planner-msg', defaultStatus: 'Planning…' },
     critic:  { avatar: (typeof _TOFU_CRITIC_SVG  !== 'undefined') ? _TOFU_CRITIC_SVG  : '✦', label: 'Critic',  cls: 'ep-critic-msg',  defaultStatus: 'Reviewing…' },
+    /* Autopilot virtual-user: streams in the USER lane with the same
+     * substrate as the worker so its reply renders identically to the
+     * agent (incremental markdown, thinking, tool rounds, elapsed bar). */
+    autopilot: { avatar: (typeof _TOFU_CRITIC_SVG !== 'undefined') ? _TOFU_CRITIC_SVG : '✦', label: 'Autopilot', cls: 'vu-user-msg', defaultStatus: (typeof t === 'function' ? t('autopilot.composing') : 'Autopilot is composing the next reply…') },
   };
   const c = _cfg[role] || _cfg.worker;
   const st = status || c.defaultStatus;
   const tm = timeStr || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const extraCls = role === 'critic' ? ' user-msg' : '';
+  const extraCls = (role === 'critic' || role === 'autopilot') ? ' user-msg' : '';
   /* safeHtml auto-escapes every interpolation. The avatar is trusted
    * hardcoded SVG/img markup (settings/branding.js) so it is wrapped in
    * raw(); msgId (caller-supplied) is escaped automatically. Returns a
@@ -293,7 +400,7 @@ function _streamingBubbleHTML(role, status, timeStr, msgId) {
 /**
  * Determine streaming bubble role from config / conversation state.
  * @param {Object} conv
- * @param {Object} [cfg] — sendConfig / regenConfig with endpointMode flag
+ * @param {Object} [cfg] - sendConfig / regenConfig with endpointMode flag
  * @returns {'worker'|'planner'}
  */
 function _streamingBubbleRole(conv, cfg) {

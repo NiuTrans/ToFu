@@ -368,7 +368,7 @@ async function saveEditAndResend(idx) {
     conv._translateAbortCtrl = _editAbortCtrl;
     updateSendButton();
     renderConversationList();
-    if (activeConvId === convId) _renderTranslatingBubble(convId);
+    if (activeConvId === convId) _renderTranslatingBubble();
   }
 
   try {

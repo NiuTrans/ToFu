@@ -334,10 +334,9 @@ def _install_flask_shim():
 
     # Werkzeug exceptions are used directly in some places
     # Quart re-exports them, but ensure werkzeug is still importable
-    try:
-        import werkzeug
-    except ImportError:
-        pass
+    import importlib.util
+    if importlib.util.find_spec('werkzeug') is None:
+        logging.getLogger(__name__).debug('werkzeug not importable; relying on quart re-exports')
 
 
 _install_flask_shim()
@@ -458,6 +457,29 @@ for _sub in ('trafilatura.xml', 'trafilatura.core', 'trafilatura.htmlprocessing'
              'trafilatura.metadata'):
     logging.getLogger(_sub).setLevel(logging.ERROR)
 logging.getLogger('hypercorn.access').addFilter(_QuietPollFilter())
+
+
+# ── Crash visibility: route uncaught exceptions to the log files ──
+# faulthandler (top of file) covers C-level fatal signals, but an uncaught
+# *Python* exception in the main thread otherwise reaches only the default
+# excepthook → stderr, never app.log / error.log. Install a hook that logs
+# it at CRITICAL (with traceback) before delegating to whatever hook was
+# already installed (e.g. the bootstrap-delegation hook that re-execs to
+# bootstrap.py on ImportError) — so we add visibility without clobbering it.
+_prev_excepthook = sys.excepthook
+
+def _crash_excepthook(exc_type, exc_value, exc_tb):
+    # Ctrl-C is a normal shutdown path, not a crash — don't scream about it.
+    if not issubclass(exc_type, KeyboardInterrupt):
+        try:
+            logging.getLogger('server').critical(
+                'Uncaught exception — process is terminating',
+                exc_info=(exc_type, exc_value, exc_tb))
+        except Exception:
+            pass  # logging must never mask the original crash
+    (_prev_excepthook or sys.__excepthook__)(exc_type, exc_value, exc_tb)
+
+sys.excepthook = _crash_excepthook
 
 
 # ── Boot progress ──
@@ -911,6 +933,16 @@ def _init_database():
     except Exception as e:
         _server_log.warning('Stale task recovery failed: %s', e)
 
+    # Resume swarm sub-agents that were mid-flight when the server stopped.
+    # DB-backed round-level resume (see lib/swarm/persistence.py): rehydrates
+    # each conversation-scoped session and re-spawns its unfinished agents
+    # from their checkpointed message history.
+    try:
+        from lib.swarm.integration import rehydrate_swarms_on_startup
+        rehydrate_swarms_on_startup()
+    except Exception as e:
+        _server_log.warning('Swarm rehydration failed: %s', e)
+
 
 def _validate_imports():
     """Validate critical imports at startup."""
@@ -1030,6 +1062,43 @@ def _find_free_port(start=15000, end=15100):
         except Exception:
             return p
     return start
+
+
+def _wait_port_free(host, port, timeout=10.0):
+    """Block until ``host:port`` can be bound, or ``timeout`` seconds elapse.
+
+    Uses a real ``bind()`` probe rather than ``connect_ex`` so the server's
+    OWN lingering listener — which is briefly still present right after an
+    in-place re-exec restart — is correctly WAITED OUT instead of being
+    mistaken for a foreign process (the connect-probe would see it as "in
+    use" and silently shift the port). Returns True once the port is bindable.
+
+    Args:
+        host: Bind host (``0.0.0.0`` / ``::`` normalized to all-interfaces).
+        port: Port to wait for.
+        timeout: Max seconds to wait before giving up.
+
+    Returns:
+        True if the port became bindable within ``timeout``, else False.
+    """
+    import socket
+    import time as _t
+    bind_host = '' if host in ('', '0.0.0.0', '::') else host
+    deadline = _t.time() + timeout
+    while True:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((bind_host, port))
+            return True
+        except OSError as e:
+            if _t.time() >= deadline:
+                _server_log.debug('[Port] %s:%d still busy after %.1fs wait: %s',
+                                  bind_host or '*', port, timeout, e)
+                return False
+            _t.sleep(0.25)
+        finally:
+            s.close()
 
 
 def _ensure_tls_certs(certfile='', keyfile=''):
@@ -1234,9 +1303,36 @@ if __name__ == '__main__':
     except Exception as _e:
         _server_log.warning('[Server] PG shutdown hook failed: %s', _e)
 
-    port = _find_free_port(start=args.port)
-    if port != args.port:
-        _server_log.info('Port %d in use — using %d', args.port, port)
+    # On an in-place restart (re-exec), the previous image's listener may
+    # still be draining on the original port for a fraction of a second.
+    # _deferred_reexec stamps the port it was serving into _TOFU_REEXEC_PORT;
+    # honor it by WAITING for that exact port to free up rather than letting
+    # the connect-probe mistake our own lingering socket for a foreign one
+    # and shift to the next port (15000 → 15001 → …).
+    _reexec_port_env = (os.environ.get('_TOFU_REEXEC_PORT', '') or '').strip()
+    os.environ.pop('_TOFU_REEXEC_PORT', None)
+    if _reexec_port_env:
+        try:
+            port = int(_reexec_port_env)
+        except (ValueError, TypeError):
+            port = args.port
+        if _wait_port_free(host, port):
+            _server_log.info('[Restart] Reclaimed original port %d', port)
+        else:
+            _server_log.warning('[Restart] Port %d still busy after wait — '
+                                 'falling back to probe', port)
+            port = _find_free_port(start=port)
+            if port != args.port:
+                _server_log.info('Port %d in use — using %d', args.port, port)
+    else:
+        port = _find_free_port(start=args.port)
+        if port != args.port:
+            _server_log.info('Port %d in use — using %d', args.port, port)
+
+    # Record the port we actually bound so an in-place restart (re-exec)
+    # can reclaim it instead of re-probing. Read by _deferred_reexec in
+    # routes/api_v1/update.py.
+    os.environ['_TOFU_RUNTIME_PORT'] = str(port)
 
     # ── TLS / HTTP/2 setup ──
     from lib.env_compat import getenv_compat
@@ -1401,6 +1497,22 @@ if __name__ == '__main__':
     hconfig.keep_alive_timeout = 600
     hconfig.graceful_timeout = 10
 
+    # ── Listen backlog ──
+    # Hypercorn's default (100) is small: if the event loop briefly stalls
+    # (CPU starvation from sibling processes, a burst of slow handlers), the
+    # kernel accept queue fills and further connections are dropped/reset —
+    # the page "goes dark" even though the process is alive and the port is
+    # bound. A larger backlog lets transient stalls QUEUE instead of failing,
+    # so the browser reconnect succeeds once the loop catches up. The kernel
+    # still caps this at net.core.somaxconn. Override via TOFU_LISTEN_BACKLOG.
+    try:
+        _listen_backlog = int(os.environ.get('TOFU_LISTEN_BACKLOG', '0') or '0')
+    except (ValueError, TypeError):
+        _listen_backlog = 0
+    if _listen_backlog <= 0:
+        _listen_backlog = 1024
+    hconfig.backlog = _listen_backlog
+
     if _has_tls:
         hconfig.certfile = _tls_cert
         hconfig.keyfile = _tls_key
@@ -1408,6 +1520,18 @@ if __name__ == '__main__':
     # ── Run ──
     async def _serve():
         loop = asyncio.get_running_loop()
+
+        # Uncaught exceptions in coroutines / callbacks never reach
+        # sys.excepthook — asyncio routes them here. Default behavior only
+        # logs to the root 'asyncio' logger at ERROR; funnel through our
+        # 'server' logger at ERROR with the traceback so they land in
+        # error.log with full context.
+        def _loop_exception_handler(_loop, ctx):
+            msg = ctx.get('message') or 'Unhandled exception in event loop'
+            exc = ctx.get('exception')
+            _server_log.error('[asyncio] %s', msg,
+                              exc_info=exc if exc else False)
+        loop.set_exception_handler(_loop_exception_handler)
 
         # ── Size the default executor ──
         # Every sync route handler runs in this loop's default executor via

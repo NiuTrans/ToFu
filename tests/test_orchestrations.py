@@ -140,17 +140,29 @@ class _AppFixture:
         api_keys._cache.clear()
         api_keys._cache_loaded = False
 
+        # Install the flask→quart shim the same way the server does
+        # (server._install_flask_shim handles the sync get_json wrapper +
+        # Quart config defaults that a bare inline copy misses). This MUST
+        # run before importing routes.* — routes/__init__ → routes/push.py
+        # calls Blueprint.websocket(), which only exists after the shim is
+        # installed. Otherwise a standalone run of this file errors at import.
+        import server  # noqa: F401  — import side-effect installs the shim
+
         # Redirect the orchestrations store to a tmp file.
         import routes.api_v1.orchestrations as orch_mod
         self._orig_orch_path = orch_mod._ORCH_PATH
         orch_mod._ORCH_PATH = os.path.join(self._tmp.name, 'orchestrations.json')
 
-        # Install the flask→quart shim the same way the server does
-        # (server._install_flask_shim handles the sync get_json wrapper +
-        # Quart config defaults that a bare inline copy misses).
-        import server  # noqa: F401  — import side-effect installs the shim
-
         os.environ['TUNNEL_TOKEN'] = 'test-tunnel-token-not-real'
+
+        # Force private mode: the auth gate's default is 'open', which hands
+        # every loopback (test-client) request a synthetic admin context, so
+        # the 'requires auth → 401' assertions would see 200. Pin private and
+        # clear the cached state so it takes effect this process.
+        self._orig_auth_mode = os.environ.get('TOFU_AUTH_MODE')
+        os.environ['TOFU_AUTH_MODE'] = 'private'
+        from lib import auth_mode
+        auth_mode.reset_for_tests()
 
         from quart import Quart
         self.app = Quart(__name__)
@@ -169,6 +181,12 @@ class _AppFixture:
         api_keys._cache.clear()
         api_keys._cache_loaded = False
         orch_mod._ORCH_PATH = self._orig_orch_path
+        if self._orig_auth_mode is None:
+            os.environ.pop('TOFU_AUTH_MODE', None)
+        else:
+            os.environ['TOFU_AUTH_MODE'] = self._orig_auth_mode
+        from lib import auth_mode
+        auth_mode.reset_for_tests()
         self._tmp.cleanup()
 
 
@@ -293,6 +311,54 @@ class CrudTest(unittest.TestCase):
             r = await self._cli().get('/api/v1/orchestrations/builtin/nope',
                                       headers=self._hdr())
             self.assertEqual(r.status_code, 404)
+        _run(go())
+
+    def test_role_schema_full_map(self):
+        async def go():
+            r = await self._cli().get('/api/v1/orchestrations/role-schema',
+                                      headers=self._hdr())
+            self.assertEqual(r.status_code, 200)
+            body = await r.get_json()
+            self.assertTrue(body['ok'])
+            self.assertIn('critic', body['roles'])
+            self.assertIn('worker', body['roles'])
+            self.assertTrue(body['generic'])
+            self.assertIn('select', body['kinds'])
+            # Field labels are i18n keys, not user-facing strings.
+            crit = body['roles']['critic']
+            self.assertEqual(crit[0]['key'], 'objective')
+            self.assertTrue(all(f['label'].startswith('orch.') for f in crit))
+        _run(go())
+
+    def test_role_schema_single_role(self):
+        async def go():
+            r = await self._cli().get(
+                '/api/v1/orchestrations/role-schema?role=worker',
+                headers=self._hdr())
+            self.assertEqual(r.status_code, 200)
+            body = await r.get_json()
+            self.assertTrue(body['ok'])
+            self.assertEqual(body['role'], 'worker')
+            keys = [f['key'] for f in body['fields']]
+            self.assertIn('must_do', keys)
+            self.assertIn('must_not_do', keys)
+        _run(go())
+
+    def test_role_schema_unknown_role_gets_generic(self):
+        async def go():
+            r = await self._cli().get(
+                '/api/v1/orchestrations/role-schema?role=made-up',
+                headers=self._hdr())
+            body = await r.get_json()
+            self.assertTrue(body['ok'])
+            keys = [f['key'] for f in body['fields']]
+            self.assertEqual(keys[0], 'objective')  # generic fallback
+        _run(go())
+
+    def test_role_schema_requires_auth(self):
+        async def go():
+            r = await self._cli().get('/api/v1/orchestrations/role-schema')
+            self.assertEqual(r.status_code, 401)
         _run(go())
 
     def test_plan_returns_steps(self):
@@ -423,7 +489,7 @@ class TemplateBakedCoordsTest(unittest.TestCase):
 
     _JS_PATH = os.path.join(os.path.dirname(__file__), '..',
                             'static', 'js', 'orchestration.js')
-    _TEMPLATES = ('endpoint', 'fanout', 'adversarial')
+    _TEMPLATES = ('endpoint', 'autopilot', 'fanout', 'adversarial')
 
     # var <name> = mk({ ptype: 'role', role: 'planner' }, 155, 180, ...);
     _MK_RE = re.compile(
@@ -498,6 +564,239 @@ class TemplateBakedCoordsTest(unittest.TestCase):
                         f"({n['baked_x']},{n['baked_y']}) != layout "
                         f"({pos['x']},{pos['y']}) — re-run layout_definition "
                         f"and update the baked coords in orchestration.js")
+
+
+# ── Durable run-instance persistence (Task Mode, Phase 2) ───────────
+
+class RunInstanceTest(unittest.TestCase):
+    """lib.orchestration_runs — durable run header + event log against a
+    fresh SQLite DB. Exercises the load-bearing persistence layer directly
+    (no app/HTTP), mirroring the dual-sink contract the /tasks routes rely on.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmpdir = tempfile.TemporaryDirectory()
+        cls._dbpath = os.path.join(cls._tmpdir.name, 'orch_runs.db')
+        os.environ['TOFU_DB_BACKEND'] = 'sqlite'
+        os.environ['TOFU_DB_PATH'] = cls._dbpath
+        from lib.database import init_db
+        init_db()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmpdir.cleanup()
+
+    def _defn(self):
+        return {'schema': 'tofu.orchestration/v1', 'name': 'Screener',
+                'nodes': [], 'edges': []}
+
+    def test_create_get_list_and_definition_snapshot(self):
+        from lib import orchestration_runs as r
+        rid = r.new_run_id()
+        self.assertTrue(rid.startswith('run_'))
+        r.create_run(rid, definition=self._defn(), input_text='go',
+                     orch_id='orch_x', name='Screener', created_by='k1')
+        run = r.get_run(rid)
+        self.assertEqual(run['status'], 'pending')
+        self.assertEqual(run['orch_id'], 'orch_x')
+        self.assertEqual(run['definition']['name'], 'Screener')  # snapshot
+        self.assertEqual(run['input'], 'go')
+        # list omits the definition blob (cheap listing)
+        listed = [x for x in r.list_runs() if x['id'] == rid]
+        self.assertEqual(len(listed), 1)
+        self.assertNotIn('definition', listed[0])
+        r.delete_run(rid)
+
+    def test_event_log_cursor_replay_and_dup_seq_is_benign(self):
+        from lib import orchestration_runs as r
+        rid = r.new_run_id()
+        r.create_run(rid, definition=self._defn())
+        r.append_event(rid, 0, {'type': 'flow_start', 'nodes': 2})
+        r.append_event(rid, 1, {'type': 'step_start', 'node_id': 'n1'})
+        r.append_event(rid, 2, {'type': 'step_complete', 'node_id': 'n1'})
+        # duplicate seq (replay race) must not raise and must not duplicate
+        r.append_event(rid, 2, {'type': 'dup'})
+        evs = r.get_events(rid, 0)
+        self.assertEqual([e['type'] for e in evs],
+                         ['flow_start', 'step_start', 'step_complete'])
+        self.assertTrue(all('seq' in e for e in evs))
+        # cursor replay from the middle
+        self.assertEqual([e['type'] for e in r.get_events(rid, 2)],
+                         ['step_complete'])
+        r.delete_run(rid)
+
+    def test_terminal_status_sets_finished_and_final(self):
+        from lib import orchestration_runs as r
+        rid = r.new_run_id()
+        r.create_run(rid, definition=self._defn())
+        r.update_status(rid, 'done', final='12 shortlisted', error=None)
+        run = r.get_run(rid)
+        self.assertEqual(run['status'], 'done')
+        self.assertEqual(run['final'], '12 shortlisted')
+        self.assertGreater(run['finished_at'], 0)
+        self.assertIsNone(run['error'])
+        r.delete_run(rid)
+
+    def test_status_filter_and_delete(self):
+        from lib import orchestration_runs as r
+        rid = r.new_run_id()
+        r.create_run(rid, definition=self._defn(), orch_id='orch_f')
+        r.update_status(rid, 'error', error='boom')
+        self.assertTrue(any(x['id'] == rid for x in r.list_runs(status='error')))
+        self.assertFalse(any(x['id'] == rid for x in r.list_runs(status='done')))
+        run = r.get_run(rid)
+        self.assertEqual(run['error'], 'boom')
+        self.assertTrue(r.delete_run(rid))
+        self.assertIsNone(r.get_run(rid))
+
+
+class TaskRunHttpTest(unittest.TestCase):
+    """End-to-end through the REAL /api/v1/orchestrations/tasks routes:
+    POST a flow → poll /events to completion → assert the durable event log
+    and final result persisted.
+
+    This is the load-bearing coverage for the DUAL-SINK durability claim:
+    it drives the actual route handler, the real FlowExecutor, and the real
+    orchestration_runs DB tables. The only thing stubbed is the LLM —
+    FlowExecutor._default_runner is patched to a canned response so no
+    network/model call happens (the engine, event emission, dual-sink
+    on_event, and DB persistence are all exercised for real).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        # Fresh SQLite DB BEFORE the app/runtime touch it. The worker thread
+        # acquires its own thread-local connection against this global path,
+        # so it must be set + initialized before any run is spawned.
+        cls._dbtmp = tempfile.TemporaryDirectory()
+        os.environ['TOFU_DB_BACKEND'] = 'sqlite'
+        os.environ['TOFU_DB_PATH'] = os.path.join(cls._dbtmp.name, 'tasks.db')
+        from lib.database import init_db
+        init_db()
+
+        cls.fix = _AppFixture()
+        from lib.api_keys import create_key
+        _row, cls.token = create_key(name='orch-task-test', scopes=[], admin=True)
+
+        # Stub the LLM-backed agent runner: every role node returns a canned
+        # deliverable. Keeps the engine + dual-sink real, the model fake.
+        import lib.orchestration_engine as eng
+        cls._orig_runner = eng.FlowExecutor._default_runner
+        eng.FlowExecutor._default_runner = (
+            lambda self, node, context, iteration: {
+                'output': 'stub output for ' + str(node.get('role') or node.get('id')),
+                'status': 'completed', 'error': ''})
+
+    @classmethod
+    def tearDownClass(cls):
+        import lib.orchestration_engine as eng
+        eng.FlowExecutor._default_runner = cls._orig_runner
+        cls.fix.cleanup()
+        cls._dbtmp.cleanup()
+
+    def _hdr(self):
+        return {'Authorization': f'Bearer {self.token}'}
+
+    def _def(self, name='TaskFlow'):
+        return {
+            'schema': 'tofu.orchestration/v1', 'name': name,
+            'nodes': [
+                {'id': 's1', 'type': 'control', 'kind': 'start',
+                 'params': {'seed': 'screen these candidates'}},
+                {'id': 'w1', 'type': 'role', 'role': 'worker',
+                 'params': {'tier': 'heavy', 'isolation': 'shared-context'}},
+                {'id': 'e1', 'type': 'control', 'kind': 'stop'},
+            ],
+            'edges': [{'from': 's1', 'to': 'w1'}, {'from': 'w1', 'to': 'e1'}],
+        }
+
+    def test_create_then_poll_events_to_completion(self):
+        async def go():
+            cli = self.fix.app.test_client()
+            # 1. POST a durable run.
+            r = await cli.post('/api/v1/orchestrations/tasks',
+                               headers=self._hdr(),
+                               json={'definition': self._def(), 'input': 'go'})
+            self.assertEqual(r.status_code, 201)
+            created = await r.get_json()
+            self.assertTrue(created['ok'])
+            run_id = created['run_id']
+            self.assertTrue(run_id.startswith('run_'))
+
+            # 2. Poll /events until done. The worker runs via
+            # asyncio.ensure_future on THIS loop, so the awaits below both
+            # advance it and consume the cursor stream.
+            cursor, status, seen, deadline = 0, 'pending', [], 0
+            while deadline < 100:   # ~10s cap
+                deadline += 1
+                r = await cli.get(
+                    f'/api/v1/orchestrations/tasks/{run_id}/events?cursor={cursor}',
+                    headers=self._hdr())
+                self.assertEqual(r.status_code, 200)
+                body = await r.get_json()
+                self.assertTrue(body['ok'])
+                for ev in body['events']:
+                    seen.append(ev['type'])
+                cursor = body['next_cursor']
+                status = body['status']
+                if body['done']:
+                    break
+                await asyncio.sleep(0.1)
+
+            # 3. The run completed and the durable event log replays the
+            # real engine vocabulary.
+            self.assertEqual(status, 'done', f'did not finish; saw={seen}')
+            self.assertIn('flow_start', seen)
+            self.assertIn('step_complete', seen)
+            self.assertIn('flow_complete', seen)
+
+            # 4. The header row persisted the terminal status + final.
+            r = await cli.get(f'/api/v1/orchestrations/tasks/{run_id}',
+                              headers=self._hdr())
+            self.assertEqual(r.status_code, 200)
+            run = (await r.get_json())['run']
+            self.assertEqual(run['status'], 'done')
+            self.assertEqual(run['definition']['name'], 'TaskFlow')  # snapshot
+
+            # 5. Durability: a SECOND poll from cursor 0 replays the SAME
+            # events from the DB (not the in-memory runtime) — the dual-sink
+            # claim. Re-fetch via the route after completion.
+            r = await cli.get(
+                f'/api/v1/orchestrations/tasks/{run_id}/events?cursor=0',
+                headers=self._hdr())
+            replay = await r.get_json()
+            replay_types = [e['type'] for e in replay['events']]
+            self.assertIn('flow_start', replay_types)
+            self.assertIn('flow_complete', replay_types)
+            self.assertTrue(replay['done'])
+
+            # 6. The run shows up in the list, then deletes cleanly.
+            r = await cli.get('/api/v1/orchestrations/tasks', headers=self._hdr())
+            runs = (await r.get_json())['runs']
+            self.assertTrue(any(x['id'] == run_id for x in runs))
+            r = await cli.delete(f'/api/v1/orchestrations/tasks/{run_id}',
+                                 headers=self._hdr())
+            self.assertEqual(r.status_code, 200)
+            r = await cli.get(f'/api/v1/orchestrations/tasks/{run_id}',
+                              headers=self._hdr())
+            self.assertEqual(r.status_code, 404)
+        _run(go())
+
+    def test_create_invalid_definition_is_400(self):
+        async def go():
+            bad = self._def(); bad['name'] = ''
+            r = await self.fix.app.test_client().post(
+                '/api/v1/orchestrations/tasks', headers=self._hdr(),
+                json={'definition': bad})
+            self.assertEqual(r.status_code, 400)
+        _run(go())
+
+    def test_tasks_require_auth(self):
+        async def go():
+            r = await self.fix.app.test_client().get('/api/v1/orchestrations/tasks')
+            self.assertEqual(r.status_code, 401)
+        _run(go())
 
 
 if __name__ == '__main__':

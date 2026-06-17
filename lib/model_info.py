@@ -114,6 +114,43 @@ def is_deepseek(model: str) -> bool:
     return 'deepseek' in model.lower()
 
 
+# Gemini 3.x reasoning-effort ladder.
+#
+# Gemini 3.x is a *reasoning* model family (minimal / low / medium / high
+# thinking levels, default medium). On the OpenAI-compatible gateway the only
+# knob that actually reaches Vertex's ``thinkingLevel`` is the OpenAI-style
+# ``reasoning_effort`` string — verified empirically by the reasoning-token
+# count in ``usage`` (minimal≈0 → high≈1000+ tokens). The legacy
+# ``enable_thinking`` boolean and the nested ``thinking.thinking_level`` field
+# are both silently ignored on this path.
+#
+# Tofu's depth ladder (off/low/medium/high/xhigh/max) collapses onto Gemini's
+# four levels — xhigh/max have no Gemini equivalent and clamp to ``high``.
+_GEMINI_EFFORT_MAP = {
+    'off': 'minimal', 'minimal': 'minimal',
+    'low': 'low',
+    'medium': 'medium',
+    'high': 'high', 'xhigh': 'high', 'max': 'high',
+}
+
+
+def gemini_reasoning_effort(effort, thinking_enabled: bool = True) -> str:
+    """Map a Tofu thinking-depth value to a Gemini 3.x ``reasoning_effort``.
+
+    Args:
+        effort: Tofu depth ladder value (off/low/medium/high/xhigh/max) or None.
+        thinking_enabled: When False, force ``minimal`` regardless of effort
+            (Gemini has no true "off" — minimal is the lowest level and yields
+            ~0 reasoning tokens for simple queries).
+
+    Returns:
+        One of ``'minimal'`` / ``'low'`` / ``'medium'`` / ``'high'``.
+    """
+    if not thinking_enabled:
+        return 'minimal'
+    return _GEMINI_EFFORT_MAP.get((effort or 'medium').lower(), 'medium')
+
+
 
 # ══════════════════════════════════════════════════════════
 #  Continue / Resume capability probes

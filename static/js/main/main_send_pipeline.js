@@ -60,13 +60,12 @@ async function startAssistantResponse(convId) {
   //   We sync all messages EXCEPT the trailing empty assistant (it's just a
   //   UI placeholder — the backend doesn't need it).
   await syncConversationToServer(conv);
-  // Debug panel shows raw conv.messages for inspection (not API-processed).
-  showMessagesInDebug(
-    conv.messages.slice(0, -1),  // exclude trailing empty assistant msg
-    `${conv.messages.length} ${t('conv.messages')}`,
-    false,
-    convId,
-  );
+  // Debug panel: single source of truth is the backend. The DB was just
+  // synced above, so restoreDebugForConv fetches the exact api-form messages
+  // the LLM will see (via /debug-messages → build_api_messages_from_db),
+  // instead of the raw, not-API-processed client-side conv.messages. The
+  // subsequent messages_snapshot SSE updates it in place as rounds run.
+  if (typeof restoreDebugForConv === "function") restoreDebugForConv(convId);
   let taskId;
   /* ★ Use shared _buildConvConfig to avoid config divergence.
    * startAssistantResponse is now only used by continueAssistant() and
@@ -380,7 +379,7 @@ async function sendMessage() {
     conv._translateAbortCtrl = _sendAbortCtrl;
     updateSendButton();
     renderConversationList();
-    if (activeConvId === convId) _renderTranslatingBubble(convId);
+    if (activeConvId === convId) _renderTranslatingBubble();
   }
 
   try {

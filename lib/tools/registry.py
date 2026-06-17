@@ -32,12 +32,41 @@ Design contract (DO NOT BREAK)
 4. **Side-effect gates are allowed.**  ``build()`` may log (e.g.
    "browser requested but extension not connected") and may return an
    empty list — exactly mirroring the legacy behaviour.
+
+Plugin isolation (multi-tenant)
+-------------------------------
+``discover_plugin_specs()`` loads third-party ``tofu.tools`` entry points into
+the SAME process-global ``_TOOL_SPECS`` list as the built-ins.  On a shared,
+multi-tenant server (e.g. the headless ``/api/v1/agent/run`` API) that means a
+plugin installed for one caller would otherwise be visible to EVERY caller —
+its tool schema (and any imperative "always call me first" text in that schema)
+silently pollutes unrelated requests.
+
+To prevent this, every spec carries a :attr:`ToolSpec.source`
+(``'builtin'`` | ``'plugin'``) tag and plugins additionally carry a
+:attr:`ToolSpec.plugin_name`.  :func:`assemble_tool_list` consults the
+per-request :attr:`ToolContext.enabled_plugins` allow-list:
+
+* built-in specs are ALWAYS evaluated;
+* a plugin spec is evaluated only when its ``plugin_name`` is allow-listed.
+
+The allow-list is resolved per request by :func:`resolve_enabled_plugins` from
+``cfg['plugins']`` (request-scoped) falling back to the
+``TOFU_DEFAULT_TOOL_PLUGINS`` env var (deployment-wide default).  The default
+when neither is set is **fail-closed**: NO third-party plugins are visible.  A
+dedicated single-tenant deployment that wants the old "everything I installed
+is on" behaviour sets ``TOFU_DEFAULT_TOOL_PLUGINS=*`` (or passes
+``cfg['plugins']='*'``), which maps to ``enabled_plugins=None`` (gate fully
+open).  This isolation is a VISIBILITY boundary (the LLM never sees the schema),
+not a security sandbox — a plugin's handler code still lives in-process.
 """
 
 from __future__ import annotations
 
+import os
+import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from lib.log import get_logger
@@ -83,6 +112,20 @@ class ToolContext:
     scheduler_enabled: bool = False
     messages: list[dict[str, Any]] | None = None
 
+    # ── Multi-tenant plugin visibility allow-list ──
+    # Which third-party (``source='plugin'``) tool specs this task may see.
+    #   * ``None``  → ALL plugins visible (single-tenant / legacy behaviour —
+    #                 e.g. a dedicated app/ deployment that owns its process).
+    #   * ``set()`` → NO plugins visible (the safe headless multi-tenant
+    #                 default: a shared server never leaks one tenant's
+    #                 plugins to another).
+    #   * ``{names}`` → only plugins whose ``ToolSpec.plugin_name`` is in the
+    #                 set are visible.
+    # Built-in specs are NEVER affected by this field. Populated from
+    # ``cfg['plugins']`` (per-request) falling back to the
+    # ``TOFU_DEFAULT_TOOL_PLUGINS`` env var — see :meth:`resolve_enabled_plugins`.
+    enabled_plugins: set[str] | None = None
+
     # ── Mutated by the assembler between phases ──
     current_count: int = 0
     has_base_tools: bool = False
@@ -91,6 +134,19 @@ class ToolContext:
     def tid(self) -> str:
         """Short task-id prefix for log lines."""
         return (self.task_id or '')[:8]
+
+    def plugin_allowed(self, plugin_name: str) -> bool:
+        """Whether a ``source='plugin'`` spec named *plugin_name* is visible.
+
+        ``enabled_plugins is None`` → all plugins allowed (legacy / dedicated
+        single-tenant process). Otherwise the plugin must be explicitly listed.
+        A plugin spec with an empty ``plugin_name`` (a misconfigured plugin
+        that didn't get tagged) is treated as NOT allow-listed unless the gate
+        is fully open (``None``) — fail-closed, never leak by accident.
+        """
+        if self.enabled_plugins is None:
+            return True
+        return bool(plugin_name) and plugin_name in self.enabled_plugins
 
     @property
     def multiroot_active(self) -> bool:
@@ -171,6 +227,21 @@ class ToolSpec:
     handler_special:
         If set (e.g. ``'__code_exec__'``), register :attr:`handler` as a
         *special* dispatch key instead of by exact name.
+    source:
+        Provenance of this spec — ``'builtin'`` (registered by core at import
+        time) or ``'plugin'`` (contributed by a third-party ``tofu.tools``
+        entry point).  Set automatically by :func:`discover_plugin_specs`;
+        built-ins keep the default.  Drives the per-request visibility gate in
+        :func:`assemble_tool_list`: ``'builtin'`` specs are ALWAYS evaluated,
+        ``'plugin'`` specs only when allow-listed via
+        :attr:`ToolContext.enabled_plugins`.  This is the multi-tenant
+        isolation seam — see the module-level "Plugin isolation" note.
+    plugin_name:
+        For ``source='plugin'`` specs, the entry-point name the spec was loaded
+        from (e.g. ``'liantong_kb'``).  This — NOT :attr:`key` — is what a
+        caller lists in ``config.plugins`` / ``TOFU_DEFAULT_TOOL_PLUGINS`` to
+        make the plugin visible.  One entry point may register several specs;
+        they all share its ``plugin_name``.  Empty for built-ins.
     """
 
     key: str
@@ -184,6 +255,8 @@ class ToolSpec:
     handler: ToolHandlerFn | None = None
     handler_names: frozenset[str] = field(default_factory=frozenset)
     handler_special: str = ''
+    source: str = 'builtin'
+    plugin_name: str = ''
 
 
 # ── Module-level registry ─────────────────────────────────
@@ -301,9 +374,21 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
     """
     tool_list: list[dict] = []
 
+    def _visible(spec: ToolSpec) -> bool:
+        # Built-ins always evaluated; plugins gated by the per-request
+        # allow-list so one tenant's installed plugin can't leak into another's
+        # tool surface on a shared server.
+        if spec.source != 'plugin':
+            return True
+        if ctx.plugin_allowed(spec.plugin_name):
+            return True
+        logger.debug('[Task %s] plugin spec key=%s (plugin=%s) hidden — not in '
+                     'enabled_plugins', ctx.tid, spec.key, spec.plugin_name)
+        return False
+
     # ── Base phase ──
     for spec in _TOOL_SPECS:
-        if spec.phase != 'base':
+        if spec.phase != 'base' or not _visible(spec):
             continue
         ctx.current_count = len(tool_list)
         try:
@@ -318,7 +403,7 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
 
     # ── Capability phase ──
     for spec in _TOOL_SPECS:
-        if spec.phase != 'capability':
+        if spec.phase != 'capability' or not _visible(spec):
             continue
         ctx.current_count = len(tool_list)
         try:
@@ -492,6 +577,19 @@ def _build_mcp(ctx: ToolContext) -> list[dict]:
     return []
 
 
+def _build_custom(ctx: ToolContext) -> list[dict]:
+    # Per-request custom tools brought by a headless /api/v1/agent/run caller.
+    # The route validates + mints a ToolEnvironment, stashes its clean schemas
+    # on cfg['_customToolSchemas'], and attaches the env as task['_tool_env']
+    # (whose handlers the executor resolves before the global registry).
+    # Registered LAST so the cache-stable built-in ordering is untouched.
+    schemas = ctx.cfg.get('_customToolSchemas')
+    if not schemas or not isinstance(schemas, list):
+        return []
+    logger.info('[Task %s] 🧩 Custom tools injected: %d', ctx.tid, len(schemas))
+    return list(schemas)
+
+
 def _register_builtins() -> None:
     """Register the built-in tool specs in canonical (cache-stable) order."""
     builtins = [
@@ -554,6 +652,10 @@ def _register_builtins() -> None:
                  category='swarm', description='Async multi-agent swarm'),
         ToolSpec('mcp', _build_mcp, phase='capability',
                  category='mcp', description='External MCP-server tools'),
+        # ── per-request custom tools (always last; handlers are task-local) ──
+        ToolSpec('custom', _build_custom, phase='capability',
+                 category='custom',
+                 description='Per-request custom tools (handlers via task[_tool_env])'),
     ]
     for spec in builtins:
         register_tool_spec(spec)
@@ -598,16 +700,109 @@ def discover_plugin_specs() -> int:
         logger.debug('[ToolRegistry] entry_points lookup failed: %s', e)
         return 0
     for ep in eps:
+        ep_name = getattr(ep, 'name', '?')
         try:
             register_fn = ep.load()
-            register_fn(register_tool_spec)
+            # Hand the plugin a wrapper that STAMPS provenance onto every spec
+            # it registers, so we don't depend on the plugin author remembering
+            # to set source/plugin_name. This is what makes the per-request
+            # visibility gate (ToolContext.enabled_plugins) able to tell a
+            # plugin's specs apart from built-ins — see the module "Plugin
+            # isolation" note. ``replace`` is safe on the frozen dataclass.
+            def _stamping_register(spec: ToolSpec, *, replace_existing: bool = False,
+                                   _pname: str = ep_name, **_kw) -> None:
+                # Accept the plugin author's ``replace=`` kwarg under either
+                # name (back-compat) without colliding with dataclasses.replace.
+                do_replace = replace_existing or bool(_kw.get('replace'))
+                stamped = replace(spec, source='plugin', plugin_name=_pname)
+                register_tool_spec(stamped, replace=do_replace)
+            register_fn(_stamping_register)
             loaded += 1
             logger.info('[ToolRegistry] loaded plugin tool spec(s) from %s',
-                        ep.name)
+                        ep_name)
         except Exception as e:
             logger.warning('[ToolRegistry] plugin %s failed to load: %s',
-                           getattr(ep, 'name', '?'), e, exc_info=True)
+                           ep_name, e, exc_info=True)
     return loaded
+
+
+def available_plugins() -> dict[str, list[str]]:
+    """Map each loaded plugin name → the spec keys it registered.
+
+    Introspection helper for ops / docs / a future ``/api/v1/capabilities``
+    surface: lets an operator see WHICH third-party plugins are installed in
+    this process and therefore what a caller may name in ``config.plugins``.
+    Built-in specs are excluded.
+    """
+    out: dict[str, list[str]] = {}
+    for spec in _TOOL_SPECS:
+        if spec.source == 'plugin' and spec.plugin_name:
+            out.setdefault(spec.plugin_name, []).append(spec.key)
+    return out
+
+
+# ══════════════════════════════════════════════════════════
+#  Per-request plugin allow-list resolution
+# ══════════════════════════════════════════════════════════
+
+_DEFAULT_PLUGINS_ENV = 'TOFU_DEFAULT_TOOL_PLUGINS'
+
+
+def _parse_plugin_spec(value: Any) -> set[str] | None:
+    """Normalise a raw plugins value into an allow-list set (or ``None``).
+
+    Accepts:
+      * ``'*'`` / ``['*']`` / ``'all'`` → ``None`` (gate fully open, ALL
+        plugins visible).
+      * a comma/space-separated string  → set of names.
+      * a list/tuple/set of names       → set of names.
+      * ``None`` / ``''`` / ``[]``      → empty set (NO plugins visible).
+
+    The ``'*'`` sentinel maps to ``None`` because that is exactly the
+    ``ToolContext.enabled_plugins`` value meaning "allow everything".
+    """
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        v = value.strip()
+        if v in ('*', 'all'):
+            return None
+        if not v:
+            return set()
+        return {tok for tok in re.split(r'[,\s]+', v) if tok}
+    if isinstance(value, (list, tuple, set)):
+        items = {str(x).strip() for x in value if str(x).strip()}
+        if '*' in items or 'all' in items:
+            return None
+        return items
+    logger.debug('[ToolRegistry] ignoring unrecognised plugins value: %r', value)
+    return set()
+
+
+def resolve_enabled_plugins(cfg: dict[str, Any]) -> set[str] | None:
+    """Resolve the per-request plugin allow-list for :class:`ToolContext`.
+
+    Resolution order (first non-absent wins):
+
+    1. ``cfg['plugins']`` — request-scoped. A headless caller sets this via
+       ``config.plugins`` on ``/api/v1/agent/run`` (or any orchestrator cfg).
+    2. ``TOFU_DEFAULT_TOOL_PLUGINS`` env var — deployment-wide default. A
+       dedicated single-tenant install (e.g. liantong's ``app/`` copy) sets
+       this once so it never has to pass ``plugins`` per request.
+    3. Neither set → **fail-closed**: empty set → NO third-party plugins.
+
+    Each level accepts the :func:`_parse_plugin_spec` vocabulary, including the
+    ``'*'`` wildcard (→ ``None`` = all plugins visible).
+
+    Returns:
+        ``None`` (all plugins), ``set()`` (none), or a set of plugin names.
+    """
+    if 'plugins' in cfg:
+        return _parse_plugin_spec(cfg.get('plugins'))
+    env = os.environ.get(_DEFAULT_PLUGINS_ENV)
+    if env is not None:
+        return _parse_plugin_spec(env)
+    return set()
 
 
 # Register built-ins + discover plugins at import time.

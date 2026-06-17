@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 import re
 
 import lib as _lib  # module ref for hot-reload (Settings changes take effect without restart)
-from lib.tools import ToolContext, assemble_tool_list
+from lib.tools import ToolContext, assemble_tool_list, resolve_enabled_plugins
 
 
 def _build_search_addendum() -> str:
@@ -211,6 +211,12 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
     #    the same registry, so adding/removing a tool needs ZERO edits here.
     #    The spec registration order reproduces the cache-stable layout the
     #    old ladder produced.
+    # Third-party (tofu.tools entry-point) plugins are gated per request so a
+    # plugin installed in a shared multi-tenant process can't leak its tool
+    # schema into unrelated callers. Resolved from cfg['plugins'] →
+    # TOFU_DEFAULT_TOOL_PLUGINS env → fail-closed (no plugins). See
+    # lib/tools/registry.py "Plugin isolation" and docs/TOOL_PLUGINS.md.
+    enabled_plugins = resolve_enabled_plugins(cfg)
     ctx = ToolContext(
         cfg=cfg, task_id=task_id,
         project_path=project_path, project_enabled=project_enabled,
@@ -220,6 +226,7 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
         swarm_enabled=swarm_enabled, image_gen_enabled=image_gen_enabled,
         human_guidance_enabled=human_guidance_enabled,
         scheduler_enabled=scheduler_enabled, messages=messages,
+        enabled_plugins=enabled_plugins,
     )
     tool_list, has_real_tools = assemble_tool_list(ctx)
 

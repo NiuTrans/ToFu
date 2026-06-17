@@ -287,21 +287,24 @@ def get_catalog_v1():
     bridge = get_bridge()
     connected_names = {s['name'] for s in bridge.list_servers()}
 
+    def _live_meta(sid):
+        """(tools_count, server_version, server_impl_name) for a connected server."""
+        for s in bridge.list_servers():
+            if s['name'] == sid:
+                return (s['tools_count'],
+                        s.get('server_version', '') or '',
+                        s.get('server_impl_name', '') or '')
+        return (0, '', '')
+
     entries = []
+    catalog_ids = set()
     for entry in get_catalog():
         sid = entry['id']
+        catalog_ids.add(sid)
         installed = sid in config
         connected = sid in connected_names
-        tools_count = 0
-        server_version = ''
-        server_impl_name = ''
-        if connected:
-            for s in bridge.list_servers():
-                if s['name'] == sid:
-                    tools_count = s['tools_count']
-                    server_version = s.get('server_version', '') or ''
-                    server_impl_name = s.get('server_impl_name', '') or ''
-                    break
+        tools_count, server_version, server_impl_name = (
+            _live_meta(sid) if connected else (0, '', ''))
         stored_env = (config.get(sid, {}) or {}).get('env', {}) or {}
         stored_env_keys = [k for k, v in stored_env.items()
                            if isinstance(v, str) and v.strip()]
@@ -315,6 +318,47 @@ def get_catalog_v1():
             'stored_env_keys': stored_env_keys,
             'breaker': bridge.get_breaker_state(sid),
         })
+
+    # Surface servers that are configured in mcp_servers.json but have no
+    # curated catalog entry, so they can never be silently invisible in the
+    # settings panel. Synthesize a minimal "Custom" card from the stored
+    # config. env values are NOT leaked — only their keys (as stored_env_keys).
+    from lib.mcp.registry import CAT_CUSTOM
+    for sid, srv_cfg in config.items():
+        if sid in catalog_ids:
+            continue
+        connected = sid in connected_names
+        tools_count, server_version, server_impl_name = (
+            _live_meta(sid) if connected else (0, '', ''))
+        stored_env = (srv_cfg or {}).get('env', {}) or {}
+        stored_env_keys = [k for k, v in stored_env.items()
+                           if isinstance(v, str) and v.strip()]
+        # Re-expose stored env as optional, secret env_specs so the install
+        # modal can re-edit credentials without inventing schema.
+        env_specs = [{'key': k, 'label': k, 'required': False, 'secret': True}
+                     for k in stored_env_keys]
+        entries.append({
+            'id': sid,
+            'name': sid,
+            'description': srv_cfg.get('description', '') or 'Custom MCP server (from mcp_servers.json)',
+            'icon': '🔌',
+            'category': CAT_CUSTOM,
+            'command': srv_cfg.get('command', ''),
+            'args': srv_cfg.get('args', []),
+            'transport': srv_cfg.get('transport', 'stdio'),
+            'env_specs': env_specs,
+            'url': srv_cfg.get('url', ''),
+            'tags': ['custom'],
+            'custom': True,
+            'installed': True,
+            'connected': connected,
+            'tools_count': tools_count,
+            'server_version': server_version,
+            'server_impl_name': server_impl_name,
+            'stored_env_keys': stored_env_keys,
+            'breaker': bridge.get_breaker_state(sid),
+        })
+
     return api_ok({'catalog': entries})
 
 

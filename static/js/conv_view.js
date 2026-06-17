@@ -79,8 +79,8 @@
      *                            for stable identity; _ensureMsgId
      *                            stamps one if missing).
      *  @param {Object} [opts]
-     *    @param {number} [opts.idx]      — explicit idx; otherwise computed
-     *    @param {boolean} [opts.append]  — if true and no existing element
+     *    @param {number} [opts.idx]      - explicit idx; otherwise computed
+     *    @param {boolean} [opts.append]  - if true and no existing element
      *                                       is found, append to chatInner
      *  @returns {boolean} true if the DOM was mutated.
      */
@@ -194,7 +194,7 @@
      *  @param {string} convId
      *  @param {Object} msg          — the assistant message that was streaming
      *  @param {Object} [opts]
-     *    @param {boolean} [opts.removeIfTruncated=true] — if msg is no
+     *    @param {boolean} [opts.removeIfTruncated=true] - if msg is no
      *                       longer in conv.messages (truncated by Edit/Regen
      *                       during finishStream), just remove the bubble.
      *  @returns {boolean} true if a swap or removal happened.
@@ -214,7 +214,7 @@
        * silently corrupts the DOM and hides the real assistant.
        * Refuse the swap and let the caller decide what to do. */
       if (msg && msg.role && msg.role !== 'assistant'
-          && !msg._isEndpointReview) {
+          && !msg._isEndpointReview && !msg._isVirtualUser) {
         console.warn(
           '[ConvView] finalizeStreaming refused — msg.role=%s ' +
           '(_isVirtualUser=%s _msgId=%s) is not an assistant; ' +

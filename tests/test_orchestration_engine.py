@@ -639,6 +639,197 @@ class HumanNodeTest(unittest.TestCase):
         self.assertIn('human-approve', actions)
 
 
+class IsolatedSubflowTest(unittest.TestCase):
+    """An ``isolated`` subflow is a black box: it runs in its own nested
+    FlowExecutor with a fresh context (only the upstream context seeds it),
+    and only its converged result crosses back to the parent."""
+
+    def _child(self, name='Child'):
+        # researcher → writer, so the child has two distinct internal turns.
+        return {'schema': 'tofu.orchestration/v1', 'name': name, 'nodes': [
+            _ctrl('cs', 'start'), _role('a', 'researcher'), _role('b', 'writer'),
+            _ctrl('ce', 'stop')],
+            'edges': [{'from': 'cs', 'to': 'a'}, {'from': 'a', 'to': 'b'},
+                      {'from': 'b', 'to': 'ce'}]}
+
+    def _parent(self, scope='isolated', role='general'):
+        return {'schema': 'tofu.orchestration/v1', 'name': 'Parent', 'nodes': [
+            _ctrl('s', 'start'),
+            {'id': 'big', 'type': 'subflow', 'role': role,
+             'params': {'scope': scope, 'definition': self._child()}},
+            _role('after', 'coder'), _ctrl('e', 'stop')],
+            'edges': [{'from': 's', 'to': 'big'}, {'from': 'big', 'to': 'after'},
+                      {'from': 'after', 'to': 'e'}]}
+
+    def test_isolated_subflow_runs_child_as_black_box(self):
+        r = _MockRunner(outputs={'a': 'RESEARCH', 'b': 'CHILDFINAL', 'after': 'done'})
+        out = FlowExecutor(self._parent(), agent_runner=r).run()
+        self.assertTrue(out['ok'], out.get('error'))
+        # All three agents ran: child's researcher + writer, then parent's coder.
+        roles = sorted(c['role'] for c in r.calls)
+        self.assertEqual(roles, ['coder', 'researcher', 'writer'])
+        self.assertEqual(out['agents_run'], 3)
+
+    def test_parent_transcript_hides_child_internal_turns(self):
+        r = _MockRunner(outputs={'a': 'RESEARCH', 'b': 'CHILDFINAL', 'after': 'done'})
+        out = FlowExecutor(self._parent(role='general'), agent_runner=r).run()
+        # The parent transcript records the subflow as ONE entry under its
+        # role; the child's researcher/writer turns are NOT in it.
+        parent_roles = [e['role'] for e in out['transcript']]
+        self.assertIn('general', parent_roles)   # the subflow node's face
+        self.assertIn('coder', parent_roles)     # downstream parent node
+        self.assertNotIn('researcher', parent_roles)
+        self.assertNotIn('writer', parent_roles)
+
+    def test_only_child_final_crosses_the_membrane(self):
+        # The downstream parent node must see the child's converged final
+        # (writer output), NOT the child's intermediate researcher turn.
+        r = _MockRunner(outputs={'a': 'INTERMEDIATE_RESEARCH', 'b': 'CHILDFINAL',
+                                 'after': 'ok'})
+        out = FlowExecutor(self._parent(), agent_runner=r).run()
+        after_ctx = [c for c in r.calls if c['role'] == 'coder'][0]['context']
+        self.assertIn('CHILDFINAL', after_ctx)
+        self.assertNotIn('INTERMEDIATE_RESEARCH', after_ctx)
+
+    def test_upstream_context_seeds_the_child(self):
+        # The parent's pre-subflow context must reach the child's first node.
+        r = _MockRunner(outputs={'pre': 'SEEDMARK', 'a': 'r', 'b': 'f', 'after': 'ok'})
+        defn = {'schema': 'tofu.orchestration/v1', 'name': 'P', 'nodes': [
+            _ctrl('s', 'start'), _role('pre', 'planner'),
+            {'id': 'big', 'type': 'subflow', 'role': 'general',
+             'params': {'scope': 'isolated', 'definition': self._child()}},
+            _ctrl('e', 'stop')],
+            'edges': [{'from': 's', 'to': 'pre'}, {'from': 'pre', 'to': 'big'},
+                      {'from': 'big', 'to': 'e'}]}
+        FlowExecutor(defn, agent_runner=r).run()
+        child_first = [c for c in r.calls if c['role'] == 'researcher'][0]
+        self.assertIn('SEEDMARK', child_first['context'])
+
+    def test_isolated_subflow_with_inner_loop(self):
+        # The black box can contain a full endpoint loop — the nested engine
+        # runs the loop/verdict machinery for free.
+        child = {'schema': 'tofu.orchestration/v1', 'name': 'InnerLoop', 'nodes': [
+            _ctrl('cs', 'start'), _ctrl('cl', 'loop', max_iterations=4),
+            _role('cw', 'worker', isolation='shared-context'),
+            _role('cc', 'critic'), _ctrl('ce', 'stop')],
+            'edges': [{'from': 'cs', 'to': 'cl'}, {'from': 'cl', 'to': 'cw'},
+                      {'from': 'cw', 'to': 'cc'}, {'from': 'cc', 'to': 'cl'},
+                      {'from': 'cl', 'to': 'ce'}]}
+        seq = {'w': 0}
+        def runner(node, ctx, it):
+            role = node.get('role')
+            if role == 'worker':
+                seq['w'] += 1
+                return {'output': f'w{seq["w"]}', 'status': 'completed', 'error': ''}
+            if role == 'critic':
+                return {'output': ('CONTINUE: ❌ more' if seq['w'] < 2 else 'VERDICT: STOP'),
+                        'status': 'completed', 'error': ''}
+            return {'output': (role or '') + '-out', 'status': 'completed', 'error': ''}
+        defn = {'schema': 'tofu.orchestration/v1', 'name': 'P', 'nodes': [
+            _ctrl('s', 'start'),
+            {'id': 'big', 'type': 'subflow', 'role': 'general',
+             'params': {'scope': 'isolated', 'definition': child}},
+            _ctrl('e', 'stop')],
+            'edges': [{'from': 's', 'to': 'big'}, {'from': 'big', 'to': 'e'}]}
+        out = FlowExecutor(defn, agent_runner=runner).run()
+        self.assertTrue(out['ok'], out.get('error'))
+        self.assertEqual(seq['w'], 2)   # inner loop iterated twice then stopped
+
+    def test_isolated_subflow_emits_axis(self):
+        # A subflow's emits axis is reported on its step events (so the chat
+        # adapter can place the turn). Default for 'general' face = assistant.
+        events = []
+        r = _MockRunner(outputs={'a': 'r', 'b': 'f', 'after': 'ok'})
+        FlowExecutor(self._parent(role='general'), agent_runner=r,
+                     on_event=events.append).run()
+        sub_starts = [e for e in events if e.get('type') == 'step_start'
+                      and e.get('subflow')]
+        self.assertTrue(sub_starts)
+        self.assertEqual(sub_starts[0]['emits'], 'assistant')
+        self.assertEqual(sub_starts[0]['isolation'], 'isolated')
+
+    def test_isolated_subflow_counts_against_agent_budget(self):
+        # child (2 agents) + parent coder (1) = 3 > budget 2 → fails.
+        r = _MockRunner()
+        out = FlowExecutor(self._parent(), agent_runner=r, max_agents=2).run()
+        self.assertEqual(out['status'], 'failed')
+        self.assertIn('budget', out['error'])
+
+    def test_inline_subflow_still_flattens(self):
+        # Sanity: a scope='inline' subflow is flattened (the default behavior),
+        # so its inner roles DO appear in the parent transcript.
+        r = _MockRunner(outputs={'a': 'r', 'b': 'f', 'after': 'ok'})
+        out = FlowExecutor(self._parent(scope='inline'), agent_runner=r).run()
+        parent_roles = [e['role'] for e in out['transcript']]
+        self.assertIn('researcher', parent_roles)
+        self.assertIn('writer', parent_roles)
+
+    def test_plan_shows_isolated_subflow_step(self):
+        plan = compile_plan(self._parent())
+        self.assertTrue(plan['ok'], plan.get('error'))
+        actions = [s.get('action') for s in plan['steps']]
+        self.assertIn('run-subflow', actions)
+        # The inline-equivalent would instead show the inner run-agent steps.
+        sub_step = [s for s in plan['steps'] if s.get('action') == 'run-subflow'][0]
+        self.assertEqual(sub_step['scope'], 'isolated')
+
+    def test_internal_failure_halts_parent(self):
+        # A structural failure INSIDE the box (the child engine returns
+        # status='failed', e.g. its agent budget is exhausted) must NOT hand
+        # an empty deliverable to the parent and continue — it propagates as
+        # the parent run's failure, and the downstream parent node never runs.
+        # Child needs 2 agents; nested engine inherits max_agents=1 → fails.
+        r = _MockRunner(outputs={'a': 'r', 'b': 'f', 'after': 'SHOULD_NOT_RUN'})
+        out = FlowExecutor(self._parent(), agent_runner=r, max_agents=1).run()
+        self.assertEqual(out['status'], 'failed')
+        self.assertIn('big', out['error'])
+        self.assertFalse(any(c['role'] == 'coder' for c in r.calls))
+
+    def test_internal_failure_emits_failed_step_complete(self):
+        # The box's failure is observable: a step_complete{status:'failed'}
+        # event fires for the subflow before the parent halts.
+        events = []
+        r = _MockRunner(outputs={'a': 'r', 'b': 'f'})
+        FlowExecutor(self._parent(), agent_runner=r, max_agents=1,
+                     on_event=events.append).run()
+        sub_done = [e for e in events if e.get('type') == 'step_complete'
+                    and e.get('subflow')]
+        self.assertTrue(sub_done)
+        self.assertEqual(sub_done[0]['status'], 'failed')
+
+    def test_internal_abort_propagates(self):
+        # An abort inside the box unwinds the parent (status='aborted'),
+        # not a silent empty deliverable.
+        flag = {'v': False}
+        def runner(node, ctx, it):
+            flag['v'] = True   # trip the abort after the child's first agent
+            return {'output': 'x', 'status': 'completed', 'error': ''}
+        roles = []
+        def capture(node, ctx, it):
+            roles.append(node.get('role'))
+            return runner(node, ctx, it)
+        out = FlowExecutor(self._parent(), agent_runner=capture,
+                           abort_check=lambda: flag['v']).run()
+        self.assertEqual(out['status'], 'aborted')
+        self.assertNotIn('coder', roles)   # downstream parent node never ran
+
+    def test_completed_empty_box_continues(self):
+        # A box that COMPLETES with an empty deliverable is legitimate (ran,
+        # produced nothing) — the parent continues, mirroring role semantics.
+        def runner(node, ctx, it):
+            role = node.get('role')
+            if role in ('researcher', 'writer'):
+                return {'output': '', 'status': 'completed', 'error': ''}
+            return {'output': 'after-ran', 'status': 'completed', 'error': ''}
+        r_calls = []
+        def capture(node, ctx, it):
+            r_calls.append(node.get('role'))
+            return runner(node, ctx, it)
+        out = FlowExecutor(self._parent(), agent_runner=capture).run()
+        self.assertTrue(out['ok'], out.get('error'))
+        self.assertIn('coder', r_calls)   # downstream ran despite empty box
+
+
 class CompilePlanTest(unittest.TestCase):
     def test_plan_lists_steps(self):
         defn = {'schema': 'tofu.orchestration/v1', 'name': 'EP', 'nodes': [

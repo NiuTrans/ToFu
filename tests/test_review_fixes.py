@@ -12,6 +12,12 @@ review so it cannot silently regress:
                                       taking a permit.
   4. TestToolAdjacencyDedup        — llm_sanitize adjacency scan is bounded by
                                       tool_call count, not the dedup'd id set.
+  5. TestReasoningPreservedOnStrip — llm_sanitize keeps reasoning_content /
+                                      thinking_signature / reasoning_details when
+                                      stripping orphaned/non-adjacent tool_calls.
+  6. TestAbortFinishRace           — TaskRuntime.abort() sets abort_event under
+                                      _lock so a finish() race can't mislabel an
+                                      aborted task 'done'.
 
 NOTE: the backtest win_rate / carry-forward regression tests moved to the
 standalone tofu-trading package along with lib/trading_backtest_engine.
@@ -221,3 +227,83 @@ class TestToolAdjacencyDedup:
         assert kept == ['a', 'b', 'c']
         # The trailing user message survives intact.
         assert out[-1] == {'role': 'user', 'content': 'next'}
+
+
+# ═══════════════════════════════════════════════════════════
+#  7. Reasoning fields survive tool_call stripping
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestReasoningPreservedOnStrip:
+    """When an assistant turn's tool_calls are stripped (orphaned or
+    non-adjacent), its reasoning_content / thinking_signature /
+    reasoning_details MUST be preserved. Rebuilding as a bare
+    {'role':'assistant','content':...} dropped them and triggered Anthropic
+    HTTP 400 on the next extended-thinking replay turn."""
+
+    def test_orphaned_tool_call_keeps_reasoning(self):
+        from lib.llm_sanitize import _fix_orphaned_tool_calls
+        msgs = [
+            {'role': 'user', 'content': 'hi'},
+            {'role': 'assistant', 'content': 'thinking done',
+             'reasoning_content': 'R' * 20,
+             'thinking_signature': 'sig-abc',
+             'reasoning_details': [{'type': 'reasoning', 'text': 'r'}],
+             'tool_calls': [
+                 {'id': 'orphan', 'function': {'name': 'f', 'arguments': '{}'}},
+             ]},
+            # No matching tool result → orphaned → tool_calls stripped.
+        ]
+        out = _fix_orphaned_tool_calls(msgs)
+        asst = [m for m in out if m.get('role') == 'assistant'][0]
+        assert 'tool_calls' not in asst
+        assert asst['content'] == 'thinking done'
+        assert asst['reasoning_content'] == 'R' * 20
+        assert asst['thinking_signature'] == 'sig-abc'
+        assert asst['reasoning_details'] == [{'type': 'reasoning', 'text': 'r'}]
+
+    def test_non_adjacent_tool_call_keeps_reasoning(self):
+        from lib.llm_sanitize import _fix_tool_call_adjacency
+        msgs = [
+            {'role': 'assistant', 'content': 'c',
+             'reasoning_content': 'keep-me',
+             'tool_calls': [
+                 {'id': 'x', 'function': {'name': 'f', 'arguments': '{}'}},
+             ]},
+            # tool result missing entirely → tool_calls stripped.
+            {'role': 'user', 'content': 'next'},
+        ]
+        out = _fix_tool_call_adjacency(msgs)
+        asst = [m for m in out if m.get('role') == 'assistant'][0]
+        assert 'tool_calls' not in asst
+        assert asst['reasoning_content'] == 'keep-me'
+
+
+# ═══════════════════════════════════════════════════════════
+#  8. TaskRuntime abort/finish race
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestAbortFinishRace:
+    def test_abort_sets_event_under_lock(self):
+        from lib.agent_core.task_runtime import TaskRuntime
+        rt = TaskRuntime('test-abort')
+        task = rt.create()
+        assert rt.abort(task['id']) is True
+        assert task['abort_event'].is_set()
+
+    def test_abort_after_finish_is_noop(self):
+        from lib.agent_core.task_runtime import TaskRuntime
+        rt = TaskRuntime('test-abort')
+        task = rt.create()
+        rt.finish(task['id'], result='done')
+        assert rt.abort(task['id']) is False
+        assert task['status'] == 'done'
+
+    def test_finish_after_abort_marks_aborted(self):
+        from lib.agent_core.task_runtime import TaskRuntime
+        rt = TaskRuntime('test-abort')
+        task = rt.create()
+        rt.abort(task['id'])
+        rt.finish(task['id'])  # no error → abort_event decides 'aborted'
+        assert task['status'] == 'aborted'

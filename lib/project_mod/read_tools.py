@@ -229,10 +229,51 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None):
         return str(e)
     if not os.path.isfile(target):
         return f'File not found: {rel_path}'
+
+    # ── Binary / image classification (mirror _read_absolute_file) ──
+    # Done AFTER path resolution so it applies to project-RELATIVE paths
+    # too — file type is keyed on the file, never on absolute-vs-relative.
+    # Images → read_local_file returns a __screenshot__ dict so the base64
+    # rides the native image_url protocol and NEVER enters the text stream.
+    # PDFs / Office → text extraction.  Without this a relative-path image
+    # (e.g. static/icons/x.png) was opened with errors='replace', decoded to
+    # ~1 char/byte of U+FFFD garbage, and tokenised as text — conv
+    # mqgfkmxy (2026-06-16): four sub-512KB PNGs → 1.7M chars → 1.36M
+    # tokens → fatal HTTP 400.  Text-with-binary-extension (.svg XML,
+    # .min.js) is deliberately NOT diverted here; it falls through to the
+    # text reader, which applies a content-based binary sniff below.
+    ext = os.path.splitext(target)[1].lower()
+    from lib.file_reader import (
+        IMAGE_EXTENSIONS as _IMG_EXT,
+        OFFICE_EXTENSIONS as _OFF_EXT,
+        PDF_EXTENSIONS as _PDF_EXT,
+    )
+    if ext in _IMG_EXT or ext in _PDF_EXT or ext in _OFF_EXT:
+        from lib.file_reader import read_local_file
+        return read_local_file(target)
+
     sz = os.path.getsize(target)
     if sz > MAX_FILE_SIZE and not (start_line or end_line):
         return (f'File too large ({_fmt_size(sz)}). Use grep_search to find specific content, '
                 f'or read_files with start_line/end_line for a specific range.')
+
+    # ── Content-based binary sniff ──
+    # Catches binaries whose extension is NOT image/pdf/office (e.g. .so,
+    # .zip, a mislabelled blob, or an image read with the wrong suffix) and
+    # stops raw bytes from being decoded as U+FFFD text.  Clean text files
+    # — including .svg / minified JS — pass this fine.
+    try:
+        with open(target, 'rb') as _bf:
+            _head = _bf.read(8192)
+        if _head:
+            _nontext = sum(1 for b in _head if b < 8 or (13 < b < 32 and b != 27))
+            if _nontext > len(_head) * 0.30:
+                return (f'[Binary file: {rel_path} ({_fmt_size(sz)}) — not shown. '
+                        f'Content is not valid text. Images are read via the native '
+                        f'image protocol; other binaries (archives, compiled objects) '
+                        f'cannot be read as text.]')
+    except OSError as e:
+        logger.debug('[Tools] read_file binary sniff failed for %s: %s', rel_path, e)
 
     filename = os.path.basename(rel_path)
     is_data = _is_data_file(filename, sz)
@@ -427,6 +468,16 @@ def tool_read_files(base, reads):
                 logger.debug('[Tools] read_files range check failed for %s: %s', rel_path, e, exc_info=True)
 
         result = _read_project_file(spec_base, rel_path, sl, el)
+        # Relative-path images/PDFs/Office now return a __screenshot__ dict
+        # (parity with the absolute branch) — track separately so base64
+        # never reaches the text accumulator below.
+        if isinstance(result, dict) and result.get('__screenshot__'):
+            result['filename'] = os.path.basename(rel_path)
+            text_fallback = result.get('_text_fallback', 'Image loaded.')
+            image_results[i] = result
+            parts.append(text_fallback)
+            total_chars += len(text_fallback)
+            continue
         if total_chars + len(result) > BATCH_CHAR_BUDGET:
             remaining = BATCH_CHAR_BUDGET - total_chars
             if remaining > 200:

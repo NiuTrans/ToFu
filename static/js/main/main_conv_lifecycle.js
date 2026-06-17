@@ -22,6 +22,7 @@ function newChat() {
     prevConv.swarmEnabled = !!swarmEnabled;
     prevConv.endpointEnabled = !!endpointEnabled;
     prevConv.autopilotEnabled = !!autopilotEnabled;
+    prevConv.activeFlow = activeFlow || '';
     prevConv.imageGenEnabled = !!imageGenEnabled;
     if (imageGenMode) {
       prevConv.imageGenAspect = _igSelectedAspect || '1:1';
@@ -100,6 +101,7 @@ function loadConversation(id) {
     prevConv.swarmEnabled = !!swarmEnabled;
     prevConv.endpointEnabled = !!endpointEnabled;
     prevConv.autopilotEnabled = !!autopilotEnabled;
+    prevConv.activeFlow = activeFlow || '';
     prevConv.imageGenEnabled = !!imageGenEnabled;
     prevConv.imageGenMode = !!imageGenMode;
     prevConv.humanGuidanceEnabled = !!humanGuidanceEnabled;
@@ -480,6 +482,7 @@ function _buildToolbarOverrides() {
     thinkingEnabled,
     model: config.model || serverModel,
     systemPrompt: config.systemPrompt || '',
+    systemPromptMode: config.systemPromptMode || 'append',
     thinkingDepth: config.thinkingDepth,
     temperature: config.temperature,
     searchMode,
@@ -494,6 +497,7 @@ function _buildToolbarOverrides() {
     humanGuidanceEnabled,
     endpointMode: endpointEnabled,
     autopilot: autopilotEnabled,
+    activeFlow: activeFlow || '',
     agentBackend: activeAgentBackend || 'builtin',
     autoTranslate: !!autoTranslate,
     autoApply: autoApplyWrites,
@@ -522,6 +526,7 @@ function _buildConvSnapshot(conv, isActive) {
     swarmEnabled: conv.swarmEnabled,
     endpointEnabled: conv.endpointEnabled,
     autopilotEnabled: conv.autopilotEnabled,
+    activeFlow: conv.activeFlow || '',
     imageGenEnabled: conv.imageGenEnabled,
     humanGuidanceEnabled: conv.humanGuidanceEnabled,
     projectPath: isActive ? _getConvProjectPath(conv) : conv.projectPath,

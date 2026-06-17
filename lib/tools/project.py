@@ -362,6 +362,10 @@ PROJECT_TOOL_RUN_COMMAND = {
                     "type": "string",
                     "description": "Shell command to execute, e.g. 'python -m pytest tests/', 'git status', 'npm test'"
                 },
+                "description": {
+                    "type": "string",
+                    "description": "ALWAYS provide a short one-line summary (in the user's language) of what this command does and why. It is rendered as a caption above the command in the UI so the user can grasp the intent at a glance without parsing the shell syntax — especially valuable for long pipelines. E.g. 'Run the auth test suite', 'Check installed package versions'."
+                },
                 "timeout": {
                     "type": "integer",
                     "description": "Timeout in seconds. Default auto-detects (60s for FS-heavy, 300s otherwise). Set to 0 for NO timeout (unlimited) — only use when user explicitly requests it."

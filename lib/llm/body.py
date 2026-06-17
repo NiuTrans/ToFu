@@ -23,6 +23,7 @@ from lib.llm_sanitize import (
 from lib.log import get_logger
 from lib.model_info import (
     _clamp_max_tokens,
+    gemini_reasoning_effort,
     is_claude,
     is_claude_opus_47,
     is_doubao,
@@ -602,7 +603,16 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
         kw['enable_thinking'] = bool(thinking_enabled)
         body['chat_template_kwargs'] = kw
         body['temperature'] = temperature if temperature is not None else 0.7
-    elif _tf == 'enable_thinking' or (not _tf and (is_longcat(model) or is_qwen(model) or is_gemini(model) or is_ernie(model))):
+    elif _tf == 'reasoning_effort' or (not _tf and is_gemini(model)):
+        # Gemini 3.x is a reasoning model. The only knob the OpenAI-compat
+        # gateway forwards to Vertex's thinkingLevel is the OpenAI-style
+        # ``reasoning_effort`` string (verified via usage.reasoning_tokens:
+        # minimal≈0 → high≈1000+). The legacy top-level ``enable_thinking``
+        # boolean and the nested ``thinking.thinking_level`` field are both
+        # silently ignored on this path.  Gemini 3.x also recommends NOT
+        # sending temperature/top_p/top_k, so we omit temperature here.
+        body['reasoning_effort'] = gemini_reasoning_effort(_effort, thinking_enabled)
+    elif _tf == 'enable_thinking' or (not _tf and (is_longcat(model) or is_qwen(model) or is_ernie(model))):
         body['enable_thinking'] = thinking_enabled
         if is_longcat(model):
             body['temperature'] = 1.0 if thinking_enabled else (temperature or 0.7)

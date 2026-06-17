@@ -25,14 +25,14 @@ from lib.protocols import TaskEventSink
 logger = get_logger(__name__)
 
 from lib.tasks_pkg.approval import request_write_approval
-from lib.tasks_pkg.compaction import budget_tool_result, enforce_round_aggregate_budget, mark_empty_result
+from lib.tasks_pkg.compaction import budget_tool_result, clamp_tool_result_text, enforce_round_aggregate_budget, mark_empty_result
 from lib.tasks_pkg.executor import SWARM_TOOL_NAMES, _build_simple_meta, _execute_tool_one, _finalize_tool_round, tool_registry
 from lib.tasks_pkg.manager import _strip_base64_for_snapshot, append_event
 from lib.tasks_pkg.tool_display import _build_tool_round_entry
 from lib.tasks_pkg.tool_hooks import run_post_hooks, run_pre_hooks
 from lib.token_counter import count_text
 from lib.tool_input_repair import resolve_tool_name, schema_hint, validate_then_repair
-from lib.tools import PROJECT_TOOL_NAMES, build_project_tool_meta
+from lib.tools import build_project_tool_meta
 from lib.model_info import model_supports_vision
 
 
@@ -186,6 +186,46 @@ def _registry_tool_flags() -> tuple[frozenset, frozenset]:
 _WRITE_TOOLS, _IDEMPOTENT_TOOLS = _registry_tool_flags()
 
 
+def _task_partitions(task: dict[str, Any]) -> tuple[frozenset, frozenset]:
+    """Per-task write/idempotent partitions: base UNION the task's custom env.
+
+    The module-level ``_WRITE_TOOLS`` / ``_IDEMPOTENT_TOOLS`` are frozen at
+    import and cover built-ins + ToolSpec plugins. Per-request custom tools
+    (``task['_tool_env']``) declare their own ``write`` / ``idempotent`` flags,
+    which would otherwise be invisible here — a custom write tool would run in
+    the parallel pool (race) and a custom read tool would never dedup. Union
+    them in at dispatch time so the partitions are correct for THIS task.
+    """
+    write = set(_WRITE_TOOLS)
+    idem = set(_IDEMPOTENT_TOOLS)
+    # ── MCP tools: conservative write classification ──
+    # External MCP tools carry no built-in safety partition, so by default we
+    # treat every discovered MCP tool as a WRITE tool (serial dispatch +
+    # approval-eligible in Manual mode). A tool whose MCP ``readOnlyHint``
+    # annotation is explicitly True is exempted (stays in the parallel pool).
+    # This closes the hole where an arbitrary remote-mutating MCP tool ran in
+    # parallel with no approval. Computed per-task because the MCP bridge may
+    # connect after this module is imported.
+    try:
+        from lib.mcp import get_bridge
+        bridge = get_bridge()
+        if bridge.connected:
+            for ns_name, read_only in bridge.get_tool_safety().items():
+                if not read_only:
+                    write.add(ns_name)
+    except Exception as e:
+        logger.debug('[tool_dispatch] MCP partition classification skipped: %s', e)
+    # ── Per-request custom tools (task-local env) ──
+    env = task.get('_tool_env')
+    if env is not None:
+        try:
+            write |= env.write_names
+            idem |= env.idempotent_names
+        except Exception as e:
+            logger.debug('[tool_dispatch] task partition union skipped: %s', e)
+    return frozenset(write), frozenset(idem)
+
+
 
 def _execute_tool_one_pooled(*args, **kwargs):
     """Run ``_execute_tool_one`` then release the worker's thread-local DB conn.
@@ -201,10 +241,10 @@ def _execute_tool_one_pooled(*args, **kwargs):
         return _execute_tool_one(*args, **kwargs)
     finally:
         try:
-            from lib.database import close_thread_db
-            close_thread_db()
+            from lib.agent_core.store import get_conversation_store
+            get_conversation_store().release_connection()
         except Exception as _ctd_err:
-            logger.debug('[tool_dispatch] pooled close_thread_db failed: %s', _ctd_err)
+            logger.debug('[tool_dispatch] pooled release_connection failed: %s', _ctd_err)
 
 
 def _make_cache_key(fn_name: str, fn_args: dict[str, Any]) -> str:
@@ -273,19 +313,36 @@ def _build_cache_hit_meta(
         fmt = cached_content.get('format', 'png')
         comp_size = cached_content.get('compressedSize', 0)
         filename = os.path.basename(fn_args.get('path', '') or '')
-        data_uri = cached_content.get('dataUrl', '') or ''
         source_label = 'Prefetch' if is_prefetch else 'Cache'
         badge_suffix = '' if is_prefetch else ' (cached)'
+        # Multi-image batch carries every image in ``images``; fall back to
+        # the dict itself for a single image.
+        img_dicts = cached_content.get('images') or [cached_content]
+        descriptors = []
+        for img in img_dicts:
+            uri = img.get('dataUrl', '') or ''
+            if uri:
+                descriptors.append({
+                    'uri': uri,
+                    'format': img.get('format', fmt),
+                    'filename': img.get('filename', '') or filename,
+                })
+        n = len(img_dicts)
+        title = f'🖼️ {filename}' if filename else '🖼️ image'
+        snippet = f'{filename or "image"} ({fmt}, {comp_size:,} bytes)'
+        if n > 1:
+            title = f'🖼️ {n} images'
+            snippet = f'{n} images loaded'
         meta = {
             'toolName': fn_name,
-            'title': f'🖼️ {filename}' if filename else '🖼️ image',
-            'snippet': f'{filename or "image"} ({fmt}, {comp_size:,} bytes)',
+            'title': title,
+            'snippet': snippet,
             'source': source_label, 'fetched': True,
             'fetchedChars': comp_size, 'url': '',
             'badge': f'🖼️ {fmt}{badge_suffix}',
         }
-        if data_uri:
-            meta['imageDataUris'] = [{'uri': data_uri, 'format': fmt, 'filename': filename}]
+        if descriptors:
+            meta['imageDataUris'] = descriptors
         return meta
 
     content_str = cached_content if isinstance(cached_content, str) else str(cached_content)
@@ -826,9 +883,20 @@ def execute_tool_pipeline(
         Current model identifier (for logging).
     """
     tid = task['id'][:8]
-    auto_apply = cfg.get('autoApply', True)
+    # Attendance-aware auto-apply default. A task is "attended" only when a
+    # human is watching a UI that can answer the write-approval prompt (set by
+    # the interactive chat routes). Headless / autonomous tasks (agent/run,
+    # scheduler, autopilot) are unattended: they MUST auto-apply or they would
+    # block on an approval nobody can answer. When the caller omits autoApply we
+    # therefore default attended→Manual (False) and unattended→auto (True).
+    _attended = bool(task.get('_attended'))
+    auto_apply = cfg.get('autoApply')
+    if auto_apply is None:
+        auto_apply = not _attended
     tool_results = {}  # tc_id → (tool_content, is_search)
     _pipeline_timed_out = False
+    # Per-task write/idempotent partitions (base UNION custom env flags).
+    _write_tools, _idempotent_tools = _task_partitions(task)
 
     # ══════════════════════════════════════════
     #  Pre-phase: Serial write-approval tools
@@ -855,7 +923,7 @@ def execute_tool_pipeline(
             continue
 
         # ── Dedup check for idempotent tools ──
-        if fn_name in _IDEMPOTENT_TOOLS:
+        if fn_name in _idempotent_tools:
             cache_key = _make_cache_key(fn_name, fn_args)
             cached = _cache.get(cache_key)
             if cached is not None:
@@ -934,21 +1002,36 @@ def execute_tool_pipeline(
                 tool_results[tc_id] = (dedup_content, cached_is_search)
                 continue
 
-        is_write_op = fn_name in ('write_file', 'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents', 'create_project')
+        # ── Write-approval gate (Manual mode) ──
+        # The approval set is DERIVED from the per-task write partition
+        # (_write_tools), so every state-mutating tool — project writes,
+        # run_command, memory mutators, MCP write tools, and custom write
+        # tools — is approval-eligible from a single source of truth (no second
+        # hand-maintained list). Gating only ever happens for an ATTENDED task
+        # (a human can answer); unattended / headless tasks never block here.
         needs_approval = (
-            is_write_op and fn_name in PROJECT_TOOL_NAMES
-            and not auto_apply and not task['aborted']
+            fn_name in _write_tools
+            and _attended and not auto_apply and not task['aborted']
             and not (round_entry and round_entry.get('toolName') == 'code_exec')
         )
+        # run_command is in the write partition for concurrency safety, but
+        # read-only invocations (grep/ls/cat/git status/…) must NOT prompt —
+        # only commands that could mutate the filesystem require approval.
+        if needs_approval and fn_name == 'run_command':
+            from lib.project_mod.tools import _is_destructive_command
+            needs_approval = _is_destructive_command(fn_args.get('command', ''))
 
         if needs_approval:
-            tool_content = _handle_approval(task, fn_name, fn_args, rn, round_entry, project_path, round_num, model)
-            tool_results[tc_id] = (tool_content, False)
-            # ── Write ops invalidate project-tool caches ──
-            # After a write_file/apply_diff, read_files/grep_search/list_dir/find_files
-            # results for any path may have changed.
-            _invalidate_project_cache(_cache, trigger=fn_name)
-            continue
+            approved, reject_content = _handle_approval(
+                task, fn_name, fn_args, rn, round_entry, project_path, round_num, model)
+            if not approved:
+                tool_results[tc_id] = (reject_content, False)
+                continue
+            # Approved → fall through to normal dispatch. The item is in
+            # _write_tools, so the serial write-tool phase below executes it via
+            # _execute_tool_one and invalidates the project cache afterwards.
+            #   (one execution path for project / run_command / memory / MCP /
+            #    custom write tools.)
 
         # ── Abort check: skip remaining tools if user clicked Stop ──
         if task.get('aborted'):
@@ -996,10 +1079,10 @@ def execute_tool_pipeline(
     #  write tools run serially to prevent filesystem race conditions.
     # ══════════════════════════════════════════
     _serial_write_items = [
-        item for item in parallel_items if item[1] in _WRITE_TOOLS
+        item for item in parallel_items if item[1] in _write_tools
     ]
     parallel_items = [
-        item for item in parallel_items if item[1] not in _WRITE_TOOLS
+        item for item in parallel_items if item[1] not in _write_tools
     ]
     for item in _serial_write_items:
         tc, fn_name, tc_id, fn_args, rn, round_entry, _pe = item
@@ -1059,7 +1142,7 @@ def execute_tool_pipeline(
                         ret_tc_id, tool_content, is_search = fut.result()
                         tool_results[ret_tc_id] = (tool_content, is_search)
                         # ── Populate dedup cache for idempotent tools ──
-                        if fut_fn_name in _IDEMPOTENT_TOOLS:
+                        if fut_fn_name in _idempotent_tools:
                             # Find the matching fn_args from parallel_items
                             for _pi in parallel_items:
                                 if _pi[2] == ret_tc_id:  # tc_id match
@@ -1244,6 +1327,18 @@ def execute_tool_pipeline(
                 round_entry['compactedFromChars'] = _l0_pre_chars
                 round_entry['compactedToChars'] = len(tool_content)
 
+            # ★ Layer 2: tool-agnostic hard ceiling — the LAST line of
+            # defence. Unlike Layer 0 (budget_tool_result) this has NO
+            # per-tool exemption, so it ALSO clamps read_files (which Layer 0
+            # skips). Makes the "opaque blob floods context" bug class
+            # unrepresentable: a relative-path PNG decoded as text, a str()'d
+            # image dict, or any future leak gets clamped to a survivable
+            # result instead of a fatal HTTP 400. See conv mqgfkmxy (2026-06).
+            if isinstance(tool_content, str):
+                _conv_id_hc = task.get('convId', '') if task else ''
+                tool_content = clamp_tool_result_text(
+                    fn_name, tool_content, tc_id=tc_id, conv_id=_conv_id_hc)
+
             # Collect for aggregate budget check
             _round_results_for_budget.append((tc_id, tool_content, fn_name))
 
@@ -1401,6 +1496,7 @@ def execute_tool_pipeline(
 def _approval_meta_run_command(approval_meta, fn_args):
     """Enrich approval metadata for ``run_command``."""
     approval_meta['command'] = fn_args.get('command', '')
+    approval_meta['description'] = fn_args.get('description', '')
     approval_meta['path'] = fn_args.get('working_dir', '') or ''
 
 
@@ -1541,21 +1637,25 @@ def _handle_approval(
     project_path: str | None,
     round_num: int,
     model: str,
-) -> str:
-    """Handle the manual-approval flow for a write operation.
+) -> tuple[bool, str | None]:
+    """Gate a write operation on manual user approval (no execution).
 
-    Emits a ``write_approval_request`` event, blocks waiting for the user
-    response, and either executes the tool (approved) or returns a
-    rejection message (rejected).
+    Emits a ``write_approval_request`` event and blocks waiting for the user
+    response. This function ONLY decides — it never executes the tool. On
+    approval the caller lets the tool fall through to the normal serial
+    write-tool dispatch, so a single execution path serves project writes,
+    run_command, memory, MCP, and custom write tools.
 
     Uses the :data:`_APPROVAL_META_ENRICHERS` dispatch table to build
     tool-specific approval metadata.
 
     Returns
     -------
-    str
-        The tool result content string (either the execution result or
-        a rejection message).
+    tuple[bool, str | None]
+        ``(approved, reject_content)``. When approved, ``(True, None)`` and
+        ``round_entry`` is left ``pending_approval`` for the executor to
+        finalize. When rejected, ``(False, message)`` and the round has
+        already been finalized with a ``rejected`` badge.
     """
     tid = task['id'][:8]
     approval_id = f'{task["id"]}_{uuid.uuid4().hex[:8]}'
@@ -1594,18 +1694,16 @@ def _handle_approval(
         meta['badge'] = 'rejected'
         meta['writeOk'] = False
         _finalize_tool_round(task, rn, round_entry, [meta])
-        return tool_content
+        return False, tool_content
 
-    # Approved — execute the write immediately (serial, with conv_id + task_id for undo tracking)
-    from lib.project_mod import execute_tool as _exec_proj
-    tool_content = (
-        _exec_proj(fn_name, fn_args, project_path, conv_id=task['convId'], task_id=task['id'])
-        if project_path
-        else 'Error: No project path.'
-    )
-    meta = build_project_tool_meta(fn_name, fn_args, tool_content)
-    _finalize_tool_round(task, rn, round_entry, [meta])
-    return tool_content
+    # Approved — do NOT execute here. The caller lets the item fall through to
+    # the normal serial write-tool dispatch (_execute_tool_one), so a single
+    # execution path serves project writes, run_command, memory, MCP, and custom
+    # write tools uniformly. round_entry stays 'pending_approval' until that
+    # execution finalizes it.
+    logger.info('[Task %s] Write approved: tool=%s — dispatching via normal path',
+                tid, fn_name)
+    return True, None
 
 
 def _append_screenshot_message(messages, tc_id, tool_content):
@@ -1621,47 +1719,47 @@ def _append_screenshot_message(messages, tc_id, tool_content):
         Screenshot dict with keys ``dataUrl``, ``format``, ``originalSize``,
         ``compressedSize``, ``compressionApplied``.
     """
-    data_url = tool_content['dataUrl']
-    fmt = tool_content.get('format', 'png')
-    orig_size = tool_content.get('originalSize', 0)
-    comp_size = tool_content.get('compressedSize', 0)
-    compression_applied = tool_content.get('compressionApplied', False)
+    # A multi-image batch (read_files of several images) carries every image
+    # in ``images``; otherwise treat the dict itself as the single image.
+    img_dicts = tool_content.get('images') or [tool_content]
 
-    # Parse the data URL: "data:image/png;base64,iVBOR..."
-    if data_url.startswith('data:'):
-        header, b64_data = data_url.split(',', 1)
-        media_type = header.split(':')[1].split(';')[0]
-    else:
-        b64_data = data_url
-        media_type = f'image/{fmt}'
+    def _data_url_parts(img):
+        du = img.get('dataUrl', '')
+        if du.startswith('data:'):
+            header, b64 = du.split(',', 1)
+            return header.split(':')[1].split(';')[0], b64
+        return f'image/{img.get("format", "png")}', du
 
-    size_info = f'{comp_size:,} bytes'
-    if compression_applied and orig_size:
-        size_info = f'{orig_size:,} → {comp_size:,} bytes (compressed)'
+    content_blocks = []
+    for img in img_dicts:
+        media_type, b64_data = _data_url_parts(img)
+        content_blocks.append({
+            'type': 'image_url',
+            'image_url': {'url': f'data:{media_type};base64,{b64_data}'},
+        })
 
     # Use custom text description if provided (e.g. image gen results),
     # otherwise fall back to the generic screenshot description.
     text_desc = tool_content.get('_text_fallback')
     if not text_desc:
+        fmt = tool_content.get('format', 'png')
+        orig_size = tool_content.get('originalSize', 0)
+        comp_size = tool_content.get('compressedSize', 0)
+        size_info = f'{comp_size:,} bytes'
+        if tool_content.get('compressionApplied') and orig_size:
+            size_info = f'{orig_size:,} → {comp_size:,} bytes (compressed)'
         text_desc = (
             f'📸 Screenshot captured ({fmt}, {size_info}). '
             f'The image above shows the current visible area of the page. '
             f'Analyze it visually.'
         )
+    if len(img_dicts) > 1:
+        text_desc = f'{len(img_dicts)} images loaded above.\n{text_desc}'
+
+    content_blocks.append({'type': 'text', 'text': text_desc})
 
     messages.append({
         'role': 'tool',
         'tool_call_id': tc_id,
-        'content': [
-            {
-                'type': 'image_url',
-                'image_url': {
-                    'url': f'data:{media_type};base64,{b64_data}',
-                },
-            },
-            {
-                'type': 'text',
-                'text': text_desc,
-            },
-        ],
+        'content': content_blocks,
     })

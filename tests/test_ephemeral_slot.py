@@ -134,5 +134,70 @@ class EphemeralSlotTest(unittest.TestCase):
         self.assertEqual(count_ephemeral_slots(), n_before)
 
 
+class PreflightModeTest(unittest.TestCase):
+    """Pre-flight probe precedence: explicit env > benchmark auto-skip > on.
+
+    A dead self-hosted endpoint must NOT hard-400 a whole benchmark arm
+    just because a TCP handshake didn't land — in TOFU_DISABLE_CONFIGURED_SLOTS
+    mode the ephemeral slot is the only dispatch route, so reachability is
+    the dispatch retry loop's job, not the mint's.
+    """
+
+    def setUp(self):
+        self._saved = {k: os.environ.get(k) for k in (
+            'TOFU_EPHEMERAL_PREFLIGHT', 'TOFU_DISABLE_CONFIGURED_SLOTS',
+            'TOFU_EPHEMERAL_PREFLIGHT_TIMEOUT')}
+        for k in self._saved:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_default_normal_mode_probes(self):
+        from lib.llm_dispatch.ephemeral import _preflight_enabled
+        self.assertTrue(_preflight_enabled())
+
+    def test_benchmark_mode_auto_skips(self):
+        from lib.llm_dispatch.ephemeral import _preflight_enabled
+        os.environ['TOFU_DISABLE_CONFIGURED_SLOTS'] = '1'
+        self.assertFalse(_preflight_enabled())
+
+    def test_explicit_on_overrides_benchmark_mode(self):
+        # An operator who explicitly asks for the probe gets it, even in
+        # benchmark mode.
+        from lib.llm_dispatch.ephemeral import _preflight_enabled
+        os.environ['TOFU_DISABLE_CONFIGURED_SLOTS'] = '1'
+        os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = '1'
+        self.assertTrue(_preflight_enabled())
+
+    def test_explicit_off_in_normal_mode(self):
+        from lib.llm_dispatch.ephemeral import _preflight_enabled
+        os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = '0'
+        self.assertFalse(_preflight_enabled())
+
+    def test_benchmark_mode_mint_skips_probe_for_dead_endpoint(self):
+        # The whole point: in benchmark mode, minting against a dead
+        # self-hosted endpoint must SUCCEED (slot added), not raise the
+        # "endpoint unreachable" ValueError.
+        os.environ['TOFU_DISABLE_CONFIGURED_SLOTS'] = '1'
+        os.environ['TOFU_EPHEMERAL_PREFLIGHT_TIMEOUT'] = '1'
+        from lib.llm_dispatch.ephemeral import (
+            dispose_ephemeral_slot, mint_ephemeral_slot)
+        # 127.0.0.1:1 — loopback, port 1 never listening. With the probe
+        # active this raises; in benchmark mode it must be skipped.
+        h = mint_ephemeral_slot(
+            base_url='http://127.0.0.1:1/v1', api_key='',
+            model_id='m1', owner='benchmark-arm')
+        try:
+            self.assertIsNotNone(h)
+            self.assertEqual(h.slot.base_url, 'http://127.0.0.1:1/v1')
+        finally:
+            dispose_ephemeral_slot(h)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -25,7 +25,7 @@ __all__ = [
     # Modifications / Undo
     'get_modifications', 'get_conv_ids_with_modifications',
     'undo_conv_modifications', 'undo_task_modifications', 'undo_all_modifications',
-    'redo_task_modifications',
+    'redo_task_modifications', 'resolve_base_path',
     '_record_modification',
     # Scanner
     'set_project', 'set_project_paths', 'ensure_project_state', 'clear_project', 'rescan',
@@ -100,6 +100,7 @@ from lib.project_mod.modifications import (
     get_conv_ids_with_modifications,
     get_modifications,
     redo_task_modifications,
+    resolve_base_path,
     undo_all_modifications,
     undo_conv_modifications,
     undo_task_modifications,

@@ -55,7 +55,17 @@ class TestThreadConnLifecycle:
         legitimately hold their own ``system``-domain connections for their
         whole lifetime. Those are alive and are NOT leaks; only an entry whose
         owning thread has DIED is a leak.
+
+        We first reap dead-thread connections so the baseline reflects only
+        LIVE entries. In a full-suite run, earlier tests that exercise real
+        orchestrator/swarm worker threads (which grab a chat connection and
+        exit without an explicit release) leave transient dead-thread entries
+        in the registry. Production self-heals these via the same reaper on the
+        semaphore-acquire path, so reaping here mirrors prod and isolates THIS
+        test's own 200-task leak signal from sibling-test residue.
         """
+        if core._BACKEND == 'pg':
+            core._reap_dead_thread_connections()
         baseline = _registry_len()
 
         def task(_i):

@@ -21,12 +21,69 @@ from lib.log import get_logger
 from lib.tasks_pkg.compaction._constants import (
     _BUDGET_EXEMPT_TOOLS,
     _DEFAULT_TOOL_RESULT_MAX,
+    _SINGLE_RESULT_HARD_CEILING_CHARS,
     MAX_ROUND_TOOL_RESULTS_CHARS,
     TOOL_RESULT_MAX_CHARS,
 )
 from lib.tasks_pkg.compaction._persist import _human_size, _persist_to_disk
 
 logger = get_logger(__name__)
+
+
+def clamp_tool_result_text(tool_name: str, content: str,
+                           tc_id: str = '', conv_id: str = '') -> str:
+    """Tool-agnostic hard ceiling on a single tool-result text (Layer 2).
+
+    The LAST line of defence before a tool result is committed to the
+    message stream.  Unlike :func:`budget_tool_result` (Layer 0), this has
+    NO per-tool exemptions and NO disk-persist escape hatch — it simply
+    refuses to let any single result exceed
+    ``_SINGLE_RESULT_HARD_CEILING_CHARS`` chars of text, full stop.
+
+    Its job is to make the "opaque blob floods the context" bug CLASS
+    unrepresentable: even if a future ingress point (a new tool, a
+    mis-routed binary read, a str()'d image dict) sneaks an oversized blob
+    past every earlier layer, it gets head+tail-clamped here into a
+    degraded-but-survivable result instead of a fatal context overflow.
+
+    ``__screenshot__`` dicts and other non-str content are passed through
+    untouched — images ride the native ``image_url`` protocol and never
+    enter the text stream this guards.
+
+    Args:
+        tool_name:  Tool that produced the result (for the log + marker).
+        content:    Candidate tool-result text.
+        tc_id:      Tool-call id (for the log line).
+        conv_id:    Conversation id (for the log line).
+
+    Returns:
+        ``content`` unchanged if within the ceiling, else a head+tail
+        clamp with an explanatory middle marker.
+    """
+    if not isinstance(content, str):
+        return content
+    if len(content) <= _SINGLE_RESULT_HARD_CEILING_CHARS:
+        return content
+
+    original_len = len(content)
+    ceiling = _SINGLE_RESULT_HARD_CEILING_CHARS
+    head_budget = int(ceiling * 0.70)
+    tail_budget = int(ceiling * 0.25)
+    head = content[:head_budget]
+    tail = content[-tail_budget:]
+    elided = original_len - head_budget - tail_budget
+    marker = (
+        f'\n\n... [⚠ {elided:,} chars elided by hard ceiling — this single '
+        f'"{tool_name}" result was {original_len:,} chars (> {ceiling:,} cap). '
+        f'This usually means binary/base64 data leaked into a text result. '
+        f'Re-read a specific line range or file instead.] ...\n\n'
+    )
+    logger.error('[HardCeiling] %s result %s exceeded single-result ceiling '
+                 '%s — clamped (tc=%s conv=%s). Investigate: opaque blob in '
+                 'text stream.',
+                 tool_name, _human_size(original_len), _human_size(ceiling),
+                 tc_id[:8] if tc_id else '?', conv_id[:8] if conv_id else '?')
+    return head + marker + tail
 
 
 def budget_tool_result(tool_name: str, content: str,

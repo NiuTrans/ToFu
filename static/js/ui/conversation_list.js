@@ -32,7 +32,7 @@ function stripNoTranslateTags(text) {
  * @returns {Promise<object|null>}  Server response `{ok, msgCount, msg}` or
  *                                  null on failure.
  */
-async function _patchMessageOnServer(convId, msgIdx, patch, opts = {}) {
+async function _patchMessageOnServer(convId, msgIdx, patch, /** @type {any} */ opts = {}) {
   if (!convId || msgIdx == null || !patch || Object.keys(patch).length === 0) return null;
   // Prefer stable id addressing when the message has _msgId. The conv is
   // expected on the global `conversations` array; if a caller has only the
@@ -88,6 +88,51 @@ function formatConvTime(ts) {
     datePart = `${months[d.getMonth()]} ${d.getDate()}${sameYear ? "" : ", " + d.getFullYear()}`;
   }
   return `<span class="conv-date-text">${datePart}</span><span class="conv-date-sep">·</span><span class="conv-date-time">${time}</span>`;
+}
+
+/* ── Date grouping for the conversation list ──
+ * Rows are sorted recency-first (_convSorter), so each date bucket is a
+ * contiguous run. Each bucket gets a clickable header that folds its rows.
+ * The ">30 days" ("older") bucket starts collapsed. */
+const _CONV_OLDER_DAYS = 30;
+/** Set of date-group keys the user has collapsed. "older" starts collapsed. */
+const _collapsedConvGroups = new Set(['older']);
+
+/** Classify a timestamp into a date-group key. */
+function _convDateGroupKey(ts) {
+  if (!ts) return 'older';
+  const now = new Date();
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const dayMs = 86400000;
+  if (ts >= startToday) return 'today';
+  if (ts >= startToday - dayMs) return 'yesterday';
+  if (ts >= startToday - 6 * dayMs) return 'prev7';
+  if (ts >= startToday - (_CONV_OLDER_DAYS - 1) * dayMs) return 'prev30';
+  return 'older';
+}
+
+const _CONV_GROUP_I18N = {
+  today: 'sidebar.dateToday',
+  yesterday: 'sidebar.dateYesterday',
+  prev7: 'sidebar.datePrev7',
+  prev30: 'sidebar.datePrev30',
+  older: 'sidebar.dateOlder',
+};
+
+/** Collapsible section-header markup for a date-group key + its row count. */
+function _convGroupHeaderHtml(key, count, collapsed) {
+  const label = t(_CONV_GROUP_I18N[key] || key);
+  const chevron = `<svg class="conv-date-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+  return `<button type="button" class="conv-date-group${collapsed ? ' collapsed' : ''}" data-group="${key}" onclick="_toggleConvGroup('${key}')">` +
+    `${chevron}<span class="conv-date-label">${label}</span><span class="conv-date-count">${count}</span></button>`;
+}
+
+/** Toggle a date group's collapsed state and re-render. */
+function _toggleConvGroup(key) {
+  if (_collapsedConvGroups.has(key)) _collapsedConvGroups.delete(key);
+  else _collapsedConvGroups.add(key);
+  _lastConvListHash = "";          // force a full rebuild past the hash guard
+  renderConversationList();
 }
 
 let _lastConvListHash = "";
@@ -338,32 +383,81 @@ function _teardownConvVirtual() {
 }
 
 /**
+ * Build the render plan for `filtered`: a flat list of items, each either a
+ * date-group header, a conversation row, or the collapsed-"older" toggle.
+ * `filtered` is recency-sorted so each date bucket is one contiguous run.
+ * The ">30 days" bucket is collapsed behind a toggle unless expanded (or the
+ * active conv lives in it, in which case it's force-expanded so its row is
+ * always visible).
+ *
+ * @returns {Array<{type:'header'|'conv'|'older'|'older-collapse', key?:string, conv?:object, count?:number}>}
+ */
+function _buildConvPlan(filtered) {
+  /* Per-group row counts so each header shows its size. */
+  const counts = {};
+  for (const c of filtered) {
+    const key = _convDateGroupKey(c.updatedAt || c.createdAt);
+    counts[key] = (counts[key] || 0) + 1;
+  }
+  /* Keep the active conv's group always expanded so its row never hides. */
+  const activeKey = activeConvId
+    ? (() => { const a = filtered.find(c => c.id === activeConvId); return a ? _convDateGroupKey(a.updatedAt || a.createdAt) : null; })()
+    : null;
+
+  /** @type {Array<{type:'header'|'conv', key?:string, count?:number, collapsed?:boolean, conv?:object}>} */
+  const plan = [];
+  let curGroup = null;
+  let curCollapsed = false;
+  for (const c of filtered) {
+    const key = _convDateGroupKey(c.updatedAt || c.createdAt);
+    if (key !== curGroup) {
+      curCollapsed = _collapsedConvGroups.has(key) && key !== activeKey;
+      plan.push({ type: 'header', key, count: counts[key], collapsed: curCollapsed });
+      curGroup = key;
+    }
+    if (curCollapsed) continue;   // rows hidden under a collapsed header
+    plan.push({ type: 'conv', conv: c });
+  }
+  return plan;
+}
+
+/** Render a single plan item to HTML. */
+function _planItemHtml(item) {
+  if (item.type === 'header') return _convGroupHeaderHtml(item.key, item.count, item.collapsed);
+  const c = item.conv;
+  return _buildConvItemHTML(c, escapeHtml(stripNoTranslateTags(c.title)), "");
+}
+
+/**
  * Render `filtered` into `listEl` with bottom-sentinel windowing. Renders
  * the first page (extended downward if needed so the active conv is always
- * included), then lazily appends subsequent pages on scroll.
+ * included), then lazily appends subsequent pages on scroll. Rows are grouped
+ * under date-section headers via the render plan from _buildConvPlan().
  */
 function _renderConvWindow(listEl, filtered) {
   _teardownConvVirtual();
 
+  const plan = _buildConvPlan(filtered);
+
   /* Ensure the active row is within the initial window so its .active
    * class + status dot are present immediately (sorted recent-first means
-   * this is almost always index 0, but a click on an old conv can be deep). */
+   * this is almost always near the top, but a click on an old conv can be
+   * deep). Index is into the PLAN (headers shift positions). */
   let firstEnd = _CONV_WINDOW_PAGE;
   if (activeConvId) {
-    const ai = filtered.findIndex(c => c.id === activeConvId);
+    const ai = plan.findIndex(it => it.type === 'conv' && it.conv.id === activeConvId);
     if (ai >= firstEnd) firstEnd = ai + 1;
   }
-  firstEnd = Math.min(firstEnd, filtered.length);
+  firstEnd = Math.min(firstEnd, plan.length);
 
   let html = "";
   for (let i = 0; i < firstEnd; i++) {
-    const c = filtered[i];
-    html += _buildConvItemHTML(c, escapeHtml(stripNoTranslateTags(c.title)), "");
+    html += _planItemHtml(plan[i]);
   }
   listEl.innerHTML = html;
 
   /* Everything fits in the first window — no sentinel/observer needed. */
-  if (firstEnd >= filtered.length) return;
+  if (firstEnd >= plan.length) return;
 
   let cursor = firstEnd;
   const sentinel = document.createElement('div');
@@ -377,16 +471,15 @@ function _renderConvWindow(listEl, filtered) {
     if (_convVirtual.sentinel !== sentinel) return;
     if (!entries.some(e => e.isIntersecting)) return;
 
-    const end = Math.min(cursor + _CONV_WINDOW_PAGE, filtered.length);
+    const end = Math.min(cursor + _CONV_WINDOW_PAGE, plan.length);
     let frag = "";
     for (let i = cursor; i < end; i++) {
-      const c = filtered[i];
-      frag += _buildConvItemHTML(c, escapeHtml(stripNoTranslateTags(c.title)), "");
+      frag += _planItemHtml(plan[i]);
     }
     sentinel.insertAdjacentHTML('beforebegin', frag);
     cursor = end;
 
-    if (cursor >= filtered.length) {
+    if (cursor >= plan.length) {
       _teardownConvVirtual();
       return;
     }
@@ -451,7 +544,7 @@ function renderConversationList() {
      *    status tag IN PLACE — no innerHTML rebuild, no full reparse/relayout
      *    of the sidebar (the dominant long-task cost during a send's
      *    translate→stream→done lifecycle). Mirrors the folder-tab fast path. ── */
-    const _structHash = `AF${_activeFolderId||''}|FL${foldersReady?1:0}|F${folderHash}|` +
+    const _structHash = `AF${_activeFolderId||''}|FL${foldersReady?1:0}|CG${[..._collapsedConvGroups].sort().join('.')}|F${folderHash}|` +
       filtered.map(c => `${c.id}|${c.title}|${c.updatedAt||""}|${c.folderId||""}`).join("\n");
     const _statusHash = filtered.map(c => {
       const f = _convStatusFlags(c);

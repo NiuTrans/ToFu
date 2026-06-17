@@ -35,17 +35,17 @@ var _AUTH_SRC_KEY_COOKIE = {
 function _renderAuthSources() {
   var box = document.getElementById('authSourcesList');
   if (!box) return;
-  box.innerHTML = safeHtml`<div class="auth-src-loading">${t('common.loading') || '加载中…'}</div>`;
+  box.innerHTML = String(safeHtml`<div class="auth-src-loading">${t('common.loading') || '加载中…'}</div>`);
   Api.authSources.list().then(function (data) {
     var sources = (data && data.sources) || [];
     if (!sources.length) {
-      box.innerHTML = safeHtml`<div class="auth-src-empty">${t('settings.authSourcesEmpty') || '暂无可登录的来源。'}</div>`;
+      box.innerHTML = String(safeHtml`<div class="auth-src-empty">${t('settings.authSourcesEmpty') || '暂无可登录的来源。'}</div>`);
       return;
     }
     box.innerHTML = sources.map(_authSourceCardHtml).join('');
   }).catch(function (e) {
     console.warn('[AuthSrc] list failed', e);
-    box.innerHTML = safeHtml`<div class="auth-src-empty">${t('settings.authSourcesLoadFail') || '加载失败'}</div>`;
+    box.innerHTML = String(safeHtml`<div class="auth-src-empty">${t('settings.authSourcesLoadFail') || '加载失败'}</div>`);
   });
 }
 

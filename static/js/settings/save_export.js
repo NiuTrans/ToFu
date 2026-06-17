@@ -31,6 +31,8 @@ function saveSettings() {
   config.maxTokens = parseInt(document.getElementById("settingMaxTokens").value);
   config.imageMaxWidth = parseInt(document.getElementById("settingImageMaxWidth").value) || 0;
   config.systemPrompt = document.getElementById("settingSystem").value;
+  var spModeSel = document.getElementById('settingSystemPromptMode');
+  if (spModeSel) config.systemPromptMode = (spModeSel.value === 'replace') ? 'replace' : 'append';
   var dtdEl = document.getElementById('settingDefaultThinkingDepth');
   if (dtdEl) {
     var oldDefault = config.defaultThinkingDepth;
@@ -246,7 +248,7 @@ function importServerConfig(event) {
   var reader = new FileReader();
   reader.onload = async function(e) {
     try {
-      var imported = JSON.parse(e.target.result);
+      var imported = JSON.parse(String(e.target.result || ""));
       var r = await Api.serverConfig.update(imported);
       var data = r ? await r.json().catch(function() { return {}; }) : {};
       if (data.ok) {

@@ -55,9 +55,22 @@ isn't a known alias passes through to the orchestrator unchanged.
   | human_guidance  | humanGuidanceEnabled                    |
   | scheduler       | schedulerEnabled                        |
   | project         | projectPath        | absolute path      |
+  | plugins         | plugins            | list/'*' /comma-str|
   | max_tokens      | maxTokens          | int                |
   | temperature     | temperature        | float              |
   +-----------------+--------------------+--------------------+
+
+Tool-plugin isolation (multi-tenant)
+====================================
+Third-party tools contributed via the ``tofu.tools`` entry-point group are
+**process-global** once installed, so on a shared server they would otherwise
+be visible to every caller. They are therefore gated per request: a plugin is
+only exposed to the model when its entry-point name is allow-listed via
+``config.plugins`` (this request) or the ``TOFU_DEFAULT_TOOL_PLUGINS`` env var
+(deployment default). With neither set the default is **fail-closed** — no
+third-party plugins. Pass ``config.plugins='*'`` (or set the env var to ``*``)
+to expose all installed plugins (single-tenant convenience). Built-in tools
+(search, project, memory, swarm, …) are never affected. See docs/TOOL_PLUGINS.md.
 
 For backwards compatibility the legacy ``capabilities`` field is still
 accepted and merged into ``config`` (config wins on conflict).
@@ -85,6 +98,10 @@ from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import (
     optional_bool, optional_dict, optional_str, parse_body, require_list,
+)
+from lib.tools.tool_env import (
+    CustomToolError, dispose_tool_env, dispose_tool_env_after_terminal,
+    mint_tool_env,
 )
 from lib.trajectory import AVAILABLE_FORMATS, flatten
 
@@ -164,6 +181,13 @@ _ALIAS_SETTERS = {
     'project':        lambda c, v: c.__setitem__('projectPath', str(v)) if v else None,
     'max_tokens':     lambda c, v: c.__setitem__('maxTokens', v),
     'temperature':    lambda c, v: c.__setitem__('temperature', v),
+    # Third-party tool-plugin allow-list. Accepts a list of plugin names
+    # (entry-point names from the tofu.tools group), a comma/space string, or
+    # '*' / ['*'] for "all installed plugins". Passes straight through to the
+    # orchestrator cfg, where resolve_enabled_plugins() turns it into the
+    # ToolContext gate. Omit → deployment default (TOFU_DEFAULT_TOOL_PLUGINS)
+    # → fail-closed (no plugins). See docs/TOOL_PLUGINS.md.
+    'plugins':        lambda c, v: c.__setitem__('plugins', v),
 }
 
 
@@ -478,10 +502,30 @@ def agent_run():
             f'unknown trajectory format {trajectory_fmt!r}; must be one of '
             f'{list(AVAILABLE_FORMATS)}', field='trajectory')
 
+    # ── 3b. Per-request custom tools (optional) ───────────────────
+    # Validated + minted into a request-scoped ToolEnvironment. Its clean
+    # schemas ride the normal tool list via cfg['_customToolSchemas']; its
+    # handlers resolve task-locally in _execute_tool_one. Nothing persists
+    # into the global tool_registry. See docs/CUSTOM_TOOLS.md.
+    tool_env = None
+    custom_tools = body.get('tools')
+    if custom_tools:
+        try:
+            tool_env = mint_tool_env(tools=custom_tools, owner=owner_key_id)
+        except CustomToolError as e:
+            if handle:
+                dispose_ephemeral_slot(handle)
+            return api_bad_request(str(e), field='tools')
+        except RuntimeError as e:
+            if handle:
+                dispose_ephemeral_slot(handle)
+            return api_internal_error(e, context='api_v1.agent_run.tools')
+        cfg['_customToolSchemas'] = tool_env.schemas
+
     audit_log('agent_run_start', key_id=owner_key_id,
               model=model_id, byo=bool(handle), provider_id=(byo_prov or {}).get('id'),
               n_messages=len(messages_in), stream=stream,
-              trajectory=trajectory_fmt)
+              trajectory=trajectory_fmt, n_custom_tools=len(tool_env.tools) if tool_env else 0)
 
     # ── 4. Dispatch ───────────────────────────────────────────────
     from lib.tasks_pkg import create_task, spawn_task
@@ -491,6 +535,15 @@ def agent_run():
     task['_via_agent_run'] = True
     if owner_key_id:
         task['_api_key_id'] = owner_key_id
+    if tool_env is not None:
+        task['_tool_env'] = tool_env
+    # ── Hard provider isolation ──
+    # When a BYO endpoint was resolved (inline `provider` block or a
+    # registered @prov_xxx), bind the whole task to that provider's slot so
+    # NO dispatch on it can leak onto the operator's configured keys. See
+    # lib/llm_dispatch/provider_pin.py.
+    if handle is not None:
+        task['_pinned_provider_id'] = handle.slot.provider_id
 
     # ── Billing: pre-flight reserve (multi-user installs only) ──
     # Mirrors routes/api_v1/chat.py. Personal / open installs have an
@@ -512,6 +565,8 @@ def agent_run():
         except InsufficientFunds as e:
             if handle:
                 dispose_ephemeral_slot(handle)
+            if tool_env is not None:
+                dispose_tool_env(tool_env)
             from lib.api_response import api_error
             return api_error(
                 f'Insufficient credits. '
@@ -527,6 +582,8 @@ def agent_run():
                             reservation_micro=reservation_micro)
         if handle:
             dispose_ephemeral_slot(handle)
+        if tool_env is not None:
+            dispose_tool_env(tool_env)
         logger.exception('[agent.run] spawn_task failed')
         return api_internal_error(e, context='api_v1.agent_run')
 
@@ -536,6 +593,12 @@ def agent_run():
         threading.Thread(
             target=dispose_after_terminal, args=(task, handle),
             name=f'ephemeral-dispose-{handle.handle_id}',
+            daemon=True,
+        ).start()
+    if tool_env is not None:
+        threading.Thread(
+            target=dispose_tool_env_after_terminal, args=(task, tool_env),
+            name=f'custom-tools-dispose-{tool_env.handle_id}',
             daemon=True,
         ).start()
 

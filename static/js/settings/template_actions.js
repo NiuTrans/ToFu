@@ -109,7 +109,7 @@ async function _showTemplateMenu(btn) {
   // Close on outside click
   setTimeout(function() {
     document.addEventListener('click', function _closeMenu(e) {
-      if (!menu.contains(e.target) && e.target !== btn) {
+      if (!menu.contains(/** @type {Node} */ (e.target)) && e.target !== btn) {
         menu.remove();
         document.removeEventListener('click', _closeMenu);
       }
@@ -133,6 +133,7 @@ async function _showTemplateMenu(btn) {
 //   'cheap': input < $3/1M AND output < $15/1M  (strict)
 // Add future tiers here AND in lib/llm_dispatch/config.py::PRICING_TIERS.
 
+/** @type {Array<[string, number, number]>} */
 var _PRICING_TIERS_JS = [
   // [tag, input_max, output_max]  — per $/1M tokens
   ['cheap', 3.0, 15.0],

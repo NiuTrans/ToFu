@@ -143,7 +143,7 @@ function _saveModelEdit(provIdx, modelIdx) {
   if (!form) return;
 
   var oldModelId = m.model_id;
-  m.model_id = (form.querySelector('.stg-edit-mid').value || '').trim();
+  m.model_id = String(form.querySelector('.stg-edit-mid').value || '').trim();
   m.rpm = parseInt(form.querySelector('.stg-edit-rpm').value) || 30;
   m.cost = parseFloat(form.querySelector('.stg-edit-cost').value) || 0.01;
   m.thinking_default = form.querySelector('.stg-edit-think').checked;
@@ -173,7 +173,7 @@ async function _addAlias(provIdx, modelIdx) {
   if (!p || !p.models) return;
   var m = p.models[modelIdx];
   if (!m) return;
-  var alias = await showPrompt('输入别名（同一模型的替代 ID）:');
+  var alias = String(await showPrompt('输入别名（同一模型的替代 ID）:') || '');
   if (!alias || !alias.trim()) return;
   if (!m.aliases) m.aliases = [];
   alias = alias.trim();

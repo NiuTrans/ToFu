@@ -739,9 +739,10 @@ _THINKING_FORMAT_HINTS = [
     # Doubao / Claude-style: thinking.type = "enabled"
     (re.compile(r'claude|anthropic', re.I),       'thinking_type'),
     (re.compile(r'doubao|seed.*pro', re.I),       'thinking_type'),
-    # Qwen / Gemini / LongCat style: enable_thinking = true
+    # Qwen / LongCat style: enable_thinking = true
     (re.compile(r'qwen|qwq', re.I),              'enable_thinking'),
-    (re.compile(r'gemini', re.I),                 'enable_thinking'),
+    # Gemini 3.x: OpenAI-style reasoning_effort string (→ Vertex thinkingLevel)
+    (re.compile(r'gemini', re.I),                 'reasoning_effort'),
     (re.compile(r'longcat', re.I),                'enable_thinking'),
     # GLM (Zhipu AI): thinking.type format
     (re.compile(r'glm', re.I),                    'thinking_type'),
@@ -800,7 +801,7 @@ def _detect_thinking_format(models: list[dict], brand: str) -> str:
         'doubao': 'thinking_type',
         'glm': 'thinking_type',
         'qwen': 'enable_thinking',
-        'gemini': 'enable_thinking',
+        'gemini': 'reasoning_effort',
     }
     if brand in brand_map:
         return brand_map[brand]

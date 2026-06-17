@@ -41,6 +41,15 @@
     "**/abtest_workdir/**": true,
     // Catch any future *_workdir eval/benchmark scratch dir (thousands of repo checkouts)
     "**/*_workdir/**": true,
+    // udocker container roots hold full distro trees (texlive, etc.) — hundreds of thousands of tiny files
+    "**/udocker_root/**": true,
+    "**/.udocker/**": true,
+    // SWE-bench / eval scratch: repo checkouts under workspaces/, trash dirs,
+    // and *workdir* dirs that the strict *_workdir glob misses (maps_workdir_pro8b, swebench_run2).
+    "**/workspaces/**": true,
+    "**/.tofu_trash/**": true,
+    "**/swebench_*/**": true,
+    "**/*workdir*/**": true,
 
     // Generated bundles / artifacts
     "**/static/js/bundle-*.js": true,
@@ -74,6 +83,12 @@
     "**/swebench_rerun_workdir": true,
     "**/abtest_workdir": true,
     "**/*_workdir": true,
+    "**/udocker_root": true,
+    "**/.udocker": true,
+    "**/workspaces": true,
+    "**/.tofu_trash": true,
+    "**/swebench_*": true,
+    "**/*workdir*": true,
     "**/static/js/bundle-*.js": true,
     "**/*.log": true,
     "**/*.db": true,
@@ -107,6 +122,12 @@
     "**/swebench_rerun_workdir/**",
     "**/abtest_workdir/**",
     "**/*_workdir/**",
+    "**/udocker_root/**",
+    "**/.udocker/**",
+    "**/workspaces/**",
+    "**/.tofu_trash/**",
+    "**/swebench_*/**",
+    "**/*workdir*/**",
     "**/node_modules/**",
     "**/__pycache__/**",
     "**/.pytest_cache/**",
@@ -146,6 +167,12 @@
     "**/swebench_rerun_workdir": true,
     "**/abtest_workdir": true,
     "**/*_workdir": true,
+    "**/udocker_root": true,
+    "**/.udocker": true,
+    "**/workspaces": true,
+    "**/.tofu_trash": true,
+    "**/swebench_*": true,
+    "**/*workdir*": true,
     "**/*.pyc": true
   },
 

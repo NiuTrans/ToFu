@@ -48,6 +48,7 @@ _ROLE_HELP = {
     'synthesizer': 'Merges many agent outputs into one converged result.',
     'router': 'Classifies each item and routes it down a branch.',
     'general': 'Versatile fallback when no specialist fits.',
+    'virtual_user': 'Stands in for the human (autopilot): auto-replies to keep a task going until done. Speaks as the USER side; emits [VU: TASK_DONE] when finished.',
 }
 
 _CONTROL_HELP = {
@@ -85,9 +86,20 @@ A graph is a set of NODES wired by directed EDGES.
 Node types:
   * "role"    — an agent. fields: id, type:"role", role:<role>, name?,
                 params:{{objective?, tier?(light|standard|heavy),
-                isolation?(fresh-context|shared-context)}}
+                isolation?(fresh-context|shared-context),
+                emits?(user|assistant)}}
+  * "subflow" — a "big role" composed of small roles: ONE node that runs a
+                whole nested graph. fields: id, type:"subflow", role:<label>,
+                name?, params:{{definition:<a full nested graph>, emits?}}.
+                Use it to encapsulate a reusable multi-step unit and design
+                its internal context organisation independently.
   * "control" — structure. fields: id, type:"control", kind:<kind>,
                 name?, params:{{...kind-specific}}
+
+The MESSAGE axis (params.emits) is ORTHOGONAL to role: it sets which side
+of the chat a turn lands on. Omit it to use the per-role default
+(critic/reviewer/virtual_user → "user"; everything else → "assistant").
+Set it explicitly only to override that default.
 
 Available agent roles:
 {roles}
@@ -103,6 +115,10 @@ CRITICAL design rules:
     params.isolation = "shared-context". One-shot parallel agents use
     "fresh-context".
   * Use a "synthesizer" after a "barrier" to merge fan-out results.
+  * AUTOPILOT pattern: a loop wrapping worker → virtual_user, where the
+    virtual_user (emits "user") auto-replies to keep the worker going and
+    ends the loop with [VU: TASK_DONE]. The loop's verifier is
+    "virtual_user".
   * Node ids must be unique short strings (e.g. "planner1", "loop1").
   * Do NOT invent roles/kinds outside the lists above.
 

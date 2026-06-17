@@ -26,8 +26,6 @@ FILE_DESCRIPTIONS = {
     'lib/__init__.py':      '配置常量（API Key、URL、模型名、抓取参数）',
     'lib/database.py':      'SQLite 数据库初始化、连接、CRUD',
     'lib/tools.py':         'LLM 工具定义（web_search、fetch_url）',
-    'lib/fetch.py':         'URL 抓取、PDF 解析、HTML 文本提取',
-    'lib/search.py':        'DuckDuckGo/Wikipedia 搜索引擎',
     'lib/tasks.py':         '任务引擎：LLM 流式调用、工具循环、预抓取',
     'index.html':           '前端 HTML 骨架，引用 CSS 和 JS',
     'static/styles.css':    '全部 CSS 样式',

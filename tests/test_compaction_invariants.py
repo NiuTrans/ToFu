@@ -497,10 +497,16 @@ class TestMicroCompactDurablePersistence:
         assert 'toolContent' in src, (
             "micro_compact no longer mutates toolContent for durability"
         )
-        # CAS-style UPDATE on conversations table:
-        assert 'UPDATE conversations' in src, (
-            "micro_compact lost the conversations table UPDATE — "
-            "placeholders will not survive next build_api_messages_from_db"
+        # CAS-style persist of the conversation row. The literal
+        # ``UPDATE conversations`` SQL moved behind the ConversationStore
+        # seam (2026-06 persistence-decoupling); accept either the inline
+        # SQL (legacy) or the seam call so the invariant tracks behaviour,
+        # not the layer the SQL happens to live in.
+        assert ('UPDATE conversations' in src
+                or 'cas_update_conversation_messages' in src), (
+            "micro_compact lost its CAS conversation persist (inline UPDATE "
+            "or store.cas_update_conversation_messages) — placeholders will "
+            "not survive next build_api_messages_from_db"
         )
 
 

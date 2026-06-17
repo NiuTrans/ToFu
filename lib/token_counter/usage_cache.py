@@ -200,21 +200,19 @@ class UsageCacheCounter(TokenCounter):
             for txt in iter_message_texts([m]):
                 delta_tokens += cheap_estimate_text(txt)
 
-        # Tool schema / system prompt might have changed since record
-        # time. Since we don't have the old ones to diff, approximate
-        # by counting them fresh and assuming the delta is small.
-        # (A tighter model would require the caller to also record
-        # system+tools; not worth it for now.)
-        extra_tokens = 0
-        if system or tools:
-            for txt in iter_message_texts([], system=system, tools=tools):
-                extra_tokens += cheap_estimate_text(txt)
-
-        total = entry.prompt_tokens + delta_tokens + extra_tokens
+        # IMPORTANT: do NOT add the tool-schema / system-prompt cost here.
+        # ``entry.prompt_tokens`` is the gateway's exact count for the
+        # PREVIOUS request, which ALREADY included that round's tools +
+        # system. The schema is virtually identical round-to-round (same
+        # enabled toolset), so counting it fresh and adding it on top would
+        # DOUBLE-count the entire tool schema — on a tool-heavy config that
+        # is tens of thousands of phantom tokens, firing compaction early.
+        # We only add the appended-suffix delta; tool/system drift between
+        # rounds is negligible vs. that double-count risk.
+        total = entry.prompt_tokens + delta_tokens
         logger.debug('[TokenCounter][UsageCache] conv=%s hit: %d (cached) + '
-                     '%d (suffix) + %d (sys/tools) = %d',
-                     conv_id[:8], entry.prompt_tokens, delta_tokens,
-                     extra_tokens, total)
+                     '%d (suffix) = %d',
+                     conv_id[:8], entry.prompt_tokens, delta_tokens, total)
         return total
 
 

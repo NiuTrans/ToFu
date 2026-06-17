@@ -278,13 +278,22 @@ def skill_catalog_v1():
     from lib.memory import list_all_memories
     from lib.memory.catalog import get_catalog
     project_path = _project_path()
-    installed_ids = {
-        m['id'] for m in list_all_memories(project_path=project_path)
-        if m.get('is_package')
-    }
+    packages = [m for m in list_all_memories(project_path=project_path)
+                if m.get('is_package')]
+    installed_ids = {m['id'] for m in packages}
+    # Catalog-installed packages carry a ``.catalog_id`` marker; match on
+    # that first so e.g. catalog ``xlsx-skill`` (memory id ``xlsx``) shows
+    # as installed.  Fall back to the raw id for drag-dropped packages
+    # whose folder name happens to equal a catalog id.
+    by_catalog_id = {m['catalog_id']: m['id'] for m in packages
+                     if m.get('catalog_id')}
     catalog = get_catalog()
     for entry in catalog:
-        entry['installed'] = entry['id'] in installed_ids
+        cid = entry['id']
+        mem_id = by_catalog_id.get(cid) or (cid if cid in installed_ids
+                                            else None)
+        entry['installed'] = mem_id is not None
+        entry['installed_memory_id'] = mem_id or ''
     return jsonify({'catalog': catalog,
                     'installed_ids': sorted(installed_ids)})
 
@@ -351,6 +360,7 @@ def skill_catalog_install_v1():
         result = install_skill_package(
             bytes(buf.getvalue()), scope=scope, project_path=project_path,
             overwrite=overwrite, original_filename=f'{skill_id}.zip',
+            catalog_id=skill_id, subdir=entry.get('subdir') or None,
         )
     except InstallerError as e:
         logger.warning('[Memory.v1] Catalog install rejected (%s): %s',

@@ -143,7 +143,7 @@ _startSchedulerPolling();
 document.addEventListener("click", (e) => {
   if (_schedulerPanelOpen) {
     const badge = document.getElementById("schedulerBadge");
-    if (badge && !badge.contains(e.target)) {
+    if (badge && !badge.contains(/** @type {Node} */ (e.target))) {
       _schedulerPanelOpen = false;
       const panel = document.getElementById("schedulerPanel");
       if (panel) panel.classList.remove("visible");

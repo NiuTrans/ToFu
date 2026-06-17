@@ -473,7 +473,8 @@ function updateMobileSheet() {
     mobileImageGen:    "imageGenToggle",
     mobileHumanGuidance: "humanGuidanceToggle",
     mobileSwarm:       "swarmToggle",
-    mobileEndpoint:    "endpointToggle"
+    mobileEndpoint:    "endpointToggle",
+    mobileAutopilot:   "autopilotToggle"
   };
   let activeCount = 0;
   for (const [mobileId, desktopId] of Object.entries(map)) {
@@ -640,11 +641,11 @@ window.addEventListener('resize', (function() {
     if (window.innerWidth > 768) return;
     // Close open toolbar submenus
     document.querySelectorAll(".toolbar-submenu.open").forEach(sub => {
-      if (!sub.contains(e.target)) sub.classList.remove("open");
+      if (!sub.contains(/** @type {Node} */ (e.target))) sub.classList.remove("open");
     });
     // Close preset dropdown
     const pw = document.querySelector(".preset-toggle-wrapper.open");
-    if (pw && !pw.contains(e.target)) pw.classList.remove("open");
+    if (pw && !pw.contains(/** @type {Node} */ (e.target))) pw.classList.remove("open");
   });
 })();
 
@@ -765,6 +766,27 @@ function _getSendMode() {
 }
 
 function _doSendOrGenerate() {
-  if (imageGenMode) { generateImageDirect(); }
-  else { sendMessage(); }
+  if (imageGenMode) { generateImageDirect(); return; }
+  /* ★ Empty-send while streaming = "take over from here" arm gesture.
+   * During streaming the composer button IS the Stop button, so pressing
+   * Enter on an empty input is a free, non-conflicting gesture. If autopilot
+   * is on we arm the in-flight task so the virtual user takes over when the
+   * current reply finishes. A non-empty send still queues a real message
+   * (which takes priority over autopilot), so this only fires when empty. */
+  const _inp = document.getElementById("userInput");
+  const _empty = !(_inp && _inp.value.trim())
+    && (typeof pendingImages === 'undefined' || pendingImages.length === 0)
+    && (typeof pendingPdfTexts === 'undefined' || pendingPdfTexts.length === 0);
+  if (_empty) {
+    const _conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
+    const _streaming = _conv
+      && ((typeof activeStreams !== 'undefined' && activeStreams.has(_conv.id))
+          || !!_conv.activeTaskId);
+    if (_streaming && typeof autopilotEnabled !== 'undefined' && autopilotEnabled
+        && typeof _maybeArmAutopilot === 'function') {
+      _maybeArmAutopilot();
+    }
+    return;  // never call sendMessage() with empty input
+  }
+  sendMessage();
 }

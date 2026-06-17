@@ -572,16 +572,20 @@ function dispatchSSEEvent(line, ctx) {
       twUpdate(convId);
       // ★ Re-trigger HG translations on state snapshot (handles page refresh / SSE reconnect)
       if (ev.toolRounds) _retriggerHgTranslations(convId);
-    } else if (ev.type === "autopilot_vu_event"
+    } else if (ev.type === "autopilot_vu_start"
+            || ev.type === "autopilot_vu_event"
             || ev.type === "autopilot_vu_done"
             || ev.type === "autopilot_vu_cancel") {
       /* ★ Autopilot virtual-user STREAMING events ──────────────────────
-       * The VU bubble is created LAZILY — the first inner event with
-       * real activity (delta with text, or tool_start) triggers
-       * insertion.  We deliberately do NOT have an `autopilot_vu_start`
-       * pre-creation event, because it caused empty bubbles to flash
-       * on-screen and persist to DB even when autopilot bailed out.
+       * The VU bubble is created EAGERLY by `autopilot_vu_start` the
+       * moment the worker stops, so the user sees an "Autopilot ·
+       * composing…" bubble in the USER lane (NOT a phase chip on the
+       * worker bubble).  The bubble is in-memory ONLY until success —
+       * `autopilot_vu_cancel` removes it with no DB trace, so a VU that
+       * bails out (TASK_DONE / abort / real-user msg) leaves nothing
+       * behind (preserves the old "no ghost empty VU" guarantee).
        *
+       *   autopilot_vu_start  — create the VU bubble (empty, streaming).
        *   autopilot_vu_event  — wraps a VU sub-task event (delta /
        *     tool_start / tool_result / tool_progress / tool_complete /
        *     tool_compacted / stdin_* / write_approval_request /
@@ -1209,6 +1213,21 @@ function dispatchSSEEvent(line, ctx) {
           `next task=${ev.autopilotNextTaskId.slice(0,8)} ` +
           `vu="${(ev.autopilotVuMessage.content||'').slice(0,80)}${(ev.autopilotVuMessage.content||'').length>80?'…':''}"`
         );
+      }
+      /* ★ Autopilot: when a VU bubble took over the shared streaming
+       *   substrate, THIS worker bubble was finalized to a static
+       *   element EARLY (at autopilot_vu_start) — before this done event
+       *   delivered the worker's usage / model / finishReason / cost.
+       *   Re-render the now-static worker bubble so its finish bar shows
+       *   tokens + cost instead of just the model tag.  The flag is set
+       *   in _beginVuStreaming, so this covers BOTH the follow-up path
+       *   AND the cancel path (VU bailed → bubble already removed).
+       *   (Mirrors the streaming-msg-destroyed-by-renderChat fix.) */
+      if (activeConvId === convId && assistantMsg._vuTookOverBubble
+          && window.ConvView
+          && typeof window.ConvView.upsertMessage === 'function') {
+        delete assistantMsg._vuTookOverBubble;
+        window.ConvView.upsertMessage(convId, assistantMsg);
       }
       /* ★ Continue: merge usage & apiRounds with existing */ if (ev.usage) {
         if (typeof updateContextBar === 'function') updateContextBar();

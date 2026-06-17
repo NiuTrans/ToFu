@@ -644,10 +644,16 @@ async function undoConvModifications(msgIdx) {
   )
     return;
   try {
-    // ★ Per-round undo: prefer taskId (specific to this round), fallback to convId
+    // ★ Per-round undo: prefer taskId (specific to this round), fallback to convId.
+    //   ALWAYS pin the conversation's own project path so undo targets the
+    //   session that recorded the change — NOT whichever project is globally
+    //   active in the UI (which may differ when another conversation switched
+    //   projects mid-task). Without this, undo silently no-ops (undone=0).
     const body = msg._taskId
       ? { taskId: msg._taskId }
       : { convId: conv.id };
+    const convProjectPath = _getConvProjectPath(conv);
+    if (convProjectPath) body.projectPath = convProjectPath;
     const resp = await Api.project.undo(body);
     const data = resp ? await resp.json().catch(() => ({})) : {};
     if (resp && resp.ok && data.ok) {
@@ -770,13 +776,13 @@ function _updateProjectUI() {
   if (!projectState.active) {
     bar.style.display = "none";
     bar.classList.remove("scanning");
-    badge.classList.remove("visible");
+    badge?.classList.remove("visible");
     toggle.classList.remove("active");
     return;
   }
 
   bar.style.display = "flex";
-  badge.classList.add("visible");
+  badge?.classList.add("visible");
   toggle.classList.add("active");
 
   // ── Render folder badges ──

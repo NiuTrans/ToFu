@@ -165,10 +165,14 @@ class TestJsonExtract:
 @pytest.mark.unit
 class TestInsertOrReplace:
     def test_single_pk_do_update(self):
-        out, _ = _tr('INSERT OR REPLACE INTO users (id, name) VALUES (?, ?)')
-        assert 'INSERT INTO users (id, name)' in out
-        assert 'ON CONFLICT (id) DO UPDATE SET' in out
-        assert 'name = EXCLUDED.name' in out
+        # trading_config PK = (key) — a still-mapped single-PK table. (users,
+        # the former example, no longer issues INSERT OR REPLACE in-tree and
+        # was pruned from _PK_MAP; only its INSERT OR IGNORE seed remains, which
+        # doesn't consult _PK_MAP.)
+        out, _ = _tr('INSERT OR REPLACE INTO trading_config (key, value) VALUES (?, ?)')
+        assert 'INSERT INTO trading_config (key, value)' in out
+        assert 'ON CONFLICT (key) DO UPDATE SET' in out
+        assert 'value = EXCLUDED.value' in out
 
     def test_composite_pk(self):
         # trading_intel_crawl_log PK = (crawl_date, category, source_key) — a
@@ -190,7 +194,7 @@ class TestInsertOrReplace:
 
     @pytest.mark.parametrize('table,pk', [
         ('trading_intel_crawl_log', 'crawl_date, category, source_key'),
-        ('users', 'id'),
+        ('trading_config', 'key'),
     ])
     def test_known_tables_emit_conflict_target(self, table, pk):
         out, _ = _tr(f'INSERT OR REPLACE INTO {table} ({pk}, payload) '
@@ -216,7 +220,15 @@ class TestPkMapCompleteness:
     non-SQLite backends and never reach the PG translator.
     """
 
-    SQLITE_ONLY = {'conversations_fts'}
+    # Tables whose only INSERT OR REPLACE runs DIRECTLY on the SQLite
+    # connection and never reaches the PG translator, so they need no _PK_MAP
+    # entry:
+    #   conversations_fts — SQLite FTS5 virtual table (no-op on PG).
+    #   schema_meta       — bootstrap version cache; _schema_sqlite.py writes it
+    #                        with INSERT OR REPLACE on the raw sqlite3 conn,
+    #                        while _schema_pg.py::_write_meta uses native
+    #                        ON CONFLICT. Neither path calls translate_sql.
+    SQLITE_ONLY = {'conversations_fts', 'schema_meta'}
     # Artifacts that are not real table names (doc/test placeholders).
     NON_TABLES = {'table', 'unmapped', 'some_unmapped_table'}
 
@@ -248,6 +260,61 @@ class TestPkMapCompleteness:
             'in lib/database/_sql_translate.py — on PostgreSQL their writes '
             'would RAISE (previously: silently dropped). Register their PK: '
             f'{missing}')
+
+
+@pytest.mark.unit
+class TestPkMapNoDeadEntries:
+    """Reverse of TestPkMapCompleteness: every _PK_MAP entry must be JUSTIFIED.
+
+    An entry is justified if EITHER:
+      * an in-tree ``INSERT OR REPLACE INTO <table>`` call-site exists (the
+        translator's upsert branch is actually exercised for it), OR
+      * the table is on EXTERNAL_TABLES — owned by an out-of-tree package
+        (``tofu-trading``) whose upserts still route through this wrapper, so
+        it legitimately has no in-tree caller.
+
+    Without this guard, dead entries accumulate every time a table migrates to
+    ``_core_schema.upsert()`` but its _PK_MAP line is left behind (exactly the
+    cleanup this test was added to lock in). The forward guard
+    (TestPkMapCompleteness) only catches the opposite drift.
+    """
+
+    # Tables whose INSERT OR REPLACE call-sites live in the external
+    # tofu-trading package (not in this repo). They have no in-tree caller by
+    # design; keep this list in sync with the trading schema there.
+    EXTERNAL_TABLES = {
+        'trading_price_cache', 'trading_config', 'trading_fee_rules',
+        'trading_daily_briefing', 'trading_bg_tasks', 'trading_intel_crawl_log',
+        'trading_strategy_compatibility',
+    }
+
+    def test_no_dead_pk_map_entries(self):
+        import glob
+        import re
+
+        from lib.database._sql_translate import _PK_MAP
+
+        in_tree = set()
+        for pat in ('lib/**/*.py', 'routes/**/*.py'):
+            for f in glob.glob(pat, recursive=True):
+                try:
+                    src = open(f, encoding='utf-8').read()
+                except OSError:
+                    continue
+                for m in re.finditer(r'INSERT\s+OR\s+(?:REPLACE|IGNORE)\s+INTO\s+(\w+)',
+                                     src, re.IGNORECASE):
+                    in_tree.add(m.group(1))
+
+        dead = sorted(
+            t for t in _PK_MAP
+            if t not in in_tree and t not in self.EXTERNAL_TABLES
+        )
+        assert not dead, (
+            'These _PK_MAP entries in lib/database/_sql_translate.py have NO '
+            'in-tree INSERT OR REPLACE call-site and are not on the '
+            'EXTERNAL_TABLES allowlist — they are dead weight (the table likely '
+            'migrated to _core_schema.upsert()). Remove them, or add to '
+            f'EXTERNAL_TABLES if owned by an out-of-tree package: {dead}')
 
 
 @pytest.mark.unit

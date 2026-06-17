@@ -102,7 +102,7 @@ function _igClassifyError(data, httpStatus) {
     title = 'No model available';
   }
 
-  return {
+  return /** @type {any} */ ({
     title,
     text: errText,
     detail: data.text || '',
@@ -111,7 +111,7 @@ function _igClassifyError(data, httpStatus) {
     isTimeout,
     isRateLimit,
     isContentBlocked,
-  };
+  });
 }
 
 /**
@@ -769,25 +769,25 @@ async function _igGenerateBatch(prompt, count) {
         }
 
         // ── Incrementally update saved result ──
-        assistantMsg._igResults[i] = {
+        assistantMsg._igResults[i] = /** @type {any} */ ({
           ok: true, prompt, model: data.model || model, provider_id: data.provider_id || '',
           aspect_ratio: _igSelectedAspect, resolution: _igSelectedResolution,
           image_url: data.image_url || '', remote_image_url: data.remote_image_url || '',
           file_size: data.file_size || 0, elapsed, response_text: data.text || '', error: '',
-        };
+        });
       } else {
         const errInfo = _igClassifyError(data, data._status);
         if (slotEl) {
-          slotEl.setAttribute('data-slot-idx', i);
-          slotEl.setAttribute('data-msg-idx', msgIdx);
+          slotEl.setAttribute('data-slot-idx', String(i));
+          slotEl.setAttribute('data-msg-idx', String(msgIdx));
           slotEl.innerHTML = _igBatchErrorSlotHtml(errInfo, model, msgIdx, i, prompt);
         }
 
         // Show toast for specific error types
         if (errInfo.isRateLimit) {
-          _igToast(`⏳ Slot ${i + 1} rate limited`, 'warning');
+          _igToast(`⏳ Slot ${String(i + 1)} rate limited`, 'warning');
         } else if (errInfo.isContentBlocked) {
-          _igToast(`🚫 Slot ${i + 1} content blocked`, 'error');
+          _igToast(`🚫 Slot ${String(i + 1)} content blocked`, 'error');
         }
 
         assistantMsg._igResults[i] = {
@@ -817,8 +817,8 @@ async function _igGenerateBatch(prompt, count) {
 
       const errInfo = { title: isAbort ? 'Cancelled' : 'Network error', text: errText, errorType: isAbort ? 'cancelled' : 'network', isRateLimit: false, isContentBlocked: false };
       if (slotEl) {
-        slotEl.setAttribute('data-slot-idx', i);
-        slotEl.setAttribute('data-msg-idx', msgIdx);
+        slotEl.setAttribute('data-slot-idx', String(i));
+        slotEl.setAttribute('data-msg-idx', String(msgIdx));
         slotEl.innerHTML = _igBatchErrorSlotHtml(errInfo, model, msgIdx, i, prompt);
       }
 

@@ -36,9 +36,9 @@ window.ChipInput = (function () {
     var values = _store[id] || [];
     var placeholder = box.getAttribute('data-placeholder') || '';
     var chips = values.map(function (v, i) {
-      return safeHtml`<span class="chip"><span class="chip-text">${v}</span>` +
-        safeHtml`<button type="button" class="chip-x" title="${t('common.remove') || '移除'}"
-          onclick="ChipInput.remove('${raw(id)}', ${raw(String(i))})">×</button></span>`;
+      return String(safeHtml`<span class="chip"><span class="chip-text">${v}</span>`) +
+        String(safeHtml`<button type="button" class="chip-x" title="${t('common.remove') || '移除'}"
+          onclick="ChipInput.remove('${raw(id)}', ${raw(String(i))})">×</button></span>`);
     });
     box.innerHTML = chips.join('') + safeHtml`<input type="text" class="chip-add"
         placeholder="${placeholder}"
@@ -100,7 +100,7 @@ window.ChipInput = (function () {
   }
 
   function _onPaste(ev, id) {
-    var text = (ev.clipboardData || window.clipboardData).getData('text');
+    var text = (ev.clipboardData || /** @type {any} */ (window).clipboardData).getData('text');
     if (text && /[\s,;\n]/.test(text)) {
       ev.preventDefault();
       add(id, text);

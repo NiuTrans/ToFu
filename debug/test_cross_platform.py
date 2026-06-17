@@ -254,9 +254,9 @@ check('git checkout is destructive', _is_destructive_command('git checkout main'
 # ══════════════════════════════════════════════════════════
 section('12. Optional Dependency Flags')
 
-# lib/fetch/utils.py — HAS_* flags must be booleans (True if installed, False if not)
+# tofu_search/fetch/utils.py — HAS_* flags must be booleans (True if installed, False if not)
 try:
-    from lib.fetch.utils import HAS_TRAFILATURA, HAS_PLAYWRIGHT, HAS_FITZ, HAS_PIL
+    from tofu_search.fetch.utils import HAS_TRAFILATURA, HAS_PLAYWRIGHT, HAS_FITZ, HAS_PIL
     check('HAS_TRAFILATURA is a bool', isinstance(HAS_TRAFILATURA, bool),
           f'got {type(HAS_TRAFILATURA).__name__}')
     check('HAS_PLAYWRIGHT is a bool', isinstance(HAS_PLAYWRIGHT, bool),
@@ -268,7 +268,7 @@ try:
     print(f'    (HAS_TRAFILATURA={HAS_TRAFILATURA}, HAS_PLAYWRIGHT={HAS_PLAYWRIGHT}, '
           f'HAS_FITZ={HAS_FITZ}, HAS_PIL={HAS_PIL})')
 except Exception as e:
-    check('lib.fetch.utils HAS_* flags importable', False, str(e))
+    check('tofu_search.fetch.utils HAS_* flags importable', False, str(e))
 
 # lib/pdf_parser/_common — HAS_PYMUPDF and HAS_PYMUPDF4LLM must be booleans
 try:
@@ -283,10 +283,10 @@ except Exception as e:
 
 # The import itself should not crash even if deps are missing
 try:
-    import lib.fetch.utils
-    check('lib.fetch.utils imports without crash', True)
+    import tofu_search.fetch.utils
+    check('tofu_search.fetch.utils imports without crash', True)
 except Exception as e:
-    check('lib.fetch.utils imports without crash', False, str(e))
+    check('tofu_search.fetch.utils imports without crash', False, str(e))
 
 try:
     import lib.pdf_parser._common

@@ -48,7 +48,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from lib.env_compat import getenv_compat
 from lib.log import get_logger
-from lib.orchestration import validate_definition
+from lib.orchestration import (
+    MAX_SUBFLOW_DEPTH, expand_subflows, render_role_brief, resolve_emits,
+    validate_definition,
+)
 
 logger = get_logger(__name__)
 
@@ -63,7 +66,15 @@ _DEFAULT_PARALLEL = 8
 _CARRY_ATTEMPT_CHARS = 1800
 _CARRY_FEEDBACK_CHARS = 1800
 
-_VERIFIER_ROLES = frozenset({'critic', 'reviewer'})
+# Roles that close a loop iteration by emitting a verdict. ``virtual_user``
+# stands in for the human in autopilot mode: its reply (and its
+# [VU: TASK_DONE] / [VERDICT: STOP] signal) drives the same loop boundary a
+# critic does. The verdict heuristics below also recognise the VU sentinel.
+_VERIFIER_ROLES = frozenset({'critic', 'reviewer', 'virtual_user'})
+
+# Autopilot graceful-stop sentinel (mirrors lib/tasks_pkg/autopilot.py's
+# _VU_DONE_SENTINEL). A virtual_user emits this when the task is finished.
+_VU_DONE_SENTINEL = '[VU: TASK_DONE]'
 
 # State-changing ("deliverable") tools — mirrors
 # lib/tasks_pkg/endpoint_review.STATE_CHANGING_TOOLS. Kept as a local copy
@@ -160,11 +171,21 @@ class FlowExecutor:
                  parent_task: dict | None = None,
                  all_tools: list | None = None,
                  model: str = '',
-                 project_path: str = ''):
+                 project_path: str = '',
+                 subflow_resolver: Callable | None = None,
+                 _subflow_depth: int = 0):
         verdict = validate_definition(definition)
         if not verdict['ok']:
             raise FlowExecutionError(
                 'cannot execute invalid definition: ' + '; '.join(verdict['errors']))
+
+        # Flatten any subflow ("big role" = small roles) nodes into one flat
+        # graph the interpreter runs unchanged. Embedded subflows expand with
+        # no resolver; ``params.ref`` subflows need ``subflow_resolver``.
+        try:
+            definition = expand_subflows(definition, resolver=subflow_resolver)
+        except ValueError as e:
+            raise FlowExecutionError(f'subflow expansion failed: {e}') from e
 
         self.defn = definition
         self.nodes: dict[str, dict] = {n['id']: n for n in definition.get('nodes', [])}
@@ -181,6 +202,15 @@ class FlowExecutor:
         self._project_path = project_path
 
         self._runner = agent_runner or self._default_runner
+        # Whether a runner was explicitly injected (tests / custom). A nested
+        # executor for an isolated subflow must reuse an injected runner, but
+        # let a default-runner parent hand the child its OWN default runner
+        # (bound-method identity is unreliable, so track it with a flag).
+        self._custom_runner = agent_runner is not None
+        # Resolver + current nesting depth, threaded into nested executors so
+        # an ``isolated`` subflow (a black box) runs in its own FlowExecutor.
+        self._subflow_resolver = subflow_resolver
+        self._subflow_depth = int(_subflow_depth)
 
         # Forward / reverse adjacency.
         self.fwd: dict[str, list[str]] = {nid: [] for nid in self.nodes}
@@ -223,6 +253,15 @@ class FlowExecutor:
         Returns ``{ok, status, final, transcript, agents_run, error}``.
         """
         start = self._find_start()
+        # The Start node may carry a `seed` (the request the author baked
+        # into the canvas). An explicit initial_context (e.g. typed in the
+        # Run panel) wins; otherwise the seed is the flow's entry input,
+        # making Start a real self-contained entry point, not a bare marker.
+        if not (initial_context or '').strip():
+            start_node = self.nodes.get(start) or {}
+            seed = (start_node.get('params') or {}).get('seed')
+            if isinstance(seed, str) and seed.strip():
+                initial_context = seed
         t0 = time.monotonic()
         self._emit({'type': 'flow_start', 'name': self.defn.get('name'),
                     'nodes': len(self.nodes)})
@@ -288,6 +327,12 @@ class FlowExecutor:
                 context = self._run_role(node, context)
                 node_id = self._single_next(node_id)
                 continue
+            if ntype == 'subflow':
+                # Only isolated subflows survive expand_subflows; inline ones
+                # were already flattened into this graph.
+                context = self._run_subflow_isolated(node, context)
+                node_id = self._single_next(node_id)
+                continue
             if kind == 'parallel':
                 context, node_id = self._run_parallel(node_id, context)
                 continue
@@ -324,6 +369,10 @@ class FlowExecutor:
         params = node.get('params') or {}
         shared = params.get('isolation') == 'shared-context'
         is_verifier = role in _VERIFIER_ROLES
+        # Message axis (orthogonal to role): does this turn land as a user
+        # or assistant message? Explicit params.emits wins; else derived
+        # from role (critic/reviewer/virtual_user → user, else assistant).
+        emits = resolve_emits(node)
 
         # Build the effective per-call context.
         #  * A shared-context node sees its OWN prior attempt + any pending
@@ -340,7 +389,7 @@ class FlowExecutor:
             eff_context = self._append_deliverables_snapshot(eff_context)
 
         self._emit({'type': 'step_start', 'node_id': nid, 'role': role,
-                    'name': node.get('name') or role,
+                    'name': node.get('name') or role, 'emits': emits,
                     'isolation': 'shared' if shared else 'fresh'})
         t0 = time.monotonic()
         try:
@@ -382,9 +431,148 @@ class FlowExecutor:
                 }
 
         self._emit({'type': 'step_complete', 'node_id': nid, 'role': role,
-                    'status': st, 'preview': out[:200],
+                    'status': st, 'preview': out[:200], 'emits': emits,
                     'state_changing': sc_count})
         return self._append_context(context, role, out)
+
+    def _run_subflow_isolated(self, node: dict, context: str) -> str:
+        """Run an ``isolated`` subflow as a black box and append its result.
+
+        This is the true nested scope (vs ``inline``, which ``expand_subflows``
+        already flattened away before the engine ever sees it). The child runs
+        in its OWN :class:`FlowExecutor` with a fresh context:
+
+          * Input membrane — the child sees ONLY the upstream ``context`` as
+            its seed (``run(initial_context=...)``). None of this engine's
+            accumulated shared-context / verifier feedback / node memory
+            crosses in.
+          * Output membrane — the child's converged ``final`` is the only
+            thing that crosses back out, appended to the parent context under
+            the subflow's ``role`` label exactly like a role turn. The child's
+            internal turns never enter the parent transcript.
+
+        To the parent graph the subflow is indistinguishable from a role:
+        it counts against ``max_agents``, emits ``step_start`` / ``step_complete``
+        with its ``emits`` axis, and records one transcript entry. The nested
+        executor reuses the entire engine (loop / parallel / verdict machinery
+        all work inside the box for free); ``MAX_SUBFLOW_DEPTH`` bounds the
+        recursion.
+        """
+        # The subflow is a CONTAINER, not an agent — its child's nested runs
+        # are the real agents, folded into our count below. We only gate on
+        # the budget here so an already-exhausted run can't open a new box.
+        with self._lock:
+            if self._agents_run >= self.max_agents:
+                raise FlowExecutionError(
+                    f'agent budget exhausted ({self.max_agents})')
+
+        nid = node.get('id')
+        role = node.get('role') or 'general'
+        emits = resolve_emits(node)
+        params = node.get('params') or {}
+
+        if self._subflow_depth + 1 > MAX_SUBFLOW_DEPTH:
+            raise FlowExecutionError(
+                f'isolated subflow {nid!r} nesting exceeds '
+                f'MAX_SUBFLOW_DEPTH ({MAX_SUBFLOW_DEPTH})')
+
+        child = params.get('definition')
+        if child is None:
+            ref = params.get('ref')
+            if not (self._subflow_resolver and ref):
+                raise FlowExecutionError(
+                    f'isolated subflow {nid!r} has ref {ref!r} but no '
+                    'resolver was supplied')
+            child = self._subflow_resolver(ref)
+            if not isinstance(child, dict):
+                raise FlowExecutionError(
+                    f'isolated subflow {nid!r} ref {ref!r} did not resolve '
+                    'to a definition')
+
+        self._emit({'type': 'step_start', 'node_id': nid, 'role': role,
+                    'name': node.get('name') or role, 'emits': emits,
+                    'isolation': 'isolated', 'subflow': True})
+        t0 = time.monotonic()
+        logger.info('[FlowEngine] isolated subflow %s START role=%s depth=%d',
+                    nid, role, self._subflow_depth + 1)
+
+        child_engine = FlowExecutor(
+            child,
+            agent_runner=self._runner if self._custom_runner else None,
+            on_event=self._on_event,
+            abort_check=self._abort_check,
+            max_agents=self.max_agents,
+            max_iterations=self.max_iterations,
+            max_parallel=self.max_parallel,
+            parent_task=self._parent_task,
+            all_tools=self._all_tools,
+            model=self._model,
+            project_path=self._project_path,
+            subflow_resolver=self._subflow_resolver,
+            _subflow_depth=self._subflow_depth + 1,
+        )
+        try:
+            result = child_engine.run(initial_context=context)
+        except _AbortSignal:
+            raise
+        except Exception as e:
+            logger.error('[FlowEngine] isolated subflow %s crashed: %s',
+                         nid, e, exc_info=True)
+            result = {'ok': False, 'status': 'failed', 'final': '', 'error': str(e)}
+
+        # The child's nested agent runs are already counted in ITS engine; fold
+        # the count into ours so max_agents stays a global ceiling.
+        with self._lock:
+            self._agents_run += child_engine._agents_run
+
+        # Only the child's converged DELIVERABLE crosses the membrane — not
+        # its accumulated scratchpad (which carries inner role labels) and not
+        # a trailing verifier verdict. That deliverable is the last producer
+        # (non-verifier) turn; fall back to the raw final if the box had none.
+        out = self._subflow_deliverable(result)
+        st = result.get('status') or 'completed'
+        if st == 'aborted':
+            raise _AbortSignal()
+        # Record + emit BEFORE deciding to halt, so the event stream + transcript
+        # always show the box's outcome even when it fails.
+        self._record(nid, role, out, st, result.get('error') or '',
+                     time.monotonic() - t0)
+        self._emit({'type': 'step_complete', 'node_id': nid, 'role': role,
+                    'status': st, 'preview': out[:200], 'emits': emits,
+                    'subflow': True})
+        logger.info('[FlowEngine] isolated subflow %s DONE status=%s', nid, st)
+        # A STRUCTURAL failure of the box (could not execute the sub-graph) is
+        # fatal — it must NOT silently hand an empty deliverable to the parent
+        # walk. Propagate as the same FlowExecutionError the engine raises for
+        # its own structural failures (budget, cycles), which surfaces as the
+        # parent run's status='failed'. A box that *completed* with an empty
+        # deliverable is a different, legitimate case and continues (matching
+        # role semantics: "ran, produced nothing").
+        if st == 'failed':
+            raise FlowExecutionError(
+                f'isolated subflow {nid!r} failed: '
+                f'{result.get("error") or "no detail"}')
+        return self._append_context(context, role, out)
+
+    @staticmethod
+    def _subflow_deliverable(result: dict) -> str:
+        """Extract the value an isolated subflow exports across its membrane.
+
+        A child engine's ``final`` is its accumulated context — it carries
+        inner ``[role]`` block labels and may end on a verifier verdict
+        (e.g. a critic's ``VERDICT: STOP``), neither of which should leak to
+        the parent. The black box's real output is its last *producer*
+        (non-verifier) turn. Falls back to the raw ``final`` when the child
+        had no producer turn (e.g. an empty or all-verifier flow).
+        """
+        transcript = result.get('transcript') or []
+        for entry in reversed(transcript):
+            if entry.get('role') in _VERIFIER_ROLES:
+                continue
+            out = entry.get('output')
+            if out:
+                return str(out)
+        return str(result.get('final') or '')
 
     def _count_deliverables(self, res: dict) -> tuple:
         """Count state-changing vs exploratory tool calls in a runner result.
@@ -564,7 +752,8 @@ class FlowExecutor:
 
             verifier_out = self._last_verifier_output()
             self._feedback_history.append(verifier_out)
-            phase, defect = self._classify_verdict(verifier_out)
+            phase, defect = self._classify_verdict(
+                verifier_out, verifier_role=self._last_verifier_role())
 
             if phase == 'stop':
                 logger.info('[FlowEngine] loop %s STOP after iteration %d', lid, i + 1)
@@ -631,13 +820,21 @@ class FlowExecutor:
                                     'produce a DELTA, do not regrow the plan)\n'
                                     + progress)
         replan_ctx = '\n\n'.join(replan_ctx_parts)
-        # Tag the planner objective so it knows this is a re-plan.
+        # Tag the planner objective so it knows this is a re-plan. Render the
+        # full structured brief first, then append the re-plan directive into
+        # the objective field (the renderer treats objective as the lead).
         params = dict(planner_node.get('params') or {})
+        base_brief = render_role_brief(planner_node) or 'Plan the work.'
         params['objective'] = (
-            (params.get('objective') or 'Plan the work.')
+            base_brief
             + f'\n\n[RE-PLAN #{replan}] Address the structural defect above and '
             'produce a minimal DELTA to the existing plan — do not rewrite or '
             'grow it.')
+        # Drop the other structured fields: they are already folded into
+        # base_brief, so leaving them would double-render on the next pass.
+        for _k in list(params.keys()):
+            if _k not in ('objective', 'tier', 'isolation', 'emits', 'name'):
+                params.pop(_k, None)
         planner_node['params'] = params
         return self._run_role(planner_node, replan_ctx)
 
@@ -897,11 +1094,17 @@ class FlowExecutor:
 
     def _last_verifier_output(self) -> str:
         for entry in reversed(self._transcript):
-            if entry.get('role') in ('critic', 'reviewer'):
+            if entry.get('role') in _VERIFIER_ROLES:
                 return entry.get('output') or ''
         return self._transcript[-1].get('output') if self._transcript else ''
 
-    def _classify_verdict(self, text: str) -> tuple:
+    def _last_verifier_role(self) -> str:
+        for entry in reversed(self._transcript):
+            if entry.get('role') in _VERIFIER_ROLES:
+                return entry.get('role') or ''
+        return ''
+
+    def _classify_verdict(self, text: str, *, verifier_role: str = '') -> tuple:
         """Classify a verifier's output into ``(phase, plan_defect)``.
 
         ``phase`` ∈ {'stop','worker','planner'}; ``plan_defect`` is the
@@ -914,7 +1117,24 @@ class FlowExecutor:
             reason must NOT be a worker-execution complaint in disguise;
             otherwise it is downgraded to 'worker'.
           * Kill-switch TOFU_ENDPOINT_REPLAN=0 downgrades planner→worker.
+
+        ``virtual_user`` verifiers invert the default: autopilot keeps the
+        loop going unless the VU explicitly signals completion (the
+        ``[VU: TASK_DONE]`` sentinel or a STOP verdict). A plain VU reply —
+        even an empty one — means "continue", the opposite of a critic's
+        ambiguous output (which stops to avoid spinning).
         """
+        is_vu = verifier_role == 'virtual_user'
+
+        if is_vu:
+            # Autopilot: explicit done sentinel / STOP tag ends the loop;
+            # anything else (including empty) is a keep-going reply.
+            low = (text or '').lower()
+            if (_VU_DONE_SENTINEL.lower() in low
+                    or '[verdict: stop]' in low or 'verdict: stop' in low):
+                return 'stop', None
+            return 'worker', None
+
         if not text:
             return 'stop', None
 
@@ -997,7 +1217,8 @@ class FlowExecutor:
         params = node.get('params') or {}
         spec = SubTaskSpec(
             role=node.get('role', 'general'),
-            objective=params.get('objective') or node.get('name') or 'Execute this step.',
+            objective=(render_role_brief(node) or node.get('name')
+                       or 'Execute this step.'),
             context=context,
             model_tier=params.get('tier') or 'standard',
         )
@@ -1083,6 +1304,12 @@ def compile_plan(definition: dict) -> dict:
     if not verdict['ok']:
         return {'ok': False, 'steps': [], 'error': '; '.join(verdict['errors'])}
 
+    # Flatten subflows so the preview shows the real (inlined) steps.
+    try:
+        definition = expand_subflows(definition)
+    except ValueError as e:
+        return {'ok': False, 'steps': [], 'error': f'subflow: {e}'}
+
     nodes = {n['id']: n for n in definition.get('nodes', [])}
     fwd: dict[str, list[str]] = {nid: [] for nid in nodes}
     rev: dict[str, list[str]] = {nid: [] for nid in nodes}
@@ -1109,6 +1336,10 @@ def compile_plan(definition: dict) -> dict:
         if n.get('type') == 'role':
             steps.append({'node_id': cur, 'role': n.get('role'),
                           'action': 'run-agent'})
+        elif n.get('type') == 'subflow':
+            # Survives expansion only when isolated (inline was flattened).
+            steps.append({'node_id': cur, 'role': n.get('role'),
+                          'action': 'run-subflow', 'scope': 'isolated'})
         elif n.get('kind') == 'artifact':
             steps.append({'node_id': cur, 'kind': 'artifact',
                           'action': 'declare-deliverable',

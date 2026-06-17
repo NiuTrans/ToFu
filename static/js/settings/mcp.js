@@ -15,6 +15,7 @@
 /** Cached catalog & state */
 var _mcpCatalog = [];
 var _mcpActiveCategory = 'all';
+var _mcpScope = 'all';         // 'all' | 'installed' | 'available'
 var _mcpSearchQuery = '';
 var _mcpInstallTarget = null;  // CatalogEntry being installed
 var _mcpInstallIsReinstall = false;  // true = editing existing (stored env will be honoured)
@@ -62,7 +63,7 @@ function _renderMcpCategoryBar() {
     cats[c] = (cats[c] || 0) + 1;
   });
   var html = '<button class="mcp-cat-pill' + (_mcpActiveCategory === 'all' ? ' active' : '') + '" onclick="_mcpSetCategory(\'all\')">全部 <span class="mcp-cat-count">' + _mcpCatalog.length + '</span></button>';
-  var order = ['Development','Data & DB','Communication','Search & Web','Productivity','DevOps','Finance','Design','Other'];
+  var order = ['Development','Data & DB','Communication','Search & Web','Productivity','DevOps','Finance','Design','Other','Custom'];
   order.forEach(function(c) {
     if (!cats[c]) return;
     html += '<button class="mcp-cat-pill' + (_mcpActiveCategory === c ? ' active' : '') + '" onclick="_mcpSetCategory(\'' + c + '\')">' + escapeHtml(c) + ' <span class="mcp-cat-count">' + cats[c] + '</span></button>';
@@ -76,6 +77,18 @@ function _mcpSetCategory(cat) {
   _renderMcpCatalog();
 }
 
+/** Switch the installed/available scope filter and re-render. */
+function _mcpSetScope(scope) {
+  _mcpScope = scope;
+  var tabs = document.getElementById('mcpScopeTabs');
+  if (tabs) {
+    tabs.querySelectorAll('.skills-scope-tab').forEach(function(t) {
+      t.classList.toggle('active', t.getAttribute('data-scope') === scope);
+    });
+  }
+  _renderMcpCatalog();
+}
+
 function _mcpFilterCatalog(query) {
   _mcpSearchQuery = (query || '').toLowerCase().trim();
   _renderMcpCatalog();
@@ -85,6 +98,10 @@ function _mcpFilterCatalog(query) {
 function _mcpFilteredCatalog() {
   return _mcpCatalog.filter(function(e) {
     if (_mcpActiveCategory !== 'all' && e.category !== _mcpActiveCategory) return false;
+    // Scope filter: an entry counts as "installed" if it is configured
+    // (installed) regardless of live connection state.
+    if (_mcpScope === 'installed' && !e.installed) return false;
+    if (_mcpScope === 'available' && e.installed) return false;
     if (_mcpSearchQuery) {
       var hay = (e.name + ' ' + e.description + ' ' + (e.tags || []).join(' ')).toLowerCase();
       return hay.indexOf(_mcpSearchQuery) !== -1;
@@ -101,8 +118,8 @@ function _mcpFilteredCatalog() {
 function _mcpRetryLabel(secs) {
   secs = Math.max(0, Math.round(secs || 0));
   if (secs <= 0) return t('mcp.retryNow');
-  if (secs < 60) return t('mcp.retryInSec').replace('{n}', secs);
-  return t('mcp.retryInMin').replace('{n}', Math.ceil(secs / 60));
+  if (secs < 60) return t('mcp.retryInSec').replace('{n}', String(secs));
+  return t('mcp.retryInMin').replace('{n}', String(Math.ceil(secs / 60)));
 }
 
 /**
@@ -129,7 +146,10 @@ function _renderMcpCatalog() {
   if (!grid) return;
   var items = _mcpFilteredCatalog();
   if (items.length === 0) {
-    grid.innerHTML = '<p class="stg-empty">没有匹配的 App。</p>';
+    var emptyMsg = _mcpScope === 'installed' ? '还没有安装任何 App。可在「全部」或「未安装」中安装，或点「+ 添加」接入自定义服务器。'
+      : _mcpScope === 'available' ? '所有 App 都已安装。'
+      : '没有匹配的 App。';
+    grid.innerHTML = '<p class="stg-empty">' + emptyMsg + '</p>';
     return;
   }
   // Show featured first, then alphabetical
@@ -156,7 +176,7 @@ function _renderMcpCatalog() {
       html += '<span class="mcp-app-status on"><span class="dot"></span>ON</span>';
     } else if (breaker) {
       html += '<span class="mcp-app-status reconnecting" title="' +
-        escapeHtml(t('mcp.reconnecting') + ' · ' + t('mcp.retryFailCount').replace('{n}', breaker.failures || 0)) +
+        escapeHtml(t('mcp.reconnecting') + ' · ' + t('mcp.retryFailCount').replace('{n}', String(breaker.failures || 0))) +
         '">⟳ ' + _mcpBreakerCountdownSpan(breaker) + '</span>';
     } else if (installed) {
       html += '<span class="mcp-app-status off">IDLE</span>';
@@ -185,7 +205,13 @@ function _renderMcpCatalog() {
           escapeHtml(t('mcp.reconnecting')) + '">⟳ ' +
           _mcpBreakerCountdownSpan(breaker) + '</span>';
       }
-      html += '<button class="btn btn-primary btn-xs" onclick="_mcpOpenInstallModal(\'' + escapeHtml(e.id) + '\', true)" title="编辑凭据并重新连接（已有凭据会回填为默认；留空则沿用）">连接</button>';
+      if (e.custom) {
+        // Custom servers have no catalog entry, so the catalog install
+        // endpoint would 404. Reconnect straight through connectOne.
+        html += '<button class="btn btn-primary btn-xs" onclick="_mcpReconnect(\'' + escapeHtml(e.id) + '\')" title="重新连接此自定义服务器">连接</button>';
+      } else {
+        html += '<button class="btn btn-primary btn-xs" onclick="_mcpOpenInstallModal(\'' + escapeHtml(e.id) + '\', true)" title="编辑凭据并重新连接（已有凭据会回填为默认；留空则沿用）">连接</button>';
+      }
       html += '<button class="btn btn-secondary btn-xs" onclick="_mcpPurge(\'' + escapeHtml(e.id) + '\')" title="彻底删除配置，包括已保存的凭据">清除凭据</button>';
     } else {
       // If the catalog entry has NO required env vars, skip the modal
@@ -558,7 +584,30 @@ async function _mcpReconnect(serverId) {
   }
 }
 
-// ── Manual add (advanced) ──
+// ── Manual add (code-free custom server) ──
+
+/** Open the add-custom-server modal, resetting all fields. */
+function _mcpOpenAddModal() {
+  ['mcpNewName', 'mcpNewCommand', 'mcpNewArgs', 'mcpNewUrl', 'mcpNewEnv', 'mcpNewDesc'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  var transport = document.getElementById('mcpNewTransport');
+  if (transport) transport.value = 'stdio';
+  _mcpTransportChanged();
+  var status = document.getElementById('mcpAddStatus');
+  if (status) { status.style.display = 'none'; status.textContent = ''; }
+  var btn = document.getElementById('mcpAddSaveBtn');
+  if (btn) { btn.disabled = false; btn.textContent = t('mcp.saveConnect'); }
+  var overlay = document.getElementById('mcpAddOverlay');
+  if (overlay) overlay.style.display = 'flex';
+}
+
+function _mcpCloseAddModal(evt) {
+  if (evt && evt.target !== evt.currentTarget) return;
+  var overlay = document.getElementById('mcpAddOverlay');
+  if (overlay) overlay.style.display = 'none';
+}
 
 function _mcpTransportChanged() {
   var transport = (document.getElementById('mcpNewTransport') || {}).value || 'stdio';
@@ -569,9 +618,22 @@ function _mcpTransportChanged() {
 }
 
 async function _mcpSaveServer() {
+  var status = document.getElementById('mcpAddStatus');
+  var saveBtn = document.getElementById('mcpAddSaveBtn');
+  function _fail(msg) {
+    if (status) {
+      status.style.display = 'block';
+      status.className = 'mcp-install-status error';
+      status.textContent = '✕ ' + msg;
+    } else {
+      showAlert(msg);
+    }
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = t('mcp.saveConnect'); }
+  }
+
   var name = (document.getElementById('mcpNewName') || {}).value || '';
   name = name.trim();
-  if (!name) { showAlert('请输入服务器名称'); return; }
+  if (!name) { _fail('请输入服务器名称'); return; }
 
   var transport = (document.getElementById('mcpNewTransport') || {}).value || 'stdio';
   var payload = { name: name, transport: transport, enabled: true };
@@ -580,10 +642,10 @@ async function _mcpSaveServer() {
     payload.command = (document.getElementById('mcpNewCommand') || {}).value || '';
     var argsText = (document.getElementById('mcpNewArgs') || {}).value || '';
     payload.args = argsText.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
-    if (!payload.command) { showAlert('请输入命令 (command)'); return; }
+    if (!payload.command) { _fail('请输入命令 (command)'); return; }
   } else {
     payload.url = (document.getElementById('mcpNewUrl') || {}).value || '';
-    if (!payload.url) { showAlert('请输入 SSE URL'); return; }
+    if (!payload.url) { _fail('请输入 SSE URL'); return; }
   }
 
   // Parse env vars
@@ -601,16 +663,30 @@ async function _mcpSaveServer() {
   var desc = (document.getElementById('mcpNewDesc') || {}).value || '';
   if (desc.trim()) payload.description = desc.trim();
 
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '保存中…'; }
+  if (status) {
+    status.style.display = 'block';
+    status.className = 'mcp-install-status info';
+    status.textContent = '正在启动 ' + name + '…';
+  }
+
   try {
     var data = await Api.mcp.serverCreate(payload);
-    if (!data || !data.ok) { showAlert('保存失败: ' + ((data && data.error) || '未知错误')); return; }
+    if (!data || !data.ok) { _fail((data && data.error) || '保存失败（无法连接到服务器）'); return; }
 
     // Auto-connect
     await Api.mcp.connectOne(name);
 
     debugLog('[MCP] Server "' + name + '" saved & connected', 'success');
-    await _populateMcpTab();
+    if (status) {
+      status.className = 'mcp-install-status success';
+      status.textContent = '✓ ' + name + ' 已保存并连接';
+    }
+    setTimeout(function() {
+      _mcpCloseAddModal();
+      _populateMcpTab();
+    }, 900);
   } catch (e) {
-    showAlert('保存失败: ' + e.message);
+    _fail(_mcpErrDetail(e));
   }
 }

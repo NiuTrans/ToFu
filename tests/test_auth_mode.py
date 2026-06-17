@@ -110,11 +110,15 @@ class OpenModeGateTest(unittest.TestCase):
         auth_mode._STORE_PATH = cls._orig_mode_path
         api_keys._cache.clear()
         api_keys._cache_loaded = False
-        auth_mode.reset_for_tests()
+        # Restore the env var to exactly what it was before this class ran
+        # (the shared conftest sets a session-wide TOFU_AUTH_MODE default;
+        # do NOT hardcode a mode here — an earlier version pinned 'private'
+        # and poisoned every downstream test once the conftest default
+        # became 'open').
         if cls._env_was is not None:
             os.environ['TOFU_AUTH_MODE'] = cls._env_was
-        # Restore conftest's expectation for downstream tests.
-        os.environ['TOFU_AUTH_MODE'] = 'private'
+        else:
+            os.environ.pop('TOFU_AUTH_MODE', None)
         auth_mode.reset_for_tests()
         cls._tmp.cleanup()
 

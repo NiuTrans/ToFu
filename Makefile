@@ -13,11 +13,12 @@
 #    make smoke         — Run smoke tests only
 #    make desktop       — Build desktop installer (PyInstaller)
 #    make desktop-icons — Generate .ico/.icns from logo.png
+#    make vendor-mcp    — Re-sync tools/<name>/ snapshots of internal MCP servers
 #    make stop          — Stop the running Tofu server (graceful SIGTERM)
 #
 # ═══════════════════════════════════════════════════════════════
 
-.PHONY: lint test-unit test-api test-visual test-all test-coverage healthcheck ci smoke help desktop desktop-icons stop
+.PHONY: lint test-unit test-api test-visual test-all test-coverage healthcheck ci smoke help desktop desktop-icons stop vendor-mcp
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -35,6 +36,11 @@ lint-format: ## Check formatting (non-blocking, for gradual adoption)
 lint-fix: ## Auto-fix lint issues
 	python -m ruff check --fix lib/ routes/ tests/
 	python -m ruff format lib/ routes/ tests/
+
+# ── Vendoring internal MCP servers ─────────────────────────────
+
+vendor-mcp: ## Re-sync tools/<name>/ snapshots of internal MCP servers from sibling checkouts
+	./scripts/vendor_mcp.sh
 
 .PHONY: typecheck
 typecheck: ## Type-check the vanilla-JS frontend (tsc --checkJs, no build step)

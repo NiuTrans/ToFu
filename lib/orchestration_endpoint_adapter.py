@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 
 
 # Engine role → endpoint phase classification.
-_VERIFIER_ROLES = frozenset({'critic', 'reviewer'})
+_VERIFIER_ROLES = frozenset({'critic', 'reviewer', 'virtual_user'})
 _PLANNER_ROLES = frozenset({'planner'})
 
 
@@ -93,6 +93,11 @@ class EndpointEventAdapter:
     def _on_step_complete(self, ev: dict):
         role = ev.get('role') or ''
         out = ev.get('preview') or ''
+        # The MESSAGE axis the engine resolved for this node (user|assistant).
+        # Older events without it fall back to role-based classification so
+        # this adapter keeps working against an un-upgraded engine.
+        emits = ev.get('emits') or self._derive_emits(role)
+
         if role in _PLANNER_ROLES:
             self._planner_iteration += 1
             self._push({
@@ -103,10 +108,10 @@ class EndpointEventAdapter:
                 '_epPlannerIteration': self._planner_iteration,
             })
             self._pending_replan = False
-        elif role in _VERIFIER_ROLES:
-            # Determine the next phase from the verdict text the engine saw.
-            # The engine already classified it; we re-derive a light label
-            # from the preview so the UI shows the right placeholder.
+        elif emits == 'user':
+            # A "user-side" turn — a critic verdict (endpoint) OR a virtual
+            # user reply (autopilot). Both render on the user side and carry
+            # the review markers the frontend keys off.
             next_phase = self._derive_next_phase(out)
             self._next_phase = next_phase
             self._push({
@@ -119,7 +124,7 @@ class EndpointEventAdapter:
                 '_epNextPhase': next_phase,
             })
         else:
-            # A worker (producer) turn.
+            # An assistant-side producer turn (worker / specialist).
             self._iteration += 1
             self._push({
                 'role': 'assistant',
@@ -128,6 +133,15 @@ class EndpointEventAdapter:
                 '_epIteration': self._iteration,
                 '_epStateChangingCount': ev.get('state_changing', 0),
             })
+
+    @staticmethod
+    def _derive_emits(role: str) -> str:
+        """Fallback message-axis derivation for events lacking ``emits``.
+
+        Mirrors lib.orchestration.resolve_emits' role rule so an older engine
+        (no ``emits`` in its events) classifies identically to the new one.
+        """
+        return 'user' if role in _VERIFIER_ROLES else 'assistant'
 
     def _on_zero_deliverable_guard(self, ev: dict):
         # Mirror endpoint's synthetic critic row so the UI shows the guard.
@@ -157,6 +171,8 @@ class EndpointEventAdapter:
         if self._pending_replan:
             return 'planner'
         low = (text or '').lower()
+        if '[vu: task_done]' in low:
+            return 'stop'
         if '[verdict: stop]' in low or 'verdict: stop' in low:
             # STOP with unresolved markers is overridden by the engine; if a
             # replan/worker iteration follows we'll have seen those events.

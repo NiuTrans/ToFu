@@ -7,9 +7,13 @@ let _timerPollInterval = null;
 
 // ── Toggle panel visibility ──
 function toggleTimerPanel(e) {
-  if (e) e.stopPropagation();
   const panel = document.getElementById("timerPanel");
   if (!panel) return;
+  // The panel is a DOM descendant of the badge, so clicks (and the click
+  // that ends a text-selection drag) inside the panel bubble up to this
+  // onclick handler. Without this guard they would flip the panel shut.
+  if (e && panel.contains(/** @type {Node} */ (e.target))) return;
+  if (e) e.stopPropagation();
   _timerPanelOpen = !_timerPanelOpen;
   panel.classList.toggle("visible", _timerPanelOpen);
   if (_timerPanelOpen) _refreshTimerPanel();
@@ -43,7 +47,7 @@ async function _refreshTimerPanel() {
     if (!content) return;
 
     if (timers.length === 0) {
-      content.innerHTML = '<div class="timer-panel-empty">No timers. The AI can create one with timer_create during a task.</div>';
+      content.innerHTML = '<div class="timer-panel-empty">' + t('timer.empty') + '</div>';
       return;
     }
 
@@ -181,13 +185,12 @@ async function _refreshTimerBadge() {
 
 // Close panel on outside click
 document.addEventListener("click", (e) => {
-  if (_timerPanelOpen) {
-    const badge = document.getElementById("timerBadge");
-    if (badge && !badge.contains(e.target)) {
-      _timerPanelOpen = false;
-      const panel = document.getElementById("timerPanel");
-      if (panel) panel.classList.remove("visible");
-    }
+  if (!_timerPanelOpen) return;
+  const badge = document.getElementById("timerBadge");
+  if (badge && !badge.contains(/** @type {Node} */ (e.target))) {
+    _timerPanelOpen = false;
+    const panel = document.getElementById("timerPanel");
+    if (panel) panel.classList.remove("visible");
   }
 });
 

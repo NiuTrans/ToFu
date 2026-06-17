@@ -85,7 +85,7 @@ let activeConvId = sessionStorage.getItem('tofu_activeConvId') || null,
   activeStreams = new Map(),
   streamBufs = new Map(),
   pendingImages = [],
-  pdfProcessing = false;
+  pdfProcessing = 0;  // counter: # of in-flight PDF text-parses (see upload.js)
 /** ★ Message queue: when user sends while streaming, messages are queued here
  *  and auto-dispatched when the current stream finishes.
  *  Key = convId, Value = Array of { text, images, pdfTexts, replyQuotes, convRefs, timestamp } */
@@ -137,6 +137,7 @@ let thinkingEnabled = true,
   swarmEnabled = true,
   endpointEnabled = false,
   autopilotEnabled = false,
+  activeFlow = "",   // "" | "builtin:endpoint" | "builtin:autopilot" | <orchId>
   imageGenEnabled = false,
   imageGenMode = false,
   humanGuidanceEnabled = false,

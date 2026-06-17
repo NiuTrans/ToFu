@@ -54,6 +54,7 @@ from lib.llm_errors import (  # noqa: F401
 # Re-export model detection from lib.model_info
 from lib.model_info import (  # noqa: F401
     _clamp_max_tokens,
+    gemini_reasoning_effort,
     is_claude,
     is_claude_opus_47,
     is_doubao,
@@ -122,6 +123,7 @@ __all__ = [
     'is_claude', 'is_claude_opus_47', 'is_doubao', 'is_ernie',
     'is_gemini', 'is_glm', 'is_gpt', 'is_kimi', 'is_longcat',
     'is_minimax', 'is_qwen', 'model_supports_vision',
+    'gemini_reasoning_effort',
     '_clamp_max_tokens',
     # sanitization (re-exported)
     '_fix_empty_user_messages',

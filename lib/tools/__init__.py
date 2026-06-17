@@ -47,12 +47,15 @@ from .registry import (  # noqa: E402,F401
     ToolSpec,
     all_specs,
     assemble_tool_list,
+    available_plugins,
     discover_plugin_specs,
     register_tool_spec,
+    resolve_enabled_plugins,
     sync_spec_handlers,
 )
 
 __all__ += [
     'ToolContext', 'ToolSpec', 'all_specs', 'assemble_tool_list',
-    'discover_plugin_specs', 'register_tool_spec', 'sync_spec_handlers',
+    'available_plugins', 'discover_plugin_specs', 'register_tool_spec',
+    'resolve_enabled_plugins', 'sync_spec_handlers',
 ]

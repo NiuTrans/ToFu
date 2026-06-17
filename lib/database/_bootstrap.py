@@ -298,9 +298,7 @@ def _flock_required():
     shared mount rather than risk a double-start. Default false → warn loudly
     but proceed (single-host deployments must not be regressed).
     """
-    raw = (getenv_compat('TOFU_PG_REQUIRE_FLOCK',
-                         default=getenv_compat('CHATUI_PG_REQUIRE_FLOCK', default=''))
-           or '')
+    raw = getenv_compat('TOFU_PG_REQUIRE_FLOCK') or ''
     return raw.strip().lower() in ('1', 'true', 'yes', 'on', 'refuse', 'require')
 
 
@@ -474,6 +472,172 @@ def stop_heartbeat(pgdata=None):
         _clear_heartbeat(pgdata)
 
 
+# ─────────────────────────────────────────────────────────────────────
+#  Instance-identity stamp — the copy/move detector
+#
+#  Ownership markers (`.pg_owner_host`, `.tofu_heartbeat`, `postmaster.pid`)
+#  live INSIDE pgdata, which is exactly the directory people copy. When the
+#  whole project is copied to a NEW path (a colleague's home, `tofu-meituan2`,
+#  an open-source clone) the markers come along and the fresh instance trusts
+#  them — silently routing every DB call back to the ORIGINAL machine's PG
+#  via FUSE cross-machine discovery. Result: shared data, privacy leak, no
+#  error shown.
+#
+#  The discriminator is the pgdata's own ABSOLUTE PATH. Legitimate cross-host
+#  sharing happens at the SAME mount path (two machines, one FUSE pgdata);
+#  a copy lands at a DIFFERENT path. So we stamp the canonical path (plus a
+#  random instance id + creation ts) into `.pg_instance_id` whenever this
+#  process takes local ownership. On a later startup, if the stamped path no
+#  longer matches the current canonical path, the directory was copied/moved
+#  → we ignore ALL inherited ownership markers and take over locally. This
+#  strengthens — never weakens — the same-path multi-host failover logic,
+#  which continues to rely on `.pg_owner_host` + heartbeat.
+# ─────────────────────────────────────────────────────────────────────
+
+_INSTANCE_ID_FILE = '.pg_instance_id'
+
+
+def _instance_id_path(pgdata):
+    return os.path.join(pgdata, _INSTANCE_ID_FILE)
+
+
+def _canonical_pgdata_path(pgdata):
+    """Return a stable canonical key for a pgdata location.
+
+    Uses ``os.path.realpath`` (resolves symlinks + ``..``) so the same
+    physical directory always produces the same string regardless of how
+    it was addressed. Returns the input unchanged on error.
+    """
+    try:
+        return os.path.realpath(pgdata)
+    except OSError as e:
+        logger.debug('[DB] realpath(%s) failed: %s', pgdata, e)
+        return pgdata
+
+
+def _read_instance_stamp(pgdata):
+    """Return the parsed `.pg_instance_id` dict, or None if absent/invalid."""
+    path = _instance_id_path(pgdata)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get('path'):
+            return data
+        logger.debug('[DB] instance stamp at %s malformed: %r', path, data)
+        return None
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as e:
+        logger.debug('[DB] Could not read instance stamp at %s: %s', path, e)
+        return None
+
+
+def _write_instance_stamp(pgdata):
+    """Stamp this pgdata with its current canonical path + a fresh id.
+
+    Idempotent for the path: if a stamp already exists for the SAME
+    canonical path, the existing id/created are preserved (we only rewrite
+    when the path differs or no stamp exists). Best-effort — failures are
+    logged at debug and never abort startup.
+    """
+    import uuid
+    canon = _canonical_pgdata_path(pgdata)
+    existing = _read_instance_stamp(pgdata)
+    if existing and _canonical_pgdata_path(existing.get('path', '')) == canon:
+        return  # already stamped for this path — keep stable id
+    payload = {
+        'path': canon,
+        'id': (existing or {}).get('id') or uuid.uuid4().hex,
+        'created': (existing or {}).get('created') or time.time(),
+        'restamped': time.time() if existing else None,
+    }
+    path = _instance_id_path(pgdata)
+    tmp = path + '.tmp'
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+        logger.info('[DB] Stamped pgdata instance identity: path=%s id=%s',
+                    canon, payload['id'])
+    except OSError as e:
+        logger.debug('[DB] Could not write instance stamp to %s: %s', path, e)
+
+
+def _pgdata_was_copied(pgdata):
+    """Return (was_copied, stamped_path) for this pgdata.
+
+    ``was_copied`` is True only when a stamp EXISTS and its recorded
+    canonical path differs from the current canonical path — i.e. the
+    directory was copied or moved here from elsewhere. A missing stamp
+    (legacy pgdata predating this mechanism, or a brand-new initdb) returns
+    False so existing same-path multi-host behaviour is untouched; the stamp
+    is written lazily the next time we take local ownership.
+    """
+    stamp = _read_instance_stamp(pgdata)
+    if not stamp:
+        return False, None
+    stamped = _canonical_pgdata_path(stamp.get('path', ''))
+    current = _canonical_pgdata_path(pgdata)
+    if stamped and stamped != current:
+        return True, stamped
+    return False, stamped
+
+
+def _clear_ownership_markers(pgdata, *, remove_pidfile=True, reason=''):
+    """Remove the machine-specific ownership markers from a pgdata.
+
+    Clears `.pg_owner_host`, the tofu heartbeat, and (optionally)
+    `postmaster.pid` / `postmaster.opts`. The DATA files are never touched.
+    Used by the copy/move self-heal and by the `reset-ownership` admin
+    command. Best-effort; each failure is logged at warning level.
+    """
+    suffix = f' ({reason})' if reason else ''
+    removed = []
+    targets = ['.pg_owner_host', _HEARTBEAT_FILE]
+    if remove_pidfile:
+        targets += ['postmaster.pid', 'postmaster.opts']
+    for name in targets:
+        p = os.path.join(pgdata, name)
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+                removed.append(name)
+        except OSError as e:
+            logger.warning('[DB] Could not remove ownership marker %s%s: %s',
+                           name, suffix, e)
+    if removed:
+        logger.info('[DB] Cleared ownership markers%s: %s', suffix, ', '.join(removed))
+    return removed
+
+
+def _heal_if_copied(pgdata):
+    """If this pgdata was copied/moved here, drop inherited ownership markers.
+
+    Returns True when a copy was detected and markers were cleared (the
+    caller should treat the directory as freshly-owned-locally), False
+    otherwise. The instance stamp is re-written for the new path by the
+    subsequent ``_mark_pg_owned_locally`` call.
+    """
+    was_copied, stamped = _pgdata_was_copied(pgdata)
+    if not was_copied:
+        return False
+    logger.warning('[DB] pgdata was COPIED/MOVED here (stamped path=%s, '
+                   'current=%s) — ignoring inherited ownership markers and '
+                   'taking over locally. This prevents silently connecting to '
+                   "the original machine's PostgreSQL.",
+                   stamped, _canonical_pgdata_path(pgdata))
+    try:
+        from lib.log import audit_log as _audit
+        _audit('pg_copied_pgdata_self_heal',
+               stamped_path=stamped,
+               current_path=_canonical_pgdata_path(pgdata))
+    except Exception as e:
+        logger.debug('[DB] audit_log for copy self-heal failed: %s', e)
+    _clear_ownership_markers(pgdata, remove_pidfile=False, reason='copied pgdata')
+    _clear_heartbeat(pgdata)
+    return True
+
+
 def _mark_pg_owned_locally(pgdata=None):
     """Record that this process is responsible for the local PG.
 
@@ -484,6 +648,7 @@ def _mark_pg_owned_locally(pgdata=None):
     global _PG_STARTED_BY_US
     _PG_STARTED_BY_US = True
     if pgdata:
+        _write_instance_stamp(pgdata)
         _start_heartbeat_thread(pgdata)
 
 
@@ -661,6 +826,13 @@ def _pg_already_running_on_another_machine(pgdata, pg_port):
         (True, host_ip) if another machine has PG running on this pgdata,
         (False, None) otherwise.
     """
+    # Copy/move self-heal: if this pgdata was copied here from another path,
+    # every inherited marker (owner_host, heartbeat, pidfile) belongs to the
+    # ORIGINAL instance. Never defer to it — that is the "silently connect to
+    # the source machine's PG" trap. Clear the markers and report no remote.
+    if _heal_if_copied(pgdata):
+        return False, None
+
     pidfile = os.path.join(pgdata, 'postmaster.pid')
     if not os.path.exists(pidfile):
         logger.debug('[DB] No postmaster.pid — PG not running')

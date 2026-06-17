@@ -11,9 +11,11 @@ registry seams through which the base reaches plugins.
 Two kinds of member
 -------------------
 1. **Relocated leaves** — self-contained base modules that physically live
-   here now: ``push.py``, ``task_runtime.py``, ``profiles.py``.  Old import
-   paths (``lib.push``, ``lib.task_runtime``, ``lib.agent_profiles``) still
-   work via thin compatibility shims that re-export from here.
+   here now: ``push.py``, ``task_runtime.py``, ``profiles.py``.  The old
+   ``lib.push`` / ``lib.task_runtime`` paths still work via thin compatibility
+   shims that re-export from here; the ``lib.agent_profiles`` shim was removed
+   (2026-06) once it had no remaining importer — use ``lib.agent_core.profiles``
+   (or this facade) instead.
 2. **Named-in-place members** — the rest of the base is a *cross-cutting
    subset* of code inside ``tasks_pkg`` / ``llm_dispatch`` / ``swarm`` that
    would create back-imports (and ~960 import-site rewrites) if force-moved.

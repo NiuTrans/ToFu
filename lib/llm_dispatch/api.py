@@ -481,7 +481,8 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
       - Doubao:   thinking.type = 'enabled' / 'disabled'
       - GLM:      thinking.type = 'enabled' / 'disabled'
       - MiniMax:  reasoning_split = True
-      - Qwen/Gemini/LongCat: enable_thinking = True/False
+      - Qwen/LongCat: enable_thinking = True/False
+      - Gemini 3.x: reasoning_effort = 'minimal'/'low'/'medium'/'high'
 
     When dispatch swaps the model (e.g. Claude → Doubao), the body may carry
     the wrong format, causing HTTP 400 errors. This function detects mismatches
@@ -493,11 +494,13 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
     thinking_dict = body.get('thinking')
     enable_thinking = body.get('enable_thinking')
     reasoning_split = body.get('reasoning_split')
+    reasoning_effort = body.get('reasoning_effort')
     effort = body.get('effort')
 
     has_thinking_params = (thinking_dict is not None or
                            enable_thinking is not None or
-                           reasoning_split is not None)
+                           reasoning_split is not None or
+                           reasoning_effort is not None)
     if not has_thinking_params:
         return  # No thinking params to adjust
 
@@ -510,11 +513,18 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
         is_enabled = bool(enable_thinking)
     elif reasoning_split is not None:
         is_enabled = bool(reasoning_split)
+    elif reasoning_effort is not None:
+        # Gemini dialect: 'minimal' is the closest thing to "thinking off".
+        is_enabled = reasoning_effort != 'minimal'
+        # Carry the effort across the swap if no explicit effort was set.
+        if not effort:
+            effort = reasoning_effort
 
     # Clean ALL thinking-related keys before re-setting
     body.pop('thinking', None)
     body.pop('enable_thinking', None)
     body.pop('reasoning_split', None)
+    body.pop('reasoning_effort', None)
     body.pop('effort', None)
 
     # Re-apply for the new model using the same logic as build_body
@@ -552,7 +562,10 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
             kw = {}
         kw['enable_thinking'] = bool(is_enabled)
         body['chat_template_kwargs'] = kw
-    elif _tf == 'enable_thinking' or (not _tf and (is_longcat(new_model) or is_qwen(new_model) or is_gemini(new_model))):
+    elif _tf == 'reasoning_effort' or (not _tf and is_gemini(new_model)):
+        from lib.llm import gemini_reasoning_effort
+        body['reasoning_effort'] = gemini_reasoning_effort(effort, is_enabled)
+    elif _tf == 'enable_thinking' or (not _tf and (is_longcat(new_model) or is_qwen(new_model))):
         body['enable_thinking'] = is_enabled
     elif _tf == 'thinking_type' or (not _tf and is_doubao(new_model)):
         body['thinking'] = {'type': 'enabled' if is_enabled else 'disabled'}

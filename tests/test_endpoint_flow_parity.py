@@ -186,6 +186,17 @@ def _wait_done(fn, task, timeout=60):
             logger.error('parity task failed: %s', e, exc_info=True)
             err.append(e)
         finally:
+            # The orchestrator grabbed this daemon thread's pooled DB
+            # connection via get_thread_db(); production code releases it in a
+            # finally (TaskRuntime / orchestrator run_task). Mirror that here
+            # so the thread doesn't die holding a connection — otherwise it
+            # leaves a dead-thread entry in the PG conn registry that
+            # contaminates test_db_thread_conn_lifecycle in aggregate runs.
+            try:
+                from lib.database import close_thread_db
+                close_thread_db()
+            except Exception as _ctd_err:
+                logger.debug('parity worker close_thread_db failed: %s', _ctd_err)
             done.set()
 
     threading.Thread(target=_w, daemon=True).start()
@@ -204,6 +215,16 @@ def scripted(monkeypatch):
     import lib.llm_dispatch as dispatch_mod
     monkeypatch.setattr(manager_mod, 'dispatch_stream', llm)
     monkeypatch.setattr(dispatch_mod, 'dispatch_stream', llm)
+    # The flagged path runs swarm SubAgents, which bind dispatch_stream at
+    # IMPORT time (`from lib.llm_dispatch import dispatch_stream as
+    # _default_dispatch_stream` in lib/swarm/agent.py) and call that alias —
+    # NOT lib.llm_dispatch.dispatch_stream at runtime. Patching only the
+    # package attribute above leaves SubAgents hitting the REAL API, which in
+    # an aggregate run (after a swarm test has warmed the path) retries/backs
+    # off until the 60s task timeout. Patch the alias the SubAgent actually
+    # calls so BOTH paths are hermetic regardless of import order.
+    import lib.swarm.agent as swarm_agent_mod
+    monkeypatch.setattr(swarm_agent_mod, '_default_dispatch_stream', llm)
     monkeypatch.setenv('LLM_MODEL', 'mock-model')
     monkeypatch.setenv('LLM_API_KEYS', 'mock-test-key')
     monkeypatch.setenv('LLM_BASE_URL', 'http://127.0.0.1:19999/v1')

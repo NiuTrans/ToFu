@@ -305,8 +305,6 @@ the modules known at time of writing:
 | `lib/tasks_pkg/compaction.py`      | Context compaction — called during long conversations|
 | `lib/tasks_pkg/model_config.py`    | Model config lookup — called per LLM request         |
 | `lib/llm/` (package)               | LLM API communication — called per LLM request      |
-| `lib/search.py`                    | Search execution — called per search tool invocation |
-| `lib/fetch/core.py`                | Content fetching — called per fetch_url tool call    |
 | `lib/swarm/artifact_store.py`      | Inter-agent artifact I/O — called per agent step     |
 
 If you add a new module to the per-request path, add `# HOT_PATH` at the top.
@@ -455,7 +453,6 @@ statements, this ensures consumers can do `from lib.X import any_public_name`.
 | Package                  | Core Sub-modules                              | Optional Sub-modules                                      |
 |--------------------------|-----------------------------------------------|-----------------------------------------------------------|
 | `lib/trading`               | `_common`, `nav`, `info`, `strategy_data`     | `intel`, `backtest`                                       |
-| `lib/fetch`              | `utils`, `http`, `html_extract`, `pdf_extract`, `core` | `playwright_pool`                                |
 | `lib/trading_strategy_engine`| `strategy`, `signals`, `risk_metrics`        | `ensemble`, `monte_carlo`, `optimization`, `portfolio`, `pipeline` |
 | `lib/trading_backtest_engine`| `config`, `state`, `strategies`, `reporting`, `engine` | `validation`, `comparison`, `analysis`          |
 | `lib/trading_autopilot`     | `_constants`                                  | `correlation`, `strategy_evolution`, `kpi`, `reasoning`, `cycle`, `scheduler`, `outcome` |
@@ -600,7 +597,7 @@ without pulling in transitive dependencies.
 | Protocol           | Methods                                    | Satisfied By                        | Used By                                  |
 |--------------------|--------------------------------------------|-------------------------------------|------------------------------------------|
 | `LLMService`       | `chat()`, `stream()`                       | `lib.llm_dispatch` module functions | trading_autopilot, swarm, tasks_pkg, trading.intel |
-| `FetchService`     | `fetch_page_content()`, `fetch_urls()`     | `lib.fetch` module functions        | tasks_pkg.executor, trading.intel           |
+| `FetchService`     | `fetch_page_content()`, `fetch_urls()`     | `tofu_search.fetch` module functions | tasks_pkg.executor                          |
 | `TradingDataProvider` | `get_latest_price()`, `fetch_asset_info()`, `fetch_price_history()`, `build_intel_context()` | `lib.trading` module functions | trading_autopilot |
 | `TaskEventSink`    | `append_event()`                           | `lib.tasks_pkg.manager.append_event`| executor, tool_dispatch                  |
 | `ToolHandler`      | `__call__(task, tc, fn_name, …)`           | Each `@tool_registry.handler()` fn  | ToolRegistry dispatch                    |
@@ -640,7 +637,7 @@ def _prefetch_user_urls(
     if fetch_service:
         _fetch_urls = fetch_service.fetch_urls
     else:
-        from lib.fetch import fetch_urls
+        from tofu_search import fetch_urls
         _fetch_urls = fetch_urls
     ...
 ```

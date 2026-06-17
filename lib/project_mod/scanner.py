@@ -416,8 +416,16 @@ def _safe_path(base, rel):
     base = os.path.abspath(base)
     if not rel or rel in ('.', '/', ''):
         return base
+    # Absolute paths resolve directly — these tools (list_dir/grep/find) are
+    # read-only, so reading outside the project root is non-destructive and
+    # mirrors read_files, which already accepts any absolute path. Only the
+    # *relative* form is confined to the root (a relative arg must not be able
+    # to climb out via '../').
+    expanded = os.path.expanduser(rel)
+    if os.path.isabs(expanded):
+        return os.path.abspath(expanded)
     resolved = os.path.abspath(os.path.join(base, rel))
-    if not resolved.startswith(base):
+    if resolved != base and not resolved.startswith(base + os.sep):
         raise ValueError(f'Path traversal blocked: {rel}')
     return resolved
 

@@ -17,6 +17,17 @@ const _HEALTH_CHECK_INTERVAL = 10000;  // ms between health checks when silent
 const _SILENCE_THRESHOLD = 20;         // seconds of silence before first health check (reduced from 30s for VS Code port forwarding)
 const _SILENCE_SEVERE = 45;            // seconds before showing severe warning
 
+/* Inline status SVGs for the in-bubble liveness banner. Per CLAUDE.md §3.4 +
+ * the "no emoji in UI status, SVG only" directive: never use emoji for these
+ * state markers. `currentColor` lets each banner variant tint the icon via its
+ * text color. Kept tiny (13px) to sit inline with 11px banner text. */
+const _LIVENESS_ICON_OK =
+  '<svg class="stream-liveness-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13.5 4.5 6.5 11.5 2.5 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const _LIVENESS_ICON_WARN =
+  '<svg class="stream-liveness-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1.5 15 14H1L8 1.5Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 6.2v3.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="8" cy="11.6" r="1" fill="currentColor"/></svg>';
+const _LIVENESS_ICON_DEAD =
+  '<svg class="stream-liveness-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.6"/><path d="M5.5 5.5 10.5 10.5M10.5 5.5 5.5 10.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+
 function _fmtElapsed(ms) {
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
@@ -26,6 +37,35 @@ function _fmtElapsed(ms) {
   const h = Math.floor(m / 60);
   const rm = m % 60;
   return `${h}h${rm > 0 ? String(rm).padStart(2,'0') + 'm' : ''}`;
+}
+
+/**
+ * Derive a short human-readable label for what the stream is doing right now,
+ * from the live phase buffer. Used by the stream timer so a long silence shows
+ * *what* the server is busy with (tools, reasoning, retrying) rather than going
+ * blank. Returns '' when there's no informative phase.
+ */
+function _streamPhaseLabel(buf) {
+  const p = buf && buf.phase;
+  if (!p || !p.phase) return '';
+  switch (p.phase) {
+    case 'tool_exec':
+      return p.detail ? String(p.detail) : 'running tools';
+    case 'llm_thinking':
+      return p.detail ? String(p.detail) : 'thinking';
+    case 'thinking_active':
+      return 'reasoning';
+    case 'compacting':
+      return p.detail ? String(p.detail) : 'compacting context';
+    case 'retrying':
+      return p.detail ? String(p.detail) : 'retrying';
+    case 'working':
+      return p.detail ? String(p.detail) : 'working';
+    case 'autopilot_thinking':
+      return p.detail ? String(p.detail) : 'autopilot is generating the next reply';
+    default:
+      return '';
+  }
 }
 
 /**
@@ -139,16 +179,19 @@ async function _updateStreamTimerUI(convId) {
   // Show elapsed time always (subtle)
   let elapsedHtml = `<span class="stream-elapsed">${_fmtElapsed(now - info.startTime)}</span>`;
 
-  // During tool execution, LLM thinking, or retrying, silence is expected — only show elapsed
   const buf = streamBufs.get(convId);
-  if (buf && buf.phase && (buf.phase.phase === 'tool_exec' || buf.phase.phase === 'llm_thinking' || buf.phase.phase === 'retrying' || buf.phase.phase === 'working')) {
-    el.innerHTML = elapsedHtml;
-    return;
-  }
 
-  // Short silence — just show elapsed
+  // Short silence — just show elapsed.  NOTE: we no longer suppress detection
+  // by phase (tool_exec / llm_thinking / retrying / working).  The server
+  // emits a `: keepalive` frame every 15s and ANY byte resets lastDataTime
+  // (sse_pipeline.js:_streamTimerTouch), so a silence past _SILENCE_THRESHOLD
+  // means even keepalives stopped arriving — that is genuinely anomalous in
+  // EVERY phase, not just between turns.  Suppressing it during those phases
+  // is exactly how a hung reasoning / dead-proxy stall used to masquerade as
+  // a live "Reasoning … chars" spinner.
   if (silentSec < _SILENCE_THRESHOLD) {
     el.innerHTML = elapsedHtml;
+    _setBubbleLiveness(convId, '');
     return;
   }
 
@@ -194,8 +237,12 @@ async function _updateStreamTimerUI(convId) {
             stream.controller.abort();
           }
         } else {
-          // Task is still running — silence is expected (LLM thinking, tool executing)
-          // The SSE pipe might just be slow. Touch the timer to reduce noise.
+          // Task is still running — silence is expected (LLM thinking, tool executing).
+          // The SSE pipe might just be slow. Record this so the UI can reassure the
+          // user that the server is still actively working instead of showing a
+          // scary "no update" warning.
+          info._taskStillRunning = true;
+          info._taskProbedAt = Date.now();
           console.debug(`[StreamTimer] Task ${taskId.slice(0,8)} still running — silence is expected`);
         }
       } catch (probeErr) {
@@ -205,20 +252,83 @@ async function _updateStreamTimerUI(convId) {
     });
   }
 
-  // Build warning display
+  // A recent probe (within 2× the health-check interval) confirmed the task is
+  // still running on the server — the SSE pipe is just quiet/slow, not stuck.
+  const _recentlyConfirmedAlive =
+    info._taskStillRunning &&
+    (now - (info._taskProbedAt || 0)) < (_HEALTH_CHECK_INTERVAL * 2);
+  const _activityLbl = _streamPhaseLabel(buf);
+
+  // Build warning display.  Mirror the verdict into BOTH the small header
+  // timer AND the in-bubble status line (_setBubbleLiveness) — the in-bubble
+  // line is where the user actually looks, and during a stall it would
+  // otherwise stay frozen on a live-looking "Reasoning … chars" spinner.
   if (info._lastHealthResult === false) {
-    // Server confirmed dead
+    // Server confirmed not responding (≥2 consecutive health-check failures).
     el.innerHTML = elapsedHtml +
-      ` <span class="stream-stuck-severe">⚠️ server offline</span>` +
+      ` <span class="stream-stuck-severe">${_LIVENESS_ICON_DEAD} server not responding</span>` +
       ` <button class="stream-force-finish-btn" onclick="_forceFinishDeadStream('${convId}')">Force Finish</button>`;
+    _setBubbleLiveness(convId,
+      `<span class="stream-liveness stream-liveness-dead">${_LIVENESS_ICON_DEAD} Server not responding (${silentSec}s silent) — health check failed</span>`);
+  } else if (_recentlyConfirmedAlive) {
+    // Server confirmed the task is still running on its side — the SSE pipe is
+    // just quiet.  This is the "it's our harness, not a hang" case: name what
+    // it's busy with so the silence is explained rather than scary.
+    const _suffix = _activityLbl ? ` · ${escapeHtml(_activityLbl)}` : '';
+    el.innerHTML = elapsedHtml +
+      ` <span class="stream-stuck-activity">still working${_suffix}</span>`;
+    const _what = _activityLbl ? escapeHtml(_activityLbl) : 'processing';
+    _setBubbleLiveness(convId,
+      `<span class="stream-liveness stream-liveness-ok">${_LIVENESS_ICON_OK} Server alive — still working (${_what}, ${silentSec}s no stream output)</span>`);
   } else if (silentSec >= _SILENCE_SEVERE) {
+    // Silent past the severe threshold and we haven't been able to confirm the
+    // task is alive — surface it loudly + offer Force Finish.
     el.innerHTML = elapsedHtml +
       ` <span class="stream-stuck-severe">${silentSec}s no update</span>` +
       ` <button class="stream-force-finish-btn" onclick="_forceFinishDeadStream('${convId}')">Force Finish</button>`;
+    _setBubbleLiveness(convId,
+      `<span class="stream-liveness stream-liveness-warn">${_LIVENESS_ICON_WARN} No update for ${silentSec}s — checking whether the server is still responding…</span>`);
   } else {
     el.innerHTML = elapsedHtml +
       ` <span class="stream-stuck-warn">${silentSec}s no update</span>`;
+    _setBubbleLiveness(convId,
+      `<span class="stream-liveness stream-liveness-warn">${_LIVENESS_ICON_WARN} No update for ${silentSec}s — verifying the server is still alive…</span>`);
   }
+}
+
+/**
+ * Push a liveness banner into the in-bubble status zone (the same
+ * `[data-zone="status"]` element streaming_ui.js renders the phase spinner
+ * into).  This is what makes a stall visible WHERE THE USER LOOKS instead of
+ * only in the small header timer.  Pass '' to clear it.
+ *
+ * We append (not replace) so the existing phase spinner ("Reasoning … chars")
+ * stays — the banner sits beneath it, turning a frozen-looking spinner into
+ * "spinner + an explicit liveness verdict".  Keyed via data-liveness-key so we
+ * only touch the DOM when the message actually changes (no per-second churn).
+ */
+function _setBubbleLiveness(convId, html) {
+  if (activeConvId !== convId) return;
+  const body = document.getElementById('streaming-body');
+  if (!body) return;
+  const statusZone = body.querySelector('[data-zone="status"]');
+  if (!statusZone) return;
+  let banner = statusZone.querySelector('.stream-liveness-wrap');
+  if (!html) {
+    if (banner) banner.remove();
+    statusZone.removeAttribute('data-liveness-key');
+    return;
+  }
+  // Re-apply if the text changed OR the banner was wiped by a statusZone
+  // innerHTML rebuild in streaming_ui.js (which leaves the attribute behind).
+  if (banner && statusZone.getAttribute('data-liveness-key') === html) return;
+  statusZone.setAttribute('data-liveness-key', html);
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.className = 'stream-liveness-wrap';
+    statusZone.appendChild(banner);
+  }
+  banner.innerHTML = html;
 }
 
 function _streamTimerTouch(convId) {
@@ -226,6 +336,8 @@ function _streamTimerTouch(convId) {
   if (info) {
     info.lastDataTime = Date.now();
     info._lastHealthResult = undefined; // reset — server is clearly alive if we got data
+    info._taskStillRunning = false;     // fresh data supersedes the stale-probe reassurance
+    info._taskProbedAt = 0;
     _serverAlive = true;
     _consecutiveHealthFails = 0;
   }
@@ -357,12 +469,14 @@ function twStop(convId) {
     _pendingStreamTimer = null;
   }
   _pendingStreamMsg = null;
+  // Clear any in-bubble liveness banner so it doesn't linger after the turn ends.
+  _setBubbleLiveness(convId, '');
   // Cancel any pending twUpdate timers
   if (_twTimeoutId) { clearTimeout(_twTimeoutId); _twTimeoutId = null; }
   if (_twRafId) { cancelAnimationFrame(_twRafId); _twRafId = null; }
   _twDirty = false;
   // Invalidate zone cache and incremental render state
-  if (typeof _streamZoneCache !== "undefined") _streamZoneCache = { body: null, tool: null, think: null, content: null, status: null };
+  if (typeof _streamZoneCache !== "undefined") _streamZoneCache = { body: null, tool: null, think: null, content: null, fc: null, status: null, swarmInbox: null };
   // Stop elapsed timer
   const timerInfo = _streamTimers.get(convId);
   if (timerInfo) {

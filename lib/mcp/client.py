@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -345,6 +347,203 @@ def _coerce_args_to_schema(
     return out
 
 
+def _extract_read_only_hint(tool: Any) -> bool:
+    """Return the MCP ``annotations.readOnlyHint`` for *tool* (default False).
+
+    The MCP spec puts behavioural hints on ``Tool.annotations`` (a
+    ``ToolAnnotations`` object with optional ``readOnlyHint`` / ``destructiveHint``
+    / … fields). Older servers omit it entirely. We treat a tool as read-only
+    ONLY when the hint is explicitly True — anything else (missing, False,
+    unparsable) is conservatively treated as a write tool by the caller.
+    """
+    annotations = getattr(tool, 'annotations', None)
+    if annotations is None:
+        return False
+    try:
+        hint = getattr(annotations, 'readOnlyHint', None)
+        if hint is None and isinstance(annotations, dict):
+            hint = annotations.get('readOnlyHint')
+        return hint is True
+    except Exception as e:
+        logger.debug('[MCP] readOnlyHint extraction failed for %s: %s',
+                     getattr(tool, 'name', '?'), e)
+        return False
+
+
+# ── Vendored MCP servers: first-connect auto-install ─────
+#
+# Internal MCP servers (hope-mcp, …) are private and not on PyPI, so a fresh
+# Tofu checkout has no way to obtain them — the user just sees "launcher X is
+# not on PATH". To make onboarding zero-touch we ship the source in-repo and
+# pip-install it into Tofu's OWN interpreter on first connect.
+#
+# The registry + repo_root live in the tiny, dependency-free
+# ``lib/mcp/vendored`` module so the release-time vendoring script can read
+# the same source of truth WITHOUT importing this heavy module. The
+# underscore aliases below preserve the historical internal names used
+# throughout this file (and monkeypatched by tests).
+from lib.mcp.vendored import VENDORED_LAUNCHERS as _VENDORED_LAUNCHERS
+from lib.mcp.vendored import repo_root as _repo_root
+
+# Guard so a failing install is attempted at most once per process per
+# command — otherwise every reconnect sweep would re-run pip. Protected by
+# ``_install_lock``.
+_install_attempted: set[str] = set()
+_install_lock = threading.Lock()
+
+
+def _find_vendored_source(command: str) -> tuple[str, bool] | None:
+    """Resolve the install source for ``command``.
+
+    Returns ``(src_dir, editable)`` for the first candidate dir that contains
+    a ``pyproject.toml``, or ``None`` if the command is unregistered / no
+    source exists. ``editable`` is True only when the resolved dir is OUTSIDE
+    the repo's ``tools/`` tree (i.e. a sibling dev checkout) — the vendored
+    snapshot under ``tools/`` is always installed non-editable.
+    """
+    spec = _VENDORED_LAUNCHERS.get(command)
+    if not spec:
+        return None
+    root = _repo_root()
+    tools_dir = os.path.join(root, 'tools') + os.sep
+    for rel in spec['sources']:
+        cand = rel if os.path.isabs(rel) else os.path.abspath(os.path.join(root, rel))
+        if os.path.isfile(os.path.join(cand, 'pyproject.toml')):
+            is_vendored = (cand + os.sep).startswith(tools_dir)
+            return cand, (not is_vendored)
+    return None
+
+
+def _try_autoinstall_launcher(command: str) -> str | None:
+    """pip-install a vendored MCP server into Tofu's interpreter, then resolve.
+
+    Returns the resolved absolute launcher path on success, else ``None``.
+    Installs into ``sys.executable`` (the very env Tofu runs in) so the new
+    console script lands next to the interpreter where ``_resolve_launcher``
+    finds it — no PATH/venv changes required.
+
+    ``PIP_REQUIRE_VIRTUALENV`` is explicitly neutralised for the child: many
+    internal conda setups enable it globally, which makes a bare ``pip
+    install`` abort with "Could not find an activated virtualenv" even though
+    installing into the active conda env is exactly what we want.
+    """
+    found = _find_vendored_source(command)
+    if not found:
+        return None
+    src, editable = found
+
+    with _install_lock:
+        if command in _install_attempted:
+            # Already tried this process; re-resolve in case a concurrent
+            # caller succeeded, but never pip again.
+            return _resolve_launcher(command)
+        _install_attempted.add(command)
+
+    pip_args = [sys.executable, '-m', 'pip', 'install', '--no-input']
+    if editable:
+        pip_args.append('-e')
+    pip_args.append(src)
+
+    child_env = dict(os.environ)
+    child_env['PIP_REQUIRE_VIRTUALENV'] = 'false'
+    _ensure_writable_caches(child_env)
+
+    logger.info('[MCP] auto-installing vendored launcher %r from %s (editable=%s)',
+                command, src, editable)
+    try:
+        proc = subprocess.run(
+            pip_args, env=child_env, capture_output=True, text=True,
+            timeout=300,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.error('[MCP] auto-install of %r failed to run pip: %s', command, e)
+        return None
+
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or '').strip().splitlines()[-5:]
+        logger.error('[MCP] auto-install of %r failed (rc=%d): %s',
+                     command, proc.returncode, ' | '.join(tail))
+        return None
+
+    resolved = _resolve_launcher(command)
+    if resolved:
+        logger.info('[MCP] auto-install of %r OK → %s', command, resolved)
+    else:
+        logger.error('[MCP] auto-install of %r reported success but launcher '
+                     'still not resolvable', command)
+    return resolved
+
+
+def _resolve_launcher(command: str) -> str | None:
+    """Best-effort resolve a bare launcher name to an absolute path.
+
+    Why this exists: the #1 cause of "launcher X is not on PATH" reports is
+    a Python console script (e.g. ``hope-mcp``, ``overleaf-mcp``) that WAS
+    pip-installed — but into the same interpreter that runs Tofu, whose
+    ``bin/`` directory isn't on the *spawned subprocess's* PATH (conda envs
+    activated via a wrapper, systemd units, IDE-launched servers, …). The
+    script sits right next to ``sys.executable`` yet ``shutil.which`` (which
+    only searches ``$PATH``) misses it, so the user is told to "install"
+    something that is in fact already installed.
+
+    We look, in order, for an executable named ``command`` in:
+      1. the directory of the running interpreter (``sys.executable``) —
+         this is where ``pip install`` drops console scripts for the very
+         env Tofu runs in;
+      2. ``<base_prefix>/bin`` (covers venvs whose scripts were installed
+         against the base interpreter);
+      3. a ``Scripts`` sibling (Windows layout), for completeness.
+
+    Returns an absolute path if found, else ``None``. Only meaningful for a
+    BARE command (no path separator) — anything with a slash is taken
+    as-is by the caller.
+    """
+    if not command or os.sep in command or (os.altsep and os.altsep in command):
+        return None
+
+    candidates: list[str] = []
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable)) if sys.executable else ''
+    for base in (exe_dir, getattr(sys, 'base_prefix', '') or ''):
+        if not base:
+            continue
+        # base_prefix is a prefix, not a bin dir — append bin/ when needed.
+        bin_dirs = [base] if os.path.basename(base) in ('bin', 'Scripts') \
+            else [os.path.join(base, 'bin'), os.path.join(base, 'Scripts')]
+        for bd in bin_dirs:
+            candidates.append(os.path.join(bd, command))
+
+    seen: set[str] = set()
+    for cand in candidates:
+        if cand in seen:
+            continue
+        seen.add(cand)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            logger.info('[MCP] resolved launcher %r → %s (not on PATH, found '
+                        'next to interpreter)', command, cand)
+            return cand
+    return None
+
+
+def _prepend_interpreter_bin_to_path(env: dict[str, str]) -> None:
+    """Prepend the running interpreter's ``bin/`` dir to ``env['PATH']``.
+
+    Ensures stdio MCP child processes inherit the same environment Tofu
+    runs in. Without this, a server installed into Tofu's conda env can
+    launch (we resolve its absolute path) but then fails when it shells
+    out to a sibling tool from the same env (e.g. ``hope-mcp`` → ``hope``)
+    because that tool isn't on the inherited PATH. Idempotent: skips if the
+    dir is already the first PATH entry.
+    """
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable)) if sys.executable else ''
+    if not exe_dir or not os.path.isdir(exe_dir):
+        return
+    current = env.get('PATH', '')
+    parts = current.split(os.pathsep) if current else []
+    if parts and parts[0] == exe_dir:
+        return
+    env['PATH'] = os.pathsep.join([exe_dir, *[p for p in parts if p != exe_dir]])
+
+
 def _launcher_install_hint(command: str) -> str:
     """Return an actionable install hint for a missing launcher binary.
 
@@ -574,6 +773,7 @@ class MCPBridge:
                     description=tool.description or '',
                     input_schema=tool.inputSchema or {'type': 'object', 'properties': {}},
                     openai_def=self._tool_to_openai(name, tool),
+                    read_only_hint=_extract_read_only_hint(tool),
                 )
             self._started = True
 
@@ -778,15 +978,29 @@ class MCPBridge:
                             f'MCP server {name}: stdio transport requires "command"'
                         )
 
-                    # Pre-flight: verify the launcher is on PATH. Without this we
-                    # get a cryptic FileNotFoundError deep inside mcp.client.stdio.
+                    # Pre-flight: verify the launcher is resolvable. Without
+                    # this we get a cryptic FileNotFoundError deep inside
+                    # mcp.client.stdio. If it's not on PATH, try to self-heal
+                    # by resolving a pip-installed console script that lives
+                    # next to the running interpreter (the common "installed
+                    # but not on the subprocess PATH" case) before giving up.
                     import shutil as _shutil
                     if not _shutil.which(command):
-                        hint = _launcher_install_hint(command)
-                        raise FileNotFoundError(
-                            f'MCP server {name!r}: launcher {command!r} is not on PATH. '
-                            f'{hint}'
-                        )
+                        resolved = _resolve_launcher(command)
+                        if not resolved:
+                            # Last resort: if this is a vendored internal
+                            # server, pip-install it into Tofu's own env now
+                            # so onboarding is zero-touch (no PATH edits, no
+                            # manual install). One attempt per process.
+                            resolved = _try_autoinstall_launcher(command)
+                        if resolved:
+                            command = resolved
+                        else:
+                            hint = _launcher_install_hint(command)
+                            raise FileNotFoundError(
+                                f'MCP server {name!r}: launcher {command!r} is not on PATH. '
+                                f'{hint}'
+                            )
 
                     from mcp import StdioServerParameters
                     from mcp.client.stdio import stdio_client
@@ -809,6 +1023,13 @@ class MCPBridge:
                     # writable project-local dir when $HOME/.cache is read-only
                     # — otherwise uvx dies before the MCP handshake.
                     _ensure_writable_caches(env)
+                    # Make the running interpreter's bin/ dir visible to the
+                    # child. This is what lets a pip-installed MCP server find
+                    # its sibling console tools (e.g. hope-mcp shelling out to
+                    # `hope`) AND mirrors the _resolve_launcher fallback so the
+                    # subprocess sees the same launcher we resolved. Prepended
+                    # so the env Tofu runs in wins over a stale system copy.
+                    _prepend_interpreter_bin_to_path(env)
                     extra_env = srv_cfg.get('env', {})
                     if extra_env:
                         env.update(extra_env)
@@ -1073,6 +1294,18 @@ class MCPBridge:
         """
         with self._lock:
             return [info['openai_def'] for info in self._tool_index.values()]
+
+    def get_tool_safety(self) -> dict[str, bool]:
+        """Map every discovered MCP tool's namespaced name → read-only flag.
+
+        The flag is the tool's MCP ``annotations.readOnlyHint`` (default
+        ``False`` when the server omits it). Consumers use this to partition
+        MCP tools for concurrency / write-approval: a tool that is NOT
+        read-only is treated as a write tool (serial + approval-eligible).
+        """
+        with self._lock:
+            return {ns: bool(info.get('read_only_hint'))
+                    for ns, info in self._tool_index.items()}
 
     def get_tool_info(self, namespaced_name: str) -> MCPToolInfo | None:
         """Look up tool info by namespaced name."""

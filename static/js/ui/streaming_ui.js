@@ -282,6 +282,14 @@ function updateStreamingUI(msg) {
       ? `<span class="stream-phase-ctx">${escapeHtml(phase.toolContext)}</span>`
       : "";
     _phaseHtml = `<div class="stream-phase"><span class="stream-phase-icon">${icon}</span><span class="stream-phase-text">${escapeHtml(phase.detail)}${ctx}</span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
+  } else if (phase && phase.phase === "waiting_model" && !hasActiveSearch) {
+    /* ★ Request is in flight but the model hasn't emitted its first token
+     *   yet (prompt prefill / TTFT), or the next turn is a silent tool call
+     *   with no preamble. Emitted by stream_llm_response right before
+     *   dispatch_stream; cleared by the first content/thinking delta, or
+     *   yielded to the tool UI once a tool_start makes hasActiveSearch true. */
+    _phaseKey = "waiting-model:" + (phase.detail || "");
+    _phaseHtml = `<div class="stream-phase"><span class="stream-phase-text">${escapeHtml(phase.detail || 'Sent to the model, waiting for it to start replying…')}</span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
   } else if (phase && phase.phase === "compacting") {
     _phaseKey = "compact:" + phase.detail;
     _phaseHtml = `<div class="stream-phase"><span class="stream-phase-text">${escapeHtml(phase.detail)}</span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
@@ -295,13 +303,6 @@ function updateStreamingUI(msg) {
     /* Generic "working" phase from external backends (e.g. "Initializing Claude Code...") */
     _phaseKey = "working:" + phase.detail;
     _phaseHtml = `<div class="stream-phase"><span class="stream-phase-text">${escapeHtml(phase.detail)}</span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
-  } else if (phase && phase.phase === "autopilot_thinking") {
-    /* ★ Autopilot virtual-user is composing the next reply — and may be
-     *   running tools to investigate first. The detail string carries
-     *   the live tool name + first arg so the user can see the probing
-     *   in real time (e.g. "Autopilot investigating · read_files lib/foo.py"). */
-    _phaseKey = "autopilot:" + (phase.detail || "");
-    _phaseHtml = `<div class="stream-phase stream-phase-autopilot"><span class="stream-phase-text">${escapeHtml(phase.detail || 'Autopilot is generating the next user reply…')}</span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
   } else if (hasActiveSearch) {
     _phaseKey = "search";
     _phaseHtml = "";
@@ -455,7 +456,7 @@ function _syncToolRoundsDOM(container, rounds) {
         const _isInteractive = round.status === "awaiting_human" || round.status === "awaiting_stdin"
           || round.status === "pending_approval";
         const _renderRow = (r, active) => _isRoundSwarm(r)
-          ? _buildSwarmPanelHTML(r)
+          ? _buildSwarmPanelHTML(r, toolRounds)
           : _renderUnifiedToolLine(r, active);
         if (!slot) {
           slot = document.createElement("div");
@@ -470,7 +471,7 @@ function _syncToolRoundsDOM(container, rounds) {
            * timeline) — always rebuild from the latest snapshot. The fingerprint
            * gate above already guaranteed something actually changed. */
           slot.style.contentVisibility = "visible";
-          slot.innerHTML = _buildSwarmPanelHTML(round);
+          slot.innerHTML = _buildSwarmPanelHTML(round, toolRounds);
         } else if (isActive || round.status === "pending_approval") {
           if (_isInteractive) slot.style.contentVisibility = "visible";
           slot.innerHTML = _renderUnifiedToolLine(round, isActive);
@@ -657,7 +658,58 @@ function _swStatusIcon(status) {
    stubs from the persisted `spawn_agents` handle JSON stored in
    `round.toolContent` so the completed panel's body isn't empty when the
    user expands it. Returns [] when no handle is recoverable. */
-function _recoverSwarmAgents(round) {
+/* Scan ALL tool rounds of the current message for the agent results that
+   ARE persisted — the `await_agents` rounds (each `completed[]` entry has
+   agent_id/status/elapsed/tokens/preview) and the `get_agent_result` rounds
+   (single agent + full `final_answer`). Returns a map keyed by agent_id so
+   `_recoverSwarmAgents` can repaint real per-agent status + result after a
+   reload, instead of objective-only stubs. */
+function _swarmResultsByAgent(allRounds) {
+  const map = {};
+  if (!Array.isArray(allRounds)) return map;
+  const _merge = (id, patch) => {
+    if (!id) return;
+    const cur = map[id] || {};
+    for (const k in patch) {
+      // Don't overwrite an existing non-empty value with an empty one.
+      if (patch[k] === "" || patch[k] === undefined || patch[k] === null) continue;
+      cur[k] = patch[k];
+    }
+    map[id] = cur;
+  };
+  for (const r of allRounds) {
+    const tn = r && r.toolName;
+    if (tn !== "await_agents" && tn !== "get_agent_result") continue;
+    let payload;
+    try { payload = JSON.parse(r.toolContent); } catch (e) { continue; }
+    if (!payload || typeof payload !== "object") continue;
+    if (Array.isArray(payload.completed)) {
+      for (const c of payload.completed) {
+        _merge(c.agent_id, {
+          role: c.role, objective: c.objective, status: c.status,
+          elapsed: c.elapsed, tokens: c.tokens, preview: c.preview,
+          error: c.error,
+        });
+      }
+    }
+    if (payload.agent_id && (payload.final_answer || payload.found)) {
+      // get_agent_result: `status:'ok'` is the wrapper status, not the agent
+      // status — derive the agent status from error/final_answer presence.
+      const agentStatus = payload.error
+        ? "failed"
+        : (payload.final_answer ? "completed" : payload.status);
+      _merge(payload.agent_id, {
+        role: payload.role, objective: payload.objective, status: agentStatus,
+        elapsed: payload.elapsed, tokens: payload.tokens,
+        preview: payload.final_answer || "", error: payload.error,
+        toolCallCount: payload.tool_calls,
+      });
+    }
+  }
+  return map;
+}
+
+function _recoverSwarmAgents(round, allRounds) {
   const tc = round && round.toolContent;
   if (!tc || typeof tc !== "string") return [];
   let handle;
@@ -667,25 +719,49 @@ function _recoverSwarmAgents(round) {
     return [];  /* tool result wasn't the JSON handle — nothing to recover */
   }
   const list = (handle && Array.isArray(handle.agents)) ? handle.agents : [];
-  return list.map((a) => ({
-    id: a.id || "",
-    role: a.role || "agent",
-    objective: a.objective || "",
-    status: "done",
-    phase: "done",
-    preview: "",
-    tools: [],
-  }));
+  /* The live `_swarmAgents` array (synthesized from swarm_* SSE events) is
+     gone after a reload, but the agent RESULTS were persisted on sibling
+     await_agents / get_agent_result rounds. Cross-reference them so the
+     recovered panel shows real status + result, not objective-only stubs. */
+  const results = _swarmResultsByAgent(allRounds);
+  const enriched = Object.keys(results).length > 0;
+  if (list.length === 0) {
+    console.warn("[Swarm] _recoverSwarmAgents: spawn handle had no agents[] — panel body will be empty (round", round && round.roundNum, ")");
+  } else {
+    console.warn("[Swarm] _recoverSwarmAgents: rebuilt", list.length,
+      "agent(s) from persisted handle (results cross-referenced from sibling rounds:", enriched, "; round",
+      round && round.roundNum, ")");
+  }
+  return list.map((a) => {
+    const id = a.id || "";
+    const res = results[id] || {};
+    // No result row for this agent → it never reported back; keep it visibly
+    // unfinished rather than faking a green "done".
+    const status = res.status || "unknown";
+    return {
+      id,
+      role: res.role || a.role || "agent",
+      objective: res.objective || a.objective || "",
+      status,
+      phase: status,
+      preview: res.preview || "",
+      elapsed: res.elapsed || "",
+      tokens: res.tokens || "",
+      error: res.error || "",
+      tools: [],
+    };
+  });
 }
 
 /* ★ Build the live swarm panel HTML (used during streaming) */
-function _buildSwarmPanelHTML(round) {
+function _buildSwarmPanelHTML(round, allRounds) {
   /* Live path: `_swarmAgents` is populated from swarm_* SSE events.
-     Reload path: that field is gone, so recover stubs from the persisted
-     handle JSON — otherwise the completed panel renders an empty body. */
+     Reload path: that field is gone, so recover agents from the persisted
+     handle JSON + sibling result rounds — otherwise the completed panel
+     renders an empty body. */
   let agents = round._swarmAgents || [];
   if (agents.length === 0) {
-    agents = _recoverSwarmAgents(round);
+    agents = _recoverSwarmAgents(round, allRounds);
   }
   const isActive = round.status === "searching" || round._swarmActive;
   const total = agents.length;
@@ -806,6 +882,7 @@ function _buildSwarmPanelHTML(round) {
         searching: "Searching…", coding: "Coding…", analyzing: "Analyzing…",
         done: "Complete", completed: "Complete", failed: "Failed", error: "Error",
         pending: "Queued", running: "Working…", waiting: "Queued", queued: "Queued",
+        unknown: "No result",
       };
       /* Status wins for a terminated agent: if status is done/failed but the
          phase got stranded at a spawn-time value (e.g. "waiting" because the
@@ -973,13 +1050,13 @@ function _buildSwarmPanelHTML(round) {
 }
 
 /* ★ Build the done HTML specifically for swarm rounds — reuses the panel layout */
-function _buildSwarmDoneHTML(round, showNums) {
-  /* Prefer the full panel: live `_swarmAgents`, else stubs recovered from
-     the persisted handle JSON (post-reload). */
+function _buildSwarmDoneHTML(round, showNums, allRounds) {
+  /* Prefer the full panel: live `_swarmAgents`, else agents recovered from
+     the persisted handle JSON + sibling result rounds (post-reload). */
   if ((round._swarmAgents && round._swarmAgents.length > 0)
-      || _recoverSwarmAgents(round).length > 0) {
+      || _recoverSwarmAgents(round, allRounds).length > 0) {
     const patchedRound = Object.assign({}, round, { _swarmActive: false });
-    return _buildSwarmPanelHTML(patchedRound);
+    return _buildSwarmPanelHTML(patchedRound, allRounds);
   }
   /* No agents and no results — don't render empty swarm panels */
   const results = round.results || [];

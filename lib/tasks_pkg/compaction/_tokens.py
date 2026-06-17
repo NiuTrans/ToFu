@@ -30,8 +30,9 @@ def _estimate_msg_tokens(msg: dict) -> int:
     """Rough token estimate for a single message (CJK-aware).
 
     Uses ``lib.token_counter.heuristic.cheap_estimate_text`` which is
-    the same CJK-aware heuristic (1 token per CJK char + 1 token per
-    ~3.5 other chars) that gates the richer counter backends.
+    the same entropy-aware heuristic (1 token per CJK char + 1 token per
+    dense base64/hex char + 1 token per ~3 other chars) that gates the
+    richer counter backends.
 
     For a bit-exact authoritative count (via tiktoken / Anthropic
     count_tokens / HF tokenizer), callers should use
@@ -87,19 +88,42 @@ def _count_tokens_authoritative(messages: list, task: dict | None = None) -> tup
     model = cfg.get('model', '') or ''
     context_limit = _get_context_limit(task)
     conv_id = (task or {}).get('convId', '') or ''
+    # The orchestrator stashes the live tool schema here (see
+    # orchestrator.py `_assemble_tool_list`). It ships in every request and
+    # the gateway tokenizes it, so the gate must include it or it
+    # under-counts by the whole tool-schema size on tool-heavy configs.
+    tools = (task or {}).get('_tool_schema') or None
 
     try:
         result = _ct_count_tokens(
             messages,
             model=model,
+            tools=tools,
             conv_id=conv_id or None,
             context_limit=context_limit,
         )
-        return int(result.get('tokens', 0)), str(result.get('method', 'unknown'))
+        auth_tokens = int(result.get('tokens', 0))
+        method = str(result.get('method', 'unknown'))
     except Exception as e:
         logger.warning('[Compact] count_tokens call failed, falling back to '
                        'heuristic: %s', e)
         return _estimate_total_tokens(messages), 'heuristic_fallback'
+
+    # Safety floor for the COMPACTION GATE only (not the UI counter): never
+    # let the gate report FEWER tokens than the conservative entropy
+    # heuristic would. tiktoken's cl100k vocabulary under-counts Claude's
+    # tokenizer on high-entropy content (base64/minified data) — for conv
+    # mq7y3irly1r4hu tiktoken gave 0.66x of the gateway while the heuristic
+    # gave 0.83x. A gate that trusts the lower number can let an oversized
+    # prompt slip past the trigger into the fatal reactive path. Taking the
+    # max keeps the gate on the safe side regardless of which backend wins,
+    # while the UI still gets the accuracy-optimized count from count_tokens.
+    heuristic_tokens = _estimate_total_tokens(messages)
+    if heuristic_tokens > auth_tokens:
+        logger.debug('[Compact] heuristic floor %d > authoritative %d (via %s) '
+                     '— using floor for gate', heuristic_tokens, auth_tokens, method)
+        return heuristic_tokens, f'{method}+heuristic_floor'
+    return auth_tokens, method
 
 
 # ── Parse Bedrock / Anthropic "prompt too long" error text ─────────────

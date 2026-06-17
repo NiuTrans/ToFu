@@ -967,28 +967,12 @@ def _patch_assistant_message_with_git(task: dict, amend_evt: dict) -> None:
     git_sha = amend_evt.get('gitSha')
     if not (conv_id and task_id and git_sha):
         return
-    try:
-        from lib.database import (DOMAIN_CHAT, db_execute_with_retry,
-                                  get_thread_db, json_dumps_pg)
-    except Exception as _e:
-        logger.debug('[Task:%s] cannot patch gitSha — DB import failed: %s',
-                     task_id[:8], _e)
+    from lib.agent_core.store import get_conversation_store
+    store = get_conversation_store()
+    loaded = store.load_conversation_messages(conv_id)
+    if loaded is None:
         return
-    import json as _json
-
-    db = get_thread_db(DOMAIN_CHAT)
-    row = db.execute(
-        'SELECT messages FROM conversations WHERE id=? AND user_id=1',
-        (conv_id,),
-    ).fetchone()
-    if not row:
-        return
-    try:
-        messages = _json.loads(row['messages'] or '[]')
-    except (ValueError, TypeError) as _e:
-        logger.debug('[Task:%s] gitSha-patch: messages parse failed: %s',
-                     task_id[:8], _e)
-        return
+    messages, _updated_at = loaded
     if not isinstance(messages, list) or not messages:
         return
 
@@ -1019,13 +1003,7 @@ def _patch_assistant_message_with_git(task: dict, amend_evt: dict) -> None:
         msg['modifiedFiles'] = amend_evt['modifiedFiles']
 
     try:
-        import time as _time
-        db_execute_with_retry(
-            db,
-            'UPDATE conversations SET messages=?, updated_at=? '
-            'WHERE id=? AND user_id=1',
-            (json_dumps_pg(messages), int(_time.time() * 1000), conv_id),
-        )
+        store.save_conversation_messages(conv_id, messages)
         logger.info('[Task:%s] persisted gitSha=%s to conv=%s msg[%d]',
                     task_id[:8], git_sha[:12], conv_id[:8], target_idx)
     except Exception as _e:
@@ -1077,8 +1055,8 @@ def run_task(task: dict[str, Any]) -> None:
         #    explicit cfg (explicit caller values always win).  No-op when
         #    cfg has no 'profile' key or selects the empty 'default'.  Applied
         #    here — before model resolution + tool assembly — so every
-        #    downstream consumer sees the merged values.  See lib/agent_profiles.py.
-        from lib.agent_profiles import apply_profile, resolve_profile_name
+        #    downstream consumer sees the merged values.
+        from lib.agent_core.profiles import apply_profile, resolve_profile_name
         _profile_name = resolve_profile_name(cfg)
         if _profile_name != 'default':
             cfg = apply_profile(cfg)
@@ -1092,6 +1070,21 @@ def run_task(task: dict[str, Any]) -> None:
             from lib.browser import _set_active_client
             _set_active_client(_browser_client_id)
             logger.debug('[Task %s] Browser client routed to %s', tid, _browser_client_id[:12])
+
+        # ── Hard provider pin (multi-tenant isolation) ──
+        # When this task was created from an inline `provider` block or a
+        # registered @prov_xxx BYO endpoint, bind THIS worker thread to that
+        # provider so every LLM dispatch on it (main solve, L2/advanced
+        # compaction summaries, endpoint replan turns) can only pick that
+        # provider's slot — never silently falling back to an operator key
+        # and eating a 429. Cleared in the finally block because worker
+        # threads are pooled and reused. See lib/llm_dispatch/provider_pin.py.
+        from lib.llm_dispatch.provider_pin import set_pinned_provider
+        _pinned_provider_id = task.get('_pinned_provider_id') or ''
+        if _pinned_provider_id:
+            set_pinned_provider(_pinned_provider_id)
+            logger.info('[Task %s] Provider-pinned to %s (hard isolation)',
+                        tid, _pinned_provider_id)
 
         # ── Section 1: Config & Model Resolution ──
         mcfg = _resolve_model_config(cfg, task['id'])
@@ -1249,6 +1242,16 @@ def run_task(task: dict[str, Any]) -> None:
             messages=task['messages'],
         )
 
+        # Stash the assembled tool schema on the task so the compaction
+        # token-gate can account for its cost. The tool-schema JSON ships
+        # in every request and the gateway tokenizes all of it, but the
+        # proactive gate (_count_tokens_authoritative) only saw `messages`
+        # — under-counting by the full tool-schema size. Stashing here
+        # (rather than threading through run_compaction_pipeline →
+        # force_compact_if_needed → _should_force_compact) keeps the
+        # pipeline signatures untouched.
+        task['_tool_schema'] = tool_list
+
         # (Planner no-tools override removed — all endpoint roles now
         #  get full tool access.  See endpoint_review._run_planner_turn.)
 
@@ -1299,6 +1302,7 @@ def run_task(task: dict[str, Any]) -> None:
             conv_id=task.get('convId', ''),
             task=task,
             model=model,
+            system_prompt_mode=cfg.get('systemPromptMode', 'append'),
         )
         # Cleanup prefetch futures (no longer needed)
         task.pop('_prefetch_project', None)
@@ -1530,6 +1534,17 @@ def run_task(task: dict[str, Any]) -> None:
                                 'role':    'user',
                                 'content': '\n\n'.join(_payloads),
                             })
+                            # Persist the delivered flag so a restart mid-turn
+                            # doesn't re-inject these <swarm-update>s on resume.
+                            try:
+                                from lib.swarm import persistence as _swarm_persist
+                                _swarm_persist.mark_delivered(
+                                    _swarm_key_for(task),
+                                    [it.get('agent_id', '') for it in _inbox_items
+                                     if it.get('agent_id')])
+                            except Exception as _mde:
+                                logger.debug('[Task %s] swarm mark_delivered failed: %s',
+                                             tid, _mde)
                             logger.info(
                                 '[Task %s] injected %d swarm-update item(s) '
                                 'as 1 user message at round %d',
@@ -1885,6 +1900,27 @@ def run_task(task: dict[str, Any]) -> None:
                 logger.debug('[%s] Appended final assistant reply to messages '
                              '(%d content chars, %d reasoning chars)',
                              tid, len(_final_content), len(_final_reasoning))
+                # Emit a final snapshot so the debug panel shows the complete
+                # message list. The only in-loop snapshots are "请求前" (before
+                # the assistant reply exists) and the post-tool one (skipped on
+                # a no-tool-call completion), so without this the panel is stuck
+                # on [system?, user].
+                try:
+                    snap = _strip_base64_for_snapshot(messages)
+                    snap_evt = build_event(
+                        EventType.MESSAGES_SNAPSHOT,
+                        round='final',
+                        label=f'最终回复后 · {len(messages)}条',
+                        messages=snap)
+                    # Carry the tool schema so the panel's tools section
+                    # survives — showMessagesInDebug rebuilds _debugCache and
+                    # drops the cached tools unless this snapshot re-supplies them.
+                    if tool_list:
+                        snap_evt['tools'] = tool_list
+                    append_event(task, snap_evt)
+                except Exception:
+                    logger.warning('[Task %s] final messages_snapshot failed model=%s',
+                                   tid, model, exc_info=True)
 
         # ── Write back updated messages to task so callers (e.g.
         #    _run_single_turn → endpoint.py) can access the complete
@@ -1951,6 +1987,13 @@ def run_task(task: dict[str, Any]) -> None:
         append_event(task, build_event(EventType.DONE, error=_user_err, finishReason='error'))
         persist_task_result(task)
     finally:
+        # ── Clear the hard provider pin so it can't bleed into the NEXT
+        #    task that lands on this pooled worker thread. ──
+        try:
+            from lib.llm_dispatch.provider_pin import clear_pinned_provider
+            clear_pinned_provider()
+        except Exception as _pp_err:
+            logger.debug('[Task:%s] clear_pinned_provider failed: %s', tid, _pp_err)
         # ── Release this worker thread's thread-local DB connection back to
         #    the shared pool.  run_task runs on long-lived threads (the
         #    asyncio.to_thread default pool, or daemon task threads); without
@@ -1958,10 +2001,10 @@ def run_task(task: dict[str, Any]) -> None:
         #    exhausting the connection semaphore under high concurrency
         #    (see the "pool exhausted / tracked_threads ≫ active" symptom). ──
         try:
-            from lib.database import close_thread_db
-            close_thread_db()
+            from lib.agent_core.store import get_conversation_store
+            get_conversation_store().release_connection()
         except Exception as _ctd_err:
-            logger.debug('[Task:%s] close_thread_db on task end failed: %s',
+            logger.debug('[Task:%s] release_connection on task end failed: %s',
                          tid, _ctd_err)
 
 

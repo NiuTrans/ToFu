@@ -135,9 +135,16 @@ def test_phase_event_carries_backoff_s(monkeypatch):
     assert 2.0 <= phase['backoff_s'] < 2.5
 
 
-def test_classic_premature_retry_does_not_sleep(monkeypatch):
-    """Classic premature-close retries pay the full token cost; no backoff
-    is applied (the low cap=2 already bounds wall-time)."""
+def test_classic_premature_retry_uses_backoff(monkeypatch):
+    """Classic premature-close retries are now paced with the SAME
+    exponential-backoff schedule as zero-byte.
+
+    Rationale: the classic cap was raised from 2 → 16
+    (``_PREMATURE_RETRY_MAX_CLASSIC``), so retrying a dropped connection
+    up to 16 times with NO backoff would hammer the gateway in
+    milliseconds. Backoff is the necessary companion to the higher cap.
+    (Earlier design: cap=2, no backoff — that's what the prior version of
+    this test asserted.)"""
     sleeps = []
     monkeypatch.setattr(stream_handler, '_interruptible_sleep',
                         lambda s, t: sleeps.append(s))
@@ -164,7 +171,47 @@ def test_classic_premature_retry_does_not_sleep(monkeypatch):
     )
     assert decision['action'] == 'continue'
     assert decision['premature_retry_count'] == 1
-    assert sleeps == [], f'classic retry should not sleep, got {sleeps}'
+    # Attempt 1 → base 0.5s + jitter [0, 0.5) → exactly one sleep in [0.5, 1.0).
+    assert len(sleeps) == 1, f'classic retry should sleep once, got {sleeps}'
+    assert 0.5 <= sleeps[0] < 1.0, f'sleep {sleeps[0]} out of attempt-1 range'
+
+
+def test_late_round_stream_anomaly_does_not_sleep(monkeypatch):
+    """The late-round stream-anomaly bucket keeps the historical
+    NO-backoff behaviour (only zero-byte + classic premature-close are
+    paced). This is an empty round with a stream anomaly on round > 0 that
+    is NOT a zero-byte hang (substantial elapsed, no thinking)."""
+    sleeps = []
+    monkeypatch.setattr(stream_handler, '_interruptible_sleep',
+                        lambda s, t: sleeps.append(s))
+
+    task = _fresh_task()
+    decision = analyse_stream_result(
+        assistant_msg={
+            'role': 'assistant',
+            'content': '',
+            'reasoning_content': '',
+        },
+        last_finish_reason='stop',
+        task=task,
+        tid='test',
+        model='aws.claude-opus-4.7',
+        round_num=2,
+        _premature_retry_count=0,
+        messages=[],
+        usage={
+            '_stream_anomaly': True,
+            '_empty_stop': False,
+            'trace_id': 'M-TEST-3',
+            # Long elapsed + a real chunk count so this is NOT classified
+            # zero-byte (which requires _chunks_received==0 or the stub path).
+            '_chunks_received': 12,
+            'stream_elapsed_ms': 90000,
+        },
+    )
+    assert decision['action'] == 'continue'
+    assert decision['premature_retry_count'] == 1
+    assert sleeps == [], f'late-round anomaly should not sleep, got {sleeps}'
 
 
 def test_interruptible_sleep_returns_promptly_on_abort():

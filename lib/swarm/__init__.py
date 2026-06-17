@@ -49,6 +49,7 @@ from lib.swarm.artifact_store import (
 from lib.swarm.integration import (
     execute_swarm_tool,
     get_active_session,
+    rehydrate_swarms_on_startup,
 )
 from lib.swarm.master import MasterOrchestrator
 from lib.swarm.protocol import (
@@ -105,7 +106,7 @@ __all__ = [
     'SubAgent', 'MasterOrchestrator', 'StreamingScheduler',
     'AsyncStreamingScheduler', 'RateLimiter',
     # Integration
-    'execute_swarm_tool', 'get_active_session',
+    'execute_swarm_tool', 'get_active_session', 'rehydrate_swarms_on_startup',
     # Registry
     'AGENT_ROLES', 'MODEL_TIERS',
     'scope_tools_for_role', 'get_tools_for_role',

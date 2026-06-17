@@ -419,7 +419,7 @@ function _localEndpointBadge(urls) {
     else coldCount++;
   }
   var cls = 'unknown', dotTitle = t('settings.epNotProbed');
-  var partial = t('settings.epPartialOk').replace('{ok}', okCount).replace('{total}', n);
+  var partial = t('settings.epPartialOk').replace('{ok}', String(okCount)).replace('{total}', String(n));
   if (errCount > 0 && okCount === 0) { cls = 'error'; dotTitle = t('settings.epAllFailed'); }
   else if (errCount > 0) { cls = 'mixed'; dotTitle = partial; }
   else if (okCount === n) { cls = 'ok'; dotTitle = t('settings.epAllOk'); }

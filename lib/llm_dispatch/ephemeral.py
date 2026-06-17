@@ -78,9 +78,38 @@ __all__ = [
 # time surfaces "endpoint unreachable" immediately as a clean 400, so the
 # caller gets a clear error instead of a 60s stall. Disabled with
 # TOFU_EPHEMERAL_PREFLIGHT=0; timeout via TOFU_EPHEMERAL_PREFLIGHT_TIMEOUT.
+def _benchmark_mode() -> bool:
+    """True when operator slots are disabled (TOFU_DISABLE_CONFIGURED_SLOTS).
+
+    In this mode the ephemeral slot is the ONLY route to dispatch — there
+    is no operator pool to fall back to (that's the whole point of the
+    fail-loud benchmark mode). So a hard mint-time 400 on a transient TCP
+    blip would discard the entire request / benchmark arm for a reason
+    that has nothing to do with the model. Spinning up isolation must not
+    hinge on a single socket connect landing; a genuinely-down endpoint is
+    better surfaced by the dispatch retry loop (abortable, with backoff).
+    """
+    return os.environ.get('TOFU_DISABLE_CONFIGURED_SLOTS', '').strip().lower() \
+        in ('1', 'true', 'yes', 'on')
+
+
 def _preflight_enabled() -> bool:
-    return os.environ.get('TOFU_EPHEMERAL_PREFLIGHT', '1').strip().lower() \
-        not in ('0', 'false', 'no', 'off', '')
+    """Whether to TCP-probe a self-hosted endpoint at mint time.
+
+    Precedence:
+      1. Explicit ``TOFU_EPHEMERAL_PREFLIGHT`` (1/0) ALWAYS wins — an
+         operator who sets it means it, even in benchmark mode.
+      2. Unset + benchmark mode (``TOFU_DISABLE_CONFIGURED_SLOTS``) →
+         OFF, so a connect blip can't 400 a whole arm.
+      3. Unset + normal mode → ON (the interactive default: a user who
+         typed a bad BYO URL gets an instant clear error, not a 60s hang).
+    """
+    raw = os.environ.get('TOFU_EPHEMERAL_PREFLIGHT', '').strip().lower()
+    if raw != '':
+        return raw not in ('0', 'false', 'no', 'off')
+    if _benchmark_mode():
+        return False
+    return True
 
 
 def _preflight_timeout() -> float:
@@ -264,6 +293,11 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
                 'endpoint unreachable at %s (%s); the model server may be '
                 'down or the port not listening' % (base_url, detail))
         logger.debug('[Ephemeral] pre-flight probe ok for %s', base_url)
+    elif _is_self_hosted and _benchmark_mode():
+        # Skipped on purpose — see _preflight_enabled. The dispatch retry
+        # loop is the safety net for a genuinely-down endpoint here.
+        logger.debug('[Ephemeral] pre-flight probe skipped for %s '
+                     '(benchmark mode: TOFU_DISABLE_CONFIGURED_SLOTS)', base_url)
 
     caps, rpm, latency, cost = _seed_caps_and_pricing(model_id)
     if capabilities:
@@ -277,7 +311,13 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
         model=model_id,
         capabilities=caps,
         base_url=base_url,
-        provider_id=f'ephemeral:{owner or handle_id}',
+        # ★ Unique per handle (NOT per owner): the provider_id is what the
+        #   thread-scoped hard pin (lib/llm_dispatch/provider_pin.py) matches
+        #   on, so two concurrent inline-provider requests from the SAME API
+        #   key must still pin to their own distinct slots. ``owner`` stays in
+        #   the tag for audit/debug readability, but handle_id guarantees
+        #   uniqueness.
+        provider_id=f'ephemeral:{owner}:{handle_id}' if owner else f'ephemeral:{handle_id}',
         extra_headers=dict(extra_headers or {}),
         thinking_format=thinking_format or '',
         rpm_limit=rpm,

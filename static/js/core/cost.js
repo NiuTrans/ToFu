@@ -62,34 +62,12 @@ let autoApplyWrites = JSON.parse(
   localStorage.getItem("claude_auto_apply") || "true",
 );
 
-// ── Pricing state ──
-let pricingData = {
-  model: serverModel,
-  inputPrice: 15.0,
-  outputPrice: 75.0,
-  usdToCny: 7.24,
-  exchangeRateUpdated: 0,
-  pricingUpdated: 0,
-  pricingSource: "default",
-  exchangeRateSource: "none",
-  onlineMatchedModel: null,
-};
-
-async function loadPricing() {
-  try {
-    const data = await Api.pricing.get();
-    if (data) {
-      pricingData = data;
-      debugLog(
-        `Pricing loaded: $${data.inputPrice}/1M in, $${data.outputPrice}/1M out, rate=${data.usdToCny}`,
-        "success",
-      );
-      if (typeof _updatePricingDisplay === "function") _updatePricingDisplay();
-    }
-  } catch (e) {
-    debugLog("Pricing load failed: " + e.message, "warn");
-  }
-}
+// NOTE: the old client-side `pricingData` + `loadPricing()` pair was removed
+// (2026-06) — it fetched /api/v1/pricing into a write-only variable and called
+// a `_updatePricingDisplay()` that no longer exists. Cost math is now
+// server-authoritative (lib/cost.py + lib/pricing.py via calcCostCny), and the
+// settings model-picker reads `_modelPricingCache` (from /api/server-config),
+// not this. Nothing consumed `pricingData`.
 
 /* ── Pricing tables (server-side authoritative) ───────────────────────
  * Cost-from-usage math now lives in lib/cost.py (port of the old

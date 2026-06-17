@@ -40,18 +40,23 @@ All notable changes to tofu-open are documented in this file.
   `tsc` only reads the existing `.js` files; the runtime bundle is still
   produced by `lib/js_bundler.py`.
 
-### Added (groundwork — inert, not yet wired)
-- **SQLAlchemy Core table-definition layer (`lib/database/_core_schema.py`).**
-  Lets NEW tables be defined ONCE as Core `Table` objects and compiled to
+### Changed
+- **SQLAlchemy Core table-definition layer (`lib/database/_core_schema.py`) — now live.**
+  Lets tables be defined ONCE as Core `Table` objects and compiled to
   correct DDL + DML for BOTH backends (PG `JSONB`/`IDENTITY` ↔ SQLite
   `JSON`/autoinc, paramstyle `%(x)s` ↔ `?`, dialect-correct
   `INSERT … ON CONFLICT … DO UPDATE` upserts) — the single source of truth
   that retires the hand-maintained twin-DDL + regex `_sql_translate` path
   *for those tables*. **Compile-only**: opens no SQLAlchemy Engine; execution
-  stays on the existing `get_db()` connection. **Not yet wired into
-  `init_db()` and runs no DDL** — registering a live table is a §10.3 schema
-  change pending sign-off. Proven by `tests/test_core_schema_groundwork.py`
-  (dual-dialect DDL/DML + module-inertness). Adds `sqlalchemy>=2.0`.
+  stays on the existing `get_db()` connection. The first batch of tables
+  (`users`, `conversations`, `task_results`, `task_events`, `chat_artifacts`,
+  `transcript_archive`, `daily_cost_cache`, `paper_reports`, `paper_library`,
+  `paper_translations`, plus the kv stores) is wired into `init_db()` via
+  `create_if_absent` in `_schema_pg.py` / `_schema_sqlite.py`; the generated
+  DDL is byte-equivalent to the legacy hand-DDL (proven by
+  `tests/test_core_schema_parity.py`), so no `_SCHEMA_VERSION` bump was
+  required. Registering a NEW table here is still a §10.3 schema change
+  pending sign-off. Adds `sqlalchemy>=2.0`.
 
 ### Changed
 - **Unified the LLM SSE streaming core.** `lib/llm/stream.py` (sync,

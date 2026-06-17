@@ -590,7 +590,7 @@ function _applyMatrixRecommendations(provIdx) {
 
   if (typeof showToast === 'function') {
     showToast(applied > 0
-      ? t('settings.matrixApplied').replace('{n}', applied)
+      ? t('settings.matrixApplied').replace('{n}', String(applied))
       : t('settings.matrixNothingApplied'), applied > 0 ? 'success' : 'info');
   }
   _rerenderMatrix(provIdx);

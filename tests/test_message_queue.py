@@ -1,82 +1,46 @@
-"""Tests for server-side message queue (lib/message_queue.py)."""
+"""Tests for the server-side message queue (lib/message_queue.py).
 
-import json
+HTTP surface (post-migration):
+  * GET    /api/v1/chat/queue/<convId>            — list queued messages
+  * DELETE /api/v1/chat/queue/<convId>/<queueId>  — remove one item
+  * DELETE /api/v1/chat/queue/<convId>            — clear the queue
+
+The legacy ``POST /api/chat/queue`` manual-enqueue endpoint was DELETED on
+2026-05-29 — ``/api/v1/chat/send`` now auto-detects whether to start a task
+immediately or enqueue, so there is no standalone HTTP enqueue surface to
+test. These tests therefore seed the queue through the supported library
+entry point (``lib.message_queue.enqueue_message``, the same function the
+send path calls) and exercise the surviving GET/DELETE HTTP endpoints.
+"""
+
 import time
+
 import pytest
+
+from lib.message_queue import enqueue_message
 
 
 def _qid():
-    """Generate unique test conv ID to avoid cross-test pollution."""
+    """Unique test conv ID to avoid cross-test pollution."""
     return f'test-queue-{time.time_ns()}'
 
 
+def _seed(conv_id, text, timestamp):
+    """Enqueue one message via the library (the deleted POST's replacement)."""
+    return enqueue_message(conv_id, {'text': text, 'timestamp': timestamp},
+                           {'model': 'test-model'})
+
+
 class TestMessageQueueAPI:
-    """Test queue API endpoints."""
-
-    def test_enqueue_message(self, flask_client):
-        """POST /api/chat/queue enqueues a message."""
-        client = flask_client
-        conv_id = _qid()
-        client.put(f'/api/conversations/{conv_id}', json={
-            'title': 'Queue Test',
-            'messages': [{'role': 'user', 'content': 'Hello', 'timestamp': 1000}],
-            'createdAt': 1000,
-            'updatedAt': 1000,
-        })
-
-        resp = client.post('/api/chat/queue', json={
-            'convId': conv_id,
-            'message': {
-                'text': 'Queued message 1',
-                'timestamp': 2000,
-            },
-            'config': {'model': 'test-model'},
-        })
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert 'queueId' in data
-        assert data['position'] == 1
-
-    def test_enqueue_empty_rejected(self, flask_client):
-        """POST /api/chat/queue rejects empty messages."""
-        resp = flask_client.post('/api/chat/queue', json={
-            'convId': 'test-conv',
-            'message': {},
-            'config': {},
-        })
-        assert resp.status_code == 400
-
-    def test_enqueue_no_convid_rejected(self, flask_client):
-        """POST /api/chat/queue rejects missing convId."""
-        resp = flask_client.post('/api/chat/queue', json={
-            'message': {'text': 'hello'},
-        })
-        assert resp.status_code == 400
+    """Test the surviving queue HTTP endpoints."""
 
     def test_get_queue(self, flask_client):
-        """GET /api/chat/queue/<convId> returns queued messages."""
-        client = flask_client
+        """GET /api/v1/chat/queue/<convId> returns queued messages in order."""
         conv_id = _qid()
-        client.put(f'/api/conversations/{conv_id}', json={
-            'title': 'Queue Test 2',
-            'messages': [{'role': 'user', 'content': 'Hello', 'timestamp': 1000}],
-            'createdAt': 1000,
-            'updatedAt': 1000,
-        })
+        _seed(conv_id, 'First', 1000)
+        _seed(conv_id, 'Second', 2000)
 
-        # Enqueue two messages
-        client.post('/api/chat/queue', json={
-            'convId': conv_id,
-            'message': {'text': 'First', 'timestamp': 1000},
-            'config': {},
-        })
-        client.post('/api/chat/queue', json={
-            'convId': conv_id,
-            'message': {'text': 'Second', 'timestamp': 2000},
-            'config': {},
-        })
-
-        resp = client.get(f'/api/chat/queue/{conv_id}')
+        resp = flask_client.get(f'/api/v1/chat/queue/{conv_id}')
         assert resp.status_code == 200
         queue = resp.get_json()
         assert len(queue) == 2
@@ -86,69 +50,40 @@ class TestMessageQueueAPI:
         assert queue[1]['position'] == 2
 
     def test_remove_from_queue(self, flask_client):
-        """DELETE /api/chat/queue/<convId>/<queueId> removes one item."""
-        client = flask_client
+        """DELETE /api/v1/chat/queue/<convId>/<queueId> removes one item."""
         conv_id = _qid()
-        client.put(f'/api/conversations/{conv_id}', json={
-            'title': 'Queue Test 3',
-            'messages': [{'role': 'user', 'content': 'Hello', 'timestamp': 1000}],
-            'createdAt': 1000,
-            'updatedAt': 1000,
-        })
+        _seed(conv_id, 'Keep me', 1000)
+        removed_id = _seed(conv_id, 'Remove me', 2000)['queueId']
 
-        r1 = client.post('/api/chat/queue', json={
-            'convId': conv_id,
-            'message': {'text': 'Keep me', 'timestamp': 1000},
-            'config': {},
-        })
-        r2 = client.post('/api/chat/queue', json={
-            'convId': conv_id,
-            'message': {'text': 'Remove me', 'timestamp': 2000},
-            'config': {},
-        })
-        queue_id = r2.get_json()['queueId']
-
-        resp = client.delete(f'/api/chat/queue/{conv_id}/{queue_id}')
+        resp = flask_client.delete(f'/api/v1/chat/queue/{conv_id}/{removed_id}')
         assert resp.status_code == 200
 
-        # Verify only 1 left
-        queue = client.get(f'/api/chat/queue/{conv_id}').get_json()
+        queue = flask_client.get(f'/api/v1/chat/queue/{conv_id}').get_json()
         assert len(queue) == 1
         assert queue[0]['text'] == 'Keep me'
 
-    def test_clear_queue(self, flask_client):
-        """DELETE /api/chat/queue/<convId> clears all items."""
-        client = flask_client
+    def test_remove_unknown_is_404(self, flask_client):
+        """DELETE of a non-existent queue item returns 404."""
         conv_id = _qid()
-        client.put(f'/api/conversations/{conv_id}', json={
-            'title': 'Queue Test 4',
-            'messages': [{'role': 'user', 'content': 'Hello', 'timestamp': 1000}],
-            'createdAt': 1000,
-            'updatedAt': 1000,
-        })
+        _seed(conv_id, 'Only one', 1000)
+        resp = flask_client.delete(f'/api/v1/chat/queue/{conv_id}/no-such-queue-id')
+        assert resp.status_code == 404
 
-        client.post('/api/chat/queue', json={
-            'convId': conv_id,
-            'message': {'text': 'A', 'timestamp': 1000},
-            'config': {},
-        })
-        client.post('/api/chat/queue', json={
-            'convId': conv_id,
-            'message': {'text': 'B', 'timestamp': 2000},
-            'config': {},
-        })
+    def test_clear_queue(self, flask_client):
+        """DELETE /api/v1/chat/queue/<convId> clears all items."""
+        conv_id = _qid()
+        _seed(conv_id, 'A', 1000)
+        _seed(conv_id, 'B', 2000)
 
-        resp = client.delete(f'/api/chat/queue/{conv_id}')
+        resp = flask_client.delete(f'/api/v1/chat/queue/{conv_id}')
         assert resp.status_code == 200
-        data = resp.get_json()
-        assert data['cleared'] == 2
+        assert resp.get_json()['cleared'] == 2
 
-        # Verify empty
-        queue = client.get(f'/api/chat/queue/{conv_id}').get_json()
+        queue = flask_client.get(f'/api/v1/chat/queue/{conv_id}').get_json()
         assert len(queue) == 0
 
     def test_get_empty_queue(self, flask_client):
-        """GET /api/chat/queue/<convId> returns empty list for unknown conv."""
-        resp = flask_client.get('/api/chat/queue/nonexistent')
+        """GET for an unknown conv returns an empty list."""
+        resp = flask_client.get('/api/v1/chat/queue/nonexistent')
         assert resp.status_code == 200
         assert resp.get_json() == []

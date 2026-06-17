@@ -402,8 +402,8 @@ function updateSubmenuCounts() {
   const toolTrigger = document.querySelector("#submenuTools .submenu-trigger");
   if (toolTrigger) toolTrigger.classList.toggle("has-active", toolCount > 0);
 
-  // Mode: swarm, endpoint, autopilot
-  const modeCount = (swarmEnabled ? 1 : 0) + (endpointEnabled ? 1 : 0) + (autopilotEnabled ? 1 : 0);
+  // Mode: swarm, endpoint, autopilot, flow
+  const modeCount = (swarmEnabled ? 1 : 0) + (endpointEnabled ? 1 : 0) + (autopilotEnabled ? 1 : 0) + (activeFlow ? 1 : 0);
   _setCount(document.getElementById("submenuModeCount"), modeCount);
   const modeTrigger = document.querySelector("#submenuMode .submenu-trigger");
   if (modeTrigger) modeTrigger.classList.toggle("has-active", modeCount > 0);
@@ -546,6 +546,10 @@ function toggleEndpoint() {
     _applyAutopilotUI(false);
     debugLog("Autopilot disabled — Endpoint Mode takes precedence", "info");
   }
+  if (endpointEnabled && activeFlow) {
+    _applyFlowUI('');
+    debugLog("Flow cleared — Endpoint Mode takes precedence", "info");
+  }
   _saveConvToolState();
   debugLog(
     endpointEnabled
@@ -572,6 +576,12 @@ function toggleAutopilot() {
     _applyEndpointUI(false);
     debugLog("Endpoint Mode disabled — Autopilot takes precedence", "info");
   }
+  /* A flow selection and the toggles are mutually exclusive — the flow IS
+   * the execution mode (backend drops the toggles when a flow is set). */
+  if (autopilotEnabled && activeFlow) {
+    _applyFlowUI('');
+    debugLog("Flow cleared — Autopilot takes precedence", "info");
+  }
   _saveConvToolState();
   debugLog(
     autopilotEnabled
@@ -579,7 +589,133 @@ function toggleAutopilot() {
       : "Autopilot: OFF",
     "success",
   );
+  /* ★ Mid-stream arm: if the user turns autopilot ON while a reply is
+   * already streaming for the active conv, hand off the IN-FLIGHT task to
+   * the virtual user — the frozen task config wouldn't otherwise fire the
+   * VU hook. This is the "I'm stepping away now" gesture; no re-send needed. */
+  if (autopilotEnabled) _maybeArmAutopilot();
 }
+
+/**
+ * Arm autopilot for the active conversation if a reply is currently
+ * streaming. The backend persists autopilotEnabled and flips the live
+ * task's config so the virtual user takes over at the next natural stop.
+ * No-op (silent) when nothing is streaming — the toggle alone already
+ * covers the next manual send.
+ */
+function _maybeArmAutopilot() {
+  const conv = getActiveConv();
+  if (!conv) return;
+  const streaming = activeStreams.has(conv.id) || !!conv.activeTaskId;
+  if (!streaming) return;
+  if (!(typeof Api !== 'undefined' && Api.chat && Api.chat.armAutopilot)) return;
+  Api.chat.armAutopilot(conv.id).then((r) => {
+    if (r && r.armed) {
+      debugLog("Autopilot armed — virtual user will take over when this reply finishes", "success");
+      if (typeof showToast === "function") {
+        showToast("", t('autopilot.armedTitle'), t('autopilot.armedBody'), 4000);
+      }
+    }
+  }).catch((e) => console.warn('[Autopilot] arm failed:', e && e.message));
+}
+if (typeof window !== 'undefined') window._maybeArmAutopilot = _maybeArmAutopilot;
+
+// ══════════════════════════════════════════════════════
+// ★ Orchestration Flow selector (Mode dropdown)
+//   activeFlow ∈ { '' , 'builtin:endpoint', 'builtin:autopilot', <orchId> }.
+//   Selecting a flow makes the whole conversation run on the FlowExecutor
+//   engine (routes/chat.py → resolve_chat_flow_entry); it is mutually
+//   exclusive with the endpoint/autopilot toggles (the flow IS the mode).
+// ══════════════════════════════════════════════════════
+var _orchFlowCache = null;   // cached [{id,name}] of stored custom flows
+
+function _applyFlowUI(flowVal) {
+  activeFlow = flowVal || '';
+  const btn = document.getElementById("flowToggle");
+  if (btn) btn.classList.toggle("active", !!activeFlow);
+  const badge = document.getElementById("flowBadge");
+  if (badge) badge.style.display = activeFlow ? "" : "none";
+  const label = document.getElementById("flowActiveLabel");
+  if (label) label.textContent = _flowDisplayName(activeFlow);
+  // Reflect the radio-style selection in the dropdown list.
+  document.querySelectorAll('#flowMenuList .flow-menu-item').forEach(el => {
+    el.classList.toggle('selected', (el.dataset.flow || '') === activeFlow);
+  });
+}
+
+function _flowDisplayName(flowVal) {
+  if (!flowVal) return t('toolbar.flowNone');
+  if (flowVal === 'builtin:endpoint') return t('toolbar.autonomousMode');
+  if (flowVal === 'builtin:autopilot') return t('toolbar.autopilot');
+  const f = (_orchFlowCache || []).find(x => ('' + x.id) === flowVal);
+  return f ? f.name : t('toolbar.flowCustom');
+}
+
+function setActiveFlow(flowVal) {
+  _applyFlowUI(flowVal || '');
+  /* Flow ⇄ toggles mutual exclusion: a flow owns the loop boundary. */
+  if (activeFlow && (endpointEnabled || autopilotEnabled)) {
+    _applyEndpointUI(false);
+    _applyAutopilotUI(false);
+  }
+  _saveConvToolState();
+  if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
+  debugLog(
+    activeFlow ? `Flow: ${_flowDisplayName(activeFlow)} — runs on the orchestration engine`
+               : "Flow: none",
+    "success",
+  );
+  // Close the dropdown after a pick.
+  const menu = document.getElementById("flowMenu");
+  if (menu) menu.classList.remove("open");
+}
+
+function toggleFlowMenu(e) {
+  if (e) e.stopPropagation();
+  const menu = document.getElementById("flowMenu");
+  if (!menu) return;
+  const willOpen = !menu.classList.contains("open");
+  menu.classList.toggle("open", willOpen);
+  if (willOpen) _populateFlowMenu();
+}
+
+async function _populateFlowMenu() {
+  const list = document.getElementById("flowMenuList");
+  if (!list) return;
+  // Built-ins are always present; custom flows come from the store.
+  let custom = [];
+  try {
+    custom = await Api.orchestrations.list();
+    _orchFlowCache = (custom || []).map(e => ({ id: e.id, name: e.name || 'Untitled' }));
+  } catch (err) {
+    console.warn('[Flow] list failed:', err && err.message);
+    _orchFlowCache = _orchFlowCache || [];
+  }
+  const items = [
+    { flow: '', name: t('toolbar.flowNone'), desc: t('toolbar.flowNoneDesc') },
+    { flow: 'builtin:endpoint', name: t('toolbar.autonomousMode'), desc: t('toolbar.autonomousModeDesc') },
+    { flow: 'builtin:autopilot', name: t('toolbar.autopilot'), desc: t('toolbar.autopilotDesc') },
+  ];
+  for (const f of (_orchFlowCache || [])) {
+    items.push({ flow: '' + f.id, name: f.name, desc: t('toolbar.flowCustomDesc') });
+  }
+  list.innerHTML = items.map(it =>
+    '<div class="flow-menu-item' + ((it.flow === activeFlow) ? ' selected' : '') + '" '
+    + 'data-flow="' + escapeHtml(it.flow) + '" onclick="setActiveFlow(\'' + escapeHtml(it.flow).replace(/'/g, "\\'") + '\')">'
+    + '<span class="flow-menu-check">✓</span>'
+    + '<span class="flow-menu-text"><span class="flow-menu-name">' + escapeHtml(it.name) + '</span>'
+    + '<span class="flow-menu-desc">' + escapeHtml(it.desc) + '</span></span>'
+    + '</div>'
+  ).join('');
+}
+
+// Close the flow menu on outside click.
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#flowMenuWrapper")) {
+    const menu = document.getElementById("flowMenu");
+    if (menu) menu.classList.remove("open");
+  }
+});
 
 /* ═══ Folder management UI ═══ */
 

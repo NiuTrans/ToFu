@@ -26,8 +26,6 @@ api-form messages list (discarded after the LLM call) and the next turn
 re-reads the original 33k-char content.
 """
 
-import json
-
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -127,16 +125,10 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
 
     if conv_id:
         try:
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            _db = get_thread_db(DOMAIN_CHAT)
-            _row = _db.execute(
-                'SELECT messages, updated_at FROM conversations '
-                'WHERE id=? AND user_id=1',
-                (conv_id,),
-            ).fetchone()
-            if _row and _row[0]:
-                _conv_messages = json.loads(_row[0]) if isinstance(_row[0], str) else _row[0]
-                _conv_updated_at = _row[1] if not hasattr(_row, 'get') else _row['updated_at']
+            from lib.agent_core.store import get_conversation_store
+            _loaded = get_conversation_store().load_conversation_messages(conv_id)
+            if _loaded is not None:
+                _conv_messages, _conv_updated_at = _loaded
                 if isinstance(_conv_messages, list):
                     for _m in _conv_messages:
                         if not isinstance(_m, dict):
@@ -299,18 +291,9 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
     # round when this conversation is rebuilt and L1 fires again.
     if _conv_dirty and _conv_messages is not None and conv_id:
         try:
-            from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
-            import time as _time
-            _db = get_thread_db(DOMAIN_CHAT)
-            _now_ms = int(_time.time() * 1000)
-            cur = _db.execute(
-                'UPDATE conversations SET messages=?, updated_at=? '
-                'WHERE id=? AND user_id=1 AND updated_at=?',
-                (json_dumps_pg(_conv_messages), _now_ms, conv_id,
-                 _conv_updated_at),
-            )
-            _db.commit()
-            _affected = getattr(cur, 'rowcount', None)
+            from lib.agent_core.store import get_conversation_store
+            _affected = get_conversation_store().cas_update_conversation_messages(
+                conv_id, _conv_messages, _conv_updated_at)
             if _affected == 0:
                 logger.info('[L1-persist] conv=%s CAS skipped — row was '
                             'updated by another writer; placeholders will '

@@ -30,7 +30,9 @@ import pytest
 
 from lib.agent_core_manifest import (
     CORE_MODULES,
+    _PERSISTENCE_IMPORT_BASELINE,
     is_concrete_plugin_import,
+    is_forbidden_persistence_import,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -119,6 +121,57 @@ def test_core_does_not_import_concrete_plugins():
             + '\n  '.join(violations)
             + '\n\nFix: register a ToolSpec / BodyDialect instead of importing '
             'the concrete plugin module in core.')
+
+
+def test_core_persistence_imports_within_ratchet():
+    """No core file may import lib.database / lib.conversations beyond its baseline.
+
+    The agent base reaches all persistence through the ConversationStore seam
+    (``lib.agent_core.store.get_conversation_store``).  Direct imports of the
+    host DB layer are being removed stage-by-stage; this test ratchets the
+    per-file count DOWN (monotonic — like tests/test_frontend_api_isolation.py).
+
+    To fix a failure: route the call through the store seam, then LOWER the
+    file's number in ``_PERSISTENCE_IMPORT_BASELINE`` (or delete the entry when
+    it reaches 0).  NEVER raise a baseline to make the test pass.
+    """
+    counts: dict[str, int] = {}
+    for path in _collect_core_files():
+        dotted_self = _path_to_dotted(path)
+        # Count DISTINCT import lines: _imports_of yields both 'lib.database'
+        # and 'lib.database.X' for one `from lib.database import X` line, so
+        # dedupe by lineno to count statements, not symbols.
+        lines = {ln for imported, ln in _imports_of(path)
+                 if is_forbidden_persistence_import(imported)}
+        if lines:
+            counts[dotted_self] = len(lines)
+
+    violations: list[str] = []
+    # (a) no file exceeds its baseline; (b) no NEW file gains an import.
+    for mod, n in counts.items():
+        allowed = _PERSISTENCE_IMPORT_BASELINE.get(mod, 0)
+        if n > allowed:
+            violations.append(
+                f'{mod}: {n} direct persistence import(s), baseline {allowed} '
+                f'— route through lib.agent_core.store.get_conversation_store()')
+    # (c) ratchet hygiene: a baseline entry that's been driven below its number
+    #     (or to 0) must be lowered/removed so the gain can never silently
+    #     creep back.
+    stale: list[str] = []
+    for mod, allowed in _PERSISTENCE_IMPORT_BASELINE.items():
+        actual = counts.get(mod, 0)
+        if actual < allowed:
+            stale.append(f'{mod}: baseline {allowed} but only {actual} remain '
+                         f'— lower it to {actual}')
+
+    msg_parts = []
+    if violations:
+        msg_parts.append('Core/persistence boundary exceeded:\n  '
+                         + '\n  '.join(violations))
+    if stale:
+        msg_parts.append('Ratchet not tightened (lower these baselines):\n  '
+                         + '\n  '.join(stale))
+    assert not msg_parts, '\n\n'.join(msg_parts)
 
 
 def test_facade_members_are_within_core():

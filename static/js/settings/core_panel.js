@@ -72,6 +72,9 @@ function openSettings() {
   document.getElementById("settingImageMaxWidth").value =
     (typeof config.imageMaxWidth === 'number' ? config.imageMaxWidth : 0);
   document.getElementById("settingSystem").value = config.systemPrompt || "";
+  var spModeSel = document.getElementById('settingSystemPromptMode');
+  if (spModeSel) spModeSel.value = (config.systemPromptMode === 'replace') ? 'replace' : 'append';
+  if (typeof _refreshSystemPromptSummary === 'function') _refreshSystemPromptSummary();
 
   // Default thinking depth
   var dtd = document.getElementById('settingDefaultThinkingDepth');

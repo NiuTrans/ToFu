@@ -257,4 +257,41 @@ async def capabilities():
     })
 
 
+@api_v1_capabilities_bp.route('/api/v1/system-prompt/default', methods=['GET'])
+@api_meta(summary='Default (built-in) system prompt',
+          description='Returns the freshly-built Claude-Code-style static '
+                      'system prompt. Used by the Settings panel to pre-fill '
+                      'the system-prompt editor so users can fine-tune or '
+                      'fully replace it. Query flags: project (bool), '
+                      'tools (bool) — match the preview to the user\'s mode.',
+          tags=['capabilities'], public=True)
+async def system_prompt_default():
+    from flask import request
+
+    def _flag(name: str, default: bool) -> bool:
+        v = (request.args.get(name) or '').strip().lower()
+        if not v:
+            return default
+        return v in ('1', 'true', 'yes', 'on')
+
+    project = _flag('project', False)
+    tools = _flag('tools', True)
+    try:
+        from lib.tasks_pkg import system_prompt_cc
+        text = system_prompt_cc.build_static_prompt(
+            cwd='', is_git=False, model='',
+            has_real_tools=tools,
+            is_code_context=project,
+            # Omit the trailing "Current date:" line — the date is injected
+            # dynamically at request time, so baking it into the editor text
+            # would freeze a stale date if the user saves it in replace mode.
+            include_date=False,
+        )
+    except Exception as e:
+        logger.error('[capabilities] build default system prompt failed: %s',
+                     e, exc_info=True)
+        return api_ok({'prompt': '', 'error': str(e)})
+    return api_ok({'prompt': text, 'project': project, 'tools': tools})
+
+
 __all__ = ['api_v1_capabilities_bp']

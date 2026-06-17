@@ -497,8 +497,9 @@ Legal values:
 | `thinking_format`      | Body shape sent to the engine                       | Engines       |
 |------------------------|-----------------------------------------------------|---------------|
 | `""` (default)         | Auto-detect from model name + brand                 | —             |
-| `enable_thinking`      | top-level `{"enable_thinking": bool}`               | Bailian Qwen, Gemini cloud, LongCat, ERNIE |
+| `enable_thinking`      | top-level `{"enable_thinking": bool}`               | Bailian Qwen, LongCat, ERNIE |
 | `thinking_type`        | `{"thinking": {"type": "enabled"\|"disabled"}}`     | Doubao, GLM cloud, Kimi, Claude |
+| `reasoning_effort`     | top-level `{"reasoning_effort": "minimal"\|"low"\|"medium"\|"high"}` | Gemini 3.x (maps to Vertex `thinkingLevel`) |
 | `chat_template_kwargs` | `{"chat_template_kwargs": {"enable_thinking": …}}`  | sglang, vLLM, any OpenAI-shim engine that gates thinking through Jinja |
 | `none`                 | nothing thinking-related sent                       | DeepSeek-Reasoner (always-thinking) |
 

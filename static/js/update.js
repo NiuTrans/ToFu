@@ -332,10 +332,127 @@ function _renderDepsFailed(b) {
     '<p class="upd-hint">' + escapeHtml(t('update.restartHint')) + '</p>';
 }
 
+// ── Restart progress model ───────────────────────────────────────────
+// During an in-place re-exec there is NO server listening (the old process
+// os.execv's into the new one; Hypercorn only binds after DB init + import
+// validation + service startup). So we can't stream live boot logs over the
+// wire. Instead we drive a determinate bar through the server's REAL boot
+// phases (mirrors server.py's _boot() sequence), time-estimated, and treat
+// /api/health as the single source of truth: the instant it answers we snap
+// to 100% with the genuine returned version. The bar eases toward each
+// phase's cap but never reaches 100% on its own — it can only *under*-report
+// progress, never claim "done" before the server actually is.
+var _RESTART_PHASES = [
+  { key: 'shutdown', dur: 1.5, to: 12 },  // graceful drain + os.execv
+  { key: 'reload',   dur: 3.0, to: 34 },  // re-import core modules
+  { key: 'db',       dur: 2.5, to: 52 },  // init_db / warmup
+  { key: 'imports',  dur: 3.0, to: 72 },  // critical-import validation
+  { key: 'services', dur: 3.0, to: 86 },  // background workers / MCP
+  { key: 'bind',     dur: 6.0, to: 94 },  // _wait_port_free + Hypercorn bind
+];
+var _restartT0 = 0;
+var _restartRaf = null;
+var _restartPoll = null;
+var _restartDone = false;
+
+/** Map elapsed seconds → {pct, key} along the phase timeline (ease-out per
+ *  phase). The final phase holds at its cap if the server overruns, so a
+ *  slow boot looks "still working" rather than falsely complete. */
+function _restartProgress(elapsed) {
+  var from = 0, acc = 0;
+  for (var i = 0; i < _RESTART_PHASES.length; i++) {
+    var ph = _RESTART_PHASES[i];
+    var last = (i === _RESTART_PHASES.length - 1);
+    if (elapsed < acc + ph.dur || last) {
+      var t = Math.min(1, (elapsed - acc) / ph.dur);
+      var eased = 1 - Math.pow(1 - t, 2);
+      return { pct: Math.min(from + (ph.to - from) * eased, ph.to), key: ph.key };
+    }
+    acc += ph.dur; from = ph.to;
+  }
+  return { pct: 94, key: 'bind' };
+}
+
+/** Render the restart progress card into the dialog body. */
+function _renderRestartProgress() {
+  const body = document.getElementById('updateModalBody');
+  if (!body) return;
+  body.innerHTML =
+    '<div class="upd-restart" id="updRestartCard">' +
+      '<div class="upd-restart-head">' +
+        '<span class="upd-restart-spin" id="updRestartSpin"></span>' +
+        '<div class="upd-restart-headtext">' +
+          '<div class="upd-restart-title" id="updRestartTitle">' + escapeHtml(t('update.restartTitle')) + '</div>' +
+          '<div class="upd-restart-sub">' + escapeHtml(t('update.restartSub')) + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="upd-restart-bar"><div class="upd-restart-fill" id="updRestartFill"></div></div>' +
+      '<div class="upd-restart-foot">' +
+        '<span class="upd-restart-phase" id="updRestartPhase">' + escapeHtml(t('update.phase.shutdown')) + '</span>' +
+        '<span class="upd-restart-pct" id="updRestartPct">0%</span>' +
+      '</div>' +
+    '</div>';
+}
+
+/** Animation frame: advance the bar from the phase timeline. */
+function _restartAnimate() {
+  if (_restartDone) return;
+  const elapsed = (Date.now() - _restartT0) / 1000;
+  const p = _restartProgress(elapsed);
+  const fill = document.getElementById('updRestartFill');
+  const pctEl = document.getElementById('updRestartPct');
+  const phaseEl = document.getElementById('updRestartPhase');
+  if (fill) fill.style.width = p.pct.toFixed(1) + '%';
+  if (pctEl) pctEl.textContent = Math.round(p.pct) + '%';
+  if (phaseEl) {
+    const label = t('update.phase.' + p.key);
+    const secs = ' · ' + t('update.restartElapsed').replace('%s', String(Math.round(elapsed)));
+    phaseEl.textContent = label + secs;
+  }
+  _restartRaf = requestAnimationFrame(_restartAnimate);
+}
+
+/** Snap to 100% "Back online · vX", then reload the page. */
+function _restartSucceed(version) {
+  if (_restartDone) return;
+  _restartDone = true;
+  if (_restartRaf) cancelAnimationFrame(_restartRaf);
+  if (_restartPoll) clearInterval(_restartPoll);
+  const fill = document.getElementById('updRestartFill');
+  const pctEl = document.getElementById('updRestartPct');
+  const phaseEl = document.getElementById('updRestartPhase');
+  const spin = document.getElementById('updRestartSpin');
+  const card = document.getElementById('updRestartCard');
+  if (card) card.classList.add('is-online');
+  if (spin) spin.classList.add('is-done');
+  if (fill) fill.style.width = '100%';
+  if (pctEl) pctEl.textContent = '100%';
+  if (phaseEl) {
+    phaseEl.textContent = t('update.phase.online') +
+      (version ? ' · v' + version : '');
+  }
+  // Brief pause so the user sees the completed state before the reload.
+  setTimeout(function () { window.location.reload(); }, 750);
+}
+
+/** Restart failed to come back within the ceiling — stop and tell the user. */
+function _restartTimeout() {
+  if (_restartDone) return;
+  _restartDone = true;
+  if (_restartRaf) cancelAnimationFrame(_restartRaf);
+  if (_restartPoll) clearInterval(_restartPoll);
+  const phaseEl = document.getElementById('updRestartPhase');
+  const spin = document.getElementById('updRestartSpin');
+  if (spin) spin.classList.add('is-error');
+  if (phaseEl) phaseEl.textContent = t('update.restartTimeout');
+  showToast('⚠️', t('update.restartTimeout'), '', 6000);
+}
+
 /** Explicit restart — re-execs the server, then waits for it to come back.
  *  Invoked from the post-pull "Restart now" button AND the always-available
  *  footer button (no git pull needed). The backend re-execs in place via
- *  os.execv, so there is no kill-then-relaunch gap. */
+ *  os.execv reclaiming the SAME port, so the page can reconnect to the same
+ *  URL once /api/health answers again. */
 async function restartServer(opts) {
   // The footer button is available with no pending update — confirm first so
   // a stray click never interrupts running tasks.
@@ -343,33 +460,31 @@ async function restartServer(opts) {
   const btn = document.getElementById('updateRestartBtn')
     || document.getElementById('updateRestartNowBtn');
   if (btn) { btn.disabled = true; btn.textContent = t('update.restarting'); }
+
+  _renderRestartProgress();
   try {
     await Api.update.restart();
   } catch (e) {
     if (typeof debugLog === 'function') debugLog('[Update] restart request failed: ' + (e && e.message), 'warning');
   }
-  showToast('🔄', t('update.restarting'), t('update.restartWait'), 8000);
-  _waitForServerBack(0);
+
+  _restartDone = false;
+  _restartT0 = Date.now();
+  _restartRaf = requestAnimationFrame(_restartAnimate);
+  // Wait out the backend's 0.6s pre-exec sleep before the first probe so we
+  // never mistake the still-alive OLD process for a successful restart.
+  setTimeout(function () { _restartPoll = setInterval(_restartCheckHealth, 1500); }, 2500);
 }
 
-/** Poll /api/health until the server answers again, then reload. */
-function _waitForServerBack(attempt) {
-  if (attempt > 40) {  // ~80s ceiling
-    showToast('⚠️', t('update.restartTimeout'), '', 6000);
-    return;
-  }
-  setTimeout(async function () {
-    let ok = false;
-    try {
-      const resp = await Api.health.check();
-      ok = !!(resp && resp.ok);
-    } catch (e) { ok = false; }
-    if (ok) {
-      window.location.reload();
-    } else {
-      _waitForServerBack(attempt + 1);
-    }
-  }, 2000);
+/** One health probe; on success finish, on overall timeout bail. */
+async function _restartCheckHealth() {
+  if (_restartDone) return;
+  if ((Date.now() - _restartT0) / 1000 > 80) { _restartTimeout(); return; }
+  let info = null;
+  try {
+    info = await Api.health.info();  // parsed JSON → carries version
+  } catch (e) { info = null; }
+  if (info && info.ok) _restartSucceed(info.version || '');
 }
 
 function closeUpdateModal() {

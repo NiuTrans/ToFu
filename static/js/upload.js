@@ -191,7 +191,7 @@ function compressImage(file, userMaxWidth) {
   return new Promise((resolve) => {
     const reader = new FileReader();
     reader.onload = (ev) => {
-      const dataUrl = ev.target.result;
+      const dataUrl = String(ev.target.result || "");
       const originalBytes = Math.round((dataUrl.length * 3) / 4);
       const passthrough = () => resolve({
         base64: dataUrl.split(",")[1],
@@ -535,7 +535,7 @@ function renderImagePreviews() {
         : isPdf
           ? `PDF page ${img.pdfPage}`
           : "";
-      return `<div class="img-preview${isPdf ? " pdf-page" : ""}" ${tip ? `title="${tip}"` : ""}  onclick="previewPendingImage(${i})"><img src="${img.preview}" alt="preview">${srcLabel ? `<div class="pdf-badge">${srcLabel}</div>` : ""}<button class="remove-img" onclick="event.stopPropagation();removeImage(${i})">✕</button><div class="img-size">${label}</div></div>`;
+      return `<div class="img-preview${isPdf ? " pdf-page" : ""}" draggable="true" data-img-idx="${i}" ${tip ? `title="${tip}"` : ""}  onclick="previewPendingImage(${i})"><img src="${img.preview}" alt="preview" draggable="false">${srcLabel ? `<div class="pdf-badge">${srcLabel}</div>` : ""}<button class="remove-img" onclick="event.stopPropagation();removeImage(${i})">✕</button><div class="img-size">${label}</div></div>`;
     })
     .join("");
   // ★ Target-aware: render into edit area when editing, main input otherwise
@@ -553,6 +553,62 @@ function removeImage(i) {
   renderImagePreviews();
   if (typeof _igUpdateGenButton === 'function') _igUpdateGenButton();
 }
+
+// ── Drag-to-reorder image preview chips ──────────────
+// Image chips carry draggable="true" + data-img-idx. We move the dragged
+// entry within pendingImages on drop. Document-level delegation is used so
+// the handlers survive renderImagePreviews()'s innerHTML rebuilds.
+var _imgDragFromIdx = null;
+function _imgChipFrom(target) {
+  const chip = target && target.closest ? target.closest('.img-preview[data-img-idx]') : null;
+  if (!chip) return null;
+  // Only chips inside an image-previews container are reorderable images
+  // (pdf-text-card lacks data-img-idx, so closest already filters those out).
+  const idx = parseInt(chip.dataset.imgIdx, 10);
+  return Number.isInteger(idx) ? { chip, idx } : null;
+}
+document.addEventListener('dragstart', (e) => {
+  const hit = _imgChipFrom(e.target);
+  if (!hit) return;
+  _imgDragFromIdx = hit.idx;
+  hit.chip.classList.add('img-dragging');
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move';
+    // Required for Firefox to initiate the drag.
+    try { e.dataTransfer.setData('text/plain', String(hit.idx)); } catch (_e) { /* ignore */ }
+  }
+});
+document.addEventListener('dragend', (e) => {
+  const hit = _imgChipFrom(e.target);
+  if (hit) hit.chip.classList.remove('img-dragging');
+  document.querySelectorAll('.img-preview.img-drop-target')
+    .forEach((el) => el.classList.remove('img-drop-target'));
+  _imgDragFromIdx = null;
+});
+document.addEventListener('dragover', (e) => {
+  if (_imgDragFromIdx === null) return;
+  const hit = _imgChipFrom(e.target);
+  if (!hit) return;
+  e.preventDefault();  // allow drop
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  document.querySelectorAll('.img-preview.img-drop-target')
+    .forEach((el) => { if (el !== hit.chip) el.classList.remove('img-drop-target'); });
+  if (hit.idx !== _imgDragFromIdx) hit.chip.classList.add('img-drop-target');
+});
+document.addEventListener('drop', (e) => {
+  if (_imgDragFromIdx === null) return;
+  const hit = _imgChipFrom(e.target);
+  if (!hit) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const from = _imgDragFromIdx;
+  const to = hit.idx;
+  _imgDragFromIdx = null;
+  if (from === to || from < 0 || from >= pendingImages.length) { renderImagePreviews(); return; }
+  const moved = pendingImages.splice(from, 1)[0];
+  pendingImages.splice(to, 0, moved);
+  renderImagePreviews();
+}, true);  // capture: run before the full-page file-drop handler
 function removePdfText(i) {
   const entry = pendingPdfTexts[i];
   if (entry) entry._vlmAlive = false; // ★ Kill VLM polling for this entry

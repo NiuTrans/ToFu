@@ -208,9 +208,25 @@ class PgCursor:
         translated, is_pragma = translate_sql(sql)
         if is_pragma:
             return self
-        self._cursor.executemany(translated, params_list)
-        self.description = self._cursor.description
-        self.rowcount = self._cursor.rowcount
+        try:
+            self._cursor.executemany(translated, params_list)
+            self.description = self._cursor.description
+            self.rowcount = self._cursor.rowcount
+            self._conn._last_used = time.monotonic()
+            # Mark the connection dirty so teardown COMMITs instead of
+            # rolling back — otherwise executemany-only writes are silently
+            # discarded by close_db()'s clean-reads rollback branch.
+            _sql_upper = translated[:30].lstrip().upper()
+            if _sql_upper.startswith(('INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP')):
+                self._conn._dirty = True
+        except Exception as e:
+            logger.error('[DB] SQL executemany failed (%s): %.120s', type(e).__name__, e)
+            logger.debug('[DB] executemany error detail: %s\n  Translated: %.200s', e, translated)
+            try:
+                self._conn._conn.rollback()
+            except Exception as _rb_err:
+                logger.debug('[DB] Rollback after executemany error also failed: %s', _rb_err)
+            raise
         return self
 
     def fetchone(self):

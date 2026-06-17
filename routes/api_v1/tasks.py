@@ -23,9 +23,10 @@ import time
 
 from flask import Blueprint, Response, request
 
-from lib.api_response import api_not_found, api_ok
+from lib.api_response import api_bad_request, api_not_found, api_ok
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
+from lib.request_parser import optional_bool, parse_body, require_str
 
 from .auth import current_auth, require_scope
 
@@ -242,6 +243,46 @@ def task_abort(task_id):
     return api_ok(taskId=task_id, status='aborting')
 
 
+@api_v1_tasks_bp.route('/api/v1/tasks/<task_id>/tool_result', methods=['POST'])
+@require_scope('tasks')
+@api_meta(
+    summary='Return a client-executed custom tool result',
+    description=(
+        'Client-handoff backend for per-request custom tools (execution.mode='
+        '"client"). When the agent calls such a tool the task emits a '
+        '`custom_tool_call` event `{callId, toolName, arguments}` and blocks; '
+        'the client executes the tool and POSTs the result here to unblock it. '
+        'See docs/CUSTOM_TOOLS.md.'),
+    tags=['tasks'], scope='tasks',
+    request_body={'required': True, 'content': {'application/json': {
+        'schema': {'type': 'object', 'required': ['call_id', 'content'],
+                   'properties': {
+                       'call_id': {'type': 'string'},
+                       'content': {'type': 'string'},
+                       'is_error': {'type': 'boolean'}}}}}})
+def task_tool_result(task_id):
+    _, task = _find_task(task_id)
+    if task is None:
+        return api_not_found('Task not found')
+    body = parse_body()
+    try:
+        call_id = require_str(body, 'call_id')
+        content = require_str(body, 'content', allow_empty=True)
+    except ValueError as e:
+        return api_bad_request(str(e))
+    is_error = optional_bool(body, 'is_error', default=False)
+    from lib.tools.tool_env import resolve_client_tool_result
+    ok = resolve_client_tool_result(call_id, content, is_error=is_error)
+    if not ok:
+        return api_not_found(
+            f'No pending custom tool call {call_id!r} (expired, already '
+            'resolved, or unknown).')
+    audit_log('api_task_tool_result', task_id=task_id, call_id=call_id,
+              is_error=is_error,
+              key_id=(current_auth().key_id if current_auth() else ''))
+    return api_ok(taskId=task_id, callId=call_id, resolved=True)
+
+
 @api_v1_tasks_bp.route('/api/v1/tasks/<task_id>', methods=['DELETE'])
 @require_scope('admin')
 @api_meta(summary='Drop a task from the registry (admin)',
@@ -260,4 +301,4 @@ def task_delete(task_id):
     return api_ok(taskId=task_id, status='deleted')
 
 
-__all__ = ['api_v1_tasks_bp']
+__all__ = ['api_v1_tasks_bp']  # task_tool_result registered on the same bp

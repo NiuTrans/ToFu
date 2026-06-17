@@ -103,6 +103,9 @@ _BUNDLE_FILES = [
     'memory.js',
     'skills.js',
     'orchestration.js',
+    # Task Mode viewer — references _ORCH_ICONS from orchestration.js at
+    # runtime, so it MUST come after it.
+    'task-mode.js',
     'scheduler.js',
     'optimizer.js',
     'update.js',
@@ -134,6 +137,7 @@ _BUNDLE_FILES = [
     'settings/other_tabs.js',
     'settings/auth_sources.js',
     'settings/save_export.js',
+    'settings/system_prompt_editor.js',
     'settings/oauth.js',
     'settings/mcp.js',
     # Agent backend selection (depends on apiUrl/debugLog from core+ui;

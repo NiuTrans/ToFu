@@ -68,6 +68,21 @@ class LLMDispatcher:
         Auto-discovery ensures that a friend deploying with their own endpoint
         (e.g. YEYSAI, OpenRouter) gets working slots without running migrate.py.
         """
+        # ── Benchmark / multi-tenant fail-loud mode ──
+        # When set, build NO operator-curated slots at all. The only way to
+        # dispatch is then an inline `provider` block / @prov_xxx BYO
+        # endpoint (ephemeral slots, injected at request time). This is
+        # defense-in-depth on top of the per-task provider pin: with the
+        # operator's Keys/Providers store absent there is literally no key
+        # to leak onto, so an isolation bug fails LOUDLY (clean "no slot"
+        # error) instead of silently consuming shared internal quota.
+        if os.environ.get('TOFU_DISABLE_CONFIGURED_SLOTS', '').strip().lower() \
+                in ('1', 'true', 'yes', 'on'):
+            logger.warning('[Dispatch] TOFU_DISABLE_CONFIGURED_SLOTS set — '
+                           'building 0 operator slots; only inline-provider / '
+                           'BYO ephemeral slots can serve requests')
+            return
+
         # ★ Always re-read config from disk — the module-level
         #   _SAVED_CONFIG is a stale snapshot from server startup that
         #   misses providers added via the Settings UI.
@@ -778,6 +793,19 @@ class LLMDispatcher:
                              s.provider_id, s.key_name, e)
                 return True
 
+        # ── Hard provider pin (multi-tenant isolation) ──
+        # When the current task thread is bound to a provider (an inline
+        # `provider` block or a registered @prov_xxx BYO endpoint), the
+        # picker may ONLY select that provider's slot — for EVERY
+        # capability, never silently falling back to an operator-curated
+        # key. See lib/llm_dispatch/provider_pin.py for the full rationale
+        # (the 429 / no-fallback cross-tenant leak this prevents).
+        from lib.llm_dispatch.provider_pin import get_pinned_provider
+        _pinned_provider = get_pinned_provider()
+
+        def _slot_provider_ok(s):
+            return (not _pinned_provider) or s.provider_id == _pinned_provider
+
         with self._lock:
             candidates = []
             for slot in self.slots:
@@ -799,9 +827,17 @@ class LLMDispatcher:
                     continue
                 if not _slot_key_enabled(slot):
                     continue
+                if not _slot_provider_ok(slot):
+                    continue
                 candidates.append(slot)
 
             if not candidates:
+                # ★ Pinned-provider isolation: a pinned task whose own slot
+                #   is momentarily unavailable (cooldown/excluded) must WAIT,
+                #   never widen onto an operator key. Return None so the
+                #   dispatch retry loop keeps cycling within the provider.
+                if _pinned_provider:
+                    return None
                 # ★ strict_model: if the user chose a specific model and all
                 #   its slots are in cooldown, return None immediately so the
                 #   retry loop waits — do NOT fall back to another model.
@@ -814,6 +850,8 @@ class LLMDispatcher:
                             if not self._is_chat_compatible(slot):
                                 continue
                             if not _slot_key_enabled(slot):
+                                continue
+                            if not _slot_provider_ok(slot):
                                 continue
                             if not (exclude_models and slot.model in exclude_models):
                                 if not (exclude_keys and slot.key_name in exclude_keys):
@@ -844,6 +882,16 @@ class LLMDispatcher:
             #   or fall back to a different model.
             if strict_model and chosen.score() == float('inf'):
                 return None
+
+            # ── Isolation observability ──
+            # One line per pick so a provider leak is a single grep:
+            #   pinned=ephemeral:… but provider=… mismatched → leak.
+            # Only emitted when a pin is active (operator UI traffic stays
+            # quiet). debug-level: high volume, on the hot path.
+            if _pinned_provider:
+                logger.debug('[Dispatch] pick model=%s provider=%s key=%s '
+                             'pinned=%s', chosen.model, chosen.provider_id,
+                             chosen.key_name, _pinned_provider)
 
             if reserve:
                 chosen.record_request()  # atomic: inflight++ while still holding lock
@@ -974,6 +1022,12 @@ class LLMDispatcher:
         ex_models = exclude_models or set()
         ex_keys = exclude_keys or set()
         ex_pairs = exclude_pairs or set()
+        # Respect the thread's hard provider pin (same isolation rule as
+        # _pick): a pinned task only "has capable slots" among its own
+        # provider's slots, so the retry loop waits for THAT provider to
+        # recover instead of treating operator slots as a fallback.
+        from lib.llm_dispatch.provider_pin import get_pinned_provider
+        _pinned_provider = get_pinned_provider()
         with self._lock:
             for s in self.slots:
                 if capability not in s.capabilities:
@@ -983,6 +1037,8 @@ class LLMDispatcher:
                 if (s.key_name, s.model) in ex_pairs:
                     continue
                 if not self._is_chat_compatible(s):
+                    continue
+                if _pinned_provider and s.provider_id != _pinned_provider:
                     continue
                 return True
         return False

@@ -26,6 +26,7 @@ var _paperQAAbort = null;
 var _paperReportModel = '';  // user-selected model for report generation
 var _paperImages = [];  // [{url, caption, page, source, width, height}] — for embedding in report
 var _paperPdfFilename = '';  // server-side PDF filename — handed back from /api/paper/upload and /api/paper/fetch-arxiv-stream
+var _paperSearchResults = [];  // last arXiv search candidate list (rendered on the landing screen)
 
 // ── Report streaming state (2026-04-18 rewrite) ──
 // Server owns the report task; the frontend only polls.
@@ -287,14 +288,15 @@ function _renderPaperLibrary() {
 
   // Update count badge
   var countEl = document.getElementById('paperLibCount');
-  if (countEl) countEl.textContent = _paperLibrary.length || '';
+  if (countEl) countEl.textContent = String(_paperLibrary.length || '');
 
   if (_paperLibrary.length === 0) {
+    var _tte = (typeof t === 'function') ? t : function(k){ return k; };
     listEl.innerHTML =
       '<div class="paper-lib-empty">' +
         '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' +
-        '<span>No papers yet</span>' +
-        '<span class="paper-lib-empty-hint">Upload a PDF or fetch from arXiv</span>' +
+        '<span>' + escapeHtml(_tte('paper.noPapersYet')) + '</span>' +
+        '<span class="paper-lib-empty-hint">' + escapeHtml(_tte('paper.noPapersHint')) + '</span>' +
       '</div>';
     return;
   }
@@ -316,7 +318,7 @@ function _renderPaperLibrary() {
           '<span class="paper-lib-item-title" title="' + escapeHtml(p.title) + '">' + escapeHtml(p.title) + '</span>' +
           '<span class="paper-lib-item-meta">' + dateStr + (pageStr ? ' · ' + pageStr : '') + hasReport + '</span>' +
         '</div>' +
-        '<button class="paper-lib-item-del" onclick="event.stopPropagation();_deletePaperEntry(\'' + p.id + '\')" title="Delete">' +
+        '<button class="paper-lib-item-del" onclick="event.stopPropagation();_deletePaperEntry(\'' + p.id + '\')" title="' + escapeHtml((typeof t === 'function') ? t('paper.delete') : 'Delete') + '">' +
           '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>' +
         '</button>' +
       '</div>';
@@ -337,7 +339,7 @@ function _formatPaperDate(ts) {
   if (!ts) return '';
   var d = new Date(ts);
   var now = new Date();
-  var diff = now - d;
+  var diff = now.getTime() - d.getTime();
   if (diff < 86400000) {
     var h = d.getHours();
     var m = d.getMinutes();
@@ -425,8 +427,8 @@ async function enterPaperMode(pdfUrl, fileName, parsedText, arxivId) {
   var pmBtn = document.getElementById('paperModeBtn');
   if (pmBtn) {
     pmBtn.classList.add('active');
-    // Swap icon to back-arrow
-    pmBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>';
+    // Swap icon to back-arrow; keep the topbar text label.
+    pmBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg><span class="topbar-tool-label">' + (typeof t === 'function' ? t('topbar.backToChat') : 'Back') + '</span>';
     pmBtn.title = 'Back to Chat';
   }
 
@@ -476,9 +478,9 @@ function exitPaperMode() {
   var pmBtn = document.getElementById('paperModeBtn');
   if (pmBtn) {
     pmBtn.classList.remove('active');
-    // Restore book icon
-    pmBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="14" y2="11"/></svg>';
-    pmBtn.title = 'Paper Reader';
+    // Restore book icon + topbar text label.
+    pmBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="14" y2="11"/></svg><span class="topbar-tool-label">' + (typeof t === 'function' ? t('topbar.paper') : 'Paper') + '</span>';
+    pmBtn.title = (typeof t === 'function' ? t('paper.title') : 'Paper Reader');
   }
 
   if (_paperResizeObserver) { _paperResizeObserver.disconnect(); _paperResizeObserver = null; }
@@ -503,12 +505,18 @@ function togglePaperMode() {
 }
 
 function _updatePaperTitles() {
-  var name = _paperFileName || 'Paper Reader';
+  var _tt = (typeof t === 'function') ? t : function(k){ return k; };
+  var noPaper = _tt('paper.noPaperOpen');
+  var name = _paperFileName || noPaper;
   var stitle = document.getElementById('paperSidebarTitle');
-  if (stitle) { stitle.textContent = name; stitle.title = name; }
+  if (stitle) {
+    stitle.textContent = name;
+    stitle.title = name;
+    stitle.classList.toggle('paper-sidebar-title-empty', !_paperFileName);
+  }
   var pageCount = document.getElementById('paperPageCount');
   if (pageCount && _paperTotalPages) {
-    pageCount.textContent = _paperTotalPages + (_paperTotalPages === 1 ? ' page' : ' pages');
+    pageCount.textContent = _tt('paper.pages', { count: _paperTotalPages });
   } else if (pageCount) {
     pageCount.textContent = '';
   }
@@ -516,7 +524,7 @@ function _updatePaperTitles() {
   if (paperMode) {
     var topbar = document.getElementById('topbarTitle');
     if (topbar) {
-      var label = _paperFileName ? _paperFileName : 'Paper Reader';
+      var label = _paperFileName ? _paperFileName : _tt('paper.title');
       topbar.textContent = label;
       topbar.title = label;
     }
@@ -607,7 +615,7 @@ async function _renderAllPages() {
       // ── Wrapper: explicit CSS dimensions, aspect-ratio for proportional scaling ──
       var wrapper = document.createElement('div');
       wrapper.className = 'paper-page-wrapper';
-      wrapper.dataset.page = i;
+      wrapper.dataset.page = String(i);
       wrapper.style.width = cssW + 'px';
       wrapper.style.aspectRatio = (cssW / cssH).toFixed(6);
 
@@ -679,7 +687,7 @@ function _observePageWrappers(viewer) {
       var origW = parseFloat(textLayer.style.width);
       if (!origW) continue;
       var actualW = entries[i].contentBoxSize
-        ? (entries[i].contentBoxSize[0] || entries[i].contentBoxSize).inlineSize
+        ? /** @type {any} */ (entries[i].contentBoxSize[0] || entries[i].contentBoxSize).inlineSize
         : wrapper.clientWidth;
       var scale = actualW / origW;
       if (Math.abs(scale - 1) < 0.001) {
@@ -916,21 +924,23 @@ function _updateZoomLabel() { _syncZoomUI(); }
 function _showPaperLanding() {
   var viewer = document.getElementById('paperPdfViewer');
   if (!viewer) return;
+  var _tt = (typeof t === 'function') ? t : function(k){ return k; };
   viewer.innerHTML =
     '<div class="paper-landing">' +
       '<div class="paper-landing-icon">📄</div>' +
-      '<h3>Paper Reader</h3>' +
-      '<p>Upload a PDF or paste an arXiv URL to get started</p>' +
+      '<h3>' + escapeHtml(_tt('paper.title')) + '</h3>' +
+      '<p>' + escapeHtml(_tt('paper.landingDesc')) + '</p>' +
       '<div class="paper-landing-actions">' +
         '<label class="paper-upload-btn">' +
           '<input type="file" accept=".pdf,application/pdf" onchange="_handlePaperFileUpload(event)" style="display:none">' +
           '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>' +
-          ' Upload PDF' +
+          ' ' + escapeHtml(_tt('paper.uploadPdf')) +
         '</label>' +
         '<div class="paper-arxiv-input">' +
-          '<input type="text" id="paperArxivUrl" placeholder="arXiv URL or ID (e.g. 2301.12345)"' +
-                 ' onkeydown="if(event.key===\'Enter\')_fetchArxivPaper()">' +
-          '<button onclick="_fetchArxivPaper()" class="paper-arxiv-btn">Fetch</button>' +
+          '<svg class="paper-arxiv-search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>' +
+          '<input type="text" id="paperArxivUrl" placeholder="' + escapeHtml(_tt('paper.arxivPlaceholder')) + '"' +
+                 ' onkeydown="if(event.key===\'Enter\')_submitArxivQuery()">' +
+          '<button onclick="_submitArxivQuery()" class="paper-arxiv-btn">' + escapeHtml(_tt('paper.search')) + '</button>' +
         '</div>' +
       '</div>' +
     '</div>';
@@ -1105,9 +1115,129 @@ function _renderArxivFetchProgress(state) {
     '</div>';
 }
 
-async function _fetchArxivPaper() {
+/** Heuristic: does this input look like a direct arXiv ID / URL (vs a title query)? */
+function _looksLikeArxivRef(s) {
+  s = (s || '').trim();
+  if (/arxiv\.org\//i.test(s)) return true;
+  if (/^\d{4}\.\d{4,5}(v\d+)?$/.test(s)) return true;          // 2301.12345
+  if (/^[a-z-]+\/\d{7}(v\d+)?$/i.test(s)) return true;          // hep-th/0601001
+  return false;
+}
+
+/**
+ * Entry point from the landing input. Routes a direct arXiv ID/URL straight
+ * to download, or a free-text title to the arXiv search results list.
+ */
+function _submitArxivQuery() {
   var input = document.getElementById('paperArxivUrl');
-  var url = input?.value?.trim();
+  var q = input?.value?.trim();
+  if (!q) { debugLog('Please enter a title to search, or an arXiv URL / ID', 'warning'); return; }
+  if (_looksLikeArxivRef(q)) {
+    _fetchArxivPaper(q);
+  } else {
+    _searchArxivPapers(q);
+  }
+}
+
+/** Search arXiv by title/keywords and render candidate cards. */
+async function _searchArxivPapers(query) {
+  var viewer = document.getElementById('paperPdfViewer');
+  var _tt = (typeof t === 'function') ? t : function(k){ return k; };
+  if (viewer) {
+    viewer.innerHTML =
+      '<div class="paper-loading paper-search-loading">' +
+        '<div class="paper-loading-spinner"></div>' +
+        '<div>' + escapeHtml(_tt('paper.searching')) + '</div>' +
+      '</div>';
+  }
+
+  try {
+    var data = await Api.paper.searchArxiv(query, 12);
+    var results = (data && data.ok && Array.isArray(data.results)) ? data.results : [];
+    _paperSearchResults = results;
+    _renderArxivSearchResults(query, results);
+  } catch (e) {
+    console.error('[Paper] arXiv search failed:', e);
+    if (viewer) {
+      viewer.innerHTML =
+        '<div class="paper-error">' + escapeHtml(_tt('paper.searchFailed')) +
+        '<br><button onclick="_showPaperLanding()" class="paper-retry-btn">' +
+        escapeHtml(_tt('paper.searchBack')) + '</button></div>';
+    }
+  }
+}
+
+/** Render the list of arXiv search-result cards. */
+function _renderArxivSearchResults(query, results) {
+  var viewer = document.getElementById('paperPdfViewer');
+  if (!viewer) return;
+  var _tt = (typeof t === 'function') ? t : function(k){ return k; };
+
+  var header =
+    '<div class="paper-search-head">' +
+      '<button class="paper-search-back" onclick="_showPaperLanding()" title="' + escapeHtml(_tt('paper.searchBack')) + '">' +
+        '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>' +
+      '</button>' +
+      '<div class="paper-search-head-text">' +
+        '<div class="paper-search-head-title">' + escapeHtml(_tt('paper.searchResultsTitle')) + '</div>' +
+        '<div class="paper-search-head-q">“' + escapeHtml(query) + '”</div>' +
+      '</div>' +
+    '</div>';
+
+  if (!results.length) {
+    viewer.innerHTML =
+      '<div class="paper-search">' + header +
+        '<div class="paper-search-empty">' + escapeHtml(_tt('paper.searchNoResults')) + '</div>' +
+      '</div>';
+    return;
+  }
+
+  var hint = '<div class="paper-search-hint">' + escapeHtml(_tt('paper.searchResultsHint')) + '</div>';
+
+  var cards = results.map(function(r, i) {
+    var authors = Array.isArray(r.authors) ? r.authors : [];
+    var authorStr = authors.slice(0, 4).join(', ') + (authors.length > 4 ? ' et al.' : '');
+    var meta = [];
+    if (r.primary_category) meta.push('<span class="paper-card-cat">' + escapeHtml(r.primary_category) + '</span>');
+    if (r.published) meta.push('<span class="paper-card-date">' + escapeHtml(r.published) + '</span>');
+    meta.push('<span class="paper-card-id">arXiv:' + escapeHtml(r.arxiv_id) + '</span>');
+    return '' +
+      '<div class="paper-result-card" role="button" tabindex="0" data-idx="' + i + '"' +
+           ' onclick="_openArxivResult(' + i + ')"' +
+           ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();_openArxivResult(' + i + ')}">' +
+        '<div class="paper-result-num">' + (i + 1) + '</div>' +
+        '<div class="paper-result-body">' +
+          '<div class="paper-result-title">' + escapeHtml(r.title || r.arxiv_id) + '</div>' +
+          (authorStr ? '<div class="paper-result-authors">' + escapeHtml(authorStr) + '</div>' : '') +
+          (r.summary ? '<div class="paper-result-summary">' + escapeHtml(r.summary) + '</div>' : '') +
+          '<div class="paper-result-meta">' + meta.join('') + '</div>' +
+        '</div>' +
+        '<div class="paper-result-arrow">' +
+          '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>' +
+        '</div>' +
+      '</div>';
+  }).join('');
+
+  viewer.innerHTML =
+    '<div class="paper-search">' + header + hint +
+      '<div class="paper-result-list">' + cards + '</div>' +
+    '</div>';
+}
+
+/** Load the arXiv paper at index `idx` of the last search results. */
+function _openArxivResult(idx) {
+  var r = _paperSearchResults && _paperSearchResults[idx];
+  if (!r || !r.arxiv_id) return;
+  _fetchArxivPaper(r.arxiv_id);
+}
+
+async function _fetchArxivPaper(directUrl) {
+  var url = directUrl;
+  if (url == null) {
+    var input = document.getElementById('paperArxivUrl');
+    url = input?.value?.trim();
+  }
+  url = (url || '').trim();
   if (!url) { debugLog('Please enter an arXiv URL or ID', 'warning'); return; }
 
   _paperLoading = true;
@@ -1162,7 +1292,7 @@ async function _fetchArxivPaper() {
     var _pdfMatch = /\/api\/paper\/pdf\/([^?#]+)/.exec(doneData.pdf_url || '');
     _paperPdfFilename = _pdfMatch ? decodeURIComponent(_pdfMatch[1]) : '';
     _paperArxivId = doneData.arxiv_id || curArxivId || '';
-    _paperFileName = 'arXiv:' + _paperArxivId;
+    _paperFileName = (doneData.title || '').trim() || ('arXiv:' + _paperArxivId);
     _paperParsedText = doneData.parsed_text || '';
     _paperTotalPages = doneData.total_pages || 0;
     _paperHash = doneData.paper_hash || '';
@@ -1221,7 +1351,7 @@ function _switchPaperTab(tab) {
     } else {
       var _empty = document.getElementById('paperReportContent');
       if (_empty) {
-        _empty.innerHTML = '<div class="paper-report-empty"><p>No paper text available. Load a PDF first.</p></div>';
+        _empty.innerHTML = '<div class="paper-report-empty"><p>' + escapeHtml((typeof t === 'function') ? t('paper.reportNoText') : 'No paper text available. Load a PDF first.') + '</p></div>';
       }
     }
   }
@@ -1237,10 +1367,11 @@ function _renderPaperQA() {
   var container = document.getElementById('paperQAMessages');
   if (!container) return;
   if (!_paperQAHistory || _paperQAHistory.length === 0) {
+    var _ttq = (typeof t === 'function') ? t : function(k){ return k; };
     container.innerHTML =
       '<div class="paper-qa-empty"><div class="paper-qa-empty-icon">💬</div>' +
-      '<p>Ask questions about this paper</p>' +
-      '<p class="paper-qa-hint">Select text in the PDF to quote it, or type a question below</p></div>';
+      '<p>' + escapeHtml(_ttq('paper.qaEmptyTitle')) + '</p>' +
+      '<p class="paper-qa-hint">' + escapeHtml(_ttq('paper.qaEmptyHint')) + '</p></div>';
     return;
   }
   var html = '';
@@ -1627,7 +1758,7 @@ function _paintReportFromState() {
       }
     } else if (s.status === 'error' && !s.fullText) {
       bodyEl.innerHTML = '<div class="paper-error">' + escapeHtml(s.error || 'Failed') +
-        '<br><button onclick="_generatePaperReport()" class="paper-retry-btn">Retry</button></div>';
+        '<br><button onclick="_generatePaperReport()" class="paper-retry-btn">' + escapeHtml((typeof t === 'function') ? t('paper.retry') : 'Retry') + '</button></div>';
     }
     // Otherwise keep the loading spinner from the skeleton
   }
@@ -1743,7 +1874,7 @@ async function _generatePaperReport(force) {
     if (_activePaperId !== startPaperId) return;
     if (!ok) {
       container.innerHTML =
-        '<div class="paper-report-empty"><p>No paper text available.</p>' +
+        '<div class="paper-report-empty"><p>' + escapeHtml((typeof t === 'function') ? t('paper.reportNoText') : 'No paper text available.') + '</p>' +
         '<p style="opacity:0.6;font-size:12px;margin-top:6px">The PDF may be scanned/image-only, or parsing failed. Try re-uploading.</p></div>';
       return;
     }
@@ -1803,7 +1934,7 @@ async function _generatePaperReport(force) {
     if (_activePaperId !== startPaperId) return;
     console.warn('[Paper:Report] start failed:', e);
     container.innerHTML = '<div class="paper-error">Failed: ' + escapeHtml(e.message) +
-      '<br><button onclick="_generatePaperReport()" class="paper-retry-btn">Retry</button></div>';
+      '<br><button onclick="_generatePaperReport()" class="paper-retry-btn">' + escapeHtml((typeof t === 'function') ? t('paper.retry') : 'Retry') + '</button></div>';
   }
 }
 
@@ -1944,7 +2075,7 @@ function _selectPaperReportModel(modelId) {
       label.textContent = (typeof _modelShortName === 'function') ? _modelShortName(modelId) : modelId;
     } else {
       // No model available (empty model list) — keep the button usable.
-      label.textContent = 'Select model';
+      label.textContent = (typeof t === 'function') ? t('paper.reportSelectModel') : 'Select model';
     }
   }
   // Close dropdown
@@ -1997,7 +2128,7 @@ function _regeneratePaperReport() {
 
 function _copyPaperReport() {
   if (!_paperReportCache) return;
-  navigator.clipboard.writeText(_paperReportCache).then(function() { debugLog('Copied', 'success'); });
+  navigator.clipboard.writeText(_paperReportCache).then(function() { debugLog((typeof t === 'function') ? t('paper.reportCopied') : 'Copied', 'success'); });
 }
 
 function _togglePaperReportExportMenu(ev) {
@@ -2064,6 +2195,7 @@ var _babelTranslating = false;
 function _initBabelPdfTab() {
   var container = document.getElementById('paperTranslateContent');
   if (!container) return;
+  var _ttb = (typeof t === 'function') ? t : function(k){ return k; };
   container.innerHTML =
     '<div class="babel-pdf-module">' +
       '<div class="babel-pdf-brand">' +
@@ -2071,10 +2203,10 @@ function _initBabelPdfTab() {
           '<path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2v3"/>' +
           '<path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/>' +
         '</svg>' +
-        '<div class="babel-pdf-brand-text"><span class="babel-pdf-title">Babel PDF</span><span class="babel-pdf-subtitle">Academic paper translation</span></div>' +
+        '<div class="babel-pdf-brand-text"><span class="babel-pdf-title">Babel PDF</span><span class="babel-pdf-subtitle">' + escapeHtml(_ttb('paper.babelSubtitle')) + '</span></div>' +
       '</div>' +
       '<div class="babel-pdf-lang-bar">' +
-        '<button class="babel-pdf-lang' + (!_babelTargetLang ? ' active' : '') + '" data-lang="" onclick="_switchBabelLang(\'\', this)">Original</button>' +
+        '<button class="babel-pdf-lang' + (!_babelTargetLang ? ' active' : '') + '" data-lang="" onclick="_switchBabelLang(\'\', this)">' + escapeHtml(_ttb('paper.babelOriginal')) + '</button>' +
         '<button class="babel-pdf-lang' + (_babelTargetLang === 'zh' ? ' active' : '') + '" data-lang="zh" onclick="_switchBabelLang(\'zh\', this)">中文</button>' +
         '<button class="babel-pdf-lang' + (_babelTargetLang === 'en' ? ' active' : '') + '" data-lang="en" onclick="_switchBabelLang(\'en\', this)">English</button>' +
         '<button class="babel-pdf-lang' + (_babelTargetLang === 'ja' ? ' active' : '') + '" data-lang="ja" onclick="_switchBabelLang(\'ja\', this)">日本語</button>' +
@@ -2094,8 +2226,8 @@ function _initBabelPdfTab() {
       body.innerHTML =
         '<div class="babel-pdf-empty">' +
           '<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4"><path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2v3"/><path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/></svg>' +
-          '<p>Select a target language to translate the paper</p>' +
-          '<p class="babel-pdf-hint">Translation runs section by section via LLM</p>' +
+          '<p>' + escapeHtml(_ttb('paper.babelEmptyTitle')) + '</p>' +
+          '<p class="babel-pdf-hint">' + escapeHtml(_ttb('paper.babelEmptyHint')) + '</p>' +
         '</div>';
     }
   }
@@ -2113,28 +2245,31 @@ function _startBabelTranslation() {
   var status = document.getElementById('babelPdfStatus');
   if (!body) return;
 
+  var _ttb = (typeof t === 'function') ? t : function(k){ return k; };
+  var langNames = { zh: '中文', en: 'English', ja: '日本語' };
   if (!_babelTargetLang) {
-    body.innerHTML = '<div class="babel-pdf-empty"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4"><path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2v3"/><path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/></svg><p>Select a target language to translate</p><p class="babel-pdf-hint">Translation runs section by section via LLM</p></div>';
+    body.innerHTML = '<div class="babel-pdf-empty"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4"><path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2v3"/><path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/></svg><p>' + escapeHtml(_ttb('paper.babelEmptyTitle')) + '</p><p class="babel-pdf-hint">' + escapeHtml(_ttb('paper.babelEmptyHint')) + '</p></div>';
     if (status) status.textContent = '';
     return;
   }
 
   if (!_paperParsedText) {
-    body.innerHTML = '<div class="babel-pdf-empty"><p>No paper loaded. Upload a PDF first.</p></div>';
+    body.innerHTML = '<div class="babel-pdf-empty"><p>' + escapeHtml(_ttb('paper.babelNoPaper')) + '</p></div>';
     return;
   }
 
   // Check cache
   if (_babelTranslatedPages[_babelTargetLang]) {
     _renderBabelResult(_babelTranslatedPages[_babelTargetLang]);
-    if (status) status.textContent = 'Translation complete (cached)';
+    if (status) status.textContent = _ttb('paper.babelCompleteCached');
     return;
   }
 
-  var langNames = { zh: '中文', en: 'English', ja: '日本語' };
-  if (status) status.textContent = 'Translating to ' + (langNames[_babelTargetLang] || _babelTargetLang) + '…';
+  var _langLabel = langNames[_babelTargetLang] || _babelTargetLang;
+  var _translatingMsg = _ttb('paper.babelTranslatingTo', { lang: _langLabel });
+  if (status) status.textContent = _translatingMsg;
 
-  body.innerHTML = '<div class="paper-loading"><div class="paper-loading-spinner"></div><div>Translating to ' + (langNames[_babelTargetLang] || _babelTargetLang) + '…</div><div class="babel-pdf-progress"><div class="babel-pdf-progress-bar" id="babelProgressBar" style="width:0%"></div></div></div>';
+  body.innerHTML = '<div class="paper-loading"><div class="paper-loading-spinner"></div><div>' + escapeHtml(_translatingMsg) + '</div><div class="babel-pdf-progress"><div class="babel-pdf-progress-bar" id="babelProgressBar" style="width:0%"></div></div></div>';
 
   _babelTranslateAllPages(_babelTargetLang);
 }
@@ -2150,7 +2285,7 @@ async function _babelTranslateAllPages(lang) {
 
   function _setProgress(done, total) {
     if (bar && total > 0) bar.style.width = Math.round((done / total) * 100) + '%';
-    if (statusEl) statusEl.textContent = 'Translated ' + done + '/' + total + ' sections';
+    if (statusEl) statusEl.textContent = (typeof t === 'function') ? t('paper.babelTranslatedCount', { done: done, total: total }) : ('Translated ' + done + '/' + total + ' sections');
   }
 
   try {
@@ -2164,7 +2299,7 @@ async function _babelTranslateAllPages(lang) {
             _babelTranslatedPages[lang] = cacheData.text;
             _renderBabelResult(cacheData.text);
             _saveActivePaperState();
-            if (statusEl) statusEl.textContent = 'Translation complete (cached)';
+            if (statusEl) statusEl.textContent = (typeof t === 'function') ? t('paper.babelCompleteCached') : 'Translation complete (cached)';
           }
           return;
         }
@@ -2186,7 +2321,7 @@ async function _babelTranslateAllPages(lang) {
         _babelTranslatedPages[lang] = startData.text;
         _renderBabelResult(startData.text);
         _saveActivePaperState();
-        if (statusEl) statusEl.textContent = 'Translation complete (cached)';
+        if (statusEl) statusEl.textContent = (typeof t === 'function') ? t('paper.babelCompleteCached') : 'Translation complete (cached)';
       }
       return;
     }
@@ -2226,7 +2361,7 @@ async function _babelTranslateAllPages(lang) {
             _babelTranslatedPages[lang] = ev.text || aggregated.join('\n\n');
             _renderBabelResult(_babelTranslatedPages[lang]);
             _saveActivePaperState();
-            if (statusEl) statusEl.textContent = 'Translation complete';
+            if (statusEl) statusEl.textContent = (typeof t === 'function') ? t('paper.babelComplete') : 'Translation complete';
           }
           return;
         } else if (ev.type === 'error') {
@@ -2250,12 +2385,13 @@ async function _babelTranslateAllPages(lang) {
   } catch (e) {
     console.warn('[Babel] Translation failed:', e);
     var body = document.getElementById('babelPdfBody');
+    var _ttf = (typeof t === 'function') ? t : function(k){ return k; };
     if (body && _babelTargetLang === lang) {
-      body.innerHTML = '<div class="paper-error">Translation failed: ' +
+      body.innerHTML = '<div class="paper-error">' + escapeHtml(_ttf('paper.babelFailed')) + ': ' +
                        escapeHtml(e.message || String(e)) +
-                       '<br><button class="paper-retry-btn" onclick="_startBabelTranslation()">Retry</button></div>';
+                       '<br><button class="paper-retry-btn" onclick="_startBabelTranslation()">' + escapeHtml(_ttf('paper.retry')) + '</button></div>';
     }
-    if (statusEl) statusEl.textContent = 'Translation failed';
+    if (statusEl) statusEl.textContent = _ttf('paper.babelFailed');
   } finally {
     _babelTranslating = false;
   }

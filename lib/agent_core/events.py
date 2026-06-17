@@ -154,6 +154,7 @@ class EventType:
     SWARM_AGENT_ERROR = 'swarm_agent_error'
     SWARM_AGENT_TOOL_CALL = 'swarm_agent_tool_call'
     # ── autopilot ──
+    AUTOPILOT_VU_START = 'autopilot_vu_start'
     AUTOPILOT_VU_EVENT = 'autopilot_vu_event'
     AUTOPILOT_VU_DONE = 'autopilot_vu_done'
     AUTOPILOT_VU_CANCEL = 'autopilot_vu_cancel'
@@ -297,6 +298,10 @@ _SPECS: tuple[EventSpec, ...] = (
               'A sub-agent invoked a tool (for live trace UI).',
               fields={'agentId': 'sub-agent id', 'toolName': 'tool'}),
     # ───────────────────────── autopilot ─────────────────────────
+    EventSpec(EventType.AUTOPILOT_VU_START, _C.AUTOPILOT,
+              'Autopilot kicked in — create the simulated-user bubble eagerly '
+              '(in-memory only; not persisted until autopilot_vu_done).',
+              fields={'vuMsgId': 'stable id for the VU message bubble'}),
     EventSpec(EventType.AUTOPILOT_VU_EVENT, _C.AUTOPILOT,
               'Autopilot value-unit progress event.',
               fields={'detail': 'vu detail'}),
@@ -309,8 +314,19 @@ _SPECS: tuple[EventSpec, ...] = (
               'An artifact (document/canvas) was created or updated.',
               fields={'artifactId': 'id', 'title': 'title', 'kind': 'artifact kind'}),
     EventSpec(EventType.TIMER_POLL_CHECK, _C.SCHEDULER,
-              'Inline timer/scheduler poll heartbeat.',
-              fields={'detail': 'poll status'}),
+              'Inline timer/scheduler poll heartbeat — one per poll cycle.',
+              fields={'roundNum': 'tool round index', 'toolCallId': 'tool-call id',
+                      'timerId': 'timer id', 'pollNum': 'poll counter',
+                      'decision': 'started|wait|ready|skipped|error|parse_error',
+                      'reason': 'LLM/decision rationale',
+                      'tokensUsed': 'tokens spent on this poll',
+                      'checkInstruction': '(started) what is being verified',
+                      'checkCommand': '(started) shell command run before each poll',
+                      'cmdOutput': 'truncated check_command output (the evidence)',
+                      'parseError': 'true if the decision could not be parsed',
+                      'pollInterval': '(started) seconds between polls',
+                      'maxPolls': '(started) poll ceiling',
+                      'nextPollTs': 'epoch-ms of the next scheduled poll'}),
     EventSpec(EventType.SSE_TIMEOUT, _C.TRANSPORT,
               'Server signalled the stream idle-timed-out; client may reconnect.',
               fields={}),

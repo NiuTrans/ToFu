@@ -425,6 +425,11 @@ def chat_completions():
         task['_translate_usage'] = _translate_usage
     if auth and auth.key_id:
         task['_api_key_id'] = auth.key_id
+    # ── Hard provider isolation ── bind the task to the BYO endpoint's
+    # slot so no dispatch can leak onto operator keys. See
+    # lib/llm_dispatch/provider_pin.py.
+    if _byo_handle is not None:
+        task['_pinned_provider_id'] = _byo_handle.slot.provider_id
 
     # ── Billing: pre-flight reserve (multi-user mode only) ──
     # Estimate the cost of the request based on prompt size + the

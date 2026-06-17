@@ -517,16 +517,23 @@ class StreamingToolAccumulator:
         # Single __screenshot__ — already in the right format
         if content.get('__screenshot__'):
             return content
-        # __batch_images__ — extract first image, attach text fallback
+        # __batch_images__ — preserve EVERY image (the model and UI both need
+        # all of them).  We keep the first image's fields at the top level for
+        # backward compatibility with single-image consumers, and add an
+        # ``images`` list carrying the full batch so downstream code can emit
+        # one image_url block / thumbnail per image.
         if content.get('__batch_images__'):
             images = content['__batch_images__']
             text = content.get('_text_content', '')
-            if images:
-                first_img = next(iter(images.values()))
-                if isinstance(first_img, dict) and first_img.get('__screenshot__'):
-                    if text and not first_img.get('_text_fallback'):
-                        first_img['_text_fallback'] = text
-                    return first_img
+            img_list = [v for v in images.values()
+                        if isinstance(v, dict) and v.get('__screenshot__')]
+            if img_list:
+                first_img = dict(img_list[0])
+                if text and not first_img.get('_text_fallback'):
+                    first_img['_text_fallback'] = text
+                if len(img_list) > 1:
+                    first_img['images'] = img_list
+                return first_img
         return content
 
     def _prepare_cache_value(self, content, fn_name):

@@ -95,6 +95,47 @@ def _get_session_dir(base_path):
     return session_dir
 
 
+def resolve_base_path(task_id=None, conv_id=None):
+    """Find the project ``base_path`` that recorded a given task/conversation.
+
+    Scans every persisted session's modifications.json for a record whose
+    ``taskId`` (preferred) or ``convId`` matches, and returns the
+    ``basePath`` stored on that record.  This lets undo target the correct
+    project even when the caller can't supply an explicit ``projectPath``
+    and the globally-active project (``_state['path']``) points elsewhere
+    — the exact situation that breaks undo when multiple conversations
+    edit different projects concurrently.
+
+    Returns the absolute base_path str, or ``None`` if no matching record
+    is found (e.g. legacy records written before ``basePath`` tagging).
+    """
+    if not task_id and not conv_id:
+        return None
+    try:
+        names = os.listdir(SESSIONS_DIR)
+    except OSError as e:
+        logger.debug('[Modifications] resolve_base_path: cannot list %s: %s',
+                     SESSIONS_DIR, e)
+        return None
+    for name in names:
+        session_dir = os.path.join(SESSIONS_DIR, name)
+        session_file = os.path.join(session_dir, 'modifications.json')
+        if not os.path.isfile(session_file):
+            continue
+        try:
+            with open(session_file) as f:
+                mods = json.load(f).get('modifications', [])
+        except Exception as e:
+            logger.debug('[Modifications] resolve_base_path: skip %s: %s', name, e)
+            continue
+        for m in mods:
+            if task_id and m.get('taskId') == task_id and m.get('basePath'):
+                return m['basePath']
+            if conv_id and not task_id and m.get('convId') == conv_id and m.get('basePath'):
+                return m['basePath']
+    return None
+
+
 # Session dirs whose stale-tmp sweep has already run in this process.
 # We only clean at cold-load time so an in-flight _atomic_json_write
 # from a concurrent thread cannot have its .tmp rug-pulled.
@@ -304,6 +345,14 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
         'path': path,
         'timestamp': time.time(),
     }
+    # ★ Record the absolute base_path so undo can recover WHICH project a
+    #   round belongs to from a taskId/convId alone — without trusting the
+    #   globally-active UI project (_state['path']), which may point at a
+    #   different project when conversations are edited concurrently.
+    try:
+        mod['basePath'] = os.path.abspath(base_path) if base_path else ''
+    except Exception as e:
+        logger.debug('[Modifications] basePath abspath failed for %s: %s', base_path, e)
     if conv_id:
         mod['convId'] = conv_id
     if task_id:

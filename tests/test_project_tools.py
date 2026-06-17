@@ -11,7 +11,9 @@ from lib.project_mod.tools import (
     _clean_command_output,
     _extract_write_targets,
     _filter_changes_by_targets,
+    _is_catastrophic_delete,
     _is_destructive_command,
+    _maybe_wrap_rm_with_trash,
 )
 
 # ═══════════════════════════════════════════════════════════
@@ -199,6 +201,106 @@ class TestIsDestructiveCommand:
 
     def test_sed_without_i_not_destructive(self):
         assert not _is_destructive_command("sed 's/foo/bar/g' input.txt")
+
+
+# ═══════════════════════════════════════════════════════════
+#  _is_catastrophic_delete — top-level deletion guard
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestIsCatastrophicDelete:
+    # ── Must BLOCK: filesystem root + first-level dirs ──
+    def test_rm_rf_root(self):
+        assert _is_catastrophic_delete('rm -rf /') == '/'
+
+    def test_rm_mnt(self):
+        assert _is_catastrophic_delete('rm -rf /mnt') is not None
+
+    def test_rm_home(self):
+        assert _is_catastrophic_delete('rm -r /home') is not None
+
+    def test_rm_data_trailing_slash(self):
+        assert _is_catastrophic_delete('rm -rf /data/') is not None
+
+    def test_flag_order_does_not_smuggle(self):
+        # rm /mnt -r -f  → still blocked (flags after the path)
+        assert _is_catastrophic_delete('rm /mnt -r -f') is not None
+
+    def test_wildcard_on_toplevel_blocked(self):
+        assert _is_catastrophic_delete('rm -rf /mnt/*') is not None
+
+    def test_rmdir_toplevel_blocked(self):
+        assert _is_catastrophic_delete('rmdir /usr') is not None
+
+    def test_blocked_in_pipeline_segment(self):
+        # A safe command chained with a catastrophic one is still caught.
+        assert _is_catastrophic_delete('cd /tmp && rm -rf /home') is not None
+
+    # ── Must ALLOW: deep absolute + any relative target ──
+    def test_deep_absolute_allowed(self):
+        assert _is_catastrophic_delete('rm -rf /mnt/team/your-username/build') is None
+
+    def test_relative_target_allowed(self):
+        assert _is_catastrophic_delete('rm -rf build/') is None
+
+    def test_relative_file_allowed(self):
+        assert _is_catastrophic_delete('rm foo.txt') is None
+
+    def test_non_delete_command_ignored(self):
+        assert _is_catastrophic_delete('ls /mnt') is None
+        assert _is_catastrophic_delete('cat /etc/passwd') is None
+
+
+# ═══════════════════════════════════════════════════════════
+#  _maybe_wrap_rm_with_trash — recoverable deletion shim
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestRmTrashWrap:
+    def test_rm_gets_wrapped(self):
+        out = _maybe_wrap_rm_with_trash('rm -rf build/', '/work/ws')
+        assert out != 'rm -rf build/'
+        assert 'rm() {' in out
+        assert '.tofu_trash' in out
+        assert out.rstrip().endswith('rm -rf build/')
+
+    def test_trash_root_is_self_ignoring(self):
+        # The shim must drop a `.gitignore` (containing `*`) into the trash
+        # root so trashed files never leak into git in the cwd repo.
+        out = _maybe_wrap_rm_with_trash('rm -rf build/', '/work/ws')
+        assert '.tofu_trash/.gitignore' in out
+
+    def test_trash_lazy_prune_present(self):
+        # The shim lazily prunes old trash entries (default TTL 7 days) so the
+        # bin can't grow unbounded. The prune must run the real `rm` (a
+        # `find ... -exec rm -rf` placed BEFORE the rm() function shadows it).
+        out = _maybe_wrap_rm_with_trash('rm -rf build/', '/work/ws')
+        assert '-mtime +7' in out
+        assert out.index('-mtime') < out.index('rm() {')
+
+    def test_trash_prune_disabled_when_ttl_zero(self, monkeypatch):
+        import lib.project_mod.tools as t
+        monkeypatch.setattr(t, '_TRASH_TTL_DAYS', 0)
+        out = t._maybe_wrap_rm_with_trash('rm -rf build/', '/work/ws')
+        assert '-mtime' not in out
+        assert 'rm() {' in out  # trashing itself still active
+
+    def test_non_rm_untouched(self):
+        assert _maybe_wrap_rm_with_trash('ls -la', '/work/ws') == 'ls -la'
+
+    def test_rm_substring_not_wrapped(self):
+        # 'confirm' contains 'rm' but is not an rm command.
+        cmd = 'cat confirm.txt'
+        assert _maybe_wrap_rm_with_trash(cmd, '/work/ws') == cmd
+
+    def test_already_referencing_trash_not_double_wrapped(self):
+        cmd = 'rm -rf .tofu_trash/old'
+        assert _maybe_wrap_rm_with_trash(cmd, '/work/ws') == cmd
+
+    def test_disabled_via_flag(self, monkeypatch):
+        import lib.project_mod.tools as t
+        monkeypatch.setattr(t, '_RM_TRASH_ENABLED', False)
+        assert t._maybe_wrap_rm_with_trash('rm -rf build/', '/work/ws') == 'rm -rf build/'
 
 
 # ═══════════════════════════════════════════════════════════

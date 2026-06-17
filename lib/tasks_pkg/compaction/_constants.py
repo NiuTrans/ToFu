@@ -218,6 +218,19 @@ _PERSIST_PREVIEW_CHARS = 2000
 # are persisted to disk.
 MAX_ROUND_TOOL_RESULTS_CHARS = 300_000
 
+# ── Absolute single-result hard ceiling (tool-agnostic backstop) ──
+# Layer-2 catch-all in clamp_tool_result_text: NO single tool result text
+# may exceed this, regardless of tool or per-tool budget — including the
+# _BUDGET_EXEMPT_TOOLS (read_files).  This is the structural tripwire that
+# ends the "opaque blob enters the text stream" bug CLASS: every historical
+# variant (relative-path PNG decoded as text, str()'d __screenshot__ dict,
+# base64 leak) tokenises far above this and would have been clamped to a
+# degraded-but-alive result instead of a fatal HTTP 400.  Set well above any
+# legitimate single text file (a 512KB source file ≈ 512K chars) but far
+# below the ~1M-token wall.  __screenshot__ dicts are exempt — they never
+# enter the text stream (native image_url protocol).
+_SINGLE_RESULT_HARD_CEILING_CHARS = 800_000
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Internal state (cooldown lock, summary cooldowns, lazy-init latch)

@@ -51,7 +51,28 @@ KNOWN_ROLES = frozenset({
     'researcher', 'coder', 'analyst', 'browser', 'reviewer', 'writer', 'general',
     # endpoint-style + composition roles
     'planner', 'worker', 'critic', 'synthesizer', 'router',
+    # autopilot: a synthetic user that auto-replies to keep the loop going
+    'virtual_user',
 })
+
+#: The MESSAGE axis (orthogonal to ``role``). Every role/subflow node
+#: produces a conversation turn; ``emits`` decides whether that turn is
+#: recorded as a ``user`` or ``assistant`` message (and which side of the
+#: chat it renders on). This makes the user/assistant distinction — until
+#: now hardcoded in the endpoint adapter (critic→user, planner/worker→
+#: assistant) — a first-class, per-node authoring choice. Omitting it falls
+#: back to :func:`resolve_emits` derivation, so existing definitions and
+#: ``build_endpoint_definition`` are unchanged.
+VALID_EMITS = frozenset({'user', 'assistant'})
+
+#: Roles whose turn is, by default, a ``user`` message (the conversation's
+#: "other side"). A verifier critiques the producer; a virtual user stands
+#: in for the human. Everything else defaults to ``assistant``.
+_USER_EMIT_ROLES = frozenset({'critic', 'reviewer', 'virtual_user'})
+
+#: Nesting cap for subflow expansion — defense against pathological or
+#: (via a ref resolver) self-referential nesting.
+MAX_SUBFLOW_DEPTH = 5
 
 #: Control-node kinds and whether at most one may exist per definition.
 CONTROL_KINDS = {
@@ -79,12 +100,364 @@ MAX_ARTIFACT_PATH_LEN = 512
 VALID_TIERS = frozenset({'light', 'standard', 'heavy'})
 VALID_ISOLATION = frozenset({'fresh-context', 'shared-context'})
 
+#: Subflow execution scope (a ``subflow`` node only). ``inline`` is the
+#: phase-1 macro-expansion: the child's nodes are spliced into the parent
+#: graph (shared parent context — no boundary). ``isolated`` is the true
+#: black box: the child runs in its OWN nested executor with its own
+#: context, sees only the upstream context as a seed, and returns a single
+#: converged result — to the parent it is indistinguishable from a role.
+#: An absent scope defaults to ``inline`` so pre-scope definitions (and
+#: every existing test) behave exactly as before; the Studio stamps new
+#: groups with ``isolated`` explicitly.
+VALID_SCOPES = frozenset({'inline', 'isolated'})
+
 MAX_NAME_LEN = 120
 MAX_NODES = 200
 MAX_OBJECTIVE_LEN = 4000
 
+#: Max items in a list-kind structured param, and max chars per item.
+MAX_LIST_ITEMS = 20
+MAX_LIST_ITEM_LEN = 500
 
-def validate_definition(defn: Any) -> dict[str, Any]:
+#: Valid structured-param field kinds. The frontend inspector renders each
+#: kind with a matching control; the validator type-checks by kind.
+VALID_PARAM_KINDS = frozenset({'text', 'textarea', 'select', 'list', 'int', 'bool'})
+
+# ── Per-role structured params (the "what to do" schema) ──────────────
+#
+# Each role exposes a list of FieldSpec dicts describing the structured
+# inputs the studio inspector should render and the engine renders into the
+# delegation brief (see :func:`render_role_brief`). A FieldSpec is::
+#
+#     {
+#       'key':   'must_do',            # params.<key> — stable, NOT i18n'd
+#       'kind':  'list',               # one of VALID_PARAM_KINDS
+#       'label': 'orch.field.mustDo',  # i18n KEY (frontend resolves via t())
+#       'options': [{'value': 'stop_continue', 'label': 'orch.opt.stopContinue'}],
+#                                       # select-kind only; value stable, label i18n key
+#       'placeholder': 'orch.ph.mustDo',  # optional i18n key
+#       'heading': 'Must Do',           # section heading in the rendered brief
+#     }
+#
+# EVERY role keeps the core ``objective`` field (stable key) — only its
+# LABEL changes per role, which is what fixes the "obscure single field".
+# Roles without an entry use :data:`_GENERIC_ROLE_SCHEMA`. Labels are i18n
+# KEYS, never user-facing strings — the backend owns structure, the frontend
+# owns wording (consumed via the /role-schema accessor).
+
+def _f(key, kind, label, *, heading=None, options=None, placeholder=None):
+    spec = {'key': key, 'kind': kind, 'label': label}
+    if heading is not None:
+        spec['heading'] = heading
+    if options is not None:
+        spec['options'] = options
+    if placeholder is not None:
+        spec['placeholder'] = placeholder
+    return spec
+
+
+#: The core task field every role carries (label overridden per role below).
+def _objective_field(label, placeholder=None):
+    return _f('objective', 'textarea', label, heading='Task',
+              placeholder=placeholder)
+
+
+#: Generic schema for roles without a bespoke entry (writer / synthesizer /
+#: analyst / general / browser / router, and any unknown/user-defined role).
+_GENERIC_ROLE_SCHEMA = [
+    _objective_field('orch.field.task', 'orch.ph.task'),
+    _f('expected_outcome', 'textarea', 'orch.field.expectedOutcome',
+       heading='Expected Outcome', placeholder='orch.ph.expectedOutcome'),
+]
+
+ROLE_PARAM_SCHEMA = {
+    'critic': [
+        _objective_field('orch.field.reviewCriteria', 'orch.ph.reviewCriteria'),
+        _f('must_check', 'list', 'orch.field.mustCheck', heading='Must Check',
+           placeholder='orch.ph.mustCheck'),
+        _f('verdict_format', 'select', 'orch.field.verdictFormat',
+           heading='Verdict Format', options=[
+               {'value': 'stop_continue', 'label': 'orch.opt.stopContinue'},
+               {'value': 'pass_fail', 'label': 'orch.opt.passFail'},
+           ]),
+        _f('adversarial', 'bool', 'orch.field.adversarial',
+           heading='Adversarial Verification'),
+    ],
+    'reviewer': [
+        _objective_field('orch.field.reviewCriteria', 'orch.ph.reviewCriteria'),
+        _f('must_check', 'list', 'orch.field.mustCheck', heading='Must Check',
+           placeholder='orch.ph.mustCheck'),
+        _f('verdict_format', 'select', 'orch.field.verdictFormat',
+           heading='Verdict Format', options=[
+               {'value': 'stop_continue', 'label': 'orch.opt.stopContinue'},
+               {'value': 'pass_fail', 'label': 'orch.opt.passFail'},
+           ]),
+        _f('adversarial', 'bool', 'orch.field.adversarial',
+           heading='Adversarial Verification'),
+    ],
+    'researcher': [
+        _objective_field('orch.field.researchQuestions', 'orch.ph.researchQuestions'),
+        _f('sources', 'list', 'orch.field.sources', heading='Sources',
+           placeholder='orch.ph.sources'),
+        _f('expected_outcome', 'textarea', 'orch.field.expectedOutcome',
+           heading='Expected Outcome', placeholder='orch.ph.expectedOutcome'),
+    ],
+    'worker': [
+        _objective_field('orch.field.taskWorker', 'orch.ph.taskWorker'),
+        _f('must_do', 'list', 'orch.field.mustDo', heading='Must Do',
+           placeholder='orch.ph.mustDo'),
+        _f('must_not_do', 'list', 'orch.field.mustNotDo', heading='Must Not Do',
+           placeholder='orch.ph.mustNotDo'),
+        _f('expected_outcome', 'textarea', 'orch.field.expectedOutcome',
+           heading='Expected Outcome', placeholder='orch.ph.expectedOutcome'),
+    ],
+    'planner': [
+        _objective_field('orch.field.planningBrief', 'orch.ph.planningBrief'),
+        _f('deliverables', 'list', 'orch.field.deliverables',
+           heading='Deliverables', placeholder='orch.ph.deliverables'),
+    ],
+    'virtual_user': [
+        _objective_field('orch.field.persona', 'orch.ph.persona'),
+        _f('done_signal', 'text', 'orch.field.doneSignal',
+           heading='Done Signal', placeholder='orch.ph.doneSignal'),
+    ],
+}
+
+
+def resolve_emits(node: dict) -> str:
+    """Resolve a node's effective message axis (``'user'`` | ``'assistant'``).
+
+    An explicit ``params.emits`` wins (validated against :data:`VALID_EMITS`).
+    Otherwise it is derived from the node's ``role`` so existing definitions
+    behave exactly as before:
+
+      * ``critic`` / ``reviewer`` / ``virtual_user`` → ``'user'``
+      * everything else (planner, worker, specialists, subflows) → ``'assistant'``
+
+    Pure; never raises — an invalid explicit value falls through to derivation
+    (the validator is what flags it as an error).
+    """
+    params = node.get('params') or {}
+    explicit = params.get('emits')
+    if explicit in VALID_EMITS:
+        return explicit
+    role = node.get('role') or ''
+    return 'user' if role in _USER_EMIT_ROLES else 'assistant'
+
+
+def resolve_scope(node: dict) -> str:
+    """Resolve a ``subflow`` node's execution scope (``'inline'`` | ``'isolated'``).
+
+    An explicit, valid ``params.scope`` wins; anything else (absent or
+    invalid) falls back to ``'inline'`` so existing definitions keep their
+    flatten-into-parent behavior. Pure; never raises — an invalid explicit
+    value falls through to the default (the validator flags it as an error).
+    """
+    params = node.get('params') or {}
+    scope = params.get('scope')
+    return scope if scope in VALID_SCOPES else 'inline'
+
+
+#: Non-task params a role node legitimately carries (validated elsewhere or
+#: structural). Keys outside the role's field schema AND this set get an
+#: unknown-key WARNING (forward-compat, mirrors the unknown-role stance).
+_ROLE_INFRA_KEYS = frozenset({'tier', 'isolation', 'emits', 'name'})
+
+
+def _validate_role_params(role: str, where: str, params: dict,
+                          errors: list, warnings: list) -> None:
+    """Type-check a role node's structured params against its schema.
+
+    Enforced as ERRORS: wrong kind (e.g. a list field given a non-list/str),
+    a select value outside its options, and length / item-count caps. Reported
+    as WARNINGS: param keys the role's schema doesn't know about (so an old
+    or future field never hard-blocks a save). ``objective`` length is checked
+    by the caller; here it is only kind-checked.
+    """
+    schema = role_param_schema(role)
+    known = {spec['key'] for spec in schema} | _ROLE_INFRA_KEYS
+    by_key = {spec['key']: spec for spec in schema}
+
+    for key, val in params.items():
+        if key not in by_key:
+            if key not in known:
+                warnings.append(f'{where} unknown param {key!r} for role '
+                                f'{role!r} (ignored by the engine)')
+            continue
+        spec = by_key[key]
+        kind = spec['kind']
+        if val is None:
+            continue
+        if kind == 'list':
+            if not isinstance(val, (list, tuple, str)):
+                errors.append(f'{where} param {key!r} must be a list')
+                continue
+            items = _coerce_list(val)
+            if len(items) > MAX_LIST_ITEMS:
+                errors.append(f'{where} param {key!r} exceeds {MAX_LIST_ITEMS} items')
+            for it in items:
+                if len(it) > MAX_LIST_ITEM_LEN:
+                    errors.append(f'{where} param {key!r} item exceeds '
+                                  f'{MAX_LIST_ITEM_LEN} chars')
+                    break
+        elif kind == 'bool':
+            if not isinstance(val, bool):
+                errors.append(f'{where} param {key!r} must be a boolean')
+        elif kind == 'int':
+            if not isinstance(val, int) or isinstance(val, bool):
+                errors.append(f'{where} param {key!r} must be an integer')
+        elif kind == 'select':
+            opts = {o['value'] for o in (spec.get('options') or [])}
+            if not isinstance(val, str) or val not in opts:
+                errors.append(f'{where} param {key!r} must be one of '
+                              f'{sorted(opts)}')
+        else:  # text / textarea
+            if not isinstance(val, str):
+                errors.append(f'{where} param {key!r} must be a string')
+            elif len(val) > MAX_OBJECTIVE_LEN:
+                errors.append(f'{where} param {key!r} exceeds {MAX_OBJECTIVE_LEN} chars')
+
+
+def role_param_schema(role: str) -> list[dict]:
+    """Return the structured-param FieldSpec list for a role.
+
+    Known roles get their bespoke schema; everything else (unknown /
+    user-defined / generic specialists) gets :data:`_GENERIC_ROLE_SCHEMA`.
+    Pure; returns the shared list object (callers must not mutate it).
+    """
+    return ROLE_PARAM_SCHEMA.get(role, _GENERIC_ROLE_SCHEMA)
+
+
+def _coerce_list(value) -> list[str]:
+    """Normalize a list-kind param value to a list of non-empty strings.
+
+    Tolerates a single string (split on newlines) so a textarea-backed list
+    field round-trips, and drops blank entries.
+    """
+    if isinstance(value, str):
+        items = value.split('\n')
+    elif isinstance(value, (list, tuple)):
+        items = value
+    else:
+        return []
+    out = []
+    for it in items:
+        s = str(it).strip()
+        if s:
+            out.append(s)
+    return out
+
+
+def render_role_brief(node: dict) -> str:
+    """Compose a role node's structured params into a delegation brief.
+
+    This is the bridge from the authoring layer to the execution layer: the
+    engine fills ``SubTaskSpec.objective`` with this rendered text (the swarm
+    stays dumb — it still just wraps the result in ``## Your Task``).
+
+    Back-compat invariant: a node whose only meaningful param is ``objective``
+    (no other structured fields set) returns **exactly** ``objective`` —
+    byte-identical to the pre-structured-params behavior — so every existing
+    definition, ``build_endpoint_definition`` and ``build_autopilot_definition``
+    render unchanged.
+
+    Composition rule: the ``objective`` field renders as a bare lead paragraph
+    (no heading); every other set field renders as a ``### <heading>`` section.
+    List fields become ``- item`` bullets; bool fields render only when true;
+    select fields render their stored value. Empty/unset fields are omitted.
+    Section order follows the role's schema order. Pure; never raises.
+    """
+    params = node.get('params') or {}
+    role = node.get('role') or ''
+    schema = role_param_schema(role)
+
+    lead = ''
+    sections: list[str] = []
+    for spec in schema:
+        key = spec.get('key')
+        kind = spec.get('kind')
+        val = params.get(key)
+        if key == 'objective':
+            lead = (val or '').strip() if isinstance(val, str) else ''
+            continue
+        heading = spec.get('heading') or key
+        if kind == 'list':
+            items = _coerce_list(val)
+            if items:
+                body = '\n'.join(f'- {it}' for it in items)
+                sections.append(f'### {heading}\n{body}')
+        elif kind == 'bool':
+            if val is True:
+                sections.append(f'### {heading}\nYes.')
+        elif kind in ('text', 'textarea', 'select'):
+            s = (val or '').strip() if isinstance(val, str) else ''
+            if s:
+                sections.append(f'### {heading}\n{s}')
+        elif kind == 'int':
+            if isinstance(val, int):
+                sections.append(f'### {heading}\n{val}')
+
+    if not sections:
+        return lead
+    parts = ([lead] if lead else []) + sections
+    return '\n\n'.join(parts)
+
+
+def _validate_subflow_node(node: dict, where: str, params: dict,
+                           errors: list, warnings: list,
+                           depth: int, seen_refs: frozenset[str]) -> None:
+    """Validate a ``subflow`` node (a "big role" composed of small roles).
+
+    A subflow node embeds (``params.definition``) or references
+    (``params.ref`` — a stored orchestration id) a complete child
+    ``tofu.orchestration/v1`` definition. To the parent it is one node with
+    its own ``role`` label + ``emits``; internally it is a self-contained
+    flow with its own start/stop and context organisation. Validation
+    recurses into an embedded definition (bounded by
+    :data:`MAX_SUBFLOW_DEPTH`) and detects ref cycles. A bare ``ref`` is NOT
+    resolved here (the validator is pure / I/O-free) — the engine resolves +
+    re-validates it at expansion time; we only guard against a subflow
+    referencing an ancestor (direct self-include).
+    """
+    emits = params.get('emits')
+    if emits is not None and emits not in VALID_EMITS:
+        errors.append(f'{where} invalid emits {emits!r} '
+                      f'(expected one of {sorted(VALID_EMITS)})')
+
+    scope = params.get('scope')
+    if scope is not None and scope not in VALID_SCOPES:
+        errors.append(f'{where} invalid scope {scope!r} '
+                      f'(expected one of {sorted(VALID_SCOPES)})')
+
+    child = params.get('definition')
+    ref = params.get('ref')
+    if child is None and ref is None:
+        errors.append(f'{where} subflow needs params.definition (embedded) '
+                      'or params.ref (stored id)')
+        return
+
+    if ref is not None:
+        if not isinstance(ref, str) or not ref:
+            errors.append(f'{where} subflow ref must be a non-empty string')
+        elif ref in seen_refs:
+            errors.append(f'{where} subflow ref {ref!r} is recursive '
+                          '(references an ancestor flow)')
+        return  # embedded definition (if any) is validated below; ref is opaque here
+
+    if depth + 1 > MAX_SUBFLOW_DEPTH:
+        errors.append(f'{where} subflow nesting exceeds MAX_SUBFLOW_DEPTH '
+                      f'({MAX_SUBFLOW_DEPTH})')
+        return
+
+    sub = validate_definition(child, _depth=depth + 1, _seen_refs=seen_refs)
+    for e in sub['errors']:
+        errors.append(f'{where} subflow: {e}')
+    for w in sub['warnings']:
+        warnings.append(f'{where} subflow: {w}')
+
+
+def validate_definition(defn: Any, *, _depth: int = 0,
+                        _seen_refs: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Validate an orchestration definition.
 
     Pure function — no I/O, no mutation of the input. Returns a verdict
@@ -167,6 +540,16 @@ def validate_definition(defn: Any) -> dict[str, Any]:
             obj = params.get('objective')
             if isinstance(obj, str) and len(obj) > MAX_OBJECTIVE_LEN:
                 errors.append(f'{where} objective exceeds {MAX_OBJECTIVE_LEN} chars')
+            emits = params.get('emits')
+            if emits is not None and emits not in VALID_EMITS:
+                errors.append(f'{where} invalid emits {emits!r} '
+                              f'(expected one of {sorted(VALID_EMITS)})')
+            _validate_role_params(role if isinstance(role, str) else '',
+                                  where, params, errors, warnings)
+        elif ntype == 'subflow':
+            role_count += 1
+            _validate_subflow_node(node, where, params, errors, warnings,
+                                   _depth, _seen_refs)
         elif ntype == 'control':
             kind = node.get('kind')
             if kind not in CONTROL_KINDS:
@@ -195,7 +578,7 @@ def validate_definition(defn: Any) -> dict[str, Any]:
                         errors.append(f'{where} prompt exceeds {MAX_OBJECTIVE_LEN} chars')
         else:
             errors.append(f'{where} invalid type {ntype!r} (expected '
-                          "'role' or 'control')")
+                          "'role', 'subflow' or 'control')")
 
     # Single-instance control nodes.
     for kind, cfg in CONTROL_KINDS.items():
@@ -289,6 +672,184 @@ def build_endpoint_definition(*, name: str = 'Endpoint Loop',
     }
     layout_definition(defn)
     return defn
+
+
+def build_autopilot_definition(*, name: str = 'Autopilot',
+                               max_iterations: int = 12,
+                               worker: str = 'worker') -> dict:
+    """Build the canonical autopilot (virtual-user) flow as a definition.
+
+    Expresses autopilot mode — a ``worker`` that keeps going because a
+    ``virtual_user`` auto-replies at every natural stop — as a
+    ``tofu.orchestration/v1`` graph:
+
+        start → loop[ worker(assistant) → virtual_user(user) ] → stop
+
+    The virtual user emits a ``user`` turn (the message axis this change
+    introduces), and signals completion with ``[VU: TASK_DONE]`` (mapped to
+    the loop's STOP verdict). The worker is ``shared-context`` so it
+    accumulates the running conversation across turns. This is the single
+    source of truth bridging autopilot mode and the declarative engine —
+    the sibling of :func:`build_endpoint_definition`.
+    """
+    defn = {
+        'schema': SCHEMA_ID,
+        'name': name,
+        'nodes': [
+            {'id': 'start', 'type': 'control', 'kind': 'start'},
+            {'id': 'loop', 'type': 'control', 'kind': 'loop',
+             'params': {'max_iterations': int(max_iterations),
+                        'stop_condition': 'verdict:STOP', 'verifier': 'virtual_user'}},
+            {'id': 'worker', 'type': 'role', 'role': worker,
+             'params': {'isolation': 'shared-context', 'tier': 'heavy',
+                        'emits': 'assistant',
+                        'objective': 'Continue the task. Make concrete '
+                        'progress every turn; act, do not just analyze.'}},
+            {'id': 'vu', 'type': 'role', 'role': 'virtual_user',
+             'params': {'emits': 'user', 'tier': 'standard',
+                        'objective': 'Stand in for the human. Reply in 1-3 '
+                        'sentences to keep the task moving. Emit '
+                        '[VERDICT: STOP] (or [VU: TASK_DONE]) only when the '
+                        'assistant has clearly finished.'}},
+            {'id': 'stop', 'type': 'control', 'kind': 'stop'},
+        ],
+        'edges': [
+            {'from': 'start', 'to': 'loop'},
+            {'from': 'loop', 'to': 'worker'},
+            {'from': 'worker', 'to': 'vu'},
+            {'from': 'vu', 'to': 'loop'},
+            {'from': 'loop', 'to': 'stop'},
+        ],
+    }
+    layout_definition(defn)
+    return defn
+
+
+def expand_subflows(defn: dict, *, resolver: Any = None, _depth: int = 0) -> dict:
+    """Flatten every ``subflow`` node into the parent graph (macro expansion).
+
+    A subflow node is inlined: its embedded child definition's inner nodes
+    are spliced into the parent with namespaced ids (``<subflowId>/<childId>``),
+    the child's ``start`` / ``stop`` control nodes are dropped, and the
+    parent's edges into / out of the subflow node are rewired to the child's
+    real entry / exit nodes. Subroutine-inlining semantics.
+
+    This is the phase-1 nesting strategy: the result is a single flat graph
+    the existing :class:`FlowExecutor` runs unchanged. Inlining deliberately
+    does NOT create a context boundary (inner nodes share the parent
+    context).
+
+    Only ``inline``-scoped subflows (the default — see
+    :func:`resolve_scope`) are flattened here. An ``isolated`` subflow is the
+    true black box: it is left **intact** as a subflow node so the engine can
+    run it in its own nested :class:`FlowExecutor` with a fresh context. Its
+    embedded child is therefore NOT expanded by the parent — the nested
+    executor expands its own inline subflows when it is constructed.
+
+    Args:
+        defn: A validated definition (possibly containing subflow nodes).
+        resolver: Optional ``callable(ref:str) -> definition|None`` used to
+            resolve ``params.ref`` subflows from a store. Embedded
+            ``params.definition`` subflows need no resolver.
+        _depth: Recursion guard (bounded by :data:`MAX_SUBFLOW_DEPTH`).
+
+    Returns:
+        A NEW definition dict (input is not mutated). Positions are recomputed
+        via :func:`layout_definition` so the flattened graph lays out cleanly.
+
+    Raises:
+        ValueError: on a ref that cannot be resolved, or nesting past the cap.
+    """
+    import copy
+
+    if _depth > MAX_SUBFLOW_DEPTH:
+        raise ValueError(f'subflow nesting exceeds MAX_SUBFLOW_DEPTH ({MAX_SUBFLOW_DEPTH})')
+
+    nodes = defn.get('nodes') or []
+    edges = defn.get('edges') or []
+    if not any(isinstance(n, dict) and n.get('type') == 'subflow'
+               and resolve_scope(n) == 'inline' for n in nodes):
+        return copy.deepcopy(defn)
+
+    out_nodes: list[dict] = []
+    out_edges: list[dict] = [dict(e) for e in edges if isinstance(e, dict)]
+
+    for node in nodes:
+        if not isinstance(node, dict) or node.get('type') != 'subflow':
+            out_nodes.append(copy.deepcopy(node))
+            continue
+        # Isolated subflows are a context boundary, not a macro — leave the
+        # node (and its embedded child) intact for the nested executor.
+        if resolve_scope(node) == 'isolated':
+            out_nodes.append(copy.deepcopy(node))
+            continue
+
+        sid = node.get('id')
+        params = node.get('params') or {}
+        child = params.get('definition')
+        if child is None:
+            ref = params.get('ref')
+            if not (resolver and ref):
+                raise ValueError(f'subflow {sid!r} has a ref {ref!r} but no '
+                                 'resolver was supplied to expand it')
+            child = resolver(ref)
+            if not isinstance(child, dict):
+                raise ValueError(f'subflow {sid!r} ref {ref!r} did not resolve '
+                                 'to a definition')
+        # Recursively flatten the child first.
+        child = expand_subflows(child, resolver=resolver, _depth=_depth + 1)
+
+        cnodes = [n for n in (child.get('nodes') or []) if isinstance(n, dict)]
+        cedges = [e for e in (child.get('edges') or []) if isinstance(e, dict)]
+        prefix = f'{sid}/'
+
+        def _pid(cid: str) -> str:
+            return prefix + cid
+
+        child_starts = {n['id'] for n in cnodes if n.get('kind') == 'start'}
+        child_stops = {n['id'] for n in cnodes if n.get('kind') == 'stop'}
+
+        # Inner entry nodes = successors of a child start; exit nodes =
+        # predecessors of a child stop. These become the rewire anchors.
+        entries = [e['to'] for e in cedges if e.get('from') in child_starts]
+        exits = [e['from'] for e in cedges if e.get('to') in child_stops]
+
+        # Splice inner nodes (minus start/stop), namespaced.
+        for cn in cnodes:
+            if cn.get('id') in child_starts or cn.get('id') in child_stops:
+                continue
+            spliced = copy.deepcopy(cn)
+            spliced['id'] = _pid(cn['id'])
+            out_nodes.append(spliced)
+
+        # Inner edges (minus those touching child start/stop), namespaced.
+        for ce in cedges:
+            s, d = ce.get('from'), ce.get('to')
+            if s in child_starts or d in child_stops or s in child_stops or d in child_starts:
+                continue
+            out_edges.append({'from': _pid(s), 'to': _pid(d)})
+
+        # Rewire parent edges that touched the subflow node.
+        rewired: list[dict] = []
+        for e in out_edges:
+            if e.get('to') == sid:
+                for ent in entries:
+                    rewired.append({'from': e['from'], 'to': _pid(ent)})
+            elif e.get('from') == sid:
+                for ex in exits:
+                    rewired.append({'from': _pid(ex), 'to': e['to']})
+            else:
+                rewired.append(e)
+        out_edges = rewired
+
+    result = {
+        'schema': defn.get('schema', SCHEMA_ID),
+        'name': defn.get('name', ''),
+        'nodes': out_nodes,
+        'edges': out_edges,
+    }
+    layout_definition(result)
+    return result
 
 
 def layout_definition(defn: dict, *, x_gap: int = 230, y_gap: int = 150,
@@ -411,6 +972,9 @@ def layout_definition(defn: dict, *, x_gap: int = 230, y_gap: int = 150,
 __all__ = [
     'SCHEMA_ID', 'KNOWN_ROLES', 'CONTROL_KINDS',
     'VALID_TIERS', 'VALID_ISOLATION', 'VALID_ARTIFACT_FORMATS', 'VALID_HUMAN_MODES',
-    'validate_definition',
-    'layout_definition', 'build_endpoint_definition',
+    'VALID_EMITS', 'VALID_SCOPES', 'MAX_SUBFLOW_DEPTH', 'resolve_emits',
+    'resolve_scope', 'ROLE_PARAM_SCHEMA', 'VALID_PARAM_KINDS',
+    'role_param_schema', 'render_role_brief',
+    'validate_definition', 'expand_subflows',
+    'layout_definition', 'build_endpoint_definition', 'build_autopilot_definition',
 ]

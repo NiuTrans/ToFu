@@ -165,7 +165,7 @@ function _applyTranslationDone(convId, idx, msg, result, field) {
  *   2. content-visibility:auto on .message invalidates intrinsic-size on
  *      every replacement, drifting scrollTop upward until the chat appears
  *      to jump to the top.
- * We now mutate just the .translate-status-sub / .translate-preview-sub
+ * We now mutate just the .translate-status-sub / .translate-preview
  * children of the existing #translate-loading-N indicator. The spinner DOM
  * survives, scrollTop is untouched, and we only fall back to the legacy
  * full-message re-render if the loading indicator isn't in the DOM yet
@@ -223,8 +223,11 @@ function _patchTranslateLoadingDom(loadingEl, msg) {
     if (!statusEl) {
       statusEl = document.createElement('div');
       statusEl.className = 'translate-status-sub';
-      statusEl.style.cssText = 'font-size:11px;color:#f59e0b;margin-top:2px';
-      loadingEl.appendChild(statusEl);
+      // The head sub-line stays directly under the spinner row; the preview
+      // (when present) renders below it.
+      const headEl = loadingEl.querySelector('.translate-loading-head');
+      if (headEl && headEl.parentNode === loadingEl) headEl.after(statusEl);
+      else loadingEl.appendChild(statusEl);
     }
     statusEl.title = msg._translateStatus;
     statusEl.textContent = '⚠ ' + display;
@@ -232,20 +235,37 @@ function _patchTranslateLoadingDom(loadingEl, msg) {
     statusEl.remove();
   }
 
-  // ── partial-preview sub-line ──
-  let previewEl = loadingEl.querySelector('.translate-preview-sub');
+  // ── partial-preview body (rendered markdown, morphs into the final 译文) ──
+  let previewEl = loadingEl.querySelector('.translate-preview');
   if (msg._translatePartial) {
     if (!previewEl) {
       previewEl = document.createElement('div');
-      previewEl.className = 'translate-preview-sub';
-      previewEl.style.cssText = 'font-size:12px;color:var(--text-secondary,#888);margin-top:4px;white-space:pre-wrap;opacity:0.7;max-height:200px;overflow:hidden';
+      previewEl.className = 'translate-preview';
+      previewEl.innerHTML = '<div class="md-content"></div><span class="translate-caret"></span>';
       loadingEl.appendChild(previewEl);
+      loadingEl.classList.add('has-preview');
     }
-    if (previewEl.textContent !== msg._translatePartial) {
-      previewEl.textContent = msg._translatePartial;
+    const mdEl = previewEl.querySelector('.md-content');
+    if (mdEl && previewEl._lastPartial !== msg._translatePartial) {
+      previewEl._lastPartial = msg._translatePartial;
+      // Sticky auto-scroll: keep the latest streamed line in view, but stop
+      // following the instant the user scrolls up to read earlier text.
+      const nearBottom = (previewEl.scrollHeight - previewEl.scrollTop
+                          - previewEl.clientHeight) < 32;
+      let html;
+      try {
+        const fn = (typeof renderMarkdown === 'function') ? renderMarkdown : null;
+        const strip = (typeof stripNoTranslateTags === 'function')
+          ? stripNoTranslateTags : (s) => s;
+        html = fn ? fn(strip(msg._translatePartial)) : null;
+      } catch (e) { html = null; }
+      if (html != null) mdEl.innerHTML = html;
+      else mdEl.textContent = msg._translatePartial;
+      if (nearBottom) previewEl.scrollTop = previewEl.scrollHeight;
     }
   } else if (previewEl) {
     previewEl.remove();
+    loadingEl.classList.remove('has-preview');
   }
   return true;
 }
@@ -694,7 +714,9 @@ async function _resumePendingTranslations(convId) {
 
   pushSubscribe('translate', '*', (frame) => {
     try {
-      if (!frame || frame.status !== 'done' || !frame.translated) return;
+      if (!frame) return;
+      const _isRunning = frame.status === 'running' || frame.type === 'running';
+      if (!_isRunning && (frame.status !== 'done' || !frame.translated)) return;
       const convId = frame.convId;
       if (!convId) return;
       const conv = (typeof conversations !== 'undefined')
@@ -715,15 +737,36 @@ async function _resumePendingTranslations(convId) {
 
       const field = frame.field || 'translatedContent';
 
+      // The poll loop is the authoritative path for client-initiated tasks;
+      // skip when it's still running so we don't race with it.
+      if (msg._translateTaskId && !msg._translateDone) return;
+
+      // ── Running frame: surface the live "translating…" indicator + the
+      //    streaming partial preview for the SERVER-driven auto-translate
+      //    path (which has no client poll loop). Without this the active
+      //    view shows the bare finished English message with no hint a
+      //    translation is on its way until the final 'done' frame lands. ──
+      if (_isRunning) {
+        if (field !== 'translatedContent') return;
+        if (msg.translatedContent || msg._translateDone) return;
+        // Flip into the pending state so renderMessage shows the indicator.
+        if (msg._translateDone !== false) {
+          msg._translateDone = false;
+          _renderMsgInPlace(convId, idx, msg);
+        }
+        _applyTranslationStatus(convId, idx, msg, {
+          statusMessage: frame.statusMessage || '',
+          statusKind: frame.statusKind || '',
+          partial: frame.partial || '',
+        });
+        return;
+      }
+
       // Skip when the message already has the translation (manual click /
       // poll loop already applied it) — _applyTranslationDone is safe to
       // re-run but writing again would trigger a redundant PATCH + render.
       if (field === 'translatedContent' && msg.translatedContent === frame.translated) return;
       if (field === 'content' && msg.content === frame.translated) return;
-
-      // The poll loop is the authoritative path for client-initiated tasks;
-      // skip when it's still running so we don't race with it.
-      if (msg._translateTaskId && !msg._translateDone) return;
 
       console.log(`%c[Translate] ← push frame applied conv=${convId.slice(0,8)} msg=${idx}`,
         'color:#22c55e');

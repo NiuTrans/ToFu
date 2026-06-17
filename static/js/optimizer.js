@@ -15,7 +15,7 @@ function toggleOptimizerPanel(e) {
   // the panel bubble up here. Without this guard, clicking a row, button,
   // or the "older proposals" header would flip _optimizerPanelOpen back to
   // false and close the popup.
-  if (e && panel.contains(e.target)) return;
+  if (e && panel.contains(/** @type {Node} */ (e.target))) return;
   if (e) e.stopPropagation();
   _optimizerPanelOpen = !_optimizerPanelOpen;
   panel.classList.toggle("visible", _optimizerPanelOpen);
@@ -320,7 +320,7 @@ _startOptimizerPolling();
 document.addEventListener("click", (e) => {
   if (!_optimizerPanelOpen) return;
   const badge = document.getElementById("optimizerBadge");
-  if (badge && !badge.contains(e.target)) {
+  if (badge && !badge.contains(/** @type {Node} */ (e.target))) {
     _optimizerPanelOpen = false;
     const panel = document.getElementById("optimizerPanel");
     if (panel) panel.classList.remove("visible");

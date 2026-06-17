@@ -183,7 +183,8 @@ var ConvCache = (function () {
       codeExecEnabled: conv.codeExecEnabled, browserEnabled: conv.browserEnabled,
       desktopEnabled: conv.desktopEnabled, memoryEnabled: conv.memoryEnabled,
       schedulerEnabled: conv.schedulerEnabled, swarmEnabled: conv.swarmEnabled,
-      endpointEnabled: conv.endpointEnabled, imageGenMode: conv.imageGenMode,
+      endpointEnabled: conv.endpointEnabled, autopilotEnabled: conv.autopilotEnabled,
+      activeFlow: conv.activeFlow, imageGenMode: conv.imageGenMode,
       humanGuidanceEnabled: conv.humanGuidanceEnabled,
       projectPath: conv.projectPath, projectPaths: conv.projectPaths,
       readOnlyPaths: conv.readOnlyPaths,
@@ -224,7 +225,7 @@ var ConvCache = (function () {
   /**
    * Paginated read.
    * @param {string} convId
-   * @param {{beforeIdx?:number, afterIdx?:number, limit?:number}} opts
+   * @param {{beforeIdx?:number, afterIdx?:number, limit?:number}} [opts]
    *   beforeIdx — return messages with idx in [..., beforeIdx)
    *   afterIdx  — return messages with idx in (afterIdx, ...]
    *   limit     — max number to return (no limit if omitted).

@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 #  Schema Version Cache — Skip redundant DDL on subsequent startups
 # ═══════════════════════════════════════════════════════════════════════
 
-_SCHEMA_VERSION = 22  # Increment when tables/columns/indexes change
+_SCHEMA_VERSION = 24  # Increment when tables/columns/indexes change
 
 
 def _column_exists(conn, table, column):
@@ -224,6 +224,18 @@ def _init_chat_schema(conn):
     create_if_absent(conn, CONVERSATIONS, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id, updated_at DESC)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_conv_meta ON conversations(user_id, updated_at DESC, id, title, msg_count, created_at)')
+    # Partial expression index for stale-task startup recovery: the recovery
+    # scan probes `settings->>'activeTaskId' IS NOT NULL` (see
+    # lib/tasks_pkg/manager.py::recover_stale_tasks_on_startup). Only the handful
+    # of conversations carrying a stuck activeTaskId after a crash are indexed,
+    # so this stays tiny and turns a full-table seq scan into an index lookup.
+    # The expression MUST match what translate_sql emits for the recovery query
+    # (`json_extract` → `settings::jsonb->>'activeTaskId'`), otherwise the
+    # planner won't recognize the index. settings is already jsonb so the cast
+    # is a no-op at runtime but is required for the expression to align.
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_conv_active_task ON conversations "
+                "((settings::jsonb->>'activeTaskId')) "
+                "WHERE (settings::jsonb->>'activeTaskId') IS NOT NULL")
 
     # task_results + task_events: migrated onto Core (lib/database/_core_schema.py).
     # Parity-verified byte-equivalent; guarded creates are no-ops on existing
@@ -234,6 +246,12 @@ def _init_chat_schema(conn):
     create_if_absent(conn, TASK_RESULTS, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_task_conv ON task_results(conv_id)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_task_created ON task_results(created_at)')
+    # Partial index for the startup stale-task sweep (recover_stale_tasks_on_startup
+    # selects WHERE status='running'). task_results grows unbounded (25k+ done
+    # rows) while running/interrupted stay tiny, so a partial index keeps the
+    # sweep at ~0.04ms instead of a full seq scan that grows with table size.
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_task_status ON task_results(status) "
+                "WHERE status IN ('running', 'interrupted')")
 
     # ── task_events: persisted SSE event log (durable Last-Event-ID resumption) ──
     # Replaces in-memory task['events'] for cross-restart and post-cleanup
@@ -336,6 +354,16 @@ def _init_chat_schema(conn):
     # ── pg_trgm GIN index for ILIKE fallback on search_text ──
     cur.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_conv_search_trgm ON conversations USING gin (search_text gin_trgm_ops)')
+    # ── Expression trgm index matching the Phase-2 search fallback predicate ──
+    # routes/conversations_search.py filters with `lower(left(search_text,10000))
+    # LIKE ?`. The plain idx_conv_search_trgm above is on the RAW column, so the
+    # lower()/left() wrappers defeat it → full Seq Scan that detoasts every row
+    # (~1.2s on 3k rows). This expression index matches the predicate EXACTLY
+    # (same lower(left(...,10000)) shape) → Bitmap Index Scan: common term
+    # 1218ms→101ms, rare term 744ms→<1ms. The 10000 cap MUST stay in sync with
+    # the SQL in conversations_search.py or the planner won't use this index.
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_conv_search_head_trgm ON conversations '
+                'USING gin (lower(left(search_text, 10000)) gin_trgm_ops)')
     # ── GIN index on search_tsv for fast tsvector @@ queries ──
     cur.execute('CREATE INDEX IF NOT EXISTS idx_conv_search_tsv ON conversations USING gin (search_tsv)')
 
@@ -375,30 +403,13 @@ def _init_chat_schema(conn):
         logger.info('[DB] Backfilling search_tsv for %d conversations...', tsv_backfill)
         _backfill_search_tsv(conn)
 
-    # ── Agent backend session mapping ──
-    _safe_create_table(cur, '''
-        CREATE TABLE IF NOT EXISTS agent_sessions (
-            conv_id TEXT NOT NULL,
-            backend TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT NOW(),
-            last_used_at TIMESTAMPTZ DEFAULT NOW(),
-            PRIMARY KEY (conv_id, backend)
-        )
-    ''')
+    # ── Agent backend session mapping + message queue: migrated onto Core. ──
+    from lib.database._core_schema import (
+        AGENT_SESSIONS, MESSAGE_QUEUE, create_if_absent,
+    )
+    create_if_absent(conn, AGENT_SESSIONS, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_agent_sessions_backend ON agent_sessions(backend)')
-
-    # ── Message queue: server-side pending message queue ──
-    _safe_create_table(cur, '''
-        CREATE TABLE IF NOT EXISTS message_queue (
-            id TEXT PRIMARY KEY,
-            conv_id TEXT NOT NULL,
-            payload TEXT NOT NULL DEFAULT '{}',
-            config TEXT NOT NULL DEFAULT '{}',
-            position INTEGER NOT NULL DEFAULT 1,
-            created_at BIGINT NOT NULL
-        )
-    ''')
+    create_if_absent(conn, MESSAGE_QUEUE, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_mq_conv ON message_queue(conv_id, position)')
 
     # paper_reports: migrated onto Core (lib/database/_core_schema.py).
@@ -465,68 +476,17 @@ def _init_system_schema(conn):
     create_if_absent(conn, PRICING_CACHE, table_exists=_table_exists)
     create_if_absent(conn, RECENT_PROJECTS, table_exists=_table_exists)
 
-    _safe_create_table(cur, '''
-        CREATE TABLE IF NOT EXISTS error_resolutions (
-            fingerprint TEXT PRIMARY KEY,
-            logger_name TEXT NOT NULL DEFAULT '',
-            sample_message TEXT NOT NULL DEFAULT '',
-            resolved_by TEXT NOT NULL DEFAULT '',
-            ticket TEXT NOT NULL DEFAULT '',
-            notes TEXT NOT NULL DEFAULT '',
-            resolved_at BIGINT NOT NULL,
-            updated_at BIGINT NOT NULL
-        )
-    ''')
+    # error_resolutions (PG-only): migrated onto Core.
+    from lib.database._core_schema import ERROR_RESOLUTIONS, create_if_absent
+    create_if_absent(conn, ERROR_RESOLUTIONS, table_exists=_table_exists)
 
-    _safe_create_table(cur, '''
-        CREATE TABLE IF NOT EXISTS scheduled_tasks (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            schedule TEXT NOT NULL,
-            task_type TEXT NOT NULL DEFAULT 'command',
-            command TEXT NOT NULL,
-            description TEXT DEFAULT '',
-            enabled BOOLEAN NOT NULL DEFAULT TRUE,
-            notify_on_failure BOOLEAN NOT NULL DEFAULT TRUE,
-            notify_on_success BOOLEAN NOT NULL DEFAULT FALSE,
-            max_runtime INTEGER NOT NULL DEFAULT 300,
-            last_run TEXT,
-            last_result TEXT,
-            last_status TEXT DEFAULT 'never',
-            run_count INTEGER NOT NULL DEFAULT 0,
-            fail_count INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL DEFAULT '',
-            -- Proactive agent fields (task_type='agent')
-            target_conv_id TEXT DEFAULT '',
-            source_conv_id TEXT DEFAULT '',
-            tools_config TEXT DEFAULT '{}',
-            poll_count INTEGER NOT NULL DEFAULT 0,
-            last_poll_at TEXT DEFAULT '',
-            last_poll_decision TEXT DEFAULT '',
-            last_poll_reason TEXT DEFAULT '',
-            last_execution_at TEXT DEFAULT '',
-            last_execution_task_id TEXT DEFAULT '',
-            last_execution_status TEXT DEFAULT '',
-            execution_count INTEGER NOT NULL DEFAULT 0,
-            max_executions INTEGER NOT NULL DEFAULT 0,
-            expires_at TEXT DEFAULT ''
-        )
-    ''')
-
-    _safe_create_table(cur, '''
-        CREATE TABLE IF NOT EXISTS proactive_poll_log (
-            id SERIAL PRIMARY KEY,
-            task_id TEXT NOT NULL,
-            poll_time TEXT NOT NULL,
-            decision TEXT NOT NULL DEFAULT 'skip',
-            reason TEXT NOT NULL DEFAULT '',
-            status_snapshot TEXT NOT NULL DEFAULT '',
-            model TEXT NOT NULL DEFAULT '',
-            tokens_used INTEGER NOT NULL DEFAULT 0,
-            execution_task_id TEXT DEFAULT ''
-        )
-    ''')
+    # scheduled_tasks + proactive_poll_log: migrated onto Core. The post-create
+    # ALTERs below stay (upgrade-only; Core's create only fires on fresh installs).
+    from lib.database._core_schema import (
+        SCHEDULED_TASKS, PROACTIVE_POLL_LOG, create_if_absent,
+    )
+    create_if_absent(conn, SCHEDULED_TASKS, table_exists=_table_exists)
+    create_if_absent(conn, PROACTIVE_POLL_LOG, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_poll_log_task ON proactive_poll_log(task_id, poll_time DESC)')
 
     # ── Migration: add proactive agent columns ──
@@ -561,78 +521,52 @@ def _init_system_schema(conn):
             logger.info('[DB] Migration: added column %s to scheduled_tasks', col_name)
 
     # ── Timer Watcher tables ──
-    _safe_create_table(cur, '''
-        CREATE TABLE IF NOT EXISTS timer_watchers (
-            id TEXT PRIMARY KEY,
-            conv_id TEXT NOT NULL,
-            source_task_id TEXT NOT NULL DEFAULT '',
-            check_instruction TEXT NOT NULL,
-            check_command TEXT NOT NULL DEFAULT '',
-            continuation_message TEXT NOT NULL,
-            poll_interval INTEGER NOT NULL DEFAULT 60,
-            max_polls INTEGER NOT NULL DEFAULT 120,
-            poll_count INTEGER NOT NULL DEFAULT 0,
-            status TEXT NOT NULL DEFAULT 'active',
-            tools_config TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL DEFAULT '',
-            triggered_at TEXT DEFAULT '',
-            cancelled_at TEXT DEFAULT '',
-            execution_task_id TEXT DEFAULT '',
-            last_poll_at TEXT DEFAULT '',
-            last_poll_decision TEXT DEFAULT '',
-            last_poll_reason TEXT DEFAULT ''
-        )
-    ''')
+    # timer_watchers + timer_poll_log: migrated onto Core.
+    from lib.database._core_schema import (
+        TIMER_WATCHERS, TIMER_POLL_LOG, create_if_absent,
+    )
+    create_if_absent(conn, TIMER_WATCHERS, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_timer_status ON timer_watchers(status)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_timer_conv ON timer_watchers(conv_id)')
-
-    _safe_create_table(cur, '''
-        CREATE TABLE IF NOT EXISTS timer_poll_log (
-            id SERIAL PRIMARY KEY,
-            timer_id TEXT NOT NULL,
-            poll_time TEXT NOT NULL,
-            decision TEXT NOT NULL DEFAULT 'wait',
-            reason TEXT NOT NULL DEFAULT '',
-            check_output TEXT NOT NULL DEFAULT '',
-            tokens_used INTEGER NOT NULL DEFAULT 0
-        )
-    ''')
+    create_if_absent(conn, TIMER_POLL_LOG, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_timer_poll_log ON timer_poll_log(timer_id, poll_time DESC)')
 
+    # ── Swarm durable state (see lib/swarm/persistence.py) ──
+    # Persists conversation-scoped swarm sessions and per-agent message
+    # checkpoints so an in-flight sub-agent can be rehydrated and resumed
+    # at round granularity after a server restart. swarm_key == convId.
+    # swarm_sessions + swarm_agents: migrated onto Core.
+    from lib.database._core_schema import (
+        SWARM_SESSIONS, SWARM_AGENTS, create_if_absent,
+    )
+    create_if_absent(conn, SWARM_SESSIONS, table_exists=_table_exists)
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_swarm_sessions_status ON swarm_sessions(status)')
+    create_if_absent(conn, SWARM_AGENTS, table_exists=_table_exists)
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_swarm_agents_key ON swarm_agents(swarm_key)')
+
+    # ── Orchestration run instances (see lib/orchestration_runs.py) ──
+    # Mirror of the SQLite block — see ``lib/database/_schema_sqlite.py`` for
+    # the template-vs-instance design notes. A run pins a definition snapshot;
+    # orchestration_run_events is the durable cursor-replay event log.
+    # orchestration_runs + orchestration_run_events: migrated onto Core.
+    from lib.database._core_schema import (
+        ORCHESTRATION_RUNS, ORCHESTRATION_RUN_EVENTS, create_if_absent,
+    )
+    create_if_absent(conn, ORCHESTRATION_RUNS, table_exists=_table_exists)
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_orch_runs_status ON orchestration_runs(status, updated_at DESC)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_orch_runs_orch ON orchestration_runs(orch_id, created_at DESC)')
+    create_if_absent(conn, ORCHESTRATION_RUN_EVENTS, table_exists=_table_exists)
+
     # ── Daily Optimizer tables (see lib/optimizer/) ──
-    _safe_create_table(cur, '''
-        CREATE TABLE IF NOT EXISTS optimizer_proposals (
-            id TEXT PRIMARY KEY,
-            created_at TEXT NOT NULL,
-            title TEXT NOT NULL,
-            rationale TEXT NOT NULL,
-            action_type TEXT NOT NULL,
-            action_args TEXT NOT NULL,
-            severity TEXT NOT NULL DEFAULT 'low',
-            confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
-            evidence TEXT NOT NULL DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'pending_review',
-            status_reason TEXT NOT NULL DEFAULT ''
-        )
-    ''')
+    # optimizer_proposals + optimizer_action_log: migrated onto Core.
+    from lib.database._core_schema import (
+        OPTIMIZER_PROPOSALS, OPTIMIZER_ACTION_LOG, create_if_absent,
+    )
+    create_if_absent(conn, OPTIMIZER_PROPOSALS, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_opt_prop_created ON optimizer_proposals(created_at DESC)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_opt_prop_status ON optimizer_proposals(status)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_opt_prop_action ON optimizer_proposals(action_type)')
-
-    _safe_create_table(cur, '''
-        CREATE TABLE IF NOT EXISTS optimizer_action_log (
-            id TEXT PRIMARY KEY,
-            proposal_id TEXT NOT NULL,
-            applied_at TEXT NOT NULL,
-            expires_at TEXT NOT NULL DEFAULT '',
-            pre_metric TEXT NOT NULL DEFAULT '',
-            outcome_metric TEXT NOT NULL DEFAULT '',
-            outcome_recorded_at TEXT NOT NULL DEFAULT '',
-            reverted_at TEXT NOT NULL DEFAULT '',
-            revert_reason TEXT NOT NULL DEFAULT ''
-        )
-    ''')
+    create_if_absent(conn, OPTIMIZER_ACTION_LOG, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_opt_actlog_proposal ON optimizer_action_log(proposal_id)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_opt_actlog_applied ON optimizer_action_log(applied_at DESC)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_opt_actlog_expires ON optimizer_action_log(expires_at)')
@@ -644,14 +578,9 @@ def _init_system_schema(conn):
     # so multiple sibling requests in the same millisecond don't trip
     # a uniqueness collision (would have been a real bug under burst
     # traffic).  See lib/rate_limit_store.py.
-    _safe_create_table(cur, '''
-        CREATE TABLE IF NOT EXISTS rate_limit_events (
-            id       BIGSERIAL PRIMARY KEY,
-            endpoint TEXT      NOT NULL,
-            ip       TEXT      NOT NULL,
-            ts_ms    BIGINT    NOT NULL
-        )
-    ''')
+    # rate_limit_events: migrated onto Core (BIGSERIAL/INTEGER AUTOINCREMENT PK).
+    from lib.database._core_schema import RATE_LIMIT_EVENTS, create_if_absent
+    create_if_absent(conn, RATE_LIMIT_EVENTS, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_rate_limit_lookup ON rate_limit_events(endpoint, ip, ts_ms)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_rate_limit_ts ON rate_limit_events(ts_ms)')
 
@@ -660,81 +589,31 @@ def _init_system_schema(conn):
     #  ``lib/database/_schema_sqlite.py`` for design notes on the
     #  micro-credit unit and ledger-as-source-of-truth invariant).
     # ─────────────────────────────────────────────────────────────────
-    _safe_create_table(cur, '''
-        CREATE TABLE IF NOT EXISTS tenant_users (
-            id TEXT PRIMARY KEY,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL DEFAULT '',
-            display_name TEXT NOT NULL DEFAULT '',
-            role TEXT NOT NULL DEFAULT 'user',
-            status TEXT NOT NULL DEFAULT 'active',
-            created_at BIGINT NOT NULL,
-            last_login_at BIGINT NOT NULL DEFAULT 0,
-            email_verified INTEGER NOT NULL DEFAULT 0,
-            metadata TEXT NOT NULL DEFAULT '{}'
-        )
-    ''')
+    # tenant_users: migrated onto Core.
+    from lib.database._core_schema import TENANT_USERS, create_if_absent
+    create_if_absent(conn, TENANT_USERS, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_tenant_users_email ON tenant_users(email)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_tenant_users_role ON tenant_users(role)')
 
-    _safe_create_table(cur, '''
-        CREATE TABLE IF NOT EXISTS billing_ledger (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            ts BIGINT NOT NULL,
-            amount_micro BIGINT NOT NULL,
-            kind TEXT NOT NULL,
-            ref_type TEXT NOT NULL DEFAULT '',
-            ref_id TEXT NOT NULL DEFAULT '',
-            balance_after_micro BIGINT NOT NULL,
-            note TEXT NOT NULL DEFAULT ''
-        )
-    ''')
+    # billing_ledger: migrated onto Core.
+    from lib.database._core_schema import BILLING_LEDGER, create_if_absent
+    create_if_absent(conn, BILLING_LEDGER, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_ledger_user_ts ON billing_ledger(user_id, ts DESC)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_ledger_ref ON billing_ledger(ref_type, ref_id)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_ledger_kind ON billing_ledger(kind)')
 
-    _safe_create_table(cur, '''
-        CREATE TABLE IF NOT EXISTS billing_wallets (
-            user_id TEXT PRIMARY KEY,
-            balance_micro BIGINT NOT NULL DEFAULT 0,
-            currency TEXT NOT NULL DEFAULT 'CREDIT',
-            low_balance_alert_micro BIGINT NOT NULL DEFAULT 0,
-            updated_at BIGINT NOT NULL
-        )
-    ''')
-
-    _safe_create_table(cur, '''
-        CREATE TABLE IF NOT EXISTS billing_redeem_codes (
-            code TEXT PRIMARY KEY,
-            amount_micro BIGINT NOT NULL,
-            batch TEXT NOT NULL DEFAULT '',
-            created_by TEXT NOT NULL DEFAULT '',
-            created_at BIGINT NOT NULL,
-            expires_at BIGINT NOT NULL DEFAULT 0,
-            redeemed_by TEXT NOT NULL DEFAULT '',
-            redeemed_at BIGINT NOT NULL DEFAULT 0,
-            note TEXT NOT NULL DEFAULT ''
-        )
-    ''')
+    # billing_wallets + billing_redeem_codes: migrated onto Core.
+    from lib.database._core_schema import (
+        BILLING_WALLETS, BILLING_REDEEM_CODES, create_if_absent,
+    )
+    create_if_absent(conn, BILLING_WALLETS, table_exists=_table_exists)
+    create_if_absent(conn, BILLING_REDEEM_CODES, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_redeem_batch ON billing_redeem_codes(batch)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_redeem_redeemed ON billing_redeem_codes(redeemed_by)')
 
-    _safe_create_table(cur, '''
-        CREATE TABLE IF NOT EXISTS billing_payments (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            provider TEXT NOT NULL,
-            provider_id TEXT NOT NULL DEFAULT '',
-            amount_minor BIGINT NOT NULL,
-            currency TEXT NOT NULL DEFAULT 'USD',
-            credit_micro BIGINT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at BIGINT NOT NULL,
-            settled_at BIGINT NOT NULL DEFAULT 0,
-            raw TEXT NOT NULL DEFAULT '{}'
-        )
-    ''')
+    # billing_payments: migrated onto Core.
+    from lib.database._core_schema import BILLING_PAYMENTS, create_if_absent
+    create_if_absent(conn, BILLING_PAYMENTS, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_payments_user ON billing_payments(user_id)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_payments_provider ON billing_payments(provider, provider_id)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_payments_status ON billing_payments(status)')

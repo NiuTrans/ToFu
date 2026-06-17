@@ -42,6 +42,11 @@ class SkillCatalogEntry(TypedDict, total=False):
     requires: dict          # optional {bins: [...], env: [...]} hint
     install_note: str       # optional sentence shown under the card
     docs_path: str          # optional path inside the zip to link on card
+    subdir: str             # optional repo-relative path of the single
+                            # sub-skill to install from a multi-skill
+                            # archive (e.g. 'skills/pptx'). Without this,
+                            # a mono-repo zip installs whichever SKILL.md
+                            # the walker reaches first.
 
 
 # \u2500\u2500 Categories \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -72,26 +77,14 @@ CATALOG: list[SkillCatalogEntry] = [
     # \u2500\u2500 Anthropic official Skills \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
     {
-        'id': 'anthropic-skills',
-        'name': 'Anthropic Skills (all)',
-        'description': 'Official Claude Skills bundle \u2014 docx, xlsx, pptx, pdf, Artifacts builder, webapp-testing, Skill-Creator, and more.',
-        'icon': '\U0001f9e1',
-        'category': CAT_DOCS,
-        'download_url': 'https://github.com/anthropics/skills/archive/refs/heads/main.zip',
-        'homepage': 'https://github.com/anthropics/skills',
-        'author': 'Anthropic',
-        'tags': ['official', 'anthropic', 'claude', 'docs', 'artifacts', 'pdf', 'excel'],
-        'featured': True,
-        'install_note': 'Installs the whole repo; sub-skills live under skills/*/SKILL.md.',
-    },
-    {
         'id': 'skill-creator',
         'name': 'Skill Creator',
         'description': 'Anthropic\u2019s scaffolding skill \u2014 lets the agent write new SKILL.md packages following best practices.',
         'icon': '\U0001f9ea',
         'category': CAT_CODE,
         'download_url': 'https://codeload.github.com/anthropics/skills/zip/refs/heads/main',
-        'homepage': 'https://github.com/anthropics/skills/tree/main/skill-creator',
+        'homepage': 'https://github.com/anthropics/skills/tree/main/skills/skill-creator',
+        'subdir': 'skills/skill-creator',
         'author': 'Anthropic',
         'tags': ['anthropic', 'meta', 'authoring'],
     },
@@ -102,7 +95,8 @@ CATALOG: list[SkillCatalogEntry] = [
         'icon': '\U0001f4dd',
         'category': CAT_DOCS,
         'download_url': 'https://codeload.github.com/anthropics/skills/zip/refs/heads/main',
-        'homepage': 'https://github.com/anthropics/skills/tree/main/document-skills/docx',
+        'homepage': 'https://github.com/anthropics/skills/tree/main/skills/docx',
+        'subdir': 'skills/docx',
         'author': 'Anthropic',
         'tags': ['word', 'docx', 'document', 'office'],
         'featured': True,
@@ -115,7 +109,8 @@ CATALOG: list[SkillCatalogEntry] = [
         'icon': '\U0001f4ca',
         'category': CAT_DOCS,
         'download_url': 'https://codeload.github.com/anthropics/skills/zip/refs/heads/main',
-        'homepage': 'https://github.com/anthropics/skills/tree/main/document-skills/xlsx',
+        'homepage': 'https://github.com/anthropics/skills/tree/main/skills/xlsx',
+        'subdir': 'skills/xlsx',
         'author': 'Anthropic',
         'tags': ['excel', 'xlsx', 'spreadsheet', 'office'],
         'featured': True,
@@ -128,20 +123,25 @@ CATALOG: list[SkillCatalogEntry] = [
         'icon': '\U0001f4c4',
         'category': CAT_DOCS,
         'download_url': 'https://codeload.github.com/anthropics/skills/zip/refs/heads/main',
-        'homepage': 'https://github.com/anthropics/skills/tree/main/document-skills/pdf',
+        'homepage': 'https://github.com/anthropics/skills/tree/main/skills/pdf',
+        'subdir': 'skills/pdf',
         'author': 'Anthropic',
         'tags': ['pdf', 'document', 'extract'],
     },
     {
         'id': 'pptx-skill',
         'name': 'PowerPoint (pptx)',
-        'description': 'Build and edit PowerPoint decks \u2014 slides, layouts, speaker notes.',
+        'description': 'Build, edit, and read PowerPoint decks \u2014 create from scratch (pptxgenjs) or from a template, with design-quality guidance and visual QA.',
         'icon': '\U0001f3a5',
         'category': CAT_DOCS,
         'download_url': 'https://codeload.github.com/anthropics/skills/zip/refs/heads/main',
-        'homepage': 'https://github.com/anthropics/skills/tree/main/document-skills/pptx',
+        'homepage': 'https://github.com/anthropics/skills/tree/main/skills/pptx',
+        'subdir': 'skills/pptx',
         'author': 'Anthropic',
-        'tags': ['pptx', 'powerpoint', 'slides', 'office'],
+        'tags': ['pptx', 'powerpoint', 'slides', 'deck', 'presentation', 'office'],
+        'featured': True,
+        'requires': {'bins': ['python3']},
+        'install_note': 'Full features also use `pptxgenjs` (npm), `markitdown[pptx]` (pip) and LibreOffice for rendering.',
     },
     {
         'id': 'artifacts-builder',
@@ -150,7 +150,8 @@ CATALOG: list[SkillCatalogEntry] = [
         'icon': '\U0001f3a8',
         'category': CAT_CREATIVE,
         'download_url': 'https://codeload.github.com/anthropics/skills/zip/refs/heads/main',
-        'homepage': 'https://github.com/anthropics/skills/tree/main/artifacts-builder-skill',
+        'homepage': 'https://github.com/anthropics/skills/tree/main/skills/web-artifacts-builder',
+        'subdir': 'skills/web-artifacts-builder',
         'author': 'Anthropic',
         'tags': ['artifacts', 'html', 'react', 'svg'],
     },
@@ -161,7 +162,8 @@ CATALOG: list[SkillCatalogEntry] = [
         'icon': '\U0001f9ea',
         'category': CAT_CODE,
         'download_url': 'https://codeload.github.com/anthropics/skills/zip/refs/heads/main',
-        'homepage': 'https://github.com/anthropics/skills/tree/main/webapp-testing-skill',
+        'homepage': 'https://github.com/anthropics/skills/tree/main/skills/webapp-testing',
+        'subdir': 'skills/webapp-testing',
         'author': 'Anthropic',
         'tags': ['playwright', 'testing', 'browser'],
         'requires': {'bins': ['node'], 'env': []},

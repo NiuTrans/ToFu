@@ -29,7 +29,10 @@ GENERATE_IMAGE_TOOL = {
             "background, recolor, add/remove objects, restyle, etc. — pass that image's "
             "URL or path as source_image and describe the change in prompt. Editing "
             "preserves the rest of the source image and is automatically routed to a "
-            "capable model. "
+            "capable model. After every successful generation/edit, this tool reports "
+            "the saved image reference (a project path or an '/api/images/...' URL) in "
+            "its result text — reuse that exact value as source_image to edit the image "
+            "you just produced, instead of generating a new one from scratch. "
             "Provide a detailed English prompt for best results. "
             "You can optionally specify aspect ratio and resolution."
         ),

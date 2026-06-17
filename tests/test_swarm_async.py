@@ -1196,5 +1196,122 @@ class TestAutoContinueGuardrails(unittest.TestCase):
         self.assertNotIn(self.key, self.integ._autocontinue_chain)
 
 
+class TestRehydration(unittest.TestCase):
+    """Durable round-level resume: rehydrate a swarm from persisted checkpoints.
+
+    Uses the in-memory DB so persistence tables exist. Verifies:
+      * completed agents are preloaded into the results map (NOT re-run),
+      * a completed-but-undelivered result is re-enqueued as <swarm-update>,
+      * non-terminal agents are re-spawned and seeded from their checkpoint,
+      * load_resumable_sessions drops fully-terminal+delivered sessions.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import os
+        os.environ['TOFU_DB_BACKEND'] = 'sqlite'
+        os.environ.setdefault('TOFU_DB_PATH', '/tmp/swarm_rehydrate_unittest.db')
+        from lib.database import init_db
+        init_db()
+
+    def setUp(self):
+        from lib.swarm import persistence as p
+        self.p = p
+        self.key = 'conv-rehy-' + str(id(self))
+        agent_inbox.reset_for_test(self.key)
+
+    def tearDown(self):
+        self.p.delete_session(self.key)
+        with _sessions_lock:
+            _active_sessions.pop(self.key, None)
+        agent_inbox.reset_for_test(self.key)
+
+    def test_load_resumable_filters_terminal_delivered(self):
+        self.p.save_session(self.key, conv_id=self.key, task_id='t1',
+                            specs=[{'id': 'a1', 'role': 'researcher', 'objective': 'X'}],
+                            config={}, status='running')
+        # one completed+delivered agent → NOT resumable
+        self.p.save_agent(self.key, 'a1', role='researcher', objective='X',
+                          status='completed', messages=[], result={'status': 'completed'},
+                          rounds_used=1, delivered=True)
+        self.assertEqual(
+            [s for s in self.p.load_resumable_sessions() if s['swarm_key'] == self.key],
+            [])
+        # flip to undelivered → resumable (notification owed)
+        self.p.mark_delivered  # noqa: just reference
+        self.p.save_agent(self.key, 'a1', role='researcher', objective='X',
+                          status='completed', messages=[], result={'status': 'completed'},
+                          rounds_used=1, delivered=False)
+        keys = [s['swarm_key'] for s in self.p.load_resumable_sessions()]
+        self.assertIn(self.key, keys)
+
+    def test_rehydrate_preloads_completed_and_respawns_running(self):
+        # Persist a session: a1 completed (delivered), a2 running mid-flight.
+        self.p.save_session(self.key, conv_id=self.key, task_id='t2',
+                            specs=[
+                                {'id': 'a1', 'role': 'researcher', 'objective': 'done one'},
+                                {'id': 'a2', 'role': 'coder', 'objective': 'resume me'},
+                            ],
+                            config={}, status='running')
+        self.p.save_agent(self.key, 'a1', role='researcher', objective='done one',
+                          status='completed',
+                          messages=[{'role': 'assistant', 'content': 'A1 FINAL'}],
+                          result={'status': 'completed', 'final_answer': 'A1 FINAL'},
+                          rounds_used=2, delivered=True)
+        self.p.save_agent(self.key, 'a2', role='coder', objective='resume me',
+                          status='running',
+                          messages=[{'role': 'user', 'content': 'go'},
+                                    {'role': 'assistant', 'content': 'mid'}],
+                          rounds_used=1, delivered=False)
+
+        sess = next(s for s in self.p.load_resumable_sessions()
+                    if s['swarm_key'] == self.key)
+
+        specs = [SubTaskSpec.from_dict(d) for d in sess['specs']]
+        master = MasterOrchestrator(task_id='t2', conv_id=self.key, specs=specs,
+                                    inbox_key=self.key)
+
+        seeded = {}
+
+        def _factory(spec, **kwargs):
+            # The factory in the real code seeds agent.messages from
+            # _resume_messages AFTER build; here we just record what got passed
+            # and return a fast fake. We read master._resume_messages to assert
+            # the seed map was populated for the running agent.
+            return _FakeAgent(spec, final_answer=f'resumed {spec.id}')
+
+        with patch('lib.swarm.master._build_sub_agent', side_effect=_factory):
+            master.rehydrate_in_background(sess['agents'])
+            done = _wait_until(lambda: master.completed_count >= 2, timeout=3.0)
+
+        self.assertTrue(done, 'rehydrated swarm did not settle')
+        # a1 preloaded with its stored answer (not re-run → answer unchanged)
+        r1 = master.get_agent_result('a1')
+        self.assertEqual(r1['final_answer'], 'A1 FINAL')
+        # a2 was re-spawned: its resume messages were seeded into the map
+        self.assertIn('a2', master._resume_messages)
+        self.assertEqual(len(master._resume_messages['a2']), 2)
+
+    def test_rehydrate_reenqueues_undelivered_completed(self):
+        self.p.save_session(self.key, conv_id=self.key, task_id='t3',
+                            specs=[{'id': 'a1', 'role': 'researcher', 'objective': 'X'}],
+                            config={}, status='running')
+        self.p.save_agent(self.key, 'a1', role='researcher', objective='X',
+                          status='completed',
+                          messages=[{'role': 'assistant', 'content': 'undelivered ans'}],
+                          result={'status': 'completed', 'final_answer': 'undelivered ans'},
+                          rounds_used=1, delivered=False)
+        sess = next(s for s in self.p.load_resumable_sessions()
+                    if s['swarm_key'] == self.key)
+        specs = [SubTaskSpec.from_dict(d) for d in sess['specs']]
+        master = MasterOrchestrator(task_id='t3', conv_id=self.key, specs=specs,
+                                    inbox_key=self.key)
+        with _patch_factory():
+            master.rehydrate_in_background(sess['agents'])
+            _wait_until(lambda: master.is_terminated, timeout=3.0)
+        # The undelivered completed result was re-pushed to the model inbox.
+        self.assertGreaterEqual(agent_inbox.peek(self.key), 1)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

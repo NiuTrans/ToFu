@@ -112,6 +112,28 @@ def _safe_extract_zip(zip_obj: zipfile.ZipFile, dest_dir: str) -> int:
     return file_count
 
 
+def _find_skill_root_in_subdir(start_dir: str, subdir: str) -> str | None:
+    """Locate a specific sub-skill inside an extracted multi-skill archive.
+
+    Mono-repos like ``anthropics/skills`` ship every sub-skill under
+    ``skills/<name>/SKILL.md`` and the zip wraps them one level deep
+    (``skills-main/skills/pptx/SKILL.md``).  ``subdir`` is the
+    repo-relative path of the wanted skill (e.g. ``'skills/pptx'``); we
+    return the first directory whose path ENDS with that suffix and holds
+    a ``SKILL.md``.  Returns ``None`` when no such directory exists.
+    """
+    want = subdir.strip('/').replace('\\', '/')
+    want_parts = tuple(want.split('/'))
+    for root, _dirs, files in os.walk(start_dir):
+        if 'SKILL.md' not in files:
+            continue
+        rel = os.path.relpath(root, start_dir).replace('\\', '/')
+        rel_parts = tuple(p for p in rel.split('/') if p and p != '.')
+        if rel_parts[-len(want_parts):] == want_parts:
+            return root
+    return None
+
+
 def _find_skill_root(start_dir: str) -> str | None:
     """Locate the directory containing ``SKILL.md`` inside ``start_dir``.
 
@@ -205,6 +227,8 @@ def install_skill_package(
     project_path: str | None = None,
     overwrite: bool = False,
     original_filename: str | None = None,
+    catalog_id: str | None = None,
+    subdir: str | None = None,
 ) -> dict[str, Any]:
     """Install a skill package into the memory tree.
 
@@ -217,8 +241,18 @@ def install_skill_package(
         overwrite: When ``True``, replace an existing package with the
             same id.  When ``False`` (default), the new package is
             installed under ``<id>_2``, ``<id>_3``, ... to avoid clobber.
-        original_filename: Optional \u2014 used purely for logging when
+        original_filename: Optional — used purely for logging when
             ``source`` is bytes.
+        catalog_id: Optional — when installing from the curated catalog,
+            the catalog entry id (e.g. ``'xlsx-skill'``). Persisted in a
+            ``.catalog_id`` marker inside the package so the catalog can
+            later detect that this entry is installed (the SKILL.md-derived
+            memory id rarely equals the catalog id).
+        subdir: Optional — repo-relative path of a single sub-skill to
+            install from a multi-skill archive (e.g. ``'skills/pptx'`` in
+            the ``anthropics/skills`` mono-repo). When given, only that
+            sub-directory is installed instead of the first ``SKILL.md``
+            the breadth-first walk happens to reach.
 
     Returns:
         ``{'memory': <memory dict>, 'install_hints': [...], 'replaced': bool}``
@@ -261,7 +295,16 @@ def install_skill_package(
             raise InstallerError(f'Cannot read source: {source!r}')
 
         # \u2500\u2500 Step 2: locate SKILL.md \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-        skill_root = _find_skill_root(extracted)
+        if subdir:
+            skill_root = _find_skill_root_in_subdir(extracted, subdir)
+            if not skill_root:
+                raise InstallerError(
+                    f'Sub-skill {subdir!r} not found in the archive. The '
+                    'catalog entry may reference a path that no longer '
+                    'exists upstream.'
+                )
+        else:
+            skill_root = _find_skill_root(extracted)
         if not skill_root:
             raise InstallerError(
                 'No SKILL.md found in the package. A skill package must '
@@ -312,6 +355,19 @@ def install_skill_package(
             target_dir,
         )
 
+        # Record the catalog origin so the catalog endpoint can mark this
+        # entry as installed — the SKILL.md-derived ``skill_id`` rarely
+        # matches the catalog id (e.g. catalog ``xlsx-skill`` → id ``xlsx``).
+        # Written BEFORE _memory_from_file so the returned dict picks it up.
+        if catalog_id:
+            try:
+                with open(os.path.join(target_dir, '.catalog_id'), 'w',
+                          encoding='utf-8') as cf:
+                    cf.write(catalog_id.strip() + '\n')
+            except OSError as e:
+                logger.warning('[SkillInstaller] Failed to write .catalog_id '
+                               'marker for %s: %s', skill_id, e)
+
         # \u2500\u2500 Step 5: build the memory dict for the response \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
         mem = _memory_from_file(
             os.path.join(target_dir, 'SKILL.md'),
@@ -338,4 +394,5 @@ def install_skill_package(
             'memory': mem,
             'install_hints': install_hints,
             'replaced': replaced,
+            'catalog_id': catalog_id or '',
         }

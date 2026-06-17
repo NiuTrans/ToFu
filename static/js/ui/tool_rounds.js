@@ -733,7 +733,10 @@ function _renderUnifiedToolLine(round, isSearching) {
     } else if (ameta.command != null) {
       // run_command — show command preview
       const cmdText = escapeHtml(ameta.command || "");
-      detailHtml = `<div class="ptool-diff-preview"><pre class="ptool-cmd-code" style="margin:0;padding:8px 12px;font-size:12px;"><code>$ ${cmdText}</code></pre></div>`;
+      const cmdDescHtml = ameta.description
+        ? `<div class="ptool-cmd-desc">${escapeHtml(ameta.description)}</div>`
+        : "";
+      detailHtml = `<div class="ptool-diff-preview">${cmdDescHtml}<pre class="ptool-cmd-code" style="margin:0;padding:8px 12px;font-size:12px;"><code>$ ${cmdText}</code></pre></div>`;
     } else if (ameta.contentPreview) {
       const previewLines = (ameta.contentPreview || "")
         .split("\n")
@@ -821,6 +824,14 @@ function _renderUnifiedToolLine(round, isSearching) {
     //   render it live inside the block so the user can follow along.
     if (round.toolName === "run_command" || round.toolName === "code_exec") {
       const cmdText = escapeHtml(round.query || "");
+      let _cmdDesc = "";
+      try {
+        const _a = typeof round.toolArgs === "string" ? JSON.parse(round.toolArgs) : (round.toolArgs || {});
+        _cmdDesc = (_a && _a.description) || "";
+      } catch (_e) { /* malformed toolArgs — skip description */ }
+      const descHtml = _cmdDesc
+        ? `<div class="ptool-cmd-desc">${escapeHtml(_cmdDesc)}</div>`
+        : "";
       const partial = typeof round._partialOutput === "string" ? round._partialOutput : "";
       let liveOutHtml = "";
       if (partial) {
@@ -839,6 +850,7 @@ function _renderUnifiedToolLine(round, isSearching) {
              <span class="ptool-cmd-label">Running...</span>
              <span class="ptool-spinner"></span>
            </div>
+           ${descHtml}
            <pre class="ptool-cmd-code"><code>$ ${cmdText}</code></pre>
            ${liveOutHtml}
          </div>`;
@@ -863,6 +875,9 @@ function _renderUnifiedToolLine(round, isSearching) {
   // ★ run_command / code_exec: render as inline terminal block with collapsible output
   if ((round.toolName === "run_command" || round.toolName === "code_exec") && (meta.command != null || meta.output != null)) {
     const cmd = escapeHtml(meta.command || round.query || "");
+    const descHtml = meta.description
+      ? `<div class="ptool-cmd-desc">${escapeHtml(meta.description)}</div>`
+      : "";
     const output = meta.output || "";
     const exitCode = meta.exitCode ?? "?";
     const timedOut = meta.timedOut || false;
@@ -891,6 +906,7 @@ function _renderUnifiedToolLine(round, isSearching) {
            <span class="ptool-cmd-label">${round.toolName === "code_exec" ? "Code Execution" : "Command"}</span>
            <span class="ptool-cmd-status">${statusLabel}</span>
          </div>
+         ${descHtml}
          <pre class="ptool-cmd-code"><code>$ ${cmd}</code></pre>
          ${outputHtml}
        </div>`;
@@ -1060,22 +1076,26 @@ function _renderUnifiedToolLine(round, isSearching) {
   if (round.toolName === "read_files" && Array.isArray(meta.imageDataUris) && meta.imageDataUris.length) {
     const imgs = meta.imageDataUris.filter((d) => d && d.uri);
     if (imgs.length) {
-      const cards = imgs.map((d) => {
+      const multi = imgs.length > 1;
+      const tiles = imgs.map((d) => {
         const cap = escapeHtml(d.filename || d.format || "");
-        return `<div class="imagegen-card">
+        return `<figure class="rf-img-tile">
              <img src="${escapeHtml(d.uri)}" alt="${cap}" loading="lazy"
                   onclick="_openImageFullscreen(this.src)" />
-             ${cap ? `<div class="imagegen-card-footer"><span class="ig-prompt">${cap}</span></div>` : ""}
-           </div>`;
+             ${cap ? `<figcaption class="rf-img-cap" title="${cap}">${cap}</figcaption>` : ""}
+           </figure>`;
       }).join("");
-      return `<div class="ptool-imagegen-block" data-rn="${round.roundNum}">
-           <div class="ptool-line ptool-imagegen-header">
+      const countBadge = multi
+        ? `<span class="ptool-badge ptool-badge-info">${imgs.length} images</span>`
+        : (meta.badge ? `<span class="ptool-badge ptool-badge-info">${escapeHtml(meta.badge)}</span>` : "");
+      return `<div class="ptool-readimg-block" data-rn="${round.roundNum}">
+           <div class="ptool-line ptool-readimg-header">
              <span class="ptool-icon">${svg}</span>
              <span class="ptool-text">${q}</span>
-             ${meta.badge ? `<span class="ptool-badge ptool-badge-info">${escapeHtml(meta.badge)}</span>` : ""}
+             ${countBadge}
              ${_tcPreviewBtn(round)}
            </div>
-           ${cards}
+           <div class="rf-img-grid${multi ? " rf-img-grid-multi" : ""}">${tiles}</div>
          </div>`;
     }
   }
@@ -1497,6 +1517,11 @@ function _renderTimerWatcherBlock(round, svg) {
   const timerId = round._timerTimerId || "";
   const totalPolls = polls.filter(p => p.decision !== "started").length;
   const timerIdShort = timerId ? timerId.slice(0, 12) : "";
+  // Was the most recent poll a parse/LLM error? Surface it in the header so
+  // a stuck verification (LLM not returning a usable decision) is obvious.
+  const realPolls = polls.filter(p => p.decision !== "started");
+  const lastPoll = realPolls.length ? realPolls[realPolls.length - 1] : null;
+  const lastWasError = lastPoll && (lastPoll.decision === "error" || lastPoll.decision === "parse_error" || lastPoll.parseError);
 
   // Header
   let headerLabel, headerCls;
@@ -1509,11 +1534,37 @@ function _renderTimerWatcherBlock(round, svg) {
   } else if (isActive) {
     const skipN = round._timerSkipCount || 0;
     const skipSuffix = skipN > 0 ? `, ${skipN} skipped` : "";
-    headerLabel = `⏱️ Timer ${timerIdShort} — watching… (${totalPolls} poll${totalPolls !== 1 ? "s" : ""}${skipSuffix})`;
-    headerCls = "timer-watcher-active";
+    const errSuffix = lastWasError ? ", ⚠️ last check errored" : "";
+    headerLabel = `⏱️ Timer ${timerIdShort} — watching… (${totalPolls} poll${totalPolls !== 1 ? "s" : ""}${skipSuffix}${errSuffix})`;
+    headerCls = lastWasError ? "timer-watcher-active timer-watcher-warn" : "timer-watcher-active";
   } else {
     headerLabel = `⏱️ Timer ${timerIdShort} — ${round.status || "done"} (${totalPolls} polls)`;
     headerCls = "";
+  }
+
+  // ── What is being verified — show the check instruction + command so the
+  //    user understands the timer's job, and how often it checks. ──
+  let metaHtml = "";
+  const instr = round._timerCheckInstruction || "";
+  const cmd = round._timerCheckCommand || "";
+  const interval = round._timerPollInterval || 0;
+  const maxPolls = round._timerMaxPolls || 0;
+  if (instr || cmd || interval) {
+    const cadence = interval
+      ? `Checks every ${interval}s${maxPolls ? ` · up to ${maxPolls} times` : ""}`
+      : "";
+    metaHtml = `<div class="timer-watcher-meta">
+      ${instr ? `<div class="timer-meta-row"><span class="timer-meta-label">Verifying</span><span class="timer-meta-val">${escapeHtml(instr.slice(0, 400))}</span></div>` : ""}
+      ${cmd ? `<div class="timer-meta-row"><span class="timer-meta-label">Command</span><code class="timer-meta-cmd">${escapeHtml(cmd.slice(0, 300))}</code></div>` : ""}
+      ${cadence ? `<div class="timer-meta-row"><span class="timer-meta-label">Cadence</span><span class="timer-meta-val">${cadence}</span></div>` : ""}
+    </div>`;
+  }
+
+  // ── "Next check in Ns" hint while active ──
+  let nextPollHtml = "";
+  if (isActive && round._timerNextPollTs) {
+    const secs = Math.max(0, Math.round((round._timerNextPollTs - Date.now()) / 1000));
+    nextPollHtml = `<div class="timer-next-poll">⏳ Next check ${secs > 0 ? `in ~${secs}s` : "due now"}…</div>`;
   }
 
   // Build poll lines (most recent first for readability)
@@ -1524,26 +1575,46 @@ function _renderTimerWatcherBlock(round, svg) {
 
   let pollLines = "";
   for (const p of visible) {
-    let icon, cls;
+    let icon, cls, label;
+    const isParseErr = p.decision === "parse_error" || p.parseError;
     if (p.decision === "started") {
-      icon = "🔔"; cls = "timer-poll-started";
+      icon = "🔔"; cls = "timer-poll-started"; label = "";
     } else if (p.decision === "ready") {
-      icon = "✅"; cls = "timer-poll-ready";
+      icon = "✅"; cls = "timer-poll-ready"; label = `#${p.pollNum}`;
     } else if (p.decision === "error") {
-      icon = "❌"; cls = "timer-poll-error";
+      icon = "❌"; cls = "timer-poll-error"; label = `#${p.pollNum}`;
+    } else if (isParseErr) {
+      icon = "⚠️"; cls = "timer-poll-error timer-poll-parse-err"; label = `#${p.pollNum}`;
     } else {
-      icon = "⏳"; cls = "timer-poll-wait";
+      icon = "⏳"; cls = "timer-poll-wait"; label = `#${p.pollNum}`;
     }
     const ts = p.ts ? new Date(p.ts).toLocaleTimeString() : "";
-    const reason = escapeHtml((p.reason || "").slice(0, 120));
-    const pollLabel = p.decision === "started" ? "" : `#${p.pollNum}`;
+    const fullReason = p.reason || "";
+    const reason = escapeHtml(fullReason.slice(0, 120));
     const tokens = p.tokensUsed ? ` · ${p.tokensUsed} tok` : "";
-    pollLines += `<div class="timer-poll-line ${cls}">
+
+    // Expandable detail: full reason + the check_command output (evidence).
+    const hasDetail = (fullReason.length > 120) || (p.cmdOutput && p.cmdOutput.length > 0);
+    let detailHtml = "";
+    if (hasDetail) {
+      const fullReasonHtml = fullReason.length > 120
+        ? `<div class="timer-poll-detail-reason">${escapeHtml(fullReason)}</div>` : "";
+      const cmdOutHtml = (p.cmdOutput && p.cmdOutput.length > 0)
+        ? `<div class="timer-poll-detail-label">Check output (evidence):</div><pre class="timer-poll-detail-output"><code>${escapeHtml(p.cmdOutput)}</code></pre>`
+        : "";
+      detailHtml = `<div class="timer-poll-detail">${fullReasonHtml}${cmdOutHtml}</div>`;
+    }
+    const toggleAttr = hasDetail
+      ? ` onclick="event.stopPropagation();var d=this.nextElementSibling;if(d){d.classList.toggle('expanded');this.classList.toggle('expanded');}"`
+      : "";
+    const caret = hasDetail ? `<span class="timer-poll-caret">▸</span>` : `<span class="timer-poll-caret-spacer"></span>`;
+    pollLines += `<div class="timer-poll-line ${cls}${hasDetail ? " timer-poll-has-detail" : ""}"${toggleAttr}>
+      ${caret}
       <span class="timer-poll-icon">${icon}</span>
-      <span class="timer-poll-num">${pollLabel}</span>
+      <span class="timer-poll-num">${label}</span>
       <span class="timer-poll-reason">${reason}</span>
       <span class="timer-poll-meta">${ts}${tokens}</span>
-    </div>`;
+    </div>${detailHtml}`;
   }
 
   let hiddenHtml = "";
@@ -1578,7 +1649,7 @@ function _renderTimerWatcherBlock(round, svg) {
          <span class="timer-toggle">${expandedByDefault ? '▾' : '▸'}</span>
        </div>
        <div class="timer-watcher-body${expandedByDefault ? ' expanded' : ''}" id="${uid}-wrap">
-         ${pollLines}${hiddenHtml}${skipTrailer}
+         ${metaHtml}${pollLines}${hiddenHtml}${skipTrailer}${nextPollHtml}
        </div>
      </div>`;
 }
@@ -1596,7 +1667,7 @@ function _renderUnifiedGroup(allRounds) {
    * by round number. */
   const _renderSlot = (r) => {
     const inner = _isRoundSwarm(r)
-      ? _buildSwarmPanelHTML(r)
+      ? _buildSwarmPanelHTML(r, allRounds)
       : _renderUnifiedToolLine(r, r.status === "searching");
     const swarmAttr = _isRoundSwarm(r) ? ' data-prn-kind="swarm"' : '';
     return `<div data-prn="${r.roundNum}"${swarmAttr}>${inner}</div>`;

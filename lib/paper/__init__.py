@@ -40,7 +40,7 @@ from .images import (
 )
 
 # arXiv + library
-from .arxiv import _extract_arxiv_id
+from .arxiv import _extract_arxiv_id, fetch_arxiv_title, search_arxiv
 from .library import (
     _LIB_IMAGES_CAP,
     _LIB_PARSED_TEXT_CAP,
@@ -96,7 +96,7 @@ __all__ = [
     '_ensure_paper_images', '_inject_images_into_report',
     '_lookup_paper_title', '_ensure_title_heading', '_build_image_manifest',
     # arxiv + library
-    '_extract_arxiv_id',
+    '_extract_arxiv_id', 'fetch_arxiv_title', 'search_arxiv',
     '_PAPER_LIB_COLUMNS', '_LIB_PARSED_TEXT_CAP', '_LIB_QA_HISTORY_CAP',
     '_LIB_IMAGES_CAP', '_LIB_TITLE_CAP', '_lib_row_to_dict',
     # report

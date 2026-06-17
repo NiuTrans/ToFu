@@ -23,6 +23,7 @@
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  /** @param {any} micro @param {number} [precision] */
   function _fmtMicro(micro, precision) {
     return ((micro || 0) / 1_000_000).toFixed(precision == null ? 4 : precision);
   }
@@ -33,6 +34,7 @@
     catch (_) { return String(ts); }
   }
 
+  /** @returns {Promise<any>} */
   async function _api(url, opts) {
     const r = await fetch(typeof apiUrl === 'function' ? apiUrl(url) : url,
       Object.assign({credentials: 'same-origin',
@@ -141,7 +143,7 @@
   async function relayAdminTopup(userId) {
     const amt = await showPrompt('充值金额(credits,正数):', { defaultValue: '100' });
     if (!amt) return;
-    const credits = parseFloat(amt);
+    const credits = parseFloat(String(amt));
     if (!isFinite(credits) || credits <= 0) { showAlert('无效金额'); return; }
     const note = await showPrompt('备注(可选):', { defaultValue: '管理员充值' });
     try {

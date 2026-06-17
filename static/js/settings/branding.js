@@ -76,7 +76,7 @@ const _BRAND_PATTERNS = [
 function _detectBrand(text) {
   if (!text) return 'generic';
   for (var i = 0; i < _BRAND_PATTERNS.length; i++) {
-    if (_BRAND_PATTERNS[i][0].test(text)) return _BRAND_PATTERNS[i][1];
+    if (/** @type {RegExp} */ (_BRAND_PATTERNS[i][0]).test(text)) return _BRAND_PATTERNS[i][1];
   }
   return 'generic';
 }

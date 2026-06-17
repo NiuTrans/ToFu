@@ -156,15 +156,53 @@ class ResolveConvConfigTest(unittest.TestCase):
             conv_settings={}, overrides={}, is_active=True)
         expected = {
             'maxTokens', 'thinkingEnabled', 'model', 'preset',
-            'systemPrompt', 'thinkingDepth', 'temperature', 'searchMode',
+            'systemPrompt', 'systemPromptMode',
+            'thinkingDepth', 'temperature', 'searchMode',
             'fetchEnabled', 'codeExecEnabled', 'memoryEnabled',
             'schedulerEnabled', 'swarmEnabled', 'projectPath',
             'projectPaths', 'readOnlyPaths', 'autoApply', 'browserEnabled',
             'desktopEnabled', 'imageGenEnabled', 'humanGuidanceEnabled',
             'endpointMode', 'autopilot', 'agentBackend',
             'autoTranslate', 'browserClientId', 'keepToolHistory',
+            'activeFlow', 'flowBuiltin', 'flowId',
         }
         self.assertEqual(set(out.keys()), expected)
+
+    def test_active_flow_builtin_parsed(self):
+        out = resolve_conv_config(
+            conv_settings={}, overrides={'activeFlow': 'builtin:autopilot'},
+            is_active=True)
+        self.assertEqual(out['activeFlow'], 'builtin:autopilot')
+        self.assertEqual(out['flowBuiltin'], 'autopilot')
+        self.assertEqual(out['flowId'], '')
+
+    def test_active_flow_stored_id_parsed(self):
+        out = resolve_conv_config(
+            conv_settings={}, overrides={'activeFlow': 'orch_abc123'},
+            is_active=True)
+        self.assertEqual(out['flowBuiltin'], '')
+        self.assertEqual(out['flowId'], 'orch_abc123')
+
+    def test_active_flow_unknown_builtin_ignored(self):
+        out = resolve_conv_config(
+            conv_settings={}, overrides={'activeFlow': 'builtin:nope'},
+            is_active=True)
+        self.assertEqual(out['flowBuiltin'], '')
+        self.assertEqual(out['flowId'], '')
+
+    def test_active_flow_empty_when_none(self):
+        out = resolve_conv_config(conv_settings={}, overrides={}, is_active=True)
+        self.assertEqual(out['activeFlow'], '')
+        self.assertEqual(out['flowBuiltin'], '')
+        self.assertEqual(out['flowId'], '')
+
+    def test_active_flow_inactive_reads_stored(self):
+        out = resolve_conv_config(
+            conv_settings={'activeFlow': 'orch_stored'},
+            overrides={'activeFlow': 'builtin:endpoint'},
+            is_active=False)
+        self.assertEqual(out['flowId'], 'orch_stored')
+        self.assertEqual(out['flowBuiltin'], '')
 
 
 class ResolveConvSettingsTest(unittest.TestCase):
@@ -236,6 +274,7 @@ class ResolveConvSettingsTest(unittest.TestCase):
             'swarmEnabled', 'endpointEnabled', 'autopilotEnabled',
             'imageGenEnabled', 'humanGuidanceEnabled', 'projectPath',
             'projectPaths', 'readOnlyPaths', 'autoTranslate', 'folderId',
+            'activeFlow',
         }
         self.assertEqual(set(out.keys()), expected)
 

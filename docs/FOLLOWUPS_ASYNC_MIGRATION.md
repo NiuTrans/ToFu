@@ -76,15 +76,19 @@ return, max-drawdown, cost-basis win-rate). **Still uncovered:**
 Sortino/annualisation between `reporting.py` and `risk_metrics.py` should still
 be consolidated. Extend the same golden-value pattern there next.
 
-### 5. `_core_schema.py` (SQLAlchemy Core) adoption
-**Gap:** `lib/database/_core_schema.py` is inert groundwork (zero production
-callers) intended to retire the hand-maintained twin DDL
-(`_schema_pg.py`/`_schema_sqlite.py`) + regex `_sql_translate.py` for new
-tables.
-**Action:** route the **next new table** through `_core_schema.define_table`
-as a proof, or drop the `sqlalchemy>=2.0` dependency until ready. `[§10]` —
-registering a live table = DB schema change, needs sign-off + `_SCHEMA_VERSION`
-bump.
+### 5. `_core_schema.py` (SQLAlchemy Core) adoption — DONE (first batch wired)
+**Status:** live. `lib/database/_core_schema.py` is no longer inert: 12 tables
+(`users`, `conversations`, `task_results`, `task_events`, `chat_artifacts`,
+`transcript_archive`, `daily_cost_cache`, `paper_reports`, `paper_library`,
+`paper_translations`, + kv stores) are created from their Core definitions via
+`create_if_absent` in `_schema_pg.py` / `_schema_sqlite.py`, and ~10 call-sites
+use `_core_schema.upsert`. The generated DDL is byte-equivalent to the legacy
+hand-DDL (no `_SCHEMA_VERSION` bump), proven by
+`tests/test_core_schema_parity.py` (29 tests, green).
+**Remaining:** migrate the rest of the hand-DDL tables off `_schema_*.py` +
+`_sql_translate.py` opportunistically, and route the **next new table** through
+`_core_schema.define_table`. `[§10]` — registering a new live table is a DB
+schema change needing sign-off + `_SCHEMA_VERSION` bump.
 
 ### 6. `_sql_translate.py` remaining gaps (now tracked by tests)
 `tests/test_sql_translate.py::TestPkMapCompleteness` greps the repo for

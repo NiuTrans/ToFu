@@ -40,7 +40,7 @@ from lib.orchestration import layout_definition, validate_definition
 from lib.request_parser import optional_str, parse_body
 from lib.task_runtime import TaskRuntime
 
-from .auth import require_auth
+from .auth import current_auth, require_auth
 from .._task_routes import register_task_routes
 
 logger = get_logger(__name__)
@@ -281,13 +281,51 @@ def _resolve_definition(body: dict) -> dict | None:
     tags=['orchestrations'],
 )
 def builtin_orchestration(name):
-    from lib.orchestration import build_endpoint_definition
+    from lib.orchestration import (
+        build_autopilot_definition, build_endpoint_definition,
+    )
 
-    builders = {'endpoint': build_endpoint_definition}
+    builders = {
+        'endpoint': build_endpoint_definition,
+        'autopilot': build_autopilot_definition,
+    }
     builder = builders.get(name)
     if builder is None:
         return api_not_found(f'Unknown built-in flow {name!r}')
     return jsonify({'ok': True, 'definition': builder()})
+
+
+@api_v1_orchestrations_bp.route('/api/v1/orchestrations/role-schema', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Get the per-role structured-param schema',
+    description='Returns the FieldSpec lists the studio inspector renders for '
+                'each role (the structured "what to do" inputs that fold into '
+                'the delegation brief). Field labels are i18n KEYS — the '
+                'frontend resolves wording via t(). Query ?role=<name> returns '
+                'just that role\'s schema (generic fallback for unknown roles); '
+                'omit it to get the full {roles: {...}, generic: [...], kinds} '
+                'map. The backend owns structure; this is the single source so '
+                'the inspector never mirrors a constant.',
+    tags=['orchestrations'],
+)
+def role_schema_orchestration():
+    from flask import request
+
+    from lib.orchestration import (
+        ROLE_PARAM_SCHEMA, VALID_PARAM_KINDS, role_param_schema,
+    )
+
+    role = (request.args.get('role') or '').strip()
+    if role:
+        return jsonify({'ok': True, 'role': role,
+                        'fields': role_param_schema(role)})
+    return jsonify({
+        'ok': True,
+        'roles': {r: spec for r, spec in ROLE_PARAM_SCHEMA.items()},
+        'generic': role_param_schema('__generic__'),
+        'kinds': sorted(VALID_PARAM_KINDS),
+    })
 
 
 @api_v1_orchestrations_bp.route('/api/v1/orchestrations/layout', methods=['POST'])
@@ -426,6 +464,182 @@ def orchestration_human_input():
     logger.info('[Orchestrations] human input req=%s len=%d',
                 req_id, len(response_text))
     return api_ok({'requestId': req_id})
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Durable run instances (Task Mode) — see docs/proposals/TASK_MODE.md
+#
+#  The /run endpoint above is the ephemeral chat-inline path (TaskRuntime
+#  only, TTL-purged). /tasks is its durable sibling: a run instance pins a
+#  definition snapshot in the DB and mirrors every engine event to
+#  orchestration_run_events so the run is reopenable after a reload/restart.
+# ═══════════════════════════════════════════════════════════════════
+
+def _created_by() -> str:
+    ctx = current_auth()
+    return getattr(ctx, 'key_id', '') if ctx else ''
+
+
+@api_v1_orchestrations_bp.route('/api/v1/orchestrations/tasks', methods=['POST'])
+@require_auth
+@api_meta(
+    summary='Create a durable orchestration run instance (Task Mode)',
+    description='Validates then runs the flow as a DURABLE, reopenable run. '
+                'Unlike /run, the definition snapshot + every event are '
+                'persisted to the DB. Pass an inline "definition" or a stored '
+                '"id", plus an optional "input". Returns {ok, run_id}; poll '
+                '/tasks/<run_id>/events for streamed + replayable events.',
+    tags=['orchestrations'],
+)
+def create_run_task():
+    from lib.orchestration_engine import FlowExecutor, FlowExecutionError
+    from lib import orchestration_runs as runs
+
+    body = parse_body()
+    defn = _resolve_definition(body)
+    if not isinstance(defn, dict):
+        return api_bad_request('definition or id is required')
+    verdict = validate_definition(defn)
+    if not verdict['ok']:
+        return api_bad_request('Invalid orchestration definition',
+                               errors=verdict['errors'])
+    user_input = optional_str(body, 'input', default='', max_len=8000)
+    orch_id = optional_str(body, 'id', default='')
+
+    run_id = runs.new_run_id()
+    runs.create_run(run_id, definition=defn, input_text=user_input,
+                    orch_id=orch_id, name=defn.get('name') or '',
+                    created_by=_created_by())
+
+    task = orchestration_run_runtime.create(
+        task_id=run_id, meta={'name': defn.get('name'), 'run_id': run_id})
+    tid = task['id']
+
+    def _worker():
+        # Dual sink: the in-memory runtime (live push + poll) AND the durable
+        # event log (cross-restart replay). append_event returns the seq the
+        # runtime assigned, which is the PK we persist under.
+        def _on_event(ev):
+            seq = orchestration_run_runtime.append_event(tid, ev)
+            if seq is not None:
+                runs.append_event(run_id, seq, ev)
+        try:
+            executor = FlowExecutor(
+                defn,
+                on_event=_on_event,
+                abort_check=task['abort_event'].is_set,
+            )
+            result = executor.run(initial_context=user_input)
+            orchestration_run_runtime.finish(tid, result=result)
+            status = (result or {}).get('status') or 'done'
+            runs.update_status(
+                run_id,
+                'done' if status == 'completed' else 'error',
+                final=(result or {}).get('final') or '',
+                error=None if status == 'completed' else ((result or {}).get('error') or 'failed'))
+        except FlowExecutionError as e:
+            orchestration_run_runtime.finish(tid, error=str(e),
+                                             error_context='orchestration:structural')
+            runs.update_status(run_id, 'error', error=str(e))
+
+    orchestration_run_runtime.spawn(tid, _worker)
+    logger.info('[Orchestrations] task run START run=%s name=%r',
+                run_id, defn.get('name'))
+    return jsonify({'ok': True, 'run_id': run_id}), 201
+
+
+@api_v1_orchestrations_bp.route('/api/v1/orchestrations/tasks', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='List durable run instances',
+    description='Returns run headers (newest first), without the definition '
+                'blob. Optional query filters: ?status= and ?orch_id=.',
+    tags=['orchestrations'],
+)
+def list_run_tasks():
+    from flask import request
+    from lib import orchestration_runs as runs
+
+    status = (request.args.get('status') or '').strip()
+    orch_id = (request.args.get('orch_id') or '').strip()
+    return jsonify({'ok': True,
+                    'runs': runs.list_runs(status=status, orch_id=orch_id)})
+
+
+@api_v1_orchestrations_bp.route('/api/v1/orchestrations/tasks/<run_id>',
+                                methods=['GET'])
+@require_auth
+@api_meta(summary='Fetch one durable run instance (header + definition)',
+          tags=['orchestrations'])
+def get_run_task(run_id):
+    from lib import orchestration_runs as runs
+
+    run = runs.get_run(run_id)
+    if run is None:
+        return api_not_found('Run not found')
+    return jsonify({'ok': True, 'run': run})
+
+
+@api_v1_orchestrations_bp.route('/api/v1/orchestrations/tasks/<run_id>/events',
+                                methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Durable cursor replay of a run\'s events',
+    description='Returns persisted events with seq >= cursor. Survives reload '
+                'and server restart (unlike the in-memory /run/poll). '
+                '{ok, events, next_cursor, status, done}.',
+    tags=['orchestrations'],
+)
+def get_run_task_events(run_id):
+    from flask import request
+    from lib import orchestration_runs as runs
+
+    run = runs.get_run(run_id)
+    if run is None:
+        return api_not_found('Run not found')
+    try:
+        cursor = int(request.args.get('cursor') or 0)
+    except (ValueError, TypeError):
+        cursor = 0
+    events = runs.get_events(run_id, cursor)
+    next_cursor = (events[-1]['seq'] + 1) if events else cursor
+    status = run['status']
+    return jsonify({
+        'ok': True,
+        'events': events,
+        'next_cursor': next_cursor,
+        'status': status,
+        'done': status in ('done', 'error', 'aborted'),
+    })
+
+
+@api_v1_orchestrations_bp.route('/api/v1/orchestrations/tasks/<run_id>/abort',
+                                methods=['POST'])
+@require_auth
+@api_meta(summary='Abort a running durable run instance', tags=['orchestrations'])
+def abort_run_task(run_id):
+    from lib import orchestration_runs as runs
+
+    if runs.get_run(run_id) is None:
+        return api_not_found('Run not found')
+    orchestration_run_runtime.abort(run_id)
+    runs.update_status(run_id, 'aborted')
+    logger.info('[Orchestrations] task run ABORT run=%s', run_id)
+    return api_ok({'run_id': run_id})
+
+
+@api_v1_orchestrations_bp.route('/api/v1/orchestrations/tasks/<run_id>',
+                                methods=['DELETE'])
+@require_auth
+@api_meta(summary='Delete a durable run instance and its events',
+          tags=['orchestrations'])
+def delete_run_task(run_id):
+    from lib import orchestration_runs as runs
+
+    if not runs.delete_run(run_id):
+        return api_not_found('Run not found')
+    logger.info('[Orchestrations] task run DELETE run=%s', run_id)
+    return api_ok()
 
 
 register_task_routes(

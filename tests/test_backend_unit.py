@@ -172,6 +172,31 @@ class TestBuildBody:
         assert 'enable_thinking' in body
         assert 'chat_template_kwargs' not in body
 
+    def test_gemini_reasoning_effort_ladder(self):
+        """Gemini 3.x is a reasoning model whose depth is controlled ONLY by
+        the OpenAI-style ``reasoning_effort`` string on the sankuai gateway.
+        The legacy ``enable_thinking`` boolean and nested ``thinking_level``
+        are silently ignored, so build_body must emit ``reasoning_effort``
+        and nothing else."""
+        from lib.llm import build_body
+
+        cases = {'off': 'minimal', 'low': 'low', 'medium': 'medium',
+                 'high': 'high', 'xhigh': 'high', 'max': 'high'}
+        for depth, expected in cases.items():
+            body = build_body('gemini-3.5-flash', self.DUMMY_MSGS,
+                              max_tokens=4096,
+                              thinking_enabled=(depth != 'off'),
+                              thinking_depth=depth, stream=False)
+            assert body.get('reasoning_effort') == expected, (depth, body)
+            assert 'enable_thinking' not in body
+            assert 'thinking' not in body
+
+    def test_gemini_default_effort_medium(self):
+        from lib.llm import build_body
+        body = build_body('gemini-3.5-flash', self.DUMMY_MSGS, max_tokens=4096,
+                          thinking_enabled=True, stream=False)
+        assert body.get('reasoning_effort') == 'medium'
+
     def test_tools_passed_through(self):
         from lib.llm import build_body
 
@@ -342,6 +367,15 @@ class TestThinkingFormatDetection:
         models = [{'model_id': 'claude-opus-5', 'owned_by': 'anthropic'}]
         assert _detect_thinking_format(models, 'claude') == 'thinking_type'
 
+    def test_gemini_detected_as_reasoning_effort(self):
+        """Gemini 3.x uses the OpenAI-style reasoning_effort string, not the
+        legacy enable_thinking boolean — both brand override and name vote."""
+        from lib.llm_dispatch.discovery import _detect_thinking_format
+        assert _detect_thinking_format(
+            [{'model_id': 'gemini-3.5-flash'}], 'gemini') == 'reasoning_effort'
+        assert _detect_thinking_format(
+            [{'model_id': 'gemini-3.5-flash'}], 'generic') == 'reasoning_effort'
+
     def test_owned_by_case_insensitive(self):
         from lib.llm_dispatch.discovery import _detect_thinking_format
         models = [{'model_id': 'qwen3-30b', 'owned_by': 'SGLang'}]
@@ -389,7 +423,7 @@ class TestSlotThinkingFormat:
         assert slot.thinking_format == ''
 
     def test_known_values_accepted(self):
-        for tf in ('', 'enable_thinking', 'thinking_type',
+        for tf in ('', 'enable_thinking', 'thinking_type', 'reasoning_effort',
                     'chat_template_kwargs', 'none'):
             self._slot(thinking_format=tf)  # must not raise
 
@@ -470,6 +504,37 @@ class TestReadjustThinkingParams:
         _readjust_thinking_params(body, 'qwen35-4b', 'chat_template_kwargs')
         # No thinking params present = nothing to rewrite.
         assert body == before
+
+    def test_swap_to_gemini_emits_reasoning_effort(self):
+        """A Claude body (thinking.adaptive + effort) re-routed to a Gemini
+        slot must shed the Claude shape and carry ``reasoning_effort`` mapped
+        from the original effort."""
+        from lib.llm_dispatch.api import _readjust_thinking_params
+
+        body = {'model': 'claude-sonnet-4', 'thinking': {'type': 'adaptive'},
+                'effort': 'high', 'temperature': 1.0}
+        _readjust_thinking_params(body, 'gemini-3.5-flash', '')
+        assert body.get('reasoning_effort') == 'high'
+        assert 'thinking' not in body
+        assert 'enable_thinking' not in body
+        assert 'effort' not in body
+
+    def test_swap_from_gemini_to_qwen_drops_reasoning_effort(self):
+        """A Gemini body (reasoning_effort) re-routed to cloud Qwen must drop
+        ``reasoning_effort`` and carry the ``enable_thinking`` boolean."""
+        from lib.llm_dispatch.api import _readjust_thinking_params
+
+        body = {'model': 'gemini-3.5-flash', 'reasoning_effort': 'high'}
+        _readjust_thinking_params(body, 'qwen3-max', '')
+        assert 'reasoning_effort' not in body
+        assert body.get('enable_thinking') is True
+
+    def test_gemini_minimal_treated_as_thinking_off_on_swap(self):
+        from lib.llm_dispatch.api import _readjust_thinking_params
+
+        body = {'model': 'gemini-3.5-flash', 'reasoning_effort': 'minimal'}
+        _readjust_thinking_params(body, 'doubao-pro', '')
+        assert body.get('thinking') == {'type': 'disabled'}
 
 
 # ═══════════════════════════════════════════════════════════

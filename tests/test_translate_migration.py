@@ -162,7 +162,7 @@ def test_poll_endpoint_done_shape():
             task['completed_at'] = time.time()
 
         async with app.test_client() as client:
-            r = await client.get(f'/api/translate/poll/{task["id"]}')
+            r = await client.get(f'/api/v1/translate/poll/{task["id"]}')
             assert r.status_code == 200
             data = await r.get_json()
             assert data['taskId'] == task['id']
@@ -197,7 +197,7 @@ def test_poll_endpoint_running_with_partial():
         })
 
         async with app.test_client() as client:
-            r = await client.get(f'/api/translate/poll/{task["id"]}')
+            r = await client.get(f'/api/v1/translate/poll/{task["id"]}')
             assert r.status_code == 200
             data = await r.get_json()
             assert data['status'] == 'running'
@@ -224,7 +224,7 @@ def test_poll_endpoint_unknown_task():
 
     async def _t():
         async with app.test_client() as client:
-            r = await client.get('/api/translate/poll/no-such-task-xyz')
+            r = await client.get('/api/v1/translate/poll/no-such-task-xyz')
             assert r.status_code == 404
             data = await r.get_json()
             assert data['error'] == 'Task not found'
@@ -262,7 +262,7 @@ def test_poll_batch_shape():
         t2.update({'status': 'running', 'progress': '1/3', 'partial': 'part'})
 
         async with app.test_client() as client:
-            r = await client.post('/api/translate/poll_batch',
+            r = await client.post('/api/v1/translate/poll-batch',
                                    json={'taskIds': [t1['id'], t2['id'], 'missing-id']})
             assert r.status_code == 200
             results = await r.get_json()

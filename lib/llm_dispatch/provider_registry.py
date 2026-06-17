@@ -87,7 +87,8 @@ _DIALECTS: dict[str, BodyDialect] = {}
 # them.  Mirror of lib.llm_dispatch.slot.THINKING_FORMATS (imported lazily to
 # avoid a circular import at module load).
 _BUILTIN_FORMATS = frozenset({
-    '', 'enable_thinking', 'thinking_type', 'chat_template_kwargs', 'none',
+    '', 'enable_thinking', 'thinking_type', 'reasoning_effort',
+    'chat_template_kwargs', 'none',
 })
 
 

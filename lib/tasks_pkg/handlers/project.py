@@ -311,12 +311,19 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         # Extract the first image for VLM upload, keep text content
         _images = tool_content['__batch_images__']
         _text = tool_content.get('_text_content', '')
-        # Capture every image's data URI for inline rendering before we
-        # collapse to a single dict (only the first goes to the VLM wire).
-        _img_descriptors = [_screenshot_to_descriptor(img) for img in _images.values()]
-        # Use the first image as the primary screenshot result
-        first_img = next(iter(_images.values()))
+        # Capture every image's data URI for inline rendering. Each image dict
+        # already carries its own filename (set in read_tools).
+        _img_list = [img for img in _images.values()
+                     if isinstance(img, dict) and img.get('__screenshot__')]
+        _img_descriptors = [_screenshot_to_descriptor(img, img.get('filename', ''))
+                            for img in _img_list]
+        # Use the first image as the primary screenshot result, but attach the
+        # full list so EVERY image rides the wire to the VLM (one image_url
+        # block each — see _append_screenshot_message).
+        first_img = _img_list[0] if _img_list else next(iter(_images.values()))
         tool_content = first_img
+        if len(_img_list) > 1:
+            tool_content['images'] = _img_list
         # Store the text content as fallback
         if _text:
             tool_content['_text_fallback'] = _text

@@ -20,10 +20,13 @@ Critical ordering invariant (memory: ``compaction-viewer-architecture``):
 
   1. Early ``_archive_transcript(trigger='reactive')`` snapshot.
   2. Phase 0 image-strip via ``_strip_images_aggressive``.
-  3. Phase 1 aggressive ``micro_compact``.
-  4. Phase 2 cooldown reset.
-  5. Phase 3 ``force_compact_if_needed(_compaction_skip_archive=True)``.
-  6. Phase 4 wire-byte head truncate (defence-in-depth).
+  3. Phase 0.5 in-place truncate of the largest text message
+     (``_truncate_largest_message``) — handles the single-fat-message
+     overflow that whole-message dropping cannot.
+  4. Phase 1 aggressive ``micro_compact``.
+  5. Phase 2 cooldown reset.
+  6. Phase 3 ``force_compact_if_needed(_compaction_skip_archive=True)``.
+  7. Phase 4 wire-byte head truncate (defence-in-depth).
 
 Steps 1+2 must come BEFORE step 5, and step 5 MUST carry the skip flag.
 Otherwise the viewer gets two 'reactive' archive rows on the same 413.
@@ -35,6 +38,7 @@ from lib.log import get_logger
 from lib.tasks_pkg.compaction._archive import _archive_transcript
 from lib.tasks_pkg.compaction._constants import (
     _cooldown_lock,
+    _SINGLE_RESULT_HARD_CEILING_CHARS,
     _summary_cooldowns,
     _WIRE_BYTE_SOFT_LIMIT,
     _WIRE_IMAGE_KEEP_TAIL,
@@ -44,6 +48,7 @@ from lib.tasks_pkg.compaction._layer2 import force_compact_if_needed
 from lib.tasks_pkg.compaction._tokens import (
     _estimate_total_tokens,
     _get_context_limit,
+    _human_size,
     _parse_reported_token_count,
     _usable_context,
 )
@@ -123,6 +128,60 @@ def _strip_images_aggressive(messages: list,
     return stripped, bytes_freed
 
 
+def _truncate_largest_message(messages: list, *, ceiling_chars: int) -> tuple[int, int]:
+    """Head+tail-truncate the single largest tool-result text in place.
+
+    Layer-4 remediation for the failure mode that made conv mqgfkmxy fatal:
+    when ONE tool message carries the entire overflow (e.g. 1.7MB of binary
+    decoded as text), dropping whole messages (``_head_truncate``) can't help
+    because the offending message is in the protected tail AND the byte
+    target is reached before it's dropped. This shrinks *within* the worst
+    message so the overflow is actually removed.
+
+    Only string tool/user/assistant content is touched; ``image_url`` /
+    multimodal list content is left to ``_strip_images_aggressive``.
+
+    Args:
+        messages:      Live message list (mutated in place).
+        ceiling_chars: Clamp the worst message's text to roughly this size.
+
+    Returns:
+        ``(truncated_index, chars_freed)`` — ``(-1, 0)`` if nothing exceeded
+        the ceiling.
+    """
+    worst_idx = -1
+    worst_len = ceiling_chars
+    for i, msg in enumerate(messages):
+        if msg.get('role') == 'system':
+            continue
+        content = msg.get('content')
+        if isinstance(content, str) and len(content) > worst_len:
+            worst_len = len(content)
+            worst_idx = i
+
+    if worst_idx < 0:
+        return -1, 0
+
+    original = messages[worst_idx]['content']
+    head_budget = int(ceiling_chars * 0.70)
+    tail_budget = int(ceiling_chars * 0.25)
+    elided = len(original) - head_budget - tail_budget
+    clamped = (
+        original[:head_budget]
+        + (f'\n\n... [⚠ {elided:,} chars elided by emergency reactive '
+           f'truncation — this single message was {len(original):,} chars, '
+           f'likely binary/base64 decoded as text] ...\n\n')
+        + original[-tail_budget:]
+    )
+    messages[worst_idx]['content'] = clamped
+    freed = len(original) - len(clamped)
+    logger.warning('[ReactiveCompact] In-place truncated largest message '
+                   '(idx=%d role=%s) %s → %s (~%d chars freed)',
+                   worst_idx, messages[worst_idx].get('role', '?'),
+                   _human_size(len(original)), _human_size(len(clamped)), freed)
+    return worst_idx, freed
+
+
 def reactive_compact(messages: list, task: dict | None = None,
                      *, error_text: str | None = None) -> bool:
     """Emergency compaction triggered when the API rejects a request as too long.
@@ -199,6 +258,20 @@ def reactive_compact(messages: list, task: dict | None = None,
                            tokens_before, context_limit_hint,
                            _estimate_wire_bytes(messages) / 1048576,
                            _WIRE_BYTE_SOFT_LIMIT / 1048576)
+
+    # Phase 0.5: in-place truncate the single largest text message.
+    # When ONE tool result carries the whole overflow (e.g. a binary file
+    # decoded as ~1.7MB of text — conv mqgfkmxy, 2026-06), dropping whole
+    # messages can't help: the offending message sits in the protected tail
+    # and the byte target is hit before it's reached. Shrinking WITHIN the
+    # worst message is the only thing that removes the overflow. Runs every
+    # reactive pass (not just over_wire) since token-overflow has the same
+    # single-fat-message shape.
+    _t_idx, _t_freed = _truncate_largest_message(
+        messages, ceiling_chars=_SINGLE_RESULT_HARD_CEILING_CHARS)
+    if _t_idx >= 0:
+        logger.warning('%s [ReactiveCompact] Phase 0.5 in-place truncate freed '
+                       '~%d chars from message idx=%d', pfx, _t_freed, _t_idx)
 
     # Phase 1: aggressive micro-compact.
     micro_compact(

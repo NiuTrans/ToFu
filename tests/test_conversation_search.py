@@ -442,6 +442,117 @@ class TestSearchEndpoint:
         assert resp.status_code == 200
         assert not any(r["id"] == conv_id for r in resp.get_json())
 
+    def test_search_pg_phase1_uses_tsvector_index(self, flask_client):
+        """On PG, a whole-word query must be served by the index-backed
+        Phase-1 (search_tsv), NOT a sequential scan. This pins the fix for
+        the ~790ms full Seq Scan that PG searches previously paid on every
+        keystroke. Skips on SQLite (different Phase-1 path)."""
+        from lib.database import _BACKEND
+        if _BACKEND != 'pg':
+            pytest.skip('PG-specific index path')
+
+        import asyncio
+
+        from lib.database import DOMAIN_CHAT, async_transaction
+
+        # The endpoint builds 'word:*' prefix tsquery terms; mirror that and
+        # assert the GIN index (idx_conv_search_tsv) is USABLE for Phase-1.
+        #
+        # We force ``enable_seqscan = off`` for the EXPLAIN: on the tiny test
+        # fixture (~a dozen rows) PG's cost-based planner correctly prefers a
+        # Seq Scan — an index probe is genuinely more expensive than scanning
+        # a handful of rows — so asserting the plan *chose* the index is
+        # non-deterministic and table-size-dependent. The durable property
+        # this test pins is that the index EXISTS and APPLIES to the query
+        # (the regression target is the index being dropped or the column
+        # losing its GIN index), which surfaces deterministically once seqscan
+        # is disabled. ``SET LOCAL`` inside async_transaction scopes the
+        # override to this txn and rolls it back, so it never leaks onto the
+        # pooled connection and skews unrelated queries.
+        async def _plan():
+            async with async_transaction(domain=DOMAIN_CHAT) as conn:
+                await conn.execute('SET LOCAL enable_seqscan = off')
+                rows = await conn.fetchall(
+                    "EXPLAIN SELECT id FROM conversations "
+                    "WHERE user_id=? AND search_tsv @@ to_tsquery('simple', ?) "
+                    "ORDER BY updated_at DESC LIMIT 50",
+                    (1, 'gradient:*'))
+            return rows
+
+        rows = asyncio.run(_plan())
+        plan = '\n'.join(str(r[0]) for r in rows)
+        assert 'idx_conv_search_tsv' in plan or 'Bitmap Index Scan' in plan, (
+            f'Phase-1 PG search cannot use the tsvector GIN index '
+            f'(index missing or dropped?):\n{plan}')
+
+
+    def test_search_pg_fallback_uses_head_trgm_index(self, flask_client):
+        """On PG, the Phase-2 substring fallback (`lower(left(search_text,
+        10000)) LIKE ?`) must be served by the expression trgm index
+        ``idx_conv_search_head_trgm``, NOT a full Seq Scan that detoasts every
+        row. This pins the fix for the ~1.2s fallback scan. The index
+        expression MUST match the query predicate (same lower(left(...,10000))
+        shape) or the planner won't use it.
+
+        Like the tsvector test above, we force ``enable_seqscan = off`` so the
+        assertion is about the index being USABLE/APPLICABLE (the regression
+        target: index dropped, or the 10000 cap drifting out of sync with the
+        SQL in conversations_search.py), not about the cost-based planner's
+        choice on the tiny test fixture."""
+        from lib.database import _BACKEND
+        if _BACKEND != 'pg':
+            pytest.skip('PG-specific index path')
+
+        import asyncio
+
+        from lib.database import DOMAIN_CHAT, async_transaction
+
+        async def _plan():
+            async with async_transaction(domain=DOMAIN_CHAT) as conn:
+                await conn.execute('SET LOCAL enable_seqscan = off')
+                rows = await conn.fetchall(
+                    "EXPLAIN SELECT id FROM conversations "
+                    "WHERE user_id=? AND lower(left(search_text, 10000)) LIKE ? "
+                    "ORDER BY updated_at DESC LIMIT 50",
+                    (1, '%gradient%'))
+            return rows
+
+        rows = asyncio.run(_plan())
+        plan = '\n'.join(str(r[0]) for r in rows)
+        assert 'idx_conv_search_head_trgm' in plan or 'Bitmap Index Scan' in plan, (
+            f'Phase-2 PG search fallback cannot use the head-trgm GIN index '
+            f'(index missing, or left(...) cap out of sync with the SQL?):\n{plan}')
+
+    def test_slow_search_threshold_log(self):
+        """The timing helper logs WARNING above the threshold, DEBUG below —
+        so a regression in the index path is visible in app.log."""
+        import logging
+
+        from routes import conversations_search as cs
+
+        records = []
+
+        class _Cap(logging.Handler):
+            def emit(self, rec):
+                records.append((rec.levelno, rec.getMessage()))
+
+        h = _Cap()
+        cs.logger.addHandler(h)
+        old_level = cs.logger.level
+        cs.logger.setLevel(logging.DEBUG)
+        try:
+            cs._log_search_timing('q', 3, cs._SLOW_SEARCH_THRESHOLD_S + 0.5)
+            cs._log_search_timing('q', 3, 0.001)
+        finally:
+            cs.logger.removeHandler(h)
+            cs.logger.setLevel(old_level)
+
+        levels = [lvl for lvl, _ in records]
+        assert logging.WARNING in levels, 'slow search should log WARNING'
+        assert logging.DEBUG in levels, 'fast search should log DEBUG'
+        slow_msg = next(m for lvl, m in records if lvl == logging.WARNING)
+        assert 'SLOW' in slow_msg
+
     def test_search_substring_match(self, flask_client):
         """ILIKE fallback finds substring matches that tsvector misses."""
         now = int(time.time() * 1000)

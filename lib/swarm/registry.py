@@ -378,6 +378,29 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
         'tools_hint': ['read_files', 'grep_search', 'find_files', 'list_dir'],
         'model_hint': 'heavy',
     },
+
+    # ── Autopilot role (used by the FlowExecutor autopilot path) ──
+    # The virtual user stands in for the human: it auto-replies to keep the
+    # task moving and signals completion with [VU: TASK_DONE]. Mirrors
+    # lib/tasks_pkg/autopilot._VU_ROLE_PROMPT. Empty tools_hint = all tools
+    # (the VU has the SAME tools as the worker, per the autopilot design).
+    'virtual_user': {
+        'when_to_use': (
+            'Autopilot step — a synthetic user that auto-replies at every '
+            'natural stop to keep a task progressing without a real human, '
+            'until the assistant has clearly finished.'
+        ),
+        'system_prompt_suffix': (
+            'You are a VIRTUAL USER standing in for the human. Reply in 1-3 '
+            'sentences, in the same language as the assistant, to keep the '
+            'task moving forward. For engineering tasks prefer the most '
+            'robust long-term solution. Output ONLY the reply text. Emit '
+            'exactly [VU: TASK_DONE] when the assistant has clearly '
+            'completed the task.'
+        ),
+        'tools_hint': [],
+        'model_hint': 'standard',
+    },
 }
 
 

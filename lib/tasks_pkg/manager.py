@@ -25,6 +25,23 @@ from lib.task_runtime import TaskRuntime
 
 logger = get_logger(__name__)
 
+# Gateway/provider routing prefixes that are an internal dispatch detail, not
+# something the user picked. Mirrors the canonical list in
+# lib/llm_dispatch/discovery.py so the user-facing model name (e.g.
+# "claude-opus-4.8") never leaks "aws.claude-opus-4.8" into the UI.
+_GATEWAY_PREFIXES = ('aws.', 'vertex.', 'gcp.', 'azure.', 'bedrock.')
+
+
+def _display_model_name(model: str) -> str:
+    """Strip internal gateway/provider prefixes for a user-facing label."""
+    name = model or 'the model'
+    for prefix in _GATEWAY_PREFIXES:
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    return name
+
+
 # ── Backing runtime ──────────────────────────────────────────────
 # kind='chat'. push_channel='chat' (matches the existing /api/push routes
 # and the frontend ``pushSubscribe('chat', taskId)`` consumer).
@@ -1004,7 +1021,7 @@ def _sync_result_to_conversation(task, meta):
                      pfx, conv_id, e, exc_info=True)
 
 
-def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db):
+def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db=None):
     """Automatically translate the assistant's response on the server side.
 
     Called from _sync_result_to_conversation after the assistant content is persisted.
@@ -1013,8 +1030,14 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db):
 
     Respects the per-conversation autoTranslate setting (frozen at send-time by
     the frontend — won't be overwritten while a task is active).
+
+    ``db`` may be omitted; callers that don't hold a connection (e.g. the
+    endpoint module, which is DB-decoupled) pass nothing and this acquires
+    the thread-local chat connection itself.
     """
     pfx = '[AutoTranslate]'
+    if db is None:
+        db = get_thread_db(DOMAIN_CHAT)
     try:
         row = db.execute(
             'SELECT messages, settings FROM conversations WHERE id=? AND user_id=1',
@@ -1142,7 +1165,7 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db):
                        pfx, conv_id[:8], e)
 
 
-def _maybe_auto_translate_critic(conv_id, content, msg_idx, db):
+def _maybe_auto_translate_critic(conv_id, content, msg_idx, db=None):
     """Server-side auto-translate for endpoint-mode critic review messages.
 
     Endpoint-mode critic output is authored by the Critic LLM (English by
@@ -1438,10 +1461,13 @@ def recover_stale_tasks_on_startup():
             logger.info('[Startup] Marked %d stale running task(s) as interrupted', len(stale_rows))
 
         # ── Step 2: Clear activeTaskId from all conversation settings ──
-        # Find conversations that still have activeTaskId set
+        # Find conversations that still have activeTaskId set. json_extract is
+        # translated to `settings::jsonb->>'activeTaskId'` on PG (index-backed by
+        # idx_conv_active_task) and runs natively on SQLite — both backends probe
+        # the JSON key directly instead of a leading-wildcard full-table scan.
         conv_rows = db.execute(
             "SELECT id, settings, messages FROM conversations WHERE user_id=1 "
-            "AND settings IS NOT NULL AND CAST(settings AS TEXT) LIKE '%activeTaskId%'"
+            "AND json_extract(settings, '$.activeTaskId') IS NOT NULL"
         ).fetchall()
 
         cleared = 0
@@ -1719,6 +1745,20 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
         _avoid_pairs = {_rotate_signal}
         logger.info('%s zero-byte force-rotate: avoiding %s:%s for this dispatch',
                     pfx, _rotate_signal[0], _rotate_signal[1])
+
+    # ★ Surface the in-flight request as a live phase BEFORE the first token.
+    #   Between a finished tool and the model's next token there is a silent
+    #   gap (prompt prefill / TTFT) during which no content/thinking delta
+    #   fires — and if the next turn is a tool call with no preamble, nothing
+    #   renders until tool_start.  Without this the spinner stays frozen on
+    #   the previous "Analyzing results…" label and the task looks hung.
+    #   Cleared automatically by the first content/thinking delta, or by
+    #   tool_start (hasActiveSearch) on the frontend.
+    _model_label = _display_model_name(model)
+    append_event(task, build_event(
+        EventType.PHASE, phase='waiting_model',
+        detail=f'Sent to {_model_label}, waiting for it to start replying…',
+        model=model))
 
     msg, finish_reason, usage = dispatch_stream(
         body,

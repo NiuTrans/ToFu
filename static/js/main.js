@@ -115,7 +115,7 @@ function _applyModelUI(modelId) {
   const toggle = document.getElementById("presetToggle");
   if (toggle) {
     toggle.setAttribute("data-model", modelId);
-    toggle.setAttribute("data-brand", brand);
+    toggle.setAttribute("data-brand", String(brand));
     const iconEl = toggle.querySelector(".ps-icon");
     const labelEl = toggle.querySelector(".ps-label");
     if (labelEl) {
@@ -500,6 +500,7 @@ function _saveConvToolState() {
   conv.swarmEnabled = !!swarmEnabled;
   conv.endpointEnabled = !!endpointEnabled;
   conv.autopilotEnabled = !!autopilotEnabled;
+  conv.activeFlow = activeFlow || '';
   conv.imageGenEnabled = !!imageGenEnabled;
   conv.imageGenMode = !!imageGenMode;
   conv.humanGuidanceEnabled = !!humanGuidanceEnabled;
@@ -584,6 +585,7 @@ function _restoreConvToolState(conv) {
   _applySwarmUI(!!conv.swarmEnabled);
   _applyEndpointUI(!!conv.endpointEnabled);
   _applyAutopilotUI(!!conv.autopilotEnabled);
+  _applyFlowUI(conv.activeFlow || '');
   _applyImageGenToolUI(!!conv.imageGenEnabled);
   _applyImageGenUI(!!conv.imageGenMode);
   _applyHumanGuidanceUI(!!conv.humanGuidanceEnabled);
@@ -641,6 +643,8 @@ function _resetToolsToDefaults() {
   _applyMemoryUI(true);
   _applySwarmUI(true);
   _applyEndpointUI(false);
+  _applyAutopilotUI(false);
+  _applyFlowUI('');
   _applyImageGenToolUI(false);
   _applyImageGenUI(false);
   if (typeof paperMode !== 'undefined' && paperMode && typeof exitPaperMode === 'function') exitPaperMode();
@@ -1002,7 +1006,6 @@ function _resetToolsToDefaults() {
     renderConversationList();
   });
   if (typeof _initSelectionPopup === "function") _initSelectionPopup();
-  loadPricing();
   loadProjectStatus();
   /* ★ Pre-fetch agent backend availability for the backend selector dropdown */
   _fetchAgentBackends().catch(() => {});

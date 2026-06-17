@@ -341,6 +341,25 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
     r.approvalId === 'ap1' && r.approvalMeta && r.approvalMeta.path === 'x.txt');
 }
 
+// ── 15b. write_approval_request for run_command carries command/description ──
+//   (the destructive-run_command gate path — meta.command drives the
+//    ameta.command!=null render branch in ui/tool_rounds.js). ──
+{
+  const { ctx } = setup();
+  T.dispatchSSEEvent(line({ type: 'tool_start', roundNum: 1, toolCallId: 'wac',
+    toolName: 'run_command' }), ctx);
+  T.dispatchSSEEvent(line({ type: 'write_approval_request', toolCallId: 'wac',
+    approvalId: 'ap2', meta: { toolName: 'run_command', command: 'rm foo.py',
+      description: 'delete foo' } }), ctx);
+  const r = ctx.assistantMsg.toolRounds.find(x => x.toolCallId === 'wac');
+  check('run_command_approval_pending', r && r.status === 'pending_approval' &&
+    r.approvalId === 'ap2');
+  check('run_command_approval_meta', r && r.approvalMeta &&
+    r.approvalMeta.command === 'rm foo.py' &&
+    r.approvalMeta.description === 'delete foo' &&
+    r.approvalMeta.path == null);
+}
+
 // ── 16. round_usage stashes _liveLastRoundUsage; returns falsy ──
 {
   const { ctx } = setup();
@@ -524,5 +543,5 @@ def test_sse_dispatch_characterization():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'SSE dispatch characterization failures:\n' + output
-    # 25 scenario groups, ~52 individual checks.
-    assert output.count('PASS') >= 50, f'expected >=50 PASS lines, got:\n{output}'
+    # 26 scenario groups, ~54 individual checks.
+    assert output.count('PASS') >= 52, f'expected >=52 PASS lines, got:\n{output}'

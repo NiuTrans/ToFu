@@ -722,9 +722,9 @@ CONDA_PKGS=(
     # lxml ≥6 works with libxml2 2.14+ and icu 75 OR 78 — gives the solver
     # maximum freedom. It's ABI-compatible with lxml 5.x at the Python level.
     "lxml>=6"
-    # BS4 — HTML fallback parser in lib/fetch/html_extract.py
+    # BS4 — HTML fallback parser in tofu_search/fetch/html_extract.py
     "beautifulsoup4>=4.12"
-    # python-dateutil — eagerly imported by lib/fetch/html_extract.py
+    # python-dateutil — eagerly imported by tofu_search/fetch/html_extract.py
     "python-dateutil>=2.8"
     # Office document parsers for lib/doc_parser.py (upload pipeline)
     "python-docx>=1.0"
@@ -998,6 +998,49 @@ if [[ ${#PIP_ONLY_PKGS[@]} -gt 0 ]]; then
     fi
 fi
 
+# ── tofu-search — the standalone search + content-fetch pipeline ──
+# server.py lists tofu_search.fetch / tofu_search.search as CRITICAL imports,
+# so the server refuses to boot without it. Two install sources:
+#   1. A bundled wheel under vendor/ (personal/internal exports) — used when
+#      present, because corp networks point pip at an internal mirror that
+#      does NOT carry tofu-search (only public PyPI does).
+#   2. Public PyPI (opensource installs / fresh git clone on a vanilla host).
+# --no-deps is safe: its deps (requests / trafilatura / bs4 / lxml /
+# python-dateutil) are installed above, and --no-deps keeps pip from
+# shadowing conda's lxml 6.
+if python -c "import tofu_search" 2>/dev/null; then
+    ok "tofu-search already importable — skipping"
+elif ! python -c "import pip" 2>/dev/null; then
+    warn "pip not available — cannot install tofu-search (server will fail to boot)"
+else
+    step "Installing tofu-search (required search/fetch pipeline)"
+    _TOFU_SEARCH_WHL=""
+    if [[ -d "${INSTALL_DIR}/vendor" ]]; then
+        _TOFU_SEARCH_WHL="$(ls -1 "${INSTALL_DIR}"/vendor/tofu_search-*.whl 2>/dev/null | sort -V | tail -1)"
+    fi
+    if [[ -n "$_TOFU_SEARCH_WHL" ]]; then
+        info "Installing bundled wheel: ${_TOFU_SEARCH_WHL##*/}"
+        if _safe_pip_install --no-deps --upgrade "$_TOFU_SEARCH_WHL"; then
+            ok "tofu-search installed from bundled wheel"
+        else
+            warn "Bundled tofu-search wheel install failed — falling back to PyPI"
+            _safe_pip_install --no-deps --upgrade "tofu-search>=0.2.0" \
+                && ok "tofu-search installed from PyPI" \
+                || fail "tofu-search install failed — the server will not boot. Retry: pip install tofu-search"
+        fi
+    else
+        info "No bundled wheel — installing from PyPI"
+        if _safe_pip_install --no-deps --upgrade "tofu-search>=0.2.0"; then
+            ok "tofu-search installed from PyPI"
+        else
+            warn "tofu-search install from PyPI failed."
+            warn "  If you are behind a corp mirror that lacks tofu-search, retry with public PyPI:"
+            warn "    pip install --index-url https://pypi.org/simple/ 'tofu-search>=0.2.0'"
+            fail "tofu-search install failed — the server will not boot without it."
+        fi
+    fi
+fi
+
 # ── Optional: bundled internal MCP servers (hope-mcp, xuecheng-mcp) ──
 # personal/internal exports include sibling repos under vendor/<name>/.
 # Install them so the MCP tab's "Install" button (which spawns
@@ -1157,7 +1200,7 @@ fi
 # so install.sh never prints "Installation complete!" on a broken env again.
 info "Verifying lxml + trafilatura + htmldate + justext + transitive deps import correctly..."
 
-_TOFU_IMPORT_PROBE='import lxml.etree, lxml_html_clean, trafilatura, htmldate, justext, courlan, dateparser, babel, tld, pytz, regex, tzlocal; print("lxml", lxml.__version__, "trafilatura", trafilatura.__version__, "htmldate", htmldate.__version__, "justext", justext.__version__)'
+_TOFU_IMPORT_PROBE='import lxml.etree, lxml_html_clean, trafilatura, htmldate, justext, courlan, dateparser, babel, tld, pytz, regex, tzlocal, tofu_search.search, tofu_search.fetch; print("lxml", lxml.__version__, "trafilatura", trafilatura.__version__, "htmldate", htmldate.__version__, "justext", justext.__version__)'
 _TOFU_IMPORT_ERR="$(mktemp -t tofu_import_err.XXXXXX)"
 
 if python -c "$_TOFU_IMPORT_PROBE" 2>"$_TOFU_IMPORT_ERR"; then
@@ -1246,7 +1289,7 @@ if [[ "$SKIP_PLAYWRIGHT" -eq 0 ]]; then
     step "Installing Playwright Chromium"
 
     # On Linux, install Chromium's shared libs from conda-forge so that no
-    # sudo / system packages are required. lib/fetch/playwright_pool.py
+    # sudo / system packages are required. tofu_search/fetch/playwright_pool.py
     # auto-prepends $CONDA_PREFIX/lib to LD_LIBRARY_PATH at runtime.
     if [[ "$OS" == "Linux" ]]; then
         info "Installing Chromium shared-lib deps from conda-forge (rootless)..."

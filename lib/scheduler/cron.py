@@ -64,13 +64,39 @@ def cron_matches(cron_expr, dt=None):
             dt.weekday() in python_dow)
 
 
-def next_cron_run(cron_expr, from_dt=None, max_lookahead_hours=48):
-    """Find the next datetime that matches the cron expression."""
+def next_cron_run(cron_expr, from_dt=None, max_lookahead_days=366):
+    """Find the next datetime that matches the cron expression.
+
+    Looks ahead up to ``max_lookahead_days`` (default ~1 year) so that
+    sparse schedules like ``0 0 1 * *`` (monthly) or ``30 14 28 2 *``
+    (once a year) resolve instead of returning ``None``.  Days that cannot
+    possibly match (wrong month / day-of-month / day-of-week) are skipped
+    whole, so the worst case is ~366 day-checks plus one day of
+    minute-checks — not 527 040 minute iterations.
+    """
     dt = from_dt or datetime.now()
     dt = dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
 
-    end = dt + timedelta(hours=max_lookahead_hours)
+    fields = cron_expr.strip().split()
+    if len(fields) != 5:
+        raise ValueError(f'Invalid cron expression (need 5 fields): {cron_expr}')
+
+    # Pre-parse the date fields once for day-level skipping. These mirror
+    # cron_matches' AND semantics exactly, so a day we skip here could never
+    # have matched cron_matches anyway.
+    dom_set = _parse_cron_field(fields[2], 1, 31)
+    month_set = _parse_cron_field(fields[3], 1, 12)
+    dow_set = _parse_cron_field(fields[4], 0, 6)
+    python_dow = {(d - 1) % 7 for d in dow_set}
+
+    end = dt + timedelta(days=max_lookahead_days)
     while dt < end:
+        day_ok = (dt.month in month_set and dt.day in dom_set
+                  and dt.weekday() in python_dow)
+        if not day_ok:
+            # Jump straight to the start of the next day.
+            dt = (dt + timedelta(days=1)).replace(hour=0, minute=0)
+            continue
         if cron_matches(cron_expr, dt):
             return dt
         dt += timedelta(minutes=1)
@@ -78,7 +104,12 @@ def next_cron_run(cron_expr, from_dt=None, max_lookahead_hours=48):
 
 
 def describe_cron(cron_expr):
-    """Human-readable description of a cron expression."""
+    """Human-readable description of a cron expression.
+
+    Handles minute/hour lists and ranges so multi-time schedules like
+    ``30 8,12,18 * * *`` render fully ("at 08:30, 12:30, 18:30") instead
+    of dropping all but the first hour.
+    """
     fields = cron_expr.strip().split()
     if len(fields) != 5:
         return cron_expr
@@ -88,16 +119,29 @@ def describe_cron(cron_expr):
     parts = []
 
     # Time
-    if m == '0' and h == '*':
-        parts.append('every hour on the hour')
-    elif m.startswith('*/'):
-        parts.append(f'every {m[2:]} minutes')
+    if m.startswith('*/'):
+        step = m[2:]
+        parts.append(f'every {step} minutes' if h == '*'
+                     else f'every {step} minutes during hour(s) {h}')
+    elif m == '*':
+        parts.append('every minute' if h == '*'
+                     else f'every minute of hour(s) {h}')
     elif h == '*':
-        parts.append(f'every hour at minute {m}')
-    elif m == '0':
-        parts.append(f'at {h}:00')
+        parts.append(f'at minute {m} of every hour')
     else:
-        parts.append(f'at {h}:{m.zfill(2)}')
+        # Both minute and hour are concrete — enumerate the actual times so
+        # lists/ranges aren't silently truncated.
+        try:
+            minutes = sorted(_parse_cron_field(m, 0, 59))
+            hours = sorted(_parse_cron_field(h, 0, 23))
+            times = [f'{hh:02d}:{mm:02d}' for hh in hours for mm in minutes]
+            if 0 < len(times) <= 8:
+                parts.append('at ' + ', '.join(times))
+            elif times:
+                parts.append(f'at {len(times)} times daily '
+                             f'({times[0]}…{times[-1]})')
+        except (ValueError, TypeError):
+            parts.append(f'at {h}:{m.zfill(2)}')
 
     # Day
     dow_names = {0: 'Sun', 1: 'Mon', 2: 'Tue', 3: 'Wed', 4: 'Thu', 5: 'Fri', 6: 'Sat'}

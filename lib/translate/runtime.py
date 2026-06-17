@@ -63,6 +63,36 @@ def _do_translate(task_id, text, target, source, conv_id, msg_idx, field, *, msg
     original_text = text
     input_len = len(text)
 
+    def _push_running(*, partial=None, status_message=None, status_kind=None):
+        """Emit a 'running' push frame so a client VIEWING this conversation
+        renders the live translating indicator / streaming preview without
+        having to switch away and back.
+
+        Only fires when conv_id is known (auto-translate + manual click both
+        carry it).  The frontend '*' subscriber ignores running frames for
+        client-initiated tasks (its own poll loop is authoritative), so this
+        is a no-op for the manual-click path and only drives the otherwise
+        signal-less server-side auto-translate path.
+        """
+        if not conv_id:
+            return
+        try:
+            from lib.push import push_event
+            frame = {
+                'type': 'running', 'status': 'running',
+                'convId': conv_id, 'msgIdx': msg_idx,
+                'msgId': msg_id or '', 'field': field,
+            }
+            if partial is not None:
+                frame['partial'] = partial
+            if status_message:
+                frame['statusMessage'] = status_message
+                frame['statusKind'] = status_kind or ''
+            push_event('translate', task_id, frame)
+        except Exception as e:
+            logger.debug('[Translate] push running frame failed task=%s: %s',
+                         task_id[:8], e)
+
     def _on_status(event):
         """Record the latest retry/status event onto the task dict."""
         msg = _format_status_message(event)
@@ -72,17 +102,21 @@ def _do_translate(task_id, text, target, source, conv_id, msg_idx, field, *, msg
                 t['statusMessage'] = msg
                 t['statusKind'] = event.get('kind', '')
                 t['statusUpdatedAt'] = time.time()
+        _push_running(status_message=msg, status_kind=event.get('kind', ''))
 
     # ── Streaming preview throttling ──
     # _translate_one_chunk fires progress_cb for every SSE delta (often
-    # 1-3 chars at a time).  Updating the task dict + serving polls for
-    # every micro-delta is wasteful — the frontend polls at 2-4s anyway.
-    # Throttle to one task-dict write per 250ms.
+    # 1-3 chars at a time).  Server-side auto-translate drives the ACTIVE
+    # view through the push channel, where each _push_running frame is
+    # delivered in real time — so this throttle is the direct cap on how
+    # fluid the live streaming preview looks.  250ms (4fps) made fast small
+    # models look choppy/laggy; 100ms (10fps) streams smoothly while still
+    # coalescing micro-deltas so large docs don't flood the socket.
     _last_partial_ts = [0.0]
 
     def _on_progress(text_so_far):
         now = time.time()
-        if now - _last_partial_ts[0] < 0.25:
+        if now - _last_partial_ts[0] < 0.10:
             return
         _last_partial_ts[0] = now
         with _translate_tasks_lock:
@@ -90,6 +124,12 @@ def _do_translate(task_id, text, target, source, conv_id, msg_idx, field, *, msg
             if t and t.get('status') == 'running':
                 t['partial'] = text_so_far
                 t['partialUpdatedAt'] = now
+        _push_running(partial=text_so_far)
+
+    # Surface the indicator the instant the worker picks the task up, even
+    # before the first SSE delta arrives — the active view otherwise shows
+    # the bare finished English message with no hint translation is coming.
+    _push_running(status_message='', status_kind='started')
 
     try:
         text, nt_blocks = _extract_notranslate_blocks(text)

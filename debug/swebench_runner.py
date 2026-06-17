@@ -127,6 +127,10 @@ class ModelConfig:
     # Used to create tool-ablation variants (e.g. project-tools-only) without
     # touching server defaults. Example: {'searchMode': 'off', 'mcpEnabled': False}.
     config_overrides: dict = field(default_factory=dict)
+    # Optional: harness-prompt variant key consumed by build_agent_prompt().
+    # '' = the default instruction set; 'nudge' = default + the defensiveness
+    # and behavior-driven-test-selection nudges (glm A/B, 2026-06).
+    prompt_variant: str = ''
 
 
 # Built-in model presets — Framework × Model matrix
@@ -192,6 +196,17 @@ MODEL_PRESETS = {
         concurrency=2,  # RPM=60
         price_input=0.002, price_output=0.008,
         price_cache_read=0.0004, price_cache_write=0.002,
+    ),
+    # A/B treatment arm (2026-06): identical to tofu-glm but with the two
+    # candidate harness-prompt nudges (defensiveness + behavior-driven test
+    # selection). Control arm = tofu-glm. Does NOT touch the shared system
+    # prompt — the nudges live only in build_agent_prompt(variant='nudge').
+    'tofu-glm-nudge': ModelConfig(
+        name='tofu-glm-nudge', backend='tofu', model_id='glm-5.1',
+        concurrency=2,
+        price_input=0.002, price_output=0.008,
+        price_cache_read=0.0004, price_cache_write=0.002,
+        prompt_variant='nudge',
     ),
     'tofu-glm-notool': ModelConfig(
         name='tofu-glm-notool', backend='tofu', model_id='glm-5.1',
@@ -711,8 +726,15 @@ def setup_all_conda_envs(instances: list[SWEInstance]) -> dict[str, Path]:
 
 # ─── Agent Prompt ─────────────────────────────────────────────────────────────
 
-def build_agent_prompt(inst: SWEInstance) -> str:
-    """Build the prompt for the agent to solve the issue."""
+def build_agent_prompt(inst: SWEInstance, variant: str = '') -> str:
+    """Build the prompt for the agent to solve the issue.
+
+    Args:
+        inst: The SWE-bench instance.
+        variant: '' for the default instruction set; 'nudge' to append the
+            two A/B candidate nudges (defensiveness + behavior-driven test
+            selection). Used by the glm-only A/B (2026-06).
+    """
     prompt = textwrap.dedent(f"""\
         You are solving a GitHub issue in the repository {inst.repo}.
 
@@ -728,10 +750,34 @@ def build_agent_prompt(inst: SWEInstance) -> str:
         4. Do NOT modify any test files.
         5. Do NOT add new test files.
         6. Focus on fixing the actual issue described above.
+        7. After editing, run the project's existing tests for the module(s) you
+           changed (locate the relevant test files yourself and invoke the repo's
+           normal test runner). Confirm the issue is fixed AND that the
+           surrounding tests that previously passed still pass.
+        8. Guard against regressions: a change that fixes the reported case but
+           breaks an existing test is not a fix. If you add a conditional or
+           narrow an existing branch, verify the original code path still works.
+           Do not finish until the tests you can run are green.
 
         The repository is already checked out at the correct commit. Start by exploring
         the project structure and reading the relevant files mentioned in the issue.
     """)
+
+    if variant == 'nudge':
+        prompt += textwrap.dedent("""\
+
+            ## Additional guidance
+
+            - When you replace an existing expression or branch, make sure your
+              new code handles every input shape the old code handled. Do not
+              assume a narrower form than the original accepted (e.g. that a
+              string always contains a separator, or that a value is never None)
+              unless you have verified that narrower form always holds.
+            - Choose which tests to run by the BEHAVIOR described in the issue,
+              not just by proximity to the file you edited. Find and run the
+              test module that exercises that behavior — it may live elsewhere
+              than the code you changed.
+        """)
 
     if inst.hints_text:
         prompt += f"\n## Hints\n\n{inst.hints_text}\n"
@@ -747,7 +793,7 @@ def run_tofu_inference(inst: SWEInstance, workspace: Path,
     tool_name = mcfg.name if mcfg else 'tofu'
     model_id = mcfg.model_id if mcfg else TOFU_MODEL
     result = InferenceResult(instance_id=inst.instance_id, tool=tool_name)
-    prompt = build_agent_prompt(inst)
+    prompt = build_agent_prompt(inst, variant=getattr(mcfg, 'prompt_variant', '') if mcfg else '')
     t0 = time.time()
 
     try:
@@ -764,7 +810,7 @@ def run_tofu_inference(inst: SWEInstance, workspace: Path,
                 if mcfg and getattr(mcfg, 'config_overrides', None):
                     _config.update(mcfg.config_overrides)
                 resp = requests.post(
-                    f'{TOFU_BASE_URL}/api/chat/start',
+                    f'{TOFU_BASE_URL}/api/v1/chat/start',
                     json={
                         'convId': f'swebench-{inst.instance_id}-{tool_name}-{int(time.time())}',
                         'messages': [{'role': 'user', 'content': prompt}],
@@ -803,7 +849,7 @@ def run_tofu_inference(inst: SWEInstance, workspace: Path,
                 #   indistinguishable from a never-started run.
                 try:
                     last = requests.get(
-                        f'{TOFU_BASE_URL}/api/chat/poll/{task_id}', timeout=10,
+                        f'{TOFU_BASE_URL}/api/v1/chat/poll/{task_id}', timeout=10,
                     )
                     if last.status_code == 200:
                         _data = last.json()
@@ -845,7 +891,7 @@ def run_tofu_inference(inst: SWEInstance, workspace: Path,
                     log.warning('[%s] Safety-timeout last-poll failed: %s',
                                 tool_name, _e)
                 try:
-                    requests.post(f'{TOFU_BASE_URL}/api/chat/abort/{task_id}', timeout=5)
+                    requests.post(f'{TOFU_BASE_URL}/api/v1/chat/abort/{task_id}', timeout=5)
                 except Exception as _e:
                     log.debug('[%s] abort call failed (non-fatal): %s',
                               tool_name, _e)
@@ -854,7 +900,7 @@ def run_tofu_inference(inst: SWEInstance, workspace: Path,
             time.sleep(poll_interval)
             try:
                 poll_resp = requests.get(
-                    f'{TOFU_BASE_URL}/api/chat/poll/{task_id}',
+                    f'{TOFU_BASE_URL}/api/v1/chat/poll/{task_id}',
                     timeout=10,
                 )
                 # ★ 404 = task gone (server restarted, task cleaned up).
@@ -936,11 +982,14 @@ def run_tofu_inference(inst: SWEInstance, workspace: Path,
 
                 result.cost_usd = _compute_cost(result, mcfg)
 
-                # Save full poll response for debugging
+                # Save full poll response for debugging. Cap is generous
+                # (2 MB) so the apiRounds tool-call transcript survives intact
+                # — the 50 KB cap used to truncate the JSON mid-string, making
+                # tool-call sequences un-mineable in later analysis.
                 try:
-                    result.raw_output = json.dumps(data, ensure_ascii=False)[:50000]
+                    result.raw_output = json.dumps(data, ensure_ascii=False)[:2_000_000]
                 except Exception:
-                    result.raw_output = str(data)[:20000]
+                    result.raw_output = str(data)[:2_000_000]
 
                 if status == 'error':
                     result.error = data.get('error', 'Unknown error')
@@ -1191,9 +1240,9 @@ def run_cc_inference(inst: SWEInstance, workspace: Path,
                     result.output_tokens = usage.get('output_tokens', 0)
                     result.cache_read_tokens = usage.get('cache_read_input_tokens', 0)
                     result.cache_write_tokens = usage.get('cache_creation_input_tokens', 0)
-                    result.raw_output = proc.stdout[:50000]  # save full output for detail file
+                    result.raw_output = proc.stdout[:2_000_000]  # save full output for detail file
                 except (json.JSONDecodeError, KeyError, TypeError):
-                    result.raw_output = proc.stdout[:20000]
+                    result.raw_output = proc.stdout[:2_000_000]
 
             # ── Ground-truth override from the cc-proxy meter ──
             # CC's own result-usage OMITS its internal microcompact summary

@@ -234,6 +234,17 @@ function _handleTimerPollCheck(ev, c) {
         ) || assistantMsg.toolRounds.find(r => r.roundNum === ev.roundNum);
         if (r) {
           r._timerTimerId = ev.timerId;
+          // Capture the next-poll timestamp so the UI can render a countdown.
+          if (ev.nextPollTs) r._timerNextPollTs = ev.nextPollTs;
+          // The 'started' event carries the verification metadata (what is
+          // being checked + how). Stash it on the round so the panel header
+          // and detail can explain the timer to the user.
+          if (ev.decision === "started") {
+            if (ev.checkInstruction) r._timerCheckInstruction = ev.checkInstruction;
+            if (ev.checkCommand) r._timerCheckCommand = ev.checkCommand;
+            if (ev.pollInterval) r._timerPollInterval = ev.pollInterval;
+            if (ev.maxPolls) r._timerMaxPolls = ev.maxPolls;
+          }
           if (ev.decision === "skipped") {
             r._timerSkipCount = (r._timerSkipCount || 0) + 1;
             r._timerLastSkipTs = Date.now();
@@ -251,6 +262,8 @@ function _handleTimerPollCheck(ev, c) {
                 reason: ev.reason || "",
                 tokensUsed: ev.tokensUsed || 0,
                 timerId: ev.timerId || "",
+                cmdOutput: ev.cmdOutput || "",
+                parseError: !!ev.parseError,
                 ts: Date.now(),
               });
             }

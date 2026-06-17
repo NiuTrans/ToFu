@@ -35,6 +35,26 @@ from lib.database._core_schema import (
     TASK_EVENTS as _TASK_EVENTS,
     TASK_RESULTS as _TASK_RESULTS,
     TRADING_CONFIG as _TRADING_CONFIG,
+    # ── Wave 2 (2026-06) ──
+    AGENT_SESSIONS as _AGENT_SESSIONS,
+    MESSAGE_QUEUE as _MESSAGE_QUEUE,
+    SCHEDULED_TASKS as _SCHEDULED_TASKS,
+    PROACTIVE_POLL_LOG as _PROACTIVE_POLL_LOG,
+    TIMER_WATCHERS as _TIMER_WATCHERS,
+    TIMER_POLL_LOG as _TIMER_POLL_LOG,
+    SWARM_SESSIONS as _SWARM_SESSIONS,
+    SWARM_AGENTS as _SWARM_AGENTS,
+    ORCHESTRATION_RUNS as _ORCHESTRATION_RUNS,
+    ORCHESTRATION_RUN_EVENTS as _ORCHESTRATION_RUN_EVENTS,
+    OPTIMIZER_PROPOSALS as _OPTIMIZER_PROPOSALS,
+    OPTIMIZER_ACTION_LOG as _OPTIMIZER_ACTION_LOG,
+    RATE_LIMIT_EVENTS as _RATE_LIMIT_EVENTS,
+    ERROR_RESOLUTIONS as _ERROR_RESOLUTIONS,
+    TENANT_USERS as _TENANT_USERS,
+    BILLING_LEDGER as _BILLING_LEDGER,
+    BILLING_WALLETS as _BILLING_WALLETS,
+    BILLING_REDEEM_CODES as _BILLING_REDEEM_CODES,
+    BILLING_PAYMENTS as _BILLING_PAYMENTS,
     both_ddl,
     define_table,
     jsonb_column,
@@ -783,3 +803,625 @@ def test_conversations_sqlite_parity():
         "\n--- Core SQLite ---\n" + core +
         "\n--- Live SQLite ---\n" + LIVE_SQLITE_CONVERSATIONS
     )
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Wave 2 (2026-06) — the remaining hand-DDL tables.
+#  Live DDL copied verbatim from _schema_pg.py / _schema_sqlite.py.
+# ═══════════════════════════════════════════════════════════════════════
+
+# agent_sessions — conv→backend session map, composite PK + NOW() timestamps.
+LIVE_PG_AGENT_SESSIONS = """
+    CREATE TABLE agent_sessions (
+        conv_id TEXT NOT NULL,
+        backend TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        last_used_at TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (conv_id, backend)
+    )
+"""
+LIVE_SQLITE_AGENT_SESSIONS = """
+    CREATE TABLE agent_sessions (
+        conv_id TEXT NOT NULL,
+        backend TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        last_used_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (conv_id, backend)
+    )
+"""
+
+# message_queue — pending message queue, single PK.
+LIVE_PG_MESSAGE_QUEUE = """
+    CREATE TABLE message_queue (
+        id TEXT PRIMARY KEY,
+        conv_id TEXT NOT NULL,
+        payload TEXT NOT NULL DEFAULT '{}',
+        config TEXT NOT NULL DEFAULT '{}',
+        position INTEGER NOT NULL DEFAULT 1,
+        created_at BIGINT NOT NULL
+    )
+"""
+LIVE_SQLITE_MESSAGE_QUEUE = """
+    CREATE TABLE message_queue (
+        id TEXT PRIMARY KEY,
+        conv_id TEXT NOT NULL,
+        payload TEXT NOT NULL DEFAULT '{}',
+        config TEXT NOT NULL DEFAULT '{}',
+        position INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL
+    )
+"""
+
+# scheduled_tasks — cron/agent registry, single PK; BOOLEAN flags + nullable cols.
+LIVE_PG_SCHEDULED_TASKS = """
+    CREATE TABLE scheduled_tasks (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        schedule TEXT NOT NULL,
+        task_type TEXT NOT NULL DEFAULT 'command',
+        command TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        notify_on_failure BOOLEAN NOT NULL DEFAULT TRUE,
+        notify_on_success BOOLEAN NOT NULL DEFAULT FALSE,
+        max_runtime INTEGER NOT NULL DEFAULT 300,
+        last_run TEXT,
+        last_result TEXT,
+        last_status TEXT DEFAULT 'never',
+        run_count INTEGER NOT NULL DEFAULT 0,
+        fail_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT '',
+        target_conv_id TEXT DEFAULT '',
+        source_conv_id TEXT DEFAULT '',
+        tools_config TEXT DEFAULT '{}',
+        poll_count INTEGER NOT NULL DEFAULT 0,
+        last_poll_at TEXT DEFAULT '',
+        last_poll_decision TEXT DEFAULT '',
+        last_poll_reason TEXT DEFAULT '',
+        last_execution_at TEXT DEFAULT '',
+        last_execution_task_id TEXT DEFAULT '',
+        last_execution_status TEXT DEFAULT '',
+        execution_count INTEGER NOT NULL DEFAULT 0,
+        max_executions INTEGER NOT NULL DEFAULT 0,
+        expires_at TEXT DEFAULT ''
+    )
+"""
+LIVE_SQLITE_SCHEDULED_TASKS = """
+    CREATE TABLE scheduled_tasks (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        schedule TEXT NOT NULL,
+        task_type TEXT NOT NULL DEFAULT 'command',
+        command TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        notify_on_failure INTEGER NOT NULL DEFAULT 1,
+        notify_on_success INTEGER NOT NULL DEFAULT 0,
+        max_runtime INTEGER NOT NULL DEFAULT 300,
+        last_run TEXT,
+        last_result TEXT,
+        last_status TEXT DEFAULT 'never',
+        run_count INTEGER NOT NULL DEFAULT 0,
+        fail_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT '',
+        target_conv_id TEXT DEFAULT '',
+        source_conv_id TEXT DEFAULT '',
+        tools_config TEXT DEFAULT '{}',
+        poll_count INTEGER NOT NULL DEFAULT 0,
+        last_poll_at TEXT DEFAULT '',
+        last_poll_decision TEXT DEFAULT '',
+        last_poll_reason TEXT DEFAULT '',
+        last_execution_at TEXT DEFAULT '',
+        last_execution_task_id TEXT DEFAULT '',
+        last_execution_status TEXT DEFAULT '',
+        execution_count INTEGER NOT NULL DEFAULT 0,
+        max_executions INTEGER NOT NULL DEFAULT 0,
+        expires_at TEXT DEFAULT ''
+    )
+"""
+
+# proactive_poll_log — append-only, autoincrement PK.
+LIVE_PG_PROACTIVE_POLL_LOG = """
+    CREATE TABLE proactive_poll_log (
+        id SERIAL PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        poll_time TEXT NOT NULL,
+        decision TEXT NOT NULL DEFAULT 'skip',
+        reason TEXT NOT NULL DEFAULT '',
+        status_snapshot TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        tokens_used INTEGER NOT NULL DEFAULT 0,
+        execution_task_id TEXT DEFAULT ''
+    )
+"""
+LIVE_SQLITE_PROACTIVE_POLL_LOG = """
+    CREATE TABLE proactive_poll_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL,
+        poll_time TEXT NOT NULL,
+        decision TEXT NOT NULL DEFAULT 'skip',
+        reason TEXT NOT NULL DEFAULT '',
+        status_snapshot TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        tokens_used INTEGER NOT NULL DEFAULT 0,
+        execution_task_id TEXT DEFAULT ''
+    )
+"""
+
+# timer_watchers — durable watchers, single PK.
+LIVE_PG_TIMER_WATCHERS = """
+    CREATE TABLE timer_watchers (
+        id TEXT PRIMARY KEY,
+        conv_id TEXT NOT NULL,
+        source_task_id TEXT NOT NULL DEFAULT '',
+        check_instruction TEXT NOT NULL,
+        check_command TEXT NOT NULL DEFAULT '',
+        continuation_message TEXT NOT NULL,
+        poll_interval INTEGER NOT NULL DEFAULT 60,
+        max_polls INTEGER NOT NULL DEFAULT 120,
+        poll_count INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'active',
+        tools_config TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT '',
+        triggered_at TEXT DEFAULT '',
+        cancelled_at TEXT DEFAULT '',
+        execution_task_id TEXT DEFAULT '',
+        last_poll_at TEXT DEFAULT '',
+        last_poll_decision TEXT DEFAULT '',
+        last_poll_reason TEXT DEFAULT ''
+    )
+"""
+LIVE_SQLITE_TIMER_WATCHERS = LIVE_PG_TIMER_WATCHERS  # identical (all TEXT/INTEGER)
+
+# timer_poll_log — append-only, autoincrement PK.
+LIVE_PG_TIMER_POLL_LOG = """
+    CREATE TABLE timer_poll_log (
+        id SERIAL PRIMARY KEY,
+        timer_id TEXT NOT NULL,
+        poll_time TEXT NOT NULL,
+        decision TEXT NOT NULL DEFAULT 'wait',
+        reason TEXT NOT NULL DEFAULT '',
+        check_output TEXT NOT NULL DEFAULT '',
+        tokens_used INTEGER NOT NULL DEFAULT 0
+    )
+"""
+LIVE_SQLITE_TIMER_POLL_LOG = """
+    CREATE TABLE timer_poll_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timer_id TEXT NOT NULL,
+        poll_time TEXT NOT NULL,
+        decision TEXT NOT NULL DEFAULT 'wait',
+        reason TEXT NOT NULL DEFAULT '',
+        check_output TEXT NOT NULL DEFAULT '',
+        tokens_used INTEGER NOT NULL DEFAULT 0
+    )
+"""
+
+# swarm_sessions — single PK, bigint timestamps.
+LIVE_PG_SWARM_SESSIONS = """
+    CREATE TABLE swarm_sessions (
+        swarm_key TEXT PRIMARY KEY,
+        conv_id TEXT NOT NULL DEFAULT '',
+        task_id TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'running',
+        specs_json TEXT NOT NULL DEFAULT '[]',
+        config_json TEXT NOT NULL DEFAULT '{}',
+        created_at BIGINT NOT NULL DEFAULT 0,
+        updated_at BIGINT NOT NULL DEFAULT 0
+    )
+"""
+LIVE_SQLITE_SWARM_SESSIONS = """
+    CREATE TABLE swarm_sessions (
+        swarm_key TEXT PRIMARY KEY,
+        conv_id TEXT NOT NULL DEFAULT '',
+        task_id TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'running',
+        specs_json TEXT NOT NULL DEFAULT '[]',
+        config_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0
+    )
+"""
+
+# swarm_agents — composite PK; delivered is a plain INTEGER flag on both backends.
+LIVE_PG_SWARM_AGENTS = """
+    CREATE TABLE swarm_agents (
+        swarm_key TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT '',
+        objective TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        messages_json TEXT NOT NULL DEFAULT '[]',
+        result_json TEXT NOT NULL DEFAULT '{}',
+        rounds_used INTEGER NOT NULL DEFAULT 0,
+        delivered INTEGER NOT NULL DEFAULT 0,
+        updated_at BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (swarm_key, agent_id)
+    )
+"""
+LIVE_SQLITE_SWARM_AGENTS = """
+    CREATE TABLE swarm_agents (
+        swarm_key TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT '',
+        objective TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        messages_json TEXT NOT NULL DEFAULT '[]',
+        result_json TEXT NOT NULL DEFAULT '{}',
+        rounds_used INTEGER NOT NULL DEFAULT 0,
+        delivered INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (swarm_key, agent_id)
+    )
+"""
+
+# orchestration_runs — single PK, bigint timestamps.
+LIVE_PG_ORCHESTRATION_RUNS = """
+    CREATE TABLE orchestration_runs (
+        id TEXT PRIMARY KEY,
+        orch_id TEXT NOT NULL DEFAULT '',
+        name TEXT NOT NULL DEFAULT '',
+        definition TEXT NOT NULL DEFAULT '{}',
+        input TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        final TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at BIGINT NOT NULL DEFAULT 0,
+        updated_at BIGINT NOT NULL DEFAULT 0,
+        finished_at BIGINT NOT NULL DEFAULT 0
+    )
+"""
+LIVE_SQLITE_ORCHESTRATION_RUNS = """
+    CREATE TABLE orchestration_runs (
+        id TEXT PRIMARY KEY,
+        orch_id TEXT NOT NULL DEFAULT '',
+        name TEXT NOT NULL DEFAULT '',
+        definition TEXT NOT NULL DEFAULT '{}',
+        input TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        final TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0,
+        finished_at INTEGER NOT NULL DEFAULT 0
+    )
+"""
+
+# orchestration_run_events — composite PK (run_id, seq).
+LIVE_PG_ORCHESTRATION_RUN_EVENTS = """
+    CREATE TABLE orchestration_run_events (
+        run_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        type TEXT NOT NULL DEFAULT '',
+        node_id TEXT NOT NULL DEFAULT '',
+        payload TEXT NOT NULL DEFAULT '{}',
+        ts BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (run_id, seq)
+    )
+"""
+LIVE_SQLITE_ORCHESTRATION_RUN_EVENTS = """
+    CREATE TABLE orchestration_run_events (
+        run_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        type TEXT NOT NULL DEFAULT '',
+        node_id TEXT NOT NULL DEFAULT '',
+        payload TEXT NOT NULL DEFAULT '{}',
+        ts INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (run_id, seq)
+    )
+"""
+
+# optimizer_proposals — single PK; confidence is DOUBLE PRECISION/REAL.
+LIVE_PG_OPTIMIZER_PROPOSALS = """
+    CREATE TABLE optimizer_proposals (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        title TEXT NOT NULL,
+        rationale TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        action_args TEXT NOT NULL,
+        severity TEXT NOT NULL DEFAULT 'low',
+        confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+        evidence TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending_review',
+        status_reason TEXT NOT NULL DEFAULT ''
+    )
+"""
+LIVE_SQLITE_OPTIMIZER_PROPOSALS = """
+    CREATE TABLE optimizer_proposals (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        title TEXT NOT NULL,
+        rationale TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        action_args TEXT NOT NULL,
+        severity TEXT NOT NULL DEFAULT 'low',
+        confidence REAL NOT NULL DEFAULT 0,
+        evidence TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending_review',
+        status_reason TEXT NOT NULL DEFAULT ''
+    )
+"""
+
+# optimizer_action_log — single PK, all TEXT.
+LIVE_OPTIMIZER_ACTION_LOG = """
+    CREATE TABLE optimizer_action_log (
+        id TEXT PRIMARY KEY,
+        proposal_id TEXT NOT NULL,
+        applied_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL DEFAULT '',
+        pre_metric TEXT NOT NULL DEFAULT '',
+        outcome_metric TEXT NOT NULL DEFAULT '',
+        outcome_recorded_at TEXT NOT NULL DEFAULT '',
+        reverted_at TEXT NOT NULL DEFAULT '',
+        revert_reason TEXT NOT NULL DEFAULT ''
+    )
+"""
+
+# rate_limit_events — BIGSERIAL/INTEGER AUTOINCREMENT PK.
+LIVE_PG_RATE_LIMIT_EVENTS = """
+    CREATE TABLE rate_limit_events (
+        id BIGSERIAL PRIMARY KEY,
+        endpoint TEXT NOT NULL,
+        ip TEXT NOT NULL,
+        ts_ms BIGINT NOT NULL
+    )
+"""
+LIVE_SQLITE_RATE_LIMIT_EVENTS = """
+    CREATE TABLE rate_limit_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        endpoint TEXT NOT NULL,
+        ip TEXT NOT NULL,
+        ts_ms INTEGER NOT NULL
+    )
+"""
+
+# error_resolutions — PG-ONLY (no SQLite CREATE in live bootstrap).
+LIVE_PG_ERROR_RESOLUTIONS = """
+    CREATE TABLE error_resolutions (
+        fingerprint TEXT PRIMARY KEY,
+        logger_name TEXT NOT NULL DEFAULT '',
+        sample_message TEXT NOT NULL DEFAULT '',
+        resolved_by TEXT NOT NULL DEFAULT '',
+        ticket TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        resolved_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+    )
+"""
+
+# tenant_users — multi-tenant user table; email inline UNIQUE; email_verified
+# is INTEGER on BOTH backends.
+LIVE_PG_TENANT_USERS = """
+    CREATE TABLE tenant_users (
+        id TEXT PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL DEFAULT '',
+        display_name TEXT NOT NULL DEFAULT '',
+        role TEXT NOT NULL DEFAULT 'user',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at BIGINT NOT NULL,
+        last_login_at BIGINT NOT NULL DEFAULT 0,
+        email_verified INTEGER NOT NULL DEFAULT 0,
+        metadata TEXT NOT NULL DEFAULT '{}'
+    )
+"""
+LIVE_SQLITE_TENANT_USERS = """
+    CREATE TABLE tenant_users (
+        id TEXT PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL DEFAULT '',
+        display_name TEXT NOT NULL DEFAULT '',
+        role TEXT NOT NULL DEFAULT 'user',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at INTEGER NOT NULL,
+        last_login_at INTEGER NOT NULL DEFAULT 0,
+        email_verified INTEGER NOT NULL DEFAULT 0,
+        metadata TEXT NOT NULL DEFAULT '{}'
+    )
+"""
+
+# billing_ledger — append-only, single PK; bigint micro amounts.
+LIVE_PG_BILLING_LEDGER = """
+    CREATE TABLE billing_ledger (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        ts BIGINT NOT NULL,
+        amount_micro BIGINT NOT NULL,
+        kind TEXT NOT NULL,
+        ref_type TEXT NOT NULL DEFAULT '',
+        ref_id TEXT NOT NULL DEFAULT '',
+        balance_after_micro BIGINT NOT NULL,
+        note TEXT NOT NULL DEFAULT ''
+    )
+"""
+LIVE_SQLITE_BILLING_LEDGER = """
+    CREATE TABLE billing_ledger (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        ts INTEGER NOT NULL,
+        amount_micro INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        ref_type TEXT NOT NULL DEFAULT '',
+        ref_id TEXT NOT NULL DEFAULT '',
+        balance_after_micro INTEGER NOT NULL,
+        note TEXT NOT NULL DEFAULT ''
+    )
+"""
+
+# billing_wallets — single PK (user_id).
+LIVE_PG_BILLING_WALLETS = """
+    CREATE TABLE billing_wallets (
+        user_id TEXT PRIMARY KEY,
+        balance_micro BIGINT NOT NULL DEFAULT 0,
+        currency TEXT NOT NULL DEFAULT 'CREDIT',
+        low_balance_alert_micro BIGINT NOT NULL DEFAULT 0,
+        updated_at BIGINT NOT NULL
+    )
+"""
+LIVE_SQLITE_BILLING_WALLETS = """
+    CREATE TABLE billing_wallets (
+        user_id TEXT PRIMARY KEY,
+        balance_micro INTEGER NOT NULL DEFAULT 0,
+        currency TEXT NOT NULL DEFAULT 'CREDIT',
+        low_balance_alert_micro INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+    )
+"""
+
+# billing_redeem_codes — single PK (code).
+LIVE_PG_BILLING_REDEEM_CODES = """
+    CREATE TABLE billing_redeem_codes (
+        code TEXT PRIMARY KEY,
+        amount_micro BIGINT NOT NULL,
+        batch TEXT NOT NULL DEFAULT '',
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL DEFAULT 0,
+        redeemed_by TEXT NOT NULL DEFAULT '',
+        redeemed_at BIGINT NOT NULL DEFAULT 0,
+        note TEXT NOT NULL DEFAULT ''
+    )
+"""
+LIVE_SQLITE_BILLING_REDEEM_CODES = """
+    CREATE TABLE billing_redeem_codes (
+        code TEXT PRIMARY KEY,
+        amount_micro INTEGER NOT NULL,
+        batch TEXT NOT NULL DEFAULT '',
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL DEFAULT 0,
+        redeemed_by TEXT NOT NULL DEFAULT '',
+        redeemed_at INTEGER NOT NULL DEFAULT 0,
+        note TEXT NOT NULL DEFAULT ''
+    )
+"""
+
+# billing_payments — single PK.
+LIVE_PG_BILLING_PAYMENTS = """
+    CREATE TABLE billing_payments (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        provider_id TEXT NOT NULL DEFAULT '',
+        amount_minor BIGINT NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'USD',
+        credit_micro BIGINT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at BIGINT NOT NULL,
+        settled_at BIGINT NOT NULL DEFAULT 0,
+        raw TEXT NOT NULL DEFAULT '{}'
+    )
+"""
+LIVE_SQLITE_BILLING_PAYMENTS = """
+    CREATE TABLE billing_payments (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        provider_id TEXT NOT NULL DEFAULT '',
+        amount_minor INTEGER NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'USD',
+        credit_micro INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        settled_at INTEGER NOT NULL DEFAULT 0,
+        raw TEXT NOT NULL DEFAULT '{}'
+    )
+"""
+
+
+def _assert_parity(table, live_pg, live_sqlite):
+    """Compile both backends and compare against the live DDL constants."""
+    core = both_ddl(table)
+    assert _norm(core["pg"]) == _norm(live_pg), (
+        "\n--- Core PG ---\n" + core["pg"] + "\n--- Live PG ---\n" + live_pg)
+    assert _norm(core["sqlite"]) == _norm(live_sqlite), (
+        "\n--- Core SQLite ---\n" + core["sqlite"] + "\n--- Live SQLite ---\n" + live_sqlite)
+
+
+def test_agent_sessions_parity():
+    _assert_parity(_AGENT_SESSIONS, LIVE_PG_AGENT_SESSIONS, LIVE_SQLITE_AGENT_SESSIONS)
+
+
+def test_message_queue_parity():
+    _assert_parity(_MESSAGE_QUEUE, LIVE_PG_MESSAGE_QUEUE, LIVE_SQLITE_MESSAGE_QUEUE)
+
+
+def test_scheduled_tasks_parity():
+    _assert_parity(_SCHEDULED_TASKS, LIVE_PG_SCHEDULED_TASKS, LIVE_SQLITE_SCHEDULED_TASKS)
+
+
+def test_proactive_poll_log_parity():
+    _assert_parity(_PROACTIVE_POLL_LOG, LIVE_PG_PROACTIVE_POLL_LOG, LIVE_SQLITE_PROACTIVE_POLL_LOG)
+
+
+def test_timer_watchers_parity():
+    _assert_parity(_TIMER_WATCHERS, LIVE_PG_TIMER_WATCHERS, LIVE_SQLITE_TIMER_WATCHERS)
+
+
+def test_timer_poll_log_parity():
+    _assert_parity(_TIMER_POLL_LOG, LIVE_PG_TIMER_POLL_LOG, LIVE_SQLITE_TIMER_POLL_LOG)
+
+
+def test_swarm_sessions_parity():
+    _assert_parity(_SWARM_SESSIONS, LIVE_PG_SWARM_SESSIONS, LIVE_SQLITE_SWARM_SESSIONS)
+
+
+def test_swarm_agents_parity():
+    _assert_parity(_SWARM_AGENTS, LIVE_PG_SWARM_AGENTS, LIVE_SQLITE_SWARM_AGENTS)
+
+
+def test_orchestration_runs_parity():
+    _assert_parity(_ORCHESTRATION_RUNS, LIVE_PG_ORCHESTRATION_RUNS, LIVE_SQLITE_ORCHESTRATION_RUNS)
+
+
+def test_orchestration_run_events_parity():
+    _assert_parity(_ORCHESTRATION_RUN_EVENTS, LIVE_PG_ORCHESTRATION_RUN_EVENTS,
+                   LIVE_SQLITE_ORCHESTRATION_RUN_EVENTS)
+
+
+def test_optimizer_proposals_parity():
+    _assert_parity(_OPTIMIZER_PROPOSALS, LIVE_PG_OPTIMIZER_PROPOSALS, LIVE_SQLITE_OPTIMIZER_PROPOSALS)
+
+
+def test_optimizer_action_log_parity():
+    _assert_parity(_OPTIMIZER_ACTION_LOG, LIVE_OPTIMIZER_ACTION_LOG, LIVE_OPTIMIZER_ACTION_LOG)
+
+
+def test_rate_limit_events_parity():
+    _assert_parity(_RATE_LIMIT_EVENTS, LIVE_PG_RATE_LIMIT_EVENTS, LIVE_SQLITE_RATE_LIMIT_EVENTS)
+
+
+def test_error_resolutions_pg_parity():
+    # PG-only table; only the PG DDL exists in the live bootstrap.
+    core = both_ddl(_ERROR_RESOLUTIONS)["pg"]
+    assert _norm(core) == _norm(LIVE_PG_ERROR_RESOLUTIONS), (
+        "\n--- Core PG ---\n" + core + "\n--- Live PG ---\n" + LIVE_PG_ERROR_RESOLUTIONS)
+
+
+def test_tenant_users_parity():
+    _assert_parity(_TENANT_USERS, LIVE_PG_TENANT_USERS, LIVE_SQLITE_TENANT_USERS)
+
+
+def test_billing_ledger_parity():
+    _assert_parity(_BILLING_LEDGER, LIVE_PG_BILLING_LEDGER, LIVE_SQLITE_BILLING_LEDGER)
+
+
+def test_billing_wallets_parity():
+    _assert_parity(_BILLING_WALLETS, LIVE_PG_BILLING_WALLETS, LIVE_SQLITE_BILLING_WALLETS)
+
+
+def test_billing_redeem_codes_parity():
+    _assert_parity(_BILLING_REDEEM_CODES, LIVE_PG_BILLING_REDEEM_CODES, LIVE_SQLITE_BILLING_REDEEM_CODES)
+
+
+def test_billing_payments_parity():
+    _assert_parity(_BILLING_PAYMENTS, LIVE_PG_BILLING_PAYMENTS, LIVE_SQLITE_BILLING_PAYMENTS)

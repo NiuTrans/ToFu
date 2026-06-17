@@ -212,6 +212,7 @@ def _build_run_command(meta, fn_name, fn_args, tool_content, path):
     output_text = re.sub(r'\n?\[exit code: -?\d+\]\s*$', '', output_text).strip()
     output_text = re.sub(r'\n?\[Command timed out\].*$', '', output_text).strip()
     meta['command'] = cmd
+    meta['description'] = fn_args.get('description', '')
     meta['output'] = output_text
     meta['exitCode'] = 'timeout' if timed_out else exit_code
     meta['timedOut'] = timed_out

@@ -25,12 +25,14 @@ logger = get_logger(__name__)
 # ``lib/llm/body.py::build_body`` and ``lib/llm_dispatch/api.py::_readjust_thinking_params``.
 #
 #   ''                       auto-detect from model name + brand
-#   'enable_thinking'        cloud Qwen / LongCat / Gemini cloud / ERNIE
+#   'enable_thinking'        cloud Qwen / LongCat / ERNIE
 #   'thinking_type'          Doubao / GLM / Kimi / Claude
+#   'reasoning_effort'       Gemini 3.x (OpenAI-style reasoning_effort string)
 #   'chat_template_kwargs'   sglang / vLLM self-hosted dual-mode
 #   'none'                   send no thinking parameters
 THINKING_FORMATS = frozenset({
-    '', 'enable_thinking', 'thinking_type', 'chat_template_kwargs', 'none',
+    '', 'enable_thinking', 'thinking_type', 'reasoning_effort',
+    'chat_template_kwargs', 'none',
 })
 
 
@@ -86,8 +88,9 @@ class Slot:
     extra_headers: dict = field(default_factory=dict)  # provider-specific custom HTTP headers
     thinking_format: str = ''       # per-provider thinking param format:
                                     # '' = auto-detect from model name (default)
-                                    # 'enable_thinking' = {enable_thinking: bool} (LongCat, Qwen, Gemini)
+                                    # 'enable_thinking' = {enable_thinking: bool} (LongCat, Qwen)
                                     # 'thinking_type' = {thinking: {type: enabled/disabled}} (Doubao, Claude)
+                                    # 'reasoning_effort' = {reasoning_effort: str} (Gemini 3.x)
                                     # 'none' = no thinking parameters sent
     protocol: str = ''              # per-provider wire protocol:
                                     # '' / 'openai' = OpenAI Chat Completions (default)

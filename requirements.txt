@@ -15,12 +15,12 @@ psutil>=5.9
 # provider seams via lib/search_bridge.py at startup.
 tofu-search>=0.2.0
 trafilatura>=1.6
-# playwright is optional — powers the JS-rendered fallback in lib/fetch.
+# playwright is optional — powers the JS-rendered fallback in tofu_search.fetch.
 # On Linux, Chromium needs X11/GTK shared libs (libatk, libgbm, libXcomposite, …).
 #   With root:    sudo python -m playwright install-deps chromium
 #   Without root: install.sh falls back to `conda install -c conda-forge`
 #                 (atk-1.0, xorg-libxcomposite, mesa-libgbm-cos7-x86_64, …) and
-#                 lib/fetch/playwright_pool.py auto-augments LD_LIBRARY_PATH.
+#                 tofu_search/fetch/playwright_pool.py auto-augments LD_LIBRARY_PATH.
 playwright>=1.40
 Pillow>=10.0
 python-pptx>=0.6.21
@@ -29,12 +29,12 @@ lxml>=4.9
 # justext (a trafilatura dep) still does `from lxml.html.clean import Cleaner`,
 # so we must ensure the extracted package is present.
 lxml_html_clean>=0.4
-# BeautifulSoup — HTML fallback parser in lib/fetch/html_extract.py.
+# BeautifulSoup — HTML fallback parser in tofu_search/fetch/html_extract.py.
 # Usually pulled in transitively by trafilatura, but listed here so it's
 # guaranteed even if trafilatura's deps change.
 beautifulsoup4>=4.12
 # python-dateutil — robust date parsing for HTML publish-date extraction
-# in lib/fetch/html_extract.py (imported eagerly, no ImportError fallback).
+# in tofu_search/fetch/html_extract.py (imported eagerly, no ImportError fallback).
 python-dateutil>=2.8
 # Office document parsing — lib/doc_parser.py handles .docx/.pptx/.xlsx/
 # .doc/.xls/.ppt uploads. Each has a graceful ImportError fallback, but
@@ -44,8 +44,24 @@ openpyxl>=3.1
 xlrd>=2.0
 olefile>=0.46
 mcp>=1.0
+# orjson — fast C JSON encoder. REQUIRED (not optional): routes/chat.py's SSE
+# state snapshot serializes the ENTIRE conversation (content+thinking+toolRounds,
+# 10+ MB for long convs). Plain json.dumps holds the GIL for the whole call, so
+# even via asyncio.to_thread it stalls the event loop ~40 ms and overflows the
+# accept queue → the page goes dark (the 15000 incident, 2026-06). orjson encodes
+# the same payload in ~5 ms, dropping the loop stall below the danger threshold.
+# A stdlib iterencode fallback covers the rare inputs orjson rejects (non-str keys).
+orjson>=3.9
+# tiktoken — exact BPE tokenizer (cl100k/o200k) used by lib/token_counter as
+# the local "exact" tier for OpenAI/Claude-family models. Without it the
+# resolver chain falls through to the CJK/entropy heuristic, which under-counts
+# high-entropy content (base64/minified data) and can let an oversized prompt
+# slip past the proactive-compaction trigger. Optional at runtime (the
+# heuristic is the always-present fallback), but shipping it makes the
+# compaction token-gate substantially tighter.
+tiktoken>=0.7
 # PDF parsing stack — pymupdf (fitz) is used across lib/pdf_parser, routes/paper,
-# and lib/fetch for fast local PDF text/image extraction. pymupdf4llm is an
+# and tofu_search.fetch for fast local PDF text/image extraction. pymupdf4llm is an
 # optional LLM-oriented Markdown extractor built on top of pymupdf.
 pymupdf>=1.24
 pymupdf4llm>=0.0.17

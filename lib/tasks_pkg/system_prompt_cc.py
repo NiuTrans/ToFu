@@ -233,6 +233,13 @@ _DOING_TASKS_CODE_ONLY = [
     "can't run the code), say so explicitly rather than claiming "
     "success.",
 
+    "Guard against regressions: after a change, re-run the existing "
+    "tests covering the area you touched, not just the one case you "
+    "set out to fix. A change that makes your target case pass but "
+    "breaks a previously-passing test is not a fix. When you add a "
+    "conditional or narrow an existing branch, confirm the original "
+    "path still behaves as before.",
+
     "Avoid backwards-compatibility hacks like renaming unused _vars, "
     "re-exporting types, adding // removed comments for removed code, "
     "etc. If you are certain that something is unused, you can delete "
@@ -276,8 +283,8 @@ _ACTIONS_PRINCIPLE = (
     "still attend to the risks and consequences when taking actions. "
     "A user approving an action (like a git push) once does NOT mean "
     "that they approve it in all contexts, so unless actions are "
-    "authorized in advance in durable instructions like CLAUDE.md "
-    "files, always confirm first. Authorization stands for the scope "
+    "authorized in advance in durable instructions like the project's "
+    "configuration files, always confirm first. Authorization stands for the scope "
     "specified, not beyond. Match the scope of your actions to what "
     "was actually requested."
 )
@@ -562,7 +569,8 @@ def section_current_date() -> str:
 def build_static_prompt(*, cwd: str, is_git: bool, model: str,
                          extra_roots: list[str] | None = None,
                          has_real_tools: bool = True,
-                         is_code_context: bool = True) -> str:
+                         is_code_context: bool = True,
+                         include_date: bool = True) -> str:
     """Assemble the full Claude Code-style static prompt block.
 
     Sections are concatenated with blank lines between, matching Claude
@@ -583,6 +591,11 @@ def build_static_prompt(*, cwd: str, is_git: bool, model: str,
                          git/CI examples in ``# Executing actions``,
                          file_path:line_number guidance). Default True
                          for back-compat with callers that don't pass it.
+        include_date:    When False, omit the trailing ``Current date:``
+                         line. Used by the Settings default-prompt preview
+                         so the editor text doesn't bake in a stale date,
+                         and by replace-mode injection which appends the
+                         date as its own dynamic block.
     """
     parts: list[str] = [
         section_intro(is_code_context=is_code_context),
@@ -601,7 +614,8 @@ def build_static_prompt(*, cwd: str, is_git: bool, model: str,
     parts.append(section_environment(cwd=cwd, is_git=is_git,
                                       model=model, extra_roots=extra_roots,
                                       has_real_tools=has_real_tools))
-    parts.append(section_current_date())
+    if include_date:
+        parts.append(section_current_date())
 
     return "\n\n".join(p for p in parts if p)
 
@@ -649,9 +663,9 @@ def build_user_context_reminder(claude_md: str | None,
     """
     ctx = {}
     if claude_md:
-        ctx['claudeMd'] = claude_md.strip()
+        ctx['Project context'] = claude_md.strip()
     if current_date:
-        ctx['currentDate'] = f"Today's date is {current_date}."
+        ctx['Current date'] = f"Today's date is {current_date}."
 
     if not ctx:
         return None

@@ -709,6 +709,17 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
                 fallback_parts.append(f'Model response: {text_response}')
             fallback_parts.append(f'Prompt: {prompt[:200]}')
             fallback_parts.append(f'Aspect ratio: {aspect_ratio}, Resolution: {resolution}')
+            # Surface a reusable reference so the model can EDIT this image on a
+            # later turn by passing it back as `source_image`. Without this the
+            # model has no URL/path to reference and always re-generates from
+            # scratch. Prefer the project path; fall back to the uploads URL.
+            _edit_ref = project_save_path or saved_url
+            if _edit_ref:
+                fallback_parts.append(
+                    f'To EDIT this image later (recolor, change background, add/remove '
+                    f'objects, restyle, etc.), call generate_image again with '
+                    f'source_image="{_edit_ref}" and describe the change in the prompt.'
+                )
             if project_save_path:
                 fallback_parts.append(f'Image saved to project path: {project_save_path}')
             elif output_path and not project_save_path:

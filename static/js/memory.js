@@ -54,6 +54,19 @@ function toggleMemoryAddForm() {
   s.style.display = isHidden ? "block" : "none";
   if (isHidden) s.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
+// Open the Memory modal with the manual-create form already expanded.
+// Used by the "新建记忆" entry point in the Settings → Skills tab so users
+// can find the manual-add flow without hunting for the toolbar button.
+function openMemoryCreateForm() {
+  openMemoryModal();
+  const s = document.getElementById("memoryAddSection");
+  if (s) {
+    s.style.display = "block";
+    setTimeout(() => s.scrollIntoView({ behavior: "smooth", block: "nearest" }), 50);
+  }
+  const name = document.getElementById("memoryNewName");
+  if (name) setTimeout(() => name.focus(), 60);
+}
 function switchMemoryTab(scope) {
   document.querySelectorAll(".memory-tab").forEach(t => t.classList.toggle("active", t.dataset.scope === scope));
   refreshMemoryList(scope);
@@ -225,12 +238,14 @@ function _buildMemoryCardEl(sk) {
     card.appendChild(tagsRow);
   }
 
-  // Body (collapsed by default)
+  // Body (collapsed by default). Markdown is rendered lazily on first
+  // expand — parsing every card's body up front made the list build slow
+  // and the expand toggle janky.
   const body = document.createElement("div");
   body.className = "memory-card-body";
   const bodyInner = document.createElement("div");
   bodyInner.className = "memory-card-body-inner";
-  bodyInner.innerHTML = _renderMemoryBody(sk.body || "(empty)");
+  bodyInner.dataset.raw = sk.body || "(empty)";
   body.appendChild(bodyInner);
   card.appendChild(body);
 
@@ -270,6 +285,14 @@ function toggleMemoryBody(headerEl) {
   const icon = headerEl.querySelector(".memory-card-expand-icon");
   const isOpen = body.classList.toggle("open");
   if (icon) icon.classList.toggle("expanded", isOpen);
+  // Lazy-render markdown the first time this card is expanded.
+  if (isOpen) {
+    const inner = body.querySelector(".memory-card-body-inner");
+    if (inner && inner.dataset.raw != null) {
+      inner.innerHTML = _renderMemoryBody(inner.dataset.raw);
+      delete inner.dataset.raw;
+    }
+  }
 }
 async function toggleMemoryEnabled(id) {
   // Optimistic in-place update — no full reload

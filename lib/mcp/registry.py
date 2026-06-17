@@ -14,11 +14,18 @@ file.
 
 from __future__ import annotations
 
+import os
 from typing import TypedDict
 
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+# Project root, resolved at import time so in-tree bundled MCP servers (e.g.
+# github-batch under tools/) can be referenced without hardcoding an
+# environment-specific absolute path (CLAUDE.md §3.5).
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_GITHUB_BATCH_PATH = os.path.join(_PROJECT_ROOT, 'tools', 'github-batch-mcp')
 
 
 # ── Types ─────────────────────────────────────────────────
@@ -60,10 +67,14 @@ CAT_FINANCE = 'Finance'
 CAT_DESIGN  = 'Design'
 CAT_RESEARCH = 'Science & Research'
 CAT_OTHER   = 'Other'
+# Servers configured in mcp_servers.json that have no curated catalog entry
+# are surfaced under this category by the API layer (see routes/api_v1/mcp.py).
+CAT_CUSTOM  = 'Custom'
 
 CATEGORIES = [
     CAT_DEV, CAT_DATA, CAT_COMMS, CAT_SEARCH,
-    CAT_PROD, CAT_DEVOPS, CAT_FINANCE, CAT_DESIGN, CAT_RESEARCH, CAT_OTHER,
+    CAT_PROD, CAT_DEVOPS, CAT_FINANCE, CAT_DESIGN, CAT_RESEARCH,
+    CAT_OTHER, CAT_CUSTOM,
 ]
 
 
@@ -92,6 +103,23 @@ CATALOG: list[CatalogEntry] = [
         'url': 'https://github.com/github/github-mcp-server',
         'tags': ['git', 'code', 'issues', 'pr'],
         'featured': True,
+    },
+    {
+        'id': 'github-batch',
+        'name': 'GitHub Batch Commit',
+        'description': 'Batch-commit many files (incl. large files via Git LFS) in O(1) API calls.',
+        'icon': '<img src="static/icons/mcp/github.svg" alt="GitHub">',
+        'category': CAT_DEV,
+        'command': 'uvx',
+        'args': ['--from', _GITHUB_BATCH_PATH, 'github-batch-mcp'],
+        'env_specs': [{
+            'key': 'GITHUB_PERSONAL_ACCESS_TOKEN',
+            'label': 'Personal Access Token',
+            'hint': 'ghp_xxxxxxxxxxxx (repo scope, or contents:write)',
+            'required': True,
+        }],
+        'url': 'https://github.com/github/github-mcp-server',
+        'tags': ['git', 'commit', 'batch', 'lfs', 'bulk'],
     },
     {
         'id': 'gitlab',

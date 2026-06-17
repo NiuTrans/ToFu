@@ -24,11 +24,30 @@ import sqlite3
 import threading
 import time
 
-from flask import g
-
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+
+def _get_g():
+    """Return the request-context global object, resolved LAZILY.
+
+    Why not ``from flask import g`` at module top: ``server.py`` installs a
+    Flask→Quart shim (``sys.modules['flask'] = quart``) at boot. A
+    module-level ``from flask import g`` binds ``g`` at import time, so if
+    this module is imported BEFORE the shim runs (common in unit tests that
+    pull ``lib.database`` transitively), ``g`` is permanently bound to
+    REAL Flask's proxy. The teardown handler below then touches that stale
+    proxy under a Quart app context and raises
+    ``RuntimeError: Working outside of application context`` — and, because
+    the binding is process-global, it poisons every later server-backed
+    test in the same pytest run. Importing ``g`` at call time always yields
+    whatever ``flask`` currently resolves to (the shim's quart, in the app;
+    real flask if genuinely unshimmed), so the proxy matches the live
+    context. See .tofu/skills/test-server-shim-load-order.md.
+    """
+    from flask import g
+    return g
 
 # ── Per-namespace log leveling ──────────────────────────────────────────
 # The database layer logs genuine failures (SQL errors, failed commits,
@@ -489,9 +508,18 @@ class _SqliteCursorWrapper:
         return self
 
     def executemany(self, sql, params_list):
-        self._cursor.executemany(sql, params_list)
-        self.description = self._cursor.description
-        self.rowcount = self._cursor.rowcount
+        try:
+            self._cursor.executemany(sql, params_list)
+            self.description = self._cursor.description
+            self.rowcount = self._cursor.rowcount
+            self._conn._last_used = time.monotonic()
+            _sql_upper = sql[:30].lstrip().upper()
+            if _sql_upper.startswith(('INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP')):
+                self._conn._dirty = True
+        except Exception as e:
+            logger.error('[DB] SQL executemany failed (%s): %.120s', type(e).__name__, e)
+            logger.debug('[DB] executemany error detail: %s\n  SQL: %.200s', e, sql)
+            raise
         return self
 
     def fetchone(self):
@@ -960,6 +988,7 @@ def _pool_put(conn):
 
 def get_db(domain=DOMAIN_CHAT):
     """Get a request-scoped database connection (PG pooled or SQLite)."""
+    g = _get_g()
     key = f'_db_{domain}'
     db = getattr(g, key, None)
     if db is not None:
@@ -1270,8 +1299,28 @@ def db_execute_with_retry(db, sql, params=(), *, commit=True, max_retries=3):
                     # Try to reconnect for PG connection errors
                     if etype in ('OperationalError', 'InterfaceError') and hasattr(db, '_conn'):
                         try:
+                            old_raw = db._conn
                             fresh = _new_pg_connection()
+                            # Adopt fresh's raw connection AND its semaphore slot.
+                            # The slot + global _conn_count tied to the dead raw
+                            # connection must be released here, otherwise every
+                            # reconnect permanently leaks one pool slot and one
+                            # PG backend (fresh kept its own slot/count).
+                            try:
+                                old_raw.close()
+                            except Exception as _c_err:
+                                logger.debug('[DB-Retry] Closing dead raw conn failed: %s', _c_err)
+                            old_sem = getattr(db, '_semaphore', None)
+                            if old_sem is not None:
+                                try:
+                                    old_sem.release()
+                                except ValueError:
+                                    logger.debug('[DB-Retry] Old semaphore already released')
+                                import lib.database._core as _core_mod
+                                with _conn_count_lock:
+                                    _core_mod._conn_count = max(0, _core_mod._conn_count - 1)
                             db._conn = fresh._conn
+                            db._semaphore = fresh._semaphore
                             db._created_at = fresh._created_at
                             db._last_used = time.monotonic()
                             logger.info('[DB-Retry] Reconnected underlying PG connection (was: %s)', etype)
@@ -1300,6 +1349,7 @@ def db_execute_with_retry(db, sql, params=(), *, commit=True, max_retries=3):
 
 def close_db(exception):
     """Flask teardown handler — return connections to pool (both PG and SQLite)."""
+    g = _get_g()
     for domain in (DOMAIN_CHAT, DOMAIN_TRADING, DOMAIN_SYSTEM):
         key = f'_db_{domain}'
         db = g.pop(key, None)

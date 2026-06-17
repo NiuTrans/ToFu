@@ -12,6 +12,11 @@
 .migrate_backup/
 load_env.py
 
+# ── Data-cleanup leftovers (large stray artifacts at repo root, e.g. the
+#    276MB delete.list.all.final; not part of the app, exceed GitHub's
+#    100MB limit and break export/push — see export-large-stray-file note). ──
+/delete.list*
+
 # ── Python ──
 __pycache__/
 *.pyc
@@ -37,9 +42,25 @@ data/
 /thesis_references.bib
 
 # ── Eval / bench workdirs (large, causes FUSE timeouts) ──
-swebench_workdir/
-swebench_rerun_workdir/
-abtest_workdir/
+# Glob covers every eval/bench harness output dir (swebench_workdir/,
+# swebench_glm_ab_workdir/, swebench_pilot_workdir/, abtest_workdir/, …).
+# These hold thousands of repo clones + conda envs (800K+ files combined)
+# and are the #1 cause of grep/find FUSE timeouts — never track or scan them.
+*_workdir/
+
+# ── CWD pollution: stray dirs created by eval/agent harnesses that wrote
+#    output to a path RELATIVE to the repo root instead of an absolute one
+#    (e.g. INS/your-username/..., mnt/dolphinfs/...; the harness stripped the
+#    leading "/" and re-created our own abs path as a nested tree). Not part
+#    of the app — see the 2026-06 "unrelated folders polluting the tree" note. ──
+/INS/
+/mnt/
+/Mant/
+/_/
+/django/
+/outputs/
+/similar_fix.py/
+/pylint-*/
 
 # ── Test coverage ──
 .coverage
@@ -88,6 +109,10 @@ Thumbs.db
 #    by lib/file_history; round-by-round GC churns it, so it must never be
 #    version-tracked — see the 2026-06 "satus full of D" incident). ──
 .tofu/
+
+# ── Safe-delete trash (files moved aside by the delete mechanism instead of
+#    being unlinked; purge manually to reclaim disk). Never track. ──
+.tofu_trash/
 
 # ── Sensitive reports (moved to docs/ but should not be published) ──
 docs/SECURITY_AUDIT_REPORT.md

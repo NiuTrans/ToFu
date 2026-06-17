@@ -186,6 +186,18 @@ def _get_cmd_env(cwd=None):
             else:
                 env['PYTHONPATH'] = cwd
 
+    # ★ Portable sandbox env-jail (restricted/agent-run principals only):
+    #   point HOME/TMPDIR inside the workspace and prepend the rm/mv shim dir
+    #   to PATH. Applied LAST so the shim dir wins over venv/system bins.
+    #   Local desktop/CLI callers are not restricted → untouched.
+    try:
+        from lib.project_mod.abs_path_guard import is_restricted
+        if cwd and is_restricted():
+            from lib.project_mod import portable_sandbox
+            portable_sandbox.prepare_env(env, cwd)
+    except Exception:
+        pass
+
     return env
 
 
@@ -868,6 +880,167 @@ def _is_destructive_command(command):
         # file ops (rm, mv, cp, touch, chmod, tar, …), and any unknown binary.
         return True
 
+# ── Catastrophic top-level deletion guard ───────────────────────────
+# Deleting a first-level directory (``/mnt``, ``/home``, ``/data`` …) or
+# the filesystem root itself is never a legitimate agent action — it is
+# the failure mode that wiped other teams' paths during a benchmark run.
+# We refuse it OUTRIGHT (no trash rewrite, no approval bypass), parsing
+# the actual ``rm``/``rmdir`` arguments so flag order can't smuggle it
+# past us (``rm -fr /mnt`` == ``rm /mnt -r -f``).
+_DELETE_COMMANDS = frozenset({'rm', 'rmdir', 'unlink'})
+
+# Number of leading path components a delete target must have to be
+# considered "deep enough" to allow. ``/`` → 0, ``/mnt`` → 1 (blocked),
+# ``/mnt/foo`` → 2 (allowed). Tunable via env for stricter sites.
+_MIN_DELETE_DEPTH = max(1, int(os.environ.get('TOFU_MIN_DELETE_DEPTH', '2')))
+
+
+def _is_catastrophic_delete(command, cwd=None):
+    """Return the offending path if *command* deletes a forbidden abs target.
+
+    Two independent rules; either one rejects:
+
+      1. **Depth rule (always on).** A delete (``rm``/``rmdir``/``unlink``)
+         whose resolved absolute target has fewer than ``_MIN_DELETE_DEPTH``
+         path components (``/``, ``/mnt``, ``/home``, ``~`` → home root) is
+         catastrophic and refused for every caller — this is never legitimate.
+
+      2. **Workspace-containment rule (restricted callers only).** When the
+         current task runs in a *restricted* context — i.e. a remote /
+         ``agent/run`` principal, the same flag ``abs_path_guard`` uses to
+         sandbox absolute read/write — any absolute delete whose realpath
+         falls OUTSIDE the active workspace ``cwd`` is refused, even if it is
+         "deep enough" to pass rule 1. This is what stops an agent from
+         deleting another user's path (``/mnt/.../INS/<other>/…``) or a home
+         dir (``/home/<someone>``) or escaping via ``..``. Local desktop / CLI
+         callers are NOT restricted, so their ability to delete outside the
+         project (e.g. ``rm -rf ~/old_build``) is preserved — no product
+         regression.
+
+    Only absolute / ``~`` / env-var-expanded targets are evaluated: a
+    relative ``rm -rf build`` stays inside ``cwd`` and is always safe.
+    """
+    if not command or not command.strip():
+        return None
+    # Workspace containment only engages for restricted principals AND when a
+    # workspace cwd is known. Import locally to avoid a module import cycle.
+    ws_real = None
+    try:
+        from lib.project_mod.abs_path_guard import is_restricted
+        if cwd and is_restricted():
+            ws_real = os.path.realpath(cwd)
+    except Exception:
+        ws_real = None
+    for seg in _split_pipeline(command):
+        seg = seg.strip()
+        if not seg:
+            continue
+        while _re.match(r'^\w+=\S*\s', seg):
+            seg = _re.sub(r'^\w+=\S*\s+', '', seg, count=1)
+        parts = seg.split()
+        if not parts:
+            continue
+        base_cmd = parts[0].split('/')[-1]
+        if base_cmd not in _DELETE_COMMANDS:
+            continue
+        for arg in parts[1:]:
+            if arg.startswith('-'):
+                continue
+            # Only absolute / home / env-expanded targets can escape the
+            # workspace. A bare relative path stays inside cwd.
+            if not (arg.startswith('/') or arg.startswith('~')
+                    or arg.startswith('$')):
+                continue
+            # Strip a wildcard tail (``/mnt/*`` is as bad as ``/mnt``).
+            cleaned = arg.rstrip('/*')
+            expanded = os.path.expanduser(os.path.expandvars(cleaned))
+            # Unresolved env var (``$FOO`` with FOO unset) → treat the bare
+            # prefix as root-ish and block, since we can't prove it's safe.
+            if expanded.startswith('$') or not expanded:
+                return arg
+            if not expanded.startswith('/'):
+                continue
+            depth = len([c for c in expanded.split('/') if c])
+            if depth < _MIN_DELETE_DEPTH:
+                return arg
+            # ★ Rule 2: restricted callers may only delete inside the workspace.
+            if ws_real:
+                tgt_real = os.path.realpath(expanded)
+                if not (tgt_real == ws_real
+                        or tgt_real.startswith(ws_real + os.sep)):
+                    return arg
+    return None
+
+
+# ── rm → trash rewrite (recoverable deletion) ───────────────────────
+# Make ordinary deletes reversible: instead of executing ``rm`` directly,
+# we prepend a shell function that MOVES targets into a per-workspace
+# ``.tofu_trash/`` directory. This is self-contained (no trash-cli / gio
+# dependency, works on headless FUSE mounts) and survives flag variations
+# because the agent's literal ``rm ...`` call hits our function first.
+# Disable with ``TOFU_RM_TRASH=0``. Each delete lazily prunes trash entries
+# older than ``TOFU_TRASH_TTL_DAYS`` (default 7; 0 = keep forever).
+_RM_TRASH_ENABLED = os.environ.get('TOFU_RM_TRASH', '1') not in ('0', 'false', 'False')
+_TRASH_DIRNAME = os.environ.get('TOFU_TRASH_DIRNAME', '.tofu_trash')
+# Lazy retention: on each delete, prune trash timestamp-dirs older than this
+# many days so the recoverable-delete bin can't grow unbounded. Set to 0 to
+# disable pruning (keep forever). Default 7 days.
+try:
+    _TRASH_TTL_DAYS = int(os.environ.get('TOFU_TRASH_TTL_DAYS', '7'))
+except (ValueError, TypeError) as e:
+    logger.debug('Invalid TOFU_TRASH_TTL_DAYS, defaulting to 7: %s', e)
+    _TRASH_TTL_DAYS = 7
+
+
+def _maybe_wrap_rm_with_trash(command, cwd):
+    """Prepend an ``rm`` shell-function shim that trashes instead of deletes.
+
+    Returns the (possibly rewritten) command. No-op when disabled, when the
+    command has no ``rm`` segment, or when the command already references the
+    trash dir (avoid double-wrapping). The shim moves each target under
+    ``<cwd>/.tofu_trash/<timestamp>/`` preserving relative layout; ``-f`` on
+    a missing file still succeeds (exit 0) to match ``rm`` semantics. On each
+    delete it also lazily prunes trash entries older than
+    ``TOFU_TRASH_TTL_DAYS`` (default 7) so the bin can't grow unbounded.
+    """
+    if not _RM_TRASH_ENABLED or not command:
+        return command
+    # Cheap pre-check: only wrap when an `rm` actually appears as a command
+    # token (not inside a path/string like `confirm.txt`).
+    if not _re.search(r'(^|[|&;]|\s)rm(\s|$)', command):
+        return command
+    if _TRASH_DIRNAME in command:
+        return command
+    trash_root = os.path.join(cwd or '.', _TRASH_DIRNAME)
+    # Lazy retention prune: drop trash timestamp-dirs older than the TTL so the
+    # bin can't grow unbounded. Runs at the START of the command, while `rm` is
+    # still the real binary (before the function below shadows it). No-op when
+    # the trash dir doesn't exist yet or TTL is disabled (0).
+    prune = ''
+    if _TRASH_TTL_DAYS > 0:
+        prune = (
+            'find "{trash}" -mindepth 1 -maxdepth 1 -type d -mtime +{ttl} '
+            '-exec rm -rf {} + 2>/dev/null; '
+        ).replace('{ttl}', str(_TRASH_TTL_DAYS)).replace('{trash}', trash_root)
+    # POSIX shell function: route every `rm` through a move-to-trash that
+    # ignores rm's own flags (-r/-f/-rf/...) and trashes the file operands.
+    # The trash root is made self-ignoring (a `.gitignore` containing `*`) so
+    # trashed files never leak into git in WHATEVER repo the command runs in —
+    # cwd may be a cloned target repo (e.g. an eval workdir) that has its own
+    # git and no knowledge of our top-level .gitignore. Without this, `git add
+    # -A` there would sweep trashed files into the captured diff.
+    shim = prune + (
+        'rm() { '
+        '_td="{trash}/$(date +%Y%m%d_%H%M%S_%N)"; mkdir -p "$_td"; '
+        '[ -f "{trash}/.gitignore" ] || printf "*\\n" > "{trash}/.gitignore" 2>/dev/null; '
+        'for _a in "$@"; do '
+        'case "$_a" in -*) continue;; esac; '
+        '[ -e "$_a" ] || [ -L "$_a" ] || continue; '
+        'mkdir -p "$_td/$(dirname "$_a")" 2>/dev/null; '
+        'mv "$_a" "$_td/$_a" 2>/dev/null || cp -a "$_a" "$_td/$_a" 2>/dev/null; '
+        'done; return 0; }; '
+    ).replace('{trash}', trash_root)
+    return shim + command
     # All segments are known read-only
     return False
 
@@ -1063,6 +1236,20 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     if _DANGEROUS_RE.search(command):
         return 'Error: Command blocked for safety: matches dangerous pattern.'
 
+    # ★ Catastrophic top-level deletion guard — refuse `rm /mnt`, `rm -rf /`,
+    #   `rmdir /home`, etc. OUTRIGHT. These are never legitimate and are the
+    #   exact failure mode that wiped shared paths during a benchmark run.
+    #   Checked before the trash rewrite so a shallow target is never even
+    #   moved to trash — it is rejected.
+    _cat = _is_catastrophic_delete(command, base)
+    if _cat is not None:
+        logger.error('[run_command] BLOCKED catastrophic delete of %r (cwd=%s): %.200s',
+                     _cat, base, command)
+        return (f"Error: Command blocked for safety: refusing to delete "
+                f"top-level path '{_cat}'. Deleting filesystem roots or "
+                f"first-level directories (e.g. /mnt, /home, /data) is not "
+                f"permitted. Delete only specific paths inside your workspace.")
+
     # ★ Cross-DC timeout adjustment — multiply timeout for remote DolphinFS clusters
     try:
         from lib.cross_dc import get_timeout_multiplier
@@ -1089,8 +1276,28 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
                        '[run_command] auto-added grep flags for FUSE/binary safety\n')
         command = hardened
 
+    # ★ rm → trash rewrite: ordinary deletes become recoverable (moved to a
+    #   per-workspace .tofu_trash/ instead of unlinked). Applied to the
+    #   EXECUTED command only — the displayed/logged `command` stays clean so
+    #   the model sees its own `rm ...` echoed back, not the shim. Catastrophic
+    #   deletes are already rejected above and never reach here.
+    exec_command = _maybe_wrap_rm_with_trash(command, base)
+
     shell_prefix = SHELL_PREFIX
-    full_command = f'{shell_prefix} {command}' if shell_prefix else command
+    full_command = f'{shell_prefix} {exec_command}' if shell_prefix else exec_command
+
+    # ★ Portable sandbox (restricted/agent-run principals only). On a host
+    #   that allows it this wraps the command in a real isolation backend
+    #   (bwrap/podman); on a locked host it is a no-op here and containment
+    #   comes from the HOME/TMPDIR jail + rm shim applied in _get_cmd_env.
+    #   Local desktop/CLI callers are NOT restricted → completely unaffected.
+    try:
+        from lib.project_mod.abs_path_guard import is_restricted
+        if is_restricted() and base:
+            from lib.project_mod import portable_sandbox
+            full_command = portable_sandbox.wrap_command(full_command, base)
+    except Exception as _sb_e:  # never let sandbox wiring break command exec
+        logger.debug('[run_command] portable_sandbox.wrap skipped: %s', _sb_e)
 
     timeout_str = f'{timeout}s' if timeout else 'unlimited'
     logger.info('run_command: $ %s  (timeout=%s, cwd=%s, interactive=%s)',

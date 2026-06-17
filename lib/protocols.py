@@ -54,6 +54,7 @@ __all__ = [
     'FetchService',
     'TradingDataProvider',
     'TaskEventSink',
+    'ConversationStore',
     'ToolHandler',
     'BodyBuilder',
 ]
@@ -263,6 +264,110 @@ class TaskEventSink(Protocol):
             event: Event dict with at minimum a ``'type'`` key
                    (e.g. ``{'type': 'tool_start', 'roundNum': 1, ...}``).
                    Stored in ``task['events']`` and used for SSE streaming.
+        """
+        ...
+
+
+# ═══════════════════════════════════════════════════════════
+#  Conversation Store Protocol
+# ═══════════════════════════════════════════════════════════
+
+@runtime_checkable
+class ConversationStore(Protocol):
+    """Protocol for the agent base's persistence boundary.
+
+    The reusable agent base (orchestrator, endpoint, compaction,
+    task_runtime — see ``lib/agent_core_manifest.py``) must NOT import
+    ``lib.database`` / ``lib.conversations`` directly.  It reaches all
+    persistence through this protocol, obtained via
+    ``lib.agent_core.store.get_conversation_store()``.
+
+    Satisfied by ``lib.tasks_pkg.persistence_store.DefaultConversationStore``
+    (chatui's PostgreSQL/SQLite host adapter), or any host that wants to run
+    the agent against a different store (test mocks, an embedded app with no
+    conversations table, etc.).
+
+    Methods are added stage-by-stage as core call sites are migrated behind
+    the seam; each one mirrors an operation the base used to perform inline.
+    """
+
+    def release_connection(self) -> None:
+        """Release this worker thread's pooled DB connection(s).
+
+        Called in a ``finally`` at the end of a unit of work on a long-lived
+        worker thread (the ``asyncio.to_thread`` pool, daemon task threads),
+        so a per-thread connection isn't pinned for the thread's lifetime.
+        A no-op for stores that don't pool per-thread connections.
+        """
+        ...
+
+    def load_conversation_messages(self, conv_id: str) -> tuple[list, int] | None:
+        """Return ``(messages, updated_at)`` for a conversation, or ``None``.
+
+        ``messages`` is the parsed message list (possibly empty); ``updated_at``
+        is the row's last-modified timestamp in epoch-ms (0 if unknown).
+        Returns ``None`` when no conversation row exists.  Parse failures are
+        logged by the store and yield an empty list rather than raising.
+        """
+        ...
+
+    def save_conversation_messages(self, conv_id: str, messages: list) -> int:
+        """Persist ``messages`` for a conversation (non-CAS full overwrite).
+
+        Returns the new ``updated_at`` timestamp (epoch-ms) written.  Does NOT
+        touch any full-text search index — callers that need FTS use the
+        search-aware sync path on the host adapter.
+        """
+        ...
+
+    def cas_update_conversation_messages(self, conv_id: str, messages: list,
+                                         expected_updated_at: int) -> int:
+        """Compare-and-swap overwrite of a conversation's messages.
+
+        Writes only if the row's current ``updated_at`` still equals
+        ``expected_updated_at``.  Returns the number of rows affected (0 when a
+        concurrent writer bumped the row — the caller treats that as a skip).
+        """
+        ...
+
+    def ensure_compaction_schema(self) -> None:
+        """Create the ``transcript_archive`` table/index if absent (idempotent).
+
+        Safety net for installs whose DDL migration hasn't run; the canonical
+        schema lives in the host's migration layer.
+        """
+        ...
+
+    def archive_transcript(self, conv_id: str, messages: list, *,
+                           trigger: str = 'force', task_id: str = '',
+                           round_num: int = 0, model: str = '',
+                           tokens_before: int = 0, tokens_after: int = 0,
+                           msgs_before: int = 0, msgs_after: int = 0,
+                           reason: str = '') -> 'int | None':
+        """Insert a pre-compaction transcript archive row; return its id.
+
+        The store serialises ``messages`` itself.  Returns the new row id, or
+        ``None`` on failure (logged by the store).
+        """
+        ...
+
+    def update_archive_summary(self, archive_id: int, summary: str,
+                               tokens_after: int, msgs_after: int) -> None:
+        """Fill in the summary + post-compaction counts on an archive row."""
+        ...
+
+    def delete_archives(self, conv_id: str) -> None:
+        """Delete all transcript-archive rows for a conversation."""
+        ...
+
+    def sync_conversation_with_search(self, conv_id: str, messages: list) -> int:
+        """Overwrite a conversation's messages AND refresh its search index.
+
+        Unlike :meth:`save_conversation_messages`, this also writes
+        ``msg_count`` + ``search_text`` and updates the full-text-search
+        index — the persistence path endpoint mode uses so multi-turn
+        Planner/Worker/Critic output survives an SSE disconnect and stays
+        searchable.  Returns the new ``updated_at`` (epoch-ms).
         """
         ...
 

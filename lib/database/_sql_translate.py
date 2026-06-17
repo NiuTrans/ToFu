@@ -1,6 +1,22 @@
-"""SQL compatibility layer — translates legacy SQL syntax to PostgreSQL.
+"""SQL compatibility layer — the permanent SQLite→PostgreSQL dialect bridge.
 
-Handles ? → %s placeholders, INSERT OR REPLACE → ON CONFLICT, PRAGMA no-ops, etc.
+This is NOT a migration leftover or a deprecated shim: it is the seam that lets
+the whole codebase author ONE SQLite-flavoured query string (with ``?``
+placeholders) and run it on either backend. ``PgCursor.execute`` calls
+:func:`translate_sql` on EVERY statement on the PG path, so this module is
+load-bearing for all ~360 parametrized call-sites — not just upserts.
+
+It performs ~14 independent transforms. Only ONE — the ``INSERT OR REPLACE`` →
+ON CONFLICT branch (the sole transform with per-table knowledge, see
+:data:`_PK_MAP`) — has a structured replacement: ``_core_schema.upsert()``,
+which all in-tree tables now use. The remaining transforms (``?`` → ``%s``
+placeholder rewriting, ``json_extract`` → jsonb accessors, ``strftime`` /
+``datetime('now')`` → PG time functions, PRAGMA no-ops, …) have no Core
+equivalent and stay here. Retiring the bridge entirely would require rewriting
+every call-site to PG-native SQL AND would break the SQLite fallback path — a
+separate project, not a cleanup. Keep it honest: extend it, don't pretend it
+is going away.
+
 Extracted from _core.py for modularity. Re-exported via _core for backward compat.
 """
 
@@ -54,49 +70,41 @@ _RE_PRAGMA_TABLE_INFO = re.compile(
 )
 
 
-def _get_pk_columns(table_name):
-    """Return known primary key columns for INSERT OR REPLACE translation.
+# ═══════════════════════════════════════════════════════════════════════
+#  INSERT OR REPLACE → ON CONFLICT primary-key map
+# ═══════════════════════════════════════════════════════════════════════
+# Maps a table name to the PK columns used to synthesize a PG
+# ``ON CONFLICT (<pk>) DO UPDATE`` target for an upsert. This covers ONLY the
+# legacy upsert-translation branch — one of ~14 transforms this module does —
+# NOT the whole translator.
+#
+# State (2026-06): every IN-TREE table that once relied on this branch has
+# migrated to ``lib/database/_core_schema.upsert()`` (dialect-correct upserts
+# built from a single Core table definition). The only entries that remain are
+# tables whose upsert call-sites live in the EXTERNAL ``tofu-trading`` package,
+# which still routes through this wrapper on PostgreSQL. They have no in-tree
+# caller by design, so the reverse-direction guard in
+# tests/test_sql_translate.py (TestPkMapNoDeadEntries) keeps them on an
+# explicit allowlist and fails if any NEW dead entry accumulates here.
+_PK_MAP = {
+    'trading_price_cache':            ['symbol'],
+    'trading_config':                 ['key'],
+    'trading_fee_rules':              ['symbol'],
+    'trading_daily_briefing':         ['date'],
+    'trading_bg_tasks':               ['task_id'],
+    'trading_intel_crawl_log':        ['crawl_date', 'category', 'source_key'],
+    'trading_strategy_compatibility': ['pair_key'],
+}
 
-    PostgreSQL needs explicit ON CONFLICT (pk_columns) DO UPDATE SET ...
-    to emulate INSERT OR REPLACE behavior.
+
+def _get_pk_columns(table_name):
+    """Return known primary key columns for an upsert translation.
+
+    PostgreSQL needs an explicit ``ON CONFLICT (pk_columns) DO UPDATE SET ...``
+    to emulate ``INSERT OR REPLACE``. See :data:`_PK_MAP` for the registered
+    set (now external-package tables only — in-tree tables use
+    ``_core_schema.upsert()``).
     """
-    _PK_MAP = {
-        # conversations: MIGRATED to lib/database/_core_schema.upsert()
-        # (queries-on-Core) — all 7 INSERT OR REPLACE call-sites converted.
-        # task_results: MIGRATED to lib/database/_core_schema.upsert()
-        # (queries-on-Core) — no INSERT OR REPLACE call-sites remain.
-        # task_events: MIGRATED to lib/database/_core_schema.upsert() (DO NOTHING,
-        # queries-on-Core) — no INSERT OR REPLACE/IGNORE call-sites remain.
-        'users':                      ['id'],
-        'schema_meta':                ['key'],
-        # pricing_cache: MIGRATED to lib/database/_core_schema.upsert() — no
-        # INSERT OR REPLACE call-sites remain, so no translation entry needed.
-        # (First table on the queries-on-Core track; see the proof-of-concept.)
-        'recent_projects':            ['path'],
-        'trading_price_cache':        ['symbol'],
-        'trading_config':             ['key'],
-        'trading_fee_rules':          ['symbol'],
-        'trading_daily_briefing':     ['date'],
-        'trading_bg_tasks':           ['task_id'],
-        'trading_intel_crawl_log':    ['crawl_date', 'category', 'source_key'],
-        # Swarm artifact store (legacy in-memory, kept for back-compat)
-        'artifacts':                  ['key'],
-        # Chat artifacts (renderable reports — md / html / svg)
-        'chat_artifacts':             ['id'],
-        # Scheduler
-        'scheduled_tasks':            ['id'],
-        'proactive_poll_log':         ['id'],
-        # Error tracking
-        'error_resolutions':          ['fingerprint'],
-        # paper_reports / paper_translations / paper_library: MIGRATED to
-        # lib/database/_core_schema.upsert() (queries-on-Core) — no INSERT OR
-        # REPLACE call-sites remain, so no translation entries needed.
-        # daily_cost_cache: MIGRATED to lib/database/_core_schema.upsert()
-        # (composite-PK queries-on-Core conversion) — no INSERT OR REPLACE
-        # call-sites remain, so no translation entry needed.
-        # Trading autopilot strategy-pair compatibility scores
-        'trading_strategy_compatibility': ['pair_key'],
-    }
     return _PK_MAP.get(table_name)
 
 

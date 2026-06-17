@@ -14,6 +14,7 @@ __all__ = [
     'PPTX_TRANSLATE_ENABLED',
     'DEBUG_MODE',
     'OPTIMIZER_ENABLED',
+    'SCHEDULER_ALLOW_CODE_EXEC',
     'ARTIFACTS_ENABLED',
     'FETCH_TOP_N', 'FETCH_TIMEOUT',
     'FETCH_MAX_CHARS_SEARCH', 'FETCH_MAX_CHARS_DIRECT',
@@ -196,6 +197,14 @@ CACHE_EXTENDED_TTL = _resolve_feature_flag('CACHE_EXTENDED_TTL', 'cache_extended
 # users can disable it in Settings if they don't want autonomous changes
 # (e.g. auto-applied block_search_domain).
 OPTIMIZER_ENABLED = _resolve_feature_flag('OPTIMIZER_ENABLED', 'optimizer_enabled', True)
+# Scheduler code-execution gate: when False, scheduled task_type='command'/'python'
+# tasks can neither be created nor executed (the LLM-driven persistent
+# arbitrary-code-execution seam is locked down). Built-in 'pg_backup' /
+# 'optimizer' / 'prompt' / 'agent' types are unaffected. Default True
+# preserves existing behavior; set SCHEDULER_ALLOW_CODE_EXEC=0 (or
+# scheduler_allow_code_exec: false in features.json) to lock down.
+SCHEDULER_ALLOW_CODE_EXEC = _resolve_feature_flag(
+    'SCHEDULER_ALLOW_CODE_EXEC', 'scheduler_allow_code_exec', True)
 # Renderable chat artifacts (md/html/svg) — see lib/artifacts/.  Default
 # ON; set ``ARTIFACTS_ENABLED=0`` (env) or ``artifacts_enabled: false``
 # in features.json to disable producers + chip rendering.  Routes stay
@@ -363,6 +372,8 @@ def reload_config():
     _mod.DEBUG_MODE = _resolve_feature_flag('DEBUG_MODE', 'debug_mode', False)
     _mod.CACHE_EXTENDED_TTL = _resolve_feature_flag('CACHE_EXTENDED_TTL', 'cache_extended_ttl', True)
     _mod.OPTIMIZER_ENABLED = _resolve_feature_flag('OPTIMIZER_ENABLED', 'optimizer_enabled', True)
+    _mod.SCHEDULER_ALLOW_CODE_EXEC = _resolve_feature_flag(
+        'SCHEDULER_ALLOW_CODE_EXEC', 'scheduler_allow_code_exec', True)
     _mod.ARTIFACTS_ENABLED = _resolve_feature_flag('ARTIFACTS_ENABLED', 'artifacts_enabled', True)
     # Plugin flags (tofu.flags): re-resolve each registered flag in place.
     try:

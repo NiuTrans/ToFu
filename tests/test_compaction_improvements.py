@@ -1669,6 +1669,76 @@ class TestCompactRefusalGuards:
         )
 
 
+
+@pytest.mark.unit
+class TestForceCompactReportsSummaryFailure:
+    """When the L2 summary LLM returns empty content, force_compact_if_needed
+    MUST report failure (return False) and NOT inject the synthetic
+    context_compact tool-pair.
+
+    Regression for the mq7y3irly1r4hu fatal-loop bug (2026-06-12): on an
+    empty summary, force_compact used to still append the synthetic pair
+    and return True, which made reactive_compact believe compaction
+    succeeded and skip its _head_truncate safety net — looping the same
+    oversized prompt back to the API until the task crashed FATAL."""
+
+    def _mk_messages(self):
+        # System + several real turns so the boundary is well-formed.
+        msgs = [{'role': 'system', 'content': 'sys'}]
+        for i in range(4):
+            msgs.append({'role': 'user', 'content': f'user turn {i}'})
+            msgs.append({'role': 'assistant', 'content': f'assistant turn {i}'})
+        return msgs
+
+    def test_empty_summary_returns_false_and_no_injection(self, monkeypatch):
+        from lib.tasks_pkg.compaction import _layer2
+
+        # Force the summary LLM to come back empty (the exact failure mode).
+        monkeypatch.setattr(_layer2, '_generate_query_aware_summary',
+                            lambda *a, **k: None)
+        # Avoid DB/SSE side-effects from the archive snapshot.
+        monkeypatch.setattr(_layer2, '_archive_transcript', lambda *a, **k: None)
+
+        msgs = self._mk_messages()
+        original = list(msgs)
+        task = {'id': 'fail_test', 'convId': 'conv_fail',
+                'config': {'model': 'gpt-4'}}
+
+        result = _layer2.force_compact_if_needed(
+            msgs, task=task, force=True, keep_recent_pairs=2,
+        )
+
+        assert result is False, (
+            'force_compact_if_needed must return False when the summary '
+            'failed — the reactive head-truncate net depends on it.'
+        )
+        assert msgs == original, (
+            'Failed compaction must NOT mutate/grow the message list with a '
+            'synthetic context_compact pair.'
+        )
+
+    def test_successful_summary_returns_true_and_injects(self, monkeypatch):
+        from lib.tasks_pkg.compaction import _layer2
+
+        monkeypatch.setattr(_layer2, '_generate_query_aware_summary',
+                            lambda *a, **k: 'SUMMARY BODY')
+        monkeypatch.setattr(_layer2, '_archive_transcript', lambda *a, **k: None)
+
+        msgs = self._mk_messages()
+        task = {'id': 'ok_test', 'convId': 'conv_ok',
+                'config': {'model': 'gpt-4'}}
+
+        result = _layer2.force_compact_if_needed(
+            msgs, task=task, force=True, keep_recent_pairs=2,
+        )
+
+        assert result is True
+        # The synthetic context_compact tool-pair was appended.
+        assert any(m.get('role') == 'tool'
+                   and m.get('name') == _layer2._COMPACT_TOOL_NAME
+                   for m in msgs)
+
+
 # ═══════════════════════════════════════════════════════════
 #  13. Paired Assistant Compaction (Phase B2)
 #  A/B-verified 2026-04-27: -1.4% cache_write vs Phase B alone.

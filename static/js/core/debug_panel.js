@@ -141,6 +141,23 @@ function toggleDebug() {
   document
     .getElementById("debugPanel")
     .classList.toggle("visible", debugVisible);
+  // ★ Single source of truth: whenever the panel is opened, (re)load the
+  //   active conversation's messages from the backend. A cold page refresh
+  //   restores the active conv via renderChat (not loadConversation), so
+  //   restoreDebugForConv never fired and the panel showed empty until the
+  //   next generation. Loading on open guarantees fresh, backend-built content.
+  if (debugVisible
+      && typeof activeConvId !== "undefined" && activeConvId
+      && typeof restoreDebugForConv === "function") {
+    restoreDebugForConv(activeConvId);
+  }
+}
+// Close the debug panel (top-right ✕). Distinct from clearDebug(), which only
+// wipes content — the ✕ must actually hide the panel.
+function closeDebug() {
+  debugVisible = false;
+  const panel = document.getElementById("debugPanel");
+  if (panel) panel.classList.remove("visible");
 }
 // Called on conversation switch: restore cached debug for this conv.
 //

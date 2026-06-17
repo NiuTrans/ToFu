@@ -305,6 +305,20 @@ def _memory_from_file(filepath, scope='global', package_dir=None,
     # Pull OpenClaw / Anthropic-style gating fields out of metadata.
     pkg_meta = _extract_package_metadata(meta)
 
+    # Packages installed from the curated catalog drop a ``.catalog_id``
+    # marker so the catalog endpoint can match them back (the memory id is
+    # derived from SKILL.md ``name`` and rarely equals the catalog id).
+    catalog_id = ''
+    if package_dir:
+        marker = os.path.join(package_dir, '.catalog_id')
+        if os.path.isfile(marker):
+            try:
+                with open(marker, encoding='utf-8') as cf:
+                    catalog_id = cf.read().strip()
+            except OSError as e:
+                logger.debug('Failed to read .catalog_id in %s: %s',
+                             package_dir, e)
+
     # Top-level frontmatter overrides (``requires_bins:`` /
     # ``requires_env:`` directly in frontmatter, predating the
     # ``metadata.openclaw`` block format).
@@ -332,6 +346,7 @@ def _memory_from_file(filepath, scope='global', package_dir=None,
         'filepath': filepath,
         'is_package': bool(package_dir),
         'package_dir': package_dir or '',
+        'catalog_id': catalog_id,
     }
 
     eligible, reasons = _check_memory_eligible(mem)

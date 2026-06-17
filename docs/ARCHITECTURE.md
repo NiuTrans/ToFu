@@ -167,7 +167,7 @@ flowchart TB
   %% ============ INFRA ============
   subgraph INFRA["⑦ 基础设施 Infra"]
     direction LR
-    db[database/<br/>PG primary · SQLite fallback<br/>_schema_pg · _schema_sqlite<br/>_sql_translate · _wrappers]
+    db[database/<br/>PG primary · SQLite fallback<br/>_core_schema (single table source) · _schema_pg · _schema_sqlite<br/>_sql_translate · _wrappers]
     log[log.py<br/>app · access · error · vendor · audit]
     comp_p[compat.py<br/>Linux/macOS/Windows shim]
     xdc[cross_dc.py<br/>FUSE latency auto-probe]
@@ -232,7 +232,7 @@ Grounded against the current filesystem (2026-05-03).
 | `log.py` | `get_logger`, `log_context`, `log_exception`, `audit_log` |
 | `agent_core/` | **Browsable facade for the reusable agent base.** Re-exports the core public surface (`run_task`, `dispatch_chat/stream`, `TaskRuntime`, `push_event`, `apply_profile`, + the `ToolSpec`/`BodyDialect` registry seams) and maps each symbol → defining module in `CORE_MEMBERS`. Does NOT move files — it *names* the base. Machine-readable boundary lives in `agent_core_manifest.py`; enforced by `tests/test_agent_core_boundary.py` (core may not import a concrete plugin). |
 | `agent_core_manifest.py` | Declares `CORE_MODULES` / `REGISTRY_SEAMS` / `CONCRETE_PLUGIN_MODULES` — the source of truth for the core/plugin split. |
-| `agent_profiles.py` | Capability profiles: named cfg-default bundles (`default`/`research`/`coding`/`minimal` + `data/config/profiles/*.json`). `apply_profile(cfg)` fills gaps; explicit cfg wins. Applied once at top of `run_task`. |
+| `agent_core/profiles.py` | Capability profiles: named cfg-default bundles (`default`/`research`/`coding`/`minimal` + `data/config/profiles/*.json`). `apply_profile(cfg)` fills gaps; explicit cfg wins. Applied once at top of `run_task`. (Former `lib/agent_profiles.py` shim deleted 2026-06.) |
 | `llm/` package | SSE streaming (`stream.py`), `build_body` (`body.py`), cache breakpoints (`cache.py`), retries (`_transport.py`), diagnostics (`diagnostics.py`) — split from the former `llm_client.py` (2026-05-21) |
 | `llm_dispatch/` | api · config · discovery · dispatcher · factory · slot (multi-key × multi-model) |
 | `model_info.py` | `_clamp_max_tokens` per-model caps |
@@ -254,7 +254,7 @@ Grounded against the current filesystem (2026-05-03).
 | `scheduler/` | manager · executor · cron · timer · proactive · tool_defs · _shared |
 | `pdf_parser/` | core · text · images · math · vlm · postprocess · _common |
 | `optimizer/` | orchestrator · analyzer · proposer · applier · storage · actions/ (**nightly self-tuning**) |
-| `database/` | _core · _bootstrap · _schema_pg · _schema_sqlite · _sql_translate · _wrappers |
+| `database/` | _core · _bootstrap · **_core_schema** (single SQLAlchemy-Core source for every table) · _schema_pg · _schema_sqlite (create_if_absent + backend extras) · _sql_translate · _wrappers |
 | `trading/` (23 files) | info · intel · intel_mega_crawler · intel_timeline · market · screening · historical_data · nav · llm_simulator · news_apis · news_gathering · portfolio_analytics · simhash · sources · strategy_data · strategy_interface · backtest · brain/ · portfolio/ · radar/ |
 | `trading_autopilot/` (14 files) | adaptive_decision_engine · backtest_learner · cycle · debate · kpi · meta_strategy · outcome · reasoning · strategy_evolution · strategy_learner · correlation · scheduler |
 | `trading_backtest_engine/` | engine · strategies · intel_backtest · validation · reporting · analysis · comparison · config · state |

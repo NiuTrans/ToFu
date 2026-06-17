@@ -132,6 +132,7 @@ def _sim_frontend_summary(turns):
 #  Tests
 # ═══════════════════════════════════════════════════════════
 
+@pytest.mark.unit
 class TestKeepToolHistoryFlow:
     """Test the complete keepToolHistory flow across multiple turns."""
 
@@ -307,6 +308,7 @@ class TestKeepToolHistoryFlow:
         assert oh['ratio'] > 5.0
 
 
+@pytest.mark.unit
 class TestMessageStructureIntegrity:
     """Test that rebuilt messages maintain valid structure for the LLM API."""
 
@@ -391,6 +393,7 @@ class TestMessageStructureIntegrity:
                 )
 
 
+@pytest.mark.unit
 class TestEdgeCases:
     """Edge cases and error handling."""
 
@@ -471,6 +474,7 @@ class TestEdgeCases:
         assert stats['used_store'] is True
 
 
+@pytest.mark.unit
 class TestOverheadScenarioMatrix:
     """Comprehensive matrix of overhead scenarios for the report."""
 

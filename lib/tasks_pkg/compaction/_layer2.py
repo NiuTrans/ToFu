@@ -412,6 +412,15 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     task_id = task.get('id', '')[:8] if task else '?'
     pfx = f'[Task {task_id}]'
 
+    # Optional out-param: caller passes a mutable dict to learn whether
+    # messages were actually mutated. Stays False on every early-return
+    # failure path; flipped to True only after the message list is
+    # replaced.  reactive_compact relies on this so its head-truncate
+    # safety net engages when the LLM summary comes back empty.
+    _result_meta = kwargs.get('_result_meta') if kwargs else None
+    if isinstance(_result_meta, dict):
+        _result_meta['compacted'] = False
+
     tokens_before = _estimate_total_tokens(messages)
     msg_count_before = len(messages)
     context_limit = _get_context_limit(task)
@@ -444,6 +453,8 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
             pfx, msg_count_before, tokens_before,
             (task.get('config', {}) or {}).get('model', '?') if task else '?',
         )
+        if isinstance(_result_meta, dict):
+            _result_meta['compacted'] = False
         return ('Context compaction skipped — no user message found to '
                 'anchor preservation. Messages preserved as-is.')
 
@@ -460,6 +471,8 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
             '(system_end=%d, total=%d)',
             pfx, boundary, system_end, msg_count_before,
         )
+        if isinstance(_result_meta, dict):
+            _result_meta['compacted'] = False
         return ('Context compaction skipped — boundary calculation would '
                 'preserve no live messages. Bailing out to prevent data loss.')
 
@@ -497,6 +510,8 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
 
     if not summary_text:
         logger.warning('%s [Compact] Summary generation failed — keeping messages intact', pfx)
+        if isinstance(_result_meta, dict):
+            _result_meta['compacted'] = False
         return ('Context compaction attempted but summary generation failed. '
                 'Messages preserved as-is.')
 
@@ -520,6 +535,9 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     messages.clear()
     messages.extend(new_messages)
 
+    if isinstance(_result_meta, dict):
+        _result_meta['compacted'] = True
+
     tokens_after = _estimate_total_tokens(messages)
     reduction_pct = (1 - tokens_after / max(1, tokens_before)) * 100
 
@@ -533,14 +551,9 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
 
     if _archive_id is not None:
         try:
-            from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db
-            db2 = get_thread_db(DOMAIN_CHAT)
-            db_execute_with_retry(db2,
-                'UPDATE transcript_archive SET summary=?, '
-                'tokens_after=?, msgs_after=? WHERE id=?',
-                ((summary_text or '')[:200_000], int(tokens_after),
-                 int(len(messages)), int(_archive_id)),
-            )
+            from lib.agent_core.store import get_conversation_store
+            get_conversation_store().update_archive_summary(
+                _archive_id, summary_text or '', int(tokens_after), int(len(messages)))
         except Exception as _upd_e:
             logger.debug('[Compact] archive row update failed: %s', _upd_e)
 
@@ -598,12 +611,27 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
     logger.info('%s [ForceCompact] Injecting context_compact for conv=%s',
                 pfx, conv_id[:8] if conv_id else '?')
 
+    # ★ Surface the L2 summary as a live phase. Without this, the front-end
+    #   spinner stays frozen on "Analyzing results…" for the several seconds
+    #   the cheap-model summary call takes — the user can't tell the harness
+    #   is busy compressing context rather than hung.
+    if task is not None:
+        try:
+            from lib.agent_core.events import EventType, build_event
+            from lib.tasks_pkg.manager import append_event
+            append_event(task, build_event(
+                EventType.PHASE, phase='compacting',
+                detail='Compressing earlier context to fit the window…'))
+        except Exception as _ph_e:
+            logger.debug('%s [ForceCompact] phase emit failed: %s', pfx, _ph_e)
+
     _trigger = (kwargs.get('_compaction_trigger')
                 if isinstance(kwargs, dict) else None) or 'force'
     _reason = (kwargs.get('_compaction_reason')
                if isinstance(kwargs, dict) else None) or ''
     _skip_archive = bool(kwargs.get('_compaction_skip_archive')
                          if isinstance(kwargs, dict) else False)
+    _meta: dict = {}
     compact_result = execute_compact_tool(
         messages, task=task,
         keep_recent_pairs=keep_recent_pairs,
@@ -611,7 +639,20 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
         _compaction_trigger=_trigger,
         _compaction_reason=_reason,
         _compaction_skip_archive=_skip_archive,
+        _result_meta=_meta,
     )
+
+    # If the summary LLM returned empty / compaction refused, the message
+    # list was NOT mutated. Injecting a synthetic context_compact
+    # tool-pair here would only grow the context and — worse — make the
+    # caller (reactive_compact) believe compaction succeeded, skipping its
+    # head-truncate safety net and looping the same oversized prompt back
+    # to the API. Report failure so the caller can fall through.
+    if not _meta.get('compacted'):
+        logger.warning('%s [ForceCompact] Compaction did not mutate messages '
+                       '(summary empty or refused) — reporting failure so the '
+                       'caller can fall back', pfx)
+        return False
 
     compact_call_id = f'compact_{uuid.uuid4().hex[:12]}'
 

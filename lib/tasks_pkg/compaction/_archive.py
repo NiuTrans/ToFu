@@ -34,18 +34,8 @@ def _ensure_compaction_tables():
     that haven't run the DDL migration yet — the metadata columns are
     added by the init_db migration block, not here.
     """
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    db = get_thread_db(DOMAIN_CHAT)
-    db.executescript('''
-        CREATE TABLE IF NOT EXISTS transcript_archive (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            conv_id TEXT NOT NULL,
-            messages_json TEXT NOT NULL,
-            summary TEXT NOT NULL DEFAULT '',
-            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_ta_conv ON transcript_archive(conv_id);
-    ''')
+    from lib.agent_core.store import get_conversation_store
+    get_conversation_store().ensure_compaction_schema()
 
 
 def _init_tables():
@@ -130,7 +120,7 @@ def _archive_transcript(conv_id: str, messages: list, summary: str = '',
     import time
 
     _init_tables()
-    from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db
+    from lib.agent_core.store import get_conversation_store
     task_id = (task.get('id', '') if task else '') or ''
     model = ''
     if task:
@@ -142,47 +132,22 @@ def _archive_transcript(conv_id: str, messages: list, summary: str = '',
             logger.debug('[Compact] model extract failed: %s', _m_e)
             model = ''
 
-    archive_id: int | None = None
-    try:
-        db = get_thread_db(DOMAIN_CHAT)
-        from lib.database import json_dumps_pg
-        messages_json = json_dumps_pg(messages, default=str)
-        # Use a write-then-select pattern (cross-backend safe) to recover
-        # the newly-allocated row id without committing to vendor-specific
-        # RETURNING / lastrowid semantics.
-        db_execute_with_retry(db,
-            'INSERT INTO transcript_archive '
-            '(conv_id, messages_json, summary, trigger, task_id, round_num, '
-            ' model, tokens_before, tokens_after, msgs_before, msgs_after, reason) '
-            'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-            (conv_id, messages_json, summary or '', trigger, task_id,
-             int(round_num or 0), model,
-             int(tokens_before or 0), int(tokens_after or 0),
-             int(msgs_before or 0), int(msgs_after or 0),
-             (reason or '')[:500]),
-        )
-        try:
-            cur = db.execute(
-                'SELECT id FROM transcript_archive WHERE conv_id=? '
-                'ORDER BY id DESC LIMIT 1',
-                (conv_id,),
-            )
-            row = cur.fetchone()
-            if row is not None:
-                archive_id = int(row[0] if not isinstance(row, dict) else row.get('id'))
-        except Exception as e_id:
-            logger.debug('[Compact] Archive id lookup failed: %s', e_id)
-
-        logger.info('[Compact] Transcript archived conv=%s  id=%s  trigger=%s  '
-                    'messages=%d  size=%s  tokens=%d→%d',
-                    conv_id[:8] if conv_id else '?',
-                    archive_id, trigger,
-                    len(messages), _human_size(len(messages_json)),
-                    int(tokens_before or 0), int(tokens_after or 0))
-    except Exception as e:
-        logger.warning('[Compact] Transcript archive failed conv=%s: %s',
-                       conv_id[:8] if conv_id else '?', e, exc_info=True)
+    archive_id = get_conversation_store().archive_transcript(
+        conv_id, messages,
+        trigger=trigger, task_id=task_id, round_num=int(round_num or 0),
+        model=model,
+        tokens_before=int(tokens_before or 0), tokens_after=int(tokens_after or 0),
+        msgs_before=int(msgs_before or 0), msgs_after=int(msgs_after or 0),
+        reason=reason or '',
+    )
+    if archive_id is None:
         return None
+    logger.info('[Compact] Transcript archived conv=%s  id=%s  trigger=%s  '
+                'messages=%d  tokens=%d→%d',
+                conv_id[:8] if conv_id else '?',
+                archive_id, trigger,
+                len(messages),
+                int(tokens_before or 0), int(tokens_after or 0))
 
     # Emit SSE event so the frontend can render an inline marker.  We guard
     # against missing task / archive_id so the archival path never breaks
@@ -217,10 +182,9 @@ def cleanup_compaction_data(conv_id: str):
     """
     import shutil
 
-    from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db
+    from lib.agent_core.store import get_conversation_store
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        db_execute_with_retry(db, 'DELETE FROM transcript_archive WHERE conv_id=?', (conv_id,))
+        get_conversation_store().delete_archives(conv_id)
         logger.debug('[Compaction] Cleaned up DB artifacts for conv=%s',
                      conv_id[:8] if conv_id else '?')
     except Exception as e:

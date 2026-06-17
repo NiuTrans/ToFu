@@ -71,6 +71,13 @@ class AgentRunRouteTest(unittest.TestCase):
         byo_providers._cache.clear()
         byo_providers._cache_loaded = False
         os.environ['TUNNEL_TOKEN'] = 'test-no-real'
+        # These tests stub spawn_task and exercise the BYO surface /
+        # mint-dispose mechanics — NOT endpoint reachability. The mint-time
+        # TCP probe (added 2026-06) would otherwise make a real network call
+        # to the sample sglang IP and time out in sandboxed CI. Disable it
+        # here; reachability has its own dedicated test in test_ephemeral_slot.
+        cls._orig_preflight = os.environ.get('TOFU_EPHEMERAL_PREFLIGHT')
+        os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = '0'
 
         from quart import Quart
         cls.app = Quart(__name__)
@@ -101,6 +108,10 @@ class AgentRunRouteTest(unittest.TestCase):
         api_keys._cache_loaded = False
         byo_providers._cache.clear()
         byo_providers._cache_loaded = False
+        if cls._orig_preflight is None:
+            os.environ.pop('TOFU_EPHEMERAL_PREFLIGHT', None)
+        else:
+            os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = cls._orig_preflight
         cls._tmp.cleanup()
 
     def setUp(self):

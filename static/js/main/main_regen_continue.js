@@ -93,7 +93,7 @@ async function regenerateFromUser(idx) {
     conv._translateAbortCtrl = _regenAbortCtrl;
     updateSendButton();
     renderConversationList();
-    if (activeConvId === convId) _renderTranslatingBubble(convId);
+    if (activeConvId === convId) _renderTranslatingBubble();
   }
 
   try {

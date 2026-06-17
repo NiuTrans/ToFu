@@ -356,7 +356,8 @@ async function _prefetchConvFileChanges(conv) {
   // pending map get a Promise<files[]> with the right shape (the
   // single-shot contract from _extractFileChangesFromRoundsAsync).
   const _resolvers = fps.map(() => {
-    let resolve;
+    /** @type {(v:any)=>void} */
+    let resolve = () => {};
     const p = new Promise((r) => { resolve = r; });
     return { p, resolve };
   });

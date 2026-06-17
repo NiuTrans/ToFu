@@ -20,6 +20,7 @@ Endpoints:
   POST /api/paper/translate/abort        — Abort running translate
   POST /api/paper/translate/lookup       — Find by (paper_hash, lang)
   POST /api/paper/translate/cache        — DB cache lookup
+  POST /api/paper/search-arxiv           — Search arXiv by title/keywords
   POST /api/paper/fetch-arxiv            — Download PDF (sync)
   POST /api/paper/fetch-arxiv-stream     — Download + parse + extract (SSE)
   GET  /api/paper/pdf/<file>             — Serve a stored PDF
@@ -98,6 +99,8 @@ from lib.paper import (  # noqa: F401  — back-compat re-exports
     _new_translate_task,
     _paper_hash,
     _report_dedup_index,
+    fetch_arxiv_title,
+    search_arxiv,
     _report_dedup_lock,
     _report_index_get,
     _report_index_register,
@@ -896,6 +899,33 @@ async def get_translate_cache():
     return jsonify({'ok': False})
 
 
+@api_v1_paper_bp.route('/api/v1/paper/search-arxiv', methods=['POST'])
+async def search_arxiv_route():
+    """Search arXiv by free-text title / keyword query.
+
+    Body JSON:
+        query: str — paper title, keywords, or author names
+        max_results: int (optional, default 10, capped at 25)
+    Returns:
+        { ok: true, query: str, results: [
+            { arxiv_id, title, authors: [str], summary, published,
+              primary_category, pdf_url, abs_url } ] }
+    """
+    data = await async_parse_body()
+    query = (data.get('query') or '').strip()
+    if not query:
+        logger.warning('[Paper:arXiv:Search] Empty query')
+        return api_bad_request('No query provided')
+
+    try:
+        max_results = int(data.get('max_results') or 10)
+    except (ValueError, TypeError):
+        max_results = 10
+
+    results = await asyncio.to_thread(search_arxiv, query, max_results)
+    return api_ok({'query': query, 'results': results})
+
+
 @api_v1_paper_bp.route('/api/v1/paper/fetch-arxiv', methods=['POST'])
 async def fetch_arxiv():
     """Download PDF from arXiv URL and serve it locally.
@@ -975,12 +1005,12 @@ async def fetch_arxiv_stream():
         url: str — arXiv URL or ID
 
     SSE events (each one JSON on a ``data:`` line):
-        {stage: 'resolve', arxiv_id: str, pdf_url: str}  — URL parsed
+        {stage: 'resolve', arxiv_id: str, title: str, pdf_url: str}  — URL parsed
         {stage: 'download', downloaded: int, total: int}  — download progress
         {stage: 'download_done', file_size: int, elapsed: float}
         {stage: 'parse_start'}
         {stage: 'parse_done', total_pages: int, text_length: int, elapsed: float}
-        {stage: 'done', ok: true, pdf_url: str, arxiv_id: str,
+        {stage: 'done', ok: true, pdf_url: str, arxiv_id: str, title: str,
                parsed_text: str, total_pages: int, text_length: int, cached: bool}
         {stage: 'error', error: str}
     """
@@ -1009,7 +1039,12 @@ async def fetch_arxiv_stream():
         # initial 'resolve' state until the buffer fills. See also trading_brain.py.
         yield ':' + (' ' * 2048) + '\n\n'
         yield ':' + (' ' * 2048) + '\n\n'
+        # Resolve the real paper title up front so the UI can label the
+        # paper by title instead of the bare arXiv ID. Best-effort: an empty
+        # string just falls back to "arXiv:<id>" on the client.
+        paper_title = fetch_arxiv_title(arxiv_id)
         yield _sse({'stage': 'resolve', 'arxiv_id': arxiv_id,
+                    'title': paper_title,
                     'pdf_url': f'/api/paper/pdf/{filename}'})
 
         # ── Step 1: Download PDF (cached or fresh) ──
@@ -1169,6 +1204,7 @@ async def fetch_arxiv_stream():
             yield _sse({'stage': 'done', 'ok': True,
                         'pdf_url': f'/api/paper/pdf/{filename}',
                         'arxiv_id': arxiv_id,
+                        'title': paper_title,
                         'parsed_text': '',
                         'total_pages': 0,
                         'text_length': 0,
@@ -1198,6 +1234,7 @@ async def fetch_arxiv_stream():
         yield _sse({'stage': 'done', 'ok': True,
                     'pdf_url': f'/api/paper/pdf/{filename}',
                     'arxiv_id': arxiv_id,
+                    'title': paper_title,
                     'parsed_text': parsed_text,
                     'total_pages': total_pages,
                     'text_length': text_length,

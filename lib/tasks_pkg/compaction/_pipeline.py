@@ -68,6 +68,7 @@ def _reinject_system_contexts_after_compact(messages: list, task: dict | None = 
                 conv_id=task.get('convId', ''),
                 task=task,
                 model=cfg.get('model', ''),
+                system_prompt_mode=cfg.get('systemPromptMode', 'append'),
             )
             logger.info('[PostCompact] Re-injected system contexts after compaction')
 

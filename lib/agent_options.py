@@ -105,7 +105,7 @@ _FIELDS: list[tuple[str, str, type, Any, Optional[tuple], str]] = [
 
     # ── Backend / mode ────────────────────────────────────────────
     ('profile',               'profile',               str,   '',     None,
-        'Capability profile name (lib/agent_profiles.py). Supplies cfg '
+        'Capability profile name (lib/agent_core/profiles.py). Supplies cfg '
         'defaults that explicit keys override. Empty / "default" = no-op.'),
     ('agentBackend',          'agent_backend',         str,   'builtin',
         ('builtin', 'codex', 'claude_code'),

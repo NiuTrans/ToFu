@@ -61,6 +61,7 @@ class MCPToolInfo(TypedDict):
     description: str
     input_schema: dict[str, Any]
     openai_def: dict[str, Any]  # ready-to-use OpenAI function-calling dict
+    read_only_hint: bool        # MCP annotations.readOnlyHint (default False)
 
 
 def make_namespaced_name(server_name: str, tool_name: str) -> str:

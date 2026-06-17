@@ -9,8 +9,7 @@ Tries (in order):
 
 Returns ``(translated_text, usage_dict)``. The usage dict carries
 ``_dispatch.model`` and ``_dispatch.key`` so the caller can identify
-which (key, model) actually produced the output (used by the parallel
-chunked-translate code path to surface a representative model name).
+which (key, model) actually produced the output.
 """
 
 import re
@@ -19,114 +18,36 @@ import time
 from lib import translate_cache
 from lib.log import get_logger
 
-from .constants import _FREETEXT_CHUNK_SIZE, _FREETEXT_CHUNK_THRESHOLD
 from .dedup import _dedup_repetition_loop
 from .prompt import _wrap_for_translation
 
 logger = get_logger(__name__)
 
 
-def _chunk_freetext(text, chunk_size=_FREETEXT_CHUNK_SIZE):
-    """Split free-text on paragraph boundaries into <= chunk_size pieces.
-
-    Greedy paragraph fill (preferring ``\\n\\n`` separators) so sentences and
-    code blocks are not cut mid-way.  A single paragraph that itself exceeds
-    ``chunk_size`` is hard-split as a last resort.  Mirrors the paper
-    translator's chunker (``lib/paper/translate_engine.py``) which already
-    avoids the single-call truncation problem this guards against.
-
-    Returns a list of chunk strings whose concatenation (joined by ``\\n\\n``)
-    reproduces the paragraph structure of the input.
-    """
-    paragraphs = re.split(r'\n\n+', text)
-    chunks, buf = [], ''
-    for para in paragraphs:
-        if not para.strip():
-            continue
-        if len(para) > chunk_size:
-            if buf:
-                chunks.append(buf)
-                buf = ''
-            for i in range(0, len(para), chunk_size):
-                chunks.append(para[i:i + chunk_size])
-            continue
-        if buf and len(buf) + len(para) + 2 > chunk_size:
-            chunks.append(buf)
-            buf = para
-        else:
-            buf = (buf + '\n\n' + para) if buf else para
-    if buf:
-        chunks.append(buf)
-    return chunks
-
-
 def _translate_freetext(text, system_prompt, chunk_label='',
                         source='', target='', status_cb=None,
                         progress_cb=None, overall_deadline=None,
                         use_cache=True):
-    """Translate free-text, chunking long inputs to avoid silent truncation.
+    """Translate free-text in a SINGLE LLM call — no input splitting.
 
-    Drop-in replacement for ``_translate_one_chunk`` with the same signature
-    and ``(translated_text, usage_dict)`` return.  Inputs at or below
-    ``_FREETEXT_CHUNK_THRESHOLD`` are passed straight through (single call,
-    no behaviour change).  Longer inputs are split on paragraph boundaries
-    and each chunk is translated in its own call, then re-joined with
-    ``\\n\\n`` — every chunk stays inside the model's reliable output range,
-    so the whole message gets translated instead of stopping a third of the
-    way through.
+    Public free-text entry point used by every caller (server auto-translate,
+    sync ``/api/v1/translate``, the chat send-path, the legacy message queue,
+    and the re-translate script).  Forwards the WHOLE text to
+    ``_translate_one_chunk``; the trailing ``chunk`` vocabulary is historical.
 
-    ``progress_cb`` (live preview) receives the cumulative translation across
-    chunks; ``status_cb`` is forwarded per-chunk.  ``overall_deadline`` is the
-    wall-clock budget for the WHOLE message and is divided across remaining
-    chunks so one slow chunk cannot starve the rest.
+    Input splitting was tried and removed: cutting a message into pieces
+    isolates an already-target-language tail (or severs a ``` fence) into its
+    own call, where a weak cheap model "translates" it into the wrong language
+    or echoes it verbatim.  A whole-document call lets the prompt's mixed-
+    language rule keep already-target text intact while translating the rest,
+    and the engine's truncation detector + model-rotation retry cover the
+    long-input case the split was meant to solve.
     """
-    if len(text) <= _FREETEXT_CHUNK_THRESHOLD:
-        return _translate_one_chunk(
-            text, system_prompt, chunk_label=chunk_label,
-            source=source, target=target, status_cb=status_cb,
-            progress_cb=progress_cb, overall_deadline=overall_deadline,
-            use_cache=use_cache)
-
-    chunks = _chunk_freetext(text)
-    if len(chunks) <= 1:
-        return _translate_one_chunk(
-            text, system_prompt, chunk_label=chunk_label,
-            source=source, target=target, status_cb=status_cb,
-            progress_cb=progress_cb, overall_deadline=overall_deadline,
-            use_cache=use_cache)
-
-    total = len(chunks)
-    logger.info('[Translate%s] Long input (%d chars) split into %d chunks',
-                chunk_label, len(text), total)
-
-    _start_ts = time.time()
-    done_parts = []
-    last_usage = None
-    for ci, chunk in enumerate(chunks):
-        # Live-preview: prefix already-finished chunks so the user sees the
-        # running translation grow rather than each chunk in isolation.
-        _prefix = ('\n\n'.join(done_parts) + '\n\n') if done_parts else ''
-
-        def _chunk_progress(text_so_far, _prefix=_prefix):
-            if progress_cb is not None:
-                progress_cb(_prefix + text_so_far)
-
-        # Divide the remaining wall-clock budget across the remaining chunks
-        # so a slow early chunk cannot consume the entire deadline.
-        _chunk_deadline = None
-        if overall_deadline is not None:
-            _remaining = float(overall_deadline) - (time.time() - _start_ts)
-            _chunk_deadline = max(10.0, _remaining / max(1, total - ci))
-
-        part, last_usage = _translate_one_chunk(
-            chunk, system_prompt, chunk_label=f'{chunk_label}:chunk{ci + 1}/{total}',
-            source=source, target=target,
-            status_cb=status_cb,
-            progress_cb=_chunk_progress if progress_cb is not None else None,
-            overall_deadline=_chunk_deadline, use_cache=use_cache)
-        done_parts.append(part)
-
-    return '\n\n'.join(done_parts), last_usage
+    return _translate_one_chunk(
+        text, system_prompt, chunk_label=chunk_label,
+        source=source, target=target, status_cb=status_cb,
+        progress_cb=progress_cb, overall_deadline=overall_deadline,
+        use_cache=use_cache)
 
 
 def _translate_one_chunk(chunk, system_prompt, chunk_label='',

@@ -1,17 +1,25 @@
 """lib/database/_core_schema.py — SQLAlchemy Core table-definition layer.
 
-> **Status: live.** This module lets DB tables be defined ONCE as SQLAlchemy
-> Core `Table` objects and compiled to correct DDL + DML for BOTH backends
-> (PostgreSQL primary, SQLite fallback), retiring the hand-maintained
-> twin-DDL + regex `_sql_translate.py` path *for those tables*. The tables
-> registered at the bottom of this file are wired into `init_db()`:
-> `_schema_pg.py` and `_schema_sqlite.py` create them via `create_if_absent`,
-> which runs the Core-compiled `CREATE TABLE` on a fresh install and is a
-> no-op on a populated DB. Parity tests (`tests/test_core_schema_parity.py`)
-> prove the generated DDL is byte-equivalent to the legacy hand-DDL on both
-> backends, so the wiring required no `_SCHEMA_VERSION` bump. Registering a
-> NEW table here still goes through the live bootstrap — a §10.3 schema
-> change requiring explicit sign-off.
+> **Status: live — migration COMPLETE (2026-06).** Every table in the
+> dual-backend schema is now defined ONCE here as a SQLAlchemy Core `Table`
+> object and compiled to correct DDL + DML for BOTH backends (PostgreSQL
+> primary, SQLite fallback). `_schema_pg.py` / `_schema_sqlite.py` no longer
+> hand-author any `CREATE TABLE`: they import each Core table and create it via
+> `create_if_absent`, then apply the backend-specific extras Core can't express
+> (indexes, PG-only full-text `tsvector`/GIN/trigger infra, and upgrade-only
+> `ALTER TABLE` migrations). This retired the hand-maintained twin-DDL AND the
+> `INSERT OR REPLACE`/`_PK_MAP` upsert branch of `_sql_translate.py` — but NOT
+> the translator itself, which remains the permanent SQLite→PG dialect bridge
+> (`?`→`%s`, `json_extract`, `strftime`, …) that runs on every query on both
+> backends.
+>
+> `create_if_absent` runs the Core-compiled `CREATE TABLE` on a fresh install
+> and is a no-op on a populated DB. Parity tests
+> (`tests/test_core_schema_parity.py`) prove the generated DDL is
+> byte-equivalent to the legacy hand-DDL on both backends, so the migration
+> required no `_SCHEMA_VERSION` bump. Defining a NEW table is now a one-place
+> change here (plus a parity test) — a §10.3 schema change requiring explicit
+> sign-off.
 
 Why SQLAlchemy *Core* (not the ORM)
 -----------------------------------
@@ -184,6 +192,22 @@ def autoincrement_pk():
     return sa.Column('id', sa.Integer, primary_key=True)
 
 
+def bigint_autoincrement_pk():
+    """An auto-incrementing **64-bit** integer primary-key column rendering
+    ``BIGSERIAL`` on PostgreSQL and ``INTEGER ... AUTOINCREMENT`` on SQLite.
+
+    Like :func:`autoincrement_pk` but for tables whose live PG DDL uses
+    ``BIGSERIAL`` (e.g. ``rate_limit_events`` — a high-churn event log whose id
+    can exceed 32 bits). ``sa.BigInteger`` + ``primary_key=True`` renders
+    ``BIGSERIAL`` on PG; the SQLite variant is pinned to ``Integer`` so it stays
+    ``INTEGER PRIMARY KEY AUTOINCREMENT`` (the only type eligible to alias the
+    rowid). As with :func:`autoincrement_pk`, the table MUST also be defined
+    with ``sqlite_autoincrement=True`` so SQLite emits the ``AUTOINCREMENT``
+    keyword."""
+    return sa.Column('id', sa.BigInteger().with_variant(sa.Integer, 'sqlite'),
+                     primary_key=True)
+
+
 def double_column():
     """A float column that is ``DOUBLE PRECISION`` on PostgreSQL and ``REAL`` on
     SQLite — the live idiom for cost/amount columns.
@@ -259,12 +283,13 @@ def both_ddl(table: sa.Table) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Registered tables — the FIRST tables migrated onto Core.
+#  Registered tables — the COMPLETE dual-backend schema (migration done 2026-06).
 #
-#  A table appears here only after its parity test in
-#  tests/test_core_schema_parity.py is green on BOTH backends, proving the
-#  Core-generated DDL is byte-equivalent to the live hand-DDL. The DDL is
-#  unchanged, so NO _SCHEMA_VERSION bump is required.
+#  Every table the project creates lives here; _schema_pg.py / _schema_sqlite.py
+#  no longer hand-author CREATE TABLE. A table appears here only after its
+#  parity test in tests/test_core_schema_parity.py is green on BOTH backends,
+#  proving the Core-generated DDL is byte-equivalent to the live hand-DDL. The
+#  DDL is unchanged, so NO _SCHEMA_VERSION bump is required.
 # ═══════════════════════════════════════════════════════════════════════
 
 # daily_cost_cache — pre-aggregated per-day LLM cost. Composite PK
@@ -472,6 +497,320 @@ TRANSCRIPT_ARCHIVE = define_table(
     sa.Column('msgs_after', sa.Integer, nullable=False, server_default=sa.text('0')),
     sa.Column('reason', sa.Text, nullable=False, server_default=''),
     sqlite_autoincrement=True,
+)
+
+
+# ── Wave 2 (2026-06): the remaining hand-DDL tables, migrated onto Core. ──
+# Same parity-gated workflow as the tables above — each has a byte-equivalence
+# test in tests/test_core_schema_parity.py that is green on BOTH backends.
+
+# agent_sessions — conv→backend session-id map. Composite PK (conv_id, backend);
+# two human-readable timestamps (TIMESTAMPTZ/TEXT) defaulting to NOW()/datetime.
+AGENT_SESSIONS = define_table(
+    'agent_sessions',
+    sa.Column('conv_id', sa.Text, nullable=False),
+    sa.Column('backend', sa.Text, nullable=False),
+    sa.Column('session_id', sa.Text, nullable=False),
+    sa.Column('created_at', timestamptz_column(), server_default=now_timestamp()),
+    sa.Column('last_used_at', timestamptz_column(), server_default=now_timestamp()),
+    sa.PrimaryKeyConstraint('conv_id', 'backend'),
+)
+
+# message_queue — server-side pending message queue. Single TEXT PK; payload /
+# config are plain TEXT (json strings, not JSONB) with '{}' defaults.
+MESSAGE_QUEUE = define_table(
+    'message_queue',
+    sa.Column('id', sa.Text, primary_key=True),
+    sa.Column('conv_id', sa.Text, nullable=False),
+    sa.Column('payload', sa.Text, nullable=False, server_default="{}"),
+    sa.Column('config', sa.Text, nullable=False, server_default="{}"),
+    sa.Column('position', sa.Integer, nullable=False, server_default=sa.text('1')),
+    sa.Column('created_at', bigint_column(), nullable=False),
+)
+
+# scheduled_tasks — cron/agent task registry. Single TEXT PK. Mixes NOT-NULL
+# columns, nullable TEXT columns with no default (last_run/last_result),
+# nullable-with-default columns (description and the proactive-agent fields),
+# and BOOLEAN flags (enabled/notify_*). The post-create ALTERs in _schema_*.py
+# stay (upgrade-only); Core's create only fires on a fresh install.
+SCHEDULED_TASKS = define_table(
+    'scheduled_tasks',
+    sa.Column('id', sa.Text, primary_key=True),
+    sa.Column('name', sa.Text, nullable=False),
+    sa.Column('schedule', sa.Text, nullable=False),
+    sa.Column('task_type', sa.Text, nullable=False, server_default='command'),
+    sa.Column('command', sa.Text, nullable=False),
+    sa.Column('description', sa.Text, server_default=''),
+    sa.Column('enabled', bool_column(), nullable=False, server_default=sa.true()),
+    sa.Column('notify_on_failure', bool_column(), nullable=False, server_default=sa.true()),
+    sa.Column('notify_on_success', bool_column(), nullable=False, server_default=sa.false()),
+    sa.Column('max_runtime', sa.Integer, nullable=False, server_default=sa.text('300')),
+    sa.Column('last_run', sa.Text),
+    sa.Column('last_result', sa.Text),
+    sa.Column('last_status', sa.Text, server_default='never'),
+    sa.Column('run_count', sa.Integer, nullable=False, server_default=sa.text('0')),
+    sa.Column('fail_count', sa.Integer, nullable=False, server_default=sa.text('0')),
+    sa.Column('created_at', sa.Text, nullable=False, server_default=''),
+    sa.Column('updated_at', sa.Text, nullable=False, server_default=''),
+    sa.Column('target_conv_id', sa.Text, server_default=''),
+    sa.Column('source_conv_id', sa.Text, server_default=''),
+    sa.Column('tools_config', sa.Text, server_default="{}"),
+    sa.Column('poll_count', sa.Integer, nullable=False, server_default=sa.text('0')),
+    sa.Column('last_poll_at', sa.Text, server_default=''),
+    sa.Column('last_poll_decision', sa.Text, server_default=''),
+    sa.Column('last_poll_reason', sa.Text, server_default=''),
+    sa.Column('last_execution_at', sa.Text, server_default=''),
+    sa.Column('last_execution_task_id', sa.Text, server_default=''),
+    sa.Column('last_execution_status', sa.Text, server_default=''),
+    sa.Column('execution_count', sa.Integer, nullable=False, server_default=sa.text('0')),
+    sa.Column('max_executions', sa.Integer, nullable=False, server_default=sa.text('0')),
+    sa.Column('expires_at', sa.Text, server_default=''),
+)
+
+# proactive_poll_log — append-only poll decisions. Auto-increment PK
+# (SERIAL/INTEGER AUTOINCREMENT).
+PROACTIVE_POLL_LOG = define_table(
+    'proactive_poll_log',
+    autoincrement_pk(),
+    sa.Column('task_id', sa.Text, nullable=False),
+    sa.Column('poll_time', sa.Text, nullable=False),
+    sa.Column('decision', sa.Text, nullable=False, server_default='skip'),
+    sa.Column('reason', sa.Text, nullable=False, server_default=''),
+    sa.Column('status_snapshot', sa.Text, nullable=False, server_default=''),
+    sa.Column('model', sa.Text, nullable=False, server_default=''),
+    sa.Column('tokens_used', sa.Integer, nullable=False, server_default=sa.text('0')),
+    sa.Column('execution_task_id', sa.Text, server_default=''),
+    sqlite_autoincrement=True,
+)
+
+# timer_watchers — durable timer/condition watchers. Single TEXT PK; all TEXT +
+# integer poll fields, nullable-with-default trailing columns.
+TIMER_WATCHERS = define_table(
+    'timer_watchers',
+    sa.Column('id', sa.Text, primary_key=True),
+    sa.Column('conv_id', sa.Text, nullable=False),
+    sa.Column('source_task_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('check_instruction', sa.Text, nullable=False),
+    sa.Column('check_command', sa.Text, nullable=False, server_default=''),
+    sa.Column('continuation_message', sa.Text, nullable=False),
+    sa.Column('poll_interval', sa.Integer, nullable=False, server_default=sa.text('60')),
+    sa.Column('max_polls', sa.Integer, nullable=False, server_default=sa.text('120')),
+    sa.Column('poll_count', sa.Integer, nullable=False, server_default=sa.text('0')),
+    sa.Column('status', sa.Text, nullable=False, server_default='active'),
+    sa.Column('tools_config', sa.Text, nullable=False, server_default="{}"),
+    sa.Column('created_at', sa.Text, nullable=False, server_default=''),
+    sa.Column('updated_at', sa.Text, nullable=False, server_default=''),
+    sa.Column('triggered_at', sa.Text, server_default=''),
+    sa.Column('cancelled_at', sa.Text, server_default=''),
+    sa.Column('execution_task_id', sa.Text, server_default=''),
+    sa.Column('last_poll_at', sa.Text, server_default=''),
+    sa.Column('last_poll_decision', sa.Text, server_default=''),
+    sa.Column('last_poll_reason', sa.Text, server_default=''),
+)
+
+# timer_poll_log — append-only timer poll decisions. Auto-increment PK.
+TIMER_POLL_LOG = define_table(
+    'timer_poll_log',
+    autoincrement_pk(),
+    sa.Column('timer_id', sa.Text, nullable=False),
+    sa.Column('poll_time', sa.Text, nullable=False),
+    sa.Column('decision', sa.Text, nullable=False, server_default='wait'),
+    sa.Column('reason', sa.Text, nullable=False, server_default=''),
+    sa.Column('check_output', sa.Text, nullable=False, server_default=''),
+    sa.Column('tokens_used', sa.Integer, nullable=False, server_default=sa.text('0')),
+    sqlite_autoincrement=True,
+)
+
+# swarm_sessions — durable swarm session state. Single TEXT PK; TEXT json
+# columns + bigint timestamps defaulting to 0.
+SWARM_SESSIONS = define_table(
+    'swarm_sessions',
+    sa.Column('swarm_key', sa.Text, primary_key=True),
+    sa.Column('conv_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('task_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('status', sa.Text, nullable=False, server_default='running'),
+    sa.Column('specs_json', sa.Text, nullable=False, server_default="[]"),
+    sa.Column('config_json', sa.Text, nullable=False, server_default="{}"),
+    sa.Column('created_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('updated_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+)
+
+# swarm_agents — per-agent message checkpoints. Composite PK (swarm_key,
+# agent_id); delivered is an INTEGER flag (0/1) on both backends in the live
+# DDL — kept as plain Integer, NOT bool_column.
+SWARM_AGENTS = define_table(
+    'swarm_agents',
+    sa.Column('swarm_key', sa.Text, nullable=False),
+    sa.Column('agent_id', sa.Text, nullable=False),
+    sa.Column('role', sa.Text, nullable=False, server_default=''),
+    sa.Column('objective', sa.Text, nullable=False, server_default=''),
+    sa.Column('status', sa.Text, nullable=False, server_default='pending'),
+    sa.Column('messages_json', sa.Text, nullable=False, server_default="[]"),
+    sa.Column('result_json', sa.Text, nullable=False, server_default="{}"),
+    sa.Column('rounds_used', sa.Integer, nullable=False, server_default=sa.text('0')),
+    sa.Column('delivered', sa.Integer, nullable=False, server_default=sa.text('0')),
+    sa.Column('updated_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.PrimaryKeyConstraint('swarm_key', 'agent_id'),
+)
+
+# orchestration_runs — durable flow-run instances. Single TEXT PK.
+ORCHESTRATION_RUNS = define_table(
+    'orchestration_runs',
+    sa.Column('id', sa.Text, primary_key=True),
+    sa.Column('orch_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('name', sa.Text, nullable=False, server_default=''),
+    sa.Column('definition', sa.Text, nullable=False, server_default="{}"),
+    sa.Column('input', sa.Text, nullable=False, server_default=''),
+    sa.Column('status', sa.Text, nullable=False, server_default='pending'),
+    sa.Column('final', sa.Text, nullable=False, server_default=''),
+    sa.Column('error', sa.Text, nullable=False, server_default=''),
+    sa.Column('created_by', sa.Text, nullable=False, server_default=''),
+    sa.Column('created_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('updated_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('finished_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+)
+
+# orchestration_run_events — append-only durable event log; composite PK
+# (run_id, seq).
+ORCHESTRATION_RUN_EVENTS = define_table(
+    'orchestration_run_events',
+    sa.Column('run_id', sa.Text, nullable=False),
+    sa.Column('seq', sa.Integer, nullable=False),
+    sa.Column('type', sa.Text, nullable=False, server_default=''),
+    sa.Column('node_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('payload', sa.Text, nullable=False, server_default="{}"),
+    sa.Column('ts', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.PrimaryKeyConstraint('run_id', 'seq'),
+)
+
+# optimizer_proposals — nightly self-tuning proposals. Single TEXT PK;
+# confidence is DOUBLE PRECISION/REAL.
+OPTIMIZER_PROPOSALS = define_table(
+    'optimizer_proposals',
+    sa.Column('id', sa.Text, primary_key=True),
+    sa.Column('created_at', sa.Text, nullable=False),
+    sa.Column('title', sa.Text, nullable=False),
+    sa.Column('rationale', sa.Text, nullable=False),
+    sa.Column('action_type', sa.Text, nullable=False),
+    sa.Column('action_args', sa.Text, nullable=False),
+    sa.Column('severity', sa.Text, nullable=False, server_default='low'),
+    sa.Column('confidence', double_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('evidence', sa.Text, nullable=False, server_default=''),
+    sa.Column('status', sa.Text, nullable=False, server_default='pending_review'),
+    sa.Column('status_reason', sa.Text, nullable=False, server_default=''),
+)
+
+# optimizer_action_log — applied-action audit + revert tracking. Single TEXT PK.
+OPTIMIZER_ACTION_LOG = define_table(
+    'optimizer_action_log',
+    sa.Column('id', sa.Text, primary_key=True),
+    sa.Column('proposal_id', sa.Text, nullable=False),
+    sa.Column('applied_at', sa.Text, nullable=False),
+    sa.Column('expires_at', sa.Text, nullable=False, server_default=''),
+    sa.Column('pre_metric', sa.Text, nullable=False, server_default=''),
+    sa.Column('outcome_metric', sa.Text, nullable=False, server_default=''),
+    sa.Column('outcome_recorded_at', sa.Text, nullable=False, server_default=''),
+    sa.Column('reverted_at', sa.Text, nullable=False, server_default=''),
+    sa.Column('revert_reason', sa.Text, nullable=False, server_default=''),
+)
+
+# rate_limit_events — per-request gate log. BIGSERIAL/INTEGER AUTOINCREMENT PK
+# (high-churn, id can exceed 32 bits). ts_ms is epoch-ms.
+RATE_LIMIT_EVENTS = define_table(
+    'rate_limit_events',
+    bigint_autoincrement_pk(),
+    sa.Column('endpoint', sa.Text, nullable=False),
+    sa.Column('ip', sa.Text, nullable=False),
+    sa.Column('ts_ms', bigint_column(), nullable=False),
+    sqlite_autoincrement=True,
+)
+
+# error_resolutions — operator error-triage notes. Single TEXT PK. NOTE: this
+# table is created ONLY on PostgreSQL in the live bootstrap (it has no SQLite
+# CREATE), so only a PG parity test + PG-path wiring exist for it.
+ERROR_RESOLUTIONS = define_table(
+    'error_resolutions',
+    sa.Column('fingerprint', sa.Text, primary_key=True),
+    sa.Column('logger_name', sa.Text, nullable=False, server_default=''),
+    sa.Column('sample_message', sa.Text, nullable=False, server_default=''),
+    sa.Column('resolved_by', sa.Text, nullable=False, server_default=''),
+    sa.Column('ticket', sa.Text, nullable=False, server_default=''),
+    sa.Column('notes', sa.Text, nullable=False, server_default=''),
+    sa.Column('resolved_at', bigint_column(), nullable=False),
+    sa.Column('updated_at', bigint_column(), nullable=False),
+)
+
+# tenant_users — multi-tenant relay user table (distinct from chat `users`).
+# email is inline UNIQUE; email_verified is a plain INTEGER (0/1) on BOTH
+# backends in the live DDL — NOT bool_column. metadata is TEXT json.
+TENANT_USERS = define_table(
+    'tenant_users',
+    sa.Column('id', sa.Text, primary_key=True),
+    sa.Column('email', sa.Text, nullable=False, unique=True),
+    sa.Column('password_hash', sa.Text, nullable=False, server_default=''),
+    sa.Column('display_name', sa.Text, nullable=False, server_default=''),
+    sa.Column('role', sa.Text, nullable=False, server_default='user'),
+    sa.Column('status', sa.Text, nullable=False, server_default='active'),
+    sa.Column('created_at', bigint_column(), nullable=False),
+    sa.Column('last_login_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('email_verified', sa.Integer, nullable=False, server_default=sa.text('0')),
+    sa.Column('metadata', sa.Text, nullable=False, server_default="{}"),
+)
+
+# billing_ledger — append-only source-of-truth for credit movements. Single
+# TEXT PK; all amounts are BIGINT micro-credits.
+BILLING_LEDGER = define_table(
+    'billing_ledger',
+    sa.Column('id', sa.Text, primary_key=True),
+    sa.Column('user_id', sa.Text, nullable=False),
+    sa.Column('ts', bigint_column(), nullable=False),
+    sa.Column('amount_micro', bigint_column(), nullable=False),
+    sa.Column('kind', sa.Text, nullable=False),
+    sa.Column('ref_type', sa.Text, nullable=False, server_default=''),
+    sa.Column('ref_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('balance_after_micro', bigint_column(), nullable=False),
+    sa.Column('note', sa.Text, nullable=False, server_default=''),
+)
+
+# billing_wallets — denormalized balance cache. Single TEXT PK (user_id).
+BILLING_WALLETS = define_table(
+    'billing_wallets',
+    sa.Column('user_id', sa.Text, primary_key=True),
+    sa.Column('balance_micro', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('currency', sa.Text, nullable=False, server_default='CREDIT'),
+    sa.Column('low_balance_alert_micro', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('updated_at', bigint_column(), nullable=False),
+)
+
+# billing_redeem_codes — prepaid redeem codes. Single TEXT PK (code).
+BILLING_REDEEM_CODES = define_table(
+    'billing_redeem_codes',
+    sa.Column('code', sa.Text, primary_key=True),
+    sa.Column('amount_micro', bigint_column(), nullable=False),
+    sa.Column('batch', sa.Text, nullable=False, server_default=''),
+    sa.Column('created_by', sa.Text, nullable=False, server_default=''),
+    sa.Column('created_at', bigint_column(), nullable=False),
+    sa.Column('expires_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('redeemed_by', sa.Text, nullable=False, server_default=''),
+    sa.Column('redeemed_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('note', sa.Text, nullable=False, server_default=''),
+)
+
+# billing_payments — external payment records. Single TEXT PK. amount_minor is
+# minor-currency units; credit_micro is the granted micro-credits. raw is TEXT json.
+BILLING_PAYMENTS = define_table(
+    'billing_payments',
+    sa.Column('id', sa.Text, primary_key=True),
+    sa.Column('user_id', sa.Text, nullable=False),
+    sa.Column('provider', sa.Text, nullable=False),
+    sa.Column('provider_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('amount_minor', bigint_column(), nullable=False),
+    sa.Column('currency', sa.Text, nullable=False, server_default='USD'),
+    sa.Column('credit_micro', bigint_column(), nullable=False),
+    sa.Column('status', sa.Text, nullable=False, server_default='pending'),
+    sa.Column('created_at', bigint_column(), nullable=False),
+    sa.Column('settled_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('raw', sa.Text, nullable=False, server_default="{}"),
 )
 
 

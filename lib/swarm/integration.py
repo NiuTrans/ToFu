@@ -123,6 +123,34 @@ def _resolve_output_dir(task_id: str) -> str:
     return os.path.join(base, task_id)
 
 
+# ── Durable session config (for restart rehydration) ─────
+
+#: cfg keys that materially affect sub-agent tool-list assembly. Persisted in
+#: ``swarm_sessions.config_json`` so ``_rehydrate_one`` can rebuild the same
+#: tool list a fresh spawn would have produced.
+_PERSIST_CFG_KEYS = (
+    'searchMode', 'search_mode', 'searchEnabled', 'fetchEnabled',
+    'codeExecEnabled', 'browserEnabled', 'desktopEnabled',
+    'imageGenEnabled', 'humanGuidanceEnabled', 'schedulerEnabled',
+    'memoryEnabled', 'max_parallel', 'max_retries',
+)
+
+
+def _persist_config(cfg: dict, model: str, thinking_enabled: bool,
+                    project_path: str, parent_cfg: dict) -> dict:
+    """Snapshot the config needed to rebuild a swarm's sub-agents on restart."""
+    out = {
+        'model':            model,
+        'thinking_enabled': thinking_enabled,
+        'project_path':     project_path,
+        'parent_cfg':       dict(parent_cfg or {}),
+    }
+    for k in _PERSIST_CFG_KEYS:
+        if k in (cfg or {}):
+            out[k] = cfg[k]
+    return out
+
+
 # ── Cleanup ──────────────────────────────────────────────
 
 def _key_is_live(swarm_key: str) -> bool:
@@ -179,6 +207,11 @@ def _cleanup_stale_sessions():
         _session_timestamps.pop(key, None)
         agent_inbox.clear(key)
         _purge_aliases(key)
+        try:
+            from lib.swarm import persistence
+            persistence.delete_session(key)
+        except Exception as e:
+            logger.debug('[Swarm:%s] persisted session delete (TTL) failed: %s', key, e)
         # Drop the auto-continue bookkeeping for a reaped conversation so the
         # chain counter / inflight latch don't accumulate stale keys.
         with _autocontinue_lock:
@@ -200,6 +233,11 @@ def _cleanup_stale_sessions():
             _session_timestamps.pop(key, None)
             agent_inbox.clear(key)
             _purge_aliases(key)
+            try:
+                from lib.swarm import persistence
+                persistence.delete_session(key)
+            except Exception as e:
+                logger.debug('[Swarm:%s] persisted session delete (evict) failed: %s', key, e)
             if session:
                 logger.warning('[Swarm:%s] Evicted (MAX_SESSIONS=%d exceeded)',
                                key, MAX_SESSIONS)
@@ -257,7 +295,12 @@ def _set_session(swarm_key: str, session: MasterOrchestrator, *,
 
 
 def _remove_session(task_id: str):
-    """Remove the session resolved from *task_id* (task id or swarm key)."""
+    """Remove the session resolved from *task_id* (task id or swarm key).
+
+    Also drops the durable DB rows — ``_remove_session`` is only called on
+    genuine teardown (explicit abort or the task ended with a terminated
+    swarm), never on DETACH, so the persisted state is no longer needed.
+    """
     key = _resolve_key(task_id)
     with _sessions_lock:
         _active_sessions.pop(key, None)
@@ -265,6 +308,11 @@ def _remove_session(task_id: str):
         for alias in [a for a, k in _key_aliases.items() if k == key]:
             _key_aliases.pop(alias, None)
     agent_inbox.clear(key)
+    try:
+        from lib.swarm import persistence
+        persistence.delete_session(key)
+    except Exception as e:
+        logger.debug('[Swarm:%s] persisted session delete failed: %s', key, e)
 
 
 def add_session_alias(task_id: str, swarm_key: str):
@@ -697,6 +745,13 @@ def _handle_spawn_agents(fn_args: dict, *,
                 parent_cfg[_k] = task['config'][_k]
             elif _k in cfg:
                 parent_cfg[_k] = cfg[_k]
+        # Forward the hard provider pin so sub-agents (which run on their
+        # OWN threads) stay bound to the same BYO endpoint as the parent
+        # solve — they must not leak onto operator keys either. See
+        # lib/llm_dispatch/provider_pin.py.
+        _pin = task.get('_pinned_provider_id')
+        if _pin:
+            parent_cfg['_pinned_provider_id'] = _pin
 
         session = MasterOrchestrator(
             task_id=task_id,
@@ -717,6 +772,22 @@ def _handle_spawn_agents(fn_args: dict, *,
             on_settled=lambda k=swarm_key: _maybe_autocontinue(k),
         )
         _set_session(swarm_key, session, task_id=task_id)
+
+        # Persist the session so a server restart can rehydrate + resume it.
+        # ``config`` carries everything ``_rehydrate_one`` needs to rebuild the
+        # sub-agent tool list and model. Best-effort — never blocks the spawn.
+        try:
+            from lib.swarm import persistence
+            persistence.save_session(
+                swarm_key,
+                conv_id=conv_id, task_id=task_id,
+                specs=[s.to_dict() for s in specs],
+                config=_persist_config(cfg, model, thinking_enabled,
+                                       project_path, parent_cfg),
+                status='running')
+        except Exception as e:
+            logger.debug('[Swarm:%s] session persist failed (non-fatal): %s',
+                         swarm_key, e)
 
         try:
             session.run_in_background()
@@ -753,6 +824,20 @@ def _handle_spawn_agents(fn_args: dict, *,
             # Track followup specs in MasterOrchestrator so ``get_status``
             # (and the /api/v1/swarm/status route) sees the full agent list.
             session.register_followup_specs(accepted_specs)
+            # Update the persisted spec set so a restart rehydrates the full
+            # roster (first wave + this follow-up wave).
+            try:
+                from lib.swarm import persistence
+                persistence.save_session(
+                    swarm_key,
+                    conv_id=session.conv_id, task_id=task_id,
+                    specs=[s.to_dict() for s in session.specs],
+                    config=_persist_config(cfg, model, thinking_enabled,
+                                           project_path, {}),
+                    status='running')
+            except Exception as e:
+                logger.debug('[Swarm:%s] followup session persist failed: %s',
+                             swarm_key, e)
         if on_event and accepted_specs:
             # objective is for the UI agent card — full text, CSS wraps it.
             on_event({
@@ -846,7 +931,19 @@ def _handle_await_agents(fn_args: dict, *, task_id: str,
     except (TypeError, ValueError) as e:
         logger.debug('[Swarm] Bad await timeout %r, defaulting to 60s: %s', timeout, e)
         timeout = 60.0
+    _requested_timeout = timeout
     timeout = max(1.0, min(timeout, AWAIT_AGENTS_HARD_CAP_SEC))
+    if _requested_timeout > AWAIT_AGENTS_HARD_CAP_SEC:
+        # The model asked to block longer than we allow in a single call.
+        # This is the silent trap behind "await always times out": a sub-agent
+        # whose runtime exceeds the cap can never be awaited to completion in
+        # one call, and mode='all' then times out every time. Make it visible.
+        logger.warning(
+            '[Swarm:%s] await_agents requested timeout=%.0fs CLAMPED to hard '
+            'cap %ss — a single await cannot block longer. If agents run '
+            'longer than this, the call will time out (agents keep running); '
+            'call await_agents again or await specific ids.',
+            task_id, _requested_timeout, AWAIT_AGENTS_HARD_CAP_SEC)
 
     result = session.await_agents(
         ids=[str(x) for x in ids_in] or None,
@@ -1081,3 +1178,153 @@ def _handle_artifact_tool(fn_name: str, fn_args: dict, task_id: str) -> str:
         return store.summary()
 
     return f'Unknown artifact tool: {fn_name}'
+
+
+
+# ═══════════════════════════════════════════════════════════
+#  Startup rehydration — resume swarms after a server restart
+# ═══════════════════════════════════════════════════════════
+
+def _rebuild_tool_list(config: dict) -> list:
+    """Rebuild the sub-agent tool schema list from a persisted session config.
+
+    Mirrors what ``_assemble_tool_list`` produced for the original spawn, so a
+    resumed sub-agent has the same tools available. Best-effort — on any
+    failure returns an empty list (the agent still resumes, just tool-less,
+    which is far better than not resuming at all).
+    """
+    try:
+        from lib.tasks_pkg.model_config import _assemble_tool_list
+        project_path = config.get('project_path', '') or ''
+        search_mode = config.get('search_mode') or config.get('searchMode', 'multi')
+        cfg = {
+            'searchMode':        search_mode,
+            'fetchEnabled':      config.get('fetchEnabled', True),
+            'codeExecEnabled':   config.get('codeExecEnabled', False),
+            'browserEnabled':    config.get('browserEnabled', False),
+            'desktopEnabled':    config.get('desktopEnabled', False),
+            'imageGenEnabled':   config.get('imageGenEnabled', False),
+            'memoryEnabled':     config.get('memoryEnabled', True),
+            'swarmEnabled':      True,
+        }
+        # Preserve the parent's tool-plugin allow-list so a rehydrated sub-agent
+        # sees the same third-party plugins it had at spawn (else it would fall
+        # back to the deployment default). Absent → resolve_enabled_plugins
+        # fail-closes, same as a fresh request. See docs/TOOL_PLUGINS.md.
+        if 'plugins' in config:
+            cfg['plugins'] = config['plugins']
+        tool_list, _has, _max = _assemble_tool_list(
+            cfg, project_path, bool(project_path),
+            'swarm-rehydrate', search_mode,
+            search_mode in ('single', 'multi'),
+            config.get('fetchEnabled', True),
+            config.get('codeExecEnabled', False),
+            config.get('browserEnabled', False),
+            config.get('desktopEnabled', False),
+            swarm_enabled=True,
+            image_gen_enabled=config.get('imageGenEnabled', False),
+            scheduler_enabled=config.get('schedulerEnabled', False),
+        )
+        return tool_list or []
+    except Exception as e:
+        logger.warning('[Swarm] tool-list rebuild on rehydrate failed: %s', e,
+                       exc_info=True)
+        return []
+
+
+def _rehydrate_one(sess: dict) -> bool:
+    """Rebuild + resume a single persisted swarm session. Returns success."""
+    swarm_key = sess.get('swarm_key', '')
+    if not swarm_key:
+        return False
+    # Don't clobber a session that's somehow already live (idempotent startup).
+    if _get_session(swarm_key) is not None:
+        logger.debug('[Swarm:%s] already live — skipping rehydrate', swarm_key)
+        return False
+
+    specs = [SubTaskSpec.from_dict(d) for d in (sess.get('specs') or [])]
+    if not specs:
+        logger.debug('[Swarm:%s] no specs persisted — skipping', swarm_key)
+        return False
+
+    config = sess.get('config') or {}
+    conv_id = sess.get('conv_id', '') or ''
+    task_id = sess.get('task_id', '') or swarm_key
+    all_tools = _rebuild_tool_list(config)
+    output_dir = _resolve_output_dir(task_id)
+
+    push_conv_id = conv_id
+
+    def _emit(ev: dict):
+        if push_conv_id:
+            try:
+                from lib.agent_core.push import push_event
+                push_event('swarm', push_conv_id, ev)
+            except Exception as e:
+                logger.debug('[Swarm:%s] rehydrate push mirror failed: %s', swarm_key, e)
+
+    agent_inbox.untombstone(swarm_key)
+
+    session = MasterOrchestrator(
+        task_id=task_id,
+        conv_id=conv_id,
+        specs=specs,
+        project_path=config.get('project_path', '') or '',
+        model=config.get('model', '') or '',
+        thinking_enabled=config.get('thinking_enabled', True),
+        search_mode=config.get('search_mode') or config.get('searchMode', 'multi'),
+        on_progress=_emit,
+        abort_check=None,
+        all_tools=all_tools,
+        max_parallel=config.get('max_parallel', 8),
+        max_retries=config.get('max_retries', 1),
+        output_dir=output_dir,
+        parent_config=config.get('parent_cfg', {}),
+        inbox_key=swarm_key,
+        on_settled=lambda k=swarm_key: _maybe_autocontinue(k),
+    )
+    _set_session(swarm_key, session, task_id=task_id)
+    try:
+        session.rehydrate_in_background(sess.get('agents') or [])
+    except Exception as e:
+        logger.error('[Swarm:%s] rehydrate_in_background failed: %s',
+                     swarm_key, e, exc_info=True)
+        _remove_session(swarm_key)
+        return False
+    logger.info('[Swarm:%s] rehydrated (specs=%d, agents=%d)',
+                swarm_key, len(specs), len(sess.get('agents') or []))
+    return True
+
+
+def rehydrate_swarms_on_startup() -> int:
+    """Resume all persisted non-terminal swarm sessions after a restart.
+
+    Called once from ``server.py`` startup (after the DB is ready). Loads
+    every resumable session from the DB, rebuilds its MasterOrchestrator +
+    tool list, and re-spawns the still-running sub-agents from their
+    checkpointed message history. Returns the count successfully resumed.
+
+    Best-effort and isolated per session: one bad session never blocks the
+    others or the server boot.
+    """
+    try:
+        from lib.swarm import persistence
+        sessions = persistence.load_resumable_sessions()
+    except Exception as e:
+        logger.warning('[Swarm] startup rehydrate: could not load sessions: %s', e)
+        return 0
+
+    if not sessions:
+        return 0
+
+    resumed = 0
+    for sess in sessions:
+        try:
+            if _rehydrate_one(sess):
+                resumed += 1
+        except Exception as e:
+            logger.error('[Swarm] rehydrate of %s failed: %s',
+                         sess.get('swarm_key', '?'), e, exc_info=True)
+    logger.info('[Swarm] startup rehydration complete — %d/%d session(s) resumed',
+                resumed, len(sessions))
+    return resumed

@@ -91,6 +91,7 @@ from lib.tasks_pkg.compaction._constants import (  # noqa: E402,F401
     _PERSIST_DIR_BASE,
     _PERSIST_PREVIEW_CHARS,
     MAX_ROUND_TOOL_RESULTS_CHARS,
+    _SINGLE_RESULT_HARD_CEILING_CHARS,
     _summary_cooldowns,
     _cooldown_lock,
     _tables_initialized,
@@ -140,6 +141,7 @@ from lib.tasks_pkg.compaction._persist import (  # noqa: E402,F401
 
 from lib.tasks_pkg.compaction._budget import (  # noqa: E402,F401
     budget_tool_result,
+    clamp_tool_result_text,
     enforce_round_aggregate_budget,
     mark_empty_result,
 )
@@ -209,6 +211,7 @@ from lib.tasks_pkg.compaction._reactive import (  # noqa: E402,F401
     _estimate_wire_bytes,
     _head_truncate,
     _strip_images_aggressive,
+    _truncate_largest_message,
     reactive_compact,
 )
 

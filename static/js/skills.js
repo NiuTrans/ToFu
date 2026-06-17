@@ -211,8 +211,10 @@ function _skillsRenderCatalogCard(e) {
   }
   html += '<div class="skill-card-actions">';
   if (installed) {
-    html += '<button class="btn btn-secondary btn-xs" onclick="_skillsViewFiles(\'' + escapeHtml(e.id) + '\')">查看文件</button>';
-    html += '<button class="btn btn-secondary btn-xs" onclick="_skillsUninstall(\'' + escapeHtml(e.id) + '\')">卸载</button>';
+    var memId = e.installed_memory_id || e.id;
+    html += '<span class="skill-installed-tag">✓ 已安装</span>';
+    html += '<button class="btn btn-secondary btn-xs" onclick="_skillsViewFiles(\'' + escapeHtml(memId) + '\')">查看文件</button>';
+    html += '<button class="btn btn-secondary btn-xs" onclick="_skillsUninstall(\'' + escapeHtml(memId) + '\')">卸载</button>';
   } else {
     html += '<button class="btn btn-primary btn-xs" onclick="_skillsCatalogInstall(\'' + escapeHtml(e.id) + '\', this)">安装</button>';
   }

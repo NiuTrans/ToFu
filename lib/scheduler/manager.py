@@ -8,10 +8,19 @@ import time
 import uuid
 from datetime import datetime
 
-from lib.log import get_logger
+from lib.log import audit_log, get_logger
 from lib.scheduler.cron import cron_matches, describe_cron, next_cron_run
 
 logger = get_logger(__name__)
+
+# Cap on total scheduled tasks (mirrors Claude Code's MAX_JOBS). Prevents an
+# LLM loop from filling the table with thousands of crons.
+MAX_SCHEDULED_TASKS = 100
+
+# Task types that execute arbitrary code and are gated by
+# lib.SCHEDULER_ALLOW_CODE_EXEC. 'prompt'/'agent' are LLM-only;
+# 'pg_backup'/'optimizer' ignore their command field.
+_CODE_EXEC_TASK_TYPES = frozenset({'command', 'python'})
 
 
 class ScheduledTaskManager:
@@ -79,12 +88,51 @@ class ScheduledTaskManager:
         Returns:
             task dict
         """
-        # Validate cron expression
-        if not schedule.startswith('once:'):
+        # ── Code-execution gate ──
+        # task_type='command'/'python' schedule unattended arbitrary code.
+        # Lock them behind the SCHEDULER_ALLOW_CODE_EXEC feature flag so a
+        # deployment can disable the persistent code-exec seam entirely.
+        if task_type in _CODE_EXEC_TASK_TYPES:
+            import lib as _lib
+            if not getattr(_lib, 'SCHEDULER_ALLOW_CODE_EXEC', True):
+                raise ValueError(
+                    f"task_type='{task_type}' is disabled on this deployment "
+                    "(SCHEDULER_ALLOW_CODE_EXEC is off). Use task_type='prompt' "
+                    "or 'agent' for LLM-driven tasks.")
+
+        # ── Schedule validation ──
+        if schedule.startswith('once:'):
+            raw = schedule[5:].strip()
+            try:
+                target = datetime.fromisoformat(raw)
+            except (ValueError, TypeError) as e:
+                raise ValueError(
+                    f"Invalid one-time schedule '{raw}': expected "
+                    f"'once:YYYY-MM-DD HH:MM'. ({e})")
+            if target <= datetime.now():
+                raise ValueError(
+                    f"One-time schedule '{raw}' is in the past — it would "
+                    "never fire. Pick a future time.")
+        else:
             try:
                 cron_matches(schedule)
             except ValueError as e:
                 raise ValueError(f'Invalid schedule: {e}')
+            # Reject crons that match no calendar date within the next year
+            # (e.g. '0 0 30 2 *' — Feb 30 never exists).
+            if next_cron_run(schedule) is None:
+                raise ValueError(
+                    f"Cron expression '{schedule}' does not match any date in "
+                    "the next year — check the day-of-month / month fields.")
+
+        # ── Capacity cap ──
+        db_count = self._get_db().execute(
+            'SELECT COUNT(*) AS n FROM scheduled_tasks').fetchone()
+        existing = db_count['n'] if isinstance(db_count, dict) else db_count[0]
+        if existing >= MAX_SCHEDULED_TASKS:
+            raise ValueError(
+                f'Too many scheduled tasks (max {MAX_SCHEDULED_TASKS}). '
+                'Delete an existing task first.')
 
         task_id = str(uuid.uuid4())[:12]
         now = datetime.now().isoformat()
@@ -199,6 +247,20 @@ class ScheduledTaskManager:
         max_runtime = task.get('max_runtime', 300)
 
         logger.info('[Scheduler] Executing task type=%s cmd=%s', task_type, str(command)[:100])
+
+        # Defense-in-depth: re-check the code-exec gate at execution time so a
+        # task created while the flag was ON cannot keep running arbitrary code
+        # after an operator flips SCHEDULER_ALLOW_CODE_EXEC off.
+        if task_type in _CODE_EXEC_TASK_TYPES:
+            import lib as _lib
+            if not getattr(_lib, 'SCHEDULER_ALLOW_CODE_EXEC', True):
+                logger.warning('[Scheduler] Blocked %s task "%s" — '
+                               'SCHEDULER_ALLOW_CODE_EXEC is off',
+                               task_type, task.get('name', '?'))
+                return False, 'Blocked: code execution disabled on this deployment.'
+            audit_log('scheduled_code_exec', task_id=task.get('id', '?'),
+                      task_name=task.get('name', '?'), task_type=task_type,
+                      command=str(command)[:500])
 
         if task_type == 'command':
             try:

@@ -63,9 +63,9 @@ function _renderIgVisibility() {
   for (var i = 0; i < unique.length; i++) {
     var entry = unique[i];
     var brandHint = (entry.provider.name || '') + ' ' + (entry.provider.base_url || '') + ' ' + entry.model.model_id;
-    var brand = entry.provider.brand || _detectBrand(brandHint);
-    if (!grouped[brand]) grouped[brand] = { name: entry.provider.name || brand, models: [] };
-    grouped[brand].models.push(entry.model);
+    var bkey = entry.provider.brand || _detectBrand(brandHint);
+    if (!grouped[bkey]) grouped[bkey] = { name: entry.provider.name || bkey, models: [] };
+    grouped[bkey].models.push(entry.model);
   }
 
   var brandNames = {
@@ -161,9 +161,9 @@ function _renderDropdownVisibility() {
   for (var i = 0; i < allModels.length; i++) {
     var entry = allModels[i];
     var brandHint = (entry.provider.name || '') + ' ' + (entry.provider.base_url || '') + ' ' + entry.model.model_id;
-    var brand = entry.provider.brand || _detectBrand(brandHint);
-    if (!grouped[brand]) grouped[brand] = { name: entry.provider.name || brand, models: [] };
-    grouped[brand].models.push(entry.model);
+    var bkey = entry.provider.brand || _detectBrand(brandHint);
+    if (!grouped[bkey]) grouped[bkey] = { name: entry.provider.name || bkey, models: [] };
+    grouped[bkey].models.push(entry.model);
   }
 
   var html = '';

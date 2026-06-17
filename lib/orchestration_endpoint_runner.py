@@ -1,21 +1,27 @@
-"""lib/orchestration_endpoint_runner.py — Endpoint mode via FlowExecutor.
+"""lib/orchestration_endpoint_runner.py — Chat modes via FlowExecutor.
 
-The FLAGGED cutover entry point. When ``TOFU_ENDPOINT_VIA_FLOW=1`` (default
-OFF), ``routes/chat.py`` routes an endpoint task here instead of to the
-battle-tested ``lib/tasks_pkg/endpoint.py``. This runs the canonical
-endpoint graph (``build_endpoint_definition``) through
-:class:`lib.orchestration_engine.FlowExecutor`, translating engine events
-into the endpoint SSE/message schema via
-:class:`lib.orchestration_endpoint_adapter.EndpointEventAdapter`.
+The convergence point where endpoint mode, autopilot mode, AND arbitrary
+user-authored Studio flows all run through ONE engine
+(:class:`lib.orchestration_engine.FlowExecutor`) and ONE translator
+(:class:`lib.orchestration_endpoint_adapter.EndpointEventAdapter` → endpoint
+SSE/message schema, so the existing frontend renders every mode unchanged).
 
-Default-off by design: this is scaffolding so the WHOLE path exists behind
-a flag and can be exercised side-by-side with the live path, NOT a
-replacement. The live endpoint.py remains authoritative until this has been
-validated on real tasks.
+Entry points (all share :func:`_run_flow_as_endpoint_task`):
+  * :func:`run_endpoint_via_flow`  — canonical endpoint graph.
+  * :func:`run_autopilot_via_flow` — canonical autopilot (worker ⇄ VU) graph.
+  * :func:`run_flow_via_chat`      — a user-SELECTED flow (inline / builtin /
+    stored id) resolved by :func:`resolve_chat_flow_definition`.
 
-Kill switch / opt-in:
-    TOFU_ENDPOINT_VIA_FLOW=1   → use this engine path
-    (unset / 0)                → use the live lib/tasks_pkg/endpoint.py
+``routes/chat.py`` calls :func:`resolve_chat_flow_entry` to pick one (or
+``None`` → fall back to the live path / a normal task).
+
+Flags (each default OFF, symmetric):
+    TOFU_ENDPOINT_VIA_FLOW=1    → endpoint mode uses this engine path
+    TOFU_AUTOPILOT_VIA_FLOW=1   → autopilot mode uses this engine path
+    (a user-selected flow is ALWAYS honored — the selection is the opt-in)
+
+The live ``lib/tasks_pkg/endpoint.py`` / ``autopilot.py`` paths remain the
+default + authoritative until each flagged path is validated on real tasks.
 """
 
 from __future__ import annotations
@@ -27,14 +33,110 @@ from lib.log import audit_log, get_logger
 logger = get_logger(__name__)
 
 
+def _flag_on(name: str) -> bool:
+    val = getenv_compat(name, default='0').strip().lower()
+    return val in ('1', 'true', 'yes', 'on')
+
+
 def endpoint_via_flow_enabled() -> bool:
     """True iff the flagged FlowExecutor endpoint path is opted in.
 
     Default OFF — only ``TOFU_ENDPOINT_VIA_FLOW=1`` (or ``true``/``yes``)
     enables it. Anything else (unset, ``0``, garbage) uses the live path.
     """
-    val = getenv_compat('TOFU_ENDPOINT_VIA_FLOW', default='0').strip().lower()
-    return val in ('1', 'true', 'yes', 'on')
+    return _flag_on('TOFU_ENDPOINT_VIA_FLOW')
+
+
+def autopilot_via_flow_enabled() -> bool:
+    """True iff the flagged FlowExecutor autopilot path is opted in.
+
+    Symmetric to :func:`endpoint_via_flow_enabled`. Default OFF — only
+    ``TOFU_AUTOPILOT_VIA_FLOW=1`` reroutes autopilot mode through the
+    unified engine instead of the live ``lib/tasks_pkg/autopilot.py``
+    virtual-user follow-up loop.
+    """
+    return _flag_on('TOFU_AUTOPILOT_VIA_FLOW')
+
+
+def _load_stored_definition(flow_id: str) -> dict | None:
+    """Load a user-authored flow definition from the orchestrations store.
+
+    Reads ``data/config/orchestrations.json`` directly via the shared
+    json_store (NOT through the route module, to avoid a routes→lib import
+    cycle). Returns the inner ``definition`` dict or ``None``.
+    """
+    try:
+        from lib.config_dir import config_path
+        from lib.json_store import read_json
+        entries = read_json(config_path('orchestrations.json'), default=[])
+        if isinstance(entries, list):
+            for e in entries:
+                if isinstance(e, dict) and e.get('id') == flow_id:
+                    d = e.get('definition')
+                    return d if isinstance(d, dict) else None
+    except Exception as e:
+        logger.warning('[FlowChat] failed to load stored flow %r: %s', flow_id, e)
+    return None
+
+
+def resolve_chat_flow_definition(config: dict) -> tuple[dict | None, str]:
+    """Resolve a chat task's selected flow into a definition + source label.
+
+    Precedence: inline ``flowDefinition`` → ``flowBuiltin`` name
+    (endpoint|autopilot) → stored ``flowId``. Returns ``(defn, source)`` or
+    ``(None, '')`` when no flow is selected.
+    """
+    from lib.orchestration import (
+        build_autopilot_definition, build_endpoint_definition,
+    )
+
+    defn = config.get('flowDefinition')
+    if isinstance(defn, dict) and defn.get('nodes'):
+        return defn, 'inline'
+
+    name = config.get('flowBuiltin')
+    if isinstance(name, str) and name:
+        builder = {'endpoint': build_endpoint_definition,
+                   'autopilot': build_autopilot_definition}.get(name)
+        if builder is not None:
+            return builder(), f'builtin:{name}'
+        logger.warning('[FlowChat] unknown flowBuiltin %r — ignoring', name)
+
+    fid = config.get('flowId')
+    if isinstance(fid, str) and fid:
+        d = _load_stored_definition(fid)
+        if d is not None:
+            return d, f'stored:{fid}'
+        logger.warning('[FlowChat] flowId %r not found in store — ignoring', fid)
+
+    return None, ''
+
+
+def resolve_chat_flow_entry(config: dict):
+    """Pick the FlowExecutor entry point for a chat task, or ``None``.
+
+    Encapsulates ALL the dispatch/flag logic so ``routes/chat.py`` stays a
+    thin switch:
+
+      1. An explicit flow selection (``flowDefinition`` / ``flowBuiltin`` /
+         ``flowId``) → :func:`run_flow_via_chat` (a NEW capability — honored
+         whenever the user selects a flow; no flag, the selection is the
+         opt-in).
+      2. ``endpointMode`` + ``TOFU_ENDPOINT_VIA_FLOW`` → :func:`run_endpoint_via_flow`.
+      3. ``autopilot`` + ``TOFU_AUTOPILOT_VIA_FLOW`` → :func:`run_autopilot_via_flow`.
+
+    Returns a ``callable(task)`` or ``None`` (caller falls back to the live
+    endpoint path or a normal task).
+    """
+    config = config or {}
+    if (config.get('flowDefinition') or config.get('flowBuiltin')
+            or config.get('flowId')):
+        return run_flow_via_chat
+    if config.get('endpointMode') and endpoint_via_flow_enabled():
+        return run_endpoint_via_flow
+    if config.get('autopilot') and autopilot_via_flow_enabled():
+        return run_autopilot_via_flow
+    return None
 
 
 def _extract_user_request(task: dict) -> str:
@@ -79,21 +181,78 @@ def _build_tools_for_task(task: dict):
         )
         return tool_list, mcfg.get('model', ''), mcfg.get('project_path', '')
     except Exception as e:
-        logger.error('[EndpointViaFlow] tool assembly failed: %s', e, exc_info=True)
+        logger.error('[FlowChat] tool assembly failed: %s', e, exc_info=True)
         return [], '', ''
 
 
 def run_endpoint_via_flow(task: dict):
     """Run endpoint mode through FlowExecutor (flagged path).
 
-    Mirrors ``run_endpoint_task``'s task contract: streams events via
-    ``append_event`` and persists via ``persist_task_result``. Each engine
-    event is translated to the endpoint schema by EndpointEventAdapter and
-    emitted live so the existing frontend renders it unchanged.
+    Thin wrapper over :func:`_run_flow_as_endpoint_task` with the canonical
+    endpoint graph (``build_endpoint_definition``).
+    """
+    from lib.orchestration import build_endpoint_definition
+    cfg = task.get('config') or {}
+    max_iter = int(cfg.get('endpointMaxIterations') or 10)
+    _run_flow_as_endpoint_task(
+        task, build_endpoint_definition(max_iterations=max_iter),
+        label='endpoint', max_iter=max_iter)
+
+
+def run_autopilot_via_flow(task: dict):
+    """Run autopilot mode through FlowExecutor (flagged path).
+
+    Symmetric to :func:`run_endpoint_via_flow`: runs the canonical autopilot
+    graph (``build_autopilot_definition`` — worker ⇄ virtual_user loop) on
+    the unified engine. The virtual_user's turns surface as user-side
+    messages via the adapter's ``emits`` handling, so the existing chat UI
+    renders the synthetic-user replies with no frontend change.
+    """
+    from lib.orchestration import build_autopilot_definition
+    cfg = task.get('config') or {}
+    max_iter = int(cfg.get('autopilotMaxIterations')
+                   or cfg.get('endpointMaxIterations') or 12)
+    _run_flow_as_endpoint_task(
+        task, build_autopilot_definition(max_iterations=max_iter),
+        label='autopilot', max_iter=max_iter)
+
+
+def run_flow_via_chat(task: dict):
+    """Run a USER-SELECTED orchestration flow as a chat task.
+
+    The flow is resolved from the task config (inline ``flowDefinition`` /
+    ``flowBuiltin`` name / stored ``flowId``) by
+    :func:`resolve_chat_flow_definition`. This is the capability that lets a
+    flow authored in the Studio drive a real conversation — the final
+    convergence point where endpoint, autopilot, AND arbitrary custom flows
+    all run through one engine + one adapter.
+    """
+    cfg = task.get('config') or {}
+    defn, source = resolve_chat_flow_definition(cfg)
+    if defn is None:
+        # Should not happen (resolve_chat_flow_entry gated on selection) but
+        # be defensive: fall back to the canonical endpoint flow.
+        from lib.orchestration import build_endpoint_definition
+        defn, source = build_endpoint_definition(), 'fallback:endpoint'
+        logger.warning('[FlowChat] task=%s no flow resolved — using endpoint '
+                       'fallback', task['id'][:8])
+    max_iter = int(cfg.get('endpointMaxIterations') or 12)
+    _run_flow_as_endpoint_task(task, defn, label=f'flow({source})',
+                               max_iter=max_iter)
+
+
+def _run_flow_as_endpoint_task(task: dict, defn: dict, *, label: str,
+                               max_iter: int):
+    """Execute *defn* on FlowExecutor with the endpoint task/SSE/DB contract.
+
+    The shared core behind endpoint / autopilot / custom-flow chat entry
+    points. Streams events via ``append_event``, translates engine events to
+    the endpoint MESSAGE schema via :class:`EndpointEventAdapter` (so the
+    frontend renders unchanged), and persists each turn through the LIVE
+    endpoint DB-sync + auto-translate functions for reload/poll parity.
     """
     from lib.tasks_pkg.manager import append_event, persist_task_result
     from lib.agent_core.events import EventType, build_event
-    from lib.orchestration import build_endpoint_definition
     from lib.orchestration_engine import FlowExecutor, FlowExecutionError
     from lib.orchestration_endpoint_adapter import EndpointEventAdapter
     # Reuse the LIVE endpoint DB-sync path verbatim so the conversation row
@@ -108,22 +267,19 @@ def run_endpoint_via_flow(task: dict):
     )
 
     if 'id' not in task:
-        raise ValueError("run_endpoint_via_flow called with a task missing 'id'")
+        raise ValueError("_run_flow_as_endpoint_task called with a task missing 'id'")
     tid = task['id'][:8]
     task['endpoint_mode'] = True
     task['_endpoint_phase'] = 'planning'
     task['_endpoint_iteration'] = 0
     task['_endpoint_via_flow'] = True
+    task['_flow_label'] = label
 
-    audit_log('endpoint_via_flow_start', task_id=task['id'])
-    logger.info('[EndpointViaFlow] task=%s START (flagged FlowExecutor path)', tid)
+    audit_log('flow_via_chat_start', task_id=task['id'], flow=label)
+    logger.info('[FlowChat] task=%s START label=%s (FlowExecutor path)', tid, label)
 
-    cfg = task.get('config') or {}
-    max_iter = int(cfg.get('endpointMaxIterations') or 10)
     tool_list, model, project_path = _build_tools_for_task(task)
     user_request = _extract_user_request(task)
-
-    defn = build_endpoint_definition(max_iterations=max_iter)
 
     # Adapter forwards endpoint-shaped messages live AND accumulates them.
     # ``adapter.messages`` is the running list of endpoint turns; we capture
@@ -168,7 +324,7 @@ def run_endpoint_via_flow(task: dict):
                 #    re-covers any turn missed here. No-op if autoTranslate OFF.
                 _trigger_per_turn_auto_translate(task, msg, msg_idx)
             except Exception as e:
-                logger.warning('[EndpointViaFlow] per-turn DB sync/translate failed '
+                logger.warning('[FlowChat] per-turn DB sync/translate failed '
                                '(non-fatal) task=%s: %s', tid, e)
 
     adapter = EndpointEventAdapter(emit=_emit_endpoint_msg)
@@ -203,12 +359,12 @@ def run_endpoint_via_flow(task: dict):
     except FlowExecutionError as e:
         status = 'error'
         stop_reason = f'structural: {e}'
-        logger.error('[EndpointViaFlow] task=%s structural failure: %s', tid, e)
+        logger.error('[FlowChat] task=%s structural failure: %s', tid, e)
         task['content'] = ''
     except Exception as e:
         status = 'error'
         stop_reason = f'{type(e).__name__}: {e}'
-        logger.error('[EndpointViaFlow] task=%s crashed: %s', tid, e, exc_info=True)
+        logger.error('[FlowChat] task=%s crashed: %s', tid, e, exc_info=True)
         task['content'] = ''
 
     # Endpoint turns the adapter produced (for DB persistence parity).
@@ -219,7 +375,7 @@ def run_endpoint_via_flow(task: dict):
             _store_endpoint_turns_on_task(task, adapter.messages)
             _sync_endpoint_turns_to_conversation(task, adapter.messages)
         except Exception as e:
-            logger.warning('[EndpointViaFlow] final DB sync failed '
+            logger.warning('[FlowChat] final DB sync failed '
                            '(non-fatal) task=%s: %s', tid, e)
         # Safety-net auto-translate: re-covers any turn whose per-turn hook
         # missed (exception / msg_idx=None). Dedups against in-flight translate
@@ -228,7 +384,7 @@ def run_endpoint_via_flow(task: dict):
         try:
             _trigger_endpoint_auto_translate(task, adapter.messages)
         except Exception as e:
-            logger.warning('[EndpointViaFlow] safety-net auto-translate failed '
+            logger.warning('[FlowChat] safety-net auto-translate failed '
                            '(non-fatal) task=%s: %s', tid, e)
     task['_endpoint_phase'] = 'done'
     task['_endpoint_stop_reason'] = stop_reason
@@ -248,10 +404,10 @@ def run_endpoint_via_flow(task: dict):
     append_event(task, done_evt)
     persist_task_result(task)
 
-    audit_log('endpoint_via_flow_complete', task_id=task['id'],
+    audit_log('flow_via_chat_complete', task_id=task['id'], flow=label,
               status=status, reason=stop_reason, iterations=iterations)
-    logger.info('[EndpointViaFlow] task=%s DONE status=%s reason=%s',
-                tid, status, stop_reason)
+    logger.info('[FlowChat] task=%s label=%s DONE status=%s reason=%s',
+                tid, label, status, stop_reason)
 
 
 class _NullLock:
@@ -260,4 +416,8 @@ class _NullLock:
     def __exit__(self, *a): return False
 
 
-__all__ = ['run_endpoint_via_flow', 'endpoint_via_flow_enabled']
+__all__ = [
+    'run_endpoint_via_flow', 'endpoint_via_flow_enabled',
+    'run_autopilot_via_flow', 'autopilot_via_flow_enabled',
+    'run_flow_via_chat', 'resolve_chat_flow_definition', 'resolve_chat_flow_entry',
+]

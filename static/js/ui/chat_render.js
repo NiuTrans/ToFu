@@ -29,7 +29,7 @@ function _msgFingerprint(msg) {
     if (typeof msg.error === 'object') {
       _errFp = (msg.error.kind || '') + ':' + ((msg.error.message || '').length);
     } else {
-      _errFp = String(msg.error).length;
+      _errFp = String(String(msg.error).length);
     }
   }
   return (msg.role || "") + ":" +
@@ -401,6 +401,14 @@ function renderMessage(msg, idx) {
   if (!isUser && msg._memoryPrefetch) {
     body += renderMemoryPrefetchHtml(msg._memoryPrefetch);
   }
+  /* ★ Autopilot VU bubble, still streaming and not yet showing content —
+   * render a live "composing…" pulse so the eagerly-created bubble isn't
+   * blank while the simulated user warms up / investigates. */
+  if (msg._isVirtualUser && msg._streamingVu && !msg.content
+      && !(msg.toolRounds && msg.toolRounds.length) && !msg.thinking) {
+    body += `<div class="stream-status vu-composing"><div class="pulse"></div> `
+          + `${escapeHtml(typeof t === "function" ? t("autopilot.composing") : "Autopilot is composing the next reply…")}</div>`;
+  }
   const rounds = getToolRoundsFromMsg(msg);
   if (rounds.length > 0) {
     /* ★ Autopilot virtual-user messages carry the VU sub-task's tool
@@ -719,14 +727,23 @@ function renderMessage(msg, idx) {
         const i18nKey = kind ? `translate.retry.${kind}` : '';
         const localized = i18nKey && typeof t === 'function' ? t(i18nKey) : '';
         const display = (localized && localized !== i18nKey) ? localized : msg._translateStatus;
-        statusSub = `<div class="translate-status-sub" style="font-size:11px;color:#f59e0b;margin-top:2px" title="${escapeHtml(msg._translateStatus)}">⚠ ${escapeHtml(display)}</div>`;
+        statusSub = `<div class="translate-status-sub" title="${escapeHtml(msg._translateStatus)}">⚠ ${escapeHtml(display)}</div>`;
       }
-      // ── Streaming preview: render partial translation text as it arrives. ──
+      // ── Streaming preview: render the partial translation as markdown as it
+      //    arrives, in a styled block that morphs smoothly into the final
+      //    bilingual译文 once the stream completes. ──
       let previewSub = '';
       if (msg._translatePartial) {
-        previewSub = `<div class="translate-preview-sub" style="font-size:12px;color:var(--text-secondary,#888);margin-top:4px;white-space:pre-wrap;opacity:0.7;max-height:200px;overflow:hidden">${escapeHtml(msg._translatePartial)}</div>`;
+        let _pv;
+        try { _pv = renderMarkdown(stripNoTranslateTags(msg._translatePartial)); }
+        catch (e) { _pv = escapeHtml(msg._translatePartial); }
+        previewSub = `<div class="translate-preview"><div class="md-content">${_pv}</div><span class="translate-caret"></span></div>`;
       }
-      body += `<div class="translate-loading" id="translate-loading-${idx}"><span class="translate-spinner"></span> ${t('translate.translatingToCN')}${statusSub}${previewSub}</div>`;
+      const _hasPreview = previewSub ? ' has-preview' : '';
+      body += `<div class="translate-loading${_hasPreview}" id="translate-loading-${idx}">`
+        + `<div class="translate-loading-head"><span class="translate-spinner"></span>`
+        + `<span class="translate-loading-label">${t('translate.translatingToCN')}</span></div>`
+        + `${statusSub}${previewSub}</div>`;
     }
   }
   if (msg.error)

@@ -198,7 +198,18 @@ def project_undo():
     data = parse_body()
     task_id = data.get('taskId', '').strip()
     conv_id = data.get('convId', '').strip()
-    project_path = _active_project_path(data.get('projectPath', '').strip())
+    explicit_path = data.get('projectPath', '').strip()
+    # ★ Concurrency-safe resolution: an explicit projectPath (sent by the
+    #   frontend per-conversation) wins. Otherwise recover the project that
+    #   actually recorded this task/conv — NEVER fall back to the globally-
+    #   active project (_state['path']), which may point at a different
+    #   project when conversations edit projects concurrently, causing undo
+    #   to silently no-op (undone=0).
+    if not explicit_path:
+        from lib.project_mod import resolve_base_path
+        explicit_path = resolve_base_path(task_id=task_id or None,
+                                          conv_id=conv_id or None) or ''
+    project_path = _active_project_path(explicit_path)
     if not project_path:
         return api_bad_request('No active project')
 

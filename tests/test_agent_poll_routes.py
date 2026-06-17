@@ -15,41 +15,28 @@ gating works.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import os
-import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 def _install_shim():
-    """Install the flask→quart shim. Returns a callable that undoes the
-    (global) ``Request.get_json`` patch, or None if nothing was patched.
+    """Install the FULL Flask→Quart shim by importing server.
 
-    The ``get_json`` patch mutates ``quart.wrappers.Request`` PROCESS-WIDE.
-    If it isn't reverted, every later test's native-async handler that does
-    ``await request.get_json()`` breaks (the converted conversation/search
-    endpoints persist empty bodies), so the caller MUST restore it on
-    teardown.
+    Previously this file hand-rolled a PARTIAL shim that only wrapped
+    ``Request.get_json`` (and reverted it on teardown). That was both
+    insufficient — it never wrapped ``make_response``, so a sync route
+    returning a coroutine (e.g. the un-mocked paper-poll handler) made Quart
+    raise ``TypeError: response value type (coroutine) is not valid`` — and
+    harmful: reverting ``get_json`` partially UNDID server's real shim for
+    later tests. ``import server`` runs ``_install_flask_shim()`` (idempotent;
+    unwraps prior installs) and applies ALL the sync-safe wrappers. It is also
+    already installed at conftest-import time, so this is normally a cached
+    no-op kept here for standalone runs of this file. No revert needed — the
+    full shim is the intended process-wide state.
     """
-    import quart
-    sys.modules['flask'] = quart
-    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
-        qs = f'quart.{attr}'
-        if qs in sys.modules:
-            sys.modules[f'flask.{attr}'] = sys.modules[qs]
-    from quart.wrappers import Request as _QR
-    if inspect.iscoroutinefunction(_QR.get_json):
-        _orig = _QR.get_json
-
-        def _sync(self, *a, **kw):
-            return asyncio.run(_orig(self, *a, **kw))
-        _QR.get_json = _sync
-
-        def _restore():
-            _QR.get_json = _orig
-        return _restore
+    import server  # noqa: F401 — side-effect installs the full shim
     return None
 
 
@@ -65,15 +52,7 @@ class AgentPollRouteTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _restore_get_json = _install_shim()
-        # Register the revert IMMEDIATELY (before anything below can raise).
-        # unittest skips tearDownClass when setUpClass raises, but
-        # addClassCleanup callbacks still run — so the process-wide
-        # Request.get_json patch is reverted even if Quart(__name__) or
-        # blueprint registration blows up. Otherwise the patch leaks and
-        # corrupts every later native-async handler in the run.
-        if _restore_get_json is not None:
-            cls.addClassCleanup(_restore_get_json)
+        _install_shim()  # full Flask→Quart shim (idempotent; no revert)
         cls._tmp = tempfile.TemporaryDirectory()
         from lib import api_keys
         cls._orig_path = api_keys._STORE_PATH
@@ -81,6 +60,16 @@ class AgentPollRouteTest(unittest.TestCase):
         api_keys._cache.clear()
         api_keys._cache_loaded = False
         os.environ['TUNNEL_TOKEN'] = 'tt'
+
+        # These tests assert unauth → 401, which requires the credential
+        # gate to be active. The shared conftest defaults to 'open' (synthetic
+        # admin for loopback), so pin 'private' for this class and restore it
+        # in tearDownClass. In private mode an unauth request is rejected at
+        # the gate before reaching the handler.
+        cls._orig_auth_mode = os.environ.get('TOFU_AUTH_MODE')
+        os.environ['TOFU_AUTH_MODE'] = 'private'
+        from lib import auth_mode
+        auth_mode.reset_for_tests()
 
         from quart import Quart
         cls.app = Quart(__name__)
@@ -107,6 +96,12 @@ class AgentPollRouteTest(unittest.TestCase):
         api_keys._STORE_PATH = cls._orig_path
         api_keys._cache.clear()
         api_keys._cache_loaded = False
+        if cls._orig_auth_mode is None:
+            os.environ.pop('TOFU_AUTH_MODE', None)
+        else:
+            os.environ['TOFU_AUTH_MODE'] = cls._orig_auth_mode
+        from lib import auth_mode
+        auth_mode.reset_for_tests()
         cls._tmp.cleanup()
 
     def _hdr(self, token):
@@ -118,7 +113,7 @@ class AgentPollRouteTest(unittest.TestCase):
         sentinel = {'status': 'done', 'translated': 'hello',
                     'model': 'test-m'}
 
-        with patch('routes.translate.translate_poll',
+        with patch('routes.api_v1.translate.translate_poll_v1',
                     return_value=sentinel):
             async def go():
                 return await self.app.test_client().get(
@@ -154,7 +149,7 @@ class AgentPollRouteTest(unittest.TestCase):
         sentinel = [{'taskId': 'a', 'status': 'done', 'translated': 'x'},
                      {'taskId': 'b', 'status': 'running'}]
 
-        with patch('routes.translate.translate_poll_batch',
+        with patch('routes.api_v1.translate.translate_poll_batch_v1',
                     return_value=sentinel):
             async def go():
                 return await self.app.test_client().post(
@@ -182,8 +177,12 @@ class AgentPollRouteTest(unittest.TestCase):
                     'events': [{'seq': 1, 'type': 'phase'}],
                     'next_cursor': 1}
 
+        # poll_report_task is ``async def``, so a bare patch() yields an
+        # AsyncMock whose call returns a coroutine — which the sync façade
+        # route would hand to Quart verbatim (TypeError). Force a sync
+        # MagicMock so the delegate returns the dict the route serializes.
         with patch('routes.paper.poll_report_task',
-                    return_value=sentinel):
+                    new_callable=MagicMock, return_value=sentinel):
             async def go():
                 return await self.app.test_client().get(
                     '/api/v1/agents/paper/report/poll?task_id=t1&cursor=0',
@@ -200,7 +199,7 @@ class AgentPollRouteTest(unittest.TestCase):
                     'events': [{'seq': 0, 'type': 'done'}],
                     'next_cursor': 1}
         with patch('routes.paper.poll_translate_task',
-                    return_value=sentinel):
+                    new_callable=MagicMock, return_value=sentinel):
             async def go():
                 return await self.app.test_client().get(
                     '/api/v1/agents/paper/translate/poll?task_id=t2&cursor=5',

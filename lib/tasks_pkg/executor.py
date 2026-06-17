@@ -617,7 +617,19 @@ def _execute_tool_one(
         from lib.browser import _set_active_client
         _set_active_client(_browser_cid)
 
-    handler = tool_registry.lookup(fn_name, round_entry)
+    # ★ Per-request custom tools resolve task-locally, BEFORE the global
+    #   registry — a request's tools never persist into tool_registry and
+    #   never leak into another task. See lib/tools/tool_env.py.
+    handler = None
+    _tool_env = task.get('_tool_env')
+    if _tool_env is not None:
+        try:
+            handler = _tool_env.resolve(fn_name)
+        except Exception as e:
+            logger.warning('[Executor] tool_env.resolve failed for %s: %s',
+                           fn_name, e, exc_info=True)
+    if handler is None:
+        handler = tool_registry.lookup(fn_name, round_entry)
     if handler is not None:
         # ★ Universal exception safety net: any uncaught exception inside
         # a tool handler (unexpected arg shape, downstream bug, I/O failure…)

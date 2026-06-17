@@ -123,6 +123,13 @@ class SubAgent:
         self._started = False
         self._cleaned_up = False
 
+        # Durable-resume key. Set by the master orchestrator's _make_agent
+        # factory (like ``output_file``). When present, the agent checkpoints
+        # its full ``messages`` array to the DB at each round boundary so a
+        # server restart can rehydrate and resume it mid-conversation. Empty
+        # in unit tests / standalone use → all checkpoint writes are no-ops.
+        self.swarm_key = ''
+
         # ── Debug: log agent initialization details ──
         tool_names = []
         for t in self.tools:
@@ -306,8 +313,22 @@ class SubAgent:
         # Emitting again here would regress the phase from 'running' → 'starting'
         # and (if IDs ever mismatch) create duplicate frontend cards.
 
+        # Hard provider isolation: a swarm sub-agent runs on its OWN thread,
+        # so the parent's thread-local provider pin does not propagate
+        # automatically. Re-apply it here (forwarded via parent_task config)
+        # so every dispatch this sub-agent makes stays bound to the same BYO
+        # endpoint. No-op when unset. See lib/llm_dispatch/provider_pin.py.
+        _pin = ''
         try:
-            self._run_loop(start_time)
+            _pin = ((self.parent_task or {}).get('config') or {}).get(
+                '_pinned_provider_id') or ''
+        except Exception as _pe:
+            logger.debug('[%s] provider-pin lookup failed: %s', self.agent_id, _pe)
+
+        try:
+            from lib.llm_dispatch.provider_pin import provider_pin
+            with provider_pin(_pin):
+                self._run_loop(start_time)
         except Exception as e:
             self.result.status = SubAgentStatus.FAILED.value
             self.result.error_message = f'{type(e).__name__}: {e}'
@@ -336,6 +357,11 @@ class SubAgent:
                 self.result.status = SubAgentStatus.FAILED.value
                 self.result.error_message = self.result.error_message or 'No final answer produced'
 
+        # Final checkpoint with the terminal status + result, BEFORE _cleanup
+        # truncates self.messages. The scheduler/master then marks the session
+        # row terminated once every agent is done.
+        self._checkpoint(final=True)
+
         # Cleanup
         self._cleanup()
 
@@ -345,6 +371,32 @@ class SubAgent:
         # cause the frontend to process TWO completion events per agent.
 
         return self.result
+
+    def _checkpoint(self, *, final: bool = False):
+        """Persist this agent's resumable state to the DB (best-effort).
+
+        Called at every round boundary (after the assistant message +
+        tool results for the round are in ``self.messages``) and once more
+        at run end. No-op unless ``self.swarm_key`` was set by the master.
+        Never raises — persistence is a safety net, not a critical path.
+        """
+        if not self.swarm_key:
+            return
+        try:
+            from lib.swarm import persistence
+            status = self.result.status or SubAgentStatus.RUNNING.value
+            persistence.save_agent(
+                self.swarm_key, self.spec.id,
+                role=self.spec.role,
+                objective=self.spec.objective,
+                status=status,
+                messages=self.messages,
+                result=self.result.to_dict() if final else None,
+                rounds_used=self.result.rounds_used,
+            )
+        except Exception as e:
+            logger.debug('[Agent:%s] checkpoint failed (non-fatal): %s',
+                         self.agent_id, e)
 
     def _run_loop(self, start_time: float):
         """Core agent loop: LLM call → tool execution → repeat.
@@ -530,6 +582,14 @@ class SubAgent:
             )
 
             self._execute_tool_calls(tool_calls, round_num)
+
+            # ── Round-boundary checkpoint ──
+            # Persist the full message history (assistant turn + tool results)
+            # so a restart can rehydrate and resume from exactly here. This is
+            # the last completed round; an interrupted next round is re-run on
+            # resume (side-effecting tools may therefore re-execute — accepted
+            # by design, see lib/swarm/persistence.py).
+            self._checkpoint()
 
             # ── Post-tool-execution abort check ──
             if self.abort_check():
@@ -810,6 +870,10 @@ class SubAgent:
             'toolRounds': self.parent_task.get('toolRounds', []),
             'phase': self.parent_task.get('phase'),
             '_suppressEvents': True,
+            # ★ Inherit per-request custom tools (handlers resolve task-locally
+            #   in _execute_tool_one before the global registry). The schema
+            #   side is already role-scoped via scope_tools_for_role.
+            '_tool_env': self.parent_task.get('_tool_env'),
         }
 
         tc_id = tool_call.get('id', str(uuid.uuid4())[:8])

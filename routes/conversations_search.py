@@ -17,6 +17,22 @@ from routes.conversations import conversations_bp
 
 logger = get_logger(__name__)
 
+#: Searches slower than this (seconds) are logged at WARNING so a regression
+#: in the index path is visible in app.log without flipping to DEBUG. Fast
+#: searches log at DEBUG to keep the steady-state log quiet.
+_SLOW_SEARCH_THRESHOLD_S = 0.3
+
+
+def _log_search_timing(query: str, n_results: int, elapsed: float) -> None:
+    """Log search latency — WARNING when slow, DEBUG otherwise."""
+    if elapsed >= _SLOW_SEARCH_THRESHOLD_S:
+        logger.warning('[search_convs] SLOW query=%r results=%d elapsed=%.3fs '
+                       '(>= %.1fs threshold — check Phase-1 index path)',
+                       query, n_results, elapsed, _SLOW_SEARCH_THRESHOLD_S)
+    else:
+        logger.debug('[search_convs] query=%r results=%d elapsed=%.3fs',
+                     query, n_results, elapsed)
+
 
 @conversations_bp.route('/api/v1/conversations/search', methods=['GET'])
 async def search_convs():
@@ -38,31 +54,52 @@ async def search_convs():
     MAX_RESULTS = 50
     SNIPPET_RADIUS = 40
 
-    # ── Phase 1: FTS5 MATCH search (SQLite only) ──
-    # The ``conversations_fts`` virtual table + ``MATCH`` operator are SQLite
-    # FTS5 features; on PostgreSQL that SQL is a hard syntax error (no such
-    # table/operator). Previously this query ran unconditionally and threw on
-    # every PG search — silently swallowed, leaving only the portable Phase-2
-    # LIKE scan. Gate it on the active backend so PG skips straight to Phase 2
-    # (correct + no error-log noise) and SQLite keeps its fast inverted-index path.
+    # ── Phase 1: index-backed full-text match ──
+    # Both backends keep a GIN-indexed full-text column populated on every
+    # write path, so Phase 1 is index-backed and ~10-40x faster than the
+    # Phase-2 substring scan:
+    #   • SQLite → ``conversations_fts`` FTS5 virtual table + ``MATCH``.
+    #   • PG     → ``search_tsv`` tsvector (``idx_conv_search_tsv`` GIN) +
+    #              ``to_tsquery('simple', 'w1:* & w2:*')`` prefix match.
+    # The SQLite FTS5 SQL is a hard syntax error on PG (no such table/operator)
+    # and vice-versa, so each backend takes its own branch. Previously PG had
+    # NO Phase 1 at all and fell straight through to a full Seq Scan on every
+    # keystroke (~790ms on 2.9k rows, avg 45KB search_text) — that is the slow
+    # path this branch eliminates.
     from lib.database import _BACKEND
     _fts_words = re.sub(r'[^\w\s]', '', query, flags=re.UNICODE).split()
-    _fts_query = ' '.join(f'{w}*' for w in _fts_words if w)
 
     result_ids = []
-    if _fts_query and _BACKEND != 'pg':
-        try:
-            rows = await async_fetchall(
-                """SELECT c.id FROM conversations c
-                   JOIN conversations_fts f ON f.rowid = c.rowid
-                   WHERE c.user_id=? AND f.search_text MATCH ?
-                   ORDER BY c.updated_at DESC LIMIT ?""",
-                (DEFAULT_USER_ID, _fts_query, MAX_RESULTS), domain=DOMAIN_CHAT)
-            result_ids = [r['id'] for r in rows]
-        except Exception as e:
-            logger.debug('[search_convs] FTS5 query failed (will fallback): %s', e)
+    if _fts_words:
+        if _BACKEND == 'pg':
+            # Prefix match on each word so partial typing still hits the index.
+            _ts_query = ' & '.join(f'{w}:*' for w in _fts_words)
+            try:
+                rows = await async_fetchall(
+                    """SELECT id FROM conversations
+                       WHERE user_id=? AND search_tsv @@ to_tsquery('simple', ?)
+                       ORDER BY updated_at DESC LIMIT ?""",
+                    (DEFAULT_USER_ID, _ts_query, MAX_RESULTS), domain=DOMAIN_CHAT)
+                result_ids = [r['id'] for r in rows]
+            except Exception as e:
+                logger.debug('[search_convs] tsvector query failed (will fallback): %s', e)
+        else:
+            _fts_query = ' '.join(f'{w}*' for w in _fts_words)
+            try:
+                rows = await async_fetchall(
+                    """SELECT c.id FROM conversations c
+                       JOIN conversations_fts f ON f.rowid = c.rowid
+                       WHERE c.user_id=? AND f.search_text MATCH ?
+                       ORDER BY c.updated_at DESC LIMIT ?""",
+                    (DEFAULT_USER_ID, _fts_query, MAX_RESULTS), domain=DOMAIN_CHAT)
+                result_ids = [r['id'] for r in rows]
+            except Exception as e:
+                logger.debug('[search_convs] FTS5 query failed (will fallback): %s', e)
 
-    # ── Phase 2: LIKE fallback for substring matches FTS5 misses ──
+    # ── Phase 2: LIKE fallback for substring matches Phase 1 misses ──
+    # Bound the scan to the first 10000 chars of search_text: full-text already
+    # caught whole-word hits, so this only needs to catch substrings, and the
+    # ``left(...)`` cap avoids decompressing megabyte-scale TOASTed values.
     if len(result_ids) < MAX_RESULTS:
         _like_pattern = '%' + query.replace('%', '\\%').replace('_', '\\_') + '%'
         remaining = MAX_RESULTS - len(result_ids)
@@ -71,7 +108,7 @@ async def search_convs():
                 placeholders = ','.join(['?'] * len(result_ids))
                 rows = await async_fetchall(
                     f"""SELECT id FROM conversations
-                        WHERE user_id=? AND lower(search_text) LIKE ?
+                        WHERE user_id=? AND lower(left(search_text, 10000)) LIKE ?
                           AND id NOT IN ({placeholders})
                         ORDER BY updated_at DESC LIMIT ?""",
                     (DEFAULT_USER_ID, _like_pattern, *result_ids, remaining),
@@ -79,7 +116,7 @@ async def search_convs():
             else:
                 rows = await async_fetchall(
                     """SELECT id FROM conversations
-                       WHERE user_id=? AND lower(search_text) LIKE ?
+                       WHERE user_id=? AND lower(left(search_text, 10000)) LIKE ?
                        ORDER BY updated_at DESC LIMIT ?""",
                     (DEFAULT_USER_ID, _like_pattern, remaining), domain=DOMAIN_CHAT)
             result_ids.extend(r['id'] for r in rows)
@@ -88,7 +125,7 @@ async def search_convs():
 
     if not result_ids:
         elapsed = time.monotonic() - t0
-        logger.debug('[search_convs] query=%r, results=0, elapsed=%.3fs', query, elapsed)
+        _log_search_timing(query, 0, elapsed)
         return jsonify([])
 
     # ── Extract snippets in Python (portable — no PG substring/position) ──
@@ -122,6 +159,5 @@ async def search_convs():
     ]
 
     elapsed = time.monotonic() - t0
-    logger.debug('[search_convs] query=%r, results=%d, elapsed=%.3fs',
-                 query, len(results), elapsed)
+    _log_search_timing(query, len(results), elapsed)
     return jsonify(results)

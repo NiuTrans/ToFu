@@ -130,6 +130,7 @@ function _renderProvidersTab() {
         '<option value=""'  + (tfVal === '' ? ' selected' : '') + '>' + escapeHtml(t('settings.thinkingFormatAuto')) + '</option>' +
         '<option value="enable_thinking"' + (tfVal === 'enable_thinking' ? ' selected' : '') + '>' + escapeHtml(t('settings.thinkingFormatEnable')) + '</option>' +
         '<option value="thinking_type"' + (tfVal === 'thinking_type' ? ' selected' : '') + '>' + escapeHtml(t('settings.thinkingFormatType')) + '</option>' +
+        '<option value="reasoning_effort"' + (tfVal === 'reasoning_effort' ? ' selected' : '') + '>' + escapeHtml(t('settings.thinkingFormatReasoningEffort')) + '</option>' +
         '<option value="none"' + (tfVal === 'none' ? ' selected' : '') + '>' + escapeHtml(t('settings.thinkingFormatNone')) + '</option>' +
       '</select></div>';
 

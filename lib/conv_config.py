@@ -133,6 +133,30 @@ def _pick(active: Any, inactive: Any, *, is_active: bool):
     return active if is_active else inactive
 
 
+#: Built-in flow names the toolbar's ``builtin:<name>`` selector maps to.
+#: Mirrors the builders registered in lib.orchestration_endpoint_runner.
+_KNOWN_FLOW_BUILTINS = frozenset({'endpoint', 'autopilot'})
+
+
+def _parse_active_flow(value: Any) -> tuple[str, str]:
+    """Split the toolbar ``activeFlow`` token into ``(flow_builtin, flow_id)``.
+
+    The frontend Mode dropdown stores ONE string:
+      * ``''`` / non-string        → no flow selected → ('', '')
+      * ``'builtin:<name>'``       → a canonical flow → (name, '')
+      * any other non-empty string → a stored orchestration id → ('', id)
+
+    These map directly onto the ``flowBuiltin`` / ``flowId`` fields that
+    ``lib.orchestration_endpoint_runner.resolve_chat_flow_entry`` reads.
+    """
+    if not isinstance(value, str) or not value:
+        return '', ''
+    if value.startswith('builtin:'):
+        name = value[len('builtin:'):]
+        return (name, '') if name in _KNOWN_FLOW_BUILTINS else ('', '')
+    return '', value
+
+
 def resolve_conv_config(
     conv_settings: Optional[Mapping] = None,
     overrides: Optional[Mapping] = None,
@@ -175,6 +199,15 @@ def resolve_conv_config(
         'model': model,
         'preset': model,
         'systemPrompt': ov.get('systemPrompt') or defaults.get('systemPrompt') or '',
+        # 'append' (default) → user prompt is prepended ON TOP of the
+        # built-in Claude-Code static prompt. 'replace' → user prompt
+        # fully replaces the built-in base block (CLAUDE.md / memory /
+        # swarm / date are still auto-injected — they track feature
+        # toggles, not the base prose). See _inject_system_contexts.
+        'systemPromptMode': (
+            ov.get('systemPromptMode')
+            or defaults.get('systemPromptMode')
+            or 'append'),
         'thinkingDepth': _pick(
             ov.get('thinkingDepth') or legacy_depth,
             conv.get('thinkingDepth') or legacy_depth or None,
@@ -257,6 +290,14 @@ def resolve_conv_config(
         'browserClientId': None,  # populated below
         'keepToolHistory': ov.get('keepToolHistory') is not False,
     }
+    # ── Orchestration flow selection (the Mode dropdown) ──
+    # Active conv reads the live toolbar token; inactive reads the stored one.
+    active_flow = _pick(ov.get('activeFlow'), conv.get('activeFlow'),
+                        is_active=is_active)
+    flow_builtin, flow_id = _parse_active_flow(active_flow)
+    out['activeFlow'] = active_flow if isinstance(active_flow, str) else ''
+    out['flowBuiltin'] = flow_builtin
+    out['flowId'] = flow_id
     # browserClientId is gated on the resolved browserEnabled flag.
     if out['browserEnabled']:
         out['browserClientId'] = ov.get('browserClientId') or None
@@ -302,6 +343,8 @@ def resolve_conv_settings(
         'autopilotEnabled': _coerce_bool(conv.get('autopilotEnabled')),
         'imageGenEnabled': _coerce_bool(conv.get('imageGenEnabled')),
         'humanGuidanceEnabled': _coerce_bool(conv.get('humanGuidanceEnabled')),
+        'activeFlow': (conv.get('activeFlow') if isinstance(conv.get('activeFlow'), str)
+                       else (ov.get('activeFlow') if isinstance(ov.get('activeFlow'), str) else '')),
         'projectPath': conv.get('projectPath') or '',
         'projectPaths': list(conv.get('projectPaths') or []),
         'readOnlyPaths': list(conv.get('readOnlyPaths') or []),

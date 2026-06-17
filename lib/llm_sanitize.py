@@ -142,6 +142,19 @@ def _strip_non_api_fields(messages: list) -> list:
 #  Tool-call/result repair (Anthropic-strict)
 # ══════════════════════════════════════════════════════════
 
+def _strip_tool_calls(msg: dict) -> dict:
+    """Return a copy of an assistant message with ``tool_calls`` removed but
+    every other field preserved.
+
+    Critically keeps ``reasoning_content`` / ``thinking_signature`` /
+    ``reasoning_details`` so that Claude/DeepSeek extended-thinking replay can
+    still re-attach a signed thinking block. Rebuilding as a bare
+    ``{'role': 'assistant', 'content': ...}`` (the previous behaviour) dropped
+    those fields and triggered Anthropic HTTP 400 on the next turn.
+    """
+    return {k: v for k, v in msg.items() if k != 'tool_calls'}
+
+
 def _fix_orphaned_tool_calls(messages: list) -> list:
     """Remove or fix assistant messages with tool_calls that lack matching tool_results.
 
@@ -212,10 +225,11 @@ def _fix_orphaned_tool_calls(messages: list) -> list:
             fixed.append(new_msg)
             orphan_tc_count += len(orphaned_tcs)
         else:
-            # ALL tool_calls are orphaned — strip tool_calls entirely
+            # ALL tool_calls are orphaned — strip tool_calls but keep content
+            # AND reasoning fields (thinking replay needs them).
             content = msg.get('content')
             if content:
-                fixed.append({'role': 'assistant', 'content': content})
+                fixed.append(_strip_tool_calls(msg))
             # If no content either, we drop the message entirely
             orphan_tc_count += len(orphaned_tcs)
 
@@ -328,7 +342,7 @@ def _fix_tool_call_adjacency(messages: list) -> list:
             else:
                 content = msg.get('content')
                 if content:
-                    result[i] = {'role': 'assistant', 'content': content}
+                    result[i] = _strip_tool_calls(msg)
                 else:
                     result.pop(i)
                     continue  # Don't increment i

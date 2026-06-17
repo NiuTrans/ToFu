@@ -34,8 +34,9 @@ function saveConversations(changedConvId) {
    * so users see the active conversation bubble to the top promptly. */
   if (changedConvId && activeStreams.size > 0) {
     const _now = Date.now();
-    if (!saveConversations._lastSidebarRefresh || _now - saveConversations._lastSidebarRefresh > 2000) {
-      saveConversations._lastSidebarRefresh = _now;
+    const _sc = /** @type {any} */ (saveConversations);
+    if (!_sc._lastSidebarRefresh || _now - _sc._lastSidebarRefresh > 2000) {
+      _sc._lastSidebarRefresh = _now;
       requestAnimationFrame(() => {
         if (typeof renderConversationList === 'function') renderConversationList();
       });
@@ -66,7 +67,7 @@ function _hydrateImageBase64(conv) {
         .then(blob => new Promise(resolve => {
           const reader = new FileReader();
           reader.onload = () => {
-            const dataUrl = reader.result;
+            const dataUrl = String(reader.result || "");
             const commaIdx = dataUrl.indexOf(",");
             if (commaIdx > 0) {
               img.base64 = dataUrl.slice(commaIdx + 1);
@@ -243,6 +244,7 @@ async function syncConversationToServer(conv, { allowTruncate = false } = {}) {
       swarmEnabled: conv.swarmEnabled || false,
       endpointEnabled: conv.endpointEnabled || false,
       autopilotEnabled: conv.autopilotEnabled || false,
+      activeFlow: conv.activeFlow || '',
       imageGenEnabled: conv.imageGenEnabled || false,
       imageGenMode: conv.imageGenMode || false,
       imageGenModel: conv.imageGenModel || null,
@@ -349,6 +351,8 @@ function _applySettingsToConv(conv, settings) {
     conv.endpointEnabled = settings.endpointEnabled;
   if (settings.autopilotEnabled !== undefined)
     conv.autopilotEnabled = settings.autopilotEnabled;
+  if (settings.activeFlow !== undefined)
+    conv.activeFlow = settings.activeFlow;
   if (settings.imageGenEnabled !== undefined)
     conv.imageGenEnabled = settings.imageGenEnabled;
   if (settings.imageGenMode !== undefined)
@@ -391,6 +395,7 @@ let _convMetaEtag = null;   // ETag for 304 Not Modified support
 async function loadConversationsFromServer(prefetchId) {
   try {
     /* ── Fast path: only metadata for sidebar (no messages) ── */
+    /** @type {Record<string,string>} */
     const headers = {};
     /* When prefetching, skip ETag/304 — we need fresh data + the conv body */
     if (!prefetchId && _convMetaEtag) headers['If-None-Match'] = _convMetaEtag;
@@ -401,7 +406,7 @@ async function loadConversationsFromServer(prefetchId) {
     for (let _attempt = 0; _attempt < 3; _attempt++) {
       resp = await fetch(url, { headers });
       if (resp.status === 503) {
-        const delay = (resp.headers.get('Retry-After') || (_attempt + 1)) * 1000;
+        const delay = (parseInt(resp.headers.get('Retry-After'), 10) || (_attempt + 1)) * 1000;
         debugLog(`[loadConvs] 503 DB busy, retry ${_attempt + 1}/2 in ${delay}ms`, 'warn');
         await new Promise(r => setTimeout(r, delay));
         continue;
@@ -631,7 +636,7 @@ async function loadConversationMessages(convId) {
       if (!resp) { /* network/abort — retry */ continue; }
       if (resp.status === 503) {
         /* DB temporarily busy — wait and retry */
-        const delay = (resp.headers.get('Retry-After') || (_attempt + 1)) * 1000;
+        const delay = (parseInt(resp.headers.get('Retry-After'), 10) || (_attempt + 1)) * 1000;
         debugLog(`[loadConvMsgs] ${convId.slice(0,8)}: 503 DB busy, retry ${_attempt + 1}/2 in ${delay}ms`, 'warn');
         await new Promise(r => setTimeout(r, delay));
         continue;

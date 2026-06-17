@@ -4,6 +4,8 @@ import json
 import threading
 import time
 
+import orjson
+
 from flask import Blueprint, Response, jsonify, request
 
 from lib.database import DOMAIN_CHAT, get_db
@@ -38,6 +40,38 @@ from routes.common import DEFAULT_USER_ID, _invalidate_meta_cache
 logger = get_logger(__name__)
 
 chat_bp = Blueprint('chat', __name__)
+
+
+def _dumps_yielding(obj) -> str:
+    """Serialize a (potentially multi-MB) SSE snapshot off the event loop.
+
+    Background: the C accelerator behind ``json.dumps`` holds the GIL for the
+    *entire* call and never releases it mid-encode, so wrapping plain
+    ``json.dumps`` in ``asyncio.to_thread`` does NOT free the loop — a 10 MB
+    conversation snapshot still stalls ``accept()`` for ~40 ms (the wedge
+    behind the 15000 incident).
+
+    ``orjson.dumps`` encodes the same 10 MB in ~5 ms — fast enough that the
+    loop stall drops to ~4 ms even though it, too, holds the GIL; the encode
+    is simply over before it matters, and it also tames the pathological
+    "one huge string field" shape that ``iterencode`` (one atomic chunk)
+    cannot. It is the primary path.
+
+    orjson rejects a handful of inputs the stdlib tolerates (notably non-str
+    dict keys → ``JSONEncodeError``/``TypeError``). For those rare snapshots
+    we fall back to ``JSONEncoder.iterencode``, which yields to the
+    interpreter between chunks so the loop can still breathe.
+
+    The two encoders differ only in item separators (orjson is compact:
+    ``,``/``:`` vs stdlib ``, ``/``: ``); both are valid JSON the frontend
+    parses identically.
+    """
+    try:
+        return orjson.dumps(obj).decode('utf-8')
+    except (TypeError, ValueError) as e:
+        logger.warning('[Chat] orjson snapshot encode failed (%s); '
+                       'falling back to stdlib iterencode', e)
+        return ''.join(json.JSONEncoder(ensure_ascii=False).iterencode(obj))
 # v1 blueprint for the JSON routes (the carve-out /api/chat/stream/<id> stays on chat_bp).
 from routes.api_v1.chat import api_v1_chat_bp  # noqa: E402
 
@@ -110,6 +144,10 @@ def chat_start():
 
     # ── Default: built-in Tofu backend ──
     task = create_task(conv_id, messages, cfg)
+    # Human-attended UI task: a user is watching and can answer the write-
+    # approval prompt, so Manual mode actually gates here (see
+    # execute_tool_pipeline's attendance-aware default).
+    task['_attended'] = True
     # Tag tasks that were started with inline messages (no DB-backed
     # conversation row). These tasks skip _sync_result_to_conversation()
     # entirely — external callers read results from task_results directly.
@@ -237,8 +275,24 @@ def _start_task_for_conv(conv_id, config, data=None):
         return None, _start_external_backend(full_data, api_messages, backend_name)
 
     task = create_task(conv_id, api_messages, config)
+    task['_attended'] = True
     task_id = task['id']
     _cfg_model = config.get('model', '?')
+
+    # ★ A user-SELECTED orchestration flow (Mode dropdown) is mutually
+    #   exclusive with the endpoint/autopilot toggles — the flow IS the
+    #   execution mode. Drop the toggles so we never double-loop, and so the
+    #   resolver's flow-wins precedence isn't masked by a stale endpoint flag.
+    _flow_selected = bool(config.get('flowDefinition') or config.get('flowBuiltin')
+                          or config.get('flowId'))
+    if _flow_selected and (config.get('endpointMode') or config.get('autopilot')):
+        logger.info('[Chat] conv=%s endpointMode/autopilot dropped — '
+                    'an orchestration flow is selected (flow takes precedence)',
+                    conv_id[:8])
+        config = dict(config)
+        config['endpointMode'] = False
+        config['autopilot'] = False
+        task['config'] = config
 
     # ★ Endpoint mode: route to the autonomous planner → worker → critic loop
     is_endpoint = config.get('endpointMode', False)
@@ -255,27 +309,31 @@ def _start_task_for_conv(conv_id, config, data=None):
         config['autopilot'] = False
         task['config'] = config
 
-    if is_endpoint:
-        # ★ Flagged cutover (default OFF): TOFU_ENDPOINT_VIA_FLOW=1 routes
-        #   endpoint mode through the unified FlowExecutor engine instead of
-        #   the live lib/tasks_pkg/endpoint.py. Same task contract + SSE
-        #   schema (via EndpointEventAdapter). The live path stays the
-        #   default until the engine path is validated on real tasks.
-        from lib.orchestration_endpoint_runner import (
-            endpoint_via_flow_enabled, run_endpoint_via_flow,
-        )
-        from lib.tasks_pkg.endpoint import run_endpoint_task
-        _endpoint_entry = (run_endpoint_via_flow if endpoint_via_flow_enabled()
-                           else run_endpoint_task)
+    # ★ FlowExecutor dispatch (the orchestration-engine convergence point):
+    #   a user-SELECTED flow (flowDefinition / flowBuiltin / flowId) is always
+    #   honored; endpointMode / autopilot route through the engine only when
+    #   their respective flags are on (TOFU_ENDPOINT_VIA_FLOW /
+    #   TOFU_AUTOPILOT_VIA_FLOW). Returns None when no engine path applies, so
+    #   endpoint mode falls back to the live loop and everything else to a
+    #   normal task. All flagging/precedence lives in resolve_chat_flow_entry.
+    from lib.orchestration_endpoint_runner import resolve_chat_flow_entry
+    _flow_entry = resolve_chat_flow_entry(config)
+
+    if _flow_entry is not None or is_endpoint:
+        # Endpoint mode without a flow entry → the live planner→worker→critic
+        # loop (default + authoritative). Otherwise the chosen engine entry.
+        if _flow_entry is None:
+            from lib.tasks_pkg.endpoint import run_endpoint_task
+            _flow_entry = run_endpoint_task
         task['endpoint_mode'] = True
         task['_endpoint_phase'] = 'planning'
         task['_endpoint_iteration'] = 0
-        logger.info('[Chat] Starting ENDPOINT task %s for conv %s model=%s via=%s',
-                    task_id[:8], conv_id[:8], _cfg_model, _endpoint_entry.__name__)
+        logger.info('[Chat] Starting FLOW task %s for conv %s model=%s via=%s',
+                    task_id[:8], conv_id[:8], _cfg_model, _flow_entry.__name__)
         try:
-            threading.Thread(target=_endpoint_entry, args=(task,), daemon=True).start()
+            threading.Thread(target=_flow_entry, args=(task,), daemon=True).start()
         except Exception as _spawn_err:
-            logger.exception('[Chat] Failed to start endpoint thread for task %s conv=%s',
+            logger.exception('[Chat] Failed to start flow/endpoint thread for task %s conv=%s',
                              task_id[:8], conv_id[:8])
             from lib.error_envelope import make_envelope as _make_env
             task['status'] = 'error'
@@ -544,6 +602,7 @@ def chat_branch_start():
             return _start_external_backend(full_data, api_messages, backend_name)
 
         task = create_task(conv_id, api_messages, cfg)
+        task['_attended'] = True
         task_id = task['id']
         _cfg_model = cfg.get('model', '?')
         logger.info('[Branch] Starting task %s for conv %s msg=%d branch=%d model=%s',
@@ -696,6 +755,24 @@ def chat_regenerate():
                             conv_id[:8], _cleared)
         except Exception as e:
             logger.warning('[Regen] Failed to clear queue for conv=%s: %s', conv_id[:8], e)
+
+        # 5b. Clear the server-side tool-history store for this conv. That
+        #     store (lib/tasks_pkg/server_message_store) keeps a full-fidelity
+        #     in-memory copy of the prior turns' tool_use/tool_result history,
+        #     keyed by conv_id and driven by keepToolHistory (default ON).
+        #     On the next task the orchestrator's rebuild_messages_with_history
+        #     REPLACES the DB-built (now-truncated) messages with that stored
+        #     copy — which still contains the rounds we just truncated away.
+        #     Without clearing it, every regen/edit replays an ever-growing
+        #     stale context instead of the truncated one. Clearing forces a
+        #     clean rebuild from the truncated DB state; the preserved turns'
+        #     tool history is reconstructed from their stored toolRounds by
+        #     conv_message_builder, so no real context is lost.
+        try:
+            from lib.tasks_pkg.server_message_store import clear as _clear_msg_store
+            _clear_msg_store(conv_id)
+        except Exception as e:
+            logger.warning('[Regen] Failed to clear message store for conv=%s: %s', conv_id[:8], e)
 
         logger.info('[Regen] conv=%s truncated to idx=%d msgs=%d edited=%s title=%.50s',
                     conv_id[:8], truncate_to, len(messages),
@@ -1235,7 +1312,17 @@ async def chat_stream(task_id):
             #   the state snapshot and the first live event at the same cursor.
             #   If the client only received the state snapshot and reconnects,
             #   _lastEventId will be null → fresh connection with full state.
-            yield f'data: {json.dumps(state, ensure_ascii=False)}\n\n'
+            # ★ Robustness: the snapshot serializes the ENTIRE conversation
+            #   content + thinking + toolRounds. For very large conversations
+            #   this json.dumps is multi-millisecond CPU work; running it
+            #   directly on the event-loop thread stalls accept()/all other
+            #   connections (a single big conv could make the whole page go
+            #   dark). Offload to the executor via _dumps_yielding (orjson —
+            #   plain json.dumps holds the GIL for the whole call so to_thread
+            #   alone does NOT free the loop). Live deltas below stay inline →
+            #   streaming latency unchanged.
+            _state_payload = await asyncio.to_thread(_dumps_yielding, state)
+            yield f'data: {_state_payload}\n\n'
 
             if _task_terminal():
                 done_evt = {'type': 'done'}
