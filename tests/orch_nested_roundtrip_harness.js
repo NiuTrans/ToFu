@@ -236,7 +236,91 @@ assert(critic.params.adversarial === false, 'unchecked bool stored as false');
 
 const structuredDef = W._orchToDefinition();
 
+// ════════════════════════════════════════════════════════════════════
+// Scenario 5 — edges as first-class objects + typed I/O contract
+//  (a) clicking an edge SELECTS it (does not delete); Delete removes it.
+//  (b) selecting a node clears the edge selection and vice-versa.
+//  (c) a node's typed io.inputs/outputs round-trip into params.io, and an
+//      edge binding writes the target input's `from` ref.
+//  (d) the tool-heavy-worker preset stamps summary(text)+changes(artifact).
+// ════════════════════════════════════════════════════════════════════
+W._orchStack = []; W._orchNodes = []; W._orchEdges = [];
+W._orchSel = null; W._orchSelEdge = null; W._orchSeq = 0; W._orchName = 'IOFlow';
+
+W._orchAddNode({ ptype: 'control', kind: 'start' }, 100, 30);
+W._orchAddNode({ ptype: 'role', role: 'worker' }, 100, 150);
+const ioWorkerId = W._orchSel;
+W._orchAddNode({ ptype: 'role', role: 'writer' }, 100, 280);
+const ioWriterId = W._orchSel;
+W._orchAddNode({ ptype: 'control', kind: 'stop' }, 100, 410);
+const ioStart = W._orchNodes.filter(function (n) { return n.kind === 'start'; })[0].id;
+const ioStop = W._orchNodes.filter(function (n) { return n.kind === 'stop'; })[0].id;
+W._orchEdges.push({ id: 'io1', from: ioStart, to: ioWorkerId });
+W._orchEdges.push({ id: 'io2', from: ioWorkerId, to: ioWriterId });
+W._orchEdges.push({ id: 'io3', from: ioWriterId, to: ioStop });
+
+// (a) selecting an edge sets _orchSelEdge and does NOT remove the edge.
+W._orchSelectEdge('io2');
+assert(W._orchSelEdge === 'io2', 'edge click selects (sets _orchSelEdge)');
+assert(W._orchSel === null, 'selecting an edge clears node selection');
+assert(W._orchEdges.some(function (e) { return e.id === 'io2'; }),
+  'selecting an edge does NOT delete it');
+
+// (b) selecting a node clears the edge selection.
+W._orchSelectNode(ioWorkerId);
+assert(W._orchSel === ioWorkerId, 'node selected');
+assert(W._orchSelEdge === null, 'selecting a node clears edge selection');
+
+// (c) tool-heavy preset on the worker → summary(text) + changes(artifact).
+W._orchSel = ioWorkerId;
+W._orchIoToolHeavyPreset();
+const ioWorker = W._orchNodes.filter(function (n) { return n.id === ioWorkerId; })[0];
+assert(ioWorker.params.io && Array.isArray(ioWorker.params.io.outputs),
+  'preset created io.outputs');
+assert(ioWorker.params.io.outputs.length === 2, 'preset declares two outputs');
+assert(ioWorker.params.io.outputs[1].name === 'changes'
+  && ioWorker.params.io.outputs[1].type === 'artifact',
+  'preset second output = changes(artifact)');
+
+// Writer declares a typed input, then we bind the io2 edge to worker.changes.
+W._orchSel = ioWriterId;
+W._orchIoAdd('inputs');
+const ioWriter = W._orchNodes.filter(function (n) { return n.id === ioWriterId; })[0];
+assert(ioWriter.params.io.inputs.length === 1, 'writer got one input port');
+W._orchIoSet('inputs', 0, 'type', 'artifact');
+// Bind via the edge inspector helper: writer input[0] ← worker.changes.
+W._orchBindEdgeInput(ioWriterId, 0, ioWorkerId + '.changes');
+assert(ioWriter.params.io.inputs[0].from === ioWorkerId + '.changes',
+  'edge binding wrote the input.from ref');
+
+// Removing the last input port cleans up the empty io.inputs key.
+W._orchIoSet('inputs', 0, 'name', 'manifest');
+assert(ioWriter.params.io.inputs[0].name === 'manifest', 'input name editable');
+
+// (a-cont) Delete removes the SELECTED edge (simulate the keydown path).
+W._orchSelectEdge('io3');
+W._orchDeleteEdge(W._orchSelEdge);
+assert(!W._orchEdges.some(function (e) { return e.id === 'io3'; }),
+  'Delete removes the selected edge');
+assert(W._orchSelEdge === null, 'edge selection cleared after delete');
+// Re-add so the flow stays runnable for backend validation.
+W._orchEdges.push({ id: 'io3b', from: ioWriterId, to: ioStop });
+
+// Reverse keeps a valid orientation (worker→writer becomes writer→worker is
+// invalid here only if a dup exists; just assert the helper swaps endpoints).
+const beforeRev = W._orchEdges.filter(function (e) { return e.id === 'io2'; })[0];
+const revFrom = beforeRev.from, revTo = beforeRev.to;
+W._orchReverseEdge('io2');
+const afterRev = W._orchEdges.filter(function (e) { return e.id === 'io2'; })[0];
+assert(afterRev.from === revTo && afterRev.to === revFrom,
+  'reverse swaps edge endpoints');
+// Put it back so the dataflow (worker→writer) is intact for validation.
+W._orchReverseEdge('io2');
+
+const ioDef = W._orchToDefinition();
+
 console.log('CHECKS=' + _checks);
 console.log('ALL_OK');
 console.log('RESULT_JSON=' + JSON.stringify(finalDef));
 console.log('RESULT_JSON2=' + JSON.stringify(structuredDef));
+console.log('RESULT_JSON3=' + JSON.stringify(ioDef));

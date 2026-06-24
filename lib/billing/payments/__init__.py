@@ -35,7 +35,9 @@ their own pricing.
 
 from __future__ import annotations
 
-from lib.billing.payments.stripe import handle_stripe_webhook
+from lib.billing.payments.stripe import (
+    handle_stripe_webhook, create_stripe_checkout,
+)
 from lib.billing.payments.alipay import (
     create_alipay_order, handle_alipay_notify,
 )
@@ -46,6 +48,6 @@ from lib.billing.payments._common import (
 __all__ = [
     'PaymentRecord',
     'list_payments', 'record_payment', 'mark_payment_settled',
-    'handle_stripe_webhook',
+    'handle_stripe_webhook', 'create_stripe_checkout',
     'create_alipay_order', 'handle_alipay_notify',
 ]

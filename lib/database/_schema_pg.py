@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 #  Schema Version Cache — Skip redundant DDL on subsequent startups
 # ═══════════════════════════════════════════════════════════════════════
 
-_SCHEMA_VERSION = 24  # Increment when tables/columns/indexes change
+_SCHEMA_VERSION = 28  # Increment when tables/columns/indexes change
 
 
 def _column_exists(conn, table, column):
@@ -403,20 +403,32 @@ def _init_chat_schema(conn):
         logger.info('[DB] Backfilling search_tsv for %d conversations...', tsv_backfill)
         _backfill_search_tsv(conn)
 
-    # ── Agent backend session mapping + message queue: migrated onto Core. ──
+    # ── Message queue: migrated onto Core. ──
     from lib.database._core_schema import (
-        AGENT_SESSIONS, MESSAGE_QUEUE, create_if_absent,
+        MESSAGE_QUEUE, create_if_absent,
     )
-    create_if_absent(conn, AGENT_SESSIONS, table_exists=_table_exists)
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_agent_sessions_backend ON agent_sessions(backend)')
     create_if_absent(conn, MESSAGE_QUEUE, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_mq_conv ON message_queue(conv_id, position)')
+    # ── Migration (v26): unified priority turn-source queue columns ──
+    for col, sql in {
+        'kind':     "ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'real'",
+        'priority': "ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 100",
+    }.items():
+        try:
+            cur.execute(sql)
+        except Exception as e:
+            logger.debug('[DB] PG migration message_queue.%s skipped: %s', col, e)
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_mq_conv_prio ON message_queue(conv_id, priority, position)')
 
     # paper_reports: migrated onto Core (lib/database/_core_schema.py).
     # Parity-verified byte-equivalent; guarded create is a no-op on existing
     # DBs. See tests/test_core_schema_parity.py.
     from lib.database._core_schema import PAPER_REPORTS, create_if_absent
     create_if_absent(conn, PAPER_REPORTS, table_exists=_table_exists)
+    # Migration: add `meta` (JSON model+usage+cost finish-tag) to existing DBs.
+    if not _column_exists(conn, 'paper_reports', 'meta'):
+        cur.execute("ALTER TABLE paper_reports ADD COLUMN meta TEXT NOT NULL DEFAULT ''")
+        logger.info('[DB] Migration: added column meta to paper_reports')
 
     # paper_library: migrated onto Core (lib/database/_core_schema.py).
     # Parity-verified byte-equivalent; guarded create is a no-op on existing
@@ -530,6 +542,20 @@ def _init_system_schema(conn):
     cur.execute('CREATE INDEX IF NOT EXISTS idx_timer_conv ON timer_watchers(conv_id)')
     create_if_absent(conn, TIMER_POLL_LOG, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_timer_poll_log ON timer_poll_log(timer_id, poll_time DESC)')
+    # Migration (v25): record which model the poll LLM resolved to.
+    if not _column_exists(conn, 'timer_poll_log', 'model'):
+        cur.execute("ALTER TABLE timer_poll_log ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+        logger.info('[DB] Migration: added column model to timer_poll_log')
+    # Migration (v27): stable per-poll id + the raw LLM output (so a
+    # parse-failure poll can be located by id and its raw decision text
+    # survives refresh/restart for diagnosis).
+    for _tpl_col, _tpl_sql in {
+        'poll_id':    "ALTER TABLE timer_poll_log ADD COLUMN poll_id TEXT NOT NULL DEFAULT ''",
+        'raw_output': "ALTER TABLE timer_poll_log ADD COLUMN raw_output TEXT NOT NULL DEFAULT ''",
+    }.items():
+        if not _column_exists(conn, 'timer_poll_log', _tpl_col):
+            cur.execute(_tpl_sql)
+            logger.info('[DB] Migration: added column %s to timer_poll_log', _tpl_col)
 
     # ── Swarm durable state (see lib/swarm/persistence.py) ──
     # Persists conversation-scoped swarm sessions and per-agent message

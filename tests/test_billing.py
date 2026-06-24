@@ -20,19 +20,20 @@ import unittest.mock as _mock
 from unittest.mock import patch
 
 
-def _ensure_db_initialised():
-    from lib.database import init_db
-    init_db()
-
-
 class _BillingTestBase(unittest.TestCase):
     """Common setUp: tempdir, isolated pricing.json, fresh SQLite DB."""
 
     @classmethod
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory()
-        os.environ['TOFU_DB_BACKEND'] = 'sqlite'
-        os.environ['TOFU_DB_PATH'] = os.path.join(cls._tmp.name, 'tofu.db')
+        # Repoint the DB layer at a fresh per-class SQLite file. This MUST go
+        # through reset_sqlite_for_tests rather than just setting TOFU_DB_PATH
+        # + init_db(): the backend/path globals are frozen at import time, so
+        # the env var alone is a no-op and (under an ambient PG env) the test
+        # would silently share the live database. See the helper's docstring.
+        from lib.database import reset_sqlite_for_tests
+        cls._db_snapshot = reset_sqlite_for_tests(
+            os.path.join(cls._tmp.name, 'tofu.db'))
         # Isolate pricing.json so test edits don't pollute the dev tree.
         cls._pricing_path = os.path.join(cls._tmp.name, 'pricing.json')
         cls._pricing_patch = patch('lib.billing.pricing._PRICING_PATH',
@@ -40,11 +41,12 @@ class _BillingTestBase(unittest.TestCase):
         cls._pricing_patch.start()
         from lib.billing import pricing as _p
         _p.reload_pricing()
-        _ensure_db_initialised()
 
     @classmethod
     def tearDownClass(cls):
         cls._pricing_patch.stop()
+        from lib.database import restore_db_state
+        restore_db_state(getattr(cls, '_db_snapshot', None))
         cls._tmp.cleanup()
 
 
@@ -103,6 +105,92 @@ class CostTest(_BillingTestBase):
                                   margin=0.0)
         self.assertEqual(b.components['input'], 0)
         self.assertGreater(b.components['cache_read'], 0)
+
+
+# ── single-engine unification (2026-06-24) ──────────────────────────
+
+class SingleEngineUnificationTest(_BillingTestBase):
+    """compute_request_cost now delegates rate math to lib.cost.compute_cost.
+
+    The two money-critical invariants:
+      (1) cache_read/cache_write tokens ARE billed (the old settle path
+          dropped them → silent under-charge on cache-heavy turns);
+      (2) the wallet debit equals the displayed ¥/$ cost to the micro
+          (they share ONE arithmetic core), so display and bill can't drift.
+    """
+
+    def test_cache_tokens_are_billed(self):
+        from lib.billing import compute_request_cost
+        # A cache-heavy Anthropic turn. Pre-unification only input+output were
+        # charged; cache_read/cache_write were dropped entirely.
+        b = compute_request_cost('claude-opus-4-7',
+                                  input_tokens=500, output_tokens=1500,
+                                  cache_write_tokens=8000,
+                                  cache_read_tokens=40000, margin=0.0)
+        self.assertGreater(b.components['cache_read'], 0)
+        self.assertGreater(b.components['cache_write'], 0)
+        # The cache portion must be a real fraction of the bill, not lost.
+        cache_micro = b.components['cache_read'] + b.components['cache_write']
+        self.assertGreater(cache_micro, b.components['input'])
+
+    def test_debit_equals_displayed_cost(self):
+        # The wallet base (margin 0) must equal compute_cost's summed USD
+        # sub-components × 1e6 — proving display and bill use one engine.
+        from lib.billing import compute_request_cost
+        from lib.billing.cost import MICRO_PER_USD
+        from lib.cost import compute_cost
+        cases = [
+            ('claude-opus-4-7', {'input_tokens': 500, 'output_tokens': 1500,
+                                 'cache_creation_input_tokens': 8000,
+                                 'cache_read_input_tokens': 40000}),
+            ('gpt-4o', {'prompt_tokens': 10000, 'completion_tokens': 2000,
+                        'cache_read_tokens': 6000}),
+            ('gpt-4o-mini', {'input_tokens': 1000, 'output_tokens': 500}),
+        ]
+        for model, u in cases:
+            cc = compute_cost(u, model_id=model)
+            disp_micro = round((cc['inputCostUsd'] + cc['outputCostUsd']
+                                + cc['cacheWriteCostUsd']
+                                + cc['cacheReadCostUsd']) * MICRO_PER_USD)
+            b = compute_request_cost(
+                model,
+                input_tokens=int(u.get('input_tokens')
+                                 or u.get('prompt_tokens') or 0),
+                output_tokens=int(u.get('output_tokens')
+                                  or u.get('completion_tokens') or 0),
+                cache_read_tokens=int(u.get('cache_read_tokens')
+                                      or u.get('cache_read_input_tokens') or 0),
+                cache_write_tokens=int(u.get('cache_write_tokens')
+                                       or u.get('cache_creation_input_tokens') or 0),
+                margin=0.0)
+            self.assertEqual(b.base_micro, disp_micro,
+                             f'{model}: debit {b.base_micro} != display {disp_micro}')
+
+    def test_rich_table_models_priced_not_defaulted(self):
+        # A model only in lib/pricing.py (NOT in the sparse pricing.json) is
+        # now priced correctly instead of falling to default_model.
+        from lib.billing import compute_request_cost
+        b = compute_request_cost('claude-opus-4-7',
+                                  input_tokens=1_000_000, output_tokens=0,
+                                  margin=0.0)
+        # claude-opus-4-7 is $5/Mtok input → 5_000_000 micro.
+        self.assertEqual(b.base_micro, 5_000_000)
+
+    def test_margin_still_applied_over_unified_base(self):
+        from lib.billing import compute_request_cost
+        base = compute_request_cost('gpt-4o-mini', input_tokens=1000,
+                                    output_tokens=500, margin=0.0).micro
+        marg = compute_request_cost('gpt-4o-mini', input_tokens=1000,
+                                    output_tokens=500, margin=0.25).micro
+        self.assertEqual(marg, int(base * 1.25))
+
+    def test_qwen_cny_native_billed(self):
+        # Qwen bills in CNY tiers; the adapter converts via the live rate.
+        # Must produce a positive, non-defaulted micro amount.
+        from lib.billing import compute_request_cost
+        b = compute_request_cost('qwen-plus', input_tokens=100_000,
+                                 output_tokens=100_000, margin=0.0)
+        self.assertGreater(b.base_micro, 0)
 
 
 # ── ledger ──────────────────────────────────────────────────────────

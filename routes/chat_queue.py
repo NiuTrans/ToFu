@@ -123,3 +123,92 @@ def chat_autopilot_arm():
     result = arm_autopilot(conv_id)
     audit_log('autopilot_arm_request', conv_id=conv_id, armed=result['armed'])
     return api_ok(result)
+
+
+@api_v1_chat_bp.route('/api/v1/chat/autopilot/disarm', methods=['POST'], endpoint='ui_chat_autopilot_disarm')
+@require_scope('chat')
+def chat_autopilot_disarm():
+    """Cancel autopilot for a conversation ("stop taking over").
+
+    The inverse of arm: clears the persistent armed-marker sentinel from the
+    queue AND flips ``config['autopilot']=False`` on any live task so the loop
+    stops at the current turn's natural end.  Also persists
+    ``settings.autopilotEnabled=false`` so a later manual send does not relaunch
+    the loop.  Backs the queue-bar cancel button and the toggle-OFF gesture.
+
+    Body: ``{convId}``.  Returns ``{disarmed, markerCleared, taskIds}``.
+    """
+    data = parse_body()
+    conv_id = (data.get('convId') or '').strip()
+    if not conv_id:
+        from lib.api_response import api_bad_request
+        return api_bad_request('convId is required', field='convId')
+
+    # Persist autopilotEnabled=false (best-effort).
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT settings FROM conversations WHERE id=? AND user_id=?',
+            (conv_id, DEFAULT_USER_ID),
+        ).fetchone()
+        if row:
+            try:
+                settings = json.loads(row[0] or '{}')
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug('[Autopilot disarm] settings parse failed for '
+                             'conv=%s: %s', conv_id[:8], e)
+                settings = {}
+            settings['autopilotEnabled'] = False
+            db_execute_with_retry(
+                db,
+                'UPDATE conversations SET settings=? WHERE id=? AND user_id=?',
+                (json.dumps(settings, ensure_ascii=False), conv_id,
+                 DEFAULT_USER_ID),
+            )
+    except Exception as e:
+        logger.warning('[Autopilot disarm] failed to persist autopilotEnabled '
+                       'for conv=%s: %s', conv_id[:8], e)
+
+    from lib.tasks_pkg.autopilot import disarm_autopilot
+    result = disarm_autopilot(conv_id)
+    audit_log('autopilot_disarm_request', conv_id=conv_id,
+              disarmed=result['disarmed'])
+    return api_ok(result)
+
+
+@api_v1_chat_bp.route('/api/v1/chat/autopilot/kick', methods=['POST'], endpoint='ui_chat_autopilot_kick')
+@require_scope('chat')
+def chat_autopilot_kick():
+    """Start the virtual-user loop on a FINISHED conversation ("push it forward").
+
+    Use case: the user chatted with autopilot ON, the turn ended, and they
+    want the virtual user to keep the conversation going WITHOUT typing — the
+    empty-Enter gesture on a conversation that is no longer streaming.  Because
+    the autopilot hook only runs at a turn's natural stop (no live task once
+    the reply finished), this spawns a thin carrier task whose ``run_task``
+    short-circuits straight to the VU hook (``_run_autopilot_kick``).
+
+    Body: ``{convId, config?}`` — ``config`` is the resolved per-conversation
+    send config (model, tools, …); when omitted the conversation defaults are
+    used by ``build_api_messages_from_db``.
+
+    Returns ``{taskId}`` on success.  Returns 409 with ``{error}`` when there
+    is nothing to kick — a task is already running for the conv (the caller
+    should ARM instead), the conversation is missing, or its history is empty.
+    """
+    data = parse_body()
+    conv_id = (data.get('convId') or '').strip()
+    if not conv_id:
+        from lib.api_response import api_bad_request
+        return api_bad_request('convId is required', field='convId')
+    config = data.get('config') or {}
+
+    from lib.tasks_pkg.autopilot import kick_autopilot
+    result = kick_autopilot(conv_id, config)
+    audit_log('autopilot_kick_request', conv_id=conv_id,
+              task_id=result.get('taskId'), error=result.get('error'))
+    if not result.get('taskId'):
+        from lib.api_response import api_conflict
+        return api_conflict(result.get('error') or 'cannot_kick',
+                            taskId=None)
+    return api_ok(result)

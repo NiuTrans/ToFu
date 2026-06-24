@@ -24,6 +24,26 @@ from .prompt import _wrap_for_translation
 logger = get_logger(__name__)
 
 
+def _build_trace(*, path, model, in_chars, out_chars, attempts=1,
+                 content_fails=0, dispatch_fails=0, elapsed=0.0,
+                 verdict='ok', target=''):
+    """Build a structured provenance record for one translation call.
+
+    Attached to the returned usage dict as ``_translate_trace`` and emitted
+    as a single grep-able ``[Translate:trace]`` log line so every
+    auto-translate leaves a machine-parseable audit trail (path taken,
+    model, attempts, in/out length, ratio, completeness verdict).
+    """
+    return {
+        'path': path, 'model': model, 'in_chars': in_chars,
+        'out_chars': out_chars,
+        'ratio': round(out_chars / in_chars, 3) if in_chars else 0.0,
+        'attempts': attempts, 'content_fails': content_fails,
+        'dispatch_fails': dispatch_fails, 'elapsed': round(elapsed, 1),
+        'verdict': verdict, 'target': target,
+    }
+
+
 def _translate_freetext(text, system_prompt, chunk_label='',
                         source='', target='', status_cb=None,
                         progress_cb=None, overall_deadline=None,
@@ -116,7 +136,11 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                     chunk_label, len(chunk), len(cached_text), cached_model)
         return cached_text, {'model': cached_model,
                              '_dispatch': {'model': cached_model},
-                             '_cache_hit': True}
+                             '_cache_hit': True,
+                             '_translate_trace': _build_trace(
+                                 path='cache', model=cached_model,
+                                 in_chars=len(chunk), out_chars=len(cached_text),
+                                 verdict='cache', target=target)}
 
     # ── Try dedicated MT provider first (if configured) ──
     from lib.mt_provider import is_mt_configured, mt_translate_chunked
@@ -130,7 +154,11 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                         chunk_label, len(chunk), len(result), elapsed)
             translate_cache.put(chunk, source, target, result, model='mt:niutrans')
             # Return with a synthetic usage dict for compatibility
-            return result, {'model': 'mt:niutrans', '_dispatch': {'model': 'mt:niutrans'}}
+            return result, {'model': 'mt:niutrans', '_dispatch': {'model': 'mt:niutrans'},
+                            '_translate_trace': _build_trace(
+                                path='mt', model='mt:niutrans',
+                                in_chars=len(chunk), out_chars=len(result),
+                                elapsed=elapsed, verdict='mt', target=target)}
         except Exception as e:
             logger.warning('[Translate%s] MT provider failed, falling back to LLM: %s',
                            chunk_label, e)
@@ -142,6 +170,8 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
     from lib.llm import RateLimitError
 
     clen = len(chunk)
+    _target_is_chinese = ((target or '').lower().startswith('chinese')
+                          or 'zh' in (target or '').lower())
     # Bigger per-attempt budget + more dispatch retries per attempt.
     if clen > 6000:
         _mt, _timeout, _retries = 16000, 180, 12
@@ -172,6 +202,7 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
     _content_fail_count = 0
     _dispatch_fail_count = 0
     _last_err = None
+    _terminal_verdict = 'ok'
     c, u = '', None
     # ── Models proven bad for THIS chunk ──
     # When a model returns an empty or truncated body, we add it here so the
@@ -347,13 +378,19 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
         _is_truncated = False
         _reason = ''
 
+        # EN→ZH output is naturally ~0.4-0.7x the source length, so a flat
+        # 20% floor lets a translation that silently dropped HALF the
+        # document (the dominant 漏译 mode — cheap models stop early with
+        # finish_reason=stop) sail through undetected. Raise the floor for
+        # Chinese targets so those drops are caught and retried.
+        _short_floor = 0.30 if _target_is_chinese else 0.20
         if _finish == 'length':
             _is_truncated = True
             _reason = f'finish_reason=length, model={_model}'
-        elif clen > 500 and len(c) < clen * 0.20:
+        elif clen > 500 and len(c) < clen * _short_floor:
             _is_truncated = True
-            _reason = (f'output too short ({len(c)}/{clen} = {len(c)/clen*100:.0f}%), '
-                       f'model={_model}')
+            _reason = (f'output too short ({len(c)}/{clen} = {len(c)/clen*100:.0f}%, '
+                       f'floor={_short_floor:.0%}), model={_model}')
 
         if _is_truncated:
             _content_fail_count += 1
@@ -370,6 +407,19 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                                chunk_label, _content_fail_count, _reason, len(c))
                 _notify('truncated_final', _attempt, _elapsed,
                         f'truncated after {_content_fail_count} retries')
+                # 溯源: committing a KNOWN-incomplete translation is a silent
+                # failure unless we leave a loud, machine-parseable trail.
+                try:
+                    from lib.log import audit_log
+                    audit_log('translate_truncated_accept',
+                              chunk_label=chunk_label, model=_model,
+                              in_chars=clen, out_chars=len(c),
+                              ratio=round(len(c) / max(1, clen), 3),
+                              content_fails=_content_fail_count,
+                              reason=_reason, target=target)
+                except Exception as _ae:
+                    logger.debug('[Translate%s] audit_log failed: %s', chunk_label, _ae)
+                _terminal_verdict = 'truncated'
                 break  # accept best-effort
             logger.warning('[Translate%s] Truncated translation (attempt %d, content_fails=%d): %s '
                            '— excluding model and retrying',
@@ -385,12 +435,22 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
         # to copy the whole thing.  Detect by exact match (after stripping)
         # and by target-language-character ratio, then exclude the model and
         # retry with a different one.
-        from lib.text_lang import cjk_ratio
+        from lib.text_lang import (
+            cjk_ratio, is_predominantly_chinese, is_predominantly_english,
+        )
         _is_noop = False
         _noop_reason = ''
         _c_stripped = c.strip()
         _src_stripped = chunk.strip()
-        if _c_stripped == _src_stripped and len(_src_stripped) >= 40:
+        # When the source is ALREADY in the target language, verbatim output
+        # is a legitimate pass-through, not an echo. Translating Chinese→Chinese
+        # correctly returns (near-)identical text; flagging that as a no-op
+        # would burn the retry budget and then fail the whole translation.
+        _target_is_chinese = ((target or '').lower().startswith('chinese')
+                              or 'zh' in (target or '').lower())
+        _src_already_target = _target_is_chinese and is_predominantly_chinese(_src_stripped)
+        if (not _src_already_target
+                and _c_stripped == _src_stripped and len(_src_stripped) >= 40):
             _is_noop = True
             _noop_reason = f'output==input verbatim ({len(_c_stripped)} chars), model={_model}'
         elif (target or '').lower().startswith('chinese') or 'zh' in (target or '').lower():
@@ -427,6 +487,54 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
             _notify('noop_output', _attempt, _elapsed,
                     f'output identical to input, retrying (fails={_content_fail_count})')
             continue
+
+        # ── Wrong-language flip detection ──
+        # The no-op CJK check above only fires when the SOURCE is almost pure
+        # English (cjk_ratio < 0.1). It therefore misses the dominant failure
+        # on MIXED English+Chinese input (target=Chinese): the model performs a
+        # language NORMALISATION and rewrites the already-Chinese majority INTO
+        # English to satisfy the prompt's anti-verbatim rule — so a source that
+        # was English-then-Chinese comes back predominantly English. The prompt
+        # forbids this, but weak cheap models do it anyway, so we verify the
+        # OUTCOME instead of trusting the instruction: when target=Chinese and
+        # the source carried meaningful Chinese, the output must NOT be
+        # predominantly English. Reject + exclude the model + retry — a
+        # different model usually keeps the Chinese intact.
+        _is_flip = False
+        _flip_reason = ''
+        if (_target_is_chinese and len(_c_stripped) >= 200
+                and cjk_ratio(_src_stripped) >= 0.10
+                and is_predominantly_english(_c_stripped)):
+            _is_flip = True
+            _flip_reason = (
+                f'wrong-language flip: target=Chinese, source cjk_ratio='
+                f'{cjk_ratio(_src_stripped):.2f} but output latin-dominant '
+                f'(out cjk={cjk_ratio(_c_stripped):.2f}, len={len(_c_stripped)}), '
+                f'model={_model}')
+
+        if _is_flip:
+            _content_fail_count += 1
+            _last_err = _flip_reason
+            if _used_key and _model:
+                _dispatcher.record_truncation(_used_key, _model, error=_flip_reason)
+                _excluded_models.add(_model)
+            if _content_fail_count >= _MAX_CONTENT_RETRIES:
+                logger.error('[Translate%s] Still wrong-language after %d content retries: %s '
+                             '— giving up, will surface error',
+                             chunk_label, _content_fail_count, _flip_reason)
+                _notify('wrong_language_final', _attempt, _elapsed,
+                        f'output flipped language after {_content_fail_count} retries')
+                # Refuse to commit a flipped translation — it would clobber the
+                # already-Chinese source with English. Force the trailing
+                # emptiness check to raise.
+                c = ''
+                break
+            logger.warning('[Translate%s] Wrong-language flip (attempt %d, content_fails=%d): %s '
+                           '— excluding model and retrying',
+                           chunk_label, _attempt, _content_fail_count, _flip_reason)
+            _notify('wrong_language', _attempt, _elapsed,
+                    f'output flipped to wrong language, retrying (fails={_content_fail_count})')
+            continue
         break  # success
 
     # If every attempt produced an empty result, raise a clear error so the
@@ -451,5 +559,29 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
         _disp = u.get('_dispatch', {}) or {}
         _model_for_cache = _disp.get('model', u.get('model', '')) or ''
     translate_cache.put(chunk, source, target, final, model=_model_for_cache)
+
+    # ── 溯源: full lifecycle trace attached to the usage dict + one
+    #    structured, grep-able line. Flags suspiciously-short output even
+    #    when it cleared the truncation floor, so silent partial drops stay
+    #    visible after the fact. ──
+    _ratio = len(final) / clen if clen else 0.0
+    _soft_floor = 0.40 if _target_is_chinese else 0.30
+    _suspicious = bool(clen > 500 and _ratio < _soft_floor
+                       and _terminal_verdict == 'ok')
+    _trace = _build_trace(
+        path='llm', model=_model_for_cache or '?', in_chars=clen,
+        out_chars=len(final), attempts=_attempt,
+        content_fails=_content_fail_count, dispatch_fails=_dispatch_fail_count,
+        elapsed=time.time() - _start_ts, verdict=_terminal_verdict,
+        target=target)
+    _trace['suspicious'] = _suspicious
+    logger.info('[Translate:trace%s] verdict=%s%s path=llm model=%s in=%d out=%d '
+                'ratio=%.2f attempts=%d cfail=%d dfail=%d elapsed=%.1fs',
+                chunk_label, _terminal_verdict,
+                ' SUSPICIOUS-SHORT' if _suspicious else '',
+                _trace['model'], clen, len(final), _ratio, _attempt,
+                _content_fail_count, _dispatch_fail_count, _trace['elapsed'])
+    if isinstance(u, dict):
+        u['_translate_trace'] = _trace
 
     return final, u

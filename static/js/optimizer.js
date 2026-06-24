@@ -37,12 +37,12 @@ function _optFmtTime(iso) {
 
 function _optStatusIcon(status) {
   switch (status) {
-    case "applied": return "🟢";
-    case "pending_review": return "🟡";
-    case "rejected": return "🔴";
-    case "expired": return "⚪";
-    case "reverted": return "↩️";
-    default: return "⚪";
+    case "applied": return IconDot('green');
+    case "pending_review": return IconDot('yellow');
+    case "rejected": return IconDot('red');
+    case "expired": return IconDot('grey');
+    case "reverted": return Icon('refresh', 12);
+    default: return IconDot('grey');
   }
 }
 
@@ -77,11 +77,11 @@ function _optRenderAction(p) {
     return `${t('optimizer.blockSearchDomain')} <b>${escapeHtml(args.domain)}</b>${ttl}`;
   }
   if (type === "other") {
-    return `💡 ${escapeHtml(p.title || t('optimizer.untitled'))}`;
+    return `${Icon('lightbulb', 13)} ${escapeHtml(p.title || t('optimizer.untitled'))}`;
   }
   // Fall-through: show type + first arg
   const firstArg = Object.keys(args).slice(0, 2).map(k => `${k}=${JSON.stringify(args[k]).slice(0, 30)}`).join(", ");
-  return `⚙️ ${escapeHtml(type)}${firstArg ? " <span style='color:var(--text-secondary)'>" + escapeHtml(firstArg) + "</span>" : ""}`;
+  return `${Icon('cog', 13)} ${escapeHtml(type)}${firstArg ? " <span style='color:var(--text-secondary)'>" + escapeHtml(firstArg) + "</span>" : ""}`;
 }
 
 function _optimizerFeatureEnabled() {

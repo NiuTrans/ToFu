@@ -12,7 +12,9 @@ logger = get_logger(__name__)
 
 # ── Memory operation handlers (registry pattern) ────────────────────
 
-def _memory_create(fn_args, project_path):
+def _memory_create(fn_args, project_path, extra_paths=None):
+    # New memories are always written to the PRIMARY project_path;
+    # extra_paths is accepted for a uniform handler signature but ignored.
     from lib.memory import create_memory
     mem = create_memory(
         name=fn_args.get('name', 'Untitled Memory'),
@@ -30,13 +32,14 @@ def _memory_create(fn_args, project_path):
     return content, '💡 saved', f"💡 Memory: {fn_args.get('name', '?')}"
 
 
-def _memory_update(fn_args, project_path):
+def _memory_update(fn_args, project_path, extra_paths=None):
     from lib.memory import update_memory
     sid = fn_args.get('memory_id', '')
     mem = update_memory(
         memory_id=sid,
         updates={k: v for k, v in fn_args.items() if k not in ('memory_id',) and v is not None},
         project_path=project_path,
+        extra_paths=extra_paths,
     )
     if mem is None:
         logger.warning('[Memory] update_memory returned None for memory_id=%s', sid)
@@ -44,16 +47,17 @@ def _memory_update(fn_args, project_path):
     return f"Memory updated: **{mem['name']}** (id: {mem['id']})", '✏️ updated', f"✏️ Memory: {mem['name']}"
 
 
-def _memory_delete(fn_args, project_path):
+def _memory_delete(fn_args, project_path, extra_paths=None):
     from lib.memory import delete_memory
     sid = fn_args.get('memory_id', '')
-    deleted = delete_memory(memory_id=sid, project_path=project_path)
+    deleted = delete_memory(memory_id=sid, project_path=project_path,
+                            extra_paths=extra_paths)
     if deleted:
         return f"Memory deleted: {sid}", '🗑️ deleted', f"🗑️ Memory: {sid}"
     return f"Memory not found: {sid}", '❌ not found', f"🗑️ Memory: {sid}"
 
 
-def _memory_merge(fn_args, project_path):
+def _memory_merge(fn_args, project_path, extra_paths=None):
     from lib.memory import merge_memories
     result = merge_memories(
         memory_ids=fn_args.get('memory_ids', []),
@@ -63,6 +67,7 @@ def _memory_merge(fn_args, project_path):
         tags=fn_args.get('tags', []),
         scope=fn_args.get('scope', 'project'),
         project_path=project_path,
+        extra_paths=extra_paths,
     )
     merged = result['merged_memory']
     n_del = len(result['deleted_ids'])
@@ -73,7 +78,7 @@ def _memory_merge(fn_args, project_path):
     )
 
 
-def _memory_search(fn_args, project_path):
+def _memory_search(fn_args, project_path, extra_paths=None):
     from lib.memory.relevance import search_memories
     query = fn_args.get('query', '')
     top_k = fn_args.get('top_k', 30)
@@ -81,6 +86,7 @@ def _memory_search(fn_args, project_path):
         query=query,
         project_path=project_path,
         top_k=top_k,
+        extra_paths=extra_paths,
     )
     snippet = query[:80] if query else '(empty)'
     return result, '🔍 searched', f'🔍 Memory search: {snippet}'
@@ -100,12 +106,19 @@ _MEMORY_OP_DISPATCH = {
                         description='Create, update, delete, or merge memories')
 def _handle_memory_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
     _proj = project_path if project_enabled else None
+    # Multi-root: read/locate memories across the primary + extra roots
+    # (projectPaths[1:]). New memories are still written to the primary.
+    _extra_paths = []
+    if _proj:
+        _all_paths = (cfg or {}).get('projectPaths') or []
+        _extra_paths = [p for p in _all_paths[1:]
+                        if p and p != _proj] if len(_all_paths) > 1 else []
     memory_ok = False
     try:
         handler = _MEMORY_OP_DISPATCH.get(fn_name)
         if handler is None:
             raise ValueError(f'Unknown memory operation: {fn_name}')
-        tool_content, badge_ok, title = handler(fn_args, _proj)
+        tool_content, badge_ok, title = handler(fn_args, _proj, _extra_paths)
         memory_ok = True
     except Exception as e:
         logger.warning('[Executor] memory operation %s failed: %s', fn_name, e, exc_info=True)

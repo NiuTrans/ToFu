@@ -169,13 +169,27 @@ def _do_translate(task_id, text, target, source, conv_id, msg_idx, field, *, msg
                                               status_cb=_on_status,
                                               progress_cb=_on_progress)
         _model = 'unknown'
+        _trace = {}
         if isinstance(_usage, dict):
             _disp = _usage.get('_dispatch', {})
             _model = _disp.get('model', _usage.get('model', 'unknown'))
+            _trace = _usage.get('_translate_trace', {}) or {}
         content = content.strip()
 
         if nt_blocks:
             content = _reattach_notranslate_blocks(content, nt_blocks)
+
+        # 溯源: loudly flag a committed translation that the engine judged
+        # incomplete (truncated/suspicious) — the dominant 漏译 signature.
+        _verdict = _trace.get('verdict', 'ok')
+        if _verdict != 'ok' or _trace.get('suspicious'):
+            logger.warning('[Translate] Task %s committing INCOMPLETE translation: '
+                           'verdict=%s suspicious=%s %d→%d chars (ratio=%.2f) '
+                           'model=%s conv=%s msg=%s — original may be partially untranslated',
+                           task_id[:8], _verdict, _trace.get('suspicious', False),
+                           input_len, len(content),
+                           (len(content) / input_len) if input_len else 0.0,
+                           _model, conv_id[:8] if conv_id else '?', msg_idx)
 
         with _translate_tasks_lock:
             task['status'] = 'done'

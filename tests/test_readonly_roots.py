@@ -118,5 +118,54 @@ class AllWritableRegressionTest(_TmpWorkspace):
         self.assertTrue(res['ok'])
 
 
+class TaskDoesNotThrashGlobalTest(_TmpWorkspace):
+    """ensure_project_state(conv_id=...) must register the per-conv scope WITHOUT
+    mutating the UI-facing global _state/_roots.
+
+    Regression for the read/write badge flip-flop: two conversations on
+    different primaries had their background run_tasks thrashing the global
+    singleton (set_project → _roots.clear()), wiping each other's roots and RO
+    flags. The project bar reads the global via get_state(), so it flipped.
+    """
+
+    def test_task_call_does_not_touch_global(self):
+        from lib.project_mod.scanner import ensure_project_state
+
+        # UI sets the active project to the writable root (no conv_id).
+        set_project_paths([self.rw])
+        before = cfg.get_state()
+        self.assertEqual(before['path'], os.path.realpath(self.rw)
+                         if os.path.realpath(self.rw) == before['path'] else self.rw)
+
+        # A background task on ANOTHER conversation runs on the RO dir.
+        ok = ensure_project_state(self.ro, conv_id='conv-task-1')
+        self.assertTrue(ok)
+
+        # Global is UNCHANGED — the bar still shows the UI's project.
+        after = cfg.get_state()
+        self.assertEqual(after['path'], before['path'])
+        # …but the task's conv scope IS registered and resolves correctly.
+        self.assertEqual(cfg._conv_primary.get('conv-task-1'),
+                         os.path.abspath(self.ro))
+
+    def test_task_call_preserves_other_conv_readonly_flag(self):
+        from lib.project_mod.scanner import ensure_project_state
+
+        # UI: writable primary + RO extra (the badge state the user set).
+        set_project_paths([self.rw, self.ro], readonly_paths=[self.ro])
+        self.assertTrue(cfg.is_readonly_path(os.path.join(self.ro, 'x.py')))
+
+        # A concurrent task on a different conv touches the RO dir as primary.
+        ensure_project_state(self.ro, conv_id='conv-task-2')
+
+        # The UI's global RO flag survives — no _roots.clear() wiped it.
+        st = cfg.get_state()
+        ro_extra = [r for r in st.get('extraRoots', []) if r['path'] == os.path.abspath(self.ro)
+                    or r['path'] == os.path.realpath(self.ro)]
+        self.assertTrue(ro_extra, 'RO extra root vanished from global state')
+        self.assertTrue(ro_extra[0]['readOnly'])
+        self.assertTrue(cfg.is_readonly_path(os.path.join(self.ro, 'x.py')))
+
+
 if __name__ == '__main__':
     unittest.main()

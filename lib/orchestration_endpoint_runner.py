@@ -178,6 +178,7 @@ def _build_tools_for_task(task: dict):
             human_guidance_enabled=mcfg['human_guidance_enabled'],
             scheduler_enabled=mcfg['scheduler_enabled'],
             messages=task.get('messages'),
+            conv_id=task.get('convId', ''),
         )
         return tool_list, mcfg.get('model', ''), mcfg.get('project_path', '')
     except Exception as e:
@@ -269,8 +270,15 @@ def _run_flow_as_endpoint_task(task: dict, defn: dict, *, label: str,
     if 'id' not in task:
         raise ValueError("_run_flow_as_endpoint_task called with a task missing 'id'")
     tid = task['id'][:8]
+    # Derive the opening phase from the flow's ACTUAL first role node instead
+    # of always claiming 'planning'. A plannerless flow (e.g. autopilot:
+    # worker→vu) must NOT advertise endpointPhase='planning' or the frontend
+    # stands up a Planner bubble that never receives content (hangs at
+    # "Waiting…"). 'planning' → Planner bubble, 'working' → Worker, etc.
+    from lib.orchestration import initial_phase_for_flow
+    initial_phase = initial_phase_for_flow(defn)
     task['endpoint_mode'] = True
-    task['_endpoint_phase'] = 'planning'
+    task['_endpoint_phase'] = initial_phase
     task['_endpoint_iteration'] = 0
     task['_endpoint_via_flow'] = True
     task['_flow_label'] = label
@@ -281,53 +289,43 @@ def _run_flow_as_endpoint_task(task: dict, defn: dict, *, label: str,
     tool_list, model, project_path = _build_tools_for_task(task)
     user_request = _extract_user_request(task)
 
-    # Adapter forwards endpoint-shaped messages live AND accumulates them.
-    # ``adapter.messages`` is the running list of endpoint turns; we capture
-    # it by closure so the emit callback can sync the full snapshot per turn.
+    # Adapter has TWO output channels:
+    #   • on_stream → LIVE SSE events (endpoint_iteration / delta /
+    #     endpoint_planner_done / endpoint_critic_msg) forwarded verbatim to
+    #     the task stream so the streaming UI renders tokens AS THEY ARRIVE.
+    #   • emit      → endpoint-shaped MESSAGE dicts, fired once per COMPLETED
+    #     turn → incremental DB persistence (survives SSE drop / reload).
+    # ``adapter.messages`` is the running list of endpoint turns; captured by
+    # closure so the DB-sync callback can persist the full snapshot per turn.
     _adapter_ref = {}
 
-    def _emit_endpoint_msg(msg: dict):
-        # 1) Translate the adapter's message dict into the SSE event the
-        #    frontend already understands.
-        if msg.get('_isEndpointPlanner'):
-            append_event(task, build_event(
-                EventType.ENDPOINT_PLANNER_DONE,
-                content=msg.get('content', ''),
-                usage={},
-            ))
-        elif msg.get('_isEndpointReview'):
-            append_event(task, build_event(
-                EventType.ENDPOINT_CRITIC_MSG,
-                iteration=msg.get('_epIteration', 0),
-                content=msg.get('content', ''),
-                next_phase=msg.get('_epNextPhase', 'worker'),
-                synthetic=bool(msg.get('_isSyntheticCritic')),
-            ))
-        else:
-            append_event(task, build_event(
-                EventType.ENDPOINT_ITERATION,
-                iteration=msg.get('_epIteration', 0),
-                phase='working',
-            ))
+    def _stream_endpoint_event(ev: dict):
+        # Forward the adapter's translated SSE event straight to the task
+        # stream. ``ev`` already uses the wire vocabulary the frontend
+        # handles (its 'type' is one of the registered endpoint/content
+        # events); append_event preserves order + persists for replay.
+        append_event(task, ev)
 
-        # 2) Persist incrementally through the LIVE endpoint sync path, so a
-        #    turn survives even if SSE drops mid-run (identical to endpoint.py).
-        #    The sync returns the absolute DB index of the LAST turn (== msg),
-        #    which the per-turn auto-translate trigger needs.
+    def _persist_endpoint_msg(msg: dict):
+        # Persist incrementally through the LIVE endpoint sync path, so a turn
+        # survives even if SSE drops mid-run (identical to endpoint.py). The
+        # sync returns the absolute DB index of the LAST turn (== msg), which
+        # the per-turn auto-translate trigger needs.
         turns = _adapter_ref.get('messages') or []
         if turns:
             try:
                 _store_endpoint_turns_on_task(task, turns)
                 msg_idx = _sync_endpoint_turns_to_conversation(task, turns)
-                # 3) Pipelined per-turn auto-translate (parallel with the next
-                #    phase), identical to the live path. Safety net at the end
-                #    re-covers any turn missed here. No-op if autoTranslate OFF.
+                # Pipelined per-turn auto-translate (parallel with the next
+                # phase), identical to the live path. Safety net at the end
+                # re-covers any turn missed here. No-op if autoTranslate OFF.
                 _trigger_per_turn_auto_translate(task, msg, msg_idx)
             except Exception as e:
                 logger.warning('[FlowChat] per-turn DB sync/translate failed '
                                '(non-fatal) task=%s: %s', tid, e)
 
-    adapter = EndpointEventAdapter(emit=_emit_endpoint_msg)
+    adapter = EndpointEventAdapter(emit=_persist_endpoint_msg,
+                                   on_stream=_stream_endpoint_event)
     _adapter_ref['messages'] = adapter.messages
 
     # Surface raw engine progress too (loop/replan/guard) for diagnostics.
@@ -337,6 +335,7 @@ def _run_flow_as_endpoint_task(task: dict, defn: dict, *, label: str,
     status = 'done'
     stop_reason = 'completed'
     iterations = 0
+    executor = None
     try:
         executor = FlowExecutor(
             defn,
@@ -366,6 +365,17 @@ def _run_flow_as_endpoint_task(task: dict, defn: dict, *, label: str,
         stop_reason = f'{type(e).__name__}: {e}'
         logger.error('[FlowChat] task=%s crashed: %s', tid, e, exc_info=True)
         task['content'] = ''
+    # Per-node run trace (resolved brief + bounded I/O per node) — for the
+    # canvas/inspector overlay served via /api/v1/chat/flow-trace/<task>.
+    # Read from the executor so a PARTIAL trace survives a mid-run crash.
+    if executor is not None:
+        try:
+            task['_flow_trace'] = executor.trace
+        except Exception as _te:
+            logger.debug('[FlowChat] trace capture failed task=%s: %s', tid, _te)
+            task.setdefault('_flow_trace', [])
+    else:
+        task.setdefault('_flow_trace', [])
 
     # Endpoint turns the adapter produced (for DB persistence parity).
     # Final sync — captures any last turn whose emit raced the loop exit.

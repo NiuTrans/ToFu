@@ -12,7 +12,22 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ['load_token', 'save_token', 'delete_token', 'token_path']
+__all__ = ['load_token', 'save_token', 'delete_token', 'token_path',
+           'OAuthExchangeError']
+
+
+class OAuthExchangeError(Exception):
+    """Raised when an OAuth token exchange/refresh fails upstream.
+
+    Carries the real HTTP status and a human-readable detail so the route
+    layer can surface the ACTUAL upstream reason (e.g. a 403 geo-block)
+    instead of a generic "code may have expired" message.
+    """
+
+    def __init__(self, message: str, *, status_code: int = 0, detail: str = ''):
+        super().__init__(message)
+        self.status_code = status_code
+        self.detail = detail or message
 
 
 def token_path(provider: str) -> str:

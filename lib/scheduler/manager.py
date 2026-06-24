@@ -550,6 +550,8 @@ class ScheduledTaskManager:
         else:
             record_poll(task_id, 'act_failed', reason, 'cheap', tokens_used, status_snapshot)
             logger.error('%s ❌ Execution failed to start', pfx)
+            audit_log('proactive_exec_failed', task_id=task_id,
+                      task_name=task.get('name', '?'), reason=str(reason)[:200])
 
     def _ensure_default_optimizer_task(self):
         """Idempotently register the Daily Optimizer cron task.

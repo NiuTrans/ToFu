@@ -49,54 +49,219 @@
   }
 })();
 
-// ── Handle received OAuth code ──
-function _handleOAuthCode(provider, code, state) {
-  if (!provider || !code) return;
+// Browser-side exchange params per provider, captured from the login response.
+var _oauthExchangeParams = {};
 
-  var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
-  _updateOAuthCard(provider, { status: 'exchanging' });
+// ── Browser-side token exchange (B1 geo-block workaround) ──
+// Exchanges the auth code against the provider's token endpoint FROM THE
+// BROWSER (using the user's VPN/proxy), then hands the resulting token to
+// the server to persist. Returns a Promise that resolves to the parsed
+// token JSON on success, or rejects (so the caller falls back to the
+// server-side exchange). Anthropic/OpenAI token endpoints are CORS-open for
+// the public OAuth client, but if not, the fetch rejects and we fall back.
+function _browserExchange(provider, code, state) {
+  var ex = _oauthExchangeParams[provider];
+  if (!ex || !ex.token_url || !ex.code_verifier) return Promise.reject(new Error('no-exchange-params'));
 
-  // Send code to server for token exchange
-  // Try POST first; if proxy returns 405, fall back to GET with query params
+  var headers, bodyData;
+  if (ex.style === 'form') {
+    headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
+    var p = new URLSearchParams();
+    p.set('grant_type', 'authorization_code');
+    p.set('code', code);
+    p.set('redirect_uri', ex.redirect_uri);
+    p.set('client_id', ex.client_id);
+    p.set('code_verifier', ex.code_verifier);
+    bodyData = p.toString();
+  } else {
+    headers = { 'Content-Type': 'application/json' };
+    bodyData = JSON.stringify({
+      grant_type: 'authorization_code',
+      code: code,
+      state: state || ex.state || '',
+      redirect_uri: ex.redirect_uri,
+      client_id: ex.client_id,
+      code_verifier: ex.code_verifier,
+    });
+  }
+
+  // Direct cross-origin fetch to the provider token endpoint, via the
+  // browser's own network. No credentials — this is a public OAuth client.
+  return fetch(ex.token_url, { method: 'POST', headers: headers, body: bodyData, mode: 'cors' })
+    .then(function(r) {
+      return r.text().then(function(txt) {
+        var json; try { json = JSON.parse(txt); } catch (e) { json = null; }
+        if (!r.ok || !json || !json.access_token) {
+          var msg = (json && (json.error_description || (json.error && json.error.message) || json.error)) || ('HTTP ' + r.status);
+          var err = new Error('exchange-failed: ' + msg);
+          err._upstreamStatus = r.status;
+          throw err;
+        }
+        return json;
+      });
+    });
+}
+
+// Persist a browser-exchanged token via the server. Returns the parsed
+// JSON result (with .error on failure).
+function _storeBrowserToken(provider, tokenJson) {
+  return Api.oauth.storeToken(provider, tokenJson)
+    .then(function(r) { return r.json(); });
+}
+
+// ── Server-side token exchange (fallback path) ──
+// POSTs the raw code to /api/oauth/callback so the SERVER does the exchange.
+// Used when browser-side exchange isn't possible or fails for a non-auth
+// reason (e.g. the server's egress isn't geo-blocked). Returns parsed JSON.
+function _serverExchange(provider, code, state) {
   var body = { provider: provider, code: code };
   if (state) body.state = state;
-  function _doCallbackRequest(useGet) {
+  function _req(useGet) {
     if (useGet) {
-      console.warn('[OAuth] POST got 405, retrying as GET for /api/oauth/callback');
       var qs = 'provider=' + encodeURIComponent(provider) + '&code=' + encodeURIComponent(code);
       if (state) qs += '&state=' + encodeURIComponent(state);
       return Api.oauth.callbackGet(qs);
     }
     return Api.oauth.callbackPost(body);
   }
-  _doCallbackRequest(false)
+  return _req(false)
+    .then(function(r) { return (r.status === 404 || r.status === 405) ? _req(true) : r; })
     .then(function(r) {
-      if (r.status === 404 || r.status === 405) return _doCallbackRequest(true);
-      return r;
-    })
-    .then(function(r) {
-      if (!r.ok) return r.text().then(function(t) { throw new Error(t.slice(0, 200)); });
+      if (!r.ok) return r.text().then(function(t) {
+        var j; try { j = JSON.parse(t); } catch (e) { j = null; }
+        throw new Error((j && j.error) || t.slice(0, 200));
+      });
       return r.json();
-    })
-    .then(function(data) {
-      if (data.error) {
-        _updateOAuthCard(provider, { status: 'error' });
-        showAlert('Token 交换失败: ' + data.error);
-        return;
-      }
-      // Success!
-      _updateOAuthCard(provider, { status: 'success', authenticated: true, email: data.email || '' });
-      _autoConfigureOAuthProvider(provider, { email: data.email });
+    });
+}
 
-      // Hide manual fallback
-      var manualDiv = document.getElementById('oauth' + capProvider + 'Manual');
-      if (manualDiv) manualDiv.style.display = 'none';
+// ── Complete a login given an auth code: browser-first, server fallback ──
+// 1. Try the browser-side exchange (uses the user's VPN — bypasses the
+//    server's geo-blocked egress). On success, store via the server.
+// 2. If browser exchange can't run (no params) or fails with a NETWORK/CORS
+//    error (not a real auth rejection), fall back to the server exchange.
+//    A genuine auth rejection (4xx with an error body) is reported as-is.
+function _completeLogin(provider, code, state) {
+  var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
+  _updateOAuthCard(provider, { status: 'exchanging' });
+
+  function _onSuccess(data) {
+    _updateOAuthCard(provider, { status: 'success', authenticated: true, email: data.email || '' });
+    _autoConfigureOAuthProvider(provider, { email: data.email });
+    var manualDiv = document.getElementById('oauth' + capProvider + 'Manual');
+    if (manualDiv) manualDiv.style.display = 'none';
+    var manualInput = document.getElementById('oauth' + capProvider + 'ManualUrl');
+    if (manualInput) manualInput.value = '';
+  }
+  function _onError(msg) {
+    _updateOAuthCard(provider, { status: 'error' });
+    showAlert('Token 交换失败: ' + msg);
+  }
+
+  // Step 1: browser-side exchange → store via server.
+  _browserExchange(provider, code, state)
+    .then(function(tokenJson) {
+      console.log('[OAuth] Browser-side exchange succeeded for', provider);
+      return _storeBrowserToken(provider, tokenJson).then(function(data) {
+        if (!data || data.error) { _onError((data && data.error) || 'store failed'); return; }
+        _onSuccess(data);
+      });
     })
     .catch(function(e) {
-      console.error('[OAuth] Token exchange error:', e);
-      _updateOAuthCard(provider, { status: 'error' });
-      showAlert('Token 交换失败: ' + e.message);
+      // Browser exchange failed. If it was a genuine auth rejection from the
+      // provider (4xx with a body), surface it — retrying server-side won't
+      // help and would just hit the geo-block. Otherwise (CORS/network/no
+      // params), fall back to the server-side exchange.
+      var st = e && e._upstreamStatus;
+      if (st === 400 || st === 401) {
+        _onError(e.message.replace(/^exchange-failed: /, ''));
+        return;
+      }
+      console.warn('[OAuth] Browser exchange unavailable (%s) — falling back to server', e && e.message);
+      _serverExchange(provider, code, state)
+        .then(function(data) {
+          if (!data || data.error) {
+            // Both browser (CORS) and server (geo-block) failed → curl helper.
+            _showCurlHelper(provider, code, state, (data && data.error) || '');
+            return;
+          }
+          _onSuccess(data);
+        })
+        .catch(function(e2) { _showCurlHelper(provider, code, state, e2.message); });
     });
+}
+
+// ── curl-assisted manual exchange (B2: both browser AND server are blocked) ──
+// Anthropic/OpenAI token endpoints don't send CORS headers, so a browser
+// fetch is preflight-blocked; and the server's egress is geo-blocked. The
+// one network that CAN reach them is the user's own terminal (with VPN), so
+// we hand them the exact curl and accept the token JSON they paste back.
+function _buildCurlCommand(provider, code, state) {
+  var ex = _oauthExchangeParams[provider];
+  if (!ex || !ex.token_url || !ex.code_verifier) return '';
+  if (ex.style === 'form') {
+    var p = new URLSearchParams();
+    p.set('grant_type', 'authorization_code');
+    p.set('code', code);
+    p.set('redirect_uri', ex.redirect_uri);
+    p.set('client_id', ex.client_id);
+    p.set('code_verifier', ex.code_verifier);
+    return "curl '" + ex.token_url + "' \\\n  -H 'Content-Type: application/x-www-form-urlencoded' \\\n  --data-raw '" + p.toString() + "'";
+  }
+  var body = JSON.stringify({
+    grant_type: 'authorization_code', code: code, state: state || ex.state || '',
+    redirect_uri: ex.redirect_uri, client_id: ex.client_id, code_verifier: ex.code_verifier,
+  });
+  return "curl '" + ex.token_url + "' \\\n  -H 'Content-Type: application/json' \\\n  --data-raw '" + body + "'";
+}
+
+function _showCurlHelper(provider, code, state, reason) {
+  var capP = provider === 'codex' ? 'Codex' : 'Claude';
+  var curl = _buildCurlCommand(provider, code, state);
+  if (!curl) {
+    _updateOAuthCard(provider, { status: 'error' });
+    showAlert('Token 交换失败: ' + (reason || '') + '（且无法生成手动命令，请重新点击登录）');
+    return;
+  }
+  // Keep the card in a 'pending' state — the user has a clear next action.
+  _updateOAuthCard(provider, { status: 'waiting_callback' });
+  var manualDiv = document.getElementById('oauth' + capP + 'Manual');
+  if (manualDiv) manualDiv.style.display = '';
+
+  var helper = document.getElementById('oauth' + capP + 'CurlHelper');
+  if (!helper) {
+    helper = document.createElement('div');
+    helper.id = 'oauth' + capP + 'CurlHelper';
+    helper.className = 'oauth-curl-helper';
+    helper.style.marginTop = '10px';
+    if (manualDiv) manualDiv.appendChild(helper);
+  }
+  helper.innerHTML =
+    '<p class="oauth-manual-hint" style="color:#e0a030">' +
+    '服务器网络无法连接 Anthropic（已被区域封锁）。请在<strong>本机终端（已开代理）</strong>运行下面的命令，' +
+    '再把返回的 JSON（含 <code>access_token</code>）粘贴到上方输入框后点「提交」：</p>' +
+    '<textarea readonly class="oauth-manual-input" id="oauth' + capP + 'Curl" ' +
+    'style="width:100%;height:104px;font-family:monospace;font-size:11px;white-space:pre"></textarea>' +
+    '<button class="btn-small" id="oauth' + capP + 'CurlCopy" style="margin-top:6px">复制命令</button>';
+  var ta = document.getElementById('oauth' + capP + 'Curl');
+  if (ta) ta.value = curl;
+  var copyBtn = document.getElementById('oauth' + capP + 'CurlCopy');
+  if (copyBtn) {
+    copyBtn.onclick = function() {
+      ta.select(); document.execCommand('copy');
+      var b = this; b.textContent = '已复制';
+      setTimeout(function() { b.textContent = '复制命令'; }, 1500);
+    };
+  }
+  // Repurpose the paste input for the JSON result.
+  var input = document.getElementById('oauth' + capP + 'ManualUrl');
+  if (input) { input.value = ''; input.placeholder = '粘贴 curl 返回的 JSON（含 access_token）'; }
+}
+
+// ── Handle received OAuth code (from postMessage / relay) ──
+function _handleOAuthCode(provider, code, state) {
+  if (!provider || !code) return;
+  _completeLogin(provider, code, state);
 }
 
 function _loadOAuthStatus() {
@@ -204,6 +369,12 @@ function _oauthLogin(provider) {
         return;
       }
 
+      // Stash browser-side exchange params (B1): when the server's egress is
+      // geo-blocked from the provider token endpoint, the browser (with the
+      // user's VPN) does the exchange itself. code_verifier is OUR PKCE
+      // secret, so it's fine to keep it client-side for the duration.
+      _oauthExchangeParams[provider] = data.exchange || null;
+
       // Step 2: Open the auth URL in a popup window
       // For Claude: redirects to console.anthropic.com which shows code#state
       // For Codex: redirects to localhost relay which auto-sends via postMessage
@@ -305,65 +476,73 @@ function _oauthManualSubmit(provider) {
   }
   var val = input.value.trim();
 
+  // Format 0: token JSON pasted from the curl helper (B2 dead-end path).
+  // If it parses to an object with access_token, store it directly — no
+  // exchange needed (the user's terminal already did it).
+  if (val.charAt(0) === '{') {
+    var tok = null;
+    try { tok = JSON.parse(val); } catch (e) { tok = null; }
+    if (tok && tok.access_token) {
+      _updateOAuthCard(provider, { status: 'exchanging' });
+      _storeBrowserToken(provider, tok)
+        .then(function(data) {
+          if (!data || data.error) {
+            _updateOAuthCard(provider, { status: 'error' });
+            showAlert('\u4fdd\u5b58\u5931\u8d25: ' + ((data && data.error) || 'unknown'));
+            return;
+          }
+          _updateOAuthCard(provider, { status: 'success', authenticated: true, email: data.email || '' });
+          var md = document.getElementById('oauth' + capP + 'Manual');
+          if (md) md.style.display = 'none';
+          input.value = '';
+          _autoConfigureOAuthProvider(provider, { email: data.email });
+        })
+        .catch(function(e) {
+          _updateOAuthCard(provider, { status: 'error' });
+          showAlert('\u4fdd\u5b58\u5931\u8d25: ' + e.message);
+        });
+      return;
+    }
+    showAlert('\u7c98\u8d34\u7684 JSON \u4e2d\u672a\u627e\u5230 access_token');
+    return;
+  }
+
   // Support multiple formats:
   // 1. Full callback URL: http://localhost:PORT/callback?code=XXX&state=YYY
   // 2. code#state format (shown by Anthropic console after auth)
   // 3. Raw authorization code
-  var body = { provider: provider };
+  var code = '', state = '';
   if (val.indexOf('http') === 0) {
-    body.callback_url = val;
+    try {
+      var u = new URL(val);
+      code = u.searchParams.get('code') || '';
+      state = u.searchParams.get('state') || '';
+    } catch (e) { code = ''; }
+    if (!code) { showAlert('回调 URL 中未找到授权码'); return; }
   } else if (val.indexOf('#') > 0) {
     // code#state format from Anthropic console
     var parts = val.split('#');
-    body.code = parts[0];
-    body.state = parts[1] || '';
+    code = parts[0];
+    state = parts[1] || '';
   } else {
-    body.code = val;
+    code = val;
   }
 
-  // Try POST first; if proxy returns 405, fall back to GET with query params
-  function _doManualCallbackRequest(useGet) {
-    if (useGet) {
-      console.warn('[OAuth] POST got 405, retrying as GET for /api/oauth/callback (manual)');
-      var qs = 'provider=' + encodeURIComponent(body.provider);
-      if (body.code) qs += '&code=' + encodeURIComponent(body.code);
-      if (body.state) qs += '&state=' + encodeURIComponent(body.state);
-      if (body.callback_url) qs += '&callback_url=' + encodeURIComponent(body.callback_url);
-      return Api.oauth.callbackGet(qs);
-    }
-    return Api.oauth.callbackPost(body);
-  }
-  _doManualCallbackRequest(false)
-    .then(function(r) {
-      if (r.status === 404 || r.status === 405) return _doManualCallbackRequest(true);
-      return r;
-    })
-    .then(function(r) {
-      if (!r.ok) return r.text().then(function(t) { throw new Error(t.slice(0, 200)); });
-      return r.json();
-    })
-    .then(function(data) {
-      if (data.error) {
-        showAlert('授权失败: ' + data.error);
-      } else {
-        _updateOAuthCard(provider, { status: 'success', authenticated: true, email: data.email || '' });
-        var manualDiv = document.getElementById('oauth' + capP + 'Manual');
-        if (manualDiv) manualDiv.style.display = 'none';
-        input.value = '';
-        _autoConfigureOAuthProvider(provider, { email: data.email });
-      }
-    })
-    .catch(function(e) {
-      showAlert('提交失败: ' + e.message);
-    });
+  // Browser-first exchange (bypasses the server's geo-block), server fallback.
+  _completeLogin(provider, code, state);
 }
 
 function _autoConfigureOAuthProvider(provider, status) {
   var name = provider === 'codex' ? 'ChatGPT Plus' : 'Claude Pro';
   var el = document.getElementById('settingsStatusHint');
   if (el) {
-    el.textContent = '✅ ' + name + ' 登录成功！请在「服务商」标签页添加对应模型。';
+    el.textContent = '✅ ' + name + ' 登录成功！已自动注册为模型服务商，可直接在模型选择器中使用其订阅额度。';
     el.style.color = '#28a745';
+  }
+  // The backend auto-provisions a managed provider on login; refresh the
+  // providers list so the new models appear without a manual reload.
+  if (typeof _loadServerConfig === 'function') {
+    try { _loadServerConfig(); } catch (e) { /* best-effort UI refresh */ }
   }
 }
 

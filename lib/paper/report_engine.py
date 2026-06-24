@@ -23,6 +23,37 @@ from .tools import _execute_report_tool
 logger = get_logger(__name__)
 
 
+def _build_report_meta(model, provider_id, usage_total, round_count, elapsed_s):
+    """Assemble the report "finish tag" metadata dict.
+
+    Combines the resolved generation model, accumulated token usage, and the
+    computed cost (via ``lib.cost.compute_cost`` — the same math the chat
+    finish-info bar uses) into a small JSON-serialisable dict the frontend
+    renders as a badge under the report. Cost is best-effort: a pricing miss
+    leaves ``costCny``/``costUsd`` as None but the model + token counts still
+    show.
+    """
+    cost = None
+    try:
+        from lib.cost import compute_cost
+        cost = compute_cost(usage_total, model_id=model, provider_id=provider_id)
+    except Exception as e:
+        logger.warning('[Paper:Report] cost computation failed: %s', e)
+    meta = {
+        'model': model or '',
+        'providerId': provider_id or '',
+        'rounds': round_count,
+        'elapsedSec': round(elapsed_s, 1),
+        'promptTokens': usage_total.get('prompt_tokens', 0),
+        'completionTokens': usage_total.get('completion_tokens', 0),
+        'cacheReadTokens': usage_total.get('cache_read_tokens', 0),
+        'cacheWriteTokens': usage_total.get('cache_write_tokens', 0),
+        'costUsd': cost.get('costUsd') if cost else None,
+        'costCny': cost.get('costCny') if cost else None,
+    }
+    return meta
+
+
 def _run_report_task(task, messages, images):
     """Background worker: runs the tool loop and populates task events.
 
@@ -49,6 +80,19 @@ def _run_report_task(task, messages, images):
     model_name = model or _lib.LLM_MODEL
     t0 = time.time()
     full_content = ''
+    # ── Finish-tag accumulators ──
+    # Sum token usage across every dispatch round (tool rounds + final write)
+    # so the badge reflects the TOTAL cost of producing the report, not just
+    # the last call. resolved_model / provider_id are filled from the
+    # dispatcher metadata stamped on `usage['_dispatch']`.
+    _usage_total = {
+        'prompt_tokens': 0, 'completion_tokens': 0,
+        'cache_read_tokens': 0, 'cache_write_tokens': 0,
+        'reasoning_tokens': 0,
+    }
+    _resolved_model = ''
+    _provider_id = None
+    _round_count = 0
     # Extract a short context string for search relevance filtering
     _user_msg = messages[1]['content'] if len(messages) > 1 else ''
     _report_user_question = _user_msg[:300] if _user_msg else ''
@@ -93,6 +137,29 @@ def _run_report_task(task, messages, images):
                 thinking_enabled=False,
                 log_prefix='[Paper:Report]',
             )
+
+            # Accumulate token usage + capture the resolved model/provider
+            # (the dispatcher may fall back to a different model than asked).
+            _round_count += 1
+            if isinstance(usage, dict):
+                _usage_total['prompt_tokens'] += int(
+                    usage.get('prompt_tokens') or usage.get('input_tokens') or 0)
+                _usage_total['completion_tokens'] += int(
+                    usage.get('completion_tokens') or usage.get('output_tokens') or 0)
+                _usage_total['cache_read_tokens'] += int(
+                    usage.get('cache_read_tokens')
+                    or usage.get('cache_read_input_tokens') or 0)
+                _usage_total['cache_write_tokens'] += int(
+                    usage.get('cache_write_tokens')
+                    or usage.get('cache_creation_input_tokens') or 0)
+                _usage_total['reasoning_tokens'] += int(
+                    usage.get('reasoning_tokens')
+                    or usage.get('thinking_tokens') or 0)
+                _disp = usage.get('_dispatch') or {}
+                if _disp.get('model'):
+                    _resolved_model = _disp['model']
+                if _disp.get('provider_id'):
+                    _provider_id = _disp['provider_id']
 
             tool_calls = msg.get('tool_calls')
             if not tool_calls:
@@ -246,6 +313,17 @@ def _run_report_task(task, messages, images):
         enriched = _inject_images_into_report(full_content, images, lang=lang)
         task['enriched_text'] = enriched
 
+        # ── Build the "finish tag" meta (model + token usage + cost) ──
+        # Persisted alongside the report so re-opening a cached report still
+        # shows which model generated it and what it cost. The resolved model
+        # (what the dispatcher actually used) wins over the requested one.
+        report_model = _resolved_model or model or _lib.LLM_MODEL
+        report_meta = _build_report_meta(
+            report_model, _provider_id, _usage_total, _round_count,
+            time.time() - t0)
+        task['report_meta'] = report_meta
+        meta_json = json.dumps(report_meta, ensure_ascii=False)
+
         # Persist to DB
         if enriched:
             try:
@@ -253,10 +331,13 @@ def _run_report_task(task, messages, images):
                 from lib.database._core_schema import PAPER_REPORTS, upsert
                 upsert(db2, PAPER_REPORTS, {
                     'paper_hash': phash, 'lang': lang, 'report': enriched,
-                    'model': model or _lib.LLM_MODEL, 'created_at': int(time.time()),
+                    'model': report_model, 'meta': meta_json,
+                    'created_at': int(time.time()),
                 }, retry=True)
-                logger.info('[Paper:Report] Persisted — hash=%s lang=%s %d chars (%d imgs)',
-                            phash, lang, len(enriched), len(images))
+                logger.info('[Paper:Report] Persisted — hash=%s lang=%s %d chars (%d imgs) '
+                            'model=%s cost=%s',
+                            phash, lang, len(enriched), len(images),
+                            report_model, report_meta.get('costCny'))
             except Exception as e:
                 logger.warning('[Paper:Report] Failed to persist: %s', e)
 
@@ -267,7 +348,8 @@ def _run_report_task(task, messages, images):
 
         task['status'] = 'done'
         task['finished_at'] = time.time()
-        _append_report_event(task, {'type': 'done', 'report': enriched or full_content, 'paperHash': phash})
+        _append_report_event(task, {'type': 'done', 'report': enriched or full_content,
+                                    'paperHash': phash, 'meta': report_meta})
 
     except Exception as e:
         logger.error('[Paper:Report] Task %s failed after %.1fs: %s',

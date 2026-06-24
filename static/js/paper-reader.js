@@ -17,6 +17,7 @@ var _paperTotalPages = 0;
 var _paperScale = 1.5;
 var _paperActiveTab = 'qa';
 var _paperReportCache = '';
+var _paperReportMeta = null;  // finish-tag: {model, costCny, costUsd, promptTokens, ...}
 var _paperHash = '';  // server-side hash for DB report cache lookup
 
 var _paperQAHistory = [];
@@ -256,6 +257,7 @@ function _openPaperEntry(entry) {
   _paperArxivId = entry.arxivId || '';
   _paperQAHistory = entry.qaHistory || [];
   _paperReportCache = '';  // Report is loaded from server DB on demand
+  _paperReportMeta = null; // finish tag is re-fetched with the cached report
   _paperHash = entry.paperHash || '';
   _paperImages = Array.isArray(entry.images) ? entry.images : [];
   _babelTranslatedPages = entry.babelCache || {};
@@ -439,6 +441,7 @@ async function enterPaperMode(pdfUrl, fileName, parsedText, arxivId) {
   }
 
   _switchPaperTab('qa');
+  _setPaperMobileView('pdf');
 
   // Seed the report model selection so the button label reflects the actual
   // model from the start (no more stale "Default" placeholder).
@@ -474,6 +477,11 @@ function exitPaperMode() {
   if (container) container.style.display = 'none';
   if (chatWrapper) chatWrapper.style.display = '';
   if (inputArea) inputArea.style.display = '';
+
+  // ★ Recompute toolbar width now the input area is visible again. Any reflow
+  // that fired while paper mode hid .input-area was a no-op (offsetParent
+  // null), so --toolbar-w may be stale/scrunched. Re-measure once.
+  if (typeof _scheduleReflow === 'function') _scheduleReflow();
 
   var pmBtn = document.getElementById('paperModeBtn');
   if (pmBtn) {
@@ -927,7 +935,7 @@ function _showPaperLanding() {
   var _tt = (typeof t === 'function') ? t : function(k){ return k; };
   viewer.innerHTML =
     '<div class="paper-landing">' +
-      '<div class="paper-landing-icon">📄</div>' +
+      '<div class="paper-landing-icon">' + Icon('file', 40) + '</div>' +
       '<h3>' + escapeHtml(_tt('paper.title')) + '</h3>' +
       '<p>' + escapeHtml(_tt('paper.landingDesc')) + '</p>' +
       '<div class="paper-landing-actions">' +
@@ -1343,6 +1351,17 @@ function _switchPaperTab(tab) {
     panel.style.display = panel.dataset.tab === tab ? '' : 'none';
   });
   if (tab === 'report') {
+    // Collapse the sidebar so the report gets the full width. Paper mode
+    // expands the sidebar on entry (to show the library), so we only need
+    // to collapse it here when the user actually opens the Report tab.
+    try {
+      var _sb = document.getElementById('sidebar');
+      if (_sb && !_sb.classList.contains('collapsed') && typeof toggleSidebar === 'function') {
+        toggleSidebar();
+      }
+    } catch (e) {
+      console.warn('[Paper] auto-collapse sidebar for report failed:', e);
+    }
     // Server owns the report task. The frontend always asks
     // _loadOrGenerateReport() which (a) resumes local poll if any, (b)
     // looks up a running server task, (c) hits DB cache, or (d) starts.
@@ -1359,6 +1378,27 @@ function _switchPaperTab(tab) {
   if (tab === 'translate') _initBabelPdfTab();
 }
 
+/** Mobile-only: toggle which full-screen pane is shown — the PDF ('pdf') or
+ *  the Reader pane ('reader', i.e. the Q&A/Report/Babel tabs). On desktop the
+ *  split view shows both at once and this is a no-op for layout (the switcher
+ *  bar is hidden by CSS), but we still track the attribute harmlessly. */
+function _setPaperMobileView(view) {
+  if (view !== 'pdf' && view !== 'reader') view = 'pdf';
+  var body = document.querySelector('.paper-body');
+  if (body) body.setAttribute('data-paper-view', view);
+  document.querySelectorAll('.paper-mobile-switch-btn').forEach(function(btn) {
+    btn.classList.toggle('active', btn.dataset.view === view);
+  });
+  // When (re)showing the PDF on a phone it may have been laid out while hidden
+  // (offsetParent null → fit math is wrong), so refit to the now-visible width.
+  if (view === 'pdf' && _paperPdfDoc && typeof paperFitWidth === 'function') {
+    // Defer one frame so the pane has its final width before measuring.
+    requestAnimationFrame(function() {
+      try { paperFitWidth(); } catch (e) { console.warn('[Paper] mobile fit-width failed:', e); }
+    });
+  }
+}
+
 // ══════════════════════════════════════════════════════
 //  ★ Tab 1: Q&A
 // ══════════════════════════════════════════════════════
@@ -1369,7 +1409,7 @@ function _renderPaperQA() {
   if (!_paperQAHistory || _paperQAHistory.length === 0) {
     var _ttq = (typeof t === 'function') ? t : function(k){ return k; };
     container.innerHTML =
-      '<div class="paper-qa-empty"><div class="paper-qa-empty-icon">💬</div>' +
+      '<div class="paper-qa-empty"><div class="paper-qa-empty-icon">' + Icon('messageCircle', 32) + '</div>' +
       '<p>' + escapeHtml(_ttq('paper.qaEmptyTitle')) + '</p>' +
       '<p class="paper-qa-hint">' + escapeHtml(_ttq('paper.qaEmptyHint')) + '</p></div>';
     return;
@@ -1482,6 +1522,7 @@ function _quotePaperSelection() {
   var input = document.getElementById('paperQAInput');
   if (!input) return;
   if (_paperActiveTab !== 'qa') _switchPaperTab('qa');
+  _setPaperMobileView('reader');
   input.value = '> ' + text.replace(/\n/g, '\n> ') + '\n\n' + input.value;
   input.focus();
   sel.removeAllRanges();
@@ -1496,6 +1537,7 @@ function _askAboutPaperSelection() {
   var input = document.getElementById('paperQAInput');
   if (!input) return;
   if (_paperActiveTab !== 'qa') _switchPaperTab('qa');
+  _setPaperMobileView('reader');
   input.value = '> ' + text.replace(/\n/g, '\n> ') + '\n\nExplain this part of the paper.';
   sel.removeAllRanges();
   _hidePaperQuoteBar();
@@ -1552,6 +1594,7 @@ function _resetReportLocalState() {
     clearTimeout(_paperReportStream.pollTimer);
   }
   _paperReportStream = null;
+  _paperReportMeta = null;  // drop stale finish tag from the previous paper/run
 }
 
 function _makeReportStreamState(paperId, lang, taskId) {
@@ -1565,6 +1608,7 @@ function _makeReportStreamState(paperId, lang, taskId) {
     thinkingText: '',
     toolRounds: [],      // chat-compatible: [{roundNum, toolName, query, toolCallId, toolArgs, status, toolContent, _elapsed}]
     contentStarted: false,
+    meta: null,          // finish-tag {model, costCny, ...} from the done event
     error: '',
     pollTimer: null,
     pollBusy: false,
@@ -1677,6 +1721,10 @@ function _applyReportEvent(s, ev) {
         s.fullText = ev.report;
         if (s.paperId === _activePaperId) _paperReportCache = ev.report;
       }
+      if (ev.meta) {
+        s.meta = ev.meta;
+        if (s.paperId === _activePaperId) _paperReportMeta = ev.meta;
+      }
       if (ev.paperHash && s.paperId === _activePaperId) _paperHash = ev.paperHash;
       return true;
 
@@ -1697,16 +1745,238 @@ function _applyReportEvent(s, ev) {
   return false;
 }
 
+/* ── Report render-layer enhancement ──────────────────────────────────
+ * The report is plain Markdown rendered by renderMarkdown(). To make the
+ * finished report richer WITHOUT moving layout responsibility onto the model
+ * (which would break streaming, theming, caching and safety), we post-process
+ * the rendered DOM: heading anchors, a sticky TOC sidebar, styled callout
+ * boxes (blockquotes that open with a keyword) and framed figures.
+ * Intermediate streaming frames stay as plain renderMarkdown() — enhancement
+ * only runs on the final / cached render. */
+
+// Order matters: multi-char / more-specific keywords (takeaway) are tested
+// before the broad ones (important's bare "关键") so "关键结论：" classifies as
+// a takeaway, not important. The trailing (?:[:：]|\b) accepts a colon (the
+// form the prompt asks for, and the only thing that works after CJK since \b
+// does not fire between two CJK chars) OR an ASCII word boundary (English
+// keywords without a colon).
+var _REPORT_CALLOUT_KEYWORDS = [
+  { cls: 'takeaway', re: /^(key takeaway|takeaway|key point|key finding|summary|bottom line|关键结论|核心结论|要点|总结|小结)(?:[:：]|\b)/i },
+  { cls: 'warning', re: /^(warning|caution|caveat|limitation|警告|注意|局限|风险)(?:[:：]|\b)/i },
+  { cls: 'important', re: /^(important|critical|重要|关键)(?:[:：]|\b)/i },
+  { cls: 'tip', re: /^(tip|pro tip|提示|建议)(?:[:：]|\b)/i },
+  { cls: 'note', re: /^(note|nb|备注|说明)(?:[:：]|\b)/i },
+];
+
+function _slugifyHeading(text, used) {
+  var base = String(text || '')
+    .toLowerCase().trim()
+    .replace(/[^\w\u4e00-\u9fff\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '') || 'section';
+  var slug = base, n = 2;
+  while (used[slug]) { slug = base + '-' + n; n++; }
+  used[slug] = true;
+  return slug;
+}
+
+/** Decorate blockquotes that open with a keyword into themed callout boxes. */
+function _decorateCallouts(article) {
+  var quotes = article.querySelectorAll('blockquote');
+  for (var i = 0; i < quotes.length; i++) {
+    var bq = quotes[i];
+    if (bq.closest('.paper-callout')) continue;
+    var lead = (bq.textContent || '').trimStart();
+    var match = null;
+    for (var k = 0; k < _REPORT_CALLOUT_KEYWORDS.length; k++) {
+      if (_REPORT_CALLOUT_KEYWORDS[k].re.test(lead)) { match = _REPORT_CALLOUT_KEYWORDS[k]; break; }
+    }
+    if (!match) continue;
+    bq.classList.add('paper-callout', 'paper-callout-' + match.cls);
+  }
+}
+
+/** Wrap image-only paragraphs into <figure> with a <figcaption>. */
+function _frameFigures(article) {
+  var imgs = article.querySelectorAll('img');
+  for (var i = 0; i < imgs.length; i++) {
+    var img = imgs[i];
+    if (img.closest('figure')) continue;
+    var p = img.closest('p');
+    if (!p) continue;
+    // Only wrap when the paragraph is essentially just the image (+ caption em)
+    var hasOtherText = (p.textContent || '').trim().length > 0
+      && !p.querySelector('em') && !img.getAttribute('alt');
+    if (hasOtherText) continue;
+    var fig = document.createElement('figure');
+    fig.className = 'paper-figure';
+    fig.appendChild(img.cloneNode(true));
+    var capText = '';
+    var em = p.querySelector('em');
+    if (em && em.textContent.trim()) capText = em.textContent.trim();
+    else if (img.getAttribute('alt')) capText = img.getAttribute('alt').trim();
+    if (capText) {
+      var cap = document.createElement('figcaption');
+      cap.textContent = capText;
+      fig.appendChild(cap);
+    }
+    p.parentNode.replaceChild(fig, p);
+  }
+}
+
+/** Assign stable ids to h2/h3 and return the TOC entry list. */
+function _indexHeadings(article) {
+  var heads = article.querySelectorAll('h2, h3');
+  var used = {}, entries = [];
+  for (var i = 0; i < heads.length; i++) {
+    var h = heads[i];
+    var text = (h.textContent || '').trim();
+    if (!text) continue;
+    if (!h.id) h.id = 'report-' + _slugifyHeading(text, used);
+    entries.push({ id: h.id, text: text, level: h.tagName === 'H3' ? 3 : 2 });
+  }
+  return entries;
+}
+
+function _buildReportTOC(entries) {
+  if (entries.length < 3) return '';  // not worth a sidebar for a tiny report
+  var label = (typeof _i18nLang !== 'undefined' && _i18nLang === 'zh') ? '目录' : 'Contents';
+  var html = '<nav class="paper-report-toc" aria-label="' + label + '">'
+    + '<div class="paper-report-toc-title">' + label + '</div><ul>';
+  for (var i = 0; i < entries.length; i++) {
+    var e = entries[i];
+    html += '<li class="toc-l' + e.level + '"><a href="#' + e.id + '" data-target="' + e.id
+      + '" onclick="_scrollReportToHeading(event,\'' + e.id + '\')">' + escapeHtml(e.text) + '</a></li>';
+  }
+  html += '</ul></nav>';
+  return html;
+}
+
+function _scrollReportToHeading(ev, id) {
+  if (ev) ev.preventDefault();
+  var el = document.getElementById(id);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/** Scroll-spy: highlight the TOC entry for the heading currently in view. */
+function _wireReportScrollSpy(scrollEl, article, toc) {
+  if (!scrollEl || !toc || typeof IntersectionObserver === 'undefined') return;
+  var links = {};
+  toc.querySelectorAll('a[data-target]').forEach(function(a) { links[a.getAttribute('data-target')] = a; });
+  var heads = article.querySelectorAll('h2, h3');
+  if (!heads.length) return;
+  var visible = {};
+  var obs = new IntersectionObserver(function(items) {
+    items.forEach(function(it) { visible[it.target.id] = it.isIntersecting; });
+    var firstActive = null;
+    for (var i = 0; i < heads.length; i++) { if (visible[heads[i].id]) { firstActive = heads[i].id; break; } }
+    Object.keys(links).forEach(function(k) { links[k].classList.toggle('active', k === firstActive); });
+  }, { root: scrollEl, rootMargin: '0px 0px -70% 0px', threshold: 0 });
+  for (var i = 0; i < heads.length; i++) obs.observe(heads[i]);
+  // Stash so a later re-render can disconnect the stale observer.
+  if (scrollEl._reportSpyObs) { try { scrollEl._reportSpyObs.disconnect(); } catch (e) {} }
+  scrollEl._reportSpyObs = obs;
+}
+
+/** Build the "finish tag" badge: which model generated the report + its cost.
+ *  Visually subtle, sits at the END of the report so it never disrupts content.
+ *  `meta` is the server-supplied dict ({model, costCny, costUsd, promptTokens,
+ *  completionTokens, rounds, elapsedSec}). Returns '' when meta is absent. */
+function _renderReportFinishTag(meta) {
+  if (!meta || !meta.model) return '';
+  var zh = (typeof _i18nLang !== 'undefined' && _i18nLang === 'zh');
+  var parts = [];
+  // Model — the headline of the tag.
+  parts.push('<span class="paper-finish-model" title="' +
+    escapeHtml(zh ? '生成本报告的模型' : 'Model that generated this report') + '">' +
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v1a3 3 0 0 0-3 3 3 3 0 0 0 0 6 3 3 0 0 0 3 3v1a3 3 0 0 0 6 0v-1a3 3 0 0 0 3-3 3 3 0 0 0 0-6 3 3 0 0 0-3-3V5a3 3 0 0 0-3-3z"/></svg>' +
+    escapeHtml(meta.model) + '</span>');
+  // Cost — prefer CNY (matches the rest of the app), fall back to USD.
+  var costStr = '';
+  if (typeof meta.costCny === 'number' && meta.costCny > 0) {
+    costStr = (typeof formatCny === 'function') ? formatCny(meta.costCny)
+      : ('¥' + meta.costCny.toFixed(4));
+  } else if (typeof meta.costUsd === 'number' && meta.costUsd > 0) {
+    costStr = '$' + meta.costUsd.toFixed(4);
+  }
+  if (costStr) {
+    parts.push('<span class="paper-finish-cost" title="' +
+      escapeHtml(zh ? '本次生成的预估费用' : 'Estimated cost of this generation') +
+      '">' + escapeHtml(costStr) + '</span>');
+  }
+  // Tokens (compact) — secondary detail.
+  var inTok = meta.promptTokens || 0;
+  var outTok = meta.completionTokens || 0;
+  if (inTok || outTok) {
+    var fmt = function (n) {
+      if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+      if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+      return String(n);
+    };
+    parts.push('<span class="paper-finish-tokens" title="' +
+      escapeHtml(zh ? '输入 / 输出 tokens' : 'input / output tokens') + '">' +
+      fmt(inTok) + ' \u2192 ' + fmt(outTok) + ' tok</span>');
+  }
+  var label = zh ? '由以下模型生成' : 'Generated by';
+  return '<div class="paper-report-finish-tag" role="contentinfo">' +
+    '<span class="paper-finish-label">' + escapeHtml(label) + '</span>' +
+    parts.join('') + '</div>';
+}
+
+/** Render a FINAL report into `container`: markdown + TOC sidebar + callouts +
+ *  framed figures + finish-tag badge. `container` is the scroll element
+ *  (.paper-report-content or #reportBodyContent). `meta` (optional) drives the
+ *  finish tag; defaults to the module-global `_paperReportMeta`.
+ *  Safe to call repeatedly (full rebuild). */
+function _renderFinalReport(container, text, meta) {
+  if (!container) return;
+  if (meta === undefined) meta = _paperReportMeta;
+  if (typeof renderMarkdown !== 'function') {
+    container.innerHTML = '<pre>' + escapeHtml(text || '') + '</pre>';
+    return;
+  }
+  if (container._reportSpyObs) { try { container._reportSpyObs.disconnect(); } catch (e) {} container._reportSpyObs = null; }
+
+  var article = document.createElement('article');
+  article.className = 'paper-report-article';
+  article.innerHTML = renderMarkdown(text || '');
+  _decorateCallouts(article);
+  _frameFigures(article);
+  var finishTag = _renderReportFinishTag(meta);
+  if (finishTag) {
+    var tagWrap = document.createElement('div');
+    tagWrap.innerHTML = finishTag;
+    if (tagWrap.firstChild) article.appendChild(tagWrap.firstChild);
+  }
+  var entries = _indexHeadings(article);
+  var tocHTML = _buildReportTOC(entries);
+
+  container.classList.add('paper-report-enhanced');
+  if (tocHTML) {
+    var doc = document.createElement('div');
+    doc.className = 'paper-report-doc';
+    doc.innerHTML = tocHTML;
+    doc.appendChild(article);
+    container.innerHTML = '';
+    container.appendChild(doc);
+    _wireReportScrollSpy(container, article, doc.querySelector('.paper-report-toc'));
+  } else {
+    container.innerHTML = '';
+    container.appendChild(article);
+  }
+}
+
 /** Paint the Report tab DOM from the current stream state. */
 function _paintReportFromState() {
   var container = document.getElementById('paperReportContent');
   if (!container || !_paperReportStream) return;
   var s = _paperReportStream;
 
-  // Terminal: done → just render final text (once).
+  // Terminal: done → render the final, enhanced report (once).
   if (s.status === 'done' && s.fullText && !s.toolRounds.some(r => r.status === 'searching')) {
     if (s._lastRenderedLen !== s.fullText.length || s._lastRenderedStatus !== 'done') {
-      container.innerHTML = typeof renderMarkdown === 'function' ? renderMarkdown(s.fullText) : '<pre>' + escapeHtml(s.fullText) + '</pre>';
+      _renderFinalReport(container, s.fullText);
       s._lastRenderedLen = s.fullText.length;
       s._lastRenderedStatus = 'done';
     }
@@ -1811,6 +2081,7 @@ async function _pollReportTask() {
         // switched to paper B before the task finished).
         if (s.paperId === _activePaperId) {
           _paperReportCache = data.report;
+          if (data.meta) { s.meta = data.meta; _paperReportMeta = data.meta; }
           _saveActivePaperState();
         }
       }
@@ -1862,7 +2133,7 @@ async function _generatePaperReport(force) {
 
   // In-memory cache — instant path
   if (_paperReportCache && !force) {
-    container.innerHTML = typeof renderMarkdown === 'function' ? renderMarkdown(_paperReportCache) : '<pre>' + escapeHtml(_paperReportCache) + '</pre>';
+    _renderFinalReport(container, _paperReportCache);
     return;
   }
 
@@ -1919,9 +2190,10 @@ async function _generatePaperReport(force) {
     // DB cache hit — done in one round-trip
     if (data.cached && data.report) {
       _paperReportCache = data.report;
+      _paperReportMeta = data.meta || null;
       if (data.paper_hash) _paperHash = data.paper_hash;
       _saveActivePaperState();
-      container.innerHTML = typeof renderMarkdown === 'function' ? renderMarkdown(data.report) : '<pre>' + escapeHtml(data.report) + '</pre>';
+      _renderFinalReport(container, data.report);
       return;
     }
 
@@ -1986,12 +2258,11 @@ async function _loadOrGenerateReport() {
     if (_activePaperId !== startPaperId) return;
     if (cacheData && cacheData.ok && cacheData.report) {
       _paperReportCache = cacheData.report;
+      _paperReportMeta = cacheData.meta || null;
       if (cacheData.paper_hash) _paperHash = cacheData.paper_hash;
       _saveActivePaperState();
       var c2 = document.getElementById('paperReportContent');
-      if (c2) {
-        c2.innerHTML = typeof renderMarkdown === 'function' ? renderMarkdown(cacheData.report) : '<pre>' + escapeHtml(cacheData.report) + '</pre>';
-      }
+      if (c2) _renderFinalReport(c2, cacheData.report);
       return;
     }
   } catch (e) {
@@ -2440,8 +2711,8 @@ window.addEventListener('katex:loaded', function() {
     if (typeof _paintReportFromState === 'function') _paintReportFromState();
   } else {
     var rc = document.getElementById('paperReportContent');
-    if (rc && _paperReportCache && typeof renderMarkdown === 'function') {
-      rc.innerHTML = renderMarkdown(_paperReportCache);
+    if (rc && _paperReportCache) {
+      _renderFinalReport(rc, _paperReportCache);
     }
   }
   // QA tab.

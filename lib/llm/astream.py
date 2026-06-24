@@ -58,7 +58,7 @@ async def async_stream_chat(body, *, on_thinking=None, on_content=None,
                             on_tool_call_ready=None,
                             abort_check=None, log_prefix='', api_key=None,
                             base_url=None, extra_headers=None,
-                            api_protocol='openai'):
+                            api_protocol='openai', oauth=''):
     """Async streaming chat completion with callbacks.
 
     Same signature and semantics as stream_chat() but fully async.
@@ -76,7 +76,8 @@ async def async_stream_chat(body, *, on_thinking=None, on_content=None,
                 on_tool_call_ready=on_tool_call_ready,
                 abort_check=abort_check, log_prefix=log_prefix,
                 attempt=attempt, api_key=api_key, base_url=base_url,
-                extra_headers=extra_headers, api_protocol=api_protocol)
+                extra_headers=extra_headers, api_protocol=api_protocol,
+                oauth=oauth)
             if _limit_learned:
                 if usage is None:
                     usage = {}
@@ -123,12 +124,13 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
                                   on_tool_call_ready=None,
                                   abort_check=None, log_prefix='', attempt=0,
                                   api_key=None, base_url=None,
-                                  extra_headers=None, api_protocol='openai'):
+                                  extra_headers=None, api_protocol='openai',
+                                  oauth=''):
     """Single async attempt at a streaming chat completion (httpx transport)."""
     plan = prepare_request(
         body, attempt=attempt, log_prefix=log_prefix,
         api_key=api_key, base_url=base_url, extra_headers=extra_headers,
-        api_protocol=api_protocol)
+        api_protocol=api_protocol, oauth=oauth)
 
     proxy_url = _httpx_proxy_url(plan.url)
 

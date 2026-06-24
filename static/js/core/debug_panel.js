@@ -59,7 +59,7 @@ window.addEventListener("unhandledrejection", (evt) => {
 const _debugCache = {};
 function clearDebug() {
   document.getElementById("debugContent").innerHTML = "";
-  document.getElementById("debugTitle").textContent = "📨 Messages";
+  document.getElementById("debugTitle").innerHTML = Icon('inbox', 14) + ' Messages';
   const p = document.getElementById("debugContent");
   if (p) p._rawMessages = null;
 }
@@ -195,7 +195,7 @@ function restoreDebugForConv(convId) {
   const _ph = document.getElementById("debugContent");
   const _title = document.getElementById("debugTitle");
   if (_ph) _ph.innerHTML = '<div class="debug-loading">Loading messages from server…</div>';
-  if (_title) _title.textContent = "📨 Messages (loading…)";
+  if (_title) _title.innerHTML = Icon('inbox', 14) + ' Messages (loading…)';
   const _sp = (typeof config !== 'undefined' && config.systemPrompt) || '';
   Api.conversations.getDebugMessages(convId, _sp)
     .then(data => {
@@ -250,14 +250,14 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools) {
   }
   const title = document.getElementById("debugTitle");
   if (title) {
-    const toolsSuffix = tools && tools.length > 0 ? ` · 🔧${tools.length}` : '';
+    const toolsSuffix = tools && tools.length > 0 ? ` · ${Icon('wrench', 11)}${tools.length}` : '';
     const compactedSuffix = _compactedCount > 0
-      ? ` · 🗜${_compactedCount}/${_toolMsgCount}` : '';
+      ? ` · ${Icon('archive', 11)}${_compactedCount}/${_toolMsgCount}` : '';
     const tokSuffix = _totalTokens > 0
       ? ` · ~${_totalTokens >= 1000
           ? (_totalTokens / 1000).toFixed(1) + 'K'
           : _totalTokens}tok` : '';
-    title.textContent = `📨 Messages (${messages.length})${toolsSuffix}${compactedSuffix}${tokSuffix}${label ? " — " + label : ""}`;
+    title.innerHTML = `${Icon('inbox', 14)} Messages (${messages.length})${toolsSuffix}${compactedSuffix}${tokSuffix}${label ? " — " + escapeHtml(String(label)) : ""}`;
   }
   // Helper: syntax-color JSON (full, no truncation)
   function colorJson(obj, depth) {
@@ -337,7 +337,7 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools) {
       badge.className = "debug-compact-badge";
       const fromKB = compInfo.from != null ? _fmtKB(compInfo.from) : "?";
       const toKB = compInfo.to != null ? _fmtKB(compInfo.to) : "?";
-      badge.textContent = `🗜 ${compInfo.layer} ${fromKB}→${toKB}`;
+      badge.innerHTML = `${Icon('archive', 11)} ${escapeHtml(compInfo.layer)} ${fromKB}→${toKB}`;
       badge.title = `Tool result compacted (${compInfo.layer}) — original ${fromKB}, now ${toKB}`;
       header.appendChild(badge);
     }
@@ -370,11 +370,11 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools) {
     if (msg.tool_calls && msg.tool_calls.length > 0) {
       const tcDiv = document.createElement("div");
       tcDiv.className = "debug-tool-calls";
-      tcDiv.textContent =
-        "🔧 " +
-        msg.tool_calls
+      tcDiv.innerHTML =
+        Icon('wrench', 12) + ' ' +
+        escapeHtml(msg.tool_calls
           .map((tc) => (tc.function ? tc.function.name : "?"))
-          .join(", ");
+          .join(", "));
       block.appendChild(tcDiv);
     }
     // Body (collapsed, lazy-rendered)
@@ -456,7 +456,7 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools) {
         if (newCompInfo) {
           const fromKB = newCompInfo.from != null ? _fmtKB(newCompInfo.from) : "?";
           const toKB = newCompInfo.to != null ? _fmtKB(newCompInfo.to) : "?";
-          const text = `🗜 ${newCompInfo.layer} ${fromKB}→${toKB}`;
+          const text = `${Icon('archive', 11)} ${escapeHtml(newCompInfo.layer)} ${fromKB}→${toKB}`;
           if (!badge) {
             badge = document.createElement("span");
             badge.className = "debug-compact-badge";
@@ -465,7 +465,7 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools) {
             const sumEl = hdr.querySelector(".debug-msg-summary");
             hdr.insertBefore(badge, sumEl);
           }
-          badge.textContent = text;
+          badge.innerHTML = text;
           badge.title = `Tool result compacted (${newCompInfo.layer}) — original ${fromKB}, now ${toKB}`;
         } else if (badge) {
           badge.remove();
@@ -488,16 +488,16 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools) {
         const oldTc = existing[i].querySelector(".debug-tool-calls");
         if (messages[i].tool_calls && messages[i].tool_calls.length > 0) {
           const tcText =
-            "🔧 " +
-            messages[i].tool_calls
+            Icon('wrench', 12) + ' ' +
+            escapeHtml(messages[i].tool_calls
               .map((tc) => (tc.function ? tc.function.name : "?"))
-              .join(", ");
+              .join(", "));
           if (oldTc) {
-            oldTc.textContent = tcText;
+            oldTc.innerHTML = tcText;
           } else {
             const tcDiv = document.createElement("div");
             tcDiv.className = "debug-tool-calls";
-            tcDiv.textContent = tcText;
+            tcDiv.innerHTML = tcText;
             const body2 = existing[i].querySelector(".debug-msg-body");
             existing[i].insertBefore(tcDiv, body2);
           }
@@ -568,7 +568,7 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools) {
       tHeader.className = 'debug-msg-header';
       const tRole = document.createElement('span');
       tRole.className = 'role-tools';
-      tRole.textContent = '🔧 TOOLS';
+      tRole.innerHTML = Icon('wrench', 12) + ' TOOLS';
       tHeader.appendChild(tRole);
       const tSummary = document.createElement('span');
       tSummary.className = 'debug-msg-summary';
@@ -642,8 +642,8 @@ function copyDebugContent() {
     _safeClipboardWrite(text).then(() => {
       const btn = document.getElementById("debugCopyBtn");
       if (btn) {
-        btn.textContent = "✅";
-        setTimeout(() => (btn.textContent = "📋"), 1500);
+        btn.innerHTML = Icon('check', 13);
+        setTimeout(() => (btn.innerHTML = Icon('clipboard', 13)), 1500);
       }
     });
   }

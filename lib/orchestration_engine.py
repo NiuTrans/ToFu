@@ -49,7 +49,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from lib.env_compat import getenv_compat
 from lib.log import get_logger
 from lib.orchestration import (
-    MAX_SUBFLOW_DEPTH, expand_subflows, render_role_brief, resolve_emits,
+    IO_START_REF, MAX_SUBFLOW_DEPTH, expand_subflows,
+    node_output_names, parse_io_ref, render_role_brief, resolve_emits,
     validate_definition,
 )
 
@@ -65,6 +66,13 @@ _DEFAULT_PARALLEL = 8
 # analysis-spiral / context-bloat failure mode. We mirror that here.
 _CARRY_ATTEMPT_CHARS = 1800
 _CARRY_FEEDBACK_CHARS = 1800
+
+# Per-node run-trace bounds. The trace is a durable record of WHAT each node
+# saw and produced — for the canvas/inspector overlay, NOT for context
+# carry-forward — so it can be generous, but still bounded so a giant tool
+# dump never bloats the stored run. Input + output are capped independently.
+_TRACE_INPUT_CHARS = 8000
+_TRACE_OUTPUT_CHARS = 16000
 
 # Roles that close a loop iteration by emitting a verdict. ``virtual_user``
 # stands in for the human in autopilot mode: its reply (and its
@@ -223,6 +231,16 @@ class FlowExecutor:
 
         self._agents_run = 0
         self._transcript: list[dict] = []
+        # ── Per-node run trace (the traceability axis) ──
+        # One entry per executed node — the RESOLVED brief it ran with, a
+        # bounded copy of its effective input context, its full (bounded)
+        # output, emits/isolation/iteration, deliverable counts, and timing.
+        # Powers the canvas/inspector overlay (what each node actually saw +
+        # produced + the prompt it ran). Distinct from _transcript (which the
+        # engine uses internally for progress summaries / deliverables).
+        self._trace: list[dict] = []
+        self._trace_seq = 0
+        self._cur_iteration = 0   # active loop iteration (0 = outside a loop)
         self._lock = threading.Lock()
 
         # ── Shared-context memory ──
@@ -245,6 +263,16 @@ class FlowExecutor:
         # Declared deliverables (artifact nodes) encountered during the walk.
         self._artifacts: list[dict] = []
 
+        # ── Typed I/O store (the dataflow axis) ──
+        # Per producer node: {output_name: value}. A node with no declared
+        # io.outputs writes its turn under the implicit DEFAULT_OUTPUT_NAME
+        # ('text'). A node that declares io.inputs reads ONLY the referenced
+        # producer outputs (Dify-style), instead of the whole accumulating
+        # scratchpad. Legacy flows (no io block anywhere) never touch this.
+        self._io_outputs: dict[str, dict] = {}
+        # The flow's initial seed context, referenceable as the 'start' input.
+        self._initial_context: str = ''
+
     # ── public entry ────────────────────────────────────────────────
 
     def run(self, *, initial_context: str = '') -> dict:
@@ -262,6 +290,7 @@ class FlowExecutor:
             seed = (start_node.get('params') or {}).get('seed')
             if isinstance(seed, str) and seed.strip():
                 initial_context = seed
+        self._initial_context = initial_context or ''
         t0 = time.monotonic()
         self._emit({'type': 'flow_start', 'name': self.defn.get('name'),
                     'nodes': len(self.nodes)})
@@ -291,10 +320,24 @@ class FlowExecutor:
             'status': status,
             'final': final,
             'transcript': self._transcript,
+            'trace': list(self._trace),
             'agents_run': self._agents_run,
             'artifacts': list(self._artifacts),
             'error': error,
         }
+
+    @property
+    def trace(self) -> list[dict]:
+        """The per-node run trace accumulated so far (live-readable).
+
+        Each entry: ``{seq, node_id, role, name, kind, iteration, emits,
+        isolation, subflow, brief, input, input_truncated, output,
+        output_truncated, status, error, elapsed, state_changing,
+        exploratory, state_changing_tools, ts}``. Powers the canvas /
+        inspector overlay.
+        """
+        with self._lock:
+            return list(self._trace)
 
     # ── graph walk ──────────────────────────────────────────────────
 
@@ -382,9 +425,16 @@ class FlowExecutor:
         #    latest turn appended, so it can apply the endpoint pre-verdict
         #    check ("0 state-changing calls → CONTINUE, don't replan").
         #  * A fresh-context non-verifier node sees only upstream context.
+        #  * A node that declares params.io.inputs reads ONLY those wired
+        #    producer outputs (typed dataflow), instead of the accumulating
+        #    scratchpad — this is the Dify-style strict-input mode.
         eff_context = context
+        typed_in = self._compose_typed_inputs(node)
+        if typed_in is not None:
+            eff_context = typed_in
         if shared:
-            eff_context = self._compose_shared_context(nid, context)
+            eff_context = self._compose_shared_context(
+                nid, eff_context if typed_in is not None else context)
         if is_verifier:
             eff_context = self._append_deliverables_snapshot(eff_context)
 
@@ -402,9 +452,26 @@ class FlowExecutor:
 
         # Count deliverables (state-changing tool calls) the runner reports.
         sc_count, explore_count, sc_names, reported = self._count_deliverables(res)
+        _elapsed = time.monotonic() - t0
         self._record(nid, role, out, st, res.get('error') or '',
-                     time.monotonic() - t0, sc_count=sc_count,
+                     _elapsed, sc_count=sc_count,
                      explore_count=explore_count)
+        # Durable per-node trace: the RESOLVED brief (rendered role prompt),
+        # the bounded effective input, and the full bounded output — for the
+        # canvas/inspector overlay. render_role_brief is pure (same text the
+        # default runner sends as SubTaskSpec.objective).
+        self._trace_node(
+            node, brief=render_role_brief(node), eff_context=eff_context,
+            output=out, status=st, error=res.get('error') or '',
+            elapsed=_elapsed, emits=emits,
+            isolation='shared' if shared else 'fresh',
+            sc_count=sc_count, explore_count=explore_count, sc_names=sc_names)
+
+        # Publish this node's typed outputs so downstream wired inputs can
+        # read them. A node with no declared io.outputs exposes its turn as
+        # the implicit 'text' output; an 'artifact'-typed output is filled
+        # with a change manifest synthesized from the runner's tool log.
+        self._publish_outputs(node, out, sc_names, explore_count)
 
         # Persist shared-context memory + capture verifier feedback / producer
         # snapshot for the next iteration. Pending feedback + directive are
@@ -431,8 +498,8 @@ class FlowExecutor:
                 }
 
         self._emit({'type': 'step_complete', 'node_id': nid, 'role': role,
-                    'status': st, 'preview': out[:200], 'emits': emits,
-                    'state_changing': sc_count})
+                    'status': st, 'preview': out[:200], 'output': out,
+                    'emits': emits, 'state_changing': sc_count})
         return self._append_context(context, role, out)
 
     def _run_subflow_isolated(self, node: dict, context: str) -> str:
@@ -535,11 +602,22 @@ class FlowExecutor:
             raise _AbortSignal()
         # Record + emit BEFORE deciding to halt, so the event stream + transcript
         # always show the box's outcome even when it fails.
+        _sf_elapsed = time.monotonic() - t0
         self._record(nid, role, out, st, result.get('error') or '',
-                     time.monotonic() - t0)
+                     _sf_elapsed)
+        # Durable trace for the black box (its child's internal turns are
+        # traced by the nested engine; here we record the box's own I/O).
+        self._trace_node(
+            node, brief=render_role_brief(node), eff_context=context,
+            output=out, status=st, error=result.get('error') or '',
+            elapsed=_sf_elapsed, emits=emits, isolation='isolated',
+            subflow=True)
+        # The black box exposes its deliverable on the dataflow axis too, so a
+        # downstream node can wire to its typed output like any role.
+        self._publish_outputs(node, out, [], 0)
         self._emit({'type': 'step_complete', 'node_id': nid, 'role': role,
-                    'status': st, 'preview': out[:200], 'emits': emits,
-                    'subflow': True})
+                    'status': st, 'preview': out[:200], 'output': out,
+                    'emits': emits, 'subflow': True})
         logger.info('[FlowEngine] isolated subflow %s DONE status=%s', nid, st)
         # A STRUCTURAL failure of the box (could not execute the sub-graph) is
         # fatal — it must NOT silently hand an empty deliverable to the parent
@@ -637,6 +715,116 @@ class FlowExecutor:
         )
         return context + block
 
+    def _publish_outputs(self, node: dict, out: str, sc_names: list,
+                         explore_count: int) -> None:
+        """Record a producer node's typed outputs into the I/O store.
+
+        A node with no declared ``io.outputs`` publishes its turn text under
+        the implicit ``text`` output. A node that declares named outputs maps
+        each one to a value by its declared ``type``:
+
+          * ``artifact`` / ``file`` → a synthesized CHANGE MANIFEST built from
+            the state-changing tool calls the runner reported (this is how a
+            tool-heavy worker exposes its many intermediate operations as ONE
+            machine-readable output, instead of a prose blob).
+          * everything else (``text`` / ``json`` / ``number`` / ``bool`` /
+            ``any``) → the turn text. (Strong typing of those is a future
+            phase; today the engine threads strings.)
+
+        Cheap + lock-guarded. Never raises.
+        """
+        nid = node.get('id')
+        if not nid:
+            return
+        outs = node_output_names(node)
+        io = (node.get('params') or {}).get('io')
+        type_by_name: dict = {}
+        if isinstance(io, dict) and isinstance(io.get('outputs'), list):
+            for o in io['outputs']:
+                if isinstance(o, dict) and isinstance(o.get('name'), str):
+                    type_by_name[o['name']] = o.get('type')
+        manifest = None
+        values: dict = {}
+        for name in outs:
+            otype = type_by_name.get(name)
+            if otype in ('artifact', 'file'):
+                if manifest is None:
+                    manifest = self._build_change_manifest(sc_names, explore_count)
+                values[name] = manifest
+            else:
+                values[name] = out
+        with self._lock:
+            self._io_outputs[nid] = values
+
+    @staticmethod
+    def _build_change_manifest(sc_names: list, explore_count: int) -> str:
+        """Synthesize a worker's change manifest from its tool log.
+
+        Turns the raw state-changing tool calls into a compact, deterministic
+        list — the typed ``artifact`` output a tool-heavy worker exposes. A
+        downstream packager / notifier wires to THIS instead of re-parsing the
+        worker's prose.
+        """
+        counts: dict[str, int] = {}
+        for n in (sc_names or []):
+            counts[n] = counts.get(n, 0) + 1
+        if not counts:
+            return ('## Change manifest\n(no state-changing actions; '
+                    f'{explore_count} exploratory calls)')
+        lines = [f'- {tool} ×{c}' if c > 1 else f'- {tool}'
+                 for tool, c in sorted(counts.items())]
+        total = sum(counts.values())
+        return ('## Change manifest\n'
+                f'{total} state-changing action(s), '
+                f'{explore_count} exploratory:\n' + '\n'.join(lines))
+
+    def _compose_typed_inputs(self, node: dict):
+        """Compose a node's effective context from its declared ``io.inputs``.
+
+        Returns the assembled context string when the node declares at least
+        one input port, else ``None`` (signalling the caller to keep the
+        legacy accumulating-scratchpad behavior). Each input pulls its wired
+        producer output from the I/O store (``'<id>'`` / ``'<id>.<out>'`` /
+        the literal ``'start'`` seed); an unresolved ref contributes nothing
+        but is logged. Inputs render as labeled sections so the downstream
+        agent sees a clean, named bundle rather than one opaque blob.
+        """
+        io = (node.get('params') or {}).get('io')
+        if not isinstance(io, dict):
+            return None
+        inputs = io.get('inputs')
+        if not isinstance(inputs, list) or not inputs:
+            return None
+
+        parts: list[str] = []
+        with self._lock:
+            store = dict(self._io_outputs)
+            seed = self._initial_context
+        for port in inputs:
+            if not isinstance(port, dict):
+                continue
+            frm = port.get('from')
+            label = port.get('name') or 'input'
+            if not isinstance(frm, str) or not frm.strip():
+                continue
+            src_id, src_out = parse_io_ref(frm)
+            if src_id == IO_START_REF:
+                val = seed
+            else:
+                produced = store.get(src_id) or {}
+                if src_out is not None:
+                    val = produced.get(src_out)
+                else:
+                    # Primary output = the producer's first declared port
+                    # (or the implicit 'text'). dict insertion order holds it.
+                    val = next(iter(produced.values()), None) if produced else None
+            if val is None or val == '':
+                logger.debug('[FlowEngine] typed input %r on %s unresolved '
+                             '(from=%r)', label, node.get('id'), frm)
+                continue
+            parts.append(f'## {label}\n{val}')
+        return '\n\n'.join(parts)
+
     def _compose_shared_context(self, nid: str, upstream: str) -> str:
         """Build a shared-context node's effective input.
 
@@ -727,6 +915,7 @@ class FlowExecutor:
         for i in range(cap):
             if self._abort_check():
                 raise _AbortSignal()
+            self._cur_iteration = i + 1
             self._emit({'type': 'loop_iteration', 'node_id': lid,
                         'iteration': i + 1, 'max': cap})
             # Run the body chain, stopping when it loops back to the loop node.
@@ -782,6 +971,7 @@ class FlowExecutor:
         else:
             logger.info('[FlowEngine] loop %s hit cap %d', lid, cap)
 
+        self._cur_iteration = 0   # left the loop — subsequent nodes are post-loop
         return context, exit_node
 
     def _find_loop_planner(self, lid: str, body_entry: str | None) -> str | None:
@@ -1227,6 +1417,19 @@ class FlowExecutor:
             'events_lock': threading.Lock(), 'events': [],
             'toolRounds': [], 'phase': 'tool', 'config': {},
         }
+        # Live token streaming: forward each content/thinking delta as a
+        # ``step_delta`` engine event tagged with this node's id/role/emits, so
+        # a consumer (EndpointEventAdapter) can stream the turn into the chat
+        # bubble live — identical to a first-class agent turn — instead of
+        # waiting for the whole turn and showing only step_complete.
+        nid = node.get('id')
+        role = node.get('role', 'general')
+        emits = resolve_emits(node)
+
+        def _stream_sink(kind: str, chunk: str):
+            self._emit({'type': 'step_delta', 'node_id': nid, 'role': role,
+                        'emits': emits, 'kind': kind, 'chunk': chunk})
+
         agent = SubAgent(
             spec,
             parent_task=parent,
@@ -1234,6 +1437,7 @@ class FlowExecutor:
             model=self._model,
             abort_check=self._abort_check,
             project_path=self._project_path,
+            stream_sink=_stream_sink,
         )
         result = agent.run()
         return {
@@ -1256,6 +1460,61 @@ class FlowExecutor:
                 'state_changing': sc_count, 'exploratory': explore_count,
             })
 
+    def _trace_node(self, node: dict, *, brief: str, eff_context: str,
+                    output: str, status: str, error: str, elapsed: float,
+                    emits: str, isolation: str, sc_count: int = 0,
+                    explore_count: int = 0, sc_names: list | None = None,
+                    subflow: bool = False) -> None:
+        """Append one durable per-node trace entry.
+
+        Captures everything the canvas/inspector overlay needs to explain a
+        run: the RESOLVED delegation brief the node actually ran with (the
+        rendered role prompt — answers "what is this role doing?"), a bounded
+        copy of its effective input context, its bounded full output, the
+        message axis / isolation / loop iteration, and deliverable counts +
+        timing. Lock-guarded; never raises (a trace failure must not abort a
+        run).
+        """
+        try:
+            nid = node.get('id')
+            entry = {
+                'seq': 0,  # filled under lock
+                'node_id': nid,
+                'role': node.get('role') or '',
+                'name': node.get('name') or '',
+                'kind': node.get('type') or '',
+                'iteration': self._cur_iteration,
+                'emits': emits,
+                'isolation': isolation,
+                'subflow': bool(subflow),
+                'brief': (brief or '')[:_TRACE_INPUT_CHARS],
+                'input': (eff_context or '')[:_TRACE_INPUT_CHARS],
+                'input_truncated': len(eff_context or '') > _TRACE_INPUT_CHARS,
+                'output': (output or '')[:_TRACE_OUTPUT_CHARS],
+                'output_truncated': len(output or '') > _TRACE_OUTPUT_CHARS,
+                'status': status,
+                'error': error or '',
+                'elapsed': round(elapsed, 2),
+                'state_changing': sc_count,
+                'exploratory': explore_count,
+                'state_changing_tools': list(sc_names or []),
+                'ts': _now_iso(),
+            }
+            with self._lock:
+                self._trace_seq += 1
+                entry['seq'] = self._trace_seq
+                self._trace.append(entry)
+            # Emit the entry as a durable ``step_trace`` event so a reopenable
+            # run (Task Mode) can reconstruct the per-node trace from its event
+            # log alone — the in-memory ``self._trace`` (and the chat task's
+            # ``_flow_trace``) does not survive a restart, but the persisted
+            # event log does. ``step_trace`` is self-contained: it carries the
+            # resolved brief + bounded input + full bounded output.
+            self._emit({'type': 'step_trace', **entry})
+        except Exception as e:
+            logger.debug('[FlowEngine] trace capture failed for %s: %s',
+                         node.get('id'), e)
+
     def _emit(self, event: dict):
         if not self._on_event:
             return
@@ -1263,6 +1522,11 @@ class FlowExecutor:
             self._on_event(event)
         except Exception as e:
             logger.debug('[FlowEngine] on_event sink error: %s', e)
+
+
+def _now_iso() -> str:
+    """Wall-clock timestamp for trace entries (UI display)."""
+    return time.strftime('%Y-%m-%dT%H:%M:%S')
 
 
 class _AbortSignal(Exception):

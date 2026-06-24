@@ -29,7 +29,7 @@ async function _checkProviderBalance(provIdx) {
     return;
   }
 
-  resultDiv.innerHTML = '<span class="stg-balance-loading">⏳ 查询中…</span>';
+  resultDiv.innerHTML = '<span class="stg-balance-loading">' + Icon('hourglass', 12) + ' 查询中…</span>';
 
   try {
     var data = await Api.providers.balance({ balance_url: balanceUrl, api_key: p.api_keys[0] });
@@ -141,7 +141,7 @@ function _updateBalanceBadge(provIdx, info) {
 
   var span = document.createElement('span');
   span.className = 'stg-badge stg-badge-balance stg-badge-bal-' + colorClass;
-  span.textContent = '\uD83D\uDCB0 ' + text;
+  span.innerHTML = Icon('chart', 11) + ' ' + escapeHtml(text);
   span.title = t('settings.balanceClickRefresh');
   span.style.cursor = 'pointer';
   span.onclick = function(e) {

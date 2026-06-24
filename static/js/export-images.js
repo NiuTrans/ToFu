@@ -382,7 +382,7 @@ const ExportImages = (() => {
     el.id = id;
     el.className = 'export-progress-toast';
     el.innerHTML = `
-      <div class="export-progress-icon">📸</div>
+      <div class="export-progress-icon">${Icon('image', 18)}</div>
       <div class="export-progress-body">
         <div class="export-progress-text">${text}</div>
         <div class="export-progress-bar-wrap">
@@ -495,7 +495,7 @@ const ExportImages = (() => {
     toolbar.className = 'epv-toolbar';
     toolbar.innerHTML = `
       <span style="font-size:15px;display:flex;align-items:center;gap:6px">
-        📸 <strong>Export Preview</strong>
+        ${Icon('image', 16)} <strong>Export Preview</strong>
         <span style="opacity:0.6;font-weight:400">${canvases.length} page${canvases.length > 1 ? 's' : ''}</span>
       </span>
       <button class="primary" id="exportDownloadAll">

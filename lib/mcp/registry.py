@@ -14,7 +14,9 @@ file.
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import threading
 from typing import TypedDict
 
 from lib.log import get_logger
@@ -37,6 +39,10 @@ class EnvSpec(TypedDict, total=False):
     hint: str           # placeholder / help text
     required: bool      # if True, installation won't proceed without it
     secret: bool        # if True, UI renders as password field (default True)
+    type: str           # "text" (default) or "select" (renders a <select>)
+    options: list       # for type=="select": [{label, value, autofill?}]
+                        # where autofill maps other env keys → preset values
+                        # applied when this option is chosen
 
 
 class CatalogEntry(TypedDict, total=False):
@@ -53,6 +59,8 @@ class CatalogEntry(TypedDict, total=False):
     url: str                    # homepage / docs link
     tags: list[str]             # searchable tags
     featured: bool              # show at the top of the catalog
+    internal_only: bool         # YourProvider-internal server — hidden from
+                                # opensource builds (see _OPENSOURCE_BUILD).
 
 
 # ── Categories ────────────────────────────────────────────
@@ -76,6 +84,27 @@ CATEGORIES = [
     CAT_PROD, CAT_DEVOPS, CAT_FINANCE, CAT_DESIGN, CAT_RESEARCH,
     CAT_OTHER, CAT_CUSTOM,
 ]
+
+
+# ── Build edition ─────────────────────────────────────────
+# Entries flagged ``internal_only`` reference YourProvider-internal services
+# (hope/llm CLIs, 学城 docs) whose launchers are NOT shipped in an opensource
+# build, so their catalog cards would be dead "Install" buttons there.
+#
+# export.py's opensource sanitizer already physically strips the internal
+# block from this file's source. This flag is the BELT-AND-BRACES backstop:
+# the sanitizer flips it to True (literal replacement, NOT dependent on entry
+# ordering), so even if an internal entry ever escapes the source strip,
+# ``get_catalog`` still filters it out at runtime. An env override is provided
+# for tests / forced opensource runs.
+_OPENSOURCE_BUILD = os.environ.get('TOFU_OPENSOURCE_BUILD', '1').strip().lower() in {
+    '1', 'true', 'yes', 'on',
+}
+
+
+def is_opensource_build() -> bool:
+    """True when running an opensource build (internal_only entries hidden)."""
+    return _OPENSOURCE_BUILD
 
 
 # ══════════════════════════════════════════════════════════
@@ -245,19 +274,64 @@ CATALOG: list[CatalogEntry] = [
         'featured': True,
     },
     {
-        'id': 'gmail',
-        'name': 'Gmail',
-        'description': 'Send, search, and manage Gmail messages',
-        'icon': '<img src="static/icons/mcp/gmail.svg" alt="Gmail">',
+        'id': 'email',
+        'name': 'Email (IMAP/SMTP)',
+        'description': 'Read, search, send, and reply to email over IMAP/SMTP — works with QQ Mail, 163, Outlook, Gmail, and any provider.',
+        'icon': '<img src="static/icons/mcp/email.svg" alt="Email">',
         'category': CAT_COMMS,
-        'command': 'npx',
-        'args': ['-y', '@anthropic/mcp-server-gmail'],
+        'command': 'uvx',
+        'args': ['mcp-email-server@latest', 'stdio'],
         'env_specs': [
-            {'key': 'GMAIL_CREDENTIALS_PATH', 'label': 'Credentials JSON Path',
-             'hint': '/path/to/credentials.json', 'required': True, 'secret': False},
+            {'key': 'MCP_EMAIL_SERVER_EMAIL_ADDRESS', 'label': 'Email Address',
+             'hint': 'you@qq.com', 'required': True, 'secret': False},
+            {'key': 'MCP_EMAIL_SERVER_PASSWORD', 'label': 'Password / Authorization Code',
+             'hint': 'QQ/163: the SMTP authorization code (授权码), NOT your login password',
+             'required': True, 'secret': True},
+            {'key': 'MCP_EMAIL_SERVER_IMAP_HOST', 'label': 'Provider / IMAP Host',
+             'hint': 'imap.qq.com (QQ) / imap.163.com / outlook.office365.com',
+             'required': True, 'secret': False,
+             'type': 'select',
+             # Selecting a known provider auto-fills the IMAP host and the
+             # SMTP host + ports (via `autofill`), so the user never has to
+             # look these up. The last option drops back to manual entry.
+             'options': [
+                 {'label': 'QQ 邮箱', 'value': 'imap.qq.com',
+                  'autofill': {'MCP_EMAIL_SERVER_SMTP_HOST': 'smtp.qq.com',
+                               'MCP_EMAIL_SERVER_IMAP_PORT': '993',
+                               'MCP_EMAIL_SERVER_SMTP_PORT': '465'}},
+                 {'label': '163 邮箱', 'value': 'imap.163.com',
+                  'autofill': {'MCP_EMAIL_SERVER_SMTP_HOST': 'smtp.163.com',
+                               'MCP_EMAIL_SERVER_IMAP_PORT': '993',
+                               'MCP_EMAIL_SERVER_SMTP_PORT': '465'}},
+                 {'label': '126 邮箱', 'value': 'imap.126.com',
+                  'autofill': {'MCP_EMAIL_SERVER_SMTP_HOST': 'smtp.126.com',
+                               'MCP_EMAIL_SERVER_IMAP_PORT': '993',
+                               'MCP_EMAIL_SERVER_SMTP_PORT': '465'}},
+                 {'label': 'Gmail', 'value': 'imap.gmail.com',
+                  'autofill': {'MCP_EMAIL_SERVER_SMTP_HOST': 'smtp.gmail.com',
+                               'MCP_EMAIL_SERVER_IMAP_PORT': '993',
+                               'MCP_EMAIL_SERVER_SMTP_PORT': '465'}},
+                 {'label': 'Outlook / Microsoft 365', 'value': 'outlook.office365.com',
+                  'autofill': {'MCP_EMAIL_SERVER_SMTP_HOST': 'smtp.office365.com',
+                               'MCP_EMAIL_SERVER_IMAP_PORT': '993',
+                               'MCP_EMAIL_SERVER_SMTP_PORT': '587'}},
+                 {'label': 'iCloud Mail', 'value': 'imap.mail.me.com',
+                  'autofill': {'MCP_EMAIL_SERVER_SMTP_HOST': 'smtp.mail.me.com',
+                               'MCP_EMAIL_SERVER_IMAP_PORT': '993',
+                               'MCP_EMAIL_SERVER_SMTP_PORT': '587'}},
+                 {'label': '其他（手动填写 IMAP Host）', 'value': '__custom__'},
+             ]},
+            {'key': 'MCP_EMAIL_SERVER_SMTP_HOST', 'label': 'SMTP Host (omit for read-only)',
+             'hint': 'smtp.qq.com (QQ) / smtp.163.com / smtp.office365.com', 'required': False, 'secret': False},
+            {'key': 'MCP_EMAIL_SERVER_USER_NAME', 'label': 'Login Username (optional)',
+             'hint': 'defaults to the email address', 'required': False, 'secret': False},
+            {'key': 'MCP_EMAIL_SERVER_IMAP_PORT', 'label': 'IMAP Port (optional)',
+             'hint': '993', 'required': False, 'secret': False},
+            {'key': 'MCP_EMAIL_SERVER_SMTP_PORT', 'label': 'SMTP Port (optional)',
+             'hint': '465', 'required': False, 'secret': False},
         ],
-        'url': 'https://github.com/anthropics/mcp-server-gmail',
-        'tags': ['email', 'google'],
+        'url': 'https://github.com/ai-zerolab/mcp-email-server',
+        'tags': ['email', 'imap', 'smtp', 'qq', 'qq-mail', 'qqmail', '163', 'outlook', 'mail', 'inbox'],
     },
 
     # ── Search & Web ───────────────────────────────────────
@@ -309,7 +383,7 @@ CATALOG: list[CatalogEntry] = [
         'id': 'fetch',
         'name': 'Fetch',
         'description': 'Web content fetching and conversion for LLM usage',
-        'icon': '🌐',
+        'icon': '<img src="static/icons/mcp/fetch.svg" alt="Fetch">',
         'category': CAT_SEARCH,
         'command': 'uvx',
         'args': ['mcp-server-fetch'],
@@ -478,7 +552,7 @@ CATALOG: list[CatalogEntry] = [
         'id': 'memory',
         'name': 'Memory',
         'description': 'Knowledge graph-based persistent memory system',
-        'icon': '🧠',
+        'icon': '<img src="static/icons/mcp/memory.svg" alt="Memory">',
         'category': CAT_OTHER,
         'command': 'npx',
         'args': ['-y', '@modelcontextprotocol/server-memory'],
@@ -490,7 +564,7 @@ CATALOG: list[CatalogEntry] = [
         'id': 'sequential-thinking',
         'name': 'Sequential Thinking',
         'description': 'Dynamic problem-solving through thought sequences',
-        'icon': '💭',
+        'icon': '<img src="static/icons/mcp/sequential-thinking.svg" alt="Sequential Thinking">',
         'category': CAT_OTHER,
         'command': 'npx',
         'args': ['-y', '@modelcontextprotocol/server-sequentialthinking'],
@@ -502,7 +576,7 @@ CATALOG: list[CatalogEntry] = [
         'id': 'filesystem',
         'name': 'Filesystem',
         'description': 'Secure file operations with access controls',
-        'icon': '📂',
+        'icon': '<img src="static/icons/mcp/filesystem.svg" alt="Filesystem">',
         'category': CAT_OTHER,
         'command': 'npx',
         'args': ['-y', '@modelcontextprotocol/server-filesystem'],
@@ -773,7 +847,7 @@ CATALOG: list[CatalogEntry] = [
         'id': 'mcp-compass',
         'name': 'MCP Compass',
         'description': 'Discover and recommend MCP servers from the ecosystem',
-        'icon': '🧭',
+        'icon': '<img src="static/icons/mcp/mcp-compass.svg" alt="MCP Compass">',
         'category': CAT_OTHER,
         'command': 'npx',
         'args': ['-y', 'mcp-compass'],
@@ -788,15 +862,122 @@ CATALOG: list[CatalogEntry] = [
 
 _CATALOG_INDEX: dict[str, CatalogEntry] = {e['id']: e for e in CATALOG}
 
+# ── Hot-reload of the catalog ─────────────────────────────
+#
+# Mirrors the launcher-registry hot-reload in ``lib/mcp/client.py``: this
+# module is imported once at startup, so a NEW card appended to ``CATALOG``
+# while Tofu is already running is invisible until a restart. To keep adding
+# a server truly zero-touch (the launcher row in ``vendored.py`` AND the card
+# here both pick up live), we re-read THIS file when its mtime advances and
+# rebuild ``CATALOG`` / ``_CATALOG_INDEX`` IN PLACE.
+#
+# Why in-place (mutate the existing list + dict) rather than rebinding or
+# ``importlib.reload(self)``: the module's *functions* (get_catalog, …) are
+# imported lazily per-request by the routes, so they always resolve to the
+# live versions — but reloading the module from within its own function is
+# fragile (re-runs all top-level code; swaps globals mid-call). Instead we
+# exec the fresh source into a THROWAWAY namespace and copy just the data
+# containers, preserving this module's identity, lock, and build-mode flag.
+_catalog_mtime: float = 0.0
+_catalog_reload_lock = threading.Lock()
+
+
+def _registry_path() -> str:
+    return os.path.abspath(__file__)
+
+
+def _reload_catalog_if_changed() -> None:
+    """Rebuild ``CATALOG``/``_CATALOG_INDEX`` in place if this file changed.
+
+    Cheap: one ``os.path.getmtime`` stat per call; the actual re-exec only
+    runs on a real mtime bump. Failures (file gone, syntax error mid-edit)
+    are swallowed — keep the last-good catalog rather than break the settings
+    grid for every request. Never DROPS the catalog to empty on a bad parse.
+    """
+    global _catalog_mtime
+    path = _registry_path()
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return
+    if mtime <= _catalog_mtime:
+        return
+    with _catalog_reload_lock:
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return
+        if mtime <= _catalog_mtime:
+            return
+        try:
+            spec = importlib.util.spec_from_file_location(
+                f'{__name__}__hotreload', path)
+            fresh_mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(fresh_mod)
+            fresh_catalog = list(getattr(fresh_mod, 'CATALOG', []) or [])
+            if not fresh_catalog:
+                raise ValueError('reloaded CATALOG is empty')
+        except Exception as e:
+            # Mid-edit syntax error / transient read failure — keep last-good
+            # catalog and retry on the next mtime bump. Advance the baseline so
+            # we don't re-exec on every request while the file is briefly broken.
+            logger.warning('[MCP:Registry] catalog reload failed (keeping '
+                           'last-good): %s', e)
+            _catalog_mtime = mtime
+            return
+        before = {e['id'] for e in CATALOG}
+        # Rebuild the data containers in place to preserve their identity for
+        # any holder of a reference (and this module's own functions).
+        CATALOG[:] = fresh_catalog
+        _CATALOG_INDEX.clear()
+        _CATALOG_INDEX.update({e['id']: e for e in CATALOG})
+        _catalog_mtime = mtime
+        added = sorted({e['id'] for e in CATALOG} - before)
+        if added:
+            logger.info('[MCP:Registry] catalog hot-reloaded: +%d new card(s) %s',
+                        len(added), ', '.join(added))
+
+
+# Baseline the mtime at import so an edit made BETWEEN process start and the
+# first catalog read is still detected (mtime then strictly advances).
+try:
+    _catalog_mtime = os.path.getmtime(_registry_path())
+except OSError:
+    _catalog_mtime = 0.0
+
 
 def get_catalog() -> list[CatalogEntry]:
-    """Return the full curated catalog."""
+    """Return the curated catalog.
+
+    Hot-reloads this file first when its mtime advanced, so a card appended to
+    ``CATALOG`` in the running process's source appears WITHOUT a restart.
+
+    In an opensource build (:func:`is_opensource_build`), entries flagged
+    ``internal_only`` are filtered out so the UI never shows an "Install"
+    button for a launcher that isn't shipped. In internal/personal builds the
+    full catalog is returned.
+    """
+    _reload_catalog_if_changed()
+    if _OPENSOURCE_BUILD:
+        return [e for e in CATALOG if not e.get('internal_only')]
     return CATALOG
 
 
 def get_catalog_entry(server_id: str) -> CatalogEntry | None:
-    """Look up a single catalog entry by ID."""
-    return _CATALOG_INDEX.get(server_id)
+    """Look up a single catalog entry by ID.
+
+    Hot-reloads this file first (see :func:`get_catalog`) so a freshly-added
+    card is installable without a restart.
+
+    Honours the opensource build filter: an ``internal_only`` entry is treated
+    as absent in opensource builds, so install/lookup paths can't resurrect a
+    hidden server by id.
+    """
+    _reload_catalog_if_changed()
+    entry = _CATALOG_INDEX.get(server_id)
+    if entry is not None and _OPENSOURCE_BUILD and entry.get('internal_only'):
+        return None
+    return entry
 
 
 def build_server_config(server_id: str, env_values: dict[str, str] | None = None) -> dict | None:
@@ -820,6 +1001,14 @@ def build_server_config(server_id: str, env_values: dict[str, str] | None = None
         'enabled': True,
         'description': entry.get('description', entry['name']),
     }
+
+    # Per-server call-timeout override (seconds). Set for servers whose tools
+    # legitimately run longer than the global MCP_CALL_TIMEOUT (e.g. long-poll
+    # tools like hope.watch_job, whose own budget is 300s). Without this the
+    # client transport kills the call at the 120s default and the result is
+    # wasted. Users can still edit it in mcp_servers.json.
+    if entry.get('timeout'):
+        config['timeout'] = entry['timeout']
 
     if transport == 'sse':
         # SSE transport: needs a URL, no command

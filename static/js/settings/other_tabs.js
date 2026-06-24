@@ -165,13 +165,13 @@ function _populateFeishuTab(cfg) {
   var desc = document.getElementById('feishuStatusDesc');
   if (dot && label && desc) {
     if (f.connected) {
-      dot.textContent = '🟢'; dot.title = '已连接';
+      dot.innerHTML = IconDot('green'); dot.title = '已连接';
       desc.textContent = 'WebSocket 已连接 · 应用：' + (f.app_id_masked || '—');
     } else if (f.enabled) {
-      dot.textContent = '🟡'; dot.title = '已启用但未连接';
+      dot.innerHTML = IconDot('yellow'); dot.title = '已启用但未连接';
       desc.textContent = '凭证已设置但未连接';
     } else {
-      dot.textContent = '⚪'; dot.title = '未启用';
+      dot.innerHTML = IconDot('grey'); dot.title = '未启用';
       desc.textContent = '请设置 App ID 和 App Secret 以启用';
     }
   }
@@ -268,10 +268,10 @@ function _refreshCacheStatsUI() {
 function _clearConvCacheFromSettings() {
   if (typeof ConvCache === 'undefined') return;
   var btn = document.getElementById('settingsClearCacheBtn');
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ 清除中…'; }
+  if (btn) { btn.disabled = true; btn.textContent = '清除中…'; }
   ConvCache.clear().then(function() {
     _refreshCacheStatsUI();
-    if (btn) { btn.disabled = false; btn.textContent = '🗑 清除缓存'; }
+    if (btn) { btn.disabled = false; btn.innerHTML = Icon('trash', 12) + ' 清除缓存'; }
     // Force all in-memory conversations to _needsLoad so next click refetches
     conversations.forEach(function(c) {
       if (c.id !== activeConvId) c._needsLoad = true;

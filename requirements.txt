@@ -69,6 +69,11 @@ pymupdf4llm>=0.0.17
 # (routes/paper.py:export_report). Frontend still uses marked.js for live
 # rendering; this dep is only used for downloadable .html exports.
 markdown>=3.5
+# PyYAML — serves the YAML variant of the OpenAPI spec
+# (routes/api_docs.py::openapi_yaml). The route degrades to JSON on
+# ImportError, so this is a soft feature dep; declared explicitly because it
+# was previously only present transitively and went missing in clean envs.
+PyYAML>=6.0
 # uv powers several MCP servers (via `uvx`) — see lib/mcp/client.py. Installing
 # it here guarantees uvx is on PATH inside the conda env without requiring a
 # separate curl|sh bootstrap.

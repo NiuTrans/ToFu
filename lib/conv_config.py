@@ -208,6 +208,13 @@ def resolve_conv_config(
             ov.get('systemPromptMode')
             or defaults.get('systemPromptMode')
             or 'append'),
+        # Per-block keep/drop toggles from the system-prompt editor.
+        # Shape: {'disabled': [block_id, ...]}. Global (not per-conv),
+        # so it reads from overrides → server defaults like systemPrompt.
+        'systemPromptBlocks': (
+            ov.get('systemPromptBlocks')
+            or defaults.get('systemPromptBlocks')
+            or {}),
         'thinkingDepth': _pick(
             ov.get('thinkingDepth') or legacy_depth,
             conv.get('thinkingDepth') or legacy_depth or None,
@@ -280,7 +287,6 @@ def resolve_conv_config(
             _coerce_bool(conv.get('autopilotEnabled')),
             is_active=is_active,
         ),
-        'agentBackend': ov.get('agentBackend') or 'builtin',
         'autoTranslate': (
             _coerce_bool(conv.get('autoTranslate'),
                           _coerce_bool(ov.get('autoTranslate'), False))

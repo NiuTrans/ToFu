@@ -31,6 +31,8 @@ def _format_status_message(event):
         'truncated_final': 'Output truncated after retries',
         'noop_output': 'Model echoed input, retrying with another model',
         'noop_final': 'Model echoed input after retries',
+        'wrong_language': 'Output in wrong language, retrying with another model',
+        'wrong_language_final': 'Output in wrong language after retries',
         'mt_fallback': 'MT provider failed, using LLM',
         'timed_out': 'Translation timed out, sending original text',
     }

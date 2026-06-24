@@ -393,8 +393,8 @@ def index_page():
     # Read index.html and rewrite both:
     #   1. The contiguous block of <script defer src="static/js/*.js"> tags
     #      → single bundle tag with content-hashed filename.
-    #   2. The single <link rel="stylesheet" href="static/styles.css?v=…">
-    #      → content-hashed query string (lib/css_bundler.py).
+    #   2. The single <link rel="stylesheet" href="static/styles.css">
+    #      → hashed minified file static/styles-<hash>.css (lib/css_bundler.py).
     try:
         with open(html_path, 'r', encoding='utf-8') as f:
             html = f.read()
@@ -448,6 +448,32 @@ def dashboard_page():
     """
     return send_from_directory(os.path.join(BASE_DIR, 'static'),
                                 'dashboard.html')
+
+
+@common_bp.route('/admin')
+@common_bp.route('/admin/')
+def admin_page():
+    """Relay-operator admin console (multi-user mode).
+
+    Standalone HTML (``static/admin.html``) that reuses the dashboard
+    shell and hosts the relay-admin panels (users / pricing / redeem
+    codes / payments) previously embedded as hidden Settings tabs.
+
+    The page itself is ALWAYS served — there is no server-side gate on
+    the route, so it can never 401 a browser (per the project's "never
+    trap a frontend user" rule). Authorization is decided client-side
+    by ``static/js/relay-admin.js`` (mode must be ``multi-user`` and the
+    principal must hold the ``admin`` scope) AND enforced server-side by
+    every ``/api/v1/users`` / ``/api/v1/billing`` endpoint it calls. A
+    non-admin sees only the "需要管理员权限" notice and cannot mutate
+    anything.
+
+    Settings (in ``index.html``) is therefore pure single-user config;
+    managing OTHER users lives here, parallel to the customer-facing
+    ``/dashboard``.
+    """
+    return send_from_directory(os.path.join(BASE_DIR, 'static'),
+                                'admin.html')
 
 @api_v1_common_bp.route('/api/v1/features')
 def features():

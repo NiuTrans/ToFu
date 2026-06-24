@@ -42,6 +42,10 @@ def _install_shim():
             import asyncio as _a
             coro = _orig(self, *a, **kw)
             return _a.run(coro)
+        # Mirror server.py: stash the genuine async original so async
+        # handlers (which call async_parse_body) recover + await it instead
+        # of hitting this sync asyncio.run() shim from inside a running loop.
+        _sync_get_json._genuine_async_get_json = _orig
         _QR.get_json = _sync_get_json
 
 
@@ -435,6 +439,93 @@ class AgentRunRouteTest(unittest.TestCase):
                 })
             self.assertEqual(r.status_code, 200,
                               await r.get_data(as_text=True))
+        _new_loop_run(go())
+
+    def test_deferred_finish_wakes_via_event(self):
+        """The handler must await an event-driven wakeup, not poll: a task
+        that finishes on a background thread AFTER the handler starts
+        waiting still returns 200 (and promptly)."""
+        async def go():
+            import threading
+            import time as _time
+            import lib.tasks_pkg as pkg
+            from lib.tasks_pkg.manager import append_event
+
+            def _deferred_spawn(task):
+                def _worker():
+                    _time.sleep(0.3)
+                    task['content'] = 'deferred hello'
+                    task['status'] = 'done'
+                    task['finishReason'] = 'stop'
+                    task['usage'] = {'input_tokens': 1, 'output_tokens': 1,
+                                     'total_tokens': 2}
+                    append_event(task, {'type': 'done',
+                                        'finishReason': 'stop',
+                                        'usage': task['usage']})
+                threading.Thread(target=_worker, daemon=True).start()
+
+            pkg.spawn_task = _deferred_spawn
+            try:
+                cli = self.app.test_client()
+                t0 = _time.time()
+                r = await cli.post(
+                    '/api/v1/agent/run',
+                    headers={'Authorization': f'Bearer {self.token}'},
+                    json={'model': 'm',
+                          'messages': [{'role': 'user', 'content': 'hi'}],
+                          'timeout_s': 5})
+                elapsed = _time.time() - t0
+                self.assertEqual(r.status_code, 200,
+                                 await r.get_data(as_text=True))
+                body = await r.get_json()
+                self.assertEqual(body['content'], 'deferred hello')
+                # Finished ~0.3s in; must not have spun the full 5s timeout.
+                self.assertLess(elapsed, 3.0)
+            finally:
+                pkg.spawn_task = self._orig_spawn
+        _new_loop_run(go())
+
+    def test_stream_mode_emits_done(self):
+        """Stream mode returns an SSE body that ends in [DONE] and carries
+        the deltas — exercising the async event-driven generator end to end."""
+        async def go():
+            cli = self.app.test_client()
+            r = await cli.post(
+                '/api/v1/agent/run',
+                headers={'Authorization': f'Bearer {self.token}'},
+                json={'model': 'm',
+                      'messages': [{'role': 'user', 'content': 'hi'}],
+                      'stream': True, 'timeout_s': 5})
+            self.assertEqual(r.status_code, 200)
+            text = await r.get_data(as_text=True)
+            self.assertIn('hello from byo', text)
+            self.assertIn('[DONE]', text)
+        _new_loop_run(go())
+
+    def test_admission_503_when_saturated(self):
+        """When the admission controller is at capacity the handler refuses
+        with 503 rather than spawning unbounded work."""
+        async def go():
+            from lib.agent_core import admission
+            import routes.api_v1.agent_run as ar
+            # Force a saturated controller for the duration of this test.
+            orig_ctrl = ar.controller
+            saturated = admission.AdmissionController(max_inflight=1)
+            self.assertTrue(saturated.try_acquire())  # consume the only slot
+            ar.controller = saturated
+            try:
+                cli = self.app.test_client()
+                r = await cli.post(
+                    '/api/v1/agent/run',
+                    headers={'Authorization': f'Bearer {self.token}'},
+                    json={'model': 'm',
+                          'messages': [{'role': 'user', 'content': 'hi'}]})
+                self.assertEqual(r.status_code, 503,
+                                 await r.get_data(as_text=True))
+                body = await r.get_json()
+                self.assertEqual(body.get('error_kind'), 'overloaded')
+            finally:
+                ar.controller = orig_ctrl
         _new_loop_run(go())
 
 

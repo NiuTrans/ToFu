@@ -150,7 +150,7 @@ function _renderProvidersTab() {
         '<span class="stg-models-title">' + escapeHtml(t('settings.modelList')) + '</span>' +
         '<div class="stg-models-actions">' +
           (canMatrix ? '<button class="stg-btn-add stg-matrix-toggle' + (matrixOn ? ' active' : '') + '" onclick="_toggleMatrixView(' + pi + ')" title="' + escapeHtml(t('settings.matrixToggleHint')) + '">⊞ ' + escapeHtml(matrixOn ? t('settings.matrixViewCards') : t('settings.matrixViewMatrix')) + '</button>' : '') +
-          (_findMatchingTemplate(p) ? '<button class="stg-btn-add" onclick="_syncFromTemplate(' + pi + ')" title="' + escapeHtml(t('settings.syncTemplateTitle')) + '">📋 ' + escapeHtml(t('settings.syncTemplate')) + '</button>' : '') +
+          (_findMatchingTemplate(p) ? '<button class="stg-btn-add" onclick="_syncFromTemplate(' + pi + ')" title="' + escapeHtml(t('settings.syncTemplateTitle')) + '">' + Icon('clipboard', 12) + ' ' + escapeHtml(t('settings.syncTemplate')) + '</button>' : '') +
           (isLocal
             ? '<button class="stg-btn-add" onclick="_discoverLocalModels(' + pi + ')" title="' + escapeHtml(t('settings.probeAllEndpointsTitle')) + '">' + escapeHtml(t('settings.probeAllEndpoints')) + '</button>'
             : '<button class="stg-btn-add" onclick="_discoverModels(' + pi + ')" title="' + escapeHtml(t('settings.autoDiscoverHint')) + '">' + escapeHtml(t('settings.autoDiscover')) + '</button>') +
@@ -237,7 +237,7 @@ function _renderModelCard(provIdx, modelIdx, m) {
       'onclick="event.stopPropagation();_toggleModelThinking(' + provIdx + ',' + modelIdx + ')" ' +
       'title="' + escapeHtml(t('settings.disableThinkingHint')) + '">thinking</button>';
   }
-  if (m.rpm) html += '<span class="stg-mcard-stat">⏱ ' + m.rpm + ' rpm</span>';
+  if (m.rpm) html += '<span class="stg-mcard-stat">' + Icon('timer', 11) + ' ' + m.rpm + ' rpm</span>';
   html += '</div>';
 
   // Pricing row — look up real input/output from pricing cache
@@ -489,7 +489,7 @@ function _renderApiKeyCard(provIdx, idx, value) {
       '<button type="button" class="stg-keys-btn" ' +
         'onclick="_toggleApiKeyVisibility(this)" ' +
         'title="' + escapeHtml(t('settings.showHideKeyTitle')) + '" ' +
-        'aria-label="' + escapeHtml(t('settings.showHideKeyTitle')) + '">👁</button>' +
+        'aria-label="' + escapeHtml(t('settings.showHideKeyTitle')) + '">' + Icon('eye', 13) + '</button>' +
       '<button type="button" class="stg-keys-btn danger" ' +
         'onclick="_deleteApiKey(' + provIdx + ',' + idx + ')" ' +
         'title="' + escapeHtml(t('settings.deleteApiKeyTitle')) + '">✕</button>' +

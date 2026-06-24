@@ -9,7 +9,7 @@ primary model errors out.
 
 from lib.llm import build_body
 from lib.llm_error_format import format_llm_error_for_user
-from lib.log import get_logger
+from lib.log import audit_log, get_logger
 from lib.tasks_pkg.manager import append_event, stream_llm_response
 
 logger = get_logger(__name__)
@@ -334,6 +334,12 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                     response_format=body.get('response_format'),
                     stream=True,
                 )
+                # ★ Preserve the session-stable TTL latch key. Without
+                #   _task_id, add_cache_breakpoints / the extended-cache-ttl
+                #   beta header fall back to the LIVE global CACHE_EXTENDED_TTL
+                #   instead of the per-task latch — flipping the cache key
+                #   mid-task and forcing a full prefix re-write (cache_read=0).
+                body['_task_id'] = task.get('id', '')
 
                 # Notify frontend (phase event = transient UI status,
                 # does NOT pollute assistantMsg.content)
@@ -490,9 +496,18 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             'detail': (f'⚠️ 模型 {original_model} 请求失败（{_fb_kind}）：'
                        f'{_fb_detail[:120]} — 已自动回退到 {_FALLBACK_MODEL} 继续生成…'),
         })
+        # A model fallback is a significant state change — record it in the
+        # audit trail so the optimizer/operator can see WHICH model failed,
+        # how often, and why (the analyzer already mines 'model_fallback').
+        # The fallback itself is self-recovering, so the log line is WARNING
+        # WITHOUT a traceback (the originating error was already logged with
+        # exc_info just above); a traceback here would imply an unhandled bug.
+        audit_log('model_fallback', old=original_model, new=_FALLBACK_MODEL,
+                  reason=_fb_reason[:200], kind=_fb_kind, tid=tid,
+                  conv=task.get('convId', ''))
         logger.warning('[%s] Model fallback: %s → %s (reason: %s)',
                        tid, original_model, _FALLBACK_MODEL,
-                       _fb_reason[:200], exc_info=True)
+                       _fb_reason[:200])
 
         fallback_body = build_body(
             _FALLBACK_MODEL, messages,
@@ -505,6 +520,11 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             response_format=body.get('response_format'),
             stream=True,
         )
+        # ★ Preserve the session-stable TTL latch key on the fallback body
+        #   too (see reactive-compact rebuild above). The fallback model is a
+        #   different cache namespace anyway, but a stable TTL decision keeps
+        #   the fallback model's OWN prefix reusable across its rounds.
+        fallback_body['_task_id'] = task.get('id', '')
 
         try:
             assistant_msg, finish_reason, usage = stream_llm_response(

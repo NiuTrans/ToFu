@@ -228,6 +228,12 @@ class _SyncResponse:
     def data(self):
         return _run_coro(self._resp.get_data())
 
+    def get_data(self, as_text=False):
+        raw = _run_coro(self._resp.get_data())
+        if as_text and isinstance(raw, (bytes, bytearray)):
+            return raw.decode('utf-8', 'replace')
+        return raw
+
     def get_json(self):
         return _run_coro(self._resp.get_json())
 

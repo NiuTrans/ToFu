@@ -162,6 +162,13 @@ function _saveModelEdit(provIdx, modelIdx) {
     }
   }
 
+  // Re-position this model alphabetically: the id may have just been set
+  // (new model) or changed (rename). Pull it out and re-insert in order.
+  if (typeof _insertModelSorted === 'function') {
+    p.models.splice(modelIdx, 1);
+    _insertModelSorted(p.models, m);
+  }
+
   _renderProvidersTab();
   _renderPresetsTab(_serverConfig);
 }

@@ -149,45 +149,42 @@ def inject_attachments(messages: list, attachments: list[str],
                         conv_id: str | None = None):
     """Inject computed attachments into the messages list.
 
-    Appends attachments to the last user message as additional text blocks.
-    If no user message exists, creates one.
+    ★ CACHE-CRITICAL: attachments are appended as a NEW trailing message,
+    NOT merged into the last historical user message.
+
+    The old behaviour walked backward to the last ``user`` message and
+    edited it in place. After even one tool round that message lives at
+    index 1 — well inside the prompt-cache prefix (``messages[0:N-2]``).
+    Editing it changed the cached bytes, so the next round could not read
+    the previously-written prefix and re-billed the whole thing uncached
+    (cache_read=0, full cache_write). The code papered over this by calling
+    ``notify_compaction`` to silence the PREFIX-MUTATION warning — but the
+    cache miss (and its cost) still happened every time the reminder fired.
+
+    Appending a fresh trailing message keeps the entire historical prefix
+    byte-identical, so round N+1 reads round N's cache. The new message sits
+    at the conversation tail where the volatile (5m) cache breakpoint lives,
+    which is the correct, cache-friendly home for per-turn context (mirrors
+    Claude Code's attachment placement in the latest turn).
 
     Args:
-        messages:    Message list mutated in place.
+        messages:    Message list mutated in place (a message is appended).
         attachments: Pre-computed attachment blocks from compute_turn_attachments.
-        conv_id:     If provided, notify cache_tracking that we legitimately
-            mutated a message inside the cache prefix. Without this, the
-            next detect_cache_break() call false-positives as
-            'PREFIX MUTATION DETECTED' (the original user message lives
-            inside messages[0:N-2] once any tool round has been emitted).
+        conv_id:     Unused for cache bookkeeping now (no prefix mutation
+            occurs), kept for signature stability / logging.
     """
     if not attachments:
         return
 
     combined = '\n\n'.join(attachments)
-    mutated_existing = False
 
-    # Find last user message
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].get('role') == 'user':
-            content = messages[i].get('content', '')
-            if isinstance(content, str):
-                messages[i]['content'] = content + '\n\n' + combined
-            elif isinstance(content, list):
-                messages[i]['content'].append({
-                    'type': 'text',
-                    'text': '\n\n' + combined,
-                })
-            mutated_existing = True
-            break
-    else:
-        # No user message found — append as a new one
-        messages.append({'role': 'user', 'content': combined})
-
-    if mutated_existing and conv_id:
-        try:
-            from lib.tasks_pkg.cache_tracking import notify_compaction
-            notify_compaction(conv_id)
-        except Exception as e:
-            logger.debug('[Attachments] notify_compaction unavailable: %s', e)
+    # Append as a NEW trailing user message. Marked _isMeta so the debug
+    # panel / token counter / persistence layers recognise it as synthetic
+    # injected context rather than a real user turn (same convention as the
+    # CLAUDE.md context message in system_context._insert_user_context_message).
+    messages.append({
+        'role': 'user',
+        'content': combined,
+        '_isMeta': True,
+    })
 

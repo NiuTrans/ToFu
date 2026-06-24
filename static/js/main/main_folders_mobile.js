@@ -462,8 +462,6 @@ function closeMobileSheet() {
 }
 
 function updateMobileSheet() {
-  /* Sync mobile backend selector with active backend */
-  _updateMobileBackendSection();
   /* Sync each mobile sheet item's .active class with the desktop toggle state */
   const map = {
     mobileCodeExec:    "codeExecToggle",
@@ -513,54 +511,6 @@ function updateMobileDepth() {
   mobileSection.querySelectorAll(".mobile-depth-btn").forEach(btn => {
     btn.classList.toggle("active", btn.dataset.depth === activeDepth);
   });
-}
-
-/**
- * Switch backend from mobile bottom sheet.
- * Calls the existing switchAgentBackend() and updates the sheet UI.
- */
-async function switchMobileBackend(backendName) {
-  await switchAgentBackend(backendName);
-  _updateMobileBackendSection();
-}
-
-/**
- * Sync the mobile backend section's active states and availability.
- * Fetches backend status if not cached.
- */
-async function _updateMobileBackendSection() {
-  const backends = _agentBackendCache || await _fetchAgentBackends();
-  // Sync active state
-  document.querySelectorAll('#mobileBackendSection .mobile-sheet-item').forEach(el => {
-    const bn = el.dataset.backend;
-    el.classList.toggle('active', bn === activeAgentBackend);
-  });
-  // Sync availability for non-builtin backends
-  for (const b of backends) {
-    if (b.name === 'builtin') continue;
-    const mobileEl = b.name === 'claude-code'
-      ? document.getElementById('mobileBackendClaudeCode')
-      : document.getElementById('mobileBackendCodex');
-    const statusEl = b.name === 'claude-code'
-      ? document.getElementById('ccStatusMobile')
-      : document.getElementById('codexStatusMobile');
-    if (!mobileEl) continue;
-    const usable = b.available && b.authenticated;
-    mobileEl.classList.toggle('disabled', !usable);
-    mobileEl.style.opacity = usable ? '' : '0.45';
-    if (statusEl) {
-      if (!b.available) {
-        statusEl.textContent = t('agent.notInstalled');
-        statusEl.style.color = 'var(--text-tertiary)';
-      } else if (!b.authenticated) {
-        statusEl.textContent = t('agent.notAuthenticated');
-        statusEl.style.color = '#f59e0b';
-      } else {
-        statusEl.textContent = b.version || t('agent.ready');
-        statusEl.style.color = '#22c55e';
-      }
-    }
-  }
 }
 
 /* ── Reflow toolbar on window resize ── */
@@ -724,9 +674,25 @@ window.addEventListener('resize', (function() {
   });
 })();
 
+// Paperclip (Lucide) SVG used inline in the input-send hint where the
+// {clip} token appears. 13px so it sits on the text baseline.
+const _CLIP_SVG = '<svg class="input-hint-clip" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551"/></svg>';
+
+// Turn a hint template containing the literal `{clip}` token into safe HTML:
+// every non-token segment is HTML-escaped, the token becomes the inline SVG.
+function _renderHintHtml(tmpl) {
+  const esc = (typeof escapeHtml === 'function')
+    ? escapeHtml
+    : function(s) { return String(s).replace(/[&<>"']/g, function(c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      }); };
+  return String(tmpl).split('{clip}').map(esc).join(_CLIP_SVG);
+}
+
 function _inputSendHintText() {
-  // Returns the footer hint string for the normal (non-image-gen) input mode,
-  // honoring config.inputSendMode and the current i18n language.
+  // Returns the footer hint TEMPLATE for the normal (non-image-gen) input mode,
+  // honoring config.inputSendMode and the current i18n language. The returned
+  // string contains a `{clip}` token; render via _renderHintHtml() into innerHTML.
   const m = (typeof config !== 'undefined' && config && config.inputSendMode) === 'ctrl_enter'
     ? 'ctrl_enter' : 'enter';
   try {
@@ -735,8 +701,8 @@ function _inputSendHintText() {
     }
   } catch (_) { /* fall through */ }
   return m === 'ctrl_enter'
-    ? 'Ctrl+Enter send · Enter / Shift+Enter newline · 📎 or drop files'
-    : 'Enter send · Ctrl+Enter / Shift+Enter newline · 📎 or drop files';
+    ? 'Ctrl+Enter send · Enter / Shift+Enter newline · {clip} or drop files'
+    : 'Enter send · Ctrl+Enter / Shift+Enter newline · {clip} or drop files';
 }
 
 function refreshInputSendHint() {
@@ -744,7 +710,7 @@ function refreshInputSendHint() {
   try {
     if (typeof imageGenMode !== 'undefined' && imageGenMode) return;
     const hint = document.getElementById('inputHint');
-    if (hint) hint.textContent = _inputSendHintText();
+    if (hint) hint.innerHTML = _renderHintHtml(_inputSendHintText());
   } catch (_) { /* noop */ }
 }
 if (typeof window !== 'undefined') window.refreshInputSendHint = refreshInputSendHint;
@@ -782,9 +748,16 @@ function _doSendOrGenerate() {
     const _streaming = _conv
       && ((typeof activeStreams !== 'undefined' && activeStreams.has(_conv.id))
           || !!_conv.activeTaskId);
-    if (_streaming && typeof autopilotEnabled !== 'undefined' && autopilotEnabled
-        && typeof _maybeArmAutopilot === 'function') {
-      _maybeArmAutopilot();
+    if (typeof autopilotEnabled !== 'undefined' && autopilotEnabled) {
+      /* Empty-send = the explicit "hand it over to the virtual user" gesture.
+       * Always ARM (enqueue the persistent, cancellable armed-marker) so the
+       * pending sentinel shows in the queue bar and survives reload. */
+      if (typeof _maybeArmAutopilot === 'function') _maybeArmAutopilot();
+      /* If the conversation has already finished (no live task), also KICK so
+       * the VU starts composing the next reply now — there is no end-of-turn
+       * hook to fire otherwise. While streaming, the armed in-flight task's
+       * hook handles the takeover at its natural stop. */
+      if (!_streaming && typeof _kickAutopilot === 'function') _kickAutopilot();
     }
     return;  // never call sendMessage() with empty input
   }

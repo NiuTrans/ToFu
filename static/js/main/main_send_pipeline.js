@@ -268,6 +268,13 @@ async function sendMessage() {
     pdfTexts: [...pendingPdfTexts],
     timestamp: Date.now(),
   };
+  // ── Per-turn context snapshot: freeze the workspace/tools/model that
+  //    are active right now so each turn carries a note of what it ran
+  //    with (rendered on the right of the user bubble). Persisted by the
+  //    backend (whitelisted in build_user_msg_from_payload) so it survives
+  //    reload. See static/js/info-rail.js.
+  const _turnCtx = (typeof buildTurnCtxSnapshot === 'function') ? buildTurnCtxSnapshot() : null;
+  if (_turnCtx) msgPayload.ctx = _turnCtx;
   // Reply quotes
   if (typeof getPendingReplyQuotes === "function") {
     const rqs = getPendingReplyQuotes();
@@ -302,6 +309,7 @@ async function sendMessage() {
   };
   if (msgPayload.replyQuotes) userMsg.replyQuotes = msgPayload.replyQuotes;
   if (msgPayload.convRefs) userMsg.convRefs = msgPayload.convRefs;
+  if (_turnCtx) userMsg._ctx = _turnCtx;
   _ensureMsgId(userMsg);
 
   conv._needsLoad = false;
@@ -811,7 +819,22 @@ function renderPendingQueueUI(convId) {
     if (queueHost) queueHost.appendChild(container);
   }
   container.classList.remove('queue-removing');
-  const items = queue.map((item, i) => {
+  /* Autopilot SVG glyph (steering-wheel-ish circle) for the sentinel item. */
+  const _apSvg = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v6M12 15v6M3 12h6M15 12h6"/></svg>`;
+  let _realCount = 0;   // human/workflow items get sequential numbers
+  const items = queue.map((item) => {
+    /* ── Autopilot armed-marker sentinel — always rendered last (priority 90),
+     *   distinct styling, cancel = DISARM (not just queue-remove). ── */
+    if (item.kind === 'autopilot') {
+      const apLabel = (typeof t === 'function') ? t('autopilot.pendingTakeover') : 'Autopilot will take over';
+      const apCancelTitle = (typeof t === 'function') ? t('autopilot.cancelTakeover') : 'Cancel autopilot';
+      return `<div class="pending-queue-item pending-queue-autopilot">
+        <span class="queue-item-number queue-item-autopilot-icon">${_apSvg}</span>
+        <span class="queue-item-text">${escapeHtml(apLabel)}</span>
+        <button class="queue-item-cancel" onclick="cancelAutopilotMarker('${convId}')" title="${escapeHtml(apCancelTitle)}">✕</button>
+      </div>`;
+    }
+    const i = _realCount++;
     const preview = item.text
       ? item.text
       : (item.images?.length ? `${item.images.length} 张图片` : "附件");
@@ -830,12 +853,39 @@ function renderPendingQueueUI(convId) {
     </div>`;
   }).join("");
   const headerSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83"/></svg>`;
+  /* Header count reflects only real queued messages; the autopilot sentinel
+   * is described by its own row, not counted as "排队消息". */
+  const _headerLabel = _realCount > 0
+    ? `${_realCount} ${(typeof t === 'function') ? t('queue.messagesQueued') : '条消息排队中'}`
+    : ((typeof t === 'function') ? t('autopilot.armedShort') : 'Autopilot armed');
   container.innerHTML = `<div class="queue-header">
     ${headerSvg}
-    <span>${queue.length} 条消息排队中</span>
-    ${queue.length > 1 ? `<button class="queue-clear-all" onclick="clearPendingQueue('${convId}')">全部清空</button>` : ''}
+    <span>${escapeHtml(_headerLabel)}</span>
+    ${_realCount > 1 ? `<button class="queue-clear-all" onclick="clearPendingQueue('${convId}')">${(typeof t === 'function') ? t('queue.clearAll') : '全部清空'}</button>` : ''}
   </div>${items}`;
 }
+
+/**
+ * Cancel the autopilot armed-marker (disarm) from the queue bar.
+ * Clears the persistent sentinel + flips any live task's autopilot off, and
+ * turns the toolbar toggle off to keep the UI consistent.
+ */
+function cancelAutopilotMarker(convId) {
+  if (typeof Api !== 'undefined' && Api.chat && Api.chat.disarmAutopilot) {
+    Api.chat.disarmAutopilot(convId)
+      .then(() => { if (typeof _refreshServerQueue === 'function') _refreshServerQueue(convId); })
+      .catch((e) => console.warn('[Autopilot] disarm (queue cancel) failed:', e && e.message));
+  }
+  /* Reflect the cancel in the toolbar toggle for the active conv. */
+  const _conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
+  if (_conv && _conv.id === convId && typeof autopilotEnabled !== 'undefined' && autopilotEnabled
+      && typeof _applyAutopilotUI === 'function') {
+    _applyAutopilotUI(false);
+    if (typeof _saveConvToolState === 'function') _saveConvToolState();
+  }
+  debugLog('Autopilot canceled — virtual user will not take over', 'info');
+}
+if (typeof window !== 'undefined') window.cancelAutopilotMarker = cancelAutopilotMarker;
 
 /**
  * Remove a single item from the pending queue (server-backed).
@@ -1108,6 +1158,7 @@ async function _refreshServerQueue(convId) {
       // Convert server format to local format
       const localQueue = serverQueue.map(item => ({
         queueId: item.queueId,
+        kind: item.kind || 'real',
         text: item.text || '',
         images: item.hasImages ? ['(server)'] : [],
         pdfTexts: item.hasPdfs ? ['(server)'] : [],

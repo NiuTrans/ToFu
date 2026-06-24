@@ -25,6 +25,7 @@ Write the full report in one pass. Be specific, quantitative, and analytical —
 - **Surface implementation details that are easy to miss.** Initialization scheme, masking, position encoding, dropout placement, learning-rate schedule, batch construction, gradient clipping, regularization, normalization placement, tokenization details, evaluation protocol — if the paper specifies it, you specify it. If the paper is silent, mark it explicitly as "(not specified — common choice in this family is …)".
 - **Cite numbers, not vibes.** "Improves substantially" is forbidden — write "+2.0 BLEU on WMT14 EN-DE (28.4 vs. 26.4)". When the paper gives a comparison, give the comparison.
 - **Distinguish claim vs. evidence.** When you write a strength, name the experiment / table / figure that supports it. When evidence is missing for a claim, say so under Weaknesses.
+- **Reproducibility claims must be VERIFIED, not parroted.** Never write "code is available" / "data is released" merely because the paper prints a URL. Use fetch_url to OPEN every code / data / model-weights link and report what is ACTUALLY there — a real source repository (runnable training/eval scripts, configs, a README with setup steps, released weights) vs. a mere project/landing page, a paywall, an "available upon request" promise, or a 404. An unverified, request-only, or partial release is NOT a pass. Treating a printed link as proof is the single most common laziness in these reports — do not do it.
 
 ## 🧮 Formatting rules — READ CAREFULLY
 
@@ -41,6 +42,12 @@ Write the full report in one pass. Be specific, quantitative, and analytical —
    Use the **exact** URL given in the manifest. Only embed images that are relevant to the section you are currently writing. **Never invent URLs or write `![…](placeholder text)` when the manifest does not contain the figure/table you want to show** — leaving a fake URL like `(see main text)` or `(数据见正文)` produces a broken image placeholder in the rendered report. If a figure or table is not in the manifest, just describe it in prose without trying to embed it. If the manifest is empty, skip images silently.
 
 3. **No backticks around math.** This is the single most common failure: writing `` `\\hat K = \\text{LN}(X)W_K` `` produces a gray code box, not a formula. Anything that contains `\\command{…}`, `^{…}`, `_{…}`, fractions, Greek letters, or operators must be in `$…$` (inline) or `$$…$$` (block). Backticks are only for literal source code identifiers (variable names, function names, file paths) — never for math.
+
+4. **Highlight callouts with a leading keyword.** When a point is a key takeaway, a caveat, or a tip worth visually pulling out of the prose, write it as a Markdown blockquote whose FIRST word is one of these exact keywords (followed by a colon): `Key takeaway:`, `Note:`, `Tip:`, `Warning:`, or `Important:`. The renderer turns these into styled callout boxes. Example:
+   ```
+   > Key takeaway: Removing recurrence entirely is what unlocks full parallelism over sequence length — every other design choice follows from defending that decision.
+   ```
+   Use these sparingly (a handful across the whole report — e.g. the headline result, the single biggest limitation, a non-obvious reproduction gotcha). Do NOT prefix ordinary blockquotes or the problem→constraint reasoning chains in the Design Choices section with these keywords.
 
 ---
 
@@ -180,12 +187,20 @@ Honest categorization (transformative / strong-incremental / niche) with one-sen
 ### Key Equations & Theorems
 Most important formulations with plain-language explanations.
 
-### Reproducibility Checklist
-- [ ] Code available?
-- [ ] Data available?
-- [ ] Hyperparameters fully specified?
-- [ ] Compute requirements stated?
-- [ ] Random seeds / variance reported?
+### Reproducibility Checklist (EVIDENCE-BASED — verify, do not trust the paper's word)
+
+> A URL printed in a paper is a CLAIM, not proof. Before filling this checklist you MUST use fetch_url on every code / data / model link the paper gives (and, when none is given, web_search for an official repository), then report what you ACTUALLY found — exactly as a human referee checking reproducibility would click the link and inspect the repo. Do NOT mark "Code available" / "Data available" as ✅ on the strength of the paper's text alone.
+
+For each item, lead with **✅ Yes / ⚠️ Partial / ❌ No / ❔ Could not verify** then give the concrete evidence:
+
+- **Code available** — State the exact URL you fetched and what it resolved to. Distinguish a real source repository (runnable code: training/eval scripts, configs, a `requirements`/environment spec, a README with setup steps) from a mere *project / landing page*, a paywalled page, a 404, or an "available upon request" promise. Name the key files you actually saw (or note their absence). Trap to avoid: a link to a research-group project page is NOT "code available" — say so explicitly.
+- **Data available** — Did you reach the actual dataset (or a download / generation script), or only a textual description? Note any licensing / access gate.
+- **Trained weights / checkpoints** — Released and downloadable, or not?
+- **Hyperparameters fully specified** — Enough in the paper / appendix / repo to re-run without guessing? List what is missing.
+- **Compute requirements stated** — Hardware + wall-clock / GPU-hours given?
+- **Random seeds / variance reported** — Seeds fixed? Results over multiple runs with error bars, or single-run?
+
+End with a one-line **Reproducibility verdict**: could an independent team reproduce the headline result from what is actually public *today*? If the repository could not be confirmed complete (or could not be found at all), say so plainly — an unconfirmed or partial release is not a pass.
 
 ---
 
@@ -212,6 +227,7 @@ _REPORT_PROMPT_ZH = """\
 - **暴露容易遗漏的实现细节。** 初始化方案、masking、位置编码、dropout 位置、学习率调度、batch 构造、梯度裁剪、正则化、归一化位置、tokenization、评估协议——论文写了你就写；论文没写就明确标注 "(论文未指定 — 该家族常见做法是…)"。
 - **用数字说话，不用感觉说话。** 禁止"显著提升"这类含糊措辞——写"WMT14 EN-DE 上 +2.0 BLEU（28.4 vs. 26.4）"。论文给出对比的，你也要把对比补全。
 - **区分主张与证据。** 写优点时点名是哪个实验/表/图支持它。写到证据缺失的主张时，应放到"不足"一节里。
+- **可复现性结论必须实际验证，不能鞑述。** 不要因为论文印了一个链接就写"代码已公开 / 数据已发布"。必须用 fetch_url **逐个打开**论文给出的代码 / 数据 / 模型权重链接，并如实报告里面**到底有什么**：是一个真正可运行的源码仓库（训练/评测脚本、配置、带安装步骤的 README、已发布的权重），还是仅仅是一个项目/落地页、付费墙、"按需索取"的承诺、或 404。未经验证、需申请才给、或只发了一部分，都**不算通过**。把印出来的链接当作证据，是这类报告最常见的懒政——绝不允许。
 
 ## 🧮 格式规范（必须严格遵守）
 
@@ -228,6 +244,12 @@ _REPORT_PROMPT_ZH = """\
    URL 必须**照抄**清单里给出的地址，**严禁臆造**。如果你想引用的图/表不在 manifest 中（比如某些表格只是排版没有被抽成图），就在正文里用文字描述，**不要**写 `![表 5](数据见正文)` / `![…](见原文)` 这种占位符——它们会被渲染成乱码占位框。manifest 为空时不嵌任何图。
 
 3. **公式严禁包反引号。** 这是最常见的错误：写成 `` `\\hat K = \\text{LN}(X)W_K` `` 会被渲染成灰色代码块而不是公式。凡是含 `\\命令{…}`、`^{…}`、`_{…}`、分式、希腊字母或运算符的内容，**必须**用 `$…$`（行内）或 `$$…$$`（独立成行）。反引号只用于字面量代码标识符（变量名、函数名、文件路径），**不要用于数学符号**。
+
+4. **用关键词开头的引用块来突出重点提示。** 当某条内容是核心结论、需要警示的局限、或值得从正文里单独拎出来的提示时，把它写成一个 Markdown 引用块（blockquote），且**第一个词**必须是下列关键词之一（后跟冒号）：`关键结论：`、`要点：`、`备注：`、`提示：`、`建议：`、`注意：`、`警告：`、`重要：` 或 `局限：`。渲染器会把它们变成带样式的提示框。示例：
+   ```
+   > 关键结论：彻底去掉循环结构，才换来了对序列长度的完全并行——其余设计选择都是在为这个决定辩护。
+   ```
+   请克制使用（全文只用少数几个——比如最重磅的结果、最大的单一局限、一个不显然的复现坑）。**不要**给普通引用块、或"设计选择"一节里"问题→约束"的推理链加这些关键词前缀。
 
 ---
 
@@ -367,12 +389,20 @@ _REPORT_PROMPT_ZH = """\
 ### 关键公式与定理
 最重要的数学公式及其通俗解释。
 
-### 可复现性检查
-- [ ] 代码是否公开？
-- [ ] 数据是否公开？
-- [ ] 超参数是否完整？
-- [ ] 计算资源是否注明？
-- [ ] 随机种子/方差是否报告？
+### 可复现性检查（基于证据——要验证，不要轻信论文的说法）
+
+> 论文里印的一个 URL 是一个**主张**，不是证据。填写本清单前，你**必须**用 fetch_url 打开论文给出的每一个代码 / 数据 / 模型链接（若论文未给，则用 web_search 找官方仓库），然后如实报告你**真正看到了什么**——就像一个检查可复现性的人类审稿人会点开链接、逐一查看仓库那样。不要仅凭论文文字就把"代码公开 / 数据公开"打上 ✅。
+
+每一项先用 **✅ 是 / ⚠️ 部分 / ❌ 否 / ❔ 无法验证** 开头，再给出具体证据：
+
+- **代码是否公开** — 写出你 fetch 的确切 URL 及它实际打开后是什么。区分一个真正的源码仓库（可运行代码：训练/评测脚本、配置、`requirements`/环境声明、带安装步骤的 README）与一个仅是*项目/落地页*、付费页、404、或"按需索取"承诺。点名你真正看到的关键文件（或指出它们的缺失）。要避开的陷阱：指向研究组项目主页的链接**不算**"代码公开"——要明确说明。
+- **数据是否公开** — 你是否抵达了真正的数据集（或下载/生成脚本），还是只有文字描述？注明任何许可/访问门槛。
+- **训练权重 / checkpoint** — 是否已发布且可下载？
+- **超参数是否完整** — 论文/附录/仓库里是否足以不靠猜测就重跑？列出缺什么。
+- **计算资源是否注明** — 是否给出硬件 + wall-clock / GPU-小时？
+- **随机种子/方差是否报告** — 种子是否固定？是多次运行带误差棒，还是单次运行？
+
+最后给出一行 **可复现性结论**：仅凭*今天*真正公开的东西，一个独立团队能否复现核心结果？若无法确认仓库完整（或根本找不到），就如实说明——未经确认或部分发布不算通过。
 
 ---
 

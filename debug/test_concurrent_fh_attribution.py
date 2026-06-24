@@ -35,7 +35,13 @@ os.environ.setdefault('TOFU_FILE_HISTORY', '1')
 
 _READ_ONLY_TOOLS = frozenset({
     'list_dir', 'read_files', 'grep_search', 'find_files',
-    'web_search', 'fetch_url',
+    'web_search', 'fetch_url', 'inspect_image',
+})
+# Tools that journal+stamp (or journal) their own edits with a task_id,
+# so a round running only these cannot OWN an unattributed fh diff path.
+_TRACKED_EDIT_TOOLS = frozenset({
+    'write_file', 'apply_diff', 'apply_diffs',
+    'insert_content', 'insert_contents', 'run_command',
 })
 
 
@@ -68,13 +74,20 @@ def _commit_round_simulating_orchestrator(base, *, task_id, conv_id, mods,
             fh_changes = fh.diff_name_status(base, prev_snap, snap_id) or []
             tracked_index = load_tracked(base) or {}
 
-    round_can_write = any(
-        (r.get('toolName') or r.get('tool_name') or '') not in _READ_ONLY_TOOLS
-        and (r.get('toolName') or r.get('tool_name'))
-        for r in (tool_rounds or [])
-    )
+    # A round OWNS an unattributed fh path only if it ran an OPAQUE
+    # writer (code_exec / MCP / unknown) — read-only and tracked-edit
+    # tools leave no unstamped edits.
+    round_has_opaque_writer = False
+    for r in (tool_rounds or []):
+        tn = r.get('toolName') or r.get('tool_name') or ''
+        if not tn:
+            continue
+        if tn in _READ_ONLY_TOOLS or tn in _TRACKED_EDIT_TOOLS:
+            continue
+        round_has_opaque_writer = True
+        break
 
-    # Apply the attribution filter (Fix 2) + drift gate.
+    # Apply the attribution filter (Fix 2) + opaque-writer gate.
     own = task_id
     filtered = []
     for entry in fh_changes:
@@ -82,8 +95,8 @@ def _commit_round_simulating_orchestrator(base, *, task_id, conv_id, mods,
                   .get('last_writer_task_id') or '')
         if writer and writer != own:
             continue  # another concurrent task
-        if not writer and not round_can_write:
-            continue  # unattributed drift on a read-only round
+        if not writer and not round_has_opaque_writer:
+            continue  # unattributed path on a round with no opaque writer
         filtered.append(entry)
     return [e['path'] for e in filtered]
 
@@ -223,20 +236,47 @@ def main() -> int:
                   f"(got {e_results})")
             failed += 1
 
-        drift_f = 'drift_writecap.py'
+        # ``code_exec`` / MCP tools write WITHOUT journalling+stamping
+        # attribution, so an unattributed fh path on a round that ran one
+        # of them IS a legitimate side-channel edit and must surface.
+        drift_f = 'drift_opaque.py'
         with open(os.path.join(base, drift_f), 'w') as f:
             f.write('# side-channel edit, no task_id\n')
         fh.track_edit(base, drift_f)  # no task_id → last_writer_task_id == ''
         f_results = _commit_round_simulating_orchestrator(
             base, task_id='task-F', conv_id='conv-F', mods=[],
-            tool_rounds=[{'toolName': 'run_command'}],
+            tool_rounds=[{'toolName': 'code_exec'}],
         )
         if drift_f in f_results:
-            print(f"PASS — Task-F (write-capable round) still surfaces "
-                  f"unattributed drift (got {f_results})")
+            print(f"PASS — Task-F (opaque-writer round) still surfaces "
+                  f"unattributed side-channel edit (got {f_results})")
         else:
-            print(f"FAIL — Task-F dropped legitimate side-channel drift "
+            print(f"FAIL — Task-F dropped legitimate side-channel edit "
                   f"{drift_f} (got {f_results or '[]'})")
+            failed += 1
+
+        # ── Tracked-edit-only round drops concurrent drift ──
+        # A round that ran ONLY file-edit tools (write_file/apply_diff/…)
+        # stamps its OWN edits, so any UNATTRIBUTED fh path it picks up is
+        # a concurrent conversation's unstamped write on the shared root
+        # (e.g. another session journalling) and must be dropped — even
+        # though the round IS write-capable.  This is the regression the
+        # source-of-truth refactor closes.
+        drift_g = 'drift_concurrent.py'
+        with open(os.path.join(base, drift_g), 'w') as f:
+            f.write('# concurrent conv edit, unstamped\n')
+        fh.track_edit(base, drift_g)  # no task_id → last_writer_task_id == ''
+        g_results = _commit_round_simulating_orchestrator(
+            base, task_id='task-G', conv_id='conv-G', mods=[],
+            tool_rounds=[{'toolName': 'write_file'}, {'toolName': 'apply_diff'}],
+        )
+        if drift_g not in g_results:
+            print(f"PASS — Task-G (tracked-edit-only round) does NOT "
+                  f"misattribute concurrent unstamped drift "
+                  f"(got {g_results or '[]'})")
+        else:
+            print(f"FAIL — Task-G misattributed concurrent drift {drift_g} "
+                  f"(got {g_results})")
             failed += 1
 
     if failed:

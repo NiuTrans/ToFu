@@ -46,6 +46,9 @@ from lib.database._core import (  # noqa: F401
     close_thread_db,
     # Schema init
     init_db,
+    # Test-only: per-test SQLite isolation
+    reset_sqlite_for_tests,
+    restore_db_state,
     # JSON serialization
     json_dumps_pg,
     # Database availability
@@ -90,6 +93,7 @@ __all__ = [
     'warmup_db',
     'heal_toast_corruption',
     'init_db',
+    'reset_sqlite_for_tests', 'restore_db_state',
     '_column_exists',
     'db_available', 'pg_available',
     '_tune_connection',

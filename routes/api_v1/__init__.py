@@ -34,7 +34,6 @@ from .billing import api_v1_billing_bp
 from .users import api_v1_users_bp
 from .conversations import api_v1_conversations_bp
 from .agents import api_v1_agents_bp
-from .agent_backends import api_v1_agent_backends_bp
 from .agent_run import api_v1_agent_run_bp
 from .folders import api_v1_folders_bp
 from .orchestrations import api_v1_orchestrations_bp
@@ -73,7 +72,6 @@ ALL_V1_BLUEPRINTS = [
     api_v1_users_bp,
     api_v1_conversations_bp,
     api_v1_agents_bp,
-    api_v1_agent_backends_bp,
     api_v1_agent_run_bp,
     api_v1_folders_bp,
     api_v1_orchestrations_bp,

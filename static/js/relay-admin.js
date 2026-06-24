@@ -80,6 +80,8 @@
     try {
       const r = await _api('/api/v1/users');
       const users = r.users || [];
+      const bill = _billingEnabled;  // hide money columns in agent-only mode
+      const colspan = bill ? 7 : 6;
       block.innerHTML = `
         <div class="settings-row" style="gap:8px; margin-bottom:12px;">
           <input type="text" id="newUserEmail" placeholder="email@example.com" class="settings-input" style="flex:1">
@@ -92,7 +94,7 @@
         </div>
         <table class="settings-table">
           <thead><tr>
-            <th>邮箱</th><th>角色</th><th>状态</th><th>余额</th>
+            <th>邮箱</th><th>角色</th><th>状态</th>${bill ? '<th>余额</th>' : ''}
             <th>注册时间</th><th>最近登录</th><th>操作</th>
           </tr></thead>
           <tbody>${users.map(u => `
@@ -100,23 +102,27 @@
               <td>${_esc(u.email)}</td>
               <td>${_esc(u.role)}</td>
               <td>${_esc(u.status)}</td>
-              <td class="balance-cell">…</td>
+              ${bill ? '<td class="balance-cell">…</td>' : ''}
               <td>${_esc(_fmtTime(u.created_at))}</td>
               <td>${_esc(_fmtTime(u.last_login_at))}</td>
               <td>
-                <button class="btn btn-secondary btn-sm" onclick="relayAdminTopup('${_esc(u.id)}')">+充值</button>
+                ${bill ? `<button class="btn btn-secondary btn-sm" onclick="relayAdminTopup('${_esc(u.id)}')">+充值</button>` : ''}
+                ${bill ? `<button class="btn btn-secondary btn-sm" onclick="relayAdminViewPayments('${_esc(u.id)}','${_esc(u.email)}')">支付</button>` : ''}
                 <button class="btn btn-secondary btn-sm" onclick="relayAdminToggleStatus('${_esc(u.id)}', '${_esc(u.status)}')">${u.status === 'active' ? '停用' : '启用'}</button>
               </td>
-            </tr>`).join('') || '<tr><td colspan="7" style="text-align:center;opacity:0.5">还没有用户</td></tr>'}</tbody>
+            </tr>
+            <tr class="pay-drill" data-drill="${_esc(u.id)}" style="display:none"><td colspan="${colspan}" style="background:var(--panel-2,#232a3a);padding:0;"></td></tr>`).join('') || `<tr><td colspan="${colspan}" style="text-align:center;opacity:0.5">还没有用户</td></tr>`}</tbody>
         </table>`;
-      // Lazy-load each user's balance.
-      for (const u of users) {
-        try {
-          const w = await _api('/api/v1/billing/wallet?user_id=' +
-                                encodeURIComponent(u.id));
-          const cell = block.querySelector(`tr[data-uid="${u.id}"] .balance-cell`);
-          if (cell) cell.textContent = _fmtMicro(w.balance_micro) + ' c';
-        } catch (_) { /* swallow per-row errors */ }
+      // Lazy-load each user's balance (only in full-relay mode).
+      if (bill) {
+        for (const u of users) {
+          try {
+            const w = await _api('/api/v1/billing/wallet?user_id=' +
+                                  encodeURIComponent(u.id));
+            const cell = block.querySelector(`tr[data-uid="${u.id}"] .balance-cell`);
+            if (cell) cell.textContent = _fmtMicro(w.balance_micro) + ' c';
+          } catch (_) { /* swallow per-row errors */ }
+        }
       }
     } catch (e) {
       block.innerHTML = '<span style="color:var(--accent-danger,#e25)">加载失败:' + _esc(e.message) + '</span>';
@@ -161,6 +167,49 @@
   }
   window.relayAdminTopup = relayAdminTopup;
 
+  // Per-user payments drill-down. Toggles an inline row under the user
+  // that lazy-loads /api/v1/billing/payments?user_id= (admin-scoped).
+  async function relayAdminViewPayments(userId, email) {
+    const drill = document.querySelector(`tr.pay-drill[data-drill="${CSS.escape(userId)}"]`);
+    if (!drill) return;
+    const cell = drill.querySelector('td');
+    if (drill.style.display !== 'none') {  // toggle closed
+      drill.style.display = 'none';
+      return;
+    }
+    drill.style.display = '';
+    cell.innerHTML = '<div style="padding:10px;opacity:.6;">加载支付记录…</div>';
+    try {
+      const r = await _api('/api/v1/billing/payments?limit=100&user_id=' +
+                            encodeURIComponent(userId));
+      const payments = r.payments || [];
+      cell.innerHTML = `
+        <div style="padding:10px 14px;">
+          <strong>${_esc(email)}</strong> 的支付记录(${payments.length})
+          <table class="settings-table" style="margin-top:6px;">
+            <thead><tr>
+              <th>时间</th><th>提供商</th><th>金额</th><th>币种</th>
+              <th>入账</th><th>状态</th><th>外部 ID</th>
+            </tr></thead>
+            <tbody>${payments.map(p => `
+              <tr>
+                <td>${_esc(_fmtTime(p.created_at))}</td>
+                <td>${_esc(p.provider)}</td>
+                <td>${(p.amount_minor / 100).toFixed(2)}</td>
+                <td>${_esc(p.currency)}</td>
+                <td>${_fmtMicro(p.credit_micro)} c</td>
+                <td>${_esc(p.status)}</td>
+                <td><code style="font-size:11px;">${_esc(p.provider_id || '—')}</code></td>
+              </tr>`).join('') || '<tr><td colspan="7" style="text-align:center;opacity:0.5">无支付记录</td></tr>'}</tbody>
+          </table>
+        </div>`;
+    } catch (e) {
+      cell.innerHTML = '<div style="padding:10px;color:var(--danger,#e25)">加载失败:' +
+        _esc(e.message) + '</div>';
+    }
+  }
+  window.relayAdminViewPayments = relayAdminViewPayments;
+
   async function relayAdminToggleStatus(userId, currentStatus) {
     const next = currentStatus === 'active' ? 'suspended' : 'active';
     if (!await showConfirm(`将该用户改为 ${next}?`)) return;
@@ -174,7 +223,14 @@
   }
   window.relayAdminToggleStatus = relayAdminToggleStatus;
 
-  // ── Pricing tab ─────────────────────────────────────────────────
+  // ── Pricing tab (margin-only) ───────────────────────────────────
+  //
+  // Per-model RATES are NO LONGER editable here. They are authoritative in
+  // lib/pricing.py (the single cost engine lib.cost.compute_cost reads them),
+  // so a second writable rate table would only drift — exactly the bug the
+  // 2026-06-24 unification removed. The ONLY billing knob still tunable from
+  // the UI is the relay profit margin; the model rates below are read-only,
+  // shown for reference.
 
   async function refreshPricing() {
     const block = document.getElementById('relayPricingBlock');
@@ -183,34 +239,60 @@
       const r = await _api('/api/v1/billing/pricing');
       const models = r.models || {};
       const margin = r.default_margin || 0;
+      const _roCell = (v) => `<td style="opacity:.7">${v ? _fmtMicro(v) : '—'}</td>`;
+      const _roRow = (name, p) => {
+        p = p || {};
+        return `<tr><td><code>${_esc(name)}</code></td>` +
+          _roCell(p.input_per_mtok_micro) + _roCell(p.output_per_mtok_micro) +
+          _roCell(p.cache_read_per_mtok_micro) + _roCell(p.cache_write_per_mtok_micro) +
+          `</tr>`;
+      };
       block.innerHTML = `
-        <p class="settings-desc">默认利润率: <strong>${(margin * 100).toFixed(0)}%</strong>
-          (基础价 × (1 + 利润率) = 客户最终价)</p>
+        <div class="settings-row" style="gap:8px;margin-bottom:8px;align-items:center;">
+          <label>默认利润率(%):</label>
+          <input type="number" id="priceMargin" min="0" max="10000" step="1"
+                 class="settings-input" style="width:100px" value="${(margin * 100)}">
+          <button class="btn btn-primary btn-sm" onclick="relayAdminSaveMargin()">保存利润率</button>
+        </div>
+        <span class="settings-desc" style="display:block;margin:0 0 12px;">基础价 × (1 + 利润率) = 客户最终价。这是本页唯一可调的计费旋钮。</span>
+        <div id="pricingSaveResult"></div>
+        <p class="settings-desc" style="margin:12px 0 6px;">
+          <strong>模型费率为只读。</strong>费率的唯一真实来源是 <code>lib/pricing.py</code>
+          (单一成本引擎 <code>lib.cost.compute_cost</code> 读取它,显示与扣费同源);
+          此处不再可编辑,以免出现第二份会漂移的费率表。如需改价请编辑 <code>lib/pricing.py</code>。
+        </p>
         <table class="settings-table">
           <thead><tr>
-            <th>模型</th>
-            <th>输入(µ/Mtok)</th>
-            <th>输出(µ/Mtok)</th>
-            <th>缓存命中(µ/Mtok)</th>
-            <th>缓存写入(µ/Mtok)</th>
+            <th>模型</th><th>输入(µ/Mtok)</th><th>输出(µ/Mtok)</th>
+            <th>缓存命中(µ/Mtok)</th><th>缓存写入(µ/Mtok)</th>
           </tr></thead>
-          <tbody>${Object.entries(models).map(([name, p]) => `
-            <tr>
-              <td><code>${_esc(name)}</code></td>
-              <td>${(p.input_per_mtok_micro || 0).toLocaleString()}</td>
-              <td>${(p.output_per_mtok_micro || 0).toLocaleString()}</td>
-              <td>${(p.cache_read_per_mtok_micro || 0).toLocaleString() || '—'}</td>
-              <td>${(p.cache_write_per_mtok_micro || 0).toLocaleString() || '—'}</td>
-            </tr>`).join('')}</tbody>
-        </table>
-        <p class="settings-desc" style="margin-top:14px;">
-          目前只读。直接编辑 <code>data/config/pricing.json</code> 后,任意 API 请求会触发热重载——无需重启。
-          1 credit ≈ US $0.001 (默认换算)。
-        </p>`;
+          <tbody>
+            ${_roRow('default_model (兜底)', r.default_model || {})}
+            ${Object.entries(models).map(([n, p]) => _roRow(n, p)).join('')}
+          </tbody>
+        </table>`;
     } catch (e) {
       block.innerHTML = '<span style="color:var(--accent-danger,#e25)">加载失败:' + _esc(e.message) + '</span>';
     }
   }
+
+  async function relayAdminSaveMargin() {
+    const marginPct = parseFloat(document.getElementById('priceMargin').value);
+    if (!isFinite(marginPct) || marginPct < 0) { showAlert('利润率无效'); return; }
+    const div = document.getElementById('pricingSaveResult');
+    try {
+      await _api('/api/v1/billing/pricing', {
+        method: 'PUT',
+        body: JSON.stringify({ default_margin: marginPct / 100 }),
+      });
+      if (div) div.innerHTML = '<p style="color:var(--accent,#5a8);margin:8px 0 0;">' +
+        '利润率已保存并热重载。</p>';
+    } catch (e) {
+      if (div) div.innerHTML = '<p style="color:var(--danger,#e25);margin:8px 0 0;">保存失败:' +
+        _esc(e.message) + '</p>';
+    }
+  }
+  window.relayAdminSaveMargin = relayAdminSaveMargin;
 
   // ── Redeem codes tab ────────────────────────────────────────────
 
@@ -315,7 +397,100 @@
     }
   }
 
-  // ── Hook into the existing tab-switch flow ──────────────────────
+  // ── Standalone /admin page support ──────────────────────────────
+  // The four panels also live on the dedicated /admin page (served from
+  // static/admin.html, reusing the dashboard shell). That page exposes a
+  // simple tab strip whose buttons call window.relayAdminSwitch(name) and
+  // sets window.__RELAY_ADMIN_PAGE = true so we render directly instead of
+  // monkey-patching the Settings modal (which doesn't exist there).
+  function relayAdminSwitch(name) {
+    document.querySelectorAll('.pane').forEach(p =>
+      p.classList.toggle('active', p.id === 'pane-' + name));
+    document.querySelectorAll('.nav-tabs button').forEach(b =>
+      b.classList.toggle('active', b.dataset.pane === name));
+    if (name === 'relayUsers')    refreshUsers();
+    if (name === 'relayPricing')  refreshPricing();
+    if (name === 'relayCodes')    refreshCodes();
+    if (name === 'relayPayments') refreshPayments();
+  }
+  window.relayAdminSwitch = relayAdminSwitch;
+
+  // Relay billing posture (full-relay vs agent-only). Set during boot;
+  // when false we hide the money panels (Pricing/Codes/Payments) and the
+  // per-user balance/top-up controls because the backend returns 404 on
+  // every money-moving route in agent-only mode.
+  let _billingEnabled = true;
+  let _modelRelayEnabled = true;
+
+  async function _loadRelayPolicy() {
+    try {
+      const caps = await _api('/api/v1/capabilities');
+      const relay = (caps && (caps.relay || (caps.data && caps.data.relay))) || {};
+      if (typeof relay.billing_enabled === 'boolean') {
+        _billingEnabled = relay.billing_enabled;
+      }
+      if (typeof relay.model_relay_enabled === 'boolean') {
+        _modelRelayEnabled = relay.model_relay_enabled;
+      }
+    } catch (e) {
+      console.warn('[RelayAdmin] relay policy load failed:', e);
+    }
+    window.__RELAY_BILLING_ENABLED = _billingEnabled;
+    window.__RELAY_MODEL_ENABLED = _modelRelayEnabled;
+  }
+
+  async function _bootStandalonePage() {
+    const gate = document.getElementById('adminGate');
+    const shell = document.getElementById('adminShell');
+    const ok = await _shouldShowAdminTabs();
+    if (!ok) {
+      if (gate) gate.style.display = '';
+      if (shell) shell.style.display = 'none';
+      return;
+    }
+    if (gate) gate.style.display = 'none';
+    if (shell) shell.style.display = '';
+    await _loadRelayPolicy();
+    // Hide the three money panels + tab buttons when billing is off.
+    if (!_billingEnabled) {
+      ['relayPricing', 'relayCodes', 'relayPayments'].forEach(name => {
+        const btn = document.querySelector(`.nav-tabs button[data-pane="${name}"]`);
+        if (btn) btn.style.display = 'none';
+      });
+    }
+    // Surface a banner whenever the deployment is restricted on EITHER
+    // axis (no billing, or BYO-only model access). The two flags are
+    // independent (see lib/relay_config.py).
+    if (!_billingEnabled || !_modelRelayEnabled) {
+      const banner = document.getElementById('agentOnlyBanner');
+      const txt = document.getElementById('agentOnlyBannerText');
+      if (txt) {
+        const parts = [];
+        if (!_modelRelayEnabled) {
+          parts.push('BYO-only：用户必须使用各自注册的模型端点（' +
+            '<code>/api/v1/providers</code> → <code>agents:run</code>），' +
+            '新发放的密钥不含 <code>chat</code> 权限，无法访问平台模型池。');
+        }
+        if (!_billingEnabled) {
+          parts.push('未计费：平台不收取费用，「定价 / 兑换码 / 支付」已隐藏。');
+        }
+        txt.innerHTML = parts.join(' ');
+      }
+      if (banner) banner.style.display = '';
+    }
+    relayAdminSwitch('relayUsers');
+  }
+
+  if (window.__RELAY_ADMIN_PAGE) {
+    if (document.readyState !== 'loading') {
+      _bootStandalonePage();
+    } else {
+      document.addEventListener('DOMContentLoaded', _bootStandalonePage);
+    }
+    return;  // standalone page never touches the Settings modal
+  }
+
+  // ── Hook into the existing tab-switch flow (in-app Settings) ────
 
   const _origSwitch = window.switchSettingsTab;
   if (typeof _origSwitch === 'function') {

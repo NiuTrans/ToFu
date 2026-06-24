@@ -143,7 +143,7 @@ class TestToCfg(unittest.TestCase):
             'browserEnabled', 'swarmEnabled', 'imageGenEnabled',
             'humanGuidanceEnabled', 'schedulerEnabled', 'mcpEnabled',
             'codeExecEnabled', 'desktopEnabled',
-            'agentBackend', 'autoApply', 'keepToolHistory',
+            'autoApply', 'keepToolHistory',
             'disableModelFallback',
         ]:
             self.assertIn(key, d, f'orchestrator-read key missing: {key}')
@@ -173,15 +173,13 @@ class TestOpenAPISchema(unittest.TestCase):
         self.assertTrue(s.get('additionalProperties'))
         self.assertIn('properties', s)
         for required in ('model', 'maxTokens', 'thinkingDepth',
-                          'searchMode', 'projectPath', 'agentBackend'):
+                          'searchMode', 'projectPath'):
             self.assertIn(required, s['properties'], f'missing {required}')
 
     def test_schema_enums_present(self):
         s = TofuOptions.openapi_schema()
         self.assertIn('enum', s['properties']['searchMode'])
         self.assertIn('multi', s['properties']['searchMode']['enum'])
-        self.assertIn('enum', s['properties']['agentBackend'])
-        self.assertIn('builtin', s['properties']['agentBackend']['enum'])
 
     def test_schema_descriptions_present(self):
         s = TofuOptions.openapi_schema()

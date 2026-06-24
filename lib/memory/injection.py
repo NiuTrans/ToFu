@@ -85,7 +85,7 @@ Use scope='project' or 'global'.
 
 
 
-def build_memory_context(project_path=None):
+def build_memory_context(project_path=None, extra_paths=None):
     """Build a minimal memory hint for injection.
 
     Since memories are now discovered via the `search_memories` tool,
@@ -94,17 +94,29 @@ def build_memory_context(project_path=None):
 
     Args:
         project_path: Path to project for project-scoped memories.
+        extra_paths: Additional workspace roots (multi-root session) whose
+            memories are unioned in alongside the primary root's.
 
     Returns None if no eligible memories exist, otherwise a short hint string.
     """
-    memories = get_eligible_memories(project_path)
+    memories = get_eligible_memories(project_path, extra_paths=extra_paths)
     if not memories:
         return None
 
-    n = len(memories)
+    # ★ CACHE-CRITICAL: this hint is appended to the system message (messages[0])
+    #   as a cache-stable block. The exact memory COUNT must NOT appear here —
+    #   it changes the moment the model calls create/delete/merge_memories
+    #   during a turn, which rewrites bytes inside the cached prompt prefix and
+    #   invalidates the ENTIRE messages-array cache from messages[0] onward
+    #   (every following message reads from a now-changed prefix → full body
+    #   re-write, cache_read pinned at the static tools/system floor). The
+    #   precise N has marginal value to the model (it has the search_memories
+    #   tool + the per-turn <relevant_memories> prefetch block), so we keep the
+    #   wording byte-stable across memory-CRUD turns. See
+    #   .tofu/skills/prefix-mutation-cache-miss-truncate-old-tool-results.md.
     return (
-        f'You have {n} accumulated memories available. '
-        f'A `<relevant_memories>` block is auto-injected when prefetch finds matches; '
-        f'call search_memories(query) only when you specifically suspect a past project '
-        f'convention or logged lesson applies (not as a generic discovery step).'
+        'You have accumulated memories available. '
+        'A `<relevant_memories>` block is auto-injected when prefetch finds matches; '
+        'call search_memories(query) only when you specifically suspect a past project '
+        'convention or logged lesson applies (not as a generic discovery step).'
     )

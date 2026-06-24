@@ -5,8 +5,10 @@ list_dir, read_files) to understand project structure at runtime.
 
 This module provides ``get_context_for_prompt()`` which assembles the
 SYSTEM-LEVEL context block: the project header, multi-root workspace topology,
-and any project intelligence file (CLAUDE.md / .cursorrules / AGENTS.md /
-COPILOT.md) that lives in the workspace.
+any project intelligence file (CLAUDE.md / .cursorrules / AGENTS.md /
+COPILOT.md) that lives in the workspace, and the project evolution journal
+(``JOURNAL.md`` — auto-seeded on a writable primary root that lacks one, then
+injected so the model reads and maintains it).
 
 It does NOT enumerate per-tool descriptions — each tool's own usage prose now
 lives in its API-level ``description`` field (see ``lib/tools/*.py``), which
@@ -28,6 +30,96 @@ from lib.project_mod.config import (
 )
 
 logger = get_logger(__name__)
+
+# Name of the project iteration journal — a living lab-notebook the agent
+# reads AND writes (distinct from the immutable CLAUDE.md rules file). Named
+# ``JOURNAL.md`` rather than ``CHANGE.md``/``CHANGELOG.md`` so the model does
+# not fall into the "Keep a Changelog" prior (terse versioned release bullets)
+# — a free-form dev journal is what we want.
+_JOURNAL_FILE = 'JOURNAL.md'
+
+
+def _ensure_journal_gitignored(root: str) -> None:
+    """Add ``JOURNAL.md`` to ``root``'s ``.gitignore`` so it isn't committed.
+
+    The journal is a per-developer working artifact, not source — auto-creating
+    it must not cause accidental commits. We only touch ``.gitignore`` when the
+    root is a git repo (has a ``.git`` entry) or already has a ``.gitignore``;
+    we never create a stray ``.gitignore`` in a non-git directory. Idempotent:
+    if the file is already ignored (as a bare or rooted entry) we do nothing.
+    Best-effort — any failure is logged, never raised into prompt build.
+    """
+    gitignore = os.path.join(root, '.gitignore')
+    has_gitignore = os.path.isfile(gitignore)
+    if not has_gitignore and not os.path.exists(os.path.join(root, '.git')):
+        return  # not a git repo and no .gitignore — leave the dir untouched
+    try:
+        existing = ''
+        if has_gitignore:
+            with open(gitignore, encoding='utf-8', errors='replace') as f:
+                existing = f.read()
+            ignored = {ln.strip() for ln in existing.splitlines()}
+            if _JOURNAL_FILE in ignored or f'/{_JOURNAL_FILE}' in ignored:
+                return  # already ignored
+        block = (f"# AI assistant evolution journal (per-developer, not source)\n"
+                 f"{_JOURNAL_FILE}\n")
+        if existing and not existing.endswith('\n'):
+            block = '\n' + block
+        with open(gitignore, 'a', encoding='utf-8') as f:
+            f.write(block)
+        logger.info('[Context] Added %s to %s', _JOURNAL_FILE, gitignore)
+    except OSError as e:
+        logger.warning('[Context] Failed to update .gitignore at %s: %s', gitignore, e)
+
+
+def _journal_seed() -> str:
+    """Return the seed content written when a project has no ``JOURNAL.md``.
+
+    The seed explains what the journal is for, lays out the basic rules for
+    tracking large-scale project evolution, and explicitly instructs the
+    agent to keep updating it and to reference it at the start of each
+    session. It is intentionally rule-text only (no fabricated history) — the
+    agent fills in real entries as the project evolves.
+    """
+    return """# Project Journal
+
+> This file is the project's **evolution journal** — a living record the AI
+> assistant maintains across sessions. It is NOT a rules file (project rules
+> live in CLAUDE.md / AGENTS.md if present) and NOT a versioned changelog.
+> It is a free-form dev log of *how and why* this project changes over time.
+
+## How to use this file
+
+- **Read it first.** At the start of a session, read this journal to understand
+  how the project reached its current state before making changes.
+- **Keep it current — on your own initiative.** After any meaningful change,
+  append a dated entry yourself. This is a standing, pre-authorized action: you
+  do NOT need to ask the user before adding an entry, and you should not pause
+  to request permission to update the journal. Do not rewrite or delete past
+  entries — the history is the point; only ever append.
+- **Record the *why*, not just the *what*.** A diff shows what changed; this
+  journal explains the reasoning a future reader (human or model) could not
+  reconstruct from the code alone.
+
+## What to record
+
+- **Experimental projects:** methods/approaches tried, why each was adopted or
+  abandoned, hyperparameter or design changes, and experiment results
+  (metrics, observations, dead ends).
+- **Engineering projects:** technology-selection changes and their rationale,
+  refactoring steps and their motivation, architectural decisions, and the
+  current status / known issues / next steps.
+
+## Entries
+
+<!-- Append newest entries at the top. Suggested format:
+
+### YYYY-MM-DD — short title
+- **Change:** what changed
+- **Why:** the reasoning / problem being solved
+- **Result / status:** outcome, metrics, or current state
+-->
+"""
 
 
 # ═══════════════════════════════════════════════════════
@@ -68,6 +160,13 @@ def get_context_for_prompt(base_path=None, conv_id=None):
                    if rs.get('path') != path}
     if not path:
         return None
+
+    # Is the PRIMARY root writable?  Used below to decide whether to nudge
+    # the model to create the iteration journal (never nudge inside a
+    # read-only root — writes there are refused anyway).
+    primary_is_ro = any(rs.get('access') == 'ro'
+                        for rs in _roots_snapshot.values()
+                        if rs.get('path') == path)
 
     logger.debug('[Context] Building prompt for path=%s, extra_roots=%s',
                  path, list(extra_roots.keys()) if extra_roots else '[]')
@@ -174,5 +273,74 @@ def get_context_for_prompt(base_path=None, conv_id=None):
             except OSError as e:
                 logger.warning('[Context] Failed to read project intelligence file %s: %s',
                                intel_path, e)
+
+    # ═══════════════════════════════════════════════════════
+    #  JOURNAL.md — the project evolution journal (auto-created)
+    # ═══════════════════════════════════════════════════════
+    # Unlike CLAUDE.md (immutable rules the agent OBEYS), JOURNAL.md is a
+    # living dev log the agent READS and WRITES: methods/tech tried and why
+    # they changed, experiment results, refactoring decisions and current
+    # status. Option A: when the primary root is WRITABLE and has no journal,
+    # we lazily SEED one here (at context-build time, not at path-selection
+    # time) with the evolution-tracking rules + the update/reference
+    # instruction, so the model both knows the file exists and is told to keep
+    # it current. We NEVER clobber an existing journal, and read-only primaries
+    # are skipped entirely (a write there would be refused).
+    journal_path = os.path.join(path, _JOURNAL_FILE)
+    journal_content = ''
+    journal_exists = os.path.isfile(journal_path)
+    if not journal_exists and not primary_is_ro:
+        # Double-check the resolver agrees this path is writable before
+        # touching disk — a root may be flagged read-only via the conv-scoped
+        # registry even when the snapshot's primary entry isn't.
+        try:
+            from lib.project_mod.config import is_readonly_path
+            blocked = is_readonly_path(journal_path, conv_id)
+        except Exception as e:
+            logger.debug('[Context] is_readonly_path check failed for %s: %s',
+                         journal_path, e)
+            blocked = False
+        if not blocked:
+            try:
+                from lib.json_store import write_text_atomic
+                write_text_atomic(journal_path, _journal_seed())
+                journal_exists = True
+                logger.info('[Context] Auto-created project journal: %s', journal_path)
+                _ensure_journal_gitignored(path)
+                try:
+                    from lib.log import audit_log
+                    audit_log('journal_autocreate', path=journal_path)
+                except Exception as _e:
+                    logger.debug('[Context] journal audit_log failed: %s', _e)
+            except OSError as e:
+                logger.warning('[Context] Failed to auto-create journal %s: %s',
+                               journal_path, e)
+
+    if journal_exists:
+        try:
+            with open(journal_path, encoding='utf-8', errors='replace') as f:
+                journal_content = f.read(32_000)
+        except OSError as e:
+            logger.warning('[Context] Failed to read journal file %s: %s',
+                           journal_path, e)
+            journal_content = ''
+
+    if journal_content.strip():
+        ctx += (f"\n{'='*50}\n"
+                f"Project Journal — {_JOURNAL_FILE}\n"
+                f"{'='*50}\n"
+                f"(Auto-detected from {journal_path})\n"
+                f"This is the project's evolution journal — a record of exploration "
+                f"and decisions, NOT a rules file. Read it to understand how the "
+                f"project reached its current state (method/technology changes and "
+                f"why, experiment results, refactoring history, current status). As "
+                f"you make meaningful changes, APPEND dated entries on your own "
+                f"initiative so the next session can pick up where you left off — "
+                f"updating this journal is a standing, pre-authorized action that "
+                f"needs NO user confirmation; never pause to ask before adding an "
+                f"entry.\n\n"
+                f"{journal_content.strip()}\n")
+        logger.info('[Context] Injected project journal: %s (%d chars)',
+                    journal_path, len(journal_content))
 
     return ctx

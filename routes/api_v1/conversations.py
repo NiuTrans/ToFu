@@ -358,4 +358,40 @@ async def create_branch(conv_id, msg_idx):
 # by routes/conversations.py:delete_branch on this same blueprint.
 
 
+@api_v1_conversations_bp.route(
+    '/api/v1/conversations/<conv_id>/toolset/apply',
+    methods=['POST'],
+)
+@require_scope('conversations')
+@api_meta(
+    summary='Apply a pending tool-toggle change to an active conversation',
+    description=(
+        'Clears the per-conversation tool-schema latch so the next chat '
+        'round re-assembles the tool list from the CURRENT toggles. The '
+        'latch normally freezes the tool array for a conversation\'s '
+        'lifetime to keep the prompt cache prefix byte-identical; a '
+        'mid-conversation toggle (Swarm/Scheduler/Browser/…) is otherwise '
+        'deferred to the next NEW conversation. Call this when the user '
+        'explicitly chooses "Apply now" — it accepts a one-time prompt-cache '
+        'rebuild (~65k tokens) in exchange for the new tools taking effect '
+        'immediately.\n\nResponse: ``{ok: true, conv_id}``.'),
+    tags=['conversations'], scope='conversations',
+)
+async def apply_toolset(conv_id):
+    if not conv_id:
+        return api_bad_request('conv_id is required', field='conv_id')
+    try:
+        from lib.tools import clear_tool_list_latch
+        clear_tool_list_latch(conv_id)
+    except Exception as e:
+        logger.error('[api_v1.conv] toolset apply failed conv=%s: %s',
+                     conv_id[:8], e, exc_info=True)
+        return api_internal_error(f'Failed to apply toolset change: {e}')
+    audit_log('toolset_apply', conv_id=conv_id,
+              key_id=(current_auth().key_id if current_auth() else ''))
+    logger.info('[api_v1.conv] toolset latch cleared (Apply now) conv=%s',
+                conv_id[:8])
+    return api_ok(conv_id=conv_id)
+
+
 __all__ = ['api_v1_conversations_bp']

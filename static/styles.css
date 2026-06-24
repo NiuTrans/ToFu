@@ -1,8 +1,8 @@
 /* v20260408b — attach button: borderless ghost icon, absolutely positioned inside textarea area */
 :root{--bg-primary:#0a0a0c;--bg-secondary:#111115;--bg-tertiary:#1a1a21;--bg-hover:#22222b;--bg-active:#2a2a35;--border:#2a2a35;--border-light:#33333f;--text-primary:#e8e8ed;--text-secondary:#9898a8;--text-tertiary:#6a6a7a;--accent:#6e56cf;--accent-hover:#7c66d4;--accent-subtle:rgba(110,86,207,0.12);--thinking-bg:rgba(207,167,56,0.06);--thinking-border:rgba(207,167,56,0.25);--thinking-text:#cfb850;--error-bg:rgba(207,56,56,0.08);--error-border:rgba(207,56,56,0.3);--error-text:#cf5050;--user-bubble:#1e1b4b;--shadow:0 2px 12px rgba(0,0,0,0.4);--radius:12px;--radius-sm:8px;--radius-xs:6px;--transition:0.2s cubic-bezier(0.4,0,0.2,1);--search-blue:#3b82f6;--search-cyan:#06b6d4;--search-purple:#8b5cf6;--fetch-green:#10b981;--fetch-teal:#14b8a6}
-*{margin:0;padding:0;box-sizing:border-box}html{overflow:hidden;height:100%;width:100%}body{font-family:'Plus Jakarta Sans',-apple-system,sans-serif;background:var(--bg-primary);color:var(--text-primary);height:100vh;height:100dvh;overflow:hidden;display:flex;width:100%}
+*{margin:0;padding:0;box-sizing:border-box}html{overflow:hidden;height:100%;width:100%}body{font-family:'Plus Jakarta Sans','Jakarta Fallback',-apple-system,sans-serif;background:var(--bg-primary);color:var(--text-primary);height:100vh;height:100dvh;overflow:hidden;display:flex;width:100%}
 ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:transparent;border-radius:3px}::-webkit-scrollbar-thumb:hover{background:var(--border-light)}.conversations-list:hover::-webkit-scrollbar-thumb,.chat-container:hover::-webkit-scrollbar-thumb,.modal:hover::-webkit-scrollbar-thumb{background:var(--border)}.conversations-list,.chat-container,.modal{scrollbar-color:transparent transparent}.conversations-list:hover,.chat-container:hover,.modal:hover{scrollbar-color:var(--border) transparent}
-.sidebar{width:280px;min-width:280px;background:var(--bg-secondary);border-right:1px solid var(--border);display:flex;flex-direction:column;transition:margin-left var(--transition);z-index:20}.sidebar.collapsed{margin-left:-280px}.sidebar-header{padding:16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px}.sidebar-header h1{font-size:15px;font-weight:700;letter-spacing:0.06em;flex:1;display:flex;align-items:center;gap:5px;font-family:'Pixelify Sans','Press Start 2P',cursive}.sidebar-brand{display:inline-flex;letter-spacing:0.04em}.sidebar-brand-t,.sidebar-brand-o,.sidebar-brand-f,.sidebar-brand-u{-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}.sidebar-brand-t{background-image:linear-gradient(135deg,#8b6cf6,#a78bfa)}.sidebar-brand-o{background-image:linear-gradient(135deg,#a78bfa,#c4b5fd)}.sidebar-brand-f{background-image:linear-gradient(135deg,#7c3aed,#8b6cf6)}.sidebar-brand-u{background-image:linear-gradient(135deg,#6d28d9,#7c3aed)}.sidebar-tofu-icon{flex-shrink:0;color:var(--accent);-webkit-text-fill-color:var(--accent);opacity:0.85}
+.sidebar{width:280px;min-width:280px;background:var(--bg-secondary);border-right:1px solid var(--border);display:flex;flex-direction:column;transition:margin-left var(--transition);z-index:20}.sidebar.collapsed{margin-left:-280px}.sidebar-header{padding:16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px}.sidebar-header h1{font-size:15px;font-weight:700;letter-spacing:0.06em;flex:1;display:flex;align-items:center;gap:5px;font-family:'Pixelify Sans','Press Start 2P',cursive}.sidebar-brand{display:inline-flex;letter-spacing:0.04em}.sidebar-brand-t,.sidebar-brand-o,.sidebar-brand-f,.sidebar-brand-u{-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}.sidebar-brand-t{background-image:linear-gradient(135deg,#8b6cf6,#a78bfa)}.sidebar-brand-o{background-image:linear-gradient(135deg,#a78bfa,#c4b5fd)}.sidebar-brand-f{background-image:linear-gradient(135deg,#7c3aed,#8b6cf6)}.sidebar-brand-u{background-image:linear-gradient(135deg,#6d28d9,#7c3aed)}.sidebar-tofu-icon{flex-shrink:0;opacity:0.85}
 .sidebar-header-actions{display:flex;gap:2px;align-items:center}
 .sidebar-header-actions .action-btn{width:30px;height:30px}
 .sidebar-action-row{display:flex;gap:6px;padding:12px 16px;align-items:stretch}
@@ -311,7 +311,7 @@
 [data-theme="light"] .debug-msg-block.debug-msg-compacted{border-left-color:#b45309}
 [data-theme="tofu"] .debug-compact-badge{color:#B8884A;background:rgba(184,136,74,0.14);border-color:rgba(184,136,74,0.45)}
 [data-theme="tofu"] .debug-msg-block.debug-msg-compacted{border-left-color:#B8884A}
-.input-area{flex-shrink:0;background:var(--bg-primary);padding:12px 24px 20px;border-top:1px solid var(--border)}.input-inner{max-width:var(--toolbar-w,820px);margin:0 auto;transition:max-width .4s ease}.image-previews{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}.img-preview{position:relative;width:64px;height:64px;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border);cursor:pointer;transition:border-color .2s}.img-preview:hover{border-color:var(--accent)}.img-preview img{width:100%;height:100%;object-fit:cover}.img-preview .remove-img{position:absolute;top:2px;right:2px;width:18px;height:18px;background:rgba(0,0,0,0.7);color:white;border:none;border-radius:50%;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center}.img-preview .img-size{position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.7);color:#aaa;font-size:9px;text-align:center;padding:1px 0;font-family:'JetBrains Mono',monospace}.img-preview.pdf-page{border-color:rgba(207,167,56,0.35)}.img-preview .pdf-badge{position:absolute;top:2px;left:2px;background:rgba(207,167,56,0.9);color:#fff;font-size:7px;font-weight:700;padding:1px 4px;border-radius:3px;font-family:'JetBrains Mono',monospace}.img-preview.img-dragging{opacity:.5;cursor:grabbing}.img-preview.img-drop-target{border-color:var(--accent)}
+.input-area{flex-shrink:0;background:var(--bg-primary);padding:12px 24px 20px;border-top:1px solid var(--border)}.input-inner{max-width:var(--toolbar-w,820px);margin:0 auto;transition:max-width .4s ease}.image-previews{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}.img-preview{position:relative;width:64px;height:64px;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border);cursor:pointer;transition:border-color .2s,box-shadow .2s,transform .12s}.img-preview:hover{border-color:var(--accent)}.img-preview[data-img-idx]{cursor:grab}.img-preview[data-img-idx]:active{cursor:grabbing}.img-preview img{width:100%;height:100%;object-fit:cover}.img-preview .remove-img{position:absolute;top:2px;right:2px;width:18px;height:18px;background:rgba(0,0,0,0.7);color:white;border:none;border-radius:50%;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center}.img-preview .img-size{position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.7);color:#aaa;font-size:9px;text-align:center;padding:1px 0;font-family:'JetBrains Mono',monospace}.img-preview.pdf-page{border-color:rgba(207,167,56,0.35)}.img-preview .pdf-badge{position:absolute;top:2px;left:2px;background:rgba(207,167,56,0.9);color:#fff;font-size:7px;font-weight:700;padding:1px 4px;border-radius:3px;font-family:'JetBrains Mono',monospace}.img-preview.img-dragging{opacity:.4;cursor:grabbing}.img-preview[data-img-idx].img-drop-target{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent);transform:translateY(-2px) scale(1.04)}
 .pdf-progress{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--thinking-bg);border:1px solid var(--thinking-border);border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;color:var(--thinking-text);animation:fadeIn .3s ease}.pdf-progress .pulse{width:6px;height:6px;background:var(--thinking-text);border-radius:50%;animation:pulse 1.5s infinite;flex-shrink:0}.pdf-progress-bar{flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden}.pdf-progress-fill{height:100%;background:var(--thinking-text);border-radius:2px;transition:width .3s ease}
 /* ═══ Input Box: Flux Neural Interface ═══ */
 @property --glow-angle{syntax:'<angle>';initial-value:0deg;inherits:false}
@@ -517,6 +517,7 @@ textarea::placeholder{color:var(--text-tertiary)}
 /* ── Footer ── */
 .input-footer{display:flex;align-items:center;justify-content:center;padding:6px 0 0;gap:16px}
 .input-hint{font-size:10.5px;color:var(--text-tertiary);opacity:.5;letter-spacing:.02em}
+.input-hint-clip{width:12px;height:12px;vertical-align:-2px}
 #fileInput{display:none}
 @property --search-angle{syntax:'<angle>';initial-value:0deg;inherits:false}@keyframes searchBorderSpin{to{--search-angle:360deg}}@keyframes searchGlow{0%,100%{box-shadow:0 0 12px rgba(59,130,246,0.15),0 0 4px rgba(59,130,246,0.08)}50%{box-shadow:0 0 22px rgba(59,130,246,0.28),0 0 8px rgba(59,130,246,0.15)}}@keyframes searchGlowPurple{0%,100%{box-shadow:0 0 12px rgba(139,92,246,0.15),0 0 4px rgba(139,92,246,0.08)}50%{box-shadow:0 0 22px rgba(139,92,246,0.28),0 0 8px rgba(139,92,246,0.15)}}@keyframes searchIconPulse{0%{transform:scale(1) rotate(0deg)}30%{transform:scale(1.18) rotate(-8deg)}60%{transform:scale(.95) rotate(4deg)}100%{transform:scale(1) rotate(0deg)}}
 /* ═══════════════════════════════════════════════════
@@ -675,6 +676,7 @@ textarea::placeholder{color:var(--text-tertiary)}
 /* Batch slot error */
 .ig-batch-error{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:28px 16px;gap:6px;background:var(--bg-tertiary);border-radius:16px;border:1px solid rgba(239,68,68,0.15);text-align:center;min-height:160px}
 .ig-batch-error .ig-error-icon{font-size:22px}
+.ig-batch-error .ig-error-icon svg{width:22px;height:22px}
 .ig-batch-error .ig-error-title{font-size:12px;font-weight:700;color:var(--text-primary)}
 .ig-batch-error .ig-error-text{font-size:11px;color:var(--text-tertiary);max-width:200px;line-height:1.4}
 /* Batch error type colors */
@@ -694,6 +696,7 @@ textarea::placeholder{color:var(--text-tertiary)}
 /* Error card with retry */
 .ig-error-card{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px 24px;gap:10px;background:var(--bg-tertiary);border-radius:16px;border:1px solid rgba(239,68,68,0.2);box-shadow:0 4px 24px rgba(0,0,0,0.1);text-align:center;animation:igFadeIn .3s ease}
 .ig-error-icon{font-size:28px}
+.ig-error-icon svg{width:28px;height:28px;vertical-align:middle}
 .ig-error-card .ig-error-title{font-size:14px;font-weight:700;color:var(--text-primary)}
 .ig-error-card .ig-error-text{font-size:12px;color:var(--text-tertiary);max-width:400px;line-height:1.5}
 .ig-error-detail{font-size:11px;color:var(--text-tertiary);margin-top:2px}
@@ -821,6 +824,9 @@ textarea::placeholder{color:var(--text-tertiary)}
 .paper-divider:hover,.paper-divider.dragging{background:var(--accent)}
 .paper-divider::after{content:'';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:4px;height:30px;border-radius:3px;background:radial-gradient(circle,var(--text-tertiary) 1.3px,transparent 1.6px);background-size:4px 7px;opacity:0.45;transition:opacity .18s,height .18s}
 .paper-divider:hover::after,.paper-divider.dragging::after{opacity:0.8;height:46px}
+
+/* Mobile-only PDF⇄Reader view switcher — hidden on desktop (see @media ≤768px) */
+.paper-mobile-switch{display:none}
 
 /* ── Right: tabs panel (equal width with PDF) ── */
 .paper-right{flex:1;min-width:300px;display:flex;flex-direction:column;min-height:0;background:var(--bg-primary)}
@@ -1032,12 +1038,32 @@ textarea::placeholder{color:var(--text-tertiary)}
 .paper-retry-btn{margin-top:8px;padding:8px 20px;border:1px solid var(--border);border-radius:8px;background:var(--bg-hover);color:var(--text-primary);font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit}
 .paper-retry-btn:hover{background:var(--bg-tertiary);border-color:var(--border-light)}
 
-/* ── Mobile ── */
+/* ── Mobile: full-screen single-pane view + bottom PDF⇄Reader switcher ──
+ * On phones the desktop side-by-side split is unusable, so we show ONE pane
+ * at a time (the PDF or the Reader = Q&A/Report/Babel tabs), each filling the
+ * whole body, toggled by the .paper-mobile-switch bar pinned to the bottom.
+ * .paper-body[data-paper-view] is the source of truth (set by
+ * _setPaperMobileView() in paper-reader.js). */
 @media(max-width:768px){
-  .paper-body{flex-direction:column}
-  .paper-left{border-right:none;border-bottom:1px solid var(--border);max-height:50vh}
-  .paper-right{width:100%;max-width:none;min-width:0;flex:1}
+  /* Body becomes a positioning context for the two stacked full-size panes.
+   * Reserve room at the bottom for the fixed switcher + the iOS safe area. */
+  .paper-mode-container{--paper-switch-h:calc(54px + env(safe-area-inset-bottom,0px))}
+  .paper-body{position:relative;flex-direction:row;padding-bottom:var(--paper-switch-h)}
+  /* Both panes overlay the same area; the active one wins via [data-paper-view].
+   * !important defeats any stale inline width/flex left by a desktop divider drag. */
+  .paper-left,.paper-right{position:absolute!important;inset:0;width:auto!important;max-width:none!important;min-width:0!important;flex:none!important;border:none!important}
+  .paper-body[data-paper-view="pdf"] .paper-left{display:flex;z-index:2}
+  .paper-body[data-paper-view="pdf"] .paper-right{display:none}
+  .paper-body[data-paper-view="reader"] .paper-right{display:flex;z-index:2}
+  .paper-body[data-paper-view="reader"] .paper-left{display:none}
   .paper-divider{display:none}
+
+  /* Bottom switcher — fixed, full width, two big touch targets */
+  .paper-mobile-switch{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:25;height:var(--paper-switch-h);padding-bottom:env(safe-area-inset-bottom,0px);background:var(--bg-secondary);border-top:1px solid var(--border);box-shadow:0 -2px 12px rgba(0,0,0,0.12)}
+  .paper-mobile-switch-btn{flex:1;display:flex;align-items:center;justify-content:center;gap:7px;border:none;background:none;color:var(--text-tertiary);font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;-webkit-tap-highlight-color:transparent;border-top:2px solid transparent;transition:color .15s,background .15s}
+  .paper-mobile-switch-btn svg{flex-shrink:0}
+  .paper-mobile-switch-btn.active{color:var(--accent);background:var(--bg-hover);border-top-color:var(--accent)}
+
   .paper-pdf-toolbar{padding:4px 8px}
   .paper-sidebar-overlay{display:none!important}
   .sidebar.paper-active .sidebar-action-row,
@@ -1045,10 +1071,10 @@ textarea::placeholder{color:var(--text-tertiary)}
   .sidebar.paper-active .folder-tabs,
   .sidebar.paper-active .conversations-list{display:flex!important}
   .sidebar.paper-active .sidebar-header h1{display:flex!important}
-  .paper-tab-btn{padding:8px 6px;font-size:12px;gap:4px}
-  .paper-tab-btn svg{width:12px;height:12px}
+  .paper-tab-btn{padding:10px 6px;font-size:12px;gap:4px}
+  .paper-tab-btn svg{width:13px;height:13px}
   .paper-qa-input-area{padding:8px}
-  #paperQAInput{font-size:14px}
+  #paperQAInput{font-size:16px}
   .paper-report-content{padding:14px}
   .paper-landing{padding:24px 16px}
   .paper-landing h3{font-size:16px}
@@ -1925,6 +1951,83 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-send-btn:activ
 .ig-slot-retry-btn:hover{background:var(--bg-tertiary);border-color:var(--border-light);color:var(--text-primary)}
 
 
+/* ═══════════════════════════════════════════
+   ★ Paper Report — Enhanced render layer
+   (TOC sidebar · callouts · framed figures)
+   Source stays Markdown; this styles the
+   post-processed DOM built by _renderFinalReport().
+   ═══════════════════════════════════════════ */
+.paper-report-content.paper-report-enhanced,
+.paper-report-body.paper-report-enhanced{padding:0}
+.paper-report-doc{display:grid;grid-template-columns:1fr minmax(168px,216px);gap:30px;align-items:start;max-width:1180px;margin:0 auto;padding:24px 30px 64px}
+.paper-report-article{grid-column:1;min-width:0}
+.paper-report-doc > .paper-report-toc{grid-column:2}
+
+/* Article reuses the existing .paper-report-body/-content typography because
+   those selectors target descendants; we only need to ensure spacing reads
+   well as a standalone column. */
+.paper-report-article > :first-child{margin-top:0}
+.paper-report-article h2{scroll-margin-top:16px}
+.paper-report-article h3{scroll-margin-top:16px}
+
+/* ── Sticky TOC sidebar ── */
+.paper-report-toc{position:sticky;top:12px;align-self:start;max-height:calc(100vh - 160px);overflow-y:auto;font-size:12.5px;line-height:1.4;border-left:2px solid var(--border);padding:2px 0 2px 14px}
+.paper-report-toc-title{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text-tertiary);margin-bottom:8px}
+.paper-report-toc ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:1px}
+.paper-report-toc li{margin:0}
+.paper-report-toc li.toc-l3{padding-left:12px}
+.paper-report-toc a{display:block;padding:4px 8px;border-radius:6px;color:var(--text-secondary);text-decoration:none;border-left:2px solid transparent;margin-left:-16px;padding-left:14px;transition:color .15s,background .15s,border-color .15s;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.paper-report-toc li.toc-l3 a{font-size:11.5px;color:var(--text-tertiary)}
+.paper-report-toc a:hover{color:var(--text-primary);background:var(--bg-hover)}
+.paper-report-toc a.active{color:var(--accent);border-left-color:var(--accent);background:rgba(99,102,241,.08);font-weight:600}
+
+/* ── Callout boxes (decorated blockquotes) ── */
+.paper-report-article blockquote.paper-callout{border-left:none;padding:12px 14px 12px 42px;margin:16px 0;border-radius:8px;position:relative;color:var(--text-secondary);background:var(--bg-secondary);border:1px solid var(--border)}
+.paper-report-article blockquote.paper-callout > :first-child{margin-top:0}
+.paper-report-article blockquote.paper-callout > :last-child{margin-bottom:0}
+.paper-report-article blockquote.paper-callout::before{content:"";position:absolute;left:14px;top:14px;width:16px;height:16px;background-repeat:no-repeat;background-position:center;background-size:contain;opacity:.9}
+.paper-callout-note{background:rgba(99,102,241,.07);border-color:rgba(99,102,241,.28)}
+.paper-callout-note::before{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236366f1' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cline x1='12' y1='16' x2='12' y2='12'/%3E%3Cline x1='12' y1='8' x2='12.01' y2='8'/%3E%3C/svg%3E")}
+.paper-callout-tip{background:rgba(34,197,94,.07);border-color:rgba(34,197,94,.3)}
+.paper-callout-tip::before{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2322c55e' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 18h6'/%3E%3Cpath d='M10 22h4'/%3E%3Cpath d='M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.3h6c0-1 .4-1.8 1-2.3A7 7 0 0 0 12 2z'/%3E%3C/svg%3E")}
+.paper-callout-warning{background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.34)}
+.paper-callout-warning::before{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f59e0b' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z'/%3E%3Cline x1='12' y1='9' x2='12' y2='13'/%3E%3Cline x1='12' y1='17' x2='12.01' y2='17'/%3E%3C/svg%3E")}
+.paper-callout-important{background:rgba(239,68,68,.07);border-color:rgba(239,68,68,.32)}
+.paper-callout-important::before{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ef4444' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 9v4'/%3E%3Cpath d='M12 17h.01'/%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3C/svg%3E")}
+.paper-callout-takeaway{background:rgba(168,85,247,.08);border-color:rgba(168,85,247,.32)}
+.paper-callout-takeaway::before{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a855f7' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 11l3 3L22 4'/%3E%3Cpath d='M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11'/%3E%3C/svg%3E")}
+
+/* ── Framed figures ── */
+.paper-report-article figure.paper-figure{margin:20px 0;text-align:center}
+.paper-report-article figure.paper-figure img{margin:0 auto}
+.paper-report-article figure.paper-figure figcaption{margin-top:8px;font-size:12px;color:var(--text-tertiary);line-height:1.5;max-width:90%;margin-left:auto;margin-right:auto}
+
+@media(max-width:900px){
+  .paper-report-doc{grid-template-columns:1fr;padding:18px 18px 48px}
+  .paper-report-doc > .paper-report-toc{display:none}
+}
+
+/* ── Finish tag (model + cost badge, appended at report end) ── */
+.paper-report-finish-tag{display:flex;flex-wrap:wrap;align-items:center;gap:8px;
+  margin:36px 0 8px;padding:10px 14px;border-top:1px solid var(--border);
+  font-size:12px;color:var(--text-tertiary);line-height:1.4}
+.paper-report-finish-tag .paper-finish-label{font-size:11px;text-transform:uppercase;
+  letter-spacing:.5px;opacity:.7;margin-right:2px}
+.paper-report-finish-tag span:not(.paper-finish-label){display:inline-flex;align-items:center;gap:5px;
+  padding:3px 9px;border-radius:999px;background:var(--bg-secondary);border:1px solid var(--border)}
+.paper-report-finish-tag .paper-finish-model{color:var(--text-secondary);font-weight:600}
+.paper-report-finish-tag .paper-finish-model svg{opacity:.75}
+.paper-report-finish-tag .paper-finish-cost{color:#16a34a;border-color:rgba(22,163,74,.32);background:rgba(22,163,74,.08)}
+.paper-report-finish-tag .paper-finish-tokens{font-variant-numeric:tabular-nums}
+
+/* ── Per-theme flourishes ── */
+[data-theme="light"] .paper-report-toc-title{color:#9a8f7a}
+[data-theme="light"] .paper-report-article figure.paper-figure figcaption{font-family:'Source Serif Pro','Georgia',serif;font-style:italic}
+[data-theme="tofu"] .paper-report-toc{border-left:2px dashed #C4B89E}
+[data-theme="tofu"] .paper-report-toc a.active{background:rgba(187,149,114,.14);color:#8A6A48;border-left-color:#BB9572}
+[data-theme="tofu"] .paper-report-article blockquote.paper-callout{border-radius:0;border-width:2px}
+[data-theme="tofu"] .paper-report-finish-tag .paper-finish-cost{color:#5a7d3a;border-color:rgba(90,125,58,.3);background:rgba(90,125,58,.08)}
+
 
 /* ═══════════════════════════════════════════
    ★ Image Generation (legacy tool results)
@@ -1977,6 +2080,15 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-send-btn:activ
 .rf-img-grid:not(.rf-img-grid-multi) .rf-img-cap{max-width:340px}
 .message-body .rf-img-tile img{margin-bottom:0}
 @media (max-width:560px){.rf-img-tile,.rf-img-tile img,.rf-img-cap{max-width:140px}.rf-img-tile img{max-height:120px}}
+/* ── inspect_image (zoom/rotate/crop viewer) — cyan accent + ops chip ── */
+.ptool-inspectimg-block .ptool-icon{color:#22d3ee}
+.rf-inspect-chip{color:#22d3ee;background:rgba(34,211,238,0.12);border:1px solid rgba(34,211,238,0.32);font-family:var(--font-mono,monospace);font-size:10px;letter-spacing:.02em}
+/* A deliberate inspection deserves more room than a thumbnail — show it larger. */
+.rf-img-grid-inspect .rf-img-tile,
+.rf-img-grid-inspect .rf-img-tile img{max-width:420px}
+.rf-img-grid-inspect .rf-img-tile img{max-height:340px;border-color:rgba(34,211,238,0.3)}
+.rf-img-grid-inspect .rf-img-cap{max-width:420px}
+@media (max-width:560px){.rf-img-grid-inspect .rf-img-tile,.rf-img-grid-inspect .rf-img-tile img,.rf-img-grid-inspect .rf-img-cap{max-width:160px}.rf-img-grid-inspect .rf-img-tile img{max-height:140px}}
 .ig-svg-badge{font-family:var(--font-mono,monospace);font-size:10px;letter-spacing:.04em;font-weight:600}
 /* Saved-path chips below the generated image */
 .ig-path-bar{display:flex;flex-wrap:wrap;gap:6px;padding:6px 12px 10px;border-top:1px solid var(--border)}
@@ -2113,6 +2225,142 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-send-btn:activ
 /* ── Mobile breakpoint — see comprehensive version at end of file ── */
 .animation-slideUp{animation:slideUp .3s ease}
 .message-finish{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);user-select:none}.finish-tag,.token-tag{font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace;padding:2px 8px;border-radius:10px;line-height:1.4;white-space:nowrap}.finish-tag{color:var(--text-tertiary);background:var(--bg-tertiary);border:1px solid var(--border)}.finish-tag.ok{color:#34d399;background:rgba(52,211,153,0.08);border-color:rgba(52,211,153,0.2)}.finish-tag.warn{color:var(--thinking-text);background:var(--thinking-bg);border-color:var(--thinking-border)}.finish-tag.err{color:var(--error-text);background:var(--error-bg);border-color:var(--error-border)}.token-tag{color:var(--text-tertiary);background:transparent;border:1px solid var(--border);font-weight:500;letter-spacing:.02em}
+
+/* ═══════════════════════════════════════════
+   ★ Cost popover — styled click-to-open breakdown
+   (replaces the old raw title="" tooltip on .cost-tag)
+   ═══════════════════════════════════════════ */
+.cost-tag-detail{cursor:pointer;position:relative}
+.cost-tag-detail:hover{text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px}
+.cost-savings{color:#34d399;font-size:0.85em;margin-left:2px}
+.cost-popover{
+  z-index:10000;
+  width:max-content;max-width:min(360px,calc(100vw - 16px));
+  max-height:calc(100vh - 16px);
+  overflow-y:auto;overflow-x:hidden;
+  overscroll-behavior:contain;
+  background:var(--bg-secondary);
+  border:1px solid var(--border-light,var(--border));
+  border-radius:10px;
+  box-shadow:0 8px 28px rgba(0,0,0,0.35),0 2px 6px rgba(0,0,0,0.2);
+  padding:12px 14px;
+  font-family:'JetBrains Mono',ui-monospace,monospace;
+  font-size:11px;line-height:1.5;
+  color:var(--text-secondary);
+  user-select:text;
+  animation:cpFade .12s ease-out
+}
+/* Thin, theme-aware scrollbar so the panel scrolls cleanly */
+.cost-popover::-webkit-scrollbar{width:8px}
+.cost-popover::-webkit-scrollbar-thumb{
+  background:var(--border-light,var(--border));border-radius:4px
+}
+.cost-popover::-webkit-scrollbar-track{background:transparent}
+.cost-popover{scrollbar-width:thin}
+@keyframes cpFade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+.cost-popover .cp-section-title{
+  font-size:11px;font-weight:700;color:var(--text-primary);
+  letter-spacing:.02em;margin-bottom:8px
+}
+.cost-popover .cp-rounds{
+  display:flex;flex-direction:column;gap:7px;
+  margin-bottom:10px;padding-bottom:10px;
+  border-bottom:1px dashed var(--border)
+}
+.cost-popover .cp-round{
+  padding:6px 8px;border-radius:6px;
+  background:var(--bg-tertiary);
+  border-left:2px solid var(--border-light,var(--border))
+}
+.cost-popover .cp-round-head{
+  display:flex;justify-content:space-between;align-items:baseline;gap:10px
+}
+.cost-popover .cp-round-label{font-weight:600;color:var(--text-primary)}
+.cost-popover .cp-round-cost{color:var(--accent);font-weight:600}
+.cost-popover .cp-round-tokens{
+  display:flex;flex-wrap:wrap;gap:8px;margin-top:3px;color:var(--text-tertiary)
+}
+.cost-popover .cp-round-tokens .cp-think{color:#a78bfa}
+.cost-popover .cp-round-tokens .cp-hit{color:#34d399}
+.cost-popover .cp-round-tokens .cp-write{color:#e8a55d}
+.cost-popover .cp-round-meta{
+  display:flex;flex-wrap:wrap;gap:8px;margin-top:4px;align-items:center
+}
+.cost-popover .cp-key{
+  display:inline-flex;align-items:center;gap:3px;
+  color:var(--text-secondary);
+  background:var(--bg-hover,rgba(127,127,127,0.12));
+  padding:1px 6px;border-radius:4px;font-size:10px
+}
+.cost-popover .cp-ico{flex:none;opacity:.85}
+.cost-popover .cp-trace{color:var(--text-tertiary);opacity:.7;font-size:10px}
+.cost-popover .cp-round-break{
+  margin-top:4px;display:flex;align-items:flex-start;gap:4px;
+  color:#e8a55d;font-size:10px;line-height:1.45
+}
+.cost-popover .cp-round-break .cp-ico{margin-top:1px}
+/* What the model did this round (its tool calls). */
+.cost-popover .cp-round-act{
+  margin-top:3px;color:var(--text-secondary);opacity:.85;
+  font-size:10px;line-height:1.4;word-break:break-word
+}
+/* Concrete tool-result inflow into this round (drives its write). The
+   write-colored accent ties it visually to the `write` chip above. */
+.cost-popover .cp-round-inflow{color:#e8a55d;opacity:.95;cursor:help}
+/* Final-answer round (no tools) — muted, italic so it reads as a terminal note. */
+.cost-popover .cp-round-final{color:var(--text-tertiary);font-style:italic;cursor:help}
+/* "write = previous output + tool results" explanation note. */
+.cost-popover .cp-round-note{
+  margin-top:3px;color:var(--text-tertiary);font-size:10px;
+  line-height:1.4;cursor:help;opacity:.85
+}
+/* Legend at the bottom of the per-round table. */
+.cost-popover .cp-legend{
+  margin-top:7px;padding-top:7px;border-top:1px dashed var(--border);
+  display:flex;flex-direction:column;gap:2px;
+  color:var(--text-tertiary);font-size:9.5px;line-height:1.45
+}
+.cost-popover .cp-legend-item b{font-weight:600;color:var(--text-secondary)}
+.cost-popover .cp-legend-item b.cp-hit{color:#34d399}
+.cost-popover .cp-legend-item b.cp-write{color:#e8a55d}
+/* At-a-glance cache-miss marker on the collapsed cost tag. */
+.cost-cache-warn{
+  display:inline-flex;align-items:center;color:#e8a55d;
+  vertical-align:middle;margin-left:1px;opacity:.9
+}
+.cost-cache-warn .cp-ico{width:11px;height:11px}
+.cost-tag-warn{border-bottom:1px dotted #e8a55d}
+.cost-popover .cp-totals{display:flex;flex-direction:column;gap:3px}
+.cost-popover .cp-row{display:flex;justify-content:space-between;gap:14px}
+.cost-popover .cp-row-label{color:var(--text-tertiary)}
+.cost-popover .cp-row-val{color:var(--text-secondary);white-space:nowrap}
+.cost-popover .cp-row-sub .cp-row-label,
+.cost-popover .cp-row-sub .cp-row-val{opacity:.7;font-size:10px}
+.cost-popover .cp-row-save .cp-row-val{color:#34d399}
+.cost-popover .cp-total-row{
+  display:flex;justify-content:space-between;align-items:baseline;gap:14px;
+  margin-top:9px;padding-top:8px;border-top:1px solid var(--border);
+  font-weight:700;color:var(--text-primary)
+}
+.cost-popover .cp-total-val{color:var(--accent);font-size:13px}
+.cost-popover .cp-trace-row{
+  margin-top:8px;color:var(--text-tertiary);opacity:.65;
+  font-size:10px;word-break:break-all
+}
+/* Task ID row — the id the user quotes for log lookup; click to copy. */
+.cost-popover .cp-taskid-row{
+  margin-top:8px;padding-top:7px;border-top:1px solid var(--border);
+  color:var(--text-tertiary);font-size:10px;word-break:break-all;cursor:pointer;
+  transition:color .2s
+}
+.cost-popover .cp-taskid-row:hover{color:var(--text-secondary)}
+.cost-popover .cp-taskid-val{
+  font-family:var(--mono,monospace);color:var(--text-secondary);
+  user-select:all
+}
+.cost-popover .cp-taskid-row.cp-copied .cp-taskid-val::after{
+  content:' ✓ copied';color:#34d399;font-family:inherit
+}
 /* ═══════════════════════════════════════════
    ★ File Changes Tracker Bar
    ═══════════════════════════════════════════ */
@@ -2490,6 +2738,132 @@ input.settings-mono {
   font-family: 'JetBrains Mono', monospace;
 }
 
+/* ── Per-block system-prompt editor ── */
+.sysprompt-blocks-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.sysprompt-blocks-mode {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sysprompt-preview-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.sysprompt-blocks-mode-label {
+  opacity: 0.65;
+}
+.sysprompt-blocks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sysprompt-block {
+  position: relative;
+  border: 1px solid var(--border-color, rgba(128,128,128,0.2));
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-elevated, var(--bg-secondary, rgba(128,128,128,0.03)));
+  transition: border-color .12s, background .12s;
+}
+/* Accent edge bar shows on/off at a glance without reading the toggle. */
+.sysprompt-block::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--accent, #4caf50);
+  transition: background .12s;
+}
+.sysprompt-block.is-off { background: transparent; }
+.sysprompt-block.is-off::before { background: var(--border-color, rgba(128,128,128,0.25)); }
+
+.sysprompt-block-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px 9px 14px;
+  cursor: pointer;
+}
+.sysprompt-block-head:hover { background: rgba(128,128,128,0.06); }
+.sysprompt-block-chevron {
+  flex: 0 0 auto;
+  width: 14px; height: 14px;
+  color: var(--text-tertiary);
+  transition: transform .15s;
+}
+.sysprompt-block.is-open .sysprompt-block-chevron { transform: rotate(90deg); }
+.sysprompt-block-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  min-width: 0;
+  flex: 1;
+}
+.sysprompt-block-title > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sysprompt-block.is-off .sysprompt-block-title { color: var(--text-tertiary); }
+.sysprompt-block-badge {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-soft, rgba(120,120,200,0.16));
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+/* Project-affected blocks: blocks whose text differs in code/project mode.
+   Distinct amber badge + a thicker, amber accent edge so the user can see at
+   a glance which sections "code/project mode" actually rewrites. */
+.sysprompt-block-badge.is-project-badge {
+  background: var(--accent-amber-soft, rgba(212, 160, 23, 0.18));
+  color: var(--accent-amber, #c79100);
+  cursor: help;
+}
+.sysprompt-block.is-project:not(.is-off)::before {
+  width: 4px;
+  background: var(--accent-amber, #d4a017);
+}
+.sysprompt-block.is-project:not(.is-off) {
+  border-color: var(--accent-amber-soft, rgba(212, 160, 23, 0.35));
+}
+.sysprompt-block-toggle {
+  flex: 0 0 auto;
+}
+.sysprompt-block-text {
+  margin: 0;
+  padding: 2px 14px 12px 14px;
+  max-height: 220px;
+  overflow: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border-color, rgba(128,128,128,0.12));
+}
+.sysprompt-block:not(.is-open) .sysprompt-block-text { display: none; }
+
 /* ── Divider — thick line like My Day section border ── */
 .settings-divider {
   height: 2px;
@@ -2796,6 +3170,11 @@ input.settings-mono {
 .stg-template-section-icon {
   font-size: 13px;
   line-height: 1;
+}
+.stg-template-section-icon svg {
+  width: 13px;
+  height: 13px;
+  display: block;
 }
 .stg-template-section-label {
   font-size: 11px;
@@ -4045,6 +4424,12 @@ input.settings-mono {
   background: var(--s-cream);
 }
 .stg-btn-add:disabled { opacity: 0.4; cursor: wait; }
+.stg-btn-ico {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.stg-btn-ico svg { flex: none; }
 .stg-models-actions { display: flex; gap: 6px; align-items: center; }
 
 
@@ -5329,6 +5714,8 @@ input.settings-mono {
   box-shadow: 8px 8px 0 var(--s-ink);
   width: 420px;
   max-width: 90vw;
+  max-height: 90vh;
+  overflow-y: auto;
   padding: 24px;
 }
 .mcp-install-modal-header {
@@ -5409,6 +5796,18 @@ input.settings-mono {
   color: var(--s-ink);
 }
 .mcp-env-input:focus { outline: 2px solid var(--s-ink); outline-offset: -1px; }
+
+.mcp-env-select {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  color: var(--s-ink);
+}
+.mcp-env-select:focus { outline: 2px solid var(--s-ink); outline-offset: -1px; }
 
 /* ══════════════════════════════════════
    Footer — thick top border like stats bar
@@ -5710,6 +6109,12 @@ input.settings-mono {
 .sw-status-pill.sw-pill-async{color:#fbbf24;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.18)}
 .sw-status-pill.sw-pill-async .sw-async-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#fbbf24;margin-right:4px;animation:swAsyncDot 1.4s ease-in-out infinite}
 @keyframes swAsyncDot{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.15)}}
+/* ── Stale pill: a swarm panel that never received its completion signal ── */
+/*    (server restart / dropped SSE). Muted slate — reads as 'unconfirmed',   */
+/*    distinct from running (blue), async (amber), done (green), error (red).  */
+.sw-status-pill.sw-pill-stale{color:#94a3b8;background:rgba(148,163,184,0.10);border:1px solid rgba(148,163,184,0.20)}
+[data-theme="light"] .sw-status-pill.sw-pill-stale{color:#64748b;background:rgba(100,116,139,0.10)}
+[data-theme="tofu"] .sw-status-pill.sw-pill-stale{color:#8a7d63;background:rgba(138,125,99,0.10)}
 /* ── Inbox-inject chip: "📨 N swarm-update arrived" between messages ──────── */
 /*    Compact, monospace, amber-green to mark "the model just received async   */
 /*    notifications before this turn". Same vocabulary as .sw-status-pill.     */
@@ -5797,7 +6202,7 @@ input.settings-mono {
 .project-autoapply-toggle{display:flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;border:1px solid rgba(245,158,11,0.25);background:rgba(245,158,11,0.06);color:#f59e0b;cursor:pointer;font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace;transition:background-color .2s,border-color .2s,color .2s;white-space:nowrap;flex-shrink:0}.project-autoapply-toggle:hover{background:rgba(245,158,11,0.12)}.project-autoapply-toggle .autoapply-dot{width:6px;height:6px;border-radius:50%;background:#f59e0b;transition:background .2s}.project-autoapply-toggle.auto-mode{border-color:rgba(52,211,153,0.3);background:rgba(52,211,153,0.08);color:#34d399}.project-autoapply-toggle.auto-mode .autoapply-dot{background:#34d399}.project-autoapply-toggle.auto-mode:hover{background:rgba(52,211,153,0.15)}
 /* ★ Folder badges in project bar — simple inline tags */
 .project-bar-folders{display:flex;gap:4px;flex-wrap:wrap;align-items:center;cursor:pointer;min-width:0}
-.folder-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 10px;border-radius:10px;font-size:11px;font-family:'JetBrains Mono',monospace;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;transition:background .15s,border-color .15s;border:1px solid rgba(245,158,11,0.25);background:rgba(245,158,11,0.10);color:#f59e0b}
+.folder-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 10px;border-radius:10px;font-size:11px;font-family:'JetBrains Mono',monospace;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;cursor:pointer;transition:background .15s,border-color .15s;border:1px solid rgba(245,158,11,0.25);background:rgba(245,158,11,0.10);color:#f59e0b}
 .folder-badge:hover{background:rgba(245,158,11,0.18);border-color:rgba(245,158,11,0.4)}
 .folder-badge-more{font-size:10px;color:var(--text-tertiary);padding:2px 4px}
 /* ★ Read-only root badge in the project bar — muted slate, lock glyph */
@@ -5894,6 +6299,32 @@ input.settings-mono {
 .timer-panel-item.timer-status-cancelled{border-left-color:#C2705F}
 .timer-panel-item.timer-status-exhausted{border-left-color:var(--text-tertiary)}
 .timer-panel-item .tpi-header{display:flex;align-items:center;gap:7px;margin-bottom:7px}
+.timer-panel-item .tpi-header-jump{cursor:pointer;border-radius:6px;margin:-3px -4px 4px;padding:3px 4px;transition:background .15s}
+.timer-panel-item .tpi-header-jump:hover{background:var(--bg-hover)}
+/* ── Timer poll-log modal ── */
+.timer-log-overlay{position:fixed;inset:0;z-index:4000;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;padding:24px;backdrop-filter:blur(2px)}
+.timer-log-card{background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-md,10px);box-shadow:var(--clay-lg,0 8px 32px rgba(0,0,0,0.4));width:min(560px,calc(100vw - 48px));max-height:min(70vh,640px);display:flex;flex-direction:column;overflow:hidden;font-size:12px}
+.timer-log-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 14px;border-bottom:1px solid var(--border)}
+.timer-log-title{font-weight:700;color:var(--text-primary);font-size:13px;display:flex;align-items:center;gap:6px}
+.timer-log-title code{font-family:'JetBrains Mono',monospace;font-size:11px;background:var(--bg-hover);padding:1px 6px;border-radius:4px;color:var(--text-secondary)}
+.timer-log-close{background:transparent;border:none;color:var(--text-secondary);cursor:pointer;padding:4px;border-radius:6px;display:inline-flex;line-height:1;transition:background .15s,color .15s}
+.timer-log-close:hover{background:var(--bg-hover);color:var(--text-primary)}
+.timer-log-body{overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:8px}
+.timer-log-empty{color:var(--text-secondary);text-align:center;padding:28px 12px}
+.timer-log-row{border:1px solid var(--border);border-left:3px solid var(--text-tertiary);border-radius:8px;padding:8px 10px;background:var(--bg-primary)}
+.timer-log-row.tl-ready{border-left-color:#3BA55D}
+.timer-log-row.tl-wait{border-left-color:#D9A12E}
+.timer-log-row.tl-error,.timer-log-row.tl-parse_error{border-left-color:#C2705F}
+.timer-log-row .tl-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.timer-log-row .tl-icon{display:inline-flex;line-height:1}
+.timer-log-row.tl-ready .tl-icon{color:#3BA55D}
+.timer-log-row.tl-wait .tl-icon{color:#D9A12E}
+.timer-log-row.tl-error .tl-icon,.timer-log-row.tl-parse_error .tl-icon{color:#C2705F}
+.timer-log-row .tl-decision{font-weight:700;font-size:10px;letter-spacing:0.4px}
+.timer-log-row .tl-time{color:var(--text-secondary);font-size:10px}
+.timer-log-row .tl-tokens{margin-left:auto;color:var(--text-tertiary);font-size:10px;font-family:'JetBrains Mono',monospace}
+.timer-log-row .tl-reason{color:var(--text-primary);margin-top:5px;line-height:1.55;word-break:break-word;overflow-wrap:anywhere}
+.timer-log-row .tl-cmd{margin-top:6px;padding:6px 8px;background:var(--bg-hover);border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-secondary);white-space:pre-wrap;word-break:break-all;max-height:140px;overflow-y:auto}
 .timer-panel-item .tpi-status{font-size:13px;line-height:1}
 .timer-panel-item .tpi-id{font-weight:700;color:var(--text-primary);font-size:12px;font-family:'JetBrains Mono',monospace}
 .timer-panel-item .tpi-status-label{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;color:#fff;margin-left:auto;padding:2px 7px;border-radius:5px;background:var(--text-tertiary)}
@@ -6027,27 +6458,94 @@ input.settings-mono {
 .ptool-panel-label { flex: 1; }
 .ptool-panel-body { padding: 4px 0; contain: layout style; }
 /* ★ Perf: content-visibility:auto on individual tool round slots — off-screen slots skip layout/paint
- * for long tool-use sessions (50+ rounds). contain-intrinsic-size prevents scrollbar jumps. */
-.ptool-panel-body > [data-prn] { content-visibility:auto; contain-intrinsic-size:auto 32px }
+ * for long tool-use sessions (50+ rounds). contain-intrinsic-size prevents scrollbar jumps.
+ * NB: slots are now nested one level deeper inside `.ptool-turn` parallel-batch
+ * containers, so these are DESCENDANT (not direct-child) selectors. */
+.ptool-panel-body [data-prn] { content-visibility:auto; contain-intrinsic-size:auto 32px }
 /* ★ During a conversation switch (cv-off is applied by _forceScrollToBottom while the
  *   scroll position settles), force every tool-round slot to render. Without this, slots
  *   flash empty — collapsing to their 32px contain-intrinsic-size placeholder — as the
  *   browser re-evaluates which slots are off-screen against a still-moving scrollTop. */
-.cv-off .ptool-panel-body > [data-prn] { content-visibility:visible!important; }
+.cv-off .ptool-panel-body [data-prn] { content-visibility:visible!important; }
 /* ★ Interactive cards (HG, stdin, approval) MUST NOT be collapsed by content-visibility
  *   — they contain live inputs, buttons, textareas.  content-visibility:auto with
  *   contain-intrinsic-size 32px can hide these tall cards (200-300px) when the browser
  *   incorrectly considers them "off-screen" during a dynamic content swap from a
  *   one-line spinner to a tall interactive card.  Override to visible for these slots. */
-.ptool-panel-body > [data-prn]:has(.hg-card),
-.ptool-panel-body > [data-prn]:has(.ptool-cmd-stdin),
-.ptool-panel-body > [data-prn]:has(.ptool-pending),
-.ptool-panel-body > [data-prn][data-prn-kind="swarm"],
-.ptool-panel-body > [data-prn]:has(.sw-panel) { content-visibility:visible; contain-intrinsic-size:auto; }
+.ptool-panel-body [data-prn]:has(.hg-card),
+.ptool-panel-body [data-prn]:has(.ptool-cmd-stdin),
+.ptool-panel-body [data-prn]:has(.ptool-pending),
+.ptool-panel-body [data-prn][data-prn-kind="swarm"],
+.ptool-panel-body [data-prn]:has(.sw-panel) { content-visibility:visible; contain-intrinsic-size:auto; }
 /* Swarm panels live as inline rows of the unified ptool-panel — drop
  * the standalone vertical margin and bring the side margins in line
  * with the surrounding tool rows so the timeline reads as one column. */
-.ptool-panel-body > [data-prn] > .sw-panel { margin: 4px 10px; }
+.ptool-panel-body [data-prn] > .sw-panel { margin: 4px 10px; }
+
+/* ═══════════════════════════════════════════
+   ★ Parallel-batch group (.ptool-turn)
+   One LLM turn = one container. Tool calls sharing an llmRound were issued
+   in PARALLEL by the harness; we bracket them so the timeline reflects the
+   real concurrency instead of a flat list. A SOLO turn (one call) renders
+   with NO chrome — display:contents makes the wrapper vanish so a single
+   call looks exactly as it did before. A MULTI-call turn (≥2) gets a
+   collapsible header + a left rail spanning its rows.
+   ═══════════════════════════════════════════ */
+/* Solo turn — transparent wrapper, zero layout impact. */
+.ptool-turn { display: contents; }
+/* Multi-call turn — real box with a left rail in the accent gutter. */
+.ptool-turn[data-batch-size="1"] { display: contents; }
+.ptool-turn:not([data-batch-size="1"]) {
+  display: block;
+  position: relative;
+  margin: 3px 8px;
+  border-left: 2px solid rgba(245,158,11,0.4);
+  border-radius: 0 6px 6px 0;
+  background: rgba(245,158,11,0.035);
+}
+/* Parallel-call header — clickable collapse toggle. */
+.ptool-turn-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 10px 3px 10px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .02em;
+  text-transform: uppercase;
+  color: rgba(245,158,11,0.85);
+  cursor: pointer; user-select: none;
+}
+.ptool-turn-head:hover { color: #f59e0b; }
+.ptool-turn-head svg { flex-shrink: 0; }
+.ptool-turn-label { flex: 1; }
+.ptool-turn-chev { font-size: 10px; color: rgba(245,158,11,0.6); }
+/* Round number tag — ties a tool-batch to the cost popover's 第N轮.
+   Inline variant lives in the multi-call header; solo variant is a thin
+   standalone line above a single tool row. */
+.ptool-turn-rno {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .02em;
+  color: rgba(245,158,11,0.95);
+  background: rgba(245,158,11,0.12);
+  border-radius: 4px; padding: 0 5px; line-height: 15px;
+  text-transform: none; flex-shrink: 0;
+}
+.ptool-turn-rno-solo {
+  display: inline-block; margin: 2px 0 1px 10px;
+}
+[data-theme="light"] .ptool-turn-rno { color: #b45309; background: rgba(180,120,0,0.1); }
+[data-theme="tofu"] .ptool-turn-rno { color: #8a6d3b; background: rgba(150,110,40,0.12); border-radius: 0; }
+/* Rows inside a multi-call turn nudge in slightly so the rail reads as a bracket.
+   Also reach the search-results header (one level deeper, nested in its
+   collapsible block) so it aligns with the flush sibling rows. */
+.ptool-turn:not([data-batch-size="1"]) > [data-prn] > .ptool-line,
+.ptool-turn:not([data-batch-size="1"]) > [data-prn] > .ptool-results-block > .ptool-line { padding-left: 12px; }
+/* Collapsed — hide the member rows, keep the header. */
+.ptool-turn.collapsed > [data-prn] { display: none; }
+
+[data-theme="light"] .ptool-turn:not([data-batch-size="1"]) {
+  border-left-color: rgba(180,120,0,0.4);
+  background: rgba(180,120,0,0.04);
+}
+[data-theme="light"] .ptool-turn-head { color: rgba(150,100,0,0.85); }
+[data-theme="light"] .ptool-turn-head:hover { color: #b45309; }
+[data-theme="light"] .ptool-turn-chev { color: rgba(150,100,0,0.6); }
 
 /* ★ Truncated tool calls "show more" bar */
 .ptool-truncated {
@@ -6249,12 +6747,24 @@ input.settings-mono {
 }
 [data-theme="light"] .ptool-search-diag { color: rgba(0,0,0,0.45); }
 
-/* ★ Expandable search results inside unified tool panel */
+/* ★ Expandable search results inside unified tool panel.
+ *   COLLAPSED: render flush + chromeless so the header row aligns with its
+ *   sibling tool rows (read_files, grep, …) — the ▼ chevron is the only
+ *   "this expands" affordance. EXPANDED: promote into a bordered, tinted
+ *   card that visually brackets the result list. Side margins stay 0 in
+ *   both states so the header never shifts horizontally on toggle; only the
+ *   border/background fade in (plus a little vertical breathing room). */
 .ptool-results-block {
-  margin: 2px 8px 2px 12px;
-  border: 1px solid rgba(234,179,8,0.1);
+  margin: 0;
+  border: 1px solid transparent;
   border-radius: 6px;
   overflow: hidden;
+  background: none;
+  transition: background .25s ease, border-color .25s ease, margin .25s ease;
+}
+.ptool-results-block.expanded {
+  margin: 4px 0;
+  border-color: rgba(234,179,8,0.18);
   background: rgba(0,0,0,0.12);
 }
 .ptool-results-header {
@@ -6281,6 +6791,7 @@ input.settings-mono {
 }
 .ptool-results-block.expanded .ptool-results-content {
   max-height: none;
+  border-top: 1px solid rgba(234,179,8,0.1);
 }
 .ptool-results-content .search-result-item {
   padding: 8px 12px;
@@ -6398,6 +6909,43 @@ input.settings-mono {
   text-transform: uppercase; letter-spacing: 0.04em; color: rgba(234,179,8,0.6);
 }
 .timer-meta-val { flex: 1; min-width: 0; color: var(--text-secondary); }
+
+/* ★ Expandable "Verifying" instruction — clamp to 3 lines, reveal full on click.
+   Replaces the old hard slice(0,400) that cut the sentence mid-word. */
+.timer-meta-row-instr { cursor: pointer; }
+.timer-meta-clamp {
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden; white-space: normal; word-break: break-word;
+}
+.timer-meta-clamp.expanded { display: block; -webkit-line-clamp: unset; overflow: visible; }
+.timer-meta-more {
+  flex-shrink: 0; align-self: flex-end; font-size: 9.5px; font-weight: 600;
+  color: rgba(234,179,8,0.75); text-transform: uppercase; letter-spacing: 0.03em;
+  cursor: pointer; white-space: nowrap;
+}
+.timer-meta-row-instr:hover .timer-meta-more { color: rgba(234,179,8,0.95); }
+/* ★ Resolved-model chip — who actually performs the verification */
+.timer-meta-model {
+  font-family: var(--font-mono, monospace); font-size: 10px; font-weight: 500;
+  color: #a78bfa; background: rgba(167,139,250,0.12);
+  border: 1px solid rgba(167,139,250,0.24); border-radius: 6px; padding: 0 6px;
+}
+.timer-poll-model {
+  flex-shrink: 0; font-family: var(--font-mono, monospace); font-size: 9.5px;
+  color: #a78bfa; background: rgba(167,139,250,0.10);
+  border: 1px solid rgba(167,139,250,0.20); border-radius: 5px; padding: 0 5px;
+  max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.timer-poll-toolcount {
+  flex-shrink: 0; font-size: 9.5px; font-weight: 600; color: rgba(234,179,8,0.7);
+  background: rgba(234,179,8,0.08); border-radius: 5px; padding: 0 5px;
+}
+/* ★ Per-poll tool-call timeline — reuses the swarm panel .sw-tl-* rules; this
+   only tweaks spacing inside the timer detail block. */
+.timer-poll-trace { margin: 4px 0 6px; }
+
+[data-theme="light"] .timer-meta-model,
+[data-theme="light"] .timer-poll-model { color: #6d28d9; }
 .timer-meta-cmd {
   flex: 1; min-width: 0; font-family: var(--font-mono, monospace); font-size: 10.5px;
   color: var(--text-secondary); background: rgba(0,0,0,0.18); padding: 1px 5px;
@@ -6412,6 +6960,24 @@ input.settings-mono {
 /* ★ parse_error — LLM responded but produced no usable decision */
 .timer-poll-parse-err .timer-poll-reason { color: rgba(245,158,11,0.95); font-weight: 600; }
 .timer-watcher-warn { border-color: rgba(245,158,11,0.55) !important; }
+
+/* ★ Stable per-poll id chip (e.g. tmr_84bd4fb3.p36) — monospace so it reads as
+   an identifier and is greppable against app.log / the DB poll_log row. */
+.timer-poll-id {
+  flex-shrink: 0; font-family: var(--font-mono, monospace); font-size: 9.5px;
+  color: var(--text-tertiary); background: rgba(255,255,255,0.05);
+  border-radius: 4px; padding: 0 5px; letter-spacing: -0.01em; cursor: help;
+}
+[data-theme="light"] .timer-poll-id { background: rgba(0,0,0,0.05); }
+
+/* ★ Raw LLM output (only present on a parse failure) — give it an amber tint so
+   it visually reads as "this is the unparseable evidence", distinct from the
+   neutral check_command output block above it. */
+.timer-poll-raw {
+  border-left: 2px solid rgba(245,158,11,0.5);
+  background: rgba(245,158,11,0.06);
+}
+[data-theme="light"] .timer-poll-raw { background: rgba(245,158,11,0.08); }
 
 /* ★ Expandable per-poll detail (full reason + check_command output) */
 .timer-poll-caret, .timer-poll-caret-spacer {
@@ -6437,6 +7003,59 @@ input.settings-mono {
 [data-theme="light"] .timer-meta-cmd { background: rgba(0,0,0,0.05); }
 [data-theme="light"] .timer-poll-detail { background: rgba(0,0,0,0.04); }
 [data-theme="light"] .timer-poll-parse-err .timer-poll-reason { color: #b45309; }
+
+/* ★ Light & Tofu themes: the block's hardcoded pale-amber text/borders are
+   tuned for the dark background and wash out on the cream background. Replace
+   with solid, contrast-safe dark amber (#8a6516 ≈ 4.6:1 on cream). */
+[data-theme="light"] .timer-watcher-block,
+[data-theme="tofu"]  .timer-watcher-block {
+  border-color: rgba(168,130,30,0.45); background: rgba(168,130,30,0.06);
+}
+[data-theme="light"] .timer-watcher-active,
+[data-theme="tofu"]  .timer-watcher-active {
+  border-color: rgba(168,130,30,0.6); background: rgba(168,130,30,0.09);
+}
+[data-theme="light"] .timer-watcher-triggered,
+[data-theme="tofu"]  .timer-watcher-triggered {
+  border-color: rgba(21,128,61,0.5); background: rgba(21,128,61,0.08);
+}
+[data-theme="light"] .timer-watcher-header,
+[data-theme="tofu"]  .timer-watcher-header {
+  color: #8a6516; border-bottom-color: rgba(168,130,30,0.22);
+}
+[data-theme="light"] .timer-watcher-header:hover,
+[data-theme="tofu"]  .timer-watcher-header:hover { background: rgba(168,130,30,0.08); }
+[data-theme="light"] .timer-toggle,
+[data-theme="tofu"]  .timer-toggle { color: #a07d2a; }
+[data-theme="light"] .timer-poll-num,
+[data-theme="tofu"]  .timer-poll-num { color: #8a6516; }
+[data-theme="light"] .timer-poll-line:hover,
+[data-theme="tofu"]  .timer-poll-line:hover { background: rgba(168,130,30,0.07); }
+[data-theme="light"] .timer-poll-started .timer-poll-reason,
+[data-theme="tofu"]  .timer-poll-started .timer-poll-reason { color: #8a6516; }
+[data-theme="light"] .timer-poll-ready .timer-poll-reason,
+[data-theme="tofu"]  .timer-poll-ready .timer-poll-reason { color: #15803d; }
+[data-theme="light"] .timer-poll-error .timer-poll-reason,
+[data-theme="tofu"]  .timer-poll-error .timer-poll-reason { color: #dc2626; }
+[data-theme="light"] .timer-watcher-meta,
+[data-theme="tofu"]  .timer-watcher-meta {
+  border-left-color: rgba(168,130,30,0.55); background: rgba(168,130,30,0.05);
+}
+[data-theme="light"] .timer-meta-label,
+[data-theme="tofu"]  .timer-meta-label { color: #8a6516; }
+[data-theme="light"] .timer-meta-more,
+[data-theme="tofu"]  .timer-meta-more { color: #8a6516; }
+[data-theme="light"] .timer-meta-row-instr:hover .timer-meta-more,
+[data-theme="tofu"]  .timer-meta-row-instr:hover .timer-meta-more { color: #6b4e11; }
+[data-theme="light"] .timer-next-poll,
+[data-theme="tofu"]  .timer-next-poll { color: #8a6516; }
+[data-theme="light"] .timer-poll-toolcount,
+[data-theme="tofu"]  .timer-poll-toolcount { color: #8a6516; background: rgba(168,130,30,0.12); }
+/* Tofu: purple model chip is too light on cream — match the tofu vertical-row purple. */
+[data-theme="tofu"] .timer-meta-model,
+[data-theme="tofu"] .timer-poll-model {
+  color: #5E4670; background: rgba(150,120,170,0.14); border-color: rgba(150,120,170,0.35);
+}
 
 /* ═══════════════════════════════════════════
    ★ run_command inline terminal block
@@ -8168,6 +8787,152 @@ input.settings-mono {
 .log-clean-breakdown-icon {
   font-size: 14px;
 }
+/* ── Tool-schema latch "apply on next conversation" banner ──
+   Amber "pending change" advisory above the composer. Colors are driven by
+   three locals so the dark / light / tofu themes only need to re-point them. */
+.toolset-apply-banner {
+  --tsb-accent: #f59e0b;        /* rail + icon + apply-button hue */
+  --tsb-text: #fde9c4;          /* high-contrast body text */
+  --tsb-fill: rgba(245, 158, 11, 0.12);
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 14px 10px 13px;
+  margin-bottom: 8px;
+  background: var(--tsb-fill);
+  border: 1px solid rgba(245, 158, 11, 0.32);
+  border-left: 3px solid var(--tsb-accent);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
+  animation: slideUp 0.3s ease;
+}
+.toolset-apply-banner-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--tsb-accent);
+}
+.toolset-apply-banner-icon svg { display: block; }
+.toolset-apply-banner-text {
+  font-size: 12.5px;
+  color: var(--tsb-text);
+  line-height: 1.45;
+  flex: 1;
+  min-width: 0;
+}
+.toolset-diff-lead {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+.toolset-diff-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.toolset-diff-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.toolset-diff-chip.added {
+  color: #6ee7a8;
+  background: rgba(34, 197, 94, 0.16);
+  border-color: rgba(34, 197, 94, 0.42);
+}
+.toolset-diff-chip.removed {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.16);
+  border-color: rgba(239, 68, 68, 0.42);
+}
+.toolset-apply-banner-actions {
+  display: flex;
+  gap: 7px;
+  flex-shrink: 0;
+  align-items: center;
+}
+.toolset-apply-btn {
+  padding: 6px 12px;
+  border-radius: var(--radius-xs);
+  border: 1px solid transparent;
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.06s ease;
+}
+.toolset-apply-btn:active { transform: translateY(1px); }
+/* Primary "Apply now" — solid accent, white text (maximum contrast). */
+.toolset-apply-btn.apply {
+  background: var(--tsb-accent);
+  border-color: var(--tsb-accent);
+  color: #1a1205;
+}
+.toolset-apply-btn.apply:hover {
+  background: #fbbf24;
+  border-color: #fbbf24;
+}
+/* Secondary "Restore" — outlined, neutral. */
+.toolset-apply-btn.dismiss {
+  border-color: var(--border-light);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+.toolset-apply-btn.dismiss:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* Light theme — darker amber on a soft amber wash so text stays legible. */
+[data-theme="light"] .toolset-apply-banner {
+  --tsb-accent: #d97706;
+  --tsb-text: #92400e;
+  --tsb-fill: rgba(245, 158, 11, 0.12);
+  border-color: rgba(217, 119, 6, 0.35);
+  box-shadow: 0 1px 6px rgba(120, 80, 10, 0.10);
+}
+[data-theme="light"] .toolset-apply-btn.apply { color: #ffffff; }
+[data-theme="light"] .toolset-apply-btn.apply:hover {
+  background: #b45309;
+  border-color: #b45309;
+}
+[data-theme="light"] .toolset-diff-chip.added {
+  color: #15803d;
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(34, 197, 94, 0.4);
+}
+[data-theme="light"] .toolset-diff-chip.removed {
+  color: #b91c1c;
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.38);
+}
+
+/* Tofu theme — warm sand accent to match the palette. */
+[data-theme="tofu"] .toolset-apply-banner {
+  --tsb-accent: #b8862f;
+  --tsb-text: #6b4f1d;
+  --tsb-fill: rgba(200, 150, 60, 0.14);
+  border-color: rgba(184, 134, 47, 0.36);
+}
+[data-theme="tofu"] .toolset-apply-btn.apply { color: #fff8ec; }
+[data-theme="tofu"] .toolset-diff-chip.added {
+  color: #2f7d4f;
+  background: rgba(46, 125, 79, 0.16);
+  border-color: rgba(46, 125, 79, 0.5);
+}
+[data-theme="tofu"] .toolset-diff-chip.removed {
+  color: #b23b2e;
+  background: rgba(178, 59, 46, 0.14);
+  border-color: rgba(178, 59, 46, 0.48);
+}
+
 .log-clean-banner-actions {
   display: flex;
   gap: 6px;
@@ -8280,6 +9045,9 @@ input.settings-mono {
 .theme-option span{font-size:12px;font-weight:600;color:var(--text-secondary)}
 .theme-option.active span{color:var(--accent)}
 .theme-cycle-btn span{font-size:15px;line-height:1}
+
+.theme-option-label{display:inline-flex;align-items:center;gap:5px}
+.theme-option-label svg{flex-shrink:0}
 /* ── Theme picker: tofu overrides inside settings panel ── */
 .settings-panel .theme-picker{gap:8px}
 .settings-panel .theme-option{border:2px solid #1a1814;border-radius:0;background:#faf7f2;box-shadow:2px 2px 0 #1a1814;transition:transform .1s,box-shadow .1s,background .1s}
@@ -8499,7 +9267,9 @@ input.settings-mono {
 [data-theme="light"] .ptool-line:hover{background:rgba(100,116,139,0.05)}
 [data-theme="light"] .ptool-badge-info{color:#475569;background:rgba(100,116,139,0.08)}
 [data-theme="light"] .ptool-spinner{border-color:rgba(64,104,184,0.2);border-top-color:#4068b8}
-[data-theme="light"] .ptool-results-block{border-color:rgba(100,116,139,0.12);background:rgba(100,116,139,0.02)}
+[data-theme="light"] .ptool-results-block{border-color:transparent;background:none}
+[data-theme="light"] .ptool-results-block.expanded{border-color:rgba(100,116,139,0.18);background:rgba(100,116,139,0.03)}
+[data-theme="light"] .ptool-results-block.expanded .ptool-results-content{border-top-color:rgba(100,116,139,0.1)}
 [data-theme="light"] .ptool-results-header:hover{background:rgba(100,116,139,0.05)}
 [data-theme="light"] .ptool-results-content .search-result-item{border-top-color:rgba(100,116,139,0.08)}
 [data-theme="light"] .ptool-results-content .search-result-item:hover{background:rgba(100,116,139,0.03)}
@@ -9043,7 +9813,7 @@ input.settings-mono {
 [data-theme="tofu"] .sidebar-brand-o{background-image:linear-gradient(135deg,#DEB89E,#E8C8AE)}
 [data-theme="tofu"] .sidebar-brand-f{background-image:linear-gradient(135deg,#978BB8,#ACA0CA)}
 [data-theme="tofu"] .sidebar-brand-u{background-image:linear-gradient(135deg,#6D9DB8,#88B4CC)}
-[data-theme="tofu"] .sidebar-tofu-icon{color:#BB9572;-webkit-text-fill-color:#BB9572;opacity:0.9}
+[data-theme="tofu"] .sidebar-tofu-icon{opacity:0.9}
 
 /* ── Conversation items: RPG save-file slots ── */
 [data-theme="tofu"] .conv-item{
@@ -11870,9 +12640,16 @@ input.settings-mono {
 
 /* ── Expandable results blocks — pixel ── */
 [data-theme="tofu"] .ptool-results-block{
-  border-color: rgba(196,149,106,0.1);
-  background: rgba(196,149,106,0.02);
+  border-color: transparent;
+  background: none;
   border-radius: 0;
+}
+[data-theme="tofu"] .ptool-results-block.expanded{
+  border-color: rgba(196,149,106,0.16);
+  background: rgba(196,149,106,0.03);
+}
+[data-theme="tofu"] .ptool-results-block.expanded .ptool-results-content{
+  border-top-color: rgba(196,149,106,0.12);
 }
 [data-theme="tofu"] .ptool-results-header:hover{
   background: rgba(196,149,106,0.04);
@@ -13092,6 +13869,7 @@ input.settings-mono {
 .skills-file-row:last-child{border-bottom:none}
 .skills-file-row:hover{background:rgba(255,255,255,.03)}
 .skills-file-kind{flex:0 0 16px;font-size:14px;text-align:center}
+.skills-file-kind svg{width:14px;height:14px;vertical-align:middle}
 .skills-file-path{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono,monospace);font-size:11.5px}
 .skills-file-size{flex:0 0 auto;font-size:10px;opacity:.55;font-variant-numeric:tabular-nums}
 .skills-file-row.is-skill{background:rgba(108,100,230,.08);font-weight:500}
@@ -13853,40 +14631,58 @@ input.settings-mono {
 /* ── Toast Notifications ── */
 .toast-container {
   position: fixed;
-  bottom: 20px;
-  right: 20px;
+  bottom: 22px;
+  right: 22px;
   z-index: 10000;
   display: flex;
   flex-direction: column-reverse;
   align-items: flex-end;
-  gap: 10px;
+  gap: 12px;
   pointer-events: none;
 }
 
 .toast {
+  --toast-accent: #60a5fa;
   pointer-events: auto;
   position: relative;
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 12px 14px;
-  border-radius: 8px;
-  background: var(--bg-secondary);
+  gap: 11px;
+  padding: 13px 14px 13px 16px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-secondary) 88%, transparent);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  backdrop-filter: blur(14px) saturate(160%);
   border: 1px solid var(--border-light);
   color: var(--text-primary);
   font-size: 13px;
   font-family: inherit;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.15);
+  box-shadow:
+    0 10px 30px -8px rgba(0, 0, 0, 0.45),
+    0 2px 8px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
   opacity: 0;
-  transform: translateX(30px);
-  animation: toastSlideIn 0.3s ease forwards;
-  max-width: 340px;
-  min-width: 200px;
+  transform: translateX(120%) scale(0.96);
+  animation: toastSlideIn 0.42s cubic-bezier(0.21, 1.02, 0.45, 1) forwards;
+  max-width: 360px;
+  min-width: 220px;
   overflow: hidden;
 }
 
+/* Accent rail down the left edge, tinted per type */
+.toast::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--toast-accent);
+  border-radius: 12px 0 0 12px;
+}
+
 .toast.removing {
-  animation: toastSlideOut 0.25s ease forwards;
+  animation: toastSlideOut 0.28s cubic-bezier(0.4, 0, 1, 1) forwards;
 }
 
 /* Type icon circle */
@@ -13898,14 +14694,16 @@ input.settings-mono {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1;
+  color: var(--toast-accent);
+  background: color-mix(in srgb, var(--toast-accent) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--toast-accent) 30%, transparent);
 }
-.toast-icon-wrap.t-success { background: rgba(52, 211, 153, 0.15); color: #34d399; }
-.toast-icon-wrap.t-error   { background: rgba(248, 113, 113, 0.15); color: #f87171; }
-.toast-icon-wrap.t-warning { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
-.toast-icon-wrap.t-info    { background: rgba(96, 165, 250, 0.15); color: #60a5fa; }
+.toast-icon-wrap svg { display: block; }
+
+.toast.t-success, .toast-icon-wrap.t-success { --toast-accent: #34d399; }
+.toast.t-error,   .toast-icon-wrap.t-error   { --toast-accent: #f87171; }
+.toast.t-warning, .toast-icon-wrap.t-warning { --toast-accent: #fbbf24; }
+.toast.t-info,    .toast-icon-wrap.t-info    { --toast-accent: #60a5fa; }
 
 .toast-body {
   display: flex;
@@ -13913,7 +14711,7 @@ input.settings-mono {
   gap: 2px;
   min-width: 0;
   flex: 1;
-  padding-top: 3px;
+  padding-top: 4px;
 }
 
 .toast-title {
@@ -13927,7 +14725,7 @@ input.settings-mono {
 .toast-detail {
   font-size: 12px;
   color: var(--text-secondary);
-  line-height: 1.4;
+  line-height: 1.45;
   word-break: break-word;
 }
 
@@ -13936,10 +14734,9 @@ input.settings-mono {
   border: none;
   color: var(--text-tertiary);
   cursor: pointer;
-  padding: 2px;
-  border-radius: 4px;
-  font-size: 13px;
-  line-height: 1;
+  padding: 3px;
+  border-radius: 6px;
+  line-height: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -13947,6 +14744,7 @@ input.settings-mono {
   flex-shrink: 0;
   margin-top: 2px;
 }
+.toast-close svg { display: block; }
 .toast-close:hover {
   color: var(--text-primary);
   background: var(--bg-tertiary);
@@ -13958,20 +14756,16 @@ input.settings-mono {
   bottom: 0;
   left: 0;
   height: 2px;
-  border-radius: 0 0 8px 8px;
-  opacity: 0.6;
+  background: var(--toast-accent);
+  opacity: 0.7;
 }
-.toast-progress.t-success { background: #34d399; }
-.toast-progress.t-error   { background: #f87171; }
-.toast-progress.t-warning { background: #fbbf24; }
-.toast-progress.t-info    { background: #60a5fa; }
 
 @keyframes toastSlideIn {
-  to { opacity: 1; transform: translateX(0); }
+  to { opacity: 1; transform: translateX(0) scale(1); }
 }
 @keyframes toastSlideOut {
-  from { opacity: 1; transform: translateX(0); }
-  to   { opacity: 0; transform: translateX(30px); }
+  from { opacity: 1; transform: translateX(0) scale(1); }
+  to   { opacity: 0; transform: translateX(120%) scale(0.96); }
 }
 @keyframes toastTimer {
   from { width: 100%; }
@@ -14267,7 +15061,7 @@ input.settings-mono {
   /* Hide ALL badges and action buttons — not enough room on 360px screens */
   .search-badge,.project-badge,.code-exec-badge,.browser-badge,
   .memory-badge,.scheduler-badge,.timer-trigger,
-  #debugToggle,#themeCycleBtn,#agentBackendSelector,
+  #debugToggle,#themeCycleBtn,
   .topbar .action-btn{display:none!important}
   /* Model badge: keep it, right-aligned, compact */
   .model-badge{font-size:10px;padding:3px 8px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;margin-left:auto}
@@ -15774,31 +16568,6 @@ input.settings-mono {
   font-family: monospace;
 }
 
-/* ═══════════════════════════════════════════
-   Agent Backend Selector
-   ═══════════════════════════════════════════ */
-.agent-backend-selector{position:relative;display:inline-flex;align-items:center}
-.agent-backend-trigger{cursor:pointer;opacity:0.7;transition:opacity 0.15s}
-.agent-backend-trigger:hover{opacity:1}
-.agent-backend-dropdown{position:absolute;top:100%;right:0;margin-top:8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:12px;padding:8px;min-width:260px;z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,0.2)}
-.agent-backend-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-tertiary);padding:4px 8px 8px;border-bottom:1px solid var(--border);margin-bottom:4px}
-.agent-backend-btn{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;border:none;background:transparent;border-radius:8px;cursor:pointer;color:var(--text-primary);text-align:left;transition:background 0.15s}
-.agent-backend-btn:hover{background:var(--bg-tertiary)}
-.agent-backend-btn.active{background:var(--bg-tertiary);box-shadow:inset 0 0 0 1.5px var(--accent, #6366f1)}
-.agent-backend-btn[disabled]{opacity:0.4;cursor:not-allowed}
-.ab-icon{width:24px;height:24px;display:flex;align-items:center;justify-content:center;flex-shrink:0;border-radius:6px;background:var(--bg-primary);border:1px solid var(--border)}
-.ab-icon img,.ab-icon svg{width:16px;height:16px}
-.ab-info{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
-.ab-name{font-size:12px;font-weight:600;white-space:nowrap}
-.ab-desc{font-size:10px;color:var(--text-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ab-status{font-size:11px;flex-shrink:0;width:18px;text-align:center}
-.ab-ready{color:#22c55e}
-.ab-unavailable{color:var(--text-tertiary);opacity:0.5}
-.ab-not-auth{color:#f59e0b}
-/* Backend indicator — small accent dot on the sidebar-header trigger button,
- * shown only when a non-builtin backend is active. */
-.agent-backend-trigger{position:relative}
-.backend-indicator{position:absolute;top:1px;right:1px;min-width:7px;height:7px;padding:0;border-radius:50%;font-size:0;color:transparent;background:#6366f1;border:1.5px solid var(--bg-secondary);box-shadow:0 0 0 1px rgba(99,102,241,0.4)}
 
 /* ══════════════════════════════════════════════════════════════════
    ★ Pre-tool indicator chips (Memory Prefetch + MCP Login Hint)
@@ -16139,6 +16908,8 @@ input.settings-mono {
   font-weight: 600;
   letter-spacing: 0.01em;
 }
+.compaction-marker-trigger svg { width: 12px; height: 12px; vertical-align: -2px; }
+.pdf-attach-icon svg { width: 22px; height: 22px; vertical-align: middle; }
 .compaction-marker-stat {
   color: var(--text-tertiary);
   font-size: 11px;
@@ -16797,6 +17568,243 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .ctx-health-bar[data-zon
 
 @media (max-width: 900px){
   .ctx-health-bar{ display:none !important; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Per-turn context capsule (.turn-ctx) — built by info-rail.js
+   (buildTurnCtxSnapshot / renderTurnCtxNote) and spliced into each USER
+   turn by renderMessage(). A single, frozen-in-time glass capsule —
+   model name + tool/workspace COUNT badges — describing the context the
+   turn was sent with; full detail is in the native tooltip.
+
+   Placement: floats in the RIGHT GUTTER (the blank band between the
+   820px chat column and the turn-nav), vertically level with its turn.
+   It is a DIRECT child of `.message` (NOT `.message-content`, which clips
+   via overflow:hidden) and positioned at `left:100%` so it sits clear of
+   both the bubble and the hover action-bar — hovering for the tooltip is
+   never blocked.
+
+   ⚠️ `.message` has `content-visibility:auto`, which applies PAINT
+   containment → it would clip this overflowing absolute child. So the
+   `:has(> .turn-ctx)` rule below neutralises containment ONLY on messages
+   that actually carry a capsule (every other message keeps the cv perf
+   win). See the delete-turn-popup memory for the same overflow gotcha.
+
+   The leading bead (.tctx-orb) deliberately echoes the live context
+   sphere (.ctx-bubble-*) so the per-turn note reads as a frozen sibling
+   of the token gauge — "merged" by shared visual language. It carries no
+   liquid level (it's a static snapshot, not a live meter).
+   ═══════════════════════════════════════════════════════════════════ */
+.message:has(> .turn-ctx){ content-visibility:visible; contain:none; }
+.turn-ctx{
+  position:absolute;
+  top:2px;
+  left:calc(100% + 24px);
+  z-index:5;                 /* below turn-nav (z:10) if they ever meet */
+  width:188px;
+  font-size:10.5px;
+  font-weight:600;
+  line-height:1.5;
+  user-select:none;
+  cursor:default;
+}
+/* ── Collapsed bar — brand logo + model + mode/count badges ──
+   A rounded-rectangle (NOT a full pill) so it can WRAP to a second row
+   without the capsule shape breaking: the logo + model claim the first
+   row (model ellipsis-truncates), and any mode/count badges that don't
+   fit wrap underneath. Fixed-width column (188px) caps the footprint. */
+.turn-ctx .tctx-bar{
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:4px 6px;
+  padding:4px 8px;
+  border-radius:11px;
+  opacity:0.85;
+  background:rgba(20,22,32,0.55);
+  border:1px solid rgba(255,255,255,0.08);
+  transition:opacity var(--transition), box-shadow var(--transition);
+}
+.turn-ctx:hover .tctx-bar{ opacity:1; box-shadow:0 2px 10px rgba(0,0,0,0.18); }
+.turn-ctx .tctx-logo{ display:inline-flex; flex:0 0 auto; align-items:center; }
+.turn-ctx .tctx-logo .stg-brand-icon svg{ display:block; width:100%; height:100%; fill:currentColor; }
+.turn-ctx .tctx-model{
+  color:var(--text-secondary);
+  flex:1 1 auto;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.turn-ctx .tctx-depth{
+  font-size:8px;
+  font-weight:700;
+  text-transform:uppercase;
+  letter-spacing:0.04em;
+  padding:0 4px;
+  border-radius:5px;
+  background:rgba(167,139,250,0.20);
+  color:#c4b5fd;
+  flex:0 0 auto;
+}
+.turn-ctx .tctx-count{
+  display:inline-flex;
+  align-items:center;
+  gap:3px;
+  flex:0 0 auto;
+  padding:0 6px 0 5px;
+  border-radius:999px;
+  font-size:9.5px;
+  font-weight:700;
+  font-variant-numeric:tabular-nums;
+  border:1px solid transparent;
+}
+.turn-ctx .tctx-count svg{ flex:0 0 auto; opacity:0.85; }
+.turn-ctx .tctx-count-tools{ background:rgba(45,212,191,0.16); color:#5eead4; border-color:rgba(45,212,191,0.24); }
+.turn-ctx .tctx-count-ws   { background:rgba(148,163,184,0.16); color:#94a3b8; border-color:rgba(148,163,184,0.24); }
+/* Mode badge — always visible on the collapsed bar (Endpoint / Autopilot /
+   Swarm / a named flow) so the run mode is legible at a glance, not just on
+   hover. Echoes the amber `mode` tone used by the panel chips. */
+.turn-ctx .tctx-mode-badge{
+  flex:0 0 auto;
+  padding:1px 6px;
+  border-radius:6px;
+  font-size:8.5px;
+  line-height:1.4;
+  font-weight:700;
+  text-transform:uppercase;
+  letter-spacing:0.03em;
+  white-space:nowrap;
+  background:rgba(245,158,11,0.18);
+  color:#fcd34d;
+  border:1px solid rgba(245,158,11,0.30);
+}
+[data-theme="light"] .turn-ctx .tctx-mode-badge{ background:rgba(217,158,40,0.14); color:#b45309; border-color:rgba(217,158,40,0.28); }
+[data-theme="tofu"] .turn-ctx .tctx-mode-badge{ background:rgba(200,150,60,0.18); color:#8a6a2a; border-color:rgba(200,150,60,0.32); }
+
+/* ── Expand panel — grows DOWN into the empty gutter on hover ── */
+.turn-ctx .tctx-panel{
+  position:absolute;
+  top:calc(100% + 5px);
+  left:0;
+  width:230px;
+  display:flex;
+  flex-direction:column;
+  gap:9px;
+  padding:11px 12px;
+  border-radius:12px;
+  background:rgba(20,22,32,0.94);
+  border:1px solid rgba(255,255,255,0.08);
+  box-shadow:0 8px 24px rgba(0,0,0,0.35);
+  /* Collapsed: fade + slide-up + non-interactive. Revealed on hover. */
+  opacity:0;
+  transform:translateY(-4px);
+  pointer-events:none;
+  transition:opacity .16s ease, transform .16s ease;
+  z-index:11;                /* above turn-nav when expanded */
+}
+/* Invisible bridge across the 5px gap so moving the cursor from the bar
+ * down to the panel doesn't cross a non-hover zone and dismiss it. */
+.turn-ctx .tctx-panel::before{
+  content:"";
+  position:absolute;
+  left:0;
+  right:0;
+  top:-7px;
+  height:7px;
+}
+.turn-ctx:hover .tctx-panel{ opacity:1; transform:translateY(0); pointer-events:auto; }
+.turn-ctx .tctx-row{ display:flex; flex-direction:column; gap:4px; }
+.turn-ctx .tctx-row-h{
+  font-size:8.5px;
+  font-weight:700;
+  letter-spacing:0.09em;
+  text-transform:uppercase;
+  opacity:0.5;
+}
+.turn-ctx .tctx-row-v{ display:flex; align-items:center; gap:5px; color:var(--text-secondary); }
+.turn-ctx .tctx-row-model{
+  font-size:11px;
+  font-weight:600;
+  word-break:break-all;
+  line-height:1.35;
+}
+.turn-ctx .tctx-chips{ display:flex; flex-wrap:wrap; gap:4px; }
+.turn-ctx .tctx-chip{
+  font-size:10px;
+  font-weight:600;
+  padding:1px 7px;
+  border-radius:999px;
+  border:1px solid transparent;
+  white-space:nowrap;
+}
+.turn-ctx .tctx-tone-search{ background:rgba(59,130,246,0.14); color:#93c5fd; border-color:rgba(59,130,246,0.22); }
+.turn-ctx .tctx-tone-net   { background:rgba(45,212,191,0.14); color:#5eead4; border-color:rgba(45,212,191,0.22); }
+.turn-ctx .tctx-tone-code  { background:rgba(168,85,247,0.15); color:#c4b5fd; border-color:rgba(168,85,247,0.25); }
+.turn-ctx .tctx-tone-ai    { background:rgba(52,211,153,0.14); color:#6ee7b7; border-color:rgba(52,211,153,0.22); }
+.turn-ctx .tctx-tone-mode  { background:rgba(245,158,11,0.15); color:#fcd34d; border-color:rgba(245,158,11,0.25); }
+.turn-ctx .tctx-tone-mcp   { background:rgba(129,140,248,0.16); color:#a5b4fc; border-color:rgba(129,140,248,0.26); }
+.turn-ctx .tctx-paths{ display:flex; flex-direction:column; gap:3px; }
+.turn-ctx .tctx-path{
+  display:flex;
+  align-items:flex-start;
+  gap:4px;
+  font-size:10px;
+  line-height:1.4;
+  color:var(--text-secondary);
+  word-break:break-all;
+}
+.turn-ctx .tctx-path .tctx-lock{ flex:0 0 auto; margin-top:2px; opacity:0.7; }
+
+/* ── Per-theme palettes (mirror .ctx-health-bar) ─────────────── */
+[data-theme="light"] .turn-ctx .tctx-bar{ background:rgba(255,255,255,0.9); border-color:#e8e6df; }
+[data-theme="light"] .turn-ctx .tctx-panel{
+  background:#ffffff;
+  border-color:#e8e6df;
+  box-shadow:0 8px 24px rgba(20,20,40,0.12);
+}
+[data-theme="light"] .turn-ctx .tctx-model,
+[data-theme="light"] .turn-ctx .tctx-row-v,
+[data-theme="light"] .turn-ctx .tctx-path{ color:#4a4a58; }
+[data-theme="light"] .turn-ctx .tctx-count-tools{ background:rgba(13,148,136,0.10); color:#0d9488; border-color:rgba(13,148,136,0.22); }
+[data-theme="light"] .turn-ctx .tctx-count-ws   { background:rgba(100,116,139,0.10); color:#64748b; border-color:rgba(100,116,139,0.20); }
+[data-theme="light"] .turn-ctx .tctx-tone-search{ background:rgba(59,130,246,0.10); color:#2563eb; border-color:rgba(59,130,246,0.22); }
+[data-theme="light"] .turn-ctx .tctx-tone-net   { background:rgba(13,148,136,0.10); color:#0d9488; border-color:rgba(13,148,136,0.22); }
+[data-theme="light"] .turn-ctx .tctx-tone-code  { background:rgba(147,51,234,0.10); color:#7c3aed; border-color:rgba(147,51,234,0.22); }
+[data-theme="light"] .turn-ctx .tctx-tone-ai    { background:rgba(16,185,129,0.10); color:#059669; border-color:rgba(16,185,129,0.22); }
+[data-theme="light"] .turn-ctx .tctx-tone-mode  { background:rgba(217,158,40,0.12); color:#b45309; border-color:rgba(217,158,40,0.25); }
+[data-theme="light"] .turn-ctx .tctx-tone-mcp   { background:rgba(99,102,241,0.10); color:#4f46e5; border-color:rgba(99,102,241,0.22); }
+
+[data-theme="tofu"] .turn-ctx .tctx-bar{
+  background:#fdf8e6;
+  border:1px solid #d8cda8;
+  box-shadow:0 1px 0 #ebdfba;
+}
+[data-theme="tofu"] .turn-ctx .tctx-panel{
+  background:#fdf8e6;
+  border:1px solid #d8cda8;
+  box-shadow:0 1px 0 #ebdfba, 0 8px 20px rgba(120,100,70,0.18);
+}
+[data-theme="tofu"] .turn-ctx .tctx-model,
+[data-theme="tofu"] .turn-ctx .tctx-row-v,
+[data-theme="tofu"] .turn-ctx .tctx-path{ color:#6a5a40; }
+[data-theme="tofu"] .turn-ctx .tctx-row-h{ color:#8a7a5e; }
+[data-theme="tofu"] .turn-ctx .tctx-depth{ background:rgba(200,150,60,0.18); color:#8a6a2a; }
+[data-theme="tofu"] .turn-ctx .tctx-count-tools{ background:rgba(70,150,140,0.16); color:#2f7268; border-color:rgba(70,150,140,0.28); }
+[data-theme="tofu"] .turn-ctx .tctx-count-ws   { background:rgba(150,135,110,0.16); color:#7a6a50; border-color:rgba(150,135,110,0.28); }
+[data-theme="tofu"] .turn-ctx .tctx-tone-search{ background:rgba(90,120,180,0.14); color:#3e5c8a; border-color:rgba(90,120,180,0.25); }
+[data-theme="tofu"] .turn-ctx .tctx-tone-net   { background:rgba(70,150,140,0.14); color:#2f7268; border-color:rgba(70,150,140,0.25); }
+[data-theme="tofu"] .turn-ctx .tctx-tone-code  { background:rgba(140,90,180,0.14); color:#6b4a8a; border-color:rgba(140,90,180,0.25); }
+[data-theme="tofu"] .turn-ctx .tctx-tone-ai    { background:rgba(122,178,107,0.18); color:#4a7a3a; border-color:rgba(122,178,107,0.30); }
+[data-theme="tofu"] .turn-ctx .tctx-tone-mode  { background:rgba(200,150,60,0.16); color:#8a6a2a; border-color:rgba(200,150,60,0.30); }
+[data-theme="tofu"] .turn-ctx .tctx-tone-mcp   { background:rgba(110,100,180,0.14); color:#574a8a; border-color:rgba(110,100,180,0.26); }
+
+/* The chat column is a fixed 820px centered, so the right gutter only
+ * gets wide enough to hold the widget (clear of the turn-nav) on roomy
+ * screens. Below that it would collide with the turn-nav / run off-screen,
+ * so hide it — exactly like the turn-nav and context sphere vanish when
+ * the gutters get cramped. */
+@media (max-width: 1280px){
+  .turn-ctx{ display:none; }
 }
 
 /* ── Fallback: browsers without color-mix() drop the meniscus
@@ -17624,7 +18632,7 @@ body.artifact-panel-open {
 [data-theme="tofu"] .ptool-panel-label{color:#7A5E12}
 [data-theme="tofu"] .ptool-badge-info{color:#6E4A1E;background:#E6DCC8}
 [data-theme="tofu"] .ptool-badge-err{color:#8E3526;background:#EAD9D2}
-[data-theme="tofu"] .tc-preview-btn{color:#6B6452}
+[data-theme="tofu"] .tc-preview-btn{color:#6B6452;opacity:0.9}
 
 /* Thinking block label (purple) */
 [data-theme="tofu"] .thinking-label{color:#56477E}
@@ -17636,8 +18644,22 @@ body.artifact-panel-open {
 [data-theme="tofu"] .fc-action{color:#6B6452}
 
 /* Turn-nav label + context-health capacity readout */
-[data-theme="tofu"] .turn-nav-label{color:#5F5847}
-[data-theme="tofu"] .ctx-bar-cap{color:#7A6326}
+[data-theme="tofu"] .turn-nav-label{color:#4A4436}
+[data-theme="tofu"] .ctx-bar-cap{color:#6B5413}
+/* ── WCAG AA contrast fixes (tofu light theme, ≥4.5:1) ──
+   Lighthouse color-contrast audit flagged these light-on-light labels.
+   Each value is darkened against the tofu surface it sits on; where a base
+   rule dims the element via opacity (which blends the rendered color toward
+   the background and tanks the ratio) we also raise the opacity. */
+[data-theme="tofu"] .conv-date-count{color:#6B6452;opacity:0.9}
+[data-theme="tofu"] .fc-undo-btn{color:#7A5226}
+[data-theme="tofu"] .fc-undo-all-btn{color:#9E3A2C}
+[data-theme="tofu"] .branch-add-btn{color:#6E5A3E}
+[data-theme="tofu"] .bilingual-type{color:#6E5A3E}
+[data-theme="tofu"] .bilingual-model{color:#7A5226}
+[data-theme="tofu"] .ptool-turn-rno{color:#6B4E1C}
+[data-theme="tofu"] .ptool-turn-label{color:#8A5A00}
+[data-theme="tofu"] .ctx-health-bar > .ctx-bar-cap{opacity:0.9}
 
 
 /* ═══════════════════════════════════════════════════════════════════

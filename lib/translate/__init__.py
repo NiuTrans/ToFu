@@ -61,6 +61,12 @@ from .commit import (
     _get_commit_lock,
 )
 
+# Incremental per-round translation (agent assistant replies)
+from .incremental import (
+    submit_round_segment,
+    finalize_incremental,
+)
+
 # PPTX file translation
 from .pptx import (
     _do_translate_pptx,
@@ -89,6 +95,8 @@ __all__ = [
     '_cleanup_translate_tasks', '_do_translate',
     # commit
     '_commit_translation_to_db', '_commit_translation_inner', '_get_commit_lock',
+    # incremental per-round translation
+    'submit_round_segment', 'finalize_incremental',
     # pptx
     '_do_translate_pptx', '_ensure_pptx_upload_dir',
     '_PPTX_UPLOAD_DIR', '_MAX_PPTX_BYTES',

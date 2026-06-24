@@ -40,6 +40,16 @@ MCP_PING_TIMEOUT = int(os.environ.get('TOFU_MCP_PING_TIMEOUT', '10'))
 MCP_BREAKER_BASE_BACKOFF = int(os.environ.get('TOFU_MCP_BREAKER_BASE_BACKOFF', '30'))
 MCP_BREAKER_MAX_BACKOFF = int(os.environ.get('TOFU_MCP_BREAKER_MAX_BACKOFF', '600'))
 
+# ── Call-level health gating (stop paying full-timeout calls to a stalled server) ──
+# The circuit breaker above only covers RECONNECT failures. A server whose
+# transport is alive but whose calls keep timing out (e.g. a long-poll tool
+# whose own budget exceeds MCP_CALL_TIMEOUT) would otherwise be hammered with
+# back-to-back full-timeout calls forever. After this many CONSECUTIVE call
+# timeouts a server is marked 'degraded' and the next call fast-fails with an
+# actionable error instead of blocking for the full timeout again. Any single
+# successful call resets the streak. Set to 0 to disable the gate.
+MCP_DEGRADED_TIMEOUT_STREAK = int(os.environ.get('TOFU_MCP_DEGRADED_TIMEOUT_STREAK', '3'))
+
 
 class MCPServerConfig(TypedDict, total=False):
     """Configuration for a single MCP server."""

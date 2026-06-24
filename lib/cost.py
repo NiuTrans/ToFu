@@ -1,6 +1,20 @@
-"""lib/cost.py — Per-message cost calculation.
+"""lib/cost.py — Per-message cost calculation (THE single cost engine).
 
-Pure-function port of ``static/js/core.js:calcCostCny``. Encapsulates:
+★ Single source of truth (2026-06-24): this is the ONE place per-token cost
+arithmetic happens. Both surfaces delegate here:
+
+  * **Display** — the headless ``/api/v1/messages/cost`` endpoint + the SSE
+    done-event / persisted ``cost`` stamps; the JS ``calcCostCny`` is a thin
+    fetch wrapper to that endpoint (it does NO client-side pricing math).
+  * **Billing** — ``lib/billing/cost.compute_request_cost`` calls
+    ``compute_cost`` and converts the per-component USD sub-costs
+    (``inputCostUsd`` / ``outputCostUsd`` / ``cacheWriteCostUsd`` /
+    ``cacheReadCostUsd``, 9-dp precise) into micro-credits, then layers the
+    relay margin. So the wallet debit and the displayed ¥/$ can never drift.
+
+Historically a partial port of the old ``static/js/core.js:calcCostCny``; the
+JS pricing tables have since been deleted, leaving this as the sole engine.
+Encapsulates:
 
 * Anthropic-vs-OpenAI cache-token convention detection.
 * Cache-write / cache-read multiplier handling per provider.
@@ -136,6 +150,14 @@ def compute_cost(
             'outputCostCny': _round(out_cny, 6),
             'cacheWriteCostCny': 0.0,
             'cacheReadCostCny': 0.0,
+            # USD per-component sub-costs — consumed by the billing adapter
+            # (lib/billing/cost.compute_request_cost) so the wallet debit and
+            # the displayed cost share ONE arithmetic core. Qwen bills in CNY,
+            # so the USD figures are the CNY costs divided by the live rate.
+            'inputCostUsd': _round(inp_cny / rate, 9),
+            'outputCostUsd': _round(out_cny / rate, 9),
+            'cacheWriteCostUsd': 0.0,
+            'cacheReadCostUsd': 0.0,
             'cacheSavingsCny': 0.0,
             'cacheSavingsUsd': 0.0,
         }
@@ -195,6 +217,13 @@ def compute_cost(
         'outputCostCny': _round(output_cost_usd * rate, 6),
         'cacheWriteCostCny': _round(cw_cost_usd * rate, 6),
         'cacheReadCostCny': _round(cr_cost_usd * rate, 6),
+        # USD per-component sub-costs — consumed by the billing adapter
+        # (lib/billing/cost.compute_request_cost) so the wallet debit and the
+        # displayed cost share ONE arithmetic core and can never drift.
+        'inputCostUsd': _round(input_cost_usd, 9),
+        'outputCostUsd': _round(output_cost_usd, 9),
+        'cacheWriteCostUsd': _round(cw_cost_usd, 9),
+        'cacheReadCostUsd': _round(cr_cost_usd, 9),
         'cacheSavingsCny': _round(
             cache_savings_usd * rate if cache_savings_usd > 0 else 0, 6),
         'cacheSavingsUsd': _round(

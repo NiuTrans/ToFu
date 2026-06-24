@@ -27,6 +27,7 @@ __all__ = [
     'get_oauth_status',
     'get_all_oauth_status',
     'exchange_code',
+    'store_token',
     'logout_oauth',
 ]
 
@@ -332,6 +333,9 @@ def start_oauth_flow(provider: str) -> dict:
         'status': 'started',
         'provider': provider,
         'callback_port': flow['callback_port'],
+        # Browser-side exchange params (B1): lets the frontend POST the token
+        # exchange from the user's own network when the server is geo-blocked.
+        'exchange': flow.get('exchange', {}),
     }
 
 
@@ -411,24 +415,93 @@ def exchange_code(provider: str, code: str, state: str = '') -> dict:
         if provider in _active_flows:
             _active_flows[provider]['status'] = 'exchanging'
 
-    if provider == 'claude':
-        from lib.oauth.claude import claude_exchange_code
-        token = claude_exchange_code(code, pkce_verifier, state=state)
-    elif provider == 'codex':
-        from lib.oauth.codex import codex_exchange_code
-        token = codex_exchange_code(code, pkce_verifier)
-    else:
-        token = None
+    from lib.oauth.token_store import OAuthExchangeError
+    try:
+        if provider == 'claude':
+            from lib.oauth.claude import claude_exchange_code
+            token = claude_exchange_code(code, pkce_verifier, state=state)
+        elif provider == 'codex':
+            from lib.oauth.codex import codex_exchange_code
+            token = codex_exchange_code(code, pkce_verifier)
+        else:
+            token = None
+    except OAuthExchangeError as e:
+        # Surface the REAL upstream reason (e.g. a 403 geo/edge block) instead
+        # of the misleading generic "code may have expired".
+        with _flows_lock:
+            if provider in _active_flows:
+                _active_flows[provider]['status'] = 'error'
+                _active_flows[provider]['error'] = str(e)
+        return {'error': str(e), 'status_code': e.status_code, 'detail': e.detail}
 
     with _flows_lock:
         if token:
             _active_flows[provider]['status'] = 'success'
             _active_flows[provider]['email'] = token.get('email', '')
             audit_log('oauth_login', provider=provider, email=token.get('email', ''))
+            try:
+                from lib.oauth.outbound import provision_oauth_provider
+                provision_oauth_provider(provider)
+            except Exception as e:
+                logger.error('[OAuth] Failed to provision provider for %s: %s',
+                             provider, e, exc_info=True)
         else:
             _active_flows[provider]['status'] = 'error'
             _active_flows[provider]['error'] = 'Token exchange failed'
             return {'error': 'Token exchange failed. The code may have expired.'}
+
+    return {
+        'ok': True,
+        'provider': provider,
+        'email': token.get('email', ''),
+        'status': 'success',
+    }
+
+
+def store_token(provider: str, token_response: dict) -> dict:
+    """Persist a token response the BROWSER obtained itself (B1 flow).
+
+    The browser exchanges the auth code against the provider from its own
+    (VPN-enabled) network — bypassing the server's geo-blocked egress — and
+    POSTs the resulting token JSON here. We validate, persist, and provision
+    the managed dispatch provider, exactly like the server-side success path.
+
+    Args:
+        provider: 'claude' or 'codex'.
+        token_response: Raw JSON the browser received from the token endpoint.
+
+    Returns:
+        ``{ok, provider, email, status}`` on success, or ``{error, ...}``.
+    """
+    from lib.oauth.token_store import OAuthExchangeError
+    try:
+        if provider == 'claude':
+            from lib.oauth.claude import claude_store_token
+            token = claude_store_token(token_response)
+        elif provider == 'codex':
+            from lib.oauth.codex import codex_store_token
+            token = codex_store_token(token_response)
+        else:
+            return {'error': f'Unknown provider: {provider}'}
+    except OAuthExchangeError as e:
+        with _flows_lock:
+            if provider in _active_flows:
+                _active_flows[provider]['status'] = 'error'
+                _active_flows[provider]['error'] = str(e)
+        return {'error': str(e), 'status_code': e.status_code, 'detail': e.detail}
+
+    with _flows_lock:
+        if provider in _active_flows:
+            _active_flows[provider]['status'] = 'success'
+            _active_flows[provider]['email'] = token.get('email', '')
+    audit_log('oauth_login', provider=provider, email=token.get('email', ''),
+              via='browser_exchange')
+    try:
+        from lib.oauth.outbound import provision_oauth_provider
+        provision_oauth_provider(provider)
+    except Exception as e:
+        logger.error('[OAuth] Failed to provision provider for %s: %s',
+                     provider, e, exc_info=True)
 
     return {
         'ok': True,
@@ -443,6 +516,13 @@ def logout_oauth(provider: str) -> dict:
     from lib.oauth.token_store import delete_token
 
     delete_token(provider)
+
+    try:
+        from lib.oauth.outbound import deprovision_oauth_provider
+        deprovision_oauth_provider(provider)
+    except Exception as e:
+        logger.error('[OAuth] Failed to deprovision provider for %s: %s',
+                     provider, e, exc_info=True)
 
     with _flows_lock:
         _active_flows.pop(provider, None)

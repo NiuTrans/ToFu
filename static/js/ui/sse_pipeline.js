@@ -8,10 +8,81 @@
    exports / imports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
-// ── Stream connection ──
-async function connectToTask(convId, taskId, retries = 0) {
+/**
+ * Connect to an autopilot KICK carrier task (push-a-finished-conv-forward).
+ *
+ * The carrier emits no worker content — only the `autopilot_vu_*` stream and
+ * a terminal `done` carrying the follow-up baton.  So unlike `connectToTask`
+ * we deliberately do NOT push an assistant placeholder into `conv.messages`:
+ *   • A ghost empty "Agent" bubble before the VU bubble would be confusing.
+ *   • The carrier's empty `done` event, if it targeted a real message, would
+ *     blank out the prior agent reply.
+ * Instead we hand the SSE pipeline a DETACHED dummy assistantMsg (not in
+ * `conv.messages`).  The VU bubble is created by `autopilot_vu_start` →
+ * `_beginVuStreaming`, and the `done` handler detects the detached dummy
+ * (indexOf === -1) and stamps the autopilot baton on the finalized VU user
+ * message at the tail instead.
+ *
+ * @param {string} convId
+ * @param {string} taskId
+ */
+async function _connectAutopilotKick(convId, taskId) {
   const conv = conversations.find((c) => c.id === convId);
   if (!conv) return;
+  console.info(
+    `[connectToTask] 🤖 Autopilot KICK connect — conv=${convId.slice(0,8)} task=${taskId.slice(0,8)}`
+  );
+  if (activeStreams.has(convId)) {
+    console.info(`[connectToTask] kick: stream already active for conv=${convId.slice(0,8)} — skipping`);
+    return;
+  }
+  /* Detached dummy — NOT pushed into conv.messages. The SSE pipeline needs a
+   * non-null assistantMsg to accumulate into, but for a kick carrier nothing
+   * worker-side is emitted, so this stays empty and unreferenced. */
+  const dummyAssistant = {
+    role: 'assistant', content: '', thinking: '', toolRounds: [],
+    timestamp: Date.now(),
+  };
+  if (typeof _ensureMsgId === 'function') _ensureMsgId(dummyAssistant);
+
+  const controller = new AbortController();
+  activeStreams.set(convId, { controller, taskId, assistantMsg: dummyAssistant });
+  conv.activeTaskId = taskId;
+  renderConversationList();
+  updateSendButton();
+  twStart(convId);
+
+  const stream = activeStreams.get(convId);
+  let sseWorked = false;
+  try {
+    sseWorked = await _trySSE(convId, taskId, stream, dummyAssistant);
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      twStop(convId);
+      finishStream(convId);
+      return;
+    }
+    debugLog(`Autopilot kick SSE failed: ${e.message}`, 'warn');
+  }
+  if (!sseWorked && !stream.controller.signal.aborted) {
+    debugLog(`Autopilot kick falling back to polling for ${taskId.slice(0, 8)}`, 'warn');
+    await _pollFallback(convId, taskId, stream, dummyAssistant);
+  }
+}
+
+// ── Stream connection ──
+async function connectToTask(convId, taskId, retries = 0, opts = {}) {
+  const conv = conversations.find((c) => c.id === convId);
+  if (!conv) return;
+  /* ★ Autopilot kick-from-idle: the carrier task has NO worker turn, so we
+   *   must NOT push the usual empty assistant placeholder (it would render a
+   *   ghost "Agent" bubble before the VU bubble, and the carrier's empty
+   *   `done` event could overwrite the prior real reply).  Delegate to a
+   *   dedicated connector that uses a DETACHED dummy assistantMsg; the VU
+   *   bubble itself is created by the `autopilot_vu_start` event. */
+  if (opts && opts.autopilotKick) {
+    return _connectAutopilotKick(convId, taskId);
+  }
   /* ★ CROSS-TALK DETECTION: log full stream context at connection time */
   console.info(
     `[connectToTask] 🔗 Connecting — conv=${convId.slice(0,8)} task=${taskId.slice(0,8)} ` +
@@ -1175,6 +1246,37 @@ function dispatchSSEEvent(line, ctx) {
       if (ev.fallbackFrom) assistantMsg.fallbackFrom = ev.fallbackFrom;
       if (ev.fallbackReason) assistantMsg.fallbackReason = ev.fallbackReason;
       if (ev.fallbackKind) assistantMsg.fallbackKind = ev.fallbackKind;
+      /* Tool-schema latch held a pending tool toggle to keep the prompt
+         cache intact — surface the "apply on next conversation" banner. */
+      if (typeof onToolsetDiverged === 'function') onToolsetDiverged(!!ev.toolsetDiverged, convId, ev.toolsetDiff);
+      /* The turn-ctx capsule on the triggering user turn was captured from
+         the LIVE toolbar at send time, but the latch held back this diff so
+         the turn actually ran with the FROZEN tool set. Correct that turn's
+         _ctx note in place (added=held-back-on → drop; removed=held-back-off
+         → restore) so the gutter capsule reflects what truly ran, then
+         persist + re-render. See info-rail.js::reconcileTurnCtxCapsule. */
+      if (ev.toolsetDiverged && ev.toolsetDiff
+          && typeof reconcileTurnCtxCapsule === 'function') {
+        try {
+          const _rc = conversations.find((c) => c.id === convId);
+          if (_rc && Array.isArray(_rc.messages)) {
+            let _uIdx = -1;
+            for (let i = _rc.messages.length - 1; i >= 0; i--) {
+              if (_rc.messages[i] && _rc.messages[i].role === 'user') { _uIdx = i; break; }
+            }
+            const _uMsg = _uIdx >= 0 ? _rc.messages[_uIdx] : null;
+            if (_uMsg && _uMsg._ctx && reconcileTurnCtxCapsule(_uMsg._ctx, ev.toolsetDiff)) {
+              if (typeof saveConversations === 'function') saveConversations(convId);
+              if (activeConvId === convId && window.ConvView
+                  && typeof window.ConvView.upsertMessage === 'function') {
+                window.ConvView.upsertMessage(convId, _uMsg, { idx: _uIdx });
+              }
+            }
+          }
+        } catch (e) {
+          console.debug('[turnCtx] reconcile against toolsetDiff failed:', e);
+        }
+      }
       /* ★ Continue: merge modifiedFiles & modifiedFileList with existing */
       if (ev.modifiedFiles != null) {
         if (assistantMsg._continueModifiedFiles) {
@@ -1204,13 +1306,24 @@ function dispatchSSEEvent(line, ctx) {
        *   polling /api/chat/active after the SSE stream has closed.
        *   finishStream() reads these to dispatch the follow-up. */
       if (ev.autopilotNextTaskId && ev.autopilotVuMessage) {
-        assistantMsg._autopilotPending = {
+        const _apPayload = {
           nextTaskId: ev.autopilotNextTaskId,
           vuMessage: ev.autopilotVuMessage,
         };
+        /* Kick-from-idle carrier: assistantMsg is a DETACHED dummy that was
+         * never pushed into conv.messages, so stamping the baton on it would
+         * make _findAutopilotPendingCarrier miss it.  Stamp on the finalized
+         * VU user message at the tail instead (vu_done ran before this). */
+        const _apConv = conversations.find(c => c.id === convId);
+        const _apDetached = _apConv && _apConv.messages.indexOf(assistantMsg) === -1;
+        let _apTarget = assistantMsg;
+        if (_apDetached && _apConv && _apConv.messages.length) {
+          _apTarget = _apConv.messages[_apConv.messages.length - 1];
+        }
+        _apTarget._autopilotPending = _apPayload;
         console.info(
           `[connectToTask] 🤖 Autopilot follow-up attached to done — ` +
-          `next task=${ev.autopilotNextTaskId.slice(0,8)} ` +
+          `next task=${ev.autopilotNextTaskId.slice(0,8)} detachedCarrier=${!!_apDetached} ` +
           `vu="${(ev.autopilotVuMessage.content||'').slice(0,80)}${(ev.autopilotVuMessage.content||'').length>80?'…':''}"`
         );
       }

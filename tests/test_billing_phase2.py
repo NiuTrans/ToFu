@@ -20,18 +20,19 @@ import unittest
 from unittest.mock import patch
 
 
-def _ensure_db_initialised():
-    from lib.database import init_db
-    init_db()
-
-
 class _BillingPhase2Base(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory()
-        os.environ['TOFU_DB_BACKEND'] = 'sqlite'
-        os.environ['TOFU_DB_PATH'] = os.path.join(cls._tmp.name, 'tofu.db')
+        # Fresh per-class SQLite DB via the dedicated test helper. A bare
+        # TOFU_DB_PATH env set is a no-op post-import and (under an ambient PG
+        # env) would silently share the live database — see the helper's
+        # docstring. This makes the suite pass regardless of run order or
+        # backend.
+        from lib.database import reset_sqlite_for_tests
+        cls._db_snapshot = reset_sqlite_for_tests(
+            os.path.join(cls._tmp.name, 'tofu.db'))
         cls._pricing_path = os.path.join(cls._tmp.name, 'pricing.json')
         cls._payments_path = os.path.join(cls._tmp.name, 'payments.json')
         cls._pricing_patch = patch('lib.billing.pricing._PRICING_PATH',
@@ -39,11 +40,12 @@ class _BillingPhase2Base(unittest.TestCase):
         cls._pricing_patch.start()
         from lib.billing import pricing as _p
         _p.reload_pricing()
-        _ensure_db_initialised()
 
     @classmethod
     def tearDownClass(cls):
         cls._pricing_patch.stop()
+        from lib.database import restore_db_state
+        restore_db_state(getattr(cls, '_db_snapshot', None))
         cls._tmp.cleanup()
 
 
@@ -200,6 +202,108 @@ class StripeWebhookTest(_BillingPhase2Base):
         bal_after = get_balance(u.id)
         handle_stripe_webhook(payload, self._sign(payload))
         self.assertEqual(get_balance(u.id), bal_after)
+
+
+# ── stripe checkout-session creation ────────────────────────────────
+
+class StripeCheckoutTest(_BillingPhase2Base):
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        from lib.json_store import write_json_atomic
+        write_json_atomic(cls._payments_path, {
+            'stripe': {'secret_key': 'sk_test_xyz'},
+            'alipay': {},
+            'credit_per_minor_unit': 1.0,
+        })
+        cls._pay_patch = patch(
+            'lib.billing.payments._common.config_path',
+            lambda *p: cls._payments_path)
+        cls._pay_patch.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._pay_patch.stop()
+        super().tearDownClass()
+
+    def test_create_checkout_session_stamps_user_and_records_pending(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from lib.billing.users import create_user
+        from lib.billing.payments import create_stripe_checkout, list_payments
+
+        u = create_user('kim@example.com', password='password1')
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.json.return_value = {
+            'id': 'cs_test_abc', 'url': 'https://checkout.stripe.com/c/pay/cs_test_abc'}
+
+        captured = {}
+
+        async def _fake_post(url, **kw):
+            captured['url'] = url
+            captured['kw'] = kw
+            return fake_resp
+
+        with patch('lib.http_client.async_http_post',
+                    new=AsyncMock(side_effect=_fake_post)):
+            session_id, url = asyncio.run(create_stripe_checkout(
+                user_id=u.id, amount_minor=1500, currency='usd',
+                success_url='https://example.com/ok'))
+
+        self.assertEqual(session_id, 'cs_test_abc')
+        self.assertTrue(url.startswith('https://checkout.stripe.com/'))
+        # The Stripe API was called with the secret key as basic-auth user.
+        self.assertTrue(captured['url'].endswith('/checkout/sessions'))
+        self.assertEqual(captured['kw']['auth'], ('sk_test_xyz', ''))
+        form = captured['kw']['data']
+        self.assertEqual(form['metadata[user_id]'], u.id)
+        self.assertEqual(form['line_items[0][price_data][unit_amount]'], '1500')
+        self.assertEqual(form['success_url'], 'https://example.com/ok')
+        # A pending payment row keyed on the session id is recorded.
+        rows = list_payments(user_id=u.id, provider='stripe')
+        self.assertTrue(any(r.provider_id == 'cs_test_abc'
+                            and r.status == 'pending' for r in rows))
+
+    def test_create_checkout_requires_secret_key(self):
+        import asyncio
+        from lib.json_store import write_json_atomic
+        from lib.billing.payments import create_stripe_checkout
+        # Blank out the secret key.
+        write_json_atomic(self._payments_path, {
+            'stripe': {}, 'alipay': {}, 'credit_per_minor_unit': 1.0})
+        try:
+            with self.assertRaises(RuntimeError):
+                asyncio.run(create_stripe_checkout(
+                    user_id='u1', amount_minor=500, currency='usd',
+                    success_url='https://example.com/ok'))
+        finally:
+            write_json_atomic(self._payments_path, {
+                'stripe': {'secret_key': 'sk_test_xyz'},
+                'alipay': {}, 'credit_per_minor_unit': 1.0})
+
+    def test_create_checkout_surfaces_stripe_error(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from lib.billing.payments import create_stripe_checkout
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 400
+        fake_resp.json.return_value = {'error': {'message': 'amount too small'}}
+        fake_resp.text = '{"error":{"message":"amount too small"}}'
+
+        async def _fake_post(url, **kw):
+            return fake_resp
+
+        with patch('lib.http_client.async_http_post',
+                    new=AsyncMock(side_effect=_fake_post)):
+            with self.assertRaises(RuntimeError) as ctx:
+                asyncio.run(create_stripe_checkout(
+                    user_id='u1', amount_minor=1, currency='usd',
+                    success_url='https://example.com/ok'))
+        self.assertIn('amount too small', str(ctx.exception))
 
 
 # ── alipay sign-string canonicalisation ─────────────────────────────

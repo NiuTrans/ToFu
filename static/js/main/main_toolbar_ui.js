@@ -585,40 +585,98 @@ function toggleAutopilot() {
   _saveConvToolState();
   debugLog(
     autopilotEnabled
-      ? "Autopilot: ON — virtual user keeps the conversation going until it decides the task is done"
+      ? "Autopilot: ON — send an empty message to hand the conversation to the virtual user"
       : "Autopilot: OFF",
     "success",
   );
-  /* ★ Mid-stream arm: if the user turns autopilot ON while a reply is
-   * already streaming for the active conv, hand off the IN-FLIGHT task to
-   * the virtual user — the frozen task config wouldn't otherwise fire the
-   * VU hook. This is the "I'm stepping away now" gesture; no re-send needed. */
-  if (autopilotEnabled) _maybeArmAutopilot();
+  /* ★ Turning the toggle ON does NOT take over immediately — opening the
+   * switch mid-reply only ENABLES autopilot; the user explicitly hands off by
+   * sending an empty message (see _doSendOrGenerate → _maybeArmAutopilot),
+   * which enqueues a cancellable armed-marker that the user can see and cancel.
+   * Turning the toggle OFF disarms: clears the marker + flips any live task's
+   * config off so the loop stops at the current turn's natural end. */
+  if (!autopilotEnabled) {
+    const _conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
+    if (_conv && typeof Api !== 'undefined' && Api.chat && Api.chat.disarmAutopilot) {
+      Api.chat.disarmAutopilot(_conv.id)
+        .then(() => { if (typeof _refreshServerQueue === 'function') _refreshServerQueue(_conv.id); })
+        .catch((e) => console.warn('[Autopilot] disarm failed:', e && e.message));
+    }
+  }
 }
 
 /**
- * Arm autopilot for the active conversation if a reply is currently
- * streaming. The backend persists autopilotEnabled and flips the live
- * task's config so the virtual user takes over at the next natural stop.
- * No-op (silent) when nothing is streaming — the toggle alone already
- * covers the next manual send.
+ * Arm autopilot for the active conversation — the explicit "hand it over"
+ * gesture (empty send while autopilot is ON).
+ *
+ * Enqueues a persistent armed-marker (priority 90) into the server-side
+ * turn-source queue.  Unlike the old behavior, this works whether or not a
+ * reply is currently streaming:
+ *   • Streaming    → the in-flight task's config is flipped too, so the VU
+ *     takes over at its natural stop without re-sending.
+ *   • Idle (done)  → the marker still arms autopilot; it shows in the queue
+ *     bar as "Autopilot 待接管" and the user can cancel it.
+ * The marker outranks nothing and is outranked by every real message, so a
+ * human message the user types later is always processed first.
+ *
+ * After arming we refresh the queue bar so the cancellable sentinel appears.
  */
 function _maybeArmAutopilot() {
   const conv = getActiveConv();
   if (!conv) return;
-  const streaming = activeStreams.has(conv.id) || !!conv.activeTaskId;
-  if (!streaming) return;
   if (!(typeof Api !== 'undefined' && Api.chat && Api.chat.armAutopilot)) return;
   Api.chat.armAutopilot(conv.id).then((r) => {
     if (r && r.armed) {
-      debugLog("Autopilot armed — virtual user will take over when this reply finishes", "success");
+      debugLog("Autopilot armed — virtual user will take over (you can cancel it in the queue bar)", "success");
       if (typeof showToast === "function") {
         showToast("", t('autopilot.armedTitle'), t('autopilot.armedBody'), 4000);
       }
     }
+    /* Surface the pending sentinel (and any real queued messages) in the bar. */
+    if (typeof _refreshServerQueue === 'function') _refreshServerQueue(conv.id);
   }).catch((e) => console.warn('[Autopilot] arm failed:', e && e.message));
 }
 if (typeof window !== 'undefined') window._maybeArmAutopilot = _maybeArmAutopilot;
+
+/**
+ * Kick autopilot on the active conversation when its reply has ALREADY
+ * finished — the "push it forward" gesture (empty-Enter, autopilot ON, not
+ * streaming). Spawns a backend carrier task that runs the virtual-user hook
+ * directly (no AI worker turn), then connects to its SSE stream so the VU
+ * bubble streams in identically to a natural-stop takeover.
+ *
+ * No-op when something is still streaming (the arm path covers that) or when
+ * autopilot is off.
+ */
+async function _kickAutopilot() {
+  const conv = getActiveConv();
+  if (!conv) return;
+  if (typeof autopilotEnabled !== 'undefined' && !autopilotEnabled) return;
+  const streaming = activeStreams.has(conv.id) || !!conv.activeTaskId;
+  if (streaming) return;
+  if (!(typeof Api !== 'undefined' && Api.chat && Api.chat.kickAutopilot)) return;
+  let cfg = {};
+  try {
+    if (typeof _buildConvConfig === 'function') cfg = await _buildConvConfig(conv);
+  } catch (e) {
+    console.warn('[Autopilot] kick: _buildConvConfig failed, using defaults:', e && e.message);
+  }
+  try {
+    const r = await Api.chat.kickAutopilot(conv.id, cfg);
+    if (r && r.taskId) {
+      conv.activeTaskId = r.taskId;
+      if (typeof saveConversations === 'function') saveConversations(conv.id);
+      renderConversationList();
+      updateSendButton();
+      debugLog('Autopilot taking over — virtual user is composing the next reply', 'success');
+      connectToTask(conv.id, r.taskId, 0, { autopilotKick: true });
+    }
+  } catch (e) {
+    /* 409 = a task is already running for this conv (arm path applies). */
+    console.warn('[Autopilot] kick failed:', e && e.message);
+  }
+}
+if (typeof window !== 'undefined') window._kickAutopilot = _kickAutopilot;
 
 // ══════════════════════════════════════════════════════
 // ★ Orchestration Flow selector (Mode dropdown)

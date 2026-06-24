@@ -15,7 +15,7 @@ import threading
 import time
 from typing import Any
 
-from lib.log import get_logger
+from lib.log import get_logger, set_req_id
 from lib.protocols import BodyBuilder
 
 logger = get_logger(__name__)
@@ -54,6 +54,7 @@ from lib.tasks_pkg.model_config import (
 from lib.tasks_pkg.stream_handler import analyse_stream_result
 from lib.tasks_pkg.system_context import (
     _inject_system_contexts,
+    _disabled_prompt_blocks,
     inject_search_addendum_to_user,
 )
 from lib.tasks_pkg.server_message_store import (
@@ -139,6 +140,318 @@ def _emit_tool_round_phase(task, assistant_msg, round_num):
             toolContext=summary,
             round=round_num + 1,
         ))
+
+
+# Realistic ceiling for genuine message JSON/role framing overhead in a
+# round's cache `write`. A round's residual (write − toolResults − prevOutput)
+# is at most a few hundred tokens of real framing; anything far above this is
+# NOT framing — it is the conversation CONTEXT being written to cache. The
+# ceiling is applied UNCONDITIONALLY (not just on cache-break rounds): the
+# excess is attributed to `recacheBody` (re-billed waste) on a break round and
+# to `contextWrite` (legitimate first-time caching) otherwise, so the round-1
+# prefix warm-up is never mislabeled as tens of thousands of tokens of
+# "message framing".
+_ENVELOPE_MAX_TOKENS = 800
+
+# Minimum cache_read drop (vs the previous round) that the write-breakdown
+# treats as re-billed body (`recacheBody`) rather than first-time context
+# (`contextWrite`). A drop is direct, percentage-independent evidence that
+# already-cached body was NOT read back and is being re-written inside `write`.
+# It is deliberately independent of detect_cache_break's 5%-relative WARNING
+# gate, which (correctly, to avoid banner noise) stays silent on a small-percent
+# but real-cost drop — e.g. a 4.9k re-bill on a 135k read is only ~3.6% so
+# api_break never fires, and the excess used to be mislabeled "first-time
+# context, not waste". Matches the project's _MIN_CACHE_MISS_TOKENS floor.
+_READ_DROP_WASTE_TOKENS = 2000
+
+
+def _compute_write_breakdown(task: dict[str, Any], api_rounds: list,
+                             round_num: int) -> dict[str, int] | None:
+    """Decompose a round's prompt-cache ``write`` into exact sub-items.
+
+    A round's ``cache_write_tokens`` is the new context cached since the
+    previous cached point. It is NOT what the model generated this round; it
+    is composed of three parts, each computed here from REAL recorded numbers
+    (never a hand-labeled lump):
+
+    * ``toolResults`` — the tool RESULTS fed back into the prefix = the sum of
+      ``toolTokens`` over the tool rounds whose ``llmRound`` is the PREVIOUS
+      LLM iteration (``round_num - 1``); these are the per-tool token counts
+      the ptool-panel badges show (``_safe_count_tokens`` of each result).
+    * ``prevOutput`` — the previous API round's assistant output (model text +
+      reasoning + serialized ``tool_call`` argument blocks), read from that
+      round's recorded ``usage`` (``completion_tokens``/``output_tokens`` +
+      ``reasoning_tokens``/``thinking_tokens``).
+    * ``contextWrite`` — conversation CONTEXT (system prompt, tool definitions,
+      history messages) written to cache for the FIRST time. Dominant on
+      round 1 (the prefix warm-up), and on any round that appends a large fresh
+      chunk of context. This is the unavoidable, non-wasteful cost of warming
+      the cache — the next round reads it back. Recognized by ``cache_read``
+      holding or GROWING vs the previous round (the new context is added on top
+      of a still-cached prefix).
+    * ``recacheBody`` — context we ALREADY paid to cache being re-billed because
+      the server didn't read it back (genuine waste; see ``recacheCause``).
+      Recognized EITHER by a confirmed ``cacheBreak`` flag OR — independently of
+      that banner-level alarm — by ``cache_read`` DROPPING vs the previous round
+      (``readDrop`` ≥ ``_READ_DROP_WASTE_TOKENS``): a drop is direct evidence
+      that already-cached body fell out and is now inside ``write``. The
+      ``detect_cache_break`` 5%-relative gate stays silent on a small-percent
+      but real-cost drop (e.g. 4.9k re-billed on a 135k read ≈ 3.6%), so relying
+      on it alone mislabeled that waste as benign ``contextWrite``. When the
+      excess exceeds the read drop, only the drop is ``recacheBody`` and the
+      remainder is genuine new ``contextWrite``; the two split the excess.
+    * ``envelope`` — the message JSON/role framing overhead, the residual
+      ``write - prevOutput - toolResults - (contextWrite|recacheBody)`` capped
+      at ``_ENVELOPE_MAX_TOKENS``. By construction the sub-items sum to EXACTLY
+      ``write``.
+
+    Args:
+        task: Live task dict (read-only here) — used for ``toolRounds``.
+        api_rounds: The per-LLM-round usage list. ``api_rounds[-1]`` is the
+            round just recorded (round ``round_num + 1``); ``api_rounds[-2]``
+            is the previous round (round ``round_num``), whose output became
+            part of this round's write.
+        round_num: Zero-based orchestrator loop index of the CURRENT iteration.
+
+    The residual above ``_ENVELOPE_MAX_TOKENS`` is ALWAYS context, not framing
+    — a 64k round-1 "envelope" (the symptom that motivated this) is the whole
+    system+tools+history prefix being cached for the first time. It is split
+    into ``contextWrite`` (first-time caching, no break) or ``recacheBody``
+    (re-billed body, on a break round); ``envelope`` keeps only a realistic
+    framing allowance. All sub-items still sum to ``write``.
+
+    Returns:
+        ``{'write', 'toolResults', 'prevOutput', 'contextWrite', 'recacheBody',
+        'envelope', 'recacheCause', 'capped'}`` token dict, or ``None`` when this round
+        wrote no cache (nothing to decompose) or the inputs are missing.
+        Returning ``None`` keeps the frontend on its plain inflow line rather
+        than printing a meaningless breakdown.
+    """
+    try:
+        if not api_rounds:
+            return None
+        _cur = api_rounds[-1]
+        if not isinstance(_cur, dict):
+            return None
+        _u = _cur.get('usage') or {}
+        write = int(_u.get('cache_write_tokens')
+                    or _u.get('cache_creation_input_tokens') or 0)
+        if write <= 0:
+            return None
+
+        # (a) tool results that flowed into THIS round's prefix: the tools that
+        #     ran in the previous LLM iteration (llmRound == round_num - 1).
+        tool_results = 0
+        _prev_llm_round = round_num - 1
+        for _r in (task.get('toolRounds') or []):
+            if not isinstance(_r, dict):
+                continue
+            if _r.get('llmRound') == _prev_llm_round:
+                _tt = _r.get('toolTokens')
+                if isinstance(_tt, (int, float)) and _tt > 0:
+                    tool_results += int(_tt)
+
+        # (b) previous API round's output tokens (text + reasoning + tool_call
+        #     args). The previous round is api_rounds[-2]; fall back to 0 when
+        #     this is the first recorded round (no predecessor).
+        prev_output = 0
+        if len(api_rounds) >= 2 and isinstance(api_rounds[-2], dict):
+            _pu = api_rounds[-2].get('usage') or {}
+            prev_output = int(_pu.get('completion_tokens') or _pu.get('output_tokens') or 0) \
+                + int(_pu.get('reasoning_tokens') or _pu.get('thinking_tokens') or 0)
+
+        # (b2) cache_read delta vs the previous round. A DROP means part of the
+        #     previously-cached prefix was not read back this round and is being
+        #     re-billed inside `write` — direct, percentage-independent evidence
+        #     of waste. This is what distinguishes a large write that is genuine
+        #     first-time context (read held/grew) from one that is re-cached
+        #     body (read fell), WITHOUT relying on detect_cache_break's
+        #     5%-relative warning gate.
+        cur_read = int(_u.get('cache_read_tokens')
+                       or _u.get('cache_read_input_tokens') or 0)
+        prev_read = 0
+        if len(api_rounds) >= 2 and isinstance(api_rounds[-2], dict):
+            _pru = api_rounds[-2].get('usage') or {}
+            prev_read = int(_pru.get('cache_read_tokens')
+                            or _pru.get('cache_read_input_tokens') or 0)
+        read_drop = max(0, prev_read - cur_read)
+
+        # (c) envelope = the genuine residual. INVARIANT: the three sub-items
+        #     MUST sum to exactly `write` (the whole point — a breakdown that
+        #     doesn't add up is worse than none). prev_output / tool_results
+        #     are counted with a DIFFERENT (output-side / local) tokenizer than
+        #     the provider's input-side `cache_write_tokens`, so they can
+        #     legitimately overshoot `write`. When that happens we must NOT
+        #     print components that exceed the total. Resolve by treating
+        #     `write` as ground truth and capping the measured components to it
+        #     in priority order (tool results first — they're the most directly
+        #     attributable and match the ptool badges, then prev output), with
+        #     the envelope absorbing whatever is left. This keeps
+        #     toolResults + prevOutput + envelope == write ALWAYS.
+        tool_results = min(tool_results, write)
+        prev_output = min(prev_output, write - tool_results)
+        residual = write - tool_results - prev_output  # always >= 0 now
+
+        # (d) Split the residual. On a NORMAL round the residual is just the
+        #     message JSON/role framing overhead (tens of tokens/message) — a
+        #     few hundred tokens. On a CACHE-BREAK round the residual is huge
+        #     (tens of thousands) because the conversation BODY between the
+        #     static prefix and the tail was re-cached: a prefix-byte mutation
+        #     or a breakpoint advance re-billed the whole body uncached. Lumping
+        #     that into "envelope" is the lie the user caught (36.5k of
+        #     "structure"). So when this round carries a cacheBreak signal,
+        #     attribute the bulk to `recacheBody` and leave only a realistic
+        #     framing allowance as `envelope`. The four sub-items still sum to
+        #     EXACTLY `write` (recacheBody is the residual minus the allowance).
+        # Framing is fundamentally BOUNDED, so cap envelope unconditionally and
+        # attribute the excess by cause: on a cache-break round it is body we
+        # already cached being re-billed (`recacheBody`, waste); otherwise it is
+        # context cached for the first time (`contextWrite`, e.g. the round-1
+        # prefix warm-up — legitimate, not framing). Exactly one of the two is
+        # ever non-zero. The five sub-items still sum to EXACTLY `write`.
+        _cache_break = _cur.get('cacheBreak')
+        recache_body = 0
+        context_write = 0
+        envelope = residual
+        if residual > _ENVELOPE_MAX_TOKENS:
+            envelope = _ENVELOPE_MAX_TOKENS
+            excess = residual - envelope
+            if _cache_break:
+                # Confirmed break (detect_cache_break fired) → the whole excess
+                # is re-billed body.
+                recache_body = excess
+            elif read_drop >= _READ_DROP_WASTE_TOKENS:
+                # No banner-level break, but cache_read fell vs the previous
+                # round: at least `read_drop` tokens of already-cached body are
+                # being re-written (waste). Attribute that to recacheBody and
+                # only the remainder — genuinely new context — to contextWrite.
+                recache_body = min(excess, read_drop)
+                context_write = excess - recache_body
+            else:
+                # Read held or grew → the excess is fresh context cached for the
+                # first time (e.g. the round-1 prefix warm-up). Legitimate.
+                context_write = excess
+
+        return {
+            'write': write,
+            'toolResults': tool_results,
+            'prevOutput': prev_output,
+            'contextWrite': context_write,
+            'recacheBody': recache_body,
+            'envelope': envelope,
+            # How far cache_read fell vs the previous round (0 if it held/grew).
+            # Lets the frontend explain a recacheBody term that the banner-level
+            # detector did not flag.
+            'readDrop': read_drop,
+            # The cache-break cause string (if any) that drove the re-cache —
+            # lets the frontend tie the recacheBody term to the 缓存失效 line.
+            # When recacheBody is driven by a sub-threshold read drop (no formal
+            # break), synthesize a cause so the term is never left unexplained.
+            'recacheCause': (
+                _cache_break if isinstance(_cache_break, dict)
+                else ({'no_cache_reuse':
+                       f'cache_read 较上一轮下降 {read_drop} tok（已缓存正文被重新计费）'}
+                      if recache_body > 0 else {})
+            ),
+            # True when the measured components had to be capped because they
+            # exceeded `write` (output-side vs input-side tokenizer mismatch).
+            # The frontend can note the figures are approximate in this case.
+            'capped': (tool_results + prev_output) >= write and residual == 0,
+        }
+    except Exception as e:
+        logger.debug('write-breakdown compute failed: %s', e)
+        return None
+
+
+def derive_round_modified_files(task: dict, project_path: str | None,
+                                project_paths: list[str] | None) -> tuple[list[dict], int, bool]:
+    """Build this round's authoritative file-change list from the journal.
+
+    The modifications journal is keyed per-root (``session_dir =
+    md5(base_path)``), so a write to an EXTRA workspace root lands in THAT
+    root's journal — not the primary's.  Scanning only ``project_path``
+    (the primary) makes extra-root edits invisible, which in turn lets the
+    project-global file-history side-channel seed ``modifiedFileList`` with
+    a CONCURRENT conversation's edit instead of this round's real edits.
+
+    This helper scans the primary root PLUS every extra root in
+    ``project_paths[1:]``, keeps only modifications stamped with THIS
+    task's id (falling back to a start-timestamp filter for legacy mods),
+    and returns ``(file_list, count, used_ts_fallback)``.  Because each mod
+    is taskId-stamped at write time, the result is conversation-isolated
+    and cannot leak across conversations.
+
+    Args:
+        task: The task dict (needs ``id``, ``convId``, ``created_at``).
+        project_path: Primary workspace root abs path.
+        project_paths: Full ``cfg['projectPaths']`` list (index 0 == primary);
+            indices 1.. are extra roots.
+
+    Returns:
+        ``(file_list, count, used_ts_fallback)`` where ``file_list`` is a
+        list of ``{path, action, root?}`` dicts keyed uniquely by
+        ``(root, path)``.
+    """
+    from lib.project_mod import get_modifications
+
+    conv_id = task.get('convId')
+    scan_roots: list[str] = []
+    seen_roots: set[str] = set()
+    for p in ([project_path] + list((project_paths or [])[1:])):
+        if p and p not in seen_roots:
+            seen_roots.add(p)
+            scan_roots.append(p)
+
+    turn_mods: list[dict] = []
+    used_ts_fallback = False
+    for root in scan_roots:
+        root_mods = get_modifications(root, conv_id=conv_id) or []
+        if not root_mods:
+            continue
+        own = [m for m in root_mods if m.get('taskId') == task.get('id')]
+        if not own:
+            task_start = task.get('created_at', 0)
+            own = [m for m in root_mods if m.get('timestamp', 0) >= task_start]
+            if own:
+                used_ts_fallback = True
+        turn_mods.extend(own)
+
+    if not turn_mods:
+        return [], 0, used_ts_fallback
+
+    seen: dict[tuple[str, str], dict] = {}
+    for m in turn_mods:
+        p = m.get('path', '?')
+        t = m.get('type', '')
+        root_name = m.get('root', '') or ''
+        if t == 'write_file':
+            action = 'created' if not m.get('existed', True) else 'written'
+        elif t in ('apply_diff', 'apply_diffs'):
+            action = 'patched'
+        elif t in ('insert_content', 'insert_contents'):
+            action = 'inserted'
+        elif t == 'run_command':
+            # Resolve the exists-check against the mod's OWN root
+            # (basePath), not the primary, so extra-root deletes classify
+            # correctly.
+            base = m.get('basePath') or project_path or ''
+            abs_p = p if os.path.isabs(p) else os.path.join(base, p)
+            if not m.get('existed', True):
+                action = 'created'
+            elif 'originalContent' in m and not os.path.exists(abs_p):
+                action = 'deleted'
+            else:
+                action = 'modified'
+        else:
+            action = t
+        seen[(root_name, p)] = {'action': action, 'root': root_name}
+
+    file_list = [
+        {'path': p, 'action': info['action'],
+         **({'root': info['root']} if info['root'] else {})}
+        for (root_name, p), info in seen.items()
+    ]
+    return file_list, len(turn_mods), used_ts_fallback
 
 
 def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, thinking_depth: str | None, cfg: dict[str, Any],
@@ -419,6 +732,13 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
 
     # ── Build done event ──
     done_evt = build_event(EventType.DONE)
+    # ★ Always expose the task ID (the whole user→assistant turn, across ALL
+    #   tool rounds). The frontend shows it in the cost popover so the user
+    #   can quote ONE id back to us for root-cause analysis — and it's the
+    #   key every [Task:id] log line is tagged with. Previously taskId was
+    #   only set inside the project-modifications block below, so chat-only
+    #   turns (no file changes) never received it.
+    done_evt['taskId'] = task['id']
     if last_finish_reason: done_evt['finishReason'] = last_finish_reason
     final_usage = accumulated_usage if accumulated_usage else last_usage
     if final_usage: done_evt['usage'] = final_usage
@@ -430,6 +750,13 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         task['thinkingDepth'] = thinking_depth
     if task.get('error'): done_evt['error'] = task['error']
     if task.get('toolSummary'): done_evt['toolSummary'] = task['toolSummary']
+    # Tool-schema latch: a mid-conversation tool toggle was held back to keep
+    # the prompt cache intact. Tell the frontend so it can offer "Apply now".
+    if cfg.get('_toolsetDiverged'):
+        done_evt['toolsetDiverged'] = True
+        _ts_diff = cfg.get('_toolsetDiff')
+        if _ts_diff and (_ts_diff.get('added') or _ts_diff.get('removed')):
+            done_evt['toolsetDiff'] = _ts_diff
     if api_rounds:
         done_evt['apiRounds'] = api_rounds
         task['apiRounds'] = api_rounds
@@ -442,51 +769,26 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
             done_evt['fallbackKind'] = task['_fallback_kind']
     if project_enabled and task['convId']:
         try:
-            from lib.project_mod import get_modifications
-            conv_mods = get_modifications(project_path, conv_id=task['convId'])
-            if conv_mods:
-                # Filter to only modifications from THIS task/round
-                turn_mods = [m for m in conv_mods if m.get('taskId') == task['id']]
-                if not turn_mods:
-                    # Fallback for older mods without taskId tag: use timestamp
-                    task_start = task.get('created_at', 0)
-                    turn_mods = [m for m in conv_mods if m.get('timestamp', 0) >= task_start]
-                done_evt['modifiedFiles'] = len(turn_mods)
-                task['modifiedFiles'] = len(turn_mods)
+            # Authoritative source of truth: this round's OWN journalled
+            # writes, aggregated across EVERY workspace root the task may
+            # have touched (primary + extras).  See
+            # ``derive_round_modified_files`` for why scanning the primary
+            # alone leaked a concurrent conversation's edit.
+            file_list, _n_mods, _used_ts_fallback = derive_round_modified_files(
+                task, project_path, cfg.get('projectPaths'))
+            if file_list:
+                done_evt['modifiedFiles'] = _n_mods
+                task['modifiedFiles'] = _n_mods
                 # ★ Include taskId so frontend can do per-round undo
                 done_evt['taskId'] = task['id']
-                # ★ Include per-file detail so frontend can show which files changed
-                #   Key by (root, path) so a file with the same relative path in
-                #   two different workspace roots doesn't collapse to one entry.
-                seen = {}  # (root, path) → {action, root}
-                for m in turn_mods:
-                    p = m.get('path', '?')
-                    t = m.get('type', '')
-                    root_name = m.get('root', '') or ''
-                    if t == 'write_file':
-                        action = 'created' if not m.get('existed', True) else 'written'
-                    elif t in ('apply_diff', 'apply_diffs'):
-                        action = 'patched'
-                    elif t in ('insert_content', 'insert_contents'):
-                        action = 'inserted'
-                    elif t == 'run_command':
-                        # run_command changes carry granular action based on existed flag
-                        if not m.get('existed', True):
-                            action = 'created'
-                        elif 'originalContent' in m and not os.path.exists(os.path.join(project_path, p)):
-                            action = 'deleted'
-                        else:
-                            action = 'modified'
-                    else:
-                        action = t
-                    seen[(root_name, p)] = {'action': action, 'root': root_name}
-                file_list = [
-                    {'path': p, 'action': info['action'],
-                     **({'root': info['root']} if info['root'] else {})}
-                    for (root_name, p), info in seen.items()
-                ]
                 done_evt['modifiedFileList'] = file_list
                 task['modifiedFileList'] = file_list
+                _n_roots = 1 + len([p for p in (cfg.get('projectPaths') or [])[1:]
+                                    if p and p != project_path])
+                if _n_roots > 1:
+                    logger.info('[Task %s] modifiedFileList derived across %d roots: '
+                                '%d file(s)%s', task['id'][:8], _n_roots,
+                                len(file_list), ' (ts-fallback)' if _used_ts_fallback else '')
         except Exception as e:
             logger.warning('[Task %s] get_modifications failed for conv=%s model=%s: %s',
                       task['id'][:8], task.get('convId', ''), model, e, exc_info=True)
@@ -668,6 +970,34 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     except Exception as _ce:
         logger.warning('[Cost] done-event stamp failed (non-fatal): %s', _ce)
 
+    # ★ Comprehensive task-completion summary — keyed on the FULL task id so a
+    #   user who quotes the id from the cost popover can grep ONE line that
+    #   spans the whole turn (all tool rounds). Includes the per-round cache
+    #   miss count so "why did cache break" is answerable straight from the
+    #   log without re-deriving it. INFO level → lands in logs/app.log.
+    try:
+        _rounds = done_evt.get('apiRounds') or []
+        _miss_rounds = [r.get('round') for r in _rounds
+                        if isinstance(r, dict) and r.get('cacheBreak')]
+        _u = done_evt.get('usage') or {}
+        _cw = (_u.get('cache_write_tokens')
+               or _u.get('cache_creation_input_tokens') or 0)
+        _cr = (_u.get('cache_read_tokens')
+               or _u.get('cache_read_input_tokens') or 0)
+        _cost = (done_evt.get('cost') or {}).get('costCny')
+        logger.info(
+            '[Task:%s] ■ DONE conv=%s model=%s rounds=%d finish=%s '
+            'cache_write=%d cache_read=%d cost=%s elapsed=%.1fs%s',
+            task['id'], task.get('convId', '') or '-', model, len(_rounds),
+            last_finish_reason or '-', _cw, _cr,
+            (f'\u00a5{_cost:.3f}' if isinstance(_cost, (int, float)) else '?'),
+            time.time() - task.get('created_at', time.time()),
+            (f' \u26a0 CACHE_MISS rounds={_miss_rounds}' if _miss_rounds else ''),
+        )
+    except Exception as _se:
+        logger.debug('[Task:%s] completion summary log failed: %s',
+                     task['id'][:8], _se)
+
     append_event(task, done_evt)
     persist_task_result(task)
 
@@ -809,37 +1139,59 @@ def _run_commit_round_async(task: dict, project_path: str) -> None:
         # THIS task.  Any path whose ``last_writer_task_id`` is some
         # other task belongs to a concurrent conversation operating
         # on the same project root and must not be reported here.
-        # Paths with no writer attribution (legacy entries from before
-        # this fix, or external-edit drift snapshots) keep the prior
-        # behaviour and are still reported.
-        # Did THIS round run any tool capable of writing to the
-        # filesystem?  The fh side-channel legitimately catches edits
-        # made by run_command / code_exec / MCP tools (which
-        # modifications.py can't track), so the empty-``last_writer_task_id``
-        # escape hatch below must stay open for those rounds.  But a round
-        # that ran ONLY read-only tools (or no tools at all) cannot have
-        # produced any real edit — so any unattributed diff path it picks
-        # up is external-edit drift or a concurrent conversation's write
-        # that simply wasn't stamped.  Reporting those is the residual
-        # cross-conversation leak.  Use a read-only WHITELIST so unknown
-        # tools (e.g. arbitrary MCP tools) are treated as write-capable
-        # and never suppress a genuine side-channel edit.
+        # ── The fh diff is ENRICHMENT ONLY, never a source of truth. ──
+        # The authoritative ``modifiedFileList`` was already built in
+        # ``_finalize_and_emit_done`` from this round's OWN writes
+        # (modifications journal, aggregated across all roots) — a
+        # conversation-isolated signal.  The fh diff is computed against
+        # the PRIMARY root's project-global snapshot index, so it
+        # legitimately catches only one thing the journal can't: file
+        # edits made by OPAQUE writers that don't stamp attribution —
+        # ``code_exec`` and arbitrary MCP tools.  (``run_command`` IS
+        # journalled by modifications.py, and the file-edit tools
+        # write_file / apply_diff(s) / insert_content(s) journal AND
+        # stamp ``last_writer_task_id`` on their own tracked entries.)
+        #
+        # So an fh diff path is only legitimately OURS when:
+        #   • its tracked entry's ``last_writer_task_id`` == this task, OR
+        #   • the entry is UNATTRIBUTED (empty writer) AND this round ran
+        #     an OPAQUE writer that could have produced an unstamped edit.
+        # Any other empty-writer path is concurrent-conversation drift on
+        # the shared primary root (e.g. another session journalling) and
+        # MUST be dropped — that was the cross-conversation leak that let
+        # a foreign file appear while this round's real (extra-root) edits
+        # were missing.
+        #
+        # ``_TRACKED_EDIT_TOOLS`` and the read-only set both stamp/leave
+        # NO unattributed edits, so a round running only those cannot own
+        # an empty-writer path.  Probe by ACTUAL tool name; unknown names
+        # (custom MCP tools) count as opaque writers — fail open so a
+        # genuine side-channel edit is never suppressed.
         _READ_ONLY_TOOLS = frozenset({
             'list_dir', 'read_files', 'grep_search', 'find_files',
-            'web_search', 'fetch_url',
+            'web_search', 'fetch_url', 'inspect_image',
         })
-        _round_can_write = False
+        _TRACKED_EDIT_TOOLS = frozenset({
+            'write_file', 'apply_diff', 'apply_diffs',
+            'insert_content', 'insert_contents', 'run_command',
+        })
+        _round_has_opaque_writer = False
         try:
             for _r in (task.get('toolRounds') or []):
                 if not isinstance(_r, dict):
                     continue
                 _tn = _r.get('toolName') or _r.get('tool_name') or ''
-                if _tn and _tn not in _READ_ONLY_TOOLS:
-                    _round_can_write = True
-                    break
+                if not _tn:
+                    continue
+                if _tn in _READ_ONLY_TOOLS or _tn in _TRACKED_EDIT_TOOLS:
+                    continue
+                # Anything else (code_exec / MCP / unknown) may write
+                # without stamping attribution.
+                _round_has_opaque_writer = True
+                break
         except Exception as _e:
-            logger.debug('[Task:%s] fh write-capability probe failed: %s', tid, _e)
-            _round_can_write = True  # fail open — never over-suppress
+            logger.debug('[Task:%s] fh opaque-writer probe failed: %s', tid, _e)
+            _round_has_opaque_writer = True  # fail open — never over-suppress
 
         try:
             if fh_changes:
@@ -853,9 +1205,10 @@ def _run_commit_round_async(task: dict, project_path: str) -> None:
                     if _writer and _writer != _own_task_id:
                         # Attributed to another concurrent task — always drop.
                         _dropped += 1
-                    elif not _writer and not _round_can_write:
-                        # Unattributed drift on a round that ran no
-                        # write-capable tool — drop to close the leak.
+                    elif not _writer and not _round_has_opaque_writer:
+                        # Unattributed path on a round that ran no opaque
+                        # writer — it cannot be ours.  Drop (closes the
+                        # concurrent-conversation leak).
                         _dropped_drift += 1
                     else:
                         _filtered.append(entry)
@@ -865,7 +1218,7 @@ def _run_commit_round_async(task: dict, project_path: str) -> None:
                                 tid, _dropped)
                 if _dropped_drift:
                     logger.info('[Task:%s] fh side-channel dropped %d unattributed '
-                                'drift path(s) on a read-only round', tid, _dropped_drift)
+                                'path(s) on a round with no opaque writer', tid, _dropped_drift)
                 fh_changes = _filtered
         except Exception as _e:
             logger.debug('[Task:%s] fh attribution filter failed: %s', tid, _e)
@@ -1026,6 +1379,19 @@ def run_task(task: dict[str, Any]) -> None:
     if 'id' not in task:
         raise ValueError("run_task called with a task dict missing 'id' — did you forget to use create_task()?")
     tid = task['id'][:8]
+    # Seed the thread-local request-id so audit_log / log_exception / log_context
+    # (which auto-stamp req_id) correlate to THIS task. run_task executes on a
+    # pooled background thread where req_id() would otherwise be empty, leaving
+    # every audit line and swallowed-exception trace un-attributable.
+    set_req_id(tid)
+    # ★ Autopilot kick-from-idle: a carrier task that runs ONLY the virtual-user
+    #   hook (no worker LLM turn).  The conversation already ended and the last
+    #   message is the agent's reply, so the simulated user answers it directly.
+    #   See lib.tasks_pkg.autopilot._run_autopilot_kick.
+    if task.get('_autopilot_kick'):
+        from lib.tasks_pkg.autopilot import _run_autopilot_kick
+        _run_autopilot_kick(task)
+        return
     # ★ Timing: thread picked the task up. Compare against '_t_created'
     #   (set in create_task) to measure how long the user "waited" before the
     #   background worker even started — i.e. thread-pool / queue latency.
@@ -1034,6 +1400,14 @@ def run_task(task: dict[str, Any]) -> None:
     if _t_created:
         logger.info('[Timing:%s] queue_wait=%.3fs (create→run_task)',
                     tid, _t_run_start - _t_created)
+    # ★ Task START bracket — logged with the FULL task id (not the 8-char
+    #   prefix) so a user can copy the id from the cost popover and grep the
+    #   whole turn's lifecycle. Pairs with the '[Task:%s] ■ DONE' summary at
+    #   completion. Every per-round line in between is tagged [<tid8>] via the
+    #   thread-local req_id set just above.
+    logger.info('[Task:%s] ▶ START conv=%s msgs=%d',
+                task['id'], task.get('convId', '') or '-',
+                len(task.get('messages') or []))
     try:
         cfg = task['config']
 
@@ -1085,6 +1459,16 @@ def run_task(task: dict[str, Any]) -> None:
             set_pinned_provider(_pinned_provider_id)
             logger.info('[Task %s] Provider-pinned to %s (hard isolation)',
                         tid, _pinned_provider_id)
+
+        # ── Conversation-sticky routing ──
+        # Bind this worker thread to the conversation so every LLM dispatch on
+        # it prefers the API key that last served this conv — keeping the
+        # Anthropic per-key prompt cache warm across rounds. Soft preference:
+        # the picker still falls back to a healthy key if the sticky one is
+        # cooled down. Cleared in the finally block (pooled threads).
+        # See lib/llm_dispatch/conv_affinity.py.
+        from lib.llm_dispatch.conv_affinity import set_conv_affinity
+        set_conv_affinity(task.get('convId') or '')
 
         # ── Section 1: Config & Model Resolution ──
         mcfg = _resolve_model_config(cfg, task['id'])
@@ -1214,6 +1598,16 @@ def run_task(task: dict[str, Any]) -> None:
                                 desktop_enabled or swarm_enabled or
                                 code_exec_enabled or image_gen_enabled)
         _pp = project_path if project_enabled else None
+        # ★ Extra workspace roots for memory scoping (multi-root session).
+        #   Memories are READ (listed / searched / prefetched) across the
+        #   primary + every extra root, unioned and de-duplicated; NEW
+        #   memories are still written only to the primary project_path.
+        #   Mirrors the projectPaths[1:] extraction used for file tools.
+        _mem_extra_paths = []
+        if project_enabled and _pp:
+            _all_mem_paths = cfg.get('projectPaths') or []
+            _mem_extra_paths = [p for p in _all_mem_paths[1:]
+                                if p and p != _pp] if len(_all_mem_paths) > 1 else []
         # Memory toggle gates EVERYTHING memory-related: the count-hint
         # background load, the per-turn prefetch (BM25 + cheap-LLM rerank),
         # and the accumulation instructions injected into the system prompt.
@@ -1223,7 +1617,8 @@ def run_task(task: dict[str, Any]) -> None:
         if memory_enabled:
             def _prefetch_memory():
                 from lib.memory import build_memory_context
-                return build_memory_context(project_path=_pp)
+                return build_memory_context(project_path=_pp,
+                                            extra_paths=_mem_extra_paths)
             _prefetch_memory_future = _prefetch_executor.submit(_prefetch_memory)
 
         # Store prefetch futures on the task for _inject_system_contexts to use
@@ -1240,6 +1635,7 @@ def run_task(task: dict[str, Any]) -> None:
             human_guidance_enabled=human_guidance_enabled,
             scheduler_enabled=scheduler_enabled,
             messages=task['messages'],
+            conv_id=task.get('convId', ''),
         )
 
         # Stash the assembled tool schema on the task so the compaction
@@ -1295,6 +1691,12 @@ def run_task(task: dict[str, Any]) -> None:
                              tid, _conv_id[:8])
 
         # ── Section 3: Context Injection ──
+        _tool_names = {
+            (t.get('function') or {}).get('name')
+            for t in (tool_list or [])
+            if isinstance(t, dict)
+        }
+        _tool_names.discard(None)
         _inject_system_contexts(
             messages, project_path, project_enabled,
             memory_enabled, search_enabled, swarm_enabled,
@@ -1303,6 +1705,8 @@ def run_task(task: dict[str, Any]) -> None:
             task=task,
             model=model,
             system_prompt_mode=cfg.get('systemPromptMode', 'append'),
+            tool_names=_tool_names or None,
+            disabled_blocks=_disabled_prompt_blocks(cfg),
         )
         # Cleanup prefetch futures (no longer needed)
         task.pop('_prefetch_project', None)
@@ -1374,6 +1778,7 @@ def run_task(task: dict[str, Any]) -> None:
                     task=task,
                     emit_event=lambda ev: append_event(task, ev),
                     active_tools=_active_tools,
+                    extra_paths=_mem_extra_paths,
                 )
             except Exception as _e:
                 # Advisory path — never block the task on prefetch failure.
@@ -1650,11 +2055,49 @@ def run_task(task: dict[str, Any]) -> None:
             #   to diagnose unexpected cost spikes.
             #   Inspired by Claude Code's promptCacheBreakDetection.ts.
             if task.get('convId') and last_usage:
-                detect_cache_break(
+                _cache_break = detect_cache_break(
                     task['convId'], messages,
                     tools=_tools_this_round, model=model,
                     usage=last_usage,
                 )
+                # Stamp the break reason onto the round we just recorded so
+                # the frontend cost popover can explain WHY cache_read dropped
+                # (system-prompt change, tools change, TTL expiry, …). Guard on
+                # the round number so we don't mis-attribute when this round
+                # produced no usage and api_rounds[-1] is an earlier round.
+                if _cache_break and api_rounds and api_rounds[-1].get('round') == round_num + 1:
+                    api_rounds[-1]['cacheBreak'] = _cache_break
+                # ★ Stamp WHAT the model did this round (the tool calls it
+                #   emitted). This is the causal driver of the NEXT round's
+                #   cache `write`: round N's assistant output (text + these
+                #   tool_calls) PLUS the tool results fed back get appended to
+                #   the prefix and cached on round N+1. Recording the tool
+                #   names lets the cost popover explain why a round that
+                #   "generated" only a few hundred output tokens leads to a
+                #   multi-thousand-token write next round.
+                if api_rounds and api_rounds[-1].get('round') == round_num + 1:
+                    try:
+                        _tcs = (assistant_msg or {}).get('tool_calls') or []
+                        _names = [
+                            (tc.get('function') or {}).get('name') or '?'
+                            for tc in _tcs if isinstance(tc, dict)
+                        ]
+                        if _names:
+                            api_rounds[-1]['toolCalls'] = _names
+                    except Exception as _te:
+                        logger.debug('[%s] tool-call stamp failed: %s', tid, _te)
+                    # ★ Stamp the EXACT decomposition of this round's `write`
+                    #   into {toolResults, prevOutput, envelope} computed from
+                    #   real recorded usage (see _compute_write_breakdown). The
+                    #   frontend renders these three sub-items — which sum to
+                    #   exactly `write` — instead of doing the arithmetic (and
+                    #   only proxying it) client-side.
+                    try:
+                        _wb = _compute_write_breakdown(task, api_rounds, round_num)
+                        if _wb:
+                            api_rounds[-1]['writeBreakdown'] = _wb
+                    except Exception as _we:
+                        logger.debug('[%s] write-breakdown stamp failed: %s', tid, _we)
                 # ★ Per-round cache stats at INFO level for production visibility
                 log_round_cache_stats(
                     task['convId'], round_num, last_usage,
@@ -1750,6 +2193,17 @@ def run_task(task: dict[str, Any]) -> None:
             #   after the first is a lossy continuation against Claude.
             if assistant_msg.get('thinking_signature'): clean_msg['thinking_signature'] = assistant_msg['thinking_signature']
             messages.append(clean_msg)
+
+            # ★ Incremental auto-translate: this round's prose segment is now
+            #   self-contained (the model finished its commentary and is about
+            #   to call tools). Translate it in the background so it's ready by
+            #   task end instead of one big translation stall. Gated + isolated
+            #   inside the helper; a no-op when autoTranslate is off.
+            try:
+                from lib.translate import submit_round_segment
+                submit_round_segment(task, round_num, assistant_msg.get('content') or '')
+            except Exception as _ite:
+                logger.debug('[%s] incremental translate submit failed (non-fatal): %s', tid, _ite)
 
             # ★ Expose live messages to context_compact tool handler
             task['_compact_messages'] = messages
@@ -1900,6 +2354,15 @@ def run_task(task: dict[str, Any]) -> None:
                 logger.debug('[%s] Appended final assistant reply to messages '
                              '(%d content chars, %d reasoning chars)',
                              tid, len(_final_content), len(_final_reasoning))
+                # ★ Incremental auto-translate: the closing prose segment (the
+                #   model's final answer after the last tool round, or the
+                #   whole reply when no tools were called). round_num here is
+                #   the final round index — unique vs the in-loop submissions.
+                try:
+                    from lib.translate import submit_round_segment
+                    submit_round_segment(task, round_num, _final_content)
+                except Exception as _ite:
+                    logger.debug('[%s] incremental translate submit (final) failed: %s', tid, _ite)
                 # Emit a final snapshot so the debug panel shows the complete
                 # message list. The only in-loop snapshots are "请求前" (before
                 # the assistant reply exists) and the post-tool one (skipped on
@@ -1987,6 +2450,9 @@ def run_task(task: dict[str, Any]) -> None:
         append_event(task, build_event(EventType.DONE, error=_user_err, finishReason='error'))
         persist_task_result(task)
     finally:
+        # ── Clear the per-task request-id correlation tag (pooled threads are
+        #    reused; a stale tid would mis-attribute the NEXT task's logs). ──
+        set_req_id('')
         # ── Clear the hard provider pin so it can't bleed into the NEXT
         #    task that lands on this pooled worker thread. ──
         try:
@@ -1994,6 +2460,12 @@ def run_task(task: dict[str, Any]) -> None:
             clear_pinned_provider()
         except Exception as _pp_err:
             logger.debug('[Task:%s] clear_pinned_provider failed: %s', tid, _pp_err)
+        # ── Clear the conversation binding (pooled threads are reused). ──
+        try:
+            from lib.llm_dispatch.conv_affinity import clear_conv_affinity
+            clear_conv_affinity()
+        except Exception as _ca_err:
+            logger.debug('[Task:%s] clear_conv_affinity failed: %s', tid, _ca_err)
         # ── Release this worker thread's thread-local DB connection back to
         #    the shared pool.  run_task runs on long-lived threads (the
         #    asyncio.to_thread default pool, or daemon task threads); without

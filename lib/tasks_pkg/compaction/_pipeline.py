@@ -59,7 +59,9 @@ def _reinject_system_contexts_after_compact(messages: list, task: dict | None = 
         # _isMeta msg, not in sys_text, so it would fire every compaction.)
         from lib.tasks_pkg.system_context import _CC_STATIC_MARKER
         if _CC_STATIC_MARKER not in sys_text:
-            from lib.tasks_pkg.system_context import _inject_system_contexts
+            from lib.tasks_pkg.system_context import (
+                _inject_system_contexts, _disabled_prompt_blocks,
+            )
             # Re-inject from scratch — the system_context module handles dedup
             _inject_system_contexts(
                 messages, project_path, project_enabled,
@@ -69,6 +71,7 @@ def _reinject_system_contexts_after_compact(messages: list, task: dict | None = 
                 task=task,
                 model=cfg.get('model', ''),
                 system_prompt_mode=cfg.get('systemPromptMode', 'append'),
+                disabled_blocks=_disabled_prompt_blocks(cfg),
             )
             logger.info('[PostCompact] Re-injected system contexts after compaction')
 

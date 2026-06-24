@@ -948,5 +948,170 @@ class TestTruncationStrategies:
         assert oh_stripped['stored_chars'] < oh_full['stored_chars']
 
 
+class TestTruncationIdempotency:
+    """The real module-level _truncate_old_tool_results must be a FIXPOINT.
+
+    Root cause of the "two consecutive turns full cache_write, no error"
+    bug (conv mqovcjp2, 2026-06-22): the truncator runs at the START of
+    every turn against the server-stored messages (live dict refs). The
+    old skip guard only recognised the micro-compact '[...compacted...]'
+    marker — NOT its own '[... truncated — was N chars ...]' note. So an
+    already-truncated old tool result got re-truncated every turn and the
+    embedded char count drifted, silently rewriting bytes inside the cached
+    prompt prefix → PREFIX MUTATION → whole body re-billed uncached.
+    """
+
+    def _big_old_history(self):
+        """Two completed turns + a new user msg, with a fat OLD tool result."""
+        from lib.tasks_pkg.server_message_store import _OLD_RESULT_MAX_CHARS
+        big = 'X' * (_OLD_RESULT_MAX_CHARS * 4)
+        return [
+            _make_system("sys"),
+            _make_user("turn 1 question"),
+            _make_assistant_with_tools(
+                "searching",
+                [_make_tool_call('tc_old', 'web_search', {'q': 'foo'})]),
+            _make_tool_result('tc_old', big),
+            _make_assistant_text("turn 1 answer"),
+            _make_user("turn 2 question"),       # second-to-last user → old boundary
+            _make_assistant_text("turn 2 answer"),
+            _make_user("turn 3 NEW question"),   # current turn
+        ]
+
+    def test_truncates_once_then_is_fixpoint(self):
+        """First pass truncates the fat old result; a second pass is a NO-OP
+        and leaves the bytes byte-identical (the cache-critical property)."""
+        from lib.tasks_pkg.server_message_store import _truncate_old_tool_results
+
+        msgs = self._big_old_history()
+
+        n1 = _truncate_old_tool_results(msgs)
+        assert n1 == 1, "first pass should truncate the one fat old result"
+        after_first = msgs[3]['content']
+        assert 'truncated —' in after_first
+
+        # Re-run on the SAME (already-truncated) list — must NOT touch it again.
+        n2 = _truncate_old_tool_results(msgs)
+        assert n2 == 0, "second pass must be a no-op (idempotent)"
+        assert msgs[3]['content'] == after_first, \
+            "re-truncation rewrote prefix bytes — would cause a cache miss"
+
+    def test_repeated_passes_never_drift(self):
+        """Five passes (simulating five turns) keep the old result stable."""
+        from lib.tasks_pkg.server_message_store import _truncate_old_tool_results
+
+        msgs = self._big_old_history()
+        _truncate_old_tool_results(msgs)
+        stable = msgs[3]['content']
+        for _ in range(5):
+            _truncate_old_tool_results(msgs)
+            assert msgs[3]['content'] == stable
+
+    def test_already_compacted_marker_still_skipped(self):
+        """The pre-existing '[...compacted...]' guard must still hold."""
+        from lib.tasks_pkg.server_message_store import (
+            _OLD_RESULT_MAX_CHARS, _truncate_old_tool_results,
+        )
+        compacted = '[' + 'compacted ' + ('Y' * (_OLD_RESULT_MAX_CHARS * 3))
+        msgs = [
+            _make_system("sys"),
+            _make_user("turn 1"),
+            _make_tool_result('tc_c', compacted),
+            _make_assistant_text("a1"),
+            _make_user("turn 2"),
+            _make_assistant_text("a2"),
+            _make_user("turn 3 NEW"),
+        ]
+        assert _truncate_old_tool_results(msgs) == 0
+
+
+class TestTruncationCachePrefixGate:
+    """The truncator must NOT mutate a tool result that is still inside the
+    Anthropic-cached prefix, even when it is already past the turn boundary.
+
+    Root cause (conv mqq5strz, 2026-06-23): a large tool result enters the
+    list at FULL size in the round it ran (→ cached). The next round a new
+    user message advances ``old_boundary`` past it, so the truncator would
+    truncate it FOR THE FIRST TIME — while it is STILL inside
+    ``messages[0:get_cache_prefix_count(conv)]``. That first-time edit
+    rewrites already-cached bytes → PREFIX MUTATION → whole body re-billed
+    every round (cache_read pinned, cache_write climbing). The idempotency
+    marker does nothing here because it is the FIRST truncation. Fix: skip
+    any index inside the cached prefix; truncate later once it scrolls out.
+    """
+
+    def _seed_cache_state(self, conv_id, message_count, read_tokens=60000):
+        """Make get_cache_prefix_count(conv_id) return message_count-2."""
+        from lib.tasks_pkg import cache_tracking as ct
+        with ct._cache_lock:
+            st = ct.CacheState()
+            st.message_count = message_count
+            st.last_cache_read_tokens = read_tokens
+            st.call_count = 1
+            ct._cache_states[conv_id] = st
+
+    def teardown_method(self, _m):
+        from lib.tasks_pkg import cache_tracking as ct
+        with ct._cache_lock:
+            ct._cache_states.pop('cp_gate_conv', None)
+
+    def _history_with_fat_old_result(self):
+        from lib.tasks_pkg.server_message_store import _OLD_RESULT_MAX_CHARS
+        big = 'X' * (_OLD_RESULT_MAX_CHARS * 4)
+        msgs = [
+            _make_system("sys"),                                    # 0
+            _make_user("turn 1 question"),                          # 1
+            _make_assistant_with_tools(                             # 2
+                "searching",
+                [_make_tool_call('tc_old', 'web_search', {'q': 'foo'})]),
+            _make_tool_result('tc_old', big),                       # 3  ← fat old result
+            _make_assistant_text("turn 1 answer"),                  # 4
+            _make_user("turn 2 question"),                          # 5  ← old_boundary
+            _make_assistant_text("turn 2 answer"),                  # 6
+            _make_user("turn 3 NEW question"),                      # 7  ← current
+        ]
+        return msgs
+
+    def test_skips_result_inside_cache_prefix(self):
+        """With a cache prefix covering index 3, the fat old result (idx 3)
+        must be left byte-identical even though it is past old_boundary (5)."""
+        from lib.tasks_pkg.server_message_store import _truncate_old_tool_results
+
+        msgs = self._history_with_fat_old_result()
+        before = msgs[3]['content']
+        # prefix_n = message_count-2 = 6 → indices 0..5 are cached; idx 3 is in.
+        self._seed_cache_state('cp_gate_conv', message_count=8)
+
+        n = _truncate_old_tool_results(msgs, conv_id='cp_gate_conv')
+        assert n == 0, "result inside cache prefix must not be truncated"
+        assert msgs[3]['content'] == before, \
+            "truncating inside the cached prefix rewrote bytes → cache miss"
+
+    def test_truncates_once_result_leaves_prefix(self):
+        """When the cache prefix no longer covers the fat result, it IS
+        truncated (the deferred, cache-safe truncation)."""
+        from lib.tasks_pkg.server_message_store import _truncate_old_tool_results
+
+        msgs = self._history_with_fat_old_result()
+        # prefix_n = message_count-2 = 2 → only indices 0,1 cached; idx 3 is OUT.
+        self._seed_cache_state('cp_gate_conv', message_count=4)
+
+        n = _truncate_old_tool_results(msgs, conv_id='cp_gate_conv')
+        assert n == 1, "result outside the prefix should be truncated"
+        assert 'truncated —' in msgs[3]['content']
+
+    def test_no_conv_id_falls_back_to_turn_boundary(self):
+        """Without conv_id (no cache state), behaviour is unchanged: the fat
+        old result past the boundary is truncated as before."""
+        from lib.tasks_pkg.server_message_store import _truncate_old_tool_results
+
+        msgs = self._history_with_fat_old_result()
+        n = _truncate_old_tool_results(msgs)  # no conv_id
+        assert n == 1
+        assert 'truncated —' in msgs[3]['content']
+
+
+if __name__ == '__main__':
+    pytest.main([__file__, '-v', '-s'])
 if __name__ == '__main__':
     pytest.main([__file__, '-v', '-s'])

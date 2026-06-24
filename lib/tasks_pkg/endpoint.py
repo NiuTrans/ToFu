@@ -1121,6 +1121,9 @@ def run_endpoint_task(task):
                         '[Endpoint] Replan error: %s — falling back to worker retry',
                         replan_error,
                     )
+                    audit_log('endpoint_replan_failed', task_id=tid,
+                              iteration=iteration, replan_count=replan_count,
+                              reason='error', detail=str(replan_error)[:200])
                     # Fall through to CONTINUE_WORKER behaviour below
                     next_phase = 'worker'
                 elif not new_plan:
@@ -1128,6 +1131,9 @@ def run_endpoint_task(task):
                         '[Endpoint] Replan produced empty plan — falling back '
                         'to worker retry',
                     )
+                    audit_log('endpoint_replan_failed', task_id=tid,
+                              iteration=iteration, replan_count=replan_count,
+                              reason='empty')
                     next_phase = 'worker'
                 else:
                     # ── Plan-size growth guard ──

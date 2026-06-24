@@ -500,6 +500,31 @@ def tool_read_files(base, reads):
 
 
 # ═══════════════════════════════════════════════════════
+#  inspect_image
+# ═══════════════════════════════════════════════════════
+
+def tool_inspect_image(base, path, *, crop=None, rotate=0, zoom=None, grid=False):
+    """Re-render a region of an image at full resolution (zoom/rotate/crop).
+
+    Resolves ``path`` the same way ``read_files`` does — absolute / ~ paths
+    pass straight through, project-relative paths resolve under ``base`` —
+    then delegates to :func:`lib.file_reader.inspect_image_file`.
+
+    Returns a ``__screenshot__`` dict on success or an ``Error: …`` string.
+    """
+    if _is_absolute_path(path):
+        target = path
+    else:
+        try:
+            target = _safe_path(base, path)
+        except ValueError as e:
+            logger.debug('[Tools] inspect_image safe_path rejected %s: %s', path, e)
+            return str(e)
+    from lib.file_reader import inspect_image_file
+    return inspect_image_file(target, crop=crop, rotate=rotate, zoom=zoom, grid=grid)
+
+
+# ═══════════════════════════════════════════════════════
 #  grep / find_files
 # ═══════════════════════════════════════════════════════
 

@@ -17,6 +17,12 @@ from .config import (
     MODEL_ALIASES,
     get_pricing_tiers,
 )
+from .conv_affinity import (
+    get_conv_affinity,
+    get_preferred_key,
+    record_conv_key,
+    sticky_routing_enabled,
+)
 from .slot import Slot
 
 logger = get_logger(__name__)
@@ -264,6 +270,7 @@ class LLMDispatcher:
             prov_extra_headers = provider.get('extra_headers') or {}
             prov_thinking_format = provider.get('thinking_format', '')
             prov_protocol = provider.get('protocol', '')
+            prov_oauth = provider.get('oauth', '')
 
             # ── Multi-endpoint expansion for local providers ──
             # Backwards-compatible: when 'endpoints' is absent we fall back
@@ -431,6 +438,7 @@ class LLMDispatcher:
                                 extra_headers=dict(prov_extra_headers),
                                 thinking_format=prov_thinking_format,
                                 protocol=prov_protocol,
+                                oauth=prov_oauth,
                                 rpm_limit=slot_rpm,
                                 latency_ema=slot_lat,
                                 cost_per_1k_tokens=slot_cost,
@@ -860,21 +868,45 @@ class LLMDispatcher:
                 if not candidates:
                     return None
 
+            # ── Conversation-sticky routing ──
+            # Anthropic's prompt cache is keyed per API key, so a conversation
+            # must keep landing on the SAME key round-to-round or every flip
+            # costs a full cache_creation write + 0% read. When this thread is
+            # bound to a conv (run_task sets it) and that conv has a recent
+            # sticky key, prefer the eligible candidate on that key over the
+            # raw min-score pick. The sticky key is a SOFT preference: if it's
+            # not among the eligible candidates (cooled down / excluded /
+            # disabled), we fall through to score-based selection and rebind.
+            _sticky = (sticky_routing_enabled() and get_conv_affinity()) or None
+            _sticky_key = get_preferred_key(_sticky) if _sticky else None
+
+            def _select(pool):
+                """Pick the best slot in *pool*, honoring the sticky key when eligible."""
+                if _sticky_key:
+                    on_key = [s for s in pool if s.key_name == _sticky_key]
+                    # Only honor the sticky key when it isn't in cooldown
+                    # (score=inf). Otherwise let the normal picker route around it.
+                    if on_key:
+                        best_sticky = min(on_key, key=lambda s: s.score())
+                        if best_sticky.score() != float('inf'):
+                            return best_sticky
+                return min(pool, key=lambda s: s.score())
+
             if prefer_model:
                 # Use alias group so interchangeable deployments are all "preferred"
                 alias_set = self._alias_set(prefer_model)
                 preferred = [s for s in candidates if s.model in alias_set]
                 if preferred:
-                    chosen = min(preferred, key=lambda s: s.score())
+                    chosen = _select(preferred)
                 elif strict_model:
                     # ★ User explicitly chose this model — all its slots are
                     #   in candidates but none match the alias group (shouldn't
                     #   happen normally, but guard against it).  Return None.
                     return None
                 else:
-                    chosen = min(candidates, key=lambda s: s.score())
+                    chosen = _select(candidates)
             else:
-                chosen = min(candidates, key=lambda s: s.score())
+                chosen = _select(candidates)
 
             # ★ strict_model: if the best candidate has score=inf it means
             #   all matching slots are in cooldown.  Return None so the
@@ -882,6 +914,20 @@ class LLMDispatcher:
             #   or fall back to a different model.
             if strict_model and chosen.score() == float('inf'):
                 return None
+
+            # ── Record the chosen key as this conv's sticky key ──
+            # Done for every pick (not just sticky hits) so the FIRST round of
+            # a conversation seeds the affinity, and a forced fallback (sticky
+            # key cooled down) rebinds to the healthy key it landed on.
+            if _sticky and chosen is not None:
+                # A churn signal worth grepping: the conv had a sticky key but
+                # the picker landed elsewhere (cooled down / excluded), which
+                # costs a fresh per-key prompt-cache write this round.
+                if _sticky_key and chosen.key_name != _sticky_key:
+                    logger.debug('[Dispatch] conv=%s sticky key %s unavailable '
+                                 '— rebinding to %s (model=%s)', _sticky[:8],
+                                 _sticky_key, chosen.key_name, chosen.model)
+                record_conv_key(_sticky, chosen.key_name)
 
             # ── Isolation observability ──
             # One line per pick so a provider leak is a single grep:

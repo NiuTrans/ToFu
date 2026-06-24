@@ -593,7 +593,7 @@ def _clear_ownership_markers(pgdata, *, remove_pidfile=True, reason=''):
     """
     suffix = f' ({reason})' if reason else ''
     removed = []
-    targets = ['.pg_owner_host', _HEARTBEAT_FILE]
+    targets = ['.pg_owner_host', _OWNER_ID_FILE, _HEARTBEAT_FILE]
     if remove_pidfile:
         targets += ['postmaster.pid', 'postmaster.opts']
     for name in targets:
@@ -634,6 +634,75 @@ def _heal_if_copied(pgdata):
     except Exception as e:
         logger.debug('[DB] audit_log for copy self-heal failed: %s', e)
     _clear_ownership_markers(pgdata, remove_pidfile=False, reason='copied pgdata')
+    _clear_heartbeat(pgdata)
+    return True
+
+
+def _standalone_mode():
+    """True when this deployment is a standalone single-machine copy.
+
+    Set ``TOFU_PG_STANDALONE=1`` (``export.py`` seeds it into every exported
+    ``.env``). In this mode we NEVER defer to a remote PG owner recorded in an
+    inherited pgdata: such an ``.pg_owner_host`` / heartbeat comes from the
+    machine the copy was made on — or a previous container sharing the same
+    FUSE-mounted absolute path — NOT a live failover peer. We clear the
+    inherited markers and own PG locally instead of routing every DB call
+    across a dead cross-host link (the "connection ... timeout expired" crash).
+
+    This deliberately disables same-path multi-host failover, which standalone
+    deployments don't use. Same-path failover deployments must leave
+    ``TOFU_PG_STANDALONE`` unset to keep the heartbeat handoff in
+    ``_pg_already_running_on_another_machine`` Step 3.
+    """
+    return getenv_compat('TOFU_PG_STANDALONE', default='').strip().lower() in (
+        '1', 'true', 'yes', 'on')
+
+
+def _heal_if_standalone_remote_owner(pgdata):
+    """In standalone mode, drop an inherited REMOTE-owner marker so we never
+    defer to another machine's PG.
+
+    Complements ``_heal_if_copied``: that one heals when the pgdata was copied
+    to a DIFFERENT absolute path. On shared FUSE storage every container sees
+    the pgdata at the SAME absolute path, so the stamp matches and copy-detect
+    can't fire — yet the ``.pg_owner_host`` still points at a stale peer. The
+    explicit ``TOFU_PG_STANDALONE`` flag resolves that ambiguity in favour of
+    "own it locally".
+
+    Returns True when an inherited remote marker was cleared (caller should
+    treat the directory as freshly owned locally), False otherwise.
+    """
+    if not _standalone_mode():
+        return False
+    # Stable-identity guard: if .pg_owner_id says this pgdata is ours, an IP
+    # flap (owner_host != local_ip) is NOT an inherited remote marker — it's
+    # our own pgdata under a new container IP. Never clear in that case.
+    if _owner_is_self(pgdata) is True:
+        return False
+    owner_host = _read_pg_host_from_pidfile(pgdata)
+    if not owner_host:
+        return False
+    local_ip = _get_local_ip()
+    if owner_host in (local_ip, 'localhost', '127.0.0.1'):
+        return False  # owner is this host — nothing inherited to heal
+    # Owner is remote. IP-independent safety: if our pidfile PID is a LIVE
+    # local postgres, THIS host already owns pgdata (the .pg_owner_host IP can
+    # be stale after a container-IP flap) — never clobber our own postmaster.
+    if _pidfile_pid_is_live_local_postgres(pgdata):
+        return False
+    logger.warning('[DB] TOFU_PG_STANDALONE set and pgdata carries a REMOTE '
+                   'owner marker (owner_host=%s, local_ip=%s) — inherited from '
+                   'another machine/container, not a failover peer. Clearing it '
+                   'and owning PG locally.', owner_host, local_ip)
+    try:
+        from lib.log import audit_log as _audit
+        _audit('pg_standalone_heal_remote_owner',
+               owner_host=owner_host, local_ip=local_ip,
+               pgdata=_canonical_pgdata_path(pgdata))
+    except Exception as e:
+        logger.debug('[DB] audit_log for standalone heal failed: %s', e)
+    _clear_ownership_markers(pgdata, remove_pidfile=False,
+                             reason='standalone remote-owner marker')
     _clear_heartbeat(pgdata)
     return True
 
@@ -807,16 +876,88 @@ def _get_local_ip():
         return '127.0.0.1'
 
 
+_HOST_IDENTITY_CACHE = None
+_OWNER_ID_FILE = '.pg_owner_id'
+
+
+def _get_host_identity():
+    """Return a STABLE per-host identity that does NOT flap when the container
+    IP is reassigned (unlike ``_get_local_ip()``).
+
+    ``_get_local_ip()`` uses a UDP-trick to 8.8.8.8 and returns whatever the
+    container's current IP is. Cloud-IDE / FUSE deployments reassign that IP
+    while the host stays the same, which made a server mistake its OWN pgdata
+    for a remote one ("connection ... timeout expired" / split-brain). The
+    machine-id (or hostname) stays constant across an IP flap but DIFFERS
+    between genuinely different containers/hosts — exactly the semantics we
+    want for "is this pgdata owned by THIS machine?".
+
+    Order: ``TOFU_HOST_ID`` env override → ``/etc/machine-id`` →
+    ``/var/lib/dbus/machine-id`` → ``socket.gethostname()``. Cached per process.
+    """
+    global _HOST_IDENTITY_CACHE
+    if _HOST_IDENTITY_CACHE:
+        return _HOST_IDENTITY_CACHE
+    ident = (getenv_compat('TOFU_HOST_ID', default='') or '').strip()
+    if not ident:
+        for p in ('/etc/machine-id', '/var/lib/dbus/machine-id'):
+            try:
+                with open(p) as f:
+                    ident = f.read().strip()
+                if ident:
+                    break
+            except OSError as e:
+                logger.debug('[DB] host-identity: could not read %s: %s', p, e)
+    if not ident:
+        try:
+            import socket
+            ident = socket.gethostname().strip()
+        except Exception as e:
+            logger.debug('[DB] host-identity: gethostname failed: %s', e)
+            ident = ''
+    _HOST_IDENTITY_CACHE = ident or 'unknown-host'
+    return _HOST_IDENTITY_CACHE
+
+
+def _owner_is_self(pgdata):
+    """IP-independent ownership check using the stable ``.pg_owner_id`` marker.
+
+    Returns:
+        True  — the stored host-identity equals ours (we own this pgdata,
+                regardless of any IP flap recorded in ``.pg_owner_host``).
+        False — the stored identity is a DIFFERENT host.
+        None  — no ``.pg_owner_id`` marker (legacy pgdata or never written);
+                caller must fall back to the IP / live-PID heuristics.
+    """
+    id_file = os.path.join(pgdata, _OWNER_ID_FILE)
+    try:
+        if os.path.exists(id_file):
+            with open(id_file) as f:
+                stored = f.read().strip()
+            if stored:
+                return stored == _get_host_identity()
+    except OSError as e:
+        logger.debug('[DB] Could not read %s: %s', _OWNER_ID_FILE, e)
+    return None
+
+
 def _write_owner_host(pgdata):
-    """Write our IP to .pg_owner_host so other machines know where to connect."""
+    """Write our IP to .pg_owner_host so other machines know where to connect,
+    plus a stable host-identity to .pg_owner_id for IP-flap-proof self-check."""
     owner_file = os.path.join(pgdata, '.pg_owner_host')
     try:
         ip = _get_local_ip()
         with open(owner_file, 'w') as f:
             f.write(ip)
-        logger.info('[DB] Wrote PG owner host: %s', ip)
+        logger.info('[DB] Wrote PG owner host: %s (id=%s)', ip, _get_host_identity())
     except Exception as e:
         logger.warning('[DB] Could not write .pg_owner_host: %s', e)
+    id_file = os.path.join(pgdata, _OWNER_ID_FILE)
+    try:
+        with open(id_file, 'w') as f:
+            f.write(_get_host_identity())
+    except Exception as e:
+        logger.warning('[DB] Could not write %s: %s', _OWNER_ID_FILE, e)
 
 
 def _pg_already_running_on_another_machine(pgdata, pg_port):
@@ -831,6 +972,12 @@ def _pg_already_running_on_another_machine(pgdata, pg_port):
     # ORIGINAL instance. Never defer to it — that is the "silently connect to
     # the source machine's PG" trap. Clear the markers and report no remote.
     if _heal_if_copied(pgdata):
+        return False, None
+
+    # Standalone single-machine copy: an inherited remote-owner marker (same
+    # FUSE abs-path, different container/host) must not make us defer. Clear it
+    # and own PG locally. No-op unless TOFU_PG_STANDALONE is set.
+    if _heal_if_standalone_remote_owner(pgdata):
         return False, None
 
     pidfile = os.path.join(pgdata, 'postmaster.pid')
@@ -849,15 +996,29 @@ def _pg_already_running_on_another_machine(pgdata, pg_port):
         logger.warning('[DB] Cannot parse postmaster.pid: %s', e)
         return False, None
 
+    # IP-independent identity check FIRST: the stable .pg_owner_id marker
+    # (machine-id / hostname) does not flap when the container IP is
+    # reassigned, unlike .pg_owner_host. If it says this pgdata is ours, we
+    # own it — no matter what IP the (possibly stale) .pg_owner_host records.
+    owner_self = _owner_is_self(pgdata)
+    if owner_self is True:
+        logger.info('[DB] .pg_owner_id matches this host (id=%s) — pgdata is OURS '
+                    '(ignoring any IP flap in .pg_owner_host)', _get_host_identity())
+        return False, None
+
     owner_host = _read_pg_host_from_pidfile(pgdata)
     local_ip = _get_local_ip()
     is_remote_owner = (
         owner_host is not None
         and owner_host not in (local_ip, 'localhost', '127.0.0.1')
     )
+    # A DIFFERENT-host identity marker is authoritative proof of remoteness
+    # even if the flapping IPs happen to coincide.
+    if owner_self is False:
+        is_remote_owner = True
 
-    logger.info('[DB] postmaster.pid: PID=%d, owner_host=%s, local_ip=%s, is_remote=%s',
-                pid, owner_host, local_ip, is_remote_owner)
+    logger.info('[DB] postmaster.pid: PID=%d, owner_host=%s, local_ip=%s, owner_self=%s, is_remote=%s',
+                pid, owner_host, local_ip, owner_self, is_remote_owner)
 
     # IP-independent ground truth: if the pidfile PID is a live local
     # postgres, THIS host already owns pgdata — regardless of what the

@@ -570,16 +570,16 @@ async function _igRetryBatchSlot(msgIdx, slotIdx, prompt, model) {
 function _igBatchErrorSlotHtml(errInfo, model, msgIdx, slotIdx, prompt) {
   const modelLabel = _IG_MODEL_SHORT[model] || model || '?';
   let typeClass = 'ig-error-generic';
-  let icon = '⚠';
+  let icon = Icon('zap', 24);
   if (errInfo.isRateLimit) {
     typeClass = 'ig-error-ratelimit';
-    icon = '⏳';
+    icon = Icon('hourglass', 24);
   } else if (errInfo.isContentBlocked) {
     typeClass = 'ig-error-blocked';
-    icon = '🚫';
+    icon = Icon('ban', 24);
   } else if (errInfo.isTimeout || errInfo.errorType === 'timeout') {
     typeClass = 'ig-error-timeout';
-    icon = '⏱';
+    icon = Icon('timer', 24);
   }
   return `<div class="ig-batch-error ${typeClass}">
     <div class="ig-error-icon">${icon}</div>

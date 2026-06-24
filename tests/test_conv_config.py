@@ -120,11 +120,6 @@ class ResolveConvConfigTest(unittest.TestCase):
         )
         self.assertFalse(out['keepToolHistory'])
 
-    def test_agent_backend_default_builtin(self):
-        out = resolve_conv_config(
-            conv_settings={}, overrides={}, is_active=True)
-        self.assertEqual(out['agentBackend'], 'builtin')
-
     def test_project_paths_list_copy(self):
         paths = ['/a', '/b']
         out = resolve_conv_config(
@@ -162,7 +157,7 @@ class ResolveConvConfigTest(unittest.TestCase):
             'schedulerEnabled', 'swarmEnabled', 'projectPath',
             'projectPaths', 'readOnlyPaths', 'autoApply', 'browserEnabled',
             'desktopEnabled', 'imageGenEnabled', 'humanGuidanceEnabled',
-            'endpointMode', 'autopilot', 'agentBackend',
+            'endpointMode', 'autopilot',
             'autoTranslate', 'browserClientId', 'keepToolHistory',
             'activeFlow', 'flowBuiltin', 'flowId',
         }

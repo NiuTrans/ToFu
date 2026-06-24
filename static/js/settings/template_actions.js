@@ -50,10 +50,11 @@ async function _showTemplateMenu(btn) {
   menu.className = 'stg-template-menu';
 
   // ── Group templates by category ──
+  var _SVG = function(inner) { return '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>'; };
   var _CATEGORY_META = {
-    official: { label: '官方 API',  icon: '🏢', desc: '直连模型厂商' },
-    relay:    { label: '中转 API',  icon: '🔀', desc: '聚合多家模型' },
-    _other:   { label: '其他',      icon: '📦', desc: '' },
+    official: { label: '官方 API',  icon: _SVG('<path d="M10 12h4"/><path d="M10 8h4"/><path d="M14 21v-3a2 2 0 0 0-4 0v3"/><path d="M6 10H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-2"/><path d="M6 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16"/>'), desc: '直连模型厂商' },
+    relay:    { label: '中转 API',  icon: _SVG('<path d="m18 14 4 4-4 4"/><path d="m18 2 4 4-4 4"/><path d="M2 18h1.973a4 4 0 0 0 3.3-1.7l5.454-8.6a4 4 0 0 1 3.3-1.7H22"/><path d="M2 6h1.972a4 4 0 0 1 3.6 2.2"/><path d="M22 18h-6.041a4 4 0 0 1-3.3-1.8l-.359-.45"/>'), desc: '聚合多家模型' },
+    _other:   { label: '其他',      icon: _SVG('<path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><polyline points="3.29 7 12 12 20.71 7"/><path d="m7.5 4.27 9 5.15"/>'), desc: '' },
   };
   var _CAT_ORDER = ['official', 'relay', '_other'];
   var grouped = {};
@@ -228,6 +229,8 @@ async function addProviderFromTemplate(templateKey) {
   // so a stale hardcoded template can't sneak an incorrect 'cheap' tag
   // (or a missing one) into a new provider card.
   _normalizeModelsPricingTags(models);
+  // Order the fresh provider's models alphabetically (cold sort).
+  if (typeof _coldSortModels === 'function') _coldSortModels(models);
 
   var newProv = {
     id: id, name: tpl.name, base_url: tpl.base_url,
@@ -355,14 +358,16 @@ async function _syncFromTemplate(provIdx) {
       }
       continue;
     }
-    p.models.push({
+    var _newTplModel = {
       model_id: tm.model_id,
       aliases: (tm.aliases || []).slice(),
       capabilities: (tm.capabilities || ['text']).slice(),
       rpm: tm.rpm || 30,
       cost: tm.cost || 0.01,
       thinking_default: (tm.capabilities || []).indexOf('thinking') >= 0,
-    });
+    };
+    if (typeof _insertModelSorted === 'function') _insertModelSorted(p.models, _newTplModel);
+    else p.models.push(_newTplModel);
     added++;
   }
   // Defense-in-depth: re-evaluate pricing-tier tags on the entire
@@ -412,7 +417,7 @@ async function _discoverModels(provIdx) {
   var oldText = btn ? btn.textContent : '';
   if (btn) {
     btn.disabled = true;
-    btn.textContent = '⏳ 发现中…';
+    btn.textContent = '发现中…';
   }
 
   try {
@@ -439,7 +444,8 @@ async function _discoverModels(provIdx) {
     var added = 0;
     for (var i = 0; i < discovered.length; i++) {
       if (!existing.has(discovered[i].model_id)) {
-        p.models.push(discovered[i]);
+        if (typeof _insertModelSorted === 'function') _insertModelSorted(p.models, discovered[i]);
+        else p.models.push(discovered[i]);
         existing.add(discovered[i].model_id);
         added++;
       }

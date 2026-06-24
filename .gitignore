@@ -12,6 +12,10 @@
 .migrate_backup/
 load_env.py
 
+# ── Self-update backups (originals of files replaced by the tarball-overlay
+#    updater for non-git deployments; reversible safety net, machine-local). ──
+.update_backup/
+
 # ── Data-cleanup leftovers (large stray artifacts at repo root, e.g. the
 #    276MB delete.list.all.final; not part of the app, exceed GitHub's
 #    100MB limit and break export/push — see export-large-stray-file note). ──
@@ -40,6 +44,9 @@ data/
 /overleaf_cache/
 /paper/
 /thesis_references.bib
+
+# ── Personal scratch copy script (not part of the app) ──
+/copy_to_chenxin.sh
 
 # ── Eval / bench workdirs (large, causes FUSE timeouts) ──
 # Glob covers every eval/bench harness output dir (swebench_workdir/,
@@ -77,6 +84,9 @@ logs/
 # ── JS bundle (auto-generated at startup) ──
 static/js/bundle-*.js
 
+# ── Minified stylesheet (auto-generated at startup by lib/css_bundler) ──
+static/styles-*.css
+
 # ── Frontend type-check harness (tsc --checkJs) ──
 node_modules/
 *.tsbuildinfo
@@ -107,8 +117,11 @@ Thumbs.db
 
 # ── File-history store (per-project copy-backup undo data, auto-created
 #    by lib/file_history; round-by-round GC churns it, so it must never be
-#    version-tracked — see the 2026-06 "satus full of D" incident). ──
-.tofu/
+#    version-tracked — see the 2026-06 "satus full of D" incident). Scope the
+#    ignore to file-history/ ONLY: .tofu/skills/ is real project content and
+#    stays tracked (the negation below is defensive against a broad re-add). ──
+.tofu/file-history/
+!.tofu/skills/
 
 # ── Safe-delete trash (files moved aside by the delete mechanism instead of
 #    being unlinked; purge manually to reclaim disk). Never track. ──
@@ -134,3 +147,5 @@ installer_output/
 static/icons/tofu.ico
 static/icons/tofu.icns
 .icon-backups/
+# AI assistant evolution journal (per-developer, not source)
+JOURNAL.md

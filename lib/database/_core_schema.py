@@ -377,13 +377,16 @@ RECENT_PROJECTS = define_table(
 )
 
 # paper_reports — persistent cache for paper analysis reports; composite PK
-# (paper_hash, lang). All TEXT + bigint created_at.
+# (paper_hash, lang). All TEXT + bigint created_at. `meta` is a JSON blob
+# holding the resolved generation model + token usage + cost (rendered as a
+# "finish tag" badge under the report); '' on legacy rows.
 PAPER_REPORTS = define_table(
     'paper_reports',
     sa.Column('paper_hash', sa.Text, nullable=False),
     sa.Column('lang', sa.Text, nullable=False, server_default='en'),
     sa.Column('report', sa.Text, nullable=False, server_default=''),
     sa.Column('model', sa.Text, nullable=False, server_default=''),
+    sa.Column('meta', sa.Text, nullable=False, server_default=''),
     sa.Column('created_at', bigint_column(), nullable=False),
     sa.PrimaryKeyConstraint('paper_hash', 'lang'),
 )
@@ -504,20 +507,14 @@ TRANSCRIPT_ARCHIVE = define_table(
 # Same parity-gated workflow as the tables above — each has a byte-equivalence
 # test in tests/test_core_schema_parity.py that is green on BOTH backends.
 
-# agent_sessions — conv→backend session-id map. Composite PK (conv_id, backend);
-# two human-readable timestamps (TIMESTAMPTZ/TEXT) defaulting to NOW()/datetime.
-AGENT_SESSIONS = define_table(
-    'agent_sessions',
-    sa.Column('conv_id', sa.Text, nullable=False),
-    sa.Column('backend', sa.Text, nullable=False),
-    sa.Column('session_id', sa.Text, nullable=False),
-    sa.Column('created_at', timestamptz_column(), server_default=now_timestamp()),
-    sa.Column('last_used_at', timestamptz_column(), server_default=now_timestamp()),
-    sa.PrimaryKeyConstraint('conv_id', 'backend'),
-)
-
-# message_queue — server-side pending message queue. Single TEXT PK; payload /
+# message_queue — unified priority turn-source queue. Single TEXT PK; payload /
 # config are plain TEXT (json strings, not JSONB) with '{}' defaults.
+#   kind     — turn source: 'real' (human), 'workflow_step', or 'autopilot'
+#              (a persistent armed-marker sentinel that is NOT dispatched as a
+#              task; the autopilot hook consults it). See lib/message_queue.py.
+#   priority — lower = higher priority. real=10, workflow_step=50, autopilot=90.
+#              Rows dispatch in (priority ASC, position ASC) order so a human
+#              message always pre-empts an autopilot sentinel.
 MESSAGE_QUEUE = define_table(
     'message_queue',
     sa.Column('id', sa.Text, primary_key=True),
@@ -525,6 +522,8 @@ MESSAGE_QUEUE = define_table(
     sa.Column('payload', sa.Text, nullable=False, server_default="{}"),
     sa.Column('config', sa.Text, nullable=False, server_default="{}"),
     sa.Column('position', sa.Integer, nullable=False, server_default=sa.text('1')),
+    sa.Column('kind', sa.Text, nullable=False, server_default="real"),
+    sa.Column('priority', sa.Integer, nullable=False, server_default=sa.text('100')),
     sa.Column('created_at', bigint_column(), nullable=False),
 )
 
@@ -618,6 +617,9 @@ TIMER_POLL_LOG = define_table(
     sa.Column('reason', sa.Text, nullable=False, server_default=''),
     sa.Column('check_output', sa.Text, nullable=False, server_default=''),
     sa.Column('tokens_used', sa.Integer, nullable=False, server_default=sa.text('0')),
+    sa.Column('model', sa.Text, nullable=False, server_default=''),
+    sa.Column('poll_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('raw_output', sa.Text, nullable=False, server_default=''),
     sqlite_autoincrement=True,
 )
 

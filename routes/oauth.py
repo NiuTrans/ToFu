@@ -116,6 +116,39 @@ def oauth_callback():
         return api_internal_error('internal_error')
 
 
+@oauth_bp.route('/api/oauth/store-token', methods=['POST'])
+def oauth_store_token():
+    """Persist a token the BROWSER exchanged itself (B1 geo-block workaround).
+
+    When the server's egress is geo-blocked from the provider's token
+    endpoint, the frontend performs the token exchange from the user's own
+    (VPN-enabled) network and POSTs the raw token JSON here.
+
+    POST Body: { "provider": "claude"|"codex", "token": { ...token JSON... } }
+    """
+    try:
+        from lib.oauth.manager import store_token
+
+        logger.info('[OAuth API] POST /api/oauth/store-token from %s', request.remote_addr)
+        data = parse_body(force=True)
+        provider = data.get('provider', '')
+        token_response = data.get('token')
+
+        if provider not in ('claude', 'codex'):
+            return api_bad_request('Invalid provider')
+        if not isinstance(token_response, dict):
+            return api_bad_request('Missing or invalid token payload')
+
+        result = store_token(provider, token_response)
+        if 'error' in result:
+            return jsonify(result), 400
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error('[OAuth API] store-token failed: %s', e, exc_info=True)
+        return api_internal_error('internal_error')
+
+
 # OAuth status + test routes moved to routes/api_v1/oauth.py.
 # login/callback/logout stay here because they mix GET form-redirects
 # (geo-block fallback) and don't fit the v1 JSON contract.

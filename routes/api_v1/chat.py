@@ -19,14 +19,19 @@ can switch to ``/api/v1/tasks/{id}/...`` for fine-grained control
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
 
 from flask import Blueprint, Response
 
+from lib.agent_core.admission import (
+    await_terminal, controller, on_terminal, register_waiter,
+    unregister_waiter, wait_for_event,
+)
 from lib.api_response import (
-    api_bad_request, api_internal_error, api_not_found, api_ok,
+    api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
 )
 from lib.billing.request_flow import (
     estimate_prompt_tokens, release_reservation, reserve_for_task, settle_task,
@@ -37,10 +42,10 @@ from lib.openapi import api_meta
 from lib.rate_limit_api import record_tokens
 from lib.usage_tracker import record as record_usage
 from lib.request_parser import (
-    optional_bool, optional_dict, optional_str, parse_body, require_list,
+    async_parse_body, optional_bool, optional_dict, optional_str, require_list,
 )
 
-from .auth import current_auth, require_scope
+from .auth import current_auth, guard_model_relay_or_dispose, require_scope
 
 logger = get_logger(__name__)
 
@@ -70,18 +75,14 @@ def _validate_messages(messages: list) -> list[dict]:
     return out
 
 
-def _wait_for_terminal(task, *, timeout_s: float):
-    """Block until the task transitions to done/error/aborted.
+async def _wait_for_terminal(task, *, timeout_s: float):
+    """Await the task reaching done/error/aborted (event-driven).
 
-    Polls the task dict directly. Times out by raising RuntimeError.
+    Times out by raising RuntimeError (logged by the caller).
     """
-    deadline = time.time() + timeout_s
-    poll = 0.1
-    while task.get('status') not in ('done', 'error', 'aborted'):
-        if time.time() >= deadline:
-            raise RuntimeError('chat completion timed out')
-        time.sleep(poll)
-        poll = min(poll * 1.2, 1.5)
+    ok = await await_terminal(task, timeout_s=timeout_s)
+    if not ok:
+        raise RuntimeError('chat completion timed out')
 
 
 def _assemble_assistant_message(task) -> dict:
@@ -178,8 +179,8 @@ def _settle_streaming_billing(task, *, user_id: str, model: str) -> None:
     settle_task(task, user_id=user_id, model=model)
 
 
-def _stream_generator(task, model: str, requested_id: str,
-                       *, billing_user_id: str = ''):
+async def _stream_generator(task, model: str, requested_id: str,
+                            *, billing_user_id: str = ''):
     """SSE generator: emits incremental chunks while the task runs.
 
     Wire format: each chunk is a ``chat.completion.chunk`` JSON line.
@@ -187,6 +188,9 @@ def _stream_generator(task, model: str, requested_id: str,
     are surfaced under an ``event_type: "tofu.*"`` field on a chunk so
     they reach native clients without breaking OpenAI consumers (which
     ignore unknown fields).
+
+    Event-driven: blocks on the task's wakeup signal instead of polling,
+    so it never pins a thread while the model is generating.
 
     When ``billing_user_id`` is set, the generator runs
     :func:`_settle_streaming_billing` exactly once before yielding the
@@ -196,10 +200,11 @@ def _stream_generator(task, model: str, requested_id: str,
     completion_id = requested_id or f'chatcmpl-{uuid.uuid4().hex[:24]}'
     emitted_role = False
     cursor = 0
-    last_heartbeat = time.time()
     _billed = False
+    task_id = task.get('id') or ''
 
-    while True:
+    try:
+      while True:
         # Snapshot events under the task's events_lock.
         with task['events_lock']:
             new_events = list(task['events'][cursor:])
@@ -265,12 +270,16 @@ def _stream_generator(task, model: str, requested_id: str,
             yield 'data: [DONE]\n\n'
             return
 
-        # Heartbeat every ~15s — keeps proxies from reaping idle SSE.
-        now = time.time()
-        if now - last_heartbeat > 15:
+        # Block until the next event (or 15s heartbeat) — no busy-wait.
+        woke = await wait_for_event(task_id, timeout=15.0)
+        if not woke:
             yield ': heartbeat\n\n'
-            last_heartbeat = now
-        time.sleep(0.05)
+    except (GeneratorExit, asyncio.CancelledError):
+        logger.info('[api_v1.chat] stream client disconnected task=%s',
+                    task_id[:8])
+        raise
+    finally:
+        unregister_waiter(task_id)
 
 
 # ── Routes ──────────────────────────────────────────────────────────
@@ -304,8 +313,8 @@ def _stream_generator(task, model: str, requested_id: str,
                 }},
     },
 )
-def chat_completions():
-    body = parse_body()
+async def chat_completions():
+    body = await async_parse_body()
     try:
         messages_in = require_list(body, 'messages')
         messages = _validate_messages(messages_in)
@@ -353,6 +362,16 @@ def chat_completions():
                 model = _resolved.model_id  # strip the suffix
             except (ValueError, RuntimeError) as e:
                 return api_bad_request(str(e), field='model')
+
+    # ── BYO-only relay backstop ──
+    # On a model_relay_enabled=false deployment, refuse requests that
+    # would consume the OPERATOR's slot pool. BYO requests + admin keys
+    # pass; a tenant pool request is rejected even if a stale key still
+    # carries ``chat`` (scope strip at mint time is the primary control;
+    # this is defense-in-depth). Disposes the slot on rejection.
+    _relay_denied = guard_model_relay_or_dispose(_byo_handle)
+    if _relay_denied is not None:
+        return _relay_denied
 
     # Field mapping (body → cfg) is the shared kernel — the same code the
     # in-process façade (tofu.chat) uses, so the two surfaces can never
@@ -452,7 +471,6 @@ def chat_completions():
                 prompt_tokens=estimate_prompt_tokens(messages),
                 max_completion_tokens=est_completion)
         except InsufficientFunds as e:
-            from lib.api_response import api_error
             return api_error(
                 f'Insufficient credits. '
                 f'Estimated cost {e.needed_micro / 1_000_000:.4f} credits, '
@@ -462,47 +480,57 @@ def chat_completions():
                 balance_micro=e.balance_micro,
                 needed_micro=e.needed_micro)
 
-    try:
-        spawn_task(task)
-    except Exception as e:
-        logger.exception('[api_v1.chat] spawn_task failed')
-        # If we held a credit reservation, release it immediately so
-        # the user isn't waiting 30 min for the janitor to recover the
-        # funds. Best-effort: if the release itself fails, the janitor
-        # is the safety net.
-        release_reservation(task, user_id=billing_user_id,
-                            reservation_micro=reservation_micro)
+    # ── Admission control: refuse with 503 when at capacity ───────
+    if not controller.try_acquire():
         if _byo_handle is not None:
             from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
             dispose_ephemeral_slot(_byo_handle)
+        release_reservation(task, user_id=billing_user_id,
+                            reservation_micro=reservation_micro)
+        logger.warning('[api_v1.chat] admission refused (in_flight=%d/%d) '
+                       'key=%s model=%s', controller.in_flight,
+                       controller.capacity,
+                       (auth.key_id if auth else '') or 'anonymous',
+                       cfg.get('model', '?'))
+        return api_error('Server at capacity; retry shortly.', status=503,
+                         error_kind='overloaded', retry_after=5)
+
+    # Release the admission slot + dispose the BYO ephemeral slot exactly
+    # once, the moment the task reaches a terminal state. Event-driven
+    # (fired from manager.append_event) — no per-request polling thread.
+    _released = {'done': False}
+
+    def _on_done(_tid, _handle=_byo_handle):
+        if _released['done']:
+            return
+        _released['done'] = True
+        controller.release()
+        if _handle is not None:
+            from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
+            try:
+                dispose_ephemeral_slot(_handle)
+            except Exception as ex:
+                logger.error('[api_v1.chat] ephemeral dispose failed '
+                             'handle=%s task=%s: %s', _handle.handle_id,
+                             _tid[:8], ex, exc_info=True)
+
+    on_terminal(task['id'], _on_done)
+    register_waiter(task['id'])
+
+    try:
+        spawn_task(task)
+    except Exception as e:
+        # spawn failed → release slot + dispose synchronously, drop waiter.
+        _on_done(task['id'])
+        unregister_waiter(task['id'])
+        # Release any credit reservation immediately so the user isn't
+        # waiting on the janitor.
+        release_reservation(task, user_id=billing_user_id,
+                            reservation_micro=reservation_micro)
+        logger.exception('[api_v1.chat] spawn_task failed task=%s',
+                         task['id'][:8])
         return api_internal_error(e, context='api_v1.chat',
                                    source='routes.api_v1.chat')
-
-    # ── BYO ephemeral slot: schedule disposal once the task terminates.
-    # Runs in a daemon thread so SSE responses can return immediately
-    # while the slot stays alive long enough for the orchestrator to
-    # finish dispatching. Bounded by a 1-hour ceiling.
-    if _byo_handle is not None:
-        import threading as _threading
-        from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
-
-        def _dispose_when_terminal(t, h):
-            deadline = time.time() + 3600
-            while t.get('status') not in ('done', 'error', 'aborted'):
-                if time.time() >= deadline:
-                    logger.warning('[api_v1.chat] BYO handle %s: task '
-                                    'still running after 1h, '
-                                    'force-disposing', h.handle_id)
-                    break
-                time.sleep(0.5)
-            dispose_ephemeral_slot(h)
-
-        _threading.Thread(
-            target=_dispose_when_terminal,
-            args=(task, _byo_handle),
-            name=f'byo-dispose-{_byo_handle.handle_id}',
-            daemon=True,
-        ).start()
 
     if stream:
         gen = _stream_generator(task, cfg.get('model', model or '?'),
@@ -518,9 +546,13 @@ def chat_completions():
                          })
 
     try:
-        _wait_for_terminal(task, timeout_s=timeout_s)
+        await _wait_for_terminal(task, timeout_s=timeout_s)
     except RuntimeError as e:
+        logger.warning('[api_v1.chat] task=%s timed out model=%s elapsed=%.0fs',
+                       task['id'][:8], cfg.get('model', '?'), timeout_s)
         return api_internal_error(str(e), context='api_v1.chat')
+    finally:
+        unregister_waiter(task['id'])
 
     body_out = _completion_response(task, model=cfg.get('model', model or '?'),
                                      requested_id=requested_id)

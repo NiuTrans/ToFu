@@ -350,6 +350,11 @@ def build_user_msg_from_payload(payload, config, conv_id=None):
         user_msg['replyQuotes'] = payload['replyQuotes']
     if payload.get('convRefs'):
         user_msg['convRefs'] = payload['convRefs']
+    # Per-turn context snapshot (workspace/tools/model active when the turn
+    # was sent) — opaque to the backend, persisted as-is so the frontend can
+    # render the per-turn note after a reload. See static/js/info-rail.js.
+    if payload.get('ctx'):
+        user_msg['_ctx'] = payload['ctx']
     # Resolve convRefTexts server-side from convRefs if not already provided
     conv_ref_texts = payload.get('convRefTexts')
     if not conv_ref_texts and payload.get('convRefs'):

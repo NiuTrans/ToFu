@@ -312,11 +312,6 @@
     runNow:    (opts)         => post('/api/v1/optimizer/run-now', Object.assign({ dry_run: false, window_hours: 24 }, opts || {})),
   };
 
-  // agentBackends ---------------------------------------------------
-  const agentBackends = {
-    status: () => get('/api/v1/agent-backends/status'),
-  };
-
   // compactions (per-conversation snapshots) ------------------------
   const compactions = {
     list: (convId)            => get(`/api/v1/conversations/${encodeURIComponent(convId)}/compactions`),
@@ -404,6 +399,13 @@
     deleteMessage: (convId, msgIdx, mode) =>
       del(`/api/v1/conversations/${encodeURIComponent(convId)}/messages/${encodeURIComponent(msgIdx)}`,
           { query: { mode: mode || 'single' }, parse: 'response', onError: 'null' }),
+    // Apply a pending tool-toggle change to an active conversation: clears the
+    // per-conversation tool-schema latch so the next round re-assembles tools
+    // from the current toggles (accepts a one-time prompt-cache rebuild).
+    // Returns parsed {ok, conv_id} or null on error.
+    applyToolset: (convId) =>
+      post(`/api/v1/conversations/${encodeURIComponent(convId)}/toolset/apply`,
+           {}, { onError: 'null' }),
     // Server-side extract-file-changes from a tool-rounds payload (v1).
     extractFileChanges: (toolRounds) =>
       post('/api/v1/messages/extract-file-changes', { toolRounds }, { onError: 'null' }),
@@ -487,6 +489,15 @@
     // so the virtual user takes over at the next natural stop.
     armAutopilot: (convId)      => post('/api/v1/chat/autopilot/arm', { convId },
                                         { onError: 'null' }),
+    // Disarm autopilot — clears the persistent armed-marker + flips live
+    // config off. Backs the queue-bar cancel button and toggle-OFF gesture.
+    disarmAutopilot: (convId)   => post('/api/v1/chat/autopilot/disarm', { convId },
+                                        { onError: 'null' }),
+    // Kick autopilot on a FINISHED conversation — "push it forward". Spawns a
+    // carrier task that runs the virtual-user hook directly (no worker turn).
+    // Returns {taskId} or throws ApiError (409 when a task is already running).
+    kickAutopilot: (convId, config) => post('/api/v1/chat/autopilot/kick',
+                                            { convId, config }),
     // Active-tasks listing — used on init to reconnect SSE streams.
     active:       (opts)        => get('/api/v1/chat/active', Object.assign({ onError: 'null' }, opts || {})),
     activeResponse: (opts)      => request('/api/v1/chat/active', Object.assign({ method: 'GET', parse: 'response', onError: 'null' }, opts || {})),
@@ -497,6 +508,10 @@
     poll: (taskId, opts) =>
       request(`/api/v1/chat/poll/${encodeURIComponent(taskId)}`,
               Object.assign({ method: 'GET', parse: 'response', onError: 'null' }, opts || {})),
+    // Per-node orchestration-flow run trace (resolved brief + bounded I/O per
+    // node) for the Studio canvas/inspector overlay. {ok, taskId, flowLabel, trace}.
+    flowTrace: (taskId) =>
+      get(`/api/v1/chat/flow-trace/${encodeURIComponent(taskId)}`, { onError: 'null' }),
     // streamResponse stays on /api/chat/stream/<id> — that's the SSE
     // carve-out (long-lived response, custom event format).
     streamResponse: (taskId, opts) =>
@@ -520,6 +535,20 @@
     check:   (opts) => get('/api/v1/update/check', Object.assign({ onError: 'null' }, opts || {})),
     apply:   ()     => post('/api/v1/update/apply', {}),
     restart: ()     => post('/api/v1/update/restart', {}, { onError: 'null' }),
+  };
+
+  // swarm (multi-agent control plane) -------------------------------
+  // status: GET — current swarm state for a task. Top-level shape:
+  //   {active, task_id, agents:[...], running, pending, completed, ...}
+  //   or {active:false, message} when no swarm is registered for the task
+  //   (e.g. session evicted after a server restart). Used by the
+  //   stuck-panel reconciler in ui/streaming_ui.js to settle zombie panels.
+  const swarm = {
+    status: (taskId, opts) =>
+      get(`/api/v1/swarm/status/${encodeURIComponent(taskId)}`,
+          Object.assign({ onError: 'null' }, opts || {})),
+    abort:  (taskId) =>
+      post(`/api/v1/swarm/abort/${encodeURIComponent(taskId)}`, {}, { onError: 'null' }),
   };
 
   // health / status -------------------------------------------------
@@ -554,6 +583,11 @@
     // editor to pre-fill / reset. project & tools flags shape the preview.
     defaultSystemPrompt: (project, tools) =>
       get('/api/v1/system-prompt/default?project=' + (project ? '1' : '0')
+          + '&tools=' + (tools === false ? '0' : '1'), { onError: 'null' }),
+    // Built-in system prompt split into toggleable blocks (id/title/text/
+    // dynamic) — used by the per-block system-prompt editor.
+    systemPromptBlocks: (project, tools) =>
+      get('/api/v1/system-prompt/blocks?project=' + (project ? '1' : '0')
           + '&tools=' + (tools === false ? '0' : '1'), { onError: 'null' }),
   };
 
@@ -616,6 +650,7 @@
       request('/api/oauth/logout',
               { method: 'GET', query: { provider }, parse: 'response', onError: 'null' }),
     callbackPost: (body)            => post('/api/oauth/callback', body, { onError: 'null', parse: 'response' }),
+    storeToken:  (provider, token)  => post('/api/oauth/store-token', { provider, token }, { onError: 'null', parse: 'response' }),
     callbackGet:  (queryString)     =>
       // queryString is a pre-encoded "k=v&k2=v2" string — we hand it off raw
       // because the legacy code did the same. Future cleanup can switch to
@@ -628,6 +663,13 @@
   const mcp = {
     catalogList:      ()                           =>
       request('/api/v1/mcp/catalog',
+              { method: 'GET', parse: 'response', onError: 'null' }),
+    // Lightweight introspection: flat list of every connected MCP tool
+    // ({tools, total, servers_connected}). Used by the per-turn context
+    // capsule (info-rail.js) to surface active MCP tools without paying the
+    // heavier catalog fetch.
+    toolsList:        ()                           =>
+      request('/api/v1/mcp/tools',
               { method: 'GET', parse: 'response', onError: 'null' }),
     // NOTE: no onError:'null' here — a failed connect returns HTTP 500
     // with a rich {error, stderr_tail} body; we want that to throw an
@@ -913,10 +955,11 @@
     ApiError,
     _resolve,         // exposed for SSE/WS path building
     // domains
-    folders, orchestrations, memory, timer, scheduler, optimizer, agentBackends, compactions,
+    folders, orchestrations, memory, timer, scheduler, optimizer, compactions,
     conversations, text, translate, chat, images, pdf, doc, artifacts,
     health, pricing, clientError, serverConfig, browser, project, daily, paper,
     features, providers, dispatch, oauth, mcp, update, trading, authSources,
+    swarm,
   };
 
   global.Api = Api;

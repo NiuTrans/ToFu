@@ -9,8 +9,9 @@ Customer flow
 -------------
 
   1. Customer clicks "Top up" on the dashboard.
-  2. Frontend calls ``POST /api/v1/billing/checkout`` (TODO Phase 4)
-     which creates a Stripe Checkout Session with::
+  2. Frontend calls ``POST /api/v1/billing/checkout`` (handled by
+     :func:`create_stripe_checkout`) which creates a Stripe Checkout
+     Session with::
 
          metadata.user_id = <tenant user id>
 
@@ -36,6 +37,8 @@ from lib.log import get_logger
 from . import _common
 
 logger = get_logger(__name__)
+
+_STRIPE_API_BASE = 'https://api.stripe.com/v1'
 
 
 def _stripe_settings() -> dict:
@@ -155,4 +158,112 @@ def _handle_checkout_session_completed(event, obj):
                   'credit_micro': rec.credit_micro}
 
 
-__all__ = ['handle_stripe_webhook']
+# ── Checkout-session creation (customer top-up entry point) ─────────
+
+async def create_stripe_checkout(
+    *,
+    user_id: str,
+    amount_minor: int,
+    currency: str = 'usd',
+    success_url: str,
+    cancel_url: str = '',
+    product_name: str = 'Tofu Relay credit top-up',
+) -> Tuple[str, str]:
+    """Create a Stripe Checkout Session and return ``(session_id, url)``.
+
+    Calls Stripe's ``POST /v1/checkout/sessions`` with HTTP Basic auth
+    (the secret key as the username). ``metadata.user_id`` is stamped on
+    the session so the ``checkout.session.completed`` webhook can credit
+    the right wallet, mirroring the Alipay ``passback_params`` flow.
+
+    Args:
+        user_id: Tenant user id to credit on settlement.
+        amount_minor: Charge amount in the currency's smallest unit
+            (cents for USD).
+        currency: ISO currency code (lowercase), e.g. ``'usd'``.
+        success_url: URL Stripe redirects to after a successful payment.
+            Stripe requires this; ``{CHECKOUT_SESSION_ID}`` is allowed.
+        cancel_url: URL for a cancelled/abandoned payment (optional).
+        product_name: Line-item label shown on the Stripe-hosted page.
+
+    Returns:
+        ``(session_id, checkout_url)`` — point the customer at the URL.
+
+    Raises:
+        RuntimeError: if Stripe is not configured, or the Stripe API
+            rejects the request.
+    """
+    settings = _stripe_settings()
+    secret_key = settings.get('secret_key') or ''
+    if not secret_key:
+        raise RuntimeError(
+            'Stripe not configured — populate '
+            'data/config/payments.json:stripe.secret_key')
+    if not success_url:
+        raise RuntimeError('success_url is required for Stripe Checkout')
+
+    # Stripe's API is form-encoded with bracket-nested keys.
+    form = {
+        'mode': 'payment',
+        'success_url': success_url,
+        'client_reference_id': user_id,
+        'metadata[user_id]': user_id,
+        'payment_intent_data[metadata][user_id]': user_id,
+        'line_items[0][quantity]': '1',
+        'line_items[0][price_data][currency]': currency.lower(),
+        'line_items[0][price_data][unit_amount]': str(int(amount_minor)),
+        'line_items[0][price_data][product_data][name]': product_name[:127],
+    }
+    if cancel_url:
+        form['cancel_url'] = cancel_url
+
+    from lib.http_client import async_http_post
+    try:
+        resp = await async_http_post(
+            f'{_STRIPE_API_BASE}/checkout/sessions',
+            data=form,
+            auth=(secret_key, ''),
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+        )
+    except Exception as e:
+        logger.error('[Stripe] checkout session request failed: %s', e,
+                     exc_info=True)
+        raise RuntimeError(f'Stripe API request failed: {e}') from e
+
+    if resp.status_code >= 400:
+        try:
+            err = (resp.json().get('error') or {}).get('message') or resp.text
+        except Exception as e:
+            logger.debug('[Stripe] could not parse error body: %s', e)
+            err = resp.text
+        logger.warning('[Stripe] checkout session rejected (%s): %.300s',
+                       resp.status_code, err)
+        raise RuntimeError(f'Stripe rejected checkout session: {err}')
+
+    body = resp.json()
+    session_id = str(body.get('id') or '')
+    url = str(body.get('url') or '')
+    if not url:
+        raise RuntimeError('Stripe returned a session with no checkout URL')
+
+    # Pre-record as pending so the payment is visible before the webhook
+    # lands. The webhook's record_payment is idempotent on
+    # (provider, provider_id), and uses the payment_intent id, so this
+    # pending row keyed on the session id is a distinct breadcrumb that
+    # does not collide with the settlement row.
+    try:
+        _common.record_payment(
+            user_id=user_id, provider='stripe',
+            provider_id=session_id, amount_minor=int(amount_minor),
+            currency=currency.upper(),
+            raw={'checkout_session': session_id}, status='pending')
+    except Exception as e:
+        logger.warning('[Stripe] pre-record of checkout session failed '
+                       '(non-fatal): %s', e)
+
+    logger.info('[Stripe] created checkout session %s for user=%s amount=%s%s',
+                session_id, user_id, amount_minor, currency.upper())
+    return session_id, url
+
+
+__all__ = ['handle_stripe_webhook', 'create_stripe_checkout']

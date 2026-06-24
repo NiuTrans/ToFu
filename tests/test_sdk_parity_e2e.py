@@ -183,7 +183,7 @@ class SDKParityE2ETest(unittest.TestCase):
             props = tofu.get('properties', {})
             # Original well-known fields stay documented.
             for key in ('model', 'maxTokens', 'thinkingDepth', 'searchMode',
-                         'projectPath', 'agentBackend'):
+                         'projectPath'):
                 self.assertIn(key, props, f'expected {key} in TofuConfig')
             # New fields from this round.
             self.assertIn('maxBudgetUsd', props,

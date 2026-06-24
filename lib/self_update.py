@@ -10,19 +10,33 @@ Backs the topbar "Update" button. Two responsibilities:
      NOT used because the project tags releases without creating GitHub
      "Release" objects (the endpoint 404s).
 
-  2. **Apply** — ``git fetch`` + ``git pull --ff-only`` against the
-     configured remote/branch. This mirrors what ``install.sh`` already
-     does for existing checkouts, so the deployed copy is a git repo by
-     construction.
+  2. **Apply** — two strategies, chosen automatically by ``apply_update``:
+     * **git checkout** → ``git fetch`` + ``git pull --ff-only`` against
+       the configured remote/branch (mirrors what ``install.sh`` does for
+       existing checkouts).
+     * **non-git deployment** (exported copy, zip download — no ``.git``)
+       → download the release tarball from GitHub and **overlay** tracked
+       source onto the project root, backing up every replaced file to
+       ``.update_backup/<ts>/`` so the overlay is reversible. This makes
+       exported/zip deployments updatable, not just git checkouts.
 
 Safety model
 ------------
-* **Refuse hard on a dirty working tree** — never auto-stash, never
-  ``--force``, never discard the user's edits. The user must resolve a
-  dirty tree themselves.
+* **git mode — refuse hard on a dirty working tree** — never auto-stash,
+  never ``--force``, never discard the user's edits. The user must resolve
+  a dirty tree themselves.
+* **tarball mode — never destructive, always reversible** — validate the
+  downloaded tree (must carry ``server.py`` / ``VERSION`` / ``lib/``)
+  BEFORE touching anything; abort cleanly on a partial/corrupt download.
+  Each replaced file is copied to ``.update_backup/<ts>/`` before being
+  overwritten. A tarball overlay **cannot delete** files removed upstream
+  (git pull can) — a documented, accepted limitation of the fallback.
 * **User data is preserved by construction.** Everything mutable lives
   outside tracked code (``data/`` configs+DB, ``.env``, ``uploads/``,
-  ``logs/``) and is gitignored, so a fast-forward pull never touches it.
+  ``logs/``) and is gitignored, so neither a fast-forward pull nor a
+  tarball overlay touches it. The overlay additionally skips
+  ``_OVERLAY_SKIP_PREFIXES`` (``.tofu/`` memories+skills, ``.git/``, venvs)
+  even if the archive happens to carry them.
 * **Runtime-state churn is tolerated.** A few paths ARE git-tracked yet
   mutate during normal operation (``.tofu/`` memories + file-history,
   ``outputs/``, ``overleaf_cache/``). Counting those as "dirty" would
@@ -43,7 +57,7 @@ import subprocess
 import sys
 from typing import Optional
 
-from lib.http_client import http_get
+from lib.http_client import http_get, http_stream
 from lib.log import audit_log, get_logger, log_context
 
 logger = get_logger(__name__)
@@ -73,6 +87,66 @@ _RUNTIME_STATE_PREFIXES = (
     'static/js/bundle-',  # regenerated bundle (gitignored, defensive)
 )
 
+# ── Tarball-overlay fallback (non-git deployments) ──
+# Exported copies and zip downloads have no .git, so ``git pull`` is
+# impossible. For those we download the release tarball and overlay tracked
+# source onto the project root (see _apply_via_tarball).
+_TARBALL_URL = f'https://api.github.com/repos/{UPDATE_REPO}/tarball/{{ref}}'
+_DOWNLOAD_TIMEOUT = 300  # seconds — release tarball on a slow corp network
+_UPDATE_BACKUP_DIR = '.update_backup'  # per-run backups of replaced files
+
+# Paths NEVER overwritten by a tarball overlay: user/runtime state that is
+# either gitignored (absent from the tarball) or git-tracked yet mutated
+# locally (.tofu/ memories+skills). Overwriting these would clobber the
+# user's data, so they are skipped even if the archive carries them.
+_OVERLAY_SKIP_PREFIXES = _RUNTIME_STATE_PREFIXES + (
+    '.git/', '.venv/', 'venv/', 'node_modules/', '__pycache__/',
+    _UPDATE_BACKUP_DIR + '/',
+)
+
+
+_git_exe_cache: Optional[str] = None
+
+
+def _git_exe() -> str:
+    """Resolve the git executable, falling back to common install dirs.
+
+    On Windows the server is often launched from a context that lacks
+    Git's bin/ on PATH (e.g. a double-clicked launcher), so a bare
+    ``'git'`` would raise FileNotFoundError and make the UI wrongly
+    report "not a git checkout". We therefore probe PATH via
+    ``shutil.which`` first, then the standard Windows install locations.
+    Result is cached for the process lifetime. Returns ``'git'`` as a
+    last resort so the OS still gets a chance to resolve it.
+    """
+    global _git_exe_cache
+    if _git_exe_cache:
+        return _git_exe_cache
+
+    import shutil
+    found = shutil.which('git')
+    if found:
+        _git_exe_cache = found
+        return found
+
+    candidates = []
+    if os.name == 'nt':
+        for base in (os.environ.get('ProgramFiles', r'C:\Program Files'),
+                     os.environ.get('ProgramFiles(x86)',
+                                    r'C:\Program Files (x86)'),
+                     os.environ.get('LocalAppData', '')):
+            if base:
+                candidates.append(os.path.join(base, 'Git', 'cmd', 'git.exe'))
+                candidates.append(os.path.join(base, 'Git', 'bin', 'git.exe'))
+    for c in candidates:
+        if c and os.path.isfile(c):
+            _git_exe_cache = c
+            logger.info('[Update] Resolved git via fallback: %s', c)
+            return c
+
+    _git_exe_cache = 'git'
+    return 'git'
+
 
 def _run_git(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
     """Run a git command in the project root, capturing output.
@@ -80,7 +154,7 @@ def _run_git(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
     Raises FileNotFoundError if git is not installed (caller handles it).
     """
     return subprocess.run(
-        ['git', *args],
+        [_git_exe(), *args],
         cwd=_ROOT,
         capture_output=True,
         text=True,
@@ -210,16 +284,21 @@ def check_for_update() -> dict:
     """Assemble the full update-check payload for the UI.
 
     Returns a dict with: current, latest, tag, update_available,
-    git_available, dirty, blocking (truncated), runtime_changes, error.
+    git_available, update_method, dirty, blocking (truncated),
+    runtime_changes, error. ``update_method`` is ``'git'`` for a checkout
+    or ``'tarball'`` for a non-git deployment — both are updatable, so the
+    UI shows the Apply button either way (only a git dirty tree blocks).
     Never raises — every failure is captured in the payload.
     """
     cur = current_version()
+    _is_git = git_available()
     payload = {
         'current': cur,
         'latest': None,
         'tag': None,
         'update_available': False,
-        'git_available': git_available(),
+        'git_available': _is_git,
+        'update_method': 'git' if _is_git else 'tarball',
         'dirty': False,
         'blocking': [],
         'runtime_changes': 0,
@@ -327,7 +406,7 @@ def _install_requirements() -> dict:
     return {'ok': True, 'detail': (cp.stdout or '')[-300:]}
 
 
-def apply_update(progress=None) -> dict:
+def _apply_via_git(progress=None) -> dict:
     """Run ``git fetch`` + ``git pull --ff-only``. Returns a result dict.
 
     Refuses (without mutating anything) when:
@@ -365,16 +444,9 @@ def apply_update(progress=None) -> dict:
     old = current_version()
     result = {'ok': False, 'old_version': old, 'new_version': old,
               'changed': False, 'needs_restart': False,
-              'error': None, 'detail': '',
+              'error': None, 'detail': '', 'method': 'git',
               'deps_changed': False, 'deps_installed': False,
               'deps_detail': ''}
-
-    if not git_available():
-        result['error'] = ('Not a git checkout — in-place update requires '
-                           'git. Re-run install.sh to update.')
-        logger.warning('[Update] apply refused: git unavailable')
-        _emit('fetch', 'error', result['error'])
-        return result
 
     status = working_tree_status()
     if not status['clean']:
@@ -471,13 +543,273 @@ def apply_update(progress=None) -> dict:
     audit_log('self_update',
               old_version=old, new_version=new,
               changed=result['changed'], remote=UPDATE_REMOTE,
-              branch=UPDATE_BRANCH,
+              branch=UPDATE_BRANCH, method='git',
               deps_changed=result['deps_changed'],
               deps_installed=result['deps_installed'])
-    logger.info('[Update] applied: %s → %s (changed=%s deps_changed=%s '
+    logger.info('[Update] applied via git: %s → %s (changed=%s deps_changed=%s '
                 'deps_installed=%s)', old, new, result['changed'],
                 result['deps_changed'], result['deps_installed'])
     return result
+
+
+def _overlay_skip(rel: str) -> bool:
+    """True if ``rel`` (project-root-relative, '/'-separated) must NOT be
+    overwritten by a tarball overlay — user/runtime state (see
+    ``_OVERLAY_SKIP_PREFIXES``)."""
+    rel = rel.replace(os.sep, '/')
+    if rel.startswith('./'):
+        rel = rel[2:]
+    return any(rel == p.rstrip('/') or rel.startswith(p)
+               for p in _OVERLAY_SKIP_PREFIXES)
+
+
+def _apply_via_tarball(tag: str, progress=None) -> dict:
+    """Update a non-git deployment by overlaying the release tarball.
+
+    Strategy (every step reversible / non-destructive until validated):
+
+      1. **fetch**  — download ``…/tarball/<tag>`` to a temp file.
+      2. **pull**   — extract to a temp dir, *validate* it carries
+         ``server.py`` / ``VERSION`` / ``lib/``, then copy each tracked
+         file onto the project root, backing up any replaced file to
+         ``.update_backup/<ts>/`` first. Skips ``_OVERLAY_SKIP_PREFIXES``
+         (user data / runtime state) so memories, DB, configs survive.
+      3. **deps**   — if ``requirements.txt`` changed, pip-install it.
+
+    A tarball overlay cannot delete files removed upstream — documented in
+    the module docstring and surfaced in ``result['detail']``.
+
+    Args:
+        tag: The release tag to install (e.g. ``'v0.13.0'``).
+        progress: Same ``fn(stage, status, detail='')`` contract as
+            ``_apply_via_git`` — reuses the ``fetch`` / ``pull`` / ``deps``
+            stage keys so the frontend stepper is identical.
+
+    Returns the same result dict shape as ``_apply_via_git`` (with
+    ``method='tarball'``).
+    """
+    import shutil
+    import tarfile
+    import tempfile
+    import time
+    from pathlib import Path
+
+    def _emit(stage: str, status: str, detail: str = ''):
+        if not progress:
+            return
+        try:
+            progress(stage, status, detail)
+        except Exception as e:
+            logger.debug('[Update] progress callback failed: %s', e)
+
+    old = current_version()
+    result = {'ok': False, 'old_version': old, 'new_version': old,
+              'changed': False, 'needs_restart': False,
+              'error': None, 'detail': '', 'method': 'tarball',
+              'deps_changed': False, 'deps_installed': False,
+              'deps_detail': ''}
+
+    url = _TARBALL_URL.format(ref=tag)
+    tmp_root = tempfile.mkdtemp(prefix='tofu-update-')
+    tar_path = os.path.join(tmp_root, 'release.tar.gz')
+
+    try:
+        # ── 1. Download ──────────────────────────────────────────────
+        _emit('fetch', 'active')
+        with log_context('self_update.tarball_download', logger=logger):
+            try:
+                with http_stream('GET', url, timeout=_DOWNLOAD_TIMEOUT,
+                                 headers={'Accept': 'application/vnd.github+json'}) as resp:
+                    if resp.status_code != 200:
+                        result['error'] = 'Could not download the release archive.'
+                        result['detail'] = f'HTTP {resp.status_code} from {url}'
+                        logger.error('[Update] tarball download HTTP %s for %s',
+                                     resp.status_code, url)
+                        _emit('fetch', 'error', result['detail'])
+                        return result
+                    total = 0
+                    with open(tar_path, 'wb') as fh:
+                        for chunk in resp.iter_content(64 * 1024):
+                            if chunk:
+                                fh.write(chunk)
+                                total += len(chunk)
+            except Exception as e:
+                result['error'] = 'Could not download the release archive.'
+                result['detail'] = str(e)[:500]
+                logger.error('[Update] tarball download failed: %s', e, exc_info=True)
+                _emit('fetch', 'error', result['detail'])
+                return result
+        if total < 1024:
+            result['error'] = 'Downloaded archive is implausibly small — aborting.'
+            result['detail'] = f'{total} bytes'
+            logger.error('[Update] tarball too small (%d bytes) — aborting', total)
+            _emit('fetch', 'error', result['detail'])
+            return result
+        logger.info('[Update] tarball downloaded: %d bytes', total)
+        _emit('fetch', 'done')
+
+        # ── 2. Extract + validate + overlay ──────────────────────────
+        _emit('pull', 'active')
+        extract_dir = os.path.join(tmp_root, 'extract')
+        os.makedirs(extract_dir, exist_ok=True)
+        try:
+            with tarfile.open(tar_path, 'r:gz') as tf:
+                members = tf.getmembers()
+                # GitHub wraps everything in a single top-level dir
+                # (``<owner>-<repo>-<sha>/``); strip it. Guard against path
+                # traversal (``..`` / absolute) before extracting anything.
+                safe = []
+                for m in members:
+                    name = m.name
+                    if name.startswith('/') or '..' in name.split('/'):
+                        logger.warning('[Update] skipping unsafe tar member: %s', name)
+                        continue
+                    safe.append(m)
+                tf.extractall(extract_dir, members=safe)
+        except Exception as e:
+            result['error'] = 'Could not extract the release archive (corrupt download?).'
+            result['detail'] = str(e)[:500]
+            logger.error('[Update] tarball extract failed: %s', e, exc_info=True)
+            _emit('pull', 'error', result['detail'])
+            return result
+
+        # Resolve the single wrapper dir.
+        entries = [os.path.join(extract_dir, n) for n in os.listdir(extract_dir)]
+        roots = [p for p in entries if os.path.isdir(p)]
+        src_root = roots[0] if len(roots) == 1 else extract_dir
+
+        # Validate: this must look like a Tofu source tree, else abort
+        # WITHOUT touching the live install.
+        for sentinel in ('server.py', 'VERSION', 'lib'):
+            if not os.path.exists(os.path.join(src_root, sentinel)):
+                result['error'] = ('Downloaded archive is not a valid Tofu '
+                                   'release — aborting (nothing changed).')
+                result['detail'] = f'missing {sentinel}'
+                logger.error('[Update] tarball validation failed: missing %s', sentinel)
+                _emit('pull', 'error', result['detail'])
+                return result
+
+        new_ver = old
+        try:
+            new_ver = (Path(src_root) / 'VERSION').read_text(encoding='utf-8').strip() or old
+        except Exception as e:
+            logger.warning('[Update] could not read VERSION from archive: %s', e)
+
+        # Overlay every file, backing up replacements first.
+        backup_dir = os.path.join(_ROOT, _UPDATE_BACKUP_DIR,
+                                   time.strftime('%Y%m%d-%H%M%S'))
+        copied = 0
+        skipped = 0
+        backed_up = 0
+        src_root_p = Path(src_root)
+        try:
+            for abs_src in src_root_p.rglob('*'):
+                if abs_src.is_dir():
+                    continue
+                rel = abs_src.relative_to(src_root_p).as_posix()
+                if _overlay_skip(rel):
+                    skipped += 1
+                    continue
+                dest = os.path.join(_ROOT, rel)
+                # Back up an existing file before overwriting it.
+                if os.path.isfile(dest):
+                    bpath = os.path.join(backup_dir, rel)
+                    os.makedirs(os.path.dirname(bpath), exist_ok=True)
+                    shutil.copy2(dest, bpath)
+                    backed_up += 1
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.copy2(str(abs_src), dest)
+                copied += 1
+        except Exception as e:
+            # A mid-overlay failure leaves a partially-updated tree. The
+            # backup dir holds the originals of everything replaced so far;
+            # tell the user where it is rather than silently half-updating.
+            result['error'] = ('Update failed partway through writing files. '
+                               'Original files were backed up.')
+            result['detail'] = (f'{str(e)[:300]} — backup at '
+                                f'{os.path.relpath(backup_dir, _ROOT)}')
+            logger.error('[Update] tarball overlay failed after %d file(s): %s',
+                         copied, e, exc_info=True)
+            _emit('pull', 'error', result['detail'])
+            return result
+
+        result['changed'] = copied > 0
+        result['new_version'] = new_ver
+        result['detail'] = (f'overlaid {copied} file(s), backed up {backed_up}, '
+                           f'preserved {skipped} (note: a tarball update cannot '
+                           f'remove files deleted upstream)')
+        logger.info('[Update] tarball overlay: copied=%d backed_up=%d skipped=%d '
+                    'backup=%s', copied, backed_up, skipped, backup_dir)
+        _emit('pull', 'done')
+
+        # ── 3. Dependencies ──────────────────────────────────────────
+        result['ok'] = True
+        result['needs_restart'] = result['changed']
+        # We can't cheaply diff requirements.txt against the prior tree
+        # (no git), so if anything changed, install defensively.
+        if result['changed']:
+            result['deps_changed'] = True
+            _emit('deps', 'active')
+            dep = _install_requirements()
+            result['deps_installed'] = dep['ok']
+            result['deps_detail'] = dep['detail']
+            if not dep['ok']:
+                result['ok'] = False
+                result['error'] = (
+                    'Code updated, but installing dependencies failed. '
+                    'Run "pip install -r requirements.txt" manually, then '
+                    'restart.')
+                _emit('deps', 'error', dep['detail'])
+            else:
+                _emit('deps', 'done')
+        else:
+            _emit('deps', 'skip')
+
+        audit_log('self_update',
+                  old_version=old, new_version=new_ver,
+                  changed=result['changed'], method='tarball', tag=tag,
+                  deps_changed=result['deps_changed'],
+                  deps_installed=result['deps_installed'])
+        logger.info('[Update] applied via tarball: %s → %s (changed=%s)',
+                    old, new_ver, result['changed'])
+        return result
+    finally:
+        try:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+        except Exception as e:
+            logger.debug('[Update] temp cleanup failed: %s', e)
+
+
+def apply_update(progress=None) -> dict:
+    """Apply the available update, choosing git vs. tarball automatically.
+
+    * **git checkout** → ``_apply_via_git`` (``git pull --ff-only``).
+    * **non-git deployment** → ``_apply_via_tarball`` (download + overlay).
+
+    Both paths share the same result-dict shape and the same
+    ``fetch`` / ``pull`` / ``deps`` progress stages, so the route layer and
+    frontend are agnostic to which ran (``result['method']`` records it).
+
+    Args:
+        progress: Optional ``fn(stage, status, detail='')`` callback.
+
+    Returns the result dict (see ``_apply_via_git`` for the shape).
+    """
+    if git_available():
+        return _apply_via_git(progress=progress)
+
+    # No git — fall back to the tarball overlay. Resolve the target tag from
+    # the release check (the same source the badge uses).
+    logger.info('[Update] no git checkout — using tarball-overlay fallback')
+    latest = fetch_latest_release()
+    if not latest or not latest.get('tag'):
+        old = current_version()
+        return {'ok': False, 'old_version': old, 'new_version': old,
+                'changed': False, 'needs_restart': False, 'method': 'tarball',
+                'error': 'Could not determine the latest release to download.',
+                'detail': '', 'deps_changed': False, 'deps_installed': False,
+                'deps_detail': ''}
+    return _apply_via_tarball(latest['tag'], progress=progress)
 
 
 __all__ = [

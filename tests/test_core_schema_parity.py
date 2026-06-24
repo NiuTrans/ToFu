@@ -36,7 +36,6 @@ from lib.database._core_schema import (
     TASK_RESULTS as _TASK_RESULTS,
     TRADING_CONFIG as _TRADING_CONFIG,
     # ── Wave 2 (2026-06) ──
-    AGENT_SESSIONS as _AGENT_SESSIONS,
     MESSAGE_QUEUE as _MESSAGE_QUEUE,
     SCHEDULED_TASKS as _SCHEDULED_TASKS,
     PROACTIVE_POLL_LOG as _PROACTIVE_POLL_LOG,
@@ -206,6 +205,7 @@ LIVE_PG_PAPER_REPORTS = """
         lang TEXT NOT NULL DEFAULT 'en',
         report TEXT NOT NULL DEFAULT '',
         model TEXT NOT NULL DEFAULT '',
+        meta TEXT NOT NULL DEFAULT '',
         created_at BIGINT NOT NULL,
         PRIMARY KEY (paper_hash, lang)
     )
@@ -216,6 +216,7 @@ LIVE_SQLITE_PAPER_REPORTS = """
         lang TEXT NOT NULL DEFAULT 'en',
         report TEXT NOT NULL DEFAULT '',
         model TEXT NOT NULL DEFAULT '',
+        meta TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL,
         PRIMARY KEY (paper_hash, lang)
     )
@@ -811,28 +812,6 @@ def test_conversations_sqlite_parity():
 #  Live DDL copied verbatim from _schema_pg.py / _schema_sqlite.py.
 # ═══════════════════════════════════════════════════════════════════════
 
-# agent_sessions — conv→backend session map, composite PK + NOW() timestamps.
-LIVE_PG_AGENT_SESSIONS = """
-    CREATE TABLE agent_sessions (
-        conv_id TEXT NOT NULL,
-        backend TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        created_at TIMESTAMPTZ DEFAULT NOW(),
-        last_used_at TIMESTAMPTZ DEFAULT NOW(),
-        PRIMARY KEY (conv_id, backend)
-    )
-"""
-LIVE_SQLITE_AGENT_SESSIONS = """
-    CREATE TABLE agent_sessions (
-        conv_id TEXT NOT NULL,
-        backend TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now')),
-        last_used_at TEXT DEFAULT (datetime('now')),
-        PRIMARY KEY (conv_id, backend)
-    )
-"""
-
 # message_queue — pending message queue, single PK.
 LIVE_PG_MESSAGE_QUEUE = """
     CREATE TABLE message_queue (
@@ -841,6 +820,8 @@ LIVE_PG_MESSAGE_QUEUE = """
         payload TEXT NOT NULL DEFAULT '{}',
         config TEXT NOT NULL DEFAULT '{}',
         position INTEGER NOT NULL DEFAULT 1,
+        kind TEXT NOT NULL DEFAULT 'real',
+        priority INTEGER NOT NULL DEFAULT 100,
         created_at BIGINT NOT NULL
     )
 """
@@ -851,6 +832,8 @@ LIVE_SQLITE_MESSAGE_QUEUE = """
         payload TEXT NOT NULL DEFAULT '{}',
         config TEXT NOT NULL DEFAULT '{}',
         position INTEGER NOT NULL DEFAULT 1,
+        kind TEXT NOT NULL DEFAULT 'real',
+        priority INTEGER NOT NULL DEFAULT 100,
         created_at INTEGER NOT NULL
     )
 """
@@ -988,7 +971,10 @@ LIVE_PG_TIMER_POLL_LOG = """
         decision TEXT NOT NULL DEFAULT 'wait',
         reason TEXT NOT NULL DEFAULT '',
         check_output TEXT NOT NULL DEFAULT '',
-        tokens_used INTEGER NOT NULL DEFAULT 0
+        tokens_used INTEGER NOT NULL DEFAULT 0,
+        model TEXT NOT NULL DEFAULT '',
+        poll_id TEXT NOT NULL DEFAULT '',
+        raw_output TEXT NOT NULL DEFAULT ''
     )
 """
 LIVE_SQLITE_TIMER_POLL_LOG = """
@@ -999,7 +985,10 @@ LIVE_SQLITE_TIMER_POLL_LOG = """
         decision TEXT NOT NULL DEFAULT 'wait',
         reason TEXT NOT NULL DEFAULT '',
         check_output TEXT NOT NULL DEFAULT '',
-        tokens_used INTEGER NOT NULL DEFAULT 0
+        tokens_used INTEGER NOT NULL DEFAULT 0,
+        model TEXT NOT NULL DEFAULT '',
+        poll_id TEXT NOT NULL DEFAULT '',
+        raw_output TEXT NOT NULL DEFAULT ''
     )
 """
 
@@ -1345,10 +1334,6 @@ def _assert_parity(table, live_pg, live_sqlite):
         "\n--- Core PG ---\n" + core["pg"] + "\n--- Live PG ---\n" + live_pg)
     assert _norm(core["sqlite"]) == _norm(live_sqlite), (
         "\n--- Core SQLite ---\n" + core["sqlite"] + "\n--- Live SQLite ---\n" + live_sqlite)
-
-
-def test_agent_sessions_parity():
-    _assert_parity(_AGENT_SESSIONS, LIVE_PG_AGENT_SESSIONS, LIVE_SQLITE_AGENT_SESSIONS)
 
 
 def test_message_queue_parity():

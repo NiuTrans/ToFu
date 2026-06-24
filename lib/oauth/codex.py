@@ -17,7 +17,7 @@ import requests
 
 from lib.log import get_logger
 from lib.oauth.pkce import generate_pkce_codes
-from lib.oauth.token_store import load_token, save_token
+from lib.oauth.token_store import load_token, save_token, OAuthExchangeError
 from lib.http_client import http_post
 
 logger = get_logger(__name__)
@@ -26,6 +26,7 @@ __all__ = [
     'CODEX_OAUTH_CONFIG',
     'codex_build_auth_url',
     'codex_exchange_code',
+    'codex_store_token',
     'codex_refresh_token',
     'codex_get_valid_token',
     'codex_translate_request',
@@ -81,6 +82,15 @@ def codex_build_auth_url() -> dict:
         'pkce': pkce,
         'callback_port': CODEX_OAUTH_CONFIG['callback_port'],
         'provider': 'codex',
+        # Params for browser-side token exchange (B1 flow).
+        'exchange': {
+            'token_url': CODEX_OAUTH_CONFIG['token_url'],
+            'client_id': CODEX_OAUTH_CONFIG['client_id'],
+            'redirect_uri': CODEX_OAUTH_CONFIG['redirect_uri'],
+            'code_verifier': pkce['code_verifier'],
+            'state': state,
+            'style': 'form',  # OpenAI token endpoint expects form-urlencoded
+        },
     }
 
 
@@ -114,7 +124,11 @@ def codex_exchange_code(code: str, pkce_verifier: str) -> dict | None:
         if resp.status_code != 200:
             logger.error('[Codex OAuth] Token exchange failed (HTTP %d): %.500s',
                          resp.status_code, resp.text)
-            return None
+            raise OAuthExchangeError(
+                _explain_exchange_failure(resp.status_code, resp.text, 'codex'),
+                status_code=resp.status_code,
+                detail=resp.text[:500],
+            )
 
         data = resp.json()
         access_token = data.get('access_token', '')
@@ -124,7 +138,8 @@ def codex_exchange_code(code: str, pkce_verifier: str) -> dict | None:
 
         if not access_token:
             logger.error('[Codex OAuth] No access_token in response')
-            return None
+            raise OAuthExchangeError(
+                'OpenAI returned no access_token', status_code=resp.status_code)
 
         # Parse JWT to get account info
         email, account_id = _parse_jwt_claims(id_token)
@@ -145,9 +160,50 @@ def codex_exchange_code(code: str, pkce_verifier: str) -> dict | None:
                      email, account_id[:8] if account_id else '?', expires_in)
         return token_data
 
+    except OAuthExchangeError:
+        raise
     except Exception as e:
         logger.error('[Codex OAuth] Token exchange error: %s', e, exc_info=True)
-        return None
+        raise OAuthExchangeError(
+            'Network error reaching OpenAI: %s' % e, status_code=0) from e
+
+
+def codex_store_token(data: dict) -> dict:
+    """Persist a token response the BROWSER already obtained (B1 flow).
+
+    Args:
+        data: Raw JSON response from OpenAI's token endpoint.
+
+    Returns:
+        The stored token dict.
+
+    Raises:
+        OAuthExchangeError: when the response carries no access_token.
+    """
+    if not isinstance(data, dict):
+        raise OAuthExchangeError('Invalid token response (not an object)', status_code=0)
+    access_token = data.get('access_token', '')
+    if not access_token:
+        raise OAuthExchangeError(
+            'Token response from the browser contained no access_token',
+            status_code=0, detail=json.dumps(data)[:300])
+    id_token = data.get('id_token', '')
+    expires_in = data.get('expires_in', 3600)
+    email, account_id = _parse_jwt_claims(id_token)
+    token_data = {
+        'type': 'codex',
+        'access_token': access_token,
+        'refresh_token': data.get('refresh_token', ''),
+        'id_token': id_token,
+        'account_id': account_id,
+        'email': email,
+        'expire': time.time() + expires_in,
+        'expires_in': expires_in,
+    }
+    save_token('codex', token_data)
+    logger.info('[Codex OAuth] Stored browser-exchanged token (email=%s, account=%s, expires_in=%ds)',
+                email, account_id[:8] if account_id else '?', expires_in)
+    return token_data
 
 
 def codex_refresh_token(refresh_tok: str = None) -> dict | None:
@@ -538,6 +594,37 @@ def codex_translate_sse_event(raw_line: str, translator: CodexSSETranslator) -> 
 
 
 # ── Internal helpers ──
+
+def _explain_exchange_failure(status: int, body: str, provider: str) -> str:
+    """Turn an upstream non-200 token-exchange response into a clear message.
+
+    A 403 ``unsupported_country_region_territory`` from OpenAI is a region
+    block on the SERVER's egress IP, not a bad code.
+    """
+    upstream = ''
+    try:
+        parsed = json.loads(body) if body else {}
+        err = parsed.get('error', parsed)
+        if isinstance(err, dict):
+            upstream = err.get('message') or err.get('error_description') or err.get('type') or ''
+        elif isinstance(err, str):
+            upstream = err
+    except Exception:
+        upstream = (body or '')[:200]
+
+    if status == 403:
+        return ('OpenAI refused the token exchange (HTTP 403: %s). This is a '
+                'region block on the SERVER\u2019s network \u2014 not an expired code. '
+                'This server cannot reach OpenAI\u2019s token endpoint from its '
+                'current network.' % (upstream or 'unsupported_country_region_territory'))
+    if status in (400, 401):
+        return ('OpenAI rejected the authorization code (HTTP %d: %s). The code may '
+                'have expired or already been used \u2014 start a fresh login.'
+                % (status, upstream or 'invalid_grant'))
+    if status == 0:
+        return upstream or 'Could not reach OpenAI.'
+    return 'Token exchange failed (HTTP %d: %s).' % (status, upstream or 'unknown error')
+
 
 def _parse_jwt_claims(id_token: str) -> tuple[str, str]:
     """Parse JWT ID token to extract email and account_id.

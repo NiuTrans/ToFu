@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlparse
+import hashlib
+import os
+import re
+from urllib.parse import unquote, urlparse
 
 import lib as _lib
 from lib.log import get_logger
 from lib.tasks_pkg.executor import _finalize_tool_round, tool_registry
-from tofu_search import fetch_page_content, perform_web_search
+from tofu_search import fetch_page_content, looks_like_text_asset, perform_web_search
 from tofu_search.search import format_search_for_tool_response
 from tofu_search.search.vertical import (detect_vertical_intent, search_vertical,
                                           search_vertical_domain, list_domains)
@@ -116,6 +119,65 @@ def _web_search_one(query: str, user_question: str, freshness: str = '',
     )
 
 
+def _safe_filename(target_url: str, ext: str) -> str:
+    """Build a collision-resistant local filename for a staged asset.
+
+    Uses the URL's basename stem when usable, otherwise just a hash of the
+    URL, always suffixed with a short URL hash + the original extension.
+    """
+    try:
+        path = unquote(urlparse(target_url).path)
+        stem = os.path.splitext(os.path.basename(path))[0]
+    except Exception as e:
+        logger.debug('[Fetch] could not derive filename stem: %s', e)
+        stem = ''
+    stem = re.sub(r'[^A-Za-z0-9._-]', '_', stem).strip('_')[:64]
+    digest = hashlib.sha1(target_url.encode('utf-8', 'replace')).hexdigest()[:10]
+    base = f'{stem}-{digest}' if stem else digest
+    return f'{base}{ext}'
+
+
+def _stage_binary_asset(target_url: str):
+    """Stage a binary file asset to ``data/fetched/`` for read_files.
+
+    Used only when the text pipeline returned nothing AND the URL is not a
+    text asset. All fetching/SSRF/size policy lives in tofu_search's
+    ``fetch_url_bytes`` — this function owns only the chatui-specific concern
+    of persisting the bytes and crafting the read_files handoff note.
+
+    Returns a dict with ``page_content`` (the note) + ``saved_path`` +
+    ``is_asset=True``, or ``None`` if the download was rejected/failed.
+    """
+    from tofu_search import fetch_url_bytes
+    got = fetch_url_bytes(target_url)
+    if not got:
+        return None
+    raw, ct = got
+
+    ext = os.path.splitext(unquote(urlparse(target_url).path))[1].lower()
+    from lib.config_dir import fetched_path
+    dest = fetched_path(_safe_filename(target_url, ext))
+    try:
+        with open(dest, 'wb') as f:
+            f.write(raw)
+    except Exception as e:
+        logger.error('[Fetch] failed to stage asset to %s: %s', dest, e, exc_info=True)
+        return None
+
+    logger.info('[Fetch] staged binary asset %d bytes (ct=%s) → %s',
+                len(raw), ct or '?', dest)
+    note = (
+        f'[fetch_url] This URL is a file asset ({ct or "unknown type"}, '
+        f'{len(raw):,} bytes), not a readable web page, so it was downloaded '
+        f'to a local staging path instead:\n\n  {dest}\n\n'
+        f'Read it with read_files(path="{dest}") — read_files handles images, '
+        f'PDFs and Office documents natively.'
+    )
+    return {'page_content': note, 'raw_chars': len(raw),
+            'filtered_chars': len(note), 'saved_path': dest,
+            'is_asset': True}
+
+
 def _fetch_url_one(target_url: str, user_question: str, fetch_reason: str = ''):
     """Fetch one URL; apply content filter; return a dict with all display fields.
 
@@ -123,6 +185,7 @@ def _fetch_url_one(target_url: str, user_question: str, fetch_reason: str = ''):
         {
           'url': str, 'page_content': str | None, 'is_pdf': bool,
           'raw_chars': int, 'filtered_chars': int, 'error_msg': str | None,
+          'saved_path': str | None, 'is_asset': bool,
         }
     """
     scheme = urlparse(target_url).scheme.lower()
@@ -148,7 +211,12 @@ def _fetch_url_one(target_url: str, user_question: str, fetch_reason: str = ''):
               or (page_content and page_content.startswith('[Page ')))
     raw_chars = len(page_content) if page_content else 0
 
-    if page_content and not is_pdf:
+    # Text assets (SVG / source / config files) come back from fetch_page_content
+    # verbatim — they're NOT prose, so skip the article relevance/noise filter
+    # which would mangle or wrongly drop them.
+    is_text_asset = looks_like_text_asset(target_url)
+
+    if page_content and not is_pdf and not is_text_asset:
         from tofu_search.fetch.content_filter import IRRELEVANT_SENTINEL
         filtered = filter_web_content(
             page_content, url=target_url,
@@ -160,11 +228,27 @@ def _fetch_url_one(target_url: str, user_question: str, fetch_reason: str = ''):
         else:
             page_content = filtered
 
+    # ── Fallback: the text pipeline found nothing. The URL is likely a BINARY
+    # file asset (image, archive, font, Office doc) that can't be extracted as
+    # text. Stage the bytes to data/fetched/ and hand back the local path so
+    # the model can read it with read_files. (Text assets like SVG/source are
+    # already returned above by fetch_page_content — no second fetch needed.)
+    saved_path = None
+    is_asset = False
+    if not page_content:
+        asset = _stage_binary_asset(target_url)
+        if asset:
+            page_content = asset.get('page_content')
+            raw_chars = asset.get('raw_chars', raw_chars)
+            saved_path = asset.get('saved_path')
+            is_asset = bool(asset.get('is_asset'))
+
     filtered_chars = len(page_content) if page_content else 0
     return {
         'url': target_url, 'page_content': page_content,
         'is_pdf': is_pdf, 'raw_chars': raw_chars,
         'filtered_chars': filtered_chars, 'error_msg': None,
+        'saved_path': saved_path, 'is_asset': is_asset,
     }
 
 
@@ -181,6 +265,16 @@ def _format_fetch_display(item, _short_url) -> dict:
     raw_chars = item['raw_chars']
     page_content = item['page_content']
     is_pdf = item['is_pdf']
+    if item.get('is_asset'):
+        return {
+            'title': f'File: {_short_url(target_url)}',
+            'snippet': (f'Saved {raw_chars:,} bytes → staging (read via read_files)'
+                        if page_content else 'Failed'),
+            'url': target_url,
+            'source': 'File Asset',
+            'fetched': bool(page_content),
+            'fetchedChars': filtered_chars,
+        }
     return {
         'title': f'{"PDF" if is_pdf else "Page"}: {_short_url(target_url)}',
         'snippet': (

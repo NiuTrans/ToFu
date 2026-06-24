@@ -26,10 +26,11 @@ Layered API
 Hot path::
 
     from lib.billing import wallet, cost, pricing
-    estimate = cost.estimate_request_cost(model, prompt_tokens)
+    estimate = cost.estimate_request_cost(model, prompt_tokens=prompt_tokens)
     wallet.reserve(user_id, estimate, ref_id=task_id)
     # ... call upstream LLM ...
-    actual = cost.compute_request_cost(model, prompt_tokens, completion_tokens)
+    actual = cost.compute_request_cost(
+        model, input_tokens=prompt_tokens, output_tokens=completion_tokens)
     wallet.settle(user_id, reserved=estimate, actual=actual, ref_id=task_id)
 
 Reservations are themselves ledger entries (kind=``reserve``), released
@@ -59,6 +60,8 @@ from lib.billing.pricing import (
     get_price,
     list_prices,
     reload_pricing,
+    save_margin,
+    PricingError,
 )
 from lib.billing.users import (
     create_user,
@@ -83,6 +86,7 @@ from lib.billing.wallet import (
 __all__ = [
     # pricing
     'ModelPrice', 'get_price', 'list_prices', 'reload_pricing',
+    'save_margin', 'PricingError',
     # cost
     'compute_request_cost', 'estimate_request_cost',
     'format_credits', 'micro_to_credits', 'credits_to_micro',

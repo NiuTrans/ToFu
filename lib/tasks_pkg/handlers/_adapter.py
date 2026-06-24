@@ -92,8 +92,23 @@ def simple_call(
     elapsed = time.time() - t0
 
     _content_len = len(tool_content) if isinstance(tool_content, str) else len(str(tool_content))
-    logger.info('[Task %s] [%s] %s completed in %.1fs (result_len=%d)',
-                tid, tag, fn_name, elapsed, _content_len)
+    # Several executors (MCP bridge, desktop agent, swarm tools) signal failure
+    # by RETURNING an error string rather than raising — so the bare "completed"
+    # line below would record a failed call as a success, and the §4.4
+    # "[Tool:…] failed" contract that the optimizer's analyzer greps for would
+    # never fire. Detect the well-known error sentinels and emit a WARNING that
+    # names the tool, so a recurring MCP/desktop failure is visible in app.log
+    # (and now mineable) instead of hiding behind a green "completed".
+    _is_err_result = isinstance(tool_content, str) and tool_content.lstrip()[:40].startswith((
+        '❌', 'Error', 'MCP Error', 'MCP tool error', 'MCP server not connected',
+        'Desktop Agent Error', 'Failed'))
+    if _is_err_result:
+        logger.warning('[Task %s] [%s] %s returned an error result in %.1fs '
+                       '(result_len=%d): %.200s',
+                       tid, tag, fn_name, elapsed, _content_len, tool_content)
+    else:
+        logger.info('[Task %s] [%s] %s completed in %.1fs (result_len=%d)',
+                    tid, tag, fn_name, elapsed, _content_len)
 
     meta = _build_simple_meta(
         fn_name, tool_content, source=source,

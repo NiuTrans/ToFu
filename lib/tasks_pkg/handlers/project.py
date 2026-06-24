@@ -181,6 +181,8 @@ def _maybe_promote_write_to_artifact(task, fn_name, fn_args, project_path, meta)
 # it uniformly; the no-project branch below routes via an anchor cwd of '.'.
 @tool_registry.tool('read_files', category='files',
                     description='Read one or more files (relative or absolute)')
+@tool_registry.tool('inspect_image', category='files',
+                    description='Zoom/rotate/crop view of a local image')
 @tool_registry.tool_set(PROJECT_TOOL_NAMES, category='project',
                         description='Read/write/search project files')
 def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
@@ -275,7 +277,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         # read_files is globally available — when no project is attached,
         # absolute paths still work (routed inside tool_read_files via
         # lib.file_reader); project-relative paths error out helpfully.
-        if fn_name == 'read_files' and not project_path:
+        if fn_name in ('read_files', 'inspect_image') and not project_path:
             tool_content = execute_tool(fn_name, fn_args, '.', conv_id=task['convId'], task_id=task['id'])
         else:
             _progress_cb = None
@@ -352,6 +354,17 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             # <img> per descriptor. Each carries a full data: URL.
             'imageDataUris': [d for d in _img_descriptors if d.get('uri')],
         }
+        # ── inspect_image: surface the transform + source/view dimensions ──
+        if fn_name == 'inspect_image':
+            _ops = tool_content.get('inspectOps', '') or ''
+            _view = tool_content.get('viewSize') or []
+            _src = tool_content.get('sourceSize') or []
+            meta['inspectOps'] = _ops
+            if len(_view) == 2 and len(_src) == 2:
+                meta['snippet'] = (f'{filename}: {_src[0]}×{_src[1]} → '
+                                   f'{_view[0]}×{_view[1]}px ({_ops})')
+            if _ops:
+                meta['badge'] = _ops
         _finalize_tool_round(task, rn, round_entry, [meta])
         return tc_id, tool_content, False
 

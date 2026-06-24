@@ -5,8 +5,11 @@ Routes (mounted under ``/api/v1``):
   GET  /api/v1/update/check    — compare installed VERSION vs. the newest
                                  GitHub release tag; report git availability
                                  and whether the working tree is safe to pull.
-  POST /api/v1/update/apply    — admin: ``git pull --ff-only`` from the
-                                 official remote. Refuses on a dirty tree.
+  POST /api/v1/update/apply    — admin: apply the update. A git checkout
+                                 uses ``git pull --ff-only`` (refuses on a
+                                 dirty tree); a non-git deployment (exported
+                                 copy / zip) downloads the release tarball
+                                 and overlays tracked source instead.
   POST /api/v1/update/restart  — admin: re-exec the server process so pulled
                                  ``.py`` changes take effect. Explicit only —
                                  ``apply`` never auto-restarts.
@@ -70,14 +73,17 @@ def update_check():
 @api_meta(
     summary='Apply the available update',
     description=(
-        'Runs git fetch + git pull --ff-only against the official remote. '
-        'Refuses (without mutating anything) if git is unavailable or the '
-        'working tree has tracked-source changes — it never auto-stashes '
-        'or force-resets. User settings live outside tracked code and are '
-        'never touched. If the pull touches requirements.txt, runs pip '
-        'install -r requirements.txt against the running interpreter so '
-        'the update is self-contained. Returns needs_restart=true when '
-        'files changed; the caller must POST /api/v1/update/restart.'
+        'Applies the update, choosing the strategy automatically. A git '
+        'checkout runs git fetch + git pull --ff-only (refuses, without '
+        'mutating anything, on a dirty tracked-source tree; never '
+        'auto-stashes or force-resets). A non-git deployment downloads the '
+        'official release tarball and overlays tracked source onto the '
+        'project root, backing up replaced files to .update_backup/. Either '
+        'way user settings/data/memories live outside tracked code and are '
+        'never touched. If requirements.txt changed, runs pip install '
+        'against the running interpreter so the update is self-contained. '
+        'Returns needs_restart=true when files changed; the caller must '
+        'POST /api/v1/update/restart.'
     ),
     tags=['system'],
 )

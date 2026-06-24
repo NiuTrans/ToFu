@@ -5,6 +5,13 @@ Memories are plain Markdown files stored in:
   • Project: <project>/.tofu/skills/*.md         (project-specific)
 
 All memories live under the project directory.
+
+Multi-root: the read/list functions accept an optional ``extra_paths`` list
+(the non-primary workspace roots of a multi-root session). Memories are then
+UNIONED across the primary root + every extra root and de-duplicated by id
+(primary root wins on a collision). NEW memories are still written ONLY to the
+primary ``project_path``; update/delete/merge locate a memory in whichever
+root it lives and mutate it in place.
 """
 
 import json
@@ -443,21 +450,52 @@ def _get_global_memory_dir(project_path):
     return os.path.join(project_path, GLOBAL_MEMORY_SUBDIR)
 
 
-def list_all_memories(project_path=None):
-    """List all global + project memories."""
+def _iter_roots(project_path, extra_paths):
+    """Return the ordered, de-duplicated list of roots to scan.
+
+    The primary ``project_path`` always comes first (so it wins on an id
+    collision); any ``extra_paths`` follow in order, skipping blanks and
+    duplicates.
+    """
+    roots = []
+    if project_path:
+        roots.append(project_path)
+    for p in (extra_paths or []):
+        if p and p not in roots:
+            roots.append(p)
+    return roots
+
+
+def list_all_memories(project_path=None, extra_paths=None):
+    """List all global + project memories across the primary + extra roots.
+
+    Project- and global-scoped memories are unioned across the primary
+    ``project_path`` and every root in ``extra_paths`` (a multi-root
+    session), de-duplicated by id with the primary root winning on a
+    collision. With no ``extra_paths`` this is identical to the original
+    single-root behaviour.
+    """
+    roots = _iter_roots(project_path, extra_paths)
+    memories = []
+    seen_ids = set()
     with _lock:
-        global_dir = _get_global_memory_dir(project_path)
-        memories = (_list_memories_in_dir(global_dir, scope='global')
-                    if global_dir else [])
-        if project_path:
-            proj_dir = os.path.join(project_path, PROJECT_MEMORY_SUBDIR)
-            memories += _list_memories_in_dir(proj_dir, scope='project')
+        for root in roots:
+            global_dir = _get_global_memory_dir(root)
+            scanned = (_list_memories_in_dir(global_dir, scope='global')
+                       if global_dir else [])
+            proj_dir = os.path.join(root, PROJECT_MEMORY_SUBDIR)
+            scanned += _list_memories_in_dir(proj_dir, scope='project')
+            for mem in scanned:
+                if mem['id'] in seen_ids:
+                    continue
+                seen_ids.add(mem['id'])
+                memories.append(mem)
     return memories
 
 
-def list_memories(project_path=None, scope='all'):
+def list_memories(project_path=None, scope='all', extra_paths=None):
     """List memories, optionally filtered by scope."""
-    all_memories = list_all_memories(project_path)
+    all_memories = list_all_memories(project_path, extra_paths=extra_paths)
     if scope == 'global':
         return [s for s in all_memories if s['scope'] == 'global']
     elif scope == 'project':
@@ -465,23 +503,24 @@ def list_memories(project_path=None, scope='all'):
     return all_memories
 
 
-def get_memory(memory_id, project_path=None):
+def get_memory(memory_id, project_path=None, extra_paths=None):
     """Get a single memory by ID. Returns memory dict or None."""
-    for s in list_all_memories(project_path):
+    for s in list_all_memories(project_path, extra_paths=extra_paths):
         if s['id'] == memory_id:
             return s
     return None
 
 
-def get_enabled_memories(project_path=None):
+def get_enabled_memories(project_path=None, extra_paths=None):
     """Get only enabled memories."""
-    return [s for s in list_all_memories(project_path) if s.get('enabled', True)]
+    return [s for s in list_all_memories(project_path, extra_paths=extra_paths)
+            if s.get('enabled', True)]
 
 
-def get_eligible_memories(project_path=None):
+def get_eligible_memories(project_path=None, extra_paths=None):
     """Get memories that are both enabled AND meet all runtime requirements."""
     return [
-        s for s in get_enabled_memories(project_path)
+        s for s in get_enabled_memories(project_path, extra_paths=extra_paths)
         if s.get('eligible', True)
     ]
 
@@ -557,9 +596,14 @@ def create_memory(name, description='', body='', tags=None, scope='global', proj
     return mem
 
 
-def update_memory(memory_id, updates, project_path=None):
-    """Update an existing memory. Returns updated memory or None."""
-    all_memories = list_all_memories(project_path)
+def update_memory(memory_id, updates, project_path=None, extra_paths=None):
+    """Update an existing memory. Returns updated memory or None.
+
+    The memory is located across the primary + extra roots and rewritten
+    in place at its own ``filepath`` (so editing an extra-root memory
+    stays in that root).
+    """
+    all_memories = list_all_memories(project_path, extra_paths=extra_paths)
     target = None
     for s in all_memories:
         if s['id'] == memory_id:
@@ -575,22 +619,27 @@ def update_memory(memory_id, updates, project_path=None):
     return target
 
 
-def delete_memory(memory_id, project_path=None):
+def delete_memory(memory_id, project_path=None, extra_paths=None):
     """Delete a memory. Handles both flat ``.md`` files and package
     directories (``<id>/SKILL.md`` + references/scripts).
 
+    The memory is located across the primary + extra roots.
     Returns True if deleted.
     """
-    all_memories = list_all_memories(project_path)
+    all_memories = list_all_memories(project_path, extra_paths=extra_paths)
+    _roots = _iter_roots(project_path, extra_paths)
     for s in all_memories:
         if s['id'] != memory_id:
             continue
         try:
             if s.get('is_package') and s.get('package_dir'):
                 pkg = s['package_dir']
-                # Defence: only delete inside the project's skills tree.
-                if project_path and not os.path.realpath(pkg).startswith(
-                        os.path.realpath(project_path)):
+                # Defence: only delete inside one of the configured roots'
+                # skills trees.
+                pkg_real = os.path.realpath(pkg)
+                if _roots and not any(
+                        pkg_real.startswith(os.path.realpath(r))
+                        for r in _roots):
                     logger.warning('Refusing to delete package outside project: %s', pkg)
                     return False
                 shutil.rmtree(pkg)
@@ -604,12 +653,16 @@ def delete_memory(memory_id, project_path=None):
     return False
 
 
-def merge_memories(memory_ids, name, description, body, tags=None, scope='project', project_path=None):
-    """Merge multiple memories into one new consolidated memory, deleting the originals."""
+def merge_memories(memory_ids, name, description, body, tags=None, scope='project', project_path=None, extra_paths=None):
+    """Merge multiple memories into one new consolidated memory, deleting the originals.
+
+    Source memories are located across the primary + extra roots; the new
+    consolidated memory is always written to the PRIMARY ``project_path``.
+    """
     if not memory_ids or len(memory_ids) < 2:
         raise ValueError("merge_memories requires at least 2 memory IDs")
 
-    all_memories = list_all_memories(project_path)
+    all_memories = list_all_memories(project_path, extra_paths=extra_paths)
     mem_map = {s['id']: s for s in all_memories}
     missing = [sid for sid in memory_ids if sid not in mem_map]
     if missing:
@@ -626,17 +679,18 @@ def merge_memories(memory_ids, name, description, body, tags=None, scope='projec
 
     deleted_ids = []
     for sid in memory_ids:
-        if delete_memory(sid, project_path):
+        if delete_memory(sid, project_path, extra_paths=extra_paths):
             deleted_ids.append(sid)
 
     return {'merged_memory': merged, 'deleted_ids': deleted_ids}
 
 
-def toggle_memory(memory_id, enabled=None, project_path=None):
+def toggle_memory(memory_id, enabled=None, project_path=None, extra_paths=None):
     """Toggle a memory's enabled state."""
     if enabled is None:
-        mem = get_memory(memory_id, project_path)
+        mem = get_memory(memory_id, project_path, extra_paths=extra_paths)
         if not mem:
             return None
         enabled = not mem.get('enabled', True)
-    return update_memory(memory_id, {'enabled': enabled}, project_path)
+    return update_memory(memory_id, {'enabled': enabled}, project_path,
+                         extra_paths=extra_paths)

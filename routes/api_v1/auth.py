@@ -552,6 +552,86 @@ def require_scope(*scopes: str):
     return decorator
 
 
+def model_relay_guard(*, is_byo: bool = False):
+    """Backstop for BYO-only deployments (``model_relay_enabled=false``).
+
+    Returns a 403-style rejection Response when the current request would
+    consume the OPERATOR's model slot pool on a relay that has opted out
+    of being a model intermediary; returns ``None`` (proceed) otherwise.
+
+    The PRIMARY control is the scope strip at key-mint time (a BYO-only
+    tenant key never carries ``chat``). This is the defense-in-depth
+    backstop that also refuses a stale pre-flag key still holding ``chat``.
+
+    Allowed through even when model relay is off:
+      * ``is_byo=True`` — the caller pinned their OWN endpoint
+        (``model="name@prov_xxx"`` / inline provider block). That's
+        exactly the path a BYO-only deployment wants to encourage.
+      * admin / operator keys — the operator running their own instance
+        is not a tenant; they keep full access to their pool.
+
+    Cheap: one cached config read; no DB hit.
+    """
+    if is_byo:
+        return None
+    from lib.relay_config import model_relay_enabled
+    if model_relay_enabled():
+        return None
+    ctx = current_auth()
+    if ctx is not None and ctx.has_scope('admin'):
+        return None
+    audit_log('model_relay_denied',
+              key_id=(ctx.key_id if ctx else ''),
+              name=(ctx.name if ctx else ''),
+              path=request.path)
+    return api_forbidden(
+        'This relay does not provide model access (BYO-only mode). '
+        'Register your own model endpoint via POST /api/v1/providers and '
+        'invoke it through /api/v1/agent/run, or with '
+        'model="<name>@<prov_id>" on the chat endpoint.',
+        error_kind='model_relay_disabled')
+
+
+def guard_model_relay_or_dispose(handle):
+    """One-shot BYO-only backstop for the four completion surfaces.
+
+    Collapses the per-route boilerplate ::
+
+        denied = model_relay_guard(is_byo=handle is not None)
+        if denied is not None:
+            return denied
+
+    into a single call. Pass the resolved ephemeral-slot ``handle``
+    (``None`` when the request targets the global pool). Returns the
+    rejection Response, or ``None`` to proceed.
+
+    Note on the name: a rejection can ONLY occur when ``handle is None``
+    — a present handle means the caller pinned their own endpoint
+    (``is_byo=True``), which the guard always allows. So there is never
+    a live slot to dispose at the point of rejection; the ``_or_dispose``
+    suffix documents the contract (rejection leaves no leaked slot)
+    rather than performing a disposal. The defensive branch below makes
+    that invariant explicit and self-heals if a future refactor ever
+    makes a handle reachable on the reject path.
+    """
+    denied = model_relay_guard(is_byo=handle is not None)
+    if denied is None:
+        return None
+    if handle is not None:
+        # Invariant: unreachable today (handle ⇒ is_byo ⇒ allowed). Kept
+        # as a self-healing safety net so a future change that lets a
+        # handle survive to a rejection can't leak the slot.
+        logger.error('[ModelRelay] guard rejected WITH a live slot '
+                     '(handle=%s) — invariant broken; disposing',
+                     getattr(handle, 'handle_id', '?'))
+        try:
+            from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
+            dispose_ephemeral_slot(handle)
+        except Exception as e:
+            logger.warning('[ModelRelay] slot dispose on reject failed: %s', e)
+    return denied
+
+
 # Legacy aliases used by ``server.py`` and tests during the transition
 # from the old name. Both refer to the same callable.
 bearer_auth_before_request = auth_before_request
@@ -563,6 +643,8 @@ __all__ = [
     'attach_rate_headers',
     'require_auth',
     'require_scope',
+    'model_relay_guard',
+    'guard_model_relay_or_dispose',
     'current_auth',
     'SESSION_COOKIE',
 ]

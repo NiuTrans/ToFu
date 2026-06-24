@@ -40,7 +40,7 @@ __all__ = [
     # Read-only roots
     'is_readonly_path', 'ReadOnlyRootError',
     # Tools
-    'tool_list_dir', 'tool_read_files', 'tool_grep', 'tool_grep_batch',
+    'tool_list_dir', 'tool_read_files', 'tool_inspect_image', 'tool_grep', 'tool_grep_batch',
     'tool_find_files', 'tool_find_files_batch',
     'tool_write_file', 'tool_apply_diff', 'tool_insert_content',
     'tool_create_project', 'tool_run_command',
@@ -136,6 +136,7 @@ from lib.project_mod.tools import (
     tool_grep,
     tool_grep_batch,
     tool_insert_content,
+    tool_inspect_image,
     tool_list_dir,
     tool_read_files,
     tool_run_command,

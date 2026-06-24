@@ -347,28 +347,75 @@ def section_actions(is_code_context: bool = True) -> str:
 # Claude Code lists specific tools; we substitute Tofu's tool names.  The
 # "CRITICAL" framing is preserved — it's the dominant behavioral lever.
 
-def section_using_tools() -> str:
-    provided_tool_subitems = [
-        "To read files use read_files instead of cat, head, tail, or sed",
-        "To edit files use apply_diff or insert_content instead of sed or awk",
-        "To create files use write_file instead of cat with heredoc or "
-        "echo redirection",
-        "To search for files use find_files instead of find or ls",
-        "To search the content of files, use grep_search instead of grep "
-        "or rg",
-        "Reserve using run_command exclusively for system commands and "
-        "terminal operations that require shell execution. If you are "
-        "unsure and there is a relevant dedicated tool, default to using "
-        "the dedicated tool and only fallback on using run_command for "
-        "these if it is absolutely necessary.",
+def section_using_tools(tool_names: set[str] | None = None) -> str:
+    """Build the ``# Using your tools`` section.
+
+    Args:
+        tool_names: The set of tool names actually registered for this
+            turn. When provided, the "prefer the dedicated tool" sub-bullets
+            are filtered so we only ever name a tool that exists — otherwise
+            the model is told (e.g.) ``write_file`` / ``apply_diff`` /
+            ``grep_search`` exist when project mode is off, and tries to call
+            a tool that isn't in the schema. When ``None`` (back-compat for
+            callers that don't pass it), all sub-bullets ship.
+    """
+    # (bullet text, tool names that must ALL be present for it to ship).
+    # An empty requirement means "always ship". When tool_names is None we
+    # ship everything (legacy behavior).
+    _candidate_subitems: list[tuple[str, tuple[str, ...]]] = [
+        ("To read files use read_files instead of cat, head, tail, or sed",
+         ('read_files',)),
+        ("To edit files use apply_diff or insert_content instead of sed or awk",
+         ('apply_diff', 'insert_content')),
+        ("To create files use write_file instead of cat with heredoc or "
+         "echo redirection",
+         ('write_file',)),
+        ("To search for files use find_files instead of find or ls",
+         ('find_files',)),
+        ("To search the content of files, use grep_search instead of grep "
+         "or rg",
+         ('grep_search',)),
+        ("Reserve using run_command exclusively for system commands and "
+         "terminal operations that require shell execution. If you are "
+         "unsure and there is a relevant dedicated tool, default to using "
+         "the dedicated tool and only fallback on using run_command for "
+         "these if it is absolutely necessary.",
+         ('run_command',)),
     ]
 
-    items = [
-        "Do NOT use run_command to run commands when a relevant dedicated "
-        "tool is provided. Using dedicated tools allows the user to better "
-        "understand and review your work. This is CRITICAL to assisting "
-        "the user:",
-        provided_tool_subitems,
+    if tool_names is None:
+        provided_tool_subitems = [text for text, _ in _candidate_subitems]
+    else:
+        # An OR over the required names: ship the bullet if ANY of the tools
+        # it mentions is present (the edit bullet names two interchangeable
+        # tools — either alone justifies it).
+        provided_tool_subitems = [
+            text for text, req in _candidate_subitems
+            if any(name in tool_names for name in req)
+        ]
+
+    # If no dedicated file/shell tools are present (e.g. search-only turn),
+    # the whole "prefer dedicated tools over the shell" framing is moot —
+    # drop the section's lead-in + sub-bullets and keep only the generic
+    # parallel-tool-calls guidance.
+    _has_run_command = tool_names is None or 'run_command' in tool_names
+    items: list = []
+    if provided_tool_subitems:
+        if _has_run_command:
+            lead_in = (
+                "Do NOT use run_command to run commands when a relevant "
+                "dedicated tool is provided. Using dedicated tools allows "
+                "the user to better understand and review your work. This "
+                "is CRITICAL to assisting the user:")
+        else:
+            lead_in = (
+                "Prefer the dedicated tool for each operation below — it "
+                "lets the user better understand and review your work. This "
+                "is CRITICAL to assisting the user:")
+        items.append(lead_in)
+        items.append(provided_tool_subitems)
+
+    items.extend([
         "You can call multiple tools in a single response. If you intend "
         "to call multiple tools and there are no dependencies between "
         "them, make all independent tool calls in parallel. Maximize use "
@@ -381,7 +428,7 @@ def section_using_tools() -> str:
         "Each tool's own ``description`` (sent with the tools list) is "
         "authoritative for its arguments, batching pattern, and usage "
         "rules. Read it when unsure.",
-    ]
+    ])
     return _with_heading("# Using your tools", items)
 
 
@@ -566,11 +613,109 @@ def section_current_date() -> str:
 #  Assembler — returns the full static block, joined with "\n\n"
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ── Block registry ──
+# Stable IDs for each toggleable static-prompt block. The editor stores
+# which IDs the user has switched OFF (keyed on ID, never on rendered text —
+# text changes between releases, IDs don't). ``intro`` is deliberately NOT
+# listed as user-toggleable in the UI because it carries the
+# ``_CC_STATIC_MARKER`` idempotency probe, but the backend will honour a
+# disable for any ID if asked.
+#
+# ``BLOCK_META`` drives the editor: id → (human title, whether the block's
+# text is dynamic/read-only). Dynamic blocks (environment, current_date) are
+# generated per-request and can only be toggled, not edited.
+BLOCK_META: dict[str, dict] = {
+    'intro': {'title': 'Intro & identity', 'dynamic': False, 'lockable': True},
+    'system': {'title': '# System', 'dynamic': False, 'lockable': False},
+    'doing_tasks': {'title': '# Doing tasks', 'dynamic': False, 'lockable': False},
+    'actions': {'title': '# Executing actions with care',
+                'dynamic': False, 'lockable': False},
+    'using_tools': {'title': '# Using your tools',
+                    'dynamic': False, 'lockable': False},
+    'tone_and_style': {'title': '# Tone and style',
+                       'dynamic': False, 'lockable': False},
+    'output_efficiency': {'title': '# Output efficiency',
+                          'dynamic': False, 'lockable': False},
+    'function_result_clearing': {'title': '# Function Result Clearing',
+                                 'dynamic': False, 'lockable': False},
+    'system_reminders': {'title': 'System-reminder semantics',
+                         'dynamic': False, 'lockable': False},
+    'environment': {'title': '# Environment',
+                    'dynamic': True, 'lockable': False},
+    'current_date': {'title': 'Current date',
+                     'dynamic': True, 'lockable': False},
+}
+
+
+def build_static_blocks(*, cwd: str, is_git: bool, model: str,
+                         extra_roots: list[str] | None = None,
+                         has_real_tools: bool = True,
+                         is_code_context: bool = True,
+                         include_date: bool = True,
+                         tool_names: set[str] | None = None,
+                         ) -> list[dict]:
+    """Build the static prompt as an ordered list of identified blocks.
+
+    Each block is ``{'id': str, 'title': str, 'text': str, 'dynamic': bool}``.
+    A block whose ``text`` is empty (because a mode gate suppressed it) is
+    omitted from the returned list entirely — callers never see ghost blocks.
+
+    This is the single source of block order/identity; ``build_static_prompt``
+    joins the (optionally filtered) result. The editor renders this list with
+    a per-block keep/drop toggle.
+
+    Args mirror ``build_static_prompt``.
+    """
+    raw: list[tuple[str, str]] = [
+        ('intro', section_intro(is_code_context=is_code_context)),
+        ('system', section_system()),
+        ('doing_tasks', section_doing_tasks(is_code_context=is_code_context)),
+        ('actions', section_actions(is_code_context=is_code_context)),
+    ]
+    if has_real_tools:
+        raw.append(('using_tools', section_using_tools(tool_names=tool_names)))
+    raw.append(('tone_and_style',
+                section_tone_and_style(is_code_context=is_code_context)))
+    raw.append(('output_efficiency', section_output_efficiency()))
+    if has_real_tools:
+        raw.append(('function_result_clearing',
+                    section_function_result_clearing()))
+        raw.append(('system_reminders', section_system_reminders()))
+        # NOTE: summarize-tool-results is folded into function_result_clearing
+        # for toggling purposes — they're one conceptual unit.
+        raw[-2] = ('function_result_clearing',
+                   section_function_result_clearing() + "\n\n"
+                   + section_summarize_tool_results())
+    else:
+        raw.append(('system_reminders', section_system_reminders()))
+    raw.append(('environment',
+                section_environment(cwd=cwd, is_git=is_git, model=model,
+                                    extra_roots=extra_roots,
+                                    has_real_tools=has_real_tools)))
+    if include_date:
+        raw.append(('current_date', section_current_date()))
+
+    blocks: list[dict] = []
+    for bid, text in raw:
+        if not text:
+            continue
+        meta = BLOCK_META.get(bid, {})
+        blocks.append({
+            'id': bid,
+            'title': meta.get('title', bid),
+            'text': text,
+            'dynamic': bool(meta.get('dynamic', False)),
+        })
+    return blocks
+
+
 def build_static_prompt(*, cwd: str, is_git: bool, model: str,
                          extra_roots: list[str] | None = None,
                          has_real_tools: bool = True,
                          is_code_context: bool = True,
-                         include_date: bool = True) -> str:
+                         include_date: bool = True,
+                         tool_names: set[str] | None = None,
+                         disabled_blocks: set[str] | None = None) -> str:
     """Assemble the full Claude Code-style static prompt block.
 
     Sections are concatenated with blank lines between, matching Claude
@@ -596,28 +741,23 @@ def build_static_prompt(*, cwd: str, is_git: bool, model: str,
                          so the editor text doesn't bake in a stale date,
                          and by replace-mode injection which appends the
                          date as its own dynamic block.
+        tool_names:      The set of tool names actually registered for this
+                         turn. Passed to ``section_using_tools`` so the
+                         "prefer the dedicated tool" bullets only name tools
+                         that exist (e.g. ``write_file`` / ``grep_search``
+                         are project-mode-only). ``None`` ships all bullets
+                         (back-compat).
+        disabled_blocks: Block IDs (see ``BLOCK_META``) the user has switched
+                         OFF in the per-block editor. Those blocks are dropped
+                         from the assembled prompt. ``None`` keeps every block.
     """
-    parts: list[str] = [
-        section_intro(is_code_context=is_code_context),
-        section_system(),
-        section_doing_tasks(is_code_context=is_code_context),
-        section_actions(is_code_context=is_code_context),
-    ]
-    if has_real_tools:
-        parts.append(section_using_tools())
-    parts.append(section_tone_and_style(is_code_context=is_code_context))
-    parts.append(section_output_efficiency())
-    if has_real_tools:
-        parts.append(section_function_result_clearing())
-        parts.append(section_summarize_tool_results())
-    parts.append(section_system_reminders())
-    parts.append(section_environment(cwd=cwd, is_git=is_git,
-                                      model=model, extra_roots=extra_roots,
-                                      has_real_tools=has_real_tools))
-    if include_date:
-        parts.append(section_current_date())
-
-    return "\n\n".join(p for p in parts if p)
+    disabled = disabled_blocks or set()
+    blocks = build_static_blocks(
+        cwd=cwd, is_git=is_git, model=model, extra_roots=extra_roots,
+        has_real_tools=has_real_tools, is_code_context=is_code_context,
+        include_date=include_date, tool_names=tool_names,
+    )
+    return "\n\n".join(b['text'] for b in blocks if b['id'] not in disabled)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

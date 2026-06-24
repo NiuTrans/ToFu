@@ -425,6 +425,12 @@ def get_state():
         s = dict(_state)
         # Include modification count for undo
         s['modificationsCount'] = len(_state.get('modifications', []))
+        # ★ Never serialize the raw undo log to clients. Each entry stores the
+        #   full pre-image (originalContent) of every edited file, so a
+        #   long-running project can balloon this response to tens of MB
+        #   (Lighthouse flagged /api/v1/project/set at 28MB). The frontend only
+        #   consumes modificationsCount; drop the heavy blobs from the payload.
+        s.pop('modifications', None)
         # ★ Always include extra roots so the frontend stays in sync
         extra = []
         primary = _state.get('path')

@@ -52,10 +52,11 @@
     } catch (_e) { return String(secs); }
   };
 
+  const _cvIco = (inner) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px">${inner}</svg>`;
   const TRIGGER_LABEL = {
-    force:    '🗜️ 自动压缩 (force)',
-    reactive: '⚡ 紧急压缩 (reactive)',
-    manual:   '🔧 手动压缩 (manual)',
+    force:    _cvIco('<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>') + ' 自动压缩 (force)',
+    reactive: _cvIco('<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>') + ' 紧急压缩 (reactive)',
+    manual:   _cvIco('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/>') + ' 手动压缩 (manual)',
   };
 
   // ── Cache: archive id → { messages, archive } ───────────────────────
@@ -178,7 +179,7 @@
     const trig = a.trigger || 'force';
     const trigLabel = TRIGGER_LABEL[trig] || trig;
     const reductionTxt = (a.tokensBefore > 0 && a.tokensAfter > 0)
-      ? `−${Math.round((1 - a.tokensAfter / a.tokensBefore) * 100)}%`
+      ? `-${Math.round((1 - a.tokensAfter / a.tokensBefore) * 100)}%`
       : '—';
     const reasonBlock = a.reason
       ? `<div class="cd-meta-row cd-meta-reason"><span class="cd-meta-k">触发原因</span><span class="cd-meta-v">${_esc(a.reason)}</span></div>`
@@ -300,7 +301,7 @@
       const sizeLabel = _fmtBytes(url.length);
       const isDataUrl = url.startsWith('data:');
       return `<div class="cd-image-block">
-        <div class="cd-image-head">🖼️ image_url · ${sizeLabel}${isDataUrl ? ' (base64)' : ''}</div>
+        <div class="cd-image-head"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg> image_url · ${sizeLabel}${isDataUrl ? ' (base64)' : ''}</div>
         <div class="cd-image-placeholder">
           <button type="button" data-reveal-image
                   data-img-url="${_esc(url)}">展开显示 · 可能较大</button>
@@ -337,7 +338,7 @@
       const isActive = (_state.archiveId === c.id);
       const trig = c.trigger || 'force';
       const reduction = (c.tokensBefore > 0 && c.tokensAfter > 0)
-        ? `−${Math.round((1 - c.tokensAfter / c.tokensBefore) * 100)}%`
+        ? `-${Math.round((1 - c.tokensAfter / c.tokensBefore) * 100)}%`
         : '—';
       return `<li class="cd-history-item ${isActive ? 'is-active' : ''}"
                   data-archive-id="${c.id}">

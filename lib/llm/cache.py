@@ -18,6 +18,22 @@ logger = get_logger(__name__)
 #   3. Unknown             → default NO markers
 _CACHE_MARKERS_HELP = ('glm-5', 'qwen', 'deepseek')
 
+# Anthropic's hard ceiling: at most 4 ``cache_control`` markers per request.
+_MAX_CACHE_BP = 4
+
+# The conversation TAIL and the last TOOL definition each get a RESERVED
+# marker that the system phase can never consume. The tail marker covers the
+# growing prefix and is the single highest-value segment — without it
+# cache_creation is 0 every round and cache_read stays pinned at the static
+# system+tools prefix, so the whole conversation body is re-billed uncached on
+# every turn (conv mqj7x0t8: 138/151 rounds with cache_w=0). The system
+# message is assembled as several cache-stable blocks (static prompt +
+# optional memory-accumulation + optional swarm/parallel-execution, and more
+# may be added later), so its budget MUST be whatever is left after these
+# reservations — never the other way around.
+_TAIL_RESERVED_BP = 1   # conversation tail (volatile, short TTL)
+_TOOL_RESERVED_BP = 1   # last tool definition (stable)
+
 
 def _gateway_honors_cache_markers(model: str) -> bool:
     """Return True if attaching cache_control markers helps this model."""
@@ -33,14 +49,20 @@ def _gateway_honors_cache_markers(model: str) -> bool:
 def add_cache_breakpoints(body, log_prefix=''):
     """Add Anthropic-style ephemeral cache breakpoints with mixed TTL.
 
-    Annotates up to 4 content blocks with cache_control for:
-      1. System messages (1-2 breakpoints for static/dynamic blocks)
-      2. Last tool definition
-      3. Last message with content — the conversation tail
+    Annotates up to ``_MAX_CACHE_BP`` (4) content blocks with cache_control.
+    The last tool definition and the conversation tail each get a RESERVED
+    marker (see ``_TOOL_RESERVED_BP`` / ``_TAIL_RESERVED_BP``); the system
+    message gets only the markers left over after those reservations. This
+    ordering guarantees the highest-value segments — the growing-prefix tail
+    above all — can never be starved no matter how many cache-stable blocks
+    the system message accumulates:
+      1. System messages (static / memory / swarm blocks) — leftover budget
+      2. Last tool definition — reserved
+      3. Last message with content — the conversation tail — reserved
 
     Mixed TTL strategy (when CACHE_EXTENDED_TTL is enabled):
-      - BP1-BP3 (system + tools): ttl="1h" — stable content
-      - BP4 (conversation tail): ttl="5m" (default) — changes every round
+      - System + tools: ttl="1h" — stable content
+      - Conversation tail: ttl="5m" (default) — changes every round
     """
     model = body.get('model', '')
     if not _gateway_honors_cache_markers(model):
@@ -83,9 +105,24 @@ def add_cache_breakpoints(body, log_prefix=''):
 
     bp = 0
 
-    # Cache system messages (BP1-BP2: stable, extended TTL)
+    # Reserve markers for the tool + tail phases up front, then give the
+    # system phase only what's left. This is what guarantees those two
+    # high-value breakpoints can never be starved — adding a 4th/5th system
+    # block just drops the extra system marker, it cannot steal the tool or
+    # tail slot. Reservations are conditional on those phases actually having
+    # something to mark (no tools → the tool marker reverts to the system
+    # phase; this also matters for the system-only edge case).
+    _reserve = 0
+    if body.get('tools'):
+        _reserve += _TOOL_RESERVED_BP
+    if len(messages) >= 2:
+        _reserve += _TAIL_RESERVED_BP
+    _system_bp_budget = max(0, _MAX_CACHE_BP - _reserve)
+
+    # Cache system messages (stable, extended TTL), capped at the budget left
+    # after the tool/tail reservations above.
     for i, msg in enumerate(messages):
-        if msg.get('role') != 'system' or bp >= 4:
+        if msg.get('role') != 'system' or bp >= _system_bp_budget:
             continue
         content = msg.get('content', '')
         if isinstance(content, str) and content.strip():
@@ -96,23 +133,23 @@ def add_cache_breakpoints(body, log_prefix=''):
             bp += 1
         elif isinstance(content, list) and content:
             for blk_idx, blk in enumerate(content):
-                if bp >= 4:
+                if bp >= _system_bp_budget:
                     break
                 if isinstance(blk, dict) and blk.get('type') == 'text':
                     content[blk_idx] = {**blk, 'cache_control': dict(_cc_stable)}
                     bp += 1
 
-    # Cache last tool definition (BP3: stable, extended TTL)
+    # Cache last tool definition (stable, extended TTL)
     tools = body.get('tools')
-    if tools and bp < 4:
+    if tools and bp < _MAX_CACHE_BP:
         fn = tools[-1].get('function')
         if fn:
             tools[-1] = {**tools[-1],
                          'function': {**fn, 'cache_control': dict(_cc_stable)}}
             bp += 1
 
-    # Cache conversation tail (BP4: volatile, short TTL)
-    if len(messages) >= 2 and bp < 4:
+    # Cache conversation tail (volatile, short TTL)
+    if len(messages) >= 2 and bp < _MAX_CACHE_BP:
         _bp4_placed = False
         for _bp4_offset in range(1, min(6, len(messages))):
             idx = len(messages) - _bp4_offset

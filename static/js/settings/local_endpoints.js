@@ -205,7 +205,7 @@ function _openBulkEditEndpoints(provIdx) {
   var html = '<div id="' + existingId + '" class="stg-modal-overlay" onclick="if(event.target===this)this.remove()">' +
     '<div class="stg-modal" style="max-width:640px;">' +
       '<div class="stg-modal-header">' +
-        '<span class="stg-modal-title">📝 批量编辑端点 URL</span>' +
+        '<span class="stg-modal-title">' + Icon('edit', 14) + ' 批量编辑端点 URL</span>' +
         '<button class="stg-modal-close" onclick="document.getElementById(\'' + existingId + '\').remove()">✕</button>' +
       '</div>' +
       '<div class="stg-modal-body">' +
@@ -584,6 +584,7 @@ async function _discoverLocalModels(provIdx) {
     Object.keys(existingById).forEach(function(mid) {
       if (!unionModels[mid]) merged.push(existingById[mid]);
     });
+    if (typeof _coldSortModels === 'function') _coldSortModels(merged);
     p.models = merged;
 
     if (firstThinking && !p.thinking_format) p.thinking_format = firstThinking;

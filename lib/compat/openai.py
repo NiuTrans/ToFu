@@ -13,10 +13,11 @@ Provides:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
-from typing import Generator
+from typing import AsyncGenerator
 
 from lib.log import get_logger
 
@@ -129,21 +130,27 @@ def build_openai_response(task: dict, model: str,
 
 # ── Streaming ──────────────────────────────────────────────────────
 
-def stream_openai_chunks(task, model: str, requested_id: str = '',
-                          *, include_tofu_native: bool = False
-                          ) -> Generator[str, None, None]:
+async def stream_openai_chunks(task, model: str, requested_id: str = '',
+                               *, include_tofu_native: bool = False
+                               ) -> AsyncGenerator[str, None]:
     """Yield SSE wire frames in OpenAI's ``chat.completion.chunk`` shape.
 
     ``include_tofu_native=True`` adds a `tofu` envelope to chunks for
     non-delta events (phase/tool_call/etc.). Vanilla OpenAI clients
     ignore unknown fields, so this is safe to leave on.
+
+    Event-driven: blocks on the task's wakeup signal instead of polling,
+    so it never pins a thread while the model is generating.
     """
+    from lib.agent_core.admission import unregister_waiter, wait_for_event
+
     completion_id = requested_id or f'chatcmpl-{uuid.uuid4().hex[:24]}'
     emitted_role = False
     cursor = 0
-    last_heartbeat = time.time()
+    task_id = task.get('id') or ''
 
-    while True:
+    try:
+      while True:
         with task['events_lock']:
             new_events = list(task['events'][cursor:])
             cursor = len(task['events'])
@@ -190,11 +197,15 @@ def stream_openai_chunks(task, model: str, requested_id: str = '',
             yield 'data: [DONE]\n\n'
             return
 
-        now = time.time()
-        if now - last_heartbeat > 15:
+        woke = await wait_for_event(task_id, timeout=15.0)
+        if not woke:
             yield ': heartbeat\n\n'
-            last_heartbeat = now
-        time.sleep(0.05)
+    except (GeneratorExit, asyncio.CancelledError):
+        logger.info('[compat:openai] stream client disconnected task=%s',
+                    task_id[:8])
+        raise
+    finally:
+        unregister_waiter(task_id)
 
 
 # ── /v1/models ─────────────────────────────────────────────────────

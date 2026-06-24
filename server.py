@@ -21,6 +21,7 @@ import json
 import logging
 import time
 import signal
+import threading
 import faulthandler
 
 # ── Capture C-level fatal signals (SIGSEGV / SIGABRT / SIGFPE / SIGILL / SIGBUS) ──
@@ -72,25 +73,115 @@ if _fault_shm_log is None:
 # transient stall during a lazy page-in delivers SIGBUS (unrecoverable).
 # MCL_CURRENT pins already-mapped pages; MCL_FUTURE pins every future mmap
 # at load time, collapsing the dangerous demand-fault window to zero.
-try:
-    import ctypes as _ctypes
-    _MCL_CURRENT, _MCL_FUTURE = 1, 2
-    _libc = _ctypes.CDLL('libc.so.6', use_errno=True)
-    if _libc.mlockall(_MCL_CURRENT | _MCL_FUTURE) != 0:
-        import errno as _errno
-        _mlk_err = _ctypes.get_errno()
-        # ENOMEM (12) = memlock rlimit too low — common in containers
-        if _mlk_err == _errno.ENOMEM:
-            os.write(2, b'[boot] mlockall skipped: memlock rlimit too low\n')
-        else:
-            os.write(2, (b'[boot] mlockall failed errno=%d\n' % _mlk_err))
-    else:
-        os.write(2, b'[boot] mlockall(MCL_CURRENT|MCL_FUTURE) OK '
-                    b'\xe2\x80\x94 pages pinned\n')
-except Exception as _mlk_exc:
+#
+# BUT pinned pages are unreclaimable and are charged against the cgroup
+# memory limit. On a memory-constrained container (e.g. an exported copy
+# on a small box) pinning the whole C-extension working set can push RSS
+# past memory.max → the OOM killer SIGKILLs the process at boot (a bare
+# "Killed" with no traceback). mlockall only HELPS on a FUSE mount and is
+# only SAFE with headroom under the cgroup limit, so we gate on both.
+# Override: TOFU_MLOCK=1 forces it on, =0 forces it off (default 'auto').
+def _tofu_path_is_fuse(_path):
+    """Best-effort: True if *_path* sits on a FUSE filesystem (stdlib-only)."""
     try:
-        os.write(2, (b'[boot] mlockall unavailable: %s\n'
-                     % str(_mlk_exc).encode(errors='replace')))
+        _path = os.path.abspath(_path)
+        _best_mp, _best_fstype = '', ''
+        with open('/proc/self/mountinfo', 'r') as _f:
+            for _line in _f:
+                # mountinfo: "... <mount point> ... - <fstype> <source> ..."
+                _halves = _line.split(' - ')
+                if len(_halves) != 2:
+                    continue
+                _left = _halves[0].split()
+                _right = _halves[1].split()
+                if len(_left) < 5 or not _right:
+                    continue
+                _mp, _fstype = _left[4], _right[0]
+                if (_path == _mp or _path.startswith(_mp.rstrip('/') + '/')) \
+                        and len(_mp) >= len(_best_mp):
+                    _best_mp, _best_fstype = _mp, _fstype
+        return _best_fstype.startswith('fuse')
+    except OSError:
+        return False
+
+
+def _tofu_cgroup_mem_limit_bytes():
+    """cgroup memory limit in bytes, or None if unlimited/unknown (stdlib-only)."""
+    for _p in ('/sys/fs/cgroup/memory.max',                    # cgroup v2
+               '/sys/fs/cgroup/memory/memory.limit_in_bytes'):  # cgroup v1
+        try:
+            with open(_p, 'r') as _f:
+                _raw = _f.read().strip()
+        except OSError:
+            continue
+        if _raw == 'max':
+            return None
+        try:
+            _val = int(_raw)
+        except ValueError:
+            continue
+        # cgroup v1 reports a huge sentinel (~PAGE_COUNTER_MAX) for "unlimited"
+        if _val <= 0 or _val >= (1 << 62):
+            return None
+        return _val
+    return None
+
+
+def _tofu_should_mlock():
+    """Decide whether mlockall is worth it. Returns (do_it, reason)."""
+    _mode = os.environ.get('TOFU_MLOCK', 'auto').strip().lower()
+    if _mode in ('0', 'off', 'false', 'no'):
+        return False, 'disabled via TOFU_MLOCK=%s' % _mode
+    if _mode in ('1', 'on', 'true', 'yes', 'force'):
+        return True, 'forced via TOFU_MLOCK=%s' % _mode
+    # auto: pin only where the SIGBUS risk is real (project dir OR the conda
+    # env holding the .so files is on FUSE) AND there is enough memory
+    # headroom that pinning won't trip the OOM killer.
+    _on_fuse = (_tofu_path_is_fuse(os.path.dirname(os.path.abspath(__file__)))
+                or _tofu_path_is_fuse(sys.prefix))
+    if not _on_fuse:
+        return False, 'not on FUSE (no SIGBUS risk to mitigate)'
+    _limit = _tofu_cgroup_mem_limit_bytes()
+    if _limit is None:
+        return True, 'on FUSE, cgroup memory unlimited'
+    try:
+        _min_gb = float(os.environ.get('TOFU_MLOCK_MIN_LIMIT_GB', '8'))
+    except ValueError:
+        _min_gb = 8.0
+    _gib = float(1 << 30)
+    if _limit >= _min_gb * _gib:
+        return True, 'on FUSE, cgroup limit %.1fGiB >= %.1fGiB' % (_limit / _gib, _min_gb)
+    return False, ('on FUSE but cgroup limit %.1fGiB < %.1fGiB — skipping to avoid '
+                   'OOM (set TOFU_MLOCK=1 to force)' % (_limit / _gib, _min_gb))
+
+
+_tofu_do_mlock, _tofu_mlock_reason = _tofu_should_mlock()
+if _tofu_do_mlock:
+    try:
+        import ctypes as _ctypes
+        _MCL_CURRENT, _MCL_FUTURE = 1, 2
+        _libc = _ctypes.CDLL('libc.so.6', use_errno=True)
+        if _libc.mlockall(_MCL_CURRENT | _MCL_FUTURE) != 0:
+            import errno as _errno
+            _mlk_err = _ctypes.get_errno()
+            # ENOMEM (12) = memlock rlimit too low — common in containers
+            if _mlk_err == _errno.ENOMEM:
+                os.write(2, b'[boot] mlockall skipped: memlock rlimit too low\n')
+            else:
+                os.write(2, (b'[boot] mlockall failed errno=%d\n' % _mlk_err))
+        else:
+            os.write(2, b'[boot] mlockall(MCL_CURRENT|MCL_FUTURE) OK '
+                        b'\xe2\x80\x94 pages pinned\n')
+    except Exception as _mlk_exc:
+        try:
+            os.write(2, (b'[boot] mlockall unavailable: %s\n'
+                         % str(_mlk_exc).encode(errors='replace')))
+        except OSError:
+            pass
+else:
+    try:
+        os.write(2, (b'[boot] mlockall skipped \xe2\x80\x94 %s\n'
+                     % _tofu_mlock_reason.encode(errors='replace')))
     except OSError:
         pass
 
@@ -480,6 +571,31 @@ def _crash_excepthook(exc_type, exc_value, exc_tb):
     (_prev_excepthook or sys.__excepthook__)(exc_type, exc_value, exc_tb)
 
 sys.excepthook = _crash_excepthook
+
+
+# ── Crash visibility: background threads ──
+# sys.excepthook covers ONLY the main thread. The entire task/orchestration
+# system (run_task, swarm agents, scheduler ticks, timers) runs in daemon
+# worker threads, where an uncaught exception otherwise reaches just the
+# default threading hook → stderr, never app.log / error.log. Route it through
+# our 'server' logger at CRITICAL (with traceback) so a silently-dying worker
+# is always diagnosable. threading.excepthook exists since Py3.8.
+_prev_thread_excepthook = threading.excepthook
+
+def _thread_crash_excepthook(args):
+    # SystemExit raised inside a thread is a normal stop signal, not a crash.
+    if not issubclass(args.exc_type, (KeyboardInterrupt, SystemExit)):
+        try:
+            logging.getLogger('server').critical(
+                'Uncaught exception in background thread %r — thread is dying',
+                getattr(args.thread, 'name', '?'),
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+        except Exception:
+            pass  # logging must never mask the original crash
+    if _prev_thread_excepthook is not None:
+        _prev_thread_excepthook(args)
+
+threading.excepthook = _thread_crash_excepthook
 
 
 # ── Boot progress ──
@@ -977,15 +1093,17 @@ def _validate_imports():
         'PIL._imaging',
         'lxml.etree',
         'greenlet._greenlet',
-        'yaml._yaml',
         'numpy.core._multiarray_umath',
         'markupsafe._speedups',
         'charset_normalizer.md',
     ]
-    # These are optional — may not be installed in all environments
+    # These are optional — may not be installed in all environments.
+    # yaml._yaml: only used by routes/api_docs.py::openapi_yaml, which already
+    # degrades to JSON on ImportError — never a hard dependency.
     _NATIVE_PRELOADS_OPTIONAL = [
         'pymupdf._extra',
         'psycopg2._psycopg',
+        'yaml._yaml',
     ]
     _boot('Eager-loading native extensions (FUSE SIGBUS mitigation)…')
     for _mod in _NATIVE_PRELOADS:
@@ -1552,8 +1670,60 @@ if __name__ == '__main__':
         loop.set_default_executor(_executor)
         _server_log.info('[Server] Sync route executor sized to %d threads', _sync_workers)
 
+        # ── Dedicated agent-worker executor ──
+        # spawn_task() runs run_task on a thread; if it shared the default
+        # executor with sync route handlers, long agent runs would starve
+        # request handling (and vice-versa). Give agent workers their own
+        # pool so the two cannot deadlock each other. Sized to the
+        # in-flight ceiling + headroom; override via TOFU_AGENT_WORKERS.
+        try:
+            _agent_workers = int(os.environ.get('TOFU_AGENT_WORKERS', '') or '0')
+        except (ValueError, TypeError):
+            _agent_workers = 0
+        if _agent_workers <= 0:
+            _agent_workers = min(256, (os.cpu_count() or 4) * 16)
+        _agent_executor = ThreadPoolExecutor(
+            max_workers=_agent_workers, thread_name_prefix='tofu-agent')
+        try:
+            from lib.tasks_pkg import set_agent_executor
+            set_agent_executor(_agent_executor)
+            _server_log.info('[Server] Agent-worker executor sized to %d threads',
+                             _agent_workers)
+        except Exception as _ae_err:
+            _server_log.warning('[Server] could not install agent executor: %s',
+                                _ae_err)
+
         from lib.push import hub as _push_hub
         _push_hub.set_loop(loop)
+
+        # ── Periodic finished-task reaper ──
+        # The headless agent-API path (agent/run, compat adapters,
+        # /api/v1/chat) never calls cleanup_old_tasks() opportunistically
+        # the way the UI chat routes do, so on a headless-only deployment
+        # the in-memory task registry would grow without bound. Run a
+        # cheap sweep on the loop every TOFU_TASK_CLEANUP_INTERVAL seconds
+        # (default 60). Finished-only + TTL-bounded — never touches a
+        # running task. Disable with the interval set to 0.
+        try:
+            _cleanup_interval = int(
+                os.environ.get('TOFU_TASK_CLEANUP_INTERVAL', '') or '60')
+        except (ValueError, TypeError):
+            _cleanup_interval = 60
+
+        async def _task_reaper():
+            from lib.tasks_pkg import cleanup_old_tasks
+            while not _shutdown_requested.is_set():
+                await asyncio.sleep(_cleanup_interval)
+                try:
+                    await asyncio.to_thread(cleanup_old_tasks)
+                except Exception as _reap_err:
+                    _server_log.warning('[Server] task reaper sweep failed: %s',
+                                        _reap_err)
+
+        if _cleanup_interval > 0:
+            loop.create_task(_task_reaper())
+            _server_log.info('[Server] Finished-task reaper every %ds',
+                             _cleanup_interval)
 
         # Bridge the SIGTERM threading.Event to an async trigger Hypercorn
         # awaits. When set, Hypercorn stops accepting new connections and

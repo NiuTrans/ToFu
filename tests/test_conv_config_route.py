@@ -112,7 +112,7 @@ class ConvConfigRouteTest(unittest.TestCase):
         body = _new_loop_run(r.get_json())
         self.assertTrue(body['ok'])
         # All expected keys present even with empty input
-        for k in ('model', 'searchMode', 'memoryEnabled', 'agentBackend'):
+        for k in ('model', 'searchMode', 'memoryEnabled'):
             self.assertIn(k, body, f'missing key: {k}')
 
     # ── /settings/resolve ──────────────────────────────────────────

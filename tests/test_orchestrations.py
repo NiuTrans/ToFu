@@ -328,6 +328,14 @@ class CrudTest(unittest.TestCase):
             crit = body['roles']['critic']
             self.assertEqual(crit[0]['key'], 'objective')
             self.assertTrue(all(f['label'].startswith('orch.') for f in crit))
+            # Read-only personas: every role carries its fixed prompt design
+            # (the character's behaviour), shown but not editable in the studio.
+            self.assertIn('personas', body)
+            self.assertIn('worker', body['personas'])
+            wp = body['personas']['worker']
+            self.assertIn('prompt', wp)
+            self.assertTrue(wp['prompt'])              # non-empty system prompt
+            self.assertEqual(wp['tier'], 'heavy')      # mirrors registry model_hint
         _run(go())
 
     def test_role_schema_single_role(self):
@@ -342,6 +350,9 @@ class CrudTest(unittest.TestCase):
             keys = [f['key'] for f in body['fields']]
             self.assertIn('must_do', keys)
             self.assertIn('must_not_do', keys)
+            # Single-role responses also carry the read-only persona.
+            self.assertIn('persona', body)
+            self.assertTrue(body['persona']['prompt'])
         _run(go())
 
     def test_role_schema_unknown_role_gets_generic(self):
@@ -781,6 +792,143 @@ class TaskRunHttpTest(unittest.TestCase):
             r = await cli.get(f'/api/v1/orchestrations/tasks/{run_id}',
                               headers=self._hdr())
             self.assertEqual(r.status_code, 404)
+        _run(go())
+
+    def test_durable_log_carries_step_trace_not_deltas(self):
+        """The durable event log must persist a self-contained ``step_trace``
+        per node (resolved brief + bounded input + full output) so a REOPENED
+        run can rebuild the per-node data-flow overlay — but must NOT persist
+        the high-frequency per-token ``step_delta`` stream (that exists only
+        to paint a live chat bubble; persisting it would bloat the log)."""
+        async def go():
+            cli = self.fix.app.test_client()
+            r = await cli.post('/api/v1/orchestrations/tasks',
+                               headers=self._hdr(),
+                               json={'definition': self._def('TraceFlow'), 'input': 'go'})
+            run_id = (await r.get_json())['run_id']
+
+            cursor, deadline = 0, 0
+            evs = []
+            while deadline < 100:
+                deadline += 1
+                r = await cli.get(
+                    f'/api/v1/orchestrations/tasks/{run_id}/events?cursor={cursor}',
+                    headers=self._hdr())
+                body = await r.get_json()
+                evs.extend(body['events'])
+                cursor = body['next_cursor']
+                if body['done']:
+                    break
+                await asyncio.sleep(0.1)
+
+            types = [e['type'] for e in evs]
+            # step_trace persisted, step_delta filtered out of the durable log.
+            self.assertIn('step_trace', types)
+            self.assertNotIn('step_delta', types)
+            # The worker node's trace is self-contained: resolved brief + the
+            # full output, keyed by node_id.
+            wtrace = [e for e in evs if e['type'] == 'step_trace'
+                      and e.get('node_id') == 'w1']
+            self.assertTrue(wtrace, 'worker step_trace missing from durable log')
+            tr = wtrace[-1]
+            self.assertIn('brief', tr)
+            self.assertIn('output', tr)
+            self.assertIn('stub output', tr['output'])
+            self.assertEqual(tr['role'], 'worker')
+
+            # Replay from cursor 0 (DB, not memory) still has the trace.
+            r = await cli.get(
+                f'/api/v1/orchestrations/tasks/{run_id}/events?cursor=0',
+                headers=self._hdr())
+            replay = await r.get_json()
+            self.assertIn('step_trace', [e['type'] for e in replay['events']])
+
+            await cli.delete(f'/api/v1/orchestrations/tasks/{run_id}',
+                             headers=self._hdr())
+        _run(go())
+
+    def _gated_def(self, name='GatedFlow'):
+        """A flow with a human APPROVE gate between worker and stop, so the
+        run parks in status='paused' until the gate is resolved."""
+        return {
+            'schema': 'tofu.orchestration/v1', 'name': name,
+            'nodes': [
+                {'id': 's1', 'type': 'control', 'kind': 'start',
+                 'params': {'seed': 'screen these candidates'}},
+                {'id': 'w1', 'type': 'role', 'role': 'worker',
+                 'params': {'tier': 'heavy', 'isolation': 'shared-context'}},
+                {'id': 'h1', 'type': 'control', 'kind': 'human',
+                 'params': {'mode': 'approve', 'prompt': 'Send outreach?'}},
+                {'id': 'e1', 'type': 'control', 'kind': 'stop'},
+            ],
+            'edges': [{'from': 's1', 'to': 'w1'}, {'from': 'w1', 'to': 'h1'},
+                      {'from': 'h1', 'to': 'e1'}],
+        }
+
+    def test_human_gate_pauses_then_resolves_to_done(self):
+        """Phase 3: a run blocked on a human approve gate reports
+        status='paused', and resolving via /run/human-approve unblocks the
+        engine and drives it to 'done'. Exercises the real gate primitive +
+        the status-transition wiring in the worker."""
+        async def go():
+            cli = self.fix.app.test_client()
+            r = await cli.post('/api/v1/orchestrations/tasks',
+                               headers=self._hdr(),
+                               json={'definition': self._gated_def(), 'input': 'go'})
+            self.assertEqual(r.status_code, 201)
+            run_id = (await r.get_json())['run_id']
+
+            # Poll until the gate request appears; capture its request_id and
+            # assert the header parked in 'paused'.
+            cursor, req_id, status, deadline = 0, None, 'pending', 0
+            while deadline < 100 and req_id is None:
+                deadline += 1
+                r = await cli.get(
+                    f'/api/v1/orchestrations/tasks/{run_id}/events?cursor={cursor}',
+                    headers=self._hdr())
+                body = await r.get_json()
+                for ev in body['events']:
+                    if ev['type'] == 'human_request':
+                        req_id = ev.get('request_id')
+                cursor = body['next_cursor']
+                status = body['status']
+                if req_id is not None:
+                    break
+                await asyncio.sleep(0.1)
+
+            self.assertIsNotNone(req_id, 'human_request gate never emitted')
+            # The header status reflects the paused gate.
+            r = await cli.get(f'/api/v1/orchestrations/tasks/{run_id}',
+                              headers=self._hdr())
+            self.assertEqual((await r.get_json())['run']['status'], 'paused')
+
+            # Resolve the gate (approve) via the existing endpoint.
+            r = await cli.post('/api/v1/orchestrations/run/human-approve',
+                               headers=self._hdr(),
+                               json={'requestId': req_id, 'approved': True})
+            self.assertEqual(r.status_code, 200)
+
+            # The engine unblocks and the run drives to completion.
+            status, seen, deadline = 'paused', [], 0
+            while deadline < 100:
+                deadline += 1
+                r = await cli.get(
+                    f'/api/v1/orchestrations/tasks/{run_id}/events?cursor={cursor}',
+                    headers=self._hdr())
+                body = await r.get_json()
+                for ev in body['events']:
+                    seen.append(ev['type'])
+                cursor = body['next_cursor']
+                status = body['status']
+                if body['done']:
+                    break
+                await asyncio.sleep(0.1)
+
+            self.assertEqual(status, 'done', f'did not finish; saw={seen}')
+            self.assertIn('human_resolved', seen)
+            self.assertIn('flow_complete', seen)
+            await cli.delete(f'/api/v1/orchestrations/tasks/{run_id}',
+                             headers=self._hdr())
         _run(go())
 
     def test_create_invalid_definition_is_400(self):

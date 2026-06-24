@@ -1,8 +1,24 @@
-"""lib/message_queue.py — Server-side message queue for conversations.
+"""lib/message_queue.py — Unified priority turn-source queue for conversations.
 
-When a conversation has an active task running, new user messages are
-enqueued server-side.  When the task completes, the next queued message
-is automatically dispatched as a new task.
+The queue holds the *sources* of upcoming conversation turns, ordered by
+priority.  Three kinds of source share one table:
+
+  • ``real``          — a human message (highest priority).
+  • ``workflow_step`` — a turn injected by an orchestration workflow
+                        (medium priority; reserved for the workflow engine).
+  • ``autopilot``     — a persistent armed-marker sentinel (lowest priority).
+
+``real`` / ``workflow_step`` rows are *dispatchable*: when the active task
+finishes, the highest-priority dispatchable row is dequeued and started as a
+new task.  The ``autopilot`` row is NOT dispatched as a task — it is a flag
+that the end-of-turn autopilot hook (:mod:`lib.tasks_pkg.autopilot`) consults
+to decide whether the virtual user should take over.  It stays in the queue
+(surviving page reloads) until the VU emits ``[VU: TASK_DONE]`` or the user
+cancels it.
+
+Because a human ``real`` row sorts ahead of the ``autopilot`` sentinel, a
+message the user types while autopilot is armed is ALWAYS processed first;
+autopilot only resumes once no dispatchable row remains.
 
 This replaces the frontend-only ``pendingMessageQueue`` Map that was lost
 on page refresh.
@@ -20,6 +36,21 @@ logger = get_logger(__name__)
 
 # Lock for dispatch coordination (prevent double-dispatch races)
 _dispatch_lock = threading.Lock()
+
+# ── Turn-source kinds + their default priorities (lower = higher) ──
+KIND_REAL = 'real'
+KIND_WORKFLOW = 'workflow_step'
+KIND_AUTOPILOT = 'autopilot'
+
+_PRIORITY_FOR_KIND = {
+    KIND_REAL: 10,
+    KIND_WORKFLOW: 50,
+    KIND_AUTOPILOT: 90,
+}
+
+
+def _priority_for_kind(kind: str) -> int:
+    return _PRIORITY_FOR_KIND.get(kind, 100)
 
 
 def _ensure_table():
@@ -55,24 +86,30 @@ def _maybe_ensure_table():
         _table_ensured = True
 
 
-def enqueue_message(conv_id: str, message_data: dict, config: dict) -> dict:
-    """Add a message to the server-side queue for a conversation.
+def enqueue_message(conv_id: str, message_data: dict, config: dict,
+                    kind: str = KIND_REAL) -> dict:
+    """Add a turn source to the server-side queue for a conversation.
 
     Args:
         conv_id: Conversation ID.
         message_data: Dict with keys: text, images, pdfTexts, replyQuotes,
                       convRefs, convRefTexts, originalContent, timestamp.
+                      For an ``autopilot`` sentinel this is an empty/marker
+                      dict (the row is never dispatched as a task).
         config: The chat config to use when dispatching this message
                 (model, searchMode, tools, etc.).
+        kind: Turn source — ``KIND_REAL`` (default), ``KIND_WORKFLOW`` or
+              ``KIND_AUTOPILOT``.  Determines the priority bucket.
 
     Returns:
-        Dict with queue_id and position.
+        Dict with queueId, position, kind.
     """
     _maybe_ensure_table()
 
     queue_id = str(uuid.uuid4())
     now_ms = int(time.time() * 1000)
     timestamp = message_data.get('timestamp', now_ms)
+    priority = _priority_for_kind(kind)
 
     db = get_thread_db(DOMAIN_CHAT)
 
@@ -87,15 +124,72 @@ def enqueue_message(conv_id: str, message_data: dict, config: dict) -> dict:
     config_json = json.dumps(config, ensure_ascii=False)
 
     db_execute_with_retry(db, '''
-        INSERT INTO message_queue (id, conv_id, payload, config, position, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (queue_id, conv_id, payload, config_json, position, timestamp))
+        INSERT INTO message_queue (id, conv_id, payload, config, position, kind, priority, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (queue_id, conv_id, payload, config_json, position, kind, priority, timestamp))
 
-    logger.info('[Queue] Enqueued message %s for conv=%s position=%d text=%d chars',
-                queue_id[:8], conv_id[:8], position,
+    logger.info('[Queue] Enqueued %s source %s for conv=%s position=%d priority=%d text=%d chars',
+                kind, queue_id[:8], conv_id[:8], position, priority,
                 len(message_data.get('text', '')))
 
-    return {'queueId': queue_id, 'position': position}
+    return {'queueId': queue_id, 'position': position, 'kind': kind}
+
+
+def arm_autopilot_marker(conv_id: str, config: dict) -> dict:
+    """Enqueue (or reaffirm) the persistent autopilot armed-marker sentinel.
+
+    Idempotent: at most one ``autopilot`` row exists per conversation.  When
+    already armed, returns the existing row's id without inserting a second.
+    The sentinel carries the resolved send ``config`` so the autopilot hook
+    and any follow-up reuse the same model / tools the user had selected.
+
+    Returns ``{queueId, armed}`` — ``armed`` True iff a NEW sentinel was added
+    (False when one already existed).
+    """
+    _maybe_ensure_table()
+    existing = _get_autopilot_marker(conv_id)
+    if existing:
+        return {'queueId': existing['queueId'], 'armed': False}
+    res = enqueue_message(conv_id, {'_autopilotMarker': True}, config,
+                          kind=KIND_AUTOPILOT)
+    return {'queueId': res['queueId'], 'armed': True}
+
+
+def _get_autopilot_marker(conv_id: str) -> dict | None:
+    """Return ``{queueId}`` for the conv's autopilot sentinel, or None."""
+    db = get_thread_db(DOMAIN_CHAT)
+    row = db.execute(
+        'SELECT id FROM message_queue WHERE conv_id=? AND kind=? LIMIT 1',
+        (conv_id, KIND_AUTOPILOT)
+    ).fetchone()
+    return {'queueId': row['id']} if row else None
+
+
+def has_autopilot_marker(conv_id: str) -> bool:
+    """True iff a persistent autopilot armed-marker exists for the conv."""
+    if not conv_id:
+        return False
+    try:
+        _maybe_ensure_table()
+        return _get_autopilot_marker(conv_id) is not None
+    except Exception as e:
+        logger.debug('[Queue] has_autopilot_marker probe failed: %s', e)
+        return False
+
+
+def clear_autopilot_marker(conv_id: str) -> bool:
+    """Remove the conv's autopilot sentinel (disarm). True if one was removed."""
+    if not conv_id:
+        return False
+    db = get_thread_db(DOMAIN_CHAT)
+    marker = _get_autopilot_marker(conv_id)
+    if not marker:
+        return False
+    db_execute_with_retry(db, 'DELETE FROM message_queue WHERE id=?',
+                          (marker['queueId'],))
+    _renumber_positions(db, conv_id)
+    logger.info('[Queue] Cleared autopilot marker for conv=%s', conv_id[:8])
+    return True
 
 
 def get_queue(conv_id: str) -> list[dict]:
@@ -108,8 +202,8 @@ def get_queue(conv_id: str) -> list[dict]:
     _maybe_ensure_table()
     db = get_thread_db(DOMAIN_CHAT)
     rows = db.execute(
-        'SELECT id, payload, position, created_at FROM message_queue '
-        'WHERE conv_id=? ORDER BY position ASC',
+        'SELECT id, payload, position, kind, priority, created_at FROM message_queue '
+        'WHERE conv_id=? ORDER BY priority ASC, position ASC',
         (conv_id,)
     ).fetchall()
 
@@ -124,6 +218,8 @@ def get_queue(conv_id: str) -> list[dict]:
         result.append({
             'queueId': row['id'],
             'position': row['position'],
+            'kind': row['kind'] or KIND_REAL,
+            'priority': row['priority'],
             'text': (data.get('text', '') or '')[:100],
             'hasImages': bool(data.get('images')),
             'hasPdfs': bool(data.get('pdfTexts')),
@@ -199,10 +295,13 @@ def dequeue_next(conv_id: str) -> dict | None:
     """
     db = get_thread_db(DOMAIN_CHAT)
 
+    # Only dispatchable sources (real / workflow_step) are popped as tasks.
+    # The autopilot sentinel is consulted by the end-of-turn hook, never
+    # dequeued here.
     row = db.execute(
         'SELECT id, payload, config FROM message_queue '
-        'WHERE conv_id=? ORDER BY position ASC LIMIT 1',
-        (conv_id,)
+        'WHERE conv_id=? AND kind!=? ORDER BY priority ASC, position ASC LIMIT 1',
+        (conv_id, KIND_AUTOPILOT)
     ).fetchone()
 
     if not row:
@@ -444,15 +543,21 @@ def dispatch_next_queued(conv_id: str) -> str | None:
 
 
 def _get_queue_depth(db, conv_id: str) -> int:
-    """Get number of remaining messages in queue."""
+    """Number of DISPATCHABLE rows in queue (real / workflow_step only).
+
+    Excludes the autopilot sentinel — it is never dispatched as a task, so
+    callers gating "is there pending work to start" must not see it.  This is
+    the lynchpin of human-over-autopilot priority: the autopilot hook calls
+    this (via ``get_queue_depth``) and defers whenever it is > 0.
+    """
     row = db.execute(
-        'SELECT COUNT(*) FROM message_queue WHERE conv_id=?',
-        (conv_id,)
+        'SELECT COUNT(*) FROM message_queue WHERE conv_id=? AND kind!=?',
+        (conv_id, KIND_AUTOPILOT)
     ).fetchone()
     return row[0] if row else 0
 
 
 def get_queue_depth(conv_id: str) -> int:
-    """Public version: get queue depth with its own DB connection."""
+    """Public version: dispatchable queue depth with its own DB connection."""
     db = get_thread_db(DOMAIN_CHAT)
     return _get_queue_depth(db, conv_id)

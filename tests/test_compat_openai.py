@@ -122,8 +122,13 @@ class OpenAITranslateTest(unittest.TestCase):
             'events_lock': threading.Lock(),
             'status': 'done', 'finishReason': 'stop',
         }
-        gen = stream_openai_chunks(task, model='m')
-        out = list(gen)
+        import asyncio
+
+        async def _drain():
+            return [frame async for frame in
+                    stream_openai_chunks(task, model='m')]
+
+        out = asyncio.new_event_loop().run_until_complete(_drain())
         text = ''.join(out)
         self.assertIn('Hel', text)
         self.assertIn('lo', text)

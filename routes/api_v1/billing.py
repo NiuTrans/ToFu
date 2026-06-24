@@ -54,6 +54,26 @@ logger = get_logger(__name__)
 api_v1_billing_bp = Blueprint('api_v1_billing', __name__)
 
 
+def _billing_disabled_response():
+    """Return a 404-style envelope when the relay runs in agent-only mode.
+
+    Agent-only relays (``relay.json: billing_enabled=false``) don't move
+    money — users bring their own model keys. The money-moving endpoints
+    (redeem / deposit / debit / mint-codes / checkout) therefore return a
+    disabled marker instead of silently succeeding. Read-only endpoints
+    (wallet / ledger / pricing) stay reachable and just report empties.
+
+    Returns ``None`` when billing is enabled (caller proceeds).
+    """
+    from lib.relay_config import billing_enabled
+    if billing_enabled():
+        return None
+    return api_not_found(
+        'Billing is disabled on this relay (agent-only mode). Users '
+        'supply their own model endpoint; no credits are charged.',
+        error_kind='billing_disabled')
+
+
 def _resolve_target_user() -> str:
     """Pick the user_id this call should target.
 
@@ -98,8 +118,10 @@ def _wallet_payload(user_id: str) -> dict:
                        'card before login.',
           tags=['billing'], public=True)
 async def get_pricing():
+    from lib.relay_config import billing_enabled
     cfg = list_prices()
     return api_ok(
+        billing_enabled=billing_enabled(),
         currency=cfg.get('currency', 'USD'),
         default_margin=cfg.get('default_margin', 0.0),
         default_model=cfg.get('default_model', {}),
@@ -108,6 +130,44 @@ async def get_pricing():
         unit='micro_credits_per_mtok',
         notes=('1 credit = 1,000,000 micro-credits. Final bill = '
                 'base × (1 + margin); margin is applied at request time.'),
+    )
+
+
+@api_v1_billing_bp.route('/api/v1/billing/pricing', methods=['PUT'])
+@require_scope('admin')
+@api_meta(summary='Admin: set the relay margin',
+          description='Persist ONLY the relay profit margin '
+                       '(``{"default_margin": 0.20}``) and hot-reload. '
+                       'Per-model RATES are NOT editable here: they are '
+                       'authoritative in ``lib/pricing.py`` (the single cost '
+                       'engine) — a second writable rate table would just '
+                       'drift. Billing-gated: 404 on agent-only relays.',
+          tags=['billing'], scope='admin')
+async def put_pricing_route():
+    _disabled = _billing_disabled_response()
+    if _disabled is not None:
+        return _disabled
+    from lib.billing import save_margin, PricingError
+    body = await async_parse_body()
+    if 'default_margin' not in (body or {}):
+        return api_bad_request('default_margin required',
+                                field='default_margin')
+    try:
+        saved = save_margin(body['default_margin'])
+    except PricingError as e:
+        return api_bad_request(str(e), error_kind='invalid_margin')
+    audit_log('pricing_margin_updated',
+              default_margin=saved.get('default_margin'),
+              by=(current_auth().key_id if current_auth() else ''))
+    return api_ok(
+        currency=saved.get('currency', 'USD'),
+        default_margin=saved.get('default_margin', 0.0),
+        default_model=saved.get('default_model', {}),
+        models=saved.get('models', {}),
+        version=saved.get('version', 1),
+        unit='micro_credits_per_mtok',
+        note=('Per-model rates are read-only here; they are authoritative '
+              'in lib/pricing.py. Only default_margin is editable.'),
     )
 
 
@@ -179,6 +239,9 @@ async def get_ledger_route():
                        'codes return 400.',
           tags=['billing'])
 async def redeem_route():
+    _disabled = _billing_disabled_response()
+    if _disabled is not None:
+        return _disabled
     try:
         user_id = _resolve_target_user()
     except PermissionError as e:
@@ -232,6 +295,9 @@ async def redeem_route():
                        'Use for refunds, promotional bonuses, etc.',
           tags=['billing'], scope='admin')
 async def deposit_route():
+    _disabled = _billing_disabled_response()
+    if _disabled is not None:
+        return _disabled
     body = await async_parse_body()
     user_id = require_str(body, 'user_id', max_len=64)
     amount_micro = require_int(body, 'amount_micro', min=1,
@@ -255,6 +321,9 @@ async def deposit_route():
                        '``allow_negative=true`` to push the balance below 0.',
           tags=['billing'], scope='admin')
 async def debit_route():
+    _disabled = _billing_disabled_response()
+    if _disabled is not None:
+        return _disabled
     body = await async_parse_body()
     user_id = require_str(body, 'user_id', max_len=64)
     amount_micro = require_int(body, 'amount_micro', min=1,
@@ -291,6 +360,9 @@ def _gen_code(prefix: str = 'TOFU', length: int = 16) -> str:
                        'as plaintext exactly once.',
           tags=['billing'], scope='admin')
 async def mint_codes_route():
+    _disabled = _billing_disabled_response()
+    if _disabled is not None:
+        return _disabled
     body = await async_parse_body()
     count = require_int(body, 'count', min=1, max=10_000)
     amount_micro = require_int(body, 'amount_micro', min=1,
@@ -425,11 +497,15 @@ async def alipay_notify_route():
 @api_v1_billing_bp.route('/api/v1/billing/checkout', methods=['POST'])
 @api_meta(summary='Create a checkout session',
           description='Issue a payment URL for the authenticated user '
-                       'to redirect to. Currently supports ``provider="alipay"``; '
-                       '``provider="stripe"`` requires the operator to '
-                       'configure Stripe Checkout (returns 501 otherwise).',
+                       'to redirect to. Supports ``provider="alipay"`` and '
+                       '``provider="stripe"`` (the latter creates a Stripe '
+                       'Checkout Session; requires ``stripe.secret_key`` in '
+                       'payments.json).',
           tags=['billing'])
 async def create_checkout_route():
+    _disabled = _billing_disabled_response()
+    if _disabled is not None:
+        return _disabled
     try:
         user_id = _resolve_target_user()
     except PermissionError as e:
@@ -458,11 +534,22 @@ async def create_checkout_route():
         return api_ok(provider='alipay', redirect_url=url,
                        out_trade_no=out_trade_no)
     if provider == 'stripe':
-        return api_bad_request(
-            'Stripe Checkout is not yet wired up. Use the Stripe '
-            'Checkout Session API directly with metadata.user_id set, '
-            'then point its webhook at /api/v1/billing/webhooks/stripe.',
-            error_kind='stripe_checkout_not_implemented')
+        from lib.billing.payments import create_stripe_checkout
+        currency = optional_str(body, 'currency', default='usd', max_len=8)
+        success_url = return_url or (
+            request.host_url.rstrip('/') + '/?topup=success')
+        cancel_url = optional_str(body, 'cancel_url', default='', max_len=500)
+        try:
+            session_id, url = await create_stripe_checkout(
+                user_id=user_id,
+                amount_minor=amount_minor,
+                currency=currency,
+                success_url=success_url,
+                cancel_url=cancel_url)
+        except RuntimeError as e:
+            return api_bad_request(str(e), error_kind='stripe_checkout_failed')
+        return api_ok(provider='stripe', redirect_url=url,
+                       session_id=session_id)
     return api_bad_request(f'Unknown provider: {provider!r}',
                             field='provider')
 

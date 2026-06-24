@@ -159,6 +159,7 @@ _BUILTIN_PROVIDER_TEMPLATES = [
      'name': 'GLM (Zhipu AI)',
      'base_url': 'https://open.bigmodel.cn/api/paas/v4',
      'models': [
+         {'model_id': 'glm-5.2',       'capabilities': ['text', 'thinking']},
          {'model_id': 'glm-5.1',       'capabilities': ['text', 'thinking']},
          {'model_id': 'glm-4.7',       'capabilities': ['text', 'thinking', 'cheap']},
          {'model_id': 'glm-4.5-flash', 'capabilities': ['text', 'cheap']},

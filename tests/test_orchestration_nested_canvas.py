@@ -38,6 +38,67 @@ ROOT = os.path.normpath(os.path.join(HERE, '..'))
 HARNESS = os.path.join(HERE, 'orch_nested_roundtrip_harness.js')
 
 
+ORCH_JS = os.path.join(ROOT, 'static', 'js', 'orchestration.js')
+
+
+def _orch_base_css_rule_heads() -> list[str]:
+    """Return the selector heads of every top-level rule in orchestration.js's
+    injected base CSS (the ``var css = `...`;`` literal, before the first
+    ``@media`` block). Walks brace depth so descendant selectors and the bodies
+    are never mistaken for rule heads. Pure string parsing — no Node needed."""
+    import re
+
+    src = open(ORCH_JS, encoding='utf-8').read()
+    m = re.search(r'var css = `(.*?)`;', src, re.S)
+    assert m, 'could not locate the injected CSS literal in orchestration.js'
+    base = m.group(1).split('@media', 1)[0]   # responsive overrides are exempt
+
+    heads: list[str] = []
+    depth = 0
+    cur = ''
+    for ch in base:
+        if ch == '{':
+            if depth == 0:
+                heads.append(cur.strip())
+                cur = ''
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                cur = ''
+        elif depth == 0:
+            cur += ch
+    return heads
+
+
+def test_no_duplicate_base_css_selectors():
+    """CI guard against the `.orch-hint` class-collision bug class.
+
+    orchestration.js injects ALL its styles as one scoped literal. A second
+    rule keyed on the *exact same single class* silently shadows the first —
+    that is how a section-hint `.orch-hint` inherited the canvas overlay's
+    `position:absolute;inset:0` and smeared text across the canvas.
+
+    We flag only SIMPLE single-class heads (``.orch-foo``) defined more than
+    once. The deliberate base+override pattern (a shared
+    ``.orch-node-start,.orch-node-stop{...}`` rule plus per-class background
+    overrides) is NOT flagged: a comma group / compound / pseudo head is not a
+    bare single-class head, so it never collides with the override rule.
+    Responsive ``@media`` overrides are exempt by construction.
+    """
+    import re
+    from collections import Counter
+
+    heads = _orch_base_css_rule_heads()
+    simple = [h for h in heads if re.fullmatch(r'\.orch-[a-z0-9-]+', h)]
+    dups = {sel: n for sel, n in Counter(simple).items() if n > 1}
+    assert not dups, (
+        'Duplicate single-class CSS rule(s) in orchestration.js base styles — '
+        'the second definition silently shadows the first (see the .orch-hint '
+        f'collision). Rename one or merge them: {dups}'
+    )
+
+
 def _jsdom_available() -> bool:
     if shutil.which('node') is None:
         return False
@@ -54,8 +115,8 @@ def _extract(out: str, prefix: str) -> dict:
     return json.loads(line[0][len(prefix):])
 
 
-def _run_harness() -> tuple[str, dict, dict]:
-    """Run the jsdom harness; return (stdout, nested-def, structured-def)."""
+def _run_harness() -> tuple[str, dict, dict, dict]:
+    """Run the jsdom harness; return (stdout, nested, structured, io) defs."""
     proc = subprocess.run(
         ['node', HARNESS], cwd=ROOT,
         capture_output=True, text=True, timeout=120,
@@ -65,7 +126,8 @@ def _run_harness() -> tuple[str, dict, dict]:
     assert 'ALL_OK' in out, f'harness did not reach ALL_OK:\n{out}'
     nested = _extract(out, 'RESULT_JSON=')
     structured = _extract(out, 'RESULT_JSON2=')
-    return out, nested, structured
+    io = _extract(out, 'RESULT_JSON3=')
+    return out, nested, structured, io
 
 
 @pytest.fixture(scope='module')
@@ -78,7 +140,7 @@ def harness_result():
 def test_harness_assertions_pass(harness_result):
     """All in-JS state assertions (enter/exit/commit, depth-2, flush,
     structured fields) held."""
-    out, _, _ = harness_result
+    out, _, _, _ = harness_result
     # The harness counts its own assertions; make sure it ran a meaningful set
     # (guards against a silently-empty run that still prints ALL_OK).
     count_line = [ln for ln in out.splitlines() if ln.startswith('CHECKS=')]
@@ -89,7 +151,7 @@ def test_harness_assertions_pass(harness_result):
 def test_roundtripped_definition_is_backend_valid(harness_result):
     """The root definition the studio serializes after a nested edit must pass
     the SAME validator the REST store + engine enforce."""
-    _, defn, _ = harness_result
+    _, defn, _, _ = harness_result
     verdict = validate_definition(defn)
     assert verdict['ok'], verdict['errors']
 
@@ -97,7 +159,7 @@ def test_roundtripped_definition_is_backend_valid(harness_result):
 def test_group_survives_as_isolated_black_box(harness_result):
     """The serialized group is an isolated subflow and stays intact (not
     flattened) through expand_subflows — i.e. it is a real black box."""
-    _, defn, _ = harness_result
+    _, defn, _, _ = harness_result
     group = [n for n in defn['nodes'] if n.get('type') == 'subflow'][0]
     assert resolve_scope(group) == 'isolated'
     flat = expand_subflows(defn)
@@ -109,7 +171,7 @@ def test_nested_child_definition_also_validates(harness_result):
     """The embedded child (and its depth-2 nested child) authored through the
     nested canvas are themselves valid definitions — the commit produced a
     well-formed sub-graph at every level."""
-    _, defn, _ = harness_result
+    _, defn, _, _ = harness_result
     group = [n for n in defn['nodes'] if n.get('type') == 'subflow'][0]
     child = group['params']['definition']
     assert validate_definition(child)['ok'], 'depth-1 child invalid'
@@ -132,7 +194,7 @@ def test_structured_fields_serialize_with_backend_shape(harness_result):
     """The inspector's structured fields (list/select/bool), driven through
     _orchSetParam, must serialize into params with the SHAPE the backend
     validator expects — list→array, select→enum-or-absent, bool→true/false."""
-    _, _, sdef = harness_result
+    _, _, sdef, _ = harness_result
     verdict = validate_definition(sdef)
     assert verdict['ok'], verdict['errors']
 
@@ -157,7 +219,7 @@ def test_structured_fields_serialize_with_backend_shape(harness_result):
 def test_structured_fields_render_into_brief(harness_result):
     """The structured params the inspector produced must compose into the
     delegation brief the engine sends — closing inspector→render_role_brief."""
-    _, _, sdef = harness_result
+    _, _, sdef, _ = harness_result
     brief = render_role_brief(_role(sdef, 'worker'))
     assert brief.startswith('Build the widget.'), brief
     assert '### Must Do' in brief
@@ -165,3 +227,64 @@ def test_structured_fields_render_into_brief(harness_result):
     assert '- write tests' in brief
     # must_not_do was cleared → its section must NOT appear.
     assert 'Must Not Do' not in brief, brief
+
+
+def test_js_fallback_schema_matches_backend(harness_result):
+    """The JS _ORCH_ROLE_SCHEMA_FALLBACK is a hand-maintained mirror of the
+    backend ROLE_PARAM_SCHEMA so the inspector works before /role-schema lands
+    (and in jsdom with no server). Pin them in sync: same role set, same field
+    keys per role in the same order — drift here means the offline inspector
+    shows the wrong fields."""
+    from lib.orchestration import ROLE_PARAM_SCHEMA, role_param_schema
+
+    # Extract the fallback object from the loaded module (the harness already
+    # eval'd orchestration.js into a jsdom window and printed nothing for it;
+    # run a tiny dedicated node eval instead so this test is self-contained).
+    src = os.path.join(ROOT, 'static', 'js', 'orchestration.js')
+    code = (
+        "const fs=require('fs');const {JSDOM}=require('jsdom');"
+        "const dom=new JSDOM('<!DOCTYPE html><body>',{runScripts:'dangerously'});"
+        "const W=dom.window;"
+        "W.eval(\"function escapeHtml(s){return ''+s} function t(k){return k} var BASE_PATH=''\");"
+        "W.eval(fs.readFileSync(" + json.dumps(src) + ",'utf8'));"
+        "const f=W._ORCH_ROLE_SCHEMA_FALLBACK;"
+        "const out={generic:f.generic.map(s=>s.key)};"
+        "out.roles={};Object.keys(f.roles).forEach(r=>{out.roles[r]=f.roles[r].map(s=>s.key)});"
+        "console.log('FALLBACK_JSON='+JSON.stringify(out));"
+    )
+    proc = subprocess.run(['node', '-e', code], cwd=ROOT,
+                          capture_output=True, text=True, timeout=120)
+    out = (proc.stdout or '') + '\n' + (proc.stderr or '')
+    assert proc.returncode == 0, out
+    fb = _extract(out, 'FALLBACK_JSON=')
+
+    # Same role set.
+    assert set(fb['roles']) == set(ROLE_PARAM_SCHEMA), (
+        set(fb['roles']) ^ set(ROLE_PARAM_SCHEMA))
+    # Same field keys per role, same order.
+    for role, be_schema in ROLE_PARAM_SCHEMA.items():
+        be_keys = [s['key'] for s in be_schema]
+        assert fb['roles'][role] == be_keys, (role, fb['roles'][role], be_keys)
+    # Generic mirror too.
+    assert fb['generic'] == [s['key'] for s in role_param_schema('__generic__')]
+
+
+def test_typed_io_contract_serializes_and_validates(harness_result):
+    """The edge-selection + typed I/O editor flow (Scenario 5) produces a
+    backend-valid definition whose worker exposes summary/changes outputs and
+    whose writer wires a typed input to worker.changes — closing the
+    frontend I/O-editor → backend io-validator loop."""
+    _, _, _, iodef = harness_result
+    verdict = validate_definition(iodef)
+    assert verdict['ok'], verdict['errors']
+
+    worker = [n for n in iodef['nodes'] if n.get('role') == 'worker'][0]
+    outs = worker['params']['io']['outputs']
+    names = [o['name'] for o in outs]
+    assert names == ['summary', 'changes'], names
+    assert outs[1]['type'] == 'artifact'
+
+    writer = [n for n in iodef['nodes'] if n.get('role') == 'writer'][0]
+    inp = writer['params']['io']['inputs'][0]
+    assert inp['from'] == worker['id'] + '.changes', inp
+    assert inp['type'] == 'artifact'

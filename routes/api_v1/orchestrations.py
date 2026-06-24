@@ -313,18 +313,27 @@ def role_schema_orchestration():
     from flask import request
 
     from lib.orchestration import (
-        ROLE_PARAM_SCHEMA, VALID_PARAM_KINDS, role_param_schema,
+        DEFAULT_OUTPUT_NAME, ROLE_PARAM_SCHEMA, VALID_IO_TYPES,
+        VALID_PARAM_KINDS, role_param_schema, role_persona,
     )
 
     role = (request.args.get('role') or '').strip()
     if role:
         return jsonify({'ok': True, 'role': role,
-                        'fields': role_param_schema(role)})
+                        'fields': role_param_schema(role),
+                        'persona': role_persona(role)})
     return jsonify({
         'ok': True,
         'roles': {r: spec for r, spec in ROLE_PARAM_SCHEMA.items()},
         'generic': role_param_schema('__generic__'),
+        # Read-only persona (the fixed system-prompt design) per role. The
+        # studio SHOWS this so the user understands what each character does,
+        # but it is NOT an editable field — the prompt design is owned by the
+        # backend (lib/swarm/registry.AGENT_ROLES), not the authoring layer.
+        'personas': role_persona(),
         'kinds': sorted(VALID_PARAM_KINDS),
+        'ioTypes': sorted(VALID_IO_TYPES),
+        'defaultOutput': DEFAULT_OUTPUT_NAME,
     })
 
 
@@ -519,10 +528,37 @@ def create_run_task():
         # Dual sink: the in-memory runtime (live push + poll) AND the durable
         # event log (cross-restart replay). append_event returns the seq the
         # runtime assigned, which is the PK we persist under.
+        #
+        # The header status also tracks the engine's lifecycle so a reopened
+        # run lists/reads correctly: pending → running on flow_start, and
+        # → paused while blocked on a human gate (back to running once the
+        # gate resolves). The terminal done/error write happens below.
+        status_state = {'cur': 'pending'}
+
+        def _set_status(new):
+            if status_state['cur'] != new:
+                status_state['cur'] = new
+                runs.update_status(run_id, new)
+
         def _on_event(ev):
+            etype = ev.get('type')
+            # Live runtime always sees every event (push + in-memory poll).
             seq = orchestration_run_runtime.append_event(tid, ev)
-            if seq is not None:
+            # Durable log: persist everything EXCEPT the high-frequency
+            # per-token ``step_delta`` stream. Those exist only to paint a
+            # live chat bubble token-by-token; a reopened run replays from the
+            # log and rebuilds each node's output from the self-contained
+            # ``step_trace`` / ``step_complete`` events, so persisting hundreds
+            # of delta rows per node would bloat orchestration_run_events for
+            # zero replay value.
+            if seq is not None and etype != 'step_delta':
                 runs.append_event(run_id, seq, ev)
+            if etype == 'flow_start':
+                _set_status('running')
+            elif etype == 'human_request':
+                _set_status('paused')
+            elif etype == 'human_resolved':
+                _set_status('running')
         try:
             executor = FlowExecutor(
                 defn,

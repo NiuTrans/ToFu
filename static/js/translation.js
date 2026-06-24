@@ -320,6 +320,99 @@ async function _tryRecoverFromServer(convId, idx, msg, field) {
   return false;
 }
 
+/* ═══════════════════════════════════════════════════════════
+ *  Server-driven auto-translate WATCHDOG
+ *
+ *  The server-side auto-translate path (lib/translate/runtime.py) delivers
+ *  its result to the live view through a SINGLE fire-and-forget push frame
+ *  ('done' on the 'translate' channel). The push hub (lib/agent_core/push.py)
+ *  DROPS frames when no client is subscribed at emit time (socket reconnect,
+ *  backgrounded tab, per-client queue overflow) and offers no Last-Event-ID
+ *  replay. When that 'done' frame is lost the active view is stuck: either the
+ *  "翻译中…" spinner spins forever (a 'running' frame landed but 'done' didn't)
+ *  or the bare original shows with no译文 — until the user switches
+ *  conversations and loadConversationMessages re-reads the committed
+ *  translatedContent from the DB. (The reported "卡住" + "来回切换才显示" bug.)
+ *
+ *  This watchdog closes that gap: once a message enters the server-driven
+ *  pending state, poll the DB (where _do_translate auto-commits regardless of
+ *  push delivery) and apply the translation in place, or clear the stuck
+ *  indicator after a budget. Idempotent + keyed so concurrent arms collapse
+ *  to a single timer. The first tick is delayed so the normal (push lands
+ *  fast) case clears with ZERO extra DB fetches — the guards below short-
+ *  circuit before _tryRecoverFromServer once translatedContent is present.
+ * ═══════════════════════════════════════════════════════════ */
+const _AUTO_TRANSLATE_WATCHDOG = new Map();
+const _AT_WATCHDOG_FIRST_DELAY = 8000;
+const _AT_WATCHDOG_INTERVAL    = 6000;
+const _AT_WATCHDOG_BUDGET_MS   = 90000;
+
+function _autoTranslateWatchdogKey(convId, msg, idx) {
+  return `${convId}:${(msg && msg._msgId) || ('idx' + idx)}`;
+}
+
+function _armAutoTranslateWatchdog(convId, idx, msg) {
+  if (!msg) return;
+  // Only meaningful for the active view — a background conv re-reads the DB
+  // (with the committed translation) on its next loadConversationMessages.
+  if (typeof activeConvId === 'undefined' || activeConvId !== convId) return;
+  const key = _autoTranslateWatchdogKey(convId, msg, idx);
+  if (_AUTO_TRANSLATE_WATCHDOG.has(key)) return;  // already watching
+
+  const startedAt = Date.now();
+  const state = {};
+
+  function _clear() {
+    if (state.timer) clearTimeout(state.timer);
+    _AUTO_TRANSLATE_WATCHDOG.delete(key);
+  }
+
+  async function _tick() {
+    const conv = (typeof conversations !== 'undefined')
+      ? conversations.find(c => c.id === convId) : null;
+    if (!conv || !Array.isArray(conv.messages)) { _clear(); return; }
+
+    // Re-resolve the message + index (multi-turn inserts can drift idx).
+    let mIdx = idx, m = conv.messages[idx];
+    if (msg._msgId) {
+      const fi = conv.messages.findIndex(x => x && x._msgId === msg._msgId);
+      if (fi >= 0) { mIdx = fi; m = conv.messages[fi]; }
+    }
+    if (!m) { _clear(); return; }
+
+    // Resolved by some other path (push landed late / manual click / error).
+    if (m.translatedContent || m._translateDone === true || m._translateError) { _clear(); return; }
+    // A client poll loop now owns this task — defer to it.
+    if (m._translateTaskId) { _clear(); return; }
+
+    // The translation auto-commits to the DB regardless of push delivery.
+    const recovered = await _tryRecoverFromServer(convId, mIdx, m, 'translatedContent');
+    if (recovered) {
+      console.log(`%c[Translate watchdog] ✓ recovered translation from DB for ${key}`, 'color:#22c55e');
+      _clear();
+      return;
+    }
+
+    if (Date.now() - startedAt > _AT_WATCHDOG_BUDGET_MS) {
+      // Give up — clear the stuck "翻译中…" indicator so the user at least
+      // sees the (untranslated) message instead of an eternal spinner. The
+      // original is intact; a manual click can re-trigger translation.
+      console.warn(`[Translate watchdog] budget exhausted for ${key} — clearing stuck indicator`);
+      delete m._translateDone;
+      delete m._translateStatus;
+      delete m._translateStatusKind;
+      delete m._translatePartial;
+      _renderMsgInPlace(convId, mIdx, m);
+      _clear();
+      return;
+    }
+    state.timer = setTimeout(_tick, _AT_WATCHDOG_INTERVAL);
+  }
+
+  state.timer = setTimeout(_tick, _AT_WATCHDOG_FIRST_DELAY);
+  _AUTO_TRANSLATE_WATCHDOG.set(key, state);
+}
+
 /**
  * Shared poll loop — used by manual / auto / resume-retry paths.
  * Returns when the task reaches a terminal state (or attempt cap).
@@ -759,6 +852,10 @@ async function _resumePendingTranslations(convId) {
           statusKind: frame.statusKind || '',
           partial: frame.partial || '',
         });
+        // Self-heal: the terminal 'done' frame is fire-and-forget and may be
+        // dropped (socket reconnect / queue overflow). Arm a DB-polling
+        // watchdog so the live view recovers without a conversation switch.
+        _armAutoTranslateWatchdog(convId, idx, msg);
         return;
       }
 

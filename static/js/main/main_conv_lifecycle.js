@@ -64,6 +64,8 @@ function newChat() {
     `<div class="welcome" id="welcome"><div class="welcome-icon"><img src="${BASE_PATH}/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>${_folderBadgeHtml}<p>${t('welcome.subtitle')}</p><div class="feature-pills"><span class="feature-pill">Extended Thinking</span><span class="feature-pill">Search</span><span class="feature-pill">URL Fetch</span><span class="feature-pill">Image Input</span><span class="feature-pill">Co-Pilot</span><span class="feature-pill">Browser</span></div></div>`;
   buildTurnNav(null);
   renderPendingQueueUI(null);
+  // ★ A brand-new conversation has no latch — hide any lingering banner.
+  if (typeof syncToolsetBanner === 'function') syncToolsetBanner();
   updateSendButton();
   if (!hasInput) {
     _clearProjectStateLocal();
@@ -195,6 +197,9 @@ function loadConversation(id) {
   renderPendingQueueUI(id);
   // ★ Refresh server queue state for this conversation
   _refreshServerQueue(id);
+  // ★ The tool-schema "apply now" banner is per-conversation — re-evaluate it
+  //   for the conv we just switched to so it never lingers from another conv.
+  if (typeof syncToolsetBanner === 'function') syncToolsetBanner();
   updateSendButton();
   if (typeof restoreDebugForConv === "function") restoreDebugForConv(id);
   const inp = document.getElementById("userInput"),
@@ -483,6 +488,7 @@ function _buildToolbarOverrides() {
     model: config.model || serverModel,
     systemPrompt: config.systemPrompt || '',
     systemPromptMode: config.systemPromptMode || 'append',
+    systemPromptBlocks: config.systemPromptBlocks || {},
     thinkingDepth: config.thinkingDepth,
     temperature: config.temperature,
     searchMode,
@@ -498,7 +504,6 @@ function _buildToolbarOverrides() {
     endpointMode: endpointEnabled,
     autopilot: autopilotEnabled,
     activeFlow: activeFlow || '',
-    agentBackend: activeAgentBackend || 'builtin',
     autoTranslate: !!autoTranslate,
     autoApply: autoApplyWrites,
     browserClientId: window._browserClientId || null,

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """debug/triage_errors.py — Cluster error-log signatures.
 
-Reads ``logs/error.log`` (override with ``TOFU_LOG_DIR`` / legacy ``CHATUI_LOG_DIR``), groups lines by
-well-known signatures, and prints a top-N table with counts, first-seen /
-last-seen timestamps, and a representative example per signature.
+Reads ``logs/error.log`` (override with ``TOFU_LOG_DIR`` / legacy ``CHATUI_LOG_DIR``),
+groups it into timestamp-anchored *records* (so a multi-line Python traceback
+counts once, not as one ``Traceback`` line plus six stray ``OTHER`` lines),
+classifies each record by signature — bucketing real tracebacks by their
+terminal exception type (``Traceback: RuntimeError``) — and prints a top-N
+table with counts, first-seen / last-seen timestamps, and a representative
+example per signature.
 
 Usage::
 
@@ -42,19 +46,32 @@ except Exception:  # pragma: no cover — best-effort fallback
         logging.basicConfig(level=logging.INFO,
                             format='%(asctime)s [%(levelname)s] %(message)s')
 
-# Signatures mirror docs/DEVELOPMENT_DIRECTION.md §3.1 — keep in sync.
-# Each entry: (label, regex). Order matters (first match wins).
-SIGNATURES: list[tuple[str, re.Pattern]] = [
+# Curated SEMANTIC signatures from docs/DEVELOPMENT_DIRECTION.md §3.1 — keep in
+# sync. Matched FIRST (against the whole record) because they name the
+# actionable failure category even when a traceback is also present.
+SEMANTIC_SIGNATURES: list[tuple[str, re.Pattern]] = [
     ('PREMATURE STREAM CLOSE',   re.compile(r'PREMATURE STREAM CLOSE', re.I)),
     ('PREFIX MUTATION',          re.compile(r'PREFIX MUTATION', re.I)),
     ('run_command timed out',    re.compile(r'run_command timed out', re.I)),
     ('429 rate-limited',         re.compile(r'\b429\b.*rate.?limited', re.I)),
     ('DISCONNECTED PREMATURELY', re.compile(r'DISCONNECTED PREMATURELY', re.I)),
-    ('Traceback',                re.compile(r'Traceback \(most recent call last\)')),
-    ('AttributeError',           re.compile(r'AttributeError')),
+]
+
+# Generic exception-name fallbacks — only consulted when a record neither
+# matches a semantic signature NOR carries a parseable Python traceback (a real
+# traceback is bucketed by its terminal exception type, see _exception_type).
+GENERIC_SIGNATURES: list[tuple[str, re.Pattern]] = [
+    ('AttributeError',           re.compile(r'\bAttributeError\b')),
     ('ConnectionError',          re.compile(r'ConnectionError|ConnectionResetError')),
     ('Timeout',                  re.compile(r'\bTimeout(Error)?\b')),
 ]
+
+# A Python traceback's terminal line is an (optionally dotted) exception name,
+# e.g. ``RuntimeError: msg`` or ``httpx.ReadTimeout``. We only accept names
+# whose final segment carries an exception-ish suffix to avoid matching prose.
+_EXC_LINE_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)(?::|$)')
+_EXC_SUFFIXES = ('Error', 'Exception', 'Warning', 'Interrupt', 'Timeout',
+                 'Exit', 'Iteration', 'Abort', 'Failure')
 
 # Matches the log formatter in server.py (``%Y-%m-%d %H:%M:%S``).
 _TS_RE = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})')
@@ -82,9 +99,62 @@ def _parse_since(spec: str) -> datetime | None:
     return datetime.now() - delta
 
 
-def _classify(line: str) -> str:
-    for label, rx in SIGNATURES:
-        if rx.search(line):
+def _iter_records(line_iter):
+    """Group raw log lines into timestamp-anchored logical records.
+
+    A record begins at a line that starts with a timestamp; subsequent lines
+    without a timestamp (traceback header, stack frames, caret markers, and the
+    terminal exception) attach to the current record. Yields ``list[str]``.
+    """
+    cur: list[str] | None = None
+    for raw in line_iter:
+        line = raw.rstrip('\n')
+        if _TS_RE.match(line):
+            if cur is not None:
+                yield cur
+            cur = [line]
+        elif cur is None:
+            cur = [line]
+        else:
+            cur.append(line)
+    if cur is not None:
+        yield cur
+
+
+def _exception_type(record_lines: list[str]) -> str | None:
+    """Return the terminal exception type of a Python traceback in the record.
+
+    Picks the LAST qualifying exception line (so chained 'During handling…'
+    tracebacks report the outermost type). Returns ``None`` when the record has
+    no traceback or no parseable exception line.
+    """
+    if not any('Traceback (most recent call last)' in ln for ln in record_lines):
+        return None
+    found = None
+    for ln in record_lines:
+        if not ln or ln[0].isspace():  # skips blanks, frames, code, carets
+            continue
+        m = _EXC_LINE_RE.match(ln)
+        if not m:
+            continue
+        name = m.group(1)
+        if name.rsplit('.', 1)[-1].endswith(_EXC_SUFFIXES):
+            found = name
+    return found
+
+
+def _classify(record_lines: list[str]) -> str:
+    text = '\n'.join(record_lines)
+    for label, rx in SEMANTIC_SIGNATURES:
+        if rx.search(text):
+            return label
+    exc = _exception_type(record_lines)
+    if exc:
+        return f'Traceback: {exc}'
+    if any('Traceback (most recent call last)' in ln for ln in record_lines):
+        return 'Traceback: <unparsed>'
+    for label, rx in GENERIC_SIGNATURES:
+        if rx.search(text):
             return label
     return 'OTHER'
 
@@ -117,16 +187,16 @@ def triage(log_path: str, since: datetime | None) -> dict:
 
     try:
         with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
-            for line in f:
-                total_lines += 1
-                line = line.rstrip('\n')
-                if not line:
+            for record in _iter_records(f):
+                total_lines += len(record)
+                head = record[0]
+                if not head.strip() and len(record) == 1:
                     continue
-                ts = _extract_ts(line)
+                ts = _extract_ts(head)
                 if since is not None and ts is not None and ts < since:
                     skipped_pre_cutoff += 1
                     continue
-                label = _classify(line)
+                label = _classify(record)
                 entry = stats[label]
                 entry['count'] += 1
                 if ts is not None:
@@ -135,7 +205,15 @@ def triage(log_path: str, since: datetime | None) -> dict:
                     if entry['last_ts'] is None or ts > entry['last_ts']:
                         entry['last_ts'] = ts
                 if not entry['example']:
-                    entry['example'] = line[:240]
+                    # For a traceback, the terminal exception line is the most
+                    # informative single line; otherwise use the record head.
+                    example = head
+                    if label.startswith('Traceback:'):
+                        for ln in reversed(record):
+                            if ln and not ln[0].isspace() and 'Traceback' not in ln:
+                                example = ln
+                                break
+                    entry['example'] = example[:240]
     except OSError as e:
         logger.error('[Triage] Failed to read %s: %s', log_path, e, exc_info=True)
         return {'_meta': {'path': log_path, 'total_lines': 0,

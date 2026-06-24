@@ -110,17 +110,37 @@ _VU_ROLE_PROMPT = (
 
 
 def is_autopilot_enabled(task: dict) -> bool:
-    """True iff autopilot is on AND endpoint mode is not also on.
+    """True iff autopilot is active for this task AND endpoint mode is not.
 
-    The mutual-exclusion check is defense in depth — the frontend
-    already gates one toggle on the other.
+    Autopilot is "active" when EITHER:
+      • ``config['autopilot']`` is set (config-driven — toggle was ON at the
+        real send, propagated into the task and its follow-ups), OR
+      • a persistent autopilot armed-marker exists for the conversation
+        (the mid-stream / idle "arm" gesture; survives page reload and is
+        cancellable from the queue bar).
+
+    Endpoint mode wins the mutual exclusion (both share the same
+    "model stopped" boundary).  The VU sub-task (``_vu_subtask``) and
+    inline tasks never consult the marker — only DB-backed parent/follow-up
+    tasks do, so the cheap config flag covers the hot recursion guard.
     """
     cfg = task.get('config') or {}
-    if not cfg.get('autopilot'):
-        return False
     if cfg.get('endpointMode') or task.get('_endpoint_managed'):
         return False
-    return True
+    if cfg.get('autopilot'):
+        return True
+    # Persistent armed-marker fallback (mid-stream arm / reload survival).
+    if task.get('_vu_subtask') or task.get('_inline_messages'):
+        return False
+    conv_id = task.get('convId') or ''
+    if not conv_id:
+        return False
+    try:
+        from lib.message_queue import has_autopilot_marker
+        return has_autopilot_marker(conv_id)
+    except Exception as e:
+        logger.debug('[Autopilot] marker probe failed (non-fatal): %s', e)
+        return False
 
 
 _VU_FORWARD_TYPES = frozenset({
@@ -335,6 +355,9 @@ def run_virtual_user(task: dict, vu_msg_id: str | None = None) -> dict | None:
     rounds = list(sub_task.get('toolRounds') or [])
     if _VU_DONE_SENTINEL in text:
         logger.info('[Autopilot %s] VU emitted TASK_DONE — stopping loop', tid)
+        # Signal the hook to clear the persistent armed-marker (disarm) so the
+        # loop ends and the queue-bar sentinel disappears.
+        task['_vu_emitted_done'] = True
         audit_log('autopilot_stop',
                   task_id=task.get('id', ''),
                   conv_id=task.get('convId', ''),
@@ -691,6 +714,15 @@ def maybe_run_autopilot(task: dict) -> dict | None:
     vu_result = run_virtual_user(task, vu_msg_id=vu_msg_id)
     if vu_result is None:
         # VU emitted [VU: TASK_DONE], errored, or task was aborted.
+        # On a graceful TASK_DONE, disarm the persistent marker so the loop
+        # ends and the queue-bar sentinel disappears.  (Abort/error leave the
+        # marker intact — a transient failure shouldn't silently disarm.)
+        if task.get('_vu_emitted_done'):
+            try:
+                from lib.message_queue import clear_autopilot_marker
+                clear_autopilot_marker(conv_id)
+            except Exception as e:
+                logger.debug('[Autopilot %s] marker clear failed: %s', tid, e)
         # Tell the frontend to discard any in-memory bubble it may
         # have lazily created from inner stream events; nothing was
         # ever persisted.
@@ -768,6 +800,161 @@ def maybe_run_autopilot(task: dict) -> dict | None:
 
 
 # ──────────────────────────────────────────────────────────────────
+#  Kick from idle — start the VU loop on a FINISHED conversation
+# ──────────────────────────────────────────────────────────────────
+
+def _run_autopilot_kick(task: dict) -> None:
+    """Carrier-task entry: run the VU hook directly, with NO worker turn.
+
+    Used by the "push the conversation forward" gesture (empty-Enter on a
+    finished conversation with autopilot ON).  Unlike a normal task, this
+    carrier never calls the LLM as the assistant — the conversation already
+    ended and the last message is the agent's reply, so the virtual user
+    should answer it straight away.  We reuse the SAME end-of-turn hook the
+    natural-stop path runs (``maybe_run_autopilot``): it emits the
+    ``autopilot_vu_*`` stream, appends the synthetic user message, spawns the
+    follow-up worker task, and returns the ``next_task_id`` / ``vu_msg``
+    baton.  The baton rides out on this carrier's ``done`` event (and on
+    ``task['_autopilot_followup']`` for the poll path) exactly as it does at
+    a natural stop, so the frontend attaches to the follow-up with no extra
+    plumbing.
+
+    Invoked from ``orchestrator.run_task`` when ``task['_autopilot_kick']``
+    is set.
+    """
+    from lib.tasks_pkg.manager import append_event, persist_task_result
+
+    tid = task['id'][:8]
+    # The carrier produces no assistant content of its own; flip to 'done'
+    # immediately so the SSE generator / poll treat the (in-flight) autopilot
+    # decision window correctly via the _autopilot_deciding latch below.
+    task['status'] = 'done'
+
+    done_evt = build_event(EventType.DONE)
+    if task.get('model'):
+        done_evt['model'] = task['model']
+
+    task['_autopilot_deciding'] = True
+    try:
+        ap_result = maybe_run_autopilot(task)
+        if ap_result:
+            done_evt['autopilotNextTaskId'] = ap_result['next_task_id']
+            done_evt['autopilotVuMessage'] = ap_result['vu_msg']
+            # Same transport-agnostic stash as the natural-stop path so a
+            # client that fell back to /api/chat/poll still gets the baton.
+            task['_autopilot_followup'] = ap_result
+            logger.info('[Autopilot kick %s] VU took over conv=%s → follow-up %s',
+                        tid, task.get('convId', '')[:8],
+                        ap_result['next_task_id'][:8])
+        else:
+            logger.info('[Autopilot kick %s] VU declined to take over conv=%s '
+                        '(TASK_DONE / no eligible context)', tid,
+                        task.get('convId', '')[:8])
+    except Exception as e:
+        logger.error('[Autopilot kick %s] hook raised: %s', tid, e, exc_info=True)
+    finally:
+        task['_autopilot_deciding'] = False
+
+    append_event(task, done_evt)
+    persist_task_result(task)
+
+
+def kick_autopilot(conv_id: str, config: dict | None = None) -> dict:
+    """Start the virtual-user loop on a conversation whose reply has finished.
+
+    The "push it forward for me" gesture: the user chatted with autopilot ON,
+    the turn ended, and they want the virtual user to keep the conversation
+    going WITHOUT typing anything.  Because ``maybe_run_autopilot`` only runs
+    as an end-of-turn hook (there is no live task to hang it on once the reply
+    finished), we spawn a thin carrier task whose ``run_task`` short-circuits
+    straight to :func:`_run_autopilot_kick`.
+
+    Refuses (``taskId=None``) when a non-VU task is already ``running`` for the
+    conversation — in that case the caller should ARM the live task instead
+    (see :func:`arm_autopilot`), so we never double-drive the loop.
+
+    Also persists ``settings.autopilotEnabled=true`` so subsequent manual
+    sends keep looping, mirroring the arm route.
+
+    Returns ``{'taskId': str}`` on success, or ``{'taskId': None, 'error':
+    str}`` when there is nothing to kick (no conversation, empty history, or a
+    task is already running).
+    """
+    if not conv_id:
+        return {'taskId': None, 'error': 'conv_id is required'}
+
+    # Refuse if a live (non-VU) task is already running — arm it instead.
+    from lib.tasks_pkg.manager import tasks, tasks_lock
+    with tasks_lock:
+        for t in tasks.values():
+            if (t.get('convId') == conv_id
+                    and t.get('status') == 'running'
+                    and not t.get('_vu_subtask')):
+                logger.info('[Autopilot kick] conv=%s already has a running '
+                            'task %s — refusing kick (arm instead)',
+                            conv_id[:8], t.get('id', '?')[:8])
+                return {'taskId': None, 'error': 'task_already_running'}
+
+    cfg = dict(config or {})
+    cfg['autopilot'] = True
+    cfg['endpointMode'] = False
+    for stale_key in (
+        'excludeLast', 'toolHistory', 'contentPrefix',
+        'checkpointToolRounds', 'checkpointUsage', 'checkpointApiRounds',
+        'checkpointModifiedFiles', 'checkpointModifiedFileList',
+    ):
+        cfg.pop(stale_key, None)
+
+    from lib.tasks_pkg import create_task, spawn_task
+    from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
+
+    api_messages = build_api_messages_from_db(conv_id, cfg)
+    if api_messages is None:
+        return {'taskId': None, 'error': 'conversation_not_found'}
+    if not api_messages:
+        return {'taskId': None, 'error': 'conversation_empty'}
+
+    task = create_task(conv_id, api_messages, cfg)
+    task['_autopilot_kick'] = True
+
+    # Persist the setting so the loop keeps going on any later manual send.
+    try:
+        from lib.database import (
+            DOMAIN_CHAT,
+            db_execute_with_retry,
+            get_thread_db,
+        )
+        db = get_thread_db(DOMAIN_CHAT)
+        srow = db.execute(
+            'SELECT settings FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)
+        ).fetchone()
+        if srow:
+            try:
+                settings = json.loads(srow[0] or '{}')
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug('[Autopilot kick] settings parse failed conv=%s: %s',
+                             conv_id[:8], e)
+                settings = {}
+            settings['autopilotEnabled'] = True
+            settings['activeTaskId'] = task['id']
+            db_execute_with_retry(
+                db,
+                'UPDATE conversations SET settings=? WHERE id=? AND user_id=1',
+                (json.dumps(settings, ensure_ascii=False), conv_id),
+            )
+    except Exception as e:
+        logger.warning('[Autopilot kick] persist autopilotEnabled failed '
+                       'conv=%s: %s', conv_id[:8], e)
+
+    logger.info('[Autopilot kick] conv=%s spawning carrier task %s',
+                conv_id[:8], task['id'][:8])
+    audit_log('autopilot_kick', conv_id=conv_id, task_id=task['id'])
+    spawn_task(task)
+    return {'taskId': task['id']}
+
+
+# ──────────────────────────────────────────────────────────────────
 #  Runtime arming — turn autopilot on for an ALREADY-RUNNING task
 # ──────────────────────────────────────────────────────────────────
 
@@ -800,33 +987,115 @@ def arm_autopilot(conv_id: str) -> dict:
     from lib.tasks_pkg.manager import tasks, tasks_lock
 
     armed_ids: list[str] = []
+    marker_cfg: dict = {}
+    endpoint_blocked = False
     with tasks_lock:
+        # Pass 1 — mutual exclusion: if ANY live task for the conv is endpoint
+        # mode, refuse to arm autopilot (they share the same termination
+        # boundary; running both double-loops).
         for tid, t in tasks.items():
-            if t.get('convId') != conv_id:
+            if t.get('convId') != conv_id or t.get('status') != 'running':
                 continue
-            if t.get('status') != 'running':
-                continue
-            if t.get('_endpoint_managed') or t.get('_vu_subtask'):
+            if t.get('_vu_subtask'):
                 continue
             cfg = t.get('config')
-            if not isinstance(cfg, dict):
-                continue
-            if cfg.get('endpointMode'):
-                # Mutually exclusive — refuse to arm an endpoint task.
-                continue
-            if not cfg.get('autopilot'):
-                cfg['autopilot'] = True
-                armed_ids.append(tid)
+            if t.get('_endpoint_managed') or (isinstance(cfg, dict) and cfg.get('endpointMode')):
+                endpoint_blocked = True
+                break
+        # Pass 2 — flip config.autopilot on live non-endpoint tasks + capture
+        # a config to seed the marker.
+        if not endpoint_blocked:
+            for tid, t in tasks.items():
+                if t.get('convId') != conv_id or t.get('status') != 'running':
+                    continue
+                if t.get('_endpoint_managed') or t.get('_vu_subtask'):
+                    continue
+                cfg = t.get('config')
+                if not isinstance(cfg, dict):
+                    continue
+                if not marker_cfg:
+                    marker_cfg = dict(cfg)
+                if not cfg.get('autopilot'):
+                    cfg['autopilot'] = True
+                    armed_ids.append(tid)
+
+    if endpoint_blocked:
+        logger.info('[Autopilot] Arm refused for conv=%s — endpoint mode is '
+                    'live (mutually exclusive)', conv_id[:8])
+        return {'armed': False, 'taskIds': [], 'markerAdded': False}
+
+    # Persist the armed-marker sentinel in the queue so the arm survives a
+    # page reload, shows in the queue bar (cancellable), and — critically —
+    # keeps autopilot armed even when no task is live (the "I'll step away,
+    # take over when the current reply finishes" gesture works whether or not
+    # a reply is still streaming).  Idempotent: at most one marker per conv.
+    marker_added = False
+    try:
+        from lib.message_queue import arm_autopilot_marker
+        res = arm_autopilot_marker(conv_id, marker_cfg)
+        marker_added = res.get('armed', False)
+    except Exception as e:
+        logger.warning('[Autopilot] failed to persist armed-marker for '
+                       'conv=%s: %s', conv_id[:8], e)
 
     if armed_ids:
-        logger.info('[Autopilot] Armed %d live task(s) for conv=%s: %s',
-                    len(armed_ids), conv_id[:8],
-                    [t[:8] for t in armed_ids])
-        audit_log('autopilot_armed',
-                  conv_id=conv_id,
-                  task_ids=armed_ids)
+        logger.info('[Autopilot] Armed %d live task(s) for conv=%s: %s '
+                    '(marker_added=%s)', len(armed_ids), conv_id[:8],
+                    [t[:8] for t in armed_ids], marker_added)
     else:
-        logger.info('[Autopilot] Arm requested for conv=%s but no live task '
-                    'to flip (reply already finished?)', conv_id[:8])
+        logger.info('[Autopilot] Arm requested for conv=%s — no live task to '
+                    'flip; persistent marker now governs (marker_added=%s)',
+                    conv_id[:8], marker_added)
+    audit_log('autopilot_armed', conv_id=conv_id, task_ids=armed_ids,
+              marker_added=marker_added)
 
-    return {'armed': bool(armed_ids), 'taskIds': armed_ids}
+    # ``armed`` reflects whether autopilot is now armed for the conv — True if
+    # a live task was flipped OR a marker is in place.
+    armed = bool(armed_ids) or marker_added or _marker_exists(conv_id)
+    return {'armed': armed, 'taskIds': armed_ids, 'markerAdded': marker_added}
+
+
+def _marker_exists(conv_id: str) -> bool:
+    try:
+        from lib.message_queue import has_autopilot_marker
+        return has_autopilot_marker(conv_id)
+    except Exception:
+        return False
+
+
+def disarm_autopilot(conv_id: str) -> dict:
+    """Cancel autopilot for a conversation: clear the marker + live config.
+
+    The inverse of :func:`arm_autopilot`.  Removes the persistent armed-marker
+    sentinel AND flips ``config['autopilot']=False`` on any live task so the
+    loop stops at the current turn's natural end.  Used by the queue-bar
+    cancel button and the toggle-OFF gesture.
+
+    Returns ``{disarmed, markerCleared, taskIds}``.
+    """
+    from lib.tasks_pkg.manager import tasks, tasks_lock
+
+    marker_cleared = False
+    try:
+        from lib.message_queue import clear_autopilot_marker
+        marker_cleared = clear_autopilot_marker(conv_id)
+    except Exception as e:
+        logger.warning('[Autopilot] disarm: marker clear failed for conv=%s: %s',
+                       conv_id[:8], e)
+
+    cleared_ids: list[str] = []
+    with tasks_lock:
+        for tid, t in tasks.items():
+            if t.get('convId') != conv_id or t.get('_vu_subtask'):
+                continue
+            cfg = t.get('config')
+            if isinstance(cfg, dict) and cfg.get('autopilot'):
+                cfg['autopilot'] = False
+                cleared_ids.append(tid)
+
+    logger.info('[Autopilot] Disarmed conv=%s (markerCleared=%s, tasks=%s)',
+                conv_id[:8], marker_cleared, [t[:8] for t in cleared_ids])
+    audit_log('autopilot_disarmed', conv_id=conv_id,
+              marker_cleared=marker_cleared, task_ids=cleared_ids)
+    return {'disarmed': marker_cleared or bool(cleared_ids),
+            'markerCleared': marker_cleared, 'taskIds': cleared_ids}

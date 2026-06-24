@@ -176,7 +176,7 @@ function _skillsRenderCatalog() {
 
 function _skillsRenderCatalogCard(e) {
   var installed = !!e.installed;
-  var icon = e.icon || '📦';
+  var icon = e.icon || Icon('package', 26);
   var iconHtml = /^<svg/i.test(icon) ? icon : escapeHtml(icon);
   var stateClass = installed ? ' is-installed' : '';
   var html = '<div class="mcp-app-card skill-card' + stateClass + '">';
@@ -246,7 +246,7 @@ function _skillsRenderInstalled() {
   var html = items.map(function (m) {
     var ineligible = !m.eligible;
     var html2 = '<div class="mcp-app-card skill-card is-installed">';
-    html2 += '<div class="mcp-app-icon">📦</div>';
+    html2 += '<div class="mcp-app-icon">' + Icon('package', 26) + '</div>';
     html2 += '<div class="mcp-app-name"><span class="mcp-app-name-text">' + escapeHtml(m.name) + '</span>';
     html2 += '<span class="mcp-app-status ' + (m.enabled ? 'on' : 'off') + '"><span class="dot"></span>' + (m.enabled ? 'ON' : 'OFF') + '</span>';
     html2 += '</div>';
@@ -335,7 +335,14 @@ async function _skillsViewFiles(memoryId) {
       return;
     }
     descEl.textContent = d.count + ' 个文件 · ' + d.root;
-    var iconMap = { skill: '⭐', doc: '📄', script: '⚙️', config: '🔧', asset: '📎' };
+    var _fkSvg = function(inner) { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>'; };
+    var iconMap = {
+      skill: _fkSvg('<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/>'),
+      doc: _fkSvg('<path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>'),
+      script: _fkSvg('<path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/>'),
+      config: _fkSvg('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/>'),
+      asset: _fkSvg('<path d="m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551"/>'),
+    };
     var html = d.files.map(function (f) {
       var sz = _skillsFmtSize(f.size);
       var cls = f.kind === 'skill' ? ' is-skill' : '';

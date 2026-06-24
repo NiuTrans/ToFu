@@ -321,6 +321,9 @@ async function _restoreConvProject(conv) {
 // ── Multi-path folder state for the modal ──
 let _mpFolders = []; // array of path strings being edited in the modal
 let _mpReadOnly = new Set(); // subset of _mpFolders the user marked read-only
+// Mirror of the badges currently painted in the project bar ({path, readOnly}),
+// so the bar's click-to-toggle handler can look an entry up by index.
+let _projectBarFolders = [];
 
 function _syncFoldersFromState() {
   // Build _mpFolders from projectState (single source of truth)
@@ -603,11 +606,15 @@ async function renderRecentProjects() {
 }
 
 function selectRecentProject(path) {
+  if (!path) return;
   // Add the recent project path into the multi-path list and apply
-  if (path && !_mpFolders.includes(path)) {
+  if (!_mpFolders.includes(path)) {
     _mpFolders.push(path);
     _mpRenderTags();
   }
+  // Switch the left-hand folder browser to that item's location so the user
+  // sees where it lives (breadcrumb + listing reflect the selected path).
+  browseDirectory(path);
 }
 
 async function clearRecentProjects() {
@@ -805,12 +812,13 @@ function _updateProjectUI() {
       }
     }
   }
+  _projectBarFolders = _barFolders;
   const _lockGlyph = '<svg class="folder-badge-lock" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
-  const badges = _barFolders.map(({ path: p, readOnly }) => {
+  const badges = _barFolders.map(({ path: p, readOnly }, i) => {
     const short = p.split('/').filter(Boolean).pop() || p;
     const cls = 'folder-badge' + (readOnly ? ' folder-badge-ro' : '');
-    const tip = escapeHtml(p) + (readOnly ? ' (read-only)' : '');
-    return `<span class="${cls}" title="${tip}">${readOnly ? _lockGlyph : ''}${escapeHtml(short)}</span>`;
+    const tip = escapeHtml(p) + (readOnly ? ' (read-only — click to allow edits)' : ' (writable — click to make read-only)');
+    return `<span class="${cls}" title="${tip}" onclick="toggleProjectBarReadOnly(${i}, event)">${readOnly ? _lockGlyph : ''}${escapeHtml(short)}</span>`;
   });
   foldersEl.innerHTML = badges.join('');
 
@@ -819,11 +827,90 @@ function _updateProjectUI() {
   if (projectState.crossDC && projectState.crossDC.latencyClass !== 'local') {
     const dc = projectState.crossDC;
     const cls = dc.latencyClass === 'very_slow' ? 'color:#ef4444' : 'color:#f59e0b';
-    const icon = dc.latencyClass === 'very_slow' ? '🐢' : '⚡';
+    const _snailSvg = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M2 13a6 6 0 1 0 12 0 4 4 0 1 0-8 0 2 2 0 0 0 4 0"/><circle cx="10" cy="13" r="8"/><path d="M2 21h12c4.4 0 8-3.6 8-8V7a2 2 0 1 0-4 0v6"/><path d="M18 3 19.1 5.2"/><path d="M22 3 20.9 5.2"/></svg>';
+    const _zapSvg = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg>';
+    const icon = dc.latencyClass === 'very_slow' ? _snailSvg : _zapSvg;
     const lat = dc.latencyMs ? `${dc.latencyMs}ms` : '?';
     statsEl.innerHTML = `<span style="${cls};font-size:11px" title="Cross-DC: cluster=${dc.cluster}, latency=${lat}">${icon} ${dc.cluster} (${lat})</span>`;
   } else {
     statsEl.innerHTML = '';
+  }
+}
+
+/* Toggle a project-bar folder badge between writable and read-only in place,
+   without opening the modal.  Mirrors _mpToggleReadOnly + mpApplyFolders:
+   recompute the full path / read-only sets from the current projectState,
+   flip the clicked root, then optimistically repaint + reconcile with the
+   backend via /api/project/set_paths (the only endpoint that carries the
+   read-only policy).  On failure we revert and report the error. */
+/* Derive the conversation's {allPaths, roList} from an _applyProjectData-shaped
+   server state object (get_state() output). The BACKEND is the single source of
+   truth for the read-only policy, so we persist what it returns — never a guess. */
+function _deriveConvPathsFromState(data) {
+  const allPaths = [];
+  const roList = [];
+  if (data && data.path) {
+    allPaths.push(data.path);
+    if (data.readOnly) roList.push(data.path);
+  }
+  for (const r of (data && data.extraRoots) || []) {
+    const p = typeof r === 'string' ? r : r.path;
+    const ro = typeof r === 'object' && !!r.readOnly;
+    if (p && !allPaths.includes(p)) {
+      allPaths.push(p);
+      if (ro) roList.push(p);
+    }
+  }
+  return { allPaths, roList };
+}
+
+// Monotonic toggle sequence — only the newest in-flight toggle is allowed to
+// paint/persist its result, so out-of-order responses can't flip the badge.
+let _roToggleSeq = 0;
+
+async function toggleProjectBarReadOnly(index, event) {
+  // The badge lives inside #projectBarFolders, whose own onclick opens the
+  // project modal. Stop the click here so toggling never pops the modal.
+  if (event) { event.stopPropagation(); event.preventDefault(); }
+  const entry = _projectBarFolders[index];
+  if (!entry || !entry.path) return;
+
+  // Rebuild the ordered path list + read-only set from current state so we
+  // never drop extra roots or lose ordering (primary must stay first).
+  const folders = _projectBarFolders.map((f) => f.path);
+  const readOnly = new Set(_projectBarFolders.filter((f) => f.readOnly).map((f) => f.path));
+  if (readOnly.has(entry.path)) readOnly.delete(entry.path);
+  else readOnly.add(entry.path);
+  const roList = folders.filter((p) => readOnly.has(p));
+
+  const seq = ++_roToggleSeq;
+  const _prevProjectState = { ...projectState, extraRoots: (projectState.extraRoots || []).slice() };
+
+  // Optimistic LOCAL repaint only (instant feedback). We do NOT sync the
+  // conversation here — the backend round-trip below owns persistence, so we
+  // never write a guessed state that could race the authoritative response.
+  _applyProjectData({
+    path: folders[0],
+    readOnly: readOnly.has(folders[0]),
+    extraRoots: folders.slice(1).map((p) => ({ path: p, readOnly: readOnly.has(p) })),
+    crossDC: projectState.crossDC || null,
+  });
+  debugLog(`${entry.path} → ${readOnly.has(entry.path) ? 'read-only' : 'writable'}`, "success");
+
+  try {
+    const resp = await Api.project.setPaths(folders, roList);
+    const data = resp ? await resp.json().catch(() => ({})) : {};
+    if (!resp || !resp.ok) throw new Error(data.error || "Failed");
+    if (seq !== _roToggleSeq) return;   // superseded by a newer toggle — drop stale paint
+    // Single source of truth: render + persist EXACTLY what the backend returned.
+    _applyProjectData(data);
+    const { allPaths, roList: srvRo } = _deriveConvPathsFromState(data);
+    _saveConvProjectPath(allPaths[0] || '', allPaths.slice(1), srvRo);
+  } catch (e) {
+    if (seq !== _roToggleSeq) return;   // a newer toggle is in charge — let it settle
+    projectState = _prevProjectState;
+    _updateProjectUI();
+    debugLog(`Read-only toggle failed: ${e.message}`, "error");
   }
 }
 
@@ -872,15 +959,23 @@ async function loadProjectStatus() {
       const roMatch = savedReadOnly.length === currentRO.length &&
         savedReadOnly.every(p => currentRO.includes(p));
       if ((!extrasMatch && savedExtras.length > 0) || !roMatch) {
-        // Primary matches but extras or read-only policy don't — re-apply.
-        debugLog("Restoring extra roots / read-only policy for conversation", "info");
-        try {
-          const fixResp = await Api.project.setPaths(allPaths, savedReadOnly);
-          const fixData = fixResp ? await fixResp.json().catch(() => ({})) : {};
-          if (fixResp && fixResp.ok) _applyProjectData(fixData);
-        } catch (e2) {
-          debugLog("Extra roots restore failed: " + e2.message, "warn");
-        }
+        // Primary matches but extras or read-only policy don't. The server's
+        // in-memory RO flag is ephemeral (reset on restart), so the durable
+        // per-conv readOnlyPaths is the authority here — paint the bar from it
+        // IMMEDIATELY, then re-hydrate the server in the BACKGROUND so the load
+        // isn't gated on the slow setPaths round-trip (fs isdir + cross-DC probe).
+        _applyProjectData({
+          path: allPaths[0],
+          readOnly: savedReadOnly.includes(allPaths[0]),
+          extraRoots: allPaths.slice(1).map(p => ({ path: p, readOnly: savedReadOnly.includes(p) })),
+          crossDC: data.crossDC || null,
+        });
+        debugLog("Re-hydrating server read-only policy in background", "info");
+        Api.project.setPaths(allPaths, savedReadOnly)
+          .then(fixResp => fixResp && fixResp.ok
+            ? fixResp.json().catch(() => null) : null)
+          .then(fixData => { if (fixData) _applyProjectData(fixData); })
+          .catch(e2 => debugLog("Background RO re-hydrate failed: " + e2.message, "warn"));
       } else {
         _applyProjectData(data);
       }

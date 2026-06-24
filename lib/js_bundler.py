@@ -21,6 +21,7 @@ JS_DIR = os.path.join(BASE_DIR, 'static', 'js')
 # ── Load order MUST match index.html (dependencies flow top → bottom) ──
 _BUNDLE_FILES = [
     'i18n.js',         # MUST be first — t() is used by all other modules
+    'core/icons.js',   # Icon()/IconDot() SVG registry — used by many modules; load early
     'idb-cache.js',
     'core.js',
     # ── core/ subpackage (split 2026-05-28 from monolithic core.js) ──
@@ -95,6 +96,7 @@ _BUNDLE_FILES = [
     'conv_view.js',
     # Feature modules (order-independent, but keep stable for cache)
     'log-clean.js',
+    'toolset-apply.js',  # tool-schema latch "apply on next conversation" banner
     'translation.js',
     'upload.js',
     'image-gen.js',
@@ -140,12 +142,8 @@ _BUNDLE_FILES = [
     'settings/system_prompt_editor.js',
     'settings/oauth.js',
     'settings/mcp.js',
-    # Agent backend selection (depends on apiUrl/debugLog from core+ui;
-    # must come BEFORE main.js because main.js references its functions
-    # like _saveConvToolState ↔ _applyAgentBackendUI bidirectionally,
-    # but only at runtime — not at module-load).
-    'agent-backend.js',
-    'relay-admin.js',
+    # relay-admin.js intentionally NOT bundled — it loads only on the
+    # standalone /admin page (static/admin.html), not in index.html.
     # ── main/ subpackage (split 2026-05-28 from monolithic main.js) ──
     # The 8 files below were extracted from main.js. They must come BEFORE
     # main.js so the boot IIFE in main.js can reference their symbols.
@@ -164,6 +162,11 @@ _BUNDLE_FILES = [
     # globals declared in core.js + main.js, so they MUST come after main.js).
     'compaction-viewer.js',
     'context-bar.js',
+    # Per-turn context note builder/renderer. Reads projectState + toolbar
+    # globals + config to snapshot each turn's context, so it MUST come
+    # after main.js. Consumed by ui/chat_render.js (renderTurnCtxNote) and
+    # main/main_send_pipeline.js (buildTurnCtxSnapshot).
+    'info-rail.js',
 ]
 
 # Global state

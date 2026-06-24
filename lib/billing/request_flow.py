@@ -67,8 +67,15 @@ def reserve_for_task(task: dict, *, user_id: str, model: str,
 
     Raises ``lib.billing.InsufficientFunds`` when the wallet can't cover
     the estimate — the caller is expected to translate that into a 402.
+
+    No-op when ``user_id`` is empty (personal/private/open install) OR
+    when the relay runs in agent-only mode (``billing_enabled=false`` —
+    users bring their own model keys and are never charged).
     """
     if not user_id:
+        return 0
+    from lib.relay_config import billing_enabled
+    if not billing_enabled():
         return 0
     from lib.billing import estimate_request_cost, reserve
     micro = estimate_request_cost(
@@ -112,20 +119,39 @@ def settle_task(task: dict, *, user_id: str, model: str) -> Optional[dict]:
     matched_model}`` dict suitable for attaching to the response body,
     or ``None`` when nothing was billed (empty ``user_id``, zero cost,
     or an error — all logged).
+
+    No-op when ``user_id`` is empty OR when the relay runs in agent-only
+    mode (``billing_enabled=false``) — symmetric with
+    :func:`reserve_for_task` so a deployment can flip billing off without
+    stranding a reservation.
     """
     if not user_id:
+        return None
+    from lib.relay_config import billing_enabled
+    if not billing_enabled():
         return None
     try:
         from lib.billing import (
             InsufficientFunds, compute_request_cost, debit, settle,
         )
         u = task.get('usage') or {}
+        # Pass the FULL usage shape — including cache_read / cache_write /
+        # reasoning tokens — so the wallet debit matches the displayed cost.
+        # Previously only input/output were forwarded, so a cache-heavy turn
+        # was silently under-debited vs the ¥ shown in the UI.
         cost = compute_request_cost(
             model or '',
             input_tokens=int(u.get('input_tokens')
                              or u.get('prompt_tokens') or 0),
             output_tokens=int(u.get('output_tokens')
-                              or u.get('completion_tokens') or 0))
+                              or u.get('completion_tokens') or 0),
+            cache_read_tokens=int(u.get('cache_read_tokens')
+                                  or u.get('cache_read_input_tokens') or 0),
+            cache_write_tokens=int(u.get('cache_write_tokens')
+                                   or u.get('cache_creation_input_tokens') or 0),
+            reasoning_tokens=int(u.get('reasoning_tokens')
+                                 or u.get('thinking_tokens') or 0),
+            provider_id=task.get('provider_id') or None)
         reserved = int(task.get('_billing_reservation_micro') or 0)
         if reserved > 0:
             snap = settle(user_id, reserved_micro=reserved,

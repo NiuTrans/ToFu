@@ -198,6 +198,7 @@ def search_memories(
     query: str,
     project_path: str | None = None,
     top_k: int = SEARCH_DEFAULT_TOP_K,
+    extra_paths: list[str] | None = None,
 ) -> str:
     """Search memories by BM25 relevance, including body content in scoring.
 
@@ -209,13 +210,15 @@ def search_memories(
         query: Search keywords from the model.
         project_path: Project path for scoped memories.
         top_k: Maximum number of results.
+        extra_paths: Additional workspace roots (multi-root session) whose
+            memories are unioned in alongside the primary root's.
 
     Returns:
         Formatted index of matching memories with file paths.
     """
     from lib.memory.storage import get_eligible_memories
 
-    memories = get_eligible_memories(project_path)
+    memories = get_eligible_memories(project_path, extra_paths=extra_paths)
     if not memories:
         return 'No memories found. You have no accumulated memories yet.'
 

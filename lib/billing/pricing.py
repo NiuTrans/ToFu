@@ -1,9 +1,24 @@
-"""lib.billing.pricing — Per-model price table.
+"""lib.billing.pricing — Relay margin + (legacy) per-model price table.
+
+★ As of the 2026-06-24 single-engine unification, the per-token RATE math
+no longer lives here. ``lib/billing/cost.compute_request_cost`` delegates to
+``lib.cost.compute_cost`` over the rich ``lib/pricing.py`` table (100+ models,
+cache conventions, Qwen tiers, provider overrides). What this module STILL
+owns for billing is the relay **margin** (``get_default_margin`` ← the
+``default_margin`` field of ``pricing.json``).
+
+The per-model ``*_per_mtok_micro`` rows + :func:`get_price` / :class:`ModelPrice`
+are now READ-ONLY legacy: surfaced by :func:`list_prices` for the public
+rate-card display only, and NOT used for any cost/debit calculation. There is
+NO writer for them anymore — :func:`save_margin` persists ONLY the relay
+margin. The authoritative cost rates live in ``lib/pricing.py`` (the single
+cost engine ``lib.cost.compute_cost`` reads them); this avoids a second,
+driftable rate table. Don't reintroduce a rate writer here.
 
 Loaded from ``data/config/pricing.json`` (created on first read with
 sensible defaults). Hot-reloadable: a ``mtime`` check on each lookup
 invalidates the in-process cache so admin edits take effect without
-restart. The file is the single source of truth.
+restart.
 
 Schema (``pricing.json``)::
 
@@ -204,7 +219,53 @@ def get_default_margin() -> float:
     return float(cfg.get('default_margin') or 0.0)
 
 
+class PricingError(ValueError):
+    """Raised when a proposed margin value fails validation."""
+
+
+def save_margin(margin: float) -> Dict:
+    """Persist ONLY the relay profit margin, then hot-reload.
+
+    ★ As of the 2026-06-24 single-engine unification the per-model RATE rows
+    are no longer an editable surface — they are NOT a cost source anymore
+    (cost rates are authoritative in ``lib/pricing.py``), so allowing edits
+    here would re-create the very drift this cleanup removed. The ONLY tunable
+    that still affects billing is the relay markup, so this writer touches
+    ``default_margin`` and leaves every other field of ``pricing.json``
+    (``default_model`` / ``models`` — kept for the read-only rate-card display
+    + legacy compatibility) byte-identical.
+
+    Args:
+        margin: Relay markup as a fraction (0.20 = +20%). 0.0 disables markup.
+
+    Returns:
+        The full persisted payload (same shape :func:`list_prices` returns).
+
+    Raises:
+        :class:`PricingError` when ``margin`` is not a number in [0, 100].
+        Nothing is written when validation fails.
+    """
+    try:
+        margin = float(margin)
+    except (TypeError, ValueError):
+        raise PricingError('default_margin: must be a number')
+    if not (0.0 <= margin <= 100.0):
+        raise PricingError('default_margin: must be between 0 and 100')
+
+    # Preserve every other field of the on-disk doc; only the margin changes.
+    cfg = dict(_ensure_loaded())
+    cfg['default_margin'] = margin
+    cfg.setdefault('version', _PRICING_VERSION)
+    cfg.setdefault('currency', 'USD')
+    write_json_atomic(_PRICING_PATH, cfg)
+    reload_pricing()
+    logger.info('[Pricing] Saved relay margin=%.3f to %s (rate rows untouched '
+                '— authoritative rates live in lib/pricing.py)',
+                margin, _PRICING_PATH)
+    return cfg
+
+
 __all__ = [
     'ModelPrice', 'get_price', 'list_prices', 'reload_pricing',
-    'get_default_margin',
+    'save_margin', 'PricingError', 'get_default_margin',
 ]

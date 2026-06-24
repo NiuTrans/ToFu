@@ -35,16 +35,26 @@ class TestAttachments:
         )
         assert result == []
 
-    def test_inject_attachments_to_last_user_msg(self):
+    def test_inject_attachments_appends_trailing_meta_msg(self):
+        """★ Cache-safe contract: attachments are appended as a NEW trailing
+        _isMeta user message, NOT merged into the historical (in-prefix) user
+        message. Merging mutated cached bytes and forced a full cache miss
+        every time the reminder fired."""
         from lib.tasks_pkg.attachments import inject_attachments
         messages = [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'Hello'},
         ]
         inject_attachments(messages, ['<attachment>test</attachment>'])
-        assert '<attachment>test</attachment>' in messages[1]['content']
+        # The original user message is left BYTE-IDENTICAL.
+        assert messages[1]['content'] == 'Hello'
+        # A new trailing _isMeta user message carries the attachment.
+        assert len(messages) == 3
+        assert messages[2]['role'] == 'user'
+        assert messages[2].get('_isMeta') is True
+        assert '<attachment>test</attachment>' in messages[2]['content']
 
-    def test_inject_attachments_to_multimodal_user_msg(self):
+    def test_inject_attachments_does_not_touch_multimodal_prefix(self):
         from lib.tasks_pkg.attachments import inject_attachments
         messages = [
             {'role': 'user', 'content': [
@@ -52,8 +62,11 @@ class TestAttachments:
             ]},
         ]
         inject_attachments(messages, ['<attachment>test</attachment>'])
-        assert len(messages[0]['content']) == 2
-        assert messages[0]['content'][1]['type'] == 'text'
+        # Original multimodal message untouched.
+        assert len(messages[0]['content']) == 1
+        # New trailing meta message appended.
+        assert len(messages) == 2
+        assert messages[1].get('_isMeta') is True
 
     def test_inject_attachments_no_user_creates_one(self):
         from lib.tasks_pkg.attachments import inject_attachments
@@ -63,6 +76,7 @@ class TestAttachments:
         inject_attachments(messages, ['<attachment>test</attachment>'])
         assert len(messages) == 2
         assert messages[1]['role'] == 'user'
+        assert messages[1].get('_isMeta') is True
 
     def test_inject_empty_attachments_no_change(self):
         from lib.tasks_pkg.attachments import inject_attachments
@@ -167,6 +181,26 @@ class TestCacheTracking:
         from lib.tasks_pkg.cache_tracking import _cache_states, get_cache_prefix_count
         _cache_states.pop('nonexistent', None)
         assert get_cache_prefix_count('nonexistent') == 0
+
+    def test_prefix_protected_after_write_only_round(self):
+        """★ Regression: a round that only WROTE the prefix (cache_read=0,
+        large cache_write — e.g. round 1 of a fresh conversation) must still
+        protect that prefix from micro-compact mutation on the next round.
+        Gating on read alone left round 2 unprotected → guaranteed miss."""
+        from lib.tasks_pkg.cache_tracking import (
+            CacheState, _cache_states, get_cache_prefix_count,
+        )
+        conv_id = 'test-prefix-write-only'
+        state = CacheState()
+        state.last_cache_read_tokens = 0        # nothing read yet
+        state.last_cache_write_tokens = 278500  # but a big prefix WAS written
+        state.message_count = 6
+        state.call_count = 1
+        _cache_states[conv_id] = state
+        try:
+            assert get_cache_prefix_count(conv_id) == 4  # max(0, 6 - 2)
+        finally:
+            _cache_states.pop(conv_id, None)
 
     def test_no_false_positive_on_message_growth(self):
         """Growing messages (tool rounds) should NOT trigger a cache break

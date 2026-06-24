@@ -79,7 +79,6 @@ class _AppFixture:
 
         from routes.api_v1.capabilities import api_v1_capabilities_bp
         from routes.api_v1.keys import api_v1_keys_bp
-        from routes.api_v1.agent_backends import api_v1_agent_backends_bp
         from routes.api_v1.folders import api_v1_folders_bp
         from routes.api_v1.optimizer import api_v1_optimizer_bp
         from routes.api_v1.scheduler import api_v1_scheduler_bp
@@ -104,7 +103,6 @@ class _AppFixture:
         from routes.legacy_redirects import legacy_redirects_bp
         self.app.register_blueprint(api_v1_capabilities_bp)
         self.app.register_blueprint(api_v1_keys_bp)
-        self.app.register_blueprint(api_v1_agent_backends_bp)
         self.app.register_blueprint(api_v1_folders_bp)
         self.app.register_blueprint(api_v1_optimizer_bp)
         self.app.register_blueprint(api_v1_scheduler_bp)
@@ -273,27 +271,6 @@ class IntegrationTest(unittest.TestCase):
             # Wrong token is rejected at the auth layer regardless of
             # whether the route is public.
             self.assertEqual(r.status_code, 401)
-        _run(go())
-
-    def test_agent_backends_status_requires_auth(self):
-        async def go():
-            r = await self._client().get('/api/v1/agent-backends/status')
-            self.assertEqual(r.status_code, 401)
-        _run(go())
-
-    def test_agent_backends_status_with_token(self):
-        from lib.api_keys import create_key
-        _row, token = create_key(name='ab', scopes=['chat'])
-
-        async def go():
-            r = await self._client().get(
-                '/api/v1/agent-backends/status',
-                headers={'Authorization': f'Bearer {token}'})
-            self.assertEqual(r.status_code, 200)
-            body = await r.get_json()
-            self.assertTrue(body['ok'])
-            self.assertIn('backends', body)
-            self.assertIsInstance(body['backends'], list)
         _run(go())
 
     def test_folders_crud_full_lifecycle(self):
@@ -1059,16 +1036,6 @@ class IntegrationTest(unittest.TestCase):
             self.assertIn('/api/v1/optimizer/proposals',
                           r.headers.get('Location', ''))
             self.assertIn('limit=60', r.headers.get('Location', ''))
-        _run(go())
-
-    def test_legacy_agent_backends_status_is_404(self):
-        # Authenticate via the tunnel token so the auth gate passes,
-        # then confirm the legacy URL is gone from the route map.
-        async def go():
-            r = await self._client().get(
-                '/api/agent-backends/status',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
-            self.assertEqual(r.status_code, 404)
         _run(go())
 
     def test_whoami_with_token(self):

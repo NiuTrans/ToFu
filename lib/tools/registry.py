@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -72,6 +73,210 @@ from typing import Any
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+
+# ══════════════════════════════════════════════════════════
+#  Sticky multi-root latch (prompt-cache stability)
+# ══════════════════════════════════════════════════════════
+# When a conversation transitions to multi-root, every path-taking tool gains
+# the ``_MULTIROOT_PATH_HINT`` text on its ``path`` field (see
+# lib/tools/project.py::with_multiroot_hint). If that decision flapped between
+# rounds, the tool-schema bytes would change and invalidate the whole prompt
+# cache prefix (~65k tokens). We therefore latch "this conversation is
+# multi-root" once and never downgrade mid-conversation. Cleared by
+# ``clear_multiroot_sticky`` when the conversation's cache state is evicted.
+_multiroot_sticky: set[str] = set()
+_multiroot_sticky_lock = threading.Lock()
+
+
+def mark_multiroot_sticky(conv_id: str) -> None:
+    """Latch *conv_id* as multi-root for the rest of the conversation."""
+    if not conv_id:
+        return
+    with _multiroot_sticky_lock:
+        _multiroot_sticky.add(conv_id)
+
+
+def is_multiroot_sticky(conv_id: str) -> bool:
+    """Whether *conv_id* has been latched multi-root."""
+    if not conv_id:
+        return False
+    with _multiroot_sticky_lock:
+        return conv_id in _multiroot_sticky
+
+
+def clear_multiroot_sticky(conv_id: str) -> None:
+    """Release the multi-root latch for *conv_id* (on cache-state cleanup)."""
+    if not conv_id:
+        return
+    with _multiroot_sticky_lock:
+        _multiroot_sticky.discard(conv_id)
+
+
+# ══════════════════════════════════════════════════════════
+#  Per-conversation tool-SCHEMA latch (the (B) root fix)
+# ══════════════════════════════════════════════════════════
+# The whole tools array sits in the cached prompt prefix (BP1-3). ANY byte
+# change between rounds — a user toggling Swarm/Scheduler/Browser on the
+# frontend, an MCP server re-emitting a tool, etc. — invalidates the entire
+# prefix (~65k tokens). The (A) fixes removed the *incidental* code-side flaps
+# (multiroot hint, MCP ordering). This latch removes the LAST class: it freezes
+# the EXACT tool list a conversation first used, and serves that byte-identical
+# snapshot for every later round, so a mid-conversation change cannot break the
+# cache. The change is not lost — it is DEFERRED: it applies to the next NEW
+# conversation, or immediately if the user clicks "Apply now" (which clears the
+# latch). We still assemble fresh every round (cheap) purely to DETECT a
+# divergence and signal the frontend.
+#
+# Kill switch: env TOFU_TOOLSET_LATCH=0 disables the freeze (assembly returns
+# the live list every round, legacy behaviour).
+_tool_latch: dict[str, tuple[str, list[dict]]] = {}  # conv_id → (hash, snapshot)
+_tool_latch_diverged: dict[str, bool] = {}           # conv_id → last divergence flag
+# conv_id → {'added': [name, ...], 'removed': [name, ...]} for the most recent
+# divergence — lets the frontend show WHICH tools the held-back toggle changed.
+_tool_latch_diff: dict[str, dict[str, list[str]]] = {}
+_tool_latch_lock = threading.Lock()
+
+
+def _tool_names(tool_list: list[dict] | None) -> list[str]:
+    """Extract the ordered tool names from an OpenAI-style tool list."""
+    names: list[str] = []
+    for t in (tool_list or []):
+        try:
+            name = (t.get('function') or {}).get('name')
+        except AttributeError:
+            name = None
+        if name:
+            names.append(name)
+    return names
+
+
+def _toolset_latch_enabled() -> bool:
+    """Whether the tool-schema latch is active (default ON)."""
+    val = os.environ.get('TOFU_TOOLSET_LATCH', '1').strip().lower()
+    return val not in ('0', 'false', 'no', 'off')
+
+
+def _hash_tool_list(tool_list: list[dict]) -> str:
+    """Stable hash of a tool list's bytes (order-sensitive, content-sensitive)."""
+    import hashlib
+    import json
+    try:
+        blob = json.dumps(tool_list, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        blob = str(tool_list)
+    return hashlib.md5(blob.encode('utf-8', errors='replace')).hexdigest()
+
+
+def latch_tool_list(conv_id: str,
+                    fresh: list[dict] | None) -> tuple[list[dict] | None, bool]:
+    """Freeze the tool list for a conversation; return ``(effective, diverged)``.
+
+    First round for *conv_id* establishes the snapshot and returns *fresh*
+    unchanged (``diverged=False``). Later rounds return the FROZEN snapshot
+    byte-for-byte; ``diverged`` is ``True`` whenever the freshly-assembled list
+    differs from the frozen one (i.e. the user changed a tool toggle). The
+    divergence is computed fresh each round, so toggling a tool then toggling
+    it back reports ``diverged=False``.
+
+    No-ops (returns ``(fresh, False)``) when *conv_id* is empty (stateless
+    assembly) or the latch is disabled via ``TOFU_TOOLSET_LATCH=0``.
+    """
+    if not conv_id or not _toolset_latch_enabled():
+        return fresh, False
+    fresh_list = fresh or []
+    fresh_hash = _hash_tool_list(fresh_list)
+    import copy
+    with _tool_latch_lock:
+        entry = _tool_latch.get(conv_id)
+        if entry is None:
+            _tool_latch[conv_id] = (fresh_hash, copy.deepcopy(fresh_list))
+            _tool_latch_diverged[conv_id] = False
+            return fresh, False
+        latched_hash, snapshot = entry
+        diverged = fresh_hash != latched_hash
+        _tool_latch_diverged[conv_id] = diverged
+        if diverged:
+            frozen_names = set(_tool_names(snapshot))
+            fresh_names = set(_tool_names(fresh_list))
+            _tool_latch_diff[conv_id] = {
+                'added': sorted(fresh_names - frozen_names),
+                'removed': sorted(frozen_names - fresh_names),
+            }
+        else:
+            _tool_latch_diff.pop(conv_id, None)
+        # Return the frozen snapshot (copy so callers can't mutate the latch).
+        return copy.deepcopy(snapshot), diverged
+
+
+def tool_list_diverged(conv_id: str) -> bool:
+    """Whether the latched tool list currently differs from a fresh assembly.
+
+    Cheap read of the flag computed by the most recent :func:`latch_tool_list`
+    call for *conv_id*. Used to decide whether to surface the "apply on next
+    conversation" affordance. Returns ``False`` when unknown.
+    """
+    return _tool_latch_diverged.get(conv_id, False)
+
+
+def tool_list_diff(conv_id: str) -> dict[str, list[str]]:
+    """Names added/removed by the held-back toggle for *conv_id*.
+
+    Returns ``{'added': [...], 'removed': [...]}`` (sorted, possibly empty)
+    describing how the freshly-assembled tool list differs from the frozen
+    snapshot, as computed by the most recent :func:`latch_tool_list` call.
+    Lets the frontend show WHICH tools a pending change touches. Returns
+    empty lists when there is no current divergence.
+    """
+    diff = _tool_latch_diff.get(conv_id)
+    if not diff:
+        return {'added': [], 'removed': []}
+    return {'added': list(diff.get('added', [])),
+            'removed': list(diff.get('removed', []))}
+
+
+def clear_tool_list_latch(conv_id: str) -> None:
+    """Drop the frozen tool list for *conv_id* (on "Apply now" or cleanup).
+
+    The next :func:`latch_tool_list` call re-establishes the snapshot from the
+    then-current toggles — i.e. the deferred tool change takes effect and the
+    prompt cache rebuilds once.
+    """
+    if not conv_id:
+        return
+    with _tool_latch_lock:
+        _tool_latch.pop(conv_id, None)
+    _tool_latch_diverged.pop(conv_id, None)
+    _tool_latch_diff.pop(conv_id, None)
+
+
+def clear_all_tool_list_latches() -> int:
+    """Drop EVERY conversation's frozen tool list. Returns the count cleared.
+
+    Called when the *global* tool surface changes for a deliberate,
+    infrequent reason — chiefly an MCP server install / uninstall / connect /
+    disconnect (see ``routes/api_v1/mcp.py``). Unlike a composer-toggle flap
+    (which the latch intentionally defers to the next conversation to protect
+    the ~65k-token prompt-cache prefix), an MCP mutation is an explicit "I want
+    this tool set now" action that should take effect on the next round of
+    EVERY conversation, not just the active one.
+
+    Cost is self-limiting: the prompt cache keys on the tool array's *bytes*,
+    not the latch identity. A conversation whose effective tool set is
+    unchanged by the mutation re-establishes a byte-identical snapshot on its
+    next round → no cache rebuild. Only conversations whose tool set genuinely
+    changed pay the one-time rebuild — which is exactly what we want.
+    """
+    with _tool_latch_lock:
+        n = len(_tool_latch)
+        _tool_latch.clear()
+    _tool_latch_diverged.clear()
+    _tool_latch_diff.clear()
+    if n:
+        logger.info('[ToolRegistry] cleared %d tool-schema latch(es) — global '
+                    'tool surface changed (MCP mutation); next round of each '
+                    'conversation re-assembles from current tools', n)
+    return n
 
 # A dispatch handler — same signature as lib.protocols.ToolHandler.  Typed
 # loosely here to avoid importing the protocol into this low-level module.
@@ -111,6 +316,11 @@ class ToolContext:
     human_guidance_enabled: bool = False
     scheduler_enabled: bool = False
     messages: list[dict[str, Any]] | None = None
+
+    # Conversation id — used to make schema-shaping decisions sticky for a
+    # conversation's lifetime (e.g. the multi-root path hint). Empty for
+    # one-off / stateless assembly (tests, compat adapters).
+    conv_id: str = ''
 
     # ── Multi-tenant plugin visibility allow-list ──
     # Which third-party (``source='plugin'``) tool specs this task may see.
@@ -156,7 +366,27 @@ class ToolContext:
         sends; element 0 is the primary, the rest are extras). Used to decide
         whether path-taking tool schemas should carry the ``rootname:`` prefix
         hint — single-root sessions keep the cache-stable default schema.
+
+        **Sticky per conversation.** Once a conversation has gone multi-root,
+        the hint stays on for the rest of that conversation even if a later
+        task transiently reports a single ``projectPaths`` (e.g. an extra root
+        was auto-registered mid-conversation by an absolute-path write, then a
+        subsequent task's snapshot lags). Flapping this value rewrites every
+        path-taking tool's schema and breaks the prompt-cache prefix — see
+        ``mark_multiroot_sticky``. A conversation never silently downgrades to
+        single-root mid-stream; the latch is cleared only on cleanup.
         """
+        live = self._multiroot_live()
+        if not self.conv_id:
+            # Stateless assembly (tests / compat adapters): no latch.
+            return live
+        if live:
+            mark_multiroot_sticky(self.conv_id)
+            return True
+        return is_multiroot_sticky(self.conv_id)
+
+    def _multiroot_live(self) -> bool:
+        """The raw, un-latched multi-root signal from this task's cfg."""
         paths = self.cfg.get('projectPaths') or []
         if not isinstance(paths, (list, tuple)):
             return False
@@ -450,6 +680,18 @@ def _build_read_files(ctx: ToolContext) -> list[dict]:
     return [READ_FILES_TOOL]
 
 
+def _build_inspect_image(ctx: ToolContext) -> list[dict]:
+    # inspect_image is ALWAYS on (like read_files) — it re-renders a region
+    # of any local image at full resolution so the model can read detail the
+    # initial downscale discarded. No project / vision toggle gates it; the
+    # dispatch path drops the resulting image for text-only models anyway.
+    from lib.tools import INSPECT_IMAGE_TOOL
+    if ctx.project_enabled and ctx.multiroot_active:
+        from lib.tools.project import with_multiroot_hint
+        return with_multiroot_hint([INSPECT_IMAGE_TOOL])
+    return [INSPECT_IMAGE_TOOL]
+
+
 def _build_project_or_code_exec(ctx: ToolContext) -> list[dict]:
     from lib.tools import CODE_EXEC_TOOL, PROJECT_TOOLS
     if ctx.project_enabled:
@@ -606,6 +848,10 @@ def _register_builtins() -> None:
                  provides=frozenset({'read_files'}),
                  idempotent_tools=frozenset({'read_files'}),
                  category='project', description='Read local files'),
+        ToolSpec('inspect_image', _build_inspect_image, phase='base',
+                 provides=frozenset({'inspect_image'}),
+                 idempotent_tools=frozenset({'inspect_image'}),
+                 category='project', description='Zoom/rotate/crop image viewer'),
         ToolSpec('project', _build_project_or_code_exec, phase='base',
                  provides=frozenset({
                      'list_dir', 'grep_search', 'find_files',

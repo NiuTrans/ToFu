@@ -90,13 +90,19 @@ class SubAgent:
                  artifact_store: ArtifactStore | None = None,
                  tool_result_max_chars: int = DEFAULT_TOOL_RESULT_MAX_CHARS,
                  build_body_fn: BodyBuilder | None = None,
-                 dispatch_stream_fn: Callable | None = None):
+                 dispatch_stream_fn: Callable | None = None,
+                 stream_sink: Callable | None = None):
         self.spec = spec
         self.parent_task = parent_task
         self.agent_id = f'agent-{spec.role}-{spec.id}'
         self.model = self._resolve_model(spec, model)
         self.thinking_enabled = thinking_enabled
         self.on_event = on_event
+        # Optional per-token sink: ``stream_sink(kind, chunk)`` where kind is
+        # 'content' | 'thinking'. Lets a caller (the orchestration engine)
+        # stream this sub-agent's output live into a chat bubble, identical to
+        # a first-class agent turn. No-op when unset (tests / swarm use).
+        self.stream_sink = stream_sink
         self.abort_check = abort_check or (lambda: False)
         self.project_path = project_path
         self.artifact_store = artifact_store  # shared across agents
@@ -458,6 +464,12 @@ class SubAgent:
                 thinking_enabled=self.thinking_enabled,
                 temperature=1.0,
             )
+            # ★ Attach a session-stable id so add_cache_breakpoints latches the
+            #   extended-TTL (1h) decision for this agent's whole multi-round
+            #   loop — matches the main orchestrator (orchestrator.py:_task_id).
+            #   agent_id is constant across rounds, so the prefix cache key
+            #   never shifts mid-session. Released in _cleanup().
+            body['_task_id'] = self.agent_id
 
             content_parts = []
             thinking_parts = []
@@ -488,11 +500,23 @@ class SubAgent:
                 content_parts.append(chunk)
                 if _output_path and chunk:
                     _log_buffer.append(chunk)
+                if self.stream_sink and chunk:
+                    try:
+                        self.stream_sink('content', chunk)
+                    except Exception as _se:
+                        logger.debug('[Agent:%s] stream_sink content error '
+                                     '(non-fatal): %s', self.agent_id, _se)
 
             def on_thinking(chunk):
                 thinking_parts.append(chunk)
                 if _output_path and chunk:
                     _log_buffer.append(chunk)
+                if self.stream_sink and chunk:
+                    try:
+                        self.stream_sink('thinking', chunk)
+                    except Exception as _se:
+                        logger.debug('[Agent:%s] stream_sink thinking error '
+                                     '(non-fatal): %s', self.agent_id, _se)
 
             try:
                 msg, stop_reason, usage = self._dispatch_stream(
@@ -966,6 +990,16 @@ class SubAgent:
         if self._cleaned_up:
             return
         self._cleaned_up = True
+
+        # Release the per-task extended-TTL latch keyed on agent_id (set in
+        # run()), mirroring orchestrator._finalize_and_emit_done — otherwise
+        # _ttl_latch leaks one entry per sub-agent for the process lifetime.
+        try:
+            from lib.tasks_pkg.cache_tracking import release_ttl_latch
+            release_ttl_latch(self.agent_id)
+        except Exception as _e:
+            logger.debug('[Agent:%s] TTL latch release skipped: %s',
+                         self.agent_id, _e)
 
         # Compact message history — keep only system, first user, and last 2 messages
         # This frees memory from potentially large tool results

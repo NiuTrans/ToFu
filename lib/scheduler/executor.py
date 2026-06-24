@@ -455,19 +455,26 @@ def _execute_timer_create(fn_args):
                     f'Continuation message was: {continuation_message[:200]}'
                 )
 
+            # Stable per-poll id so this exact check is locatable across the
+            # log file, the DB row, and the UI (matches the background loop).
+            poll_id = f'{timer_id}.p{poll_count}'
             # ── Run poll ──
             try:
-                ready, reason, tokens_used, skipped, parse_error, cmd_output = poll_timer(timer_id)
+                (ready, reason, tokens_used, skipped, parse_error, cmd_output,
+                 poll_model, tool_trace, raw_content) = poll_timer(timer_id)
             except Exception as e:
-                logger.error('[Timer:%s] Poll error: %s', timer_id, e, exc_info=True)
-                _record_poll(timer_id, 'error', str(e)[:200], 0)
+                logger.error('[Timer:%s] Poll %s error: %s', timer_id, poll_id, e, exc_info=True)
+                _record_poll(timer_id, 'error', str(e)[:200], 0, poll_id=poll_id,
+                             raw_output=str(e)[:2000])
                 _increment_poll_count(timer_id, 'error', str(e)[:200])
                 # Emit error event
                 if parent_task and round_num is not None:
                     _err_poll = {
                         'pollNum': poll_count,
+                        'pollId': poll_id,
                         'decision': 'error',
                         'reason': f'Poll error: {str(e)[:100]}',
+                        'rawContent': str(e)[:2000],
                         'tokensUsed': 0,
                         'timerId': timer_id,
                         'ts': int(_time.time() * 1000),
@@ -479,8 +486,10 @@ def _execute_timer_create(fn_args):
                         toolCallId=tc_id,
                         timerId=timer_id,
                         pollNum=poll_count,
+                        pollId=poll_id,
                         decision='error',
                         reason=f'Poll error: {str(e)[:100]}',
+                        rawContent=str(e)[:2000],
                     ))
                 continue
 
@@ -515,11 +524,16 @@ def _execute_timer_create(fn_args):
                 continue
 
             decision = 'ready' if ready else ('parse_error' if parse_error else 'wait')
-            _record_poll(timer_id, decision, reason, tokens_used, cmd_output)
+            # Persist the raw LLM output only when diagnostically useful (a
+            # malformed decision) — a clean wait/ready needs no raw dump.
+            _raw_to_store = raw_content if parse_error else ''
+            _record_poll(timer_id, decision, reason, tokens_used, cmd_output, poll_model,
+                         poll_id=poll_id, raw_output=_raw_to_store)
             _increment_poll_count(timer_id, decision, reason)
 
-            logger.info('[Timer:%s] Poll #%d: %s — %s (tokens=%d)',
-                        timer_id, poll_count, decision, reason[:80], tokens_used)
+            logger.info('[Timer:%s] Poll %s: %s — %s (tokens=%d, model=%s)',
+                        timer_id, poll_id, decision, reason[:80], tokens_used,
+                        poll_model or '?')
 
             # ── Emit SSE event for each poll check ──
             #   Carry the (truncated) check_command output so the UI can show
@@ -527,15 +541,23 @@ def _execute_timer_create(fn_args):
             #   so it can render a "next check in Ns" countdown.  reason is
             #   sent fuller (400 chars) since the UI now offers expand.
             _cmd_snippet = (cmd_output or '')[:1200]
+            # Surface the raw LLM output to the UI only when the decision could
+            # not be parsed — that is exactly when the model's actual text is
+            # what the user needs to see (and it's also persisted in the DB).
+            _raw_snippet = (raw_content or '')[:2000] if parse_error else ''
             if parent_task and round_num is not None:
                 _poll_entry = {
                     'pollNum': poll_count,
+                    'pollId': poll_id,
                     'decision': decision,
                     'reason': reason[:400],
                     'tokensUsed': tokens_used,
                     'timerId': timer_id,
                     'cmdOutput': _cmd_snippet,
                     'parseError': parse_error,
+                    'rawContent': _raw_snippet,
+                    'model': poll_model,
+                    'toolTrace': tool_trace,
                     'ts': int(_time.time() * 1000),
                 }
                 _attach_poll_to_round(_poll_entry)
@@ -552,11 +574,15 @@ def _execute_timer_create(fn_args):
                     toolCallId=tc_id,
                     timerId=timer_id,
                     pollNum=poll_count,
+                    pollId=poll_id,
                     decision=decision,
                     reason=reason[:400],
                     tokensUsed=tokens_used,
                     cmdOutput=_cmd_snippet,
                     parseError=parse_error,
+                    rawContent=_raw_snippet,
+                    model=poll_model,
+                    toolTrace=tool_trace,
                     nextPollTs=int((_time.time() + poll_interval) * 1000),
                 ))
 

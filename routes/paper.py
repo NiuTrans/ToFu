@@ -129,6 +129,22 @@ paper_bp = Blueprint('paper', __name__)
 from routes.api_v1.paper import api_v1_paper_bp  # noqa: E402
 
 
+def _parse_report_meta(row):
+    """Decode the stored ``paper_reports.meta`` JSON for the finish-tag badge.
+
+    Returns the parsed dict, or None when the column is absent (legacy rows
+    persisted before the column existed) or malformed.
+    """
+    raw = row.get('meta') if hasattr(row, 'get') else None
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.debug('[Paper:Report] Bad meta JSON: %s', e)
+        return None
+
+
 # ══════════════════════════════════════════════════════
 #  API Endpoints
 # ══════════════════════════════════════════════════════
@@ -287,7 +303,7 @@ async def start_report_task():
     if not force:
         try:
             row = await async_fetchone(
-                "SELECT report FROM paper_reports WHERE paper_hash = ? AND lang = ?",
+                "SELECT report, meta FROM paper_reports WHERE paper_hash = ? AND lang = ?",
                 (phash, lang), domain=DOMAIN_CHAT,
             )
             if row and row['report']:
@@ -298,6 +314,7 @@ async def start_report_task():
                 return jsonify({
                     'ok': True, 'cached': True,
                     'report': enriched, 'paper_hash': phash,
+                    'meta': _parse_report_meta(row),
                 })
         except Exception as e:
             logger.warning('[Paper:Report] DB cache lookup failed (will start task): %s', e)
@@ -436,6 +453,8 @@ async def poll_report_task():
     }
     if task['status'] == 'done':
         resp['report'] = task.get('enriched_text') or task.get('full_text', '')
+        if task.get('report_meta'):
+            resp['meta'] = task['report_meta']
     if task['status'] == 'error':
         resp['error'] = task.get('error', '')
     return jsonify(resp)
@@ -738,7 +757,7 @@ async def get_report_cache():
 
     try:
         row = await async_fetchone(
-            "SELECT report FROM paper_reports WHERE paper_hash = ? AND lang = ?",
+            "SELECT report, meta FROM paper_reports WHERE paper_hash = ? AND lang = ?",
             (phash, lang), domain=DOMAIN_CHAT,
         )
         if row and row['report']:
@@ -748,7 +767,8 @@ async def get_report_cache():
             images = _load_image_manifest(phash)
             enriched = _inject_images_into_report(row['report'], images, lang=lang)
             enriched = _ensure_title_heading(enriched, phash)
-            return api_ok({'report': enriched, 'paper_hash': phash})
+            return api_ok({'report': enriched, 'paper_hash': phash,
+                           'meta': _parse_report_meta(row)})
     except Exception as e:
         logger.warning('[Paper:Report:Cache] Lookup failed: %s', e)
 

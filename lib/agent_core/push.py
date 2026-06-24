@@ -119,6 +119,12 @@ class PushHub:
                 logger.warning('[Push] listener %r failed: %s', fn, e)
 
         if not targets:
+            # No client subscribed to this channel+task. Routine in headless
+            # mode, but a totally silent return makes "my events vanished"
+            # undebuggable off the request thread — leave a debug breadcrumb
+            # naming the channel/task/type.
+            logger.debug('[Push] no subscriber for channel=%s task=%s type=%s',
+                         channel, task_id, payload.get('type'))
             return
 
         loop = self._loop

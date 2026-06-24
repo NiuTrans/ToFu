@@ -124,8 +124,17 @@ def save_session(swarm_key: str, *, conv_id: str, task_id: str,
                      swarm_key, status, len(specs))
     except Exception as e:
         # An INSERT racing another INSERT on the same key hits the PK — that's
-        # benign (the row exists), so log at debug and move on.
-        logger.debug('[SwarmPersist] save_session(%s) non-fatal: %s', swarm_key, e)
+        # benign (the row exists), so log at debug and move on. ANY other DB
+        # failure means resumable session state was silently lost (a server
+        # restart can no longer resume this swarm), which is a data-loss risk
+        # — surface it at error so it isn't buried under the benign races.
+        _es = str(e).lower()
+        if 'duplicate' in _es or 'unique' in _es or 'primary key' in _es:
+            logger.debug('[SwarmPersist] save_session(%s) PK race (benign): %s',
+                         swarm_key, e)
+        else:
+            logger.error('[SwarmPersist] save_session(%s) FAILED — resumable '
+                         'session state lost: %s', swarm_key, e, exc_info=True)
 
 
 def mark_session_terminated(swarm_key: str) -> None:
@@ -220,8 +229,16 @@ def save_agent(swarm_key: str, agent_id: str, *,
         logger.debug('[SwarmPersist] saved agent key=%s id=%s status=%s rounds=%d msgs=%d',
                      swarm_key, agent_id, status, rounds_used, len(messages or []))
     except Exception as e:
-        logger.debug('[SwarmPersist] save_agent(%s/%s) non-fatal: %s',
-                     swarm_key, agent_id, e)
+        # Benign PK race (concurrent INSERT on same key) → debug; any other
+        # failure silently loses this agent's resumable checkpoint → error.
+        _es = str(e).lower()
+        if 'duplicate' in _es or 'unique' in _es or 'primary key' in _es:
+            logger.debug('[SwarmPersist] save_agent(%s/%s) PK race (benign): %s',
+                         swarm_key, agent_id, e)
+        else:
+            logger.error('[SwarmPersist] save_agent(%s/%s) FAILED — resumable '
+                         'agent checkpoint lost: %s', swarm_key, agent_id, e,
+                         exc_info=True)
 
 
 def mark_delivered(swarm_key: str, agent_ids) -> None:

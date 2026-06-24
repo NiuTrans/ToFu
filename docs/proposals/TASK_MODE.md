@@ -254,16 +254,27 @@ tool" surface we hold a tighter line.
 ## 6. Phasing
 
 1. **Emoji→SVG sweep of the orchestration UI** (separate, already agreed; lands
-   first, independent of this doc).
+   first, independent of this doc). ✅ **DONE.**
 2. **Vertical slice — durable runs:** §3.2 + §3.3 tables, `POST/GET /tasks`,
    dual-sink `on_event`, and a minimal Task Mode view that runs one flow and
-   shows the live + reloadable timeline. No per-item state yet.
-3. **Human gates in Task Mode:** wire the inspector to the existing
-   approve/input endpoints keyed by `run_id`; add the `paused` state.
+   shows the live + reloadable timeline. No per-item state yet. ✅ **DONE.**
+3. **Human gates in Task Mode + the three-pane surface:** ✅ **DONE.** The
+   center pane now shows the read-only flow **graph** (DAG of the pinned
+   definition, active node highlighted) above the timeline; the **right
+   inspector** renders active-node detail and **interactive** approve/reject/
+   input gates that resolve via the existing `human-approve` / `human-input`
+   endpoints. The worker writes the header status lifecycle —
+   `pending → running` on `flow_start`, `→ paused` on `human_request`, back to
+   `running` on `human_resolved` — so a reopened run lists/reads correctly.
+   Note: gates are keyed by the engine's `request_id` (carried verbatim in the
+   durable event payload), which already scopes them to the run; no separate
+   run_id keying was needed. Covered by
+   `tests/test_orchestrations.py::TaskRunHttpTest::test_human_gate_pauses_then_resolves_to_done`.
 4. **Per-item state (§3.4):** the candidate-dashboard. Requires a design pass
-   on how flows declare/iterate items.
+   on how flows declare/iterate items. ⏳ deferred (open question in §7).
 
-Steps 2–4 are real work; step 1 is the safe quick win.
+Step 1 was the safe quick win; steps 2–3 are landed; step 4 is the remaining
+real work, gated on the §7 item-declaration design.
 
 ---
 

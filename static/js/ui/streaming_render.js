@@ -141,6 +141,35 @@ function _flushVuStreaming(convId) {
 }
 
 /**
+ * Auto-translate a finalized VU message to the UI language (Chinese) so the
+ * user reads the simulated-user reply in their language even though the VU
+ * composed it in the assistant's language.  Mirrors the assistant turn's
+ * auto-translate path; gated on the per-conv autoTranslate setting and the
+ * shared `_isAlreadyChinese` skip (so a Chinese VU reply isn't re-translated).
+ * Fire-and-forget — failure leaves the original VU text shown.
+ */
+function _maybeAutoTranslateVu(convId, conv, entry) {
+  try {
+    if (!conv || !entry || !entry.msg) return;
+    const msg = entry.msg;
+    if (!msg.content || msg.translatedContent || msg._translateDone) return;
+    const convAutoTranslate = conv.autoTranslate !== undefined
+      ? !!conv.autoTranslate
+      : (typeof autoTranslate !== 'undefined' ? !!autoTranslate : false);
+    if (!convAutoTranslate) return;
+    if (typeof _startAutoTranslateForMsg !== 'function') return;
+    /* idx is the message's current position; _findVuMsgById gives a stable
+     * lookup but the pipeline needs the array index for surgical re-render. */
+    const idx = conv.messages.indexOf(msg);
+    if (idx < 0) return;
+    msg._translateDone = false;  // show the "translating…" indicator
+    _startAutoTranslateForMsg(conv, convId, idx, msg);
+  } catch (e) {
+    console.warn('[Autopilot VU] auto-translate trigger failed:', e && e.message);
+  }
+}
+
+/**
  * Handle the four autopilot_vu_* SSE event types.  See `_processSSELine`
  * for the contract.  The VU streams through the SAME substrate as the
  * worker (`#streaming-msg` + `streamBufs` + `twUpdate`), so its reply is
@@ -244,6 +273,13 @@ function _handleAutopilotVuEvent(convId, ev) {
     if (typeof saveConversations === "function") saveConversations(convId);
     try { if (typeof ConvCache !== "undefined") ConvCache.put(conv); }
     catch (e) { /* non-fatal */ }
+    /* ★ Display-language parity: the VU composes in the assistant's language,
+     * but the user should SEE it in their UI language.  Reuse the same
+     * assistant→Chinese auto-translate pipeline as agent turns when
+     * autoTranslate is on (the _isAlreadyChinese guard skips a no-op when the
+     * VU already replied in Chinese).  Fire-and-forget; renders bilingually
+     * via the VU branch in chat_render.js. */
+    _maybeAutoTranslateVu(convId, conv, entry);
     return;
   }
 

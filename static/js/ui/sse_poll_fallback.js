@@ -22,6 +22,18 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
   const buf = streamBufs.get(convId);
   const _preExistingContent = assistantMsg.content?.length || 0;
   const _preExistingThinking = assistantMsg.thinking?.length || 0;
+  /* ★ Reset the endpoint poll-turn counter at the start of every poll
+   *   session.  It gates the "new completed turns arrived → renderChat"
+   *   check below; if a prior session left it equal to the server's turn
+   *   count (e.g. SSE timed out after the last turn, then poll takes over),
+   *   the first endpoint poll would compute newEpCount === prevEpCount and
+   *   skip the re-render, leaving a stale streaming bubble until the
+   *   terminal finishStream re-render.  Clearing it forces the first
+   *   endpoint poll of this session to repaint from the authoritative turns. */
+  {
+    const _startConv = conversations.find(c => c.id === convId);
+    if (_startConv) _startConv._epPollTurnCount = 0;
+  }
   console.warn(`[_pollFallback] START — conv=${convId.slice(0,8)} taskId=${taskId.slice(0,8)} preExistingContent=${_preExistingContent}chars preExistingThinking=${_preExistingThinking}chars`);
   // Poll until the task finishes, the user aborts, or server is confirmed dead.
   let _pollIter = 0;
@@ -240,13 +252,23 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
          *   sidebar dot / pause button / translation gating in the running
          *   state instead of going idle until a manual refresh. */
         if (data.autopilotNextTaskId && data.autopilotVuMessage) {
-          assistantMsg._autopilotPending = {
+          const _apPayload = {
             nextTaskId: data.autopilotNextTaskId,
             vuMessage: data.autopilotVuMessage,
           };
+          /* Kick-from-idle carrier: assistantMsg is a DETACHED dummy never
+           * pushed into conv.messages — stamp the baton on the finalized VU
+           * user msg at the tail so _findAutopilotPendingCarrier finds it. */
+          const _apConv = conversations.find(c => c.id === convId);
+          const _apDetached = _apConv && _apConv.messages.indexOf(assistantMsg) === -1;
+          let _apTarget = assistantMsg;
+          if (_apDetached && _apConv && _apConv.messages.length) {
+            _apTarget = _apConv.messages[_apConv.messages.length - 1];
+          }
+          _apTarget._autopilotPending = _apPayload;
           console.info(
             `[_pollFallback] 🤖 Autopilot follow-up attached via poll — ` +
-            `next task=${data.autopilotNextTaskId.slice(0,8)} ` +
+            `next task=${data.autopilotNextTaskId.slice(0,8)} detachedCarrier=${!!_apDetached} ` +
             `vu="${(data.autopilotVuMessage.content||'').slice(0,80)}${(data.autopilotVuMessage.content||'').length>80?'…':''}"`
           );
         }

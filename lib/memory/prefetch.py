@@ -644,7 +644,8 @@ def run_memory_prefetch(messages: list,
                         project_path: str | None,
                         task: dict | None = None,
                         emit_event=None,
-                        active_tools: list[str] | None = None) -> list[dict]:
+                        active_tools: list[str] | None = None,
+                        extra_paths: list[str] | None = None) -> list[dict]:
     """Run the full BM25 → cheap-LLM → inject pipeline.
 
     Args:
@@ -661,6 +662,8 @@ def run_memory_prefetch(messages: list,
                       'web_search']``).  Lets the cheap-LLM filter drop
                       memories about subsystems the user can't currently use.
                       Pass None or [] when unknown.
+        extra_paths:  Additional workspace roots (multi-root session) whose
+                      memories are unioned in alongside the primary root's.
 
     Returns:
         The list of memory dicts that were injected (empty list if none).
@@ -693,7 +696,7 @@ def run_memory_prefetch(messages: list,
 
     try:
         from lib.memory.storage import get_eligible_memories
-        memories = get_eligible_memories(project_path)
+        memories = get_eligible_memories(project_path, extra_paths=extra_paths)
     except Exception as e:
         logger.warning('[MemPrefetch] get_eligible_memories failed: %s', e)
         _emit('failed', reason=f'load_error: {e}')

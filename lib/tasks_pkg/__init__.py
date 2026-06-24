@@ -12,7 +12,7 @@ Modules:
 
 __all__ = [
     # spawn (eager)
-    'spawn_task',
+    'spawn_task', 'set_agent_executor',
     # manager (eager)
     'tasks', 'tasks_lock',
     'create_task', 'append_event', 'persist_task_result', 'cleanup_old_tasks',
@@ -20,6 +20,7 @@ __all__ = [
     'abort_running_tasks_for_conv',
     'recover_stale_tasks_on_startup',
     'load_tool_rounds_from_conversation',
+    'load_endpoint_turns_from_conversation',
     # approval (lazy)
     'request_write_approval', 'resolve_write_approval',
     # human guidance (lazy)
@@ -46,13 +47,26 @@ import threading
 from lib.log import get_logger as _get_logger
 _spawn_logger = _get_logger('lib.tasks_pkg.spawn')
 
+# Dedicated executor for agent workers (installed by server.py at startup).
+# When None, spawn_task falls back to asyncio.to_thread's DEFAULT executor —
+# the same pool that runs sync route handlers. The dedicated pool keeps
+# long-running agent tasks from starving request handling under load.
+_agent_executor = None
+
+
+def set_agent_executor(executor) -> None:
+    """Install the dedicated agent-worker ThreadPoolExecutor (server.py)."""
+    global _agent_executor
+    _agent_executor = executor
+
 
 def spawn_task(task: dict) -> None:
     """Spawn a task using the best available mechanism.
 
     If an asyncio event loop is running (Quart/Hypercorn), spawns the task
-    via asyncio.to_thread so the event loop can track its lifecycle. Falls
-    back to a plain daemon thread otherwise (e.g. tests, Feishu bot).
+    on the dedicated agent-worker executor (or asyncio.to_thread's default
+    pool if none was installed) so the event loop can track its lifecycle.
+    Falls back to a plain daemon thread otherwise (e.g. tests, Feishu bot).
 
     This is the SINGLE entry point for starting tasks. All call sites
     (chat_send, branch, message_queue, autopilot, agent_backends) should
@@ -68,12 +82,15 @@ def spawn_task(task: dict) -> None:
         loop = None
 
     if loop and loop.is_running():
-        # We're inside the Quart event loop — use asyncio.to_thread
-        # so the orchestrator runs in the default ThreadPoolExecutor
-        # but is tracked as an asyncio Task (cancellable, awaitable).
+        # We're inside the Quart event loop. Run the orchestrator on the
+        # dedicated agent pool (separate from the sync-route pool) so the
+        # two cannot starve each other; tracked as an asyncio Task.
         async def _async_wrapper():
             try:
-                await asyncio.to_thread(run_task, task)
+                if _agent_executor is not None:
+                    await loop.run_in_executor(_agent_executor, run_task, task)
+                else:
+                    await asyncio.to_thread(run_task, task)
             except Exception as e:
                 _spawn_logger.error('[Spawn] Task %s failed: %s',
                                     task.get('id', '?')[:8], e, exc_info=True)
@@ -94,6 +111,7 @@ from lib.tasks_pkg.manager import (
     append_event,
     cleanup_old_tasks,
     create_task,
+    load_endpoint_turns_from_conversation,
     load_tool_rounds_from_conversation,
     persist_task_result,
     recover_stale_tasks_on_startup,

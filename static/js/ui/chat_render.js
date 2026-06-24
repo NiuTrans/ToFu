@@ -344,10 +344,15 @@ function renderMessage(msg, idx) {
         imgCount > 0 ? ` · ${imgCount} img${imgCount > 1 ? "s" : ""}` : "";
       const methodBadge = pdf.method === "vlm" ? ' · <b>VLM</b>' : '';
       const _ext = pdf.name ? pdf.name.slice(pdf.name.lastIndexOf('.')).toLowerCase() : '';
-      const _docIconMap = {'.pdf':'📕', '.docx':'📝', '.pptx':'📊', '.xlsx':'📈', '.txt':'📄', '.md':'📄',
-                           '.csv':'📊', '.json':'📄', '.xml':'📄', '.py':'🐍', '.js':'📜',
-                           '.html':'🌐', '.yaml':'⚙️', '.yml':'⚙️'};
-      const docIcon = _docIconMap[_ext] || '📄';
+      const _dsvg = (inner) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+      const _DOC_FILE = '<path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>';
+      const _DOC_SHEET = '<path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M8 13h2"/><path d="M14 13h2"/><path d="M8 17h2"/><path d="M14 17h2"/>';
+      const _DOC_CODE = '<path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M10 12.5 8 15l2 2.5"/><path d="m14 12.5 2 2.5-2 2.5"/>';
+      const _DOC_SLIDE = '<path d="M2 3h20"/><path d="M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3"/><path d="m7 21 5-5 5 5"/>';
+      const _docIconMap = {'.pdf':_DOC_FILE, '.docx':_DOC_FILE, '.pptx':_DOC_SLIDE, '.xlsx':_DOC_SHEET, '.txt':_DOC_FILE, '.md':_DOC_FILE,
+                           '.csv':_DOC_SHEET, '.json':_DOC_CODE, '.xml':_DOC_CODE, '.py':_DOC_CODE, '.js':_DOC_CODE,
+                           '.html':_DOC_CODE, '.yaml':_DOC_CODE, '.yml':_DOC_CODE};
+      const docIcon = _dsvg(_docIconMap[_ext] || _DOC_FILE);
       body += `<div class="pdf-attach-badge" title="${escapeHtml(pdf.name)}" onclick="previewMsgPdfText(${idx},${pdfI})" style="cursor:pointer"><span class="pdf-attach-icon">${docIcon}</span><span class="pdf-attach-info"><span class="pdf-attach-name">${escapeHtml(pdf.name.length > 25 ? pdf.name.slice(0, 23) + "…" : pdf.name)}</span><span class="pdf-attach-meta">${pdf.pages} pages · ${sizeStr}${imgStr}${scanBadge}${methodBadge}</span></span></div>`;
     });
     body += "</div>";
@@ -466,18 +471,18 @@ function renderMessage(msg, idx) {
     const ige = msg._igError;
     // Determine error-type CSS class and icon
     let errTypeClass = 'ig-error-generic';
-    let errIcon = '⚠';
+    let errIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>';
     if (ige.isRateLimit || ige.errorType === 'rate_limited') {
       errTypeClass = 'ig-error-ratelimit';
-      errIcon = '⏳';
+      errIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/></svg>';
     } else if (ige.isContentBlocked || ige.errorType === 'content_blocked') {
       errTypeClass = 'ig-error-blocked';
-      errIcon = '🚫';
+      errIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M4.929 4.929 19.07 19.071"/></svg>';
     } else if (ige.isTimeout || ige.errorType === 'timeout') {
       errTypeClass = 'ig-error-timeout';
-      errIcon = '⏱';
+      errIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/></svg>';
     } else if (ige.errorType === 'no_slot') {
-      errIcon = '🔌';
+      errIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m19 5 3-3"/><path d="m2 22 3-3"/><path d="M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4Z"/><path d="M7.5 13.5 10 11"/><path d="M10.5 16.5 13 14"/><path d="m12 6 6 6 2.3-2.3a2.4 2.4 0 0 0 0-3.4l-2.6-2.6a2.4 2.4 0 0 0-3.4 0Z"/></svg>';
     }
     body += `<div class="ig-result-wrapper">
       <div class="ig-error-card ${errTypeClass}">
@@ -512,7 +517,7 @@ function renderMessage(msg, idx) {
             ${arStr ? `<span class="ig-meta-pill">${escapeHtml(arStr)}</span>` : ''}
             ${sizeStr ? `<span class="ig-meta-pill">${sizeStr}</span>` : ''}
             ${elapsedStr ? `<span class="ig-meta-pill">${elapsedStr}</span>` : ''}
-            ${ig.history_turns ? `<span class="ig-meta-pill ig-history-pill" title="${ig.history_turns} prior editing turn${ig.history_turns > 1 ? 's' : ''}">🔄 ${ig.history_turns}</span>` : ''}
+            ${ig.history_turns ? `<span class="ig-meta-pill ig-history-pill" title="${ig.history_turns} prior editing turn${ig.history_turns > 1 ? 's' : ''}">${Icon('refresh', 11)} ${ig.history_turns}</span>` : ''}
           </div>
           <div class="ig-result-actions">
             <button onclick="event.stopPropagation();_downloadGenImage(this)" title="Download">⬇</button>
@@ -578,11 +583,11 @@ function renderMessage(msg, idx) {
           // Error slot — with error-type differentiation and retry button
           const errModel = _shortModel[r.model] || r.model || '?';
           let errTypeClass = 'ig-error-generic';
-          let errIcon = '⚠';
+          let errIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>';
           const et = r.errorType || '';
-          if (et === 'rate_limited') { errTypeClass = 'ig-error-ratelimit'; errIcon = '⏳'; }
-          else if (et === 'content_blocked') { errTypeClass = 'ig-error-blocked'; errIcon = '🚫'; }
-          else if (et === 'timeout') { errTypeClass = 'ig-error-timeout'; errIcon = '⏱'; }
+          if (et === 'rate_limited') { errTypeClass = 'ig-error-ratelimit'; errIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/></svg>'; }
+          else if (et === 'content_blocked') { errTypeClass = 'ig-error-blocked'; errIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M4.929 4.929 19.07 19.071"/></svg>'; }
+          else if (et === 'timeout') { errTypeClass = 'ig-error-timeout'; errIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/></svg>'; }
           const promptEsc = JSON.stringify(r.prompt || '').replace(/"/g, '&quot;');
           const modelEsc = JSON.stringify(r.model || '').replace(/"/g, '&quot;');
           body += `<div class="ig-batch-slot" data-slot-idx="${ri}" data-msg-idx="${idx}"><div class="ig-batch-error ${errTypeClass}">
@@ -602,14 +607,18 @@ function renderMessage(msg, idx) {
       // ★ Endpoint-mode critic messages are role=user but produced by the
       //   Critic LLM — they DO receive server-side auto-translate.  Treat
       //   them like assistants for the purposes of translation display.
-      const _isCritic = isUser && msg._isEndpointReview;
+      // ★ Virtual-user (Autopilot) messages are role=user but produced by the
+      //   VU LLM and auto-translated to the UI language for DISPLAY — treat
+      //   them like critic/assistant for translation display (the VU composes
+      //   in the assistant's language; the user sees it in their UI language).
+      const _isCritic = isUser && (msg._isEndpointReview || msg._isVirtualUser);
       const showTrans = (!isUser || _isCritic)
                         && msg.translatedContent
                         && msg._showingTranslation !== false;
       if (showTrans) {
         mdHtml = renderMarkdown(stripNoTranslateTags(msg.translatedContent));
       } else if (_isCritic) {
-        // Critic messages are user-role but contain rich markdown
+        // Critic / VU messages are user-role but contain rich markdown
         mdHtml = renderMarkdown(msg.content);
       } else if (isUser) {
         mdHtml = escapeHtml(stripNoTranslateTags(msg.originalContent || msg.content));
@@ -632,15 +641,18 @@ function renderMessage(msg, idx) {
   if (!isUser && Array.isArray(msg._compactions) && msg._compactions.length) {
     const _ccDom = msg._compactions.map((c) => {
       const trig = (c.trigger || 'force');
+      const _zapSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg>';
+      const _wrenchSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/></svg>';
+      const _archiveSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>';
       const trigLabel = trig === 'reactive'
-        ? '⚡ 紧急压缩'
-        : (trig === 'manual' ? '🔧 手动压缩' : '🗜️ 自动压缩');
+        ? _zapSvg + ' 紧急压缩'
+        : (trig === 'manual' ? _wrenchSvg + ' 手动压缩' : _archiveSvg + ' 自动压缩');
       const before = c.tokensBefore || 0;
       const after  = c.tokensAfter  || 0;
       const reductionPct = (c.reductionPct != null) ? c.reductionPct
                           : (before > 0 ? Math.round((1 - after / before) * 100) : 0);
       const sizeFrag = before > 0 && after > 0
-        ? `${(before/1000).toFixed(0)}k → ${(after/1000).toFixed(0)}k tokens · −${reductionPct}%`
+        ? `${(before/1000).toFixed(0)}k → ${(after/1000).toFixed(0)}k tokens · -${reductionPct}%`
         : (before > 0 ? `${(before/1000).toFixed(0)}k tokens 已归档` : '已归档');
       const reasonFrag = c.reason ? `<span class="compaction-marker-reason">${escapeHtml(c.reason)}</span>` : '';
       const statusCls = (c.status === 'done') ? 'is-done' : 'is-progress';
@@ -699,8 +711,8 @@ function renderMessage(msg, idx) {
     const _asstOrig = stripNoTranslateTags(msg.content || '');
     body += `<div class="bilingual-block bilingual-original"><div class="bilingual-header" onclick="if(event.target.closest('.bilingual-copy-btn'))return;this.parentElement.classList.toggle('expanded')"><span class="bilingual-label"><span class="bilingual-type active">原文</span><span class="bilingual-sep">/</span><span class="bilingual-type">译文</span>${_tmAsst}</span><button class="bilingual-copy-btn" onclick="event.stopPropagation();copyBilingualOriginal(this,'assistant',${idx})" title="Copy original text"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button><span class="bilingual-toggle">▼</span></div><div class="bilingual-body"><div class="md-content">${renderMarkdown(_asstOrig)}</div></div></div>`;
   }
-  // ── Critic (endpoint review) bilingual block — symmetric with assistant ──
-  if (isUser && msg._isEndpointReview && msg.translatedContent && msg._showingTranslation !== false) {
+  // ── Critic (endpoint review) / Autopilot VU bilingual block — symmetric with assistant ──
+  if (isUser && (msg._isEndpointReview || msg._isVirtualUser) && msg.translatedContent && msg._showingTranslation !== false) {
     const _tmCritic = msg._translateModel ? `<span class="bilingual-model" title="${escapeHtml(msg._translateModel)}">${escapeHtml(msg._translateModel)}</span>` : '';
     const _critOrig = stripNoTranslateTags(msg.content || '');
     body += `<div class="bilingual-block bilingual-original"><div class="bilingual-header" onclick="if(event.target.closest('.bilingual-copy-btn'))return;this.parentElement.classList.toggle('expanded')"><span class="bilingual-label"><span class="bilingual-type active">原文</span><span class="bilingual-sep">/</span><span class="bilingual-type">译文</span>${_tmCritic}</span><button class="bilingual-copy-btn" onclick="event.stopPropagation();copyBilingualOriginal(this,'critic',${idx})" title="Copy original text"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button><span class="bilingual-toggle">▼</span></div><div class="bilingual-body"><div class="md-content">${renderMarkdown(_critOrig)}</div></div></div>`;
@@ -709,7 +721,7 @@ function renderMessage(msg, idx) {
   // Fires for both assistant messages AND endpoint-critic (role=user,
   // _isEndpointReview) messages — both are routed through the auto-translate
   // pipeline.
-  if ((!isUser || (isUser && msg._isEndpointReview))
+  if ((!isUser || (isUser && (msg._isEndpointReview || msg._isVirtualUser)))
       && !msg.translatedContent && msg._translateDone === false) {
     const errText = msg._translateError;
     if (errText) {
@@ -787,7 +799,7 @@ function renderMessage(msg, idx) {
     // Show the Translate button on: (a) assistant messages, (b) endpoint
     // critic review messages (role=user + _isEndpointReview) — they
     // receive auto-translate too.
-    const _translateBtnAllowed = !isUser || (isUser && msg._isEndpointReview);
+    const _translateBtnAllowed = !isUser || (isUser && (msg._isEndpointReview || msg._isVirtualUser));
     const translateH = _translateBtnAllowed
       ? `<button class="msg-action-btn msg-translate-btn${isShowingTrans ? " translated" : ""}" onclick="event.stopPropagation();translateMessage(${idx})" title="${isShowingTrans ? "Show Original" : "Translate"}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg> ${isShowingTrans ? "Original" : "Translate"}</button>`
       : "";
@@ -854,11 +866,22 @@ function renderMessage(msg, idx) {
   const epWorkerCls = (!isUser && !msg._isEndpointPlanner && !msg._isEndpointReview) ? ' ep-worker-msg' : '';
   const epPlannerCls = msg._isEndpointPlanner ? ' ep-planner-msg' : '';
   const vuCls = msg._isVirtualUser ? ' vu-user-msg' : '';
+  // ── Per-turn context capsule (floats in the RIGHT GUTTER beside the turn) ──
+  // Frozen snapshot of the workspace/tools/model active when this turn was
+  // sent (msg._ctx, captured in the send pipeline). Rendered as a direct
+  // child of `.message` — NOT inside `.message-content` (which clips via
+  // overflow:hidden) — so CSS can place it at left:100% out in the gutter,
+  // clear of both the bubble and the hover action-bar. See info-rail.js.
+  let turnCtxHtml = "";
+  if (msg._ctx && typeof renderTurnCtxNote === "function") {
+    try { turnCtxHtml = renderTurnCtxNote(msg._ctx); }
+    catch (e) { console.debug("[turnCtx] renderTurnCtxNote failed:", e); }
+  }
   const badgeHtml = plannerBadge || criticBadge;
   /* Final assembly via safeHtml. roleName / userLabel / time are
    * escaped by default. Everything pre-built above (avatars = trusted
    * SVG, badgeHtml, body, branchHtml, actionBtns, the class/attr
    * fragments) is already-trusted HTML, marked raw(). */
   const _classAttr = `${isUser ? ' user-msg' : ''}${msg._isEndpointReview ? ' ep-critic-msg' : ''}${epPlannerCls}${epWorkerCls}${vuCls}`;
-  return String(safeHtml`<div class="message${raw(_classAttr)}"${raw(idAttr)}${raw(msgIdAttr)}${raw(mfpAttr)}><div class="message-avatar">${raw(isUser ? userAvatar : avatarContent)}</div><div class="message-content"><div class="message-header"><span class="message-role">${isUser ? userLabel : roleName}</span>${raw(badgeHtml)}${raw(messageTimeHtml)}</div><div class="message-body">${raw(body)}</div>${raw(branchHtml)}${raw(actionBtns)}</div></div>`);
+  return String(safeHtml`<div class="message${raw(_classAttr)}"${raw(idAttr)}${raw(msgIdAttr)}${raw(mfpAttr)}><div class="message-avatar">${raw(isUser ? userAvatar : avatarContent)}</div><div class="message-content"><div class="message-header"><span class="message-role">${isUser ? userLabel : roleName}</span>${raw(badgeHtml)}${raw(messageTimeHtml)}</div><div class="message-body">${raw(body)}</div>${raw(branchHtml)}${raw(actionBtns)}</div>${raw(turnCtxHtml)}</div>`);
 }

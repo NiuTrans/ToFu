@@ -175,7 +175,7 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
                          code_exec_enabled, browser_enabled, desktop_enabled,
                          swarm_enabled, image_gen_enabled=False,
                          human_guidance_enabled=False, scheduler_enabled=False,
-                         messages=None):
+                         messages=None, conv_id=''):
     """Build the tool_list based on enabled features.
 
     Returns (tool_list, has_real_tools, max_tool_rounds) where tool_list may be
@@ -226,9 +226,29 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
         swarm_enabled=swarm_enabled, image_gen_enabled=image_gen_enabled,
         human_guidance_enabled=human_guidance_enabled,
         scheduler_enabled=scheduler_enabled, messages=messages,
-        enabled_plugins=enabled_plugins,
+        enabled_plugins=enabled_plugins, conv_id=conv_id,
     )
     tool_list, has_real_tools = assemble_tool_list(ctx)
+
+    # ── Per-conversation tool-schema latch (root fix for tools-array cache
+    #    breaks). Freeze the EXACT tool list this conversation first used and
+    #    serve it byte-identical on every later round, so a mid-conversation
+    #    toggle (Swarm/Scheduler/Browser/…) cannot invalidate the cached
+    #    prefix. The change is deferred to the next NEW conversation (or to an
+    #    explicit "Apply now" that clears the latch). `diverged` signals the
+    #    frontend that a pending change is being held. conv_id='' (stateless
+    #    assembly / compat adapters) or TOFU_TOOLSET_LATCH=0 → no-op.
+    from lib.tools import latch_tool_list, tool_list_diff
+    tool_list, _toolset_diverged = latch_tool_list(conv_id, tool_list)
+    if _toolset_diverged:
+        _diff = tool_list_diff(conv_id)
+        logger.info('[Task %s] 🔒 tool-schema latch held a pending toggle '
+                    'change (conv=%s) added=%s removed=%s — deferring to next '
+                    'conversation / Apply-now to keep prompt cache intact',
+                    tid, conv_id[:8], _diff.get('added'), _diff.get('removed'))
+        cfg['_toolsetDiff'] = _diff
+    # Surface the flag so the orchestrator can attach it to the done event.
+    cfg['_toolsetDiverged'] = bool(_toolset_diverged)
 
     if not tool_list:
         tool_list = None

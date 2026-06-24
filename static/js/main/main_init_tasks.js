@@ -149,7 +149,7 @@ async function initActiveTasks() {
             `This could indicate a stream that started but never received any content.`,
           );
           conv.messages.pop();
-          saveConversations(conv.id);
+          saveConversations(null);  // recovery cleanup, not new activity — don't bump updatedAt
           syncConversationToServer(conv, { allowTruncate: true });
         }
       }
@@ -401,7 +401,7 @@ async function initActiveTasks() {
           }
           conv.activeTaskId = null;
           conv._activeTaskClearedAt = Date.now();
-          saveConversations(conv.id);
+          saveConversations(null);  // clearing a stale finished-task ref — not new activity, don't bump updatedAt
           syncConversationToServer(conv);
         }),
       );
@@ -470,7 +470,7 @@ async function initActiveTasks() {
               `(content=${(am.content?.length||0)}chars, finishReason=${am.finishReason})`
             );
             delete am.error;
-            saveConversations(conv.id);
+            saveConversations(null);  // clearing a stale offline error — not new activity, don't bump updatedAt
             syncConversationToServer(conv);
           }
         }));

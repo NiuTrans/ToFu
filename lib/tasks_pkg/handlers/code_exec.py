@@ -189,6 +189,12 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     m_exit = re.search(r'\[exit code: (-?\d+)\]\s*$', tool_content)
     exit_code = m_exit.group(1) if m_exit else '?'
     timed_out = '[Command timed out]' in tool_content
+    if m_exit is None and not timed_out:
+        # No exit-code marker and not a timeout: the subprocess wrapper
+        # contract changed or output was truncated. Without this, a failed
+        # command renders as exitCode='?' (ambiguous-but-OK) with no trace.
+        logger.warning('[code_exec] no [exit code] marker in output for cmd=%.80s '
+                       '(len=%d) — exit status is unknown', cmd, len(tool_content))
     prefix = f'$ {cmd}\n'
     if tool_content.startswith(prefix):
         output_text = tool_content[len(prefix):]

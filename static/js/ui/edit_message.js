@@ -150,11 +150,30 @@ function saveEditOnly(idx) {
   msg.content = t;
   // ★ Use per-conv autoTranslate (not global) — matches sendMessage behavior
   const _convAutoTranslate = conv.autoTranslate !== undefined ? !!conv.autoTranslate : !!autoTranslate;
-  // ★ Auto-translate: detect Chinese and fire-and-forget translate task
-  // Works for both previously-translated and never-translated messages.
-  // Delegates to the unified pipeline so behaviour matches manual + auto
-  // (same poll cadence, same persistence, same render).
-  if (_convAutoTranslate && t) {
+  // ★ Autopilot (virtual-user) / endpoint-critic messages are role=user but
+  //   DISPLAY-translated: `content` = the model-language original (shown in the
+  //   原文 toggle), `translatedContent` = the UI-language rendering shown in the
+  //   OUTER bubble. This is the OPPOSITE wiring from a normal user message
+  //   (originalContent=源文, content=English-for-model). Editing `content`
+  //   invalidates the cached `translatedContent`, so clear it and re-translate
+  //   the edited content INTO translatedContent — otherwise the edit only lands
+  //   in the toggle while the outer 译文 keeps showing the stale translation
+  //   (the reported bug).
+  const _isVuOrCritic = !!(msg._isVirtualUser || msg._isEndpointReview);
+  if (_isVuOrCritic) {
+    if (typeof _resetTranslationState === 'function') _resetTranslationState(msg);
+    if (_convAutoTranslate && t) {
+      _runTranslationPipeline(conv, idx, msg, {
+        sourceLang: '',
+        targetLang: 'Chinese',
+        field: 'translatedContent',
+        mode: 'auto',
+        text: t,
+      });
+    }
+  } else if (_convAutoTranslate && t) {
+    // ★ Normal user message: detect Chinese and translate content→English
+    //   (the model's strongest language) via the unified pipeline.
     const hasChinese = /[\u4e00-\u9fff\u3400-\u4dbf]/.test(t);
     if (hasChinese) {
       msg.originalContent = t;
@@ -197,6 +216,13 @@ function saveEditOnly(idx) {
       replyQuotes: msg.replyQuotes || [],
     };
     if (msg.timestamp) _patch.timestamp = msg.timestamp;
+    // ★ VU/critic edit: the cached display translation was just reset (and a
+    //   fresh one is being computed). Explicitly clear it server-side (null →
+    //   key removal) so a later sync / reload can't resurrect the stale 译文.
+    if (_isVuOrCritic) {
+      _patch.translatedContent = (msg.translatedContent === undefined) ? null : msg.translatedContent;
+      _patch._translatedCache = (msg._translatedCache === undefined) ? null : msg._translatedCache;
+    }
     const _convIdLocal = conv.id;
     const _res = await _patchMessageOnServer(_convIdLocal, idx, _patch, {
       onError: () => {
@@ -306,6 +332,14 @@ async function saveEditAndResend(idx) {
   msg.images = editedImages;
   msg.pdfTexts = editedPdfTexts;
   delete msg.originalContent;
+  // ★ Autopilot (VU) / critic messages render `translatedContent` in the OUTER
+  //   bubble (see chat_render.js). Editing `content` invalidates that cached
+  //   display translation — clear it so the outer 译文 doesn't show the stale
+  //   pre-edit text. The backend re-translates the edited content for display
+  //   (see routes/chat.py regenerate VU branch).
+  if (msg._isVirtualUser || msg._isEndpointReview) {
+    if (typeof _resetTranslationState === 'function') _resetTranslationState(msg);
+  }
   msg.timestamp = Date.now();
   conv.messages = conv.messages.slice(0, idx + 1);
   conv._needsLoad = false;
@@ -373,6 +407,10 @@ async function saveEditAndResend(idx) {
 
   try {
     const _regenSettings = await _buildConvSettings(conv);
+    // Refresh the per-turn context note: edit-and-resend re-runs the turn
+    // with the current workspace/tools/model. See static/js/info-rail.js.
+    const _editCtx = (typeof buildTurnCtxSnapshot === 'function') ? buildTurnCtxSnapshot() : null;
+    if (_editCtx) msg._ctx = _editCtx; else delete msg._ctx;
     const resp = await Api.chat.regenerate({
       convId,
       truncateToIndex: idx,
@@ -381,6 +419,7 @@ async function saveEditAndResend(idx) {
       editedPdfTexts,
       config: _regenConfig,
       settings: _regenSettings,
+      ...(_editCtx ? { ctx: _editCtx } : {}),
     }, { signal: _editAbortCtrl.signal });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));

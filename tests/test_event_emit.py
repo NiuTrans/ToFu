@@ -133,51 +133,6 @@ class TestConvertedOrchestratorSites(unittest.TestCase):
         self.assertEqual(got['round'], 3)
 
 
-class TestNormalizedEventConvergence(unittest.TestCase):
-    """The external-backend ingress path (NormalizedEvent → SSE) must emit
-    events from the SAME registry vocabulary as the built-in orchestrator."""
-
-    def test_kind_map_targets_are_registered(self):
-        from lib.agent_core.events import event_types
-        from lib.agent_backends.protocol import KIND_TO_EVENT_TYPE
-        reg = event_types()
-        for kind, et in KIND_TO_EVENT_TYPE.items():
-            self.assertIn(et, reg, f'{kind} → {et} not in registry')
-
-    def test_every_kind_is_mapped(self):
-        from lib.agent_backends.protocol import (
-            KIND_TO_EVENT_TYPE,
-            NormalizedEventKind,
-        )
-        kinds = {v for k, v in vars(NormalizedEventKind).items()
-                 if not k.startswith('_') and isinstance(v, str)}
-        self.assertEqual(kinds, set(KIND_TO_EVENT_TYPE),
-                         'every NormalizedEventKind must map to an EventType')
-
-    def test_bridge_output_types_are_registered(self):
-        from lib.agent_backends.protocol import NormalizedEvent
-        from lib.agent_backends.protocol import NormalizedEventKind as K
-        from lib.agent_backends.sse_bridge import SSEBridgeState
-        from lib.agent_core.events import event_types
-        reg = event_types()
-        st = SSEBridgeState()
-        samples = [
-            NormalizedEvent(kind=K.TEXT_DELTA, text='x'),
-            NormalizedEvent(kind=K.THINKING_DELTA, text='y'),
-            NormalizedEvent(kind=K.TOOL_START, tool_name='Read', tool_id='t'),
-            NormalizedEvent(kind=K.TOOL_COMPLETE, tool_id='t', tool_output='z'),
-            NormalizedEvent(kind=K.PHASE, phase_type='working', text='p'),
-            NormalizedEvent(kind=K.APPROVAL_REQUEST, tool_name='W', tool_id='a'),
-            NormalizedEvent(kind=K.DONE, finish_reason='stop'),
-            NormalizedEvent(kind=K.ERROR, error_message='e'),
-        ]
-        for ev in samples:
-            sse = st.translate(ev)
-            if sse is not None:
-                self.assertIn(sse['type'], reg,
-                              f'{ev.kind} produced unregistered type {sse["type"]}')
-
-
 class TestUnregisteredTypeAllowed(unittest.TestCase):
     def test_unregistered_type_still_builds(self):
         # Forward-compat: unknown types are not rejected at runtime.

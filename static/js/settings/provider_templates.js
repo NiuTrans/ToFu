@@ -36,6 +36,7 @@ const _PROVIDER_TEMPLATES = [
     base_url: 'https://open.bigmodel.cn/api/paas/v4',
     balance_url: 'https://open.bigmodel.cn/api/paas/v4/dashboard/billing/subscription',
     models: [
+      { model_id: 'glm-5.2',         capabilities: ['text', 'thinking'],  rpm: 60,  cost: 0.004 },
       { model_id: 'glm-5.1',         capabilities: ['text', 'thinking'],  rpm: 60,  cost: 0.004 },
       { model_id: 'glm-5',           capabilities: ['text', 'thinking'],  rpm: 60,  cost: 0.004 },
       { model_id: 'glm-4.7',         capabilities: ['text', 'thinking', 'cheap'],  rpm: 60,  cost: 0.002 },

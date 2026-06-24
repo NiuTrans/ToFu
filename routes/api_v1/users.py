@@ -53,8 +53,6 @@ from lib.billing.users import (
     USER_ROLES, authenticate, create_user, get_user, list_users,
     set_user_status, update_user_role,
 )
-from lib.config_dir import config_path
-from lib.json_store import read_json
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import (
@@ -73,16 +71,14 @@ api_v1_users_bp = Blueprint('api_v1_users', __name__)
 # ── Operator-tunable settings (data/config/relay.json) ───────────────
 
 def _relay_settings() -> dict:
-    """Read the relay-policy file. Cached per request (cheap)."""
-    raw = read_json(config_path('relay.json'),
-                    default={
-                        'signup_enabled': False,
-                        'signup_default_role': 'user',
-                        'signup_welcome_credit_micro': 0,
-                    })
-    if not isinstance(raw, dict):
-        return {}
-    return raw
+    """Read the relay-policy file via the shared :mod:`lib.relay_config`.
+
+    Single source of truth so signup gating, billing gating, and the
+    capabilities surface never drift. Returns the merged settings dict
+    (defaults ← file ← env).
+    """
+    from lib.relay_config import get_settings
+    return get_settings()
 
 
 def _user_payload(u) -> dict:
@@ -98,6 +94,34 @@ def _user_payload(u) -> dict:
     }
 
 
+# Scopes that grant access to the OPERATOR's model slot pool. Withheld
+# from tenant keys in a BYO-only deployment (model_relay_enabled=false)
+# so users must attach their own endpoint via agents:run.
+_MODEL_RELAY_SCOPES = frozenset({'chat'})
+
+
+def _session_scopes() -> list[str]:
+    """Build the default scope set for a freshly minted tenant key.
+
+    In a BYO-only deployment (``model_relay_enabled=false``) the
+    operator's model slot pool is off-limits: ``chat`` is dropped and
+    ``agents:run`` is added so the user can still run agents against
+    their OWN registered provider.
+    """
+    from lib.relay_config import model_relay_enabled
+    scopes = ['chat', 'tasks', 'conversations', 'files',
+               'agents:paper', 'agents:translate', 'agents:memory',
+               'agents:browser', 'agents:search', 'agents:image',
+               'webhooks', 'capabilities', 'usage']
+    if not model_relay_enabled():
+        scopes = [s for s in scopes if s not in _MODEL_RELAY_SCOPES]
+        # BYO-only users need to register + run against their own model.
+        for extra in ('providers', 'agents:run'):
+            if extra not in scopes:
+                scopes.append(extra)
+    return scopes
+
+
 def _mint_session_key(user) -> tuple[dict, str]:
     """Mint a token bound to ``user`` and return ``(public_row, plaintext)``.
 
@@ -105,10 +129,7 @@ def _mint_session_key(user) -> tuple[dict, str]:
     caller so they can copy it as a Bearer token if they want
     out-of-browser access from the same login.
     """
-    scopes = ['chat', 'tasks', 'conversations', 'files',
-               'agents:paper', 'agents:translate', 'agents:memory',
-               'agents:browser', 'agents:search', 'agents:image',
-               'webhooks', 'capabilities', 'usage']
+    scopes = _session_scopes()
     if user.role == 'admin':
         return create_key(
             name=f'session:{user.email}', scopes=[], admin=True,
@@ -353,8 +374,13 @@ def mint_user_key_route(user_id):
     name = require_str(body, 'name', max_len=80)
     rpm = int(body.get('rate_limit_rpm') or 60)
     tpd = int(body.get('rate_limit_tpd') or 0)
+    from lib.relay_config import model_relay_enabled
     scopes = optional_list(body, 'scopes', default=[]) or [
         'chat', 'tasks', 'conversations', 'usage', 'capabilities']
+    # BYO-only deployment: never hand out the operator slot-pool scope,
+    # even if the admin explicitly listed it.
+    if not model_relay_enabled():
+        scopes = [s for s in scopes if s not in _MODEL_RELAY_SCOPES]
     row, token = create_key(
         name=name, scopes=scopes,
         rate_limit_rpm=rpm, rate_limit_tpd=tpd,

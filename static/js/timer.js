@@ -51,9 +51,10 @@ async function _refreshTimerPanel() {
       return;
     }
 
+    const _jumpHint = t('timer.jumpHint');
     let html = "";
     for (const t of timers) {
-      const statusIcon = { active: "🟢", triggered: "⏰", cancelled: "🔴", exhausted: "⚪" }[t.status] || "❓";
+      const statusIcon = { active: IconDot('green'), triggered: Icon('alarm', 12), cancelled: IconDot('red'), exhausted: IconDot('grey') }[t.status] || IconDot('grey');
       const statusClass = t.status;
       const pollAt = t.last_poll_at ? new Date(t.last_poll_at).toLocaleTimeString() : "never";
       const decLabel = t.last_poll_decision ? t.last_poll_decision.toUpperCase() : "—";
@@ -61,29 +62,30 @@ async function _refreshTimerPanel() {
       const maxPolls = t.max_polls > 0 ? ` / ${t.max_polls}` : "";
       const checkCmd = t.check_command ? escapeHtml(t.check_command.slice(0, 60)) : "(none)";
       const created = t.created_at ? new Date(t.created_at).toLocaleString() : "?";
+      const convId = t.conv_id || "";
 
       html += `<div class="timer-panel-item timer-status-${statusClass}">
-        <div class="tpi-header">
+        <div class="tpi-header${convId ? ' tpi-header-jump' : ''}" ${convId ? `onclick="_jumpToTimerConv('${convId}', event)" title="${escapeHtml(_jumpHint)}"` : ''}>
           <span class="tpi-status">${statusIcon}</span>
           <span class="tpi-id">${escapeHtml(t.id)}</span>
           <span class="tpi-status-label">${t.status}</span>
         </div>
         <div class="tpi-meta">
-          📊 Polls: ${t.poll_count}${maxPolls} | Interval: ${t.poll_interval}s<br>
-          🕐 Last poll: ${pollAt} <span class="tpi-decision ${decClass}">${decLabel}</span><br>
-          ${t.last_poll_reason ? `💭 ${escapeHtml(t.last_poll_reason.slice(0, 80))}<br>` : ""}
-          🔍 Check cmd: <code>${checkCmd}</code><br>
-          📝 Check: ${escapeHtml((t.check_instruction || "").slice(0, 80))}${(t.check_instruction || "").length > 80 ? "…" : ""}<br>
-          📌 Conv: ${(t.conv_id || "?").slice(0, 12)}… | Created: ${created}
+          ${Icon('chart', 11, 'opacity:.7')} Polls: ${t.poll_count}${maxPolls} | Interval: ${t.poll_interval}s<br>
+          ${Icon('clock', 11, 'opacity:.7')} Last poll: ${pollAt} <span class="tpi-decision ${decClass}">${decLabel}</span><br>
+          ${t.last_poll_reason ? `${Icon('messageCircle', 11, 'opacity:.7')} ${escapeHtml(t.last_poll_reason.slice(0, 80))}<br>` : ""}
+          ${Icon('search', 11, 'opacity:.7')} Check cmd: <code>${checkCmd}</code><br>
+          ${Icon('edit', 11, 'opacity:.7')} Check: ${escapeHtml((t.check_instruction || "").slice(0, 80))}${(t.check_instruction || "").length > 80 ? "…" : ""}<br>
+          ${Icon('mapPin', 11, 'opacity:.7')} Conv: ${(t.conv_id || "?").slice(0, 12)}… | Created: ${created}
         </div>`;
 
       if (t.triggered_at) {
-        html += `<div class="tpi-triggered">⏰ Triggered: ${new Date(t.triggered_at).toLocaleString()}</div>`;
+        html += `<div class="tpi-triggered">${Icon('alarm', 12)} Triggered: ${new Date(t.triggered_at).toLocaleString()}</div>`;
       }
 
       // Action buttons (only for active timers)
       html += `<div class="tpi-actions">
-          <button onclick="_viewTimerLog('${t.id}')" class="tpi-btn tpi-btn-log" title="View poll log">📋 Log</button>`;
+          <button onclick="_viewTimerLog('${t.id}')" class="tpi-btn tpi-btn-log" title="View poll log">${Icon('clipboard', 11)} Log</button>`;
       if (t.status === "active") {
         html += `
           <button onclick="_triggerTimer('${t.id}')" class="tpi-btn tpi-btn-trigger" title="Force trigger now">▶ Trigger</button>
@@ -122,23 +124,90 @@ async function _cancelTimer(timerId) {
   }
 }
 
+// ── Jump to the conversation that owns a timer ──
+function _jumpToTimerConv(convId, e) {
+  if (e && e.stopPropagation) e.stopPropagation();
+  if (!convId) return;
+  // Close the panel first so the chat view is unobstructed.
+  _timerPanelOpen = false;
+  const panel = document.getElementById("timerPanel");
+  if (panel) panel.classList.remove("visible");
+
+  const conv = typeof conversations !== "undefined"
+    ? conversations.find((c) => c.id === convId)
+    : null;
+  if (!conv) {
+    if (typeof showToast === "function") {
+      showToast(t('timer.convMissing'), "warning");
+    }
+    return;
+  }
+  if (typeof loadConversation === "function") loadConversation(convId);
+}
+
+// ── Show the poll log in a visible modal (was console-only) ──
 async function _viewTimerLog(timerId) {
+  let data;
   try {
-    const data = await Api.timer.status(timerId, 20);
-    if (!data || !data.ok || !data.poll_log || data.poll_log.length === 0) {
-      debugLog("⏱️ No poll log entries yet.", "info");
-      return;
-    }
-    let msg = `⏱️ Timer ${timerId} Poll Log (newest first):\n`;
-    for (const entry of data.poll_log) {
-      const time = new Date(entry.poll_time).toLocaleString();
-      const icon = entry.decision === "ready" ? "✅" : entry.decision === "wait" ? "⏳" : "❌";
-      msg += `${icon} ${time} — ${entry.decision.toUpperCase()} — ${entry.reason || "(no reason)"} (${entry.tokens_used} tokens)\n`;
-    }
-    debugLog(msg, "info");
+    data = await Api.timer.status(timerId, 30);
   } catch (e) {
     debugLog(`⏱️ Log error: ${e.message}`, "error");
+    if (typeof showToast === "function") showToast(t('timer.logError'), "error");
+    return;
   }
+  const entries = (data && data.ok && Array.isArray(data.poll_log)) ? data.poll_log : [];
+
+  // Remove any existing log dialog before opening a new one.
+  const existing = document.getElementById("_timerLogDialog");
+  if (existing) existing.remove();
+
+  let rowsHtml;
+  if (entries.length === 0) {
+    rowsHtml = `<div class="timer-log-empty">${escapeHtml(t('timer.logEmpty'))}</div>`;
+  } else {
+    rowsHtml = entries.map((entry) => {
+      const time = entry.poll_time ? new Date(entry.poll_time).toLocaleString() : "?";
+      const dec = entry.decision || "wait";
+      const icon = dec === "ready" ? Icon('check', 12)
+        : dec === "wait" ? Icon('hourglass', 12)
+        : Icon('ban', 12);
+      const reason = entry.reason ? escapeHtml(entry.reason) : `(${t('timer.noReason')})`;
+      const tokens = entry.tokens_used != null ? `${entry.tokens_used} tok` : "";
+      const model = entry.model ? ` · ${escapeHtml(entry.model)}` : "";
+      const cmdOut = entry.check_output
+        ? `<div class="tl-cmd">${escapeHtml(String(entry.check_output).slice(0, 600))}</div>`
+        : "";
+      return `<div class="timer-log-row tl-${dec}">
+        <div class="tl-head">
+          <span class="tl-icon">${icon}</span>
+          <span class="tl-decision">${dec.toUpperCase()}</span>
+          <span class="tl-time">${escapeHtml(time)}</span>
+          <span class="tl-tokens">${escapeHtml(tokens)}${model}</span>
+        </div>
+        <div class="tl-reason">${reason}</div>
+        ${cmdOut}
+      </div>`;
+    }).join("");
+  }
+
+  const overlay = document.createElement("div");
+  overlay.id = "_timerLogDialog";
+  overlay.className = "timer-log-overlay";
+  overlay.innerHTML = `
+    <div class="timer-log-card" role="dialog" aria-modal="true">
+      <div class="timer-log-head">
+        <span class="timer-log-title">${Icon('clipboard', 15, 'vertical-align:-2px')} ${escapeHtml(t('timer.logTitle'))} <code>${escapeHtml(timerId)}</code></span>
+        <button class="timer-log-close" id="_timerLogClose" aria-label="close">${Icon('x', 14)}</button>
+      </div>
+      <div class="timer-log-body">${rowsHtml}</div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  function _close() { overlay.remove(); document.removeEventListener("keydown", _onKey); }
+  function _onKey(ev) { if (ev.key === "Escape") _close(); }
+  document.getElementById("_timerLogClose").addEventListener("click", _close);
+  overlay.addEventListener("click", (ev) => { if (ev.target === overlay) _close(); });
+  document.addEventListener("keydown", _onKey);
 }
 
 // ── Auto-refresh when panel is visible + periodic badge update ──

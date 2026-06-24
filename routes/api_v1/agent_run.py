@@ -78,34 +78,37 @@ accepted and merged into ``config`` (config wins on conflict).
 
 from __future__ import annotations
 
+import asyncio
 import json
-import threading
 import time
 import uuid
 
 from flask import Blueprint, Response
 
+from lib.agent_core.admission import (
+    await_terminal, controller, on_terminal, register_waiter,
+    unregister_waiter, wait_for_event,
+)
 from lib.api_response import (
-    api_bad_request, api_internal_error, api_not_found, api_ok,
+    api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
 )
 from lib.billing.request_flow import (
     estimate_prompt_tokens, release_reservation, reserve_for_task, settle_task,
 )
-from lib.byo_resolve import dispose_after_terminal, resolve_model_and_provider
+from lib.byo_resolve import resolve_model_and_provider
 from lib.idempotency import idempotent_post
 from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import (
-    optional_bool, optional_dict, optional_str, parse_body, require_list,
+    async_parse_body, optional_bool, optional_dict, optional_str, require_list,
 )
 from lib.tools.tool_env import (
-    CustomToolError, dispose_tool_env, dispose_tool_env_after_terminal,
-    mint_tool_env,
+    CustomToolError, dispose_tool_env, mint_tool_env,
 )
 from lib.trajectory import AVAILABLE_FORMATS, flatten
 
-from .auth import current_auth, require_scope
+from .auth import current_auth, guard_model_relay_or_dispose, require_scope
 
 logger = get_logger(__name__)
 
@@ -248,28 +251,31 @@ def _build_cfg(model_id: str, raw_config: dict | None,
 # ── Streaming + blocking response shapes ────────────────────────────
 
 
-def _wait_for_terminal(task, *, timeout_s: float):
-    deadline = time.time() + timeout_s
-    poll = 0.1
-    while task.get('status') not in ('done', 'error', 'aborted'):
-        if time.time() >= deadline:
-            raise RuntimeError('agent run timed out')
-        time.sleep(poll)
-        poll = min(poll * 1.2, 1.5)
+async def _wait_for_terminal(task, *, timeout_s: float):
+    """Await terminal state without busy-waiting (event-driven).
+
+    Returns normally on terminal; raises RuntimeError on timeout (logged
+    by the caller with task/model context).
+    """
+    ok = await await_terminal(task, timeout_s=timeout_s)
+    if not ok:
+        raise RuntimeError('agent run timed out')
 
 
-def _stream_generator(task, model: str, completion_id: str,
-                      *, billing_user_id: str = ''):
-    """SSE generator. Mirrors routes/api_v1/chat::_stream_generator
+async def _stream_generator(task, model: str, completion_id: str,
+                            *, billing_user_id: str = ''):
+    """Async SSE generator. Mirrors routes/api_v1/chat::_stream_generator
     but emits an ``agent.run.chunk`` object so consumers can tell the
     surface apart from compat-OpenAI streams.
+
+    Event-driven: waits on the task's terminal/nudge signal instead of
+    polling, so it never pins a thread while the LLM is generating.
 
     When ``billing_user_id`` is set (multi-user installs), the actual
     token usage is settled exactly once before the terminal ``[DONE]``
     line — mirroring the blocking path so stream mode is never free.
     """
     cursor = 0
-    last_heartbeat = time.time()
     emitted_role = False
     _billed = False
 
@@ -279,46 +285,54 @@ def _stream_generator(task, model: str, completion_id: str,
             settle_task(task, user_id=billing_user_id, model=model)
             _billed = True
 
-    while True:
-        with task['events_lock']:
-            new_events = list(task['events'][cursor:])
-            cursor = len(task['events'])
-        for ev in new_events:
-            etype = ev.get('type', '')
-            chunk = {
-                'id': completion_id,
-                'object': 'agent.run.chunk',
-                'created': int(time.time()),
-                'model': model,
-                'task_id': task.get('id'),
-                'event': etype,
-                'data': {k: v for k, v in ev.items() if k != 'type'},
-            }
-            if not emitted_role and etype == 'delta':
-                chunk['delta'] = {'role': 'assistant',
-                                   'content': ev.get('content', '')}
-                emitted_role = True
-            elif etype == 'delta':
-                chunk['delta'] = {'content': ev.get('content', '')}
-                if ev.get('thinking'):
-                    chunk['delta']['reasoning_content'] = ev['thinking']
-            yield f'data: {json.dumps(chunk, ensure_ascii=False)}\n\n'
-            if etype in ('done', 'error', 'aborted'):
+    task_id = task.get('id') or ''
+    try:
+        while True:
+            with task['events_lock']:
+                new_events = list(task['events'][cursor:])
+                cursor = len(task['events'])
+            for ev in new_events:
+                etype = ev.get('type', '')
+                chunk = {
+                    'id': completion_id,
+                    'object': 'agent.run.chunk',
+                    'created': int(time.time()),
+                    'model': model,
+                    'task_id': task.get('id'),
+                    'event': etype,
+                    'data': {k: v for k, v in ev.items() if k != 'type'},
+                }
+                if not emitted_role and etype == 'delta':
+                    chunk['delta'] = {'role': 'assistant',
+                                       'content': ev.get('content', '')}
+                    emitted_role = True
+                elif etype == 'delta':
+                    chunk['delta'] = {'content': ev.get('content', '')}
+                    if ev.get('thinking'):
+                        chunk['delta']['reasoning_content'] = ev['thinking']
+                yield f'data: {json.dumps(chunk, ensure_ascii=False)}\n\n'
+                if etype in ('done', 'error', 'aborted'):
+                    _settle_once()
+                    yield 'data: [DONE]\n\n'
+                    return
+            if task.get('status') in ('done', 'error', 'aborted') and not new_events:
+                yield (f'data: '
+                        f'{json.dumps({"object":"agent.run.chunk","event":task.get("status"),"task_id":task.get("id")})}'
+                        '\n\n')
                 _settle_once()
                 yield 'data: [DONE]\n\n'
                 return
-        if task.get('status') in ('done', 'error', 'aborted') and not new_events:
-            yield (f'data: '
-                    f'{json.dumps({"object":"agent.run.chunk","event":task.get("status"),"task_id":task.get("id")})}'
-                    '\n\n')
-            _settle_once()
-            yield 'data: [DONE]\n\n'
-            return
-        now = time.time()
-        if now - last_heartbeat > 15:
-            yield ': heartbeat\n\n'
-            last_heartbeat = now
-        time.sleep(0.05)
+            # Block until the next event (or 15s heartbeat) — no busy-wait.
+            woke = await wait_for_event(task_id, timeout=15.0)
+            if not woke:
+                yield ': heartbeat\n\n'
+    except (GeneratorExit, asyncio.CancelledError):
+        # Client disconnected. The task keeps running (its terminal
+        # callback still releases the admission slot); just stop streaming.
+        logger.info('[agent.run] stream client disconnected task=%s', task_id[:8])
+        raise
+    finally:
+        unregister_waiter(task_id)
 
 
 def _final_response(task: dict, *, model: str, requested_id: str,
@@ -450,8 +464,8 @@ def _final_response(task: dict, *, model: str, requested_id: str,
                 'timeout_s': {'type': 'number'},
                 'conversation_id': {'type': 'string'},
             }}}}})
-def agent_run():
-    body = parse_body()
+async def agent_run():
+    body = await async_parse_body()
     try:
         messages_in = require_list(body, 'messages')
     except ValueError as e:
@@ -473,6 +487,16 @@ def agent_run():
         if err_status == 404:
             return api_not_found(err)
         return api_bad_request(err, field='model')
+
+    # ── 1b. BYO-only relay backstop ───────────────────────────────
+    # A plain-alias model (no BYO handle) routes to the OPERATOR's slot
+    # pool, which a model_relay_enabled=false deployment forbids — even
+    # though such deployments DO grant tenants `agents:run` (so they can
+    # run agents against their OWN endpoint). BYO requests and admin keys
+    # pass; everything else is refused. Mirrors chat.py + compat routes.
+    _relay_denied = guard_model_relay_or_dispose(handle)
+    if _relay_denied is not None:
+        return _relay_denied
 
     # ── 2. Build cfg from unified config + legacy capabilities ─────
     raw_config = optional_dict(body, 'config') or {}
@@ -567,7 +591,6 @@ def agent_run():
                 dispose_ephemeral_slot(handle)
             if tool_env is not None:
                 dispose_tool_env(tool_env)
-            from lib.api_response import api_error
             return api_error(
                 f'Insufficient credits. '
                 f'Estimated cost {e.needed_micro / 1_000_000:.4f} credits, '
@@ -575,32 +598,67 @@ def agent_run():
                 status=402, error_kind='insufficient_funds',
                 balance_micro=e.balance_micro, needed_micro=e.needed_micro)
 
-    try:
-        spawn_task(task)
-    except Exception as e:
-        release_reservation(task, user_id=billing_user_id,
-                            reservation_micro=reservation_micro)
+    # ── Admission control: bound concurrent in-flight tasks ───────
+    # When the server is saturated, refuse with 503 + Retry-After
+    # instead of spawning unbounded work that starves the thread pool.
+    if not controller.try_acquire():
         if handle:
             dispose_ephemeral_slot(handle)
         if tool_env is not None:
             dispose_tool_env(tool_env)
-        logger.exception('[agent.run] spawn_task failed')
+        release_reservation(task, user_id=billing_user_id,
+                            reservation_micro=reservation_micro)
+        logger.warning('[agent.run] admission refused (in_flight=%d/%d) '
+                       'key=%s model=%s',
+                       controller.in_flight, controller.capacity,
+                       owner_key_id, model_id)
+        return api_error(
+            'Server at capacity; retry shortly.', status=503,
+            error_kind='overloaded', retry_after=5)
+
+    # Release the admission slot + dispose BYO/tool resources exactly
+    # once, the moment the task reaches a terminal state. Event-driven
+    # (fired from manager.append_event) — no per-request polling thread.
+    _slot_released = {'done': False}
+
+    def _on_done(_tid, _handle=handle, _tool_env=tool_env):
+        if _slot_released['done']:
+            return
+        _slot_released['done'] = True
+        controller.release()
+        if _handle is not None:
+            try:
+                dispose_ephemeral_slot(_handle)
+            except Exception as ex:
+                logger.error('[agent.run] ephemeral dispose failed handle=%s '
+                             'task=%s: %s', _handle.handle_id,
+                             _tid[:8], ex, exc_info=True)
+        if _tool_env is not None:
+            try:
+                dispose_tool_env(_tool_env)
+            except Exception as ex:
+                logger.error('[agent.run] tool-env dispose failed task=%s: %s',
+                             _tid[:8], ex, exc_info=True)
+
+    on_terminal(task['id'], _on_done)
+    register_waiter(task['id'])
+
+    try:
+        spawn_task(task)
+    except Exception as e:
+        # spawn failed → fire the cleanup callback synchronously (it
+        # releases the slot + disposes resources) and drop the waiter.
+        _on_done(task['id'])
+        unregister_waiter(task['id'])
+        release_reservation(task, user_id=billing_user_id,
+                            reservation_micro=reservation_micro)
+        logger.exception('[agent.run] spawn_task failed task=%s', task['id'][:8])
         return api_internal_error(e, context='api_v1.agent_run')
 
-    # Schedule disposal whenever the task terminates (handles both
-    # stream and blocking response modes uniformly).
-    if handle:
-        threading.Thread(
-            target=dispose_after_terminal, args=(task, handle),
-            name=f'ephemeral-dispose-{handle.handle_id}',
-            daemon=True,
-        ).start()
-    if tool_env is not None:
-        threading.Thread(
-            target=dispose_tool_env_after_terminal, args=(task, tool_env),
-            name=f'custom-tools-dispose-{tool_env.handle_id}',
-            daemon=True,
-        ).start()
+    logger.info('[agent.run] spawned task=%s conv=%s key=%s model=%s byo=%s '
+                'stream=%s in_flight=%d/%d', task['id'][:8],
+                conversation_id, owner_key_id, model_id, bool(handle),
+                stream, controller.in_flight, controller.capacity)
 
     # ── 5. Stream or block ────────────────────────────────────────
     if stream:
@@ -618,9 +676,13 @@ def agent_run():
             })
 
     try:
-        _wait_for_terminal(task, timeout_s=timeout_s)
+        await _wait_for_terminal(task, timeout_s=timeout_s)
     except RuntimeError as e:
+        logger.warning('[agent.run] task=%s timed out model=%s elapsed=%.0fs',
+                       task['id'][:8], model_id, timeout_s)
         return api_internal_error(str(e), context='api_v1.agent_run')
+    finally:
+        unregister_waiter(task['id'])
 
     out = _final_response(
         task, model=model_id, requested_id=requested_id,

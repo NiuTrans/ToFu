@@ -70,6 +70,22 @@ def ensure_project_state(path_str, extra_paths=None, conv_id=None, readonly_path
         except Exception as e:
             logger.warning('[Project] set_conv_roots failed conv=%s: %s',
                            conv_id[:12] if conv_id else '?', e)
+        # ★ 2026-06-22 — STOP here for task-context calls.  The global
+        #   _state/_roots singleton is the UI-facing "active project" the
+        #   project bar reflects (via get_state() / /api/v1/project/status).
+        #   A background run_task MUST NOT mutate it: both consumers a task
+        #   needs — the system-prompt root table (get_context_for_prompt) and
+        #   tool path resolution (_resolve_base) — already source roots from
+        #   the per-conv registry we just wrote (get_conv_roots(conv_id)),
+        #   passing the project path explicitly. Mutating the global here is
+        #   what made two conversations on different primaries (e.g. chatui vs
+        #   cadtrans) thrash set_project()/_roots.clear() back and forth,
+        #   wiping each other's roots AND their read-only flags — surfacing as
+        #   the project bar's read/write badge flipping on its own and the RO
+        #   lock vanishing. The conv scope is authoritative for the task; the
+        #   global is owned solely by explicit UI actions (/api/project/set,
+        #   /api/project/paths — which call set_project*() with no conv_id).
+        return True
 
     with _lock:
         if _state.get('path') == abs_path:

@@ -140,6 +140,98 @@ def test_step3_still_defers_for_same_path_remote(tmp_path, monkeypatch):
     assert host == '10.0.0.9'
 
 
+# ── Standalone-mode remote-owner heal ───────────────────────────────────
+# Same-FUSE-abs-path copies can't be copy-detected (stamp matches), so the
+# explicit TOFU_PG_STANDALONE flag clears an inherited REMOTE owner instead.
+
+def test_standalone_mode_off_by_default(tmp_path, monkeypatch):
+    from lib.database import _bootstrap as b
+    monkeypatch.delenv('TOFU_PG_STANDALONE', raising=False)
+    assert b._standalone_mode() is False
+
+
+def test_standalone_heal_clears_remote_owner(tmp_path, monkeypatch):
+    from lib.database import _bootstrap as b
+    pgdata = str(tmp_path)
+    _markers(pgdata, owner_ip='10.0.0.9')
+    b._write_instance_stamp(pgdata)  # same path → copy-detect WON'T fire
+    monkeypatch.setenv('TOFU_PG_STANDALONE', '1')
+    monkeypatch.setattr(b, '_get_local_ip', lambda: '10.0.0.50')
+    monkeypatch.setattr(b, '_pidfile_pid_is_live_local_postgres', lambda pg: False)
+
+    assert b._heal_if_standalone_remote_owner(pgdata) is True
+    assert not os.path.exists(os.path.join(pgdata, '.pg_owner_host'))
+    assert not os.path.exists(os.path.join(pgdata, '.tofu_heartbeat'))
+
+
+def test_standalone_noop_when_flag_unset(tmp_path, monkeypatch):
+    from lib.database import _bootstrap as b
+    pgdata = str(tmp_path)
+    _markers(pgdata, owner_ip='10.0.0.9')
+    monkeypatch.delenv('TOFU_PG_STANDALONE', raising=False)
+    monkeypatch.setattr(b, '_get_local_ip', lambda: '10.0.0.50')
+
+    assert b._heal_if_standalone_remote_owner(pgdata) is False
+    assert os.path.exists(os.path.join(pgdata, '.pg_owner_host'))
+
+
+def test_standalone_noop_when_owner_is_local(tmp_path, monkeypatch):
+    """Owner marker pointing at THIS host is not 'inherited' — leave it."""
+    from lib.database import _bootstrap as b
+    pgdata = str(tmp_path)
+    _markers(pgdata, owner_ip='10.0.0.50')
+    monkeypatch.setenv('TOFU_PG_STANDALONE', '1')
+    monkeypatch.setattr(b, '_get_local_ip', lambda: '10.0.0.50')
+
+    assert b._heal_if_standalone_remote_owner(pgdata) is False
+    assert os.path.exists(os.path.join(pgdata, '.pg_owner_host'))
+
+
+def test_standalone_noop_when_pidfile_is_live_local_pg(tmp_path, monkeypatch):
+    """IP flap guard: our own live postmaster must never be clobbered."""
+    from lib.database import _bootstrap as b
+    pgdata = str(tmp_path)
+    _markers(pgdata, owner_ip='10.0.0.9')
+    monkeypatch.setenv('TOFU_PG_STANDALONE', '1')
+    monkeypatch.setattr(b, '_get_local_ip', lambda: '10.0.0.50')
+    monkeypatch.setattr(b, '_pidfile_pid_is_live_local_postgres', lambda pg: True)
+
+    assert b._heal_if_standalone_remote_owner(pgdata) is False
+    assert os.path.exists(os.path.join(pgdata, '.pg_owner_host'))
+
+
+def test_step3_no_defer_in_standalone_with_remote_owner(tmp_path, monkeypatch):
+    """End-to-end: standalone + same-path remote owner → take over locally."""
+    from lib.database import _bootstrap as b
+    pgdata = str(tmp_path)
+    _markers(pgdata, owner_ip='10.0.0.9')
+    b._write_instance_stamp(pgdata)  # not a copy
+    monkeypatch.setenv('TOFU_PG_STANDALONE', '1')
+    monkeypatch.setattr(b, '_get_local_ip', lambda: '10.0.0.50')
+    monkeypatch.setattr(b, '_pidfile_pid_is_live_local_postgres', lambda pg: False)
+
+    is_remote, host = b._pg_already_running_on_another_machine(pgdata, 15439)
+    assert is_remote is False
+    assert host is None
+
+
+def test_step3_still_defers_same_path_remote_when_not_standalone(tmp_path, monkeypatch):
+    """Regression guard: failover preserved when TOFU_PG_STANDALONE is unset."""
+    from lib.database import _bootstrap as b
+    pgdata = str(tmp_path)
+    _markers(pgdata, owner_ip='10.0.0.9')
+    b._write_instance_stamp(pgdata)
+    monkeypatch.delenv('TOFU_PG_STANDALONE', raising=False)
+    monkeypatch.setattr(b, '_get_local_ip', lambda: '10.0.0.50')
+    monkeypatch.setattr('lib.compat.is_process_alive', lambda pid: True)
+    monkeypatch.setattr('lib.compat.is_process_named', lambda pid, name: False)
+    monkeypatch.setattr(b, '_pg_real_connect_ok', lambda *a, **k: True)
+
+    is_remote, host = b._pg_already_running_on_another_machine(pgdata, 15439)
+    assert is_remote is True
+    assert host == '10.0.0.9'
+
+
 # ── Marker clearing helper ──────────────────────────────────────────────
 
 def test_clear_ownership_markers_keeps_data(tmp_path):

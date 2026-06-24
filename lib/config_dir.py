@@ -56,5 +56,20 @@ def config_path(*parts):
     return os.path.join(CONFIG_DIR, *parts)
 
 
+# ── Per-project fetched-files staging directory ──
+# data/fetched/ holds file assets downloaded by the fetch_url tool that
+# cannot be extracted as text (images, archives, office docs, …). The model
+# is handed the saved path and reads it back via read_files. Lives under the
+# fully-gitignored data/ tree, so it stays isolated per project copy and is
+# never exported.
+FETCHED_DIR = os.path.join(_BASE_DIR, 'data', 'fetched')
+
+
+def fetched_path(*parts):
+    """Build a path under data/fetched/, creating the directory on first use."""
+    os.makedirs(FETCHED_DIR, exist_ok=True)
+    return os.path.join(FETCHED_DIR, *parts)
+
+
 # ── Auto-create config dir on import ──
 _ensure_config_dir()

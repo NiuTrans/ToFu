@@ -449,10 +449,10 @@ async function handleDocUpload(file) {
 
   // Determine icon by extension
   const ext = _getFileExt(file.name);
-  const iconMap = {'.docx':'📝', '.pptx':'📊', '.xlsx':'📈', '.txt':'📄', '.md':'📄',
-                   '.csv':'📊', '.json':'📄', '.xml':'📄', '.py':'🐍', '.js':'📜',
-                   '.html':'🌐', '.yaml':'⚙️', '.yml':'⚙️'};
-  const icon = iconMap[ext] || '📄';
+  const iconMap = {'.docx':Icon('file',22), '.pptx':Icon('slides',22), '.xlsx':Icon('fileSheet',22), '.txt':Icon('file',22), '.md':Icon('file',22),
+                   '.csv':Icon('fileSheet',22), '.json':Icon('fileCode',22), '.xml':Icon('fileCode',22), '.py':Icon('fileCode',22), '.js':Icon('fileCode',22),
+                   '.html':Icon('fileCode',22), '.yaml':Icon('cog',22), '.yml':Icon('cog',22)};
+  const icon = iconMap[ext] || Icon('file',22);
 
   try {
     const formData = new FormData();
@@ -503,14 +503,14 @@ function renderImagePreviews() {
       const vlmS = pdf.vlmStatus || "";
       const vlmBadge =
         vlmS === "parsing"
-          ? `<div class="pdf-vlm-badge parsing">🔄 VLM ${pdf.vlmProgress || "..."}</div>`
+          ? `<div class="pdf-vlm-badge parsing">${Icon('refresh',11)} VLM ${pdf.vlmProgress || "..."}</div>`
           : vlmS === "done"
-            ? `<div class="pdf-vlm-badge done">✅ VLM</div>`
+            ? `<div class="pdf-vlm-badge done">${Icon('file',11)} VLM</div>`
             : vlmS === "failed" || vlmS === "timeout"
-              ? `<div class="pdf-vlm-badge failed">⚠️ VLM</div>`
+              ? `<div class="pdf-vlm-badge failed">${Icon('zap',11)} VLM</div>`
               : "";
       const methodLabel = pdf.method === "vlm" ? "VLM" : "TEXT";
-      const docIcon = pdf._docIcon || "📄";
+      const docIcon = pdf._docIcon || Icon('file',22);
       return `<div class="img-preview pdf-text-card" onclick="previewPendingPdfText(${i})"><div class="pdf-text-card-inner"><div class="pdf-text-icon">${docIcon}</div><div class="pdf-text-info"><div class="pdf-text-name" title="${escapeHtml(pdf.name)}">${escapeHtml(pdf.name.length > 20 ? pdf.name.slice(0, 18) + "…" : pdf.name)}</div><div class="pdf-text-meta">${pdf.pages}p · ${sizeStr}${badge}</div>${vlmBadge}</div></div><button class="remove-img" onclick="event.stopPropagation();removePdfText(${i})">✕</button><div class="img-size">${methodLabel}</div></div>`;
     })
     .join("");
@@ -833,28 +833,22 @@ document.addEventListener('click', function(e) {
       const allRounds = getToolRoundsFromMsg(msg);
       if (allRounds.length > 0) {
         trunc.remove();
-        body.innerHTML = '';
-        /* Render in rAF-chunked batches: building 100+ tool rows synchronously
-         * freezes the main thread for ~1s (poor INP). Spreading the work across
-         * frames keeps the click responsive — same end state, rows stream in. */
-        const _renderSlot = (round) => {
-          const slot = document.createElement('div');
-          slot.setAttribute('data-prn', round.roundNum);
-          slot.innerHTML = typeof _renderUnifiedToolLine === 'function'
-            ? _renderUnifiedToolLine(round, false)
-            : `<div class="ptool-line"><span class="ptool-text">${escapeHtml(round.toolName || round.query || '')}</span></div>`;
-          return slot;
-        };
-        const CHUNK = 30;
-        let _i = 0;
-        const _renderChunk = () => {
-          const frag = document.createDocumentFragment();
-          const end = Math.min(_i + CHUNK, allRounds.length);
-          for (; _i < end; _i++) frag.appendChild(_renderSlot(allRounds[_i]));
-          body.appendChild(frag);
-          if (_i < allRounds.length) requestAnimationFrame(_renderChunk);
-        };
-        _renderChunk();
+        /* Render the full grouped structure (parallel-batch .ptool-turn
+         * containers) in one shot via the shared helper so the expanded
+         * view matches the streaming/static layout exactly. */
+        if (typeof _renderToolGroupsHTML === 'function') {
+          body.innerHTML = _renderToolGroupsHTML(allRounds, allRounds);
+        } else {
+          body.innerHTML = '';
+          for (const round of allRounds) {
+            const slot = document.createElement('div');
+            slot.setAttribute('data-prn', round.roundNum);
+            slot.innerHTML = typeof _renderUnifiedToolLine === 'function'
+              ? _renderUnifiedToolLine(round, false)
+              : `<div class="ptool-line"><span class="ptool-text">${escapeHtml(round.toolName || round.query || '')}</span></div>`;
+            body.appendChild(slot);
+          }
+        }
         return;
       }
     }

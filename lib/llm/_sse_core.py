@@ -91,7 +91,7 @@ class RequestPlan:
 
 def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                     base_url=None, extra_headers=None,
-                    api_protocol='openai') -> RequestPlan:
+                    api_protocol='openai', oauth='') -> RequestPlan:
     """Identical pre-flight for both transports.
 
     Mutates ``body`` in place (cache breakpoints, ``_task_id`` pop, Codex
@@ -119,6 +119,13 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                 else:
                     extra_headers['anthropic-beta'] = _ttl_beta
 
+    # Subscription-OAuth slot: swap in a live token + client-identity headers,
+    # and (for Claude) prepend the mandatory identity system block — all BEFORE
+    # the body translation below reads messages / builds headers.
+    if oauth:
+        from lib.oauth.outbound import resolve_oauth_request
+        api_key, extra_headers, body = resolve_oauth_request(oauth, body, extra_headers)
+
     # Codex OAuth translation
     codex_translator = None
     anthropic_translator = None
@@ -137,6 +144,9 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         body = openai_body_to_anthropic(body)
         anthropic_translator = AnthropicSSETranslator(model=_model_name)
         url = anthropic_messages_url(base_url)
+        if oauth == 'claude':
+            from lib.oauth.outbound import claude_oauth_url
+            url = claude_oauth_url(url)
         logger.debug('%s [Anthropic] Translated request for Messages API', log_prefix)
     else:
         url = f'{base_url.rstrip("/")}/chat/completions' if base_url else chat_url()
@@ -150,6 +160,10 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     if anthropic_translator is not None:
         from lib.llm.anthropic_outbound import anthropic_headers
         hdrs = anthropic_headers(api_key, extra_headers)
+        if oauth == 'claude':
+            # Subscription tokens are rejected on Authorization: Bearer
+            # (401 since 2026); the token must ride x-api-key only.
+            hdrs.pop('Authorization', None)
     else:
         hdrs = headers()
         if api_key:

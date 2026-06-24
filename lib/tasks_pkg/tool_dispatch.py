@@ -817,7 +817,15 @@ def _unpack_cache_entry(cached) -> tuple:
     Handles all legacy tuple lengths (2–6) and bare values gracefully.
     """
     if not isinstance(cached, (tuple, list)):
-        logger.debug('[Dedup] cache value is %s not tuple — wrapping', type(cached).__name__)
+        # A non-(tuple/list) entry means a buggy writer poisoned the dedup
+        # cache; we still wrap it, but a str/dict becomes the model-visible
+        # result verbatim while anything else is str()'d into garbage — both
+        # are real defects worth surfacing, not a routine fallback.
+        if isinstance(cached, (str, dict)):
+            logger.debug('[Dedup] cache value is %s not tuple — wrapping', type(cached).__name__)
+        else:
+            logger.warning('[Dedup] cache value is unexpected type %s (not tuple/str/dict) '
+                           '— wrapping; model will see str() of it', type(cached).__name__)
         return (cached, False, 'dedup', None, None, None)
     # Pad to length 6 with defaults
     defaults = (None, False, 'dedup', None, None, None)

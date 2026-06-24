@@ -96,14 +96,12 @@ def chat_active():
 @api_v1_chat_bp.route('/api/v1/chat/start', methods=['POST'], endpoint='ui_chat_start')
 @require_scope('chat')
 def chat_start():
-    """Start a chat task. Body is ``{convId, config[, messages, agentBackend]}``.
+    """Start a chat task. Body is ``{convId, config[, messages]}``.
 
     Default flow: load messages from the DB via ``build_api_messages_from_db``,
     then dispatch to the built-in orchestrator. External callers (SWE-bench,
     eval harnesses) may pass ``messages`` inline, which sets ``_inline_messages``
-    so :func:`_sync_result_to_conversation` skips DB write-back. Selecting a
-    non-builtin ``config.agentBackend`` (codex / claude_code / …) routes to
-    :func:`_start_external_backend` instead.
+    so :func:`_sync_result_to_conversation` skips DB write-back.
 
     Returns ``{taskId}``; the client polls ``/api/v1/chat/poll/<taskId>``.
     """
@@ -137,12 +135,6 @@ def chat_start():
     from lib.tasks_pkg import abort_running_tasks_for_conv
     abort_running_tasks_for_conv(conv_id)
 
-    # ── Backend dispatch: external backends get their own flow ──
-    backend_name = cfg.get('agentBackend', 'builtin')
-    if backend_name and backend_name != 'builtin':
-        return _start_external_backend(data, messages, backend_name)
-
-    # ── Default: built-in Tofu backend ──
     task = create_task(conv_id, messages, cfg)
     # Human-attended UI task: a user is watching and can answer the write-
     # approval prompt, so Manual mode actually gates here (see
@@ -265,15 +257,6 @@ def _start_task_for_conv(conv_id, config, data=None):
     if not api_messages:
         return None, (jsonify({'error': 'No messages to process'}), 400)
 
-    # External backend support
-    backend_name = config.get('agentBackend', 'builtin')
-    if backend_name and backend_name != 'builtin':
-        # Reuse existing external backend flow
-        full_data = {'convId': conv_id, 'config': config}
-        if data:
-            full_data.update(data)
-        return None, _start_external_backend(full_data, api_messages, backend_name)
-
     task = create_task(conv_id, api_messages, config)
     task['_attended'] = True
     task_id = task['id']
@@ -326,7 +309,22 @@ def _start_task_for_conv(conv_id, config, data=None):
             from lib.tasks_pkg.endpoint import run_endpoint_task
             _flow_entry = run_endpoint_task
         task['endpoint_mode'] = True
-        task['_endpoint_phase'] = 'planning'
+        # Seed the phase that the FIRST SSE `state` snapshot will report. A
+        # user-selected flow may open on a worker / verifier rather than a
+        # planner; advertising 'planning' for a plannerless flow makes the
+        # frontend stand up a Planner bubble that never streams (hangs at
+        # "Waiting…"). Live endpoint mode (no flow def) keeps 'planning'.
+        _initial_phase = 'planning'
+        try:
+            from lib.orchestration_endpoint_runner import resolve_chat_flow_definition
+            _sel_defn, _ = resolve_chat_flow_definition(config)
+            if _sel_defn is not None:
+                from lib.orchestration import initial_phase_for_flow
+                _initial_phase = initial_phase_for_flow(_sel_defn)
+        except Exception as _phase_err:
+            logger.debug('[Chat] initial-phase derivation failed, defaulting to '
+                         'planning: %s', _phase_err)
+        task['_endpoint_phase'] = _initial_phase
         task['_endpoint_iteration'] = 0
         logger.info('[Chat] Starting FLOW task %s for conv %s model=%s via=%s',
                     task_id[:8], conv_id[:8], _cfg_model, _flow_entry.__name__)
@@ -523,10 +521,9 @@ def chat_send():
         # 5. Start task (no active task — send immediately)
         task_id, err_resp = _start_task_for_conv(conv_id, config, data)
         if err_resp is not None:
-            # External backend returns a full Response directly
             if isinstance(err_resp, tuple):
                 return err_resp
-            return err_resp  # direct Response from _start_external_backend
+            return err_resp
 
         # 6. Update activeTaskId in settings
         try:
@@ -594,12 +591,6 @@ def chat_branch_start():
             return api_bad_request('No messages to process')
 
         cleanup_old_tasks()
-
-        # External backend support
-        backend_name = cfg.get('agentBackend', 'builtin')
-        if backend_name and backend_name != 'builtin':
-            full_data = {'convId': conv_id, 'config': cfg}
-            return _start_external_backend(full_data, api_messages, backend_name)
 
         task = create_task(conv_id, api_messages, cfg)
         task['_attended'] = True
@@ -699,10 +690,67 @@ def chat_regenerate():
             user_msg['images'] = edited_images
         if edited_pdf_texts is not None:
             user_msg['pdfTexts'] = edited_pdf_texts
+        # Refresh the per-turn context snapshot when the client sends a fresh
+        # one (edit-and-resend re-runs with possibly new model/tools). A plain
+        # regenerate omits ``ctx`` so the original snapshot is preserved.
+        # See static/js/info-rail.js.
+        if data.get('ctx'):
+            user_msg['_ctx'] = data['ctx']
 
         # 3. Auto-translate if needed
         text = user_msg.get('content', '')
         auto_translate = config.get('autoTranslate', False)
+        # Track whether we mutated user_msg so the response tells the frontend
+        # to refresh its local copy (otherwise a later full-conv sync would PUT
+        # the stale pre-restore content back into the DB).
+        restored_original = False
+
+        # ── Autopilot (virtual-user) / endpoint-critic messages ──
+        # These are role='user' but DISPLAY-translated: `content` is the
+        # model-language original (shown in the 原文 toggle) and
+        # `translatedContent` is the UI-language rendering shown in the OUTER
+        # bubble. This is the OPPOSITE wiring of a normal user message.
+        # An edit changes `content`, which invalidates the cached
+        # `translatedContent` — drop it (+ `_translatedCache`) so the outer
+        # bubble re-renders the edited `content` instead of the stale 译文
+        # (the reported "edit only shows in the toggle" bug). They must NOT go
+        # through the normal user→English auto-translate path below, which
+        # would set `originalContent` and corrupt the VU/critic structure into
+        # a double-translated mess.
+        _is_vu_critic = bool(user_msg.get('_isVirtualUser') or user_msg.get('_isEndpointReview'))
+        if _is_vu_critic and edited_content is not None:
+            for _k in ('translatedContent', '_translatedCache', '_translateDone',
+                       '_translateModel', '_translateField', '_translateError'):
+                user_msg.pop(_k, None)
+            restored_original = True  # tell the client to refresh its local copy
+            logger.info('[Regen] conv=%s VU/critic edit — cleared stale display '
+                        'translation (translatedContent) before regenerate',
+                        conv_id[:8])
+
+        if _is_vu_critic:
+            # Skip the normal user-message translate paths entirely for VU /
+            # critic messages — their `content` is fed to the model as-is.
+            auto_translate = False
+        if not auto_translate and text and user_msg.get('originalContent'):
+            # Auto-translate is OFF, but this message carries a translation from
+            # an earlier auto-translate-ON turn: content=English (sent to the
+            # model), originalContent=the user's original (what they see). A
+            # plain regenerate sends no editedContent, so without this the model
+            # would silently receive the stale English instead of the original.
+            # Restore the original and drop the translation metadata so the run
+            # honours the current (OFF) setting and matches the on-screen text.
+            # (Edit-and-resend already pops originalContent in step 2, so this
+            # only triggers for the no-edit regenerate path.)
+            user_msg['content'] = user_msg['originalContent']
+            user_msg.pop('originalContent', None)
+            user_msg.pop('_translateDone', None)
+            user_msg.pop('_translateModel', None)
+            user_msg.pop('_translateFailed', None)
+            text = user_msg['content']
+            restored_original = True
+            logger.info('[Regen] conv=%s auto-translate OFF — restored original '
+                        'text (dropped stale translation) before regenerate',
+                        conv_id[:8])
         if auto_translate and text:
             # Translate ANY non-English input to English (English is the
             # model's strongest language). The actual "is this already
@@ -799,7 +847,13 @@ def chat_regenerate():
             'convId': conv_id,
             'title': title,
             'msgCount': len(messages),
-            'userMessage': user_msg if edited_content is not None else None,
+            'userMessage': (user_msg if (edited_content is not None
+                                         or restored_original) else None),
+            # Tells the frontend to DROP its stale local translation fields
+            # (originalContent / _translateDone / …). Object.assign-merging
+            # the returned user_msg alone wouldn't remove keys that the server
+            # dropped, leaving a ghost bilingual block + a re-PUT risk.
+            'restoredOriginal': restored_original,
         })
 
     except Exception as e:
@@ -1009,19 +1063,6 @@ def chat_continue():
 #  Server-side message queue endpoints
 #  → moved to routes/chat_queue.py (kept on the same chat_bp)
 # ══════════════════════════════════════════════════════════
-
-
-def _start_external_backend(data, messages, backend_name):
-    """Thin HTTP wrapper over ``lib.chat.external_backend.run_external_backend``.
-
-    The engine (validation + SSE-bridge worker thread) lives in lib and
-    returns a plain result dict; here we map it to a Flask response.
-    """
-    from lib.chat.external_backend import run_external_backend
-    result = run_external_backend(data, messages, backend_name)
-    if 'error' in result:
-        return jsonify({'error': result['error']}), result.get('status', 400)
-    return jsonify(result)
 
 
 @chat_bp.route('/api/chat/stream/<task_id>', methods=['GET'])
@@ -1546,19 +1587,6 @@ def chat_abort(task_id):
         except (OSError, ProcessLookupError) as e:
             logger.debug('[Chat] Task %s — subprocess kill skipped: %s', task_id[:8], e)
 
-    # ── External backend: also signal the subprocess to terminate ──
-    _backend_name = task.get('_backend')
-    if _backend_name and _backend_name != 'builtin':
-        try:
-            from lib.agent_backends import get_backend
-            backend = get_backend(_backend_name)
-            if backend:
-                backend.abort(task_id)
-                logger.info('[Chat] Sent abort to external backend %s for task %s',
-                            _backend_name, task_id[:8])
-        except Exception as e:
-            logger.warning('[Chat] Failed to abort external backend %s: %s',
-                           _backend_name, e)
     return api_ok()
 @api_v1_chat_bp.route('/api/v1/chat/poll/<task_id>', methods=['GET'], endpoint='ui_chat_poll')
 @require_scope('chat')
@@ -1627,10 +1655,20 @@ def chat_poll(task_id):
             r['autopilotNextTaskId'] = _ap_followup['next_task_id']
             r['autopilotVuMessage'] = _ap_followup['vu_msg']
         # ★ Include endpoint turns for endpoint mode tasks so _pollFallback
-        #   can reconstruct the full multi-turn conversation
-        if task.get('endpoint_mode') and task.get('_endpoint_turns'):
+        #   can reconstruct the full multi-turn conversation.  Also surface
+        #   the same authoritative terminal signals the SSE state snapshot
+        #   carries (endpointPhase / endpointStopReason / endpointIteration)
+        #   so BOTH transports hand the frontend the identical baton — the
+        #   poll path can then suppress ghost-worker creation after Critic
+        #   STOP exactly like the SSE state handler does.
+        if task.get('endpoint_mode'):
             r['endpointMode'] = True
-            r['endpointTurns'] = task['_endpoint_turns']
+            if task.get('_endpoint_turns'):
+                r['endpointTurns'] = task['_endpoint_turns']
+            r['endpointPhase'] = task.get('_endpoint_phase', 'planning')
+            r['endpointIteration'] = task.get('_endpoint_iteration', 0)
+            if task.get('_endpoint_stop_reason'):
+                r['endpointStopReason'] = task['_endpoint_stop_reason']
         return jsonify(r)
 
     logger.debug('[Chat] Poll %s — not in memory, checking DB', task_id[:8])
@@ -1691,6 +1729,24 @@ def chat_poll(task_id):
                      'modifiedFiles', 'modifiedFileList'):
             if _db_meta.get(key):
                 r[key] = _db_meta[key]
+        # ★ Endpoint mode: the in-memory task that held _endpoint_turns has
+        #   been evicted (past TTL) or lost to a server restart, so reconstruct
+        #   the multi-turn structure from the durable conversation messages
+        #   (the authoritative store — endpoint.py syncs every turn there).
+        #   Without this, a poll-fallback that outlives the in-memory task
+        #   returns no endpointMode → the frontend overwrites the multi-turn
+        #   endpoint render with the last single-turn content blob, a
+        #   display-state desync that only a manual refresh repaired.  Covers
+        #   BOTH done and interrupted statuses (the interrupted server-crash
+        #   path is exactly when this reconstruction matters most).
+        if _db_meta.get('endpointMode'):
+            r['endpointMode'] = True
+            from lib.tasks_pkg import load_endpoint_turns_from_conversation
+            _ep_turns = load_endpoint_turns_from_conversation(row['conv_id'])
+            if _ep_turns:
+                r['endpointTurns'] = _ep_turns
+            if _db_meta.get('endpointStopReason'):
+                r['endpointStopReason'] = _db_meta['endpointStopReason']
         if _db_meta.get('fallbackModel'):
             r['fallbackModel'] = _db_meta['fallbackModel']
             r['fallbackFrom'] = _db_meta.get('fallbackFrom', '')
@@ -1703,6 +1759,51 @@ def chat_poll(task_id):
     logger.warning('[Chat] Poll %s — NOT FOUND in memory or DB! Task may have been cleaned up. '
                    'Client will receive 404 and may lose accumulated content.',
                    task_id[:8])
+    return api_not_found('Task not found')
+
+
+@api_v1_chat_bp.route('/api/v1/chat/flow-trace/<task_id>', methods=['GET'],
+                      endpoint='ui_chat_flow_trace')
+@require_scope('chat')
+def chat_flow_trace(task_id):
+    """Return the per-node run trace for an orchestration-flow chat task.
+
+    The trace is the traceability record FlowExecutor accumulates: one entry
+    per executed node carrying the RESOLVED delegation brief (the rendered
+    role prompt — "what is this role doing?"), a bounded copy of its effective
+    input context, its full bounded output, the message axis / isolation /
+    loop iteration, and deliverable counts + timing. Powers the Studio
+    canvas/inspector overlay.
+
+    Served from the live in-memory task first (mid-run / just-finished), then
+    the persisted ``task_results.metadata.flowTrace`` (survives reload /
+    restart). Returns ``{ok, taskId, flowLabel, trace: [...]}``.
+    """
+    with tasks_lock:
+        task = tasks.get(task_id)
+    if task is not None:
+        return api_ok({
+            'taskId': task_id,
+            'flowLabel': task.get('_flow_label', ''),
+            'trace': task.get('_flow_trace') or [],
+        })
+
+    db = get_db(DOMAIN_CHAT)
+    row = db.execute(
+        'SELECT metadata FROM task_results WHERE task_id=?', (task_id,)
+    ).fetchone()
+    if row and row['metadata']:
+        try:
+            meta = json.loads(row['metadata'])
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning('[Chat] flow-trace %s — metadata parse failed: %s',
+                           task_id[:8], e)
+            meta = {}
+        return api_ok({
+            'taskId': task_id,
+            'flowLabel': meta.get('flowLabel', ''),
+            'trace': meta.get('flowTrace') or [],
+        })
     return api_not_found('Task not found')
 
 

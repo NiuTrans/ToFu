@@ -61,6 +61,9 @@ async function openUpdateDialog() {
 async function _runUpdateCheck() {
   const body = document.getElementById('updateModalBody');
   if (!body) return;
+  // A restart owns the modal body — re-opening the dialog (or a retry click)
+  // must not paint the "checking…" spinner over the live progress card.
+  if (_restartActive) return;
   body.innerHTML =
     '<div class="upd-checking-wrap"><span class="upd-big-spin"></span><span>' +
     escapeHtml(t('update.checking')) + '</span></div>';
@@ -109,11 +112,7 @@ function _renderUpdateDialogBody(r) {
   if (!body) return;
 
   let actionHtml = '';
-  if (!r.git_available) {
-    // Not a git checkout — in-place update isn't possible.
-    actionHtml = '<div class="upd-badge warn"><span class="upd-badge-icon">⚠️</span><span>' +
-      escapeHtml(t('update.noGit')) + '</span></div>';
-  } else if (!r.update_available) {
+  if (!r.update_available) {
     actionHtml = '<div class="upd-badge ok"><span class="upd-badge-icon">' +
       '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
       'stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">' +
@@ -123,12 +122,19 @@ function _renderUpdateDialogBody(r) {
     // Genuine tracked-source edits block the pull. List a few, never auto-stash.
     const sample = (r.blocking || []).slice(0, 8).map(escapeHtml).join('<br>');
     actionHtml =
-      '<div class="upd-badge warn"><span class="upd-badge-icon">⚠️</span><span>' +
-      escapeHtml(t('update.dirty').replace(/^⚠️\s*/, '')) + '</span></div>' +
+      '<div class="upd-badge warn"><span class="upd-badge-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span><span>' +
+      escapeHtml(t('update.dirty')) + '</span></div>' +
       (sample ? '<pre class="upd-files">' + sample + '</pre>' : '');
   } else {
+    // A non-git deployment (exported copy / zip) updates via a downloaded
+    // release-tarball overlay rather than git pull. Note the method so the
+    // user understands the one limitation (can't delete files removed upstream).
+    const methodNote = (r.update_method === 'tarball')
+      ? '<p class="upd-hint">' + escapeHtml(t('update.tarballNote')) + '</p>'
+      : '';
     actionHtml =
       '<p class="upd-ready">' + escapeHtml(t('update.ready')) + '</p>' +
+      methodNote +
       '<button class="upd-apply-btn" id="updateApplyBtn" onclick="applyUpdate()">' +
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
       'stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/>' +
@@ -145,9 +151,10 @@ function _renderUpdateDialogBody(r) {
 function _renderUpdateStepper() {
   const area = document.getElementById('updateActionArea');
   if (!area) return;
+  const isTarball = !!(_updateState && _updateState.update_method === 'tarball');
   const labels = {
-    fetch: t('update.step.fetch'),
-    pull: t('update.step.pull'),
+    fetch: isTarball ? t('update.step.fetchDl') : t('update.step.fetch'),
+    pull: isTarball ? t('update.step.pullOverlay') : t('update.step.pull'),
     deps: t('update.step.deps'),
   };
   const items = _UPDATE_STAGES.map(function (stage) {
@@ -354,6 +361,12 @@ var _restartT0 = 0;
 var _restartRaf = null;
 var _restartPoll = null;
 var _restartDone = false;
+// True from the moment a restart is kicked off until it succeeds or times
+// out. Single source of truth that the dialog-render paths consult so they
+// never clobber the live restart progress card (e.g. re-opening the dialog
+// or the always-live footer "Restart now" button mid-restart). Distinct from
+// _restartDone, which starts false and so can't tell "not started" from "done".
+var _restartActive = false;
 
 /** Map elapsed seconds → {pct, key} along the phase timeline (ease-out per
  *  phase). The final phase holds at its cap if the server overruns, so a
@@ -416,6 +429,7 @@ function _restartAnimate() {
 function _restartSucceed(version) {
   if (_restartDone) return;
   _restartDone = true;
+  _restartActive = false;
   if (_restartRaf) cancelAnimationFrame(_restartRaf);
   if (_restartPoll) clearInterval(_restartPoll);
   const fill = document.getElementById('updRestartFill');
@@ -439,6 +453,7 @@ function _restartSucceed(version) {
 function _restartTimeout() {
   if (_restartDone) return;
   _restartDone = true;
+  _restartActive = false;
   if (_restartRaf) cancelAnimationFrame(_restartRaf);
   if (_restartPoll) clearInterval(_restartPoll);
   const phaseEl = document.getElementById('updRestartPhase');
@@ -454,9 +469,14 @@ function _restartTimeout() {
  *  os.execv reclaiming the SAME port, so the page can reconnect to the same
  *  URL once /api/health answers again. */
 async function restartServer(opts) {
+  // Already restarting — ignore a re-entry (footer button stays live, the
+  // post-pull button could be double-clicked) so we never spawn a second
+  // poll loop or reset the progress timeline.
+  if (_restartActive) return;
   // The footer button is available with no pending update — confirm first so
   // a stray click never interrupts running tasks.
   if (opts && opts.confirm && !await showConfirm(t('update.restartConfirm'), { danger: true })) return;
+  _restartActive = true;
   const btn = document.getElementById('updateRestartBtn')
     || document.getElementById('updateRestartNowBtn');
   if (btn) { btn.disabled = true; btn.textContent = t('update.restarting'); }
@@ -488,6 +508,12 @@ async function _restartCheckHealth() {
 }
 
 function closeUpdateModal() {
+  // A restart owns the modal: the progress card is the only feedback the user
+  // has while the server is down (no live logs over the wire). Dismissing it —
+  // via the × button or a backdrop click — would strand the user staring at a
+  // dead page with no indication the restart is still in flight. Pin it open
+  // until the restart resolves (auto-reloads on success, or shows a timeout).
+  if (_restartActive) return;
   const modal = document.getElementById('updateModal');
   if (modal) modal.classList.remove('open');
 }

@@ -95,6 +95,11 @@ class Slot:
     protocol: str = ''              # per-provider wire protocol:
                                     # '' / 'openai' = OpenAI Chat Completions (default)
                                     # 'anthropic' = Anthropic Messages API (POST /v1/messages)
+    oauth: str = ''                 # subscription-OAuth provider for this slot:
+                                    # '' = normal api_key auth (default)
+                                    # 'claude' / 'codex' = resolve a live token +
+                                    # client-identity headers at request time
+                                    # (see lib/oauth/outbound.py)
     stream_only: bool = False       # True if model only supports stream=True (e.g. qwq-plus, deepseek-reasoner)
 
     # ── Rate limiting ──

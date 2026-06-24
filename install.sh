@@ -732,6 +732,16 @@ CONDA_PKGS=(
     "xlrd>=2.0"
     "olefile>=0.46"
     "mcp>=1.0"
+    # orjson — fast JSON encoder; imported by routes/chat.py for chat
+    # snapshot serialisation. Hard dep: the server won't boot without it.
+    "orjson>=3.9"
+    # sqlalchemy Core — lib/database/_core_schema.py builds the chat
+    # persistence schema with it. Hard dep: imported at server boot.
+    "sqlalchemy>=2.0"
+    # markdown — server-side Markdown rendering. Hard dep at import time.
+    "markdown>=3.4"
+    # tiktoken — exact BPE tokenizer tier for lib/token_counter.
+    "tiktoken>=0.5"
     # PDF parsing (fitz) — used in lib/pdf_parser and routes/paper
     "pymupdf>=1.24"
     # uv / uvx — used by lib/mcp/client.py to launch MCP servers
@@ -785,6 +795,30 @@ PIP_ONLY_PKGS=(
     "regex>=2024.0"        # required by dateparser
     "tzlocal>=5.0"         # required by dateparser
 )
+
+# ── Drift guard: every dep declared in requirements.txt must be covered by
+#    CONDA_PKGS or PIP_ONLY_PKGS (or installed by a dedicated step below).
+#    install.sh deliberately splits installs across conda/pip to dodge the
+#    lxml6/icu78/PG18 deadlock, so we can't just `pip install -r`. Instead we
+#    fail FAST here if the hand-maintained lists fall out of sync with
+#    requirements.txt — far better than a ModuleNotFoundError at server boot.
+_REQ_FILE="${INSTALL_DIR:-$PWD}/requirements.txt"
+if [[ -f "$_REQ_FILE" ]]; then
+    _norm() { tr 'A-Z' 'a-z' | sed -E 's/[<>=!~; ].*//; s/_/-/g; s/[[:space:]]//g'; }
+    # Packages installed by dedicated steps, not the two arrays:
+    #   tofu-search (own step), docling (--with-docling only).
+    _EXEMPT=$'tofu-search\ndocling'
+    _covered="$(printf '%s\n' "${CONDA_PKGS[@]}" "${PIP_ONLY_PKGS[@]}" | _norm; printf '%s\n' "$_EXEMPT")"
+    _declared="$(grep -vE '^\s*#' "$_REQ_FILE" | grep -vE '^\s*$' | _norm | sort -u)"
+    _missing="$(comm -23 <(printf '%s\n' "$_declared" | sort -u) <(printf '%s\n' "$_covered" | sort -u))"
+    if [[ -n "$_missing" ]]; then
+        warn "requirements.txt declares packages NOT covered by install.sh:"
+        printf '%s\n' "$_missing" | sed 's/^/    - /' >&2
+        warn "Add each to CONDA_PKGS (conda-forge) or PIP_ONLY_PKGS (pip) above."
+        fail "install.sh package lists are out of sync with requirements.txt."
+    fi
+    ok "Dependency lists cover all of requirements.txt"
+fi
 
 # ── Heal broken envs: remove any pip-installed versions of these deps ──
 # A common failure mode on older hosts (CentOS 7 / glibc 2.17) is that an
@@ -941,11 +975,23 @@ _safe_pip_install() {
     _log="$(mktemp -t tofu_pip.XXXXXX)"
     local _rc=0
     (
-        export PIP_USER=0
+        # Some hosts force --user globally via the PIP_USER env var OR a
+        # pip.conf 'user=true' (~/.pip/pip.conf, ~/.config/pip/pip.conf,
+        # /etc/pip.conf). With --user active, pip refuses --prefix:
+        # "Can not combine '--user' and '--prefix'". Setting PIP_USER=0 is
+        # NOT enough — pip still treats the var as set, and a pip.conf
+        # default is untouched. Neutralise BOTH sources:
+        #   - env: unset PIP_USER / PYTHONUSERBASE
+        #   - config files: PIP_CONFIG_FILE=/dev/null makes pip ignore every
+        #     pip.conf (the index URL comes from PIP_INDEX_URL, set elsewhere,
+        #     so the corp mirror still applies).
+        #   - CLI: --no-user as a final belt-and-braces override.
+        unset PIP_USER
         unset PYTHONUSERBASE
+        export PIP_CONFIG_FILE=/dev/null
         # Tee so the user still sees pip's output live; capture to log
         # for the post-mortem permission check.
-        python -m pip install --prefix "$ENV_PREFIX" "$@" 2>&1 | tee "$_log"
+        python -m pip install --no-user --prefix "$ENV_PREFIX" "$@" 2>&1 | tee "$_log"
         exit "${PIPESTATUS[0]}"
     )
     _rc=$?
@@ -1049,7 +1095,7 @@ fi
 if [[ -d "${INSTALL_DIR}/vendor" ]]; then
     step "Installing bundled internal MCP servers"
     _BUNDLED_MCPS=()
-    for _mcp in hope-mcp xuecheng-mcp; do
+    for _mcp in hope-mcp xuecheng-mcp llm-mcp; do
         _path="${INSTALL_DIR}/vendor/${_mcp}"
         if [[ -d "$_path" && -f "$_path/pyproject.toml" ]]; then
             _BUNDLED_MCPS+=("$_path")

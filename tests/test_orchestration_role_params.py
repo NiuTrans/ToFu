@@ -82,6 +82,31 @@ class SchemaWellFormednessTest(unittest.TestCase):
         self.assertEqual(role_param_schema('totally-made-up'),
                          role_param_schema('__generic__'))
 
+    def test_capability_roles_have_bespoke_schema(self):
+        # The audit: every first-class palette role with specific capabilities
+        # must expose a bespoke field set, NOT fall through to the bare
+        # generic (task + expected_outcome) schema.
+        generic_keys = [s['key'] for s in role_param_schema('__generic__')]
+        for role in ['coder', 'analyst', 'writer', 'browser', 'synthesizer',
+                     'router', 'planner']:
+            self.assertIn(role, ROLE_PARAM_SCHEMA, f'{role} has no bespoke schema')
+            keys = [s['key'] for s in ROLE_PARAM_SCHEMA[role]]
+            self.assertNotEqual(keys, generic_keys,
+                                f'{role} still uses the generic schema')
+
+    def test_bespoke_field_keys_present(self):
+        # Spot-check the signature field of each new schema matches the
+        # role's real capability (so the inspector surfaces the right input).
+        expect = {
+            'coder': 'scope_paths', 'analyst': 'data_sources',
+            'writer': 'audience', 'browser': 'steps',
+            'synthesizer': 'conflict_policy', 'router': 'categories',
+            'planner': 'acceptance_criteria',
+        }
+        for role, key in expect.items():
+            keys = [s['key'] for s in ROLE_PARAM_SCHEMA[role]]
+            self.assertIn(key, keys, f'{role} missing {key}')
+
 
 class BackCompatTest(unittest.TestCase):
     def test_objective_only_renders_byte_identical(self):
@@ -202,6 +227,28 @@ class RenderBriefTest(unittest.TestCase):
         node = {'role': 'worker', 'params': {'must_do': ['only this']}}
         out = render_role_brief(node)
         self.assertEqual(out, '### Must Do\n- only this')
+
+    def test_coder_bespoke_sections_render(self):
+        node = {'role': 'coder', 'params': {
+            'objective': 'Fix the parser.', 'scope_paths': ['lib/parse.py'],
+            'constraints': ['no public API change'],
+            'verify_cmd': 'pytest tests/test_parse.py'}}
+        out = render_role_brief(node)
+        self.assertTrue(out.startswith('Fix the parser.'))
+        self.assertIn('### Files / Paths', out)
+        self.assertIn('- lib/parse.py', out)
+        self.assertIn('### Constraints', out)
+        self.assertIn('### Verify Command', out)
+        self.assertIn('pytest tests/test_parse.py', out)
+
+    def test_writer_select_renders_value(self):
+        node = {'role': 'writer', 'params': {
+            'objective': 'Write the README.', 'tone': 'technical',
+            'audience': 'maintainers'}}
+        out = render_role_brief(node)
+        self.assertIn('### Tone', out)
+        self.assertIn('technical', out)
+        self.assertIn('### Audience', out)
 
 
 class EngineIntegrationTest(unittest.TestCase):

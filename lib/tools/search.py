@@ -126,6 +126,10 @@ def _build_fetch_url_tool():
         "you SHOULD use fetch_url to follow the most relevant links and explore deeper.\n"
         "IMPORTANT: This tool is for REMOTE web URLs only (http:// or https://). "
         "Do NOT use for local file paths or file:// URIs — use read_files with an absolute path instead.\n"
+        "If the URL points to a file asset rather than a web page (e.g. an SVG, image, "
+        "archive, font or Office document), it is handled automatically: text-like assets "
+        "(SVG/JSON/source code) are returned inline, while binary assets are downloaded to a "
+        "local staging path and the response tells you the path to open with read_files.\n"
     )
     if filter_on:
         description += (

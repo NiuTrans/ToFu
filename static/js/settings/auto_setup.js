@@ -24,7 +24,7 @@ function _showAutoSetupModal() {
   var html = '<div id="stgAutoSetupModal" class="stg-modal-overlay" onclick="if(event.target===this)this.remove()">' +
     '<div class="stg-modal">' +
       '<div class="stg-modal-header">' +
-        '<span class="stg-modal-title">🚀 自动配置服务商</span>' +
+        '<span class="stg-modal-title"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg>自动配置服务商</span>' +
         '<button class="stg-modal-close" onclick="document.getElementById(\'stgAutoSetupModal\').remove()">✕</button>' +
       '</div>' +
       '<div class="stg-modal-body">' +
@@ -46,7 +46,7 @@ function _showAutoSetupModal() {
       '</div>' +
       '<div class="stg-modal-footer">' +
         '<button class="stg-btn-secondary" onclick="document.getElementById(\'stgAutoSetupModal\').remove()">取消</button>' +
-        '<button class="stg-btn-primary" id="stgAutoProbeBtn" onclick="_runAutoProbe()">🔍 开始探测</button>' +
+        '<button class="stg-btn-primary" id="stgAutoProbeBtn" onclick="_runAutoProbe()">' + Icon('search', 13) + ' 开始探测</button>' +
       '</div>' +
     '</div>' +
   '</div>';
@@ -87,7 +87,7 @@ async function _runAutoProbe() {
   // Show progress
   if (probeBtn) {
     probeBtn.disabled = true;
-    probeBtn.textContent = '⏳ 正在探测…';
+    probeBtn.textContent = '正在探测…';
   }
   _showAutoStatus('loading', '正在发现模型… 这可能需要几秒钟');
 
@@ -160,7 +160,7 @@ async function _runAutoProbe() {
   } finally {
     if (probeBtn) {
       probeBtn.disabled = false;
-      probeBtn.textContent = '🔍 开始探测';
+      probeBtn.textContent = '开始探测';
     }
   }
 }

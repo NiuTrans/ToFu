@@ -680,6 +680,25 @@ def _execute_tool_one(
                     fn_name, type(e).__name__, tc_id[:8], _arg_preview,
                     exc_info=True,
                 )
+                # ── Feed the self-diagnosis loop ──
+                # This is a GENUINE tool bug (not a recoverable LLM-fault
+                # ValueError / UnknownWorkspaceRootError handled above). Emit a
+                # structured, fingerprinted audit event so the nightly
+                # optimizer can CLUSTER recurring failures by signature and
+                # surface the ones that keep recurring — instead of relying on
+                # brittle '[Tool:X] failed' regex scraping of app.log with no
+                # dedup. req_id() (seeded to the task id in run_task) ties the
+                # event back to its task automatically.
+                try:
+                    from lib.error_fingerprint import fingerprint
+                    from lib.log import audit_log
+                    audit_log('tool_error', tool=fn_name,
+                              exc_type=type(e).__name__,
+                              fingerprint=fingerprint(str(e), exc_type=type(e).__name__),
+                              detail=str(e)[:200])
+                except Exception as _ae:
+                    logger.debug('[Executor] tool_error audit emit failed for %s: %s',
+                                 fn_name, _ae)
             err_msg = (
                 f'Error: tool "{fn_name}" execution failed with '
                 f'{type(e).__name__}: {e}. Check the parameter schema '

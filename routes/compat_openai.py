@@ -15,15 +15,18 @@ Auth: standard ``Authorization: Bearer tofu_…`` (validated by the
 
 from __future__ import annotations
 
-import time
 import uuid
 
 from flask import Blueprint, Response
 
-from lib.api_response import (
-    api_bad_request, api_internal_error, api_not_found,
+from lib.agent_core.admission import (
+    await_terminal, controller, on_terminal, register_waiter,
+    unregister_waiter,
 )
-from lib.byo_resolve import dispose_after_terminal, resolve_model_and_provider
+from lib.api_response import (
+    api_bad_request, api_error, api_internal_error, api_not_found,
+)
+from lib.byo_resolve import resolve_model_and_provider
 from lib.compat.openai import (
     build_openai_response, models_payload, stream_openai_chunks,
     translate_openai_request,
@@ -34,9 +37,9 @@ from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.rate_limit_api import record_tokens
 from lib.usage_tracker import record as record_usage
-from lib.request_parser import parse_body
+from lib.request_parser import async_parse_body, parse_body
 
-from routes.api_v1.auth import current_auth, require_scope
+from routes.api_v1.auth import current_auth, guard_model_relay_or_dispose, require_scope
 
 logger = get_logger(__name__)
 
@@ -45,14 +48,11 @@ compat_openai_bp = Blueprint('compat_openai', __name__)
 
 # ── Helpers ────────────────────────────────────────────────────────
 
-def _wait_terminal(task, timeout_s: float):
-    deadline = time.time() + timeout_s
-    poll = 0.1
-    while task.get('status') not in ('done', 'error', 'aborted'):
-        if time.time() >= deadline:
-            raise RuntimeError('completion timed out')
-        time.sleep(poll)
-        poll = min(poll * 1.2, 1.5)
+async def _wait_terminal(task, timeout_s: float):
+    """Await terminal state without busy-waiting (event-driven)."""
+    ok = await await_terminal(task, timeout_s=timeout_s)
+    if not ok:
+        raise RuntimeError('completion timed out')
 
 
 # ── Routes ─────────────────────────────────────────────────────────
@@ -68,8 +68,8 @@ def _wait_terminal(task, timeout_s: float):
               'and reasoning_effort are all supported. The underlying '
               'task gets a `task_id` you can poll via /api/v1/tasks/.'),
           tags=['compat:openai'], scope='chat')
-def chat_completions():
-    body = parse_body()
+async def chat_completions():
+    body = await async_parse_body()
     try:
         messages, cfg, options = translate_openai_request(body)
     except ValueError as e:
@@ -97,6 +97,12 @@ def chat_completions():
                     else api_bad_request(_err, field='model'))
         cfg['model'] = _model_id  # strip the @suffix
 
+    # BYO-only relay backstop (model_relay_enabled=false): refuse
+    # operator-pool requests; BYO + admin pass. See routes/api_v1/auth.py.
+    _relay_denied = guard_model_relay_or_dispose(_byo_handle)
+    if _relay_denied is not None:
+        return _relay_denied
+
     audit_log('compat_openai_chat',
               key_id=(auth.key_id if auth else ''),
               name=(auth.name if auth else ''),
@@ -114,21 +120,44 @@ def chat_completions():
     if _byo_handle is not None:
         task['_pinned_provider_id'] = _byo_handle.slot.provider_id
 
+    # ── Admission control: refuse with 503 when at capacity ───────
+    if not controller.try_acquire():
+        if _byo_handle is not None:
+            dispose_ephemeral_slot(_byo_handle)
+        logger.warning('[compat:openai] admission refused (in_flight=%d/%d) '
+                       'key=%s model=%s', controller.in_flight,
+                       controller.capacity, owner, cfg.get('model', '?'))
+        return api_error('Server at capacity; retry shortly.', status=503,
+                         error_kind='overloaded', retry_after=5)
+
+    # Release slot + dispose BYO ephemeral slot once, on terminal state.
+    _released = {'done': False}
+
+    def _on_done(_tid, _handle=_byo_handle):
+        if _released['done']:
+            return
+        _released['done'] = True
+        controller.release()
+        if _handle is not None:
+            try:
+                dispose_ephemeral_slot(_handle)
+            except Exception as ex:
+                logger.error('[compat:openai] ephemeral dispose failed '
+                             'handle=%s task=%s: %s', _handle.handle_id,
+                             _tid[:8], ex, exc_info=True)
+
+    on_terminal(task['id'], _on_done)
+    register_waiter(task['id'])
+
     try:
         spawn_task(task)
     except Exception as e:
-        if _byo_handle is not None:
-            dispose_ephemeral_slot(_byo_handle)
-        logger.exception('[compat:openai] spawn_task failed')
+        _on_done(task['id'])
+        unregister_waiter(task['id'])
+        logger.exception('[compat:openai] spawn_task failed task=%s',
+                         task['id'][:8])
         return api_internal_error(e, context='compat:openai',
                                    source='routes.compat_openai')
-
-    if _byo_handle is not None:
-        import threading
-        threading.Thread(
-            target=dispose_after_terminal, args=(task, _byo_handle),
-            name=f'byo-dispose-{_byo_handle.handle_id}', daemon=True,
-        ).start()
 
     model = cfg.get('model', '?')
     requested_id = options.get('id') or ''
@@ -148,9 +177,13 @@ def chat_completions():
         return resp
 
     try:
-        _wait_terminal(task, options['timeout_s'])
+        await _wait_terminal(task, options['timeout_s'])
     except RuntimeError as e:
+        logger.warning('[compat:openai] task=%s timed out model=%s elapsed=%.0fs',
+                       task['id'][:8], model, options['timeout_s'])
         return api_internal_error(str(e), context='compat:openai')
+    finally:
+        unregister_waiter(task['id'])
 
     out = build_openai_response(task, model=model, requested_id=requested_id)
     out['task_id'] = task['id']  # extension; OpenAI SDKs ignore unknown fields

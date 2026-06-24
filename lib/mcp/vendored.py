@@ -39,4 +39,7 @@ VENDORED_LAUNCHERS: dict[str, dict[str, list[str]]] = {
     'hope-mcp': {
         'sources': ['../hope-mcp', 'tools/hope-mcp'],
     },
+    'llm-mcp': {
+        'sources': ['../llm-mcp', 'tools/llm-mcp'],
+    },
 }

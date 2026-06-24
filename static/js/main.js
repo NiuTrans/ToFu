@@ -205,6 +205,14 @@ function _reflowToolbar() {
   const inputInner = document.querySelector('.input-inner');
   if (!inputInner) return;
 
+  /* ★ Bail if the input area is hidden (e.g. Paper Reading Mode sets
+   * .input-area display:none). While hidden, every child's
+   * getBoundingClientRect() returns width 0, so the measured sum collapses
+   * and we'd write the Math.max(480) floor → a scrunched toolbar that
+   * persists after returning to chat. Skip entirely; exitPaperMode()
+   * re-runs the reflow once the area is visible again. */
+  if (inputInner.offsetParent === null) return;
+
   /* 1. Blow out max-width so toolbar lays out naturally */
   inputInner.style.transition = 'none';
   inputInner.style.setProperty('--toolbar-w', '9999px');
@@ -446,9 +454,9 @@ function _applyImageGenUI(enabled) {
     ? t('ig.placeholder')
     : 'Type your message...';
   const hint = document.getElementById('inputHint');
-  if (hint) hint.textContent = imageGenMode
+  if (hint) hint.innerHTML = _renderHintHtml(imageGenMode
     ? t('ig.hint')
-    : _inputSendHintText();
+    : _inputSendHintText());
   /* ★ Reflow toolbar only if the mode actually changed — switching between
    * ig-active / normal swaps the visible toolbar so re-measure is needed.
    * But on conv switch where both convs have imageGenMode=false, skip. */
@@ -504,7 +512,6 @@ function _saveConvToolState() {
   conv.imageGenEnabled = !!imageGenEnabled;
   conv.imageGenMode = !!imageGenMode;
   conv.humanGuidanceEnabled = !!humanGuidanceEnabled;
-  conv.agentBackend = activeAgentBackend || 'builtin';
   /* ★ FIX: Sync projectPath from the UI-visible projectState to the conv object.
    * Without this, conv.projectPath can diverge from projectState when:
    *  (a) A new conv is created (has no projectPath property at all)
@@ -611,29 +618,12 @@ function _restoreConvToolState(conv) {
       b.classList.toggle('active', b.dataset.res === _igSelectedResolution));
   }
   _applyAutoTranslateUI(conv.autoTranslate !== undefined ? !!conv.autoTranslate : true);
-  /* ★ Restore agent backend selection per-conversation */
-  const _savedBackend = conv.agentBackend || 'builtin';
-  if (_savedBackend !== activeAgentBackend) {
-    activeAgentBackend = _savedBackend;
-    // Restore capabilities from cache
-    if (_agentBackendCache) {
-      const b = _agentBackendCache.find(x => x.name === activeAgentBackend);
-      if (b) _agentBackendCapabilities = b.capabilities || {};
-    }
-    _applyAgentBackendUI();
-    _applyBackendCapabilities();
-  }
   if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
   if (typeof updateContextBar === 'function') updateContextBar();
   /* ★ Reflow toolbar after restoring conv tool state (toolbar width may differ). */
   _scheduleReflow();
 }
 function _resetToolsToDefaults() {
-  // ★ Reset agent backend to builtin
-  activeAgentBackend = 'builtin';
-  _agentBackendCapabilities = null;
-  _applyAgentBackendUI();
-  _applyBackendCapabilities();
   config.thinkingDepth = config.defaultThinkingDepth;   // ← reset to default depth BEFORE applying model UI (let _applyModelUI normalize)
   _applyModelUI(serverModel);
   _applySearchModeUI("multi");
@@ -1007,8 +997,6 @@ function _resetToolsToDefaults() {
   });
   if (typeof _initSelectionPopup === "function") _initSelectionPopup();
   loadProjectStatus();
-  /* ★ Pre-fetch agent backend availability for the backend selector dropdown */
-  _fetchAgentBackends().catch(() => {});
   _updateAutoApplyUI();
   _applyAutoTranslateUI();
   setInterval(() => {

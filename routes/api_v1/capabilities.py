@@ -225,6 +225,31 @@ def _features() -> dict:
         return {}
 
 
+def _relay_summary() -> dict:
+    """Auth mode + relay policy a foreign frontend uses to branch its UI.
+
+    * ``mode``           — open / private / multi-user (the auth gate).
+    * ``billing_enabled``— relay charges credits (full relay) vs
+                            agent-only (users bring their own model key).
+    * ``model_relay_enabled`` — tenant users may invoke the operator's
+                            model slot pool (``chat``) vs BYO-only.
+    * ``signup_enabled`` — public self-registration open?
+    """
+    out = {'mode': 'open', 'billing_enabled': True,
+           'model_relay_enabled': True, 'signup_enabled': False}
+    try:
+        from lib.auth_mode import get_mode
+        out['mode'] = get_mode()
+    except Exception as e:
+        logger.debug('[capabilities] auth mode unavailable: %s', e)
+    try:
+        from lib.relay_config import public_summary
+        out.update(public_summary())
+    except Exception as e:
+        logger.debug('[capabilities] relay policy unavailable: %s', e)
+    return out
+
+
 @api_v1_capabilities_bp.route('/api/v1/capabilities', methods=['GET'])
 @api_meta(summary='Capabilities — runtime model/tool/agent registry',
           description='Public endpoint. Use for client auto-config.',
@@ -239,6 +264,7 @@ async def capabilities():
     return api_ok({
         'tofu_version': ver,
         'api_version': 'v1',
+        'relay': _relay_summary(),
         'features': _features(),
         'models': _models_summary(),
         'tools': _tools_summary(),
@@ -276,12 +302,25 @@ async def system_prompt_default():
 
     project = _flag('project', False)
     tools = _flag('tools', True)
+    # Build a representative tool-name set so the "# Using your tools"
+    # section in the preview matches what the model would really see in
+    # each mode. read_files is always-on; the rest of the file/shell tools
+    # only exist when project mode is on.
+    _preview_tool_names: set[str] | None = None
+    if tools:
+        _preview_tool_names = {'web_search', 'fetch_url', 'read_files'}
+        if project:
+            _preview_tool_names |= {
+                'write_file', 'apply_diff', 'insert_content',
+                'find_files', 'grep_search', 'run_command',
+            }
     try:
         from lib.tasks_pkg import system_prompt_cc
         text = system_prompt_cc.build_static_prompt(
             cwd='', is_git=False, model='',
             has_real_tools=tools,
             is_code_context=project,
+            tool_names=_preview_tool_names,
             # Omit the trailing "Current date:" line — the date is injected
             # dynamically at request time, so baking it into the editor text
             # would freeze a stale date if the user saves it in replace mode.
@@ -292,6 +331,51 @@ async def system_prompt_default():
                      e, exc_info=True)
         return api_ok({'prompt': '', 'error': str(e)})
     return api_ok({'prompt': text, 'project': project, 'tools': tools})
+
+
+@api_v1_capabilities_bp.route('/api/v1/system-prompt/blocks', methods=['GET'])
+@api_meta(summary='Built-in system prompt, split into toggleable blocks',
+          description='Returns the built-in static system prompt as an '
+                      'ordered list of blocks (id/title/text/dynamic) for '
+                      'the per-block editor. Each block carries a stable id '
+                      'used to persist keep/drop toggles. Query flags: '
+                      'project (bool), tools (bool) — shape the preview to '
+                      'the chosen mode (some blocks only appear in code '
+                      'mode or when tools are on).',
+          tags=['capabilities'], public=True)
+async def system_prompt_blocks():
+    from flask import request
+
+    def _flag(name: str, default: bool) -> bool:
+        v = (request.args.get(name) or '').strip().lower()
+        if not v:
+            return default
+        return v in ('1', 'true', 'yes', 'on')
+
+    project = _flag('project', False)
+    tools = _flag('tools', True)
+    _preview_tool_names: set[str] | None = None
+    if tools:
+        _preview_tool_names = {'web_search', 'fetch_url', 'read_files'}
+        if project:
+            _preview_tool_names |= {
+                'write_file', 'apply_diff', 'insert_content',
+                'find_files', 'grep_search', 'run_command',
+            }
+    try:
+        from lib.tasks_pkg import system_prompt_cc
+        blocks = system_prompt_cc.build_static_blocks(
+            cwd='', is_git=False, model='',
+            has_real_tools=tools,
+            is_code_context=project,
+            tool_names=_preview_tool_names,
+            include_date=False,  # date is dynamic; don't expose in editor
+        )
+    except Exception as e:
+        logger.error('[capabilities] build system prompt blocks failed: %s',
+                     e, exc_info=True)
+        return api_ok({'blocks': [], 'error': str(e)})
+    return api_ok({'blocks': blocks, 'project': project, 'tools': tools})
 
 
 __all__ = ['api_v1_capabilities_bp']

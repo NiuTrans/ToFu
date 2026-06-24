@@ -26,6 +26,7 @@ function _isRoundCodeExec(round) {
 function _isRoundProject(round) {
   return [
     "read_files",
+    "inspect_image",
     "list_dir",
     "grep_search",
     "find_files",
@@ -64,6 +65,7 @@ function _isRoundSwarm(round) {
 }
 
 /* ★ Tool display metadata — icon, label, color for non-search/fetch tools */
+const _TD_SVG = (inner) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px">${inner}</svg>`;
 const _TOOL_DISPLAY = {
   web_search:    { icon: "", label: "Searching", color: "#60a5fa" },
   fetch_url:     { icon: "", label: "Fetching",  color: "#34d399" },
@@ -72,11 +74,11 @@ const _TOOL_DISPLAY = {
   get_agent_result: { icon: "", label: "Agent Result",   color: "#f59e0b" },
   create_memory:  { icon: "", label: "Memory",     color: "#a78bfa" },
   schedule_task: { icon: "", label: "Schedule",  color: "#fb923c" },
-  timer_create:  { icon: "⏱️", label: "Timer Watcher", color: "#a855f7" },
-  timer_manage:  { icon: "⏱️", label: "Timer",   color: "#a855f7" },
-  bash_exec:     { icon: "▶️", label: "Running",   color: "#f472b6" },
+  timer_create:  { icon: _TD_SVG('<circle cx="12" cy="14" r="8"/><line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/>'), label: "Timer Watcher", color: "#a855f7" },
+  timer_manage:  { icon: _TD_SVG('<circle cx="12" cy="14" r="8"/><line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/>'), label: "Timer",   color: "#a855f7" },
+  bash_exec:     { icon: _TD_SVG('<path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/>'), label: "Running",   color: "#f472b6" },
   desktop_click: { icon: "", label: "Desktop",   color: "#94a3b8" },
-  desktop_type:  { icon: "⌨️", label: "Desktop",   color: "#94a3b8" },
+  desktop_type:  { icon: _TD_SVG('<path d="M10 8h.01"/><path d="M12 12h.01"/><path d="M14 8h.01"/><path d="M16 12h.01"/><path d="M18 8h.01"/><path d="M6 8h.01"/><path d="M7 16h10"/><path d="M8 12h.01"/><rect width="20" height="16" x="2" y="4" rx="2"/>'), label: "Desktop",   color: "#94a3b8" },
   desktop_screenshot: { icon: "", label: "Desktop", color: "#94a3b8" },
   generate_image: { icon: "", label: "Image", color: "#e879f9" },
   ask_human: { icon: "", label: "Guidance", color: "#a5b4fc" },
@@ -90,7 +92,7 @@ function _getToolDisplay(round) {
   if (_isRoundBrowser(round)) return { icon: "", label: "Browser",   color: "#38bdf8" };
   // Generic fallback — use the tool name itself
   const name = (round.toolName || "tool").replace(/_/g, " ");
-  return { icon: "⚡", label: name.charAt(0).toUpperCase() + name.slice(1), color: "#94a3b8" };
+  return { icon: _TD_SVG('<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>'), label: name.charAt(0).toUpperCase() + name.slice(1), color: "#94a3b8" };
 }
 
 function _getRoundBlockClass(round) {
@@ -101,6 +103,7 @@ function _getRoundIcon(round) {
   if (_isRoundProject(round)) {
     const m = {
       read_files: "file",
+      inspect_image: "zoomimg",
       list_dir: "folder",
       grep_search: "search",
       find_files: "find",
@@ -152,7 +155,7 @@ function _renderCodeExecBlock(round, isSearching) {
   const cmd = escapeHtml(meta.command || round.query || "");
   if (isSearching) {
     return `<div class="code-exec-block code-exec-running">
-         <div class="code-exec-header"><span class="code-exec-icon">⚡</span><span class="code-exec-label">Running...</span><span class="ptool-spinner"></span></div>
+         <div class="code-exec-header"><span class="code-exec-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg></span><span class="code-exec-label">Running...</span><span class="ptool-spinner"></span></div>
          <pre class="code-exec-cmd"><code>$ ${cmd}</code></pre>
        </div>`;
   }
@@ -174,7 +177,7 @@ function _renderCodeExecBlock(round, isSearching) {
     ? `<pre class="code-exec-output"><code>${escapeHtml(output)}</code></pre>`
     : "";
   return `<div class="code-exec-block ${statusCls}">
-       <div class="code-exec-header"><span class="code-exec-icon">⚡</span><span class="code-exec-label">Code Execution</span><span class="code-exec-status">${statusLabel}</span></div>
+       <div class="code-exec-header"><span class="code-exec-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg></span><span class="code-exec-label">Code Execution</span><span class="code-exec-status">${statusLabel}</span></div>
        <pre class="code-exec-cmd"><code>$ ${cmd}</code></pre>
        ${outputHtml}
      </div>`;
@@ -195,6 +198,8 @@ const _projToolSvg = {
   diff: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18"/><path d="M8 8l4-4 4 4"/><path d="M8 16l4 4 4-4"/></svg>',
   terminal:
     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
+  zoomimg:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>',
 };
 
 // ── Browser Tools — SVG Icons ──
@@ -376,7 +381,7 @@ function _renderToolRepairedBadge(round) {
     (rep.detail ? ":\n" + rep.detail : ".")
   );
   const cls = stillFailed ? "ptool-badge-warn" : "ptool-badge-repaired";
-  return `<span class="ptool-badge ${cls}" title="${tip}">🔧 ${label}</span>`;
+  return `<span class="ptool-badge ${cls}" title="${tip}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/></svg> ${label}</span>`;
 }
 
 /**
@@ -494,7 +499,7 @@ function _renderInboxInjectRow(round) {
     : `<div class="sw-inbox-row-empty">No payload preview available.</div>`;
   return `<details class="sw-inbox-row" data-rn="${round.roundNum}">
        <summary class="ptool-line sw-inbox-row-header">
-         <span class="ptool-icon">📨</span>
+         <span class="ptool-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg></span>
          <span class="ptool-text">Received <b>${count}</b> async sub-agent ${word}</span>
          ${idsLabel}
          <span class="ptool-badge ptool-badge-info">injected → context</span>
@@ -686,7 +691,7 @@ function _renderUnifiedToolLine(round, isSearching) {
         const rShow = rLines.slice(0, maxPreviewLines);
         let diffLines = "";
         sShow.forEach((l) => {
-          diffLines += `<div class="ptool-diff-line ptool-diff-del"><span class="ptool-diff-sign">−</span><span class="ptool-diff-code">${escapeHtml(l)}</span></div>`;
+          diffLines += `<div class="ptool-diff-line ptool-diff-del"><span class="ptool-diff-sign">-</span><span class="ptool-diff-code">${escapeHtml(l)}</span></div>`;
         });
         if (sLines.length > maxPreviewLines)
           diffLines += `<div class="ptool-diff-line ptool-diff-del ptool-diff-ellipsis"><span class="ptool-diff-sign"> </span><span class="ptool-diff-code">… ${sLines.length - maxPreviewLines} more lines</span></div>`;
@@ -719,7 +724,7 @@ function _renderUnifiedToolLine(round, isSearching) {
       const replaceShow = replaceLines.slice(0, maxLines);
       let diffLines = "";
       searchShow.forEach((l) => {
-        diffLines += `<div class="ptool-diff-line ptool-diff-del"><span class="ptool-diff-sign">−</span><span class="ptool-diff-code">${escapeHtml(l)}</span></div>`;
+        diffLines += `<div class="ptool-diff-line ptool-diff-del"><span class="ptool-diff-sign">-</span><span class="ptool-diff-code">${escapeHtml(l)}</span></div>`;
       });
       if (totalSearchLines > maxLines)
         diffLines += `<div class="ptool-diff-line ptool-diff-del ptool-diff-ellipsis"><span class="ptool-diff-sign"> </span><span class="ptool-diff-code">… ${totalSearchLines - maxLines} more lines (${totalSearchLines} lines · ${totalSearchChars.toLocaleString()} chars total)</span></div>`;
@@ -779,7 +784,7 @@ function _renderUnifiedToolLine(round, isSearching) {
       _recoverTimerPolls(round);
     }
     return `<div class="ptool-line ptool-active">
-         <span class="ptool-icon">⏱️</span>
+         <span class="ptool-icon">${Icon('timer')}</span>
          <span class="ptool-text">${q || "Timer Watcher"}</span>
          <span class="ptool-badge ptool-badge-warn">waiting for first poll…</span>
          <span class="ptool-spinner"></span>
@@ -976,7 +981,7 @@ function _renderUnifiedToolLine(round, isSearching) {
         const group = _byQuery.get(key);
         const groupItems = group.map(_renderResultItem).join("");
         const header = key
-          ? `<div class="search-query-group-header"><span class="search-query-group-icon">🔍</span><span class="search-query-group-q">${escapeHtml(key)}</span><span class="search-query-group-count">${group.length}</span></div>`
+          ? `<div class="search-query-group-header"><span class="search-query-group-icon">${Icon('search', 13)}</span><span class="search-query-group-q">${escapeHtml(key)}</span><span class="search-query-group-count">${group.length}</span></div>`
           : "";
         return `<div class="search-query-group">${header}${groupItems}</div>`;
       }).join("");
@@ -1070,12 +1075,16 @@ function _renderUnifiedToolLine(round, isSearching) {
        </div>`;
   }
 
-  // ★ read_files image(s): render inline thumbnails when the backend
-  //   attached data URIs (meta.imageDataUris). Each descriptor carries a
-  //   full data: URL the browser can render directly.
-  if (round.toolName === "read_files" && Array.isArray(meta.imageDataUris) && meta.imageDataUris.length) {
+  // ★ read_files / inspect_image image(s): render inline thumbnails when the
+  //   backend attached data URIs (meta.imageDataUris). Each descriptor carries
+  //   a full data: URL the browser can render directly. inspect_image is the
+  //   zoom/rotate/crop viewer — it gets a distinct accent + an "ops" chip
+  //   describing the transform (e.g. "crop, 2×").
+  if ((round.toolName === "read_files" || round.toolName === "inspect_image") &&
+      Array.isArray(meta.imageDataUris) && meta.imageDataUris.length) {
     const imgs = meta.imageDataUris.filter((d) => d && d.uri);
     if (imgs.length) {
+      const isInspect = round.toolName === "inspect_image";
       const multi = imgs.length > 1;
       const tiles = imgs.map((d) => {
         const cap = escapeHtml(d.filename || d.format || "");
@@ -1085,17 +1094,23 @@ function _renderUnifiedToolLine(round, isSearching) {
              ${cap ? `<figcaption class="rf-img-cap" title="${cap}">${cap}</figcaption>` : ""}
            </figure>`;
       }).join("");
+      // inspect_image: prefer the ops badge (crop/zoom/rotate); read_files
+      // multi: image count; else fall back to the generic meta badge.
+      const opsChip = isInspect && meta.inspectOps
+        ? `<span class="ptool-badge rf-inspect-chip" title="Applied transform">${escapeHtml(meta.inspectOps)}</span>`
+        : "";
       const countBadge = multi
         ? `<span class="ptool-badge ptool-badge-info">${imgs.length} images</span>`
-        : (meta.badge ? `<span class="ptool-badge ptool-badge-info">${escapeHtml(meta.badge)}</span>` : "");
-      return `<div class="ptool-readimg-block" data-rn="${round.roundNum}">
+        : (!isInspect && meta.badge ? `<span class="ptool-badge ptool-badge-info">${escapeHtml(meta.badge)}</span>` : "");
+      return `<div class="ptool-readimg-block${isInspect ? " ptool-inspectimg-block" : ""}" data-rn="${round.roundNum}">
            <div class="ptool-line ptool-readimg-header">
              <span class="ptool-icon">${svg}</span>
              <span class="ptool-text">${q}</span>
+             ${opsChip}
              ${countBadge}
              ${_tcPreviewBtn(round)}
            </div>
-           <div class="rf-img-grid${multi ? " rf-img-grid-multi" : ""}">${tiles}</div>
+           <div class="rf-img-grid${multi ? " rf-img-grid-multi" : ""}${isInspect ? " rf-img-grid-inspect" : ""}">${tiles}</div>
          </div>`;
     }
   }
@@ -1131,7 +1146,7 @@ function _renderUnifiedToolLine(round, isSearching) {
         ? `<button class="ig-action-btn" onclick="event.stopPropagation();window.open('${escapeHtml(svgUrl)}','_blank')" title="${escapeHtml("Open SVG" + (svgPath ? " — " + svgPath : ""))}">SVG</button>`
         : "";
       const pathBadges = [
-        projPath ? `<span class="ig-path-chip" title="Saved to project: ${escapeHtml(projPath)}"><span class="ig-path-icon">🖼</span>${escapeHtml(projPath)}</span>` : "",
+        projPath ? `<span class="ig-path-chip" title="Saved to project: ${escapeHtml(projPath)}"><span class="ig-path-icon">${Icon('image', 12)}</span>${escapeHtml(projPath)}</span>` : "",
         svgPath ? `<span class="ig-path-chip ig-path-chip-svg" title="SVG saved to project: ${escapeHtml(svgPath)}"><span class="ig-path-icon">⬡</span>${escapeHtml(svgPath)}</span>` : "",
       ].filter(Boolean).join("");
       const pathFooter = pathBadges
@@ -1472,10 +1487,16 @@ async function _recoverTimerPolls(round) {
       const chronological = [...polls].reverse();
       const recoveredPolls = chronological.map((p, idx) => ({
         pollNum: p.poll_num || p.pollNum || (idx + 1),
+        pollId: p.poll_id || p.pollId || '',
         decision: p.decision || 'wait',
         reason: (p.reason || '').slice(0, 200),
+        rawContent: p.raw_output || p.rawContent || '',
         tokensUsed: p.tokens_used || 0,
         timerId: timerId,
+        model: p.model || '',
+        cmdOutput: p.check_output || '',
+        parseError: p.decision === 'parse_error',
+        toolTrace: [],  // not persisted per-poll; live trace only
         ts: p.poll_time ? new Date(p.poll_time).getTime() : Date.now(),
       }));
       const triggered = chronological.some(p => p.decision === 'ready');
@@ -1522,28 +1543,34 @@ function _renderTimerWatcherBlock(round, svg) {
   const realPolls = polls.filter(p => p.decision !== "started");
   const lastPoll = realPolls.length ? realPolls[realPolls.length - 1] : null;
   const lastWasError = lastPoll && (lastPoll.decision === "error" || lastPoll.decision === "parse_error" || lastPoll.parseError);
+  // The model the poll LLM resolved to (cheap-capability alias → concrete
+  // model). Prefer the round-level stash, fall back to the newest poll.
+  const pollModel = round._timerModel || (lastPoll && lastPoll.model) || "";
 
   // Header
   let headerLabel, headerCls;
+  const _tIco = Icon('timer', 13) + ' ';
   if (triggered) {
-    headerLabel = `⏱️ Timer ${timerIdShort} — ✅ triggered after ${totalPolls} poll${totalPolls !== 1 ? "s" : ""}`;
+    headerLabel = `${_tIco}Timer ${timerIdShort} — triggered after ${totalPolls} poll${totalPolls !== 1 ? "s" : ""}`;
     headerCls = "timer-watcher-triggered";
   } else if (round._timerOrphaned) {
-    headerLabel = `⏱️ Timer ${timerIdShort} — ⚠️ task interrupted (${totalPolls} poll${totalPolls !== 1 ? "s" : ""}, timer still active in background)`;
+    headerLabel = `${_tIco}Timer ${timerIdShort} — task interrupted (${totalPolls} poll${totalPolls !== 1 ? "s" : ""}, timer still active in background)`;
     headerCls = "timer-watcher-orphaned";
   } else if (isActive) {
     const skipN = round._timerSkipCount || 0;
     const skipSuffix = skipN > 0 ? `, ${skipN} skipped` : "";
-    const errSuffix = lastWasError ? ", ⚠️ last check errored" : "";
-    headerLabel = `⏱️ Timer ${timerIdShort} — watching… (${totalPolls} poll${totalPolls !== 1 ? "s" : ""}${skipSuffix}${errSuffix})`;
+    const errSuffix = lastWasError ? ", last check errored" : "";
+    headerLabel = `${_tIco}Timer ${timerIdShort} — watching… (${totalPolls} poll${totalPolls !== 1 ? "s" : ""}${skipSuffix}${errSuffix})`;
     headerCls = lastWasError ? "timer-watcher-active timer-watcher-warn" : "timer-watcher-active";
   } else {
-    headerLabel = `⏱️ Timer ${timerIdShort} — ${round.status || "done"} (${totalPolls} polls)`;
+    headerLabel = `${_tIco}Timer ${timerIdShort} — ${round.status || "done"} (${totalPolls} polls)`;
     headerCls = "";
   }
 
   // ── What is being verified — show the check instruction + command so the
-  //    user understands the timer's job, and how often it checks. ──
+  //    user understands the timer's job, who runs it, and how often. ──
+  //    The instruction can be long; render it expandable instead of clipping
+  //    mid-sentence (the old slice(0,400) cut "report st…").
   let metaHtml = "";
   const instr = round._timerCheckInstruction || "";
   const cmd = round._timerCheckCommand || "";
@@ -1553,9 +1580,33 @@ function _renderTimerWatcherBlock(round, svg) {
     const cadence = interval
       ? `Checks every ${interval}s${maxPolls ? ` · up to ${maxPolls} times` : ""}`
       : "";
+
+    // Expandable instruction: a clamped preview + full text revealed on click.
+    let instrHtml = "";
+    if (instr) {
+      const LONG = instr.length > 160;
+      const valId = "tw-instr-" + round.roundNum;
+      const toggle = LONG
+        ? ` onclick="event.stopPropagation();var v=document.getElementById('${valId}');v.classList.toggle('expanded');this.querySelector('.timer-meta-more').textContent=v.classList.contains('expanded')?'show less':'show more';"`
+        : "";
+      const moreLink = LONG
+        ? `<span class="timer-meta-more">show more</span>` : "";
+      instrHtml = `<div class="timer-meta-row timer-meta-row-instr"${toggle}>
+        <span class="timer-meta-label">Verifying</span>
+        <span class="timer-meta-val timer-meta-clamp" id="${valId}">${escapeHtml(instr)}</span>
+        ${moreLink}
+      </div>`;
+    }
+
+    // Who runs the check — the cheap-capability LLM, with the concrete model.
+    const verifierVal = pollModel
+      ? `Cheap LLM · <span class="timer-meta-model">${escapeHtml(pollModel)}</span>`
+      : `Cheap LLM (model resolved at poll time)`;
+
     metaHtml = `<div class="timer-watcher-meta">
-      ${instr ? `<div class="timer-meta-row"><span class="timer-meta-label">Verifying</span><span class="timer-meta-val">${escapeHtml(instr.slice(0, 400))}</span></div>` : ""}
+      ${instrHtml}
       ${cmd ? `<div class="timer-meta-row"><span class="timer-meta-label">Command</span><code class="timer-meta-cmd">${escapeHtml(cmd.slice(0, 300))}</code></div>` : ""}
+      <div class="timer-meta-row"><span class="timer-meta-label">Verifier</span><span class="timer-meta-val">${verifierVal}</span></div>
       ${cadence ? `<div class="timer-meta-row"><span class="timer-meta-label">Cadence</span><span class="timer-meta-val">${cadence}</span></div>` : ""}
     </div>`;
   }
@@ -1564,7 +1615,7 @@ function _renderTimerWatcherBlock(round, svg) {
   let nextPollHtml = "";
   if (isActive && round._timerNextPollTs) {
     const secs = Math.max(0, Math.round((round._timerNextPollTs - Date.now()) / 1000));
-    nextPollHtml = `<div class="timer-next-poll">⏳ Next check ${secs > 0 ? `in ~${secs}s` : "due now"}…</div>`;
+    nextPollHtml = `<div class="timer-next-poll">${Icon('hourglass', 12)} Next check ${secs > 0 ? `in ~${secs}s` : "due now"}…</div>`;
   }
 
   // Build poll lines (most recent first for readability)
@@ -1578,41 +1629,83 @@ function _renderTimerWatcherBlock(round, svg) {
     let icon, cls, label;
     const isParseErr = p.decision === "parse_error" || p.parseError;
     if (p.decision === "started") {
-      icon = "🔔"; cls = "timer-poll-started"; label = "";
+      icon = Icon('bell', 13); cls = "timer-poll-started"; label = "";
     } else if (p.decision === "ready") {
-      icon = "✅"; cls = "timer-poll-ready"; label = `#${p.pollNum}`;
+      icon = Icon('save', 13); cls = "timer-poll-ready"; label = `#${p.pollNum}`;
     } else if (p.decision === "error") {
-      icon = "❌"; cls = "timer-poll-error"; label = `#${p.pollNum}`;
+      icon = Icon('ban', 13); cls = "timer-poll-error"; label = `#${p.pollNum}`;
     } else if (isParseErr) {
-      icon = "⚠️"; cls = "timer-poll-error timer-poll-parse-err"; label = `#${p.pollNum}`;
+      icon = Icon('zap', 13); cls = "timer-poll-error timer-poll-parse-err"; label = `#${p.pollNum}`;
     } else {
-      icon = "⏳"; cls = "timer-poll-wait"; label = `#${p.pollNum}`;
+      icon = Icon('hourglass', 13); cls = "timer-poll-wait"; label = `#${p.pollNum}`;
     }
     const ts = p.ts ? new Date(p.ts).toLocaleTimeString() : "";
     const fullReason = p.reason || "";
     const reason = escapeHtml(fullReason.slice(0, 120));
     const tokens = p.tokensUsed ? ` · ${p.tokensUsed} tok` : "";
+    // The raw LLM output — only meaningful (and only sent/persisted) when the
+    // decision could not be parsed. This is the evidence that explains WHY the
+    // poll failed, so it is the centerpiece of an errored poll's detail.
+    const rawContent = (isParseErr && p.rawContent) ? String(p.rawContent) : "";
+    // Per-poll model chip — which LLM made this decision.
+    const modelChip = p.model
+      ? `<span class="timer-poll-model" title="Verified by ${escapeHtml(p.model)}">${escapeHtml(p.model)}</span>` : "";
+    // Stable per-poll id (e.g. tmr_84bd4fb3.p36) — lets the user correlate this
+    // exact check with the app.log line and the DB poll_log row.
+    const pollIdChip = p.pollId
+      ? `<span class="timer-poll-id" title="Poll id — search app.log for this">${escapeHtml(p.pollId)}</span>` : "";
+    // Per-poll tool-call timeline — reuse the swarm panel's .sw-tl-* look so
+    // the timer's tool activity reads identically to a sub-agent's.
+    const trace = Array.isArray(p.toolTrace) ? p.toolTrace : [];
 
-    // Expandable detail: full reason + the check_command output (evidence).
-    const hasDetail = (fullReason.length > 120) || (p.cmdOutput && p.cmdOutput.length > 0);
+    // Expandable detail: full reason + raw LLM output + tool-call timeline + check_command output.
+    const hasDetail = (fullReason.length > 120) || rawContent.length > 0 || trace.length > 0 || (p.cmdOutput && p.cmdOutput.length > 0);
     let detailHtml = "";
     if (hasDetail) {
       const fullReasonHtml = fullReason.length > 120
         ? `<div class="timer-poll-detail-reason">${escapeHtml(fullReason)}</div>` : "";
+      // Raw LLM output — what the model actually returned when its decision
+      // could not be parsed as JSON. Shown verbatim so the failure is diagnosable.
+      const rawHtml = rawContent.length > 0
+        ? `<div class="timer-poll-detail-label">Raw LLM output (unparseable decision):</div>` +
+          `<pre class="timer-poll-detail-output timer-poll-raw"><code>${escapeHtml(rawContent)}</code></pre>`
+        : "";
+      let traceHtml = "";
+      if (trace.length > 0) {
+        const rows = trace.map(tc => {
+          const td = (typeof _TOOL_DISPLAY !== "undefined") ? _TOOL_DISPLAY[tc.name] : null;
+          const ticon = (td && td.icon) ? td.icon : _TD_SVG('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/>');
+          const dot = tc.isError
+            ? `<span class="sw-tl-dot sw-tl-failed">✕</span>`
+            : `<span class="sw-tl-dot sw-tl-done">✓</span>`;
+          const el = (typeof tc.elapsed === "number") ? `${tc.elapsed.toFixed(1)}s` : "";
+          return `<div class="sw-tl-row sw-tl-${tc.isError ? "failed" : "done"}">
+            <div class="sw-tl-line">${dot}<span class="sw-tl-icon">${ticon}</span>` +
+            `<span class="sw-tl-name">${escapeHtml(tc.name || "?")}</span>` +
+            (tc.argsBrief ? `<span class="sw-tl-args" title="${escapeHtml(tc.argsBrief)}">${escapeHtml(tc.argsBrief)}</span>` : "") +
+            (el ? `<span class="sw-tl-elapsed">${el}</span>` : "") +
+          `</div></div>`;
+        }).join("");
+        traceHtml = `<div class="timer-poll-detail-label">Tools called this poll:</div>` +
+          `<div class="sw-a-timeline timer-poll-trace">${rows}</div>`;
+      }
       const cmdOutHtml = (p.cmdOutput && p.cmdOutput.length > 0)
         ? `<div class="timer-poll-detail-label">Check output (evidence):</div><pre class="timer-poll-detail-output"><code>${escapeHtml(p.cmdOutput)}</code></pre>`
         : "";
-      detailHtml = `<div class="timer-poll-detail">${fullReasonHtml}${cmdOutHtml}</div>`;
+      detailHtml = `<div class="timer-poll-detail">${fullReasonHtml}${rawHtml}${traceHtml}${cmdOutHtml}</div>`;
     }
     const toggleAttr = hasDetail
       ? ` onclick="event.stopPropagation();var d=this.nextElementSibling;if(d){d.classList.toggle('expanded');this.classList.toggle('expanded');}"`
       : "";
     const caret = hasDetail ? `<span class="timer-poll-caret">▸</span>` : `<span class="timer-poll-caret-spacer"></span>`;
+    const toolBadge = trace.length > 0
+      ? `<span class="timer-poll-toolcount" title="${trace.length} tool call(s) this poll">${Icon('wrench', 11)} ${trace.length}</span>` : "";
     pollLines += `<div class="timer-poll-line ${cls}${hasDetail ? " timer-poll-has-detail" : ""}"${toggleAttr}>
       ${caret}
       <span class="timer-poll-icon">${icon}</span>
       <span class="timer-poll-num">${label}</span>
       <span class="timer-poll-reason">${reason}</span>
+      ${toolBadge}${pollIdChip}${modelChip}
       <span class="timer-poll-meta">${ts}${tokens}</span>
     </div>${detailHtml}`;
   }
@@ -1633,7 +1726,7 @@ function _renderTimerWatcherBlock(round, svg) {
       : "";
     const lastPollNum = round._timerLastSkipPollNum || 0;
     skipTrailer = `<div class="timer-poll-line timer-poll-skipped">
-      <span class="timer-poll-icon">💤</span>
+      <span class="timer-poll-icon">${Icon('clock', 13)}</span>
       <span class="timer-poll-num">${lastPollNum ? `#${lastPollNum}` : ""}</span>
       <span class="timer-poll-reason">${round._timerSkipCount} poll${round._timerSkipCount !== 1 ? "s" : ""} skipped — check_command output unchanged</span>
       <span class="timer-poll-meta">${skipTs}</span>
@@ -1654,33 +1747,133 @@ function _renderTimerWatcherBlock(round, svg) {
      </div>`;
 }
 
+/* ── Parallel-batch grouping ──────────────────────────────────────────
+ * A single LLM turn (one assistant message) can carry several tool_calls
+ * that the harness runs together. The backend tags every such round with
+ * the SAME `llmRound` (= orchestrator loop index, see
+ * lib/tasks_pkg/tool_dispatch.py). Rounds with the same llmRound were
+ * therefore issued IN PARALLEL; rounds with different llmRound are
+ * sequential turns. We group contiguous same-llmRound rounds into one
+ * `.ptool-turn` container so the UI reflects the real parallelism instead
+ * of a flat list.
+ *
+ * Accuracy guard: we ONLY group on real `llmRound` data. Legacy rounds
+ * without it are each their own (solo) group — the old roundNum-gap
+ * heuristic is too unreliable to *claim* parallelism visually. */
+function _computeToolBatches(rounds) {
+  const hasLlm = (rounds || []).some((r) => r && r.llmRound != null);
+  const groups = [];
+  let cur = null;
+  for (const r of rounds || []) {
+    const key = hasLlm && r.llmRound != null ? "L" + r.llmRound : "S" + r.roundNum;
+    if (!cur || cur.key !== key) { cur = { key, rounds: [] }; groups.push(cur); }
+    cur.rounds.push(r);
+  }
+  return groups;
+}
+
+/* Count distinct LLM turns represented by a set of rounds (for the panel
+ * header). Falls back to round count when no llmRound data is present. */
+function _countToolTurns(rounds) {
+  const set = new Set();
+  let hasLlm = false;
+  for (const r of rounds || []) {
+    if (r && r.llmRound != null) { hasLlm = true; set.add(r.llmRound); }
+  }
+  return hasLlm ? set.size : (rounds || []).length;
+}
+
+/* Panel header text — "N tools used" plus a "· M turns" suffix only when
+ * parallelism actually compressed the turn count (M < N). */
+function _toolPanelHeaderLabel(rounds, anyActive) {
+  const count = (rounds || []).length;
+  if (anyActive) return t("toolPanel.working", { n: count });
+  const turns = _countToolTurns(rounds);
+  const base = t("toolPanel.toolsUsed", { n: count, s: count !== 1 ? "s" : "" });
+  return turns < count
+    ? base + t("toolPanel.turnsSuffix", { n: turns, s: turns !== 1 ? "s" : "" })
+    : base;
+}
+
+/* git-fork glyph (two parents → one child) — reads as "these calls
+ * branched off the same turn". SVG only, per CLAUDE.md §3.4. */
+const _turnForkSvg = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><path d="M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9"/><path d="M12 12v3"/></svg>';
+
+function _turnLabelText(size) {
+  return t("toolPanel.parallelCalls", { n: size });
+}
+
+/* Round number a tool-batch maps to. A group's llmRound is 0-based; the
+ * cost popover labels the matching API round 1-based as `第N轮`, so
+ * N = llmRound + 1. Returns null for legacy rounds with no llmRound
+ * (we never claim a round number we don't actually have). */
+function _groupRoundNo(g) {
+  const r0 = g && g.rounds && g.rounds[0];
+  return r0 && r0.llmRound != null ? r0.llmRound + 1 : null;
+}
+
+/* Human label for a round number — uses the shared `toolPanel.roundTag`
+ * i18n key (also used by the cost popover in finish_info.js) so the two
+ * panels line up 1:1 and a user can trace one round across both. */
+function _roundTagText(rno) {
+  return t("toolPanel.roundTag", { n: rno });
+}
+
+/* Standalone round tag for a SOLO turn (one tool call). Solo groups are
+ * display:contents (no box), so this renders as a thin label line above
+ * the single tool row. */
+function _renderSoloRoundTag(rno) {
+  return `<div class="ptool-turn-rno ptool-turn-rno-solo">${escapeHtml(_roundTagText(rno))}</div>`;
+}
+
+/* The collapsible header shown atop a multi-call .ptool-turn container.
+ * Shared verbatim by the static renderer and the streaming sync path so
+ * a finalize swap is seamless. `rno` (optional) prefixes the round number
+ * so the header reads e.g. `第3轮 · 2 parallel calls`. */
+function _renderTurnHead(size, rno) {
+  const rnoHtml = rno != null ? `<span class="ptool-turn-rno">${escapeHtml(_roundTagText(rno))}</span>` : "";
+  return `<div class="ptool-turn-head">${_turnForkSvg}${rnoHtml}<span class="ptool-turn-label">${_turnLabelText(size)}</span><span class="ptool-turn-chev">▾</span></div>`;
+}
+
+/* Render one tool round into its `[data-prn]` slot. Swarm rounds get the
+ * full agent dashboard; everything else the compact tool line. `allRounds`
+ * is the full timeline (swarm panels need it for cross-round context). */
+function _renderToolSlot(r, allRounds) {
+  const inner = _isRoundSwarm(r)
+    ? _buildSwarmPanelHTML(r, allRounds)
+    : _renderUnifiedToolLine(r, r.status === "searching");
+  const swarmAttr = _isRoundSwarm(r) ? ' data-prn-kind="swarm"' : '';
+  return `<div data-prn="${r.roundNum}"${swarmAttr}>${inner}</div>`;
+}
+
+/* Render the full grouped inner HTML of the panel body: one `.ptool-turn`
+ * per batch. Solo turns get no chrome (CSS collapses the wrapper via
+ * display:contents); multi-call turns get the collapsible parallel header.
+ * Used by the static render path AND the upload.js "expand all" handler. */
+function _renderToolGroupsHTML(rounds, allRounds) {
+  const ctx = allRounds || rounds;
+  return _computeToolBatches(rounds).map((g) => {
+    const slots = g.rounds.map((r) => _renderToolSlot(r, ctx)).join("");
+    const size = g.rounds.length;
+    const rno = _groupRoundNo(g);
+    const head = size >= 2 ? _renderTurnHead(size, rno) : (rno != null ? _renderSoloRoundTag(rno) : "");
+    return `<div class="ptool-turn" data-llm-round="${escapeHtml(String(g.key))}" data-batch-size="${size}" data-round-no="${rno != null ? rno : ""}">${head}${slots}</div>`;
+  }).join("");
+}
+
 function _renderUnifiedGroup(allRounds) {
   const anyActive = allRounds.some((r) => r.status === "searching" || r._swarmActive);
   const count = allRounds.length;
-  const headerLabel = anyActive
-    ? `Working… (${count})`
-    : `${count} tool${count > 1 ? "s" : ""} used`;
-  /* Render one slot per round, swarm rounds use the full agent
-   * dashboard (`_buildSwarmPanelHTML`), everything else uses the
-   * compact tool-line.  Each slot wears `data-prn` so the streaming
-   * sync path (see `_syncToolRoundsDOM`) can locate and update it
-   * by round number. */
-  const _renderSlot = (r) => {
-    const inner = _isRoundSwarm(r)
-      ? _buildSwarmPanelHTML(r, allRounds)
-      : _renderUnifiedToolLine(r, r.status === "searching");
-    const swarmAttr = _isRoundSwarm(r) ? ' data-prn-kind="swarm"' : '';
-    return `<div data-prn="${r.roundNum}"${swarmAttr}>${inner}</div>`;
-  };
+  const headerLabel = _toolPanelHeaderLabel(allRounds, anyActive);
   const STATIC_LIMIT = 100;
   let lines, truncHtml = "";
   if (!anyActive && count > STATIC_LIMIT) {
     const tail = allRounds.slice(-50);
-    lines = tail.map(_renderSlot).join("");
+    lines = _renderToolGroupsHTML(tail, allRounds);
     const hiddenN = count - 50;
-    truncHtml = `<div class="ptool-truncated" data-hidden-count="${hiddenN}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg><span>${hiddenN} earlier tool calls hidden — click to expand</span></div>`;
+    truncHtml = `<div class="ptool-truncated" data-hidden-count="${hiddenN}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg><span>${escapeHtml(t("toolPanel.hidden", { n: hiddenN }))}</span></div>`;
   } else {
-    lines = allRounds.map(_renderSlot).join("");
+    lines = _renderToolGroupsHTML(allRounds, allRounds);
   }
   return `<div class="ptool-panel${anyActive ? " ptool-panel-active" : ""}">
        <div class="ptool-panel-header">
@@ -1689,6 +1882,20 @@ function _renderUnifiedGroup(allRounds) {
        <div class="ptool-panel-body" data-full-count="${count}">${truncHtml}${lines}</div>
      </div>`;
 }
+
+/* Collapse / expand a parallel-call group when its header is clicked.
+ * Delegated (survives innerHTML rebuilds) and scoped to the header so a
+ * click on a tool row inside the group never toggles it. */
+document.addEventListener("click", function (e) {
+  const head = e.target.closest(".ptool-turn-head");
+  if (!head) return;
+  const turn = head.closest(".ptool-turn");
+  if (!turn) return;
+  e.stopPropagation();
+  const collapsed = turn.classList.toggle("collapsed");
+  const chev = head.querySelector(".ptool-turn-chev");
+  if (chev) chev.textContent = collapsed ? "▸" : "▾";
+});
 
 // ★ Backwards compat aliases
 const _renderProjectGroup = _renderUnifiedGroup;
@@ -1714,7 +1921,7 @@ function renderMcpLoginHintHtml(lh) {
   if (!lh) return '';
   const phase = lh.phase || 'awaiting_approval';
   const user = lh.username || '';
-  let icon = '📱';
+  let icon = Icon('smartphone', 14);
   let state = 'running';
   let headline = '';
   let sub = '';          // short subtitle (non-technical)
@@ -1752,7 +1959,7 @@ function renderMcpLoginHintHtml(lh) {
     snippetBlock = _formatSnippet(lh.snippet);
   } else if (phase === 'timeout') {
     state = 'failed';
-    icon = '⏰';
+    icon = Icon('alarm', 14);
     headline = 'Login timed out';
     sub = 'No approval received in time — try again';
     snippetBlock = _formatSnippet(lh.snippet);
@@ -1784,7 +1991,7 @@ function renderMemoryPrefetchHtml(mp) {
   const fellBack = !!mp.fellBack;
 
   // ── Build a short headline ──
-  let icon = "🧠";
+  let icon = Icon('brain', 14);
   let state = "running";
   let headline = "";
   let sub = "";

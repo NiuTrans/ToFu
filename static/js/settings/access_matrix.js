@@ -195,7 +195,7 @@ function _renderAccessMatrix(provIdx) {
               }).join('') +
             '</select></label>') +
         '<button type="button" class="stg-btn-add stg-mx-probe' + (running ? ' running' : '') + '"' + (running ? ' disabled' : '') +
-          ' onclick="_runMatrixProbe(' + provIdx + ',' + (hasResults ? 'true' : 'false') + ')" title="' + escapeHtml(t('settings.matrixProbeHint')) + '">⚡ ' +
+          ' onclick="_runMatrixProbe(' + provIdx + ',' + (hasResults ? 'true' : 'false') + ')" title="' + escapeHtml(t('settings.matrixProbeHint')) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg> ' +
           escapeHtml(running ? t('settings.matrixProbing') : (hasResults ? t('settings.matrixRetest') : t('settings.matrixProbe'))) + '</button>' +
       '</div>' +
     '</div>' +
@@ -287,7 +287,7 @@ function _probeStatusInfo(status) {
   switch (status) {
     case 'ok':           return { glyph: '✓', cls: 'ok',     label: t('settings.probeOk') };
     case 'rate_limited': return { glyph: '429', cls: 'rate', label: t('settings.probeRateLimited') };
-    case 'unauthorized': return { glyph: '⛔', cls: 'unauth', label: t('settings.probeUnauthorized') };
+    case 'unauthorized': return { glyph: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px"><circle cx="12" cy="12" r="10"/><path d="M4.929 4.929 19.07 19.071"/></svg>', cls: 'unauth', label: t('settings.probeUnauthorized') };
     case 'not_found':    return { glyph: '∅', cls: 'nf',     label: t('settings.probeNotFound') };
     case 'unavailable':  return { glyph: '⚠', cls: 'down',   label: t('settings.probeUnavailable') };
     default:             return { glyph: '✕', cls: 'err',    label: t('settings.probeError') };

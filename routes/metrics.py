@@ -138,6 +138,21 @@ def _collect_infra_metrics(out: list) -> None:
     except Exception as e:
         logger.debug('[Metrics] rate-limit block failed: %s', e)
     try:
+        from lib.agent_core.admission import controller
+        st = controller.stats()
+        _emit_gauge(out, 'tofu_agent_inflight',
+                     'Agent tasks admitted and in-flight (admission gate)',
+                     [({}, st['in_flight'])])
+        _emit_gauge(out, 'tofu_agent_capacity',
+                     'Max concurrent agent tasks (0 = unbounded)',
+                     [({}, st['capacity'])])
+        if st['capacity'] > 0:
+            _emit_gauge(out, 'tofu_agent_available',
+                         'Free admission slots for new agent tasks',
+                         [({}, st['available'])])
+    except Exception as e:
+        logger.debug('[Metrics] admission block failed: %s', e)
+    try:
         from lib.push import hub
         # PushHub may not have a public .stats() — best-effort.
         size = 0

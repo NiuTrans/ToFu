@@ -38,6 +38,10 @@ async function _populateMcpTab() {
     _renderMcpCatalog();
     _renderMcpInstalled();
     _mcpUpdateToolCount();
+    // Keep the per-turn context capsule's MCP chips in sync with the live
+    // connection state (install / connect / uninstall all funnel through a
+    // _populateMcpTab refresh). See info-rail.js::refreshMcpRailState.
+    if (typeof refreshMcpRailState === 'function') refreshMcpRailState();
   } catch (e) {
     if (grid) grid.innerHTML = '<p class="stg-empty">加载 Apps 失败: ' + escapeHtml(e.message) + '</p>';
     debugLog('[MCP] Failed to load catalog: ' + e.message, 'error');
@@ -170,7 +174,7 @@ function _renderMcpCatalog() {
       : breaker ? ' installed reconnecting'
       : installed ? ' installed' : '';
     html += '<div class="mcp-app-card' + stateClass + '">';
-    html += '<div class="mcp-app-icon">' + (e.icon || '🔌') + '</div>';
+    html += '<div class="mcp-app-icon">' + (e.icon || Icon('plug', 26)) + '</div>';
     html += '<div class="mcp-app-name"><span class="mcp-app-name-text">' + escapeHtml(e.name) + '</span>';
     if (connected) {
       html += '<span class="mcp-app-status on"><span class="dot"></span>ON</span>';
@@ -407,7 +411,7 @@ function _mcpOpenInstallModal(serverId, isReinstall) {
   // Catalog icons are server-owned (lib/mcp/registry.py), not user input,
   // so innerHTML is safe here — matches how _renderMcpCatalog() already
   // emits the same icon strings into the grid cards on L3609.
-  var _icon = entry.icon || '🔌';
+  var _icon = entry.icon || Icon('plug', 34);
   document.getElementById('mcpInstallIcon').innerHTML =
     (typeof _icon === 'string' && _icon.trim().startsWith('<'))
       ? _icon
@@ -436,8 +440,11 @@ function _mcpOpenInstallModal(serverId, isReinstall) {
   var storedKeys = (entry.stored_env_keys || []);
 
   function _renderSpec(spec) {
-    var inputType = (spec.secret !== false) ? 'password' : 'text';
     var hasStored = storedKeys.indexOf(spec.key) !== -1;
+    if (spec.type === 'select' && Array.isArray(spec.options)) {
+      return _renderSelectSpec(spec, hasStored);
+    }
+    var inputType = (spec.secret !== false) ? 'password' : 'text';
     var html = '<div class="stg-field">';
     html += '<label>' + escapeHtml(spec.label || spec.key);
     if (spec.required) html += ' <span style="color:#ef4444;">*</span>';
@@ -445,6 +452,32 @@ function _mcpOpenInstallModal(serverId, isReinstall) {
     html += '</label>';
     var ph = hasStored ? '已保存，留空则沿用；填写即覆盖' : (spec.hint || '');
     html += '<input type="' + inputType + '" class="mcp-env-input" data-key="' + escapeHtml(spec.key) + '" data-has-stored="' + (hasStored ? '1' : '0') + '" placeholder="' + escapeHtml(ph) + '">';
+    html += '</div>';
+    return html;
+  }
+
+  // A select-type spec renders a provider dropdown that drives a companion
+  // (normally hidden) text input carrying the real env value. Picking a known
+  // provider fills the host AND any sibling fields named in the option's
+  // `autofill` map (e.g. SMTP host + ports). The "__custom__" option reveals
+  // the text input for manual entry. The dropdown itself is class
+  // `mcp-env-select` (NOT `mcp-env-input`), so it is never collected as a
+  // value at install time — only the companion input is.
+  function _renderSelectSpec(spec, hasStored) {
+    var html = '<div class="stg-field">';
+    html += '<label>' + escapeHtml(spec.label || spec.key);
+    if (spec.required) html += ' <span style="color:#ef4444;">*</span>';
+    if (hasStored) html += ' <span style="color:#10b981;font-size:11px;">● 已保存</span>';
+    html += '</label>';
+    html += '<select class="mcp-env-select" data-select-for="' + escapeHtml(spec.key) + '" onchange="_mcpEnvPresetChanged(this)">';
+    html += '<option value="">— 选择服务商 —</option>';
+    spec.options.forEach(function(opt) {
+      var af = opt.autofill ? escapeHtml(JSON.stringify(opt.autofill)) : '';
+      html += '<option value="' + escapeHtml(opt.value) + '" data-autofill="' + af + '">' + escapeHtml(opt.label) + '</option>';
+    });
+    html += '</select>';
+    var ph = hasStored ? '已保存，留空则沿用；填写即覆盖' : (spec.hint || '');
+    html += '<input type="text" class="mcp-env-input" data-key="' + escapeHtml(spec.key) + '" data-has-stored="' + (hasStored ? '1' : '0') + '" placeholder="' + escapeHtml(ph) + '" style="margin-top:6px;display:none;">';
     html += '</div>';
     return html;
   }
@@ -470,6 +503,43 @@ function _mcpOpenInstallModal(serverId, isReinstall) {
   btn.textContent = _mcpInstallIsReinstall ? '保存并连接' : '安装并连接';
 
   document.getElementById('mcpInstallOverlay').style.display = 'flex';
+}
+
+/**
+ * Provider-dropdown change handler. Drives the companion host input for the
+ * select's own key, and applies the chosen option's `autofill` map to sibling
+ * env inputs (e.g. SMTP host + ports). Choosing "__custom__" clears and
+ * reveals the host input for manual entry; choosing the blank prompt hides it.
+ */
+function _mcpEnvPresetChanged(sel) {
+  var fields = document.getElementById('mcpInstallFields');
+  if (!fields) return;
+  var key = sel.getAttribute('data-select-for');
+  var hostInput = fields.querySelector('.mcp-env-input[data-key="' + key + '"]');
+  var opt = sel.options[sel.selectedIndex];
+  var value = sel.value;
+
+  if (!value) {
+    if (hostInput) { hostInput.value = ''; hostInput.style.display = 'none'; }
+    return;
+  }
+  if (value === '__custom__') {
+    if (hostInput) { hostInput.value = ''; hostInput.style.display = ''; hostInput.focus(); }
+    return;
+  }
+  // Known provider: set host, keep the input hidden (value still collected).
+  if (hostInput) { hostInput.value = value; hostInput.style.display = 'none'; }
+
+  var afRaw = opt ? opt.getAttribute('data-autofill') : '';
+  if (afRaw) {
+    var autofill = {};
+    try { autofill = JSON.parse(afRaw); }
+    catch (e) { debugLog('[MCP] bad autofill JSON: ' + e.message, 'warning'); }
+    Object.keys(autofill).forEach(function(k) {
+      var sib = fields.querySelector('.mcp-env-input[data-key="' + k + '"]');
+      if (sib) sib.value = autofill[k];
+    });
+  }
 }
 
 function _mcpCloseInstallModal(evt) {

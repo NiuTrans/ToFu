@@ -113,6 +113,20 @@ async function regenerateFromUser(idx) {
 
     // Update local state if server translated the message
     if (result.userMessage) {
+      // ★ When auto-translate is OFF, the server restores the original text
+      //   and DROPS the translation metadata. Object.assign only MERGES keys,
+      //   so explicitly delete the stale local translation fields first —
+      //   otherwise the bilingual block lingers and a later full-conv sync
+      //   would re-PUT the stale originalContent into the DB.
+      if (result.restoredOriginal) {
+        delete msg.originalContent;
+        delete msg._translateDone;
+        delete msg._translateModel;
+        delete msg._translateFailed;
+        delete msg.translatedContent;
+        delete msg._translatedCache;
+        delete msg._showingTranslation;
+      }
       Object.assign(msg, result.userMessage);
       if (activeConvId === convId) {
         const msgEl = document.getElementById('msg-' + idx);

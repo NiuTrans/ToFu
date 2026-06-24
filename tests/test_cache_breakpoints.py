@@ -772,8 +772,11 @@ class TestBreakpointLimit:
         total = _count_breakpoints(body)
         assert total <= 4, f'Total BPs = {total} exceeds max 4'
 
-    def test_5_system_blocks_capped_at_4(self):
-        """System message with 5 text blocks — only first 4 get BPs."""
+    def test_5_system_blocks_no_tail_no_tools_uses_full_budget(self):
+        """System-only request (no tools, single message → no tail to
+        reserve) lets the system phase use the full 4-marker budget. The
+        reservations are conditional, so nothing is wasted when the
+        reserved phases have nothing to mark."""
         body = {
             'model': 'claude-sonnet-4-20250514',
             'messages': [{
@@ -785,17 +788,53 @@ class TestBreakpointLimit:
             }],
         }
         add_cache_breakpoints(body)
-        total = _count_breakpoints(body)
-        assert total == 4, f'Expected exactly 4 BPs (capped), got {total}'
+        sys_bps = sum(
+            1 for blk in body['messages'][0]['content']
+            if 'cache_control' in blk)
+        assert sys_bps == 4, (
+            f'System-only request should use the full 4-BP budget, got {sys_bps}')
 
-    def test_system_blocks_exhaust_limit_no_bp4(self):
-        """If system uses all 4 BPs, tool def and tail get none."""
+    def test_many_system_blocks_with_tail_and_tools_caps_at_2(self):
+        """The real production shape: 5 system blocks + tools + a tail. The
+        tool and tail markers are reserved, so the system phase is capped at
+        the leftover 2 — and the tail/tool are guaranteed."""
         body = {
             'model': 'claude-sonnet-4-20250514',
             'messages': [
                 {'role': 'system', 'content': [
                     {'type': 'text', 'text': f'Block {i}'}
-                    for i in range(4)
+                    for i in range(5)
+                ]},
+                {'role': 'user', 'content': 'query'},
+                {'role': 'tool', 'content': 'result'},
+            ],
+            'tools': [
+                {'type': 'function', 'function': {
+                    'name': 'test', 'description': 'Test.',
+                    'parameters': {'type': 'object'},
+                }},
+            ],
+        }
+        add_cache_breakpoints(body)
+        sys_bps = sum(
+            1 for blk in body['messages'][0]['content']
+            if 'cache_control' in blk)
+        assert sys_bps == 2, (
+            f'System phase should be capped at 2 (4 - tool - tail), got {sys_bps}')
+        assert 'cache_control' in body['tools'][-1]['function'], 'tool BP starved'
+        assert _has_cache_control(body['messages'][-1]), 'tail BP starved'
+        assert _count_breakpoints(body) == 4
+
+    def test_system_blocks_do_not_starve_tail(self):
+        """The regression: 3 system blocks + tools must NOT consume the tail
+        breakpoint. The conversation tail caches the growing history; losing
+        it re-bills the whole body uncached every round (conv mqj7x0t8)."""
+        body = {
+            'model': 'claude-sonnet-4-20250514',
+            'messages': [
+                {'role': 'system', 'content': [
+                    {'type': 'text', 'text': f'Block {i}'}
+                    for i in range(3)  # static + memory + swarm
                 ]},
                 {'role': 'user', 'content': 'query'},
                 {'role': 'tool', 'content': 'result'},
@@ -809,11 +848,16 @@ class TestBreakpointLimit:
         }
         add_cache_breakpoints(body)
         total = _count_breakpoints(body)
-        assert total == 4, f'Expected 4 (all from system), got {total}'
-        # Tool def should NOT have BP (budget exhausted)
-        assert 'cache_control' not in body['tools'][-1]['function']
-        # Tail should NOT have BP (budget exhausted)
-        assert not _has_cache_control(body['messages'][-1])
+        assert total == 4, f'Expected 4 BPs (2 system + tool + tail), got {total}'
+        # System phase capped at 2 — the 3rd system block gets no BP.
+        sys_bps = sum(
+            1 for blk in body['messages'][0]['content']
+            if 'cache_control' in blk)
+        assert sys_bps == 2, f'System should cap at 2 BPs, got {sys_bps}'
+        # Tool def MUST get a BP (not starved).
+        assert 'cache_control' in body['tools'][-1]['function']
+        # Tail MUST get a BP — this is the whole point of the fix.
+        assert _has_cache_control(body['messages'][-1])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -192,6 +192,16 @@ _PG_DEAD_SIGNATURES = (
     'Connection refused',
     'could not open shared memory segment',  # /dev/shm wiped
     'server closed the connection unexpectedly',
+    # FUSE-stall / container-IP-flap: a locally-owned postmaster stops
+    # answering 127.0.0.1 and psycopg2 reports a connect timeout rather than
+    # "Connection refused". Without this signature the self-heal never fired
+    # and every DB call spun on timeouts forever (scheduler + MCP keepalive
+    # were the first to surface it). _maybe_reboot_pg() is gated on
+    # is_pg_owned_locally(), so this only ever reboots PG WE own — a timeout
+    # against a genuine remote-owner DSN is left to the bootstrap layer.
+    'timeout expired',
+    'could not connect to server',
+    'Operation timed out',
 )
 _PG_ZOMBIE_SIGNATURES = (
     'could not open shared memory segment',
@@ -1703,6 +1713,126 @@ def init_db():
         _sqlite_schema_init(_new_sqlite_connection)
 
 
+def reset_sqlite_for_tests(db_path: str):
+    """Repoint the SQLite backend at a fresh ``db_path`` and re-init schema.
+
+    Test-only helper that makes per-test / per-class DB isolation actually
+    work. The naive approach — ``os.environ['TOFU_DB_PATH'] = ...`` inside a
+    ``setUpClass`` — has NO effect, because ``_BACKEND`` and ``DB_PATH`` are
+    module-level globals frozen when ``lib.database._core`` is first imported
+    (which happens at conftest collection time, long before any test body
+    runs). Worse, if the ambient environment selects PostgreSQL, unit tests
+    that expect SQLite silently share the live PG and accumulate cross-test
+    state (duplicate-email / stale-balance failures that depend on run order).
+
+    This function performs the repoint that the env-var alone cannot:
+
+      1. Forces the active backend to SQLite (overriding any ambient PG
+         selection) so these unit tests never touch a real database.
+      2. Sets the module global ``DB_PATH`` — read fresh inside
+         :func:`_new_sqlite_connection` on every connect — to the new file.
+      3. Drops every cached connection (the shared SQLite pool AND all
+         thread-local handles) so the next ``get_thread_db`` / ``_pool_get``
+         opens against the new path instead of the old one.
+      4. Re-runs :func:`init_db` to create the schema in the fresh file.
+
+    Args:
+        db_path: Absolute path to the (fresh) SQLite file to use. Its parent
+            directory is created if missing.
+
+    Raises:
+        ValueError: if ``db_path`` is empty.
+    """
+    global _BACKEND, DB_PATH, db_available, pg_available
+    if not db_path:
+        raise ValueError('reset_sqlite_for_tests requires a non-empty db_path')
+
+    snapshot = {
+        '_BACKEND': _BACKEND, 'DB_PATH': DB_PATH,
+        'db_available': db_available, 'pg_available': pg_available,
+    }
+
+    _BACKEND = 'sqlite'
+    db_available = True
+    pg_available = False
+    DB_PATH = db_path
+    os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
+
+    # Drain the shared SQLite pool.
+    with _sqlite_pool_lock:
+        while _sqlite_pool:
+            conn = _sqlite_pool.pop()
+            try:
+                conn.close()
+            except Exception as e:
+                logger.debug('[DB] reset_sqlite_for_tests: pool close failed: %s', e)
+
+    # Drop every thread-local connection so the next access reconnects to the
+    # new path. We can only directly reach the calling thread's handles via
+    # _thread_local; replace the object outright so stale handles on other
+    # threads (rare in unit tests) are orphaned and GC'd rather than reused.
+    global _thread_local
+    for d in (DOMAIN_CHAT, DOMAIN_TRADING, DOMAIN_SYSTEM):
+        attr = f'db_{d}'
+        old = getattr(_thread_local, attr, None)
+        if old is not None:
+            try:
+                old.close()
+            except Exception as e:
+                logger.debug('[DB] reset_sqlite_for_tests: tl close failed: %s', e)
+            setattr(_thread_local, attr, None)
+    _thread_local = threading.local()
+
+    init_db()
+    logger.debug('[DB] reset_sqlite_for_tests: repointed to %s', db_path)
+    return snapshot
+
+
+def restore_db_state(snapshot: dict):
+    """Undo a :func:`reset_sqlite_for_tests` repoint (test-only).
+
+    Restores the backend/path globals captured in ``snapshot`` and drops
+    every cached connection so the next access reconnects against the
+    ORIGINAL binding. This is the symmetric teardown that prevents a
+    test class which repointed the DB at a temp file from poisoning later
+    tests that share the conftest session DB (the temp file is deleted
+    when the class's ``TemporaryDirectory`` is cleaned up, so without this
+    restore the next connect hits a vanished path → ``no such table``).
+
+    Args:
+        snapshot: The dict returned by :func:`reset_sqlite_for_tests`.
+    """
+    global _BACKEND, DB_PATH, db_available, pg_available, _thread_local
+    if not snapshot:
+        return
+
+    # Drop any connections opened against the temp DB before swapping back.
+    with _sqlite_pool_lock:
+        while _sqlite_pool:
+            conn = _sqlite_pool.pop()
+            try:
+                conn.close()
+            except Exception as e:
+                logger.debug('[DB] restore_db_state: pool close failed: %s', e)
+    for d in (DOMAIN_CHAT, DOMAIN_TRADING, DOMAIN_SYSTEM):
+        attr = f'db_{d}'
+        old = getattr(_thread_local, attr, None)
+        if old is not None:
+            try:
+                old.close()
+            except Exception as e:
+                logger.debug('[DB] restore_db_state: tl close failed: %s', e)
+            setattr(_thread_local, attr, None)
+    _thread_local = threading.local()
+
+    _BACKEND = snapshot.get('_BACKEND', _BACKEND)
+    DB_PATH = snapshot.get('DB_PATH', DB_PATH)
+    db_available = snapshot.get('db_available', db_available)
+    pg_available = snapshot.get('pg_available', pg_available)
+    logger.debug('[DB] restore_db_state: restored backend=%s path=%s',
+                 _BACKEND, DB_PATH)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Backend Detection & Auto-Start (runs on import)
 # ═══════════════════════════════════════════════════════════════════════
@@ -1776,6 +1906,16 @@ else:
                                               name='db-conn-reaper')
             _reaper_thread.start()
 
+            # Record the backend decision in the audit trail so an operator
+            # can always answer "which DB is actually serving?" from audit.log
+            # — the failover branch below logs the SQLite case symmetrically.
+            try:
+                from lib.log import audit_log
+                audit_log('db_backend_selected', backend='pg',
+                          host=PG_HOST, port=PG_PORT, dbname=PG_DBNAME)
+            except Exception as _ae:
+                logger.debug('[DB] audit_log for PG backend selection failed: %s', _ae)
+
         except ImportError:
             logger.warning('[DB] psycopg2 not installed — falling back to SQLite')
             _pg_ok = False
@@ -1831,6 +1971,20 @@ else:
         logger.info('[DB] SQLite fallback backend: %s '
                     '(busy_timeout=%dms, pool_max=%d)',
                     DB_PATH, _BUSY_TIMEOUT_MS, _SQLITE_POOL_MAX)
+        # Audit the backend decision symmetrically with the PG branch. The
+        # existing-cluster case already audited 'pg_bootstrap_failed_with_'
+        # 'existing_cluster' above; this also covers the fresh-host /
+        # no-cluster path that previously left NO audit trace of running on
+        # SQLite — so an operator scanning audit.log can always see the
+        # failover and which backend is live.
+        try:
+            from lib.log import audit_log
+            audit_log('db_backend_selected', backend='sqlite',
+                      path=DB_PATH,
+                      reason=('pg_bootstrap_failed_existing_cluster' if _pgdata_exists
+                              else 'pg_unavailable_or_no_cluster'))
+        except Exception as _ae:
+            logger.debug('[DB] audit_log for SQLite backend selection failed: %s', _ae)
 
 
 # ═══════════════════════════════════════════════════════════════════════

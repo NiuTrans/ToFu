@@ -201,7 +201,18 @@ def generate_conversation_title(messages: list, lang: str | None = None) -> str:
                 {'role': 'user',
                  'content': f'Conversation:\n\n{convo}\n\nTitle:'},
             ],
-            max_tokens=32,
+            # A title is at most TITLE_MAX_CHARS, but the budget must cover
+            # the model's reasoning trace too: the 'cheap' pool is full of
+            # thinking models (deepseek-v4, glm, qwen3-max, kimi-thinking),
+            # and for some of them (e.g. deepseek-reasoner) thinking is on by
+            # definition and its tokens count against max_tokens. 32 tokens
+            # truncated good titles mid-word (e.g. "更新 GLM-5.2 …" → "更新 GL")
+            # and starved thinking models into empty output. dispatch_chat
+            # already defaults thinking_enabled=False (disabling thinking where
+            # the model honors the flag); the final string is collapsed to one
+            # line and hard-capped by _clean_title, so a generous ceiling only
+            # buys completeness, never a longer title.
+            max_tokens=512,
             temperature=0.2,
             capability='cheap',
             log_prefix='[TitleGen]',

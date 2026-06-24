@@ -6,6 +6,7 @@ Sub-modules:
   code_exec    — code execution tool definitions
   conversation — conversation reference tools
   image_gen    — image generation constants (tool names for display dispatch)
+  image_edit   — inspect_image constants (zoom/rotate/crop image viewer)
   meta         — build_project_tool_meta (dynamic tool list assembly)
   project      — project-mode file tools (read, write, grep, etc.)
 """
@@ -23,6 +24,7 @@ from . import (  # noqa: E402
     code_exec,
     conversation,
     human_guidance,
+    image_edit,
     image_gen,
     meta,
     project,
@@ -32,12 +34,13 @@ from .browser import *  # noqa: F401,F403
 from .code_exec import *  # noqa: F401,F403
 from .conversation import *  # noqa: F401,F403
 from .human_guidance import *  # noqa: F401,F403
+from .image_edit import *  # noqa: F401,F403
 from .image_gen import *  # noqa: F401,F403
 from .meta import *  # noqa: F401,F403
 from .project import *  # noqa: F401,F403
 from .search import *  # noqa: F401,F403
 
-build_facade(__all__, search, browser, code_exec, conversation, image_gen, meta, project, human_guidance)
+build_facade(__all__, search, browser, code_exec, conversation, image_gen, image_edit, meta, project, human_guidance)
 
 # ── Declarative tool-assembly registry (imported last: its built-in spec
 #    builders lazily reference the schema constants above at request time) ──
@@ -48,14 +51,23 @@ from .registry import (  # noqa: E402,F401
     all_specs,
     assemble_tool_list,
     available_plugins,
+    clear_all_tool_list_latches,
+    clear_multiroot_sticky,
+    clear_tool_list_latch,
     discover_plugin_specs,
+    latch_tool_list,
     register_tool_spec,
     resolve_enabled_plugins,
     sync_spec_handlers,
+    tool_list_diff,
+    tool_list_diverged,
 )
 
 __all__ += [
     'ToolContext', 'ToolSpec', 'all_specs', 'assemble_tool_list',
-    'available_plugins', 'discover_plugin_specs', 'register_tool_spec',
-    'resolve_enabled_plugins', 'sync_spec_handlers',
+    'available_plugins', 'clear_all_tool_list_latches',
+    'clear_multiroot_sticky', 'clear_tool_list_latch',
+    'discover_plugin_specs', 'latch_tool_list', 'register_tool_spec',
+    'resolve_enabled_plugins', 'sync_spec_handlers', 'tool_list_diff',
+    'tool_list_diverged',
 ]

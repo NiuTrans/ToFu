@@ -1,26 +1,38 @@
 """lib/orchestration_endpoint_adapter.py — FlowExecutor → endpoint UI bridge.
 
-The frontend renders endpoint mode from a specific message schema:
+The frontend renders endpoint mode from a specific message schema AND a
+specific live SSE event sequence:
 
-    assistant(planner, _isEndpointPlanner, _epPlannerIteration=N)
-    assistant(worker,  _epIteration=N)
-    user(critic, _isEndpointReview, _epNextPhase='worker'|'planner', _epApproved)
+    Messages (DB / reload):
+      assistant(planner, _isEndpointPlanner, _epPlannerIteration=N)
+      assistant(worker,  _epIteration=N)
+      user(critic, _isEndpointReview, _epNextPhase='worker'|'planner', _epApproved)
 
-When the eventual cutover routes endpoint mode through
-:class:`lib.orchestration_engine.FlowExecutor`, the engine emits its OWN
-vocabulary (``step_start`` / ``step_complete`` / ``loop_iteration`` /
-``replan`` / ``zero_deliverable_guard`` …). This adapter is the pure,
-stateful translator between the two — so the cutover can drive the
-existing UI with ZERO frontend changes, behind a feature flag.
+    Live SSE (streaming UI):
+      endpoint_iteration(phase=planning|working|reviewing, iteration=N)  ← opens the bubble
+      delta(content=… | thinking=…)                                       ← fills it live
+      endpoint_planner_done(content=…)                                    ← finalizes planner
+      endpoint_critic_msg(iteration, content, next_phase)                 ← finalizes critic
 
-It is intentionally a standalone, dependency-light class with no I/O: feed
-it engine events via :meth:`on_event`, collect endpoint-shaped message
-dicts from :meth:`drain`. Tests exercise it directly; the live wiring
-(SSE emission, DB persistence) stays in the route/orchestrator layer.
+The engine (:class:`lib.orchestration_engine.FlowExecutor`) emits its OWN
+vocabulary (``step_start`` / ``step_delta`` / ``step_complete`` /
+``loop_iteration`` / ``replan`` / ``zero_deliverable_guard`` …). This adapter
+is the stateful translator between the two, so endpoint / autopilot / custom
+flows drive the existing UI with ZERO frontend changes.
 
-This module does NOT perform the cutover — it makes it *possible* and
-*testable* without touching the battle-tested ``lib/tasks_pkg/endpoint.py``
-path. Nothing imports it yet except its test.
+Two output channels, deliberately separated:
+
+* ``on_stream(sse_event)`` — LIVE SSE events for the streaming UI. Emitted as
+  the turn unfolds: an ``endpoint_iteration`` when a node STARTS (so the
+  bubble exists before any token), ``delta`` events per streamed chunk, and a
+  finalizing ``endpoint_planner_done`` / ``endpoint_critic_msg`` when the node
+  COMPLETES.
+* ``emit(message_dict)`` — endpoint-shaped MESSAGE dicts for DB persistence /
+  reload parity. Fired once per completed turn (``self.messages`` accumulates
+  the same dicts).
+
+Either may be ``None`` (tests drive ``on_event`` directly and read
+``self.messages``).
 """
 
 from __future__ import annotations
@@ -39,11 +51,11 @@ _PLANNER_ROLES = frozenset({'planner'})
 
 
 class EndpointEventAdapter:
-    """Translate FlowExecutor events into endpoint-mode message dicts.
+    """Translate FlowExecutor events into endpoint-mode messages + live SSE.
 
     Usage::
 
-        adapter = EndpointEventAdapter(emit=task_append_event)
+        adapter = EndpointEventAdapter(emit=db_sync, on_stream=task_append_event)
         executor = FlowExecutor(defn, on_event=adapter.on_event)
         executor.run(...)
         messages = adapter.messages   # endpoint-shaped, ready to persist
@@ -51,23 +63,32 @@ class EndpointEventAdapter:
     Parameters
     ----------
     emit : callable(dict), optional
-        If supplied, each translated endpoint message is also forwarded
-        live (e.g. to ``TaskRuntime.append_event``). The adapter always
-        accumulates them in ``self.messages`` regardless.
+        Called once per COMPLETED turn with the endpoint-shaped message dict
+        (DB persistence). The adapter always accumulates them in
+        ``self.messages`` regardless.
+    on_stream : callable(dict), optional
+        Called with each LIVE SSE event (``endpoint_iteration`` / ``delta`` /
+        ``endpoint_planner_done`` / ``endpoint_critic_msg``) as the turn
+        unfolds, so the streaming UI renders tokens live.
     """
 
-    def __init__(self, emit: Callable | None = None):
+    def __init__(self, emit: Callable | None = None,
+                 on_stream: Callable | None = None):
         self._emit = emit
+        self._on_stream = on_stream
         self.messages: list[dict] = []
         self._iteration = 0           # worker iteration counter
         self._planner_iteration = 0   # planner (re)plan counter
         self._next_phase = 'worker'   # phase the upcoming critic points to
         self._pending_replan = False  # a replan event arrived; next planner is a re-plan
+        # Role of the node whose step_start fired but step_complete hasn't yet
+        # (the in-flight turn) — lets a stray delta route even if events race.
+        self._cur_role = ''
 
     # ── engine event sink ───────────────────────────────────────────
 
     def on_event(self, ev: dict):
-        """Consume one FlowExecutor event; may produce an endpoint message."""
+        """Consume one FlowExecutor event; may produce messages + SSE events."""
         etype = ev.get('type')
         try:
             handler = getattr(self, f'_on_{etype}', None)
@@ -90,13 +111,57 @@ class EndpointEventAdapter:
         # it was already tagged _epNextPhase='planner'.
         self._pending_replan = True
 
+    def _on_step_start(self, ev: dict):
+        """A node began executing — open the matching live bubble.
+
+        Emits the ``endpoint_iteration`` the frontend keys off to stand up
+        (or transition to) the right streaming bubble BEFORE any token
+        arrives, so deltas have somewhere to land. Producer iterations are
+        counted HERE (at start) so the iteration number is stable across the
+        start event, the deltas, and the eventual completed message.
+        """
+        role = ev.get('role') or ''
+        emits = ev.get('emits') or self._derive_emits(role)
+        self._cur_role = role
+
+        if role in _PLANNER_ROLES:
+            self._stream({'type': 'endpoint_iteration', 'iteration': 0,
+                          'phase': 'planning'})
+        elif emits == 'user':
+            # Verifier (critic / reviewer / virtual_user) — its turn lands on
+            # the user side; the frontend's 'reviewing' branch finalizes the
+            # worker bubble and creates the critic bubble.
+            self._stream({'type': 'endpoint_iteration',
+                          'iteration': self._iteration, 'phase': 'reviewing'})
+        else:
+            # Assistant-side producer (worker / specialist) — count the turn.
+            self._iteration += 1
+            self._stream({'type': 'endpoint_iteration',
+                          'iteration': self._iteration, 'phase': 'working'})
+
+    def _on_step_delta(self, ev: dict):
+        """Stream one content/thinking chunk into the current bubble."""
+        chunk = ev.get('chunk') or ''
+        if not chunk:
+            return
+        if ev.get('kind') == 'thinking':
+            self._stream({'type': 'delta', 'thinking': chunk})
+        else:
+            self._stream({'type': 'delta', 'content': chunk})
+
     def _on_step_complete(self, ev: dict):
         role = ev.get('role') or ''
-        out = ev.get('preview') or ''
+        # Prefer the FULL turn output; fall back to the 200-char preview only
+        # when running against an un-upgraded engine that omits it. Using the
+        # preview as message content truncated every turn to 200 chars.
+        out = ev.get('output')
+        if out is None:
+            out = ev.get('preview') or ''
         # The MESSAGE axis the engine resolved for this node (user|assistant).
         # Older events without it fall back to role-based classification so
         # this adapter keeps working against an un-upgraded engine.
         emits = ev.get('emits') or self._derive_emits(role)
+        self._cur_role = ''
 
         if role in _PLANNER_ROLES:
             self._planner_iteration += 1
@@ -108,6 +173,8 @@ class EndpointEventAdapter:
                 '_epPlannerIteration': self._planner_iteration,
             })
             self._pending_replan = False
+            # Finalize the planner bubble live.
+            self._stream({'type': 'endpoint_planner_done', 'content': out})
         elif emits == 'user':
             # A "user-side" turn — a critic verdict (endpoint) OR a virtual
             # user reply (autopilot). Both render on the user side and carry
@@ -123,9 +190,15 @@ class EndpointEventAdapter:
                 '_epApproved': next_phase == 'stop',
                 '_epNextPhase': next_phase,
             })
+            # Finalize the critic/VU bubble live.
+            self._stream({'type': 'endpoint_critic_msg',
+                          'iteration': self._iteration, 'content': out,
+                          'next_phase': next_phase})
         else:
-            # An assistant-side producer turn (worker / specialist).
-            self._iteration += 1
+            # An assistant-side producer turn (worker / specialist). The
+            # iteration was already counted at step_start; the worker bubble
+            # is finalized by the NEXT iteration / complete event (matching
+            # the live endpoint path), so no finalize SSE is emitted here.
             self._push({
                 'role': 'assistant',
                 'content': out,
@@ -145,11 +218,15 @@ class EndpointEventAdapter:
 
     def _on_zero_deliverable_guard(self, ev: dict):
         # Mirror endpoint's synthetic critic row so the UI shows the guard.
+        content = ('⚠️ Zero-deliverable guard: the worker produced no '
+                   'state-changing actions; injecting an execute-now '
+                   'directive.')
+        # Open + finalize a synthetic critic bubble live (no deltas).
+        self._stream({'type': 'endpoint_iteration',
+                      'iteration': self._iteration, 'phase': 'reviewing'})
         self._push({
             'role': 'user',
-            'content': ('⚠️ Zero-deliverable guard: the worker produced no '
-                        'state-changing actions; injecting an execute-now '
-                        'directive.'),
+            'content': content,
             'timestamp': _now(),
             '_isEndpointReview': True,
             '_epIteration': self._iteration,
@@ -157,6 +234,9 @@ class EndpointEventAdapter:
             '_epNextPhase': 'worker',
             '_isSyntheticCritic': True,
         })
+        self._stream({'type': 'endpoint_critic_msg',
+                      'iteration': self._iteration, 'content': content,
+                      'next_phase': 'worker', 'synthetic': True})
 
     # ── helpers ──────────────────────────────────────────────────────
 
@@ -188,6 +268,13 @@ class EndpointEventAdapter:
                 self._emit(msg)
             except Exception as e:
                 logger.debug('[EndpointAdapter] emit failed: %s', e)
+
+    def _stream(self, ev: dict):
+        if self._on_stream:
+            try:
+                self._on_stream(ev)
+            except Exception as e:
+                logger.debug('[EndpointAdapter] on_stream failed: %s', e)
 
 
 def _now() -> str:

@@ -129,4 +129,10 @@ class RateLimiter:
                 raise
             finally:
                 self.release()
+        # All attempts consumed and the last one was a rate-limit error we
+        # chose to retry — this is a terminal give-up, not a transient retry,
+        # so it warrants an ERROR (the per-attempt logs above are WARNING).
+        logger.error('[RateLimiter] Agent %s exhausted %d rate-limit retries — '
+                     'giving up: %s', getattr(agent, "agent_id", "?"),
+                     max_attempts, last_exc)
         raise last_exc  # type: ignore[misc]

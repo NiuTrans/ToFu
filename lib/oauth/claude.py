@@ -22,7 +22,7 @@ import requests
 
 from lib.log import get_logger
 from lib.oauth.pkce import generate_pkce_codes
-from lib.oauth.token_store import load_token, save_token
+from lib.oauth.token_store import load_token, save_token, OAuthExchangeError
 from lib.http_client import http_post
 
 logger = get_logger(__name__)
@@ -31,6 +31,7 @@ __all__ = [
     'CLAUDE_OAUTH_CONFIG',
     'claude_build_auth_url',
     'claude_exchange_code',
+    'claude_store_token',
     'claude_refresh_token',
     'claude_get_valid_token',
 ]
@@ -87,6 +88,18 @@ def claude_build_auth_url() -> dict:
         'pkce': pkce,
         'callback_port': CLAUDE_OAUTH_CONFIG['callback_port'],
         'provider': 'claude',
+        # Params for browser-side token exchange (B1 flow): the browser POSTs
+        # to token_url itself, using ITS network (VPN/proxy), then sends the
+        # resulting tokens to /api/oauth/store-token. code_verifier is the
+        # client's own PKCE secret, so handing it to the browser is correct.
+        'exchange': {
+            'token_url': CLAUDE_OAUTH_CONFIG['token_url'],
+            'client_id': CLAUDE_OAUTH_CONFIG['client_id'],
+            'redirect_uri': CLAUDE_OAUTH_CONFIG['redirect_uri'],
+            'code_verifier': pkce['code_verifier'],
+            'state': state,
+            'style': 'json',  # Anthropic token endpoint expects JSON
+        },
     }
 
 
@@ -123,7 +136,11 @@ def claude_exchange_code(code: str, pkce_verifier: str, state: str = '') -> dict
         if resp.status_code != 200:
             logger.error('[Claude OAuth] Token exchange failed (HTTP %d): %.500s',
                          resp.status_code, resp.text)
-            return None
+            raise OAuthExchangeError(
+                _explain_exchange_failure(resp.status_code, resp.text, 'claude'),
+                status_code=resp.status_code,
+                detail=resp.text[:500],
+            )
 
         data = resp.json()
         access_token = data.get('access_token', '')
@@ -132,7 +149,8 @@ def claude_exchange_code(code: str, pkce_verifier: str, state: str = '') -> dict
 
         if not access_token:
             logger.error('[Claude OAuth] No access_token in response')
-            return None
+            raise OAuthExchangeError(
+                'Anthropic returned no access_token', status_code=resp.status_code)
 
         # Build token storage
         token_data = {
@@ -150,9 +168,51 @@ def claude_exchange_code(code: str, pkce_verifier: str, state: str = '') -> dict
                      token_data['email'], expires_in)
         return token_data
 
+    except OAuthExchangeError:
+        raise
     except Exception as e:
         logger.error('[Claude OAuth] Token exchange error: %s', e, exc_info=True)
-        return None
+        raise OAuthExchangeError(
+            'Network error reaching Anthropic: %s' % e, status_code=0) from e
+
+
+def claude_store_token(data: dict) -> dict:
+    """Persist a token response the BROWSER already obtained (B1 flow).
+
+    The browser does the token exchange against Anthropic from its own
+    (VPN-enabled) network and hands us the raw token JSON. We validate +
+    persist it exactly like the server-side path would.
+
+    Args:
+        data: The raw JSON response from Anthropic's token endpoint.
+
+    Returns:
+        The stored token dict.
+
+    Raises:
+        OAuthExchangeError: when the response carries no access_token.
+    """
+    if not isinstance(data, dict):
+        raise OAuthExchangeError('Invalid token response (not an object)', status_code=0)
+    access_token = data.get('access_token', '')
+    if not access_token:
+        raise OAuthExchangeError(
+            'Token response from the browser contained no access_token',
+            status_code=0, detail=json.dumps(data)[:300])
+    expires_in = data.get('expires_in', 28800)
+    token_data = {
+        'type': 'claude',
+        'access_token': access_token,
+        'refresh_token': data.get('refresh_token', ''),
+        'expire': time.time() + expires_in,
+        'expires_in': expires_in,
+        'email': _extract_email_from_token(data),
+        'id_token': data.get('id_token', ''),
+    }
+    save_token('claude', token_data)
+    logger.info('[Claude OAuth] Stored browser-exchanged token (email=%s, expires_in=%ds)',
+                token_data['email'], expires_in)
+    return token_data
 
 
 def claude_refresh_token(refresh_tok: str = None) -> dict | None:
@@ -255,6 +315,39 @@ def claude_get_valid_token() -> str | None:
         logger.warning('[Claude OAuth] Refresh failed, using potentially expired token')
 
     return access_token
+
+
+def _explain_exchange_failure(status: int, body: str, provider: str) -> str:
+    """Turn an upstream non-200 token-exchange response into a clear message.
+
+    Distinguishes the common failure modes so the UI doesn't mislead the
+    user with a generic "code expired": a 403 "Request not allowed" is an
+    edge/geo block on the SERVER's egress IP, not a bad code.
+    """
+    upstream = ''
+    try:
+        parsed = json.loads(body) if body else {}
+        err = parsed.get('error', parsed)
+        if isinstance(err, dict):
+            upstream = err.get('message') or err.get('error_description') or err.get('type') or ''
+        elif isinstance(err, str):
+            upstream = err
+    except Exception:
+        upstream = (body or '')[:200]
+
+    if status == 403:
+        return ('Anthropic refused the token exchange (HTTP 403: %s). This is an '
+                'edge/region block on the SERVER\u2019s network \u2014 not an expired code. '
+                'The authorization succeeded in your browser, but this server cannot '
+                'reach Anthropic\u2019s token endpoint from its current network.'
+                % (upstream or 'Request not allowed'))
+    if status in (400, 401):
+        return ('Anthropic rejected the authorization code (HTTP %d: %s). The code may '
+                'have expired or already been used \u2014 start a fresh login.'
+                % (status, upstream or 'invalid_grant'))
+    if status == 0:
+        return upstream or 'Could not reach Anthropic.'
+    return 'Token exchange failed (HTTP %d: %s).' % (status, upstream or 'unknown error')
 
 
 def _extract_email_from_token(token_response: dict) -> str:

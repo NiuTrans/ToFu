@@ -107,9 +107,6 @@ _FIELDS: list[tuple[str, str, type, Any, Optional[tuple], str]] = [
     ('profile',               'profile',               str,   '',     None,
         'Capability profile name (lib/agent_core/profiles.py). Supplies cfg '
         'defaults that explicit keys override. Empty / "default" = no-op.'),
-    ('agentBackend',          'agent_backend',         str,   'builtin',
-        ('builtin', 'codex', 'claude_code'),
-        'Which agent runtime to use.'),
     ('endpointMode',          'endpoint_mode',         bool,  False,  None, 'Planner→Worker→Critic loop.'),
     ('autopilot',             'autopilot',             bool,  False,  None, 'Autopilot mode.'),
 
@@ -227,7 +224,6 @@ class TofuOptions:
 
     # Backend / mode
     profile: str = ''
-    agent_backend: str = 'builtin'
     endpoint_mode: bool = False
     autopilot: bool = False
 

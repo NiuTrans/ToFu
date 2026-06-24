@@ -21,6 +21,7 @@ from lib.tools import (
     BROWSER_TOOL_NAMES,
     CODE_EXEC_TOOL_NAMES,
     CONV_REF_TOOL_NAMES,
+    IMAGE_EDIT_TOOL_NAMES,
     IMAGE_GEN_TOOL_NAMES,
     PROJECT_TOOL_NAMES,
 )
@@ -336,6 +337,32 @@ def _tool_display_image_gen(fn_name, fn_args, tc_id, tc_args_str):
     }
 
 
+
+
+def _tool_display_inspect_image(fn_name, fn_args, tc_id, tc_args_str):
+    """Build display info for inspect_image tool calls.
+
+    Surfaces the target file plus the requested transform (crop / zoom /
+    rotate / grid) so the tool-call line reads e.g. ``diagram.png — crop, 2×``.
+    """
+    path = fn_args.get('path', '?') or '?'
+    base = os.path.basename(path) or path
+    ops = []
+    if fn_args.get('crop'):
+        ops.append('crop')
+    z = fn_args.get('zoom')
+    if z:
+        try:
+            ops.append(f'{float(z):g}×')
+        except (TypeError, ValueError):
+            ops.append('zoom')
+    rot = fn_args.get('rotate')
+    if rot:
+        ops.append(f'{rot}°')
+    if fn_args.get('grid'):
+        ops.append('grid')
+    suffix = f' — {", ".join(ops)}' if ops else ''
+    return f'{base}{suffix}', {'toolName': 'inspect_image'}
 
 
 def _tool_display_human_guidance(fn_name, fn_args, tc_id, tc_args_str):
@@ -698,6 +725,10 @@ def _build_display_dispatch_table():
     for name in IMAGE_GEN_TOOL_NAMES:
         table[name] = _tool_display_image_gen
 
+    # Image inspection tool (zoom/rotate/crop viewer)
+    for name in IMAGE_EDIT_TOOL_NAMES:
+        table[name] = _tool_display_inspect_image
+
     # Human guidance tool
     table['ask_human'] = _tool_display_human_guidance
 
@@ -715,7 +746,7 @@ _TOOL_DISPLAY_DISPATCH = _build_display_dispatch_table()
 #    — the rootname pill is only meaningful for paths the user could
 #    distinguish between project roots.
 _FS_TOOLS_FOR_ROOT_PILL = frozenset({
-    'read_files', 'list_dir', 'grep_search', 'find_files',
+    'read_files', 'inspect_image', 'list_dir', 'grep_search', 'find_files',
     'write_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents',
     'create_project', 'run_command',
@@ -771,7 +802,7 @@ def _extract_first_path_arg(fn_name, fn_args):
         if fn_args.get('path'):
             return fn_args['path']
         return ''
-    if fn_name in ('apply_diff', 'insert_content'):
+    if fn_name in ('apply_diff', 'insert_content', 'inspect_image'):
         return fn_args.get('path') or ''
     if fn_name in ('apply_diffs', 'insert_contents'):
         edits = fn_args.get('edits')
@@ -856,6 +887,36 @@ def _resolve_tool_root_name(fn_name, fn_args, conv_id=None):
         # Unknown root prefix — surface what the model wrote so the user
         # can see the typo / stale name in the UI.
         return head
+
+    # No explicit ``rootname:`` prefix. When the path is ABSOLUTE, attribute
+    # it to whichever registered root contains it (longest-prefix match).
+    # Without this, an absolute path under a NON-primary root (e.g. the model
+    # reading ``/abs/to/FDP/hope/op2_train.sh`` while ``chatui`` is primary)
+    # would skip the prefix branch above and fall through to the primary
+    # fallback below — mislabeled as the primary root, or unlabeled. The
+    # longest-prefix match disambiguates nested roots correctly.
+    if raw_path and (raw_path.startswith('/') or raw_path.startswith('~')
+                     or os.path.isabs(raw_path)):
+        try:
+            abs_path = os.path.abspath(os.path.expanduser(raw_path))
+        except (OSError, ValueError) as e:
+            logger.debug('[ToolDisplay] abspath(%r) failed: %s', raw_path, e)
+            abs_path = ''
+        if abs_path:
+            best_name, best_len = '', -1
+            for rn, rp in registry_items:
+                if not rp:
+                    continue
+                try:
+                    abs_root = os.path.abspath(os.path.expanduser(rp))
+                except (OSError, ValueError) as e:
+                    logger.debug('[ToolDisplay] abspath(%r) failed: %s', rp, e)
+                    continue
+                if abs_path == abs_root or abs_path.startswith(abs_root.rstrip('/') + '/'):
+                    if len(abs_root) > best_len:
+                        best_name, best_len = rn, len(abs_root)
+            if best_name:
+                return best_name
 
     # No prefix — fall back to the primary root's name.
     if primary_path:

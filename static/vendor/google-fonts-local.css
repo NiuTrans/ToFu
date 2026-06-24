@@ -33,6 +33,23 @@
   font-display: swap;
   src: url(fonts/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8FqtjPQ.ttf) format('truetype');
 }
+/* Metric-overridden fallback for 'Plus Jakarta Sans' — mitigates the
+   font-swap layout shift (Lighthouse cls-culprits / font-display insight).
+   The overrides match Plus Jakarta Sans' own vertical metrics (unitsPerEm
+   1000, hhea ascent 1038, descent -222, lineGap 0) so the fallback line box
+   is the SAME height as the web font; when the real font swaps in, no
+   reflow. Aliased to whichever common sans-serif exists locally — on a
+   system with none, the face is skipped and the stack falls through to
+   -apple-system/sans-serif (a harmless no-op). No size-adjust: a wrong
+   horizontal scale would make CLS worse, and the affected nodes are
+   single-line flex items whose box HEIGHT is what shifts. */
+@font-face {
+  font-family: 'Jakarta Fallback';
+  src: local('Arial'), local('Helvetica Neue'), local('Segoe UI'), local('Roboto');
+  ascent-override: 103.8%;
+  descent-override: 22.2%;
+  line-gap-override: 0%;
+}
 @font-face {
   font-family: 'Plus Jakarta Sans';
   font-style: normal;

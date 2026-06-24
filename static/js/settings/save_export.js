@@ -33,6 +33,13 @@ function saveSettings() {
   config.systemPrompt = document.getElementById("settingSystem").value;
   var spModeSel = document.getElementById('settingSystemPromptMode');
   if (spModeSel) config.systemPromptMode = (spModeSel.value === 'replace') ? 'replace' : 'append';
+  var spbEl = document.getElementById('settingSystemDisabledBlocks');
+  if (spbEl) {
+    var _disabledIds = [];
+    try { _disabledIds = JSON.parse(spbEl.value || '[]'); } catch (e) { _disabledIds = []; }
+    if (!Array.isArray(_disabledIds)) _disabledIds = [];
+    config.systemPromptBlocks = { disabled: _disabledIds };
+  }
   var dtdEl = document.getElementById('settingDefaultThinkingDepth');
   if (dtdEl) {
     var oldDefault = config.defaultThinkingDepth;

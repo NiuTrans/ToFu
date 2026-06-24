@@ -236,6 +236,8 @@ function _handleTimerPollCheck(ev, c) {
           r._timerTimerId = ev.timerId;
           // Capture the next-poll timestamp so the UI can render a countdown.
           if (ev.nextPollTs) r._timerNextPollTs = ev.nextPollTs;
+          // Remember the model the poll LLM resolved to (shown in the header).
+          if (ev.model) r._timerModel = ev.model;
           // The 'started' event carries the verification metadata (what is
           // being checked + how). Stash it on the round so the panel header
           // and detail can explain the timer to the user.
@@ -258,12 +260,16 @@ function _handleTimerPollCheck(ev, c) {
             if (!_alreadyHas) {
               r._timerPolls.push({
                 pollNum: ev.pollNum,
+                pollId: ev.pollId || "",
                 decision: ev.decision,
                 reason: ev.reason || "",
+                rawContent: ev.rawContent || "",
                 tokensUsed: ev.tokensUsed || 0,
                 timerId: ev.timerId || "",
                 cmdOutput: ev.cmdOutput || "",
                 parseError: !!ev.parseError,
+                model: ev.model || "",
+                toolTrace: Array.isArray(ev.toolTrace) ? ev.toolTrace : [],
                 ts: Date.now(),
               });
             }

@@ -287,9 +287,9 @@ async function translateMessage(idx) {
   if (!conv) return;
   const msg = conv.messages[idx];
   if (!msg) return;
-  // Allow on: assistant messages AND endpoint critic reviews (role=user +
-  // _isEndpointReview).  Reject only plain user messages.
-  if (msg.role === "user" && !msg._isEndpointReview) return;
+  // Allow on: assistant messages, endpoint critic reviews, AND autopilot VU
+  // messages (all role=user + a marker).  Reject only plain user messages.
+  if (msg.role === "user" && !msg._isEndpointReview && !msg._isVirtualUser) return;
   // If we already have a cached translation (manual or auto-translate), just toggle
   if (msg._translatedCache || msg.translatedContent) {
     if (msg._showingTranslation !== false) {

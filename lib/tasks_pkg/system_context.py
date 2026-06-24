@@ -261,11 +261,33 @@ def _system_text(messages) -> str:
 _CC_STATIC_MARKER = "IMPORTANT: You must NEVER generate or guess URLs"
 
 
+def _disabled_prompt_blocks(cfg: dict) -> set[str] | None:
+    """Extract the user's disabled static-prompt block IDs from task config.
+
+    Config shape (set by the per-block system-prompt editor)::
+
+        cfg['systemPromptBlocks'] = {'disabled': ['tone_and_style', ...]}
+
+    Returns a set of block IDs, or ``None`` when nothing is disabled (so the
+    default — keep every block — is preserved for old configs).
+    """
+    try:
+        spb = cfg.get('systemPromptBlocks') or {}
+        disabled = spb.get('disabled') or []
+        ids = {str(x) for x in disabled if x}
+        return ids or None
+    except Exception as e:
+        logger.debug('[Inject] disabled-blocks parse failed: %s', e)
+        return None
+
+
 def _inject_system_contexts(messages, project_path, project_enabled,
                              memory_enabled, search_enabled, swarm_enabled,
                              has_real_tools, conv_id: str = '',
                              task: dict = None, model: str = '',
-                             system_prompt_mode: str = 'append'):
+                             system_prompt_mode: str = 'append',
+                             tool_names: set[str] | None = None,
+                             disabled_blocks: set[str] | None = None):
     """Inject the Claude-Code-style system + user contexts into *messages*.
 
     Modifies the messages list directly. Final shape:
@@ -303,6 +325,15 @@ def _inject_system_contexts(messages, project_path, project_enabled,
             toggles, not the base prose). A ``'replace'`` request with no
             user system prompt falls back to ``'append'`` so the model is
             never left with an empty base.
+        tool_names: Set of tool names registered for this turn, forwarded
+            to ``build_static_prompt`` so the ``# Using your tools`` section
+            only names dedicated tools that actually exist. ``None`` (the
+            default) ships all bullets — back-compat for callers without a
+            tool list.
+        disabled_blocks: Static-prompt block IDs the user switched OFF in the
+            per-block editor (see ``system_prompt_cc.BLOCK_META``). Forwarded
+            to ``build_static_prompt`` so those blocks are dropped. ``None``
+            keeps every block.
     """
     _cid = conv_id or ''
 
@@ -407,6 +438,13 @@ def _inject_system_contexts(messages, project_path, project_enabled,
             # project mode is on. For chat-only / paper-Q&A / translation
             # turns, the prompt becomes a generic-assistant prompt.
             is_code_context=project_enabled,
+            # Only name dedicated tools in "# Using your tools" that are
+            # actually registered this turn — otherwise the model is told
+            # write_file / apply_diff / grep_search exist when project mode
+            # is off and tries to call a tool absent from the schema.
+            tool_names=tool_names,
+            # User-disabled blocks from the per-block system-prompt editor.
+            disabled_blocks=disabled_blocks,
         )
         _append_to_system_message(messages, _static_block,
                                    as_separate_block=True)

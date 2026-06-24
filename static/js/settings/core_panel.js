@@ -33,6 +33,57 @@ function _setVal(id, value, prop) {
 }
 
 // ══════════════════════════════════════════════════════
+//  Model list ordering — cold sort + insertion sort
+// ══════════════════════════════════════════════════════
+//
+// Each provider's model list is kept alphabetically ordered by model_id.
+// To avoid re-sorting on every render (which would make rows jump around
+// while editing), the full sort runs only ONCE per editor session — a
+// "cold sort" when the working copy is loaded (_coldSortAllProviderModels
+// in openSettings). In-session additions (auto-discover / template sync /
+// add / rename) keep the order via _insertModelSorted (binary-search
+// insertion). The next settings-open cold-sorts again from scratch.
+
+/** Case-insensitive sort key for a model entry. */
+function _modelSortKey(m) {
+  return ((m && m.model_id) || '').toLowerCase();
+}
+
+/** One-time full sort of a provider's model list (in place, by model_id). */
+function _coldSortModels(models) {
+  if (!Array.isArray(models)) return models;
+  models.sort(function(a, b) {
+    var ka = _modelSortKey(a), kb = _modelSortKey(b);
+    return ka < kb ? -1 : (ka > kb ? 1 : 0);
+  });
+  return models;
+}
+
+/** Cold-sort every provider's model list (called once on config load). */
+function _coldSortAllProviderModels() {
+  for (var i = 0; i < _stgProviders.length; i++) {
+    if (_stgProviders[i] && Array.isArray(_stgProviders[i].models)) {
+      _coldSortModels(_stgProviders[i].models);
+    }
+  }
+}
+
+/** Insert one model into an already-sorted list at its alphabetical
+ *  position (binary search). Cheap incremental upkeep so freshly added or
+ *  renamed models land correctly without re-sorting the whole list. */
+function _insertModelSorted(models, m) {
+  if (!Array.isArray(models)) return;
+  var key = _modelSortKey(m);
+  var lo = 0, hi = models.length;
+  while (lo < hi) {
+    var mid = (lo + hi) >> 1;
+    if (_modelSortKey(models[mid]) <= key) lo = mid + 1;
+    else hi = mid;
+  }
+  models.splice(lo, 0, m);
+}
+
+// ══════════════════════════════════════════════════════
 //  Tab switching & config loading
 // ══════════════════════════════════════════════════════
 
@@ -74,6 +125,12 @@ function openSettings() {
   document.getElementById("settingSystem").value = config.systemPrompt || "";
   var spModeSel = document.getElementById('settingSystemPromptMode');
   if (spModeSel) spModeSel.value = (config.systemPromptMode === 'replace') ? 'replace' : 'append';
+  var spbEl = document.getElementById('settingSystemDisabledBlocks');
+  if (spbEl) {
+    var _disabled = (config.systemPromptBlocks && Array.isArray(config.systemPromptBlocks.disabled))
+      ? config.systemPromptBlocks.disabled : [];
+    spbEl.value = JSON.stringify(_disabled);
+  }
   if (typeof _refreshSystemPromptSummary === 'function') _refreshSystemPromptSummary();
 
   // Default thinking depth
@@ -171,6 +228,11 @@ function openSettings() {
     // Deep-copy providers (they include nested models now)
     _stgProviders = JSON.parse(JSON.stringify(cfg.providers || []));
     _stgPresets = JSON.parse(JSON.stringify(cfg.presets || {}));
+
+    // One-time cold sort: order every provider's model list alphabetically
+    // by model_id. In-session additions stay ordered via _insertModelSorted,
+    // and the next settings-open cold-sorts again from scratch.
+    _coldSortAllProviderModels();
 
     // Pre-load external templates so sync buttons appear on first render
     _loadExternalProviderTemplates().finally(function() {

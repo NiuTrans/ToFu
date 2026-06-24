@@ -79,6 +79,7 @@ class AnthropicTranslateTest(unittest.TestCase):
         self.assertEqual(resp['usage']['output_tokens'], 7)
 
     def test_streaming_emits_named_events(self):
+        import asyncio
         from lib.compat.anthropic import stream_anthropic_chunks
         task = {
             'id': 'abc',
@@ -90,7 +91,12 @@ class AnthropicTranslateTest(unittest.TestCase):
             'events_lock': threading.Lock(),
             'status': 'done',
         }
-        out = ''.join(stream_anthropic_chunks(task, model='claude'))
+
+        async def _drain():
+            return [frame async for frame in
+                    stream_anthropic_chunks(task, model='claude')]
+
+        out = ''.join(asyncio.new_event_loop().run_until_complete(_drain()))
         self.assertIn('event: message_start', out)
         self.assertIn('event: content_block_start', out)
         self.assertIn('event: content_block_delta', out)

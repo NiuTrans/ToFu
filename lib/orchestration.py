@@ -123,6 +123,42 @@ MAX_LIST_ITEM_LEN = 500
 #: kind with a matching control; the validator type-checks by kind.
 VALID_PARAM_KINDS = frozenset({'text', 'textarea', 'select', 'list', 'int', 'bool'})
 
+# ── Typed node I/O contract (the Dify-style dataflow axis) ────────────
+#
+# Orthogonal to ``role`` (who) and ``emits`` (which side of the chat), a
+# node may declare a STRICT input/output contract under ``params.io``::
+#
+#     params.io = {
+#       'inputs':  [{'name': 'brief', 'type': 'text', 'from': 'planner.text'}],
+#       'outputs': [{'name': 'summary', 'type': 'text'},
+#                   {'name': 'changes',  'type': 'artifact'}],
+#     }
+#
+# A port's ``type`` is a hint from :data:`VALID_IO_TYPES`. An input's
+# ``from`` references an upstream producer as ``'<nodeId>'`` (its primary
+# output), ``'<nodeId>.<outputName>'`` (a named output), or the literal
+# ``'start'`` (the flow's initial context). The contract is OPTIONAL and
+# fully back-compatible: a node with no ``io`` block keeps the legacy
+# accumulating-scratchpad behavior and emits a single implicit ``text``
+# output (see :func:`node_output_names`). Declaring ``io.inputs`` switches
+# that node to typed-input composition in the engine — it then sees ONLY
+# the referenced outputs instead of the whole transcript blob, which is
+# what makes a flow read like Dify.
+VALID_IO_TYPES = frozenset({'text', 'json', 'artifact', 'file', 'number', 'bool', 'any'})
+
+#: Max declared input or output ports on a single node.
+MAX_IO_PORTS = 12
+
+#: The implicit output every node exposes when it declares none. A
+#: pure-natural-language node has exactly this one ``text`` output; a
+#: tool-heavy worker opts into a second ``artifact`` output (e.g.
+#: ``changes``) to expose its state-changing actions as a typed manifest.
+DEFAULT_OUTPUT_NAME = 'text'
+
+#: Literal ``from`` token referencing the flow's initial context (the Start
+#: node's seed / the Run-panel input).
+IO_START_REF = 'start'
+
 # ── Per-role structured params (the "what to do" schema) ──────────────
 #
 # Each role exposes a list of FieldSpec dicts describing the structured
@@ -215,6 +251,69 @@ ROLE_PARAM_SCHEMA = {
         _objective_field('orch.field.planningBrief', 'orch.ph.planningBrief'),
         _f('deliverables', 'list', 'orch.field.deliverables',
            heading='Deliverables', placeholder='orch.ph.deliverables'),
+        _f('acceptance_criteria', 'list', 'orch.field.acceptance',
+           heading='Acceptance Criteria', placeholder='orch.ph.acceptance'),
+    ],
+    'coder': [
+        _objective_field('orch.field.taskCoder', 'orch.ph.taskCoder'),
+        _f('scope_paths', 'list', 'orch.field.scopePaths', heading='Files / Paths',
+           placeholder='orch.ph.scopePaths'),
+        _f('constraints', 'list', 'orch.field.constraints', heading='Constraints',
+           placeholder='orch.ph.constraints'),
+        _f('verify_cmd', 'text', 'orch.field.verifyCmd', heading='Verify Command',
+           placeholder='orch.ph.verifyCmd'),
+    ],
+    'analyst': [
+        _objective_field('orch.field.analysisQuestion', 'orch.ph.analysisQuestion'),
+        _f('data_sources', 'list', 'orch.field.dataSources', heading='Data Sources',
+           placeholder='orch.ph.dataSources'),
+        _f('metrics', 'list', 'orch.field.metrics', heading='Metrics',
+           placeholder='orch.ph.metrics'),
+        _f('expected_outcome', 'textarea', 'orch.field.expectedOutcome',
+           heading='Expected Outcome', placeholder='orch.ph.expectedOutcome'),
+    ],
+    'writer': [
+        _objective_field('orch.field.writeTask', 'orch.ph.writeTask'),
+        _f('audience', 'text', 'orch.field.audience', heading='Audience',
+           placeholder='orch.ph.audience'),
+        _f('tone', 'select', 'orch.field.tone', heading='Tone', options=[
+            {'value': 'neutral', 'label': 'orch.opt.toneNeutral'},
+            {'value': 'formal', 'label': 'orch.opt.toneFormal'},
+            {'value': 'casual', 'label': 'orch.opt.toneCasual'},
+            {'value': 'technical', 'label': 'orch.opt.toneTechnical'},
+            {'value': 'persuasive', 'label': 'orch.opt.tonePersuasive'},
+        ]),
+        _f('must_cover', 'list', 'orch.field.mustCover', heading='Must Cover',
+           placeholder='orch.ph.mustCover'),
+    ],
+    'browser': [
+        _objective_field('orch.field.browseTask', 'orch.ph.browseTask'),
+        _f('start_url', 'text', 'orch.field.startUrl', heading='Start URL',
+           placeholder='orch.ph.startUrl'),
+        _f('steps', 'list', 'orch.field.steps', heading='Steps',
+           placeholder='orch.ph.steps'),
+        _f('extract', 'textarea', 'orch.field.extract', heading='Extract',
+           placeholder='orch.ph.extract'),
+    ],
+    'synthesizer': [
+        _objective_field('orch.field.synthTask', 'orch.ph.synthTask'),
+        _f('inputs_desc', 'textarea', 'orch.field.inputsDesc', heading='Inputs',
+           placeholder='orch.ph.inputsDesc'),
+        _f('conflict_policy', 'select', 'orch.field.conflictPolicy',
+           heading='Conflict Policy', options=[
+            {'value': 'reconcile', 'label': 'orch.opt.reconcile'},
+            {'value': 'majority', 'label': 'orch.opt.majority'},
+            {'value': 'flag', 'label': 'orch.opt.flag'},
+        ]),
+        _f('output_shape', 'textarea', 'orch.field.outputShape',
+           heading='Output Shape', placeholder='orch.ph.outputShape'),
+    ],
+    'router': [
+        _objective_field('orch.field.routeBasis', 'orch.ph.routeBasis'),
+        _f('categories', 'list', 'orch.field.categories', heading='Categories',
+           placeholder='orch.ph.categories'),
+        _f('default_route', 'text', 'orch.field.defaultRoute',
+           heading='Default Route', placeholder='orch.ph.defaultRoute'),
     ],
     'virtual_user': [
         _objective_field('orch.field.persona', 'orch.ph.persona'),
@@ -261,7 +360,7 @@ def resolve_scope(node: dict) -> str:
 #: Non-task params a role node legitimately carries (validated elsewhere or
 #: structural). Keys outside the role's field schema AND this set get an
 #: unknown-key WARNING (forward-compat, mirrors the unknown-role stance).
-_ROLE_INFRA_KEYS = frozenset({'tier', 'isolation', 'emits', 'name'})
+_ROLE_INFRA_KEYS = frozenset({'tier', 'isolation', 'emits', 'name', 'io'})
 
 
 def _validate_role_params(role: str, where: str, params: dict,
@@ -328,6 +427,43 @@ def role_param_schema(role: str) -> list[dict]:
     return ROLE_PARAM_SCHEMA.get(role, _GENERIC_ROLE_SCHEMA)
 
 
+def role_persona(role: str | None = None):
+    """Return the READ-ONLY persona design for a role (or every role).
+
+    A role's behavior is fixed by the backend in
+    :data:`lib.swarm.registry.AGENT_ROLES`: a ``system_prompt_suffix`` (the
+    character's prompt), a ``when_to_use`` guidance blurb, and a model-tier
+    hint. The Orchestration Studio SHOWS this so an author understands what a
+    character does and how it behaves — but it is deliberately **not** an
+    editable field. The prompt design is owned here, not in the authoring
+    layer, so a flow author can never silently rewrite a role's character.
+
+    ``role_persona('coder')`` → that role's persona dict (a ``general``
+    fallback for unknown roles). ``role_persona()`` → a ``{role: persona}``
+    map for every known role. Each persona is::
+
+        {'prompt': <system_prompt_suffix>, 'whenToUse': <guidance>,
+         'tier': <'light'|'standard'|'heavy'>}
+
+    The swarm import is lazy (function-local) to avoid a module-load cycle —
+    ``lib.orchestration`` is imported by the lightweight route layer, while
+    ``lib.swarm`` pulls in the heavier agent stack. Pure; never raises.
+    """
+    from lib.swarm.registry import AGENT_ROLES
+
+    def _one(r: str) -> dict:
+        cfg = AGENT_ROLES.get(r) or AGENT_ROLES.get('general') or {}
+        return {
+            'prompt': (cfg.get('system_prompt_suffix') or '').strip(),
+            'whenToUse': (cfg.get('when_to_use') or '').strip(),
+            'tier': cfg.get('model_hint', 'standard'),
+        }
+
+    if role is not None:
+        return _one(role)
+    return {r: _one(r) for r in AGENT_ROLES}
+
+
 def _coerce_list(value) -> list[str]:
     """Normalize a list-kind param value to a list of non-empty strings.
 
@@ -346,6 +482,115 @@ def _coerce_list(value) -> list[str]:
         if s:
             out.append(s)
     return out
+
+
+def node_output_names(node: dict) -> list[str]:
+    """Return the names of the outputs a node exposes.
+
+    A node that declares ``params.io.outputs`` exposes exactly those named
+    ports; any other node exposes the single implicit
+    :data:`DEFAULT_OUTPUT_NAME` (``'text'``) port — so legacy definitions
+    behave as if every node has one ``text`` output. Pure; never raises.
+    """
+    io = (node.get('params') or {}).get('io')
+    if isinstance(io, dict):
+        outs = io.get('outputs')
+        if isinstance(outs, list):
+            names = [o.get('name') for o in outs
+                     if isinstance(o, dict) and isinstance(o.get('name'), str)
+                     and o.get('name').strip()]
+            if names:
+                return names
+    return [DEFAULT_OUTPUT_NAME]
+
+
+def parse_io_ref(ref: str) -> tuple[str, str | None]:
+    """Split an input ``from`` ref into ``(node_id, output_name|None)``.
+
+    ``'planner'`` → ``('planner', None)`` (the node's primary output);
+    ``'worker.changes'`` → ``('worker', 'changes')``; the literal
+    ``'start'`` → ``('start', None)``. Pure; never raises.
+    """
+    if not isinstance(ref, str):
+        return '', None
+    ref = ref.strip()
+    if '.' in ref:
+        nid, _, out = ref.partition('.')
+        return nid, (out or None)
+    return ref, None
+
+
+def _validate_node_io(node: dict, where: str, params: dict, ids: set,
+                      id_to_node: dict, errors: list, warnings: list) -> None:
+    """Validate a node's optional ``params.io`` typed-contract block.
+
+    Checks, per :data:`VALID_IO_TYPES` and :data:`MAX_IO_PORTS`:
+      * ``io`` (if present) is an object with optional list ``inputs`` /
+        ``outputs``; each port is ``{name, type}`` with a unique, non-empty
+        name and a known type (ERROR otherwise).
+      * Each input ``from`` (when supplied) references a real upstream node
+        (or the literal ``start``); a named output ref must match one the
+        target actually declares (ERROR for an unknown node, WARNING for an
+        unknown output name so a forward-declared port never hard-blocks).
+
+    Pure relative to its inputs (mutates only the passed error/warning
+    lists). Cross-node ref resolution needs ``id_to_node``, which the caller
+    builds once for the whole definition.
+    """
+    io = params.get('io')
+    if io is None:
+        return
+    if not isinstance(io, dict):
+        errors.append(f'{where} io must be an object')
+        return
+
+    for side in ('inputs', 'outputs'):
+        ports = io.get(side)
+        if ports is None:
+            continue
+        if not isinstance(ports, list):
+            errors.append(f'{where} io.{side} must be an array')
+            continue
+        if len(ports) > MAX_IO_PORTS:
+            errors.append(f'{where} io.{side} exceeds {MAX_IO_PORTS} ports')
+        seen_names: set[str] = set()
+        for j, port in enumerate(ports):
+            pwhere = f'{where} io.{side}[{j}]'
+            if not isinstance(port, dict):
+                errors.append(f'{pwhere} must be an object')
+                continue
+            pname = port.get('name')
+            if not isinstance(pname, str) or not pname.strip():
+                errors.append(f'{pwhere} missing string name')
+            elif pname in seen_names:
+                errors.append(f'{pwhere} duplicate port name {pname!r}')
+            else:
+                seen_names.add(pname)
+            ptype = port.get('type')
+            if ptype is not None and ptype not in VALID_IO_TYPES:
+                errors.append(f'{pwhere} invalid type {ptype!r} '
+                              f'(expected one of {sorted(VALID_IO_TYPES)})')
+            if side == 'inputs':
+                frm = port.get('from')
+                if frm is None or frm == '':
+                    continue
+                if not isinstance(frm, str):
+                    errors.append(f'{pwhere} from must be a string')
+                    continue
+                src_id, src_out = parse_io_ref(frm)
+                if src_id == IO_START_REF:
+                    continue
+                if src_id not in ids:
+                    errors.append(f'{pwhere} from {frm!r} references '
+                                  'unknown node')
+                    continue
+                if src_out is not None:
+                    avail = node_output_names(id_to_node.get(src_id) or {})
+                    if src_out not in avail:
+                        warnings.append(
+                            f'{pwhere} from {frm!r}: node {src_id!r} does not '
+                            f'declare an output named {src_out!r} '
+                            f'(has {avail})')
 
 
 def render_role_brief(node: dict) -> str:
@@ -401,6 +646,87 @@ def render_role_brief(node: dict) -> str:
         return lead
     parts = ([lead] if lead else []) + sections
     return '\n\n'.join(parts)
+
+
+#: Engine role → the endpoint UI phase (and streaming-bubble role) it maps to.
+#: A planner node opens the loop with a Planner bubble; a verifier (critic /
+#: reviewer / virtual_user) lands on the user side ("reviewing"); every other
+#: producer role streams as a Worker. Mirrors ``EndpointEventAdapter``'s
+#: role/emits classification so the bubble the FRONTEND creates up front
+#: matches the first message the adapter will actually emit.
+_PLANNER_ROLES = frozenset({'planner'})
+
+
+def first_executed_role(defn: dict) -> dict | None:
+    """Return the first ROLE node the engine would run, or ``None``.
+
+    Walks the graph from the start node following single ``from→to`` edges,
+    skipping control nodes (start / loop / parallel / barrier / branch /
+    artifact), and returns the first ``type == 'role'`` (or ``subflow``) node
+    encountered. This is a static, side-effect-free preview of "what bubble
+    comes first" — used to pick the initial chat phase so a plannerless flow
+    (e.g. autopilot: worker→vu) never shows a hanging Planner placeholder.
+
+    Pure; never raises. Returns ``None`` for a graph with no reachable role.
+    """
+    if not isinstance(defn, dict):
+        return None
+    nodes = {n.get('id'): n for n in defn.get('nodes') or []
+             if isinstance(n, dict) and n.get('id')}
+    fwd: dict[str, list[str]] = {nid: [] for nid in nodes}
+    for e in defn.get('edges') or []:
+        if not isinstance(e, dict):
+            continue
+        s, d = e.get('from'), e.get('to')
+        if s in nodes and d in fwd:
+            fwd[s].append(d)
+    # Locate start (explicit start kind, else a source node).
+    start = None
+    for nid, n in nodes.items():
+        if n.get('kind') == 'start':
+            start = nid
+            break
+    if start is None:
+        rev_targets = {d for outs in fwd.values() for d in outs}
+        for nid in nodes:
+            if nid not in rev_targets:
+                start = nid
+                break
+    if start is None:
+        return None
+    seen: set[str] = set()
+    cur = start
+    while cur and cur not in seen:
+        seen.add(cur)
+        n = nodes.get(cur) or {}
+        if n.get('type') in ('role', 'subflow'):
+            return n
+        nxt = fwd.get(cur) or []
+        cur = nxt[0] if nxt else None
+    return None
+
+
+def initial_phase_for_flow(defn: dict) -> str:
+    """Classify a flow's opening chat phase from its first role node.
+
+    Returns one of ``'planning'`` | ``'reviewing'`` | ``'working'`` — the
+    same vocabulary ``routes/chat.py`` ships as ``endpointPhase`` and the
+    frontend maps to the planner / critic / worker streaming bubble. A flow
+    that opens on a ``planner`` role → ``'planning'``; one that opens on a
+    verifier (its first turn lands user-side) → ``'reviewing'``; everything
+    else (the common worker-first / autopilot case) → ``'working'``.
+
+    Pure; never raises. Defaults to ``'working'`` when no role is found.
+    """
+    node = first_executed_role(defn)
+    if not node:
+        return 'working'
+    role = node.get('role') or ''
+    if role in _PLANNER_ROLES:
+        return 'planning'
+    if resolve_emits(node) == 'user':
+        return 'reviewing'
+    return 'working'
 
 
 def _validate_subflow_node(node: dict, where: str, params: dict,
@@ -586,9 +912,23 @@ def validate_definition(defn: Any, *, _depth: int = 0,
             errors.append(f'at most one {kind!r} node allowed '
                           f'(found {kind_counts[kind]})')
 
+    id_to_node = {n.get('id'): n for n in nodes if isinstance(n, dict)}
+
+    # Typed I/O contract — validated in a second pass so an input ``from``
+    # ref may point at a node declared later in the array.
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        nid = node.get('id')
+        if not isinstance(nid, str) or not nid:
+            continue
+        nparams = node.get('params') or {}
+        if isinstance(nparams, dict):
+            _validate_node_io(node, f'node {nid!r}', nparams, ids,
+                              id_to_node, errors, warnings)
+
     # Edge validation.
     seen_edges: set[tuple[str, str]] = set()
-    id_to_node = {n.get('id'): n for n in nodes if isinstance(n, dict)}
     for i, edge in enumerate(edges):
         if not isinstance(edge, dict):
             errors.append(f'edge[{i}] must be an object')
@@ -974,7 +1314,10 @@ __all__ = [
     'VALID_TIERS', 'VALID_ISOLATION', 'VALID_ARTIFACT_FORMATS', 'VALID_HUMAN_MODES',
     'VALID_EMITS', 'VALID_SCOPES', 'MAX_SUBFLOW_DEPTH', 'resolve_emits',
     'resolve_scope', 'ROLE_PARAM_SCHEMA', 'VALID_PARAM_KINDS',
-    'role_param_schema', 'render_role_brief',
+    'VALID_IO_TYPES', 'MAX_IO_PORTS', 'DEFAULT_OUTPUT_NAME', 'IO_START_REF',
+    'node_output_names', 'parse_io_ref',
+    'role_param_schema', 'role_persona', 'render_role_brief',
+    'first_executed_role', 'initial_phase_for_flow',
     'validate_definition', 'expand_subflows',
     'layout_definition', 'build_endpoint_definition', 'build_autopilot_definition',
 ]

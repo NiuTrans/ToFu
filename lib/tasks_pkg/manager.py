@@ -313,6 +313,19 @@ def append_event(task, event):
     except Exception as e:
         logger.debug('[Manager] append_persistent_event failed (non-fatal): %s', e)
 
+    # ★ Wake any async API handler awaiting this task (event-driven wait,
+    #   replaces the old busy-poll loops). Every event nudges the waiter so
+    #   SSE generators flush incrementally; terminal events additionally
+    #   release the admission slot + fire BYO/tool-env disposal callbacks.
+    try:
+        from lib.agent_core.admission import notify_task
+        _is_terminal = (event.get('type') in ('done', 'error', 'aborted')
+                        or task.get('status') in ('done', 'error', 'aborted'))
+        notify_task(task['id'], terminal=_is_terminal)
+    except Exception as e:
+        logger.debug('[Manager] admission notify failed task=%s: %s',
+                     task['id'][:8], e)
+
 def _tool_rounds_have_dedicated_home(task):
     """True when the task's toolRounds are durably stored in conversations.messages.
 
@@ -358,6 +371,51 @@ def load_tool_rounds_from_conversation(conv_id):
     return []
 
 
+def load_endpoint_turns_from_conversation(conv_id):
+    """Return the trailing endpoint turns from a conversation's messages, or [].
+
+    Endpoint-mode results are persisted into the conversation's ``messages``
+    array (by ``_sync_endpoint_turns_to_conversation`` in endpoint.py), NOT
+    into the single ``task_results`` content blob.  When a poll outlives the
+    in-memory task (evicted past TTL, or server restarted), the DB-path of
+    ``/api/chat/poll`` no longer has ``task['_endpoint_turns']`` to echo, so
+    the frontend can't rebuild the multi-turn structure and renders a single
+    stale bubble until a manual refresh.
+
+    This recovery reader reconstructs the same list from the durable
+    conversation messages: it finds where the original (non-endpoint)
+    conversation ends and returns everything after it — the planner, every
+    worker iteration, and every critic review.  Mirrors the ``baseEnd`` slice
+    the frontend (``_pollFallback`` / SSE state handler) computes, so the
+    poll DB branch can hand back a byte-equivalent ``endpointTurns`` payload.
+
+    Returns [] when the conversation is missing/unparseable or carries no
+    endpoint turns.
+    """
+    if not conv_id:
+        return []
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT messages FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)
+        ).fetchone()
+        if not row or not row[0]:
+            return []
+        messages = json.loads(row[0])
+        original_end = 0
+        for i, m in enumerate(messages):
+            if (not m.get('_epIteration')
+                    and not m.get('_isEndpointReview')
+                    and not m.get('_isEndpointPlanner')):
+                original_end = i + 1
+        return messages[original_end:]
+    except Exception as e:
+        logger.warning('[Recovery] load_endpoint_turns_from_conversation failed conv=%s: %s',
+                       conv_id, e)
+        return []
+
+
 def build_result_meta(task):
     """Build the persisted-result metadata dict from a finished task.
 
@@ -380,12 +438,31 @@ def build_result_meta(task):
             meta['fallbackReason'] = task['_fallback_reason']
         if task.get('_fallback_kind'):
             meta['fallbackKind'] = task['_fallback_kind']
+    if task.get('id'): meta['taskId'] = task['id']
     if task.get('model'): meta['model'] = task['model']
     if task.get('provider_id'): meta['provider_id'] = task['provider_id']
     if task.get('thinkingDepth'): meta['thinkingDepth'] = task['thinkingDepth']
     if task.get('apiRounds'): meta['apiRounds'] = task['apiRounds']
     if task.get('modifiedFiles'): meta['modifiedFiles'] = task['modifiedFiles']
     if task.get('modifiedFileList'): meta['modifiedFileList'] = task['modifiedFileList']
+    # Orchestration flow per-node run trace (resolved brief + bounded I/O per
+    # node) — persisted so the canvas/inspector overlay survives reload /
+    # server restart, served via /api/v1/chat/flow-trace/<task>.
+    if task.get('_flow_trace'): meta['flowTrace'] = task['_flow_trace']
+    if task.get('_flow_label'): meta['flowLabel'] = task['_flow_label']
+    # ★ Endpoint-mode terminal signal — persisted so the /api/chat/poll DB
+    #   branch (task evicted past TTL / server restarted) can still tell the
+    #   frontend "this is a FINISHED endpoint task". Without it, a poll-fallback
+    #   that outlives the in-memory task hits the DB branch, returns no
+    #   endpointMode, and the frontend overwrites the multi-turn endpoint
+    #   structure with the last in-progress turn's single content blob — a
+    #   state-sync gap only a manual refresh repaired. The authoritative turns
+    #   live in the conversation messages (synced by endpoint.py), so the flag
+    #   tells the frontend to reconcile from there rather than from this row.
+    if task.get('endpoint_mode'):
+        meta['endpointMode'] = True
+        if task.get('_endpoint_stop_reason'):
+            meta['endpointStopReason'] = task['_endpoint_stop_reason']
     return meta
 
 
@@ -844,6 +921,8 @@ def _sync_result_to_conversation(task, meta):
             last_msg['model'] = meta['model']
         if meta.get('provider_id'):
             last_msg['provider_id'] = meta['provider_id']
+        if meta.get('taskId'):
+            last_msg['_taskId'] = meta['taskId']
         if meta.get('fallbackModel'):
             last_msg['fallbackModel'] = meta['fallbackModel']
             last_msg['fallbackFrom'] = meta.get('fallbackFrom', '')
@@ -1011,7 +1090,7 @@ def _sync_result_to_conversation(task, meta):
         # user switched conversations or clicked translate.  Fire regardless.
         if content and not error:
             try:
-                _maybe_auto_translate_assistant(conv_id, content, len(messages) - 1, db)
+                _maybe_auto_translate_assistant(conv_id, content, len(messages) - 1, db, task=task)
             except Exception as te:
                 logger.warning('%s conv=%s Auto-translate trigger failed (non-fatal): %s',
                                pfx, conv_id, te)
@@ -1021,7 +1100,7 @@ def _sync_result_to_conversation(task, meta):
                      pfx, conv_id, e, exc_info=True)
 
 
-def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db=None):
+def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db=None, task=None):
     """Automatically translate the assistant's response on the server side.
 
     Called from _sync_result_to_conversation after the assistant content is persisted.
@@ -1098,7 +1177,22 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db=None):
                                  pfx, conv_id[:8], msg_idx, len(existing_tc))
                     return
 
-        logger.debug('%s conv=%s msg=%d autoTranslate is ON — translating regardless of content language',
+        # ── Skip already-Chinese content ──
+        # The target language is hard-pinned to Chinese (see _run_translate
+        # below). When the assistant already replied in Chinese (e.g. a Qwen/
+        # Kimi model with a "default Chinese" system prompt), translating it to
+        # Chinese is a no-op the engine's echo detector misreads as "model
+        # echoed input" — it burns the full retry budget then FAILS the
+        # translation outright. Short-circuit here, mirroring the frontend
+        # _isAlreadyChinese guard (lib.text_lang.is_predominantly_chinese).
+        from lib.text_lang import is_predominantly_chinese
+        if is_predominantly_chinese(content):
+            logger.info('%s conv=%s msg=%d content already predominantly Chinese '
+                        '(target=Chinese) — skipping auto-translate (no-op)',
+                        pfx, conv_id[:8], msg_idx)
+            return
+
+        logger.debug('%s conv=%s msg=%d autoTranslate is ON — starting translation',
                      pfx, conv_id[:8], msg_idx)
 
         # ── Check for already-running translate task from the frontend ──
@@ -1124,6 +1218,24 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db=None):
         _msg_id = ''
         if msg_idx is not None and 0 <= msg_idx < len(messages):
             _msg_id = messages[msg_idx].get('_msgId') or ''
+
+        # ── Incremental per-round translation hand-off ──
+        # When the task translated each round's prose segment as it closed,
+        # the per-task worker already has the segments cached. Let it assemble
+        # + commit the final translatedContent (no big end-of-task LLM call).
+        # Only takes over when an accumulator is active for this task; else we
+        # fall through to the whole-message thread below.
+        if task is not None:
+            try:
+                from lib.translate import finalize_incremental
+                if finalize_incremental(task, conv_id, msg_idx, content, msg_id=_msg_id or None):
+                    logger.info('%s conv=%s msg=%d Incremental translator owns this '
+                                'translation — skipping whole-message thread',
+                                pfx, conv_id[:8], msg_idx)
+                    return
+            except Exception as ie:
+                logger.warning('%s conv=%s Incremental finalize failed, falling back '
+                               'to whole-message translate: %s', pfx, conv_id[:8], ie)
 
         # ── Start background translation thread ──
         logger.info('%s conv=%s msg=%d Starting server-side auto-translation (%d chars)',

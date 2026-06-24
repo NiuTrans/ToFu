@@ -48,7 +48,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
          thinking_enabled=False, preset='low', effort=None, extra=None,
          timeout=120, log_prefix='', api_key=None, base_url=None,
          extra_headers=None, max_retries=None, _limit_retry=False,
-         thinking_format='', provider_id='', api_protocol='openai'):
+         thinking_format='', provider_id='', api_protocol='openai', oauth=''):
     """Non-streaming chat completion.
 
     Args:
@@ -69,8 +69,20 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
     if _anthropic:
         from lib.llm.anthropic_outbound import anthropic_messages_url
         url = anthropic_messages_url(base_url)
+        if oauth == 'claude':
+            from lib.oauth.outbound import claude_oauth_url
+            url = claude_oauth_url(url)
     else:
         url = f'{base_url.rstrip("/")}/chat/completions' if base_url else chat_url()
+
+    # Subscription-OAuth slot: swap in a live token + client-identity headers
+    # (+ Claude identity system block) before the body is built/translated.
+    if oauth:
+        from lib.oauth.outbound import resolve_oauth_request
+        _oauth_body_seed = {'messages': messages}
+        api_key, extra_headers, _oauth_body_seed = resolve_oauth_request(
+            oauth, _oauth_body_seed, extra_headers)
+        messages = _oauth_body_seed['messages']
 
     body = build_body(
         model, messages,
@@ -125,6 +137,8 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
             if _anthropic:
                 from lib.llm.anthropic_outbound import anthropic_headers
                 hdrs = anthropic_headers(api_key, extra_headers)
+                if oauth == 'claude':
+                    hdrs.pop('Authorization', None)
             else:
                 hdrs = headers()
                 if api_key:

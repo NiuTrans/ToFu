@@ -15,10 +15,10 @@ Pure functions; no Flask imports.
 
 from __future__ import annotations
 
+import asyncio
 import json
-import time
 import uuid
-from typing import Generator
+from typing import AsyncGenerator
 
 from lib.log import get_logger
 
@@ -166,24 +166,30 @@ def build_anthropic_response(task: dict, model: str) -> dict:
     }
 
 
-def stream_anthropic_chunks(task, model: str
-                              ) -> Generator[str, None, None]:
+async def stream_anthropic_chunks(task, model: str
+                                  ) -> AsyncGenerator[str, None]:
     """Yield Anthropic-style SSE frames (named events).
 
     Sequence: message_start → content_block_start → content_block_delta*
               → content_block_stop → message_delta → message_stop.
+
+    Event-driven: blocks on the task's wakeup signal instead of polling,
+    so it never pins a thread while the model is generating.
     """
+    from lib.agent_core.admission import unregister_waiter, wait_for_event
+
     msg_id = 'msg_' + uuid.uuid4().hex[:16]
     cursor = 0
     started = False
     text_block_open = False
     block_index = 0
-    last_heartbeat = time.time()
+    task_id = task.get('id') or ''
 
     def _evt(name: str, data: dict) -> str:
         return f'event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n'
 
-    while True:
+    try:
+      while True:
         with task['events_lock']:
             new_events = list(task['events'][cursor:])
             cursor = len(task['events'])
@@ -253,11 +259,15 @@ def stream_anthropic_chunks(task, model: str
             yield _evt('message_stop', {'type': 'message_stop'})
             return
 
-        now = time.time()
-        if now - last_heartbeat > 15:
+        woke = await wait_for_event(task_id, timeout=15.0)
+        if not woke:
             yield ': heartbeat\n\n'
-            last_heartbeat = now
-        time.sleep(0.05)
+    except (GeneratorExit, asyncio.CancelledError):
+        logger.info('[compat:anthropic] stream client disconnected task=%s',
+                    task_id[:8])
+        raise
+    finally:
+        unregister_waiter(task_id)
 
 
 __all__ = [

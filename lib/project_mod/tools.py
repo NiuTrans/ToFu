@@ -44,6 +44,7 @@ from lib.project_mod.read_tools import (  # noqa: E402,F401
     tool_find_files_batch,
     tool_grep,
     tool_grep_batch,
+    tool_inspect_image,
     tool_list_dir,
     tool_read_files,
 )
@@ -2363,6 +2364,19 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
                 result['_text_content'] = warn + result.get('_text_content', '')
                 return result
         return result
+    elif fn_name == 'inspect_image':
+        raw_path = fn_args.get('path')
+        if not raw_path or not isinstance(raw_path, str):
+            return ('Error: inspect_image requires a "path" string pointing to '
+                    'an image file.')
+        bp, rp = _rb(base_path, raw_path)
+        return tool_inspect_image(
+            bp, rp,
+            crop=fn_args.get('crop'),
+            rotate=fn_args.get('rotate', 0),
+            zoom=fn_args.get('zoom'),
+            grid=bool(fn_args.get('grid', False)),
+        )
     elif fn_name == 'grep_search':
         # ★ Batch mode: if 'searches' array is present, run all searches
         searches = fn_args.get('searches')

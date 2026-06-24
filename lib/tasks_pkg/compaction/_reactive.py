@@ -34,7 +34,7 @@ Otherwise the viewer gets two 'reactive' archive rows on the same 413.
 
 import json
 
-from lib.log import get_logger
+from lib.log import audit_log, get_logger
 from lib.tasks_pkg.compaction._archive import _archive_transcript
 from lib.tasks_pkg.compaction._constants import (
     _cooldown_lock,
@@ -356,6 +356,13 @@ def _head_truncate(messages: list, task: dict | None = None,
                            dropped,
                            _estimate_wire_bytes(messages) / 1048576,
                            byte_target / 1048576)
+            # Last-resort truncation permanently discards conversation context;
+            # record what was lost so it's queryable per-conv in audit.log
+            # rather than only inferable from a transient WARNING.
+            audit_log('reactive_head_truncate',
+                      conv=(task.get('convId', '') if task else ''),
+                      dropped_msgs=dropped, mode='byte_target',
+                      wire_mb=round(_estimate_wire_bytes(messages) / 1048576, 2))
         return
 
     context_limit = _get_context_limit(task)
@@ -384,3 +391,8 @@ def _head_truncate(messages: list, task: dict | None = None,
                        '(tokens now ~%d, target ~%d, reported_api=%s)',
                        dropped, _estimate_total_tokens(messages), target_measure,
                        f'{reported_token_count:,}' if reported_token_count else 'n/a')
+        audit_log('reactive_head_truncate',
+                  conv=(task.get('convId', '') if task else ''),
+                  dropped_msgs=dropped, mode='token_target',
+                  tokens_after=_estimate_total_tokens(messages),
+                  target=target_measure)
