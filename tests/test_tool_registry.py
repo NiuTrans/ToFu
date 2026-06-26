@@ -46,9 +46,9 @@ class TestOrdering(unittest.TestCase):
         ))
         names = _names(tl)
         self.assertTrue(hr)
-        # search → fetch → read_files → project tools → memory tools (end)
-        self.assertEqual(names[:6], [
-            'web_search', 'fetch_url', 'read_files',
+        # search → fetch → read_files → inspect_image → project tools → memory (end)
+        self.assertEqual(names[:7], [
+            'web_search', 'fetch_url', 'read_files', 'inspect_image',
             'list_dir', 'grep_search', 'find_files',
         ])
         # memory tools always come last (capability phase)
@@ -84,9 +84,34 @@ class TestPhaseSemantics(unittest.TestCase):
     def test_conv_ref_requires_mention(self):
         tl_no, _ = assemble_tool_list(_ctx())
         self.assertNotIn('list_conversations', _names(tl_no))
-        tl_yes, _ = assemble_tool_list(_ctx(
-            messages=[{'role': 'user', 'content': 'see [REFERENCED_CONVERSATION:abc]'}]))
+        # Real server-injected wrapper (carries title=") on a USER turn → on.
+        tl_yes, _ = assemble_tool_list(_ctx(messages=[{
+            'role': 'user',
+            'content': ('The user has attached the following conversation(s):\n'
+                        '[REFERENCED_CONVERSATION title="Old chat" id="abc"]\n'
+                        'body\n[/REFERENCED_CONVERSATION]'),
+        }]))
         self.assertIn('list_conversations', _names(tl_yes))
+
+    def test_conv_ref_structured_field_enables(self):
+        # The authoritative signal: a user turn carrying convRefs (raw row).
+        tl, _ = assemble_tool_list(_ctx(messages=[{
+            'role': 'user', 'content': 'compare with this',
+            'convRefs': [{'id': 'abc', 'title': 'Old chat'}],
+        }]))
+        self.assertIn('list_conversations', _names(tl))
+
+    def test_conv_ref_not_triggered_by_assistant_prose(self):
+        # REGRESSION: a conversation *about* the feature, where the assistant
+        # quotes the bare token, must NOT self-enable the tools. (This is the
+        # exact false-positive that popped the toolset-diverged banner.)
+        tl, _ = assemble_tool_list(_ctx(messages=[
+            {'role': 'user', 'content': 'what is the REFERENCED_CONVERSATION tag?'},
+            {'role': 'assistant',
+             'content': 'It is the `[REFERENCED_CONVERSATION` marker injected by...'},
+        ]))
+        self.assertNotIn('list_conversations', _names(tl))
+        self.assertNotIn('get_conversation', _names(tl))
 
 
 class TestLegacyShim(unittest.TestCase):

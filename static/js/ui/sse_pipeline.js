@@ -8,6 +8,42 @@
    exports / imports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
+/* ── SSE cursor persistence across page reload (#4) ──────────────────────
+ * `stream._lastEventId` is per-connection in-memory state, so a page reload
+ * destroys it → the reload reconnect sends NO Last-Event-ID and the server
+ * replays a full state snapshot. That's lossless for FINAL state, but loses
+ * the intermediate tool/phase event granularity the user had already seen.
+ * We persist the cursor in `sessionStorage` (survives reload, auto-scoped
+ * per-tab, cleared on tab close) keyed by taskId, so the reload reconnect can
+ * offset-resume via the SAME Last-Event-ID path the in-memory reconnect uses.
+ * The server's warm/cold replay logic is unchanged — this only feeds it the
+ * cursor it already knows how to honor. sessionStorage can throw (private
+ * mode / quota) so every access is guarded; failure silently degrades to the
+ * existing full-snapshot reload.
+ */
+function _sseCursorKey(taskId) { return 'tofu_sse_cursor_' + taskId; }
+
+function _saveSseCursor(taskId, eventId) {
+  if (!taskId || eventId == null) return;
+  try { sessionStorage.setItem(_sseCursorKey(taskId), String(eventId)); }
+  catch (e) { /* private mode / quota — degrade to full-snapshot reload */ }
+}
+
+function _loadSseCursor(taskId) {
+  if (!taskId) return null;
+  try { return sessionStorage.getItem(_sseCursorKey(taskId)); }
+  catch (e) { return null; }
+}
+
+function _clearSseCursor(taskId) {
+  if (!taskId) return;
+  try { sessionStorage.removeItem(_sseCursorKey(taskId)); }
+  catch (e) { /* no-op */ }
+}
+
+
+/**
+ * Connect to an autopilot KICK carrier task (push-a-finished-conv-forward).
 /**
  * Connect to an autopilot KICK carrier task (push-a-finished-conv-forward).
  *
@@ -377,6 +413,11 @@ function dispatchSSEEvent(line, ctx) {
     // ★ Capture id: field for Last-Event-ID reconnection
     if (line.startsWith("id: ")) {
       _lastEventId = line.slice(4).trim();
+      // ★ #4: persist cursor so a page RELOAD (which destroys the in-memory
+      //   stream._lastEventId) can still offset-resume instead of replaying a
+      //   full snapshot. Keyed by taskId in sessionStorage (per-tab, cleared
+      //   on tab close). Cleared on terminal done.
+      _saveSseCursor(ctx.taskId, _lastEventId);
       return false;
     }
     if (!line.startsWith("data: ")) return false;
@@ -640,6 +681,15 @@ function dispatchSSEEvent(line, ctx) {
           _mpConv._memoryPrefetching = _RUNNING.has(_mpPhase);
         }
       }
+      // ★ Restore preferences-applied chip from snapshot (mid-stream reconnect)
+      if (ev.preferencesApplied) {
+        assistantMsg._preferencesApplied = ev.preferencesApplied;
+        if (buf) buf._preferencesApplied = ev.preferencesApplied;
+      }
+      if (ev.preferencesLearned) {
+        assistantMsg._preferencesLearned = ev.preferencesLearned;
+        if (buf) buf._preferencesLearned = ev.preferencesLearned;
+      }
       twUpdate(convId);
       // ★ Re-trigger HG translations on state snapshot (handles page refresh / SSE reconnect)
       if (ev.toolRounds) _retriggerHgTranslations(convId);
@@ -762,8 +812,14 @@ function dispatchSSEEvent(line, ctx) {
       _handleCompaction(ev, _hctx());
     } else if (ev.type === "memory_prefetch") {
       _handleMemoryPrefetch(ev, _hctx());
+    } else if (ev.type === "preferences_applied") {
+      _handlePreferencesApplied(ev, _hctx());
+    } else if (ev.type === "preference_learned") {
+      _handlePreferenceLearned(ev, _hctx());
     } else if (ev.type === "project_external_edit") {
       _handleProjectExternalEdit(ev, _hctx());
+    } else if (ev.type === "workspace_root_added") {
+      _handleWorkspaceRootAdded(ev, _hctx());
     } else if (ev.type === "timer_poll_check") {
       _handleTimerPollCheck(ev, _hctx());
     } else if (ev.type === "swarm_phase") {
@@ -1203,6 +1259,10 @@ function dispatchSSEEvent(line, ctx) {
       _handleRoundCommitted(ev, _hctx());
       return false;
     } else if (ev.type === "done") {
+      /* ★ #4: task terminated — drop the persisted reload cursor so a later
+       *   reconnect for this (finished) task doesn't send a stale Last-Event-ID
+       *   that forces the server's cold-replay path unnecessarily. */
+      _clearSseCursor(taskId);
       /* ★ DIAGNOSTIC: log task completion details for debugging silent completions */
       const _dContentLen = assistantMsg.content?.length || 0;
       const _dThinkLen = assistantMsg.thinking?.length || 0;
@@ -1446,6 +1506,18 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
     //   prior connection attempt for this task), send it so the server
     //   resumes from that cursor instead of replaying the full state
     //   snapshot.
+    // ★ #4: a page RELOAD wipes the in-memory stream._lastEventId. Seed it
+    //   from the persisted per-task cursor (sessionStorage) so the reload
+    //   reconnect offset-resumes via Last-Event-ID instead of replaying a full
+    //   snapshot. Only seed when not already set this session (a live
+    //   in-memory reconnect already has the freshest cursor).
+    if (!stream._lastEventId) {
+      const _persistedCursor = _loadSseCursor(taskId);
+      if (_persistedCursor) {
+        stream._lastEventId = _persistedCursor;
+        console.info(`[_trySSE] Seeded Last-Event-ID=${_persistedCursor} from sessionStorage (reload resume) for task=${taskId.slice(0,8)}`);
+      }
+    }
     const _sseHeaders = {};
     if (stream._lastEventId) {
       _sseHeaders['Last-Event-ID'] = stream._lastEventId;

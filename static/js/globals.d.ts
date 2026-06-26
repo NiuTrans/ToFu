@@ -33,6 +33,8 @@ declare var html2canvas: any;
 //    cross-boundary references. Keep in sync when a new global surface
 //    is added (rare). ──
 declare var Api: any;                 // static/js/api.js — global.Api = Api (IIFE)
+declare var Icon: any;                // static/js/core/icons.js — window.Icon (SVG factory)
+declare var IconDot: any;             // static/js/core/icons.js — window.IconDot (status dot)
 declare var updateContextBar: any;    // static/js/context-bar.js — window.updateContextBar
 declare var attachCompactionMarkersToConversation: any;  // compaction-viewer.js — window.*
 declare var _featureFlags: any;       // index.html inline (var _featureFlags = {})
@@ -61,6 +63,10 @@ declare var __sse_test__: any;           // static/js/ui/sse_pipeline.js — win
 declare var __swarmPushWired: any;       // static/js/ui/swarm_push.js — window.*
 declare var __translatePushWired: any;   // static/js/translation.js — window.*
 declare var ChipInput: any;              // static/js/settings/chip_input.js — window.ChipInput (used in other settings/* files)
+declare var buildTurnCtxSnapshot: any;   // static/js/info-rail.js — window.* (used by send pipeline / edit_message)
+declare var renderTurnCtxNote: any;      // static/js/info-rail.js — window.* (used by chat_render)
+declare var reconcileTurnCtxCapsule: any; // static/js/info-rail.js — window.* (used by sse_pipeline)
+declare var refreshMcpRailState: any;    // static/js/info-rail.js — window.* (used by settings/mcp)
 
 // ── DOM access widening (declaration-merged with lib.dom) ──
 //
@@ -103,7 +109,27 @@ interface GlobalEventHandlers {
 interface Event { dataTransfer: any; }
 // ResizeObserver entry: app reads contentBoxSize[0].inlineSize off the union.
 interface ResizeObserverSize { inlineSize: any; blockSize: any; }
-// app-specific expando stashed on toast <div>s
-interface HTMLDivElement { _dismissed: any; }
+// app-specific expando stashed on toast <div>s + finish-info anchor ref
+interface HTMLDivElement { _dismissed: any; _anchor: any; }
+// app-specific expando stashed on a thrown Error (oauth upstream status passthrough)
+interface Error { _upstreamStatus: any; }
+// app-specific expando properties assigned to `window` inside IIFEs. tsc can't
+// see a `window.foo = …` assignment as a declared property of the lib.dom
+// `Window` type, so reads of `window.foo` elsewhere are TS2339. These mirror
+// the bare-name `declare var` block above for symbols that are ALSO read via
+// the explicit `window.` qualifier (relay-admin gates, the reconcile ticker,
+// the info-rail capsule helpers). Loose `any` — same rationale as the rest.
+interface Window {
+  __RELAY_ADMIN_PAGE: any; __RELAY_BILLING_ENABLED: any; __RELAY_MODEL_ENABLED: any;
+  relayAdminSwitch: any; relayAdminSaveMargin: any; relayAdminViewPayments: any;
+  _swReconcileTicker: any;
+  buildTurnCtxSnapshot: any; renderTurnCtxNote: any;
+  reconcileTurnCtxCapsule: any; refreshMcpRailState: any;
+  // mobile_panels.js portaling + flow picker, and the open-flag setters it
+  // calls on timer.js / optimizer.js.
+  _setTimerPanelOpen: any; _setOptimizerPanelOpen: any;
+  openMobileTimer: any; openMobileOptimizer: any; openMobileFlowPicker: any;
+  toggleTimerPanel: any; toggleOptimizerPanel: any;
+}
 // (FileReader.result stays string|ArrayBuffer — call sites coerce via String()
 //  since merging can't override an existing property's declared type.)

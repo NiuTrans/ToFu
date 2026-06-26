@@ -38,38 +38,104 @@ logger = get_logger(__name__)
 # — a free-form dev journal is what we want.
 _JOURNAL_FILE = 'JOURNAL.md'
 
+# Hidden runtime-state artifacts the assistant writes INTO the selected project
+# directory (file-history + memories under .tofu/, .tofu_trash/ recoverable
+# deletes, .tofu_sandbox/ shims, .tofu_env.json marker).  None are source —
+# they are per-developer / per-host working state, so we keep them out of git.
+# A SINGLE glob (.tofu*) from the central registry covers every current AND
+# future ``.tofu``-prefixed artifact, so this never needs editing when a new
+# one is introduced — see lib/agent_artifacts.py for the naming convention.
+from lib.agent_artifacts import GITIGNORE_PATTERN as _TOFU_ARTIFACT_GLOB
+
+_TOFU_ARTIFACT_IGNORES = (_TOFU_ARTIFACT_GLOB,)
+
+
+def _within_git_tree(path: str) -> bool:
+    """Return True if ``path`` is itself a git repo or lives inside one.
+
+    Walks ``path`` and its ancestors looking for a ``.git`` entry (capped at a
+    sane depth so a stray FUSE/NFS mount can't make this loop forever).  This
+    is broader than a self-only ``.git`` check because the selected project is
+    often a SUB-DIRECTORY of a repo — in which case our hidden artifacts would
+    still show up in the parent repo's ``git status``, so the ``.gitignore``
+    matters there too.
+    """
+    try:
+        cur = os.path.abspath(path)
+    except OSError as e:
+        logger.debug('[Context] _within_git_tree abspath failed for %s: %s', path, e)
+        return False
+    for _ in range(40):
+        if os.path.exists(os.path.join(cur, '.git')):
+            return True
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return False
+
+
+def _gitignore_has_entry(existing_lines: set, entry: str) -> bool:
+    """True if ``entry`` is already covered by one of ``existing_lines``.
+
+    Matches the bare / rooted / trailing-slash variants (``.tofu``,
+    ``.tofu/``, ``/.tofu``, ``/.tofu/``) so we never append a duplicate that
+    differs only in slash decoration.
+    """
+    core = entry.strip().strip('/').lstrip('/')
+    if not core:
+        return True
+    variants = {core, f'{core}/', f'/{core}', f'/{core}/'}
+    return bool(existing_lines & variants)
+
+
+def _ensure_gitignored(root: str, entries, header: str) -> None:
+    """Ensure each of ``entries`` is listed in ``root``'s ``.gitignore``.
+
+    Creates ``.gitignore`` when missing AND the root is part of a git working
+    tree (``.git`` in the root or an ancestor); we never conjure a stray
+    ``.gitignore`` in a directory that has nothing to do with git.  When a
+    ``.gitignore`` already exists we always append (whatever it's for).
+    Idempotent — entries already present (in any slash form) are skipped, and
+    only the genuinely-missing ones are appended under a single ``header``
+    comment.  Best-effort: any failure is logged, never raised into the
+    prompt build.
+    """
+    gitignore = os.path.join(root, '.gitignore')
+    has_gitignore = os.path.isfile(gitignore)
+    if not has_gitignore and not _within_git_tree(root):
+        return  # not under git and no .gitignore — leave the dir untouched
+    try:
+        existing = ''
+        existing_lines = set()
+        if has_gitignore:
+            with open(gitignore, encoding='utf-8', errors='replace') as f:
+                existing = f.read()
+            existing_lines = {ln.strip() for ln in existing.splitlines()}
+        missing = [e for e in entries
+                   if not _gitignore_has_entry(existing_lines, e)]
+        if not missing:
+            return  # everything already ignored
+        block = f"# {header}\n" + '\n'.join(missing) + '\n'
+        if existing and not existing.endswith('\n'):
+            block = '\n' + block
+        with open(gitignore, 'a', encoding='utf-8') as f:
+            f.write(block)
+        logger.info('[Context] Added %s to %s', missing, gitignore)
+    except OSError as e:
+        logger.warning('[Context] Failed to update .gitignore at %s: %s', gitignore, e)
+
 
 def _ensure_journal_gitignored(root: str) -> None:
     """Add ``JOURNAL.md`` to ``root``'s ``.gitignore`` so it isn't committed.
 
     The journal is a per-developer working artifact, not source — auto-creating
-    it must not cause accidental commits. We only touch ``.gitignore`` when the
-    root is a git repo (has a ``.git`` entry) or already has a ``.gitignore``;
-    we never create a stray ``.gitignore`` in a non-git directory. Idempotent:
-    if the file is already ignored (as a bare or rooted entry) we do nothing.
-    Best-effort — any failure is logged, never raised into prompt build.
+    it must not cause accidental commits.  Thin wrapper over
+    :func:`_ensure_gitignored` (same create-only-under-git + idempotent policy).
     """
-    gitignore = os.path.join(root, '.gitignore')
-    has_gitignore = os.path.isfile(gitignore)
-    if not has_gitignore and not os.path.exists(os.path.join(root, '.git')):
-        return  # not a git repo and no .gitignore — leave the dir untouched
-    try:
-        existing = ''
-        if has_gitignore:
-            with open(gitignore, encoding='utf-8', errors='replace') as f:
-                existing = f.read()
-            ignored = {ln.strip() for ln in existing.splitlines()}
-            if _JOURNAL_FILE in ignored or f'/{_JOURNAL_FILE}' in ignored:
-                return  # already ignored
-        block = (f"# AI assistant evolution journal (per-developer, not source)\n"
-                 f"{_JOURNAL_FILE}\n")
-        if existing and not existing.endswith('\n'):
-            block = '\n' + block
-        with open(gitignore, 'a', encoding='utf-8') as f:
-            f.write(block)
-        logger.info('[Context] Added %s to %s', _JOURNAL_FILE, gitignore)
-    except OSError as e:
-        logger.warning('[Context] Failed to update .gitignore at %s: %s', gitignore, e)
+    _ensure_gitignored(
+        root, [_JOURNAL_FILE],
+        'AI assistant evolution journal (per-developer, not source)')
 
 
 def _journal_seed() -> str:
@@ -342,5 +408,26 @@ def get_context_for_prompt(base_path=None, conv_id=None):
                 f"{journal_content.strip()}\n")
         logger.info('[Context] Injected project journal: %s (%d chars)',
                     journal_path, len(journal_content))
+
+    # ═══════════════════════════════════════════════════════
+    #  Keep the assistant's hidden runtime artifacts out of git
+    # ═══════════════════════════════════════════════════════
+    # The assistant writes .tofu/ (file-history + memories), .tofu_trash/
+    # (recoverable deletes) and .tofu_sandbox/ (restricted-run shims) INTO the
+    # selected project.  Ensure they're gitignored so they never pollute
+    # ``git status`` or get committed.  Same writability gate as the journal:
+    # never write into a read-only root.
+    if not primary_is_ro:
+        try:
+            from lib.project_mod.config import is_readonly_path
+            artifacts_blocked = is_readonly_path(path, conv_id)
+        except Exception as e:
+            logger.debug('[Context] is_readonly_path check failed for %s: %s',
+                         path, e)
+            artifacts_blocked = False
+        if not artifacts_blocked:
+            _ensure_gitignored(
+                path, _TOFU_ARTIFACT_IGNORES,
+                'AI assistant runtime artifacts (file-history, trash, sandbox)')
 
     return ctx

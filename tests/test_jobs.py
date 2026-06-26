@@ -8,6 +8,17 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
+# These exercise the EXTERNAL ``hope_mcp`` package and rely on its
+# ``fake_hope`` fixture, both of which live in the sibling ``hope-mcp`` repo
+# (its own ``tests/conftest.py``) — not in chatui. They were copied here but
+# the fixture was not, so they error with ``fixture 'fake_hope' not found``.
+# Skip in this suite; run them from the hope-mcp checkout where they belong.
+pytest.skip(
+    'hope_mcp tests belong to the sibling hope-mcp repo (fake_hope fixture '
+    'lives there)', allow_module_level=True)
+
 
 def test_submit_job_builds_args(fake_hope):
     from hope_mcp.tools.jobs import submit_job

@@ -1,9 +1,0 @@
-{
-  "triggers": [
-    "变（习近平经济",
-    "（习近平经济"
-  ],
-  "api_calls": 39,
-  "model": "gemini-2.5-pro",
-  "key": "key_1"
-}

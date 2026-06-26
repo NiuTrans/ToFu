@@ -252,13 +252,22 @@ async function _refreshTimerBadge() {
   }
 }
 
+// Allow mobile_panels.js to keep the open-flag in sync when it portals the
+// panel to <body> as a bottom sheet.
+if (typeof window !== "undefined") {
+  window._setTimerPanelOpen = function (v) { _timerPanelOpen = !!v; };
+}
+
 // Close panel on outside click
 document.addEventListener("click", (e) => {
   if (!_timerPanelOpen) return;
+  const panel = document.getElementById("timerPanel");
+  // On mobile the panel is portaled out of the badge into <body>; its own
+  // backdrop (mobile_panels.js) owns closing, so skip the badge-based check.
+  if (panel && panel.classList.contains("mobile-panel-portaled")) return;
   const badge = document.getElementById("timerBadge");
   if (badge && !badge.contains(/** @type {Node} */ (e.target))) {
     _timerPanelOpen = false;
-    const panel = document.getElementById("timerPanel");
     if (panel) panel.classList.remove("visible");
   }
 });

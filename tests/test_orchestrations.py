@@ -16,6 +16,8 @@ import sys
 import tempfile
 import unittest
 
+import pytest
+
 
 # ── Pure validator tests (no app needed) ────────────────────────────
 
@@ -154,15 +156,10 @@ class _AppFixture:
         orch_mod._ORCH_PATH = os.path.join(self._tmp.name, 'orchestrations.json')
 
         os.environ['TUNNEL_TOKEN'] = 'test-tunnel-token-not-real'
-
-        # Force private mode: the auth gate's default is 'open', which hands
-        # every loopback (test-client) request a synthetic admin context, so
-        # the 'requires auth → 401' assertions would see 200. Pin private and
-        # clear the cached state so it takes effect this process.
-        self._orig_auth_mode = os.environ.get('TOFU_AUTH_MODE')
-        os.environ['TOFU_AUTH_MODE'] = 'private'
-        from lib import auth_mode
-        auth_mode.reset_for_tests()
+        # Auth mode is pinned to 'private' per-test via the ``auth_mode``
+        # marker on the test classes (CrudTest / TaskRunHttpTest), honoured
+        # by the conftest fixture — not mutated here (a fixture-level env
+        # change wouldn't re-apply per test and would leak).
 
         from quart import Quart
         self.app = Quart(__name__)
@@ -181,12 +178,6 @@ class _AppFixture:
         api_keys._cache.clear()
         api_keys._cache_loaded = False
         orch_mod._ORCH_PATH = self._orig_orch_path
-        if self._orig_auth_mode is None:
-            os.environ.pop('TOFU_AUTH_MODE', None)
-        else:
-            os.environ['TOFU_AUTH_MODE'] = self._orig_auth_mode
-        from lib import auth_mode
-        auth_mode.reset_for_tests()
         self._tmp.cleanup()
 
 
@@ -199,6 +190,10 @@ def _run(coro):
 
 
 class CrudTest(unittest.TestCase):
+    # 'requires auth → 401' assertions need the gate active (private mode);
+    # conftest defaults to 'open'. The per-test fixture honours this marker.
+    pytestmark = pytest.mark.auth_mode('private')
+
     @classmethod
     def setUpClass(cls):
         cls.fix = _AppFixture()
@@ -674,6 +669,8 @@ class TaskRunHttpTest(unittest.TestCase):
     network/model call happens (the engine, event emission, dual-sink
     on_event, and DB persistence are all exercised for real).
     """
+
+    pytestmark = pytest.mark.auth_mode('private')
 
     @classmethod
     def setUpClass(cls):

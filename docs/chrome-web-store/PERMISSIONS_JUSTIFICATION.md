@@ -1,0 +1,110 @@
+# Permission justifications
+
+The Developer Dashboard (**Privacy practices** tab) shows one text box per
+permission your manifest declares, labelled "Justify the use of …". Paste the
+matching block below into each. Keep them concise and concrete — reviewers
+reject vague answers like "needed for functionality."
+
+These blocks correspond to the **trimmed** `manifest.store.json`, which removes
+6 permissions that the current code never calls (see the bottom of this file).
+If you submit the original `browser_extension/manifest.json` instead, you will
+be asked to justify those 6 too — and you cannot, because they are unused.
+**Submit the trimmed manifest.**
+
+---
+
+## host permission: `<all_urls>`
+
+```
+The extension is a browser-automation bridge for the user's own self-hosted Tofu assistant. The user gives the assistant tasks that can involve any website (read this page, fill this form, screenshot this dashboard), so the extension must be able to inject content scripts and read page content on whatever URL the task targets. The set of sites cannot be known in advance, so a fixed host list is not possible.
+```
+
+## `scripting`
+
+```
+Used to inject content scripts (chrome.scripting.executeScript) into the tab the user's task targets, in order to read text, query elements, fill forms, click, hover, and send keystrokes. This is the core mechanism by which the assistant interacts with a page.
+```
+
+## `tabs`
+
+```
+Used to list the user's open tabs (titles and URLs) so they can choose which tab a task runs on, to look up a tab by id, to activate a tab before screenshotting it, and to wait for navigation to settle. No tab data is sent anywhere except back to the user's own Tofu server.
+```
+
+## `activeTab`
+
+```
+Used to resolve the currently active tab when a task does not specify a tab id (for example "screenshot the current page").
+```
+
+## `storage`
+
+```
+Stores the user's own configuration locally: the Tofu server URL they enter, an optional Bridge Secret, and a generated per-client id used to route commands to the right device. Nothing in storage is transmitted to any third party.
+```
+
+## `cookies`
+
+```
+Some automation tasks require reading or setting cookies for the site being automated (for example carrying a login session into a step). Used via chrome.cookies.getAll / set / remove, scoped to the URL of the task. Cookie values are returned only to the user's own Tofu server.
+```
+
+## `history`
+
+```
+Provides an optional "search my history" capability the assistant can use when a task asks it to find a page the user visited before. Invoked only on explicit task request via chrome.history.search.
+```
+
+## `bookmarks`
+
+```
+Provides an optional "read my bookmarks" capability so the assistant can open or reference a bookmarked page when a task asks for it. Read-only via chrome.bookmarks.getTree.
+```
+
+## `debugger`
+
+```
+Used ONLY to capture true full-page screenshots via the Chrome DevTools Protocol (Page.captureScreenshot with captureBeyondViewport). The standard captureVisibleTab API can only capture the visible viewport; full-page capture requires attaching the debugger to the single target tab for the duration of one screenshot, then detaching. It is not used to inspect, modify, or intercept network traffic.
+```
+
+## `notifications`
+
+```
+Used to show the user a desktop notification for bridge events (for example when the connection to their Tofu server drops), so they are not left wondering why automation stopped.
+```
+
+## `alarms`
+
+```
+Used to keep the MV3 service worker alive with a periodic keep-alive alarm so the long-poll connection to the user's server is not dropped when Chrome idles the worker.
+```
+
+---
+
+## Single-purpose statement
+
+The dashboard asks for a one-sentence single purpose. Use:
+
+```
+The single purpose of this extension is to act as a bridge that lets the user's own self-hosted Tofu AI assistant read and interact with the browser tabs the user directs it to.
+```
+
+---
+
+## Permissions REMOVED for the store build (do not declare these)
+
+`scripts/package_extension.sh --store` swaps in `manifest.store.json`, which
+drops the following. The current `background.js` / `popup.js` never call any of
+them, so they are unjustifiable and would trigger rejection:
+
+| Removed | Why it's safe to drop |
+|---|---|
+| `webNavigation` | No `chrome.webNavigation.*` call exists. Tab-load waiting uses `chrome.tabs.onUpdated`, which needs only `tabs`. |
+| `clipboardRead` | No clipboard read anywhere (no `navigator.clipboard.readText`, no `execCommand('paste')`). |
+| `clipboardWrite` | No clipboard write anywhere. |
+| `declarativeNetRequest` | No DNR ruleset and no `chrome.declarativeNetRequest.*` call. |
+| `management` | No `chrome.management.*` call. (This permission is a major review red flag — good to remove.) |
+| `offscreen` | No `chrome.offscreen.*` call and no offscreen document. |
+
+If you later add a feature that needs one of these, re-declare only that one
+and add a justification block above.

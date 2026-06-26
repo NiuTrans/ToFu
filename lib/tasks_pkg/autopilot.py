@@ -69,6 +69,7 @@ already wired through ``task['aborted']`` and the freshness guard in
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -80,33 +81,169 @@ from lib.log import audit_log, get_logger
 logger = get_logger(__name__)
 
 
-_VU_DONE_SENTINEL = '[VU: TASK_DONE]'
+from lib.agent_verdict import VU_DONE_SENTINEL as _VU_DONE_SENTINEL
+from lib.agent_verdict import classify_verdict as _classify_verdict
 
 
 _VU_ROLE_PROMPT = (
-    'You are simulating the user in a chat with an AI assistant.\n'
-    'Reply briefly, in the first person, as if you were the user.\n\n'
+    'You are the PROJECT OWNER driving this task to completion. The '
+    'assistant reports to YOU. Your job is not to answer the assistant '
+    'or to be agreeable — it is to keep the work moving toward the '
+    'objective and to refuse to declare victory until the objective is '
+    'actually met.\n\n'
+    'Trust nothing you have not checked. The assistant\'s self-report '
+    '("done", "tests pass", "I created X") is a claim, not evidence.\n\n'
+    'Before you reply, do this:\n'
+    '1. VERIFY the assistant\'s most consequential claim using your '
+    'tools. If it said tests pass, run or inspect them; if it said it '
+    'created/edited a file, read_files it; if it claimed a behavior '
+    'works, check it. You MUST verify any checkable claim that the '
+    'objective depends on — do not skip this.\n'
+    '2. ASSESS the gap between the real current state and the objective '
+    'stated at the top of this turn.\n'
+    '3. DECIDE the genuine next step toward that objective — NOT merely '
+    'a response to whatever the assistant last said. If the assistant '
+    'asked you a decision question, answer it from the objective\'s '
+    'perspective. If it declared the task finished, hold it to the '
+    'objective\'s acceptance criteria.\n'
+    '4. THINK CREATIVELY. A good owner does more than grade the '
+    'assistant\'s homework. Use what you learned while investigating to '
+    'surface things the assistant has NOT considered: an edge case or '
+    'failure mode it missed, a simpler or more robust approach, a '
+    'hidden assumption worth challenging, a related part of the '
+    'objective it has not touched yet, or a concrete improvement. When '
+    'you have such an insight, lead with it — it is more valuable than '
+    'a verification report.\n\n'
+    '=== PROVENANCE (read carefully) ===\n'
+    'Your tool calls and your private reasoning are NOT sent to the '
+    'assistant — they are shown to the human watching, but the assistant '
+    'only ever receives your final REPLY TEXT as its next user message. '
+    'So investigate as deeply as you need (the cost is yours to spend), '
+    'but distil the result: your reply must be a clean, self-contained '
+    'instruction that stands on its own without the investigation behind '
+    'it. Do not say "as I found above" or reference your tool output — '
+    'state the conclusion and the next step directly.\n'
+    '=== END PROVENANCE ===\n\n'
     'Decision rules:\n'
-    '- For code / engineering tasks: pick the most robust long-term '
-    'solution. Do not optimize for cost, implementation speed, or '
-    'backward compatibility. Prefer fixing root causes over patches.\n'
+    '- For code / engineering tasks: demand the most robust long-term '
+    'solution. Do not accept shortcuts that optimize for cost, '
+    'implementation speed, or backward compatibility. Prefer fixing '
+    'root causes over patches.\n'
     '- For open-ended discussion: use your own judgment, stay concrete, '
     'pick a direction instead of asking more questions.\n'
-    '- If the assistant has clearly finished the task and is just '
-    'signing off (no question pending, no proposal awaiting review), '
-    f'reply EXACTLY: {_VU_DONE_SENTINEL}\n'
-    '- Never invent product requirements the real user never mentioned.\n'
-    '- Keep replies to 1-3 sentences unless the assistant explicitly '
-    'asked for detail.\n'
-    '- Reply in the same language the assistant used.\n'
+    '- Stop ONLY when you have VERIFIED that the objective\'s acceptance '
+    'criteria are genuinely met (the check actually ran, the file is '
+    'actually correct, the behavior actually works) — not when the '
+    'assistant says so. When (and only when) that is true, reply '
+    f'EXACTLY: {_VU_DONE_SENTINEL}\n'
+    '- If the objective is NOT yet met, give the assistant the specific '
+    'unmet criterion or the next concrete step. Do not emit '
+    f'{_VU_DONE_SENTINEL} while anything remains unresolved.\n'
+    '- Never invent product requirements beyond the stated objective.\n'
+    '- Reply in the first person as the owner, in the same language the '
+    'assistant used. Be concise but cite the specific evidence you '
+    'verified or the criterion you are holding the assistant to.\n'
     '- Output ONLY the reply text — no quotation marks, no role labels, '
     f'no preamble. The {_VU_DONE_SENTINEL} sentinel must appear on its '
-    'own when used.\n\n'
-    'You MAY use any of the tools available to you (read_files, '
-    'search, etc.) to investigate before answering — for example, to '
-    'check a file the assistant referenced or to look up a fact.  Tool '
-    'use is optional; if you already know how to reply, just reply.'
+    'own when used.'
 )
+
+
+# Content-derived prompt version marker.  Stamped into every VU directive turn
+# so a stale-vs-live prompt mismatch is mechanically detectable (one glance at
+# the directive text / message dict) instead of relying on eyeballing the prose.
+# Derived from the prompt body itself, so it changes AUTOMATICALLY whenever the
+# prompt text changes — no one can forget to bump it.  A directive carrying an
+# old marker (or none) was produced by a server still running a pre-edit
+# import-time constant; restart picks up the new prompt.  See
+# tests/test_autopilot_verify.py for the regression assertion.
+VU_PROMPT_VERSION = hashlib.sha256(
+    _VU_ROLE_PROMPT.encode('utf-8')).hexdigest()[:8]
+
+# Emit the loaded prompt version once at import so the RUNNING process's
+# prompt is greppable in app.log without needing a directive paste to infer
+# it ("is the live process current?" answered directly from logs).
+logger.info('[Autopilot] VU prompt v%s loaded', VU_PROMPT_VERSION)
+
+
+def _extract_objective(messages: list) -> str:
+    """Return the original objective = the FIRST real user message text.
+
+    Skips VU directive turns (``_isVuDirective``) and synthetic virtual-user
+    turns (``_isVirtualUser``) so the anchor is always the human's opening
+    ask, never an autopilot-generated reply.  Returns '' when none found.
+    """
+    for m in messages or []:
+        if not isinstance(m, dict) or m.get('role') != 'user':
+            continue
+        if m.get('_isVuDirective') or m.get('_isVirtualUser'):
+            continue
+        content = m.get('content')
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            # Multimodal content blocks — concatenate the text parts.
+            parts = [b.get('text', '') for b in content
+                     if isinstance(b, dict) and b.get('type') == 'text']
+            text = ' '.join(p for p in parts if p).strip()
+        else:
+            text = ''
+        if text:
+            return text
+    return ''
+
+
+def _get_or_persist_objective(conv_id: str, messages: list) -> str:
+    """Resolve the immutable autopilot objective for a conversation.
+
+    The objective is the north star the virtual user measures the assistant
+    against.  It is captured ONCE (the first real user message) and pinned to
+    ``settings.autopilotObjective`` so every follow-up task's VU sees the SAME
+    anchor even after compaction has trimmed the early conversation history.
+
+    Read-through cache: returns the persisted value if present; otherwise
+    derives it from ``messages``, persists it, and returns it.  All failures
+    are non-fatal — the caller falls back to deriving from the live messages.
+    """
+    if not conv_id:
+        return _extract_objective(messages)
+    try:
+        from lib.database import (
+            DOMAIN_CHAT,
+            db_execute_with_retry,
+            get_thread_db,
+        )
+        db = get_thread_db(DOMAIN_CHAT)
+        srow = db.execute(
+            'SELECT settings FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)
+        ).fetchone()
+        settings = {}
+        if srow:
+            try:
+                settings = json.loads(srow[0] or '{}')
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug('[Autopilot] objective: settings parse failed '
+                             'conv=%s: %s', conv_id[:8], e)
+                settings = {}
+        existing = (settings.get('autopilotObjective') or '').strip()
+        if existing:
+            return existing
+        objective = _extract_objective(messages)
+        if objective and srow is not None:
+            settings['autopilotObjective'] = objective
+            db_execute_with_retry(
+                db,
+                'UPDATE conversations SET settings=? WHERE id=? AND user_id=1',
+                (json.dumps(settings, ensure_ascii=False), conv_id),
+            )
+            logger.info('[Autopilot] conv=%s pinned objective (%d chars)',
+                        conv_id[:8], len(objective))
+        return objective
+    except Exception as e:
+        logger.warning('[Autopilot] objective resolve failed conv=%s: %s — '
+                       'deriving from live messages', conv_id[:8], e)
+        return _extract_objective(messages)
 
 
 def is_autopilot_enabled(task: dict) -> bool:
@@ -248,18 +385,36 @@ def run_virtual_user(task: dict, vu_msg_id: str | None = None) -> dict | None:
     # We pass the parent's full message list verbatim so the VU sees the
     # entire conversation (including tool_calls / tool_result pairs);
     # the orchestrator's compaction layer handles context bounding.
+    # Resolve the immutable objective anchor (north star).  Pinned to
+    # settings.autopilotObjective so it survives across follow-up tasks and
+    # compaction; falls back to deriving from the live messages.
+    objective = _get_or_persist_objective(task.get('convId') or '',
+                                           parent_messages)
+    objective_block = ''
+    if objective:
+        objective_block = (
+            '=== ORIGINAL OBJECTIVE (your north star — does NOT change '
+            'across turns) ===\n'
+            f'{objective}\n'
+            '=== The assistant works for YOU toward this objective. '
+            'Hold it to this, not to its own self-report. ===\n\n'
+        )
+
     vu_messages = [dict(m) for m in parent_messages]
     vu_messages.append({
         'role': 'user',
         'content': (
-            '=== Your role for THIS turn: Simulated User ===\n'
+            f'{objective_block}'
+            f'=== Your role for THIS turn: Simulated User '
+            f'[prompt v{VU_PROMPT_VERSION}] ===\n'
             f'{_VU_ROLE_PROMPT}\n'
             '=== End simulated-user role ===\n\n'
             'Based on the conversation above, produce the simulated '
-            'user\'s reply now.  Investigate first with tools if you '
-            'want, then output the reply text only.'
+            'user\'s reply now.  Verify the assistant\'s key claims with '
+            'tools first, then output the reply text only.'
         ),
         '_isVuDirective': True,
+        '_vuPromptVersion': VU_PROMPT_VERSION,
     })
 
     # Build a fresh sub-task that inherits the parent's config so
@@ -353,7 +508,13 @@ def run_virtual_user(task: dict, vu_msg_id: str | None = None) -> dict | None:
 
     text = (result.get('content') or '').strip()
     rounds = list(sub_task.get('toolRounds') or [])
-    if _VU_DONE_SENTINEL in text:
+    # Route the stop decision through the single source of truth.  The
+    # virtual_user policy ends the loop only on an explicit TASK_DONE/STOP
+    # AND downgrades that to "keep going" when the reply itself still flags
+    # unresolved work (❌ / "NOT met" / "still failing" / "unresolved") — the
+    # anti-premature-done guard lives in lib/agent_verdict.py, NOT here.
+    verdict = _classify_verdict(text, verifier_role='virtual_user')
+    if verdict['phase'] == 'stop':
         logger.info('[Autopilot %s] VU emitted TASK_DONE — stopping loop', tid)
         # Signal the hook to clear the persistent armed-marker (disarm) so the
         # loop ends and the queue-bar sentinel disappears.
@@ -363,6 +524,13 @@ def run_virtual_user(task: dict, vu_msg_id: str | None = None) -> dict | None:
                   conv_id=task.get('convId', ''),
                   reason='vu_task_done')
         return None
+
+    # The verdict downgraded a premature TASK_DONE to "keep going": the reply
+    # may still literally carry the sentinel token.  Strip it so the
+    # synthetic user message we feed back is clean instructional text, not a
+    # stray sentinel the next turn would mis-read.
+    if _VU_DONE_SENTINEL in text:
+        text = text.replace(_VU_DONE_SENTINEL, '').strip()
 
     logger.info('[Autopilot %s] VU reply: %.200s%s (used %d tool round(s))',
                 tid, text, ' …' if len(text) > 200 else '', len(rounds))

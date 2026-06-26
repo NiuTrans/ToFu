@@ -57,7 +57,8 @@ async function openUpdateDialog() {
 /** Run the version check with a visible spinner + bounded timeout.
  *  The check hits GitHub's tags API server-side; on a slow/blocked
  *  network we must NOT sit on a bare label forever — show a spinner,
- *  cap the wait, and offer an explicit retry. */
+ *  cap the wait, and surface the CONCRETE failure reason (never a vague
+ *  "try again later"). */
 async function _runUpdateCheck() {
   const body = document.getElementById('updateModalBody');
   if (!body) return;
@@ -69,24 +70,95 @@ async function _runUpdateCheck() {
     escapeHtml(t('update.checking')) + '</span></div>';
 
   let r = null;
+  let failure = null;  // {title, reason} — set on any failure
   try {
     // Bounded wait — the default 30s feels frozen. 12s is plenty for a
-    // reachable GitHub; beyond that we surface a retry instead of hanging.
-    r = await Api.update.check({ timeout: 12000 });
+    // reachable GitHub; beyond that we surface a reason instead of hanging.
+    // onError:'throw' (overriding api.js's default null) so we can read the
+    // real cause — backend down vs HTTP error vs timeout — and say so.
+    r = await Api.update.check({ timeout: 12000, onError: 'throw' });
   } catch (e) {
+    failure = _classifyCheckError(e);
     if (typeof debugLog === 'function') debugLog('[Update] check failed: ' + (e && e.message), 'error');
   }
-  if (!r || !r.ok) {
-    body.innerHTML =
-      '<div class="upd-checking-wrap"><p class="upd-error">' +
-      escapeHtml(t('update.checkFailed')) + '</p>' +
-      '<button class="upd-retry-btn" onclick="_runUpdateCheck()">' +
-      escapeHtml(t('update.retry')) + '</button></div>';
+
+  // The request succeeded at the HTTP layer but the backend could not reach
+  // GitHub — it tells us the concrete cause via error_kind/error_detail.
+  if (!failure && r && r.error_kind) {
+    failure = _githubFailureReason(r.error_kind, r.error_detail);
+  }
+  // Defensive: a malformed/empty payload with no explicit error.
+  if (!failure && (!r || !r.ok)) {
+    failure = { title: t('update.checkFailTitle'), reason: t('update.errUnknown') };
+  }
+
+  if (failure) {
+    _renderCheckError(failure);
     return;
   }
   _updateState = r;
   _renderUpdateBadge();
   _renderUpdateDialogBody(r);
+}
+
+/** Map a thrown ApiError (backend side) to a concrete {title, reason}.
+ *  Distinguishes "backend unreachable" / "request timed out" / "backend
+ *  returned HTTP N" so the user always learns the real cause. */
+function _classifyCheckError(e) {
+  const title = t('update.checkFailTitle');
+  // AbortController timeout (api.js) surfaces as AbortError or code 'timeout'.
+  const code = e && e.code;
+  const name = e && e.name;
+  if (code === 'timeout' || name === 'AbortError') {
+    return { title, reason: t('update.errTimeout') };
+  }
+  // Network-layer failure reaching our OWN backend (server down / restarting).
+  if (code === 'network' || (typeof e !== 'undefined' && e instanceof TypeError)) {
+    return { title, reason: t('update.errBackend') };
+  }
+  // HTTP error from the backend route itself (e.g. 500/502/auth).
+  if (e && typeof e.status === 'number' && e.status > 0) {
+    return { title, reason: t('update.errBackendHttp').replace('%s', String(e.status)) };
+  }
+  return { title, reason: t('update.errBackend') };
+}
+
+/** Map the backend's GitHub-side error_kind to localized {title, reason}. */
+function _githubFailureReason(kind, detail) {
+  const title = t('update.checkFailTitle');
+  const map = {
+    network: t('update.errNetwork'),
+    rate_limited: t('update.errRateLimited'),
+    http: t('update.errHttp').replace('%s', escapeHtml(String(detail || '').replace(/^HTTP\s*/i, '').split(' ')[0] || '')),
+    parse: t('update.errParse'),
+    no_tags: t('update.errNoTags'),
+  };
+  return { title, reason: map[kind] || t('update.errUnknown'), detail: detail };
+}
+
+/** Render a concrete error card: heading + the real reason + retry.
+ *  Always names WHY the check failed — backend down, timeout, GitHub
+ *  unreachable, rate-limited, etc. */
+function _renderCheckError(failure) {
+  const body = document.getElementById('updateModalBody');
+  if (!body) return;
+  const icon =
+    '<span class="upd-err-icon"><svg width="22" height="22" viewBox="0 0 24 24" ' +
+    'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+    'stroke-linejoin="round"><circle cx="12" cy="12" r="10"/>' +
+    '<line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span>';
+  body.innerHTML =
+    '<div class="upd-err-card">' +
+      '<div class="upd-err-head">' + icon +
+        '<div class="upd-err-title">' + escapeHtml(failure.title || t('update.checkFailTitle')) + '</div>' +
+      '</div>' +
+      '<p class="upd-err-reason">' + escapeHtml(failure.reason || t('update.errUnknown')) + '</p>' +
+      '<button class="upd-retry-btn" onclick="_runUpdateCheck()">' +
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+        'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+        '<path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>' +
+        escapeHtml(t('update.retry')) + '</button>' +
+    '</div>';
 }
 
 /** current → latest version hero card. */

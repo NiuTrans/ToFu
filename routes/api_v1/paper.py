@@ -16,6 +16,9 @@ Routes registered (paths owned by this blueprint, definitions in routes/paper.py
   POST   /api/v1/paper/report/lookup
   GET    /api/v1/paper/report/export
   POST   /api/v1/paper/report/cache
+  POST   /api/v1/paper/qa/start
+  GET    /api/v1/paper/qa/poll
+  POST   /api/v1/paper/qa/abort
   POST   /api/v1/paper/translate/start
   GET    /api/v1/paper/translate/poll
   POST   /api/v1/paper/translate/abort

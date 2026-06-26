@@ -1,4 +1,4 @@
-// Tofu Browser Bridge — Popup (v4)
+// Tofu Browser Bridge — Popup (v4.3)
 
 document.addEventListener('DOMContentLoaded', () => {
   const statusDot = document.getElementById('statusDot');

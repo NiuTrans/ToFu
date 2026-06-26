@@ -122,7 +122,7 @@ def _tool_display_fetch_url(fn_name, fn_args, tc_id, tc_args_str):
                 u = '?'
             full_list.append(u)
         lines = '\n'.join(f'• {u}' for u in full_list)
-        display = f'📄 {n} URLs:\n{lines}'
+        display = f'{n} URLs:\n{lines}'
         return display, {
             'toolName': 'fetch_url',
             '_display_query': display,
@@ -131,8 +131,8 @@ def _tool_display_fetch_url(fn_name, fn_args, tc_id, tc_args_str):
     target_url = fn_args.get('url', '')
     is_pdf_hint = target_url.lower().rstrip('/').endswith('.pdf')
     short = _short_url(target_url)
-    display_query = f'{"📑 PDF" if is_pdf_hint else "🌐"} {short}'
-    return f'📄 {target_url}', {'toolName': 'fetch_url', '_display_query': display_query}
+    display_query = f'{"PDF " if is_pdf_hint else ""}{short}'
+    return target_url, {'toolName': 'fetch_url', '_display_query': display_query}
 
 
 def _tool_display_code_exec(fn_name, fn_args, tc_id, tc_args_str):
@@ -251,21 +251,24 @@ def _tool_display_memory(fn_name, fn_args, tc_id, tc_args_str):
 
 
 def _tool_display_conv_ref(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for conversation reference tool calls."""
-    icon = '📋' if fn_name == 'list_conversations' else '💬'
+    """Build display info for conversation reference tool calls.
+
+    No emoji prefix — the frontend renders a per-tool SVG icon (see
+    ``_webToolSvg`` in ``static/js/ui/tool_rounds.js``).
+    """
     kw = fn_args.get('keyword', 'all') if fn_name == 'list_conversations' else fn_args.get('conversation_id', '?')[:8]
-    display = f"{icon} {fn_name}: {kw}"
+    display = f"{fn_name}: {kw}"
     return display, {'toolName': fn_name}
 
 
 def _tool_display_scheduler(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for scheduler tool calls."""
-    return f"⏰ {fn_name}", {'toolName': fn_name}
+    """Build display info for scheduler tool calls (frontend renders SVG icon)."""
+    return fn_name, {'toolName': fn_name}
 
 
 def _tool_display_desktop(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for desktop tool calls."""
-    return f"🖥️ {fn_name}", {'toolName': fn_name}
+    """Build display info for desktop tool calls (frontend renders SVG icon)."""
+    return fn_name, {'toolName': fn_name}
 
 
 def _tool_display_swarm(fn_name, fn_args, tc_id, tc_args_str):
@@ -288,22 +291,22 @@ def _tool_display_swarm(fn_name, fn_args, tc_id, tc_args_str):
         # swarm across two panels (the "ghost panel" / "ticked but waiting"
         # bug). Render it as an ordinary tool round instead.
         if not n_agents:
-            return "⚡ Spawning agents…", {'toolName': 'spawn_agents'}
-        display = f"⚡ Spawning {n_agents} agent{'s' if n_agents != 1 else ''}…"
+            return "Spawning agents…", {'toolName': 'spawn_agents'}
+        display = f"Spawning {n_agents} agent{'s' if n_agents != 1 else ''}…"
         return display, {'toolName': 'spawn_agents', '_swarm': True}
 
     if fn_name == 'await_agents':
         ids = fn_args.get('ids') if isinstance(fn_args, dict) else None
         mode = (fn_args.get('mode', 'any') if isinstance(fn_args, dict) else 'any')
         if ids and isinstance(ids, list) and len(ids) > 0:
-            label = f'⏳ Awaiting {len(ids)} agent{"s" if len(ids) != 1 else ""} ({mode})'
+            label = f'Awaiting {len(ids)} agent{"s" if len(ids) != 1 else ""} ({mode})'
         else:
-            label = f'⏳ Awaiting all running agents ({mode})'
+            label = f'Awaiting all running agents ({mode})'
         return label, {'toolName': 'await_agents'}
 
     if fn_name == 'get_agent_result':
         agent_id = (fn_args.get('agent_id', '') if isinstance(fn_args, dict) else '')
-        label = f'📥 Fetching result for {agent_id[:12]}' if agent_id else '📥 Fetching agent result'
+        label = f'Fetching result for {agent_id[:12]}' if agent_id else 'Fetching agent result'
         return label, {'toolName': 'get_agent_result'}
 
     # Artifact tools fall through to the generic renderer in the dispatch
@@ -314,8 +317,8 @@ def _tool_display_swarm(fn_name, fn_args, tc_id, tc_args_str):
 
 
 def _tool_display_compact(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for context_compact tool calls."""
-    return '🗜️ Compacting context…', {'toolName': fn_name}
+    """Build display info for context_compact tool calls (frontend renders SVG icon)."""
+    return 'Compacting context…', {'toolName': fn_name}
 
 
 def _tool_display_image_gen(fn_name, fn_args, tc_id, tc_args_str):
@@ -331,7 +334,7 @@ def _tool_display_image_gen(fn_name, fn_args, tc_id, tc_args_str):
     prompt = fn_args.get('prompt', '…') or '…'
     if len(prompt) > _FULL_LIMIT:
         prompt = prompt[:_FULL_LIMIT - 1] + '…'
-    return f'🎨 Generating: {prompt}', {
+    return f'Generating: {prompt}', {
         'toolName': 'generate_image',
         'imagePrompt': prompt,
     }
@@ -377,9 +380,7 @@ def _tool_display_human_guidance(fn_name, fn_args, tc_id, tc_args_str):
     question = fn_args.get('question', '…') or '…'
     if len(question) > _FULL_LIMIT:
         question = question[:_FULL_LIMIT - 1] + '…'
-    response_type = fn_args.get('response_type', 'free_text')
-    icon = '🗳️' if response_type == 'choice' else '🙋'
-    return f'{icon} {question}', {'toolName': 'ask_human'}
+    return question, {'toolName': 'ask_human'}
 
 
 # Keys from fn_args that identify the *resource* the call is operating on
@@ -632,24 +633,85 @@ def _mcp_arg_suffix(fn_args):
     return ''
 
 
+def _mcp_links(fn_args):
+    """Map the human-readable label of a linkable MCP arg → its clickable URL.
+
+    Returns a dict keyed by the EXACT label string ``_mcp_arg_suffix`` renders
+    for that arg (e.g. ``[EMNLP Demo] Tofu`` or the ``6a1e7…a668`` short id, or
+    a Xuecheng doc title / numeric id), so the frontend can linkify that exact
+    substring on the tool-call line. Only resources we can resolve a URL for
+    are included; empty dict when none apply.
+
+    Currently covers:
+      * overleaf ``project_id`` → ``…/project/<id>`` (always — synthesized
+        from the deployment base when no exact URL was harvested)
+      * xuecheng ``doc``        → harvested ``…/collabpage/<id>`` URL (only
+        when one was seen in a prior tool result — no canonical base assumed)
+    """
+    if not isinstance(fn_args, dict):
+        return {}
+    links = {}
+    try:
+        pid = fn_args.get('project_id')
+        if pid:
+            label = _render_mcp_arg('project_id', pid)
+            from lib.mcp.project_names import get_project_url
+            href = get_project_url(str(pid).strip())
+            if label and href:
+                links[label] = href
+    except Exception as e:
+        logger.debug('[ToolDisplay] overleaf link resolve failed: %s', e)
+    try:
+        doc = fn_args.get('doc')
+        if doc:
+            label = _render_mcp_arg('doc', doc)
+            from lib.mcp.project_names import get_doc_url
+            href = get_doc_url(_doc_cid(doc))
+            if label and href:
+                links[label] = href
+    except Exception as e:
+        logger.debug('[ToolDisplay] xuecheng link resolve failed: %s', e)
+    return links
+
+
+def _doc_cid(val) -> str:
+    """Normalise a Xuecheng ``doc`` arg to its bare numeric contentId, or ''."""
+    if val is None:
+        return ''
+    s = str(val).strip()
+    m = _KM_DOC_RE.search(s)
+    if m:
+        return m.group(1)
+    return s if s.isdigit() else ''
+
+
 def _tool_display_mcp(fn_name, fn_args, tc_id, tc_args_str):
     """Build display info for MCP bridge tool calls (mcp__server__tool).
 
     Surfaces the most informative arg (file_path, name, section_title, short
     project_id, owner/repo, …) after the tool name so users can tell at a
     glance which file / project / resource the call is operating on —
-    instead of seeing a uniform ``🔌 overleaf/create_file`` for every write.
+    instead of seeing a uniform ``overleaf/create_file`` for every write.
+    No emoji prefix — the frontend renders the plug SVG icon (§3.4).
+
+    When the resource resolves to a known URL (e.g. an Overleaf project), a
+    ``_mcpLinks`` map (label → href) is attached so the frontend can render
+    that segment as a clickable link instead of an unreadable id jumble.
     """
     from lib.mcp.types import parse_namespaced_name
     parsed = parse_namespaced_name(fn_name)
     if parsed:
         server_name, tool_name = parsed
-        head = f'🔌 {server_name}/{tool_name}'
+        head = f'{server_name}/{tool_name}'
     else:
-        head = f'🔌 {fn_name}'
+        head = fn_name
     suffix = _mcp_arg_suffix(fn_args)
     display = f'{head} — {suffix}' if suffix else head
-    return display, {'toolName': fn_name}
+    extra = {'toolName': fn_name}
+    links = _mcp_links(fn_args)
+    if links:
+        extra['_mcpLinks'] = links
+    return display, extra
 
 
 def _tool_display_generic(fn_name, fn_args, tc_id, tc_args_str):
@@ -659,7 +721,7 @@ def _tool_display_generic(fn_name, fn_args, tc_id, tc_args_str):
     if fn_name.startswith(MCP_TOOL_PREFIX):
         return _tool_display_mcp(fn_name, fn_args, tc_id, tc_args_str)
     logger.warning('[Orchestrator] Unregistered tool %s — using generic round_entry. This tool may need a dedicated display handler.', fn_name)
-    return f"🔧 {fn_name}", {'toolName': fn_name}
+    return fn_name, {'toolName': fn_name}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -692,7 +754,8 @@ def _build_display_dispatch_table():
         table.setdefault(name, _tool_display_project)
 
     # ★ read_files — global tool (not in PROJECT_TOOL_NAMES), uses same
-    #   project-style display rendering (🔍 / 📂 / 📄 + path + lines).
+    #   project-style display rendering (path + line ranges; icon is the
+    #   frontend SVG, no emoji prefix).
     table.setdefault('read_files', _tool_display_project)
 
     # Browser tools (basic + advanced)
@@ -962,7 +1025,7 @@ def _build_tool_round_entry(fn_name, fn_args, tc_id, tc_args_str, tool_round_num
         display_query, extra = handler(fn_name, fn_args, tc_id, tc_args_str)
     except Exception as e:
         logger.warning('[ToolDisplay] handler for %s raised: %s', fn_name, e)
-        display_query = f'🔧 {fn_name}'
+        display_query = fn_name
         extra = {'toolName': fn_name}
 
     tool_round_num += 1

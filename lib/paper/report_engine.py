@@ -13,9 +13,16 @@ import time
 import lib as _lib
 from lib.database import get_thread_db
 from lib.llm_dispatch.api import dispatch_stream
+from lib.llm_errors import AbortedError
 from lib.log import get_logger
 
-from .images import _inject_images_into_report, _lookup_paper_title
+from .images import (
+    _backfill_library_title,
+    _extract_title_from_report,
+    _inject_images_into_report,
+    _is_placeholder_title,
+    _lookup_paper_title,
+)
 from .prompts import _MAX_REPORT_TOOL_ROUNDS, _REPORT_TOOLS
 from .report_runtime import _append_report_event, _cleanup_stale_report_tasks
 from .tools import _execute_report_tool
@@ -96,19 +103,32 @@ def _run_report_task(task, messages, images):
     # Extract a short context string for search relevance filtering
     _user_msg = messages[1]['content'] if len(messages) > 1 else ''
     _report_user_question = _user_msg[:300] if _user_msg else ''
+    aborted = False
 
     try:
         for rnd in range(_MAX_REPORT_TOOL_ROUNDS + 1):
             if _abort_check():
-                logger.info('[Paper:Report] Task %s aborted', task['task_id'])
+                aborted = True
+                logger.info('[Paper:Report] Task %s aborted before round %d', task['task_id'], rnd + 1)
                 break
 
             _round_tools = _REPORT_TOOLS if rnd < _MAX_REPORT_TOOL_ROUNDS else None
             logger.info('[Paper:Report] Task %s round %d — model=%s msgs=%d',
                         task['task_id'], rnd + 1, model_name, len(messages))
 
+            # Per-round content buffer. Tool-calling models often emit a
+            # full interim DRAFT of the report in a round that ALSO issues a
+            # tool call, then rewrite the whole report from scratch in the
+            # final (no-tool-call) round. Accumulating across rounds would
+            # bake the draft + final copy into one document — the report
+            # rendered TWICE. So we buffer each round separately and keep
+            # only the terminal round's content as the report body (see the
+            # tool_calls branch below, which discards a round's draft).
+            round_content = ''
+
             def _on_content(text):
-                nonlocal full_content
+                nonlocal round_content, full_content
+                round_content += text
                 full_content += text
                 task['full_text'] = full_content
                 _append_report_event(task, {'type': 'delta', 'delta': text})
@@ -161,11 +181,35 @@ def _run_report_task(task, messages, images):
                 if _disp.get('provider_id'):
                     _provider_id = _disp['provider_id']
 
+            # The stream may have been aborted mid-flight: async_stream_chat
+            # returns the partial message normally (no raise) when the abort
+            # is seen during line iteration. Catch that here so we don't go on
+            # to treat the truncated draft as a finished report.
+            if _abort_check():
+                aborted = True
+                logger.info('[Paper:Report] Task %s aborted mid-stream (round %d)',
+                            task['task_id'], rnd + 1)
+                break
+
             tool_calls = msg.get('tool_calls')
             if not tool_calls:
                 logger.info('[Paper:Report] Task %s — no tool calls, report complete '
                             '(%d chars, %.1fs)', task['task_id'], len(full_content), time.time() - t0)
                 break
+
+            # This round ended with tool calls, so any prose it emitted was a
+            # premature interim draft (the model will rewrite the full report
+            # after seeing the tool results). Discard that draft from the
+            # canonical body and tell pollers/the live stream to reset their
+            # accumulated text, otherwise the draft + the final report get
+            # concatenated and the report renders twice.
+            if round_content:
+                logger.info('[Paper:Report] Task %s — discarding %d-char interim draft '
+                            'emitted alongside tool calls (round %d)',
+                            task['task_id'], len(round_content), rnd + 1)
+                full_content = full_content[:-len(round_content)]
+                task['full_text'] = full_content
+                _append_report_event(task, {'type': 'delta_reset'})
 
             messages.append(msg)
 
@@ -276,6 +320,17 @@ def _run_report_task(task, messages, images):
                     'content': result[:30000],
                 })
 
+        if aborted:
+            # User stopped generation. Do NOT persist the partial report or
+            # emit `done` — emit a distinct `aborted` terminal event carrying
+            # whatever text was produced so the frontend can show it read-only.
+            task['status'] = 'aborted'
+            task['finished_at'] = time.time()
+            logger.info('[Paper:Report] Task %s stopped by user — %d chars generated in %.1fs',
+                        task['task_id'], len(full_content), time.time() - t0)
+            _append_report_event(task, {'type': 'aborted', 'partial': full_content})
+            return
+
         elapsed = time.time() - t0
         logger.info('[Paper:Report] Task %s content stream complete — %d chars in %.1fs',
                     task['task_id'], len(full_content), elapsed)
@@ -293,17 +348,34 @@ def _run_report_task(task, messages, images):
                             len(preamble), preamble.replace('\n', ' '))
                 full_content = full_content[_heading_start.start():]
 
-        # Prepend a top-level `# Title` heading so the rendered report has a
-        # title bar instead of starting cold at "## TL;DR". Title is sourced
-        # from paper_library keyed by paper_hash; falls back to the
-        # client-supplied title (sent on the report start request) which
-        # avoids a race when paper_library hasn't been upserted yet.
-        title = _lookup_paper_title(phash) or task.get('client_title') or ''
+        # Resolve the best title from three sources, in priority order:
+        #   1. A non-placeholder stored title (user-renamed or already-resolved
+        #      — never override it).
+        #   2. The title the LLM wrote into the report's Paper Card — this is
+        #      the self-heal source for rows stuck at the bare ``arXiv:<id>``
+        #      because the up-front arXiv lookup failed.
+        #   3. The client-supplied title (race fallback).
+        # ``_is_placeholder`` mirrors the backfill predicate: empty or a bare
+        # ``arXiv:<id>`` left behind by a failed up-front lookup.
+        stored_title = _lookup_paper_title(phash) or task.get('client_title') or ''
+        card_title = _extract_title_from_report(full_content)
+
+        if not _is_placeholder_title(stored_title):
+            title = stored_title
+        else:
+            title = card_title or stored_title
         if title and full_content:
-            already_titled = re.match(r'^\s*#\s+\S', full_content)
-            if not already_titled:
+            existing_h1 = re.match(r'^\s*#\s+(.+?)\s*$', full_content, re.MULTILINE)
+            first_h1 = existing_h1.group(1).strip() if existing_h1 else ''
+            if not existing_h1:
                 full_content = f'# {title}\n\n' + full_content.lstrip()
                 logger.info('[Paper:Report] Prepended title: %.120s', title)
+            elif _is_placeholder_title(first_h1) and not _is_placeholder_title(title):
+                # Model baked a bare `# arXiv:<id>` placeholder as its own H1
+                # (the up-front arXiv lookup failed). Swap in the real title.
+                full_content = re.sub(r'^\s*#\s+.+?\s*$', f'# {title}',
+                                      full_content, count=1, flags=re.MULTILINE)
+                logger.info('[Paper:Report] Replaced placeholder H1 with title: %.120s', title)
             else:
                 logger.info('[Paper:Report] Title prepend skipped — content already starts with H1')
         else:
@@ -341,6 +413,21 @@ def _run_report_task(task, messages, images):
             except Exception as e:
                 logger.warning('[Paper:Report] Failed to persist: %s', e)
 
+        # ── Self-heal the sidebar title ──
+        # If the library row is still stuck at a bare ``arXiv:<id>`` (the
+        # up-front arXiv lookup failed at fetch time), backfill the title the
+        # LLM extracted into the Paper Card. Only placeholder rows are touched
+        # — a user-renamed or correctly-resolved title is never clobbered. The
+        # authoritative title is carried in the ``done`` event so the frontend
+        # updates the sidebar live, with no manual reload.
+        resolved_title = ''
+        if card_title:
+            try:
+                resolved_title = _backfill_library_title(phash, card_title)
+            except Exception as e:
+                logger.warning('[Paper:Report] Title backfill failed for hash=%s: %s', phash, e)
+        task['resolved_title'] = resolved_title
+
         # If enrichment changed the text, emit an enriched event so pollers
         # replay the image-embedded version as the canonical body.
         if enriched and enriched != full_content:
@@ -349,7 +436,17 @@ def _run_report_task(task, messages, images):
         task['status'] = 'done'
         task['finished_at'] = time.time()
         _append_report_event(task, {'type': 'done', 'report': enriched or full_content,
-                                    'paperHash': phash, 'meta': report_meta})
+                                    'paperHash': phash, 'meta': report_meta,
+                                    'resolvedTitle': resolved_title})
+
+    except AbortedError:
+        # Raised by the dispatcher when an abort is detected between stream
+        # retries. Same clean-stop semantics as the in-loop abort check.
+        task['status'] = 'aborted'
+        task['finished_at'] = time.time()
+        logger.info('[Paper:Report] Task %s stopped by user (stream retry) — %d chars',
+                    task['task_id'], len(full_content))
+        _append_report_event(task, {'type': 'aborted', 'partial': full_content})
 
     except Exception as e:
         logger.error('[Paper:Report] Task %s failed after %.1fs: %s',

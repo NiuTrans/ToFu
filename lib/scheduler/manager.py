@@ -726,7 +726,19 @@ def start_scheduler_worker():
     daemon thread that polls for the ``timer_watchers`` table to be
     created (deferred since ``init_db()`` runs after route registration)
     and resumes any active timers.
+
+    Set ``TOFU_DISABLE_SCHEDULER=1`` to skip starting the worker entirely
+    — the test suite sets this so importing ``server`` (which many tests do)
+    does NOT spin up a real 30s-tick scheduler + timer-resume thread that
+    would run live LLM polls / web searches against the shared DB, stealing
+    CPU/IO and making timing-sensitive tests flaky.
     """
+    import os as _os
+    if _os.environ.get('TOFU_DISABLE_SCHEDULER', '').lower() in ('1', 'true', 'yes'):
+        logger.info('[Scheduler] Background worker disabled '
+                    '(TOFU_DISABLE_SCHEDULER set)')
+        return get_scheduler()
+
     mgr = get_scheduler()
     mgr.start()
     logger.info('[Scheduler] Background scheduler worker started')

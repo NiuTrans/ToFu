@@ -30,6 +30,8 @@ import sys
 import tempfile
 import unittest
 
+import pytest
+
 
 # ── Once-only global fixture ────────────────────────────────────────
 
@@ -157,6 +159,12 @@ def _install_chat_stub():
 
 
 class E2EHeadlessApiTest(unittest.TestCase):
+
+    # Auth contract assertions require the credential gate to be ACTIVE,
+    # which it only is in private/multi-user mode (open mode — the conftest
+    # default — lets unauth /api/v1/* through with a synthetic principal).
+    # The per-test conftest fixture forces private mode for this file.
+    pytestmark = pytest.mark.auth_mode('private')
 
     @classmethod
     def setUpClass(cls):

@@ -406,6 +406,12 @@ function renderMessage(msg, idx) {
   if (!isUser && msg._memoryPrefetch) {
     body += renderMemoryPrefetchHtml(msg._memoryPrefetch);
   }
+  if (!isUser && msg._preferencesApplied) {
+    body += renderPreferencesAppliedHtml(msg._preferencesApplied);
+  }
+  if (!isUser && msg._preferencesLearned) {
+    body += renderPreferenceLearnedHtml(msg._preferencesLearned);
+  }
   /* ★ Autopilot VU bubble, still streaming and not yet showing content —
    * render a live "composing…" pulse so the eagerly-created bubble isn't
    * blank while the simulated user warms up / investigates. */
@@ -415,13 +421,23 @@ function renderMessage(msg, idx) {
           + `${escapeHtml(typeof t === "function" ? t("autopilot.composing") : "Autopilot is composing the next reply…")}</div>`;
   }
   const rounds = getToolRoundsFromMsg(msg);
+  /* ★ Autopilot VU provenance: the VU's tool investigation + private
+   * reasoning are DISPLAY-ONLY — only the reply text reaches the agent
+   * (see conv_message_builder._build_user_message, which reads ONLY
+   * `content` for a user row). Collect both here and emit them inside one
+   * default-collapsed "Private · not sent" container below, so the human
+   * can tell at a glance which part is excluded from the agent's context
+   * vs. the reply that is actually sent. */
+  const _vuPrivate = !!msg._isVirtualUser;
+  let _vuPrivateHtml = '';
   if (rounds.length > 0) {
+    let _roundsHtml = '';
     /* ★ Autopilot virtual-user messages carry the VU sub-task's tool
      * investigation as `toolRounds`. Surface them under a labelled
      * header so the user can tell "Autopilot probed these things
      * before replying" from a normal assistant tool panel. */
     if (msg._isVirtualUser) {
-      body += `<div class="vu-investigation-header" title="Tools the autopilot used to investigate before composing this reply">`
+      _roundsHtml += `<div class="vu-investigation-header" title="Tools the autopilot used to investigate before composing this reply">`
             + `<span class="vu-investigation-icon"></span>`
             + `<span class="vu-investigation-label">Autopilot investigation · ${rounds.length} tool ${rounds.length === 1 ? 'call' : 'calls'}</span>`
             + `</div>`;
@@ -430,14 +446,34 @@ function renderMessage(msg, idx) {
        so historical messages still tell the user "this turn received
        async sub-agent updates before the model's reply".               */
     if (msg._inboxInjects && msg._inboxInjects.length) {
-      body += _buildSwarmInboxChipsHTML(msg._inboxInjects);
+      _roundsHtml += _buildSwarmInboxChipsHTML(msg._inboxInjects);
     }
-    body += renderToolRoundsHTML(rounds, false);
+    _roundsHtml += renderToolRoundsHTML(rounds, false);
+    if (_vuPrivate) _vuPrivateHtml += _roundsHtml; else body += _roundsHtml;
   }
   if (msg.thinking) {
     const thinkLen = msg.thinking.length;
     const thinkMeta = thinkLen >= 1024 ? ` (${Math.round(thinkLen / 1024)}k chars)` : ` (${thinkLen} chars)`;
-    body += `<div class="thinking-block" onclick="_toggleThinking(this,${idx})"><div class="thinking-header"><span class="thinking-label">Thinking Process${thinkMeta}</span><span class="thinking-toggle">▼</span></div><div class="thinking-content"><div class="thinking-text"></div></div></div>`;
+    const _thinkHtml = `<div class="thinking-block" onclick="_toggleThinking(this,${idx})"><div class="thinking-header"><span class="thinking-label">Thinking Process${thinkMeta}</span><span class="thinking-toggle">▼</span></div><div class="thinking-content"><div class="thinking-text"></div></div></div>`;
+    if (_vuPrivate) _vuPrivateHtml += _thinkHtml; else body += _thinkHtml;
+  }
+  /* ★ Flush the VU private zone — a single default-collapsed <details>
+   * container that makes the "not sent to the agent" boundary unmistakable
+   * (the reply below stands out). The inner thinking-block's lazy-load via
+   * _toggleThinking still works: the element exists in the DOM even while
+   * the <details> is closed. */
+  if (_vuPrivate && _vuPrivateHtml) {
+    const _privLabel = (typeof t === "function" && t("autopilot.privateNotSent") !== "autopilot.privateNotSent")
+      ? t("autopilot.privateNotSent")
+      : "Private · not sent to the agent";
+    body += `<details class="vu-private-zone">`
+          + `<summary class="vu-private-summary" title="${escapeHtml(_privLabel)}">`
+          + `<svg class="vu-private-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>`
+          + `<span class="vu-private-label">${escapeHtml(_privLabel)}</span>`
+          + `<span class="vu-private-toggle">▼</span>`
+          + `</summary>`
+          + `<div class="vu-private-body">${_vuPrivateHtml}</div>`
+          + `</details>`;
   }
   // ── Prior thinking (display-only) ──
   // Trailing reasoning that was emitted after the last completed tool batch
@@ -631,7 +667,22 @@ function renderMessage(msg, idx) {
         mdHtml = r.html;
         _inlinedBranches = r.inlinedSet;
       }
+      /* ★ Autopilot VU provenance boundary: the VU's tool investigation
+       * and private reasoning above/below are display-only — only THIS
+       * reply text is fed to the assistant as its next user message. Mark
+       * it so the human can tell at a glance which part becomes the
+       * agent's context vs. which part was private process. */
+      const _vuSent = msg._isVirtualUser && !msg._streamingVu && msg.content;
+      if (_vuSent) {
+        const _vuSentLabel = (typeof t === "function" && t("autopilot.sentToAgent") !== "autopilot.sentToAgent")
+          ? t("autopilot.sentToAgent")
+          : "Sent to the agent as the next message";
+        body += `<div class="vu-sent-zone"><div class="vu-handoff-header" title="${escapeHtml(_vuSentLabel)}">`
+              + `<svg class="vu-handoff-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>`
+              + `<span class="vu-handoff-label">${escapeHtml(_vuSentLabel)}</span></div>`;
+      }
       body += `<div class="md-content${isUser ? " user-content" : ""}">${mdHtml}</div>`;
+      if (_vuSent) body += `</div>`;
     } catch (e) {
   // ── Compaction markers — render inline chips for each archived snapshot ──
   // Each marker becomes a clickable chip that opens the Compaction Viewer

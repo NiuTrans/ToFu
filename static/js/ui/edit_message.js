@@ -414,6 +414,11 @@ async function saveEditAndResend(idx) {
     const resp = await Api.chat.regenerate({
       convId,
       truncateToIndex: idx,
+      // ★ Phase 3: stable-id truncate point (authoritative server-side; the
+      //   index is the fallback). Index-drift-proof if a writer reordered
+      //   messages between this read and the request. Additive — omitted when
+      //   the message somehow lacks an id.
+      ...(msg._msgId ? { truncateToMsgId: msg._msgId } : {}),
       editedContent: t,
       editedImages,
       editedPdfTexts,

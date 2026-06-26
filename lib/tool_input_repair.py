@@ -549,6 +549,123 @@ def schema_hint(tool_name: str) -> str:
     )
 
 
+# ══════════════════════════════════════════
+#  Hallucinated-tool classification (unified rejection)
+# ══════════════════════════════════════════
+#
+# After alias resolution (:func:`resolve_tool_name`) fails to map a name to a
+# real session tool, the call is a *hallucination*: the model invented a tool
+# that does not exist in this session (e.g. ``search_web`` when only
+# ``web_search`` is registered, or a tool from a different harness with no
+# alias). Historically these fell through to the executor's bare
+# ``Error: unknown tool "X"`` string returned as a normal tool result — the
+# frontend rendered it as an ordinary completed tool, with no signal that the
+# call was rejected and never executed. This is the single classifier so the
+# dispatcher can reject uniformly and the UI can style it distinctly.
+
+
+def _name_similarity(a: str, b: str) -> float:
+    """Cheap similarity in [0, 1] between two tool names (no deps).
+
+    Combines a substring-containment boost with difflib's ratio so that
+    ``search_web`` scores highly against ``web_search`` (shared tokens) and
+    ``read`` against ``read_files`` (prefix). Pure-stdlib, total, never raises.
+    """
+    a_l, b_l = a.lower(), b.lower()
+    if not a_l or not b_l:
+        return 0.0
+    from difflib import SequenceMatcher
+    ratio = SequenceMatcher(None, a_l, b_l).ratio()
+    # Token-overlap boost: split on non-alphanumerics, compare the sets.
+    a_tok = set(re.split(r'[^a-z0-9]+', a_l)) - {''}
+    b_tok = set(re.split(r'[^a-z0-9]+', b_l)) - {''}
+    if a_tok and b_tok:
+        overlap = len(a_tok & b_tok) / len(a_tok | b_tok)
+        ratio = max(ratio, 0.5 * ratio + 0.5 * overlap)
+    if a_l in b_l or b_l in a_l:
+        ratio = max(ratio, 0.85)
+    return ratio
+
+
+def suggest_tool_names(name: str, known: set[str], *, limit: int = 3,
+                       threshold: float = 0.45) -> list[str]:
+    """Return up to ``limit`` real tool names most similar to ``name``.
+
+    Used to make a hallucinated-tool rejection actionable ("did you mean
+    web_search?"). Only names scoring above ``threshold`` are returned, so a
+    name with no plausible match yields ``[]`` rather than noise.
+    """
+    if not name or not known:
+        return []
+    scored = sorted(
+        ((t, _name_similarity(name, t)) for t in known),
+        key=lambda kv: kv[1], reverse=True,
+    )
+    return [t for t, s in scored[:limit] if s >= threshold]
+
+
+def classify_tool_call(name: str, known: set[str]) -> dict[str, Any] | None:
+    """Classify a tool name against the live session tool set.
+
+    Call this AFTER :func:`resolve_tool_name` has already failed to alias the
+    name to a real tool. ``known`` MUST be the live set of tools shipped to
+    the model this turn (built-ins + MCP + swarm + memory + custom-env), so a
+    legitimate dynamically-registered tool is never flagged.
+
+    Returns:
+        ``None`` when ``name`` is a real tool (no rejection). Otherwise a
+        descriptor ``{kind:'hallucinated', attempted, suggestions}`` the
+        dispatcher stamps onto the tool round and the frontend renders as a
+        distinct "not a real tool" state.
+    """
+    if not name or not isinstance(name, str):
+        return {'kind': 'hallucinated', 'attempted': str(name), 'suggestions': []}
+    if name in known:
+        return None
+    return {
+        'kind': 'hallucinated',
+        'attempted': name,
+        'suggestions': suggest_tool_names(name, known),
+    }
+
+
+def build_rejection_message(descriptor: dict[str, Any]) -> str:
+    """Build the standardized model-facing rejection text for a fake tool call.
+
+    One source of truth for the message returned to the LLM (as the tool
+    result) so it can self-correct, instead of the ad-hoc per-site strings
+    that existed before. Mentions the closest real tools when known.
+    """
+    attempted = descriptor.get('attempted') or '?'
+    suggestions = descriptor.get('suggestions') or []
+    msg = (
+        f'Error: `{attempted}` is not a real tool and was NOT executed. '
+        f'It is not in the list of tools available to you this turn.'
+    )
+    if suggestions:
+        hint = ', '.join(f'`{s}`' for s in suggestions)
+        msg += f' Did you mean one of: {hint}? '
+    else:
+        msg += ' '
+    msg += 'Call only tools from the provided tool list, using their exact names.'
+    return msg
+
+
+def report_hallucinated(name: str, descriptor: dict[str, Any], *, model: str = '') -> None:
+    """Emit a ``tool_hallucinated`` audit event for a rejected fake tool call.
+
+    Lets the nightly optimizer cluster which non-existent tool names a given
+    model keeps inventing (e.g. a model that persistently calls ``search_web``)
+    so the alias table or system prompt can be tuned.
+    """
+    audit_log(
+        'tool_hallucinated',
+        tool=name,
+        model=model,
+        suggestions=descriptor.get('suggestions') or [],
+    )
+
+
 def report_invalid(tool_name: str, fn_args: Any, *, reason: str, model: str = '') -> None:
     """Emit ``tool_input_invalid`` audit when arguments couldn't be repaired.
 
@@ -565,4 +682,6 @@ def report_invalid(tool_name: str, fn_args: Any, *, reason: str, model: str = ''
     )
 
 
-__all__ = ['validate_then_repair', 'report_invalid', 'resolve_tool_name', 'schema_hint', 'RepairLog']
+__all__ = ['validate_then_repair', 'report_invalid', 'resolve_tool_name', 'schema_hint',
+           'classify_tool_call', 'suggest_tool_names', 'build_rejection_message',
+           'report_hallucinated', 'RepairLog']

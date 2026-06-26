@@ -204,6 +204,10 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
       if (data.taskId) assistantMsg._taskId = data.taskId;
       /* ★ memory prefetch: recover indicator state from poll response */
       if (data.memoryPrefetch) assistantMsg._memoryPrefetch = data.memoryPrefetch;
+      /* ★ preferences-applied: recover chip state from poll response */
+      if (data.preferencesApplied) assistantMsg._preferencesApplied = data.preferencesApplied;
+      /* ★ preferences-learned: recover "Noted: you prefer X" moment(s) */
+      if (data.preferencesLearned) assistantMsg._preferencesLearned = data.preferencesLearned;
       /* ★ git-shim: round commit sha for redo/diff references */
       if (data.gitSha) assistantMsg._gitSha = data.gitSha;
       /* ★ Persisted cost snapshot (server-side stamp). */

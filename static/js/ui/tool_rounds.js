@@ -231,6 +231,16 @@ const _webToolSvg = {
   merge_memories: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3v6a6 6 0 0 0 6 6 6 6 0 0 0 6-6V3"/><line x1="12" y1="15" x2="12" y2="21"/></svg>',
   search_memories: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>',
   schedule_task: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+  // Conversation-reference tools — message bubble (get) / list (search).
+  // Backend no longer prepends 💬/📋 to the label; these SVGs are the icon.
+  get_conversation: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22z"/></svg>',
+  list_conversations: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="13" y2="13"/></svg>',
+  // Async-swarm bookkeeping tools (spawn_agents gets the full panel instead).
+  await_agents: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+  get_agent_result: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>',
+  // MCP bridge tools (mcp__server__tool) — a plug glyph.
+  mcp: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M15 8V2"/><path d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z"/><path d="M9 8V2"/></svg>',
+  context_compact: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>',
   ask_human: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
   generic: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>',
 };
@@ -255,6 +265,8 @@ function _getToolSvg(round) {
   if (_isRoundImageGen(round)) return _imageGenMode(round) === "edit" ? _imageEditSvg : _imageGenSvg;
   if (_isRoundProject(round)) return _projToolSvg[icon] || _projToolSvg.file;
   if (_isRoundBrowser(round)) return _browserToolSvg[icon] || _browserToolSvg.tabs;
+  // MCP bridge tools are named ``mcp__server__tool`` — collapse to the plug icon.
+  if ((round.toolName || "").startsWith("mcp__")) return _webToolSvg.mcp;
   return _webToolSvg[icon] || _webToolSvg[round.toolName] || _webToolSvg.generic;
 }
 
@@ -382,6 +394,41 @@ function _renderToolRepairedBadge(round) {
   );
   const cls = stillFailed ? "ptool-badge-warn" : "ptool-badge-repaired";
   return `<span class="ptool-badge ${cls}" title="${tip}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/></svg> ${label}</span>`;
+}
+
+/**
+ * Render a rejected hallucinated tool call. The backend (lib/tasks_pkg/
+ * tool_dispatch.py) detected that `round.toolName` is not a real tool this
+ * turn and rejected it WITHOUT executing — stamping `status:'rejected'` and a
+ * `_rejected = {attempted, suggestions}` descriptor (mirrored onto the result
+ * meta). We render the attempted name struck-through with a distinct "not a
+ * real tool" badge and, when available, a "did you mean …" suggestion chip.
+ */
+function _renderRejectedToolLine(round, svg) {
+  const meta = (round.results || [])[0] || {};
+  const rej = round._rejected || meta.rejected || {};
+  const attempted = escapeHtml(rej.attempted || round.toolName || "?");
+  const sugg = Array.isArray(rej.suggestions) ? rej.suggestions.filter(Boolean) : [];
+  const _t = (typeof t === "function") ? t : (k, d) => d;
+  const badgeLabel = escapeHtml(_t("tool.hallucinated", "not a real tool"));
+  const tip = escapeHtml(_t(
+    "tool.hallucinatedTip",
+    "The model called a tool that doesn't exist this turn — it was rejected and never run."
+  ));
+  let suggHtml = "";
+  if (sugg.length) {
+    const chips = sugg.map((s) => `<code class="ptool-reject-sugg">${escapeHtml(s)}</code>`).join(" ");
+    const did = escapeHtml(_t("tool.didYouMean", "did you mean"));
+    suggHtml = `<span class="ptool-reject-hint">${did} ${chips}?</span>`;
+  }
+  /* SVG glyph (§3.4 — no emoji): a circle-slash "forbidden" mark. */
+  const banSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px"><circle cx="12" cy="12" r="9"/><line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/></svg>`;
+  return `<div class="ptool-line ptool-rejected" title="${tip}">
+       <span class="ptool-icon">${svg}</span>
+       <span class="ptool-text ptool-reject-name">${attempted}</span>
+       <span class="ptool-badge ptool-badge-reject">${banSvg} ${badgeLabel}</span>
+       ${suggHtml}
+     </div>`;
 }
 
 /**
@@ -622,6 +669,36 @@ function _renderMemoryBlock(round, svg, q, compactionLabelHtml, rootPill, badgeH
      </details>`;
 }
 
+/* ── MCP resource linkifier ───────────────────────────────────────────
+ * The backend attaches `round._mcpLinks` = {label → href} for any MCP
+ * tool call whose resource resolves to a URL (e.g. an Overleaf project).
+ * The label is the EXACT substring `_mcp_arg_suffix` rendered on the
+ * title line — a human-readable project name when cached, else the
+ * `6a1e7…a668` short-id. We wrap that substring in an <a> so users can
+ * jump straight to the project instead of staring at an unreadable id.
+ *
+ * `text` is ALREADY HTML-escaped; labels are escaped the same way before
+ * matching so a name with special chars still lines up. We only replace
+ * the first occurrence and skip if the label is empty or already inside
+ * an anchor (defensive). */
+function _linkifyMcpLabels(text, round) {
+  const links = round && round._mcpLinks;
+  if (!links || typeof links !== "object" || !text) return text;
+  let out = text;
+  for (const label of Object.keys(links)) {
+    const href = links[label];
+    if (!label || !href) continue;
+    // Only allow http(s) hrefs — never inject javascript:/data: URLs.
+    if (!/^https?:\/\//i.test(href)) continue;
+    const escLabel = escapeHtml(label);
+    const idx = out.indexOf(escLabel);
+    if (idx === -1) continue;
+    const anchor = `<a class="ptool-mcp-link" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(href)}">${escLabel}</a>`;
+    out = out.slice(0, idx) + anchor + out.slice(idx + escLabel.length);
+  }
+  return out;
+}
+
 function _renderUnifiedToolLine(round, isSearching) {
   const svg = _getToolSvg(round);
   const td = _getToolDisplay(round);
@@ -629,7 +706,7 @@ function _renderUnifiedToolLine(round, isSearching) {
    * displays render one item per line so users can see every candidate
    * without elision. escapeHtml first (HTML-safe), THEN substitute
    * \n → <br> so the browser actually breaks the line. */
-  const q = escapeHtml(round.query || "").replace(/\n/g, '<br>');
+  const q = _linkifyMcpLabels(escapeHtml(round.query || "").replace(/\n/g, '<br>'), round);
   const results = round.results || [];
   const meta = results[0] || {};
   const rootPill = _renderToolRootPill(round);
@@ -646,6 +723,15 @@ function _renderUnifiedToolLine(round, isSearching) {
   //   model was handed. Collapsible: expands to the raw payloads.
   if (round._inboxInject) {
     return _renderInboxInjectRow(round);
+  }
+
+  // ★ Hallucinated / rejected tool — the model invented a tool that does not
+  //   exist this turn (e.g. `search_web` when only `web_search` is real).
+  //   The backend classified + rejected it (status:'rejected' + _rejected),
+  //   so it NEVER executed. Render it distinctly so the user can tell a fake
+  //   tool call apart from a real one that errored.
+  if (round.status === "rejected" && (round._rejected || (meta && meta.rejected))) {
+    return _renderRejectedToolLine(round, svg);
   }
 
   // ★ Human Guidance — LLM is asking the user a question
@@ -886,19 +972,34 @@ function _renderUnifiedToolLine(round, isSearching) {
     const output = meta.output || "";
     const exitCode = meta.exitCode ?? "?";
     const timedOut = meta.timedOut || false;
-    const isOk = exitCode === "0" || exitCode === 0;
-    const statusCls = timedOut
-      ? "ptool-cmd-timeout"
-      : isOk
-        ? "ptool-cmd-ok"
-        : "ptool-cmd-err";
-    const statusLabel = timedOut
-      ? "timeout"
-      : isOk
-        ? "✓ done"
-        : `✗ exit ${exitCode}`;
+    // ★ "not run": the command was refused/blocked BEFORE it executed (read-only
+    //   root, dangerous pattern, no project, pre-hook block, abort, start error).
+    //   There is no real exit code — show the cause, never the cryptic "exit ?".
+    const notRun = meta.notRun === true || exitCode === "not-run";
+    const isOk = !notRun && (exitCode === "0" || exitCode === 0);
+    const statusCls = notRun
+      ? "ptool-cmd-notrun"
+      : timedOut
+        ? "ptool-cmd-timeout"
+        : isOk
+          ? "ptool-cmd-ok"
+          : "ptool-cmd-err";
+    const notRunBadge = meta.badge && meta.badge !== `exit ${exitCode}`
+      ? meta.badge : "not run";
+    const statusLabel = notRun
+      ? `⊘ ${escapeHtml(notRunBadge)}`
+      : timedOut
+        ? "timeout"
+        : isOk
+          ? "✓ done"
+          : `✗ exit ${exitCode}`;
+    // For a not-run command the reason IS the message — surface it inline
+    // (not hidden behind a collapse toggle) so the user sees why immediately.
+    const reason = notRun ? (meta.reason || output || "") : "";
     let outputHtml = "";
-    if (output) {
+    if (notRun && reason) {
+      outputHtml = `<div class="ptool-cmd-reason">${escapeHtml(reason)}</div>`;
+    } else if (output) {
       outputHtml = `<div class="ptool-cmd-output-wrap">
            <div class="ptool-cmd-toggle" onclick="event.stopPropagation();var w=this.parentElement;w.classList.toggle('expanded');this.textContent=w.classList.contains('expanded')?'▾ Collapse':'▸ Show output';">▸ Show output</div>
            <pre class="ptool-cmd-output"><code>${escapeHtml(output)}</code></pre>
@@ -2058,6 +2159,67 @@ function renderMemoryPrefetchHtml(mp) {
     (expandable ? `<span class="mp-chevron">▾</span>` : "") +
     (details ? `<div class="mp-details">${details}</div>` : "") +
     `</div>`;
+}
+
+function renderPreferencesAppliedHtml(pa) {
+  /* Quiet, collapsed-by-default "preferences applied" chip. Same visual
+     family as the memory-prefetch chip (mem-prefetch-chip) so the two read
+     as siblings. Shows that the assistant injected the user's bounded
+     preference profile this turn; expands to list which preferences were in
+     play. Backend payload: {chars, items:[...]}. See
+     lib/memory/user_profile.py + EventType.PREFERENCES_APPLIED. */
+  if (!pa) return "";
+  const items = Array.isArray(pa.items) ? pa.items : [];
+  const n = items.length;
+  const _t = (typeof t === "function") ? t : (k => k);
+  const headline = (n > 0)
+    ? _t("prefs.appliedN").replace("{n}", n)
+    : _t("prefs.applied");
+  let details = "";
+  if (n > 0) {
+    const lis = items.map(it =>
+      `<li>${escapeHtml(it)}</li>`).join("");
+    details = `<ul class="mp-mem-list pa-list">${lis}</ul>`;
+  }
+  const expandable = !!details;
+  return `<div class="mem-prefetch-chip pa-chip mp-done${expandable ? ' mp-expandable' : ''}"` +
+    `${expandable ? ' onclick="this.classList.toggle(\'mp-expanded\')"' : ''}>` +
+    `<span class="mp-icon">${Icon('sliders', 14)}</span>` +
+    `<span class="mp-text"><span class="mp-headline">${escapeHtml(headline)}</span>` +
+    (pa.chars ? `<span class="mp-sub">${_t("prefs.fromProfile")}</span>` : "") +
+    `</span>` +
+    (expandable ? `<span class="mp-chevron">▾</span>` : "") +
+    (details ? `<div class="mp-details">${details}</div>` : "") +
+    `</div>`;
+}
+
+function renderPreferenceLearnedHtml(learned) {
+  /* "Noted: you prefer X" moment(s) from the layer-3 consolidation pass.
+     learned: [{kind:'reinforced'|'pending', summary, pending, id}]. A pending
+     (new) preference shows Confirm / Dismiss; a reinforced one shows Undo-style
+     info only (it was auto-applied — low-risk tightening of an existing pref).
+     Backed by EventType.PREFERENCE_LEARNED + POST /api/v1/profile/pending. */
+  if (!Array.isArray(learned) || !learned.length) return "";
+  const _t = (typeof t === "function") ? t : (k => k);
+  const rows = learned.map(p => {
+    const sum = escapeHtml(p.summary || "");
+    if (p.pending) {
+      const pid = escapeHtml(p.id || "");
+      return `<div class="pl-row pl-pending" data-pref-id="${pid}">` +
+        `<span class="pl-lead">${Icon('lightbulb', 13)}</span>` +
+        `<span class="pl-text">${_t("prefs.learned")} <b>${sum}</b>` +
+        `<span class="pl-hint">${_t("prefs.pendingHint")}</span></span>` +
+        `<span class="pl-actions">` +
+        `<button class="pl-btn pl-confirm" onclick="window.resolvePreference&&resolvePreference(this,'${pid}',true)">${_t("prefs.confirm")}</button>` +
+        `<button class="pl-btn pl-dismiss" onclick="window.resolvePreference&&resolvePreference(this,'${pid}',false)">${_t("prefs.dismiss")}</button>` +
+        `</span></div>`;
+    }
+    return `<div class="pl-row pl-reinforced">` +
+      `<span class="pl-lead">${Icon('check', 13)}</span>` +
+      `<span class="pl-text">${_t("prefs.learnedReinforced")}: <b>${sum}</b></span>` +
+      `</div>`;
+  }).join("");
+  return `<div class="pref-learned-box">${rows}</div>`;
 }
 
 function renderToolRoundsHTML(rounds, isStreaming) {

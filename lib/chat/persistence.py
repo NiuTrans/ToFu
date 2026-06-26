@@ -177,6 +177,10 @@ def persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
                     'updated_at', 'settings', 'msg_count', 'search_text'], retry=True)
     from lib.conversations import update_conversation_fts
     update_conversation_fts(db, conv_id, search_text)
+    # Phase 5 dual-write (flag-gated, best-effort): mirror the JSONB array into
+    # conversation_messages rows. No-op unless TOFU_MESSAGES_ROWS; never raises.
+    from lib.database.messages_rows import dual_write_conv
+    dual_write_conv(db, conv_id, messages, now_ms=now_ms)
 
 
 __all__ = [

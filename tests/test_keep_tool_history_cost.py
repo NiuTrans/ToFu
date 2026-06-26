@@ -27,6 +27,8 @@ import os
 import sys
 import time
 
+import pytest
+
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -727,14 +729,15 @@ def run_cost_comparison():
 #  pytest entry point
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@pytest.mark.live_llm
 def test_cost_comparison():
     """Run the cost comparison as a pytest test.
 
-    This test makes REAL API calls and costs real money.
-    Skip in CI by setting SKIP_COST_TEST=1.
+    This test makes REAL API calls and costs real money. It's tagged
+    ``live_llm`` (manual-only — excluded from the default unit/api tiers),
+    and additionally honours ``SKIP_COST_TEST=1``.
     """
     if os.environ.get('SKIP_COST_TEST', ''):
-        import pytest
         pytest.skip('SKIP_COST_TEST is set')
 
     results = run_cost_comparison()

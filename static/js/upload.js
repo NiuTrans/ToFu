@@ -797,7 +797,16 @@ function previewToolContent(roundNum, toolCallId) {
     const round = rounds.find(r => r.roundNum === roundNum && (toolCallId ? r.toolCallId === toolCallId : true));
     if (round && round.toolContent) {
       const td = typeof _getToolDisplay === 'function' ? _getToolDisplay(round) : { icon: '📄', label: 'Tool' };
-      const title = `${td.icon} ${td.label}: ${(round.query || '').slice(0, 80)}`;
+      // ★ openTextPreview escapes the title as TEXT, so the icon must be a
+      //   plain glyph — never a raw <svg> string. _getToolDisplay returns an
+      //   SVG markup string for most tools (MCP, project, timer, …); only a
+      //   few use emoji. Including the SVG here leaked literal "<svg …>" into
+      //   the preview header. Drop the icon from the escaped title entirely.
+      //   For MCP tools round.query already reads "server/tool — resource",
+      //   so use it alone instead of the redundant title-cased label.
+      const q = (round.query || '').slice(0, 120);
+      const isMcp = (round.toolName || '').startsWith('mcp__');
+      const title = isMcp ? (q || td.label) : `${td.label}: ${q}`;
       const chars = round.toolContent.length;
       const meta = chars >= 1024 ? `${(chars / 1024).toFixed(1)}KB` : `${chars} chars`;
       openTextPreview(title, meta, round.toolContent);

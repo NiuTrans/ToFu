@@ -65,40 +65,43 @@ def _tab_label(tab_id):
         return f'"{short}"'
     return str(tab_id)
 
+# No emoji prefixes — the frontend renders a per-tool SVG icon (see
+# ``_browserToolSvg`` in ``static/js/ui/tool_rounds.js``). An emoji here
+# would duplicate that icon (CLAUDE.md §3.4).
 _DISPLAY_HANDLERS = {
-    'browser_list_tabs': lambda fn_args: '🌐 List browser tabs',
+    'browser_list_tabs': lambda fn_args: 'List browser tabs',
     'browser_read_tab': lambda fn_args: (
-        f'📖 Read {_tab_label(fn_args.get("tabId"))} [{fn_args.get("selector", "")[:30]}]'
+        f'Read {_tab_label(fn_args.get("tabId"))} [{fn_args.get("selector", "")[:30]}]'
         if fn_args.get('selector')
-        else f'📖 Read {_tab_label(fn_args.get("tabId"))}'
+        else f'Read {_tab_label(fn_args.get("tabId"))}'
     ),
-    'browser_execute_js': lambda fn_args: f'⚡ {_tab_label(fn_args.get("tabId"))}: {fn_args.get("code", "")[:40]}',
+    'browser_execute_js': lambda fn_args: f'{_tab_label(fn_args.get("tabId"))}: {fn_args.get("code", "")[:40]}',
     'browser_screenshot': lambda fn_args: (
-        f'📸 Screenshot (viewport) {_tab_label(fn_args.get("tabId"))}'
+        f'Screenshot (viewport) {_tab_label(fn_args.get("tabId"))}'
         if fn_args.get('fullPage') is False
-        else f'📸 Screenshot (full page) {_tab_label(fn_args.get("tabId"))}'
+        else f'Screenshot (full page) {_tab_label(fn_args.get("tabId"))}'
     ),
-    'browser_get_cookies': lambda fn_args: f'🍪 Get cookies [{(fn_args.get("domain") or fn_args.get("url", "all"))[:30]}]',
-    'browser_get_history': lambda fn_args: f'📜 Search history [{fn_args.get("query", "")[:30] or "all"}]',
-    'browser_create_tab': lambda fn_args: f'➕ New tab: {fn_args.get("url", "")[:40]}',
-    'browser_close_tab': lambda fn_args: f'✖ Close tab {_tab_label(fn_args.get("tabId", fn_args.get("tabIds", "?")))}',
-    'browser_navigate': lambda fn_args: f'🔗 Navigate {_tab_label(fn_args.get("tabId"))} → {fn_args.get("url", "")[:30]}',
-    'browser_get_interactive_elements': lambda fn_args: f'🔍 Get interactive elements {_tab_label(fn_args.get("tabId"))}',
-    'browser_click': lambda fn_args: f'{"🖱️ Right-click" if fn_args.get("rightClick") else "🖱️ Click"} {_tab_label(fn_args.get("tabId"))}: {fn_args.get("selector", "")[:30]}',
-    'browser_keyboard': lambda fn_args: f'⌨️ Keyboard {_tab_label(fn_args.get("tabId"))}: {fn_args.get("keys", "")[:30]}',
-    'browser_hover': lambda fn_args: f'🖱️ Hover {_tab_label(fn_args.get("tabId"))}: {fn_args.get("selector", "")[:30]}',
+    'browser_get_cookies': lambda fn_args: f'Get cookies [{(fn_args.get("domain") or fn_args.get("url", "all"))[:30]}]',
+    'browser_get_history': lambda fn_args: f'Search history [{fn_args.get("query", "")[:30] or "all"}]',
+    'browser_create_tab': lambda fn_args: f'New tab: {fn_args.get("url", "")[:40]}',
+    'browser_close_tab': lambda fn_args: f'Close tab {_tab_label(fn_args.get("tabId", fn_args.get("tabIds", "?")))}',
+    'browser_navigate': lambda fn_args: f'Navigate {_tab_label(fn_args.get("tabId"))} → {fn_args.get("url", "")[:30]}',
+    'browser_get_interactive_elements': lambda fn_args: f'Get interactive elements {_tab_label(fn_args.get("tabId"))}',
+    'browser_click': lambda fn_args: f'{"Right-click" if fn_args.get("rightClick") else "Click"} {_tab_label(fn_args.get("tabId"))}: {fn_args.get("selector", "")[:30]}',
+    'browser_keyboard': lambda fn_args: f'Keyboard {_tab_label(fn_args.get("tabId"))}: {fn_args.get("keys", "")[:30]}',
+    'browser_hover': lambda fn_args: f'Hover {_tab_label(fn_args.get("tabId"))}: {fn_args.get("selector", "")[:30]}',
     'browser_wait': lambda fn_args: (
-        f'⏳ Wait for "{fn_args.get("selector", "")[:30]}" ({_tab_label(fn_args.get("tabId"))})'
+        f'Wait for "{fn_args.get("selector", "")[:30]}" ({_tab_label(fn_args.get("tabId"))})'
         if fn_args.get('selector')
-        else (f'⏳ Wait {fn_args.get("time", "")}s ({_tab_label(fn_args.get("tabId"))})'
+        else (f'Wait {fn_args.get("time", "")}s ({_tab_label(fn_args.get("tabId"))})'
               if fn_args.get('time')
-              else f'⏳ Wait ({_tab_label(fn_args.get("tabId"))})')
+              else f'Wait ({_tab_label(fn_args.get("tabId"))})')
     ),
-    'browser_summarize_page': lambda fn_args: f'📄 Summarize page ({_tab_label(fn_args.get("tabId"))})',
-    'browser_get_app_state': lambda fn_args: f'🔧 Get app state ({_tab_label(fn_args.get("tabId"))})',
-    'browser_right_click_menu': lambda fn_args: f'🖱️ Right-click menu ({_tab_label(fn_args.get("tabId"))}): {fn_args.get("menu_item_text", "")[:30]}',
-    'browser_hover_and_click': lambda fn_args: f'🖱️ Hover & click ({_tab_label(fn_args.get("tabId"))})',
-    'browser_fill_form': lambda fn_args: f'📝 Fill form ({_tab_label(fn_args.get("tabId"))}), {len(fn_args.get("fields", []))} fields)',
+    'browser_summarize_page': lambda fn_args: f'Summarize page ({_tab_label(fn_args.get("tabId"))})',
+    'browser_get_app_state': lambda fn_args: f'Get app state ({_tab_label(fn_args.get("tabId"))})',
+    'browser_right_click_menu': lambda fn_args: f'Right-click menu ({_tab_label(fn_args.get("tabId"))}): {fn_args.get("menu_item_text", "")[:30]}',
+    'browser_hover_and_click': lambda fn_args: f'Hover & click ({_tab_label(fn_args.get("tabId"))})',
+    'browser_fill_form': lambda fn_args: f'Fill form ({_tab_label(fn_args.get("tabId"))}), {len(fn_args.get("fields", []))} fields)',
 }
 
 

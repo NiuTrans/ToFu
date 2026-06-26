@@ -15,6 +15,7 @@ Architecture (single-endpoint, proxy-safe):
 v4: single POST endpoint eliminates separate result POST that VSCode proxy drops.
 """
 
+import asyncio
 import threading
 import time
 import uuid
@@ -25,8 +26,8 @@ logger = get_logger(__name__)
 
 __all__ = [
     'mark_poll', 'get_connected_clients', 'send_browser_command',
-    'get_pending_commands', 'wait_for_commands', 'resolve_command',
-    'resolve_batch', 'is_extension_connected',
+    'get_pending_commands', 'wait_for_commands', 'wait_for_commands_async',
+    'resolve_command', 'resolve_batch', 'is_extension_connected',
     '_set_active_client', '_get_active_client',
     '_last_poll_time', '_commands', '_commands_lock',
 ]
@@ -35,9 +36,65 @@ __all__ = [
 #  Command Queue — Per-Client Routing
 # ══════════════════════════════════════════
 
-_commands = {}          # cmd_id → {id, type, params, event, result, error, created_at, picked_up, target_client}
+_commands = {}          # cmd_id → {id, type, params, event, result, error, created_at, picked_up, target_client, timeout, cancelled}
 _commands_lock = threading.Lock()
-_notify = threading.Event()   # Signaled when a new command is added
+_notify = threading.Event()   # Signaled when a new command is added (SYNC waiters)
+
+# ── Async-waiter registry (for async def poll routes) ──────────────────
+# An async poll handler runs ON the event loop, so it cannot block on the
+# threading.Event without pinning a worker thread (the whole point of the
+# async route). Instead each async waiter registers an asyncio.Event here;
+# the SYNC enqueue path (send_browser_command, on a tool thread) wakes them
+# via loop.call_soon_threadsafe — the only thread-safe way to touch an
+# asyncio.Event from outside its loop. Each waiter is
+#   {'loop':, 'event':, 'client_id':}
+# and is responsible for removing ITSELF in a finally block (covers the
+# timeout, success, AND CancelledError/disconnect paths) so nothing leaks.
+_async_waiters = []           # list[dict]
+_async_waiters_lock = threading.Lock()
+
+
+def _wake_async_waiters(client_id=None):
+    """Wake async poll waiters after a command was enqueued (called sync).
+
+    Wakes a waiter when the new command could be FOR it: unrouted commands
+    (client_id is None) wake everyone; a client-targeted command wakes only
+    the matching waiter and the anonymous (client_id-less) waiters. The
+    waiter re-checks get_pending_commands after waking, so an over-broad
+    wake is merely a harmless spurious loop, never a mis-delivery.
+    """
+    with _async_waiters_lock:
+        waiters = list(_async_waiters)
+    for w in waiters:
+        wcid = w.get('client_id')
+        if client_id and wcid and wcid != client_id:
+            continue
+        loop, event = w.get('loop'), w.get('event')
+        if loop is None or event is None:
+            continue
+        try:
+            loop.call_soon_threadsafe(event.set)
+        except RuntimeError as e:
+            # Loop already closed (handler torn down between snapshot and
+            # wake). The waiter's finally has/will deregister it; ignore.
+            logger.debug('[Browser] async waiter wake skipped (loop closed): %s', e)
+
+# Grace period (seconds) a command lingers in the queue PAST its caller's
+# timeout before _cleanup_stale forcibly evicts it. The caller has already
+# given up by then; the grace only lets a near-miss result resolve without a
+# KeyError. Delivery itself is cut off at exactly the caller's timeout (see
+# get_pending_commands) so a command never executes after the model moved on.
+_STALE_GRACE = 15
+
+# Long-poll wait window (seconds) the async poll route blocks for before
+# returning empty so the extension re-polls. Env-overridable (e.g. tests set a
+# small value); MUST stay < the extension's FETCH_TIMEOUT (12s) so the server
+# replies before the client aborts.
+import os as _os
+try:
+    POLL_WAIT_TIMEOUT = float(_os.environ.get('TOFU_BROWSER_POLL_WAIT', '8'))
+except (ValueError, TypeError):
+    POLL_WAIT_TIMEOUT = 8.0
 
 # Per-client tracking: client_id → {last_poll, first_seen, name}
 _clients = {}           # client_id → metadata dict
@@ -123,13 +180,21 @@ def send_browser_command(cmd_type, params=None, timeout=30, client_id=None):
         'created_at': time.time(),
         'picked_up': False,
         'target_client': client_id,   # None = any client can pick it up
+        'timeout': timeout,           # caller's wait budget; delivery cutoff
+        'cancelled': False,           # set when the caller gives up (see below)
     }
     with _commands_lock:
         _commands[cmd_id] = cmd
     _notify.set()
+    _wake_async_waiters(client_id)
 
     if not event.wait(timeout=timeout):
+        # Caller gave up: mark cancelled (so an in-flight get_pending_commands
+        # that raced to pick it up won't hand it to the extension) and remove it.
         with _commands_lock:
+            stale = _commands.get(cmd_id)
+            if stale is not None:
+                stale['cancelled'] = True
             timed_out_cmd = _commands.pop(cmd_id, None)
         picked = timed_out_cmd.get('picked_up', False) if timed_out_cmd else False
         url_hint = ''
@@ -171,9 +236,13 @@ def get_pending_commands(client_id=None):
     with _commands_lock:
         pending = []
         for cmd_id, cmd in list(_commands.items()):
-            if cmd.get('picked_up'):
+            if cmd.get('picked_up') or cmd.get('cancelled'):
                 continue
-            if now - cmd['created_at'] > 60:
+            # Never deliver a command the caller has already given up on: the
+            # delivery cutoff is the caller's OWN timeout, not a magic 60s. A
+            # command picked up after this would fire a stray click/navigate
+            # 30-60s after the model moved on, with its result silently dropped.
+            if now - cmd['created_at'] > cmd.get('timeout', 30):
                 continue
             # Per-client routing: only deliver commands targeted at this client
             target = cmd.get('target_client')
@@ -205,6 +274,63 @@ def wait_for_commands(timeout=8, client_id=None):
         if remaining > 0:
             _notify.wait(timeout=min(remaining, 1.0))
     return []
+
+
+async def wait_for_commands_async(timeout=None, client_id=None):
+    """Async-native variant of wait_for_commands for ``async def`` poll routes.
+
+    Awaits on an asyncio.Event instead of blocking a thread on the
+    threading.Event, so the Hypercorn worker thread is RELEASED for the
+    entire (up-to-``timeout``) wait. Commands enqueued from sync tool threads
+    wake this via ``_wake_async_waiters`` → ``loop.call_soon_threadsafe``.
+
+    Preserves the exact semantics of the sync path: per-client routing and
+    the §3 TTL delivery cutoff both live in ``get_pending_commands``, which
+    this calls unchanged. Returns a list of command dicts (possibly empty).
+    """
+    if timeout is None:
+        timeout = POLL_WAIT_TIMEOUT
+    mark_poll(client_id)
+    _cleanup_stale()
+
+    # Fast path: something is already queued for us.
+    pending = get_pending_commands(client_id=client_id)
+    if pending:
+        return pending
+
+    loop = asyncio.get_running_loop()
+    event = asyncio.Event()
+    waiter = {'loop': loop, 'event': event, 'client_id': client_id}
+    with _async_waiters_lock:
+        _async_waiters.append(waiter)
+    try:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            event.clear()
+            pending = get_pending_commands(client_id=client_id)
+            if pending:
+                return pending
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            # Cap each await slice so a missed wake (e.g. command enqueued in
+            # the tiny window between get_pending_commands and event.clear())
+            # still gets re-checked promptly, mirroring the sync 1.0s cap.
+            try:
+                await asyncio.wait_for(event.wait(), timeout=min(remaining, 1.0))
+            except asyncio.TimeoutError:
+                pass  # slice elapsed — loop re-checks the queue
+        # Final check after the loop in case a command landed at the deadline.
+        return get_pending_commands(client_id=client_id)
+    finally:
+        # ALWAYS deregister — covers timeout, success, and CancelledError
+        # (client disconnected mid-wait). Without this the registry leaks a
+        # dead loop/event on every disconnect.
+        with _async_waiters_lock:
+            try:
+                _async_waiters.remove(waiter)
+            except ValueError:
+                pass
 
 
 def resolve_command(cmd_id, result=None, error=None):
@@ -258,7 +384,8 @@ def _cleanup_stale():
     """Remove expired commands and stale clients."""
     now = time.time()
     with _commands_lock:
-        stale = [cid for cid, cmd in _commands.items() if now - cmd['created_at'] > 90]
+        stale = [cid for cid, cmd in _commands.items()
+                 if now - cmd['created_at'] > cmd.get('timeout', 30) + _STALE_GRACE]
         for cid in stale:
             cmd = _commands.pop(cid, None)
             if cmd and cmd.get('event') and not cmd['event'].is_set():

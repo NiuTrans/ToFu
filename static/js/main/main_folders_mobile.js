@@ -470,6 +470,8 @@ function updateMobileSheet() {
     mobileBrowser:     "browserToggle",
     mobileImageGen:    "imageGenToggle",
     mobileHumanGuidance: "humanGuidanceToggle",
+    mobileDesktop:     "desktopToggle",
+    mobileScheduler:   "schedulerToggle",
     mobileSwarm:       "swarmToggle",
     mobileEndpoint:    "endpointToggle",
     mobileAutopilot:   "autopilotToggle"

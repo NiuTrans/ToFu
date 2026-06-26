@@ -133,12 +133,25 @@ class ChatRouteTest(unittest.TestCase):
         _new_loop_run(go())
 
     def test_rejected_without_auth(self):
-        async def go():
-            r = await self.app.test_client().post(
-                '/api/v1/chat/completions',
-                json={'messages': [{'role': 'user', 'content': 'Hi'}]})
-            self.assertEqual(r.status_code, 401)
-        _new_loop_run(go())
+        # Credential gate only fires in private/multi-user mode; open mode
+        # (default) lets unauth requests through with a synthetic principal.
+        from lib.auth_mode import reset_for_tests
+        prev = os.environ.get('TOFU_AUTH_MODE')
+        os.environ['TOFU_AUTH_MODE'] = 'private'
+        reset_for_tests()
+        try:
+            async def go():
+                r = await self.app.test_client().post(
+                    '/api/v1/chat/completions',
+                    json={'messages': [{'role': 'user', 'content': 'Hi'}]})
+                self.assertEqual(r.status_code, 401)
+            _new_loop_run(go())
+        finally:
+            if prev is None:
+                os.environ.pop('TOFU_AUTH_MODE', None)
+            else:
+                os.environ['TOFU_AUTH_MODE'] = prev
+            reset_for_tests()
 
     def test_empty_messages_rejected(self):
         async def go():

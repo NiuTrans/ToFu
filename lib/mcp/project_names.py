@@ -47,6 +47,8 @@ __all__ = [
     'set_project_name',
     'get_doc_title',
     'set_doc_title',
+    'get_project_url',
+    'get_doc_url',
     'ingest_tool_result',
     'clear_cache',
 ]
@@ -54,7 +56,22 @@ __all__ = [
 # ── Cache storage ────────────────────────────────────────────────────
 _cache: dict[str, str] = {}                # overleaf project_id → name
 _doc_cache: dict[str, str] = {}            # xuecheng contentId → title
+_proj_url_cache: dict[str, str] = {}       # overleaf project_id → full URL
+_doc_url_cache: dict[str, str] = {}        # xuecheng contentId → full URL
 _lock = threading.Lock()
+
+# Overleaf base URL used to synthesize a project link when only the
+# project_id is known. Defaults to the public Overleaf SaaS host (the same
+# default the overleaf-mcp server itself uses); learned/overridden at runtime
+# from any tool result that embeds a ``<scheme>://<host>/project/<id>`` URL,
+# so self-hosted Overleaf instances link correctly too.
+_DEFAULT_OVERLEAF_BASE = 'https://www.overleaf.com'
+_overleaf_base: str = ''
+
+# Matches a full Overleaf project URL so we can learn the deployment's base.
+_OVERLEAF_URL_RE = re.compile(r'(https?://[^\s/]+)/project/([0-9a-f]{24})')
+# Matches a full Xuecheng doc URL so we can record the deep link per doc.
+_KM_FULL_URL_RE = re.compile(r'(https?://[^\s/]+/(?:collabpage|page)/(\d{6,15}))')
 
 # 24-char lowercase hex MongoDB ObjectID
 _PID_RE = re.compile(r'\b([0-9a-f]{24})\b')
@@ -123,11 +140,50 @@ def set_doc_title(content_id, title: str) -> None:
         logger.debug('[XuechengTitles] cached %s → %.40s', cid, nm)
 
 
+def get_project_url(project_id: str) -> str:
+    """Return a clickable URL for an Overleaf ``project_id``.
+
+    Prefers a URL harvested verbatim from a tool result (so self-hosted
+    deployments and exact paths are honored); falls back to synthesizing
+    ``<base>/project/<id>`` from the learned-or-default Overleaf base URL.
+    Returns '' only when ``project_id`` is not a 24-hex ObjectID.
+    """
+    pid = (project_id or '').strip().lower()
+    if not _PID_RE.fullmatch(pid):
+        return ''
+    with _lock:
+        cached = _proj_url_cache.get(pid)
+        base = _overleaf_base or _DEFAULT_OVERLEAF_BASE
+    if cached:
+        return cached
+    return f"{base.rstrip('/')}/project/{pid}"
+
+
+def get_doc_url(content_id) -> str:
+    """Return a clickable Xuecheng URL for ``content_id``, or '' if unknown.
+
+    Unlike Overleaf there is no single canonical base we can assume for a
+    self-hosted Xuecheng, so a doc URL is returned ONLY when one was
+    harvested from a prior tool result (read_doc / search / create_document).
+    """
+    if content_id is None:
+        return ''
+    cid = str(content_id).strip()
+    if not cid:
+        return ''
+    with _lock:
+        return _doc_url_cache.get(cid, '')
+
+
 def clear_cache() -> None:
-    """Empty both caches — intended for tests."""
+    """Empty all caches — intended for tests."""
+    global _overleaf_base
     with _lock:
         _cache.clear()
         _doc_cache.clear()
+        _proj_url_cache.clear()
+        _doc_url_cache.clear()
+        _overleaf_base = ''
 
 
 # ── Ingestion from tool results ──────────────────────────────────────
@@ -273,6 +329,28 @@ def ingest_tool_result(fn_name: str, fn_args: dict | None, tool_content) -> int:
                 set_doc_title(cid, title)
                 if before != title and get_doc_title(cid) == title:
                     learned += 1
+
+    # 5) Harvest full URLs embedded in the result text so the tool-call line
+    #    can become a clickable link. Overleaf write/create tools and the
+    #    create_document/read_doc responses embed a full ``…/project/<id>`` or
+    #    ``…/collabpage/<id>`` URL — record it per id AND learn the deployment
+    #    base (lets self-hosted Overleaf instances link correctly).
+    if isinstance(tool_content, str) and tool_content:
+        global _overleaf_base
+        for m in _OVERLEAF_URL_RE.finditer(tool_content):
+            base, pid = m.group(1), m.group(2).lower()
+            with _lock:
+                if not _overleaf_base:
+                    _overleaf_base = base
+                if len(_proj_url_cache) >= _MAX_ENTRIES and pid not in _proj_url_cache:
+                    _proj_url_cache.pop(next(iter(_proj_url_cache)), None)
+                _proj_url_cache[pid] = m.group(0)
+        for m in _KM_FULL_URL_RE.finditer(tool_content):
+            full, cid = m.group(1), m.group(2)
+            with _lock:
+                if len(_doc_url_cache) >= _MAX_ENTRIES and cid not in _doc_url_cache:
+                    _doc_url_cache.pop(next(iter(_doc_url_cache)), None)
+                _doc_url_cache[cid] = full
 
     if learned:
         logger.debug('[McpNames] %s learned %d names', fn_name, learned)

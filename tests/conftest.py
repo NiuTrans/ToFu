@@ -26,12 +26,16 @@ Design notes for the API client family:
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import tempfile
 
 import pytest
 
 import tofu_search.config as _config
+
+_conftest_logger = logging.getLogger('tests.conftest')
 
 
 # ─── Module-load: shim werkzeug.__version__ if missing ────────────────
@@ -80,6 +84,14 @@ def _install_shim_for_collection():
     _os.environ.setdefault('TOFU_DB_BACKEND', 'sqlite')
     _os.environ.setdefault('TRADING_ENABLED', '0')
     _os.environ.setdefault('PPTX_TRANSLATE_ENABLED', '0')
+    # Shrink the bridge long-poll window so poll-route tests don't each block
+    # the full production 8s (see lib/browser/queue.POLL_WAIT_TIMEOUT).
+    _os.environ.setdefault('TOFU_BROWSER_POLL_WAIT', '0.2')
+    _os.environ.setdefault('TOFU_DESKTOP_POLL_WAIT', '0.2')
+    # Never start the real background scheduler / timer-resume threads in the
+    # test process — they run live LLM polls + web searches against the
+    # shared DB, stealing CPU/IO and making timing-sensitive tests flaky.
+    _os.environ.setdefault('TOFU_DISABLE_SCHEDULER', '1')
     try:
         import server  # noqa: F401 — side-effect: installs Flask→Quart shim
     except Exception as _e:  # never block collection on the shim probe
@@ -88,6 +100,53 @@ def _install_shim_for_collection():
 
 
 _install_shim_for_collection()
+
+
+# ─── Module-load: make Quart's app_context() usable as a SYNC context ──
+#
+# Under the Flask→Quart shim ``app.app_context()`` returns a Quart
+# ``AppContext`` that only implements ``__aenter__``/``__aexit__`` (async).
+# A large family of sync-style tests (the ``tests/test_artifacts_*`` suite)
+# wrap pure DB calls in ``with flask_app.app_context():`` — legacy Flask
+# style. Under Quart that raises ``TypeError: 'AppContext' object does not
+# support the context manager protocol`` and previously failed 50+ tests.
+#
+# The code those tests exercise (``lib/artifacts/*``) reads NO app/request
+# globals, so a sync app context is semantically a no-op there. We wrap
+# ``Quart.app_context`` in a dual-mode object:
+#   * sync  ``with``  → null context (yields the app; pushes nothing)
+#   * async ``async with`` → delegates to the genuine AppContext, so the
+#     route/E2E tests that legitimately ``async with app.app_context()``
+#     (test_branch_routes, test_sdk_parity_e2e) keep their real context.
+def _install_sync_app_context_shim():
+    # Add sync ``__enter__``/``__exit__`` DIRECTLY to Quart's AppContext class
+    # rather than wrapping it — Quart's own request dispatch calls
+    # ``app.app_context().push()`` on the real object, so a wrapper that hides
+    # ``push``/``pop`` breaks live route handling. The async protocol
+    # (``__aenter__``/``__aexit__``, used by route/E2E tests and Quart
+    # internals) is left untouched; we only ADD the sync protocol, which is a
+    # null context (the artifacts/DB code under test reads no app globals).
+    try:
+        from quart.ctx import AppContext
+    except Exception as _e:  # pragma: no cover — quart always present in tests
+        import sys as _sys
+        _sys.stderr.write(f'[conftest] app_context shim skipped: {_e}\n')
+        return
+    if getattr(AppContext, '_tofu_sync_ctx', False):
+        return  # idempotent
+
+    def __enter__(self):
+        return self.app
+
+    def __exit__(self, *exc):
+        return False
+
+    AppContext.__enter__ = __enter__
+    AppContext.__exit__ = __exit__
+    AppContext._tofu_sync_ctx = True
+
+
+_install_sync_app_context_shim()
 
 
 # ─── tofu_search global-config isolation (pre-existing) ───────────────
@@ -119,6 +178,9 @@ def _configure_test_env():
     os.environ.setdefault("TOFU_DB_PATH", db_path)
     os.environ.setdefault("TRADING_ENABLED", "0")
     os.environ.setdefault("PPTX_TRANSLATE_ENABLED", "0")
+    os.environ.setdefault("TOFU_BROWSER_POLL_WAIT", "0.2")
+    os.environ.setdefault("TOFU_DESKTOP_POLL_WAIT", "0.2")
+    os.environ.setdefault("TOFU_DISABLE_SCHEDULER", "1")
     # Avoid accidental real LLM calls in CI.
     os.environ.setdefault("LLM_API_KEY", "test-key-placeholder")
     os.environ.setdefault("LLM_API_KEYS", "test-key-placeholder")
@@ -153,7 +215,7 @@ def flask_app(_configure_test_env):
 
 # ─── Per-test auth-mode override via marker ───────────────────────────
 def pytest_configure(config):
-    """Register the ``auth_mode`` marker so ``--strict-markers`` is happy."""
+    """Register custom markers so ``--strict-markers`` is happy."""
     config.addinivalue_line(
         'markers',
         'auth_mode(mode): override TOFU_AUTH_MODE for this test '
@@ -161,21 +223,68 @@ def pytest_configure(config):
     )
 
 
+# ─── Tier-marker safety net ───────────────────────────────────────────
+#
+# The suite selects tiers by marker: ``make test-unit`` runs ``-m unit``,
+# ``make test-api`` runs ``-m api``, and ``make ci`` runs unit+api. A test
+# with NO tier marker (unit / api / visual / slow / live_llm) is therefore
+# collected by ``make test-all`` but SILENTLY SKIPPED by every standard CI
+# target — so a broken unmarked test can rot undetected. Historically ~58%
+# of the suite was unmarked.
+#
+# This hook closes that gap: any test missing a tier marker is auto-tagged
+# ``unit`` so it lands in the default CI tiers, and the set of offending
+# FILES is reported once as a warning (so the omission stays visible and
+# authors are nudged to add the right marker — api/visual/slow where the
+# default ``unit`` is wrong). New unmarked tests can never again vanish
+# from CI.
+_TIER_MARKERS = frozenset({'unit', 'api', 'visual', 'slow', 'live_llm'})
+
+
+def pytest_collection_modifyitems(config, items):
+    auto_marked_files = set()
+    for item in items:
+        own = {m.name for m in item.iter_markers()}
+        if own & _TIER_MARKERS:
+            continue
+        item.add_marker(pytest.mark.unit)
+        if item.nodeid:
+            auto_marked_files.add(item.nodeid.split('::', 1)[0])
+    if auto_marked_files:
+        config.issue_config_time_warning(
+            UserWarning(
+                f'{len(auto_marked_files)} test file(s) had tests without a '
+                f'tier marker (unit/api/visual/slow/live_llm); auto-tagged '
+                f'them "unit" so they run in make test-unit / ci. Add an '
+                f'explicit marker to silence this: '
+                f'{", ".join(sorted(auto_marked_files))}'),
+            stacklevel=1,
+        )
+
+
+# Session baseline for TOFU_AUTH_MODE, captured ONCE after _configure_test_env
+# ran its setdefault('open'). Every test is forced back to THIS value on
+# teardown — not to a live snapshot — so a unittest class whose setUpClass
+# mutates the env to 'private' (those hooks run OUTSIDE the per-test fixture
+# window, so a snapshot would capture the already-polluted value) can never
+# leak 'private' into a later test that assumes the open default.
+_AUTH_MODE_BASELINE = os.environ.get('TOFU_AUTH_MODE', 'open')
+
+
 @pytest.fixture(autouse=True)
 def _auth_mode_override(request):
-    """Snapshot/restore ``TOFU_AUTH_MODE`` around EVERY test, and apply an
-    optional ``@pytest.mark.auth_mode("...")`` override.
+    """Force every test to START from + END at the session baseline
+    ``TOFU_AUTH_MODE``, and apply an optional ``@pytest.mark.auth_mode("...")``
+    override for the test's duration.
 
-    Two jobs:
-      1. If the test is marked, set the requested mode for its duration.
-      2. Regardless of marking, snapshot the env var on entry and restore it
-         on exit. This makes the suite leak-PROOF: a test whose own teardown
-         forgets to reset the mode (or hardcodes the wrong one) can no longer
-         poison every downstream test in the session. The auth_mode cache is
-         cleared on both ends so the resolver re-reads the restored value.
+    This makes auth-mode isolation leak-PROOF against the self-contained
+    ``unittest.TestCase`` files that set the env in ``setUpClass`` (whose
+    timing interleaves badly with per-test fixtures): regardless of what a
+    prior class left in the env, this test is reset to the baseline on entry,
+    the marker (if any) applies on top, and the baseline is re-asserted on
+    exit. The auth_mode cache is cleared on every transition so the resolver
+    re-reads the env.
     """
-    snapshot = os.environ.get('TOFU_AUTH_MODE')
-
     def _reset():
         try:
             from lib.auth_mode import reset_for_tests
@@ -183,6 +292,19 @@ def _auth_mode_override(request):
         except Exception:
             pass
 
+    def _set_baseline():
+        if _AUTH_MODE_BASELINE is None:
+            os.environ.pop('TOFU_AUTH_MODE', None)
+        else:
+            os.environ['TOFU_AUTH_MODE'] = _AUTH_MODE_BASELINE
+
+    # A test-method-level ``auth_mode`` marker takes effect for this test.
+    # We do NOT force the baseline on ENTRY: a ``unittest`` class may have
+    # set its own mode in ``setUpClass`` (which runs before this fixture),
+    # and that intent must stand for the class's tests. We ONLY restore the
+    # baseline on EXIT — that's what makes the suite leak-proof, because a
+    # class that mutates the env without restoring can no longer poison the
+    # next test.
     marker = request.node.get_closest_marker('auth_mode')
     if marker is not None:
         os.environ['TOFU_AUTH_MODE'] = marker.args[0] if marker.args else 'open'
@@ -190,10 +312,7 @@ def _auth_mode_override(request):
     try:
         yield
     finally:
-        if snapshot is None:
-            os.environ.pop('TOFU_AUTH_MODE', None)
-        else:
-            os.environ['TOFU_AUTH_MODE'] = snapshot
+        _set_baseline()
         _reset()
 
 
@@ -234,14 +353,21 @@ class _SyncResponse:
             return raw.decode('utf-8', 'replace')
         return raw
 
-    def get_json(self):
-        return _run_coro(self._resp.get_json())
+    def get_json(self, silent=False):
+        # Quart's Response.get_json takes no 'silent' kwarg (Flask's did);
+        # accept + swallow it so legacy sync-style tests keep working.
+        try:
+            return _run_coro(self._resp.get_json())
+        except Exception:
+            if silent:
+                return None
+            raise
 
 
 class _SyncClient:
     """Sync facade over QuartClient for legacy ``flask_client`` tests."""
 
-    _METHODS = ('get', 'post', 'put', 'patch', 'delete', 'head', 'options')
+    _METHODS = ('get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'open')
 
     def __init__(self, qclient):
         self._c = qclient

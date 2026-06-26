@@ -273,12 +273,24 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     # root. Cookie-auth UI and the local CLI are unaffected (task_is_remote
     # is False for them). See lib/project_mod/abs_path_guard.py.
     _abs_token = set_restricted(task_is_remote(task))
+    # ★ Workspace-root resolution conv-id. Roots are REGISTERED under
+    #   ``convId or id`` (orchestrator.ensure_project_state) and read back the
+    #   same way by the streaming executor. The bare ``task['convId']`` used
+    #   here historically was the odd one out: a sub-task with convId=''
+    #   (e.g. the autopilot virtual-user) registers its roots under its TASK
+    #   id but then resolved run_command's read-only / namespaced-path checks
+    #   against convId='' → the globally-shared (concurrency-clobbered)
+    #   _roots registry, which could be marked read-only by an unrelated
+    #   task. Result: the VU's run_command was refused as "READ-ONLY
+    #   workspace root" while its read_files/grep (routed via the streaming
+    #   executor's convId-or-id) worked. Use the same key everywhere.
+    _root_conv_id = task.get('convId') or task.get('id') or ''
     try:
         # read_files is globally available — when no project is attached,
         # absolute paths still work (routed inside tool_read_files via
         # lib.file_reader); project-relative paths error out helpfully.
         if fn_name in ('read_files', 'inspect_image') and not project_path:
-            tool_content = execute_tool(fn_name, fn_args, '.', conv_id=task['convId'], task_id=task['id'])
+            tool_content = execute_tool(fn_name, fn_args, '.', conv_id=_root_conv_id, task_id=task['id'])
         else:
             _progress_cb = None
             _extra_kw = {}
@@ -293,7 +305,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 }
             try:
                 tool_content = (execute_tool(fn_name, fn_args, project_path,
-                                             conv_id=task['convId'], task_id=task['id'],
+                                             conv_id=_root_conv_id, task_id=task['id'],
                                              **_extra_kw)
                                 if project_path else 'Error: No project path.')
             finally:
@@ -389,6 +401,24 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         except Exception as e:
             logger.debug('[Artifacts] promotion path failed (non-fatal): %s',
                          e, exc_info=True)
+
+    # ── Surface silent workspace-root auto-registration ──
+    # An absolute-path write outside all roots auto-registers the nearest
+    # existing ancestor as a NEW extra root (lib/project_mod/write_tools.py
+    # _resolve_write_path §2). That expansion used to be invisible — only an
+    # app.log line. The write layer signals it via a per-thread collector we
+    # drain HERE (the handler owns ``task``) and emit as a visible event.
+    try:
+        from lib.project_mod.write_tools import drain_root_added_signals
+        _new_roots = drain_root_added_signals()
+        if _new_roots:
+            from lib.agent_core.events import EventType, emit
+            emit(task, EventType.WORKSPACE_ROOT_ADDED, roots=_new_roots)
+            logger.info('[Project] workspace_root_added emitted for %d new root(s): %s',
+                        len(_new_roots),
+                        ', '.join(r.get('rootName', '?') for r in _new_roots))
+    except Exception as e:
+        logger.debug('[Project] workspace_root_added emit failed (non-fatal): %s', e)
 
     # For run_command: inject fileChanges from tracked modifications
     if fn_name == 'run_command' and project_path:

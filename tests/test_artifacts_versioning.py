@@ -102,7 +102,7 @@ class TestVersioning:
                 conv_id=cid, content='two\n', format='markdown',
                 source='write_file', source_ref={'path': 'x.md'}, title='x.md',
             )
-        r = flask_client.get(f'/api/artifacts/{v2["id"]}/versions')
+        r = flask_client.get(f'/api/v1/artifacts/{v2["id"]}/versions')
         assert r.status_code == 200
         body = r.get_json()
         assert body['count'] == 2
@@ -110,7 +110,7 @@ class TestVersioning:
         assert ids == [v1['id'], v2['id']]
 
     def test_versions_route_404(self, flask_client):
-        r = flask_client.get('/api/artifacts/nope-xyz/versions')
+        r = flask_client.get('/api/v1/artifacts/nope-xyz/versions')
         assert r.status_code == 404
 
 
@@ -129,7 +129,7 @@ class TestLibrary:
                                 format='markdown', source='write_file',
                                 source_ref={'path': 'p.md'})
             set_pinned(b['id'], True)
-        r = flask_client.get('/api/artifacts/library?limit=80')
+        r = flask_client.get('/api/v1/artifacts?limit=80')
         assert r.status_code == 200
         body = r.get_json()
         ids = [m['id'] for m in body['artifacts']]

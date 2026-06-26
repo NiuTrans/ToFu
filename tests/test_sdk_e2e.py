@@ -20,6 +20,8 @@ import threading
 import time
 import unittest
 
+import pytest
+
 
 def _free_port() -> int:
     s = socket.socket()
@@ -152,6 +154,12 @@ def _shutdown_real_server():
     os.environ.get('TOFU_SKIP_NETWORK_E2E') == '1',
     'TOFU_SKIP_NETWORK_E2E=1 set — skipping real-network SDK test')
 class SDKE2ETest(unittest.TestCase):
+
+    # The credential gate (incl. invalid-token → 401) is only ACTIVE in
+    # private/multi-user mode; open mode (conftest default) accepts any
+    # request. The server reads the mode per-request, and the per-test
+    # conftest fixture sets private before each test fires.
+    pytestmark = pytest.mark.auth_mode('private')
 
     @classmethod
     def setUpClass(cls):

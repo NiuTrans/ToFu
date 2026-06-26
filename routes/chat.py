@@ -35,6 +35,7 @@ from lib.chat import (  # noqa: F401
     resolve_conv_refs as _resolve_conv_refs,
     scan_continue_checkpoint as _scan_continue_checkpoint,
 )
+from lib.idempotency import idempotent_post
 from routes.common import DEFAULT_USER_ID, _invalidate_meta_cache
 
 logger = get_logger(__name__)
@@ -87,7 +88,12 @@ def chat_active():
     """
     cleanup_old_tasks()
     with tasks_lock:
-        result = [{'id': t['id'], 'convId': t['convId'], 'status': t['status'],
+        # ``tasks`` is a process-global registry mutated by many code paths
+        # (the orchestrator, external/eval harnesses, tests). A malformed
+        # entry missing optional keys must not 500 this status endpoint, so
+        # read every field defensively.
+        result = [{'id': t.get('id', ''), 'convId': t.get('convId', ''),
+                   'status': t.get('status', ''),
                    'aborted': bool(t.get('aborted'))}
                   for t in tasks.values()]
     return jsonify(result)
@@ -95,6 +101,7 @@ def chat_active():
 
 @api_v1_chat_bp.route('/api/v1/chat/start', methods=['POST'], endpoint='ui_chat_start')
 @require_scope('chat')
+@idempotent_post()
 def chat_start():
     """Start a chat task. Body is ``{convId, config[, messages]}``.
 
@@ -370,6 +377,7 @@ def _start_task_for_conv(conv_id, config, data=None):
 
 @api_v1_chat_bp.route('/api/v1/chat/send', methods=['POST'], endpoint='ui_chat_send')
 @require_scope('chat')
+@idempotent_post()
 def chat_send():
     """Atomic send: create user message + auto-translate + persist + start task.
 
@@ -673,6 +681,30 @@ def chat_regenerate():
             return api_internal_error('Failed to parse conversation')
 
         title = row['title']
+
+        # ── Phase 3: msgId is authoritative; index is the fallback ──
+        # The client sends ``truncateToMsgId`` (the stable id of the user
+        # message to keep-and-resend-from) alongside the legacy
+        # ``truncateToIndex``. If the id resolves in the freshly-loaded
+        # messages, its CURRENT index wins — this is index-drift-proof if any
+        # writer reordered messages between the client's read and this request.
+        # When the id is absent (older client) or doesn't resolve (message
+        # since deleted), we fall back to the supplied index unchanged, so the
+        # behaviour is strictly additive.
+        _truncate_msg_id = data.get('truncateToMsgId')
+        if _truncate_msg_id:
+            from lib.tasks_pkg.manager import find_message_by_id
+            _resolved_idx, _ = find_message_by_id(messages, _truncate_msg_id)
+            if _resolved_idx is not None:
+                if _resolved_idx != truncate_to:
+                    logger.info('[Regen] conv=%s truncateToMsgId resolved to index '
+                                '%d (client sent index %d — drift corrected)',
+                                conv_id[:8], _resolved_idx, truncate_to)
+                truncate_to = _resolved_idx
+            else:
+                logger.debug('[Regen] conv=%s truncateToMsgId=%s did not resolve '
+                             '— using index %d', conv_id[:8],
+                             str(_truncate_msg_id)[:12], truncate_to)
 
         if truncate_to < 0 or truncate_to >= len(messages):
             return api_bad_request(f'truncateToIndex {truncate_to} out of range (0..{len(messages)-1})')
@@ -1065,6 +1097,32 @@ def chat_continue():
 # ══════════════════════════════════════════════════════════
 
 
+def _warm_resume_serviceable(resume_cursor, n_events):
+    """Decide whether a warm (in-memory) Last-Event-ID resume is serviceable.
+
+    Returns True iff ``resume_cursor`` names a position the in-memory event
+    buffer can actually replay from — i.e. the next event to send
+    (``resume_cursor + 1``) is at or before the current buffer length.
+
+    When False the caller MUST fall back to a full state-snapshot
+    (a "resync"), exactly as the cold path does, instead of slicing
+    ``events[resume_from:]`` into an empty list. An empty slice on an
+    ahead-of-buffer cursor used to leave the warm stream sending nothing
+    until the next live event (a silent stall) and mis-index the live loop.
+    A cursor that is plausibly behind the buffer (``>= -1``, in range) stays
+    serviceable; only an out-of-range-ahead cursor forces resync.
+
+    ``resume_cursor`` is the SSE ``Last-Event-ID`` (id of the last RECEIVED
+    event); ``-1``/``0`` etc. are normal early cursors. The boundary case
+    ``resume_from == n_events`` IS serviceable (empty replay, then live
+    streaming continues from exactly that index).
+    """
+    if resume_cursor is None or resume_cursor < 0:
+        return False  # no/invalid cursor → fresh snapshot (caller's else-branch)
+    resume_from = resume_cursor + 1
+    return resume_from <= n_events
+
+
 @chat_bp.route('/api/chat/stream/<task_id>', methods=['GET'])
 async def chat_stream(task_id):
     import asyncio
@@ -1285,10 +1343,19 @@ async def chat_stream(task_id):
             #   replay only events AFTER the cursor. Per the SSE spec,
             #   Last-Event-ID is the id of the last *received* event, so
             #   we resume from cursor + 1 to avoid re-sending it.
-            if _resume_cursor is not None and _resume_cursor >= 0:
+            # ★ Resync guard: if the cursor is AHEAD of the in-memory buffer
+            #   (e.g. the buffer was trimmed, or a stale/over-eager client),
+            #   _warm_resume_serviceable() is False → fall through to a full
+            #   state snapshot instead of slicing an empty list (which would
+            #   silently stall the stream and mis-index the live loop).
+            if _warm_resume_serviceable(_resume_cursor, len(task['events'])):
                 resume_from = _resume_cursor + 1
                 missed_evts = task['events'][resume_from:]
             else:
+                if _resume_cursor is not None and _resume_cursor >= 0:
+                    logger.info('[Chat] SSE stream %s Last-Event-ID=%d is ahead of '
+                                'buffer (len=%d) — full-snapshot resync',
+                                task_id[:8], _resume_cursor, len(task['events']))
                 missed_evts = None
                 resume_from = None
                 cursor = len(task['events'])
@@ -1331,6 +1398,10 @@ async def chat_stream(task_id):
                     state['preset'] = task['preset']
                 if task.get('_memoryPrefetch'):
                     state['memoryPrefetch'] = task['_memoryPrefetch']
+                if task.get('_preferencesApplied'):
+                    state['preferencesApplied'] = task['_preferencesApplied']
+                if task.get('_preferencesLearned'):
+                    state['preferencesLearned'] = task['_preferencesLearned']
                 # ★ Endpoint mode: include phase and completed turns for reconnection
                 if task.get('endpoint_mode'):
                     state['endpointMode'] = True
@@ -1647,6 +1718,12 @@ def chat_poll(task_id):
         # ★ Memory prefetch indicator (persists through poll fallback + reload)
         if task.get('_memoryPrefetch'):
             r['memoryPrefetch'] = task['_memoryPrefetch']
+        # ★ Preferences-applied chip (persists through poll fallback + reload)
+        if task.get('_preferencesApplied'):
+            r['preferencesApplied'] = task['_preferencesApplied']
+        # ★ Preferences-learned moment(s) (persist through poll + reload)
+        if task.get('_preferencesLearned'):
+            r['preferencesLearned'] = task['_preferencesLearned']
         # ★ Autopilot follow-up baton — mirror the SSE done event so a client
         #   on the poll fallback path attaches to the spawned follow-up task
         #   instead of stranding it (see lib/tasks_pkg/orchestrator.py).

@@ -39,6 +39,7 @@ CONVERTED_FILES = [
     'routes/api_v1/artifacts.py',
     'routes/api_v1/daily_report.py',
     'routes/paper.py',
+    'routes/api_v1/chat_direct.py',
 ]
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -172,6 +173,7 @@ class TestConvertedViewsAreCoroutines:
         'api_v1_billing.',
         'api_v1_artifacts.',
         'api_v1_daily_report.',
+        'api_v1_chat_direct.',
     )
 
     def test_all_converted_blueprint_views_are_coroutines(self, flask_app):

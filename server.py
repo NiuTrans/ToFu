@@ -339,10 +339,28 @@ def _install_flask_shim():
         wrapper._quart_async_wrapper = True
         return wrapper
 
+    # Quart 0.19.x's send_file / send_from_directory still use the
+    # pre-Flask-2.0 kwarg name `attachment_filename`; modern route code
+    # uses Flask's `download_name`. Normalize so callers can use the
+    # current Flask spelling regardless of the installed Quart version.
+    def _compat_download_name(async_fn):
+        @functools.wraps(async_fn)
+        def adapter(*args, **kwargs):
+            if 'download_name' in kwargs:
+                params = inspect.signature(async_fn).parameters
+                if 'download_name' not in params and 'attachment_filename' in params:
+                    kwargs['attachment_filename'] = kwargs.pop('download_name')
+            return async_fn(*args, **kwargs)
+        # Mark so _genuine() unwraps through this adapter on re-install,
+        # recovering the real async helper rather than stopping here.
+        adapter.__wrapped__ = async_fn
+        adapter._quart_async_wrapper = True
+        return adapter
+
     # Replace in quart module so `from flask import send_from_directory`
     # gets the sync-safe version
-    quart.send_from_directory = _sync_safe(_orig_send_from_directory)
-    quart.send_file = _sync_safe(_orig_send_file)
+    quart.send_from_directory = _sync_safe(_compat_download_name(_orig_send_from_directory))
+    quart.send_file = _sync_safe(_compat_download_name(_orig_send_file))
     quart.make_response = _sync_safe(_orig_make_response)
 
     # Expose originals at module level for async code that needs to await directly

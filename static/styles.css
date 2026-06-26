@@ -389,10 +389,14 @@ textarea::placeholder{color:var(--text-tertiary)}
 .upd-retry-btn{margin-top:13px;padding:9px 18px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;transition:background-color .15s ease}
 .upd-retry-btn:hover{background:var(--bg-hover)}
 /* Version hero — current → latest */
-.upd-hero{display:flex;align-items:center;justify-content:center;gap:6px;padding:18px 16px;background:linear-gradient(180deg,var(--bg-tertiary),var(--bg-secondary));border:1px solid var(--border);border-radius:14px;margin-bottom:18px}
-.upd-ver{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:4px}
-.upd-ver-label{font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:var(--text-tertiary);font-weight:700}
-.upd-ver-num{font-size:21px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--text-primary);line-height:1}
+.upd-hero{display:flex;align-items:center;justify-content:center;gap:10px;padding:20px 18px;background:linear-gradient(180deg,var(--bg-tertiary),var(--bg-secondary));border:1px solid var(--border);border-radius:14px;margin-bottom:18px}
+.upd-ver{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:4px}
+.upd-ver-label{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--text-tertiary);font-weight:700}
+.upd-ver-num{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--text-primary);line-height:1;letter-spacing:-0.01em}
+/* Up-to-date hero: collapse the duplicate "same version" pair into one clear
+   statement — dim the arrow and de-emphasize the redundant latest column. */
+.upd-hero.up-to-date{gap:6px}
+.upd-hero.up-to-date .upd-arrow{opacity:.4}
 .upd-ver.latest .upd-ver-num{color:var(--accent)}
 .upd-hero.up-to-date .upd-ver.latest .upd-ver-num{color:var(--text-primary)}
 .upd-arrow{display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:50%;flex-shrink:0;color:var(--text-tertiary);background:var(--bg-hover)}
@@ -417,11 +421,20 @@ textarea::placeholder{color:var(--text-tertiary)}
 /* States */
 .upd-loading,.upd-checking{display:flex;align-items:center;gap:9px;color:var(--text-tertiary);font-size:14px}
 .upd-inline-spin{width:15px;height:15px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0}
-.upd-badge{display:flex;align-items:center;gap:10px;padding:13px 15px;border-radius:12px;font-size:14px;font-weight:600;line-height:1.4}
+.upd-badge{display:flex;align-items:center;justify-content:center;gap:10px;padding:14px 16px;border-radius:12px;font-size:14px;font-weight:700;line-height:1.4}
 .upd-badge.ok{background:rgba(34,197,94,.1);color:var(--success-color,#22c55e);border:1px solid rgba(34,197,94,.25)}
-.upd-badge.warn{background:var(--thinking-bg);color:var(--thinking-text);border:1px solid var(--thinking-border)}
+.upd-badge.warn{background:var(--thinking-bg);color:var(--thinking-text);border:1px solid var(--thinking-border);justify-content:flex-start}
+.upd-badge.ok .upd-badge-icon{width:24px;height:24px;border-radius:50%;background:rgba(34,197,94,.18);align-items:center;justify-content:center}
 .upd-badge-icon{flex-shrink:0;display:flex}
 .upd-error{color:var(--error-text);font-size:14px;line-height:1.5}
+/* Concrete check-failure card — heading + the real reason + retry */
+.upd-err-card{display:flex;flex-direction:column;align-items:center;text-align:center;gap:6px;padding:6px 4px}
+.upd-err-head{display:flex;align-items:center;gap:9px}
+.upd-err-icon{display:flex;align-items:center;justify-content:center;color:var(--error-text);flex-shrink:0}
+.upd-err-title{font-size:15px;font-weight:700;color:var(--text-primary);letter-spacing:-0.01em}
+.upd-err-reason{margin:2px 0 4px;font-size:13px;line-height:1.55;color:var(--text-secondary);max-width:340px}
+.upd-err-card .upd-retry-btn{margin-top:8px;display:inline-flex;align-items:center;gap:7px}
+.upd-err-card .upd-retry-btn svg{flex-shrink:0}
 .upd-warn{color:var(--text-primary);font-size:13px;line-height:1.5}
 .upd-uptodate,.upd-ready{color:var(--text-primary);font-size:14px;line-height:1.5}
 .upd-hint{color:var(--text-tertiary);font-size:12px;margin-top:10px;line-height:1.4}
@@ -862,6 +875,11 @@ textarea::placeholder{color:var(--text-tertiary)}
 .paper-qa-msg-content blockquote{border-left:3px solid var(--accent);padding-left:10px;margin:4px 0;color:var(--text-secondary);font-style:italic}
 .paper-qa-msg-content pre{background:var(--bg-secondary);padding:8px;border-radius:6px;overflow-x:auto;font-size:12px;margin:6px 0}
 .paper-qa-msg-content code{background:var(--bg-secondary);padding:1px 4px;border-radius:3px;font-size:12px}
+/* Agentic Q&A: tool-activity panel (web_search/fetch_url) above the answer. */
+.paper-qa-tools{margin-bottom:8px}
+.paper-qa-msg:has(.paper-qa-tools){max-width:98%}
+.paper-qa-thinking{display:flex;align-items:center;min-height:18px}
+.paper-qa-thinking .thinking-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);animation:pulse 1.2s ease-in-out infinite}
 .paper-qa-input-area{display:flex;gap:8px;padding:12px;border-top:1px solid var(--border);background:var(--bg-secondary);flex-shrink:0;align-items:flex-end}
 #paperQAInput{flex:1;resize:none;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--text-primary);font-family:inherit;font-size:13px;line-height:1.5;min-height:40px;max-height:120px;outline:none;transition:border-color .15s,box-shadow .15s}
 #paperQAInput:hover{border-color:var(--border-light)}
@@ -877,6 +895,13 @@ textarea::placeholder{color:var(--text-tertiary)}
 .paper-report-btn{display:flex;align-items:center;gap:5px;padding:6px 11px;border:1px solid var(--border);border-radius:8px;background:none;color:var(--text-secondary);font-size:11.5px;font-weight:600;cursor:pointer;transition:background .15s,color .15s,border-color .15s,transform .1s;font-family:inherit}
 .paper-report-btn:hover{background:var(--bg-hover);color:var(--text-primary);border-color:var(--border-light)}
 .paper-report-btn:active{transform:translateY(1px)}
+.paper-report-stop-btn{color:var(--error-text);border-color:var(--error-border);background:var(--error-bg)}
+.paper-report-stop-btn:hover{color:#fff;background:var(--error-text);border-color:var(--error-text)}
+.paper-report-stop-btn:disabled{opacity:.6;cursor:default;pointer-events:none}
+.paper-report-stop-btn svg{animation:paperReportStopPulse 1.4s ease-in-out infinite}
+@keyframes paperReportStopPulse{0%,100%{opacity:1}50%{opacity:.45}}
+.paper-report-stopped-banner{display:flex;align-items:center;gap:8px;padding:9px 14px;margin:0 0 14px;border:1px solid var(--error-border);border-radius:10px;background:var(--error-bg);color:var(--error-text);font-size:12.5px;font-weight:600}
+.paper-report-stopped-banner svg{flex-shrink:0}
 /* Model picker */
 .paper-report-model-picker{position:relative}
 .paper-report-model-btn{display:flex;align-items:center;gap:4px;padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--text-secondary);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit;white-space:nowrap;max-width:180px}
@@ -1065,12 +1090,22 @@ textarea::placeholder{color:var(--text-tertiary)}
   .paper-mobile-switch-btn.active{color:var(--accent);background:var(--bg-hover);border-top-color:var(--accent)}
 
   .paper-pdf-toolbar{padding:4px 8px}
-  .paper-sidebar-overlay{display:none!important}
+  /* In Paper Reading Mode the sidebar drawer IS the paper library (current
+   * paper + library list) — same as desktop. The previous mobile rules here
+   * force-reverted it to the chat conversation list, which was the bug: on a
+   * phone, opening the drawer in reading mode showed conversations instead of
+   * papers. We keep the paper-active behaviour and only resize for touch. */
+  .sidebar.paper-active .paper-sidebar-overlay{display:flex!important}
   .sidebar.paper-active .sidebar-action-row,
   .sidebar.paper-active .sidebar-search-wrapper,
   .sidebar.paper-active .folder-tabs,
-  .sidebar.paper-active .conversations-list{display:flex!important}
-  .sidebar.paper-active .sidebar-header h1{display:flex!important}
+  .sidebar.paper-active .conversations-list{display:none!important}
+  .sidebar.paper-active .sidebar-header h1{display:none!important}
+  /* Larger touch targets for the paper library on phones */
+  .paper-sidebar-current{padding:14px 16px}
+  .paper-sidebar-new-inline-btn{width:32px;height:32px}
+  .paper-lib-item{padding:12px;min-height:48px}
+  .paper-lib-item-del{display:flex;width:32px;height:32px}
   .paper-tab-btn{padding:10px 6px;font-size:12px;gap:4px}
   .paper-tab-btn svg{width:13px;height:13px}
   .paper-qa-input-area{padding:8px}
@@ -1959,9 +1994,42 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-send-btn:activ
    ═══════════════════════════════════════════ */
 .paper-report-content.paper-report-enhanced,
 .paper-report-body.paper-report-enhanced{padding:0}
+
+/* ── Reading-time estimate + scroll-progress bar (sticky report header) ── */
+.paper-read-time{position:sticky;top:0;z-index:5;padding:9px 30px 0;
+  margin:0 auto;max-width:1180px;
+  background:linear-gradient(to bottom,var(--bg-primary) 72%,transparent);
+  backdrop-filter:saturate(1.1) blur(6px);-webkit-backdrop-filter:saturate(1.1) blur(6px);
+  user-select:none}
+.paper-read-time-row{display:flex;align-items:center;gap:7px;font-size:12px;
+  color:var(--text-tertiary);line-height:1;padding-bottom:7px}
+.paper-read-time-icon{display:inline-flex;color:var(--text-tertiary);opacity:.85}
+.paper-read-time-total{color:var(--text-secondary);font-weight:600;letter-spacing:.1px}
+.paper-read-time-sep{opacity:.45}
+.paper-read-time-left{color:var(--text-tertiary);font-variant-numeric:tabular-nums;
+  transition:color .25s}
+.paper-read-time.done .paper-read-time-left{color:var(--accent);font-weight:600}
+.paper-read-time-badge{display:inline-flex;align-items:center;justify-content:center;
+  width:15px;height:15px;border-radius:50%;margin-left:auto;flex-shrink:0;
+  color:#fff;background:var(--accent);opacity:.9}
+.paper-read-time-track{height:3px;border-radius:3px;overflow:hidden;
+  background:var(--border);position:relative}
+.paper-read-time-fill{height:100%;width:0;border-radius:3px;
+  background:linear-gradient(90deg,var(--accent),color-mix(in srgb,var(--accent) 55%,#22d3ee));
+  box-shadow:0 0 6px -1px var(--accent);
+  transition:width .35s cubic-bezier(.4,0,.2,1)}
+.paper-read-time.done .paper-read-time-fill{background:var(--accent)}
+@media(max-width:900px){
+  .paper-read-time{padding-left:18px;padding-right:18px}
+}
 .paper-report-doc{display:grid;grid-template-columns:1fr minmax(168px,216px);gap:30px;align-items:start;max-width:1180px;margin:0 auto;padding:24px 30px 64px}
-.paper-report-article{grid-column:1;min-width:0}
-.paper-report-doc > .paper-report-toc{grid-column:2}
+/* Both children MUST be pinned to row 1: the TOC <nav> precedes the
+   <article> in DOM order, so without an explicit row, CSS grid's sparse
+   auto-placement parks the TOC in row1/col2 and bumps the article to
+   row2/col1 — leaving an empty row1/col1 cell as tall as the TOC (a large
+   blank gap above the report title). */
+.paper-report-article{grid-column:1;grid-row:1;min-width:0}
+.paper-report-doc > .paper-report-toc{grid-column:2;grid-row:1}
 
 /* Article reuses the existing .paper-report-body/-content typography because
    those selectors target descendants; we only need to ensure spacing reads
@@ -6622,6 +6690,15 @@ input.settings-mono {
   font-family: 'JetBrains Mono', monospace; font-size: 11.5px; line-height: 1.4;
   word-break: break-word;
 }
+/* Clickable MCP resource link (e.g. an Overleaf project name/id on a
+ * tool-call line). Inherits the monospace line; underlined on hover so
+ * it reads as a link without shouting on every row. */
+.ptool-mcp-link {
+  color: var(--accent, #818cf8);
+  text-decoration: none;
+  border-bottom: 1px dotted currentColor;
+}
+.ptool-mcp-link:hover { text-decoration: none; border-bottom-style: solid; }
 .ptool-badge {
   flex-shrink: 0;
   font-size: 10px; font-weight: 600;
@@ -7107,6 +7184,23 @@ input.settings-mono {
   color: #fbbf24;
   background: rgba(251,191,36,0.1);
 }
+/* ── "not run": command refused/blocked before it executed ──
+ * Distinct from error (red, exit≠0): this is amber/neutral — the command
+ * never ran, and the reason is shown inline rather than as a cryptic code. */
+.ptool-cmd-notrun .ptool-cmd-status {
+  color: #fbbf24;
+  background: rgba(251,191,36,0.1);
+}
+.ptool-cmd-reason {
+  padding: 8px 16px 10px 16px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #d9b873;
+  background: rgba(251,191,36,0.06);
+  border-top: 1px solid rgba(251,191,36,0.12);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .ptool-cmd-running .ptool-cmd-header {
   color: #f59e0b;
 }
@@ -7343,6 +7437,44 @@ input.settings-mono {
   border-radius: 8px;
   white-space: nowrap;
   animation: ptoolBadgeBlink 1.8s ease-in-out infinite;
+}
+
+/* ── Rejected hallucinated tool call (not a real tool, never executed) ── */
+.ptool-line.ptool-rejected {
+  opacity: 0.92;
+}
+.ptool-line.ptool-rejected .ptool-icon { opacity: 0.5; }
+.ptool-reject-name {
+  text-decoration: line-through;
+  text-decoration-color: rgba(239,68,68,0.6);
+  color: var(--text-muted, #9ca3af);
+}
+.ptool-badge-reject {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #ef4444;
+  background: rgba(239,68,68,0.12);
+  border: 1px solid rgba(239,68,68,0.3);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+.ptool-reject-hint {
+  font-size: 11px;
+  color: var(--text-muted, #9ca3af);
+  margin-left: 2px;
+}
+.ptool-reject-sugg {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 10.5px;
+  color: var(--accent, #6ea8fe);
+  background: rgba(110,168,254,0.1);
+  border: 1px solid rgba(110,168,254,0.2);
+  border-radius: 5px;
+  padding: 0 5px;
 }
 @keyframes ptoolBadgeBlink {
   0%, 100% { opacity: 1; }
@@ -9352,6 +9484,8 @@ input.settings-mono {
 [data-theme="light"] .ptool-cmd-ok .ptool-cmd-status{color:#1f7a5c;background:rgba(31,122,92,0.08)}
 [data-theme="light"] .ptool-cmd-err .ptool-cmd-status{color:#b91c1c;background:rgba(185,28,28,0.07)}
 [data-theme="light"] .ptool-cmd-timeout .ptool-cmd-status{color:#a06e00;background:rgba(160,110,0,0.08)}
+[data-theme="light"] .ptool-cmd-notrun .ptool-cmd-status{color:#a06e00;background:rgba(160,110,0,0.08)}
+[data-theme="light"] .ptool-cmd-reason{color:#7a5e1e;background:rgba(160,110,0,0.05);border-top-color:rgba(160,110,0,0.12)}
 [data-theme="light"] .ptool-cmd-running .ptool-cmd-header{color:#4068b8}
 [data-theme="light"] .ptool-cmd-running .ptool-cmd-icon{color:#4068b8}
 [data-theme="light"] .ptool-cmd-running .ptool-cmd-label{color:#4068b8}
@@ -11270,12 +11404,17 @@ input.settings-mono {
 [data-theme="tofu"] .upd-step.is-active .upd-step-label,
 [data-theme="tofu"] .upd-step.is-done .upd-step-label{color:#1a1814}
 /* Badges, file lists, hints */
-[data-theme="tofu"] .upd-badge{border-radius:0;border-width:2px;border-color:#1a1814}
-[data-theme="tofu"] .upd-badge.ok{background:rgba(74,222,128,.2);color:#2f7d4f}
+[data-theme="tofu"] .upd-badge{border-radius:0;border-width:2px;border-color:#1a1814;box-shadow:3px 3px 0 #1a1814;font-weight:800}
+[data-theme="tofu"] .upd-badge.ok{background:#dff5e3;color:#2f7d4f}
+[data-theme="tofu"] .upd-badge.ok .upd-badge-icon{background:#4ade80;color:#1a1814;border-radius:0}
 [data-theme="tofu"] .upd-badge.warn{background:#f5eedd;color:#3d362c}
 [data-theme="tofu"] .upd-files{border-radius:0;border:2px solid #1a1814;background:#f5eedd;color:#3d362c}
 [data-theme="tofu"] .upd-ready,[data-theme="tofu"] .upd-uptodate,[data-theme="tofu"] .upd-warn{color:#1a1814}
 [data-theme="tofu"] .upd-hint{color:#3d362c}
+/* Check-failure card — ink heading, muted reason */
+[data-theme="tofu"] .upd-err-icon{color:#c0392b}
+[data-theme="tofu"] .upd-err-title{color:#1a1814;font-weight:900}
+[data-theme="tofu"] .upd-err-reason{color:#3d362c}
 /* ── Settings-panel inputs override tofu modal reset — keep pixel-art shadow ── */
 [data-theme="tofu"] .settings-panel input,
 [data-theme="tofu"] .settings-panel select {
@@ -12847,10 +12986,20 @@ input.settings-mono {
 }
 
 /* ═══ STATE: Timeout ═══ */
-[data-theme="tofu"] .ptool-cmd-timeout{
+[data-theme="tofu"] .ptool-cmd-timeout,
+[data-theme="tofu"] .ptool-cmd-notrun{
   --_dot-color: #CCA858;
   --_rail-glow: rgba(204,168,88,0.3);
   border-color: rgba(204,168,88,0.2);
+}
+[data-theme="tofu"] .ptool-cmd-notrun .ptool-cmd-status{
+  color: #6B5E42;
+  background: rgba(204,168,88,0.12);
+}
+[data-theme="tofu"] .ptool-cmd-reason{
+  color: #7A6A4A;
+  background: rgba(204,168,88,0.07);
+  border-top: 1px dashed rgba(178,163,140,0.3);
 }
 [data-theme="tofu"] .ptool-cmd-timeout .ptool-cmd-label{
   color: #A07D5A;
@@ -14604,6 +14753,61 @@ input.settings-mono {
   box-shadow:0 0 0 3px rgba(129,140,248,0.10);
 }
 .vu-investigation-label{font-weight:600;}
+/* Provenance boundary header above the VU's REPLY text.  The
+ * investigation (indigo, above) + thinking (below) are display-only; only
+ * this reply is fed to the agent as its next message.  Green "sent" accent
+ * contrasts with the indigo "private process" accent so the human reads the
+ * boundary at a glance. */
+.vu-handoff-header{
+  display:flex;align-items:center;gap:6px;
+  margin:8px 0 4px 0;
+  font-size:11px;
+  color:#34d399;
+  letter-spacing:.02em;
+  text-transform:uppercase;
+  opacity:.9;
+}
+.vu-handoff-icon{flex-shrink:0;opacity:.85;}
+.vu-handoff-label{font-weight:600;}
+/* ── VU provenance: PRIVATE zone (collapsible) ──
+ * Wraps the autopilot's investigation tool panel + private reasoning into a
+ * single default-collapsed container. The dashed indigo frame + "Private ·
+ * not sent" summary make it unmistakable that NONE of this reaches the agent
+ * (only the reply below does — see conv_message_builder._build_user_message).*/
+.vu-private-zone{
+  margin:6px 0;
+  border:1px dashed rgba(129,140,248,0.35);
+  border-radius:8px;
+  background:rgba(129,140,248,0.04);
+  overflow:hidden;
+}
+.vu-private-summary{
+  display:flex;align-items:center;gap:6px;
+  padding:6px 10px;
+  cursor:pointer;
+  list-style:none;
+  font-size:11px;
+  color:#818cf8;
+  letter-spacing:.02em;
+  text-transform:uppercase;
+  user-select:none;
+}
+.vu-private-summary::-webkit-details-marker{display:none;}
+.vu-private-icon{flex-shrink:0;opacity:.85;}
+.vu-private-label{font-weight:600;flex:1;}
+.vu-private-toggle{font-size:9px;opacity:.7;transition:transform .15s ease;}
+.vu-private-zone[open] .vu-private-toggle{transform:rotate(180deg);}
+.vu-private-body{padding:2px 10px 8px 10px;}
+.vu-private-body .vu-investigation-header{margin-top:2px;}
+/* ── VU provenance: SENT zone (the reply that reaches the agent) ──
+ * Bounds the handoff header + reply markdown in a green-accented block so the
+ * "this is what's sent" region is visually separate from the private zone. */
+.vu-sent-zone{
+  margin:8px 0 2px 0;
+  border-left:2px solid rgba(52,211,153,0.55);
+  padding-left:10px;
+}
+.vu-sent-zone .vu-handoff-header{margin-top:0;}
 /* Live status chip while the autopilot virtual-user is thinking /
  * running tools.  Indigo accent matches the VU message styling. */
 .stream-phase.stream-phase-autopilot{
@@ -15002,14 +15206,12 @@ input.settings-mono {
 .sidebar-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.35);z-index:25;opacity:0;transition:opacity .3s ease;-webkit-tap-highlight-color:transparent}
 .sidebar-backdrop.visible{display:block;opacity:1}
 
-/* ── Safe area insets for notched phones ── */
-@supports(padding:env(safe-area-inset-bottom)){
-  .input-area{padding-bottom:calc(12px + env(safe-area-inset-bottom))}
-  .sidebar{padding-top:env(safe-area-inset-top)}
-  .topbar{padding-top:env(safe-area-inset-top);height:calc(52px + env(safe-area-inset-top))}
-  .chat-inner{padding-left:calc(12px + env(safe-area-inset-left));padding-right:calc(12px + env(safe-area-inset-right))}
-  .input-inner{padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right)}
-}
+/* ── Safe area insets for notched phones ──
+ * env(safe-area-inset-*) resolves to 0px where unsupported, so these are
+ * folded DIRECTLY into the mobile height/padding rules below (single source
+ * of truth). A separate @supports block is NOT used: it would be overridden
+ * by the later @media rules that redefine height/padding at equal specificity
+ * and lose to source order — the original notch bug. */
 
 /* ── Mobile: max-width 768px ── */
 @media(max-width:768px){
@@ -15040,11 +15242,18 @@ input.settings-mono {
   .main{width:100%!important;flex:1!important;min-width:0!important;overflow:hidden!important}
 
   /* ===== SIDEBAR: slide-over drawer ===== */
-  .sidebar{position:fixed!important;left:0;top:0;bottom:0;width:82vw;max-width:320px;min-width:auto!important;z-index:30;transform:translateX(-100%);transition:transform .3s cubic-bezier(.4,0,.2,1);box-shadow:none;will-change:transform}
+  .sidebar{position:fixed!important;left:0;top:0;bottom:0;width:82vw;max-width:320px;min-width:auto!important;z-index:30;padding-top:env(safe-area-inset-top,0px);transform:translateX(-100%);transition:transform .3s cubic-bezier(.4,0,.2,1);box-shadow:none;will-change:transform}
   .sidebar.collapsed{margin-left:0;transform:translateX(-100%)}
   .sidebar:not(.collapsed){transform:translateX(0);box-shadow:4px 0 24px rgba(0,0,0,0.25)}
   .sidebar-header{padding:14px 16px}
   .sidebar-header h1{font-size:15px}
+  /* Sidebar-header action buttons (search / settings) — 44px touch targets.
+   * Specificity must beat `.sidebar-header-actions .action-btn` (0,2,0) and the
+   * tofu `[data-theme="tofu"] .sidebar-header .action-btn` (0,3,0), so we match
+   * the tofu selector and add !important as insurance. */
+  .sidebar-header-actions .action-btn,
+  [data-theme="tofu"] .sidebar-header .action-btn{width:44px!important;height:44px!important}
+  .sidebar-header-actions{gap:4px}
   .sidebar-action-row{padding:10px 12px}
   .new-chat-btn{padding:10px 14px;font-size:13px}
   .sidebar-search-wrapper{padding:0 12px 10px}
@@ -15056,7 +15265,7 @@ input.settings-mono {
    * Mobile topbar shows ONLY: hamburger | title | model badge
    * All feature badges, action buttons, and selectors are hidden.
    * Users access those features via sidebar or settings. */
-  .topbar{height:48px;padding:0 10px;gap:8px;overflow:hidden!important;flex-wrap:nowrap}
+  .topbar{height:calc(48px + env(safe-area-inset-top,0px));padding:env(safe-area-inset-top,0px) 10px 0;gap:8px;overflow:hidden!important;flex-wrap:nowrap}
   .topbar-title{font-size:14px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   /* Hide ALL badges and action buttons — not enough room on 360px screens */
   .search-badge,.project-badge,.code-exec-badge,.browser-badge,
@@ -15066,8 +15275,19 @@ input.settings-mono {
   /* Model badge: keep it, right-aligned, compact */
   .model-badge{font-size:10px;padding:3px 8px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;margin-left:auto}
 
+  /* ===== PAPER READING MODE topbar =====
+   * In reading mode the input bar (and its "···" sheet) is hidden, so the
+   * ONLY exit affordance is the Paper button, which turns into a back-arrow
+   * (#paperModeBtn.active). The .topbar-tools cluster is otherwise clipped by
+   * overflow:hidden on a 360px screen, which could strand the user with no way
+   * out. So when paper mode is active: keep ONLY the back button (44px touch
+   * target, pinned right), hide the rest of the cluster. */
+  .topbar-tools:has(#paperModeBtn.active) .topbar-tool-btn:not(#paperModeBtn),
+  .topbar-tools:has(#paperModeBtn.active) .update-btn:not(#paperModeBtn){display:none!important}
+  #paperModeBtn.active{display:inline-flex!important;min-width:44px;min-height:40px;justify-content:center;flex-shrink:0}
+
   /* ===== CHAT AREA ===== */
-  .chat-inner{padding:16px 12px 120px;max-width:100%!important;overflow-x:hidden!important;word-break:break-word}
+  .chat-inner{padding:16px calc(12px + env(safe-area-inset-right,0px)) 120px calc(12px + env(safe-area-inset-left,0px));max-width:100%!important;overflow-x:hidden!important;word-break:break-word}
   .welcome-icon{width:52px;height:52px;font-size:22px;margin-bottom:14px}
   .welcome h2{font-size:20px}
   .welcome p{font-size:13px;max-width:320px}
@@ -15099,8 +15319,8 @@ input.settings-mono {
 
   /* --- Message actions: always visible on mobile (no hover) --- */
   .message-actions{opacity:1;position:relative;top:auto;right:auto;margin-top:4px;flex-wrap:wrap}
-  .msg-action-btn{padding:4px 10px;font-size:11px;min-height:32px}
-  .delete-turn-popup{position:fixed;bottom:auto;top:50%;left:50%;right:auto;transform:translate(-50%,-50%);min-width:200px}
+  .msg-action-btn{padding:7px 12px;font-size:11px;min-height:44px;display:inline-flex;align-items:center}
+  .delete-turn-popup{position:fixed;bottom:auto;top:50%;left:50%;right:auto;transform:translate(-50%,-50%);min-width:200px;max-width:calc(100vw - 32px);max-height:80dvh;overflow-y:auto}
 
   /* --- Thinking blocks --- */
   .thinking-header{padding:8px 12px}
@@ -15121,10 +15341,10 @@ input.settings-mono {
    * are hidden behind a "more" (···) button that opens a bottom sheet.
    * This keeps the toolbar to ~4 items on a 360px screen. */
   .input-area{padding:6px 8px calc(8px + env(safe-area-inset-bottom,0px));max-width:100%!important;overflow:hidden!important;border-top:1px solid var(--border)}
-  .input-inner{max-width:100%!important;overflow:hidden!important}
+  .input-inner{max-width:100%!important;overflow:hidden!important;padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px)}
   .input-box{border-radius:16px;margin-top:6px}
   textarea{font-size:16px;padding:10px 14px 8px;min-height:40px;max-height:140px}
-  .send-btn{width:32px;height:32px;padding:0;border-radius:10px}
+  .send-btn{width:44px;height:44px;padding:0;border-radius:12px}
 
   /* --- Toolbar: single compact row --- */
   .input-actions{padding:4px 8px 6px;gap:4px;overflow:hidden!important;flex-wrap:nowrap}
@@ -15150,7 +15370,7 @@ input.settings-mono {
   .thinking-depth-bar{display:none!important}
 
   /* --- Search toggle: clean icon-only pill --- */
-  .search-mode-toggle{padding:6px 8px;gap:4px;flex-shrink:0;border-radius:10px;min-width:auto}
+  .search-mode-toggle{padding:6px 10px;gap:4px;flex-shrink:0;border-radius:10px;min-width:auto;min-height:44px}
   .search-mode-toggle .sm-label{display:none}
   .search-mode-toggle .sm-mode-pill{display:none}
   .search-mode-toggle .sm-icon svg{width:16px;height:16px}
@@ -15173,12 +15393,32 @@ input.settings-mono {
   .mobile-bottom-sheet{position:fixed;bottom:0;left:0;right:0;z-index:250;
     background:var(--bg-secondary);border-radius:16px 16px 0 0;
     box-shadow:0 -4px 24px rgba(0,0,0,0.2);padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px));
-    max-height:70vh;overflow-y:auto;transform:translateY(100%);transition:transform .25s cubic-bezier(.4,0,.2,1);
+    max-height:70dvh;overflow-y:auto;transform:translateY(100%);transition:transform .25s cubic-bezier(.4,0,.2,1);
     display:none}
   .mobile-bottom-sheet.open{display:block;transform:translateY(0)}
   .mobile-bottom-sheet-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.3);z-index:249;
     display:none;-webkit-tap-highlight-color:transparent}
   .mobile-bottom-sheet-backdrop.open{display:block}
+
+  /* --- Portaled desktop popovers (timer / optimizer) as bottom sheets ---
+   * mobile_panels.js re-parents #timerPanel / #optimizerPanel to <body> and
+   * adds .mobile-panel-portaled. Their desktop absolute-position rules (anchored
+   * to the now-hidden topbar badge) must be overridden to a full-width sheet. */
+  .mobile-panel-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.3);z-index:259;
+    display:none;-webkit-tap-highlight-color:transparent}
+  .mobile-panel-backdrop.open{display:block}
+  .timer-panel.mobile-panel-portaled,
+  .optimizer-panel.mobile-panel-portaled{position:fixed!important;top:auto!important;left:0!important;
+    right:0!important;bottom:0!important;width:100%!important;max-width:100%!important;min-width:0!important;
+    margin:0!important;border-radius:16px 16px 0 0!important;z-index:260!important;
+    max-height:80dvh!important;overflow-y:auto!important;
+    padding-bottom:calc(12px + env(safe-area-inset-bottom,0px))!important;
+    transform:translateY(100%);transition:transform .25s cubic-bezier(.4,0,.2,1);display:block!important}
+  .timer-panel.mobile-panel-portaled.visible,
+  .optimizer-panel.mobile-panel-portaled.visible{transform:translateY(0)}
+  /* Flow picker sheet reuses .mobile-bottom-sheet; lift it above the shared
+   * panel backdrop so it isn't dimmed by it. */
+  .mobile-flow-sheet{z-index:260}
   .mobile-sheet-header{font-size:13px;font-weight:700;color:var(--text-secondary);padding:4px 8px 10px;
     border-bottom:1px solid var(--border);margin-bottom:8px}
   .mobile-sheet-section{margin-bottom:8px}
@@ -15216,14 +15456,14 @@ input.settings-mono {
   /* --- Preset/submenu dropdowns: bottom sheet style on mobile --- */
   .preset-dropdown{position:fixed;bottom:0;left:0;right:0;top:auto;transform:none;min-width:auto;width:100%;
     border-radius:16px 16px 0 0;padding:8px 8px calc(8px + env(safe-area-inset-bottom,0px));
-    max-height:60vh;overflow-y:auto;z-index:200}
+    max-height:60dvh;overflow-y:auto;z-index:200}
   .preset-toggle-wrapper.open .preset-dropdown{transform:none}
   .preset-dropdown-item{padding:12px 14px;border-radius:10px;font-size:13px;min-height:48px}
 
   /* (Legacy submenu dropdowns — still used if opened directly) */
   .submenu-dropdown{position:fixed;bottom:0;left:0;right:0;top:auto;transform:none;min-width:auto;width:100%;
     border-radius:16px 16px 0 0;padding:8px 8px calc(8px + env(safe-area-inset-bottom,0px));
-    max-height:60vh;overflow-y:auto;z-index:200}
+    max-height:60dvh;overflow-y:auto;z-index:200}
   .toolbar-submenu.open .submenu-dropdown{transform:none}
   .submenu-item{padding:12px 14px;gap:12px;min-height:48px}
   .submenu-item-name{font-size:14px}
@@ -15232,7 +15472,7 @@ input.settings-mono {
   .submenu-arrow{display:none}
 
   /* Action buttons (those that remain visible) */
-  .action-btn{width:30px;height:30px}
+  .action-btn{width:44px;height:44px}
   #convRefBtn{display:none}
 
   /* ===== TOFU THEME: strip decorations on mobile =====
@@ -15270,14 +15510,14 @@ input.settings-mono {
   .turn-nav{display:none!important}
 
   /* --- Modals: full screen on mobile --- */
-  .modal{padding:16px;width:100%;max-width:100%;max-height:100vh;max-height:100dvh;height:100vh;height:100dvh;border-radius:0;border:none}
+  .modal{padding:16px;padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));width:100%;max-width:100%;max-height:100dvh;height:100dvh;border-radius:0;border:none}
   .modal-overlay.open{align-items:stretch}
   .modal h3{font-size:16px;margin-bottom:16px}
   .modal .modal-actions{flex-wrap:wrap}
   .modal .btn{padding:12px 20px;font-size:14px;flex:1;min-width:0}
 
   /* Settings panel — stack tabs on top for mobile */
-  .settings-panel{width:100%;max-width:100%;max-height:100vh;max-height:100dvh;height:100vh;height:100dvh;box-shadow:none;border-width:0}
+  .settings-panel{width:100%;max-width:100%;max-height:100dvh;height:100dvh;box-shadow:none;border-width:0;padding-bottom:env(safe-area-inset-bottom,0px)}
   .settings-body{flex-direction:column}
   .settings-tabs{flex-direction:row;width:100%;min-width:0;border-right:none;border-bottom:3px solid #1a1814;padding:8px;overflow-x:auto;overflow-y:hidden}
   .settings-tabs::before{display:none}
@@ -15331,10 +15571,10 @@ input.settings-mono {
 
   /* Memory modal */
   .memory-modal{max-width:100%}
-  .memory-list{max-height:50vh}
+  .memory-list{max-height:50dvh}
 
   /* --- Debug panel: full width bottom --- */
-  .debug-panel{right:0;left:0;bottom:0;width:100%;max-width:100%;border-radius:12px 12px 0 0;max-height:50vh}
+  .debug-panel{right:0;left:0;bottom:0;width:100%;max-width:100%;border-radius:12px 12px 0 0;max-height:50dvh;padding-bottom:env(safe-area-inset-bottom,0px)}
 
   /* --- Image previews --- */
   /* --- Preview modal: preview-body fills the overlay so tapping outside the panel
@@ -16412,7 +16652,7 @@ input.settings-mono {
 }
 /* ── Small phones: max-width 380px ── */
 @media(max-width:380px){
-  .topbar{padding:0 8px;gap:6px}
+  .topbar{padding:env(safe-area-inset-top,0px) 8px 0;gap:6px}
   .topbar-title{font-size:13px}
   .model-badge{font-size:9px;padding:2px 6px;max-width:90px}
   .chat-inner{padding:12px 8px 110px}
@@ -16428,8 +16668,8 @@ input.settings-mono {
 
 /* ── Landscape phones ── */
 @media(max-height:500px) and (max-width:900px){
-  .topbar{height:40px}
-  .chat-inner{padding:10px 12px 100px}
+  .topbar{height:calc(40px + env(safe-area-inset-top,0px));padding-top:env(safe-area-inset-top,0px)}
+  .chat-inner{padding:10px calc(12px + env(safe-area-inset-right,0px)) 100px calc(12px + env(safe-area-inset-left,0px))}
   .input-area{padding:6px 10px 8px}
   textarea{min-height:36px}
   .welcome{min-height:40vh}
@@ -16601,6 +16841,66 @@ input.settings-mono {
 }
 .mem-prefetch-chip.mp-expandable{cursor:pointer;user-select:none}
 .mem-prefetch-chip.mp-expandable:hover{background:rgba(234,179,8,0.07);border-color:rgba(234,179,8,0.35)}
+
+/* Preferences-applied chip — same shape as the prefetch chip but a calmer
+   teal accent so the two read as siblings yet stay distinguishable. The
+   "preferences applied" chip is intentionally quiet (collapsed by default). */
+.mem-prefetch-chip.pa-chip{
+  background:rgba(45,212,191,0.05);
+  border-color:rgba(45,212,191,0.22);
+}
+.mem-prefetch-chip.pa-chip.mp-expandable:hover{
+  background:rgba(45,212,191,0.08);border-color:rgba(45,212,191,0.38);
+}
+.mem-prefetch-chip.pa-chip .mp-icon{color:rgba(45,212,191,0.8)}
+.mem-prefetch-chip.pa-chip .mp-details{border-top-color:rgba(45,212,191,0.22)}
+.mem-prefetch-chip.pa-chip .mp-mem-list.pa-list li{
+  background:rgba(45,212,191,0.06);
+  border-color:rgba(45,212,191,0.22);
+  color:var(--text-primary,#e4e4e7);
+}
+
+/* "Noted: you prefer X" — the learn/confirm moment (layer 3). A calm card
+   with one row per learned/staged preference; pending rows carry the
+   Confirm/Dismiss propose-then-confirm buttons. */
+.pref-learned-box{
+  display:flex;flex-direction:column;gap:6px;margin:0 0 8px 0;
+}
+.pref-learned-box .pl-row{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:8px 11px;border-radius:var(--radius-sm);
+  background:rgba(45,212,191,0.05);
+  border:1px solid rgba(45,212,191,0.22);
+  font-size:12px;line-height:1.45;color:var(--text-secondary);
+}
+.pref-learned-box .pl-row.pl-pending{
+  background:rgba(99,102,241,0.06);
+  border-color:rgba(99,102,241,0.3);
+}
+.pref-learned-box .pl-lead{flex-shrink:0;display:flex;align-items:center;color:rgba(45,212,191,0.85)}
+.pref-learned-box .pl-pending .pl-lead{color:rgba(129,140,248,0.95)}
+.pref-learned-box .pl-text{flex:1;min-width:0;color:var(--text-primary,#e4e4e7)}
+.pref-learned-box .pl-text b{font-weight:600}
+.pref-learned-box .pl-hint{
+  display:block;font-size:10.5px;opacity:0.65;margin-top:2px;
+}
+.pref-learned-box .pl-actions{display:flex;gap:6px;flex-shrink:0}
+.pref-learned-box .pl-btn{
+  font:inherit;font-size:11px;font-weight:600;cursor:pointer;
+  padding:4px 12px;border-radius:6px;border:1px solid transparent;
+  transition:background .15s ease,border-color .15s ease;
+}
+.pref-learned-box .pl-confirm{
+  background:rgba(99,102,241,0.18);border-color:rgba(99,102,241,0.4);
+  color:#c7d2fe;
+}
+.pref-learned-box .pl-confirm:hover{background:rgba(99,102,241,0.3)}
+.pref-learned-box .pl-dismiss{
+  background:transparent;border-color:rgba(148,163,184,0.3);
+  color:var(--text-secondary);
+}
+.pref-learned-box .pl-dismiss:hover{background:rgba(148,163,184,0.12)}
+.pref-learned-box .pl-resolved{opacity:0.75}
 
 /* Icon + text column */
 .mem-prefetch-chip .mp-icon{

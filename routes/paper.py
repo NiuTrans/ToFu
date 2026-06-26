@@ -87,7 +87,9 @@ from lib.paper import (  # noqa: F401  — back-compat re-exports
     _cleanup_stale_report_tasks,
     _cleanup_stale_translate_tasks,
     _ensure_paper_images,
+    _backfill_library_title,
     _ensure_title_heading,
+    _extract_title_from_report,
     _execute_report_tool,
     _extract_arxiv_id,
     _extract_paper_figures,
@@ -97,6 +99,13 @@ from lib.paper import (  # noqa: F401  — back-compat re-exports
     _lookup_paper_title,
     _new_report_task,
     _new_translate_task,
+    _new_qa_task,
+    _append_qa_event,
+    _cleanup_stale_qa_tasks,
+    _qa_latest_for,
+    _qa_runtime,
+    _run_qa_task,
+    build_qa_messages,
     _paper_hash,
     _report_dedup_index,
     fetch_arxiv_title,
@@ -311,10 +320,23 @@ async def start_report_task():
                             phash, lang, len(row['report']))
                 enriched = _inject_images_into_report(row['report'], images, lang=lang)
                 enriched = _ensure_title_heading(enriched, phash)
+                # Self-heal a sidebar title still stuck at the bare arXiv:<id>
+                # from the cached report's Paper Card (cached reports never go
+                # through the engine's backfill). Only placeholder rows change.
+                resolved_title = ''
+                card_title = _extract_title_from_report(row['report'])
+                if card_title:
+                    try:
+                        resolved_title = await asyncio.to_thread(
+                            _backfill_library_title, phash, card_title)
+                    except Exception as e:
+                        logger.warning('[Paper:Report] Cache-path title backfill failed '
+                                       'hash=%s: %s', phash, e)
                 return jsonify({
                     'ok': True, 'cached': True,
                     'report': enriched, 'paper_hash': phash,
                     'meta': _parse_report_meta(row),
+                    'resolvedTitle': resolved_title,
                 })
         except Exception as e:
             logger.warning('[Paper:Report] DB cache lookup failed (will start task): %s', e)
@@ -455,6 +477,12 @@ async def poll_report_task():
         resp['report'] = task.get('enriched_text') or task.get('full_text', '')
         if task.get('report_meta'):
             resp['meta'] = task['report_meta']
+        if task.get('resolved_title'):
+            resp['resolvedTitle'] = task['resolved_title']
+    if task['status'] == 'aborted':
+        # User stopped generation — return whatever partial text was produced
+        # so the frontend can show it read-only under a "stopped" banner.
+        resp['partial'] = task.get('full_text', '')
     if task['status'] == 'error':
         resp['error'] = task.get('error', '')
     return jsonify(resp)
@@ -773,6 +801,142 @@ async def get_report_cache():
         logger.warning('[Paper:Report:Cache] Lookup failed: %s', e)
 
     return jsonify({'ok': False})
+
+
+# ══════════════════════════════════════════════════════
+#  Agentic Q&A (server-owned TaskRuntime task)
+# ══════════════════════════════════════════════════════
+
+@api_v1_paper_bp.route('/api/v1/paper/qa/start', methods=['POST'])
+async def start_qa_task():
+    """Start a background agentic Q&A task for one question.
+
+    Unlike the legacy stateless ``/api/paper/chat``, this runs a TaskRuntime
+    tool-calling loop (web_search / fetch_url) with section-aware context: the
+    full generated report + the question-relevant paper sections (no blind
+    100k truncation). The frontend polls ``/api/v1/paper/qa/poll``.
+
+    Body JSON:
+        question: str — the user's question (required)
+        paper_text: str — full parsed paper text (required)
+        paper_hash: str (optional) — cache key; computed from text if missing.
+        lang: str (optional) — 'zh' for Chinese answer, else 'en'. Default 'en'.
+        history: list (optional) — prior [{role, content}, ...] dialogue turns.
+        model: str (optional)
+        title: str (optional) — client title (race fallback for logging).
+
+    Returns: {ok: true, task_id, paper_hash, running: true}
+    """
+    data = await async_parse_body()
+    question = (data.get('question') or '').strip()
+    paper_text = (data.get('paper_text') or '').strip()
+    if not question:
+        return api_bad_request('No question provided')
+    if not paper_text:
+        return api_bad_request('No paper_text provided')
+
+    lang = data.get('lang', 'en') or 'en'
+    model = data.get('model') or None
+    phash = (data.get('paper_hash') or '').strip() or _paper_hash(paper_text)
+    history = data.get('history') if isinstance(data.get('history'), list) else []
+    client_title = (data.get('title') or '').strip()
+
+    # Look up the generated report for this paper (so the model can answer
+    # questions about report-only claims). Best-effort — Q&A still works
+    # without a report (model answers from the paper sections alone).
+    report_md = ''
+    try:
+        row = await async_fetchone(
+            "SELECT report FROM paper_reports WHERE paper_hash = ? AND lang = ?",
+            (phash, lang), domain=DOMAIN_CHAT,
+        )
+        if row and row['report']:
+            report_md = row['report']
+        else:
+            # Fall back to the report in the other language if the requested
+            # one isn't generated yet — a report in any language still helps.
+            row2 = await async_fetchone(
+                "SELECT report FROM paper_reports WHERE paper_hash = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (phash,), domain=DOMAIN_CHAT,
+            )
+            if row2 and row2['report']:
+                report_md = row2['report']
+    except Exception as e:
+        logger.warning('[Paper:QA] Report lookup failed for hash=%s (Q&A continues '
+                       'without report): %s', phash, e)
+
+    messages, diag = build_qa_messages(
+        question, paper_text, report_md, history=history, lang=lang)
+
+    task_id = f'qa_{int(time.time() * 1000)}_{phash[:8]}_{lang}'
+    task = _new_qa_task(task_id, phash, lang, model,
+                        question=question, client_title=client_title)
+    logger.info('[Paper:QA] Starting task %s — hash=%s lang=%s sections=%d/%d '
+                'report=%s q=%.80s',
+                task_id, phash, lang, diag['n_sections_selected'],
+                diag['n_sections_total'], diag['report_present'], question)
+    _qa_runtime.spawn(task_id, _run_qa_task, task, messages)
+
+    return jsonify({
+        'ok': True, 'task_id': task_id, 'paper_hash': phash,
+        'running': True, 'reportPresent': diag['report_present'],
+    })
+
+
+@api_v1_paper_bp.route('/api/v1/paper/qa/poll', methods=['GET'])
+async def poll_qa_task():
+    """Poll a Q&A task for new events (same shape as the report poll).
+
+    Query params: task_id, cursor (default 0).
+    Returns: {ok, status, events, next_cursor, paper_hash, answer? (if done)}.
+    """
+    task_id = request.args.get('task_id', '').strip()
+    try:
+        cursor = int(request.args.get('cursor', 0))
+    except (ValueError, TypeError) as e:
+        logger.debug('[Paper:QA:Poll] bad cursor: %s', e)
+        cursor = 0
+    if not task_id:
+        return api_bad_request('task_id required')
+
+    task = _qa_runtime.get(task_id)
+    if not task:
+        logger.debug('[Paper:QA:Poll] Unknown task_id=%s', task_id)
+        return api_not_found('task not found (may have expired)')
+
+    with task['events_lock']:
+        total = len(task['events'])
+        cursor = max(0, min(cursor, total))
+        new_events = list(task['events'][cursor:])
+
+    resp = {
+        'ok': True,
+        'status': task['status'],
+        'events': new_events,
+        'next_cursor': total,
+        'paper_hash': task['paper_hash'],
+    }
+    if task['status'] == 'done':
+        resp['answer'] = task.get('full_text', '')
+    if task['status'] == 'error':
+        resp['error'] = task.get('error', '')
+    return jsonify(resp)
+
+
+@api_v1_paper_bp.route('/api/v1/paper/qa/abort', methods=['POST'])
+async def abort_qa_task():
+    """Abort a running Q&A task (best-effort)."""
+    data = await async_parse_body()
+    task_id = (data.get('task_id') or '').strip()
+    if not task_id:
+        return api_bad_request('task_id required')
+    task = _qa_runtime.get(task_id)
+    if not task:
+        return api_not_found('task not found')
+    task['abort_event'].set()
+    logger.info('[Paper:QA] Abort requested for task %s', task_id)
+    return api_ok()
 
 
 @api_v1_paper_bp.route('/api/v1/paper/translate/start', methods=['POST'])

@@ -15,7 +15,11 @@ import os
 import unittest
 
 from lib.project_mod import config as cfg
-from lib.project_mod.indexer import _JOURNAL_FILE, get_context_for_prompt
+from lib.project_mod.indexer import (
+    _TOFU_ARTIFACT_IGNORES,
+    _JOURNAL_FILE,
+    get_context_for_prompt,
+)
 from lib.project_mod.scanner import clear_project, set_project_paths
 
 
@@ -135,6 +139,112 @@ class JournalAutoCreateTest(_TmpProject):
         self.assertIn('MANDATORY', ctx)
         self.assertIn(f'Project Journal — {_JOURNAL_FILE}', ctx)
         self.assertTrue(os.path.isfile(self.journal_path))
+
+
+class TofuArtifactGitignoreTest(_TmpProject):
+    """The assistant's hidden runtime artifacts are gitignored via one glob.
+
+    The mechanism writes a SINGLE ``.tofu*`` pattern (from
+    ``lib.agent_artifacts.GITIGNORE_PATTERN``) so every current AND future
+    ``.tofu``-prefixed artifact is covered without future edits.
+    """
+
+    @property
+    def gitignore_path(self):
+        return os.path.join(self.proj, '.gitignore')
+
+    def test_glob_appended_in_git_repo(self):
+        os.makedirs(os.path.join(self.proj, '.git'))
+        set_project_paths([self.proj])
+        get_context_for_prompt(self.proj)
+        with open(self.gitignore_path) as f:
+            body = f.read()
+        # Exactly the single glob from the registry, covering .tofu/,
+        # .tofu_trash/, .tofu_sandbox/, .tofu_env.json AND any future one.
+        self.assertIn('.tofu*', body)
+        for entry in _TOFU_ARTIFACT_IGNORES:
+            self.assertIn(entry, body)
+
+    def test_glob_appended_when_gitignore_already_exists(self):
+        with open(self.gitignore_path, 'w') as f:
+            f.write('node_modules/\n')
+        set_project_paths([self.proj])
+        get_context_for_prompt(self.proj)
+        with open(self.gitignore_path) as f:
+            body = f.read()
+        self.assertIn('node_modules/', body)   # preserved
+        self.assertIn('.tofu*', body)
+
+    def test_no_stray_gitignore_in_non_git_dir(self):
+        set_project_paths([self.proj])
+        get_context_for_prompt(self.proj)
+        # Without git anywhere up the tree, no .gitignore is conjured.
+        self.assertFalse(os.path.exists(self.gitignore_path))
+
+    def test_artifacts_ignored_when_parent_is_git_repo(self):
+        # Selected project is a SUB-DIRECTORY of a git repo — artifacts would
+        # still show in the parent repo's `git status`, so a .gitignore is
+        # created in the selected dir even though it has no .git of its own.
+        os.makedirs(os.path.join(self._tmp, '.git'))
+        set_project_paths([self.proj])
+        get_context_for_prompt(self.proj)
+        self.assertTrue(os.path.isfile(self.gitignore_path))
+        with open(self.gitignore_path) as f:
+            self.assertIn('.tofu*', f.read())
+
+    def test_glob_not_duplicated_across_calls(self):
+        os.makedirs(os.path.join(self.proj, '.git'))
+        set_project_paths([self.proj])
+        get_context_for_prompt(self.proj)
+        get_context_for_prompt(self.proj)  # second build must be a no-op
+        with open(self.gitignore_path) as f:
+            body = f.read()
+        self.assertEqual(body.count('.tofu*'), 1)
+
+    def test_readonly_root_gets_no_gitignore(self):
+        os.makedirs(os.path.join(self.proj, '.git'))
+        set_project_paths([self.proj], readonly_paths=[self.proj])
+        get_context_for_prompt(self.proj)
+        # Read-only primary → we never write into it.
+        self.assertFalse(os.path.exists(self.gitignore_path))
+
+
+class AgentArtifactRegistryTest(unittest.TestCase):
+    """The central artifact registry recognises present + future .tofu* names."""
+
+    def test_known_names_are_recognised(self):
+        from lib.agent_artifacts import (
+            KNOWN_ARTIFACT_NAMES,
+            is_agent_artifact,
+        )
+        for name in KNOWN_ARTIFACT_NAMES:
+            self.assertTrue(is_agent_artifact(name), name)
+
+    def test_future_prefixed_name_recognised_without_code_change(self):
+        from lib.agent_artifacts import is_agent_artifact
+        # A hypothetical artifact added next year — the prefix convention
+        # means it is covered automatically.
+        self.assertTrue(is_agent_artifact('.tofu_cache'))
+        self.assertTrue(is_agent_artifact('.tofu_whatever_2027'))
+
+    def test_basename_and_full_path_both_work(self):
+        from lib.agent_artifacts import is_agent_artifact
+        self.assertTrue(is_agent_artifact('/some/project/.tofu_trash'))
+        self.assertTrue(is_agent_artifact('.tofu/'))
+
+    def test_non_artifacts_rejected(self):
+        from lib.agent_artifacts import is_agent_artifact
+        for name in ('lib', 'src', '.git', '.gitignore', '.tofurc_unrelated_no',
+                     '', 'tofu', '.venv'):
+            # '.tofurc...' DOES start with '.tofu' → it WOULD match; exclude it.
+            if name == '.tofurc_unrelated_no':
+                self.assertTrue(is_agent_artifact(name))  # documents the prefix rule
+                continue
+            self.assertFalse(is_agent_artifact(name), name)
+
+    def test_gitignore_pattern_is_a_single_glob(self):
+        from lib.agent_artifacts import ARTIFACT_PREFIX, GITIGNORE_PATTERN
+        self.assertEqual(GITIGNORE_PATTERN, ARTIFACT_PREFIX + '*')
 
 
 if __name__ == '__main__':

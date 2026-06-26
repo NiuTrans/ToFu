@@ -167,6 +167,10 @@ _BUNDLE_FILES = [
     # after main.js. Consumed by ui/chat_render.js (renderTurnCtxNote) and
     # main/main_send_pipeline.js (buildTurnCtxSnapshot).
     'info-rail.js',
+    # Mobile popover portaling (timer/optimizer) + mobile flow picker.
+    # MUST come after timer.js / optimizer.js / main_toolbar_ui.js — it wraps
+    # their globals (toggleTimerPanel / toggleOptimizerPanel / setActiveFlow).
+    'mobile_panels.js',
 ]
 
 # Global state

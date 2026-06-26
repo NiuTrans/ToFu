@@ -98,10 +98,14 @@ class SubAgent:
         self.model = self._resolve_model(spec, model)
         self.thinking_enabled = thinking_enabled
         self.on_event = on_event
-        # Optional per-token sink: ``stream_sink(kind, chunk)`` where kind is
-        # 'content' | 'thinking'. Lets a caller (the orchestration engine)
-        # stream this sub-agent's output live into a chat bubble, identical to
-        # a first-class agent turn. No-op when unset (tests / swarm use).
+        # Optional per-token sink: ``stream_sink(kind, chunk, **meta)`` where
+        # kind is 'content' | 'thinking' | 'phase'. 'content'/'thinking' carry
+        # an output chunk; 'phase' carries a transient status detail (+ a
+        # ``phase=`` kwarg) so the engine can surface "waiting for model…" /
+        # "retrying…" on the live bubble while dispatch is in flight. Lets a
+        # caller (the orchestration engine) stream this sub-agent's output live
+        # into a chat bubble, identical to a first-class agent turn. No-op when
+        # unset (tests / swarm use).
         self.stream_sink = stream_sink
         self.abort_check = abort_check or (lambda: False)
         self.project_path = project_path
@@ -293,6 +297,32 @@ class SubAgent:
 
     # ─────────────────────────────────────────────────
     #  Execution
+    def _emit_stream_phase(self, phase: str, detail: str, **meta):
+        """Push a transient 'phase' status through the stream sink.
+
+        Used to surface "waiting for the model…" / "retrying…" on the live
+        chat bubble while this agent's dispatch is in flight (e.g. blocked on
+        a rate-limited strict_model). The engine's stream_sink maps it to a
+        ``step_phase`` event → the EndpointEventAdapter emits a wire ``phase``
+        event (transient UI, per the retry-notification-phase-not-delta
+        convention — NEVER a delta, so it can't pollute the assistant content).
+        No-op when no stream_sink is wired (swarm / unit tests). Never raises.
+        """
+        if not self.stream_sink:
+            return
+        try:
+            self.stream_sink('phase', detail or '', phase=phase, **meta)
+        except TypeError:
+            # An older 2-arg stream_sink (kind, chunk) — degrade gracefully:
+            # the phase is best-effort UX, so just drop it rather than crash.
+            logger.debug('[Agent:%s] stream_sink lacks phase support — '
+                         'dropping phase=%s', self.agent_id, phase)
+        except Exception as _se:
+            logger.debug('[Agent:%s] stream_sink phase error (non-fatal): %s',
+                         self.agent_id, _se)
+
+    # ─────────────────────────────────────────────────
+    #  Execution
     # ─────────────────────────────────────────────────
 
     def run(self) -> SubAgentResult:
@@ -452,8 +482,15 @@ class SubAgent:
             self.result.rounds_used = round_num
             round_start = time.time()
 
-            logger.debug('[Agent:%s] ── Round %d/%d START ── messages=%d',
-                         self.agent_id, round_num, self.max_rounds, len(self.messages))
+            # INFO (not debug): this is the per-round heartbeat that reaches
+            # app.log. Without it a long-running flow/swarm worker that is
+            # merely SLOW (e.g. blocked on a rate-limited strict_model dispatch)
+            # is indistinguishable from a wedged one — the round START with no
+            # matching "LLM done" line below is precisely what tells an operator
+            # "it began round N and is still waiting on the model".
+            logger.info('[Agent:%s] \u2500\u2500 Round %d/%s START \u2500\u2500 messages=%d',
+                        self.agent_id, round_num,
+                        self.max_rounds or '\u221e', len(self.messages))
 
             # ── LLM call (uses DI-injected or default build_body / dispatch_stream) ──
             body = self._build_body(
@@ -518,6 +555,32 @@ class SubAgent:
                         logger.debug('[Agent:%s] stream_sink thinking error '
                                      '(non-fatal): %s', self.agent_id, _se)
 
+            # ── Live "waiting for the model" signal ──
+            # Before the (potentially minutes-long, rate-limited) dispatch, push
+            # a transient 'phase' through the stream sink so a flow/swarm worker
+            # bubble shows "waiting for model…" instead of a bare static pulse.
+            # The first content/thinking delta clears it on the frontend. The
+            # on_retry hook below refreshes it while the dispatcher cycles on
+            # cooldown (rate-limited strict_model) — the exact 5-minute
+            # first-token stall the user saw as a "hang". Phase, not delta:
+            # transient UI, never pollutes the assistant content.
+            self._emit_stream_phase('waiting_model',
+                                    'Sent to the model, waiting for it to '
+                                    'start replying…')
+
+            def _on_dispatch_retry(attempt=0, reason='', status_code=0):
+                # Surface dispatch retries / cooldown waits as a transient
+                # 'retrying' phase on the worker bubble. Bounded by the
+                # dispatcher itself (fires on the 1st cooldown cycle, then
+                # every ~20 cycles ≈ 6s), so no per-cycle spam here.
+                _r = reason or 'Retrying'
+                if status_code == 429 and 'rate' not in _r.lower():
+                    _r = f'{_r} (rate-limited)'
+                self._emit_stream_phase(
+                    'retrying',
+                    f'{_r}… (attempt {attempt})' if attempt else f'{_r}…',
+                    attempt=attempt, status_code=status_code)
+
             try:
                 msg, stop_reason, usage = self._dispatch_stream(
                     body,
@@ -526,6 +589,7 @@ class SubAgent:
                     abort_check=self.abort_check,
                     prefer_model=body.get('model', ''),
                     log_prefix=f'[{self.agent_id}]',
+                    on_retry=_on_dispatch_retry,
                 )
             except Exception as e:
                 logger.error('[%s] LLM call failed round %d: %s', self.agent_id, round_num, e, exc_info=True)
@@ -551,9 +615,11 @@ class SubAgent:
                 self.result.prompt_tokens += usage.get('prompt_tokens', 0)
                 self.result.completion_tokens += usage.get('completion_tokens', 0)
                 self.result.total_tokens += usage.get('total_tokens', 0)
-            logger.debug('[Agent:%s] Round %d LLM done in %.1fs — stop=%s usage=%s content_len=%d',
-                         self.agent_id, round_num, round_elapsed, stop_reason,
-                         usage, len(''.join(content_parts)))
+            logger.info('[Agent:%s] Round %d LLM done in %.1fs \u2014 stop=%s '
+                        'content_len=%d thinking_len=%d total_tokens=%d',
+                        self.agent_id, round_num, round_elapsed, stop_reason,
+                        len(''.join(content_parts)), len(''.join(thinking_parts)),
+                        self.result.total_tokens)
 
             # Save thinking for trace
             if thinking_parts:

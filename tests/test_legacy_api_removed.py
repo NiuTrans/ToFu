@@ -49,6 +49,9 @@ ALLOWED_NON_V1 = frozenset({
     '/api/oauth/login',
     '/api/oauth/callback',
     '/api/oauth/logout',
+    # Browser-side token exchange (B1 geo-block workaround): the browser
+    # POSTs a token it exchanged itself. Browser-flow carve-out, like above.
+    '/api/oauth/store-token',
     # SSE / long-poll streams
     '/api/chat/stream/<task_id>',
     '/api/paper/fetch-arxiv-stream',
@@ -114,6 +117,14 @@ def test_no_legacy_api_routes_remain():
     """
     app = _build_app_open_mode()
 
+    # The migration policy governs IN-TREE (core) routes only. External
+    # plugin blueprints (mounted via the tofu.blueprints entry-point group,
+    # e.g. liantong_kb / liantong_resume) legitimately own their own
+    # ``/api/<plugin>/`` namespace and are environment-dependent (present
+    # only when that plugin is installed), so they're out of scope here.
+    from routes import ALL_BLUEPRINTS
+    core_bp_names = {bp.name for bp in ALL_BLUEPRINTS}
+
     legacy = []
     for rule in app.url_map.iter_rules():
         path = rule.rule
@@ -123,6 +134,9 @@ def test_no_legacy_api_routes_remain():
             continue
         if path in ALLOWED_NON_V1:
             continue
+        bp_name = rule.endpoint.split('.')[0] if '.' in rule.endpoint else ''
+        if bp_name and bp_name not in core_bp_names:
+            continue  # external plugin route — not subject to v1 migration
         legacy.append(path)
 
     assert not legacy, (

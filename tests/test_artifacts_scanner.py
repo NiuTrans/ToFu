@@ -256,7 +256,7 @@ class TestEdgeCases:
 
 class TestBackfillRoute:
     def _seed_conv(self, flask_client, conv_id, messages):
-        # Use the real API to seed: PUT /api/conversations/<id>
+        # Use the real API to seed: PUT /api/v1/conversations/<id>
         payload = {
             'title':     'scan-test',
             'messages':  messages,
@@ -264,7 +264,7 @@ class TestBackfillRoute:
             'updatedAt': 1700000000000,
             'settings':  {},
         }
-        r = flask_client.put(f'/api/conversations/{conv_id}', json=payload)
+        r = flask_client.put(f'/api/v1/conversations/{conv_id}', json=payload)
         assert r.status_code in (200, 201), r.get_data(as_text=True)
 
     def test_backfill_round_trip(self, flask_client):
@@ -284,7 +284,7 @@ class TestBackfillRoute:
         conv_id = 'conv-backfill-' + _uuid.uuid4().hex[:8]
         self._seed_conv(flask_client, conv_id, msgs)
 
-        r = flask_client.post(f'/api/artifacts/scan/{conv_id}')
+        r = flask_client.post('/api/v1/artifacts/scan', json={'conv_id': conv_id})
         assert r.status_code == 200, r.get_data(as_text=True)
         body = r.get_json()
         assert body['conv_id'] == conv_id
@@ -293,13 +293,14 @@ class TestBackfillRoute:
         assert any(a['msg_id'] == msg_id_1 for a in body['artifacts'])
 
         # Idempotent: a second backfill creates 0 new rows (dedupe).
-        flask_client.post(f'/api/artifacts/scan/{conv_id}')
-        listing = flask_client.get(f'/api/artifacts/conv/{conv_id}').get_json()
+        flask_client.post('/api/v1/artifacts/scan', json={'conv_id': conv_id})
+        listing = flask_client.get(f'/api/v1/artifacts?conv={conv_id}').get_json()
         # Only the assistant-1 message produced an artifact.
         assistant_1_arts = [a for a in listing['artifacts']
                             if a['msg_id'] == msg_id_1]
         assert len(assistant_1_arts) == 1
 
     def test_backfill_404_on_missing_conv(self, flask_client):
-        r = flask_client.post('/api/artifacts/scan/no-such-conv-xyz')
+        r = flask_client.post('/api/v1/artifacts/scan',
+                              json={'conv_id': 'no-such-conv-xyz'})
         assert r.status_code == 404

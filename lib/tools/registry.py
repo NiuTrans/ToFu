@@ -395,17 +395,38 @@ class ToolContext:
 
     @property
     def has_conv_ref(self) -> bool:
-        """True if any message carries a ``[REFERENCED_CONVERSATION`` marker.
+        """True when a USER turn actually attached a referenced conversation.
 
-        Mirrors the legacy detection in ``_assemble_tool_list``: a
-        conversation @-mention injects this marker, which enables the
-        conversation-reference tools.
+        Enables the conversation-reference tools (``list_conversations`` /
+        ``get_conversation``) only when the user genuinely attached a
+        conversation via the ``@`` affordance — never because the literal
+        token happens to appear in free-form prose.
+
+        Detection, in priority order, scanning **user-role messages only**:
+          1. The structured ``convRefs`` / ``convRefTexts`` field — the
+             authoritative signal set by the send path when a reference is
+             attached (present on raw conversation rows).
+          2. The server-injected wrapper signature
+             ``[REFERENCED_CONVERSATION`` ... ``title="`` — what
+             ``conv_message_builder`` prepends to the user message after
+             resolving a ref (present on API-built messages, which no longer
+             carry ``convRefs``). The ``title="`` guard distinguishes the
+             real injected block from someone quoting the bare token.
+
+        Assistant content is NEVER scanned: a conversation *about* this
+        feature (where the model quotes the marker, as in this very chat)
+        must not self-enable the tools and break the prompt-cache latch.
         """
         if not self.messages:
             return False
         for m in self.messages:
+            if m.get('role') != 'user':
+                continue
+            if m.get('convRefs') or m.get('convRefTexts'):
+                return True
             c = m.get('content', '')
-            if isinstance(c, str) and '[REFERENCED_CONVERSATION' in c:
+            if isinstance(c, str) and '[REFERENCED_CONVERSATION' in c \
+                    and 'title="' in c:
                 return True
         return False
 

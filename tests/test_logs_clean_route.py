@@ -110,11 +110,22 @@ class LogsCleanRouteTest(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
 
     def test_unauthenticated_rejected(self):
-        async def go():
-            return await self.app.test_client().post(
-                '/api/v1/logs/clean', json={'text': 'hello'})
-        r = _new_loop_run(go())
-        self.assertEqual(r.status_code, 401)
+        from lib.auth_mode import reset_for_tests
+        prev = os.environ.get('TOFU_AUTH_MODE')
+        os.environ['TOFU_AUTH_MODE'] = 'private'
+        reset_for_tests()
+        try:
+            async def go():
+                return await self.app.test_client().post(
+                    '/api/v1/logs/clean', json={'text': 'hello'})
+            r = _new_loop_run(go())
+            self.assertEqual(r.status_code, 401)
+        finally:
+            if prev is None:
+                os.environ.pop('TOFU_AUTH_MODE', None)
+            else:
+                os.environ['TOFU_AUTH_MODE'] = prev
+            reset_for_tests()
 
 
 class ExtractFileChangesRouteTest(unittest.TestCase):
@@ -193,12 +204,23 @@ class ExtractFileChangesRouteTest(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
 
     def test_unauthenticated_rejected(self):
-        async def go():
-            return await self.app.test_client().post(
-                '/api/v1/messages/extract-file-changes',
-                json={'toolRounds': []})
-        r = _new_loop_run(go())
-        self.assertEqual(r.status_code, 401)
+        from lib.auth_mode import reset_for_tests
+        prev = os.environ.get('TOFU_AUTH_MODE')
+        os.environ['TOFU_AUTH_MODE'] = 'private'
+        reset_for_tests()
+        try:
+            async def go():
+                return await self.app.test_client().post(
+                    '/api/v1/messages/extract-file-changes',
+                    json={'toolRounds': []})
+            r = _new_loop_run(go())
+            self.assertEqual(r.status_code, 401)
+        finally:
+            if prev is None:
+                os.environ.pop('TOFU_AUTH_MODE', None)
+            else:
+                os.environ['TOFU_AUTH_MODE'] = prev
+            reset_for_tests()
 
 
 if __name__ == '__main__':

@@ -132,7 +132,10 @@ class EventType:
     COMPACTION = 'compaction'
     COMPACTION_DONE = 'compaction_done'
     MEMORY_PREFETCH = 'memory_prefetch'
+    PREFERENCES_APPLIED = 'preferences_applied'
+    PREFERENCE_LEARNED = 'preference_learned'
     PROJECT_EXTERNAL_EDIT = 'project_external_edit'
+    WORKSPACE_ROOT_ADDED = 'workspace_root_added'
     # ── interaction (require client response) ──
     HUMAN_GUIDANCE_REQUEST = 'human_guidance_request'
     WRITE_APPROVAL_REQUEST = 'write_approval_request'
@@ -197,7 +200,11 @@ _SPECS: tuple[EventSpec, ...] = (
               'A tool call began executing.',
               fields={'roundNum': 'round index', 'toolName': 'tool name',
                       'toolCallId': 'tool-call id', 'query': 'display string',
-                      'toolArgs': 'serialized args'}),
+                      'toolArgs': 'serialized args',
+                      'status': "(optional) 'rejected' when the tool was a "
+                                'hallucination and never ran',
+                      '_rejected': '(optional) {attempted, suggestions} for a '
+                                   'rejected hallucinated tool'}),
     EventSpec(EventType.TOOL_PROGRESS, _C.TOOL,
               'Streaming progress emitted by a long-running tool.',
               fields={'roundNum': 'round index', 'toolCallId': 'tool-call id',
@@ -206,7 +213,11 @@ _SPECS: tuple[EventSpec, ...] = (
               'A tool produced a (possibly partial) result payload.',
               fields={'roundNum': 'round index', 'toolCallId': 'tool-call id',
                       'results': 'list of {toolName,title,snippet,source}',
-                      'query': 'display string'}),
+                      'query': 'display string',
+                      'status': "(optional) 'rejected' for a hallucinated tool "
+                                'that was rejected without executing',
+                      '_rejected': '(optional) {attempted, suggestions} for a '
+                                   'rejected hallucinated tool'}),
     EventSpec(EventType.TOOL_COMPLETE, _C.TOOL,
               'A tool call finished; carries the final tool message.',
               fields={'roundNum': 'round index', 'toolCallId': 'tool-call id',
@@ -235,9 +246,31 @@ _SPECS: tuple[EventSpec, ...] = (
     EventSpec(EventType.MEMORY_PREFETCH, _C.CONTEXT,
               'Memory-prefetch pipeline stage update.',
               fields={'stage': 'pipeline stage', 'results': 'retrieved notes'}),
+    EventSpec(EventType.PREFERENCES_APPLIED, _C.CONTEXT,
+              'The bounded personal-preference profile was injected into this '
+              'turn (always-on, cache-safe _isMeta tail). Drives the quiet '
+              '"preferences applied" chip so the user can see the assistant '
+              'is honouring their stored preferences.',
+              fields={'chars': 'profile size in chars',
+                      'items': 'list of preference bullet lines (for the chip)'}),
+    EventSpec(EventType.PREFERENCE_LEARNED, _C.CONTEXT,
+              'A preference was learned/reinforced by the post-turn '
+              'consolidation pass. Surfaces a "Noted: you prefer X" moment; '
+              'when pending=true it awaits user confirm (undo/edit affordance).',
+              fields={'kind': 'reinforced|pending',
+                      'summary': 'one-line description of what was learned',
+                      'pending': 'true when awaiting user confirm (new pref)',
+                      'id': 'pending proposal id (empty for auto-reinforced)'}),
     EventSpec(EventType.PROJECT_EXTERNAL_EDIT, _C.CONTEXT,
               'A project file changed on disk outside the agent (drift notice).',
               fields={'path': 'file path', 'action': 'create|modify|delete'}),
+    EventSpec(EventType.WORKSPACE_ROOT_ADDED, _C.CONTEXT,
+              'An absolute-path write auto-registered a NEW extra workspace '
+              'root (the silent workspace expansion that was previously '
+              'invisible — no tool round, only an app.log line). Surfaces a '
+              'brief "added workspace root X" notice so the user knows the '
+              'agent widened the project scope.',
+              fields={'roots': 'list of {rootName, path} auto-registered this tool call'}),
     # ─────────────────── interaction (need client reply) ───────────────────
     EventSpec(EventType.HUMAN_GUIDANCE_REQUEST, _C.INTERACTION,
               'Agent asked the human a question (ask_human tool); turn pauses.',

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tofu"
-version = "0.11.0"
+version = "0.13.0"
 description = "Tofu (豆腐) — Self-hosted AI assistant with Flask backend and vanilla JS frontend"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,7 +41,7 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --strict-markers"
 markers = [
     "unit: Pure unit tests (no server, no DB)",
     "api: API integration tests (requires PostgreSQL)",

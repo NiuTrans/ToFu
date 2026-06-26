@@ -540,6 +540,10 @@ def _save_conv_blocking(db, conv_id, data):
         'settings': settings, 'msg_count': msg_count, 'search_text': search_text,
     }, insert_cols=_CONV_INSERT_COLS, retry=True)
     update_conversation_fts(db, conv_id, search_text)
+    # Phase 5 dual-write (flag-gated, best-effort): mirror the full-array PUT
+    # into conversation_messages rows. No-op unless TOFU_MESSAGES_ROWS.
+    from lib.database.messages_rows import dual_write_conv
+    dual_write_conv(db, conv_id, raw_messages, now_ms=updated)
     _invalidate_meta_cache()
     return _Defer(api_ok)
 

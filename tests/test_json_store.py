@@ -225,6 +225,57 @@ def test_update_json_atomic_thread_safe():
     _ok(f'update_json_atomic thread-safe under {NUM_THREADS}×{INCREMENTS_PER_THREAD} concurrent increments')
 
 
+_IPC_WORKER_SRC = '''
+import os, sys
+sys.path.insert(0, {root!r})
+from lib.json_store import update_json_atomic
+p = {path!r}
+N = {n}
+def inc(cfg):
+    cfg["count"] = cfg.get("count", 0) + 1
+    return cfg
+for _ in range(N):
+    update_json_atomic(p, inc, default={{}})
+'''
+
+
+def test_update_json_atomic_inter_process_safe():
+    """Concurrent updates from separate PROCESSES must not lose increments.
+
+    Without the sidecar flock, two processes' read-modify-write cycles
+    interleave and clobber each other → final count < expected. With it,
+    every increment lands. Skips cleanly on platforms without fcntl (the
+    flock degrades to a no-op there, so this guarantee doesn't hold).
+    """
+    try:
+        import fcntl  # noqa: F401
+    except ImportError:
+        _ok('inter-process test skipped (no fcntl on this platform)')
+        return
+    import subprocess
+
+    p, _ = _tmp()
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    NUM_PROCS = 4
+    INCREMENTS = 30
+    src = _IPC_WORKER_SRC.format(root=root, path=p, n=INCREMENTS)
+
+    procs = [subprocess.Popen([sys.executable, '-c', src])
+             for _ in range(NUM_PROCS)]
+    for pr in procs:
+        pr.wait()
+    assert all(pr.returncode == 0 for pr in procs), \
+        f'worker(s) failed: {[pr.returncode for pr in procs]}'
+
+    from lib.json_store import read_json
+    final = read_json(p)
+    expected = NUM_PROCS * INCREMENTS
+    assert final == {'count': expected}, \
+        f'inter-process lost updates: expected {expected}, got {final}'
+    _ok(f'update_json_atomic inter-process-safe under {NUM_PROCS}×{INCREMENTS} '
+        f'cross-process increments')
+
+
 def test_update_json_atomic_jsonc_default():
     """update_json_atomic with jsonc=True can read a file with comments."""
     from lib.json_store import update_json_atomic, read_json
@@ -312,6 +363,7 @@ def main():
         test_update_json_atomic_increments,
         test_update_json_atomic_none_skips_write,
         test_update_json_atomic_thread_safe,
+        test_update_json_atomic_inter_process_safe,
         test_update_json_atomic_jsonc_default,
         test_per_path_lock_is_per_path,
         test_write_then_read_json_array,

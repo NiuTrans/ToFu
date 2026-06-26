@@ -40,13 +40,16 @@ hard ``max_iterations`` cap, so a malformed graph can never spin forever.
 
 from __future__ import annotations
 
-import re
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from lib.env_compat import getenv_compat
+from lib.agent_verdict import (
+    STATE_CHANGING_TOOLS_WITH_CODE_EXEC as _STATE_CHANGING_TOOLS,
+    classify_verdict as _classify_verdict_core,
+    detect_stuck as _detect_stuck_core,
+)
 from lib.log import get_logger
 from lib.orchestration import (
     IO_START_REF, MAX_SUBFLOW_DEPTH, expand_subflows,
@@ -80,19 +83,10 @@ _TRACE_OUTPUT_CHARS = 16000
 # critic does. The verdict heuristics below also recognise the VU sentinel.
 _VERIFIER_ROLES = frozenset({'critic', 'reviewer', 'virtual_user'})
 
-# Autopilot graceful-stop sentinel (mirrors lib/tasks_pkg/autopilot.py's
-# _VU_DONE_SENTINEL). A virtual_user emits this when the task is finished.
-_VU_DONE_SENTINEL = '[VU: TASK_DONE]'
-
-# State-changing ("deliverable") tools — mirrors
-# lib/tasks_pkg/endpoint_review.STATE_CHANGING_TOOLS. Kept as a local copy
-# so the engine stays a dependency-free standalone interpreter; if you add
-# a state-changing tool, update BOTH sets.
-_STATE_CHANGING_TOOLS = frozenset({
-    'write_file', 'apply_diff', 'apply_diffs', 'insert_content',
-    'insert_contents', 'run_command', 'create_project', 'generate_image',
-    'code_exec',
-})
+# ``_VU_DONE_SENTINEL`` (autopilot graceful-stop sentinel) and
+# ``_STATE_CHANGING_TOOLS`` (the deliverable-tool set, flat-name variant
+# WITH code_exec — the engine counts from a flat tool-name list) are now
+# imported from ``lib.agent_verdict`` (the single source of truth).
 
 # Endpoint's zero-deliverable guard: after this many consecutive producer
 # turns with zero state-changing tool calls, the loop injects a directive
@@ -116,39 +110,153 @@ _PROGRESS_SUMMARY_CHARS = 2000
 # Stuck detection (endpoint's _detect_stuck): if two consecutive verifier
 # feedbacks are >_STUCK_JACCARD similar, the critic is repeating itself and
 # the loop is not converging — break out instead of burning iterations.
+# The threshold mirrors lib.agent_verdict.STUCK_JACCARD.
 _STUCK_JACCARD = 0.60
 
-_VERDICT_TAG_RE = re.compile(
-    r'\[VERDICT:\s*(STOP|CONTINUE_WORKER|CONTINUE_PLANNER|CONTINUE)\s*\]', re.I)
-_PLAN_DEFECT_RE = re.compile(r'\[PLAN_DEFECT:\s*([^\]]+)\]', re.I)
-# Phrases that mark a "plan defect" as really a worker-execution problem.
-_WORKER_RATIONALIZATIONS = (
-    'worker did', "worker didn't", 'worker did not', 'worker needs',
-    'worker should', 'still ❌', 'remaining ❌', 'remaining items',
-    'more iterations',
-)
-
-# Verdict heuristics for loop verifiers (critic / reviewer output).
-_STOP_RE = re.compile(r'\b(VERDICT:\s*STOP|approved|looks good|all (?:met|pass)|✅)\b', re.I)
-_CONTINUE_RE = re.compile(r'\b(CONTINUE|not met|still (?:failing|broken)|unresolved|❌)\b', re.I)
-
-# Endpoint-faithful guard: a STOP verdict whose feedback STILL contains
-# unresolved markers (❌ / "not met" / "still failing" / "unresolved") is
-# almost always a worker-didn't-finish problem, not a real done signal.
-# We override STOP→CONTINUE in that case, mirroring endpoint mode's
-# _parse_verdict (see lib/tasks_pkg/endpoint_review.py + the
-# anti-analysis-spiral rewrite). Prevents premature loop termination.
-_UNRESOLVED_RE = re.compile(r'(❌|\bNOT met\b|\bstill failing\b|\bunresolved\b)', re.I)
-
-
-def _replan_enabled() -> bool:
-    """Replan kill-switch (shared with endpoint mode): TOFU_ENDPOINT_REPLAN=0
-    disables CONTINUE_PLANNER (downgrades to worker)."""
-    return getenv_compat('TOFU_ENDPOINT_REPLAN', default='1').strip() != '0'
+# Verdict parsing + gating (tag regexes, PLAN_DEFECT gate, STOP-with-
+# unresolved-markers override, replan kill-switch) all live in
+# ``lib.agent_verdict.classify_verdict`` now — see ``_classify_verdict``
+# below, which adapts it to the engine's loose-fallback + virtual_user
+# semantics.
 
 
 class FlowExecutionError(Exception):
     """Raised for structural problems discovered at execution time."""
+
+
+class GraphNavigator:
+    """Pure graph-topology queries over a flattened orchestration definition.
+
+    Holds only the immutable structure — the node map and forward/reverse
+    adjacency — built once from the (subflow-expanded) definition.  Every
+    method here is a PURE function of that structure: no runtime state, no
+    locks, no agent execution.  Extracted from ``FlowExecutor`` (2026-06-24)
+    so the topology layer (walk targets, loop body/exit detection, barrier
+    join, reachability/distance) is separable from the control-execution +
+    verdict + tracing concerns that remain on the executor.
+
+    The executor constructs one of these as ``self._nav`` and delegates all
+    structural questions to it.
+    """
+
+    def __init__(self, nodes: dict[str, dict],
+                 fwd: dict[str, list[str]], rev: dict[str, list[str]]):
+        self.nodes = nodes
+        self.fwd = fwd
+        self.rev = rev
+
+    def node_label(self, nid: str) -> str:
+        n = self.nodes.get(nid) or {}
+        return n.get('name') or n.get('role') or n.get('kind') or nid
+
+    def single_next(self, node_id: str) -> str | None:
+        nexts = self.fwd.get(node_id, [])
+        return nexts[0] if nexts else None
+
+    def find_start(self) -> str:
+        for nid, n in self.nodes.items():
+            if n.get('kind') == 'start':
+                return nid
+        # fall back to a source node
+        for nid in self.nodes:
+            if not self.rev.get(nid):
+                return nid
+        raise FlowExecutionError('no start node and no source node')
+
+    def loop_parts(self, lid: str) -> tuple[str | None, str | None]:
+        """Return (body_entry, exit_node) for a loop node.
+
+        body_entry = a successor that can reach the loop again (cycle).
+        exit_node  = the other successor (preferring one that reaches stop).
+        """
+        succ = list(self.fwd.get(lid, []))
+        body, exit_n = None, None
+        for s in succ:
+            if self.can_reach(s, lid, avoid=lid):
+                body = body or s
+            else:
+                exit_n = exit_n or s
+        # Fallbacks if heuristic was inconclusive.
+        if body is None and succ:
+            body = succ[0]
+        if exit_n is None:
+            for s in succ:
+                if s != body:
+                    exit_n = s
+                    break
+        return body, exit_n
+
+    def find_loop_planner(self, lid: str, body_entry: str | None) -> str | None:
+        """Find the planner node feeding a loop.
+
+        = a role predecessor of the loop node that is NOT part of the loop
+        body (i.e. cannot be reached from body_entry without leaving via the
+        loop). In the canonical endpoint graph (start→planner→loop,
+        critic→loop) this isolates ``planner`` from the body's ``critic``.
+        """
+        for pred in self.rev.get(lid, []):
+            n = self.nodes.get(pred) or {}
+            if n.get('type') != 'role':
+                continue
+            if body_entry and self.can_reach(body_entry, pred, avoid=lid):
+                continue   # this predecessor is inside the loop body (e.g. critic)
+            return pred
+        return None
+
+    def find_common_barrier(self, branches: list[str]) -> str | None:
+        """Find the nearest barrier node reachable from all branches."""
+        if not branches:
+            return None
+        reach_sets = [self.reachable(b) for b in branches]
+        common = set.intersection(*reach_sets) if reach_sets else set()
+        barriers = [nid for nid in common if self.nodes[nid].get('kind') == 'barrier']
+        if barriers:
+            # nearest by BFS distance from first branch
+            return min(barriers, key=lambda n: self.distance(branches[0], n))
+        # fall back to any common node
+        if common:
+            return min(common, key=lambda n: self.distance(branches[0], n))
+        return None
+
+    def reachable(self, start: str) -> set[str]:
+        seen, stack = set(), [start]
+        while stack:
+            n = stack.pop()
+            if n in seen:
+                continue
+            seen.add(n)
+            stack.extend(self.fwd.get(n, []))
+        return seen
+
+    def can_reach(self, start: str, target: str, *, avoid: str = '') -> bool:
+        seen, stack = set(), [start]
+        while stack:
+            n = stack.pop()
+            if n == target:
+                return True
+            if n in seen or n == avoid and n != start:
+                continue
+            seen.add(n)
+            for m in self.fwd.get(n, []):
+                if m == target:
+                    return True
+                if m != avoid:
+                    stack.append(m)
+        return False
+
+    def distance(self, start: str, target: str) -> int:
+        from collections import deque
+        q = deque([(start, 0)])
+        seen = {start}
+        while q:
+            n, d = q.popleft()
+            if n == target:
+                return d
+            for m in self.fwd.get(n, []):
+                if m not in seen:
+                    seen.add(m)
+                    q.append((m, d + 1))
+        return 1 << 30
 
 
 class FlowExecutor:
@@ -229,6 +337,10 @@ class FlowExecutor:
                 self.fwd[s].append(d)
                 self.rev[d].append(s)
 
+        # Pure graph-topology queries (walk targets, loop body/exit, barrier
+        # join, reachability) live on the navigator — see GraphNavigator.
+        self._nav = GraphNavigator(self.nodes, self.fwd, self.rev)
+
         self._agents_run = 0
         self._transcript: list[dict] = []
         # ── Per-node run trace (the traceability axis) ──
@@ -280,7 +392,7 @@ class FlowExecutor:
 
         Returns ``{ok, status, final, transcript, agents_run, error}``.
         """
-        start = self._find_start()
+        start = self._nav.find_start()
         # The Start node may carry a `seed` (the request the author baked
         # into the canvas). An explicit initial_context (e.g. typed in the
         # Run panel) wins; otherwise the seed is the flow's entry input,
@@ -364,23 +476,23 @@ class FlowExecutor:
             if kind == 'stop':
                 break
             if kind == 'start':
-                node_id = self._single_next(node_id)
+                node_id = self._nav.single_next(node_id)
                 continue
             if ntype == 'role':
                 context = self._run_role(node, context)
-                node_id = self._single_next(node_id)
+                node_id = self._nav.single_next(node_id)
                 continue
             if ntype == 'subflow':
                 # Only isolated subflows survive expand_subflows; inline ones
                 # were already flattened into this graph.
                 context = self._run_subflow_isolated(node, context)
-                node_id = self._single_next(node_id)
+                node_id = self._nav.single_next(node_id)
                 continue
             if kind == 'parallel':
                 context, node_id = self._run_parallel(node_id, context)
                 continue
             if kind == 'barrier':
-                node_id = self._single_next(node_id)
+                node_id = self._nav.single_next(node_id)
                 continue
             if kind == 'loop':
                 context, node_id = self._run_loop(node_id, context)
@@ -390,7 +502,7 @@ class FlowExecutor:
                 continue
             if kind == 'artifact':
                 self._declare_artifact(node)
-                node_id = self._single_next(node_id)
+                node_id = self._nav.single_next(node_id)
                 continue
             if kind == 'human':
                 context, node_id = self._run_human(node, context)
@@ -398,7 +510,7 @@ class FlowExecutor:
             # Unknown node kind — skip defensively.
             logger.warning('[FlowEngine] skipping unknown node %s (kind=%s type=%s)',
                            node_id, kind, ntype)
-            node_id = self._single_next(node_id)
+            node_id = self._nav.single_next(node_id)
         return context
 
     def _run_role(self, node: dict, context: str) -> str:
@@ -851,7 +963,7 @@ class FlowExecutor:
     def _run_parallel(self, pid: str, context: str) -> tuple[str, str]:
         """Run every branch of a parallel node concurrently; join at barrier."""
         branches = list(self.fwd.get(pid, []))
-        barrier = self._find_common_barrier(branches)
+        barrier = self._nav.find_common_barrier(branches)
         self._emit({'type': 'parallel_start', 'node_id': pid,
                     'branches': len(branches)})
         logger.info('[FlowEngine] parallel %s → %d branches, barrier=%s',
@@ -881,7 +993,7 @@ class FlowExecutor:
         merged = context
         for o in outputs:
             merged = o if not merged else merged + '\n\n' + o
-        nxt = self._single_next(barrier) if barrier else None
+        nxt = self._nav.single_next(barrier) if barrier else None
         return merged, nxt
 
     def _run_loop(self, lid: str, context: str) -> tuple[str, str]:
@@ -896,8 +1008,8 @@ class FlowExecutor:
             then iterate. Capped by ``_MAX_REPLANS`` so a flapping critic
             can't replan forever (endpoint's CONTINUE_PLANNER behavior).
         """
-        body_entry, exit_node = self._loop_parts(lid)
-        planner_id = self._find_loop_planner(lid, body_entry)
+        body_entry, exit_node = self._nav.loop_parts(lid)
+        planner_id = self._nav.find_loop_planner(lid, body_entry)
         node = self.nodes[lid]
         cap = min(self.max_iterations, int((node.get('params') or {}).get('max_iterations') or self.max_iterations))
         cap = max(1, cap)
@@ -973,23 +1085,6 @@ class FlowExecutor:
 
         self._cur_iteration = 0   # left the loop — subsequent nodes are post-loop
         return context, exit_node
-
-    def _find_loop_planner(self, lid: str, body_entry: str | None) -> str | None:
-        """Find the planner node feeding a loop.
-
-        = a role predecessor of the loop node that is NOT part of the loop
-        body (i.e. cannot be reached from body_entry without leaving via the
-        loop). In the canonical endpoint graph (start→planner→loop,
-        critic→loop) this isolates ``planner`` from the body's ``critic``.
-        """
-        for pred in self.rev.get(lid, []):
-            n = self.nodes.get(pred) or {}
-            if n.get('type') != 'role':
-                continue
-            if body_entry and self._can_reach(body_entry, pred, avoid=lid):
-                continue   # this predecessor is inside the loop body (e.g. critic)
-            return pred
-        return None
 
     def _run_replan(self, planner_id: str, context: str, defect: str | None,
                     replan: int) -> str:
@@ -1067,7 +1162,7 @@ class FlowExecutor:
         how = 'first-edge'
 
         if classifier_role and len(nexts) > 1:
-            choice_labels = {t: self._node_label(t) for t in nexts}
+            choice_labels = {t: self._nav.node_label(t) for t in nexts}
             prompt = (
                 f'{context}\n\n## Routing decision\n'
                 f'Choose exactly ONE next step by replying with its label.\n'
@@ -1139,7 +1234,7 @@ class FlowExecutor:
             self._emit({'type': 'human_notify', 'node_id': nid, 'name': label,
                         'prompt': prompt})
             logger.info('[FlowEngine] human notify node=%s', nid)
-            return context, self._single_next(nid)
+            return context, self._nav.single_next(nid)
 
         # Abort-aware task shim so the blocking primitives unblock when the
         # run is aborted (they probe task.get('aborted')).
@@ -1159,7 +1254,7 @@ class FlowExecutor:
                         'request_id': req_id, 'preview': answer[:200]})
             block = f'[Human input — {label}]\n{answer}'
             context = (context + '\n\n' + block) if context else block
-            return context, self._single_next(nid)
+            return context, self._nav.single_next(nid)
 
         # mode == 'approve'
         from lib.tasks_pkg.approval import request_write_approval
@@ -1175,110 +1270,17 @@ class FlowExecutor:
             logger.info('[FlowEngine] human gate %s NOT approved — halting flow', req_id)
             raise _AbortSignal()
         logger.info('[FlowEngine] human gate %s approved — continuing', req_id)
-        return context, self._single_next(nid)
+        return context, self._nav.single_next(nid)
 
     def _human_seq(self) -> int:
         with self._lock:
             self._human_counter = getattr(self, '_human_counter', 0) + 1
             return self._human_counter
 
-    def _node_label(self, nid: str) -> str:
-        n = self.nodes.get(nid) or {}
-        return n.get('name') or n.get('role') or n.get('kind') or nid
-
     # ── structure helpers ───────────────────────────────────────────
-
-    def _single_next(self, node_id: str) -> str | None:
-        nexts = self.fwd.get(node_id, [])
-        return nexts[0] if nexts else None
-
-    def _find_start(self) -> str:
-        for nid, n in self.nodes.items():
-            if n.get('kind') == 'start':
-                return nid
-        # fall back to a source node
-        for nid in self.nodes:
-            if not self.rev.get(nid):
-                return nid
-        raise FlowExecutionError('no start node and no source node')
-
-    def _loop_parts(self, lid: str) -> tuple[str | None, str | None]:
-        """Return (body_entry, exit_node) for a loop node.
-
-        body_entry = a successor that can reach the loop again (cycle).
-        exit_node  = the other successor (preferring one that reaches stop).
-        """
-        succ = list(self.fwd.get(lid, []))
-        body, exit_n = None, None
-        for s in succ:
-            if self._can_reach(s, lid, avoid=lid):
-                body = body or s
-            else:
-                exit_n = exit_n or s
-        # Fallbacks if heuristic was inconclusive.
-        if body is None and succ:
-            body = succ[0]
-        if exit_n is None:
-            for s in succ:
-                if s != body:
-                    exit_n = s
-                    break
-        return body, exit_n
-
-    def _find_common_barrier(self, branches: list[str]) -> str | None:
-        """Find the nearest barrier node reachable from all branches."""
-        if not branches:
-            return None
-        reach_sets = [self._reachable(b) for b in branches]
-        common = set.intersection(*reach_sets) if reach_sets else set()
-        barriers = [nid for nid in common if self.nodes[nid].get('kind') == 'barrier']
-        if barriers:
-            # nearest by BFS distance from first branch
-            return min(barriers, key=lambda n: self._distance(branches[0], n))
-        # fall back to any common node
-        if common:
-            return min(common, key=lambda n: self._distance(branches[0], n))
-        return None
-
-    def _reachable(self, start: str) -> set[str]:
-        seen, stack = set(), [start]
-        while stack:
-            n = stack.pop()
-            if n in seen:
-                continue
-            seen.add(n)
-            stack.extend(self.fwd.get(n, []))
-        return seen
-
-    def _can_reach(self, start: str, target: str, *, avoid: str = '') -> bool:
-        seen, stack = set(), [start]
-        while stack:
-            n = stack.pop()
-            if n == target:
-                return True
-            if n in seen or n == avoid and n != start:
-                continue
-            seen.add(n)
-            for m in self.fwd.get(n, []):
-                if m == target:
-                    return True
-                if m != avoid:
-                    stack.append(m)
-        return False
-
-    def _distance(self, start: str, target: str) -> int:
-        from collections import deque
-        q = deque([(start, 0)])
-        seen = {start}
-        while q:
-            n, d = q.popleft()
-            if n == target:
-                return d
-            for m in self.fwd.get(n, []):
-                if m not in seen:
-                    seen.add(m)
-                    q.append((m, d + 1))
-        return 1 << 30
+    # Pure graph-topology queries now live on ``self._nav``
+    # (GraphNavigator): node_label / single_next / find_start / loop_parts /
+    # find_loop_planner / find_common_barrier / reachable / can_reach / distance.
 
     # ── verdict / context ───────────────────────────────────────────
 
@@ -1298,100 +1300,30 @@ class FlowExecutor:
         """Classify a verifier's output into ``(phase, plan_defect)``.
 
         ``phase`` ∈ {'stop','worker','planner'}; ``plan_defect`` is the
-        gated structural reason (or None). Mirrors endpoint mode's
-        _parse_verdict gating exactly:
-          * Explicit [VERDICT: ...] tag wins; else fall back to the loose
-            STOP/CONTINUE heuristics (so plain-language critics still work).
-          * STOP with unresolved markers (❌ / "not met" / …) → 'worker'.
-          * CONTINUE_PLANNER requires a [PLAN_DEFECT: ...] tag, and the
-            reason must NOT be a worker-execution complaint in disguise;
-            otherwise it is downgraded to 'worker'.
-          * Kill-switch TOFU_ENDPOINT_REPLAN=0 downgrades planner→worker.
+        gated structural reason (or None).  Adapts the shared
+        :func:`lib.agent_verdict.classify_verdict` to the engine's needs:
+        ``loose_fallback=True`` (a tag-free verifier still classifies via the
+        plain-language STOP/CONTINUE heuristics — back-compat with plain
+        critics and an empty verifier → STOP) and ``verifier_role`` so a
+        ``virtual_user`` inverts the default (autopilot keeps the loop going
+        unless the VU emits the [VU: TASK_DONE] sentinel or a STOP verdict).
 
-        ``virtual_user`` verifiers invert the default: autopilot keeps the
-        loop going unless the VU explicitly signals completion (the
-        ``[VU: TASK_DONE]`` sentinel or a STOP verdict). A plain VU reply —
-        even an empty one — means "continue", the opposite of a critic's
-        ambiguous output (which stops to avoid spinning).
+        The STOP-with-unresolved-markers override, the [PLAN_DEFECT:] gate,
+        and the TOFU_ENDPOINT_REPLAN=0 kill-switch all live in the shared
+        core — there is no longer an engine-local copy to drift.
         """
-        is_vu = verifier_role == 'virtual_user'
-
-        if is_vu:
-            # Autopilot: explicit done sentinel / STOP tag ends the loop;
-            # anything else (including empty) is a keep-going reply.
-            low = (text or '').lower()
-            if (_VU_DONE_SENTINEL.lower() in low
-                    or '[verdict: stop]' in low or 'verdict: stop' in low):
-                return 'stop', None
-            return 'worker', None
-
-        if not text:
-            return 'stop', None
-
-        defect = None
-        for m in _PLAN_DEFECT_RE.finditer(text):
-            defect = m.group(1).strip()
-
-        tag_match = None
-        for m in _VERDICT_TAG_RE.finditer(text):
-            tag_match = m
-
-        if tag_match is not None:
-            tag = tag_match.group(1).upper()
-            if tag == 'STOP':
-                phase = 'stop'
-            elif tag == 'CONTINUE_PLANNER':
-                phase = 'planner'
-            else:
-                phase = 'worker'
-        else:
-            # No explicit tag — loose heuristics (back-compat with the
-            # original engine + plain-language critics).
-            if _STOP_RE.search(text):
-                phase = 'stop'
-            elif _CONTINUE_RE.search(text):
-                phase = 'worker'
-            else:
-                phase = 'stop'   # ambiguous → stop, never spin forever
-
-        # STOP-with-unresolved-marker → worker (anti-analysis-spiral guard).
-        if phase == 'stop' and _UNRESOLVED_RE.search(text):
-            logger.info('[FlowEngine] STOP overridden → CONTINUE_WORKER: '
-                        'feedback still has unresolved markers')
-            phase = 'worker'
-
-        # CONTINUE_PLANNER gate.
-        if phase == 'planner':
-            if not defect:
-                logger.info('[FlowEngine] CONTINUE_PLANNER→worker: no '
-                            '[PLAN_DEFECT:] tag')
-                phase = 'worker'
-            elif any(p in defect.lower() for p in _WORKER_RATIONALIZATIONS):
-                logger.info('[FlowEngine] CONTINUE_PLANNER→worker: defect is a '
-                            'worker-execution complaint: %r', defect)
-                phase = 'worker'
-            elif not _replan_enabled():
-                logger.info('[FlowEngine] CONTINUE_PLANNER→worker: replan '
-                            'disabled (TOFU_ENDPOINT_REPLAN=0)')
-                phase = 'worker'
-
-        return phase, defect
+        res = _classify_verdict_core(
+            text, verifier_role=verifier_role, loose_fallback=True)
+        return res['phase'], res['plan_defect']
 
     def _detect_stuck(self) -> bool:
         """True if the last two verifier feedbacks are >_STUCK_JACCARD similar.
 
-        Mirrors endpoint's _detect_stuck — a repeating critic means the loop
-        is not converging; the loop breaks out rather than burning iterations.
+        Delegates to the shared :func:`lib.agent_verdict.detect_stuck` — a
+        repeating critic means the loop is not converging; the loop breaks
+        out rather than burning iterations.
         """
-        if len(self._feedback_history) < 2:
-            return False
-        prev = set(self._feedback_history[-2].lower().split())
-        curr = set(self._feedback_history[-1].lower().split())
-        if not prev or not curr:
-            return False
-        union = prev | curr
-        jaccard = len(prev & curr) / len(union) if union else 0
-        return jaccard > _STUCK_JACCARD
+        return _detect_stuck_core(self._feedback_history, threshold=_STUCK_JACCARD)
 
     def _append_context(self, context: str, role: str, out: str) -> str:
         block = f'[{role}]\n{out}'.strip()
@@ -1426,9 +1358,21 @@ class FlowExecutor:
         role = node.get('role', 'general')
         emits = resolve_emits(node)
 
-        def _stream_sink(kind: str, chunk: str):
-            self._emit({'type': 'step_delta', 'node_id': nid, 'role': role,
-                        'emits': emits, 'kind': kind, 'chunk': chunk})
+        def _stream_sink(kind: str, chunk: str, *, phase: str = '', **meta):
+            # 'content'/'thinking' → a step_delta (streamed output chunk).
+            # 'phase' → a step_phase (transient status: "waiting for model…" /
+            #   "retrying…" while the agent's dispatch is in flight). Both are
+            #   ENGINE-INTERNAL events (self._emit, NOT the registered wire
+            #   contract); the EndpointEventAdapter translates them to wire
+            #   delta / phase events. Keeping step_phase out of the registry
+            #   mirrors step_delta/step_trace (see the orphan-event test).
+            if kind == 'phase':
+                self._emit({'type': 'step_phase', 'node_id': nid, 'role': role,
+                            'emits': emits, 'phase': phase or 'working',
+                            'detail': chunk, **meta})
+            else:
+                self._emit({'type': 'step_delta', 'node_id': nid, 'role': role,
+                            'emits': emits, 'kind': kind, 'chunk': chunk})
 
         agent = SubAgent(
             spec,

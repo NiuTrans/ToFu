@@ -355,6 +355,12 @@
     getDebugMessages: (convId, systemPrompt) =>
       get(`/api/v1/conversations/${encodeURIComponent(convId)}/debug-messages`,
           { query: { systemPrompt: systemPrompt || '' }, onError: 'null' }),
+    // Branch create returns Response so the caller parses {ok, branch,
+    // branch_idx} / inspects status itself (matches the legacy fetch shape
+    // it replaced in branch.js).
+    createBranch: (convId, msgIdx, body) =>
+      post(`/api/v1/conversations/${encodeURIComponent(convId)}/messages/${encodeURIComponent(msgIdx)}/branches`,
+           body, { parse: 'response', onError: 'null' }),
     // Branch delete returns Response so the caller can inspect status / body.
     deleteBranch: (convId, msgIdx, branchIdx) =>
       del(`/api/v1/conversations/${encodeURIComponent(convId)}/messages/${encodeURIComponent(msgIdx)}/branches/${encodeURIComponent(branchIdx)}`,
@@ -814,6 +820,13 @@
       post('/api/v1/paper/report/lookup', { paper_hash: paperHash, lang }, Object.assign({ onError: 'null' }, opts || {})),
     reportCache:    (cacheBody)           => post('/api/v1/paper/report/cache', cacheBody, { onError: 'null' }),
     reportAbort:    (taskId)              => post('/api/v1/paper/report/abort', { task_id: taskId }, { onError: 'null', parse: 'none' }),
+    // Agentic Q&A — server-owned TaskRuntime task (web_search/fetch_url, full
+    // report + section-aware paper context). Polls like the report task.
+    qaStart:        (body)                => post('/api/v1/paper/qa/start', body),
+    qaPoll:         (taskId, cursor)      =>
+      request('/api/v1/paper/qa/poll',
+              { method: 'GET', query: { task_id: taskId, cursor }, parse: 'response', onError: 'null' }),
+    qaAbort:        (taskId)              => post('/api/v1/paper/qa/abort', { task_id: taskId }, { onError: 'null', parse: 'none' }),
     translateStart: (body)                => post('/api/v1/paper/translate/start', body),
     translatePoll:  (taskId, cursor)      =>
       request('/api/v1/paper/translate/poll',

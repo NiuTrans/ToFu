@@ -6,6 +6,8 @@ import sys
 import tempfile
 import unittest
 
+import pytest
+
 
 def _install_shim():
     import quart
@@ -35,6 +37,12 @@ def _new_loop_run(coro):
 
 
 class UsageRouteTest(unittest.TestCase):
+
+    # The per-key request counter is recorded by the auth middleware ONLY
+    # after a real credential resolves — which in 'open' mode (conftest
+    # default) is short-circuited before that step. This file asserts the
+    # usage/metrics contract, so the per-test fixture forces private mode.
+    pytestmark = pytest.mark.auth_mode('private')
 
     @classmethod
     def setUpClass(cls):

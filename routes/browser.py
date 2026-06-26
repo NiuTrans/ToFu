@@ -11,7 +11,7 @@ from flask import Blueprint, jsonify, request, send_file
 from lib.env_compat import getenv_compat
 from lib.log import audit_log, get_logger
 from lib.api_response import api_bad_request, api_not_found, api_ok
-from lib.request_parser import parse_body
+from lib.request_parser import async_parse_body, parse_body
 
 logger = get_logger(__name__)
 
@@ -90,13 +90,13 @@ def _bridge_unauthorized():
 
 
 @browser_bp.route('/api/browser/poll', methods=['POST', 'OPTIONS'])
-def browser_poll():
+async def browser_poll():
     if request.method == 'OPTIONS':
         return '', 204
     if not _check_bridge_auth('browser'):
         return _bridge_unauthorized()
-    from lib.browser import mark_poll, resolve_batch, wait_for_commands
-    data = parse_body()
+    from lib.browser import mark_poll, resolve_batch, wait_for_commands_async
+    data = await async_parse_body()
     client_id = data.get('clientId') or None
     mark_poll(client_id)
     results = data.get('results', [])
@@ -105,7 +105,10 @@ def browser_poll():
                     len(results), (client_id or 'anon')[:12],
                     [r.get('id', '?')[:8] for r in results])
         resolve_batch(results)
-    commands = wait_for_commands(timeout=8, client_id=client_id)
+    # Async-native wait: releases the worker thread for the whole long-poll
+    # window instead of pinning it on a threading.Event (see
+    # lib.browser.queue.wait_for_commands_async).
+    commands = await wait_for_commands_async(client_id=client_id)
     if commands:
         logger.info('[Browser] poll returning %d command(s) to client=%s: %s',
                     len(commands), (client_id or 'anon')[:12],
@@ -116,16 +119,16 @@ def browser_poll():
 
 
 @browser_bp.route('/api/browser/commands', methods=['GET', 'OPTIONS'])
-def browser_get_commands():
+async def browser_get_commands():
     """Legacy GET commands endpoint."""
     if request.method == 'OPTIONS':
         return '', 204
     if not _check_bridge_auth('browser'):
         return _bridge_unauthorized()
-    from lib.browser import mark_poll, wait_for_commands
+    from lib.browser import mark_poll, wait_for_commands_async
     client_id = request.args.get('clientId') or None
     mark_poll(client_id)
-    commands = wait_for_commands(timeout=8, client_id=client_id)
+    commands = await wait_for_commands_async(client_id=client_id)
     return jsonify({'commands': commands})
 
 

@@ -10,7 +10,7 @@ tests/
 │
 ├── test_smoke.py                — Import validation, syntax checks, blueprint registration
 ├── test_backend_unit.py         — Core backend unit tests (build_body, tool parsing, etc.)
-├── test_swarm_unit.py           — Multi-agent swarm system (protocol, registry, orchestrator)
+├── test_swarm_async.py          — Multi-agent swarm system (protocol, registry, orchestrator)
 ├── test_package_facades.py      — Package façade import validation (search, browser, pdf, skills)
 ├── test_project_tools.py        — Project-mode helpers (output cleaning, write targets, safety)
 ├── test_cross_platform.py       — Cross-platform compat layer tests
@@ -76,4 +76,11 @@ for regression prevention, it gets migrated to `tests/` with proper mocking.
 4. Verify: `make test-unit` passes
 5. Ensure `make ci` passes before submitting a PR
 
-Tests without markers will fail (`strict-markers` is enabled in `pyproject.toml`).
+Markers are declared in `pyproject.toml` under `[tool.pytest.ini_options]`,
+which now sets `--strict-markers` (an unknown/misspelled marker errors at
+collection). A test with NO tier marker is auto-tagged `unit` by a
+`pytest_collection_modifyitems` hook in `conftest.py` (so it still runs in
+`make test-unit` / `ci` rather than silently disappearing), and the run emits
+a warning naming the file. Always add the correct marker explicitly — the
+auto-`unit` default is wrong for tests that need PostgreSQL (`api`), a browser
+(`visual`), or are long-running (`slow`).

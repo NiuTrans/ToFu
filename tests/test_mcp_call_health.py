@@ -20,6 +20,7 @@ import pytest
 
 import lib.mcp.client as mc
 from lib.mcp.client import MCPBridge, _is_call_timeout_error
+from lib.mcp.registry import is_opensource_build
 from lib.mcp.types import MCP_DEGRADED_TIMEOUT_STREAK
 
 pytestmark = pytest.mark.unit
@@ -78,6 +79,10 @@ def test_run_async_passes_per_server_timeout(monkeypatch):
     assert seen['timeout'] == 370
 
 
+@pytest.mark.skipif(
+    is_opensource_build(),
+    reason='hope is a Meituan-internal MCP server, stripped from opensource builds',
+)
 def test_hope_card_ships_360s_default():
     from lib.mcp.registry import build_server_config
     cfg = build_server_config('hope', {'HOPE_USERNAME': 'x'})

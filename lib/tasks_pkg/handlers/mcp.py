@@ -61,8 +61,6 @@ def handle_mcp_tool(
     server_name = info['server_name'] if info else '?'
     tool_name = info['tool_name'] if info else fn_name
 
-    icon = '🔌'
-
     # Surface the most informative arg (file_path, name, section_title,
     # short project_id, owner/repo, …) so the title shown in the UI tells
     # users *which resource* the call touches — instead of every
@@ -96,14 +94,14 @@ def handle_mcp_tool(
 
         is_error = isinstance(tool_content, str) and tool_content.startswith(
             ('❌', 'MCP Error', 'MCP tool error', 'MCP server not connected'))
-        meta['badge'] = f'{icon} {server_name}' if not is_error else f'❌ {server_name}'
-        base_title = f'{icon} {server_name}/{tool_name}'
+        meta['badge'] = server_name if not is_error else f'{server_name} (error)'
+        base_title = f'{server_name}/{tool_name}'
         meta['title'] = f'{base_title} — {fresh_suffix}' if fresh_suffix else base_title
 
     return simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,
         executor=_run_mcp,
-        source=f'MCP:{server_name}', icon=icon, module_tag='MCP',
+        source=f'MCP:{server_name}', module_tag='MCP',
         extra={'mcpServer': server_name, 'mcpTool': tool_name},
         post_build=_post_build,
     )

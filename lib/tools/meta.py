@@ -213,9 +213,26 @@ def _build_run_command(meta, fn_name, fn_args, tool_content, path):
     output_text = re.sub(r'\n?\[Command timed out\].*$', '', output_text).strip()
     meta['command'] = cmd
     meta['description'] = fn_args.get('description', '')
+    meta['timedOut'] = timed_out
+    # ★ "Never ran" classification. When there is NO [exit code] marker and it
+    #   isn't a timeout, the command was REFUSED/BLOCKED before execution
+    #   (read-only root, dangerous pattern, empty command, no project path, a
+    #   pre-tool-hook block, an abort, or a start error). Surfacing this as the
+    #   old `exit ?` badge is useless to users — the actual reason was the whole
+    #   message. So when the contract marker is missing, treat the FULL
+    #   tool_content as the reason and flag the round as not-run.
+    not_run = (m is None) and (not timed_out)
+    if not_run:
+        reason = (tool_content or '').strip()
+        meta['exitCode'] = 'not-run'
+        meta['notRun'] = True
+        meta['output'] = reason
+        meta['reason'] = reason
+        meta['snippet'] = f'$ {cmd[:120]}'
+        meta['badge'] = _classify_not_run_badge(reason)
+        return
     meta['output'] = output_text
     meta['exitCode'] = 'timeout' if timed_out else exit_code
-    meta['timedOut'] = timed_out
     if timed_out:
         meta['snippet'] = f'$ {cmd[:120]}'
         meta['badge'] = 'timeout'
@@ -225,6 +242,32 @@ def _build_run_command(meta, fn_name, fn_args, tool_content, path):
     else:
         meta['snippet'] = f'$ {cmd[:120]}'
         meta['badge'] = f'exit {exit_code}'
+
+
+def _classify_not_run_badge(reason):
+    """Pick a short, human-readable badge for a run_command that never executed.
+
+    ``reason`` is the full tool result text (no ``[exit code]`` marker means the
+    command was refused/blocked/errored before the subprocess produced an exit
+    status). The frontend shows this badge plus the full reason — never the
+    cryptic ``exit ?``.
+    """
+    low = (reason or '').lower()
+    if 'read-only workspace root' in low or 'read-only' in low:
+        return 'read-only'
+    if 'blocked for safety' in low or 'dangerous' in low:
+        return 'blocked'
+    if 'aborted by user' in low:
+        return 'aborted'
+    if 'pre-execution hook' in low:
+        return 'blocked'
+    if 'no project path' in low:
+        return 'no project'
+    if 'empty command' in low:
+        return 'empty'
+    if low.startswith('error starting command') or 'error executing command' in low:
+        return 'start failed'
+    return 'not run'
 
 
 

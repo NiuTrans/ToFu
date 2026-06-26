@@ -28,39 +28,105 @@ def _get_db():
     return get_thread_db(DOMAIN_CHAT)
 
 
-def list_conversations(keyword=None, limit=20):
-    """List conversations, optionally filtered by keyword in title.
+def _keyword_clause(keyword, params):
+    """Build the keyword WHERE-fragment, appending bind params in place.
+
+    On PostgreSQL, match the GIN-indexed ``search_tsv`` tsvector (prefix
+    query, the same index ``routes/conversations_search.py`` uses) so a
+    content search stays index-backed instead of degrading to a full
+    ``search_text LIKE '%kw%'`` scan (~3s on a few thousand rows). The title
+    is OR-ed in via LIKE so short/partial titles still match. On SQLite (and
+    if the tsvector query can't be built) fall back to the portable
+    title-or-search_text LIKE.
+    """
+    import re as _re
+    like = f'%{keyword}%'
+    try:
+        from lib.database import _BACKEND
+    except Exception:  # pragma: no cover - import shape guard
+        _BACKEND = 'sqlite'
+
+    if _BACKEND == 'pg':
+        words = _re.sub(r'[^\w\s]', '', keyword, flags=_re.UNICODE).split()
+        if words:
+            ts_query = ' & '.join(f'{w}:*' for w in words)
+            # tsvector prefix match (indexed) OR title substring.
+            params.append(ts_query)
+            params.append(like)
+            return "(search_tsv @@ to_tsquery('simple', ?) OR title LIKE ?)"
+
+    # SQLite / no-word fallback: portable substring match on title + body.
+    params.append(like)
+    params.append(like)
+    return '(title LIKE ? OR search_text LIKE ?)'
+
+
+def list_conversations(keyword=None, limit=20, scope='auto',
+                       project_path=None, current_conv_id=None):
+    """List other conversations, optionally scoped to the current project.
+
+    Args:
+        keyword: optional filter. Matches the conversation TITLE *and* its
+            indexed ``search_text`` (message bodies), so the model can find a
+            conversation by what was discussed, not just its title.
+        limit: max rows (1-50).
+        scope: ``'project'`` → only conversations whose ``settings.projectPath``
+            equals ``project_path``; ``'all'`` → every conversation;
+            ``'auto'`` (default) → project-scoped when a ``project_path`` is
+            available, else all.
+        project_path: the current task's project path (supplied by the tool
+            handler). Required for project scoping; ignored otherwise.
+        current_conv_id: the active conversation, excluded from results.
 
     Returns a formatted string with conversation metadata.
     """
     limit = min(max(1, int(limit or 20)), 50)
     db = _get_db()
 
+    effective_scope = scope or 'auto'
+    if effective_scope == 'auto':
+        effective_scope = 'project' if project_path else 'all'
+    if effective_scope == 'project' and not project_path:
+        # Asked to scope by project but we have no path — degrade to all.
+        effective_scope = 'all'
+
+    where = ['user_id=?']
+    params = [DEFAULT_USER_ID]
+
+    if effective_scope == 'project':
+        # json_extract is rewritten to the PG jsonb accessor by _sql_translate,
+        # so this one statement works on both SQLite and PostgreSQL.
+        where.append("json_extract(settings, '$.projectPath') = ?")
+        params.append(project_path)
+
     if keyword:
-        rows = db.execute(
-            '''SELECT id, title, created_at, updated_at,
-                      json_array_length(messages) as msg_count
-               FROM conversations
-               WHERE user_id=? AND title LIKE ?
-               ORDER BY updated_at DESC LIMIT ?''',
-            (DEFAULT_USER_ID, f'%{keyword}%', limit)
-        ).fetchall()
-    else:
-        rows = db.execute(
-            '''SELECT id, title, created_at, updated_at,
-                      json_array_length(messages) as msg_count
-               FROM conversations
-               WHERE user_id=?
-               ORDER BY updated_at DESC LIMIT ?''',
-            (DEFAULT_USER_ID, limit)
-        ).fetchall()
+        where.append(_keyword_clause(keyword, params))
+
+    if current_conv_id:
+        where.append('id <> ?')
+        params.append(current_conv_id)
+
+    params.append(limit)
+    sql = (
+        'SELECT id, title, created_at, updated_at, '
+        'json_array_length(messages) as msg_count '
+        'FROM conversations WHERE ' + ' AND '.join(where) +
+        ' ORDER BY updated_at DESC LIMIT ?'
+    )
+    rows = db.execute(sql, tuple(params)).fetchall()
+
+    scope_note = ''
+    if effective_scope == 'project' and project_path:
+        scope_note = f" in this project ({project_path})"
 
     if not rows:
         if keyword:
-            return f"No conversations found matching '{keyword}'. Try a different keyword or omit the keyword to list all recent conversations."
-        return "No conversations found."
+            return (f"No conversations found matching '{keyword}'{scope_note}. "
+                    f"Try a different keyword, or pass scope='all' to search "
+                    f"every conversation.")
+        return f"No other conversations found{scope_note}."
 
-    lines = [f"Found {len(rows)} conversation(s):\n"]
+    lines = [f"Found {len(rows)} conversation(s){scope_note}:\n"]
     for r in rows:
         title = r['title'] or '(untitled)'
         msg_count = r['msg_count'] or 0
@@ -106,6 +172,17 @@ def get_conversation(conversation_id, include_tool_details=True, current_conv_id
 
     if not row:
         return f"Error: Conversation '{conversation_id}' not found. Use list_conversations to find valid conversation IDs."
+
+    # ★ Layer 2 trigger: lazily (re)generate this conversation's project
+    #   summary in the background when the model first reads it. Non-blocking —
+    #   the summary engine self-gates on staleness, so this is a cheap no-op
+    #   for an already-summarized, unchanged conversation.
+    try:
+        from lib.conversations.project_summary import ensure_summary
+        ensure_summary(conversation_id, blocking=False)
+    except Exception as e:
+        logger.debug('[conv_ref] summary trigger skipped for %s: %s',
+                     conversation_id, e)
 
     title = row['title'] or '(untitled)'
     messages = safe_json(row['messages'], default=[], label='conv-ref-messages')
@@ -281,13 +358,16 @@ def _truncate(text, max_len=120):
     return text
 
 
-def execute_conv_ref_tool(fn_name, fn_args, current_conv_id=None):
+def execute_conv_ref_tool(fn_name, fn_args, current_conv_id=None,
+                          project_path=None):
     """Execute a conversation reference tool and return the result string.
 
     Args:
         fn_name: 'list_conversations' or 'get_conversation'
         fn_args: dict of arguments
         current_conv_id: the ID of the current conversation (to prevent self-reference)
+        project_path: the current task's project path, used to scope
+            ``list_conversations`` to sibling conversations of the same project.
 
     Returns:
         str: formatted result
@@ -296,7 +376,11 @@ def execute_conv_ref_tool(fn_name, fn_args, current_conv_id=None):
         if fn_name == 'list_conversations':
             keyword = fn_args.get('keyword', None)
             limit = fn_args.get('limit', 20)
-            return list_conversations(keyword=keyword, limit=limit)
+            scope = fn_args.get('scope', 'auto')
+            return list_conversations(
+                keyword=keyword, limit=limit, scope=scope,
+                project_path=project_path, current_conv_id=current_conv_id,
+            )
 
         elif fn_name == 'get_conversation':
             conv_id = fn_args.get('conversation_id', '')

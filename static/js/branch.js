@@ -49,22 +49,18 @@ function isBranchTaskId(taskId) {
 async function _createBranchOnServer(convId, msgIdx, title, anchorText, parentSelection) {
   if (!convId || !title) return null;
   try {
-    const url = (typeof apiUrl === 'function')
-      ? apiUrl(`/api/v1/conversations/${convId}/messages/${msgIdx}/branches`)
-      : `/api/v1/conversations/${convId}/messages/${msgIdx}/branches`;
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        title,
-        anchor_text: anchorText || '',
-        parent_selection: parentSelection || '',
-      }),
-      credentials: 'same-origin',
+    // ★ Routed through the unified API client (Api.conversations.createBranch)
+    //   per CLAUDE.md §3.2.0 — no JS file other than api.js may raw-fetch /api/*.
+    //   (The old raw `fetch(url, …)` used a variable URL, which the isolation
+    //   ratchet's inline-string regex couldn't even see — a silent violation.)
+    const r = await Api.conversations.createBranch(convId, msgIdx, {
+      title,
+      anchor_text: anchorText || '',
+      parent_selection: parentSelection || '',
     });
-    if (!r.ok) {
+    if (!r || !r.ok) {
       if (typeof debugLog === 'function') {
-        debugLog(`[Branch] create failed: HTTP ${r.status}`, 'warn');
+        debugLog(`[Branch] create failed: HTTP ${r ? r.status : 'network error'}`, 'warn');
       }
       return null;
     }

@@ -316,13 +316,22 @@ function _startOptimizerPolling() {
 }
 _startOptimizerPolling();
 
+// Allow mobile_panels.js to keep the open-flag in sync when it portals the
+// panel to <body> as a bottom sheet.
+if (typeof window !== "undefined") {
+  window._setOptimizerPanelOpen = function (v) { _optimizerPanelOpen = !!v; };
+}
+
 // Close panel when clicking outside
 document.addEventListener("click", (e) => {
   if (!_optimizerPanelOpen) return;
+  const panel = document.getElementById("optimizerPanel");
+  // On mobile the panel is portaled out of the badge into <body>; its own
+  // backdrop (mobile_panels.js) owns closing, so skip the badge-based check.
+  if (panel && panel.classList.contains("mobile-panel-portaled")) return;
   const badge = document.getElementById("optimizerBadge");
   if (badge && !badge.contains(/** @type {Node} */ (e.target))) {
     _optimizerPanelOpen = false;
-    const panel = document.getElementById("optimizerPanel");
     if (panel) panel.classList.remove("visible");
   }
 });

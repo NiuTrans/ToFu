@@ -19,7 +19,12 @@ Design notes
   ``write+flush+fsync`` → ``os.replace``. This survives a crash mid-write
   on POSIX and Windows.
 * **Per-path locking**: ``update_json_atomic`` serialises read-modify-write
-  cycles for the same path so concurrent callers don't lose updates.
+  cycles for the same path so concurrent callers don't lose updates —
+  both WITHIN a process (a ``threading.Lock``) and ACROSS processes (a
+  blocking ``fcntl.flock`` on a sidecar ``<path>.lock`` file). The
+  cross-process lock degrades to a no-op where advisory locking is
+  unavailable (Windows / no ``fcntl`` / FS without flock support), leaving
+  the in-process guarantee intact.
 * **JSONC tolerance**: pass ``jsonc=True`` to strip ``//``-line comments,
   ``/* */``-block comments, and trailing commas before parsing.
 * **Errors are logged, not silenced**: read failures return ``default``
@@ -56,6 +61,86 @@ def _path_lock(path: str) -> threading.Lock:
             lk = threading.Lock()
             _PATH_LOCKS[key] = lk
         return lk
+
+
+# ── Inter-process lock (sidecar flock) ──────────────────────────────
+# The thread lock above only serialises read-modify-write WITHIN one
+# process. When two PROCESSES touch the same JSON file (two server
+# instances on a shared FUSE/NFS mount, or the server + a CLI tool), their
+# RMW cycles can interleave and lose updates. ``_interprocess_lock`` adds a
+# blocking POSIX ``fcntl.flock(LOCK_EX)`` on a sidecar ``<path>.lock`` file
+# so the RMW is atomic across processes too.
+#
+# We lock a SIDECAR file rather than the data file itself because
+# ``write_json_atomic`` swaps the data file's inode via ``os.replace`` — a
+# lock held on the old inode would not cover the new one. The sidecar inode
+# is stable.
+#
+# Mirrors the proven degradation policy of
+# ``lib/database/_bootstrap._try_acquire_startup_lock``: on Windows (no
+# portable ``fcntl``), when ``fcntl`` is unavailable, or when the filesystem
+# doesn't support advisory locks, we degrade to a no-op (the thread lock
+# still protects the common single-process case) rather than ship a
+# half-reliable path or newly regress hosts.
+
+@contextlib.contextmanager
+def _interprocess_lock(path: str):
+    """Hold an exclusive cross-process advisory lock for ``path``'s RMW.
+
+    Blocking (waits for the lock); always yields, degrading to a no-op when
+    OS-level locking is unavailable. The lock file is created next to the
+    data file and is never deleted (deleting it races other holders).
+    """
+    try:
+        import fcntl  # POSIX only
+    except ImportError:
+        # Windows / no fcntl — thread lock is the only protection.
+        yield
+        return
+
+    lock_path = os.path.abspath(path) + '.lock'
+    parent = os.path.dirname(lock_path) or '.'
+    if parent != '.' and not os.path.isdir(parent):
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError as e:
+            logger.debug('[json_store] flock parent mkdir failed for %s: %s',
+                         lock_path, e)
+            yield
+            return
+
+    fd = None
+    locked = False
+    try:
+        try:
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError as e:
+            logger.debug('[json_store] could not open lock file %s: %s — '
+                         'degrading to thread-lock-only', lock_path, e)
+            yield
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            locked = True
+        except (OSError, IOError) as e:
+            # Filesystem (e.g. some FUSE/NFS backends) doesn't support
+            # advisory locks — degrade to no-op, don't regress.
+            logger.debug('[json_store] flock unsupported on %s (%s) — '
+                         'thread-lock-only', lock_path, e)
+        yield
+    finally:
+        if fd is not None:
+            if locked:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except (OSError, IOError) as e:
+                    logger.debug('[json_store] flock unlock failed for %s: %s',
+                                 lock_path, e)
+            try:
+                os.close(fd)
+            except OSError as e:
+                logger.debug('[json_store] lock fd close failed for %s: %s',
+                             lock_path, e)
 
 
 # ── JSONC stripping ────────────────────────────────────────────────
@@ -249,7 +334,12 @@ def update_json_atomic(path: str, mutator: Callable[[Any], Any], *,
     >>> update_json_atomic('config.json', add_domain, default={})
     """
     lock = _path_lock(path)
-    with lock:
+    # Thread lock (outer, in-process) THEN flock (inner, cross-process): the
+    # cheap in-process contention resolves first; only one thread per process
+    # then contends for the OS-level lock. ``_interprocess_lock`` is a no-op
+    # where advisory locking is unavailable, so single-process behaviour is
+    # unchanged.
+    with lock, _interprocess_lock(path):
         current = read_json(path, default=default, jsonc=jsonc)
         # Passing a deep copy is the caller's responsibility — we don't
         # pay the deepcopy cost by default. Mutators that want pre/post

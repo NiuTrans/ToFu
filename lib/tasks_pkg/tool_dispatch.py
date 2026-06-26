@@ -31,7 +31,10 @@ from lib.tasks_pkg.manager import _strip_base64_for_snapshot, append_event
 from lib.tasks_pkg.tool_display import _build_tool_round_entry
 from lib.tasks_pkg.tool_hooks import run_post_hooks, run_pre_hooks
 from lib.token_counter import count_text
-from lib.tool_input_repair import resolve_tool_name, schema_hint, validate_then_repair
+from lib.tool_input_repair import (
+    build_rejection_message, classify_tool_call, report_hallucinated,
+    resolve_tool_name, schema_hint, validate_then_repair,
+)
 from lib.tools import build_project_tool_meta
 from lib.model_info import model_supports_vision
 
@@ -463,6 +466,52 @@ def tool_label(tn: str) -> str:
     return tn
 
 
+def _known_tool_names(task: dict[str, Any]) -> set[str]:
+    """Build the set of tool names that are REAL for this task's turn.
+
+    The source of truth is ``task['_tool_schema']`` — the exact tool list
+    shipped to the model this round (built-ins + MCP + swarm + memory +
+    per-request custom tools). Using the schema set, rather than the global
+    ``tool_registry``, guarantees we never flag a legitimately-registered
+    MCP/swarm/custom tool as hallucinated just because it isn't a built-in.
+
+    Falls back to the global registry's exact names ∪ custom-env names when
+    no schema was attached (e.g. a unit test that calls parse_tool_calls
+    directly), so classification degrades safely instead of flagging
+    everything.
+    """
+    names: set[str] = set()
+    for t in (task.get('_tool_schema') or []):
+        if isinstance(t, dict):
+            fn = t.get('function') or {}
+            n = fn.get('name')
+            if n:
+                names.add(n)
+    # Per-request custom tools (their schemas are normally already in
+    # _tool_schema, but union them in directly so classification is correct
+    # even if the snapshot predates a late-attached env).
+    env = task.get('_tool_env')
+    if env is not None:
+        try:
+            for s in (env.schemas or []):
+                if isinstance(s, dict):
+                    n = (s.get('function') or {}).get('name')
+                    if n:
+                        names.add(n)
+        except Exception as e:
+            logger.debug('[tool_dispatch] tool_env name union skipped: %s', e)
+    if names:
+        return names
+    # ── Fallback: no schema snapshot — use the global registry ──
+    try:
+        names |= set(tool_registry._exact.keys())
+        for name_set, _ in tool_registry._sets:
+            names |= set(name_set)
+    except Exception as e:
+        logger.debug('[tool_dispatch] registry name harvest skipped: %s', e)
+    return names
+
+
 def parse_tool_calls(
     assistant_msg: dict[str, Any],
     task: dict[str, Any],
@@ -521,6 +570,11 @@ def parse_tool_calls(
     _assistant_thinking_signature = assistant_msg.get('thinking_signature') or ''
 
     _total_tcs = len(assistant_msg['tool_calls'])
+    # Live set of REAL tool names for this turn (built-ins + MCP + swarm +
+    # memory + custom). Source of truth for both alias resolution (so an MCP
+    # tool wins the exact check and is never aliased over) and hallucination
+    # classification (an unknown name not in this set is a fake tool).
+    _known = _known_tool_names(task)
     # Build set of function names that have non-empty arguments,
     # so we can identify phantom duplicates (same name, empty args).
     _names_with_real_args = set()
@@ -550,10 +604,15 @@ def parse_tool_calls(
         # (read_file→read_files, bash→run_command, Grep→grep_search, …).
         # Rewrite well-known synonyms to the canonical Tofu tool so the call
         # executes instead of dying on a hard "Unknown tool" wall. Only
-        # confident 1:1 mappings are applied; anything unrecognized passes
-        # through and still surfaces the honest unknown-tool error.
-        if fn_name not in tool_registry:
-            _resolved, _alias_kind = resolve_tool_name(fn_name)
+        # confident 1:1 mappings are applied; anything unrecognized is then
+        # classified as a hallucination and rejected (see below).
+        #
+        # ``_known`` (not ``tool_registry``) is the membership oracle so MCP /
+        # swarm / memory / custom tools are recognised — and never aliased over
+        # nor mis-flagged as fake.
+        _hallucinated = None
+        if fn_name not in _known:
+            _resolved, _alias_kind = resolve_tool_name(fn_name, known=_known)
             if _alias_kind and _resolved != fn_name:
                 logger.info('[Task %s] Aliased tool name %r → %r (%s)',
                             tid, fn_name, _resolved, _alias_kind)
@@ -566,6 +625,22 @@ def parse_tool_calls(
                 fn_obj['name'] = _resolved
             else:
                 _tool_name_aliased = None
+                # ── Unified hallucination rejection ──
+                # No exact match and no confident alias → the model invented a
+                # tool that does not exist this turn (e.g. `search_web` when
+                # only `web_search` is registered). Classify it once, here, so
+                # there is a SINGLE rejection path: the call is never executed,
+                # the round is stamped `rejected` for distinct UI styling, and
+                # the model gets a standardized actionable message back.
+                _hallucinated = classify_tool_call(fn_name, _known)
+                if _hallucinated:
+                    logger.warning(
+                        '[Task %s] conv=%s Rejected hallucinated tool %r '
+                        '(suggestions=%s)',
+                        tid, task.get('convId', ''), fn_name,
+                        _hallucinated.get('suggestions'))
+                    report_hallucinated(fn_name, _hallucinated,
+                                        model=task.get('model', '') or '')
         else:
             _tool_name_aliased = None
         # Guard against phantom tool calls: valid name but empty arguments,
@@ -587,6 +662,14 @@ def parse_tool_calls(
         # ``_repair_log`` = schema-shape coercions (stringified_json, …).
         _json_repaired = False
         _repair_log = None
+
+        # ── Hallucinated tool → short-circuit before arg parsing ──
+        # A fake tool will never execute, so don't bother parsing/repairing its
+        # arguments. Setting _args_parse_error routes it through the existing
+        # "return error to the LLM, skip execution" branch in
+        # execute_tool_pipeline — now carrying the standardized rejection text.
+        if _hallucinated:
+            _args_parse_error = build_rejection_message(_hallucinated)
 
         # ── Parse arguments (with repair fallback) ──
         try:
@@ -673,6 +756,11 @@ def parse_tool_calls(
                 _apply_repair_to_round(round_entry, fn_name, fn_args, _repair_summary,
                                        project_enabled,
                                        task.get('convId') or task.get('id'))
+            # ★ Hallucinated tool announced during streaming — mark the
+            #   already-rendered round as rejected so the UI restyles it.
+            if _hallucinated:
+                round_entry['status'] = 'rejected'
+                round_entry['_rejected'] = _hallucinated
             # ★ Attach assistantContent to the first early-announced entry
             if _assistant_content and not _ac_tagged:
                 round_entry['assistantContent'] = _assistant_content
@@ -715,6 +803,14 @@ def parse_tool_calls(
         if _repair_summary:
             round_entry['_repaired'] = _repair_summary
             event_payload['_repaired'] = _repair_summary
+        # ★ Unified hallucination state — the call was rejected, never run.
+        #   The frontend renders `status:'rejected'` + `_rejected` distinctly
+        #   (struck-through line + "not a real tool" badge + suggestions).
+        if _hallucinated:
+            round_entry['status'] = 'rejected'
+            round_entry['_rejected'] = _hallucinated
+            event_payload['status'] = 'rejected'
+            event_payload['_rejected'] = _hallucinated
         # ★ Tag first entry with assistant content so Continue can replay it
         if _assistant_content and not _ac_tagged:
             round_entry['assistantContent'] = _assistant_content
@@ -919,14 +1015,36 @@ def execute_tool_pipeline(
     for item in parsed_tcs:
         tc, fn_name, tc_id, fn_args, rn, round_entry, _parse_err = item
 
-        # JSON parse failure → return error to LLM, skip execution
+        # JSON parse failure / hallucinated-tool rejection → return error to
+        # LLM, skip execution.
         if _parse_err:
             if round_entry:
-                _finalize_tool_round(
-                    task, rn, round_entry,
-                    [{'type': 'error', 'content': _parse_err}],
-                    query_override=round_entry.get('query', fn_name),
-                )
+                _rejected = round_entry.get('_rejected')
+                _err_meta = {'type': 'error', 'content': _parse_err,
+                             'toolName': fn_name}
+                if _rejected:
+                    # Keep the distinct 'rejected' status (don't let
+                    # _finalize_tool_round flip it to 'done') and carry the
+                    # descriptor onto the result meta + event so the frontend
+                    # styles it as a rejected hallucination, with suggestions.
+                    _err_meta['rejected'] = _rejected
+                    round_entry['results'] = [_err_meta]
+                    round_entry['status'] = 'rejected'
+                    append_event(task, build_event(
+                        EventType.TOOL_RESULT,
+                        roundNum=rn,
+                        toolCallId=round_entry.get('toolCallId', ''),
+                        query=round_entry.get('query', fn_name),
+                        results=[_err_meta],
+                        status='rejected',
+                        _rejected=_rejected,
+                    ))
+                else:
+                    _finalize_tool_round(
+                        task, rn, round_entry,
+                        [_err_meta],
+                        query_override=round_entry.get('query', fn_name),
+                    )
             tool_results[tc_id] = (_parse_err, False)
             continue
 

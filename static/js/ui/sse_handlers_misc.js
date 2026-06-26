@@ -198,6 +198,70 @@ function _handleMemoryPrefetch(ev, c) {
 
 }
 
+function _handlePreferencesApplied(ev, c) {
+  const convId = c.convId;
+  const assistantMsg = c.assistantMsg, buf = c.buf;
+      /* ── Preferences-applied indicator ────────────────────────────────
+       * Emitted once at task start by the orchestrator when the bounded
+       * personal-preference profile was injected onto the cache-safe
+       * _isMeta tail (lib/tasks_pkg/system_context.py ★2.5). Drives the
+       * quiet "preferences applied" chip so the user can SEE the assistant
+       * is honouring their stored preferences. Payload: {chars, items}. */
+      assistantMsg._preferencesApplied = {
+        chars: ev.chars || 0,
+        items: Array.isArray(ev.items) ? ev.items : [],
+      };
+      if (buf) buf._preferencesApplied = assistantMsg._preferencesApplied;
+      twUpdate(convId);
+
+}
+
+function _handlePreferenceLearned(ev, c) {
+  const convId = c.convId;
+  const assistantMsg = c.assistantMsg, buf = c.buf;
+      /* ── Preference-learned moment ("Noted: you prefer X") ────────────
+       * Emitted by the layer-3 consolidation pass (orchestrator) for each
+       * reinforced / staged preference. We accumulate them on the assistant
+       * message so the chip shows all learned items for this turn; a pending
+       * (new) preference carries an id the Confirm/Dismiss buttons POST back
+       * to /api/v1/profile/pending/<id>. */
+      const list = assistantMsg._preferencesLearned || [];
+      list.push({
+        kind: ev.kind || 'pending',
+        summary: ev.summary || '',
+        pending: !!ev.pending,
+        id: ev.id || '',
+      });
+      assistantMsg._preferencesLearned = list;
+      if (buf) buf._preferencesLearned = list;
+      twUpdate(convId);
+
+}
+
+/* Confirm / dismiss a staged preference proposal (propose-then-confirm gate).
+   Called from the inline buttons in renderPreferenceLearnedHtml. */
+async function resolvePreference(btn, pendingId, accept) {
+  try {
+    const row = btn && btn.closest ? btn.closest('.pl-row') : null;
+    if (row) { row.style.opacity = '0.5'; row.style.pointerEvents = 'none'; }
+    await Api.post(`/api/v1/profile/pending/${encodeURIComponent(pendingId)}`,
+                   { accept: !!accept });
+    if (row) {
+      const _t = (typeof t === 'function') ? t : (k => k);
+      row.innerHTML = `<span class="pl-lead">${Icon(accept ? 'check' : 'x', 13)}</span>` +
+        `<span class="pl-text">${accept ? _t('prefs.learnedReinforced') : _t('prefs.dismiss')}</span>`;
+      row.classList.add('pl-resolved');
+      row.style.opacity = '';
+    }
+  } catch (e) {
+    console.warn('[resolvePreference] failed', e);
+    if (typeof showToast === 'function') showToast('⚠️', 'Error', String(e), 4000);
+    const row = btn && btn.closest ? btn.closest('.pl-row') : null;
+    if (row) { row.style.opacity = ''; row.style.pointerEvents = ''; }
+  }
+}
+window.resolvePreference = resolvePreference;
+
 function _handleProjectExternalEdit(ev, c) {
   const convId = c.convId, taskId = c.taskId;
   const assistantMsg = c.assistantMsg, buf = c.buf;
@@ -213,6 +277,32 @@ function _handleProjectExternalEdit(ev, c) {
         }
       } catch (e) { console.warn('[project_external_edit] toast failed', e); }
       console.log('[project_external_edit]', { sha, files });
+
+}
+
+function _handleWorkspaceRootAdded(ev, c) {
+      /* ── Silent workspace-root auto-registration, now visible ─────────
+       * Emitted by the project tool handler (lib/tasks_pkg/handlers/project.js)
+       * when an absolute-path write outside all roots auto-registered the
+       * nearest existing ancestor as a NEW extra workspace root
+       * (lib/project_mod/write_tools.py _resolve_write_path §2). This used
+       * to expand the workspace invisibly — no tool round, only an app.log
+       * line — which is the exact surprise users hit ("it started writing
+       * to project X and nothing showed it was added"). Surface a brief
+       * toast naming the added root(s). Payload: {roots: [{rootName, path}]}. */
+      const roots = Array.isArray(ev.roots) ? ev.roots : [];
+      if (!roots.length) return;
+      try {
+        if (typeof showToast === 'function') {
+          const names = roots.map(r => r.rootName || r.path || '?');
+          const preview = names.slice(0, 3).join(', ') + (names.length > 3 ? ` +${names.length - 3} more` : '');
+          const _t = (typeof t === 'function') ? t : null;
+          const msg = _t ? _t('workspaceRoot.added', { roots: preview })
+                         : `Added workspace root: ${preview}`;
+          showToast(msg, 'info');
+        }
+      } catch (e) { console.warn('[workspace_root_added] toast failed', e); }
+      console.log('[workspace_root_added]', roots);
 
 }
 

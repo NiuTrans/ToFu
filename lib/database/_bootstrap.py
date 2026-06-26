@@ -2081,6 +2081,148 @@ def _pg_binaries_present():
     return shutil.which(pg_ctl) is not None
 
 
+def _try_explicit_pg_target(pgdata, base_dir, pg_host, pg_port, build_dsn):
+    """Step 1 of ``_ensure_pg_running``: handle an explicit env-set PG target.
+
+    When ``TOFU_PG_HOST`` names a remote host, OR ``TOFU_PG_PORT`` is set (even
+    for localhost), the user manages PG externally — connect directly rather
+    than bootstrap.  A LOCAL explicit port that names OUR OWN pgdata is special:
+    an unreachable target then means "our local PG is currently down" (e.g. the
+    Restart button stopped it and the new server raced ahead), so we fall
+    through to the local start path instead of failing to SQLite.
+
+    Returns
+    -------
+    (handled: bool, result: dict | None)
+        handled=True  → the caller must ``return result`` (result is the PG
+                        info dict on success, or None on a hard failure).
+        handled=False → no explicit target, OR an explicit-LOCAL-ours target is
+                        down → the caller falls through to Step 2 (local start).
+    """
+    explicit_host = getenv_compat('TOFU_PG_HOST')
+    explicit_port = getenv_compat('TOFU_PG_PORT', default=None)
+    is_explicit_external = (
+        (explicit_host and explicit_host not in ('localhost', '127.0.0.1', '::1'))
+        or explicit_port is not None  # any explicit port = user-managed PG
+    )
+    if not is_explicit_external:
+        return False, None
+
+    target_host = explicit_host or pg_host
+    target_port = int(explicit_port) if explicit_port else pg_port
+    # A local explicit port (e.g. TOFU_PG_PORT pointing at 127.0.0.1)
+    # almost always names OUR OWN pgdata started by a previous server.py —
+    # NOT a truly external/unmanaged PG. If that cluster is OURS and we
+    # have the binaries to manage it, an unreachable target just means
+    # "our local PG is currently down" (e.g. the user clicked Restart,
+    # which stops PG, and the new server raced ahead of it). In that case
+    # we must START it ourselves rather than give up and fall back to a
+    # near-empty SQLite. Only a genuinely external target (remote host, or
+    # a local port whose pgdata isn't ours) is strictly connect-or-fail.
+    target_is_local = target_host in ('localhost', '127.0.0.1', '::1')
+    target_is_ours = (
+        target_is_local
+        and _read_our_pg_port(pgdata) == target_port
+        and _pg_binaries_present()
+    )
+    logger.info('[DB] Using explicit PG target from env: %s:%d (manageable_local=%s)',
+                target_host, target_port, target_is_ours)
+    # Try psycopg2 directly (no pg_isready binary needed — works in CI)
+    try:
+        import psycopg2
+        test_dsn = build_dsn(target_host, target_port)
+        conn = psycopg2.connect(test_dsn, connect_timeout=5)
+        conn.close()
+        logger.info('[DB] Explicit PG target %s:%d is reachable', target_host, target_port)
+        # Manage our own cluster's tuning so the connection / WAL settings
+        # stay in sync (otherwise PG keeps its initdb defaults — e.g.
+        # max_connections=200 — below the app-side TOFU_DB_MAX_CONNS
+        # ceiling, producing 'too many clients' FATALs).
+        if target_is_local and _read_our_pg_port(pgdata) == target_port:
+            _mark_pg_owned_locally(pgdata)
+            if _ensure_managed_pg_config(pgdata):
+                _restart_local_pg(pgdata, base_dir)
+        return True, {'PG_HOST': target_host, 'PG_PORT': target_port,
+                      'PG_DSN': test_dsn}
+    except ImportError:
+        logger.error('[DB] psycopg2 not installed — cannot connect to explicit PG')
+        return True, None
+    except Exception as e:
+        if target_is_ours:
+            logger.warning('[DB] Explicit local PG target %s:%d is down (%s) — '
+                           'it names OUR pgdata, so attempting to START it '
+                           'locally instead of falling back to SQLite.',
+                           target_host, target_port, e)
+            # Fall through to the local start/bootstrap path (Step 2+).
+            return False, None
+        logger.error('[DB] Explicit PG target %s:%d not reachable: %s',
+                     target_host, target_port, e)
+        return True, None
+
+
+def _pgdata_major_compatible(pgdata) -> bool:
+    """Return False when the pgdata major version can't be served by the local
+    postgres binary (caller must then bail to SQLite); True to proceed.
+
+    Extracted verbatim from ``_ensure_pg_running`` Step 3b.  If the pgdata
+    directory was created by a different PG major than the installed binary
+    (common after an export/copy across machines), any start attempt FATALs on
+    a config-param mismatch (e.g. PG 18's ``autovacuum_worker_slots`` under a
+    PG 17 binary) and the scheduler retry-storms on "connection refused".  We
+    detect that here so the caller falls back cleanly.
+
+    Returns
+    -------
+    bool
+        False  → incompatible major OR no postgres binary to check against;
+                 the caller must ``return None``.
+        True   → no PG_VERSION file, unreadable version, a matching major, or
+                 a non-fatal probe error — proceed with the normal flow.
+    """
+    pg_version_file = os.path.join(pgdata, 'PG_VERSION')
+    if not os.path.isfile(pg_version_file):
+        return True
+    try:
+        with open(pg_version_file) as _vf:
+            pgdata_major = _vf.read().strip().split('.')[0]
+    except Exception as _e:
+        logger.debug('[DB] Could not read PG_VERSION from %s: %s', pgdata, _e)
+        pgdata_major = None
+    if not pgdata_major:
+        return True
+    # Query the locally-installed postgres binary for its major.
+    try:
+        _postgres_bin = _find_pg_binary('postgres')
+        _ver_out = subprocess.run(
+            [_postgres_bin, '--version'],
+            capture_output=True, text=True, timeout=5
+        )
+        if _ver_out.returncode == 0:
+            # Output is like "postgres (PostgreSQL) 17.2"
+            _bin_major = _ver_out.stdout.strip().split()[-1].split('.')[0]
+            if _bin_major != pgdata_major:
+                logger.error(
+                    '[DB] pgdata major=%s but local postgres binary major=%s '
+                    '— REFUSING to start (would FATAL with config-param errors). '
+                    'Falling back to SQLite. To recover: move %s aside (e.g. '
+                    '`mv pgdata pgdata.bak`) so a fresh pgdata is initdb\'d, '
+                    'OR install matching PG version, OR set TOFU_DB_BACKEND=sqlite.',
+                    pgdata_major, _bin_major, pgdata)
+                return False
+            logger.debug('[DB] pgdata major (%s) matches local binary', pgdata_major)
+    except FileNotFoundError:
+        # No postgres binary on host — caller (_core) already bailed
+        # earlier via _pg_binaries_present(), so this shouldn't fire,
+        # but guard anyway.
+        logger.info('[DB] No postgres binary to version-check pgdata against')
+        return False
+    except Exception as _e:
+        logger.debug('[DB] Could not run postgres --version: %s', _e)
+        # Non-fatal — let normal flow try to start PG; it'll fail
+        # with a clearer log if incompatible.
+    return True
+
+
 def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password, pg_dbname):
     """Ensure PostgreSQL is accessible. Start locally or discover remote instance.
 
@@ -2113,68 +2255,14 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
         )
         return None
 
-    # ── Step 1: Explicit host/port override ──
-    # When TOFU_PG_HOST is set to a remote host, OR when TOFU_PG_PORT is
-    # explicitly set (even with localhost), skip local bootstrap and connect
-    # directly.  This covers CI service containers, Docker Compose, managed PG,
-    # or any external instance the user wants to use.
-    explicit_host = getenv_compat('TOFU_PG_HOST')
-    explicit_port = getenv_compat('TOFU_PG_PORT', default=None)
-    is_explicit_external = (
-        (explicit_host and explicit_host not in ('localhost', '127.0.0.1', '::1'))
-        or explicit_port is not None  # any explicit port = user-managed PG
-    )
-    if is_explicit_external:
-        target_host = explicit_host or pg_host
-        target_port = int(explicit_port) if explicit_port else pg_port
-        # A local explicit port (e.g. TOFU_PG_PORT pointing at 127.0.0.1)
-        # almost always names OUR OWN pgdata started by a previous server.py —
-        # NOT a truly external/unmanaged PG. If that cluster is OURS and we
-        # have the binaries to manage it, an unreachable target just means
-        # "our local PG is currently down" (e.g. the user clicked Restart,
-        # which stops PG, and the new server raced ahead of it). In that case
-        # we must START it ourselves rather than give up and fall back to a
-        # near-empty SQLite. Only a genuinely external target (remote host, or
-        # a local port whose pgdata isn't ours) is strictly connect-or-fail.
-        target_is_local = target_host in ('localhost', '127.0.0.1', '::1')
-        target_is_ours = (
-            target_is_local
-            and _read_our_pg_port(pgdata) == target_port
-            and _pg_binaries_present()
-        )
-        logger.info('[DB] Using explicit PG target from env: %s:%d (manageable_local=%s)',
-                    target_host, target_port, target_is_ours)
-        # Try psycopg2 directly (no pg_isready binary needed — works in CI)
-        try:
-            import psycopg2
-            test_dsn = _build_dsn(target_host, target_port)
-            conn = psycopg2.connect(test_dsn, connect_timeout=5)
-            conn.close()
-            logger.info('[DB] Explicit PG target %s:%d is reachable', target_host, target_port)
-            # Manage our own cluster's tuning so the connection / WAL settings
-            # stay in sync (otherwise PG keeps its initdb defaults — e.g.
-            # max_connections=200 — below the app-side TOFU_DB_MAX_CONNS
-            # ceiling, producing 'too many clients' FATALs).
-            if target_is_local and _read_our_pg_port(pgdata) == target_port:
-                _mark_pg_owned_locally(pgdata)
-                if _ensure_managed_pg_config(pgdata):
-                    _restart_local_pg(pgdata, base_dir)
-            return {'PG_HOST': target_host, 'PG_PORT': target_port,
-                    'PG_DSN': test_dsn}
-        except ImportError:
-            logger.error('[DB] psycopg2 not installed — cannot connect to explicit PG')
-            return None
-        except Exception as e:
-            if target_is_ours:
-                logger.warning('[DB] Explicit local PG target %s:%d is down (%s) — '
-                               'it names OUR pgdata, so attempting to START it '
-                               'locally instead of falling back to SQLite.',
-                               target_host, target_port, e)
-                # Fall through to the local start/bootstrap path below (Step 2+).
-            else:
-                logger.error('[DB] Explicit PG target %s:%d not reachable: %s',
-                            target_host, target_port, e)
-                return None
+    # ── Step 1: Explicit host/port override (see _try_explicit_pg_target) ──
+    # An env-set remote host or any explicit port = user-managed PG: connect
+    # directly. handled=True → return its result; handled=False → fall through
+    # to the local start path (no explicit target, or our-own-local PG is down).
+    _handled, _explicit_result = _try_explicit_pg_target(
+        pgdata, base_dir, pg_host, pg_port, _build_dsn)
+    if _handled:
+        return _explicit_result
 
     # ── Step 2: Read OUR port from OUR postgresql.conf ──
     our_port = _read_our_pg_port(pgdata)
@@ -2270,52 +2358,11 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
                             _HEARTBEAT_TTL_S, hb_info.get('pid'))
 
     # ── Step 3b: pgdata ↔ binary major-version sanity check ──
-    # If the pgdata directory was created by a different PG major than the
-    # one installed locally (very common when a project is exported/copied
-    # between machines with different PG versions), any start attempt will
-    # fail with a FATAL config-param error (e.g. PG 18's
-    # "autovacuum_worker_slots" under PG 17 binary), causing the scheduler
-    # to retry-storm on "connection refused". Detect this here and return
-    # None so the caller falls back to SQLite cleanly.
-    pg_version_file = os.path.join(pgdata, 'PG_VERSION')
-    if os.path.isfile(pg_version_file):
-        try:
-            with open(pg_version_file) as _vf:
-                pgdata_major = _vf.read().strip().split('.')[0]
-        except Exception as _e:
-            logger.debug('[DB] Could not read PG_VERSION from %s: %s', pgdata, _e)
-            pgdata_major = None
-        if pgdata_major:
-            # Query the locally-installed postgres binary for its major.
-            try:
-                _postgres_bin = _find_pg_binary('postgres')
-                _ver_out = subprocess.run(
-                    [_postgres_bin, '--version'],
-                    capture_output=True, text=True, timeout=5
-                )
-                if _ver_out.returncode == 0:
-                    # Output is like "postgres (PostgreSQL) 17.2"
-                    _bin_major = _ver_out.stdout.strip().split()[-1].split('.')[0]
-                    if _bin_major != pgdata_major:
-                        logger.error(
-                            '[DB] pgdata major=%s but local postgres binary major=%s '
-                            '— REFUSING to start (would FATAL with config-param errors). '
-                            'Falling back to SQLite. To recover: move %s aside (e.g. '
-                            '`mv pgdata pgdata.bak`) so a fresh pgdata is initdb\'d, '
-                            'OR install matching PG version, OR set TOFU_DB_BACKEND=sqlite.',
-                            pgdata_major, _bin_major, pgdata)
-                        return None
-                    logger.debug('[DB] pgdata major (%s) matches local binary', pgdata_major)
-            except FileNotFoundError:
-                # No postgres binary on host — caller (_core) already bailed
-                # earlier via _pg_binaries_present(), so this shouldn't fire,
-                # but guard anyway.
-                logger.info('[DB] No postgres binary to version-check pgdata against')
-                return None
-            except Exception as _e:
-                logger.debug('[DB] Could not run postgres --version: %s', _e)
-                # Non-fatal — let normal flow try to start PG; it'll fail
-                # with a clearer log if incompatible.
+    # A pgdata created by a different PG major than the installed binary
+    # FATALs on start (config-param mismatch) → scheduler retry-storm. Detect
+    # it (see _pgdata_major_compatible) and fall back to SQLite cleanly.
+    if not _pgdata_major_compatible(pgdata):
+        return None
 
     # ── Step 4/5: Start PG locally or bootstrap ──
     # Before any local start/takeover, verify the pgdata mount truly enforces

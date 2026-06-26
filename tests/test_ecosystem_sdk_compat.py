@@ -14,6 +14,8 @@ import os
 import sys
 import unittest
 
+import pytest
+
 
 # Reuse the fixture machinery from test_sdk_e2e.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -23,6 +25,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     os.environ.get('TOFU_SKIP_NETWORK_E2E') == '1',
     'TOFU_SKIP_NETWORK_E2E=1 set — skipping real-network compat test')
 class OpenAISDKCompatTest(unittest.TestCase):
+
+    # The invalid-key→401 contract only holds when the credential gate is
+    # active (private/multi-user mode); the per-test conftest fixture forces
+    # private and the in-process server reads the mode per-request.
+    pytestmark = pytest.mark.auth_mode('private')
 
     @classmethod
     def setUpClass(cls):

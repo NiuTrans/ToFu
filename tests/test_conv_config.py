@@ -151,7 +151,7 @@ class ResolveConvConfigTest(unittest.TestCase):
             conv_settings={}, overrides={}, is_active=True)
         expected = {
             'maxTokens', 'thinkingEnabled', 'model', 'preset',
-            'systemPrompt', 'systemPromptMode',
+            'systemPrompt', 'systemPromptMode', 'systemPromptBlocks',
             'thinkingDepth', 'temperature', 'searchMode',
             'fetchEnabled', 'codeExecEnabled', 'memoryEnabled',
             'schedulerEnabled', 'swarmEnabled', 'projectPath',

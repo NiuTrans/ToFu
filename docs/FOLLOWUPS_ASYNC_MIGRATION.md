@@ -41,7 +41,12 @@ a high-risk rewrite of a 900-line hot path with sub-thread spawns and the
 SSE-queue bridge. **Recommendation: keep thread-based.** Revisit only if the
 data layer becomes natively async (psycopg3-async) end-to-end.
 
-### 2. HTTP test coverage for swarm-converted trading handlers — DONE
+### 2. HTTP test coverage for swarm-converted trading handlers — DONE / MOOT (trading externalized)
+> ⚠️ The trading subsystem was extracted to the standalone `tofu-trading` package
+> (2026-06); `tests/test_trading_handlers_async.py` and the trading modules below
+> NO LONGER EXIST in this repo. This item is historical — any remaining trading
+> test work now lives in the `tofu-trading` package, not here.
+
 `tests/test_trading_handlers_async.py` boots a `TRADING_ENABLED=1` SUBPROCESS
 (trading bps aren't registered in the default `TRADING_ENABLED=0` session app)
 and asserts every trading view is a coroutine (minus the `common.trading_page`
@@ -53,17 +58,23 @@ checks — only a live-app `iscoroutinefunction(view_functions[name])` probe
 catches it. (Full route-body HTTP smoke with auth/data remains a possible
 future extension, but the leaked-coroutine class of bug is now guarded.)
 
-### 3. PostgreSQL full-text search is `LIKE`-only
-**Gap:** `routes/conversations_search.py` Phase-1 uses SQLite FTS5
-`conversations_fts MATCH`, now correctly gated to SQLite only. On PostgreSQL
-search falls back to the portable Phase-2 `LIKE` scan — correct but not
-index-accelerated.
-**Action:** add a PG `tsvector` / `websearch_to_tsquery` Phase-1 path (the PG
-schema already has tsvector infrastructure). `[§10]` — touches DB schema if a
-generated tsvector column / GIN index is added; requires sign-off +
-`_SCHEMA_VERSION` bump.
+### 3. PostgreSQL full-text search tsvector Phase-1 — DONE
+**Status:** implemented (verified 2026-06-25). `routes/conversations_search.py`
+Phase-1 now has a real PG path: a GIN-indexed `search_tsv` tsvector
+(`idx_conv_search_tsv`) queried via `search_tsv @@ to_tsquery('simple', 'w1:* &
+w2:* …')` prefix match (`conversations_search.py:~80`), gated on the PG backend;
+SQLite keeps FTS5 `MATCH`. The portable `LIKE` scan remains only as the Phase-2
+substring fallback for matches Phase-1 misses (e.g. mid-word substrings). The
+original "PG is LIKE-only" gap is closed — no remaining action.
 
-### 4. Trading quant core unit tests — DONE (core), partial (autopilot/strategy)
+### 4. Trading quant core unit tests — MOOT (trading externalized to tofu-trading)
+> ⚠️ `lib/trading_signals.py`, `lib/trading_risk.py`, `tests/test_trading_quant.py`,
+> `lib/trading_autopilot/*`, `lib/trading_strategy_engine/*` and the rest of the
+> trading code referenced below were EXTRACTED to the `tofu-trading` package
+> (2026-06) and are gone from this repo. The remaining-coverage backlog moved
+> with them — it is no longer actionable here. (Original note retained below for
+> history.)
+
 `tests/test_trading_quant.py` (42 golden-value tests) now covers
 `lib/trading_signals.py` (SMA/EMA/RSI/MACD/Bollinger/momentum/drawdown,
 regime detection, signal snapshot + no-future-leak), `lib/trading_risk.py`
@@ -97,13 +108,52 @@ schema change needing sign-off + `_SCHEMA_VERSION` bump.
 `INSERT OR REPLACE` table must add its PK to `_PK_MAP`
 (`lib/database/_sql_translate.py`) or PG writes will raise.
 
-### 7. `json_store` is thread-only, not inter-process
-`lib/json_store.py` per-path locks are `threading` locks; the docstring
-oversells "atomic" for multi-process deployments. Either document the
-single-process scope explicitly or add an `flock`-based file lock if
-multi-process JSON writes are a real deployment shape.
+### 7. `json_store` inter-process locking — DONE (2026-06-25)
+`update_json_atomic` now wraps its read-modify-write in a blocking POSIX
+`fcntl.flock(LOCK_EX)` on a sidecar `<path>.lock` file (inside the existing
+`threading.Lock`), so concurrent PROCESSES on a shared mount can't lose updates.
+Degrades to a no-op where advisory locks are unavailable (Windows / no `fcntl` /
+FS without flock), preserving the in-process guarantee. Sidecar (not the data
+file) is locked because `os.replace` swaps the data inode. Guarded by
+`tests/test_json_store.py::test_update_json_atomic_inter_process_safe` (4 procs ×
+30 cross-process increments, no lost updates). Module docstring corrected.
 
 ### 8. Version source-of-truth
-`VERSION` and `pyproject.toml` are now aligned (0.11.0). Keep them in sync;
-`lib/version.py` reads `VERSION` at runtime, so `pyproject.toml` must be
-updated in the same change set as any `VERSION` bump.
+`VERSION` and `pyproject.toml` are aligned at **0.13.0** (re-synced 2026-06-25;
+they had drifted — `VERSION`=0.13.0 vs `pyproject.toml`=0.11.0). Keep them in
+sync: `lib/version.py` reads `VERSION` at runtime, so `pyproject.toml` (packaging
+metadata) MUST be bumped in the same change set as any `VERSION` bump — the two
+have no automatic link, which is exactly how the drift happened.
+
+
+### 9. `async_dispatch_stream` — NOW LIVE via `POST /api/v1/chat/stream-direct` (2026-06-25)
+**Status:** DONE. The native-async streaming path is in production via a new
+on-loop endpoint — `routes/api_v1/chat_direct.py::chat_stream_direct` →
+`run_direct_stream` drives `async_dispatch_stream` directly on the event loop
+(no `spawn_task`, no thread worker), bridging its on-loop `on_content`/
+`on_thinking` callbacks through an `asyncio.Queue` into an async SSE generator.
+Single-turn, pure-text(±thinking), SSE-only; admission-gated; NO tool loop/MCP/
+multi-round (those stay on the thread orchestrator via `/chat/completions`). The
+thread-worker path is untouched. Guarded by `tests/test_chat_stream_direct.py`
+(6) + the async-integrity scan now covering `chat_direct.py` +
+`api_v1_chat_direct.` coroutine-ness. Original reserved-by-design note (now
+historical):
+
+**Was:** not a defect, not dead code (verified 2026-06-25).
+`lib/llm_dispatch/api.py::async_dispatch_stream` is a fully-implemented,
+test-covered (`tests/test_async_dispatch_stream.py`) native-async streaming
+dispatcher that drives the httpx async transport ON the event loop. It shares
+`_StreamRetryState` + `_adapt_stream_body_for_slot` with the sync
+`dispatch_stream`, so the two stay in lockstep.
+**Why it has no production caller:** EVERY streaming path — the UI chat worker
+AND the `/v1/chat/completions` + `/v1/messages` compat endpoints — runs the task
+via `spawn_task` → `asyncio.to_thread` on an OFF-loop worker thread (the `async
+def` route just tails the task event buffer). A sync worker thread cannot
+`await`, and correctly uses the sync `dispatch_stream` (`requests`). Making this
+go live requires EITHER an async `run_task` (rejected — see §1) OR a genuinely
+on-loop streaming endpoint that bypasses the thread worker (a real feature, not
+a wiring change).
+**Do NOT** "wire it" by wrapping it in `asyncio.run()` inside the thread worker —
+that spins a throwaway event loop per stream and is a pure regression over the
+sync path. Keep it as the tested substrate for a future on-loop streaming
+caller. See the ⚠️ block in its docstring.

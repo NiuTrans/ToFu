@@ -1,5 +1,5 @@
 /**
- * Tofu Browser Bridge — Background Service Worker (v4.1)
+ * Tofu Browser Bridge — Background Service Worker (v4.3)
  *
  * Single-endpoint architecture:
  *   Every poll is a POST to /api/browser/poll with:
@@ -33,6 +33,11 @@ let BRIDGE_SECRET = '';           // Optional: matches server TOFU_BRIDGE_SECRET
 let pollActive = false;
 let connected = false;
 let lastError = '';
+
+// Result-nudge: track the in-flight poll so a freshly-completed command can
+// abort the idle long-poll and be delivered immediately (see executeAndReport).
+let _activePollController = null;
+let _flushPending = false;        // true ⇒ active poll aborted to flush a result
 
 // Result queue: completed results waiting to be sent with next poll
 const _resultQueue = [];        // [{id, result, error}, ...]
@@ -152,12 +157,17 @@ function stopPolling() {
 async function poll() {
   if (!pollActive || !SERVER_URL) return;
 
+  // Declared outside the try so the catch can restore them on a flush abort.
+  let resultsToSend = [];
+  let timeoutId = null;
   try {
     // Drain the result queue — send all completed results with this poll
-    const resultsToSend = _resultQueue.splice(0, _resultQueue.length);
+    resultsToSend = _resultQueue.splice(0, _resultQueue.length);
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+    _activePollController = controller;
+    _flushPending = false;
+    timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
 
     const resp = await fetch(`${SERVER_URL}/api/browser/poll`, {
       method: 'POST',
@@ -166,6 +176,7 @@ async function poll() {
       body: JSON.stringify({ results: resultsToSend, clientId: CLIENT_ID }),
     });
     clearTimeout(timeoutId);
+    _activePollController = null;
 
     if (!resp.ok) {
       if (resp.status === 401) {
@@ -209,7 +220,19 @@ async function poll() {
     if (pollActive) setTimeout(poll, POLL_INTERVAL);
 
   } catch (err) {
+    if (timeoutId) clearTimeout(timeoutId);
+    _activePollController = null;
     if (err.name === 'AbortError') {
+      if (_flushPending) {
+        // Deliberate abort: a command result just landed, so we cut the idle
+        // long-poll short. Re-poll INSTANTLY (not the 100ms reconnect path) so
+        // the result goes out now instead of waiting the server's 8s window.
+        // Restore the in-flight poll's drained results so none are lost.
+        _flushPending = false;
+        if (resultsToSend.length) _resultQueue.unshift(...resultsToSend);
+        if (pollActive) setTimeout(poll, 0);
+        return;
+      }
       // Fetch timeout — normal (server long-poll returned nothing), just reconnect
       connected = true;
       if (pollActive) setTimeout(poll, POLL_INTERVAL);
@@ -256,8 +279,15 @@ async function executeAndReport(cmd) {
   _resultQueue.push({ id: cmd.id, result, error });
   _inflight.delete(cmd.id);
 
-  // Nudge the poll loop: if we have results and no active poll is running,
-  // the next poll() will pick them up automatically via setTimeout.
+  // ★ Result-nudge: if a long-poll is currently in-flight, abort it so a fresh
+  // poll carries this result out immediately instead of waiting up to the
+  // server's 8s long-poll window. _flushPending lets poll()'s catch distinguish
+  // this deliberate abort from the 12s fetch-timeout abort (instant re-poll vs
+  // the normal 100ms reconnect).
+  if (_activePollController && pollActive) {
+    _flushPending = true;
+    try { _activePollController.abort(); } catch (_) {}
+  }
 }
 
 function withTimeout(promise, ms, timeoutMsg) {
@@ -418,16 +448,9 @@ function _extractContent(selector, maxChars) {
     return { elements: results, count: elements.length };
   }
 
-  let text = document.body ? (document.body.innerText || document.body.textContent || '') : '';
-  const textLength = text.length;
-  let truncated = false;
-  if (text.length > maxChars) {
-    text = text.substring(0, maxChars);
-    truncated = true;
-  }
-
-  // Return full page HTML so the server can run trafilatura/BS4 extraction
-  // (same pipeline as fetch_page_content). Cap at 2MB to avoid message bloat.
+  // Page HTML is the PRIMARY payload: the server runs trafilatura/BS4
+  // extraction on it (same pipeline as fetch_page_content) and discards
+  // innerText whenever extraction succeeds. Cap at 2MB to avoid message bloat.
   const MAX_HTML = 2 * 1024 * 1024;
   let html = document.documentElement ? document.documentElement.outerHTML : '';
   let htmlTruncated = false;
@@ -442,7 +465,25 @@ function _extractContent(selector, maxChars) {
     if (name) meta[name] = (m.getAttribute('content') || '').substring(0, 200);
   });
 
-  return { text, textLength, truncated, html, htmlTruncated, meta };
+  // innerText is only a FALLBACK for when HTML is too small for the server to
+  // extract from (server gates extraction on html.length > 200). read_tab waits
+  // for load, so outerHTML reflects the live post-render DOM — a real content
+  // page (incl. a rendered SPA) always has substantial HTML. Below this
+  // threshold the page is an empty/error/redirect shell, so we ship innerText
+  // and skip its (reflow-inducing) computation entirely on the common path.
+  const MIN_HTML_FOR_EXTRACT = 2048;
+  const out = { html, htmlTruncated, meta };
+  if (html.length < MIN_HTML_FOR_EXTRACT) {
+    let text = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+    out.textLength = text.length;
+    out.truncated = false;
+    if (text.length > maxChars) {
+      text = text.substring(0, maxChars);
+      out.truncated = true;
+    }
+    out.text = text;
+  }
+  return out;
 }
 
 // ══════════════════════════════════════════

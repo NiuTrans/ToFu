@@ -57,6 +57,7 @@ import subprocess
 import sys
 from typing import Optional
 
+from lib.agent_artifacts import is_agent_artifact
 from lib.http_client import http_get, http_stream
 from lib.log import audit_log, get_logger, log_context
 
@@ -192,30 +193,37 @@ def current_version() -> str:
         return '0.0.0'
 
 
-def fetch_latest_release() -> Optional[dict]:
-    """Fetch the newest semver tag from the official GitHub repo.
+def _fetch_latest_release_detailed() -> tuple:
+    """Fetch the newest semver tag, returning ``(payload, error)``.
 
-    Returns ``{'tag': 'v0.9.3', 'version': '0.9.3'}`` for the highest
-    semver tag, or None on any failure (network, parse, empty list).
-    Failures are logged, not raised — the caller degrades gracefully.
+    On success ``payload`` is ``{'tag': 'v0.9.3', 'version': '0.9.3'}`` for
+    the highest semver tag and ``error`` is ``None``. On failure ``payload``
+    is ``None`` and ``error`` is a dict ``{'kind', 'detail', 'status'?}``
+    that names the CONCRETE cause so the UI can tell the user exactly why
+    the check failed instead of a vague "try again later". ``kind`` is one
+    of ``network`` (couldn't reach GitHub at all), ``rate_limited``
+    (HTTP 403/429), ``http`` (other non-200), ``parse`` (unreadable JSON),
+    or ``no_tags`` (repo has no semver tags). Never raises.
     """
     try:
         resp = http_get(_TAGS_URL, timeout=15,
                         headers={'Accept': 'application/vnd.github+json'})
     except Exception as e:
         logger.warning('[Update] Failed to reach GitHub tags API: %s', e)
-        return None
+        return None, {'kind': 'network', 'detail': str(e)[:300]}
 
     if resp.status_code != 200:
         logger.warning('[Update] GitHub tags API returned %s for %s',
                        resp.status_code, UPDATE_REPO)
-        return None
+        kind = 'rate_limited' if resp.status_code in (403, 429) else 'http'
+        return None, {'kind': kind, 'status': resp.status_code,
+                      'detail': f'HTTP {resp.status_code} from {_TAGS_URL}'}
 
     try:
         tags = resp.json()
     except Exception as e:
         logger.warning('[Update] Could not parse GitHub tags JSON: %s', e)
-        return None
+        return None, {'kind': 'parse', 'detail': str(e)[:300]}
 
     best_tag = None
     best_ver = None
@@ -229,9 +237,23 @@ def fetch_latest_release() -> Optional[dict]:
             best_tag = name
     if best_tag is None:
         logger.warning('[Update] No semver tags found for %s', UPDATE_REPO)
-        return None
+        return None, {'kind': 'no_tags', 'detail': UPDATE_REPO}
 
-    return {'tag': best_tag, 'version': '.'.join(str(p) for p in best_ver)}
+    return ({'tag': best_tag, 'version': '.'.join(str(p) for p in best_ver)},
+            None)
+
+
+def fetch_latest_release() -> Optional[dict]:
+    """Fetch the newest semver tag from the official GitHub repo.
+
+    Returns ``{'tag': 'v0.9.3', 'version': '0.9.3'}`` for the highest
+    semver tag, or None on any failure (network, parse, empty list).
+    Failures are logged, not raised — the caller degrades gracefully.
+    Thin wrapper over :func:`_fetch_latest_release_detailed` that drops the
+    error detail (callers that need the reason use the detailed variant).
+    """
+    payload, _err = _fetch_latest_release_detailed()
+    return payload
 
 
 def _is_runtime_state(path: str) -> bool:
@@ -285,10 +307,14 @@ def check_for_update() -> dict:
 
     Returns a dict with: current, latest, tag, update_available,
     git_available, update_method, dirty, blocking (truncated),
-    runtime_changes, error. ``update_method`` is ``'git'`` for a checkout
-    or ``'tarball'`` for a non-git deployment — both are updatable, so the
-    UI shows the Apply button either way (only a git dirty tree blocks).
-    Never raises — every failure is captured in the payload.
+    runtime_changes, error, error_kind, error_detail. ``update_method`` is
+    ``'git'`` for a checkout or ``'tarball'`` for a non-git deployment —
+    both are updatable, so the UI shows the Apply button either way (only a
+    git dirty tree blocks). On a failed release check ``error_kind`` names
+    the concrete cause (``network`` / ``rate_limited`` / ``http`` /
+    ``parse`` / ``no_tags``) and ``error_detail`` carries the raw reason so
+    the UI can tell the user EXACTLY what went wrong. Never raises — every
+    failure is captured in the payload.
     """
     cur = current_version()
     _is_git = git_available()
@@ -304,11 +330,29 @@ def check_for_update() -> dict:
         'runtime_changes': 0,
         'repo': UPDATE_REPO,
         'error': None,
+        'error_kind': None,
+        'error_detail': None,
     }
 
-    latest = fetch_latest_release()
+    latest, err = _fetch_latest_release_detailed()
     if latest is None:
-        payload['error'] = 'Could not determine the latest release.'
+        kind = (err or {}).get('kind') or 'network'
+        payload['error_kind'] = kind
+        payload['error_detail'] = (err or {}).get('detail') or ''
+        # A human-readable summary keyed on the concrete cause. The UI
+        # prefers error_kind for its own localized copy, but error stays
+        # populated as a sensible English fallback.
+        payload['error'] = {
+            'network': 'Could not reach GitHub to check for updates '
+                       '(network/connection error).',
+            'rate_limited': 'GitHub rate-limited the update check. '
+                            'Try again in a few minutes.',
+            'http': 'GitHub returned an unexpected response to the '
+                    'update check.',
+            'parse': 'GitHub returned an unreadable response to the '
+                     'update check.',
+            'no_tags': 'The update repository has no released versions yet.',
+        }.get(kind, 'Could not determine the latest release.')
         return payload
 
     payload['latest'] = latest['version']
@@ -559,6 +603,10 @@ def _overlay_skip(rel: str) -> bool:
     rel = rel.replace(os.sep, '/')
     if rel.startswith('./'):
         rel = rel[2:]
+    # Never overwrite an agent-written artifact (.tofu*), at any depth —
+    # prefix-based so future artifacts are covered without re-listing.
+    if any(is_agent_artifact(seg) for seg in rel.split('/') if seg):
+        return True
     return any(rel == p.rstrip('/') or rel.startswith(p)
                for p in _OVERLAY_SKIP_PREFIXES)
 
@@ -815,5 +863,6 @@ def apply_update(progress=None) -> dict:
 __all__ = [
     'UPDATE_REPO', 'UPDATE_REMOTE', 'UPDATE_BRANCH',
     'git_available', 'current_version', 'fetch_latest_release',
+    '_fetch_latest_release_detailed',
     'working_tree_status', 'check_for_update', 'apply_update',
 ]

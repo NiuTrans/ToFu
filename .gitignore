@@ -149,3 +149,7 @@ static/icons/tofu.icns
 .icon-backups/
 # AI assistant evolution journal (per-developer, not source)
 JOURNAL.md
+# AI assistant runtime artifacts (file-history, trash, sandbox)
+.tofu*
+# AI assistant runtime artifacts (file-history, trash, sandbox)
+.tofu*

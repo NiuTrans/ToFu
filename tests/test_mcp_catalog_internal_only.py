@@ -17,9 +17,17 @@ from __future__ import annotations
 
 import importlib
 
+import pytest
+
 import lib.mcp.registry as reg
 
 _INTERNAL_IDS = {'hope', 'llm', 'xuecheng'}
+
+# In an opensource build the internal launchers are stripped from the source
+# catalog and ``TOFU_OPENSOURCE_BUILD`` is baked on, so the "present in the
+# internal build" assertions below are not applicable.  The hidden-in-
+# opensource and no-leak guards still run (and matter) in both builds.
+_OPENSOURCE = reg.is_opensource_build()
 
 
 def _reload_with_flag(monkeypatch, value):
@@ -31,6 +39,10 @@ def _reload_with_flag(monkeypatch, value):
     return importlib.reload(reg)
 
 
+@pytest.mark.skipif(
+    _OPENSOURCE,
+    reason='internal MCP launchers are stripped from opensource builds',
+)
 def test_internal_entries_present_in_internal_build(monkeypatch):
     r = _reload_with_flag(monkeypatch, None)
     try:
@@ -43,6 +55,10 @@ def test_internal_entries_present_in_internal_build(monkeypatch):
         _reload_with_flag(monkeypatch, None)
 
 
+@pytest.mark.skipif(
+    _OPENSOURCE,
+    reason='internal MCP launchers are stripped from opensource builds',
+)
 def test_internal_entries_flagged():
     # The three internal servers must carry the explicit flag so filtering
     # never relies on source ordering / the section banner.

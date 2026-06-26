@@ -101,12 +101,18 @@ function updateStreamingUI(msg) {
      *   before the subprocess times out. */
     const lh = msg._mcpLoginHint;
     const lhHtml = lh ? renderMcpLoginHintHtml(lh) : '';
-    const html = (lhHtml || '') + (mp ? renderMemoryPrefetchHtml(mp) : '');
+    const pa = msg._preferencesApplied;
+    const paHtml = pa ? renderPreferencesAppliedHtml(pa) : '';
+    const pl = msg._preferencesLearned;
+    const plHtml = (pl && pl.length) ? renderPreferenceLearnedHtml(pl) : '';
+    const html = (lhHtml || '') + (mp ? renderMemoryPrefetchHtml(mp) : '') + (paHtml || '') + (plHtml || '');
     /* fp includes snippet length so a late-arriving tool_result with a
      * longer snippet triggers a re-render (earlier fp only checked
      * phase+updatedAt, which can stay the same when we just append). */
     const fp = (lh ? `L|${lh.phase}|${lh.username||''}|${lh.updatedAt||0}|${(lh.snippet||'').length}|` : '') +
-               (mp ? `${mp.phase}|${mp.selected||0}|${mp.candidates||0}|${mp.totalMs||0}` : '');
+               (mp ? `${mp.phase}|${mp.selected||0}|${mp.candidates||0}|${mp.totalMs||0}` : '') +
+               (pa ? `P|${pa.chars||0}|${(pa.items||[]).length}` : '') +
+               (pl ? `PL|${pl.length}` : '');
     if (memprefetchZone.getAttribute('data-mp-fp') !== fp) {
       memprefetchZone.setAttribute('data-mp-fp', fp);
       memprefetchZone.innerHTML = html;

@@ -24,6 +24,7 @@ from lib.desktop.bridge import (
     resolve_results,
     send_desktop_command,
     take_pending_commands,
+    take_pending_commands_async,
 )
 
 __all__ = [
@@ -37,4 +38,5 @@ __all__ = [
     'resolve_results',
     'send_desktop_command',
     'take_pending_commands',
+    'take_pending_commands_async',
 ]

@@ -102,6 +102,9 @@ async function regenerateFromUser(idx) {
     const resp = await Api.chat.regenerate({
       convId,
       truncateToIndex: idx,
+      // ★ Phase 3: stable-id truncate point (authoritative server-side; index
+      //   is the fallback). See chat_regenerate's truncateToMsgId handling.
+      ...(msg._msgId ? { truncateToMsgId: msg._msgId } : {}),
       config: _regenConfig,
       settings: _regenSettings,
     }, { signal: _regenAbortCtrl.signal });

@@ -20,6 +20,8 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def _install_shim():
     """Install the FULL Flask→Quart shim by importing server.
@@ -50,6 +52,12 @@ def _new_loop_run(coro):
 
 class AgentPollRouteTest(unittest.TestCase):
 
+    # unauth → 401 assertions need the credential gate active, which it only
+    # is in private/multi-user mode. The shared conftest defaults to 'open'
+    # (synthetic admin for loopback); the per-test conftest fixture honours
+    # this marker and forces private for every test method here.
+    pytestmark = pytest.mark.auth_mode('private')
+
     @classmethod
     def setUpClass(cls):
         _install_shim()  # full Flask→Quart shim (idempotent; no revert)
@@ -60,16 +68,6 @@ class AgentPollRouteTest(unittest.TestCase):
         api_keys._cache.clear()
         api_keys._cache_loaded = False
         os.environ['TUNNEL_TOKEN'] = 'tt'
-
-        # These tests assert unauth → 401, which requires the credential
-        # gate to be active. The shared conftest defaults to 'open' (synthetic
-        # admin for loopback), so pin 'private' for this class and restore it
-        # in tearDownClass. In private mode an unauth request is rejected at
-        # the gate before reaching the handler.
-        cls._orig_auth_mode = os.environ.get('TOFU_AUTH_MODE')
-        os.environ['TOFU_AUTH_MODE'] = 'private'
-        from lib import auth_mode
-        auth_mode.reset_for_tests()
 
         from quart import Quart
         cls.app = Quart(__name__)
@@ -96,12 +94,6 @@ class AgentPollRouteTest(unittest.TestCase):
         api_keys._STORE_PATH = cls._orig_path
         api_keys._cache.clear()
         api_keys._cache_loaded = False
-        if cls._orig_auth_mode is None:
-            os.environ.pop('TOFU_AUTH_MODE', None)
-        else:
-            os.environ['TOFU_AUTH_MODE'] = cls._orig_auth_mode
-        from lib import auth_mode
-        auth_mode.reset_for_tests()
         cls._tmp.cleanup()
 
     def _hdr(self, token):

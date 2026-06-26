@@ -93,7 +93,7 @@ class TestBrowserFacade:
         from lib.browser import browser_tool_display
         assert callable(browser_tool_display)
         r = browser_tool_display('browser_list_tabs', {})
-        assert '🌐' in r
+        assert isinstance(r, str) and 'tab' in r.lower()
 
     def test_fetch(self):
         from lib.browser import fetch_url_via_browser

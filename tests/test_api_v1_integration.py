@@ -16,6 +16,8 @@ import sys
 import tempfile
 import unittest
 
+import pytest
+
 
 class _AppFixture:
     """Build a Quart app with the headless API blueprints registered.
@@ -158,6 +160,12 @@ def _run(coro):
 
 
 class IntegrationTest(unittest.TestCase):
+
+    # The credential gate only rejects in private/multi-user mode; in 'open'
+    # mode (the conftest default) unauthenticated /api/v1/* calls get a
+    # synthetic principal and return 200. This file asserts the auth
+    # contract, so the per-test conftest fixture forces private mode.
+    pytestmark = pytest.mark.auth_mode('private')
 
     @classmethod
     def setUpClass(cls):

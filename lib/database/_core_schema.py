@@ -353,6 +353,42 @@ CONVERSATIONS = define_table(
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
 )
 
+# conversation_messages — Phase 5 "messages-as-rows". The per-message row
+# store that the conversations.messages JSONB array migrates INTO. Landing
+# migrator-first behind the TOFU_MESSAGES_ROWS flag (lib/database/messages_rows.py):
+# a one-shot idempotent backfill + dual-write, with reads gated on a proven
+# byte-identical build_search_text reconstruction BEFORE any read cutover.
+#
+# Column split rationale: the four columns build_search_text() actually reads —
+# role, content, thinking, translated_content — are first-class so the search
+# blob can be reconstructed from rows alone (the verification invariant). The
+# whole original message dict (incl. _msgId, timestamp, finishReason, usage,
+# toolRounds, model, modifiedFileList, …) is preserved verbatim in meta JSONB,
+# so a row round-trips back to the exact JSONB element with no field loss.
+# content_json holds multipart content (list of text/image parts) as a JSON
+# string; content holds the plain-string form. Exactly one is populated per row
+# (mirrors the str-vs-list branch in build_search_text). Composite PK
+# (conv_id, seq) preserves order; (conv_id, msg_id) is separately UNIQUE for
+# index-free addressing. FK to conversations(id) is intentionally OMITTED —
+# conversations has a COMPOSITE PK (id, user_id), so a single-column FK can't
+# target it; the migrator/dual-writer scope rows by conv_id within the owning
+# user's write path.
+CONVERSATION_MESSAGES = define_table(
+    'conversation_messages',
+    sa.Column('conv_id', sa.Text, nullable=False),
+    sa.Column('seq', sa.Integer, nullable=False),
+    sa.Column('msg_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('role', sa.Text, nullable=False, server_default=''),
+    sa.Column('content', sa.Text, nullable=False, server_default=''),
+    sa.Column('content_json', jsonb_column(), nullable=False, server_default=sa.text("'[]'")),
+    sa.Column('thinking', sa.Text, nullable=False, server_default=''),
+    sa.Column('translated_content', sa.Text, nullable=False, server_default=''),
+    sa.Column('meta', jsonb_column(), nullable=False, server_default=sa.text("'{}'")),
+    sa.Column('created_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('updated_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.PrimaryKeyConstraint('conv_id', 'seq'),
+)
+
 # trading_config — key/value store; identical shape on PG + SQLite.
 TRADING_CONFIG = define_table(
     'trading_config',

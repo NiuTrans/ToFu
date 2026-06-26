@@ -254,6 +254,96 @@ _MIN_CACHE_MISS_TOKENS = 2000
 _MIN_NO_REUSE_TOKENS = 20000
 
 
+def _classify_break(
+    *, call_count: int, was_compaction: bool,
+    prev_cache_read: int, cache_read: int,
+    prev_cache_write: int, cache_write: int,
+    prev_prefix_tokens: int,
+) -> tuple[bool, bool, bool]:
+    """Phase-2 break classification (pure arithmetic on API cache tokens).
+
+    Returns ``(api_break, no_reuse, partial_no_reuse)`` — the three
+    mutually-narrowing break predicates.  Extracted verbatim from
+    ``detect_cache_break``'s Phase 2 so the (subtle, much-commented)
+    thresholds live in one testable place; the caller still owns the lock,
+    the state mutation, and the cause/logging/return shaping.
+
+      * api_break       — cache_read DROPPED >5% from a prior high read, with
+                          the absolute drop over the miss threshold.
+      * no_reuse        — a large fresh write with ZERO read despite an
+                          established prefix last round.
+      * partial_no_reuse— a large write repeated round-over-round while the
+                          read stayed pinned (body re-billed uncached).
+    """
+    api_break = (
+        call_count > 0
+        and prev_cache_read > _MIN_CACHE_MISS_TOKENS
+        and cache_read < prev_cache_read * 0.95
+        and (prev_cache_read - cache_read) >= _MIN_CACHE_MISS_TOKENS
+        and not was_compaction
+    )
+
+    no_reuse = (
+        call_count > 0
+        and cache_read == 0
+        and cache_write >= _MIN_NO_REUSE_TOKENS
+        and prev_prefix_tokens >= _MIN_NO_REUSE_TOKENS
+        and not was_compaction
+    )
+
+    partial_no_reuse = (
+        call_count > 0
+        and not was_compaction
+        and not api_break
+        and not no_reuse
+        and cache_write >= _MIN_NO_REUSE_TOKENS
+        and prev_cache_write >= _MIN_NO_REUSE_TOKENS
+        and cache_read <= prev_cache_read * 1.05
+    )
+
+    return bool(api_break), bool(no_reuse), bool(partial_no_reuse)
+
+
+def _resolve_break_cause(
+    *, client_changes: dict, prefix_mutation_break: bool,
+    elapsed: float, cache_read: int, prefix_mutated: bool,
+) -> str:
+    """Build the single most-specific human cause string for a confirmed break.
+
+    Pure string logic extracted verbatim from ``detect_cache_break``'s Report
+    phase (the disambiguation ladder).  Precedence: explicit client changes →
+    prefix-byte mutation → TTL expiry → narrowed stochastic-server-miss /
+    breakpoint reasoning keyed on whether a read remained and whether the
+    prefix bytes mutated.
+    """
+    if client_changes:
+        return ', '.join(f'{k}={v}' for k, v in client_changes.items())
+    if prefix_mutation_break:
+        return ('cached prefix bytes changed between turns '
+                '(non-idempotent history edit) — the whole body '
+                'was re-billed uncached')
+    if elapsed > 300:
+        return 'TTL expiry (>5min gap, prompt unchanged)'
+    if cache_read > _MIN_CACHE_MISS_TOKENS:
+        # The static system+tools prefix still read back, so the cache was NOT
+        # wholesale evicted — only the conversation body past the static floor
+        # was not reused. Verified 2026-06-23 via an identical-prompt live
+        # replay (aws.claude-opus-4.8): byte-identical input at 3s gaps still
+        # missed on ~2/11 calls. So this is a STOCHASTIC per-request server-side
+        # cache miss, NOT "BP4 advancement" (Anthropic readback is automatic up
+        # to the longest match; a moving tail marker does not lose an earlier
+        # write).
+        return ('stochastic server-side cache miss (body re-billed; '
+                'static prefix still cached) — a per-request gateway '
+                'miss reproduced at <5min gaps with identical input')
+    if not prefix_mutated:
+        return ('prefix not reused — stochastic server-side cache '
+                'miss or TTL expiry (prefix bytes unchanged)')
+    return ('prefix not reused — stochastic server-side '
+            'cache miss, TTL expiry, or a silent prefix '
+            'byte change')
+
+
 def detect_cache_break(
     conv_id: str,
     messages: list,
@@ -376,57 +466,19 @@ def detect_cache_break(
                     '%d → %d tokens',
                     conv_id[:8], prev_cache_read, cache_read)
 
-        # Detect actual cache break from API response:
-        # cache_read dropped >5% AND the absolute drop exceeds threshold
-        api_break = False
-        if (prev.call_count > 0
-                and prev_cache_read > _MIN_CACHE_MISS_TOKENS
-                and cache_read < prev_cache_read * 0.95
-                and (prev_cache_read - cache_read) >= _MIN_CACHE_MISS_TOKENS
-                and not _was_compaction):
-            api_break = True
-
-        # ★ Detect "cache written but never read back" (no-reuse miss).
-        #   The api_break check above only fires on a DROP from a prior HIGH
-        #   read; it is structurally BLIND to the pattern where every round
-        #   writes a fresh large prefix and reads nothing — prev_cache_read
-        #   stays 0, so the `> _MIN_CACHE_MISS_TOKENS` guard never passes.
-        #   That is exactly the costly "2 rounds, both full cache_write, zero
-        #   cache_read" case the user hit, and the reason it went unexplained.
-        #   Flag it when a substantial prefix existed last round (read OR
-        #   write) but was not reused this round.
+        # ── Phase-2 break classification (pure; see _classify_break) ──
+        #   api_break        — cache_read dropped from a prior high read.
+        #   no_reuse         — large fresh write, zero read, established prefix.
+        #   partial_no_reuse — large write repeated while read stayed pinned
+        #                      (conversation body re-billed uncached).
         _prev_prefix_tokens = (prev.last_cache_read_tokens
                                + prev.last_cache_write_tokens)
         prev_cache_write = prev.last_cache_write_tokens
-        no_reuse = (
-            prev.call_count > 0
-            and cache_read == 0
-            and cache_write >= _MIN_NO_REUSE_TOKENS
-            and _prev_prefix_tokens >= _MIN_NO_REUSE_TOKENS
-            and not _was_compaction
-        )
-
-        # ★ Detect "prefix repeatedly re-written while cache_read stays pinned".
-        #   The costly pattern reported by users: round after round shows a big
-        #   `cache_write` but cache_read does NOT grow — it stays pinned at the
-        #   small static system+tools prefix while the whole conversation BODY
-        #   is re-billed uncached every turn (e.g. R1 w=138k r=55k → R2 w=141k
-        #   r=55k → …). Both detectors above are structurally blind to it:
-        #     - api_break needs a DROP in cache_read; here the read is FLAT.
-        #     - no_reuse needs cache_read == 0; here the static prefix still
-        #       reads (~55k), so read != 0.
-        #   Result: detect_cache_break returned None and the cost popover showed
-        #   a large `write` with NO cause. Flag it when we wrote a big prefix
-        #   this round AND last round too, yet the read did not grow to absorb
-        #   last round's write (it stayed flat or shrank).
-        partial_no_reuse = (
-            prev.call_count > 0
-            and not _was_compaction
-            and not api_break
-            and not no_reuse
-            and cache_write >= _MIN_NO_REUSE_TOKENS
-            and prev_cache_write >= _MIN_NO_REUSE_TOKENS
-            and cache_read <= prev_cache_read * 1.05
+        api_break, no_reuse, partial_no_reuse = _classify_break(
+            call_count=prev.call_count, was_compaction=_was_compaction,
+            prev_cache_read=prev_cache_read, cache_read=cache_read,
+            prev_cache_write=prev_cache_write, cache_write=cache_write,
+            prev_prefix_tokens=_prev_prefix_tokens,
         )
 
         # ── Update state (AFTER elapsed computation) ──
@@ -473,63 +525,19 @@ def detect_cache_break(
         # round while the read stays pinned (partial_no_reuse). All three mean
         # we paid to rebuild (part of) the cache instead of reading it back.
         if api_break or no_reuse or partial_no_reuse or prefix_mutation_break:
-            # Build the most specific cause we can.
+            # Build the most specific cause we can (pure; see _resolve_break_cause).
             #
             # NOTE: "cache contention" between different conversations is NOT a
             # real phenomenon. A/B tested 2026-04-10: per-round cache_read is
             # identical between solo and interleaved modes (±0.0%). Anthropic
             # cache is keyed on exact prefix bytes — different conversations
-            # have different keys and CANNOT evict each other. Real causes of
-            # unexplained drops: (1) TTL expiry (>5min gap), (2) breakpoint
-            # advancement, (3) a silent prefix byte change, (4) server-side
-            # capacity pressure (rare).
-            if client_changes:
-                cause_str = ', '.join(
-                    f'{k}={v}' for k, v in client_changes.items())
-            elif prefix_mutation_break:
-                cause_str = ('cached prefix bytes changed between turns '
-                             '(non-idempotent history edit) — the whole body '
-                             'was re-billed uncached')
-            elif elapsed > 300:
-                cause_str = 'TTL expiry (>5min gap, prompt unchanged)'
-            else:
-                # ★ Disambiguate the remaining candidates into ONE confident
-                #   cause instead of listing all three (the old "breakpoint
-                #   advancement, server-side eviction, or a silent prefix byte
-                #   change" fallback was effectively no answer). We hold two
-                #   facts here that narrow it down:
-                #     - `_prefix_mutated` — the prefix-content hash. False
-                #       means the cached bytes did NOT change, so "a silent
-                #       prefix byte change" is impossible; drop it.
-                #     - `cache_read` — when a substantial read REMAINS (the
-                #       static system+tools prefix still reads back), the cache
-                #       was NOT wholesale evicted. Only the segment past the
-                #       advanced BP4 tail marker stopped being read — i.e.
-                #       breakpoint advancement. Server-side eviction would
-                #       instead zero out the read; it's at most a remote
-                #       parenthetical here.
-                if cache_read > _MIN_CACHE_MISS_TOKENS:
-                    # The static system+tools prefix still read back, so the
-                    # cache was NOT wholesale evicted — only the conversation
-                    # body past the static floor was not reused. Verified
-                    # 2026-06-23 via an identical-prompt live replay
-                    # (aws.claude-opus-4.8): byte-identical input at 3s gaps
-                    # still missed on ~2/11 calls. So this is a STOCHASTIC
-                    # per-request server-side cache miss, NOT "BP4 advancement"
-                    # (Anthropic readback is automatic up to the longest match;
-                    # a moving tail marker does not lose an earlier write).
-                    cause_str = (
-                        'stochastic server-side cache miss (body re-billed; '
-                        'static prefix still cached) — a per-request gateway '
-                        'miss reproduced at <5min gaps with identical input')
-                elif not _prefix_mutated:
-                    cause_str = (
-                        'prefix not reused — stochastic server-side cache '
-                        'miss or TTL expiry (prefix bytes unchanged)')
-                else:
-                    cause_str = ('prefix not reused — stochastic server-side '
-                                 'cache miss, TTL expiry, or a silent prefix '
-                                 'byte change')
+            # have different keys and CANNOT evict each other.
+            cause_str = _resolve_break_cause(
+                client_changes=client_changes,
+                prefix_mutation_break=prefix_mutation_break,
+                elapsed=elapsed, cache_read=cache_read,
+                prefix_mutated=_prefix_mutated,
+            )
 
             # ★ Prefix mutation is the most ACTIONABLE and most CERTAIN cause —
             #   it means our own code rewrote bytes inside the cached prefix,

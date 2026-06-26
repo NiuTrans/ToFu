@@ -669,6 +669,162 @@ def _adapt_stream_body_for_slot(slot, body_or_messages, is_body, *,
     )
 
 
+class _StreamRetryState:
+    """Shared retry/exclusion bookkeeping for the streaming dispatch loops.
+
+    Both ``dispatch_stream`` (sync) and ``async_dispatch_stream`` (async) run
+    the SAME three-tier exclusion state machine around their (different)
+    transport calls:
+
+      * ``exclude``       — models excluded entirely (hard model errors).
+      * ``exclude_keys``  — keys excluded entirely (quota exhaustion / auto-
+                            exhausted after consecutive 429s).
+      * ``exclude_pairs`` — ``(key_name, model)`` pairs excluded (permission /
+                            timeout / unreachable / strict-model errors), so
+                            another key serving the same model is still tried.
+
+    This class owns the state + the pure transitions that used to be hand-
+    duplicated in both loops (init, the 60s periodic exclusion reset, the
+    slot-pick exclusion kwargs, the avoid-set relaxation, and the per-error
+    set mutations).  Loop control (``continue`` / ``break`` / sleep) and the
+    transport call stay in each function — only the bookkeeping is shared, so
+    the two can never drift on WHICH set a given error mutates.
+
+    Counters:
+      * ``hard_attempts`` counts genuine failures (capped by ``max_retries``).
+      * ``_429_count`` counts free 429 retries (never counts toward the cap).
+    """
+
+    _EXCLUSION_RESET_INTERVAL = 60  # reset hard-error exclusions every 60s of 429 cycling
+
+    def __init__(self, exclude_models=None, avoid_pairs=None):
+        self.exclude = set(exclude_models) if exclude_models else set()
+        # Caller-provided model exclusions are permanent for this dispatch —
+        # remembered so the periodic reset doesn't re-introduce them.
+        self._initial_exclude_models = set(self.exclude)
+        self.exclude_keys = set()
+        self.exclude_pairs = set()
+        # Caller-provided avoid set seeds exclude_pairs so the first pick
+        # already steers around it; tracked separately so it can be relaxed
+        # as a last resort when every other slot is cooled/excluded.
+        self._initial_avoid = set(avoid_pairs) if avoid_pairs else set()
+        if self._initial_avoid:
+            self.exclude_pairs |= self._initial_avoid
+        self.last_err = None
+        self.hard_attempts = 0
+        self._429_count = 0
+        self._last_exclusion_reset = time.monotonic()
+
+    @property
+    def total_attempts(self):
+        return self.hard_attempts + self._429_count
+
+    def maybe_reset_exclusions(self, log_prefix, label):
+        """Periodically clear hard-error exclusions during 429 cycling.
+
+        502/timeout exclusions may be transient (gateway restart) but are
+        otherwise permanent for the dispatch call.  After 60s of 429 cycling
+        give excluded slots another chance — still-broken ones get re-excluded
+        quickly.  Caller-provided ``exclude_models`` are preserved.  Returns
+        the set of currently-active exclusions (for the caller's log line)
+        before the reset, or None when nothing was reset.
+        """
+        if self._429_count > 0 and (
+                time.monotonic() - self._last_exclusion_reset) >= self._EXCLUSION_RESET_INTERVAL:
+            if self.exclude or self.exclude_keys or self.exclude_pairs:
+                logger.info(
+                    '%s %s: resetting hard-error exclusions after %ds of 429 '
+                    'cycling (cycle #%d) — exclude_models=%s exclude_keys=%s '
+                    'exclude_pairs=%s',
+                    log_prefix, label, self._EXCLUSION_RESET_INTERVAL,
+                    self._429_count, self.exclude, self.exclude_keys,
+                    self.exclude_pairs)
+                self.exclude.clear()
+                self.exclude |= self._initial_exclude_models
+                self.exclude_keys.clear()
+                self.exclude_pairs.clear()
+            self._last_exclusion_reset = time.monotonic()
+
+    def eff_exclude_models(self):
+        """``exclude_models`` to pass to pick_and_reserve.
+
+        Caller-provided exclusions apply from attempt 1; failure-driven ones
+        only after the first attempt.
+        """
+        return self.exclude if (self.total_attempts > 0
+                                or self._initial_exclude_models) else None
+
+    def eff_exclude_keys(self):
+        return self.exclude_keys if self.total_attempts > 0 else None
+
+    def eff_exclude_pairs(self):
+        return self.exclude_pairs if self.total_attempts > 0 else None
+
+    def relax_avoid_if_exhausted(self):
+        """Drop the caller-provided avoid set when every other slot is gone.
+
+        Zero-byte force-rotate uses ``avoid_pairs`` to steer away from a
+        freshly-poisoned slot; if the rest of the pool is exhausted we'd
+        rather retry the bad slot than fail outright.  Relaxes at most once.
+        Returns True if it relaxed (caller should ``continue``).
+        """
+        if self._initial_avoid and self._initial_avoid <= self.exclude_pairs:
+            self.exclude_pairs -= self._initial_avoid
+            self._initial_avoid = set()
+            return True
+        return False
+
+    def note_free_429(self):
+        """A routine (non-quota) 429 — free retry, does not count toward the cap."""
+        self._429_count += 1
+
+    def note_cooldown_cycle(self):
+        """All slots in transient cooldown (slot is None, 429-equivalent)."""
+        self._429_count += 1
+
+    def note_quota_key(self, slot):
+        """Quota-exhausted 429 — disable the key for this dispatch; hard attempt."""
+        self.exclude_keys.add(slot.key_name)
+        self.hard_attempts += 1
+
+    def note_auto_exhausted_key(self, slot):
+        """Key auto-exhausted after consecutive 429s — exclude key; hard attempt."""
+        self.exclude_keys.add(slot.key_name)
+        self.hard_attempts += 1
+
+    def note_permission_pair(self, slot, dispatcher, capability, log_prefix):
+        """Permission denied — exclude the (key, model) PAIR; escalate to a
+        whole-key exclusion only if EVERY model for this key is now excluded."""
+        self.exclude_pairs.add((slot.key_name, slot.model))
+        self.hard_attempts += 1
+        _key_pairs = {(kn, m) for kn, m in self.exclude_pairs if kn == slot.key_name}
+        _key_models = {s.model for s in dispatcher.slots
+                       if s.key_name == slot.key_name
+                       and (not capability or capability in s.capabilities)}
+        if _key_models and _key_models <= {m for _, m in _key_pairs}:
+            self.exclude_keys.add(slot.key_name)
+            logger.warning('%s Permission denied on ALL models for key %s — '
+                           'excluding entire key', log_prefix, slot.key_name)
+            return True
+        return False
+
+    def note_unreachable_pair(self, slot):
+        """Endpoint unreachable — exclude the pair; hard attempt.  (The caller
+        sets the slot cooldown — that's slot mutation, not retry bookkeeping.)"""
+        self.exclude_pairs.add((slot.key_name, slot.model))
+        self.hard_attempts += 1
+
+    def note_generic_error(self, slot, *, is_timeout, strict_model):
+        """Generic stream error: a timeout or a strict-model error excludes the
+        PAIR (other keys of the model still tried); anything else excludes the
+        whole MODEL.  Hard attempt either way."""
+        if is_timeout or strict_model:
+            self.exclude_pairs.add((slot.key_name, slot.model))
+        else:
+            self.exclude.add(slot.model)
+        self.hard_attempts += 1
+
+
 def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     on_tool_call_ready=None,
                     abort_check=None, max_tokens=4096, temperature=0,
@@ -731,21 +887,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
     from lib.llm_errors import EndpointUnreachableError
 
     dispatcher = get_dispatcher()
-    exclude = set(exclude_models) if exclude_models else set()
-    # Caller-provided model exclusions are permanent for this dispatch call —
-    # remember them so the periodic exclusion-reset during 429 cycling doesn't
-    # silently re-introduce a model the caller explicitly banned.
-    _initial_exclude_models = set(exclude)
-    exclude_keys = set()      # keys to exclude entirely
-    exclude_pairs = set()     # (key_name, model) pairs to exclude (permission errors)
-    # Seed the caller-provided avoid set so the very first slot pick
-    # already steers around it.  We track these separately so we know
-    # to re-introduce them as a last resort if every other slot is
-    # cooled down or excluded.
-    _initial_avoid = set(avoid_pairs) if avoid_pairs else set()
-    if _initial_avoid:
-        exclude_pairs |= _initial_avoid
-    last_err = None
+    state = _StreamRetryState(exclude_models=exclude_models, avoid_pairs=avoid_pairs)
 
     # Detect if it's a pre-built body or raw messages
     is_body = isinstance(body_or_messages, dict) and 'messages' in body_or_messages
@@ -754,12 +896,8 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
     #   Set _MAX_429_CYCLES = 0 to disable the cap (retry indefinitely).
     #   The abort_check runs every cycle so the user can always cancel.
     _MAX_429_CYCLES = 0  # 0 = infinite; set >0 to re-enable safety cap
-    hard_attempts = 0
-    _429_count = 0
-    _last_exclusion_reset = time.monotonic()  # ★ track when we last reset hard-error exclusions
-    _EXCLUSION_RESET_INTERVAL = 60  # reset exclude_pairs every 60s during 429 cycling
 
-    while hard_attempts < max_retries:
+    while state.hard_attempts < max_retries:
         # Abort check — let the user cancel during 429 cycling
         if abort_check and abort_check():
             from lib.llm import AbortedError as _AE
@@ -768,54 +906,31 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
         # ★ Safety cap on 429 cycling — if we've been rate-limited for
         #   too many cycles, something is fundamentally wrong (e.g. payload
         #   too large causing 413 on some slots and 429 on the rest).
-        if _MAX_429_CYCLES > 0 and _429_count >= _MAX_429_CYCLES:
+        if _MAX_429_CYCLES > 0 and state._429_count >= _MAX_429_CYCLES:
             logger.error(
                 '%s dispatch_stream: 429 cycling exceeded safety cap '
                 '(%d cycles) — giving up. Last error: %s',
-                log_prefix, _MAX_429_CYCLES, str(last_err)[:200])
-            raise last_err or RuntimeError(
-                'Rate-limited %d times without success' % _429_count)
+                log_prefix, _MAX_429_CYCLES, str(state.last_err)[:200])
+            raise state.last_err or RuntimeError(
+                'Rate-limited %d times without success' % state._429_count)
 
-        total_attempts = hard_attempts + _429_count
         # Log available slots at start of each attempt for debugging
         logger.debug(
             '%s dispatch_stream attempt hard=%d/%d 429=%d: '
             'slots: %s',
-            log_prefix, hard_attempts + 1, max_retries, _429_count,
+            log_prefix, state.hard_attempts + 1, max_retries, state._429_count,
             dispatcher.summarize_slots(capability))
 
-        # ★ Periodically reset hard-error exclusions during 429 cycling.
-        #   502/timeout errors may be transient (gateway restart), but
-        #   exclude_pairs is permanent per dispatch call.  After 60s,
-        #   give excluded slots another chance — if still broken, they'll
-        #   get re-excluded quickly.  This prevents permanently losing
-        #   slots that recovered while we were in the 429 retry loop.
-        if _429_count > 0 and (time.monotonic() - _last_exclusion_reset) >= _EXCLUSION_RESET_INTERVAL:
-            if exclude or exclude_keys or exclude_pairs:
-                logger.info(
-                    '%s dispatch_stream: resetting hard-error exclusions '
-                    'after %ds of 429 cycling (cycle #%d) — '
-                    'exclude_models=%s exclude_keys=%s exclude_pairs=%s',
-                    log_prefix, _EXCLUSION_RESET_INTERVAL, _429_count,
-                    exclude, exclude_keys, exclude_pairs)
-                # Preserve caller-provided exclude_models across the reset.
-                exclude.clear()
-                exclude |= _initial_exclude_models
-                exclude_keys.clear()
-                exclude_pairs.clear()
-                # Don't reset hard_attempts — we still want to count
-                # genuinely broken slots toward the retry limit
-            _last_exclusion_reset = time.monotonic()
+        # ★ Periodically reset hard-error exclusions during 429 cycling
+        #   (502/timeout may be transient; give recovered slots another chance).
+        state.maybe_reset_exclusions(log_prefix, 'dispatch_stream')
 
-        # Caller-provided exclude_models must apply on attempt 1 too
-        # (failure-driven exclusions only kick in after total_attempts>0).
-        _eff_exclude = exclude if (total_attempts > 0 or _initial_exclude_models) else None
         slot = dispatcher.pick_and_reserve(
             capability=capability,
             prefer_model=prefer_model,
-            exclude_models=_eff_exclude,
-            exclude_keys=exclude_keys if total_attempts > 0 else None,
-            exclude_pairs=exclude_pairs if total_attempts > 0 else None,
+            exclude_models=state.eff_exclude_models(),
+            exclude_keys=state.eff_exclude_keys(),
+            exclude_pairs=state.eff_exclude_pairs(),
             strict_model=strict_model)
         if slot is None:
             # ── Last-resort: drop the caller-provided avoid set ──
@@ -824,13 +939,10 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             # already exhausted we'd rather retry the bad slot than fail
             # outright — failure here means the task aborts, while a
             # retry on the original slot might still succeed.
-            if _initial_avoid and _initial_avoid <= exclude_pairs:
-                exclude_pairs -= _initial_avoid
+            if state.relax_avoid_if_exhausted():
                 logger.info(
-                    '%s dispatch_stream: relaxing avoid_pairs %s — every '
-                    'other slot is in cooldown/excluded',
-                    log_prefix, _initial_avoid)
-                _initial_avoid = set()  # only relax once
+                    '%s dispatch_stream: relaxing avoid_pairs — every '
+                    'other slot is in cooldown/excluded', log_prefix)
                 continue
             # All slots in cooldown / excluded — wait briefly and retry.
             # ★ Two cases produce slot=None and need OPPOSITE handling:
@@ -843,23 +955,40 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             #       was the cause of spurious "All N attempts failed".
             #   (b) no capable slot exists at all → genuinely unservable.
             _slots_exist = dispatcher.has_capable_slots(
-                capability, exclude_models=exclude,
-                exclude_keys=exclude_keys, exclude_pairs=exclude_pairs)
-            if _429_count > 0 or _slots_exist:
+                capability, exclude_models=state.exclude,
+                exclude_keys=state.exclude_keys, exclude_pairs=state.exclude_pairs)
+            if state._429_count > 0 or _slots_exist:
                 time.sleep(0.3)
-                _429_count += 1
-                if _429_count % 20 == 0:
+                state.note_cooldown_cycle()
+                # ★ Notify the caller the FIRST time we enter the cooldown
+                #   wait and then sparsely (every 20 cycles ≈ 6s). This is the
+                #   case the old on_retry calls MISSED: under contention every
+                #   capable slot is cooling from OTHER requests' 429s, so this
+                #   call returns slot=None WITHOUT ever catching a raw 429 of
+                #   its own — yet it can wait minutes for a rate-limited
+                #   strict_model. A flow/swarm worker in this state showed a
+                #   bare "Waiting…" pulse with no signal. on_retry lets the
+                #   caller surface a transient "waiting for model…" phase.
+                if on_retry and (state._429_count == 1 or state._429_count % 20 == 0):
+                    try:
+                        on_retry(attempt=state._429_count,
+                                 reason='Waiting for model (rate-limited)',
+                                 status_code=429)
+                    except Exception as _ore:
+                        logger.debug('%s on_retry (cooldown) raised: %s',
+                                     log_prefix, _ore)
+                if state._429_count % 20 == 0:
                     logger.info(
                         '%s dispatch_stream: still cycling (slots cooling, %d times, '
                         'strict=%s), waiting for cooldown to expire…',
-                        log_prefix, _429_count, strict_model)
+                        log_prefix, state._429_count, strict_model)
                 continue
             logger.warning(
                 '%s dispatch_stream: NO CAPABLE SLOT on attempt %d/%d. '
                 'exclude_models=%s exclude_keys=%s exclude_pairs=%s strict_model=%s. '
                 'Available slots: %s',
-                log_prefix, hard_attempts + 1, max_retries,
-                exclude, exclude_keys, exclude_pairs, strict_model,
+                log_prefix, state.hard_attempts + 1, max_retries,
+                state.exclude, state.exclude_keys, state.exclude_pairs, strict_model,
                 dispatcher.summarize_slots(capability))
             break
 
@@ -917,19 +1046,19 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     'key_tail': (slot.api_key or '')[-4:],
                     'provider_id': slot.provider_id,
                     'latency_ms': round(latency),
-                    'attempt': hard_attempts + 1,
-                    '429_retries': _429_count,
+                    'attempt': state.hard_attempts + 1,
+                    '429_retries': state._429_count,
                 }
-            if _429_count > 0:
+            if state._429_count > 0:
                 logger.info('%s dispatch_stream OK after %d 429-retries: '
                             'finish_reason=%s model=%s provider=%s latency=%.0fms',
-                            log_prefix, _429_count, finish, slot.model,
+                            log_prefix, state._429_count, finish, slot.model,
                             slot.provider_id, latency)
             else:
                 logger.debug('%s dispatch_stream OK: finish_reason=%s model=%s '
                             'provider=%s latency=%.0fms attempt=%d/%d',
                             log_prefix, finish, slot.model,
-                            slot.provider_id, latency, hard_attempts + 1,
+                            slot.provider_id, latency, state.hard_attempts + 1,
                             max_retries)
             return msg, finish, usage
 
@@ -939,22 +1068,21 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             slot.record_error(is_rate_limit=True,
                               is_quota_exhausted=_is_quota,
                               error=_err_str if _is_quota else '')
-            last_err = e
+            state.last_err = e
             if _is_quota:
                 # ★ Persistent billing/quota exhaustion — disable this key
                 #   for the remainder of this dispatch and flag it so the
                 #   user sees "out of balance" in Settings.
-                exclude_keys.add(slot.key_name)
-                hard_attempts += 1
+                state.note_quota_key(slot)
                 logger.warning(
                     '%s Quota exhausted on %s:%s — disabling key for '
                     'today: %s',
                     log_prefix, slot.key_name, slot.model, _err_str)
                 if on_retry:
-                    on_retry(attempt=hard_attempts,
+                    on_retry(attempt=state.hard_attempts,
                              reason='Key balance exhausted', status_code=429)
                 continue
-            _429_count += 1
+            state.note_free_429()
             # ★ Don't exclude anything — slot.record_error() sets a 0.5s
             #   cooldown which naturally steers pick_and_reserve to another
             #   slot.  After cooldown expires the slot is eligible again,
@@ -969,58 +1097,44 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
               # (handler already rotates to the next key). Log at INFO, not
               # WARNING — only the final exhaustion path (all keys excluded)
               # remains WARNING/ERROR.
-            if _429_count <= 3 or _429_count % 100 == 0:
+            if state._429_count <= 3 or state._429_count % 100 == 0:
                 logger.info(
                     '%s 429 rate-limited on %s:%s (cycle #%d) — body: %s',
-                    log_prefix, slot.key_name, slot.model, _429_count,
+                    log_prefix, slot.key_name, slot.model, state._429_count,
                     _err_body)
             else:
                 logger.info(
                     '%s 429 rate-limited on %s:%s (cycle #%d)',
-                    log_prefix, slot.key_name, slot.model, _429_count)
+                    log_prefix, slot.key_name, slot.model, state._429_count)
             # ★ If the streak just tripped, the key is now flagged as
             #   exhausted — exclude it so we don't cycle back to it.
             try:
                 from lib.key_stats import is_key_enabled
                 if not is_key_enabled(slot.provider_id, slot.key_name):
-                    exclude_keys.add(slot.key_name)
-                    hard_attempts += 1
+                    state.note_auto_exhausted_key(slot)
                     logger.warning(
                         '%s Key %s auto-exhausted after %d consecutive 429s '
                         '— excluding for today',
-                        log_prefix, slot.key_name, _429_count)
+                        log_prefix, slot.key_name, state._429_count)
                     if on_retry:
-                        on_retry(attempt=hard_attempts,
+                        on_retry(attempt=state.hard_attempts,
                                  reason='Key auto-exhausted (consecutive 429s)',
                                  status_code=429)
                     continue
             except Exception as e:
                 logger.debug('%s is_key_enabled probe failed (stream): %s', log_prefix, e)
             if on_retry:
-                on_retry(attempt=_429_count, reason='Rate limited (429)', status_code=429)
+                on_retry(attempt=state._429_count, reason='Rate limited (429)', status_code=429)
             time.sleep(0.3)
             # ★ Don't increment hard_attempts — 429 retries are free
             continue
 
         except PermissionError_ as e:
-            latency = (time.time() - t0) * 1000
             slot.record_error(is_rate_limit=False)
-            last_err = e
-            exclude_pairs.add((slot.key_name, slot.model))
-            hard_attempts += 1
-            # ★ If ALL models for this key have been excluded (all got 401),
-            #   exclude the entire key to avoid further wasted attempts.
-            _key_pairs = {(kn, m) for kn, m in exclude_pairs if kn == slot.key_name}
-            _key_models = {s.model for s in dispatcher.slots
-                           if s.key_name == slot.key_name
-                           and (not capability or capability in s.capabilities)}
-            if _key_models and _key_models <= {m for _, m in _key_pairs}:
-                exclude_keys.add(slot.key_name)
-                logger.warning(
-                    '%s Permission denied on ALL models for key %s — '
-                    'excluding entire key',
-                    log_prefix, slot.key_name)
-            else:
+            state.last_err = e
+            # ★ Exclude the (key, model) PAIR; escalate to a whole-key
+            #   exclusion only if ALL models for this key are now excluded.
+            if not state.note_permission_pair(slot, dispatcher, capability, log_prefix):
                 logger.warning(
                     '%s Permission denied on %s:%s — excluding pair, '
                     'remaining slots: %s',
@@ -1037,9 +1151,8 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             #   health checker clears the cooldown when the box recovers.
             slot.record_error(is_rate_limit=False, error=str(e)[:200])
             slot.cooldown_until = time.time() + _UNREACHABLE_COOLDOWN
-            last_err = e
-            exclude_pairs.add((slot.key_name, slot.model))
-            hard_attempts += 1
+            state.last_err = e
+            state.note_unreachable_pair(slot)
             logger.warning(
                 '%s Endpoint unreachable on %s:%s (%s) — cooled %ds + '
                 'excluded pair, failing over: %s',
@@ -1047,7 +1160,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 getattr(e, 'base_url', '') or '?', _UNREACHABLE_COOLDOWN,
                 str(e)[:160])
             if on_retry:
-                on_retry(attempt=hard_attempts,
+                on_retry(attempt=state.hard_attempts,
                          reason='Endpoint unreachable', status_code=0)
 
         except AbortedError:
@@ -1075,7 +1188,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
         except Exception as e:
             latency = (time.time() - t0) * 1000
             slot.record_error(is_rate_limit=False)
-            last_err = e
+            state.last_err = e
             _is_timeout = 'timed out' in str(e).lower() or 'timeout' in type(e).__name__.lower()
             # ★ Notify frontend about retry so user sees status instead of "Waiting…"
             if on_retry:
@@ -1085,28 +1198,22 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     _reason = 'Request timed out'
                 elif _status:
                     _reason = f'HTTP {_status}'
-                on_retry(attempt=hard_attempts + 1, reason=_reason, status_code=_status)
+                on_retry(attempt=state.hard_attempts + 1, reason=_reason, status_code=_status)
+            # Timeout / strict-model → exclude the PAIR (other keys of the
+            # model still tried); otherwise exclude the whole MODEL.
+            state.note_generic_error(slot, is_timeout=_is_timeout, strict_model=strict_model)
             if _is_timeout:
-                exclude_pairs.add((slot.key_name, slot.model))
                 logger.debug('%s Timeout (%.0fms) — excluding pair '
                              '%s:%s, trying next slot', tag, latency, slot.key_name, slot.model, exc_info=True)
             elif strict_model:
-                # ★ strict_model: user explicitly chose this model — only
-                #   exclude this (key, model) pair so OTHER keys of the same
-                #   model are still tried.  If all pairs fail, the error
-                #   propagates to _llm_call_with_fallback which handles
-                #   explicit (logged + user-notified) fallback.
-                exclude_pairs.add((slot.key_name, slot.model))
                 logger.debug('%s Stream error (strict_model): %s — excluding pair '
                              '%s:%s, trying other keys', tag, str(e)[:200],
                              slot.key_name, slot.model, exc_info=True)
             else:
-                exclude.add(slot.model)
                 logger.debug('%s Stream error: %s — trying next slot', tag, str(e)[:200], exc_info=True)
-            hard_attempts += 1
 
     # All retries exhausted or no slot available — raise the last error
-    _raise_dispatch_exhausted(last_err, max_retries=max_retries,
+    _raise_dispatch_exhausted(state.last_err, max_retries=max_retries,
                               capability=capability, prefer_model=prefer_model,
                               what='dispatch_stream')
 
@@ -1137,6 +1244,25 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
 
     This is the preferred entry point for async callers (the orchestrator once
     converted to native async, or any ``async def`` route handler).
+
+    ⚠️ RESERVED-BY-DESIGN — NO PRODUCTION CALLER TODAY (verified 2026-06-25).
+    Every streaming path in the app (the UI chat worker AND the
+    ``/v1/chat/completions`` + ``/v1/messages`` compat endpoints) runs the task
+    via ``spawn_task`` → ``asyncio.to_thread`` on an OFF-loop worker thread, then
+    the ``async def`` route merely tails the task's event buffer. A worker thread
+    is sync and cannot ``await`` this; it correctly uses the sync
+    ``dispatch_stream`` (``requests``) instead. Making this go live would require
+    EITHER converting ``run_task`` to native async — explicitly rejected (see
+    docs/FOLLOWUPS_ASYNC_MIGRATION.md §1: it's off-loop already, so async gives
+    no benefit and risks starving the loop with CPU-bound work) — OR a genuinely
+    on-loop streaming endpoint that bypasses the thread worker (a real feature,
+    not a wiring change). So this is NOT dead code: it's the tested substrate for
+    a future native-async streaming caller, kept in lockstep with
+    ``dispatch_stream`` (both share ``_StreamRetryState`` +
+    ``_adapt_stream_body_for_slot``). It IS exercised by
+    ``tests/test_async_dispatch_stream.py``. Do NOT "wire it to the worker" by
+    wrapping it in ``asyncio.run()`` inside the thread — that spins a throwaway
+    loop per stream and is a pure regression over the sync path.
     """
     from lib.llm import (
         AbortedError,
@@ -1151,59 +1277,33 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
     from lib.llm_errors import EndpointUnreachableError
 
     dispatcher = get_dispatcher()
-    exclude = set(exclude_models) if exclude_models else set()
-    _initial_exclude_models = set(exclude)
-    exclude_keys = set()
-    exclude_pairs = set()
-    _initial_avoid = set(avoid_pairs) if avoid_pairs else set()
-    if _initial_avoid:
-        exclude_pairs |= _initial_avoid
-    last_err = None
+    state = _StreamRetryState(exclude_models=exclude_models, avoid_pairs=avoid_pairs)
     is_body = isinstance(body_or_messages, dict) and 'messages' in body_or_messages
 
-    hard_attempts = 0
-    _429_count = 0
-    _last_exclusion_reset = time.monotonic()
-    _EXCLUSION_RESET_INTERVAL = 60
-
-    while hard_attempts < max_retries:
+    while state.hard_attempts < max_retries:
         if abort_check and abort_check():
             raise AbortedError('Aborted during dispatch retry')
 
-        total_attempts = hard_attempts + _429_count
+        state.maybe_reset_exclusions(log_prefix, 'async_dispatch_stream')
 
-        if _429_count > 0 and (time.monotonic() - _last_exclusion_reset) >= _EXCLUSION_RESET_INTERVAL:
-            if exclude or exclude_keys or exclude_pairs:
-                logger.info('%s async_dispatch_stream: resetting hard-error '
-                            'exclusions after %ds of 429 cycling (cycle #%d)',
-                            log_prefix, _EXCLUSION_RESET_INTERVAL, _429_count)
-                exclude.clear()
-                exclude |= _initial_exclude_models
-                exclude_keys.clear()
-                exclude_pairs.clear()
-            _last_exclusion_reset = time.monotonic()
-
-        _eff_exclude = exclude if (total_attempts > 0 or _initial_exclude_models) else None
         slot = dispatcher.pick_and_reserve(
             capability=capability, prefer_model=prefer_model,
-            exclude_models=_eff_exclude,
-            exclude_keys=exclude_keys if total_attempts > 0 else None,
-            exclude_pairs=exclude_pairs if total_attempts > 0 else None,
+            exclude_models=state.eff_exclude_models(),
+            exclude_keys=state.eff_exclude_keys(),
+            exclude_pairs=state.eff_exclude_pairs(),
             strict_model=strict_model)
         if slot is None:
-            if _initial_avoid and _initial_avoid <= exclude_pairs:
-                exclude_pairs -= _initial_avoid
-                _initial_avoid = set()
+            if state.relax_avoid_if_exhausted():
                 continue
             _slots_exist = dispatcher.has_capable_slots(
-                capability, exclude_models=exclude,
-                exclude_keys=exclude_keys, exclude_pairs=exclude_pairs)
-            if _429_count > 0 or _slots_exist:
+                capability, exclude_models=state.exclude,
+                exclude_keys=state.exclude_keys, exclude_pairs=state.exclude_pairs)
+            if state._429_count > 0 or _slots_exist:
                 await async_abortable_sleep(0.3, abort_check)
-                _429_count += 1
+                state.note_cooldown_cycle()
                 continue
             logger.warning('%s async_dispatch_stream: NO CAPABLE SLOT on '
-                           'attempt %d/%d', log_prefix, hard_attempts + 1, max_retries)
+                           'attempt %d/%d', log_prefix, state.hard_attempts + 1, max_retries)
             break
 
         t0 = time.time()
@@ -1254,8 +1354,8 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                     'key_tail': (slot.api_key or '')[-4:],
                     'provider_id': slot.provider_id,
                     'latency_ms': round(latency),
-                    'attempt': hard_attempts + 1,
-                    '429_retries': _429_count,
+                    'attempt': state.hard_attempts + 1,
+                    '429_retries': state._429_count,
                 }
             logger.debug('%s async_dispatch_stream OK: finish=%s model=%s '
                          'latency=%.0fms', log_prefix, finish, slot.model, latency)
@@ -1265,43 +1365,40 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
             _is_quota = bool(getattr(e, 'is_quota', False))
             slot.record_error(is_rate_limit=True, is_quota_exhausted=_is_quota,
                               error=str(e)[:200] if _is_quota else '')
-            last_err = e
+            state.last_err = e
             if _is_quota:
-                exclude_keys.add(slot.key_name)
-                hard_attempts += 1
+                state.note_quota_key(slot)
                 if on_retry:
-                    on_retry(attempt=hard_attempts, reason='Key balance exhausted',
+                    on_retry(attempt=state.hard_attempts, reason='Key balance exhausted',
                              status_code=429)
                 continue
-            _429_count += 1
+            state.note_free_429()
             if on_retry:
-                on_retry(attempt=_429_count, reason='Rate limited (429)', status_code=429)
+                on_retry(attempt=state._429_count, reason='Rate limited (429)', status_code=429)
             await async_abortable_sleep(0.3, abort_check)
             continue
 
         except PermissionError_ as e:
             slot.record_error(is_rate_limit=False)
-            last_err = e
-            exclude_pairs.add((slot.key_name, slot.model))
-            hard_attempts += 1
-            logger.warning('%s Permission denied on %s:%s — excluding pair',
-                           log_prefix, slot.key_name, slot.model)
+            state.last_err = e
+            if not state.note_permission_pair(slot, dispatcher, capability, log_prefix):
+                logger.warning('%s Permission denied on %s:%s — excluding pair',
+                               log_prefix, slot.key_name, slot.model)
 
         except EndpointUnreachableError as e:
             # ★ Endpoint host down — cool the slot, exclude the pair, fail
             #   over. Mirrors the sync dispatch_stream handler.
             slot.record_error(is_rate_limit=False, error=str(e)[:200])
             slot.cooldown_until = time.time() + _UNREACHABLE_COOLDOWN
-            last_err = e
-            exclude_pairs.add((slot.key_name, slot.model))
-            hard_attempts += 1
+            state.last_err = e
+            state.note_unreachable_pair(slot)
             logger.warning(
                 '%s Endpoint unreachable on %s:%s (%s) — cooled %ds + '
                 'excluded pair, failing over',
                 log_prefix, slot.key_name, slot.model,
                 getattr(e, 'base_url', '') or '?', _UNREACHABLE_COOLDOWN)
             if on_retry:
-                on_retry(attempt=hard_attempts,
+                on_retry(attempt=state.hard_attempts,
                          reason='Endpoint unreachable', status_code=0)
 
         except AbortedError:
@@ -1326,22 +1423,18 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
 
         except Exception as e:
             slot.record_error(is_rate_limit=False)
-            last_err = e
+            state.last_err = e
             _is_timeout = 'timed out' in str(e).lower() or 'timeout' in type(e).__name__.lower()
             if on_retry:
                 _status = getattr(e, 'status_code', 0) or 0
-                on_retry(attempt=hard_attempts + 1,
+                on_retry(attempt=state.hard_attempts + 1,
                          reason='Request timed out' if _is_timeout else (f'HTTP {_status}' if _status else str(e)[:120]),
                          status_code=_status)
-            if _is_timeout or strict_model:
-                exclude_pairs.add((slot.key_name, slot.model))
-            else:
-                exclude.add(slot.model)
+            state.note_generic_error(slot, is_timeout=_is_timeout, strict_model=strict_model)
             logger.debug('%s async_dispatch_stream error: %s — next slot',
                          tag, str(e)[:200], exc_info=True)
-            hard_attempts += 1
 
-    _raise_dispatch_exhausted(last_err, max_retries=max_retries,
+    _raise_dispatch_exhausted(state.last_err, max_retries=max_retries,
                               capability=capability, prefer_model=prefer_model,
                               what='async_dispatch_stream')
 

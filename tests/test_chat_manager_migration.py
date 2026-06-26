@@ -350,7 +350,7 @@ def test_chat_streams_via_http_endpoints():
 
         async with app.test_client() as client:
             # poll endpoint should find the task
-            r = await client.get(f'/api/chat/poll/{task["id"]}')
+            r = await client.get(f'/api/v1/chat/poll/{task["id"]}')
             assert r.status_code == 200, f'Got {r.status_code}'
             data = await r.get_json()
             assert data['status'] == 'running'
@@ -360,7 +360,7 @@ def test_chat_streams_via_http_endpoints():
             append_event(task, {'type': 'delta', 'content': 'hello'})
             task['content'] = 'hello'
 
-            r2 = await client.get(f'/api/chat/poll/{task["id"]}')
+            r2 = await client.get(f'/api/v1/chat/poll/{task["id"]}')
             data2 = await r2.get_json()
             assert data2['content'] == 'hello'
 
@@ -369,7 +369,7 @@ def test_chat_streams_via_http_endpoints():
             task['status'] = 'done'
             task['finishReason'] = 'stop'
 
-            r3 = await client.get(f'/api/chat/poll/{task["id"]}')
+            r3 = await client.get(f'/api/v1/chat/poll/{task["id"]}')
             data3 = await r3.get_json()
             assert data3['status'] == 'done'
 
@@ -383,7 +383,7 @@ def test_chat_streams_via_http_endpoints():
         else:
             os.environ['TOFU_AUTH_MODE'] = 'private'
         _auth_mode.reset_for_tests()
-    _ok('HTTP /api/chat/poll/<id> end-to-end works against runtime-backed store')
+    _ok('HTTP /api/v1/chat/poll/<id> end-to-end works against runtime-backed store')
 
 
 def test_aborted_task_does_not_resurrect_truncated_turn():

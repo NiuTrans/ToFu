@@ -24,6 +24,7 @@ var _paperQAHistory = [];
 var _paperLoading = false;
 var _paperQAStreaming = false;
 var _paperQAAbort = null;
+var _paperQAAbortRequested = false;  // set by the Stop button to break the QA poll loop
 var _paperReportModel = '';  // user-selected model for report generation
 var _paperImages = [];  // [{url, caption, page, source, width, height}] — for embedding in report
 var _paperPdfFilename = '';  // server-side PDF filename — handed back from /api/paper/upload and /api/paper/fetch-arxiv-stream
@@ -454,6 +455,8 @@ async function enterPaperMode(pdfUrl, fileName, parsedText, arxivId) {
 
 function exitPaperMode() {
   _saveActivePaperState();
+  // Flush any in-progress reading session into the learning model.
+  if (typeof _teardownReadingTracker === 'function') _teardownReadingTracker(true);
   paperMode = false;
 
   // ★ Restore topbar title to the active conversation (or 'New Chat' if none)
@@ -510,6 +513,44 @@ function exitPaperMode() {
 
 function togglePaperMode() {
   paperMode ? exitPaperMode() : enterPaperMode();
+}
+
+/**
+ * Apply a server-resolved paper title to the active paper, live.
+ *
+ * The report backend self-heals library rows whose title is still a bare
+ * `arXiv:<id>` (the up-front arXiv lookup failed) by extracting the real
+ * title from the report's Paper Card and upserting it. It returns that title
+ * in the report `done` / cache responses as `resolvedTitle`. We apply it to
+ * the in-memory entry + sidebar immediately so the user never has to reload.
+ *
+ * Guards (mirror the backend): only overwrite when the current local title is
+ * empty or itself a bare `arXiv:<id>` — never clobber a user-renamed title.
+ * Scoped to the paper the resolution belongs to (paperId), so a background
+ * stream for paper A can't rename the now-active paper B.
+ */
+function _applyResolvedTitle(resolvedTitle, paperId) {
+  var title = (resolvedTitle || '').trim();
+  if (!title) return;
+  var pid = paperId || _activePaperId;
+  var entry = null;
+  for (var i = 0; i < _paperLibrary.length; i++) {
+    if (_paperLibrary[i].id === pid) { entry = _paperLibrary[i]; break; }
+  }
+  if (!entry) return;
+  var cur = (entry.title || '').trim();
+  var isPlaceholder = !cur || /^arxiv[:\s]/i.test(cur);
+  if (!isPlaceholder) return;       // respect a real / user-set title
+  if (cur === title) return;        // no change
+  entry.title = title;
+  if (pid === _activePaperId) {
+    _paperFileName = title;
+    _updatePaperTitles();
+  }
+  _renderPaperLibrary();
+  // Persist the healed title (server already updated its row, but this keeps
+  // the per-entry PUT path consistent and covers the in-memory entry).
+  if (pid === _activePaperId) _saveActivePaperState();
 }
 
 function _updatePaperTitles() {
@@ -1343,6 +1384,11 @@ async function _fetchArxivPaper(directUrl) {
 // ══════════════════════════════════════════════════════
 
 function _switchPaperTab(tab) {
+  // Leaving the Report tab → flush the reading session into the learning model.
+  if (_paperActiveTab === 'report' && tab !== 'report'
+      && typeof _teardownReadingTracker === 'function') {
+    _teardownReadingTracker(true);
+  }
   _paperActiveTab = tab;
   document.querySelectorAll('.paper-tab-btn').forEach(function(btn) {
     btn.classList.toggle('active', btn.dataset.tab === tab);
@@ -1418,8 +1464,26 @@ function _renderPaperQA() {
   for (var j = 0; j < _paperQAHistory.length; j++) {
     var msg = _paperQAHistory[j];
     var isUser = msg.role === 'user';
-    var ch = isUser ? escapeHtml(msg.content) : (typeof renderMarkdown === 'function' ? renderMarkdown(msg.content) : escapeHtml(msg.content));
-    html += '<div class="paper-qa-msg ' + (isUser ? 'paper-qa-user' : 'paper-qa-assistant') + '"><div class="paper-qa-msg-content">' + ch + '</div></div>';
+    var inner = '';
+    // Tool-activity panel (web_search / fetch_url) — reuse chat's renderer so
+    // the look matches the report tab + chat bubbles.
+    if (!isUser && Array.isArray(msg.toolRounds) && msg.toolRounds.length &&
+        typeof renderToolRoundsHTML === 'function') {
+      inner += '<div class="paper-qa-tools">' +
+        renderToolRoundsHTML(msg.toolRounds, msg.status === 'running') + '</div>';
+    }
+    if (isUser) {
+      inner += '<div class="paper-qa-msg-content">' + escapeHtml(msg.content) + '</div>';
+    } else if (msg.content) {
+      inner += '<div class="paper-qa-msg-content">' +
+        (typeof renderMarkdown === 'function' ? renderMarkdown(msg.content) : escapeHtml(msg.content)) +
+        '</div>';
+    } else if (msg.status === 'running') {
+      // Thinking / searching, no prose yet — show a small pulse.
+      inner += '<div class="paper-qa-msg-content paper-qa-thinking">' +
+        '<span class="thinking-dot"></span></div>';
+    }
+    html += '<div class="paper-qa-msg ' + (isUser ? 'paper-qa-user' : 'paper-qa-assistant') + '">' + inner + '</div>';
   }
   container.innerHTML = html;
   container.scrollTop = container.scrollHeight;
@@ -1469,49 +1533,122 @@ async function _sendPaperQuestion() {
     }
   }
 
+  // Recent dialogue (exclude the question we're about to add) for context.
+  var historyForServer = _paperQAHistory.slice(-10).map(function(m) {
+    return { role: m.role, content: m.content };
+  });
+
   _paperQAHistory.push({ role: 'user', content: question, timestamp: Date.now() });
+  // Assistant placeholder carries live tool-round state for this answer.
+  var asst = { role: 'assistant', content: '', timestamp: Date.now(),
+               toolRounds: [], status: 'running' };
+  _paperQAHistory.push(asst);
   input.value = '';
+  _paperQAStreaming = true;
   _renderPaperQA();
 
-  var systemMsg = 'You are a helpful research assistant. The user is reading an academic paper. Answer based on the paper content. Be specific and cite sections.\n\nPaper text:\n' + _paperParsedText.slice(0, 100000);
-  var messages = [{ role: 'system', content: systemMsg }];
-  var recent = _paperQAHistory.slice(-10);
-  for (var k = 0; k < recent.length; k++) messages.push({ role: recent[k].role, content: recent[k].content });
-
-  _paperQAHistory.push({ role: 'assistant', content: '', timestamp: Date.now() });
-  _paperQAStreaming = true;
-
+  var startPaperId = _activePaperId;
   try {
-    _paperQAAbort = new AbortController();
-    var resp = await Api.paper.chatStream(
-      { messages: messages, stream: true },
-      { signal: _paperQAAbort.signal }
-    );
-    var reader = resp.body.getReader();
-    var decoder = new TextDecoder();
-    var buffer = '';
-    while (true) {
-      var r = await reader.read();
-      if (r.done) break;
-      buffer += decoder.decode(r.value, { stream: true });
-      var lines = buffer.split('\n'); buffer = lines.pop();
-      for (var li = 0; li < lines.length; li++) {
-        if (!lines[li].startsWith('data: ')) continue;
-        var d = lines[li].slice(6).trim();
-        if (d === '[DONE]') continue;
-        try {
-          var delta = JSON.parse(d).choices?.[0]?.delta?.content || '';
-          if (delta) { _paperQAHistory[_paperQAHistory.length - 1].content += delta; _renderPaperQA(); }
-        } catch (_) {}
-      }
+    var startData = await Api.paper.qaStart({
+      question: question,
+      paper_text: _paperParsedText,
+      paper_hash: _paperHash || '',
+      lang: (typeof _i18nLang !== 'undefined' && _i18nLang === 'zh') ? 'zh' : 'en',
+      history: historyForServer,
+      model: (typeof _paperReportModel !== 'undefined') ? _paperReportModel : undefined,
+      title: _paperFileName || '',
+    });
+    if (!startData || !startData.ok || !startData.task_id) {
+      throw new Error((startData && startData.error) || 'Q&A start failed');
     }
+    await _pollQATask(startData.task_id, asst, startPaperId);
   } catch (e) {
-    if (e.name !== 'AbortError') {
-      _paperQAHistory[_paperQAHistory.length - 1].content += '\n\n⚠️ Error: ' + e.message;
-      _renderPaperQA();
-    }
+    asst.status = 'error';
+    asst.content = (asst.content || '') + '\n\n' + Icon('alertTriangle', 14) + ' ' +
+      ((typeof t === 'function') ? t('paper.qaError') : 'Error') + ': ' + (e.message || e);
+    _renderPaperQA();
+    console.warn('[Paper:QA] failed:', e);
   } finally {
     _paperQAStreaming = false; _paperQAAbort = null; _saveActivePaperState();
+  }
+}
+
+/** Poll a Q&A task to completion, applying events to the assistant message.
+ *  Mirrors _pollReportTask but writes into the QA history entry `asst`. */
+async function _pollQATask(taskId, asst, startPaperId) {
+  var cursor = 0;
+  var POLL_MS = 700;
+  while (true) {
+    if (_paperQAAbortRequested) { _paperQAAbortRequested = false; break; }
+    var resp = await Api.paper.qaPoll(taskId, cursor);
+    if (!resp || !resp.ok) {
+      if (resp && resp.status === 404) {
+        asst.status = 'error';
+        asst.content = asst.content ||
+          ((typeof t === 'function') ? t('paper.qaExpired') : 'Q&A task expired.');
+        break;
+      }
+      throw new Error('HTTP ' + (resp ? resp.status : '?'));
+    }
+    var data = await resp.json();
+    if (!data.ok) throw new Error((typeof data.error === 'string' ? data.error : 'Poll failed'));
+
+    var events = data.events || [];
+    for (var i = 0; i < events.length; i++) _applyQAEvent(asst, events[i]);
+    cursor = data.next_cursor;
+
+    if (data.status === 'done') {
+      asst.status = 'done';
+      if (data.answer) asst.content = data.answer;
+      if (startPaperId === _activePaperId) _renderPaperQA();
+      break;
+    }
+    if (data.status === 'error') {
+      asst.status = 'error';
+      asst.content = (asst.content || '') + '\n\n' + Icon('alertTriangle', 14) + ' ' +
+        ((typeof errorEnvelopeMessage === 'function') ? errorEnvelopeMessage(data.error) : (data.error || 'Error'));
+      if (startPaperId === _activePaperId) _renderPaperQA();
+      break;
+    }
+    if (startPaperId === _activePaperId) _renderPaperQA();
+    await new Promise(function(r) { setTimeout(r, POLL_MS); });
+  }
+}
+
+/** Apply one Q&A event to the assistant message state (chat-compatible). */
+function _applyQAEvent(asst, ev) {
+  switch (ev.type) {
+    case 'tool_start':
+      asst.toolRounds.push({
+        roundNum: ev.roundNum, toolName: ev.toolName, query: ev.query,
+        toolCallId: ev.toolCallId, toolArgs: ev.toolArgs,
+        status: 'searching', results: null,
+      });
+      return;
+    case 'tool_done': {
+      for (var j = 0; j < asst.toolRounds.length; j++) {
+        var r = asst.toolRounds[j];
+        if (r.roundNum === ev.roundNum) {
+          r.status = 'done';
+          r._elapsed = (ev.elapsed != null) ? (ev.elapsed + 's') : r._elapsed;
+          r.toolContent = ev.toolContent || r.toolContent;
+          if (ev.results) r.results = ev.results;
+          if (ev.searchDiag) r.searchDiag = ev.searchDiag;
+          break;
+        }
+      }
+      return;
+    }
+    case 'delta':
+      asst.content += (ev.delta || '');
+      return;
+    case 'delta_reset':
+      // Interim draft emitted alongside a tool call — discard it (the model
+      // rewrites the full answer after the tool result lands).
+      asst.content = '';
+      return;
+    default:
+      return;
   }
 }
 
@@ -1548,26 +1685,48 @@ function _askAboutPaperSelection() {
 function _hidePaperQuoteBar() {
   var q = document.getElementById('paperQuoteBtn');
   if (q) q.style.display = 'none';
+  var qr = document.getElementById('paperReportQuoteBtn');
+  if (qr) qr.style.display = 'none';
 }
 
 function _handlePaperTextSelection() {
   var sel = window.getSelection();
   var text = sel?.toString()?.trim();
   var q = document.getElementById('paperQuoteBtn');
-  if (!q) return;
-  if (!text || text.length < 3) { q.style.display = 'none'; return; }
+  var qr = document.getElementById('paperReportQuoteBtn');
+  if (qr) qr.style.display = 'none';
+  if (q) q.style.display = 'none';
+  if (!text || text.length < 3) return;
 
+  // Source A: selection inside the PDF sidebar → anchor the toolbar in
+  // .paper-left (existing behaviour).
   var viewer = document.getElementById('paperPdfViewer');
-  if (!viewer || !viewer.contains(sel.anchorNode)) { q.style.display = 'none'; return; }
+  if (q && viewer && viewer.contains(sel.anchorNode)) {
+    var range = sel.getRangeAt(0);
+    var rect = range.getBoundingClientRect();
+    var leftEl = document.querySelector('.paper-left');
+    if (!leftEl) return;
+    var lr = leftEl.getBoundingClientRect();
+    q.style.display = 'flex';
+    q.style.top = (rect.top - lr.top - 40) + 'px';
+    q.style.left = Math.max(4, rect.left - lr.left + rect.width / 2 - 80) + 'px';
+    return;
+  }
 
-  var range = sel.getRangeAt(0);
-  var rect = range.getBoundingClientRect();
-  var leftEl = document.querySelector('.paper-left');
-  if (!leftEl) { q.style.display = 'none'; return; }
-  var lr = leftEl.getBoundingClientRect();
-  q.style.display = 'flex';
-  q.style.top = (rect.top - lr.top - 40) + 'px';
-  q.style.left = Math.max(4, rect.left - lr.left + rect.width / 2 - 80) + 'px';
+  // Source B: selection inside the generated REPORT → anchor a sibling
+  // toolbar in .paper-right so a confusing report passage becomes a
+  // one-click question (the central UX ask).
+  var reportEl = document.getElementById('paperReportContent');
+  if (qr && reportEl && reportEl.contains(sel.anchorNode)) {
+    var rrange = sel.getRangeAt(0);
+    var rrect = rrange.getBoundingClientRect();
+    var rightEl = document.querySelector('.paper-right');
+    if (!rightEl) return;
+    var rr = rightEl.getBoundingClientRect();
+    qr.style.display = 'flex';
+    qr.style.top = Math.max(4, rrect.top - rr.top - 40) + 'px';
+    qr.style.left = Math.max(4, rrect.left - rr.left + rrect.width / 2 - 80) + 'px';
+  }
 }
 
 // ══════════════════════════════════════════════════════
@@ -1595,6 +1754,9 @@ function _resetReportLocalState() {
   }
   _paperReportStream = null;
   _paperReportMeta = null;  // drop stale finish tag from the previous paper/run
+  // Flush the current reading session into the learning model (the report
+  // we were reading is going away — switching paper / regenerating).
+  if (typeof _teardownReadingTracker === 'function') _teardownReadingTracker(true);
 }
 
 function _makeReportStreamState(paperId, lang, taskId) {
@@ -1707,6 +1869,16 @@ function _applyReportEvent(s, ev) {
       s.contentStarted = true;
       return true;
 
+    case 'delta_reset':
+      // The model emitted an interim draft alongside a tool call; the
+      // backend discards it and will rewrite the full report after the tool
+      // results land. Clear the accumulated text so the draft + final report
+      // don't concatenate (report rendered twice).
+      s.fullText = '';
+      s.contentStarted = false;
+      s._lastRenderedLen = -1;
+      return true;
+
     case 'enriched':
       s.fullText = ev.text || s.fullText;
       // Only mutate global hash when this stream still belongs to the active paper —
@@ -1726,6 +1898,18 @@ function _applyReportEvent(s, ev) {
         if (s.paperId === _activePaperId) _paperReportMeta = ev.meta;
       }
       if (ev.paperHash && s.paperId === _activePaperId) _paperHash = ev.paperHash;
+      if (ev.resolvedTitle) _applyResolvedTitle(ev.resolvedTitle, s.paperId);
+      return true;
+
+    case 'aborted':
+      s.status = 'aborted';
+      // Keep whatever partial text was produced so the user sees how far the
+      // model got before they stopped it. The frontend renders it read-only
+      // under a "stopped" banner (never persisted / cached).
+      if (typeof ev.partial === 'string' && ev.partial) {
+        s.fullText = ev.partial;
+        s.contentStarted = true;
+      }
       return true;
 
     case 'error':
@@ -1856,7 +2040,19 @@ function _buildReportTOC(entries) {
 function _scrollReportToHeading(ev, id) {
   if (ev) ev.preventDefault();
   var el = document.getElementById(id);
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (!el) return;
+  // Scroll ONLY the report's own scroll container. el.scrollIntoView() would
+  // scroll every scrollable ancestor — including the outer overflow:hidden
+  // containers (.paper-tab-panel / .paper-body / .paper-mode-container), which
+  // are still programmatically scrollable. That pushes the .paper-tabs bar out
+  // of view with no scrollbar to bring it back. Scroll the inner container
+  // manually so the chrome above the report never moves.
+  var scroller = el.closest('.paper-report-content, .paper-report-body');
+  if (!scroller) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+  var TOP_MARGIN = 16;  // matches h2/h3 scroll-margin-top
+  var target = scroller.scrollTop
+    + (el.getBoundingClientRect().top - scroller.getBoundingClientRect().top) - TOP_MARGIN;
+  scroller.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
 }
 
 /** Scroll-spy: highlight the TOC entry for the heading currently in view. */
@@ -1924,6 +2120,239 @@ function _renderReportFinishTag(meta) {
     parts.join('') + '</div>';
 }
 
+/* ── Reading-time estimate + progress bar (Report tab) ───────────────────
+ *
+ * We show, sticky at the top of the rendered report, an estimated reading
+ * time + a progress bar that fills as the user scrolls, with a live
+ * "remaining time" readout.
+ *
+ * The estimate uses a LEARNING reading-speed model:
+ *   • Cold start  → a sensible default WPM for dense technical prose.
+ *   • Over time   → an exponentially-weighted moving average (EWMA) of the
+ *     user's OBSERVED speed, measured from real reading sessions (words
+ *     covered ÷ active time spent on the report). Persisted in localStorage,
+ *     so it improves across papers and survives reloads.
+ *
+ * "Words" are counted in a script-aware way: CJK characters are counted
+ * individually (people read CJK roughly per-character, much slower per
+ * "word"), Latin words by whitespace runs. The model stores a single WPM in
+ * a normalized Latin-word equivalent, and we convert CJK char counts to that
+ * equivalent with a fixed ratio so one EWMA covers mixed-language reports.
+ */
+
+var _READ_SPEED_KEY = 'paper_reading_wpm_v1';
+var _READ_WPM_DEFAULT = 220;   // dense technical prose, conservative
+var _READ_WPM_MIN = 60;        // clamp learned speed to a sane band
+var _READ_WPM_MAX = 700;
+var _READ_EWMA_ALPHA = 0.25;   // weight of a fresh observation
+// One CJK character ≈ this many Latin-word-equivalents (CJK is read slower
+// per glyph than an English word, so a char is a fraction of a "word").
+var _READ_CJK_CHAR_TO_WORD = 0.6;
+
+// Live tracking state for the currently-displayed report.
+var _readTracker = null;
+
+/** Load the learned reading speed (Latin-word WPM). Falls back to default. */
+function _loadReadingWpm() {
+  try {
+    var raw = localStorage.getItem(_READ_SPEED_KEY);
+    if (!raw) return { wpm: _READ_WPM_DEFAULT, samples: 0 };
+    var o = JSON.parse(raw);
+    var wpm = Number(o && o.wpm);
+    if (!isFinite(wpm) || wpm <= 0) return { wpm: _READ_WPM_DEFAULT, samples: 0 };
+    return { wpm: Math.max(_READ_WPM_MIN, Math.min(_READ_WPM_MAX, wpm)),
+             samples: (o && o.samples) | 0 };
+  } catch (e) {
+    console.warn('[Paper:ReadTime] load wpm failed:', e);
+    return { wpm: _READ_WPM_DEFAULT, samples: 0 };
+  }
+}
+
+/** Persist a new observation into the EWMA reading-speed model. */
+function _recordReadingObservation(observedWpm) {
+  if (!isFinite(observedWpm) || observedWpm <= 0) return;
+  observedWpm = Math.max(_READ_WPM_MIN, Math.min(_READ_WPM_MAX, observedWpm));
+  var cur = _loadReadingWpm();
+  var next;
+  if (cur.samples <= 0) {
+    // First-ever real sample: blend gently with the default so one quirky
+    // session can't swing the estimate wildly.
+    next = _READ_WPM_DEFAULT * 0.5 + observedWpm * 0.5;
+  } else {
+    next = cur.wpm * (1 - _READ_EWMA_ALPHA) + observedWpm * _READ_EWMA_ALPHA;
+  }
+  next = Math.max(_READ_WPM_MIN, Math.min(_READ_WPM_MAX, next));
+  try {
+    localStorage.setItem(_READ_SPEED_KEY, JSON.stringify({
+      wpm: Math.round(next), samples: cur.samples + 1, updatedAt: Date.now(),
+    }));
+  } catch (e) {
+    console.warn('[Paper:ReadTime] persist wpm failed:', e);
+  }
+}
+
+/** Count reading workload of an element as Latin-word equivalents. */
+function _countReadingWords(el) {
+  var text = (el && el.textContent) || '';
+  if (!text) return 0;
+  // CJK (incl. kana) — counted per character.
+  var cjk = (text.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f]/g) || []).length;
+  // Strip CJK, then count Latin/numeric word runs.
+  var latin = text.replace(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f]/g, ' ');
+  var latinWords = (latin.match(/[A-Za-z0-9][A-Za-z0-9'\u2019-]*/g) || []).length;
+  return latinWords + cjk * _READ_CJK_CHAR_TO_WORD;
+}
+
+/** Format a minutes value into a localized human string. */
+function _formatReadMinutes(min) {
+  var _tt = (typeof t === 'function') ? t : function(k, p){ return k; };
+  if (min < 1) return _tt('paper.readTimeLessMin');
+  if (min < 60) return _tt('paper.readTimeMin', { n: Math.round(min) });
+  var h = Math.floor(min / 60);
+  var m = Math.round(min - h * 60);
+  return _tt('paper.readTimeHour', { h: h, m: m });
+}
+
+/** Build the sticky reading-time header for a freshly rendered report.
+ *  `article` is the rendered <article>; `scroller` is the scroll container.
+ *  Returns the header element (not yet attached). */
+function _buildReadingTimeBar(article, scroller) {
+  var words = _countReadingWords(article);
+  var model = _loadReadingWpm();
+  var totalMin = words / model.wpm;
+  var _tt = (typeof t === 'function') ? t : function(k, p){ return k; };
+
+  var bar = document.createElement('div');
+  bar.className = 'paper-read-time';
+  bar.setAttribute('role', 'progressbar');
+  bar.setAttribute('aria-valuemin', '0');
+  bar.setAttribute('aria-valuemax', '100');
+
+  var calib = (model.samples > 0)
+    ? _tt('paper.readTimeAdapted', { wpm: Math.round(model.wpm) })
+    : _tt('paper.readTimeDefault');
+
+  bar.innerHTML =
+    '<div class="paper-read-time-row">' +
+      '<span class="paper-read-time-icon" title="' + escapeHtml(calib) + '">' +
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>' +
+      '</span>' +
+      '<span class="paper-read-time-total"></span>' +
+      '<span class="paper-read-time-sep">·</span>' +
+      '<span class="paper-read-time-left"></span>' +
+      (model.samples > 0 ? '<span class="paper-read-time-badge" title="' + escapeHtml(calib) + '">' +
+        '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>' : '') +
+    '</div>' +
+    '<div class="paper-read-time-track"><div class="paper-read-time-fill"></div></div>';
+
+  bar._readWords = words;
+  bar._readTotalMin = totalMin;
+  return bar;
+}
+
+/** Wire scroll → progress/remaining updates + the learning tracker.
+ *  Disconnects any previous tracker. */
+function _wireReadingTimeTracking(bar, scroller) {
+  if (!bar || !scroller) return;
+  // Tear down a previous session (flush its sample first).
+  _teardownReadingTracker(true);
+
+  var totalEl = bar.querySelector('.paper-read-time-total');
+  var leftEl = bar.querySelector('.paper-read-time-left');
+  var fillEl = bar.querySelector('.paper-read-time-fill');
+  var totalMin = bar._readTotalMin || 0;
+  var words = bar._readWords || 0;
+
+  if (totalEl) totalEl.textContent =
+    (typeof t === 'function' ? t('paper.readTimeTotal', { min: _formatReadMinutes(totalMin) })
+                             : _formatReadMinutes(totalMin));
+
+  var tracker = {
+    bar: bar, scroller: scroller, words: words, totalMin: totalMin,
+    lastProgress: 0,     // max scroll fraction reached [0..1]
+    activeMs: 0,         // accumulated active reading time
+    lastTickTs: 0,       // timestamp of last scroll/visibility tick while active
+    flushed: false,
+    onScroll: null,
+    rafPending: false,
+  };
+
+  function _progressFraction() {
+    var max = scroller.scrollHeight - scroller.clientHeight;
+    if (max <= 0) return 1;  // whole report fits — nothing to scroll → fully "covered"
+    return Math.max(0, Math.min(1, scroller.scrollTop / max));
+  }
+
+  function _paint(frac) {
+    if (fillEl) fillEl.style.width = (frac * 100).toFixed(1) + '%';
+    bar.setAttribute('aria-valuenow', Math.round(frac * 100));
+    var remainMin = totalMin * (1 - frac);
+    if (leftEl) {
+      if (frac >= 0.999) {
+        leftEl.textContent = (typeof t === 'function') ? t('paper.readTimeDone') : 'Finished';
+        bar.classList.add('done');
+      } else {
+        bar.classList.remove('done');
+        leftEl.textContent = (typeof t === 'function')
+          ? t('paper.readTimeLeft', { min: _formatReadMinutes(remainMin) })
+          : _formatReadMinutes(remainMin);
+      }
+    }
+  }
+
+  function _tick() {
+    tracker.rafPending = false;
+    var now = Date.now();
+    var frac = _progressFraction();
+    // Accumulate active time only across short gaps between scroll events
+    // (a long idle gap = user stepped away / read elsewhere → don't count it).
+    if (tracker.lastTickTs && (now - tracker.lastTickTs) < 12000) {
+      tracker.activeMs += (now - tracker.lastTickTs);
+    }
+    tracker.lastTickTs = now;
+    if (frac > tracker.lastProgress) tracker.lastProgress = frac;
+    _paint(Math.max(frac, 0));
+  }
+
+  tracker.onScroll = function() {
+    if (tracker.rafPending) return;
+    tracker.rafPending = true;
+    requestAnimationFrame(_tick);
+  };
+
+  scroller.addEventListener('scroll', tracker.onScroll, { passive: true });
+  _readTracker = tracker;
+
+  // Initial paint (report may already fit without scrolling).
+  _paint(_progressFraction());
+}
+
+/** Flush the current reading session into the learning model and detach.
+ *  Only records a sample when the session is substantial enough to be a
+ *  meaningful signal (enough words covered + enough active time). */
+function _teardownReadingTracker(silent) {
+  var tk = _readTracker;
+  _readTracker = null;
+  if (!tk || tk.flushed) return;
+  tk.flushed = true;
+  try {
+    if (tk.scroller && tk.onScroll) tk.scroller.removeEventListener('scroll', tk.onScroll);
+  } catch (e) { /* detached node */ }
+
+  var coveredWords = tk.words * tk.lastProgress;
+  var activeMin = tk.activeMs / 60000;
+  // Need a real session: covered ≥ ~120 word-equivalents over ≥ 20s of
+  // active scrolling. Otherwise it's noise (a glance, an instant scroll-to-end).
+  if (coveredWords >= 120 && activeMin >= (20 / 60)) {
+    var observedWpm = coveredWords / activeMin;
+    _recordReadingObservation(observedWpm);
+    if (!silent) {
+      console.debug('[Paper:ReadTime] session: %d words / %.2f min → %d wpm',
+                    Math.round(coveredWords), activeMin, Math.round(observedWpm));
+    }
+  }
+}
+
 /** Render a FINAL report into `container`: markdown + TOC sidebar + callouts +
  *  framed figures + finish-tag badge. `container` is the scroll element
  *  (.paper-report-content or #reportBodyContent). `meta` (optional) drives the
@@ -1931,6 +2360,7 @@ function _renderReportFinishTag(meta) {
  *  Safe to call repeatedly (full rebuild). */
 function _renderFinalReport(container, text, meta) {
   if (!container) return;
+  if (typeof _syncReportToolbar === 'function') _syncReportToolbar(false);
   if (meta === undefined) meta = _paperReportMeta;
   if (typeof renderMarkdown !== 'function') {
     container.innerHTML = '<pre>' + escapeHtml(text || '') + '</pre>';
@@ -1953,18 +2383,26 @@ function _renderFinalReport(container, text, meta) {
   var tocHTML = _buildReportTOC(entries);
 
   container.classList.add('paper-report-enhanced');
+  // Reading-time bar: sticky at the top of the scroll container, above the
+  // doc/article. Built before mount so we can measure the article's word
+  // count, then tracking is wired after the DOM is in place (so scrollHeight
+  // is real).
+  var readBar = _buildReadingTimeBar(article, container);
   if (tocHTML) {
     var doc = document.createElement('div');
     doc.className = 'paper-report-doc';
     doc.innerHTML = tocHTML;
     doc.appendChild(article);
     container.innerHTML = '';
+    if (readBar) container.appendChild(readBar);
     container.appendChild(doc);
     _wireReportScrollSpy(container, article, doc.querySelector('.paper-report-toc'));
   } else {
     container.innerHTML = '';
+    if (readBar) container.appendChild(readBar);
     container.appendChild(article);
   }
+  if (readBar) _wireReadingTimeTracking(readBar, container);
 }
 
 /** Paint the Report tab DOM from the current stream state. */
@@ -1973,12 +2411,40 @@ function _paintReportFromState() {
   if (!container || !_paperReportStream) return;
   var s = _paperReportStream;
 
+  // Keep the toolbar's Stop/Regenerate affordance in sync with every paint.
+  _syncReportToolbar(s.status === 'running');
+
   // Terminal: done → render the final, enhanced report (once).
   if (s.status === 'done' && s.fullText && !s.toolRounds.some(r => r.status === 'searching')) {
     if (s._lastRenderedLen !== s.fullText.length || s._lastRenderedStatus !== 'done') {
       _renderFinalReport(container, s.fullText);
       s._lastRenderedLen = s.fullText.length;
       s._lastRenderedStatus = 'done';
+    }
+    return;
+  }
+
+  // Terminal: aborted → freeze the partial report (if any) under a "stopped"
+  // banner. Never persisted; a Regenerate is required to produce a full report.
+  if (s.status === 'aborted') {
+    if (s._lastRenderedStatus !== 'aborted') {
+      var bannerHtml =
+        '<div class="paper-report-stopped-banner">' +
+          '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>' +
+          '<span>' + escapeHtml((typeof t === 'function') ? t('paper.reportStopped') : 'Generation stopped') + '</span>' +
+        '</div>';
+      if (s.fullText && s.contentStarted) {
+        container.innerHTML = bannerHtml +
+          '<div class="paper-report-body">' +
+            (typeof renderMarkdown === 'function' ? renderMarkdown(s.fullText) : '<pre>' + escapeHtml(s.fullText) + '</pre>') +
+          '</div>';
+      } else {
+        container.innerHTML =
+          '<div class="paper-report-empty">' + bannerHtml +
+            '<p class="paper-report-hint">' + escapeHtml((typeof t === 'function') ? t('paper.reportStoppedHint') : 'Click Regenerate to start over') + '</p>' +
+          '</div>';
+      }
+      s._lastRenderedStatus = 'aborted';
     }
     return;
   }
@@ -2084,6 +2550,13 @@ async function _pollReportTask() {
           if (data.meta) { s.meta = data.meta; _paperReportMeta = data.meta; }
           _saveActivePaperState();
         }
+      }
+      if (data.resolvedTitle) _applyResolvedTitle(data.resolvedTitle, s.paperId);
+    } else if (data.status === 'aborted') {
+      s.status = 'aborted';
+      if (typeof data.partial === 'string' && data.partial) {
+        s.fullText = data.partial;
+        s.contentStarted = true;
       }
     } else if (data.status === 'error') {
       s.status = 'error';
@@ -2193,6 +2666,7 @@ async function _generatePaperReport(force) {
       _paperReportMeta = data.meta || null;
       if (data.paper_hash) _paperHash = data.paper_hash;
       _saveActivePaperState();
+      if (data.resolvedTitle) _applyResolvedTitle(data.resolvedTitle, startPaperId);
       _renderFinalReport(container, data.report);
       return;
     }
@@ -2200,6 +2674,7 @@ async function _generatePaperReport(force) {
     // Task started (or joined) — begin polling from cursor 0 so we replay all
     if (data.paper_hash) _paperHash = data.paper_hash;
     _paperReportStream = _makeReportStreamState(startPaperId, reportLang, data.task_id);
+    _syncReportToolbar(true);
     _pollReportTask();
 
   } catch (e) {
@@ -2240,6 +2715,7 @@ async function _loadOrGenerateReport() {
         var container = document.getElementById('paperReportContent');
         if (container) _renderReportSkeleton(container, reportLang);
         _paperReportStream = _makeReportStreamState(startPaperId, reportLang, lookupData.task_id);
+        _syncReportToolbar(true);
         _pollReportTask();
         return;
       }
@@ -2384,6 +2860,49 @@ document.addEventListener('click', function(e) {
   }
 });
 
+
+/** Show the Stop button while a report task is running; otherwise show
+ *  Regenerate. Mirrors the chat composer's send↔stop morph so the affordance
+ *  is consistent across the app. `running` defaults to the live stream status. */
+function _syncReportToolbar(running) {
+  if (running === undefined) {
+    running = !!(_paperReportStream && _paperReportStream.status === 'running');
+  }
+  var stopBtn = document.getElementById('paperReportStopBtn');
+  var regenBtn = document.getElementById('paperReportRegenBtn');
+  if (stopBtn) {
+    stopBtn.style.display = running ? '' : 'none';
+    if (running) {
+      // Restore the resting label/enabled state for a fresh run (a prior
+      // run may have left it disabled + "Stopping…").
+      stopBtn.disabled = false;
+      var lbl = stopBtn.querySelector('span');
+      if (lbl) lbl.textContent = (typeof t === 'function') ? t('paper.reportStop') : 'Stop';
+    }
+  }
+  if (regenBtn) regenBtn.style.display = running ? 'none' : '';
+}
+
+/** Stop an in-flight report generation. Signals the server-side task to abort
+ *  (best-effort) and reflects the stopping state immediately; the `aborted`
+ *  terminal event then arrives via the normal poll loop and freezes whatever
+ *  partial report was produced. */
+function _stopPaperReport() {
+  var s = _paperReportStream;
+  if (!s || !s.taskId || s.status !== 'running') return;
+  var stopBtn = document.getElementById('paperReportStopBtn');
+  if (stopBtn) {
+    stopBtn.disabled = true;
+    var lbl = stopBtn.querySelector('span');
+    if (lbl) lbl.textContent = (typeof t === 'function') ? t('paper.reportStopping') : 'Stopping…';
+  }
+  Api.paper.reportAbort(s.taskId).catch(function(e) {
+    console.warn('[Paper:Report] stop request failed:', e);
+  });
+  // Don't flip status locally — the server emits the authoritative `aborted`
+  // event, which the poll loop applies and repaints. Re-enable the label on
+  // the next paint cycle so a failed abort doesn't leave the button stuck.
+}
 
 function _regeneratePaperReport() {
   // Abort any running server task, then start fresh with force=true so
@@ -2696,6 +3215,12 @@ function _handlePaperKeyDown(e) {
 
 document.addEventListener('keydown', _handlePaperKeyDown);
 document.addEventListener('mouseup', function() { if (paperMode) setTimeout(_handlePaperTextSelection, 10); });
+
+// Flush an in-progress reading session into the learning model if the user
+// closes / reloads the tab while still reading the report.
+window.addEventListener('beforeunload', function() {
+  if (typeof _teardownReadingTracker === 'function') _teardownReadingTracker(true);
+});
 
 // When KaTeX finishes lazy-loading after the report/QA already painted
 // math-pending fallback markup, repaint these surfaces so inline formulas

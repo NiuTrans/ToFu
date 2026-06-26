@@ -68,8 +68,8 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         tool_content = 'Error: question parameter is required.'
         meta = _build_simple_meta(
             fn_name, tool_content, source='HumanGuidance',
-            title='❌ Missing question', snippet='No question provided',
-            badge='❌ error',
+            title='Missing question', snippet='No question provided',
+            badge='error',
         )
         _finalize_tool_round(task, rn, round_entry, [meta])
         return tc_id, tool_content, False
@@ -166,9 +166,9 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         return s if len(s) <= _FULL_LIMIT else s[:_FULL_LIMIT - 1] + '…'
     meta = _build_simple_meta(
         fn_name, tool_content, source='HumanGuidance',
-        title=f'🙋 {_clip(question)}',
+        title=_clip(question),
         snippet=_clip(user_response or 'No response'),
-        badge='✅ answered' if user_response else '⛔ aborted',
+        badge='answered' if user_response else 'aborted',
         extra={
             'guidanceId': guidance_id,
             'question': question,
@@ -191,7 +191,7 @@ def _handle_scheduler_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, c
     return simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,
         executor=execute_scheduler_tool,
-        source='Scheduler', icon='⏰', module_tag='Scheduler',
+        source='Scheduler', module_tag='Scheduler',
     )
 
 
@@ -211,18 +211,19 @@ def _handle_desktop_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     return simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,
         executor=_run_desktop,
-        source='Desktop Agent', icon='🖥️', module_tag='Desktop',
+        source='Desktop Agent', module_tag='Desktop',
     )
 
 
-# Module-level constant — swarm tool icon dispatch.
-_SWARM_ICON_MAP = {
-    'spawn_agents':     '🐝',
-    'await_agents':     '⏳',
-    'get_agent_result': '📥',
-    'store_artifact':   '📦',
-    'read_artifact':    '📖',
-    'list_artifacts':   '📋',
+# Swarm tool badge labels (text only — the frontend renders the SVG icon, so
+# no emoji prefix here per CLAUDE.md §3.4; an emoji would duplicate the icon).
+_SWARM_BADGE_VERB = {
+    'spawn_agents':     'spawn',
+    'await_agents':     'await',
+    'get_agent_result': 'result',
+    'store_artifact':   'store',
+    'read_artifact':    'read',
+    'list_artifacts':   'list',
 }
 
 
@@ -244,35 +245,38 @@ def _handle_swarm_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
             all_tools=all_tools or [],
         )
 
-    icon = _SWARM_ICON_MAP.get(fn_name, '🐝')
-    badge = icon
+    verb = _SWARM_BADGE_VERB.get(fn_name, 'swarm')
+    badge = verb
     if fn_name == 'spawn_agents':
         num_agents = len(fn_args.get('agents', []))
-        badge = f'{icon} {num_agents} agents'
+        badge = f'{num_agents} agents'
     elif fn_name == 'await_agents':
         ids = fn_args.get('ids') or []
-        badge = f'{icon} await {len(ids) or "all"}'
+        badge = f'await {len(ids) or "all"}'
     elif fn_name == 'get_agent_result':
-        badge = f'{icon} {(fn_args.get("agent_id") or "?")[:8]}'
+        badge = f'{(fn_args.get("agent_id") or "?")[:8]}'
 
-    post_build = _build_await_post_build(icon) if fn_name == 'await_agents' else None
+    post_build = _build_await_post_build() if fn_name == 'await_agents' else None
 
     return simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,
         executor=_run_swarm,
-        source='Swarm', icon=icon, badge=badge, module_tag='Swarm',
+        source='Swarm', badge=badge, module_tag='Swarm',
         post_build=post_build,
     )
 
 
-def _build_await_post_build(icon):
+def _build_await_post_build():
     """Return a post_build hook that rewrites the await_agents result badge
     from its JSON payload so the UI shows the real outcome.
 
-    Without this every await row gets a generic ``⏳ await all`` badge that
+    Without this every await row gets a generic ``await all`` badge that
     looks identical whether the wait completed cleanly or hit the hard-cap
     timeout. The hook surfaces ``done N/M`` plus a ``timed out`` marker so the
     user has full visibility of partial completions.
+
+    No emoji prefix — the frontend renders the SVG icon and colors the badge
+    via ``meta.awaitTimedOut`` (amber) per CLAUDE.md §3.4.
     """
     import json as _json
 
@@ -285,7 +289,7 @@ def _build_await_post_build(icon):
         if not isinstance(data, dict):
             return
         if data.get('status') == 'error':
-            meta['badge'] = '❌ no swarm'
+            meta['badge'] = 'no swarm'
             return
         completed = data.get('completed') or []
         still_running = data.get('still_running') or []
@@ -293,14 +297,14 @@ def _build_await_post_build(icon):
         n_total = n_done + len(still_running)
         timed_out = bool(data.get('timed_out'))
         if timed_out:
-            # Amber warning badge — partial result, the wait was cut short.
-            meta['badge'] = f'{icon} timed out · {n_done}/{n_total} done'
+            # Amber warning badge (via awaitTimedOut) — partial result, wait cut short.
+            meta['badge'] = f'timed out · {n_done}/{n_total} done'
             meta['awaitTimedOut'] = True
         elif n_total:
-            meta['badge'] = f'✓ {n_done}/{n_total} done'
+            meta['badge'] = f'{n_done}/{n_total} done'
         else:
             # Nothing was waited on (all already finished, or swarm idle).
-            meta['badge'] = '✓ done'
+            meta['badge'] = 'done'
         if still_running:
             meta['awaitStillRunning'] = still_running
 
@@ -313,15 +317,18 @@ def _handle_conv_ref_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cf
     current_conv_id = task.get('convId')
 
     def _run(_fn_name, _fn_args):
-        return execute_conv_ref_tool(_fn_name, _fn_args, current_conv_id=current_conv_id)
+        return execute_conv_ref_tool(
+            _fn_name, _fn_args,
+            current_conv_id=current_conv_id,
+            project_path=project_path,
+        )
 
-    icon = '📋' if fn_name == 'list_conversations' else '💬'
     detail = fn_args.get('keyword', 'all') if fn_name == 'list_conversations' else fn_args.get('conversation_id', '?')[:8]
     return simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,
         executor=_run,
-        source='Conversations', icon=icon, module_tag='ConvRef',
-        title=f'{icon} {fn_name}: {detail}',
+        source='Conversations', module_tag='ConvRef',
+        title=f'{fn_name}: {detail}',
     )
 
 

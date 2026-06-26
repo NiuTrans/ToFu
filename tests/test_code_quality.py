@@ -14,6 +14,13 @@ from pathlib import Path
 
 import pytest
 
+# These checks walk + AST-parse the ENTIRE lib/ + routes/ tree (thousands of
+# files); each takes minutes on a FUSE mount. They are convention guards, not
+# fast unit tests — mark the whole module ``slow`` so it runs in a dedicated
+# lint/quality CI step, not in the fast ``make test-unit`` / ``ci`` tier. (Run
+# with ``pytest -m slow tests/test_code_quality.py``.)
+pytestmark = pytest.mark.slow
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LIB_DIR = PROJECT_ROOT / 'lib'
 ROUTES_DIR = PROJECT_ROOT / 'routes'

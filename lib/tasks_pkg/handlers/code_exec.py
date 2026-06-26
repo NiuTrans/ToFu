@@ -189,12 +189,11 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     m_exit = re.search(r'\[exit code: (-?\d+)\]\s*$', tool_content)
     exit_code = m_exit.group(1) if m_exit else '?'
     timed_out = '[Command timed out]' in tool_content
-    if m_exit is None and not timed_out:
-        # No exit-code marker and not a timeout: the subprocess wrapper
-        # contract changed or output was truncated. Without this, a failed
-        # command renders as exitCode='?' (ambiguous-but-OK) with no trace.
-        logger.warning('[code_exec] no [exit code] marker in output for cmd=%.80s '
-                       '(len=%d) — exit status is unknown', cmd, len(tool_content))
+    # No marker + not a timeout = the command was REFUSED/BLOCKED before it
+    # ran (read-only root, dangerous pattern, no project path, pre-hook block,
+    # abort, or a start error). Classify it as not-run with the full message
+    # as the reason so the UI shows a clear cause instead of "exit ?".
+    not_run = (m_exit is None) and (not timed_out)
     prefix = f'$ {cmd}\n'
     if tool_content.startswith(prefix):
         output_text = tool_content[len(prefix):]
@@ -203,9 +202,21 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         output_text = output_lines[1] if len(output_lines) > 1 else ''
     output_text = re.sub(r'\n?\[exit code: -?\d+\]\s*$', '', output_text).strip()
     output_text = re.sub(r'\n?\[Command timed out\].*$', '', output_text).strip()
-    meta = {
-        'toolName': 'code_exec', 'command': cmd, 'output': output_text,
-        'exitCode': 'timeout' if timed_out else exit_code, 'timedOut': timed_out,
-    }
+    if not_run:
+        from lib.tools.meta import _classify_not_run_badge
+        reason = (tool_content or '').strip()
+        logger.warning('[code_exec] command not run (refused/blocked/error) '
+                       'cmd=%.80s reason=%.160s', cmd, reason)
+        meta = {
+            'toolName': 'code_exec', 'command': cmd,
+            'output': reason, 'reason': reason,
+            'exitCode': 'not-run', 'notRun': True, 'timedOut': False,
+            'badge': _classify_not_run_badge(reason),
+        }
+    else:
+        meta = {
+            'toolName': 'code_exec', 'command': cmd, 'output': output_text,
+            'exitCode': 'timeout' if timed_out else exit_code, 'timedOut': timed_out,
+        }
     _finalize_tool_round(task, rn, round_entry, [meta])
     return tc_id, tool_content, False

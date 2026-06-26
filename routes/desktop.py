@@ -14,7 +14,7 @@ from flask import Blueprint, jsonify, request
 
 from lib.env_compat import getenv_compat
 from lib.log import audit_log, get_logger
-from lib.request_parser import parse_body
+from lib.request_parser import async_parse_body
 
 logger = get_logger(__name__)
 
@@ -100,6 +100,7 @@ from lib.desktop import (  # noqa: F401,E402
     resolve_results,
     send_desktop_command,
     take_pending_commands,
+    take_pending_commands_async,
 )
 
 
@@ -108,19 +109,21 @@ from lib.desktop import (  # noqa: F401,E402
 # ══════════════════════════════════════════════════════════
 
 @desktop_bp.route('/api/desktop/poll', methods=['POST'])
-def desktop_poll():
+async def desktop_poll():
     if not _check_bridge_auth('desktop'):
         return _bridge_unauthorized()
     record_poll()
 
     # 1) Resolve any results from the agent
-    body = parse_body()
+    body = await async_parse_body()
     resolved = resolve_results(body.get('results', []))
     if resolved:
         logger.info('[Desktop] resolved %d command results', resolved)
 
-    # 2) Collect pending commands for the agent
-    pending = take_pending_commands()
+    # 2) Long-poll for pending commands. Async-native wait releases the worker
+    #    thread for the window (see lib.desktop.bridge.take_pending_commands_async)
+    #    and hands the agent a command the instant it is queued.
+    pending = await take_pending_commands_async()
     if pending:
         logger.info('[Desktop] sending %d commands to agent: %s',
                     len(pending), [c['type'] for c in pending])

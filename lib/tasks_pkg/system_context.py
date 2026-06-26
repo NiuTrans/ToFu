@@ -79,6 +79,10 @@ def _get_cached_or_compute(conv_id: str, category: str,
 
 _TIMESTAMP_PREFIX = 'Current date and time: '
 
+# Idempotency marker for the personal-preference profile block. Mirrors the
+# constant in lib/memory/user_profile.py — kept in sync there.
+_PROFILE_MARKER = '[USER PREFERENCE PROFILE]'
+
 
 def inject_search_addendum_to_user(messages: list, search_enabled: bool,
                                     round_num: int = 0):
@@ -231,6 +235,64 @@ def _insert_user_context_message(messages, body: str) -> None:
         'content': body,
         '_isMeta': True,  # synthetic marker — see Claude Code's isMeta flag
     })
+
+
+def _append_user_profile_block(messages, block: str) -> bool:
+    """Append the preference-profile block to the cache-safe tail.
+
+    Placement priority (cache-stability matters):
+      1. If a prepended ``_isMeta`` user message exists (CLAUDE.md carrier),
+         append the block there as a separate text block. This co-locates the
+         profile with the project-context reminder in the BP4 tail segment so
+         a profile edit re-writes only that already-dynamic segment.
+      2. Otherwise (project mode off → no _isMeta msg) append to the FIRST
+         real user message — still the tail, still NOT messages[0].
+
+    Returns True if the block was injected, False if no suitable user message
+    was found (in which case the caller skips the notify_compaction).
+    """
+    # Idempotency: the block rides a USER message (not messages[0]), so the
+    # system-text probe in the caller can't see it. Re-scan here and bail if
+    # the marker is already present anywhere (endpoint re-entry / post-
+    # compaction re-injection share the same messages list).
+    for m in messages:
+        c = m.get('content', '')
+        if isinstance(c, str):
+            if _PROFILE_MARKER in c:
+                return False
+        elif isinstance(c, list):
+            for blk in c:
+                if isinstance(blk, dict) and blk.get('type') == 'text' \
+                        and _PROFILE_MARKER in blk.get('text', ''):
+                    return False
+
+    target_idx = None
+    for i, m in enumerate(messages):
+        if m.get('role') == 'user' and m.get('_isMeta'):
+            target_idx = i
+            break
+    if target_idx is None:
+        # No _isMeta carrier — fall back to the first real (non-meta) user msg.
+        for i, m in enumerate(messages):
+            if m.get('role') == 'user':
+                target_idx = i
+                break
+    if target_idx is None:
+        return False
+
+    content = messages[target_idx].get('content', '')
+    if isinstance(content, str):
+        messages[target_idx]['content'] = [
+            {'type': 'text', 'text': content},
+            {'type': 'text', 'text': block},
+        ]
+    elif isinstance(content, list):
+        messages[target_idx]['content'] = list(content) + [
+            {'type': 'text', 'text': block},
+        ]
+    else:
+        messages[target_idx]['content'] = [{'type': 'text', 'text': block}]
+    return True
 
 
 def _system_text(messages) -> str:
@@ -470,6 +532,55 @@ def _inject_system_contexts(messages, project_path, project_enabled,
                        'stale legacy code paths.',
                        (_cid or '?')[:8])
 
+    # ★ 2.5 Personal preference profile → appended to the prepended _isMeta
+    #   user message (NOT the system prefix). This is the cache-safe seam: the
+    #   profile is small + bounded but DOES change when the consolidation pass
+    #   rewrites it, so it must ride the BP4 5-min-TTL tail like CLAUDE.md /
+    #   <relevant_memories> — never messages[0] (that would re-write the whole
+    #   cached prefix on every preference edit; see the memory-count-hint and
+    #   timestamp-placement A/B lessons). Gated on memory_enabled so the
+    #   Memory toggle's "off → no proactive memory plumbing" semantics hold.
+    if memory_enabled and _PROFILE_MARKER not in _existing:
+        try:
+            from lib.memory.user_profile import load_profile, render_profile_block
+            _profile_body = load_profile()
+            _profile_block = render_profile_block(_profile_body)
+        except Exception as e:
+            logger.warning('[Inject] conv=%s user-profile load failed: %s',
+                           (_cid or '?')[:8], e)
+            _profile_body, _profile_block = '', None
+        if _profile_block:
+            _profile_injected = _append_user_profile_block(messages,
+                                                           _profile_block)
+            if _profile_injected:
+                _existing = _system_text(messages)
+                # Stash on the task so the orchestrator can emit a
+                # `preferences_applied` event + persist the chip payload.
+                if task is not None:
+                    try:
+                        from lib.memory.user_profile import profile_summary_for_event
+                        task['_appliedPreferences'] = {
+                            'chars': len(_profile_body),
+                            'items': profile_summary_for_event(_profile_body),
+                        }
+                    except Exception as e:
+                        logger.debug('[Inject] profile summary stash failed: %s', e)
+                # CRITICAL: we mutated a message that, after the first tool
+                # round, sits INSIDE the cached prefix (messages[0:N-2]).
+                # Tell cache_tracking this is an expected, legitimate
+                # mutation so detect_cache_break does NOT log a false
+                # `PREFIX MUTATION DETECTED` every round. See
+                # .tofu/skills/cache-tracking-prefix-mutation-mutators.md.
+                if _cid:
+                    try:
+                        from lib.tasks_pkg.cache_tracking import notify_compaction
+                        notify_compaction(_cid)
+                    except Exception as e:
+                        logger.debug('[Inject] notify_compaction unavailable: %s', e)
+                logger.info('[Inject] conv=%s user-profile applied '
+                            '(%d chars) on _isMeta tail',
+                            (_cid or '?')[:8], len(_profile_body))
+
     # ★ 3. Compact memory accumulation instructions + memory count hint
     #   Both the HOW-TO-USE instructions and the dynamic count hint
     #   ("You have N accumulated memories...") go into the system message.
@@ -608,6 +719,29 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
         _append_to_system_message(messages,
                                    _wrap_system_reminder(swarm_prompt),
                                    as_separate_block=True)
+
+    # ★ 4.4 Cross-conversation project digest (Layer 2) — always-on in project
+    #   mode. A bounded list (top DIGEST_MAX_SIBLINGS) of the most recent OTHER
+    #   conversations of this project, each as "title — summary [id]", so the
+    #   model is AMBIENTLY aware that siblings exist and can get_conversation()
+    #   into one. Read-only/cached (never generates a summary on this hot path);
+    #   own cache-block because the sibling list changes as the project grows.
+    _DIGEST_MARKER = 'related conversation(s) you can'
+    if project_enabled and project_path and _DIGEST_MARKER not in _existing:
+        try:
+            from lib.conversations.project_summary import build_project_digest
+            _digest = build_project_digest(project_path, current_conv_id=_cid or None)
+        except Exception as e:
+            logger.debug('[Inject] project digest build failed conv=%s: %s',
+                         (_cid or '?')[:8], e)
+            _digest = ''
+        if _digest:
+            _append_to_system_message(messages,
+                                       _wrap_system_reminder(_digest),
+                                       as_separate_block=True)
+            _existing = _system_text(messages)
+            logger.info('[Inject] conv=%s project digest injected (%d chars)',
+                        (_cid or '?')[:8], len(_digest))
 
     # ★ 4.5 Current date.
     #   In append mode the date is already inlined by build_static_prompt()'s

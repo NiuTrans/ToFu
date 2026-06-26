@@ -150,15 +150,26 @@ class TestPythonSyntax:
         "offline_pkgs", "logs", ".project_sessions", ".tofu", "uploads",
         # Generated / eval scratch trees — large and on slow FUSE mounts,
         # not part of the project source. Walking them times the test out.
-        "swebench_workdir", "swebench_rerun_workdir", "abtest_workdir",
-        "outputs", "overleaf_cache", "paper", "tofu.egg-info",
+        "outputs", "overleaf_cache", "paper", "build", "dist",
         ".ruff_cache", ".pytest_cache", "data", "venv", ".venv",
     }
+
+    @staticmethod
+    def _is_skip_dir(name: str) -> bool:
+        # Explicit set + pattern match so newly-created scratch/eval trees
+        # (e.g. swebench_glm_ab_workdir) are skipped without editing this list.
+        if name in TestPythonSyntax._SKIP_DIRS:
+            return True
+        return (
+            name.startswith("swebench")
+            or name.endswith("_workdir")
+            or name.endswith(".egg-info")
+        )
 
     def _collect_py_files(self):
         py_files = []
         for root, dirs, files in os.walk(PROJECT_ROOT):
-            dirs[:] = [d for d in dirs if d not in self._SKIP_DIRS]
+            dirs[:] = [d for d in dirs if not self._is_skip_dir(d)]
             for f in files:
                 if f.endswith(".py"):
                     py_files.append(os.path.join(root, f))

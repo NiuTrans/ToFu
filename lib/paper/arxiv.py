@@ -6,7 +6,9 @@ public arXiv Atom search API so Paper Reading Mode can resolve a free-text
 title query into a list of candidate papers.
 """
 
+import html
 import re
+import time
 import xml.etree.ElementTree as ET
 from urllib.parse import quote
 
@@ -17,6 +19,11 @@ logger = get_logger(__name__)
 
 _ARXIV_API_URL = 'http://export.arxiv.org/api/query'
 _ATOM_NS = {'atom': 'http://www.w3.org/2005/Atom'}
+# arXiv's Atom API is frequently slow / rate-limited. Retry the API a couple
+# of times, then fall back to the abs HTML page (a different endpoint that is
+# rarely throttled in lockstep with the API).
+_ARXIV_TITLE_RETRIES = 2
+_ARXIV_TITLE_RETRY_SLEEP = 1.5
 
 
 def _extract_arxiv_id(url_or_id):
@@ -52,38 +59,105 @@ def _extract_arxiv_id(url_or_id):
     return None
 
 
-def fetch_arxiv_title(arxiv_id):
-    """Fetch a single paper's title from arXiv by ID.
+def _fetch_title_via_api(arxiv_id):
+    """Resolve a title via the arXiv Atom API. Returns '' on failure (logged)."""
+    url = f'{_ARXIV_API_URL}?id_list={quote(arxiv_id)}&max_results=1'
+    resp = http_get(url, timeout=15,
+                    headers={'User-Agent': 'Mozilla/5.0 (compatible; TofuBot/1.0)'})
+    resp.raise_for_status()
+    root = ET.fromstring(resp.content)
+    entry = root.find('atom:entry', _ATOM_NS)
+    if entry is None:
+        return ''
+    title_el = entry.find('atom:title', _ATOM_NS)
+    return _strip_arxiv_text(title_el.text if title_el is not None else '')
 
-    Used so Paper Reading Mode can label a fetched paper by its title
-    instead of the bare ``arXiv:<id>``. Queries the public Atom API by
-    ``id_list`` and returns the title, or '' on any failure (logged).
+
+def _fetch_title_via_abs_page(arxiv_id):
+    """Scrape the title from the arXiv abs HTML page (API fallback).
+
+    The abs page exposes the title two ways: the ``citation_title`` meta tag
+    (clean, preferred) and the ``<title>`` element (``[id] Title``). Returns
+    '' on failure (logged by the caller).
+    """
+    url = f'https://arxiv.org/abs/{quote(arxiv_id)}'
+    resp = http_get(url, timeout=15,
+                    headers={'User-Agent': 'Mozilla/5.0 (compatible; TofuBot/1.0)'})
+    resp.raise_for_status()
+    body = resp.text or ''
+
+    # Preferred: <meta name="citation_title" content="…">
+    m = re.search(
+        r'<meta[^>]+name=["\']citation_title["\'][^>]+content=["\']([^"\']+)["\']',
+        body, re.IGNORECASE)
+    if not m:
+        # Order-independent: content may precede name.
+        m = re.search(
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']citation_title["\']',
+            body, re.IGNORECASE)
+    if m:
+        return _strip_arxiv_text(html.unescape(m.group(1)))
+
+    # Fallback: <title>[2301.12345] Real Paper Title</title>
+    m = re.search(r'<title>(.*?)</title>', body, re.IGNORECASE | re.DOTALL)
+    if m:
+        title = html.unescape(m.group(1))
+        # Strip a leading "[arxiv-id] " prefix the page prepends.
+        title = re.sub(r'^\s*\[[^\]]+\]\s*', '', title)
+        return _strip_arxiv_text(title)
+    return ''
+
+
+def fetch_arxiv_title(arxiv_id):
+    """Fetch a single paper's title from arXiv by ID — robust, multi-source.
+
+    Used so Paper Reading Mode can label a fetched paper by its title instead
+    of the bare ``arXiv:<id>``. Tries the Atom API with a short retry (the API
+    is frequently slow / rate-limited), then falls back to scraping the abs
+    HTML page (a different endpoint rarely throttled in lockstep). Every
+    failed attempt is logged per §2.2 — never a silent empty.
 
     Args:
         arxiv_id: A bare arXiv ID (e.g. ``2301.12345`` or ``hep-th/0601001``),
             with or without a version suffix.
 
     Returns:
-        The paper title with whitespace collapsed, or '' if unavailable.
+        The paper title with whitespace collapsed, or '' if every source
+        failed (in which case the failure chain is logged).
     """
     arxiv_id = (arxiv_id or '').strip()
     if not arxiv_id:
         return ''
-    url = f'{_ARXIV_API_URL}?id_list={quote(arxiv_id)}&max_results=1'
-    try:
-        resp = http_get(url, timeout=15,
-                        headers={'User-Agent': 'Mozilla/5.0 (compatible; TofuBot/1.0)'})
-        resp.raise_for_status()
-        root = ET.fromstring(resp.content)
-    except Exception as e:
-        logger.warning('[Paper:arXiv:Title] Lookup failed for %s: %s', arxiv_id, e)
-        return ''
 
-    entry = root.find('atom:entry', _ATOM_NS)
-    if entry is None:
-        return ''
-    title_el = entry.find('atom:title', _ATOM_NS)
-    return _strip_arxiv_text(title_el.text if title_el is not None else '')
+    for attempt in range(1, _ARXIV_TITLE_RETRIES + 1):
+        try:
+            title = _fetch_title_via_api(arxiv_id)
+            if title:
+                if attempt > 1:
+                    logger.info('[Paper:arXiv:Title] API recovered title for %s on attempt %d',
+                                arxiv_id, attempt)
+                return title
+            logger.warning('[Paper:arXiv:Title] API returned no title for %s (attempt %d/%d)',
+                           arxiv_id, attempt, _ARXIV_TITLE_RETRIES)
+        except Exception as e:
+            logger.warning('[Paper:arXiv:Title] API lookup failed for %s (attempt %d/%d): %s',
+                           arxiv_id, attempt, _ARXIV_TITLE_RETRIES, e)
+        if attempt < _ARXIV_TITLE_RETRIES:
+            time.sleep(_ARXIV_TITLE_RETRY_SLEEP)
+
+    # API exhausted — fall back to the abs HTML page.
+    try:
+        title = _fetch_title_via_abs_page(arxiv_id)
+        if title:
+            logger.info('[Paper:arXiv:Title] Recovered title for %s via abs-page fallback', arxiv_id)
+            return title
+        logger.warning('[Paper:arXiv:Title] abs-page fallback found no title for %s', arxiv_id)
+    except Exception as e:
+        logger.warning('[Paper:arXiv:Title] abs-page fallback failed for %s: %s', arxiv_id, e)
+
+    logger.error('[Paper:arXiv:Title] All title sources exhausted for %s — '
+                 'caller will fall back to bare arXiv:<id>', arxiv_id)
+    return ''
 
 
 def _strip_arxiv_text(s):

@@ -62,6 +62,16 @@ var _i18n = {
   'sidebar.translatingTag': { zh: '翻译中', en: 'Translating' },
   'sidebar.memoryPrefetch': { zh: '筛选记忆中…', en: 'Filtering memories…' },
   'sidebar.memoryPrefetchTag': { zh: '筛选记忆', en: 'Filtering' },
+  'prefs.applied': { zh: '已在本回合提供你的偏好', en: 'Your preferences were in context' },
+  'prefs.appliedN': { zh: '本回合提供了 {n} 条偏好', en: '{n} preferences in context this turn' },
+  'prefs.fromProfile': { zh: '来自个人偏好档案', en: 'from your profile' },
+  'workspaceRoot.added': { zh: '已添加工作区根目录：{roots}', en: 'Added workspace root: {roots}' },
+  'prefs.learned': { zh: '记下了：你偏好', en: 'Noted: you prefer' },
+  'prefs.learnedReinforced': { zh: '已更新你的偏好档案', en: 'Updated your preference profile' },
+  'prefs.pendingHint': { zh: '待你确认后写入', en: 'Awaiting your confirmation' },
+  'prefs.confirm': { zh: '确认', en: 'Confirm' },
+  'prefs.dismiss': { zh: '忽略', en: 'Dismiss' },
+  'prefs.undo': { zh: '撤销', en: 'Undo' },
   'sidebar.answering': { zh: '回答中', en: 'Answering' },
   'sidebar.copyConvId': { zh: '复制会话ID', en: 'Copy conversation ID' },
   'sidebar.refConv': { zh: '引用此对话', en: 'Reference this conversation' },
@@ -111,6 +121,11 @@ var _i18n = {
   'toolbar.autonomousMode': { zh: '自主模式', en: 'Autonomous Mode' },
   'toolbar.autonomousModeDesc': { zh: '自主执行+自我审查循环', en: 'Autonomous execution + self-review loop' },
   'autopilot.composing': { zh: 'Autopilot 正在生成下一条用户回复…', en: 'Autopilot is composing the next reply…' },
+  'autopilot.sentToAgent': { zh: '作为下一条消息发送给智能体', en: 'Sent to the agent as the next message' },
+  'autopilot.privateNotSent': { zh: '私有过程 · 不发送给智能体', en: 'Private · not sent to the agent' },
+  'tool.hallucinated': { zh: '非真实工具', en: 'not a real tool' },
+  'tool.hallucinatedTip': { zh: '模型调用了本轮不存在的工具，已被拒绝、未执行。', en: "The model called a tool that doesn't exist this turn — it was rejected and never run." },
+  'tool.didYouMean': { zh: '是否想用', en: 'did you mean' },
   'autopilot.armedTitle': { zh: '已接管', en: 'Autopilot armed' },
   'autopilot.armedBody': { zh: '当前回复结束后，虚拟用户将自动接管对话', en: 'The virtual user will take over once the current reply finishes' },
   'autopilot.pendingTakeover': { zh: 'Autopilot 待接管（当前回复结束后）', en: 'Autopilot will take over (after the current reply)' },
@@ -141,7 +156,7 @@ var _i18n = {
   'orch.sec.io': { zh: '数据 I/O', en: 'Data I/O' },
   'orch.sec.persona': { zh: '角色设定（只读）', en: 'Persona (read-only)' },
   'orch.sec.flow': { zh: '数据流', en: 'Data flow' },
-  'orch.persona.note': { zh: '🎭 这是该角色固定的「人设」——它的系统提示词由后端设计（lib/swarm/registry.AGENT_ROLES），决定了这个角色做什么、怎么做。此处<b>仅供查看，不可编辑</b>：提示词是角色设计的一部分，不是逐流程可改的字段。要让它做不同的事，请在上面的「任务」里写目标，而不是改它的人设。', en: '🎭 This is the role\'s fixed persona — its system prompt is designed by the backend (lib/swarm/registry.AGENT_ROLES) and decides what this character does and how. It is shown <b>for reference only and cannot be edited</b>: the prompt is part of the role\'s design, not a per-flow field. To make it do something different, write the goal in <b>Task</b> above — don\'t rewrite its persona.' },
+  'orch.persona.note': { zh: '🎭 这是该角色固定的「人设」——它的系统提示词由后端设计（lib/swarm/registry.AGENT_ROLES），决定了这个角色做什么、怎么做。此处<b>仅供查看，不可编辑</b>：提示词是角色设计的一部分，不是逐流程可改的字段。要调整它的行为，请在「执行」里选择模型档位与上下文，并通过连线为它提供数据。', en: '🎭 This is the role\'s fixed persona — its system prompt is designed by the backend (lib/swarm/registry.AGENT_ROLES) and decides what this character does and how. It is shown <b>for reference only and cannot be edited</b>: the prompt is part of the role\'s design, not a per-flow field. To change its behaviour, set the model tier and context in <b>Execution</b> and feed it data via wired inputs.' },
   'orch.persona.prompt': { zh: '系统提示词设计', en: 'System prompt design' },
   'orch.persona.none': { zh: '该角色没有内置人设——运行时按通用智能体处理。', en: 'No built-in persona for this role — it runs as a generic agent.' },
   'orch.sec.lastRun': { zh: '最近运行', en: 'Last run' },
@@ -528,6 +543,18 @@ var _i18n = {
   'update.availableTitle': { zh: '有可用更新：v%s', en: 'Update available: v%s' },
   'update.checking': { zh: '正在检查更新…', en: 'Checking for updates…' },
   'update.checkFailed': { zh: '无法检查更新，请稍后再试。', en: 'Could not check for updates. Please try again later.' },
+  // Concrete, cause-specific failure copy — never a vague "try again later".
+  'update.checkFailTitle': { zh: '无法检查更新', en: "Couldn't check for updates" },
+  'update.errBackend': { zh: '无法连接到 Tofu 后端服务，服务器可能已停止或正在重启。', en: 'Could not reach the Tofu backend — the server may be stopped or restarting.' },
+  'update.errBackendHttp': { zh: '后端返回了错误（HTTP %s），更新检查无法完成。', en: 'The backend returned an error (HTTP %s), so the update check could not complete.' },
+  'update.errTimeout': { zh: '检查更新超时：后端在限定时间内没有响应。', en: 'The update check timed out — the backend did not respond in time.' },
+  'update.errNetwork': { zh: '无法连接到 GitHub 来获取最新版本（网络或连接问题）。', en: 'Could not reach GitHub to fetch the latest version (network/connection problem).' },
+  'update.errRateLimited': { zh: 'GitHub 暂时限制了更新检查的请求频率，请几分钟后再试。', en: 'GitHub rate-limited the update check. Please try again in a few minutes.' },
+  'update.errHttp': { zh: 'GitHub 返回了异常响应（%s），更新检查无法完成。', en: 'GitHub returned an unexpected response (%s).' },
+  'update.errParse': { zh: 'GitHub 返回了无法解析的响应，更新检查无法完成。', en: 'GitHub returned an unreadable response.' },
+  'update.errNoTags': { zh: '更新源仓库还没有发布任何版本。', en: 'The update repository has no released versions yet.' },
+  'update.errUnknown': { zh: '更新检查因未知原因失败。', en: 'The update check failed for an unknown reason.' },
+  'update.errReasonLabel': { zh: '原因', en: 'Reason' },
   'update.retry': { zh: '重试', en: 'Retry' },
   'update.current': { zh: '当前版本', en: 'Current' },
   'update.latest': { zh: '最新版本', en: 'Latest' },
@@ -1023,6 +1050,14 @@ var _i18n = {
   'mobile.autoExecLoop': { zh: '自主执行循环', en: 'Auto-exec loop' },
   'mobile.paperReader': { zh: '论文阅读', en: 'Paper Reader' },
   'mobile.paperReaderDesc': { zh: 'PDF阅读 + 问答 + 报告 + Babel PDF', en: 'PDF reading + Q&A + reports + Babel PDF' },
+  'mobile.settingsDesc': { zh: '模型、提供方与偏好', en: 'Models, providers & preferences' },
+  'mobile.mydayDesc': { zh: '每日活动报告', en: 'Daily activity report' },
+  'mobile.studioDesc': { zh: '设计多代理工作流', en: 'Design multi-agent workflows' },
+  'mobile.tasksDesc': { zh: '查看与重开编排任务', en: 'Watch & reopen orchestration runs' },
+  'mobile.flowDesc': { zh: '选择编排流程', en: 'Pick an orchestration flow' },
+  'mobile.monitoring': { zh: '监控', en: 'Monitoring' },
+  'mobile.timerDesc': { zh: '后台定时观察器', en: 'Background timer watchers' },
+  'mobile.optimizerDesc': { zh: '自主改进提案', en: 'Autonomous improvement proposals' },
 
   // ══════════════════════════════════════
   //  Paper Reader
@@ -1052,8 +1087,10 @@ var _i18n = {
   'paper.viewPdf': { zh: '原文', en: 'PDF' },
   'paper.viewReader': { zh: '阅读', en: 'Reader' },
   'paper.qaEmptyTitle': { zh: '就本论文提问', en: 'Ask questions about this paper' },
-  'paper.qaEmptyHint': { zh: '在 PDF 中选中文字以引用，或在下方输入问题', en: 'Select text in the PDF to quote it, or type a question below' },
+  'paper.qaEmptyHint': { zh: '在 PDF 或报告中选中文字以提问，或在下方输入问题', en: 'Select text in the PDF or report to ask about it, or type a question below' },
   'paper.qaInputPlaceholder': { zh: '就本论文提一个问题…', en: 'Ask a question about this paper…' },
+  'paper.qaError': { zh: '出错', en: 'Error' },
+  'paper.qaExpired': { zh: '问答任务已过期，请重试。', en: 'Q&A task expired. Please ask again.' },
   'paper.fitWidth': { zh: '适应宽度', en: 'Fit to width' },
   'paper.zoomOut': { zh: '缩小', en: 'Zoom out' },
   'paper.zoomIn': { zh: '放大', en: 'Zoom in' },
@@ -1062,6 +1099,10 @@ var _i18n = {
   'paper.reportSelectModelTitle': { zh: '选择生成报告的模型', en: 'Select model for report generation' },
   'paper.reportSelectModel': { zh: '选择模型', en: 'Select model' },
   'paper.reportRegenerate': { zh: '重新生成', en: 'Regenerate' },
+  'paper.reportStop': { zh: '停止', en: 'Stop' },
+  'paper.reportStopping': { zh: '正在停止…', en: 'Stopping…' },
+  'paper.reportStopped': { zh: '已停止生成', en: 'Generation stopped' },
+  'paper.reportStoppedHint': { zh: '点击「重新生成」可重新开始', en: 'Click Regenerate to start over' },
   'paper.reportCopy': { zh: '复制', en: 'Copy' },
   'paper.reportCopied': { zh: '已复制', en: 'Copied' },
   'paper.reportExport': { zh: '导出', en: 'Export' },
@@ -1072,6 +1113,15 @@ var _i18n = {
   'paper.reportEmptyHint': { zh: '模型会联网搜索补充背景与相关工作', en: 'The model will search the web for additional context and related work' },
   'paper.reportNoText': { zh: '暂无论文文本，请先加载 PDF。', en: 'No paper text available. Load a PDF first.' },
   'paper.retry': { zh: '重试', en: 'Retry' },
+  // Reading-time estimate + progress bar (Report tab)
+  'paper.readTimeTotal': { zh: '阅读时长约 {min}', en: '{min} read' },
+  'paper.readTimeLeft': { zh: '剩余约 {min}', en: '{min} left' },
+  'paper.readTimeDone': { zh: '已读完', en: 'Finished' },
+  'paper.readTimeMin': { zh: '{n} 分钟', en: '{n} min' },
+  'paper.readTimeLessMin': { zh: '不到 1 分钟', en: 'under 1 min' },
+  'paper.readTimeHour': { zh: '{h} 小时 {m} 分', en: '{h} h {m} min' },
+  'paper.readTimeAdapted': { zh: '已按你的阅读速度校准（约 {wpm} 词/分）', en: 'Calibrated to your reading speed (~{wpm} wpm)' },
+  'paper.readTimeDefault': { zh: '按平均阅读速度估算', en: 'Estimated at average reading speed' },
   // Babel PDF tab
   'paper.babelSubtitle': { zh: '学术论文翻译', en: 'Academic paper translation' },
   'paper.babelOriginal': { zh: '原文', en: 'Original' },
@@ -1564,6 +1614,30 @@ function _onLanguageChange(lang) {
       if (typeof _updatePaperTitles === 'function') _updatePaperTitles();
       if (typeof _renderPaperQA === 'function') _renderPaperQA();
       if (typeof _paperFileName !== 'undefined' && !_paperFileName && typeof _showPaperLanding === 'function') _showPaperLanding();
+      // Refresh the Report tab so JS-rendered strings (reading-time bar
+      // labels, TOC heading "Contents", finish tag) follow the new language.
+      // Prefer the stream painter when a stream exists (handles tool rounds /
+      // thinking too); reset its dedup markers so the body actually re-renders.
+      // Otherwise repaint a cached/finished report directly.
+      if (typeof _paperReportStream !== 'undefined' && _paperReportStream) {
+        _paperReportStream._lastRenderedLen = -1;
+        _paperReportStream._lastRenderedStatus = '';
+        _paperReportStream._lastToolKey = '';
+        var _rcS = document.getElementById('paperReportContent');
+        var _prevTopS = _rcS ? _rcS.scrollTop : 0;
+        if (typeof _paintReportFromState === 'function') _paintReportFromState();
+        if (_rcS) _rcS.scrollTop = _prevTopS;
+      } else {
+        var _rc = document.getElementById('paperReportContent');
+        if (_rc && typeof _paperReportCache !== 'undefined' && _paperReportCache
+            && typeof _renderFinalReport === 'function') {
+          // _renderFinalReport rebuilds innerHTML (resets scrollTop to 0).
+          // Preserve the reader's scroll position across the relabel.
+          var _prevTop = _rc.scrollTop;
+          _renderFinalReport(_rc, _paperReportCache);
+          _rc.scrollTop = _prevTop;
+        }
+      }
       // Refresh the Babel PDF tab if it is the active panel (rebuilds its
       // static chrome — subtitle, Original button, empty state).
       var _babelPanel = document.querySelector('.paper-tab-panel[data-tab="translate"]');

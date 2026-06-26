@@ -149,6 +149,30 @@ class EndpointEventAdapter:
         else:
             self._stream({'type': 'delta', 'content': chunk})
 
+    def _on_step_phase(self, ev: dict):
+        """Surface a transient producer status as a wire ``phase`` event.
+
+        The engine emits ``step_phase`` while an assistant-side producer's
+        dispatch is in flight ("waiting for model…" / "retrying…" under a
+        rate-limited strict_model — the 5-minute first-token stall that used
+        to show a bare static pulse). Translated to the registered ``phase``
+        event the frontend already renders on the worker bubble (transient UI,
+        cleared by the first delta — never a content delta, so it can't
+        pollute the turn). Only forwarded for assistant-side producers: a
+        verifier (critic / virtual_user) renders user-side and its phase chip
+        would land on the wrong bubble, so we skip it there.
+        """
+        emits = ev.get('emits') or self._derive_emits(ev.get('role') or '')
+        if emits == 'user':
+            return
+        out = {'type': 'phase', 'phase': ev.get('phase') or 'working',
+               'detail': ev.get('detail') or ''}
+        if ev.get('attempt'):
+            out['attempt'] = ev.get('attempt')
+        if ev.get('status_code'):
+            out['statusCode'] = ev.get('status_code')
+        self._stream(out)
+
     def _on_step_complete(self, ev: dict):
         role = ev.get('role') or ''
         # Prefer the FULL turn output; fall back to the 200-char preview only

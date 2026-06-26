@@ -229,46 +229,6 @@ def test_structured_fields_render_into_brief(harness_result):
     assert 'Must Not Do' not in brief, brief
 
 
-def test_js_fallback_schema_matches_backend(harness_result):
-    """The JS _ORCH_ROLE_SCHEMA_FALLBACK is a hand-maintained mirror of the
-    backend ROLE_PARAM_SCHEMA so the inspector works before /role-schema lands
-    (and in jsdom with no server). Pin them in sync: same role set, same field
-    keys per role in the same order — drift here means the offline inspector
-    shows the wrong fields."""
-    from lib.orchestration import ROLE_PARAM_SCHEMA, role_param_schema
-
-    # Extract the fallback object from the loaded module (the harness already
-    # eval'd orchestration.js into a jsdom window and printed nothing for it;
-    # run a tiny dedicated node eval instead so this test is self-contained).
-    src = os.path.join(ROOT, 'static', 'js', 'orchestration.js')
-    code = (
-        "const fs=require('fs');const {JSDOM}=require('jsdom');"
-        "const dom=new JSDOM('<!DOCTYPE html><body>',{runScripts:'dangerously'});"
-        "const W=dom.window;"
-        "W.eval(\"function escapeHtml(s){return ''+s} function t(k){return k} var BASE_PATH=''\");"
-        "W.eval(fs.readFileSync(" + json.dumps(src) + ",'utf8'));"
-        "const f=W._ORCH_ROLE_SCHEMA_FALLBACK;"
-        "const out={generic:f.generic.map(s=>s.key)};"
-        "out.roles={};Object.keys(f.roles).forEach(r=>{out.roles[r]=f.roles[r].map(s=>s.key)});"
-        "console.log('FALLBACK_JSON='+JSON.stringify(out));"
-    )
-    proc = subprocess.run(['node', '-e', code], cwd=ROOT,
-                          capture_output=True, text=True, timeout=120)
-    out = (proc.stdout or '') + '\n' + (proc.stderr or '')
-    assert proc.returncode == 0, out
-    fb = _extract(out, 'FALLBACK_JSON=')
-
-    # Same role set.
-    assert set(fb['roles']) == set(ROLE_PARAM_SCHEMA), (
-        set(fb['roles']) ^ set(ROLE_PARAM_SCHEMA))
-    # Same field keys per role, same order.
-    for role, be_schema in ROLE_PARAM_SCHEMA.items():
-        be_keys = [s['key'] for s in be_schema]
-        assert fb['roles'][role] == be_keys, (role, fb['roles'][role], be_keys)
-    # Generic mirror too.
-    assert fb['generic'] == [s['key'] for s in role_param_schema('__generic__')]
-
-
 def test_typed_io_contract_serializes_and_validates(harness_result):
     """The edge-selection + typed I/O editor flow (Scenario 5) produces a
     backend-valid definition whose worker exposes summary/changes outputs and

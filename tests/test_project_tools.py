@@ -279,7 +279,7 @@ class TestRmTrashWrap:
         assert out.index('-mtime') < out.index('rm() {')
 
     def test_trash_prune_disabled_when_ttl_zero(self, monkeypatch):
-        import lib.project_mod.tools as t
+        import lib.project_mod.run_command as t
         monkeypatch.setattr(t, '_TRASH_TTL_DAYS', 0)
         out = t._maybe_wrap_rm_with_trash('rm -rf build/', '/work/ws')
         assert '-mtime' not in out
@@ -298,7 +298,7 @@ class TestRmTrashWrap:
         assert _maybe_wrap_rm_with_trash(cmd, '/work/ws') == cmd
 
     def test_disabled_via_flag(self, monkeypatch):
-        import lib.project_mod.tools as t
+        import lib.project_mod.run_command as t
         monkeypatch.setattr(t, '_RM_TRASH_ENABLED', False)
         assert t._maybe_wrap_rm_with_trash('rm -rf build/', '/work/ws') == 'rm -rf build/'
 

@@ -230,6 +230,19 @@
       <div class="paper-divider" id="paperDivider"></div>
       <!-- Right: Q&A / Report / Babel PDF -->
       <div class="paper-right">
+        <!-- Floating selection toolbar for the GENERATED REPORT — lets a
+             confusing report passage become a one-click Q&A question. -->
+        <div class="paper-selection-bar" id="paperReportQuoteBtn" style="display:none">
+          <button class="paper-sel-btn" onclick="_askAboutPaperSelection()" title="Ask AI about this selection">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            Ask
+          </button>
+          <div class="paper-sel-divider"></div>
+          <button class="paper-sel-btn" onclick="_quotePaperSelection()" title="Quote selection into Q&A input">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V21z"/><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/></svg>
+            Quote
+          </button>
+        </div>
         <div class="paper-tabs">
           <button class="paper-tab-btn active" data-tab="qa" onclick="_switchPaperTab('qa')">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -273,7 +286,11 @@
                 <!-- Populated by _populatePaperReportModelDropdown() -->
               </div>
             </div>
-            <button class="paper-report-btn" onclick="_regeneratePaperReport()" data-i18n-title="paper.reportRegenerate" title="Regenerate">
+            <button class="paper-report-btn paper-report-stop-btn" id="paperReportStopBtn" onclick="_stopPaperReport()" data-i18n-title="paper.reportStop" title="Stop generation" style="display:none">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
+              <span data-i18n="paper.reportStop">Stop</span>
+            </button>
+            <button class="paper-report-btn" id="paperReportRegenBtn" onclick="_regeneratePaperReport()" data-i18n-title="paper.reportRegenerate" title="Regenerate">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
               <span data-i18n="paper.reportRegenerate">Regenerate</span>
             </button>
@@ -1854,6 +1871,41 @@
 <div class="mobile-bottom-sheet-backdrop" id="mobileSheetBackdrop" onclick="closeMobileSheet()"></div>
 <div class="mobile-bottom-sheet" id="mobileSheet">
   <div class="mobile-sheet-header" data-i18n="mobile.options">选项</div>
+  <!-- General navigation: settings + conversation search (mirrors the sidebar-header gear/search) -->
+  <div class="mobile-sheet-section">
+    <div class="mobile-sheet-item" id="mobileSettings" onclick="closeMobileSheet();openSettings()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name" data-i18n="sidebar.settings">设置</span>
+        <span class="mobile-sheet-item-desc" data-i18n="mobile.settingsDesc">模型、提供方与偏好</span>
+      </span>
+      <span class="mobile-sheet-item-check" style="opacity:0">✓</span>
+    </div>
+    <div class="mobile-sheet-item" id="mobileMyDay" onclick="closeMobileSheet();openDailyReport()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name" data-i18n="topbar.myday">My Day</span>
+        <span class="mobile-sheet-item-desc" data-i18n="mobile.mydayDesc">每日活动报告</span>
+      </span>
+      <span class="mobile-sheet-item-check" style="opacity:0">✓</span>
+    </div>
+    <div class="mobile-sheet-item" id="mobileStudio" onclick="closeMobileSheet();openOrchestration()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M6 8.5v3a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-3"/><path d="M12 13.5v2"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name" data-i18n="topbar.studio">Studio</span>
+        <span class="mobile-sheet-item-desc" data-i18n="mobile.studioDesc">设计多代理工作流</span>
+      </span>
+      <span class="mobile-sheet-item-check" style="opacity:0">✓</span>
+    </div>
+    <div class="mobile-sheet-item" id="mobileTasks" onclick="closeMobileSheet();openTaskMode()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name" data-i18n="topbar.tasks">Tasks</span>
+        <span class="mobile-sheet-item-desc" data-i18n="mobile.tasksDesc">查看与重开编排任务</span>
+      </span>
+      <span class="mobile-sheet-item-check" style="opacity:0">✓</span>
+    </div>
+  </div>
   <!-- Thinking Depth section — only visible when model supports it -->
   <div class="mobile-sheet-section" id="mobileDepthSection" style="display:none">
     <div class="mobile-sheet-section-title" data-i18n="mobile.thinkingDepth">思考深度</div>
@@ -1918,6 +1970,22 @@
       </span>
       <span class="mobile-sheet-item-check">✓</span>
     </div>
+    <div class="mobile-sheet-item" id="mobileDesktop" onclick="toggleDesktop();updateMobileSheet()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name" data-i18n="toolbar.desktopControl">桌面控制</span>
+        <span class="mobile-sheet-item-desc" data-i18n="toolbar.desktopControlDesc">操作本地应用与文件</span>
+      </span>
+      <span class="mobile-sheet-item-check">✓</span>
+    </div>
+    <div class="mobile-sheet-item" id="mobileScheduler" onclick="toggleScheduler();updateMobileSheet()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name" data-i18n="toolbar.scheduledTasks">定时任务</span>
+        <span class="mobile-sheet-item-desc" data-i18n="toolbar.scheduledTasksDesc">计划任务与 Cron</span>
+      </span>
+      <span class="mobile-sheet-item-check">✓</span>
+    </div>
     <div class="mobile-sheet-item" id="mobileProject" onclick="closeMobileSheet();openProjectModal()">
       <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
       <span class="mobile-sheet-item-text">
@@ -1954,11 +2022,40 @@
       </span>
       <span class="mobile-sheet-item-check">✓</span>
     </div>
+    <div class="mobile-sheet-item" id="mobileFlow" onclick="openMobileFlowPicker()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M10 6.5h4a2 2 0 0 1 2 2V14"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name" data-i18n="toolbar.flow">编排流程</span>
+        <span class="mobile-sheet-item-desc" id="mobileFlowLabel" data-i18n="mobile.flowDesc">选择编排流程</span>
+      </span>
+      <span class="mobile-sheet-item-check">✓</span>
+    </div>
     <div class="mobile-sheet-item" id="mobilePaperMode" onclick="closeMobileSheet();togglePaperMode()">
       <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
       <span class="mobile-sheet-item-text">
         <span class="mobile-sheet-item-name" data-i18n="mobile.paperReader">论文阅读</span>
         <span class="mobile-sheet-item-desc" data-i18n="mobile.paperReaderDesc">PDF阅读 + 问答 + 报告</span>
+      </span>
+      <span class="mobile-sheet-item-check" style="opacity:0">✓</span>
+    </div>
+  </div>
+  <!-- Monitoring section: panels that live in hidden topbar badges on mobile,
+       portaled to a bottom sheet by mobile_panels.js -->
+  <div class="mobile-sheet-section">
+    <div class="mobile-sheet-section-title" data-i18n="mobile.monitoring">监控</div>
+    <div class="mobile-sheet-item" id="mobileTimer" onclick="openMobileTimer()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name" data-i18n="topbar.timer">Active Counter</span>
+        <span class="mobile-sheet-item-desc" data-i18n="mobile.timerDesc">后台定时观察器</span>
+      </span>
+      <span class="mobile-sheet-item-check" style="opacity:0">✓</span>
+    </div>
+    <div class="mobile-sheet-item" id="mobileOptimizer" onclick="openMobileOptimizer()">
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z"/><circle cx="12" cy="12" r="10"/></svg></span>
+      <span class="mobile-sheet-item-text">
+        <span class="mobile-sheet-item-name" data-i18n="optimizer.panelTitle">Daily Optimizer</span>
+        <span class="mobile-sheet-item-desc" data-i18n="mobile.optimizerDesc">自主改进提案</span>
       </span>
       <span class="mobile-sheet-item-check" style="opacity:0">✓</span>
     </div>
@@ -2076,6 +2173,8 @@
 <script defer src="static/js/context-bar.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- info-rail.js — per-turn context note builder/renderer (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
 <script defer src="static/js/info-rail.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- mobile_panels.js — mobile portaling of timer/optimizer panels + mobile flow picker (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
+<script defer src="static/js/mobile_panels.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script>
 // Feature flags — show/hide optional modules
 var _featureFlags = {};

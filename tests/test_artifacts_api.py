@@ -261,7 +261,7 @@ class TestSseEvent:
 
 class TestRoutes:
     def test_get_meta_404(self, flask_client):
-        resp = flask_client.get('/api/artifacts/does-not-exist')
+        resp = flask_client.get('/api/v1/artifacts/does-not-exist')
         assert resp.status_code == 404
 
     def test_full_round_trip(self, flask_app, flask_client):
@@ -273,7 +273,7 @@ class TestRoutes:
                                    title='r.md')
 
         # GET meta
-        r = flask_client.get(f'/api/artifacts/{meta["id"]}')
+        r = flask_client.get(f'/api/v1/artifacts/{meta["id"]}')
         assert r.status_code == 200
         assert r.get_json()['id'] == meta['id']
         assert 'content' not in r.get_json()
@@ -289,25 +289,25 @@ class TestRoutes:
         assert r.get_data(as_text=True) == body
 
         # GET list
-        r = flask_client.get('/api/artifacts/conv/conv-route')
+        r = flask_client.get('/api/v1/artifacts?conv=conv-route')
         assert r.status_code == 200
         payload = r.get_json()
         assert payload['count'] == 1
         assert payload['artifacts'][0]['id'] == meta['id']
 
         # POST pin
-        r = flask_client.post(f'/api/artifacts/{meta["id"]}/pin',
+        r = flask_client.post(f'/api/v1/artifacts/{meta["id"]}/pin',
                               json={'pinned': True})
         assert r.status_code == 200
         assert r.get_json()['pinned'] is True
 
         # DELETE
-        r = flask_client.delete(f'/api/artifacts/{meta["id"]}')
+        r = flask_client.delete(f'/api/v1/artifacts/{meta["id"]}')
         assert r.status_code == 200
         assert r.get_json()['deleted'] is True
 
-        # After delete: 404 on raw + meta
-        r = flask_client.get(f'/api/artifacts/{meta["id"]}')
+        # After delete: 404 on meta + raw
+        r = flask_client.get(f'/api/v1/artifacts/{meta["id"]}')
         assert r.status_code == 404
         r = flask_client.get(f'/api/artifacts/{meta["id"]}/raw')
         assert r.status_code == 404

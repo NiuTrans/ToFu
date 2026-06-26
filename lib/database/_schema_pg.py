@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 #  Schema Version Cache — Skip redundant DDL on subsequent startups
 # ═══════════════════════════════════════════════════════════════════════
 
-_SCHEMA_VERSION = 28  # Increment when tables/columns/indexes change
+_SCHEMA_VERSION = 29  # Increment when tables/columns/indexes change
 
 
 def _column_exists(conn, table, column):
@@ -258,6 +258,18 @@ def _init_chat_schema(conn):
     # replay. event_id is monotonic per task, mirrored in the SSE 'id:' field.
     create_if_absent(conn, TASK_EVENTS, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_task_events_ts ON task_events(ts_ms)')
+
+    # ── conversation_messages: Phase 5 messages-as-rows (migrator-first) ──
+    # Empty on existing installs until the TOFU_MESSAGES_ROWS-gated backfill /
+    # dual-write populates it (lib/database/messages_rows.py). No data depends
+    # on it until reads are flipped (a separate, verification-gated step).
+    from lib.database._core_schema import CONVERSATION_MESSAGES
+    create_if_absent(conn, CONVERSATION_MESSAGES, table_exists=_table_exists)
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_conv_msgs_conv ON conversation_messages(conv_id, seq)')
+    # Partial UNIQUE: _msgId is the per-conv addressing key WHEN PRESENT, but
+    # legacy/un-backfilled messages carry msg_id='' and several may coexist in
+    # one conversation, so empty ids are excluded from the uniqueness guarantee.
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_msgs_msgid ON conversation_messages(conv_id, msg_id) WHERE msg_id <> ''")
 
     # ── chat_artifacts: renderable reports promoted out of chat (md/html/svg) ──
     # First-class storage for "report-shaped" outputs so they survive

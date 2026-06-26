@@ -30,11 +30,14 @@ from .tools import _execute_report_tool
 # Images
 from .images import (
     _FIG_EXTRACT_VERSION,
+    _backfill_library_title,
     _build_image_manifest,
     _ensure_paper_images,
     _ensure_title_heading,
     _extract_paper_figures,
+    _extract_title_from_report,
     _inject_images_into_report,
+    _is_placeholder_title,
     _load_image_manifest,
     _lookup_paper_title,
 )
@@ -66,6 +69,22 @@ from .report_runtime import (
 )
 from .report_engine import _run_report_task
 
+# Q&A runtime + engine + context builder (agentic Q&A)
+from .qa_context import build_qa_messages, select_relevant_sections, split_into_sections
+from .qa_runtime import (
+    _QA_TASK_TTL,
+    _append_qa_event,
+    _cleanup_stale_qa_tasks,
+    _new_qa_task,
+    _qa_latest_for,
+    _qa_latest_index,
+    _qa_register_latest,
+    _qa_runtime,
+    _qa_tasks,
+    _qa_tasks_lock,
+)
+from .qa_engine import _MAX_QA_TOOL_ROUNDS, _run_qa_task
+
 # Translate runtime + engine
 from .translate_runtime import (
     _LANG_NAMES,
@@ -95,6 +114,8 @@ __all__ = [
     '_FIG_EXTRACT_VERSION', '_load_image_manifest', '_extract_paper_figures',
     '_ensure_paper_images', '_inject_images_into_report',
     '_lookup_paper_title', '_ensure_title_heading', '_build_image_manifest',
+    '_extract_title_from_report', '_backfill_library_title',
+    '_is_placeholder_title',
     # arxiv + library
     '_extract_arxiv_id', 'fetch_arxiv_title', 'search_arxiv',
     '_PAPER_LIB_COLUMNS', '_LIB_PARSED_TEXT_CAP', '_LIB_QA_HISTORY_CAP',
@@ -112,4 +133,10 @@ __all__ = [
     '_translate_index_get', '_translate_index_register',
     '_new_translate_task', '_append_translate_event',
     '_cleanup_stale_translate_tasks', '_run_translate_task',
+    # qa
+    'build_qa_messages', 'select_relevant_sections', 'split_into_sections',
+    '_qa_runtime', '_qa_tasks', '_qa_tasks_lock', '_QA_TASK_TTL',
+    '_qa_latest_index', '_qa_latest_for', '_qa_register_latest',
+    '_new_qa_task', '_append_qa_event', '_cleanup_stale_qa_tasks',
+    '_run_qa_task', '_MAX_QA_TOOL_ROUNDS',
 ]

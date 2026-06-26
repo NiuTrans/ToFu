@@ -411,7 +411,14 @@ async function sendMessage() {
      * starts streaming.  Each subsequent round is covered by the
      * 'phase: llm_thinking' SSE branch in ui.js. */
     if (typeof updateContextBar === 'function') updateContextBar();
-    const resp = await Api.chat.send(_sendBody, { signal: _sendAbortCtrl.signal });
+    /* ★ #5 idempotency: key the send on the optimistic user message's stable
+     *   _msgId (assigned once, above). A network retry of THIS send reuses the
+     *   same key → the backend's @idempotent_post replays the cached {taskId}
+     *   instead of spawning a duplicate task (and double-charging tokens).
+     *   A genuinely new send gets a new _msgId → new key. */
+    const _sendOpts = { signal: _sendAbortCtrl.signal };
+    if (userMsg._msgId) _sendOpts.headers = { 'Idempotency-Key': String(userMsg._msgId) };
+    const resp = await Api.chat.send(_sendBody, _sendOpts);
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
       throw new Error(err.error || `Server ${resp.status}`);

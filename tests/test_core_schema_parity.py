@@ -34,6 +34,7 @@ from lib.database._core_schema import (
     USERS as _USERS_CANON,
     TASK_EVENTS as _TASK_EVENTS,
     TASK_RESULTS as _TASK_RESULTS,
+    CONVERSATION_MESSAGES as _CONVERSATION_MESSAGES,
     TRADING_CONFIG as _TRADING_CONFIG,
     # ── Wave 2 (2026-06) ──
     MESSAGE_QUEUE as _MESSAGE_QUEUE,
@@ -318,6 +319,42 @@ LIVE_SQLITE_TASK_EVENTS = """
 """
 
 
+# conversation_messages — Phase 5 messages-as-rows (NEW table, 2026-06-25; Core
+# is canonical, these constants are the intended shape + a drift tripwire).
+LIVE_PG_CONVERSATION_MESSAGES = """
+    CREATE TABLE conversation_messages (
+        conv_id            TEXT    NOT NULL,
+        seq                INTEGER NOT NULL,
+        msg_id             TEXT    NOT NULL DEFAULT '',
+        role               TEXT    NOT NULL DEFAULT '',
+        content            TEXT    NOT NULL DEFAULT '',
+        content_json       JSONB   NOT NULL DEFAULT '[]'::jsonb,
+        thinking           TEXT    NOT NULL DEFAULT '',
+        translated_content TEXT    NOT NULL DEFAULT '',
+        meta               JSONB   NOT NULL DEFAULT '{}'::jsonb,
+        created_at         BIGINT  NOT NULL DEFAULT 0,
+        updated_at         BIGINT  NOT NULL DEFAULT 0,
+        PRIMARY KEY (conv_id, seq)
+    )
+"""
+LIVE_SQLITE_CONVERSATION_MESSAGES = """
+    CREATE TABLE conversation_messages (
+        conv_id            TEXT    NOT NULL,
+        seq                INTEGER NOT NULL,
+        msg_id             TEXT    NOT NULL DEFAULT '',
+        role               TEXT    NOT NULL DEFAULT '',
+        content            TEXT    NOT NULL DEFAULT '',
+        content_json       TEXT    NOT NULL DEFAULT '[]',
+        thinking           TEXT    NOT NULL DEFAULT '',
+        translated_content TEXT    NOT NULL DEFAULT '',
+        meta               TEXT    NOT NULL DEFAULT '{}',
+        created_at         INTEGER NOT NULL DEFAULT 0,
+        updated_at         INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (conv_id, seq)
+    )
+"""
+
+
 # chat_artifacts — renderable reports (lib/database/_schema_pg.py:256, _sqlite.py:188)
 LIVE_PG_CHAT_ARTIFACTS = """
     CREATE TABLE chat_artifacts (
@@ -598,6 +635,22 @@ def test_trading_config_sqlite_parity():
     assert _norm(core) == _norm(LIVE_TRADING_CONFIG), (
         "\n--- Core SQLite ---\n" + core +
         "\n--- Live SQLite ---\n" + LIVE_TRADING_CONFIG
+    )
+
+
+def test_conversation_messages_pg_parity():
+    core = both_ddl(_CONVERSATION_MESSAGES)["pg"]
+    assert _norm(core) == _norm(LIVE_PG_CONVERSATION_MESSAGES), (
+        "\n--- Core PG ---\n" + core +
+        "\n--- Live PG ---\n" + LIVE_PG_CONVERSATION_MESSAGES
+    )
+
+
+def test_conversation_messages_sqlite_parity():
+    core = both_ddl(_CONVERSATION_MESSAGES)["sqlite"]
+    assert _norm(core) == _norm(LIVE_SQLITE_CONVERSATION_MESSAGES), (
+        "\n--- Core SQLite ---\n" + core +
+        "\n--- Live SQLite ---\n" + LIVE_SQLITE_CONVERSATION_MESSAGES
     )
 
 

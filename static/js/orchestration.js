@@ -1348,20 +1348,12 @@ function _orchRenderInspector() {
     h += _orchSec('orch.sec.execution', _ORCH_ICONS.gear, false, _gExec, 'orch.note.group');
     h += _orchSec('orch.sec.io', _ORCH_ICONS.package, false, _orchIoSectionBody(n), 'orch.io.note');
   } else if (n.type === 'role') {
-    // ── Task (open): the structured "what to do" fields from /role-schema.
-    // The first field is the core objective (role-specific label); the rest
-    // are the role's structured params. This is the primary section.
-    var _schema = _orchFieldSchema(n.role);
-    var _task = _orchLabelField(n);
-    _schema.forEach(function (spec) {
-      _task += _orchRenderField(spec, n.params);
-    });
-    h += _orchSec('orch.sec.task', _ORCH_ICONS.compass, true, _task, 'orch.note.objective');
-
-    // ── Persona (collapsed, READ-ONLY): the role's fixed prompt design. Shown
-    // so the author understands what this character does and how it behaves —
-    // never editable (the prompt is owned by the backend, not the flow).
-    h += _orchSec('orch.sec.persona', _ORCH_ICONS.bot, false,
+    // ── Persona (open, READ-ONLY): the role's fixed identity. Shown so the
+    // author understands what this character does and how it behaves — never
+    // editable (the prompt is owned by the backend, lib/swarm/registry.AGENT_ROLES).
+    // A role's task is no longer authored per-flow: the engine derives it from
+    // the node label and the wired data inputs.
+    h += _orchSec('orch.sec.persona', _ORCH_ICONS.bot, true,
         _orchPersonaSectionBody(n), 'orch.persona.note');
 
     // ── Last run (auto-expanded when present): the traceability overlay —
@@ -1372,8 +1364,9 @@ function _orchRenderInspector() {
           _runBody, 'orch.run.note');
     }
 
-    // ── Execution (collapsed): infra knobs — tier / context / speaks-as.
-    var _exec = _orchSelectFld(t('orch.fld.tier'), 'tier', n.params.tier,
+    // ── Execution (open): the model layer — label + tier / context / speaks-as.
+    var _exec = _orchLabelField(n)
+      + _orchSelectFld(t('orch.fld.tier'), 'tier', n.params.tier,
         [['light', t('orch.tier.light')], ['standard', t('orch.tier.standard')], ['heavy', t('orch.tier.heavy')]])
       + _orchSelectFld(t('orch.fld.context'), 'isolation', n.params.isolation,
         [['fresh-context', t('orch.iso.fresh')], ['shared-context', t('orch.iso.shared')]])
@@ -1381,11 +1374,10 @@ function _orchRenderInspector() {
         [['', t('orch.emits.auto', { role: _orchDefaultEmits(n.role) })],
          ['assistant', t('orch.emits.assistant')],
          ['user', t('orch.emits.user')]]);
-    h += _orchSec('orch.sec.execution', _ORCH_ICONS.gear, false, _exec, 'orch.note.exec');
+    h += _orchSec('orch.sec.execution', _ORCH_ICONS.gear, true, _exec, 'orch.note.exec');
 
-    // ── Data I/O (collapsed): the typed port contract.
-    h += _orchSec('orch.sec.io', _ORCH_ICONS.package,
-        !!(n.params.io && (n.params.io.inputs || n.params.io.outputs)),
+    // ── Data I/O (open): the typed port contract — the data nodes.
+    h += _orchSec('orch.sec.io', _ORCH_ICONS.package, true,
         _orchIoSectionBody(n), 'orch.io.note');
   } else {
     // Control nodes: one "Settings" section holding the label + the kind's
@@ -1535,103 +1527,12 @@ function _orchDefaultEmits(role) {
     ? 'user' : 'assistant';
 }
 
-// ── Per-role structured-param schema (consumed from /role-schema) ──
-// The backend (lib/orchestration.ROLE_PARAM_SCHEMA) is the single source of
-// truth. We fetch it once when the studio opens and render the inspector's
-// "what to do" fields from it. A compact built-in fallback mirrors the
-// backend so the inspector still works before the fetch lands (and in the
-// headless jsdom round-trip test, which has no server). FieldSpec shape:
-//   {key, kind, label (i18n key), heading?, options?:[{value,label}], placeholder?}
-var _orchRoleSchema = null;        // {roles:{role:[FieldSpec]}, generic:[FieldSpec]}
-// Read-only persona design per role, from /role-schema's `personas`
+// ── Read-only persona design per role, from /role-schema's `personas`
 // ({role: {prompt, whenToUse, tier}}). The studio SHOWS this so an author
 // understands a character — it is never editable (the prompt is owned by
 // the backend, lib/swarm/registry.AGENT_ROLES). A small built-in fallback
 // covers the pre-fetch / headless-test window.
 var _orchRolePersonas = null;
-
-var _ORCH_ROLE_SCHEMA_FALLBACK = {
-  roles: {
-    critic: [
-      { key: 'objective', kind: 'textarea', label: 'orch.field.reviewCriteria', placeholder: 'orch.ph.reviewCriteria' },
-      { key: 'must_check', kind: 'list', label: 'orch.field.mustCheck', placeholder: 'orch.ph.mustCheck' },
-      { key: 'verdict_format', kind: 'select', label: 'orch.field.verdictFormat', options: [
-        { value: 'stop_continue', label: 'orch.opt.stopContinue' }, { value: 'pass_fail', label: 'orch.opt.passFail' }] },
-      { key: 'adversarial', kind: 'bool', label: 'orch.field.adversarial' },
-    ],
-    reviewer: [
-      { key: 'objective', kind: 'textarea', label: 'orch.field.reviewCriteria', placeholder: 'orch.ph.reviewCriteria' },
-      { key: 'must_check', kind: 'list', label: 'orch.field.mustCheck', placeholder: 'orch.ph.mustCheck' },
-      { key: 'verdict_format', kind: 'select', label: 'orch.field.verdictFormat', options: [
-        { value: 'stop_continue', label: 'orch.opt.stopContinue' }, { value: 'pass_fail', label: 'orch.opt.passFail' }] },
-      { key: 'adversarial', kind: 'bool', label: 'orch.field.adversarial' },
-    ],
-    researcher: [
-      { key: 'objective', kind: 'textarea', label: 'orch.field.researchQuestions', placeholder: 'orch.ph.researchQuestions' },
-      { key: 'sources', kind: 'list', label: 'orch.field.sources', placeholder: 'orch.ph.sources' },
-      { key: 'expected_outcome', kind: 'textarea', label: 'orch.field.expectedOutcome', placeholder: 'orch.ph.expectedOutcome' },
-    ],
-    worker: [
-      { key: 'objective', kind: 'textarea', label: 'orch.field.taskWorker', placeholder: 'orch.ph.taskWorker' },
-      { key: 'must_do', kind: 'list', label: 'orch.field.mustDo', placeholder: 'orch.ph.mustDo' },
-      { key: 'must_not_do', kind: 'list', label: 'orch.field.mustNotDo', placeholder: 'orch.ph.mustNotDo' },
-      { key: 'expected_outcome', kind: 'textarea', label: 'orch.field.expectedOutcome', placeholder: 'orch.ph.expectedOutcome' },
-    ],
-    planner: [
-      { key: 'objective', kind: 'textarea', label: 'orch.field.planningBrief', placeholder: 'orch.ph.planningBrief' },
-      { key: 'deliverables', kind: 'list', label: 'orch.field.deliverables', placeholder: 'orch.ph.deliverables' },
-      { key: 'acceptance_criteria', kind: 'list', label: 'orch.field.acceptance', placeholder: 'orch.ph.acceptance' },
-    ],
-    coder: [
-      { key: 'objective', kind: 'textarea', label: 'orch.field.taskCoder', placeholder: 'orch.ph.taskCoder' },
-      { key: 'scope_paths', kind: 'list', label: 'orch.field.scopePaths', placeholder: 'orch.ph.scopePaths' },
-      { key: 'constraints', kind: 'list', label: 'orch.field.constraints', placeholder: 'orch.ph.constraints' },
-      { key: 'verify_cmd', kind: 'text', label: 'orch.field.verifyCmd', placeholder: 'orch.ph.verifyCmd' },
-    ],
-    analyst: [
-      { key: 'objective', kind: 'textarea', label: 'orch.field.analysisQuestion', placeholder: 'orch.ph.analysisQuestion' },
-      { key: 'data_sources', kind: 'list', label: 'orch.field.dataSources', placeholder: 'orch.ph.dataSources' },
-      { key: 'metrics', kind: 'list', label: 'orch.field.metrics', placeholder: 'orch.ph.metrics' },
-      { key: 'expected_outcome', kind: 'textarea', label: 'orch.field.expectedOutcome', placeholder: 'orch.ph.expectedOutcome' },
-    ],
-    writer: [
-      { key: 'objective', kind: 'textarea', label: 'orch.field.writeTask', placeholder: 'orch.ph.writeTask' },
-      { key: 'audience', kind: 'text', label: 'orch.field.audience', placeholder: 'orch.ph.audience' },
-      { key: 'tone', kind: 'select', label: 'orch.field.tone', options: [
-        { value: 'neutral', label: 'orch.opt.toneNeutral' }, { value: 'formal', label: 'orch.opt.toneFormal' },
-        { value: 'casual', label: 'orch.opt.toneCasual' }, { value: 'technical', label: 'orch.opt.toneTechnical' },
-        { value: 'persuasive', label: 'orch.opt.tonePersuasive' }] },
-      { key: 'must_cover', kind: 'list', label: 'orch.field.mustCover', placeholder: 'orch.ph.mustCover' },
-    ],
-    browser: [
-      { key: 'objective', kind: 'textarea', label: 'orch.field.browseTask', placeholder: 'orch.ph.browseTask' },
-      { key: 'start_url', kind: 'text', label: 'orch.field.startUrl', placeholder: 'orch.ph.startUrl' },
-      { key: 'steps', kind: 'list', label: 'orch.field.steps', placeholder: 'orch.ph.steps' },
-      { key: 'extract', kind: 'textarea', label: 'orch.field.extract', placeholder: 'orch.ph.extract' },
-    ],
-    synthesizer: [
-      { key: 'objective', kind: 'textarea', label: 'orch.field.synthTask', placeholder: 'orch.ph.synthTask' },
-      { key: 'inputs_desc', kind: 'textarea', label: 'orch.field.inputsDesc', placeholder: 'orch.ph.inputsDesc' },
-      { key: 'conflict_policy', kind: 'select', label: 'orch.field.conflictPolicy', options: [
-        { value: 'reconcile', label: 'orch.opt.reconcile' }, { value: 'majority', label: 'orch.opt.majority' },
-        { value: 'flag', label: 'orch.opt.flag' }] },
-      { key: 'output_shape', kind: 'textarea', label: 'orch.field.outputShape', placeholder: 'orch.ph.outputShape' },
-    ],
-    router: [
-      { key: 'objective', kind: 'textarea', label: 'orch.field.routeBasis', placeholder: 'orch.ph.routeBasis' },
-      { key: 'categories', kind: 'list', label: 'orch.field.categories', placeholder: 'orch.ph.categories' },
-      { key: 'default_route', kind: 'text', label: 'orch.field.defaultRoute', placeholder: 'orch.ph.defaultRoute' },
-    ],
-    virtual_user: [
-      { key: 'objective', kind: 'textarea', label: 'orch.field.persona', placeholder: 'orch.ph.persona' },
-      { key: 'done_signal', kind: 'text', label: 'orch.field.doneSignal', placeholder: 'orch.ph.doneSignal' },
-    ],
-  },
-  generic: [
-    { key: 'objective', kind: 'textarea', label: 'orch.field.task', placeholder: 'orch.ph.task' },
-    { key: 'expected_outcome', kind: 'textarea', label: 'orch.field.expectedOutcome', placeholder: 'orch.ph.expectedOutcome' },
-  ],
-};
 
 // ── Read-only role persona (the fixed prompt design) ──
 // A role's behavior is owned by the backend (lib/swarm/registry.AGENT_ROLES).
@@ -1744,12 +1645,11 @@ function _orchFlowSummaryBody(n) {
 // Fetch the authoritative schema once; re-render the inspector if a node is
 // selected so dynamically-added fields appear without a reselect.
 async function _orchFetchRoleSchema() {
-  if (_orchRoleSchema || typeof Api === 'undefined' || !Api.orchestrations
+  if (_orchRolePersonas || typeof Api === 'undefined' || !Api.orchestrations
       || !Api.orchestrations.roleSchema) return;
   try {
     var res = await Api.orchestrations.roleSchema();
-    if (res && res.ok && res.roles) {
-      _orchRoleSchema = { roles: res.roles, generic: res.generic || [] };
+    if (res && res.ok) {
       if (res.personas && typeof res.personas === 'object') _orchRolePersonas = res.personas;
       if (Array.isArray(res.ioTypes) && res.ioTypes.length) _ORCH_IO_TYPES = res.ioTypes;
       if (_orchSel) _orchRenderInspector();
@@ -1757,57 +1657,6 @@ async function _orchFetchRoleSchema() {
   } catch (e) {
     if (typeof console !== 'undefined') console.warn('role-schema fetch failed', e);
   }
-}
-
-// Resolve a role's FieldSpec list: fetched schema → built-in fallback →
-// generic. Never throws; always returns a non-empty list.
-function _orchFieldSchema(role) {
-  var src = _orchRoleSchema || _ORCH_ROLE_SCHEMA_FALLBACK;
-  var roles = src.roles || {};
-  if (roles[role]) return roles[role];
-  return src.generic || _ORCH_ROLE_SCHEMA_FALLBACK.generic;
-}
-
-// Render one structured FieldSpec into inspector HTML, reading the current
-// value off the node's params. Labels/placeholders/option labels are i18n
-// KEYS resolved here via t().
-function _orchRenderField(spec, params) {
-  var label = t(spec.label);
-  var val = params[spec.key];
-  if (spec.kind === 'list') {
-    var lines = Array.isArray(val) ? val.join('\n') : (typeof val === 'string' ? val : '');
-    var ph = spec.placeholder ? t(spec.placeholder) : '';
-    return '<label class="orch-fld"><span>' + escapeHtml(label) + '</span>'
-      + '<textarea class="orch-input orch-ta orch-ta-list" rows="3" '
-      + 'placeholder="' + escapeHtml(ph) + '" '
-      + 'oninput="_orchSetParam(\'' + spec.key + '\', this.value, false, \'list\')">'
-      + escapeHtml(lines) + '</textarea></label>';
-  }
-  if (spec.kind === 'select') {
-    var opts = (spec.options || []).map(function (o) {
-      return [o.value, t(o.label)];
-    });
-    // Prepend an unset option so a select-kind field can be left blank.
-    opts.unshift(['', t('orch.opt.unset')]);
-    return _orchSelectFld(label, spec.key, (val == null ? '' : val), opts);
-  }
-  if (spec.kind === 'bool') {
-    return _orchCheckFld(label, spec.key, !!val);
-  }
-  if (spec.kind === 'int') {
-    return _orchNumFld(label, spec.key, val);
-  }
-  // text / textarea
-  var rows = (spec.kind === 'textarea') ? 4 : 1;
-  var ctrl = (spec.kind === 'textarea')
-    ? ('<textarea class="orch-input orch-ta" rows="' + rows + '" '
-       + 'placeholder="' + escapeHtml(spec.placeholder ? t(spec.placeholder) : '') + '" '
-       + 'oninput="_orchSetParam(\'' + spec.key + '\', this.value)">'
-       + escapeHtml(typeof val === 'string' ? val : '') + '</textarea>')
-    : ('<input class="orch-input" value="' + escapeHtml(typeof val === 'string' ? val : '') + '" '
-       + 'placeholder="' + escapeHtml(spec.placeholder ? t(spec.placeholder) : '') + '" '
-       + 'oninput="_orchSetParam(\'' + spec.key + '\', this.value)">');
-  return '<label class="orch-fld"><span>' + escapeHtml(label) + '</span>' + ctrl + '</label>';
 }
 
 function _orchOnRename(v) { _orchName = v || 'Untitled Flow'; }

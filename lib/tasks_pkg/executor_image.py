@@ -561,7 +561,7 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
                 'toolName': 'generate_image',
                 'imagePrompt': '', 'imageError': 'No prompt provided',
                 'imageAspectRatio': aspect_ratio, 'imageResolution': resolution,
-                'badge': '❌ failed',
+                'badge': 'failed',
             }
             _finalize_tool_round(task, rn, round_entry, [meta])
             return tc_id, 'Error: No image prompt provided.', False
@@ -590,7 +590,7 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
 
         # ── Emit progress event ──
         round_entry['status'] = 'running'
-        badge_text = '⏳ editing…' if is_edit else '⏳ generating…'
+        badge_text = 'editing…' if is_edit else 'generating…'
         round_entry['results'] = [{
             'toolName': 'generate_image',
             'imagePrompt': prompt[:100],
@@ -615,7 +615,7 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
 
         # ── 429 progress callback — update badge so user sees rate-limit status ──
         def _on_429(retry_count):
-            badge_429 = '⏳ rate limited, retrying (#%d)…' % retry_count
+            badge_429 = 'rate limited, retrying (#%d)…' % retry_count
             round_entry['results'] = [{
                 'toolName': 'generate_image',
                 'imagePrompt': prompt[:100],
@@ -776,7 +776,7 @@ def register_image_gen_handler(tool_registry, IMAGE_GEN_TOOL_NAMES, _finalize_to
                 'imageAspectRatio': aspect_ratio, 'imageResolution': resolution,
                 'imageMode': image_mode,
                 'imageSourceUrl': source_display_url,
-                'badge': '❌ failed',
+                'badge': 'failed',
             }
             _finalize_tool_round(task, rn, round_entry, [meta])
 

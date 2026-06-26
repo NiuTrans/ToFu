@@ -381,6 +381,64 @@ def skill_catalog_install_v1():
     }), 201
 
 
+@api_v1_memory_bp.route('/api/v1/profile', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Get the personal-preference profile',
+    description=('Returns ``{body, chars, cap, over_cap, pending: [...]}`` — '
+                 'the bounded, always-injected user-preference profile plus '
+                 'any staged (unconfirmed) proposals from the consolidation '
+                 'pass.'),
+    tags=['memory'],
+)
+def get_user_profile_v1():
+    from lib.memory import user_profile as up
+    body = up.load_profile()
+    return jsonify({
+        'body': body,
+        'chars': len(body),
+        'cap': up.USER_PROFILE_CHAR_CAP,
+        'over_cap': up.profile_over_cap(body),
+        'pending': up.load_pending(),
+    })
+
+
+@api_v1_memory_bp.route('/api/v1/profile', methods=['PUT'])
+@require_auth
+@api_meta(
+    summary='Hand-edit the personal-preference profile',
+    description='Body: ``{body}``. Empty body clears the profile.',
+    tags=['memory'],
+)
+def put_user_profile_v1():
+    from lib.memory import user_profile as up
+    data = parse_body()
+    res = up.save_profile(data.get('body', ''))
+    return jsonify(res)
+
+
+@api_v1_memory_bp.route('/api/v1/profile/pending/<pending_id>',
+                         methods=['POST'])
+@require_auth
+@api_meta(
+    summary='Confirm or dismiss a staged preference proposal',
+    description=('Body: ``{accept: bool, text?: str}``. On accept the '
+                 '(optionally edited) preference is written into the profile; '
+                 'either way the proposal is removed from the pending list. '
+                 'This is the propose-then-confirm gate — new preferences are '
+                 'NEVER written silently.'),
+    tags=['memory'],
+)
+def resolve_profile_pending_v1(pending_id):
+    from lib.memory import user_profile as up
+    data = parse_body()
+    res = up.resolve_pending(pending_id, accept=bool(data.get('accept')),
+                             edited_text=data.get('text'))
+    if not res.get('resolved'):
+        return api_not_found('Pending proposal not found')
+    return jsonify(res)
+
+
 @api_v1_memory_bp.route('/api/v1/memory/<memory_id>/files', methods=['GET'])
 @require_auth
 @api_meta(

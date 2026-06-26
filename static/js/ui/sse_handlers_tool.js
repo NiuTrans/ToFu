@@ -39,6 +39,12 @@ function _handleToolStart(ev, c) {
         // ★ Harness self-repair descriptor — the backend auto-corrected this
         //   call's malformed arguments; surfaced as an "auto-fixed" badge.
         if (ev._repaired) r._repaired = ev._repaired;
+        // ★ Hallucinated-tool rejection — the backend classified this name as
+        //   a non-existent tool and rejected it (never executed). Carry the
+        //   distinct status + descriptor so the round renders as rejected
+        //   from the very first event.
+        if (ev.status === "rejected") r.status = "rejected";
+        if (ev._rejected) r._rejected = ev._rejected;
         if (!assistantMsg.toolRounds) assistantMsg.toolRounds = [];
         assistantMsg.toolRounds.push(r);
         /* ★ MCP login-hint: surface a prominent "Check your phone for the
@@ -103,7 +109,14 @@ function _handleToolResult(ev, c) {
         );
         if (r) {
           r.results = ev.results;
-          r.status = "done";
+          // A rejected hallucinated tool stays 'rejected' (it never ran) —
+          // don't flip it to 'done'. Everything else completes normally.
+          if (ev.status === "rejected" || ev._rejected) {
+            r.status = "rejected";
+            if (ev._rejected) r._rejected = ev._rejected;
+          } else {
+            r.status = "done";
+          }
           r.approvalId = null;
           r.approvalMeta = null;
           r.guidanceId = null;

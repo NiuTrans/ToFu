@@ -29,10 +29,15 @@ Anti-analysis-spiral (2026-04-26 rewrite):
   plan calls surface cleanly in logs and audit records.
 """
 
-import re
-
-from lib.env_compat import getenv_compat
-from lib.log import audit_log, get_logger
+from lib.agent_verdict import (
+    STATE_CHANGING_TOOLS,  # noqa: F401  — re-exported for endpoint.py / external callers
+    accumulate_usage as _accumulate_usage,  # noqa: F401  — re-exported (endpoint.py imports it)
+    classify_verdict,
+    count_state_changing_rounds as _count_state_changing_rounds,
+    detect_stuck as _detect_stuck,  # noqa: F401  — re-exported (endpoint.py imports it)
+    replan_enabled as _replan_enabled,  # noqa: F401  — re-exported for external callers
+)
+from lib.log import get_logger
 
 logger = get_logger(__name__)
 
@@ -40,71 +45,10 @@ from lib.tasks_pkg.endpoint_prompts import CRITIC_SYSTEM_PROMPT, PLANNER_SYSTEM_
 from lib.tasks_pkg.orchestrator import _run_single_turn
 
 
-# Kill-switch: when '0', CONTINUE_PLANNER is downgraded to CONTINUE_WORKER
-# so the redesign can be hot-disabled without a code rollback.
-# Defaults to enabled ('1').  Reads ``TOFU_ENDPOINT_REPLAN``
-# (documented in CLAUDE.md §9).
-def _replan_enabled() -> bool:
-    return getenv_compat('TOFU_ENDPOINT_REPLAN',
-                         default='1').strip() != '0'
-
-
-# ══════════════════════════════════════════════════════════
-#  Deliverables / state-changing tool counter
-# ══════════════════════════════════════════════════════════
-
-# State-changing ("deliverable") tools.  Calls to these are what we count
-# as real work; everything else (list_dir, read_files, grep_search,
-# find_files, web_search, fetch_url, …) is exploration.
-STATE_CHANGING_TOOLS = frozenset({
-    'write_file',
-    'apply_diff',
-    'apply_diffs',
-    'insert_content',
-    'insert_contents',
-    'run_command',
-    'create_project',
-    'generate_image',
-})
-
-
-def _count_state_changing_rounds(tool_rounds) -> tuple:
-    """Count state-changing vs exploratory tool rounds in a single worker turn.
-
-    Parameters
-    ----------
-    tool_rounds : list[dict] | None
-        ``task['toolRounds']`` snapshot — each entry has ``toolName``.
-
-    Returns
-    -------
-    (int, int, list[str])
-        (state_changing_count, exploratory_count, state_changing_tool_names)
-        ``state_changing_tool_names`` preserves order + duplicates so the
-        deliverables snapshot can show "apply_diff×2, write_file".
-    """
-    if not tool_rounds:
-        return 0, 0, []
-
-    state_changing_names: list[str] = []
-    exploratory_count = 0
-
-    for entry in tool_rounds:
-        if not isinstance(entry, dict):
-            continue
-        # Special key used by code_exec rounds whose toolName is different
-        # (see executor.py: round_entry may have toolName='code_exec' or
-        # tool command).  We treat code_exec as state-changing.
-        name = entry.get('toolName') or entry.get('tool_name') or ''
-        if name == 'code_exec':
-            state_changing_names.append('code_exec')
-            continue
-        if name in STATE_CHANGING_TOOLS:
-            state_changing_names.append(name)
-        else:
-            exploratory_count += 1
-
-    return len(state_changing_names), exploratory_count, state_changing_names
+# ``_replan_enabled``, ``STATE_CHANGING_TOOLS`` and
+# ``_count_state_changing_rounds`` now live in ``lib.agent_verdict`` (the
+# single source of truth) and are imported above under their historical
+# names so external callers of this module are unaffected.
 
 
 def _format_deliverables_snapshot(
@@ -286,181 +230,27 @@ def _run_planner_turn(task, messages, *, planner_tag: str = 'initial'):
 #  Verdict parsing
 # ══════════════════════════════════════════════════════════
 
-# Match all three modern tags plus the legacy bare "CONTINUE" (maps to
-# CONTINUE_WORKER).
-_VERDICT_RE = re.compile(
-    r'\[VERDICT:\s*(STOP|CONTINUE_WORKER|CONTINUE_PLANNER|CONTINUE)\s*\]',
-    re.IGNORECASE,
-)
-
-# Mandatory for CONTINUE_PLANNER: structured plan-defect reason.
-# Without this tag in the feedback body, CONTINUE_PLANNER is downgraded
-# to CONTINUE_WORKER (see _parse_verdict).
-_PLAN_DEFECT_RE = re.compile(
-    r'\[PLAN_DEFECT:\s*([^\]]+)\]',
-    re.IGNORECASE,
-)
-
-# Patterns that indicate the Critic emitted STOP while the feedback still
-# contains unresolved items.  Used by the defense-in-depth override.
-_UNRESOLVED_EMOJI_RE = re.compile(r'❌')
-_UNRESOLVED_PHRASE_RE = re.compile(
-    r'\b(?:NOT met|still failing|still NOT met|unresolved)\b',
-    re.IGNORECASE,
-)
-
-
 def _parse_verdict(text: str) -> tuple:
     """Parse the critic's output into ``(feedback_text, next_phase,
     plan_defect_reason)``.
 
+    Thin adapter over :func:`lib.agent_verdict.classify_verdict` (the single
+    source of truth).  Endpoint mode uses the STRICT policy: a missing
+    ``[VERDICT:]`` tag defaults to CONTINUE_WORKER (no loose plain-language
+    fallback), and the cleaned display feedback is returned.
+
     Returns
     -------
     (str, str, str | None)
-        - ``feedback_text`` — critic content with verdict + PLAN_DEFECT
-          tags + any trailing "### Verdict" header stripped.
-        - ``next_phase`` — one of ``'stop'``, ``'worker'``, ``'planner'``.
-        - ``plan_defect_reason`` — the extracted PLAN_DEFECT reason if
-          the critic supplied one (useful for audit logs + the re-plan
-          directive), else ``None``.
+        ``(feedback_text, next_phase, plan_defect_reason)`` where
+        ``next_phase`` ∈ {``'stop'``, ``'worker'``, ``'planner'``}.
 
-    Behaviour:
-      * Missing [VERDICT:] tag → defaults to CONTINUE_WORKER.
-      * STOP with ❌ / "NOT met" / "still failing" / "unresolved" markers →
-        downgraded to CONTINUE_WORKER (previously: CONTINUE_PLANNER).
-        Residual ❌ is nearly always a worker-execution problem, not a
-        plan-structural problem; forcing a re-plan destroys the worker's
-        partial progress and tends to escalate rather than converge.
-      * CONTINUE_PLANNER without a [PLAN_DEFECT: ...] tag → downgraded
-        to CONTINUE_WORKER.  PLAN_DEFECT gates the expensive planner
-        branch so the critic cannot silently escape into an analysis
-        spiral.
-      * TOFU_ENDPOINT_REPLAN=0 kill-switch → planner downgraded to worker.
+    Gating (STOP-with-unresolved-markers downgrade, CONTINUE_PLANNER
+    requires a non-worker-rationalization PLAN_DEFECT tag, and the
+    TOFU_ENDPOINT_REPLAN=0 kill-switch) all live in ``classify_verdict``.
     """
-    match = None
-    # Find the LAST VERDICT match (in case the critic emits more than one)
-    for m in _VERDICT_RE.finditer(text):
-        match = m
-
-    # Find ANY plan-defect tag — take the last one if multiple.
-    defect_match = None
-    for m in _PLAN_DEFECT_RE.finditer(text):
-        defect_match = m
-    plan_defect_reason = defect_match.group(1).strip() if defect_match else None
-
-    if match is None:
-        logger.warning('[Critic] No [VERDICT] tag found in critic output '
-                       '(%d chars), defaulting to CONTINUE_WORKER', len(text))
-        # Still strip any PLAN_DEFECT tag from display text even without
-        # a VERDICT — we don't want the tag showing up in the UI.
-        feedback = _PLAN_DEFECT_RE.sub('', text).strip()
-        return feedback, 'worker', plan_defect_reason
-
-    tag = match.group(1).upper()
-    if tag == 'STOP':
-        next_phase = 'stop'
-    elif tag == 'CONTINUE_PLANNER':
-        next_phase = 'planner'
-    else:
-        # CONTINUE_WORKER or legacy bare CONTINUE
-        next_phase = 'worker'
-
-    # Strip the verdict tag from the content
-    feedback = text[:match.start()].rstrip()
-    # Strip any dangling "### Verdict" markdown header
-    feedback = re.sub(
-        r'\n*#+\s*Verdict\s*:?\s*$',
-        '',
-        feedback,
-        flags=re.IGNORECASE,
-    ).rstrip()
-    # Remove the PLAN_DEFECT tag from the display feedback — it is for the
-    # orchestrator + re-plan directive, not for the conversation UI.  The
-    # raw reason has already been captured in ``plan_defect_reason``.
-    feedback = _PLAN_DEFECT_RE.sub('', feedback).rstrip()
-
-    # ── Guard: STOP with unresolved markers → downgrade to CONTINUE_WORKER ──
-    if next_phase == 'stop':
-        x_count = len(_UNRESOLVED_EMOJI_RE.findall(feedback))
-        phrase_hits = _UNRESOLVED_PHRASE_RE.findall(feedback)
-        if x_count > 0 or phrase_hits:
-            # Flipped from planner → worker in 2026-04-26 rewrite.  A
-            # single residual ❌ is almost always "worker didn't finish
-            # the last step", not "the plan is structurally wrong".
-            # Forcing a re-plan on it wipes the worker's accumulated
-            # progress and tends to escalate (see task 00d009c6:
-            # 4 plans, 7 iterations, 0 deliverables).  CONTINUE_WORKER
-            # lets the worker address the ❌ directly.
-            logger.warning(
-                '[Critic] Override STOP→CONTINUE_WORKER: feedback still '
-                'contains %d ❌ markers and %d unresolved phrases '
-                '(previous behaviour: escalate to CONTINUE_PLANNER)',
-                x_count, len(phrase_hits),
-            )
-            audit_log(
-                'critic_verdict_override',
-                original='stop',
-                new='worker',
-                x_count=x_count,
-                phrase_hits=len(phrase_hits),
-                reason='unresolved_markers_in_stop_feedback',
-            )
-            next_phase = 'worker'
-
-    # ── Guard: CONTINUE_PLANNER without PLAN_DEFECT → downgrade ──
-    if next_phase == 'planner':
-        if not plan_defect_reason:
-            logger.warning(
-                '[Critic] Override CONTINUE_PLANNER→CONTINUE_WORKER: no '
-                '[PLAN_DEFECT: ...] tag supplied.  Replan requires an '
-                'explicit structural reason; a bare CONTINUE_PLANNER is '
-                'almost always a worker-execution problem in disguise.'
-            )
-            audit_log(
-                'critic_verdict_override',
-                original='planner',
-                new='worker',
-                reason='missing_plan_defect_tag',
-            )
-            next_phase = 'worker'
-        else:
-            # Reject obvious "the worker didn't do X" rationalizations
-            # masquerading as plan defects.
-            lowered = plan_defect_reason.lower()
-            worker_rationalizations = (
-                'worker did',
-                'worker didn\'t',
-                'worker did not',
-                'worker needs',
-                'worker should',
-                'still ❌',
-                'remaining ❌',
-                'remaining items',
-                'more iterations',
-            )
-            if any(p in lowered for p in worker_rationalizations):
-                logger.warning(
-                    '[Critic] Override CONTINUE_PLANNER→CONTINUE_WORKER: '
-                    'PLAN_DEFECT reason looks like a worker-execution '
-                    'problem, not a plan-structural problem: %r',
-                    plan_defect_reason,
-                )
-                audit_log(
-                    'critic_verdict_override',
-                    original='planner',
-                    new='worker',
-                    reason='plan_defect_is_worker_problem',
-                    defect_preview=plan_defect_reason[:200],
-                )
-                next_phase = 'worker'
-
-    # ── Kill-switch: downgrade planner→worker when replan disabled ──
-    if next_phase == 'planner' and not _replan_enabled():
-        logger.info('[Critic] Replan disabled — CONTINUE_PLANNER downgraded to '
-                    'CONTINUE_WORKER (TOFU_ENDPOINT_REPLAN=0)')
-        next_phase = 'worker'
-
-    return feedback, next_phase, plan_defect_reason
+    res = classify_verdict(text, loose_fallback=False, strip_feedback=True)
+    return res['feedback'], res['phase'], res['plan_defect']
 
 
 # ══════════════════════════════════════════════════════════
@@ -630,41 +420,7 @@ def _run_critic_turn(
     }
 
 
-# ══════════════════════════════════════════════════════════
-#  Stuck detection
-# ══════════════════════════════════════════════════════════
-
-def _detect_stuck(feedback_history):
-    """Return True if the last two feedback messages are suspiciously similar.
-
-    Uses a simple Jaccard similarity on word sets — if >60% overlap, the
-    critic is probably repeating itself.
-    """
-    if len(feedback_history) < 2:
-        return False
-
-    def _word_set(text):
-        return set(text.lower().split())
-
-    prev = _word_set(feedback_history[-2])
-    curr = _word_set(feedback_history[-1])
-
-    if not curr or not prev:
-        return False
-
-    intersection = prev & curr
-    union = prev | curr
-    jaccard = len(intersection) / len(union) if union else 0
-
-    return jaccard > 0.60
-
-
-# ══════════════════════════════════════════════════════════
-#  Usage accumulation
-# ══════════════════════════════════════════════════════════
-
-def _accumulate_usage(total, delta):
-    """Merge delta usage dict into total (in-place)."""
-    for k, v in (delta or {}).items():
-        if isinstance(v, (int, float)):
-            total[k] = total.get(k, 0) + v
+# ``_detect_stuck`` and ``_accumulate_usage`` are imported from
+# ``lib.agent_verdict`` at the top of this module under their historical
+# names — endpoint.py re-imports them from here, so the public surface is
+# unchanged.
