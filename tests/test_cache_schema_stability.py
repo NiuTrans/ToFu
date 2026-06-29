@@ -342,5 +342,71 @@ class TestAssembleToolListByteStability(unittest.TestCase):
         self.assertIn('rootname:', _apply_diff_desc(tl_single))
 
 
+class TestMultirootTransitionReestablishesLatch(unittest.TestCase):
+    """Single→multi-root transition: adding a second root mid-conversation is a
+    LEGITIMATE one-time schema change (the model needs the ``rootname:`` hint
+    NOW). The OFF→ON multiroot-sticky transition must re-establish the
+    tool-schema latch so the next assembly re-freezes the snapshot WITH the
+    hint — one deliberate rebuild, then byte-stable — instead of leaving a
+    PERMANENT phantom empty-name-diff divergence (the stuck "apply in a new
+    conversation" banner that this episode diagnosed).
+    """
+
+    CONV = '_mr_trans_conv'
+
+    def setUp(self):
+        from lib.tools import clear_tool_list_latch
+        _reg.clear_multiroot_sticky(self.CONV)
+        clear_tool_list_latch(self.CONV)
+
+    def tearDown(self):
+        from lib.tools import clear_tool_list_latch
+        _reg.clear_multiroot_sticky(self.CONV)
+        clear_tool_list_latch(self.CONV)
+
+    def _assemble_and_latch(self, project_paths):
+        """Mirror the orchestrator: assemble (reads multiroot_active, which may
+        clear the latch on transition) THEN latch_tool_list, in that order."""
+        from lib.tools import latch_tool_list
+        cfg = {'projectPaths': project_paths, 'mcpEnabled': False}
+        ctx = _ctx(conv_id=self.CONV, project_path=project_paths[0],
+                   project_enabled=True, cfg=cfg)
+        tl, _has = assemble_tool_list(ctx)
+        return latch_tool_list(self.CONV, tl)
+
+    def test_transition_reestablishes_without_phantom_divergence(self):
+        from lib.tools import tool_list_diff
+        # Round 1: single-root → freezes the hint-LESS snapshot, no divergence.
+        eff1, div1 = self._assemble_and_latch(['/tmp/a'])
+        self.assertFalse(div1)
+        self.assertNotIn('rootname:', _apply_diff_desc(eff1))
+
+        # Round 2: second root added → OFF→ON transition clears+re-freezes the
+        # latch IN THE SAME ROUND with the hinted list. No phantom divergence.
+        eff2, div2 = self._assemble_and_latch(['/tmp/a', '/tmp/b'])
+        self.assertFalse(div2, 'multiroot transition must re-establish the '
+                               'latch in the same round, not report a phantom '
+                               'empty-name-diff divergence')
+        self.assertIn('rootname:', _apply_diff_desc(eff2),
+                      'the model must get the rootname hint immediately')
+        self.assertEqual(tool_list_diff(self.CONV), {'added': [], 'removed': []})
+
+    def test_stable_after_transition(self):
+        # Rounds 3+ stay byte-stable (diverged=False) on the frozen hinted list.
+        self._assemble_and_latch(['/tmp/a'])
+        self._assemble_and_latch(['/tmp/a', '/tmp/b'])
+        for _ in range(3):
+            eff, div = self._assemble_and_latch(['/tmp/a', '/tmp/b'])
+            self.assertFalse(div)
+            self.assertIn('rootname:', _apply_diff_desc(eff))
+
+    def test_transition_clear_fires_once(self):
+        # The clear must fire ONLY on the first OFF→ON mark, not every round
+        # (mark_multiroot_sticky returns True only on the transition).
+        self.assertTrue(_reg.mark_multiroot_sticky(self.CONV))
+        self.assertFalse(_reg.mark_multiroot_sticky(self.CONV))
+        self.assertFalse(_reg.mark_multiroot_sticky(self.CONV))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

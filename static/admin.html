@@ -93,8 +93,8 @@
 <header>
   <h1>🫧 Tofu Relay — Admin</h1>
   <nav class="nav">
-    <a href="/dashboard">客户 Dashboard</a>
-    <a href="/">返回 Tofu</a>
+    <a href="/dashboard" data-i18n="relayAdmin.page.navDashboard">客户 Dashboard</a>
+    <a href="/" data-i18n="relayAdmin.page.navBackToTofu">返回 Tofu</a>
   </nav>
 </header>
 
@@ -102,50 +102,50 @@
      always served (no server-side gate); authorization is decided here
      plus enforced by every /api/v1/* endpoint server-side. -->
 <main id="adminGate" class="admin-gate" style="display:none">
-  <h2>需要管理员权限</h2>
-  <p>本页仅在中转站模式（<code>auth_mode = multi-user</code>）下、且以管理员密钥登录时可用。</p>
-  <p>个人 / 自用部署无需此页 —— 在 <a href="/">Tofu 设置</a> 中配置你自己的服务商即可。</p>
+  <h2 data-i18n="relayAdmin.page.gateTitle">需要管理员权限</h2>
+  <p data-i18n-html="relayAdmin.page.gateP1">本页仅在中转站模式（<code>auth_mode = multi-user</code>）下、且以管理员密钥登录时可用。</p>
+  <p data-i18n-html="relayAdmin.page.gateP2">个人 / 自用部署无需此页 —— 在 <a href="/">Tofu 设置</a> 中配置你自己的服务商即可。</p>
 </main>
 
 <main id="adminShell" style="display:none">
   <div id="agentOnlyBanner" class="card" style="display:none;border-left:3px solid var(--accent-2);">
-    <strong>受限中转模式</strong> —— <span id="agentOnlyBannerText"></span>
-    可在 <code>data/config/relay.json</code> 中调整
-    <code>billing_enabled</code> / <code>model_relay_enabled</code>（二者互相独立）。
+    <span data-i18n-html="relayAdmin.page.bannerPrefix"><strong>受限中转模式</strong> —— </span><span id="agentOnlyBannerText"></span>
+    <span data-i18n-html="relayAdmin.page.bannerSuffix">可在 <code>data/config/relay.json</code> 中调整
+    <code>billing_enabled</code> / <code>model_relay_enabled</code>（二者互相独立）。</span>
   </div>
   <div class="nav-tabs">
-    <button data-pane="relayUsers"    onclick="relayAdminSwitch('relayUsers')">用户</button>
-    <button data-pane="relayPricing"  onclick="relayAdminSwitch('relayPricing')">定价</button>
-    <button data-pane="relayCodes"    onclick="relayAdminSwitch('relayCodes')">兑换码</button>
-    <button data-pane="relayPayments" onclick="relayAdminSwitch('relayPayments')">支付</button>
+    <button data-pane="relayUsers"    onclick="relayAdminSwitch('relayUsers')" data-i18n="relayAdmin.page.tabUsers">用户</button>
+    <button data-pane="relayPricing"  onclick="relayAdminSwitch('relayPricing')" data-i18n="relayAdmin.page.tabPricing">定价</button>
+    <button data-pane="relayCodes"    onclick="relayAdminSwitch('relayCodes')" data-i18n="relayAdmin.page.tabCodes">兑换码</button>
+    <button data-pane="relayPayments" onclick="relayAdminSwitch('relayPayments')" data-i18n="relayAdmin.page.tabPayments">支付</button>
   </div>
 
   <!-- ═══ Users ═══ -->
   <section id="pane-relayUsers" class="pane card">
-    <div class="settings-section-title">用户管理</div>
-    <p class="settings-desc">管理使用本中转站的用户、调整余额、暂停账号、查看历史。</p>
-    <div id="relayUsersBlock"><em style="opacity:0.5">加载中…</em></div>
+    <div class="settings-section-title" data-i18n="relayAdmin.page.usersTitle">用户管理</div>
+    <p class="settings-desc" data-i18n="relayAdmin.page.usersDesc">管理使用本中转站的用户、调整余额、暂停账号、查看历史。</p>
+    <div id="relayUsersBlock"><em style="opacity:0.5" data-i18n="relayAdmin.loadingPlaceholder">加载中…</em></div>
   </section>
 
   <!-- ═══ Pricing ═══ -->
   <section id="pane-relayPricing" class="pane card">
-    <div class="settings-section-title">定价表</div>
-    <p class="settings-desc">每千 token 的微币(µ)单价。修改保存到 <code>data/config/pricing.json</code>，对未来请求立即生效。1 credit = 1,000,000 µ ≈ US $0.001。</p>
-    <div id="relayPricingBlock"><em style="opacity:0.5">加载中…</em></div>
+    <div class="settings-section-title" data-i18n="relayAdmin.page.pricingTitle">定价表</div>
+    <p class="settings-desc" data-i18n-html="relayAdmin.page.pricingDesc">每千 token 的微币(µ)单价。修改保存到 <code>data/config/pricing.json</code>，对未来请求立即生效。1 credit = 1,000,000 µ ≈ US $0.001。</p>
+    <div id="relayPricingBlock"><em style="opacity:0.5" data-i18n="relayAdmin.loadingPlaceholder">加载中…</em></div>
   </section>
 
   <!-- ═══ Redeem codes ═══ -->
   <section id="pane-relayCodes" class="pane card">
-    <div class="settings-section-title">兑换码</div>
-    <p class="settings-desc">批量生成单次有效的兑换码,客户在 <code>/dashboard</code> 输入即可获得对应余额。</p>
-    <div id="relayCodesBlock"><em style="opacity:0.5">加载中…</em></div>
+    <div class="settings-section-title" data-i18n="relayAdmin.page.codesTitle">兑换码</div>
+    <p class="settings-desc" data-i18n-html="relayAdmin.page.codesDesc">批量生成单次有效的兑换码,客户在 <code>/dashboard</code> 输入即可获得对应余额。</p>
+    <div id="relayCodesBlock"><em style="opacity:0.5" data-i18n="relayAdmin.loadingPlaceholder">加载中…</em></div>
   </section>
 
   <!-- ═══ Payments ═══ -->
   <section id="pane-relayPayments" class="pane card">
-    <div class="settings-section-title">支付记录</div>
-    <p class="settings-desc">所有 Stripe / Alipay 完成的充值。Webhook 处理是幂等的——同一笔重复回调不会被重复入账。</p>
-    <div id="relayPaymentsBlock"><em style="opacity:0.5">加载中…</em></div>
+    <div class="settings-section-title" data-i18n="relayAdmin.page.paymentsTitle">支付记录</div>
+    <p class="settings-desc" data-i18n="relayAdmin.page.paymentsDesc">所有 Stripe / Alipay 完成的充值。Webhook 处理是幂等的——同一笔重复回调不会被重复入账。</p>
+    <div id="relayPaymentsBlock"><em style="opacity:0.5" data-i18n="relayAdmin.loadingPlaceholder">加载中…</em></div>
   </section>
 </main>
 
@@ -171,6 +171,11 @@ window.showPrompt = window.showPrompt || async function(msg, opts) {
   return window.prompt(msg, (opts && opts.defaultValue) || '');
 };
 </script>
+<!-- i18n.js MUST load before relay-admin.js: the admin panels resolve every
+     label through the global t(). It is self-contained (reads localStorage +
+     a DOMContentLoaded hook with null-safe DOM queries) and respects the UI
+     language the user picked in the main app (same-origin localStorage). -->
+<script defer src="static/js/i18n.js?v=0.13.0"></script>
 <script defer src="static/js/relay-admin.js?v=0.13.0"></script>
 </body>
 </html>

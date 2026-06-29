@@ -678,6 +678,10 @@
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
           <span data-i18n="settings.tabSkills">Skills</span>
         </button>
+        <button class="settings-tab" data-tab="preferences" onclick="switchSettingsTab('preferences')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+          <span data-i18n="settings.tabPreferences">偏好</span>
+        </button>
         <!-- Relay-admin tabs (用户/定价/兑换码/支付) moved to the standalone
              /admin console (static/admin.html). Settings is now pure
              single-user config. -->
@@ -1399,6 +1403,27 @@
         </div>
 
 
+        <!-- ═══ Preferences Tab ═══ -->
+        <div class="settings-tab-panel" id="settingsTab_preferences">
+          <div class="settings-section-title" data-i18n="prefsPanel.title">个人偏好档案</div>
+          <p class="settings-desc" data-i18n="prefsPanel.intro">
+            这是助手长期记住的关于你、以及「你希望它如何工作」的信息（语言、语气、编码习惯、禁忌，以及你的角色、技术栈等）。它会在每次对话中自动注入，跨项目生效。助手会在对话中自动学习并更新这些条目，你可以随时在此修改或删除。
+          </p>
+
+          <!-- Per-item editable preference list, grouped by section -->
+          <div id="prefsList" class="prefs-list"></div>
+
+          <div class="settings-row" style="justify-content:space-between;align-items:center;margin-top:14px;">
+            <span id="prefsCharCount" class="stg-badge" style="font-size:11px;">0 / 2500</span>
+            <div style="display:flex;gap:8px;">
+              <button class="btn btn-secondary btn-sm" onclick="refreshPreferences()" data-i18n="prefsPanel.reload">重新加载</button>
+              <button class="btn btn-primary btn-sm" onclick="savePreferences(this)" data-i18n="prefsPanel.save">保存</button>
+            </div>
+          </div>
+          <div id="prefsStatus" class="settings-desc" style="font-size:12px;margin-top:6px;"></div>
+        </div>
+
+        <!-- ═══ Skills Tab ═══ -->
         <!-- ═══ Skills Tab ═══ -->
         <div class="settings-tab-panel" id="settingsTab_skills">
           <!-- Header: title · counts · scope tabs · search -->
@@ -1726,12 +1751,39 @@
       </div>
     </div>
 
+    <!-- Zero-friction shortcut: when Tofu runs on the user's own machine the
+         unpacked extension already sits on disk — they can Load unpacked it
+         directly, no download/unzip. Populated by _checkBrowserStatus(). -->
+    <div class="browser-local-shortcut" id="browserLocalShortcut" style="display:none">
+      <strong data-i18n="browser.localTitle">在本机运行 Tofu？无需下载</strong>
+      <p data-i18n-html="browser.localDesc">在 <code>chrome://extensions/</code> 启用开发者模式后，点击「加载已解压的扩展程序」并直接选择下面这个文件夹：</p>
+      <code class="copyable-url" id="browserExtPath" data-tooltip="点击复制" data-i18n-title="browser.clickToCopy"
+            style="cursor:pointer;display:block;padding:8px 10px;border-radius:6px;word-break:break-all;border:1px dashed var(--accent-color)"></code>
+    </div>
+
+
+    <!-- ★ Chrome 142+ Local Network Access (LNA) guidance. Shown only when the
+         CONNECTED extension reports Chromium >= 142 (chromeMajor from /status).
+         These browsers prompt "access other devices on your local network" for
+         every site a page touches — disruptive during multi-tab searches. The
+         extension cannot grant this itself (the CDP Browser domain is blocked
+         for chrome.debugger), so we guide the user to the browser setting. -->
+    <div class="browser-lna-warning" id="browserLnaWarning" style="display:none">
+      <strong data-i18n="browser.lnaTitle">Chrome 142+ 可能反复弹出「访问本地网络设备」</strong>
+      <p data-i18n="browser.lnaDesc">从 Chrome 142 起，访问本地网络的网页会逐站弹出权限请求，多标签搜索时需反复点击。扩展无法代为授权，请用以下任一方式关闭提示：</p>
+      <p data-i18n-html="browser.lnaFlag"><strong>方式一（最快）</strong>：打开 <code class="copyable-url" style="cursor:pointer;border-bottom:1px dashed var(--accent-color)">chrome://flags/#local-network-access-check</code> → 设为 <strong>Disabled</strong> → 重启 Chrome。</p>
+      <p data-i18n-html="browser.lnaPolicy"><strong>方式二（持久）</strong>：放置一个 Chrome 托管策略文件，内容为：</p>
+      <code class="copyable-url" id="browserLnaPolicy" data-tooltip="点击复制" data-i18n-title="browser.clickToCopy"
+            style="cursor:pointer;display:block;padding:8px 10px;border-radius:6px;word-break:break-all;border:1px dashed var(--accent-color)">{ "LocalNetworkAccessAllowedForUrls": ["*"] }</code>
+      <p class="browser-lna-path" id="browserLnaPath" data-i18n-html="browser.lnaPathHint" style="display:none"></p>
+    </div>
+
     <div class="browser-setup-steps">
       <div class="setup-step">
         <span class="step-num">1</span>
         <div class="step-content">
-          <strong data-i18n="browser.stepDownload">下载扩展程序</strong>
-          <p data-i18n="browser.stepDownloadDesc">点击下方按钮下载 ZIP 文件，然后解压。</p>
+          <strong data-i18n="browser.stepDownload">下载并解压扩展</strong>
+          <p data-i18n-html="browser.stepDownloadDesc">点击下方按钮下载 ZIP，然后<strong>务必先解压</strong>。</p>
           <button class="btn btn-primary btn-sm" onclick="downloadBrowserExtension()" data-i18n="browser.stepDownloadBtn">下载扩展 ZIP</button>
         </div>
       </div>
@@ -1749,15 +1801,6 @@
           <p data-i18n-html="browser.stepVerifyDesc">点击工具栏中的扩展图标，应显示 <strong>已连接</strong>。然后在此处开启浏览器功能。</p>
         </div>
       </div>
-    </div>
-
-    <div class="browser-capabilities">
-      <h4 data-i18n="browser.capsTitle">浏览器桥接的 AI 功能</h4>
-      <ul>
-        <li><strong>browser_list_tabs</strong> — <span data-i18n="browser.capListTabs">列出所有打开的标签页（标题、URL）</span></li>
-        <li><strong>browser_read_tab</strong> — <span data-i18n="browser.capReadTab">读取任意标签页的文本内容，或使用 CSS 选择器</span></li>
-        <li><strong>browser_execute_js</strong> — <span data-i18n="browser.capExecJs">在任意标签页中执行 JavaScript（点击、填充表单、提取数据）</span></li>
-      </ul>
     </div>
 
     <div class="modal-actions">
@@ -2086,6 +2129,8 @@
 <script defer src="static/js/core/error_envelope.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/core/cross_tab_sync.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/core/conversations.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+
+<script defer src="static/js/core/translate_guard.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/core/cache_stats.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/core/markdown.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/core/health_stream_timer.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
@@ -2106,6 +2151,7 @@
 <script defer src="static/js/ui/message_actions.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/edit_message.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/turn_nav.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/streaming_swarm_panel.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/streaming_ui.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/sse_handlers_tool.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/sse_handlers_swarm.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
@@ -2116,6 +2162,7 @@
 <script defer src="static/js/ui/sse_poll_fallback.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/swarm_push.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/send_button.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/stream_lifecycle.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/conv_view.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- Feature modules (extracted from main.js) -->
 <script defer src="static/js/log-clean.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
@@ -2128,6 +2175,7 @@
 <script defer src="static/js/project.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/memory.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/skills.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/preferences.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/orchestration.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/task-mode.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/scheduler.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>

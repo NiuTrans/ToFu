@@ -138,6 +138,48 @@ class TestProjectSummaryEngine:
         d = ps.build_project_digest('/tmp/other_proj', limit=10)
         assert self.c_other in d  # only sibling in that project
 
+    def test_digest_entries_structured_and_consistent_with_text(self):
+        # The structured backbone the frontend chip consumes: same siblings,
+        # same self/other-project exclusion, summary text carried through, and
+        # consistent with what build_project_digest renders into the prompt.
+        entries = ps.project_digest_entries(
+            self.proj, current_conv_id=self.c_fresh, limit=10)
+        ids = {e['id'] for e in entries}
+        assert self.c_fresh not in ids          # self excluded
+        assert self.c_other not in ids          # other project excluded
+        assert self.c_grown in ids and self.c_tiny in ids
+        # Each entry is a {id,title,summary} dict; summary='' when none cached.
+        for e in entries:
+            assert set(e.keys()) == {'id', 'title', 'summary'}
+        # Consistency: every structured id appears in the rendered text digest.
+        text = ps.build_project_digest(
+            self.proj, current_conv_id=self.c_fresh, limit=10)
+        for e in entries:
+            assert e['id'] in text
+
+    def test_digest_entries_empty_without_project(self):
+        assert ps.project_digest_entries('', limit=10) == []
+        assert ps.project_digest_entries('/tmp/nonexistent_proj_zzz', limit=10) == []
+
     def test_digest_empty_without_project(self):
         assert ps.build_project_digest('', limit=10) == ''
         assert ps.build_project_digest('/tmp/nonexistent_proj_zzz', limit=10) == ''
+
+    def test_digest_header_advertises_tools_only_when_available(self):
+        # When the conv-ref tools ARE registered, the header instructs the
+        # model to call them. When they are NOT, the header must name no tool
+        # the model can't call (mirrors the using-tools-section guardrail).
+        with_tools = ps.build_project_digest(
+            self.proj, current_conv_id=self.c_fresh, limit=10,
+            conv_tools_available=True)
+        without_tools = ps.build_project_digest(
+            self.proj, current_conv_id=self.c_fresh, limit=10,
+            conv_tools_available=False)
+        assert 'list_conversations' in with_tools
+        assert 'get_conversation' in with_tools
+        assert 'list_conversations' not in without_tools
+        assert 'get_conversation' not in without_tools
+        # Both still surface the siblings + share the idempotency substring.
+        assert self.c_grown in with_tools and self.c_grown in without_tools
+        assert 'related conversation(s)' in with_tools
+        assert 'related conversation(s)' in without_tools

@@ -67,6 +67,16 @@ def build_chat_config(
         cfg['responseFormat'] = response_format
     if user and 'user' not in cfg:
         cfg['user'] = user
+    # ── App-personal capabilities fail closed on the headless surface ──
+    # build_chat_config backs every headless entry point (the HTTP
+    # /chat/completions + /chat/stream-direct routes and the in-process
+    # tofu.chat / tofu.stream facade), NONE of which is the interactive UI
+    # (that goes through lib.conv_config.resolve_conv_config). So the
+    # operator's personal memory store + preference profile must be strict
+    # opt-in here, never inherited from the UI's default-on. setdefault =
+    # an explicit caller value still wins. See lib/agent_core/personal_scope.
+    from lib.agent_core.personal_scope import apply_headless_personal_defaults
+    apply_headless_personal_defaults(cfg)
     return cfg
 
 

@@ -78,6 +78,7 @@ class CacheState:
         'per_tool_hashes',
         'prefix_content_hash',
         'prefix_content_count',
+        'prefix_field_hashes',
         'total_cache_read', 'total_cache_write',
         'total_breaks', 'total_input_tokens',
         'first_call_time',
@@ -97,6 +98,8 @@ class CacheState:
         self.per_tool_hashes: dict[str, str] = {}  # tool_name → hash
         self.prefix_content_hash: str = ''
         self.prefix_content_count: int = 0
+        # Per-message, per-field prefix hashes (precise culprit attribution).
+        self.prefix_field_hashes: list[dict] = []
         self.total_cache_read: int = 0
         self.total_cache_write: int = 0
         self.total_breaks: int = 0
@@ -237,6 +240,86 @@ def _hash_prefix_content(messages: list, prefix_count: int) -> str:
     return _md5(''.join(parts))
 
 
+def _hash_prefix_fields(messages: list, prefix_count: int) -> list[dict]:
+    """Per-message, per-field hashes of the cache prefix.
+
+    Companion to ``_hash_prefix_content`` (which rolls the WHOLE prefix into
+    one hash). This returns a list — one dict per message in
+    ``messages[:prefix_count]`` — mapping each wire-affecting FIELD
+    (``role`` / ``content`` / ``tool_calls`` / ``tool_call_id`` /
+    ``reasoning_content`` / ``thinking_signature`` / ``reasoning_details``)
+    to its individual hash. ``_diff_prefix_fields`` then names the EXACT
+    ``(message_index, field)`` that changed between two rounds — the same
+    way ``_diff_tool_hashes`` names the exact tool. This turns the old
+    terminal "silent prefix byte change (guess)" into a concrete culprit.
+    """
+    if prefix_count <= 0 or not messages:
+        return []
+    out: list[dict] = []
+    for msg in messages[:prefix_count]:
+        fh: dict[str, str] = {'role': _md5(msg.get('role', ''))}
+        content = msg.get('content', '')
+        if isinstance(content, list):
+            _cp = []
+            for block in content:
+                if isinstance(block, dict):
+                    _cp.append(block.get('text', '') or block.get('type', ''))
+            fh['content'] = _md5('\x1f'.join(_cp))
+        elif isinstance(content, str):
+            fh['content'] = _md5(content)
+        tcs = msg.get('tool_calls') or ()
+        if tcs:
+            _tp = []
+            for tc in tcs:
+                if isinstance(tc, dict):
+                    fn = tc.get('function') or {}
+                    _tp.append(tc.get('id', ''))
+                    if isinstance(fn, dict):
+                        _tp.append(fn.get('name', ''))
+                        _tp.append(fn.get('arguments', ''))
+            fh['tool_calls'] = _md5('\x1f'.join(_tp))
+        if msg.get('tool_call_id'):
+            fh['tool_call_id'] = _md5(str(msg.get('tool_call_id')))
+        if msg.get('reasoning_content'):
+            fh['reasoning_content'] = _md5(str(msg.get('reasoning_content')))
+        if msg.get('thinking_signature'):
+            fh['thinking_signature'] = _md5(str(msg.get('thinking_signature')))
+        rd = msg.get('reasoning_details')
+        if rd:
+            try:
+                fh['reasoning_details'] = _md5(
+                    json.dumps(rd, sort_keys=True, ensure_ascii=False))
+            except (TypeError, ValueError):
+                fh['reasoning_details'] = _md5(str(rd))
+        out.append(fh)
+    return out
+
+
+def _diff_prefix_fields(old: list, new: list, max_report: int = 6) -> list:
+    """Name the exact ``msg[i].field`` entries that differ between two
+    per-message field-hash lists (from ``_hash_prefix_fields``).
+
+    Only the overlapping index range is compared field-by-field; a length
+    change of the compared prefix is reported as a separate ``len A->B``
+    token. Capped at ``max_report`` culprits so the cause string stays
+    readable (an extra ``…`` marks truncation).
+    """
+    changes: list[str] = []
+    n = min(len(old), len(new))
+    for i in range(n):
+        o = old[i] or {}
+        nw = new[i] or {}
+        for field in sorted(set(o) | set(nw)):
+            if o.get(field) != nw.get(field):
+                changes.append(f'msg[{i}].{field}')
+                if len(changes) >= max_report:
+                    changes.append('…')
+                    return changes
+    if len(old) != len(new):
+        changes.append(f'len {len(old)}\u2192{len(new)}')
+    return changes
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Cache break detection
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -307,21 +390,26 @@ def _classify_break(
 def _resolve_break_cause(
     *, client_changes: dict, prefix_mutation_break: bool,
     elapsed: float, cache_read: int, prefix_mutated: bool,
+    prefix_culprits: list | None = None,
 ) -> str:
     """Build the single most-specific human cause string for a confirmed break.
 
     Pure string logic extracted verbatim from ``detect_cache_break``'s Report
     phase (the disambiguation ladder).  Precedence: explicit client changes →
-    prefix-byte mutation → TTL expiry → narrowed stochastic-server-miss /
-    breakpoint reasoning keyed on whether a read remained and whether the
-    prefix bytes mutated.
+    prefix-byte mutation (with the EXACT changed ``msg[i].field`` list when
+    known) → TTL expiry → narrowed stochastic-server-miss reasoning keyed on
+    whether a read remained and whether the prefix bytes mutated. Only when
+    the prefix bytes are PROVABLY identical does it fall back to the TTL /
+    stochastic-server guess.
     """
+    _culprits = ', '.join(prefix_culprits) if prefix_culprits else ''
     if client_changes:
         return ', '.join(f'{k}={v}' for k, v in client_changes.items())
     if prefix_mutation_break:
-        return ('cached prefix bytes changed between turns '
-                '(non-idempotent history edit) — the whole body '
-                'was re-billed uncached')
+        _base = ('cached prefix bytes changed between turns '
+                 '(non-idempotent history edit) — the whole body '
+                 'was re-billed uncached')
+        return f'{_base} [changed: {_culprits}]' if _culprits else _base
     if elapsed > 300:
         return 'TTL expiry (>5min gap, prompt unchanged)'
     if cache_read > _MIN_CACHE_MISS_TOKENS:
@@ -339,6 +427,11 @@ def _resolve_break_cause(
     if not prefix_mutated:
         return ('prefix not reused — stochastic server-side cache '
                 'miss or TTL expiry (prefix bytes unchanged)')
+    # Prefix bytes DID change but the write was below the surfacing floor.
+    # We still know exactly which field moved — name it instead of guessing.
+    if _culprits:
+        return ('prefix bytes changed between turns '
+                f'[changed: {_culprits}] — likely cause of the miss')
     return ('prefix not reused — stochastic server-side '
             'cache miss, TTL expiry, or a silent prefix '
             'byte change')
@@ -398,9 +491,15 @@ def detect_cache_break(
         _new_prefix_count = max(0, msg_count - 2)
         _prev_prefix_hash = _hash_prefix_content(messages, _prev_prefix_count)
         prefix_hash = _hash_prefix_content(messages, _new_prefix_count)
+        # Per-field hashes of the SAME (prev) range — lets us name the exact
+        # message+field that changed, not just THAT the prefix changed.
+        _cur_field_hashes_prevrange = _hash_prefix_fields(
+            messages, _prev_prefix_count)
+        prefix_field_hashes = _hash_prefix_fields(messages, _new_prefix_count)
 
         client_changes = {}
         _prefix_mutated = False
+        _prefix_culprits: list = []
         if prev.call_count > 0:
             if sys_hash != prev.system_hash:
                 client_changes['system_prompt'] = 'changed'
@@ -428,11 +527,15 @@ def detect_cache_break(
                     and _prev_prefix_hash != prev.prefix_content_hash
                     and not prev.compaction_pending):
                 _prefix_mutated = True
+                _prefix_culprits = _diff_prefix_fields(
+                    prev.prefix_field_hashes, _cur_field_hashes_prevrange)
                 logger.warning(
                     '[CacheTrack] conv=%s call=%d ⚠ PREFIX MUTATION DETECTED: '
                     'messages[0:%d] content hash changed without compaction. '
-                    'This will cause a cache miss. prev_hash=%s new_hash=%s',
+                    'This will cause a cache miss. changed=[%s] '
+                    'prev_hash=%s new_hash=%s',
                     conv_id[:8], prev.call_count + 1, _prev_prefix_count,
+                    ', '.join(_prefix_culprits) or '?',
                     prev.prefix_content_hash[:8], _prev_prefix_hash[:8])
 
         # ── Phase 2: Check API-reported cache stats ──
@@ -487,6 +590,7 @@ def detect_cache_break(
         prev.per_tool_hashes = per_tool_hashes
         prev.prefix_content_hash = prefix_hash
         prev.prefix_content_count = _new_prefix_count
+        prev.prefix_field_hashes = prefix_field_hashes
         prev.model = model
         prev.message_count = msg_count
         prev.last_cache_read_tokens = cache_read
@@ -537,6 +641,7 @@ def detect_cache_break(
                 prefix_mutation_break=prefix_mutation_break,
                 elapsed=elapsed, cache_read=cache_read,
                 prefix_mutated=_prefix_mutated,
+                prefix_culprits=_prefix_culprits,
             )
 
             # ★ Prefix mutation is the most ACTIONABLE and most CERTAIN cause —
@@ -806,7 +911,7 @@ def release_ttl_latch(task_id: str) -> None:
 #  Cache-aware tool result ordering
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def sort_tool_results(messages: list) -> None:
+def sort_tool_results(messages: list, conv_id: str = '') -> None:
     """Sort consecutive tool-result messages by tool_call_id for cache stability.
 
     When multiple tool results come back from parallel tool execution, their
@@ -822,11 +927,30 @@ def sort_tool_results(messages: list) -> None:
     them by tool_call_id.  It's called before build_body to ensure
     deterministic ordering.
 
+    ★ CACHE-CRITICAL: reordering messages inside the prompt-cache PREFIX
+    rewrites the cached prefix bytes and forces a full re-cache — the exact
+    silent cache-killer this module otherwise hunts. So the sort is gated to
+    indices at/after ``get_cache_prefix_count(conv_id)``: a run that begins
+    inside the prefix is left untouched (it was already cached in some order;
+    re-sorting it now can only HURT). Newly-appended tool results (the tail,
+    which is what actually varies round-over-round) are still sorted. Runs
+    that straddle the boundary are skipped entirely rather than partially
+    sorted, which would itself mutate prefix bytes.
+
     Args:
         messages: The messages list (mutated in place).
+        conv_id:  Conversation ID — used to look up the cache-prefix boundary.
+            When empty (no cache tracked), behaves as before (sort everywhere).
     """
     if not messages or len(messages) < 2:
         return
+
+    _prefix_count = 0
+    if conv_id:
+        try:
+            _prefix_count = get_cache_prefix_count(conv_id)
+        except Exception as e:
+            logger.debug('[CacheTrack] sort_tool_results prefix lookup failed: %s', e)
 
     i = 0
     n = len(messages)
@@ -837,8 +961,11 @@ def sort_tool_results(messages: list) -> None:
             while i < n and messages[i].get('role') == 'tool':
                 i += 1
             run_end = i
-            # Only sort if there are 2+ consecutive tool results
-            if run_end - run_start >= 2:
+            # Only sort if there are 2+ consecutive tool results AND the whole
+            # run lies OUTSIDE the cached prefix (run_start >= prefix_count).
+            # A run that begins inside the prefix \u2014 or straddles the boundary
+            # \u2014 is skipped: re-ordering already-cached bytes guarantees a miss.
+            if run_end - run_start >= 2 and run_start >= _prefix_count:
                 # Sort by tool_call_id for deterministic ordering
                 tool_run = messages[run_start:run_end]
                 tool_run.sort(key=lambda m: m.get('tool_call_id', ''))

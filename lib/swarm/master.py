@@ -42,6 +42,20 @@ from lib.swarm.scheduler import StreamingScheduler
 
 logger = get_logger(__name__)
 
+
+#: Minimum seconds between DEDICATED full-blob snapshot CAS writes (the
+#: write-amplification guard for FUSE-mounted DBs — a 10-agent swarm settling
+#: in a ~1s burst would otherwise do ~10 full read-modify-writes of the whole
+#: conversations.messages blob, ~10ms each on beegfs, contending with the
+#: frontend's own sync). Incremental per-agent writes are coalesced to this
+#: cadence; the final SETTLE write is always forced (carries final truth).
+#: Env-overridable. The cheap in-memory live-task stamp is NEVER throttled.
+try:
+    _SNAPSHOT_CAS_MIN_INTERVAL_S = float(
+        os.environ.get('TOFU_SWARM_SNAPSHOT_MIN_INTERVAL', '8'))
+except (TypeError, ValueError):
+    _SNAPSHOT_CAS_MIN_INTERVAL_S = 8.0
+
 #: Tool names that mutate files on disk. Used to flag sub-agents that
 #: modified the workspace so the UI can mark them for closer review.
 #: ``run_command`` is intentionally excluded — it CAN write but is also
@@ -202,6 +216,16 @@ class MasterOrchestrator:
         self._lock = threading.Lock()
         self._aborted = False
 
+        # Throttle for the DEDICATED full-blob snapshot CAS write (write-amp
+        # guard on FUSE-mounted DBs). The cheap in-memory live-task stamp runs
+        # on EVERY agent-complete and rides the regular ~10s checkpoint loop;
+        # the expensive read-modify-write of the whole conversations.messages
+        # blob is coalesced to at most once per interval — EXCEPT the settle
+        # write, which is always forced (it carries final truth, so any
+        # throttled-out incremental is covered by it). See _persist_agent_snapshot.
+        self._last_snapshot_cas = 0.0
+        self._snapshot_cas_lock = threading.Lock()
+
         # Listeners woken when ANY agent completes (used by await_agents).
         self._completion_event = threading.Event()
 
@@ -277,6 +301,190 @@ class MasterOrchestrator:
         with self._lock:
             self._agents[spec.id] = agent
         return agent
+
+    # ── Durable agent snapshot (reload-faithful swarm panel) ──────────
+
+    def _build_agent_snapshot(self) -> dict:
+        """Build the durable per-agent snapshot for the swarm panel.
+
+        Mirrors the per-agent fields the live ``_swarmAgents`` array carries
+        (synthesized frontend-side from ``swarm_*`` SSE events) so the reload
+        path can render an identical, fully-expandable panel WITHOUT the live
+        array or any ``await_agents`` sibling round.
+
+        Sourced from the authoritative ``_results_by_id`` (completed/failed
+        agents) and the scheduler's running/pending sets — so a fire-and-forget
+        swarm that was never awaited still gets real per-agent status, not the
+        ``unknown`` stubs the handle-only recovery produced.
+        """
+        from lib.swarm.snapshot import _PREVIEW_CHARS
+
+        with self._lock:
+            results = dict(self._results_by_id)
+            running_ids = (set(self._scheduler._running.keys())
+                           if self._scheduler else set())
+            pending_ids = ({s.id for s in self._scheduler._pending}
+                           if self._scheduler else set())
+            specs = list(self.specs)
+            terminated = self._terminated
+
+        agents: list[dict] = []
+        total_tokens = 0
+        for spec in specs:
+            pair = results.get(spec.id)
+            if pair is not None:
+                _, result = pair
+                # Normalise the SubAgentStatus value ('completed'/'failed') to
+                # the frontend vocabulary ('done'/'failed').
+                status = ('done'
+                          if result.status == SubAgentStatus.COMPLETED.value
+                          else 'failed' if result.status == SubAgentStatus.FAILED.value
+                          else result.status)
+                total_tokens += result.total_tokens or 0
+                agents.append({
+                    'id':            spec.id,
+                    'role':          spec.role,
+                    'model':         (getattr(self._agents.get(spec.id), 'model', '')
+                                      or self._resolve_spec_model(spec)),
+                    'objective':     spec.objective,
+                    'status':        status,
+                    'elapsed':       round(result.elapsed_seconds, 1),
+                    'tokens':        result.total_tokens,
+                    'preview':       (result.final_answer or '')[:_PREVIEW_CHARS],
+                    'modifiedFiles': _count_file_writes(result.tool_log),
+                    'error':         (result.error_message or '')
+                                     if result.status != SubAgentStatus.COMPLETED.value
+                                     else '',
+                })
+            else:
+                # No result yet. If the swarm has TERMINATED this agent is
+                # stranded — it never produced a result, so it must NOT be
+                # frozen as 'running'/'pending' under settled:true (a stopped
+                # swarm would otherwise persist agents "Running" forever).
+                # Coerce to 'aborted' when the swarm was explicitly aborted,
+                # else 'unknown'. Only a still-live swarm reflects running/pending.
+                if terminated:
+                    live = 'aborted' if self._aborted else 'unknown'
+                elif spec.id in running_ids:
+                    live = 'running'
+                elif spec.id in pending_ids:
+                    live = 'pending'
+                else:
+                    live = 'pending'
+                agents.append({
+                    'id':            spec.id,
+                    'role':          spec.role,
+                    'model':         self._resolve_spec_model(spec),
+                    'objective':     spec.objective,
+                    'status':        live,
+                    'elapsed':       '',
+                    'tokens':        0,
+                    'preview':       '',
+                    'modifiedFiles': 0,
+                    'error':         '',
+                })
+
+        # ── Monotonic version key (#2) ──
+        # A later snapshot must never be clobbered by an earlier one that
+        # loses a CAS race and retries late. Order by (settled, terminal-agent
+        # count): settled always outranks unsettled, and among unsettled the
+        # one that has resolved MORE agents is newer. persist_snapshot_to_conversation
+        # refuses to overwrite a higher version with a lower one.
+        done_count = sum(1 for a in agents
+                         if a['status'] in ('done', 'failed', 'aborted'))
+        version = (1 if terminated else 0) * 100000 + done_count
+        return {
+            'agents':       agents,
+            'settled':      terminated,
+            'totalTokens':  total_tokens,
+            'agentCount':   len(agents),
+            'doneCount':    done_count,
+            'version':      version,
+        }
+
+    def _persist_agent_snapshot(self, *, force: bool = False) -> None:
+        """Write the current agent snapshot durably onto the spawn round.
+
+        Dual-write so the panel survives every reload path:
+          1. The LIVE chat task dict's spawn round_entry (if the spawning turn
+             is still running and reachable) — so the in-turn
+             ``_sync_*_to_conversation`` persists it as part of toolRounds and
+             does not clobber it. This is an in-memory dict mutation (cheap,
+             microseconds) and runs on EVERY call, so an in-flight swarm's
+             snapshot reaches disk on the next regular ~10s checkpoint anyway.
+          2. Directly into ``conversations.messages`` via CAS — a full
+             read-modify-write of the whole messages blob (~10ms on FUSE).
+             THROTTLED: coalesced to at most once per
+             ``_SNAPSHOT_CAS_MIN_INTERVAL_S`` so a 10-agent burst doesn't do
+             ~10 full-blob rewrites contending with the frontend sync. The
+             ``force=True`` settle write bypasses the throttle (final truth;
+             covers any incremental that was throttled out — nothing is lost,
+             detached-case staleness is bounded to the interval).
+
+        Best-effort; never raises into the driver / scheduler thread.
+        """
+        try:
+            snapshot = self._build_agent_snapshot()
+            agent_ids = [a['id'] for a in snapshot.get('agents') or []]
+            if not agent_ids:
+                return
+            from lib.swarm import snapshot as _snap
+
+            agent_id_set = set(agent_ids)
+
+            # (1) Stamp the live task's spawn round(s), if reachable. The stamp
+            #     happens INSIDE tasks_lock so two swarm driver threads can't
+            #     mutate the same round concurrently. The cross-thread race
+            #     with the SYNC paths (which serialize task['toolRounds']
+            #     by-reference on the orchestrator thread) is closed on the
+            #     OTHER side: _merge_tool_rounds now shallow-copies each round
+            #     dict before serialize, so json_dumps_pg never iterates the
+            #     same dict this stamp mutates ("dict changed size during
+            #     iteration" / half-stamped round). Both together = safe.
+            #
+            #     #4: a follow-up wave merges both waves' specs into ONE
+            #     snapshot, so we stamp EACH matching spawn round with only the
+            #     agents ITS handle launched (filter_snapshot) — never the
+            #     combined set onto one panel.
+            try:
+                from lib.tasks_pkg.manager import tasks, tasks_lock
+                with tasks_lock:
+                    for _t in tasks.values():
+                        if _t.get('convId') != self.conv_id:
+                            continue
+                        for _r in (_t.get('toolRounds') or []):
+                            _hids = _snap._round_handle_ids(_r) & agent_id_set
+                            if _hids:
+                                _snap.stamp_round(_r, _snap.filter_snapshot(snapshot, _hids))
+            except Exception as e:
+                logger.debug('[Master:%s] live-task snapshot stamp skipped: %s',
+                             self.task_id, e)
+
+            # (2) Durable CAS write into conversations.messages — one filtered
+            #     write per spawn round handle (covers the detached /
+            #     fire-and-forget case + multi-wave scoping). THROTTLED unless
+            #     forced: a per-agent burst coalesces to one write per interval;
+            #     the monotonic version guard (snapshot.stamp_round) makes a
+            #     skipped incremental harmless — the next write (or the forced
+            #     settle) carries the strictly-newer state.
+            now = time.monotonic()
+            with self._snapshot_cas_lock:
+                due = force or (now - self._last_snapshot_cas
+                                >= _SNAPSHOT_CAS_MIN_INTERVAL_S)
+                if due:
+                    self._last_snapshot_cas = now
+            if not due:
+                logger.debug('[Master:%s] snapshot CAS throttled (%.1fs since '
+                             'last, interval=%.0fs) — live stamp kept, DB write '
+                             'deferred', self.task_id,
+                             now - self._last_snapshot_cas,
+                             _SNAPSHOT_CAS_MIN_INTERVAL_S)
+                return
+            _snap.persist_snapshot_to_conversation(
+                self.conv_id, agent_ids, snapshot)
+        except Exception as e:
+            logger.warning('[Master:%s] agent snapshot persist failed: %s',
+                           self.task_id, e, exc_info=True)
 
     # ── Scheduler callbacks ────────────────────────────
 
@@ -365,6 +573,12 @@ class MasterOrchestrator:
         except Exception as e:
             logger.error('[Master:%s] Failed to enqueue swarm-update for agent=%s: %s',
                          self.task_id, spec.id, e, exc_info=True)
+
+        # 4) Durably snapshot the swarm onto the spawn round so a reload (even
+        #    one with no live _swarmAgents array and no await_agents sibling)
+        #    rebuilds a faithful, fully-expandable panel. Incremental: each
+        #    completion advances the persisted per-agent state.
+        self._persist_agent_snapshot()
 
     def _on_retry_callback(self, spec: SubTaskSpec, attempt: int, err: str) -> None:
         logger.warning('[Master:%s] AGENT_RETRY agent-%s-%s attempt=%d err=%.200s',
@@ -491,6 +705,16 @@ class MasterOrchestrator:
                         'failedCount': failed,
                         'totalTokens': total_tokens,
                     })
+
+                # ── Final durable snapshot (settled=True) ──
+                # Mirrors the terminal swarm_phase:complete UI event into the
+                # persisted store so the reload panel reads 'Complete' with
+                # every agent's real outcome, independent of the SSE stream.
+                try:
+                    self._persist_agent_snapshot(force=True)
+                except Exception as _se:
+                    logger.debug('%s final snapshot persist failed: %s',
+                                 log_prefix, _se)
 
                 # ── Settle hook: may auto-continue the main agent ──
                 # Fires AFTER the terminal UI event so the panel reads as
@@ -707,8 +931,17 @@ class MasterOrchestrator:
         # a clear note so the LLM doesn't think the call was a no-op.
         if not to_wait:
             note = ''
-            if already_done:
-                note = (f'{len(already_done)} agent(s) already completed; '
+            # When caller asks for ALL (no ids) and no agents are running,
+            # return EVERY completed agent (not just already_done snapshot)
+            if not ids:
+                with self._lock:
+                    all_completed = set(self._results_by_id.keys())
+                completed = all_completed
+            else:
+                completed = already_done
+                
+            if completed:
+                note = (f'{len(completed)} agent(s) already completed; '
                         f'returning their results immediately.')
             elif unknown:
                 note = (f'No matching agents — id(s) {sorted(unknown)} '
@@ -717,7 +950,7 @@ class MasterOrchestrator:
                 note = ('No agents currently running or pending — the swarm '
                         'has finished. Call spawn_agents to launch a new wave.')
             return self._build_await_response(
-                completed_ids=sorted(already_done),
+                completed_ids=sorted(completed),
                 still_running=[],
                 unknown=sorted(unknown),
                 mode=mode,
@@ -726,12 +959,28 @@ class MasterOrchestrator:
             )
 
         # ── Wait loop ──────────────────────────────────────────────────
+        # ``swarm_terminated`` distinguishes the two ways the loop can exit
+        # without the mode condition being met: a genuine wall-clock timeout
+        # (agents still in flight) vs. the swarm driver having already
+        # finished. The second case is the "panel shows done but await keeps
+        # spinning to the hard cap" desync: once the driver thread exits
+        # (``self._terminated``) NO agent can ever newly land in
+        # ``_results_by_id`` (e.g. specs that were cancel_pending'd on abort,
+        # or otherwise dropped by the scheduler), so blocking is pointless —
+        # those ids are stranded, not in-flight. Break immediately and report
+        # them as still_running with a clear, non-timeout note so the tool
+        # row stops spinning the instant the swarm is done, matching the
+        # panel's swarm_phase:complete sweep.
+        swarm_terminated = False
         while True:
             with self._lock:
                 done_now = set(self._results_by_id.keys())
                 if mode == 'any' and (already_done or (to_wait & done_now)):
                     break
                 if mode == 'all' and to_wait.issubset(done_now):
+                    break
+                if self._terminated:
+                    swarm_terminated = True
                     break
 
             remaining = deadline - time.monotonic()
@@ -748,13 +997,26 @@ class MasterOrchestrator:
             done_now = set(self._results_by_id.keys())
         completed_set = (already_done | (to_wait & done_now))
         still_running = sorted(to_wait - done_now)
+        terminated_note = ''
+        if swarm_terminated and still_running:
+            logger.info(
+                '[Master:%s] await_agents BREAK-ON-TERMINATED mode=%s — swarm '
+                'driver exited; %d stranded id(s) will never complete: %s',
+                self.task_id, mode, len(still_running), still_running)
+            terminated_note = (
+                f'The swarm has finished — {len(completed_set)} agent(s) '
+                f'completed, but {len(still_running)} requested agent(s) '
+                f'({", ".join(still_running)}) never produced a result '
+                f'(cancelled/aborted or dropped before running) and will NOT '
+                f'complete. Not waiting further. Re-spawn them with '
+                f'spawn_agents if you still need that work.')
         return self._build_await_response(
             completed_ids=sorted(completed_set),
             still_running=still_running,
             unknown=sorted(unknown),
             mode=mode,
             timed_out=timed_out,
-            note='',
+            note=terminated_note,
         )
 
     def _build_await_response(self, *, completed_ids: list[str],

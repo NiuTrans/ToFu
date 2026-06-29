@@ -377,7 +377,11 @@ class SSEAccumulator:
                         self.tool_calls_acc[idx]['id'] = tc['id']
                     fn = tc.get('function', {})
                     if fn.get('name'):
-                        self.tool_calls_acc[idx]['function']['name'] = fn['name']
+                        # Append (not overwrite) to match the main OpenAI path
+                        # in _handle_delta — a function name may stream across
+                        # multiple deltas; overwriting would keep only the last
+                        # fragment and produce a wrong tool name.
+                        self.tool_calls_acc[idx]['function']['name'] += fn['name']
                     if fn.get('arguments'):
                         self.tool_calls_acc[idx]['function']['arguments'] += fn['arguments']
             if t_chunk.get('usage'):

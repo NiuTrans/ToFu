@@ -54,6 +54,10 @@ _BACKEND_FILES = [
     'lib/scheduler/executor.py',
     'lib/artifacts/events.py',
     'lib/swarm/events.py',
+    # The SSE stream route itself authors the lifecycle snapshot/terminal
+    # events on (re)connect / cold replay (state, done, sse_timeout) — via the
+    # typed build_event chokepoint, so the contract guard must scan it too.
+    'routes/chat.py',
 ]
 
 # ``'type': 'X'`` strings that are NOT SSE events — message-content blocks

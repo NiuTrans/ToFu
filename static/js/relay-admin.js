@@ -23,6 +23,25 @@
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  // Defensive i18n shim. This file runs on the standalone /admin page,
+  // which loads i18n.js (so the global `t()` is normally present); the
+  // wrapper degrades gracefully to the raw key string if it is ever
+  // absent, rather than throwing a ReferenceError that would blank the
+  // whole admin UI.
+  /** @param {string} key @param {Object} [params] */
+  function _t(key, params) {
+    if (typeof t === 'function') return t(key, params);
+    var s = key;
+    if (params) {
+      for (var k in params) {
+        if (Object.prototype.hasOwnProperty.call(params, k)) {
+          s = s.replace(new RegExp('\\{' + k + '\\}', 'g'), params[k]);
+        }
+      }
+    }
+    return s;
+  }
+
   /** @param {any} micro @param {number} [precision] */
   function _fmtMicro(micro, precision) {
     return ((micro || 0) / 1_000_000).toFixed(precision == null ? 4 : precision);
@@ -85,17 +104,17 @@
       block.innerHTML = `
         <div class="settings-row" style="gap:8px; margin-bottom:12px;">
           <input type="text" id="newUserEmail" placeholder="email@example.com" class="settings-input" style="flex:1">
-          <input type="password" id="newUserPassword" placeholder="临时密码" class="settings-input" style="flex:1">
+          <input type="password" id="newUserPassword" placeholder="${_esc(_t('relayAdmin.pwPlaceholder'))}" class="settings-input" style="flex:1">
           <select id="newUserRole" class="settings-input">
             <option value="user">user</option>
             <option value="admin">admin</option>
           </select>
-          <button class="btn btn-primary btn-sm" onclick="relayAdminCreateUser()">创建</button>
+          <button class="btn btn-primary btn-sm" onclick="relayAdminCreateUser()">${_esc(_t('relayAdmin.create'))}</button>
         </div>
         <table class="settings-table">
           <thead><tr>
-            <th>邮箱</th><th>角色</th><th>状态</th>${bill ? '<th>余额</th>' : ''}
-            <th>注册时间</th><th>最近登录</th><th>操作</th>
+            <th>${_esc(_t('relayAdmin.colEmail'))}</th><th>${_esc(_t('relayAdmin.colRole'))}</th><th>${_esc(_t('relayAdmin.colStatus'))}</th>${bill ? '<th>' + _esc(_t('relayAdmin.colBalance')) + '</th>' : ''}
+            <th>${_esc(_t('relayAdmin.colCreated'))}</th><th>${_esc(_t('relayAdmin.colLastLogin'))}</th><th>${_esc(_t('relayAdmin.colActions'))}</th>
           </tr></thead>
           <tbody>${users.map(u => `
             <tr data-uid="${_esc(u.id)}">
@@ -106,12 +125,12 @@
               <td>${_esc(_fmtTime(u.created_at))}</td>
               <td>${_esc(_fmtTime(u.last_login_at))}</td>
               <td>
-                ${bill ? `<button class="btn btn-secondary btn-sm" onclick="relayAdminTopup('${_esc(u.id)}')">+充值</button>` : ''}
-                ${bill ? `<button class="btn btn-secondary btn-sm" onclick="relayAdminViewPayments('${_esc(u.id)}','${_esc(u.email)}')">支付</button>` : ''}
-                <button class="btn btn-secondary btn-sm" onclick="relayAdminToggleStatus('${_esc(u.id)}', '${_esc(u.status)}')">${u.status === 'active' ? '停用' : '启用'}</button>
+                ${bill ? `<button class="btn btn-secondary btn-sm" onclick="relayAdminTopup('${_esc(u.id)}')">${_esc(_t('relayAdmin.topup'))}</button>` : ''}
+                ${bill ? `<button class="btn btn-secondary btn-sm" onclick="relayAdminViewPayments('${_esc(u.id)}','${_esc(u.email)}')">${_esc(_t('relayAdmin.payments'))}</button>` : ''}
+                <button class="btn btn-secondary btn-sm" onclick="relayAdminToggleStatus('${_esc(u.id)}', '${_esc(u.status)}')">${u.status === 'active' ? _esc(_t('relayAdmin.disable')) : _esc(_t('relayAdmin.enable'))}</button>
               </td>
             </tr>
-            <tr class="pay-drill" data-drill="${_esc(u.id)}" style="display:none"><td colspan="${colspan}" style="background:var(--panel-2,#232a3a);padding:0;"></td></tr>`).join('') || `<tr><td colspan="${colspan}" style="text-align:center;opacity:0.5">还没有用户</td></tr>`}</tbody>
+            <tr class="pay-drill" data-drill="${_esc(u.id)}" style="display:none"><td colspan="${colspan}" style="background:var(--panel-2,#232a3a);padding:0;"></td></tr>`).join('') || `<tr><td colspan="${colspan}" style="text-align:center;opacity:0.5">${_esc(_t('relayAdmin.noUsers'))}</td></tr>`}</tbody>
         </table>`;
       // Lazy-load each user's balance (only in full-relay mode).
       if (bill) {
@@ -125,7 +144,7 @@
         }
       }
     } catch (e) {
-      block.innerHTML = '<span style="color:var(--accent-danger,#e25)">加载失败:' + _esc(e.message) + '</span>';
+      block.innerHTML = '<span style="color:var(--accent-danger,#e25)">' + _esc(_t('relayAdmin.loadFailed', { err: e.message })) + '</span>';
     }
   }
 
@@ -133,7 +152,7 @@
     const email = document.getElementById('newUserEmail').value.trim();
     const password = document.getElementById('newUserPassword').value;
     const role = document.getElementById('newUserRole').value;
-    if (!email || !password) { showAlert('需要邮箱和密码'); return; }
+    if (!email || !password) { showAlert(_t('relayAdmin.needEmailPw')); return; }
     try {
       await _api('/api/v1/users', {
         method: 'POST',
@@ -142,16 +161,16 @@
       document.getElementById('newUserEmail').value = '';
       document.getElementById('newUserPassword').value = '';
       refreshUsers();
-    } catch (e) { showAlert('创建失败:' + e.message); }
+    } catch (e) { showAlert(_t('relayAdmin.createFailed', { err: e.message })); }
   }
   window.relayAdminCreateUser = relayAdminCreateUser;
 
   async function relayAdminTopup(userId) {
-    const amt = await showPrompt('充值金额(credits,正数):', { defaultValue: '100' });
+    const amt = await showPrompt(_t('relayAdmin.topupAmount'), { defaultValue: '100' });
     if (!amt) return;
     const credits = parseFloat(String(amt));
-    if (!isFinite(credits) || credits <= 0) { showAlert('无效金额'); return; }
-    const note = await showPrompt('备注(可选):', { defaultValue: '管理员充值' });
+    if (!isFinite(credits) || credits <= 0) { showAlert(_t('relayAdmin.invalidAmount')); return; }
+    const note = await showPrompt(_t('relayAdmin.topupNote'), { defaultValue: _t('relayAdmin.topupNoteDefault') });
     try {
       await _api('/api/v1/billing/deposit', {
         method: 'POST',
@@ -163,7 +182,7 @@
         }),
       });
       refreshUsers();
-    } catch (e) { showAlert('充值失败:' + e.message); }
+    } catch (e) { showAlert(_t('relayAdmin.topupFailed', { err: e.message })); }
   }
   window.relayAdminTopup = relayAdminTopup;
 
@@ -178,18 +197,18 @@
       return;
     }
     drill.style.display = '';
-    cell.innerHTML = '<div style="padding:10px;opacity:.6;">加载支付记录…</div>';
+    cell.innerHTML = '<div style="padding:10px;opacity:.6;">' + _esc(_t('relayAdmin.loadingPayments')) + '</div>';
     try {
       const r = await _api('/api/v1/billing/payments?limit=100&user_id=' +
                             encodeURIComponent(userId));
       const payments = r.payments || [];
       cell.innerHTML = `
         <div style="padding:10px 14px;">
-          <strong>${_esc(email)}</strong> 的支付记录(${payments.length})
+          ${_esc(_t('relayAdmin.paymentsOf', { email: email, n: payments.length }))}
           <table class="settings-table" style="margin-top:6px;">
             <thead><tr>
-              <th>时间</th><th>提供商</th><th>金额</th><th>币种</th>
-              <th>入账</th><th>状态</th><th>外部 ID</th>
+              <th>${_esc(_t('relayAdmin.colTime'))}</th><th>${_esc(_t('relayAdmin.colProvider'))}</th><th>${_esc(_t('relayAdmin.colAmount'))}</th><th>${_esc(_t('relayAdmin.colCurrency'))}</th>
+              <th>${_esc(_t('relayAdmin.colCredited'))}</th><th>${_esc(_t('relayAdmin.colStatus'))}</th><th>${_esc(_t('relayAdmin.colExtId'))}</th>
             </tr></thead>
             <tbody>${payments.map(p => `
               <tr>
@@ -200,26 +219,26 @@
                 <td>${_fmtMicro(p.credit_micro)} c</td>
                 <td>${_esc(p.status)}</td>
                 <td><code style="font-size:11px;">${_esc(p.provider_id || '—')}</code></td>
-              </tr>`).join('') || '<tr><td colspan="7" style="text-align:center;opacity:0.5">无支付记录</td></tr>'}</tbody>
+              </tr>`).join('') || '<tr><td colspan="7" style="text-align:center;opacity:0.5">' + _esc(_t('relayAdmin.noPayments')) + '</td></tr>'}</tbody>
           </table>
         </div>`;
     } catch (e) {
-      cell.innerHTML = '<div style="padding:10px;color:var(--danger,#e25)">加载失败:' +
-        _esc(e.message) + '</div>';
+      cell.innerHTML = '<div style="padding:10px;color:var(--danger,#e25)">' +
+        _esc(_t('relayAdmin.loadFailed', { err: e.message })) + '</div>';
     }
   }
   window.relayAdminViewPayments = relayAdminViewPayments;
 
   async function relayAdminToggleStatus(userId, currentStatus) {
     const next = currentStatus === 'active' ? 'suspended' : 'active';
-    if (!await showConfirm(`将该用户改为 ${next}?`)) return;
+    if (!await showConfirm(_t('relayAdmin.toggleConfirm', { status: next }))) return;
     try {
       await _api('/api/v1/users/' + encodeURIComponent(userId), {
         method: 'PATCH',
         body: JSON.stringify({status: next}),
       });
       refreshUsers();
-    } catch (e) { showAlert('更新失败:' + e.message); }
+    } catch (e) { showAlert(_t('relayAdmin.updateFailed', { err: e.message })); }
   }
   window.relayAdminToggleStatus = relayAdminToggleStatus;
 
@@ -249,36 +268,34 @@
       };
       block.innerHTML = `
         <div class="settings-row" style="gap:8px;margin-bottom:8px;align-items:center;">
-          <label>默认利润率(%):</label>
+          <label>${_esc(_t('relayAdmin.marginLabel'))}</label>
           <input type="number" id="priceMargin" min="0" max="10000" step="1"
                  class="settings-input" style="width:100px" value="${(margin * 100)}">
-          <button class="btn btn-primary btn-sm" onclick="relayAdminSaveMargin()">保存利润率</button>
+          <button class="btn btn-primary btn-sm" onclick="relayAdminSaveMargin()">${_esc(_t('relayAdmin.saveMargin'))}</button>
         </div>
-        <span class="settings-desc" style="display:block;margin:0 0 12px;">基础价 × (1 + 利润率) = 客户最终价。这是本页唯一可调的计费旋钮。</span>
+        <span class="settings-desc" style="display:block;margin:0 0 12px;">${_esc(_t('relayAdmin.marginDesc'))}</span>
         <div id="pricingSaveResult"></div>
         <p class="settings-desc" style="margin:12px 0 6px;">
-          <strong>模型费率为只读。</strong>费率的唯一真实来源是 <code>lib/pricing.py</code>
-          (单一成本引擎 <code>lib.cost.compute_cost</code> 读取它,显示与扣费同源);
-          此处不再可编辑,以免出现第二份会漂移的费率表。如需改价请编辑 <code>lib/pricing.py</code>。
+          ${_t('relayAdmin.ratesReadonly')}
         </p>
         <table class="settings-table">
           <thead><tr>
-            <th>模型</th><th>输入(µ/Mtok)</th><th>输出(µ/Mtok)</th>
-            <th>缓存命中(µ/Mtok)</th><th>缓存写入(µ/Mtok)</th>
+            <th>${_esc(_t('relayAdmin.colModel'))}</th><th>${_esc(_t('relayAdmin.colInput'))}</th><th>${_esc(_t('relayAdmin.colOutput'))}</th>
+            <th>${_esc(_t('relayAdmin.colCacheHit'))}</th><th>${_esc(_t('relayAdmin.colCacheWrite'))}</th>
           </tr></thead>
           <tbody>
-            ${_roRow('default_model (兜底)', r.default_model || {})}
+            ${_roRow(_t('relayAdmin.defaultModelFallback'), r.default_model || {})}
             ${Object.entries(models).map(([n, p]) => _roRow(n, p)).join('')}
           </tbody>
         </table>`;
     } catch (e) {
-      block.innerHTML = '<span style="color:var(--accent-danger,#e25)">加载失败:' + _esc(e.message) + '</span>';
+      block.innerHTML = '<span style="color:var(--accent-danger,#e25)">' + _esc(_t('relayAdmin.loadFailed', { err: e.message })) + '</span>';
     }
   }
 
   async function relayAdminSaveMargin() {
     const marginPct = parseFloat(document.getElementById('priceMargin').value);
-    if (!isFinite(marginPct) || marginPct < 0) { showAlert('利润率无效'); return; }
+    if (!isFinite(marginPct) || marginPct < 0) { showAlert(_t('relayAdmin.invalidMargin')); return; }
     const div = document.getElementById('pricingSaveResult');
     try {
       await _api('/api/v1/billing/pricing', {
@@ -286,10 +303,10 @@
         body: JSON.stringify({ default_margin: marginPct / 100 }),
       });
       if (div) div.innerHTML = '<p style="color:var(--accent,#5a8);margin:8px 0 0;">' +
-        '利润率已保存并热重载。</p>';
+        _esc(_t('relayAdmin.marginSaved')) + '</p>';
     } catch (e) {
-      if (div) div.innerHTML = '<p style="color:var(--danger,#e25);margin:8px 0 0;">保存失败:' +
-        _esc(e.message) + '</p>';
+      if (div) div.innerHTML = '<p style="color:var(--danger,#e25);margin:8px 0 0;">' +
+        _esc(_t('relayAdmin.saveFailed', { err: e.message })) + '</p>';
     }
   }
   window.relayAdminSaveMargin = relayAdminSaveMargin;
@@ -304,17 +321,17 @@
       const codes = r.codes || [];
       block.innerHTML = `
         <div class="settings-row" style="gap:8px; margin-bottom:12px; flex-wrap:wrap;">
-          <input type="number" id="codeBatchCount" min="1" max="1000" value="10" class="settings-input" style="width:80px" placeholder="个数">
-          <input type="number" id="codeBatchAmount" min="1" value="100" class="settings-input" style="width:120px" placeholder="单张金额(credits)">
-          <input type="number" id="codeExpiresIn" min="0" max="365" value="30" class="settings-input" style="width:100px" placeholder="N 天后过期">
-          <input type="text" id="codeBatchName" class="settings-input" style="flex:1" placeholder="批次名(可选)">
-          <button class="btn btn-primary btn-sm" onclick="relayAdminMintCodes()">生成</button>
+          <input type="number" id="codeBatchCount" min="1" max="1000" value="10" class="settings-input" style="width:80px" placeholder="${_esc(_t('relayAdmin.codeCountPh'))}">
+          <input type="number" id="codeBatchAmount" min="1" value="100" class="settings-input" style="width:120px" placeholder="${_esc(_t('relayAdmin.codeAmountPh'))}">
+          <input type="number" id="codeExpiresIn" min="0" max="365" value="30" class="settings-input" style="width:100px" placeholder="${_esc(_t('relayAdmin.codeExpiresPh'))}">
+          <input type="text" id="codeBatchName" class="settings-input" style="flex:1" placeholder="${_esc(_t('relayAdmin.codeBatchPh'))}">
+          <button class="btn btn-primary btn-sm" onclick="relayAdminMintCodes()">${_esc(_t('relayAdmin.generate'))}</button>
         </div>
         <div id="mintResult"></div>
         <table class="settings-table" style="margin-top:14px;">
           <thead><tr>
-            <th>代码</th><th>金额</th><th>批次</th><th>创建时间</th>
-            <th>状态</th><th>使用人</th>
+            <th>${_esc(_t('relayAdmin.colCode'))}</th><th>${_esc(_t('relayAdmin.colAmount'))}</th><th>${_esc(_t('relayAdmin.colBatch'))}</th><th>${_esc(_t('relayAdmin.colCreated'))}</th>
+            <th>${_esc(_t('relayAdmin.colStatus'))}</th><th>${_esc(_t('relayAdmin.colRedeemer'))}</th>
           </tr></thead>
           <tbody>${codes.map(c => `
             <tr>
@@ -322,12 +339,12 @@
               <td>${_fmtMicro(c.amount_micro)} c</td>
               <td>${_esc(c.batch || '—')}</td>
               <td>${_esc(_fmtTime(c.created_at))}</td>
-              <td>${c.redeemed_by ? '已使用' : '未使用'}</td>
+              <td>${c.redeemed_by ? _esc(_t('relayAdmin.codeRedeemed')) : _esc(_t('relayAdmin.codeUnredeemed'))}</td>
               <td>${_esc(c.redeemed_by || '—')}</td>
-            </tr>`).join('') || '<tr><td colspan="6" style="text-align:center;opacity:0.5">还没有兑换码</td></tr>'}</tbody>
+            </tr>`).join('') || '<tr><td colspan="6" style="text-align:center;opacity:0.5">' + _esc(_t('relayAdmin.noCodes')) + '</td></tr>'}</tbody>
         </table>`;
     } catch (e) {
-      block.innerHTML = '<span style="color:var(--accent-danger,#e25)">加载失败:' + _esc(e.message) + '</span>';
+      block.innerHTML = '<span style="color:var(--accent-danger,#e25)">' + _esc(_t('relayAdmin.loadFailed', { err: e.message })) + '</span>';
     }
   }
 
@@ -338,7 +355,7 @@
     const batch = document.getElementById('codeBatchName').value.trim();
     if (!isFinite(count) || count < 1 ||
         !isFinite(amount) || amount <= 0) {
-      showAlert('参数无效'); return;
+      showAlert(_t('relayAdmin.invalidParams')); return;
     }
     try {
       const r = await _api('/api/v1/billing/redeem-codes', {
@@ -352,13 +369,13 @@
       const text = (r.codes || []).join('\n');
       div.innerHTML = `
         <div style="margin-top:8px;padding:10px;background:rgba(80,180,160,0.06);border-left:3px solid var(--accent,#5a8);">
-          <div style="margin-bottom:6px;">已生成 <strong>${r.codes.length}</strong> 张兑换码,每张 ${_fmtMicro(r.amount_micro)} credits。
-            <button class="btn btn-secondary btn-sm" onclick="navigator.clipboard.writeText(this.parentNode.querySelector('pre').textContent)">复制全部</button>
+          <div style="margin-bottom:6px;">${_t('relayAdmin.codesGenerated', { n: r.codes.length, amount: _fmtMicro(r.amount_micro) })}
+            <button class="btn btn-secondary btn-sm" onclick="navigator.clipboard.writeText(this.parentNode.querySelector('pre').textContent)">${_esc(_t('relayAdmin.copyAll'))}</button>
           </div>
           <pre style="font-family:monospace;font-size:12px;background:#000;color:#9f9;padding:8px;border-radius:4px;max-height:200px;overflow:auto;">${_esc(text)}</pre>
         </div>`;
       refreshCodes();
-    } catch (e) { showAlert('生成失败:' + e.message); }
+    } catch (e) { showAlert(_t('relayAdmin.generateFailed', { err: e.message })); }
   }
   window.relayAdminMintCodes = relayAdminMintCodes;
 
@@ -375,11 +392,11 @@
       const r = await _api('/api/v1/billing/payments?limit=100');
       const payments = r.payments || [];
       block.innerHTML = `
-        <p class="settings-desc">显示当前管理员账号的支付记录。如需查看某个用户的支付记录,请在「用户」标签页中筛选(规划中)。</p>
+        <p class="settings-desc">${_esc(_t('relayAdmin.paymentsDesc'))}</p>
         <table class="settings-table">
           <thead><tr>
-            <th>时间</th><th>提供商</th><th>金额</th><th>币种</th>
-            <th>入账</th><th>状态</th><th>外部 ID</th>
+            <th>${_esc(_t('relayAdmin.colTime'))}</th><th>${_esc(_t('relayAdmin.colProvider'))}</th><th>${_esc(_t('relayAdmin.colAmount'))}</th><th>${_esc(_t('relayAdmin.colCurrency'))}</th>
+            <th>${_esc(_t('relayAdmin.colCredited'))}</th><th>${_esc(_t('relayAdmin.colStatus'))}</th><th>${_esc(_t('relayAdmin.colExtId'))}</th>
           </tr></thead>
           <tbody>${payments.map(p => `
             <tr>
@@ -390,10 +407,10 @@
               <td>${_fmtMicro(p.credit_micro)} c</td>
               <td>${_esc(p.status)}</td>
               <td><code style="font-size:11px;">${_esc(p.provider_id || '—')}</code></td>
-            </tr>`).join('') || '<tr><td colspan="7" style="text-align:center;opacity:0.5">还没有支付记录</td></tr>'}</tbody>
+            </tr>`).join('') || '<tr><td colspan="7" style="text-align:center;opacity:0.5">' + _esc(_t('relayAdmin.noPaymentsYet')) + '</td></tr>'}</tbody>
         </table>`;
     } catch (e) {
-      block.innerHTML = '<span style="color:var(--accent-danger,#e25)">加载失败:' + _esc(e.message) + '</span>';
+      block.innerHTML = '<span style="color:var(--accent-danger,#e25)">' + _esc(_t('relayAdmin.loadFailed', { err: e.message })) + '</span>';
     }
   }
 
@@ -467,12 +484,10 @@
       if (txt) {
         const parts = [];
         if (!_modelRelayEnabled) {
-          parts.push('BYO-only：用户必须使用各自注册的模型端点（' +
-            '<code>/api/v1/providers</code> → <code>agents:run</code>），' +
-            '新发放的密钥不含 <code>chat</code> 权限，无法访问平台模型池。');
+          parts.push(_t('relayAdmin.bannerByoOnly'));
         }
         if (!_billingEnabled) {
-          parts.push('未计费：平台不收取费用，「定价 / 兑换码 / 支付」已隐藏。');
+          parts.push(_t('relayAdmin.bannerNoBilling'));
         }
         txt.innerHTML = parts.join(' ');
       }

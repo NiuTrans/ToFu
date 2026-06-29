@@ -134,6 +134,7 @@ class EventType:
     MEMORY_PREFETCH = 'memory_prefetch'
     PREFERENCES_APPLIED = 'preferences_applied'
     PREFERENCE_LEARNED = 'preference_learned'
+    RELATED_CONVERSATIONS = 'related_conversations'
     PROJECT_EXTERNAL_EDIT = 'project_external_edit'
     WORKSPACE_ROOT_ADDED = 'workspace_root_added'
     # ── interaction (require client response) ──
@@ -173,10 +174,17 @@ _C = EventCategory
 _SPECS: tuple[EventSpec, ...] = (
     # ───────────────────────── lifecycle ─────────────────────────
     EventSpec(EventType.STATE, _C.LIFECYCLE,
-              'Full task state snapshot — emitted first on (re)connect so a '
-              'client can rebuild UI from cold; carries messages + searchRounds.',
-              fields={'messages': 'full message list', 'searchRounds': 'tool rounds',
-                      'status': 'task status'}),
+              'Full task state snapshot — emitted first on (re)connect / cold '
+              'replay so a client can rebuild the live assistant bubble without '
+              'recomputing it: carries the authoritative content, thinking, '
+              'tool rounds and terminal status.',
+              fields={'content': 'assistant text so far',
+                      'thinking': 'reasoning text so far',
+                      'status': 'task status (running|done|error|aborted)',
+                      'toolRounds': 'authoritative tool-round list (status per round)',
+                      'error': '(optional) error envelope',
+                      'finishReason': '(optional) terminal finish reason',
+                      'usage': '(optional) token usage', 'model': '(optional) model id'}),
     EventSpec(EventType.PHASE, _C.LIFECYCLE,
               'Progress / status hint for the current turn.',
               fields={'phase': "phase key (llm_thinking|tool_exec|retrying|working|…)",
@@ -261,6 +269,16 @@ _SPECS: tuple[EventSpec, ...] = (
                       'summary': 'one-line description of what was learned',
                       'pending': 'true when awaiting user confirm (new pref)',
                       'id': 'pending proposal id (empty for auto-reinforced)'}),
+    EventSpec(EventType.RELATED_CONVERSATIONS, _C.CONTEXT,
+              'The bounded cross-conversation project digest (sibling '
+              'conversations of the same project) was injected into this turn '
+              'for ambient awareness. Drives a quiet "related conversations" '
+              'provenance segment so the user can see — and audit — the same '
+              'siblings the model was told about.',
+              fields={'count': 'number of siblings surfaced',
+                      'items': 'list of {id, title, summary}',
+                      'toolsAvailable': 'whether get_conversation/'
+                                        'list_conversations were registered this turn'}),
     EventSpec(EventType.PROJECT_EXTERNAL_EDIT, _C.CONTEXT,
               'A project file changed on disk outside the agent (drift notice).',
               fields={'path': 'file path', 'action': 'create|modify|delete'}),

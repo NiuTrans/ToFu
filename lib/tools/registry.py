@@ -89,12 +89,21 @@ _multiroot_sticky: set[str] = set()
 _multiroot_sticky_lock = threading.Lock()
 
 
-def mark_multiroot_sticky(conv_id: str) -> None:
-    """Latch *conv_id* as multi-root for the rest of the conversation."""
+def mark_multiroot_sticky(conv_id: str) -> bool:
+    """Latch *conv_id* as multi-root for the rest of the conversation.
+
+    Returns ``True`` only on the OFF→ON transition (the first time this
+    conversation is marked multi-root), ``False`` if it was already sticky.
+    Callers use the transition signal to re-establish the tool-schema latch
+    exactly once — see :meth:`ToolContext.multiroot_active`.
+    """
     if not conv_id:
-        return
+        return False
     with _multiroot_sticky_lock:
+        if conv_id in _multiroot_sticky:
+            return False
         _multiroot_sticky.add(conv_id)
+        return True
 
 
 def is_multiroot_sticky(conv_id: str) -> bool:
@@ -168,6 +177,49 @@ def _hash_tool_list(tool_list: list[dict]) -> str:
     return hashlib.md5(blob.encode('utf-8', errors='replace')).hexdigest()
 
 
+def _diagnose_byte_drift(snapshot: list[dict], fresh: list[dict]) -> str:
+    """Describe the FIRST tool whose bytes differ between two same-name lists.
+
+    Called only when the latch flags a divergence but the set of tool NAMES is
+    unchanged — i.e. a tool's *content* or the list *order* drifted. Returns a
+    short human string naming the offending tool + which field changed
+    (``position`` / ``description`` / ``parameters``), with values truncated
+    per CLAUDE.md §2.6 so the log line stays grep-able and bounded. Returns
+    ``''`` when no positional difference is found (e.g. a pure re-order that
+    the name-set view already collapsed).
+    """
+    import json
+
+    def _fn(t: dict) -> dict:
+        try:
+            return t.get('function') or {}
+        except AttributeError:
+            return {}
+
+    def _trunc(s: str, n: int = 240) -> str:
+        s = str(s)
+        return s if len(s) <= n else s[:n] + f'…(+{len(s) - n} chars)'
+
+    for i, (a, b) in enumerate(zip(snapshot, fresh)):
+        fa, fb = _fn(a), _fn(b)
+        na, nb = fa.get('name'), fb.get('name')
+        if na != nb:
+            return f'position {i}: frozen={na!r} fresh={nb!r} (tool order changed)'
+        da, db = fa.get('description', ''), fb.get('description', '')
+        if da != db:
+            return (f'tool={na!r} field=description '
+                    f'frozen={_trunc(da)!r} fresh={_trunc(db)!r}')
+        pa = json.dumps(fa.get('parameters'), sort_keys=True, ensure_ascii=False)
+        pb = json.dumps(fb.get('parameters'), sort_keys=True, ensure_ascii=False)
+        if pa != pb:
+            return (f'tool={na!r} field=parameters '
+                    f'frozen={_trunc(pa, 320)} fresh={_trunc(pb, 320)}')
+    if len(snapshot) != len(fresh):
+        return (f'length changed: frozen={len(snapshot)} fresh={len(fresh)} '
+                '(same names, different count — duplicate?)')
+    return ''
+
+
 def latch_tool_list(conv_id: str,
                     fresh: list[dict] | None) -> tuple[list[dict] | None, bool]:
     """Freeze the tool list for a conversation; return ``(effective, diverged)``.
@@ -199,10 +251,23 @@ def latch_tool_list(conv_id: str,
         if diverged:
             frozen_names = set(_tool_names(snapshot))
             fresh_names = set(_tool_names(fresh_list))
-            _tool_latch_diff[conv_id] = {
-                'added': sorted(fresh_names - frozen_names),
-                'removed': sorted(frozen_names - fresh_names),
-            }
+            added = sorted(fresh_names - frozen_names)
+            removed = sorted(frozen_names - fresh_names)
+            _tool_latch_diff[conv_id] = {'added': added, 'removed': removed}
+            # Empty name-diff but bytes changed → a tool's CONTENT or the list
+            # ORDER drifted (e.g. an MCP server emitting a non-deterministic
+            # schema). Pinpoint the first offending tool+field so we can tell a
+            # spurious flap from a legitimate change instead of just showing a
+            # generic banner. Guarded to this case so the common toggle path
+            # pays nothing.
+            if not added and not removed:
+                try:
+                    detail = _diagnose_byte_drift(snapshot, fresh_list)
+                except Exception as e:
+                    detail = f'(drift diagnosis failed: {e})'
+                logger.warning('[ToolLatch] conv=%s diverged with EMPTY '
+                               'name-diff (byte-level schema drift) — %s',
+                               conv_id[:8], detail or '(no positional diff found)')
         else:
             _tool_latch_diff.pop(conv_id, None)
         # Return the frozen snapshot (copy so callers can't mutate the latch).
@@ -381,7 +446,20 @@ class ToolContext:
             # Stateless assembly (tests / compat adapters): no latch.
             return live
         if live:
-            mark_multiroot_sticky(self.conv_id)
+            # Going multi-root is a LEGITIMATE one-time schema change: the
+            # model in THIS conversation needs the ``rootname:`` path hint
+            # immediately. On the OFF→ON transition, re-establish the
+            # tool-schema latch so the next assembly (this same round, since
+            # multiroot_active is read before latch_tool_list) re-freezes the
+            # snapshot WITH the hint — one deliberate cache rebuild, then
+            # byte-stable again, and no permanent phantom empty-name-diff
+            # divergence. Mirrors the clear_all_tool_list_latches MCP-mutation
+            # precedent. Idempotent: only the first mark fires the clear.
+            if mark_multiroot_sticky(self.conv_id):
+                clear_tool_list_latch(self.conv_id)
+                logger.info('[ToolLatch] conv=%s went multi-root — cleared '
+                            'tool-schema latch so the rootname hint re-freezes '
+                            '(one-time cache rebuild)', self.conv_id[:8])
             return True
         return is_multiroot_sticky(self.conv_id)
 

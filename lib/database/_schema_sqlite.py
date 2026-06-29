@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 #  Schema Version Cache — Skip redundant DDL on subsequent startups
 # ═══════════════════════════════════════════════════════════════════════
 
-_SCHEMA_VERSION = 29  # Increment when tables/columns/indexes change
+_SCHEMA_VERSION = 30  # Increment when tables/columns/indexes change
 
 
 def _column_exists(conn, table, column):
@@ -31,6 +31,13 @@ def _table_exists(conn, table):
     cur = conn._conn.cursor()
     cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,))
     return cur.fetchone() is not None
+
+
+def _count_rows(conn, table):
+    """Return the row count of a table (orphan-heal row guard)."""
+    cur = conn._conn.cursor()
+    cur.execute(f'SELECT count(*) FROM {table}')
+    return int(cur.fetchone()[0])
 
 
 def _read_meta(conn, key):
@@ -549,6 +556,11 @@ def _init_system_schema(conn):
     cur.execute('CREATE INDEX IF NOT EXISTS idx_ledger_user_ts ON billing_ledger(user_id, ts DESC)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_ledger_ref ON billing_ledger(ref_type, ref_id)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_ledger_kind ON billing_ledger(kind)')
+    # Partial index serving the reserve-reclaim janitor's GROUP BY (user_id,
+    # ref_id) over only reserve-type rows — keeps the 5-minute sweep off a
+    # full scan of the append-only, ever-growing ledger.
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ledger_reserve_sweep "
+                "ON billing_ledger(user_id, ref_id) WHERE ref_type = 'reserve'")
 
     # billing_wallets + billing_redeem_codes: migrated onto Core.
     from lib.database._core_schema import (
@@ -598,6 +610,12 @@ def init_db(_new_connection):
     conn = None
     try:
         conn = _new_connection()
+
+        # ── Self-heal orphan tables (runs BEFORE the version fast-path so
+        #    already-current deployments still converge). Drops tables left by
+        #    removed subsystems / leaked tests that have no Core definition.
+        from lib.database._orphan_heal import heal_orphan_tables
+        heal_orphan_tables(conn, table_exists=_table_exists, count_rows=_count_rows)
 
         # ── Fast path: version AND optional-domain set both unchanged.
         #    The domain set is part of the cache key so enabling a new domain

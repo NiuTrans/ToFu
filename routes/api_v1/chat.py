@@ -414,7 +414,8 @@ async def chat_completions():
     # billed/reported, not hidden.
     _translate_usage = None
     _translate_original = None
-    if cfg.get('autoTranslate'):
+    from lib.conv_config import resolve_auto_translate
+    if resolve_auto_translate(cfg):
         from lib.chat.turn_builder import translate_user_text_to_english
         for _m in reversed(messages):
             if _m.get('role') == 'user' and isinstance(_m.get('content'), str):

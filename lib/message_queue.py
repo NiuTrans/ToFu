@@ -396,7 +396,8 @@ def dispatch_next_queued(conv_id: str) -> str | None:
             # Legacy path: message was enqueued via /api/chat/queue (old API).
             # Need to translate and append to conversation ourselves.
             import re
-            auto_translate = config.get('autoTranslate', False)
+            from lib.conv_config import resolve_auto_translate
+            auto_translate = resolve_auto_translate(config)
             has_chinese = bool(re.search(r'[\u4e00-\u9fff\u3400-\u4dbf]', text)) if text else False
             translated_text = text
             _translate_model = None

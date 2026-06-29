@@ -24,6 +24,16 @@ async function startAssistantResponse(convId) {
   }
   /* ★ Use per-conv model — config.model is global and may reflect a different conv */
   const _convModel = (convId === activeConvId) ? (config.model || serverModel) : (conv.model || serverModel);
+  /* ★ Mint the assistant message's stable id BEFORE the POST (same as the send
+   *   / regenerate paths) so live per-round translation frames route to THIS
+   *   bubble while it streams — it has no DB index yet. Shipped to the backend
+   *   via config.assistantMsgId below; create_task copies it to
+   *   task['_assistantMsgId']. Reused on the assistantMsg object + stamped on
+   *   the bubble (data-msg-id) so the in-stream preview and the final committed
+   *   translation address the same message. */
+  const _saMsgId = (typeof _newClientMsgId === 'function')
+    ? _newClientMsgId()
+    : ('tmp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
   const assistantMsg = {
     role: "assistant",
     content: "",
@@ -31,8 +41,9 @@ async function startAssistantResponse(convId) {
     timestamp: Date.now(),
     toolRounds: [],
     model: _convModel,
+    _msgId: _saMsgId,
   };
-  _ensureMsgId(assistantMsg);
+  _ensureMsgId(assistantMsg);  // no-op when _msgId already set
   conv.messages.push(assistantMsg);
   if (activeConvId === convId) {
     const inner = document.getElementById("chatInner");
@@ -43,7 +54,7 @@ async function startAssistantResponse(convId) {
       const _isEndpoint = (convId === activeConvId) ? endpointEnabled : (!!conv.endpointEnabled);
       if (_isEndpoint) assistantMsg._isEndpointPlanner = true;
       const role = _isEndpoint ? 'planner' : 'worker';
-      inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(role));
+      inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(role, null, null, _saMsgId));
       const el = document.getElementById('streaming-msg');
       if (el) {
         el.classList.add('message-new');
@@ -72,6 +83,11 @@ async function startAssistantResponse(convId) {
    * Case E orphan recovery. sendMessage and regenerateFromUser use the
    * atomic /api/chat/send and /api/chat/regenerate endpoints instead. */
   const baseConfig = await _buildConvConfig(conv);
+  /* ★ Ship the assistant msg id minted above so the backend stamps it on the
+   *   task (task['_assistantMsgId']) → live per-round translation frames route
+   *   to the streaming bubble. Endpoint mode ignores it (its own translate
+   *   path), so this is harmless when _ep is true. */
+  baseConfig.assistantMsgId = _saMsgId;
   const _ep = !!baseConfig.endpointMode;
   const _pp = baseConfig.projectPath;
   /* Decide API route: endpoint mode uses /api/v1/endpoint/start */
@@ -368,6 +384,18 @@ async function sendMessage() {
   // ── Atomic backend call: message creation + translate + task start ──
   const _sendConfig = await _buildConvConfig(conv);
 
+  // ★ Mint the assistant message's stable id BEFORE the POST and ship it to
+  //   the backend (config.assistantMsgId). The server stamps it on the task
+  //   (task['_assistantMsgId']) so live per-round translation frames route to
+  //   THIS message while it's still streaming (it has no DB index yet), and
+  //   the streaming bubble is stamped with the same data-msg-id below. Reused
+  //   verbatim for the assistantMsg object so the in-stream preview and the
+  //   final committed translation address the same message.
+  const _assistantMsgId = (typeof _newClientMsgId === 'function')
+    ? _newClientMsgId()
+    : ('tmp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
+  _sendConfig.assistantMsgId = _assistantMsgId;
+
   // ★ If autoTranslate is on and text has Chinese, show stop button immediately
   //   so the user can abort during server-side translation.
   // ★ Safety timer must comfortably exceed the backend translate cap
@@ -477,10 +505,14 @@ async function sendMessage() {
       role: "assistant", content: "", thinking: "",
       timestamp: Date.now(), toolRounds: [],
       model: _sendConfig.model || serverModel,
+      // ★ Same id we minted + shipped in config.assistantMsgId, so the live
+      //   per-round translation preview (routed by this id) lands on this
+      //   exact message object.
+      _msgId: _assistantMsgId,
     };
     // ★ Endpoint mode: mark as planner so SSE reconnection identifies it correctly
     if (_sendConfig.endpointMode) assistantMsg._isEndpointPlanner = true;
-    _ensureMsgId(assistantMsg);
+    _ensureMsgId(assistantMsg);  // no-op when _msgId already set
     conv.messages.push(assistantMsg);
     conv.activeTaskId = taskId;
     saveConversations(convId);
@@ -499,7 +531,7 @@ async function sendMessage() {
 
     if (activeConvId === convId) {
       _removeTranslatingBubble();
-      _renderStreamingBubble(conv, _sendConfig);
+      _renderStreamingBubble(conv, _sendConfig, _assistantMsgId);
     }
     buildTurnNav(conv);
     connectToTask(convId, taskId);

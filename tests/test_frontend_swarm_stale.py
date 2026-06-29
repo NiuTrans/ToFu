@@ -59,6 +59,7 @@ win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 win._TOOL_DISPLAY = global._TOOL_DISPLAY = {};
 
+eval(fs.readFileSync(process.argv[4], 'utf8'));  // ui/streaming_swarm_panel.js (swarm builders moved here 2026-06-27)
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // ui/streaming_ui.js
 
 const out = [];
@@ -153,6 +154,7 @@ def test_swarm_stale_panel_guard_and_reconcile():
             ['node', harness,
              os.path.join(JS_DIR, 'ui', 'streaming_ui.js'),   # argv[2]
              ROOT,                                            # argv[3]
+             os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js'),  # argv[4]
              ],
             capture_output=True, text=True, timeout=60,
         )

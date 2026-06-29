@@ -617,7 +617,18 @@ function _restoreConvToolState(conv) {
     document.querySelectorAll('#igResolutionBar .ig-pill').forEach(b =>
       b.classList.toggle('active', b.dataset.res === _igSelectedResolution));
   }
-  _applyAutoTranslateUI(conv.autoTranslate !== undefined ? !!conv.autoTranslate : true);
+  /* ★ Auto-translate toggle: restore the per-conv frozen value, BUT never pull
+   *   a live global-ON down to a conv that was frozen OFF — otherwise opening
+   *   an old conversation silently turns the user's global "auto-translate on"
+   *   off, and the on-open retro-translate (convAutoTranslateEffective, which
+   *   reads this same global) never fires. When the global is ON we keep it ON;
+   *   the per-conv freeze still governs the in-flight send path via
+   *   convAutoTranslate. */
+  if (typeof autoTranslate !== 'undefined' && autoTranslate) {
+    _applyAutoTranslateUI(true);
+  } else {
+    _applyAutoTranslateUI(convAutoTranslate(conv));
+  }
   if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
   if (typeof updateContextBar === 'function') updateContextBar();
   /* ★ Reflow toolbar after restoring conv tool state (toolbar width may differ). */
@@ -638,7 +649,7 @@ function _resetToolsToDefaults() {
   _applyImageGenToolUI(false);
   _applyImageGenUI(false);
   if (typeof paperMode !== 'undefined' && paperMode && typeof exitPaperMode === 'function') exitPaperMode();
-  _applyAutoTranslateUI(true);
+  _applyAutoTranslateUI(convAutoTranslate(null));
   /* ★ Reset image gen creative mode settings to defaults */
   _igSelectedAspect = '1:1';
   _igSelectedResolution = '1K';

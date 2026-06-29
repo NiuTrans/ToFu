@@ -14,21 +14,17 @@
 //   the API key that served each round, and the cache-invalidation reason.
 // ═══════════════════════════════════════════════════════════════════
 
-// Human-friendly labels for the cache-break reason keys stamped by the
-// backend (lib/tasks_pkg/cache_tracking.detect_cache_break).
-const _CACHE_BREAK_LABELS = {
-  system_prompt: 'System prompt 改变',
-  tools: '工具定义改变',
-  model: '模型切换',
-  message_count: '上下文压缩',
-  server_side: '服务端缓存失效',
-  no_cache_reuse: '上下文重新计费（缓存未复用）',
-  // Keep this label SHORT — _cacheBreakReason renders it as `label（cause）`,
-  // and the backend cause_str already spells out "非幂等编辑 → 整段上下文重新计费".
-  // A long label here would duplicate that detail. This is the most ACTIONABLE
-  // break: our own code rewrote bytes inside the cached prefix.
-  prefix_mutation: '缓存前缀被改写',
-};
+// Known cache-break reason keys stamped by the backend
+// (lib/tasks_pkg/cache_tracking.detect_cache_break). The human-readable label
+// for each resolves at render time via t('finishInfo.cb.<key>') so it follows
+// the current UI language (zh/en). Membership in this Set is the "is this a
+// known flag key?" predicate used by _cacheBreakReason. server_side /
+// no_cache_reuse / prefix_mutation carry a descriptive backend value that we
+// render verbatim (translated) instead of a fixed label.
+const _CACHE_BREAK_KEYS = new Set([
+  'system_prompt', 'tools', 'model', 'message_count',
+  'server_side', 'no_cache_reuse', 'prefix_mutation',
+]);
 
 // The backend's free-form `cause_str` (server_side / no_cache_reuse value) is
 // English — translate the known fragments to Chinese so the popover reads
@@ -78,9 +74,17 @@ const _CACHE_CAUSE_PHRASES = [
   ['prefix not reused', '前缀未被复用'],
 ];
 
-/** Translate a backend cause string's known English fragments to Chinese. */
+/** Resolve a backend cause string to the CURRENT UI language.
+ *
+ * The backend (lib/tasks_pkg/cache_tracking) emits the cause as free-form
+ * ENGLISH. On an English UI we therefore return it verbatim; on a Chinese UI
+ * we substring-rewrite the known English fragments to their Chinese
+ * equivalents (_CACHE_CAUSE_PHRASES). The phrase map is the 'zh' side of the
+ * translation — it is applied ONLY on the zh path so an English string is
+ * never wrongly Sinicized. */
 function _translateCacheCause(s) {
   let out = String(s || '');
+  if (_i18nLang !== 'zh') return out;  // English UI: backend string is already English
   for (const [en, zh] of _CACHE_CAUSE_PHRASES) {
     if (out.includes(en)) out = out.split(en).join(zh);
   }
@@ -92,27 +96,39 @@ function _translateCacheCause(s) {
 const _CP_KEY_SVG = '<svg class="cp-ico" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3 21 2"/><path d="m16 6 3 3"/><path d="m13 9 3 3"/></svg>';
 const _CP_WARN_SVG = '<svg class="cp-ico" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
 
-/** Render the human-readable cache-break reason for one round, or ''. */
+/** Render the human-readable cache-break reason for one round, or ''.
+ *
+ * Display-only: the backend (lib/tasks_pkg/cache_tracking) is the single
+ * source of truth for the CAUSE. For keys that carry a descriptive value
+ * (server_side / no_cache_reuse / prefix_mutation) we render that backend
+ * cause VERBATIM (translated word-for-word) and do NOT prepend a fixed
+ * Chinese label — a hard label like '服务端缓存失效' used to CONTRADICT a
+ * cause string that says eviction is unlikely. Flag-only keys
+ * (system_prompt / tools / model / message_count) keep their concrete
+ * label since the backend sends no free-form text for them. */
 function _cacheBreakReason(cb) {
   if (!cb || typeof cb !== 'object') return '';
   const bits = [];
   for (const k of Object.keys(cb)) {
-    const label = _CACHE_BREAK_LABELS[k] || k;
     const val = cb[k];
-    // server_side / no_cache_reuse / model carry a descriptive value;
-    // the others are flags. server_side / no_cache_reuse values are
-    // free-form English from the backend — translate the known fragments.
     if (k === 'server_side' || k === 'no_cache_reuse' || k === 'prefix_mutation') {
-      bits.push(`${label}（${escapeHtml(_translateCacheCause(val))}）`);
+      // Render the backend's own cause string verbatim (translated). No
+      // fixed label that could contradict it.
+      if (val) bits.push(escapeHtml(_translateCacheCause(val)));
     } else if (k === 'model' || k === 'message_count') {
-      bits.push(`${label}（${escapeHtml(String(val))}）`);
+      bits.push(t('finishInfo.cbWithVal', { label: t('finishInfo.cb.' + k), val: escapeHtml(String(val)) }));
     } else if (k === 'tools' && typeof val === 'string' && val.includes('changed:')) {
-      bits.push(`${label}: ${escapeHtml(val.replace('changed:', '').trim())}`);
-    } else {
-      bits.push(label);
+      bits.push(`${t('finishInfo.cb.tools')}: ${escapeHtml(val.replace('changed:', '').trim())}`);
+    } else if (_CACHE_BREAK_KEYS.has(k)) {
+      bits.push(t('finishInfo.cb.' + k));
+    } else if (typeof val === 'string' && val) {
+      // Unknown/future key: show the backend value verbatim rather than
+      // fabricating a label from the raw dict key.
+      bits.push(escapeHtml(_translateCacheCause(val)));
     }
+    // Unknown key with no descriptive value → omit (don't invent a cause).
   }
-  return bits.join('，');
+  return bits.join(t('finishInfo.listSep'));
 }
 
 /**
@@ -129,7 +145,7 @@ function _buildCostPopover(ctx) {
 
   // ── Per-round breakdown table ──
   if (numRounds > 1) {
-    html += `<div class="cp-section-title">${escapeHtml(numRounds + '')} 轮 API 调用</div>`;
+    html += `<div class="cp-section-title">${escapeHtml(t('finishInfo.apiRoundsTitle', { n: numRounds }))}</div>`;
     html += `<div class="cp-rounds">`;
     // ★ Per-round tool names. The backend stamps `rd.toolCalls` (authoritative,
     //   exactly the tool_calls the model emitted), but it's absent on every
@@ -179,8 +195,8 @@ function _buildCostPopover(ctx) {
         _sum += (m.tokens || 0);
         return m.tokens ? `${m.name} ${fmt(m.tokens)}` : m.name;
       });
-      const _body = _parts.join('、');
-      return _sum > 0 ? `${_body}（计 ${fmt(_sum)}）` : _body;
+      const _body = _parts.join(t('finishInfo.listSepDot'));
+      return _sum > 0 ? `${_body}${t('finishInfo.metaSum', { v: fmt(_sum) })}` : _body;
     };
     rounds.forEach((rd, i) => {
       const ru = rd.usage || {};
@@ -204,7 +220,7 @@ function _buildCostPopover(ctx) {
         rdCnyStr = _billable ? "…" : "¥0";
       }
       let rdLabel = t("toolPanel.roundTag", { n: i + 1 });
-      if (rd.tag && rd.tag.includes("FALLBACK")) rdLabel += ` 回退`;
+      if (rd.tag && rd.tag.includes("FALLBACK")) rdLabel += t('finishInfo.fallbackSuffix');
       // API key that served this round (from dispatch metadata).
       const _disp = ru._dispatch || {};
       const _keyTail = _disp.key_tail;
@@ -247,28 +263,33 @@ function _buildCostPopover(ctx) {
       let _wbShown = false;
       if (_wb && _wb.write > 0) {
         const _terms = [];
-        if (_wb.prevOutput > 0)   _terms.push(`上一轮回复 ${fmt(_wb.prevOutput)}`);
-        if (_wb.toolResults > 0)  _terms.push(`工具结果 ${fmt(_wb.toolResults)}`);
-        if (_wb.contextWrite > 0) _terms.push(`首次缓存上下文 ${fmt(_wb.contextWrite)}`);
-        if (_wb.recacheBody > 0)  _terms.push(`重新缓存正文 ${fmt(_wb.recacheBody)}`);
-        if (_wb.envelope > 0)     _terms.push(`消息开销 ${fmt(_wb.envelope)}`);
+        if (_wb.prevOutput > 0)   _terms.push(t('finishInfo.wbPrevOutput', { v: fmt(_wb.prevOutput) }));
+        if (_wb.toolResults > 0)  _terms.push(t('finishInfo.wbToolResults', { v: fmt(_wb.toolResults) }));
+        if (_wb.contextWrite > 0) _terms.push(t('finishInfo.wbContextWrite', { v: fmt(_wb.contextWrite) }));
+        if (_wb.recacheBody > 0)  _terms.push(t('finishInfo.wbRecacheBody', { v: fmt(_wb.recacheBody) }));
+        if (_wb.envelope > 0)     _terms.push(t('finishInfo.wbEnvelope', { v: fmt(_wb.envelope) }));
         if (_terms.length) {
-          let _tip = `本轮 write = ${fmt(_wb.write)} tok，是“自上一轮以来新写入缓存的上下文”，`
-            + `不是模型本轮生成的内容。它由以下几部分构成（后端按真实用量计算，相加恰好等于 write）：`;
-          if (_wb.prevOutput > 0)  _tip += `\n· 上一轮回复 ${fmt(_wb.prevOutput)} —— 上一轮模型生成的文本/推理 + 工具调用参数`;
+          let _tip = t('finishInfo.wbTipHead', { v: fmt(_wb.write) });
+          if (_wb.prevOutput > 0)  _tip += t('finishInfo.wbTipPrevOutput', { v: fmt(_wb.prevOutput) });
           if (_wb.toolResults > 0) {
-            _tip += `\n· 工具结果 ${fmt(_wb.toolResults)} —— 上一轮各工具返回结果`;
-            if (_inflowMeta.length) _tip += `（明细：${_fmtToolMeta(_inflowMeta)}；按本地分词统计，与服务端口径略有出入）`;
+            _tip += t('finishInfo.wbTipToolResults', { v: fmt(_wb.toolResults) });
+            if (_inflowMeta.length) _tip += t('finishInfo.wbTipToolResultsDetail', { detail: _fmtToolMeta(_inflowMeta) });
           }
-          if (_wb.contextWrite > 0) _tip += `\n· 首次缓存上下文 ${fmt(_wb.contextWrite)} —— 系统提示、工具定义与历史消息首次写入缓存（通常是首轮的前缀预热；本轮 cache 读取未下降，预期下一轮可低价复用，若未命中会在该轮标注为“重新缓存正文”）`;
+          if (_wb.contextWrite > 0) _tip += t('finishInfo.wbTipContextWrite', { v: fmt(_wb.contextWrite) });
           if (_wb.recacheBody > 0) {
-            _tip += `\n· 重新缓存正文 ${fmt(_wb.recacheBody)} —— 此前已缓存的会话正文未被读回、被重新计费（真实浪费）`;
-            if (_wb.readDrop > 0) _tip += `；本轮 cache 读取较上一轮下降 ${fmt(_wb.readDrop)} tok`;
-            if (cbReason) _tip += `，详见下方“缓存失效”`;
+            _tip += t('finishInfo.wbTipRecacheBody', { v: fmt(_wb.recacheBody) });
+            if (_wb.readDrop > 0) _tip += t('finishInfo.wbTipReadDrop', { v: fmt(_wb.readDrop) });
+            if (cbReason) _tip += t('finishInfo.wbTipSeeBreak');
           }
-          if (_wb.envelope > 0)    _tip += `\n· 消息开销 ${fmt(_wb.envelope)} —— 每条消息的 JSON/role 信封开销（仅占少量，已封顶）`;
-          if (_wb.capped) _tip += `\n（注：各分项按本地分词统计，与服务端 write 口径略有差异，已按 write 总量校准，为近似值。）`;
-          html += `<div class="cp-round-act cp-round-inflow" title="${escapeHtml(_tip)}">↳ write ${fmt(_wb.write)} 的来源：${escapeHtml(_terms.join(' + '))}</div>`;
+          if (_wb.envelope > 0)    _tip += t('finishInfo.wbTipEnvelope', { v: fmt(_wb.envelope) });
+          if (_wb.capped) _tip += t('finishInfo.wbTipCapped');
+          // When the components were capped (local-vs-provider tokenizer
+          // mismatch) they do NOT add up exactly — use ≈ and an explicit
+          // "约" so the row isn't presented as an exact equation.
+          const _sumLabel = _wb.capped
+            ? t('finishInfo.wbSumApprox', { v: fmt(_wb.write), terms: escapeHtml(_terms.join(' + ')) })
+            : t('finishInfo.wbSum', { v: fmt(_wb.write), terms: escapeHtml(_terms.join(' + ')) });
+          html += `<div class="cp-round-act cp-round-inflow" title="${escapeHtml(_tip)}">${_sumLabel}</div>`;
           _wbShown = true;
         }
       }
@@ -277,9 +298,8 @@ function _buildCostPopover(ctx) {
         // just name the previous round's tool results that flowed in. No `=`,
         // no fake equation — these local counts don't equal write.
         const _inflowStr = _fmtToolMeta(_inflowMeta);
-        const _tip = '本轮 write 里含上一轮 ' + _inflowMeta.length + ' 个工具的返回结果（首次写入缓存）。'
-          + '每项 token 数与工具面板徽章一致，按本地分词统计，与服务端 write 口径略有出入。';
-        html += `<div class="cp-round-act cp-round-inflow" title="${escapeHtml(_tip)}">↳ 含上一轮工具结果：${escapeHtml(_inflowStr)}</div>`;
+        const _tip = t('finishInfo.inflowTip', { n: _inflowMeta.length });
+        html += `<div class="cp-round-act cp-round-inflow" title="${escapeHtml(_tip)}">${escapeHtml(t('finishInfo.inflowLabel', { detail: _inflowStr }))}</div>`;
       }
       // ★ Activity line: what the model DID this round (the tool calls it
       //   emitted). This is the causal driver of the NEXT round's `write`.
@@ -288,13 +308,13 @@ function _buildCostPopover(ctx) {
         const _counts = {};
         for (const n of _tcNames) _counts[n] = (_counts[n] || 0) + 1;
         const _actStr = Object.keys(_counts)
-          .map(n => _counts[n] > 1 ? `${n}×${_counts[n]}` : n).join('、');
-        html += `<div class="cp-round-act" title="${escapeHtml('本轮模型调用了 ' + _tcNames.length + ' 个工具；它们的调用参数与返回结果会在下一轮写入缓存')}">↳ 调用 ${_tcNames.length} 个工具：${escapeHtml(_actStr)}</div>`;
+          .map(n => _counts[n] > 1 ? `${n}×${_counts[n]}` : n).join(t('finishInfo.listSepDot'));
+        html += `<div class="cp-round-act" title="${escapeHtml(t('finishInfo.actTip', { n: _tcNames.length }))}">${escapeHtml(t('finishInfo.actLabel', { n: _tcNames.length, tools: _actStr }))}</div>`;
       } else if (i === rounds.length - 1) {
         // Last round with no tool calls = the model's final text answer.
         // Tag it so a user doesn't wonder why the round count (API rounds)
         // exceeds the tool-batch count in the ptool panel.
-        html += `<div class="cp-round-act cp-round-final" title="${escapeHtml('本轮没有调用工具，是模型生成的最终回答。这是 API 轮数比工具批次多 1 的原因。')}">↳ 最终回答（无工具）</div>`;
+        html += `<div class="cp-round-act cp-round-final" title="${escapeHtml(t('finishInfo.finalTip'))}">${escapeHtml(t('finishInfo.finalLabel'))}</div>`;
       }
       // ★ Explain a write that's much larger than this round's own output:
       //   the `write` is NOT what the model generated — it's the PREVIOUS
@@ -307,25 +327,25 @@ function _buildCostPopover(ctx) {
       // and showing both would be contradictory.
       if (!cbReason && !_inflowMeta.length && rcw > 2000 && rcw > ro * 2 && (_prev || _prevTcs)) {
         const _why = _prevTcs
-          ? `本轮 write ${fmt(rcw)} ≈ 上一轮输出 + ${_prevTcs} 个工具的返回结果（首次写入缓存），并非本轮模型新生成`
-          : `本轮 write ${fmt(rcw)} 主要是上一轮输出 + 返回内容首次写入缓存，并非本轮模型新生成`;
-        html += `<div class="cp-round-note" title="${escapeHtml(_why)}">ⓘ write 来源：上一轮产出 + 工具结果</div>`;
+          ? t('finishInfo.writeNoteTipTools', { v: fmt(rcw), n: _prevTcs })
+          : t('finishInfo.writeNoteTipPlain', { v: fmt(rcw) });
+        html += `<div class="cp-round-note" title="${escapeHtml(_why)}">${escapeHtml(t('finishInfo.writeNoteLabel'))}</div>`;
       }
       // Meta line: key + (debug) trace.
       const metaBits = [];
       if (_keyStr) metaBits.push(`<span class="cp-key" title="${escapeHtml('Key: ' + _keyStr + (_model ? '  ·  Model: ' + _model : ''))}">${_CP_KEY_SVG}${escapeHtml(_keyStr)}</span>`);
       if (_dbg && ru.trace_id) metaBits.push(`<span class="cp-trace">${escapeHtml(ru.trace_id.slice(0, 8))}</span>`);
       if (metaBits.length) html += `<div class="cp-round-meta">${metaBits.join('')}</div>`;
-      if (cbReason) html += `<div class="cp-round-break">${_CP_WARN_SVG}缓存失效：${cbReason}</div>`;
+      if (cbReason) html += `<div class="cp-round-break">${_CP_WARN_SVG}${t('finishInfo.cacheBreakLabel', { reason: cbReason })}</div>`;
       html += `</div>`;
     });
     html += `</div>`;
     // ★ Legend — explains the cache/write/→ semantics so a user isn't
     //   puzzled why "531 output" becomes "1.5k write" next round.
     html += `<div class="cp-legend">`
-      + `<span class="cp-legend-item"><b>X → Y</b>：本轮输入 X / 模型生成 Y</span>`
-      + `<span class="cp-legend-item"><b class="cp-hit">cache</b>：复用上文缓存（便宜）</span>`
-      + `<span class="cp-legend-item"><b class="cp-write">write</b>：本轮新写入缓存的上下文（贵，预期下一轮可复用——未命中则计为重新缓存正文）；来源＝上一轮回复 ＋ 工具结果 ＋ 首次缓存上下文 ＋ 消息开销，并非模型本轮新生成</span>`
+      + `<span class="cp-legend-item">${t('finishInfo.legendXY')}</span>`
+      + `<span class="cp-legend-item">${t('finishInfo.legendCache')}</span>`
+      + `<span class="cp-legend-item">${t('finishInfo.legendWrite')}</span>`
       + `</div>`;
   }
 
@@ -340,8 +360,8 @@ function _buildCostPopover(ctx) {
   if (cw > 0) html += row('Cache write', `${fmt(cw)} → ${fCny(costInfo.cacheWriteCostCny)}`);
   if (cr > 0) html += row('Cache read', `${fmt(cr)} → ${fCny(costInfo.cacheReadCostCny)}`);
   html += row('Output', `${fmt(out)} → ${fCny(costInfo.outputCostCny)}`);
-  if (thk > 0) html += row('Thinking', `${fmt(thk)} (含在 output 中)`, 'cp-row-sub');
-  if (costInfo.cacheSavingsCny > 0) html += row('Cache 节省', fCny(costInfo.cacheSavingsCny), 'cp-row-save');
+  if (thk > 0) html += row('Thinking', `${fmt(thk)} ${t('finishInfo.thinkingInOutput')}`, 'cp-row-sub');
+  if (costInfo.cacheSavingsCny > 0) html += row(t('finishInfo.cacheSavings'), fCny(costInfo.cacheSavingsCny), 'cp-row-save');
   html += `</div>`;
 
   // ── Total ──
@@ -353,7 +373,7 @@ function _buildCostPopover(ctx) {
   //   for root-cause analysis. Click to copy.
   if (taskId) {
     const _tidSafe = String(taskId).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-    html += `<div class="cp-taskid-row" title="${escapeHtml('点击复制任务 ID（用于定位日志 / 提供给排查）\nTask ID: ' + taskId)}" onclick="event.stopPropagation();_safeClipboardWrite('${_tidSafe}');this.classList.add('cp-copied')">Task ID: <span class="cp-taskid-val">${escapeHtml(taskId)}</span></div>`;
+    html += `<div class="cp-taskid-row" title="${escapeHtml(t('finishInfo.taskIdTip', { id: taskId }))}" onclick="event.stopPropagation();_safeClipboardWrite('${_tidSafe}');this.classList.add('cp-copied')">Task ID: <span class="cp-taskid-val">${escapeHtml(taskId)}</span></div>`;
   }
 
   // ── Trace ids (debug only) ──
@@ -535,29 +555,29 @@ function renderFinishInfo(msg) {
     if (isNorm) {
       parts.push(`<span class="finish-tag ok">✓</span>`);
     } else if (msg.finishReason === "error") {
-      parts.push(`<span class="finish-tag err">✕ Error</span>`);
+      parts.push(`<span class="finish-tag err">✕ ${escapeHtml(t('finishInfo.reasonError'))}</span>`);
     } else if (msg.finishReason === "aborted") {
-      parts.push(`<span class="finish-tag warn">Stopped</span>`);
+      parts.push(`<span class="finish-tag warn">${escapeHtml(t('finishInfo.reasonStopped'))}</span>`);
     } else if (msg.finishReason === "interrupted") {
-      parts.push(`<span class="finish-tag warn"><span title="Server crashed during generation. Content recovered from last checkpoint — may be incomplete.">Interrupted</span></span>`);
+      parts.push(`<span class="finish-tag warn"><span title="${escapeHtml(t('finishInfo.reasonInterruptedTip'))}">${escapeHtml(t('finishInfo.reasonInterrupted'))}</span></span>`);
     } else if (msg.finishReason === "server_offline") {
       parts.push(
-        `<span class="finish-tag err"><span title="Server went offline during generation (e.g. VSCode disconnect, network drop). Partial response saved.">Server Offline</span></span>` +
+        `<span class="finish-tag err"><span title="${escapeHtml(t('finishInfo.reasonServerOfflineTip'))}">${escapeHtml(t('finishInfo.reasonServerOffline'))}</span></span>` +
         ` <button class="finish-reconnect-btn" onclick="_recoverOfflineConversations('manual_button')" ` +
-        `title="Check server for completed result" style="` +
+        `title="${escapeHtml(t('finishInfo.reconnectTip'))}" style="` +
         `font-size:11px;padding:1px 8px;margin-left:4px;cursor:pointer;` +
         `background:var(--accent);color:#fff;border:none;border-radius:4px;` +
         `vertical-align:middle;opacity:0.9` +
-        `">${Icon('refresh', 12)} Reconnect</button>`
+        `">${Icon('refresh', 12)} ${escapeHtml(t('finishInfo.reconnect'))}</button>`
       );
     } else {
       const labels = {
-        length: "Truncated",
-        tool_use: "Tool",
-        tool_calls: "Tool",
-        content_filter: "<span title='" + t('msg.contentFiltered') + "'>Filtered</span>",
-        tool_rounds_exhausted: "Tool limit",
-        max_tokens: "Truncated",
+        length: escapeHtml(t('finishInfo.reasonTruncated')),
+        tool_use: escapeHtml(t('finishInfo.reasonTool')),
+        tool_calls: escapeHtml(t('finishInfo.reasonTool')),
+        content_filter: "<span title='" + t('msg.contentFiltered') + "'>" + escapeHtml(t('finishInfo.reasonFiltered')) + "</span>",
+        tool_rounds_exhausted: escapeHtml(t('finishInfo.reasonToolLimit')),
+        max_tokens: escapeHtml(t('finishInfo.reasonTruncated')),
         premature_close: "<span title='" + t('msg.prematureClose') + "'>" + t('msg.gatewayInterrupt') + "</span>",
         abnormal_stop: "<span title='" + t('msg.abnormalStop') + "'>" + t('msg.abnormalInterrupt') + "</span>",
       };
@@ -612,8 +632,12 @@ function renderFinishInfo(msg) {
       if (_brokenRounds.length) {
         const _reasons = _brokenRounds
           .map(rd => _cacheBreakReason(rd.cacheBreak)).filter(Boolean);
-        const _tip = '缓存失效（' + _brokenRounds.length + ' 轮）：' +
-          (_reasons.join('；') || '未复用缓存');
+        // Only assert a cause when the backend actually supplied one. If
+        // every broken round came back with an empty reason, state the
+        // round count plainly instead of inventing '未复用缓存'.
+        const _tip = _reasons.length
+          ? t('finishInfo.cacheBreakSummary', { n: _brokenRounds.length, reasons: _reasons.join(t('finishInfo.listSepSemi')) })
+          : t('finishInfo.cacheBreakSummaryPlain', { n: _brokenRounds.length });
         breakHtml = ` <span class="cost-cache-warn" title="${escapeHtml(_tip)}">${_CP_WARN_SVG}</span>`;
       }
       parts.push(
@@ -634,18 +658,18 @@ function renderFinishInfo(msg) {
       // Escape for safe embedding inside inline onclick JS string literal (single-quoted)
       const _jsSafe = _allStr.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
       parts.push(
-        `<span class="finish-tag" style="cursor:pointer;opacity:0.6;font-size:0.8em" title="点击复制 trace_id:\n${escapeHtml(_allStr)}" onclick="_safeClipboardWrite('${_jsSafe}');this.textContent='copied'">${escapeHtml(_lastTrace.slice(0,8))}</span>`
+        `<span class="finish-tag" style="cursor:pointer;opacity:0.6;font-size:0.8em" title="${escapeHtml(t('finishInfo.traceCopyTip', { ids: _allStr }))}" onclick="_safeClipboardWrite('${_jsSafe}');this.textContent='copied'">${escapeHtml(_lastTrace.slice(0,8))}</span>`
       );
     }
   }
   if (msg.fallbackModel) {
     const _fbReason = msg.fallbackReason || msg.fallbackKind || "";
     const _reasonLine = _fbReason
-      ? `\n失败原因 / Reason: ${_fbReason}`
+      ? t('finishInfo.fallbackReason', { reason: _fbReason })
       : "";
-    const _tip = `原模型 ${msg.fallbackFrom || "?"} 失败，已回退到 ${msg.fallbackModel}${_reasonLine}`;
+    const _tip = t('finishInfo.fallbackTip', { from: msg.fallbackFrom || "?", to: msg.fallbackModel, reason: _reasonLine });
     parts.push(
-      `<span class="finish-tag warn" title="${escapeHtml(_tip)}">Fallback → Opus</span>`,
+      `<span class="finish-tag warn" title="${escapeHtml(_tip)}">${escapeHtml(t('finishInfo.fallbackTag'))} → ${escapeHtml(msg.fallbackModel)}</span>`,
     );
   }
   if (parts.length === 0) return "";
@@ -861,10 +885,10 @@ function _renderFileChangesHtml(files, isStreaming, msgIdx) {
 
   // Summary line
   const summaryParts = [];
-  if (okCount > 0) summaryParts.push(`${okCount} file${okCount > 1 ? 's' : ''} changed`);
-  if (pendingCount > 0) summaryParts.push(`${pendingCount} in progress`);
-  if (failCount > 0) summaryParts.push(`${failCount} failed`);
-  const summaryText = summaryParts.join(', ');
+  if (okCount > 0) summaryParts.push(t('fileChanges.filesChanged', { n: okCount, s: okCount > 1 ? 's' : '' }));
+  if (pendingCount > 0) summaryParts.push(t('fileChanges.inProgress', { n: pendingCount }));
+  if (failCount > 0) summaryParts.push(t('fileChanges.failed', { n: failCount }));
+  const summaryText = summaryParts.join(t('fileChanges.summarySep'));
   const pulseClass = isStreaming ? ' fc-pulse' : '';
   const summaryIcon = '';
 
@@ -891,25 +915,29 @@ function _renderFileChangesHtml(files, isStreaming, msgIdx) {
       ? `<span class="fc-root">${escapeHtml(f.root)}:</span>`
       : '';
     const fullPath = (f.root ? f.root + ':' : '') + f.path;
+    // Localize the backend action verb; unknown/future actions render verbatim
+    // (t() would otherwise echo the missing key string).
+    const _actKey = 'fileChanges.action.' + f.action;
+    const _actLabel = (typeof _i18n !== 'undefined' && _i18n[_actKey]) ? t(_actKey) : f.action;
     return `<div class="fc-file${f.ok ? '' : ' fc-file-err'}${pendingCls}" title="${escapeHtml(fullPath)}">
       ${actionIcon(f.action, f.ok, f.pending)}
       <span class="fc-path">${rootPrefix}<span class="fc-dir">${escapeHtml(dir)}</span><span class="fc-fname">${escapeHtml(fname)}</span></span>
-      <span class="fc-action">${escapeHtml(f.action)}${countBadge}</span>
+      <span class="fc-action">${escapeHtml(_actLabel)}${countBadge}</span>
     </div>`;
   }).join('');
 
   // ★ Undo button — only for finalized (non-streaming) messages with a valid msgIdx
   const undoBtn = (!isStreaming && typeof msgIdx === 'number')
-    ? `<button class="fc-undo-btn" onclick="event.stopPropagation();undoConvModifications(${msgIdx})" title="撤销本轮修改">` +
+    ? `<button class="fc-undo-btn" onclick="event.stopPropagation();undoConvModifications(${msgIdx})" title="${escapeHtml(t('fileChanges.undoTip'))}">` +
       `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/></svg>` +
-      `<span>Undo</span></button>`
+      `<span>${escapeHtml(t('fileChanges.undo'))}</span></button>`
     : '';
 
   // ★ Undo All button — always available as a separate interaction point
   const undoAllBtn = (!isStreaming && typeof msgIdx === 'number')
-    ? `<button class="fc-undo-all-btn" onclick="event.stopPropagation();undoAllModifications()" title="撤销所有对话中的所有修改">` +
+    ? `<button class="fc-undo-all-btn" onclick="event.stopPropagation();undoAllModifications()" title="${escapeHtml(t('fileChanges.undoAllTip'))}">` +
       `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/><line x1="12" y1="7" x2="12" y2="3"/><line x1="8" y1="7" x2="12" y2="7"/></svg>` +
-      `<span>Undo All</span></button>`
+      `<span>${escapeHtml(t('fileChanges.undoAll'))}</span></button>`
     : '';
 
   const actionBtns = (undoBtn || undoAllBtn)

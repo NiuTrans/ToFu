@@ -54,6 +54,12 @@ Write the full report in one pass. Be specific, quantitative, and analytical —
 ## ⚡ TL;DR
 2-3 crisp sentences: what they did, the key result, and why it matters. Include specific method names, numbers, and benchmarks. A busy professor should get the full picture in 10 seconds.
 
+The TL;DR MUST be self-contained — a reader who stops after it should have NO dangling questions. Concretely:
+- **Say what KIND of contribution this is.** Is the core method applied at TRAINING time, at INFERENCE / test time, at the data or eval-protocol level, or a combination? State it explicitly (e.g. "an inference-time *selection* method that re-ranks candidate patches", "a training objective", "a benchmark"). Never leave the reader guessing whether a number came from a new training run or a new way of using a fixed model.
+- **Make every number interpretable in place.** For each headline figure give the metric, the benchmark, the comparison point, and the direction — never a bare "54.2%". Write "54.2% resolve-rate on SWE-Bench Verified (Best@16 selection), +3.5 pts over the strongest baseline", not "54.2%".
+- **State the ceiling / what the number is measured against.** If the paper reports an upper bound (oracle), a lower bound (random), or a known SOTA, give it so the reader knows how much headroom remains (e.g. "vs. an oracle ceiling of 68% and a random-selection floor of 41%").
+- Do NOT use any term in the TL;DR that you only define later. If a concept is unavoidable, gloss it inline in three words.
+
 ## 📋 Paper Card
 | Field | Detail |
 |-------|--------|
@@ -69,6 +75,8 @@ A table of 6-10 key terms/abbreviations that the paper introduces or relies on h
 - Give a one-sentence definition.
 - Explain **WHY** this concept exists — what problem it solves or what role it plays in the method.
 - If it's a new term coined by this paper, say so; if it's borrowed from prior work, name the source.
+- **Each definition must be SELF-CONTAINED.** Do not define a term using another term the reader has not yet seen defined. If your definition leans on a sub-concept (e.g. a "selection rule", a "reward model", a "proxy metric"), either add that sub-concept as its own row, or define it inline in the same cell — never leave it dangling. A reader must be able to fully understand each row without scrolling elsewhere.
+- **For any quantity that is DERIVED, SCORED, or PREDICTED, say HOW it is produced**, not merely what it represents. Don't write "a continuous score in $[0,1]$" — write "a continuous score in $[0,1]$, produced by «the concrete mechanism: e.g. the LLM judge's averaged token-probability / a learned regression head / a normalized vote count»". The reader must know where every number comes from.
 
 | Term | Definition | Why it matters |
 |------|-----------|---------------|
@@ -256,6 +264,13 @@ _REPORT_PROMPT_ZH = """\
 ## ⚡ 一句话总结
 2-3 句话精炼概括：他们做了什么，关键结果是什么，为什么重要。包含具体方法名、数字和基准。让忙碌的教授 10 秒内掌握全貌。
 
+
+一句话总结必须**自包含**——读者只读这几句就不应还有悬而未决的问题。具体要求：
+- **说清这是哪一类贡献。** 核心方法是用在**训练阶段**、**推理/测试阶段**、还是数据/评测协议层面，或是几者组合？必须明说（例如“一种**推理期**的*选择/重排*方法，在固定生成器上重排候选解”、“一个训练目标”、“一个基准测试集”）。绝不能让读者猜测某个数字是来自一次新训练还是一种使用固定模型的新方式。
+- **每个数字都要当场可解释。** 每个头部数字都要给出：指标、基准、对比参照点、提升方向——绝不能光写一个“54.2%”。应写“在 SWE-Bench Verified 上达到 54.2% 的 resolve 率（Best@16 选择），比最强基线 +3.5 个百分点”。
+- **给出上限/参照系。** 若论文报告了上界（oracle）、下界（随机）或已知 SOTA，请一并给出，让读者知道还有多少提升空间（例如“对比 oracle 上限 68%、随机选择下限 41%”）。
+- 一句话总结里**不得**出现任何你只在后文才定义的术语；若某概念不可避免，用三五个字就地点一下。
+
 ## 📋 论文信息卡
 | 字段 | 内容 |
 |------|------|
@@ -271,6 +286,9 @@ _REPORT_PROMPT_ZH = """\
 - 一句话定义
 - **为什么**需要它——它在方法中扮演什么角色、解决什么问题
 - 如果是论文首创的概念就标注"本文首创"；借鉴自前人工作则写出来源
+
+- **每条定义必须自包含。** 不要用另一个读者还没见过的术语来定义当前术语。若定义依赖某个子概念（如“选择规则 selection rule”、“奖励模型”、“代理指标”），要么把该子概念也列为独立一行，要么在同一格内就地解释清楚——绝不能悬空。读者应能在不翻阅别处的情况下完全看懂每一行。
+- **凡是被推导、打分或预测出来的量，必须说清它是怎么算出来的**，而不只是它代表什么。不要只写“一个 $[0,1]$ 的连续分”——要写“一个 $[0,1]$ 的连续分，由«具体机制：如 LLM judge 输出的平均 token 概率 / 一个学习的回归头 / 归一化的投票数»产生”。读者必须知道每个数字从哪里来。
 
 | 术语 | 定义 | 为什么重要 |
 |------|------|-----------|

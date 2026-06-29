@@ -7,6 +7,45 @@
    core.js shell — symbols share `window` scope so no exports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
+/* ═══════════════════════════════════════════════════════════════════
+   Canonical auto-translate decision (frontend single source of truth).
+
+   The per-conversation `autoTranslate` flag historically read with mixed
+   `!== undefined ? : true/false` fallbacks across ~8 trigger sites, which —
+   together with the backend's own divergent defaults — made auto-translate
+   fire unpredictably. This helper expresses the ONE default (OPT-IN / OFF,
+   matching the backend `lib.conv_config.resolve_auto_translate` and the
+   `AUTO_TRANSLATE_DEFAULT = False` constant) so every frontend trigger path
+   agrees. Pass the conversation object; an explicit per-conv value always
+   wins, otherwise the global toolbar flag, otherwise OFF.
+   ═══════════════════════════════════════════════════════════════════ */
+function convAutoTranslate(conv) {
+  if (conv && conv.autoTranslate !== undefined) return !!conv.autoTranslate;
+  if (typeof autoTranslate !== 'undefined' && autoTranslate !== undefined) return !!autoTranslate;
+  return false;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   convAutoTranslateEffective(conv) — resolver for the ON-OPEN / ON-ACTIVATE
+   retro-translate decision (a FINISHED message that still has no translation).
+
+   The per-conversation `autoTranslate` is FROZEN at send-time so a mid-task
+   toggle can't change an in-flight run (the cross-talk fix — see
+   .tofu/skills/finishstream-global-autotranslate-bug.md). That freeze is right
+   for the live send/regenerate path, but it must NOT permanently veto the
+   user's CURRENT intent for an already-generated message: a conversation
+   frozen OFF could otherwise never be auto-translated even after the global
+   toggle is turned ON, leaving an old reply demanding a manual click forever
+   (the reported bug). So for THIS decision the LIVE global toggle wins when
+   it's ON; otherwise fall back to the frozen per-conv value (an explicit
+   per-conv ON is still honored). The live send/regenerate/in-flight paths keep
+   using `convAutoTranslate` (the frozen value) unchanged.
+   ═══════════════════════════════════════════════════════════════════ */
+function convAutoTranslateEffective(conv) {
+  if (typeof autoTranslate !== 'undefined' && autoTranslate) return true;
+  return convAutoTranslate(conv);
+}
+
 function saveConversations(changedConvId) {
   const now = Date.now();
   if (changedConvId) {

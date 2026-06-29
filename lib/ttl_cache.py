@@ -108,14 +108,26 @@ class TTLCache:
             return lk
 
     def _drop_key_lock(self, key: Hashable) -> None:
-        """Drop the per-key lock for ``key``. Called on eviction.
+        """Drop the per-key lock for ``key`` if it is currently idle.
 
-        Safe even if the lock is currently held by another thread:
-        threads already waiting on it keep their reference; future
-        ``get_or_compute`` callers will create a fresh lock.
+        Called on eviction. We must NOT drop a lock that another thread is
+        holding (or waiting on): if we did, the next ``get_or_compute`` for
+        the same key would mint a *fresh* Lock and run ``fn()`` concurrently
+        with the in-flight holder — defeating the per-key serialisation this
+        cache promises. So we only remove the lock when we can acquire it
+        non-blocking (proving it is unheld); otherwise we leave it in place
+        and a later eviction reclaims it once it goes idle.
         """
         with self._key_locks_mutex:
-            self._key_locks.pop(key, None)
+            lk = self._key_locks.get(key)
+            if lk is None:
+                return
+            if lk.acquire(blocking=False):
+                try:
+                    self._key_locks.pop(key, None)
+                finally:
+                    lk.release()
+            # else: held by another thread — keep it; reclaim on a later evict.
 
     # ── Public API ────────────────────────────────────────────────
 

@@ -217,5 +217,124 @@ class AdapterTest(unittest.TestCase):
                             for e in streamed))
 
 
+class ThinkingPropagationTest(unittest.TestCase):
+    """The orchestration-flow path must carry per-node thinking through
+    finalize so the bubble's thinking block survives (the "thinking refreshes
+    then disappears instantly" bug). Asserts:
+      • the finalized MESSAGE dict (planner / worker / critic) carries
+        ``thinking``;
+      • the finalizing SSE events (``endpoint_planner_done`` /
+        ``endpoint_critic_msg``) carry ``thinking``.
+    Revert-proof: dropping ``thinking`` from any of those sites fails here.
+    """
+
+    def _drive(self):
+        defn = build_endpoint_definition(max_iterations=3)
+        streamed = []
+        adapter = EndpointEventAdapter(on_stream=streamed.append)
+
+        def runner(node, ctx, it):
+            role = node.get('role')
+            # Mock runner mirrors the real _default_runner return shape,
+            # INCLUDING the new 'thinking' key the engine now populates from
+            # the accumulated stream chunks.
+            if role == 'worker':
+                return {'output': 'work done', 'status': 'completed',
+                        'error': '', 'tool_names': ['write_file'],
+                        'thinking': 'WORKER-REASONING'}
+            if role == 'critic':
+                return {'output': '[VERDICT: STOP]', 'status': 'completed',
+                        'error': '', 'thinking': 'CRITIC-REASONING'}
+            return {'output': 'PLAN', 'status': 'completed', 'error': '',
+                    'thinking': 'PLANNER-REASONING'}
+
+        FlowExecutor(defn, agent_runner=runner,
+                     on_event=adapter.on_event).run()
+        return adapter.messages, streamed
+
+    def test_messages_carry_thinking(self):
+        msgs, _ = self._drive()
+        planner = [m for m in msgs if m.get('_isEndpointPlanner')][0]
+        worker = [m for m in msgs
+                  if m.get('_epIteration') and not m.get('_isEndpointReview')][0]
+        critic = [m for m in msgs if m.get('_isEndpointReview')][-1]
+        self.assertEqual(planner.get('thinking'), 'PLANNER-REASONING')
+        self.assertEqual(worker.get('thinking'), 'WORKER-REASONING')
+        self.assertEqual(critic.get('thinking'), 'CRITIC-REASONING')
+
+    def test_finalize_sse_events_carry_thinking(self):
+        _, streamed = self._drive()
+        planner_done = [e for e in streamed
+                        if e.get('type') == 'endpoint_planner_done']
+        critic_msg = [e for e in streamed
+                      if e.get('type') == 'endpoint_critic_msg']
+        self.assertTrue(planner_done)
+        self.assertTrue(critic_msg)
+        self.assertEqual(planner_done[0].get('thinking'), 'PLANNER-REASONING')
+        self.assertEqual(critic_msg[-1].get('thinking'), 'CRITIC-REASONING')
+
+    def test_engine_step_complete_and_trace_carry_full_streamed_thinking(self):
+        """End-to-end via the engine's REAL default SubAgent runner (no LLM):
+        the engine's ``_stream_sink`` accumulates the FULL streamed thinking
+        (not the 2000-char-capped ``reasoning_trace``) and puts it on BOTH the
+        ``step_complete`` event and the durable ``step_trace`` entry.
+
+        Patches ``lib.swarm.agent._default_dispatch_stream`` /
+        ``_default_build_body`` so every node node runs the real
+        ``FlowExecutor._default_runner`` path (the production path) with no
+        network. The mocked dispatch streams a >2000-char thinking blob; the
+        critic's 'final out' classifies as STOP (loose fallback) → one
+        iteration."""
+        import lib.swarm.agent as agent_mod
+        from lib.orchestration import build_endpoint_definition
+
+        big_think = 'THINK-' * 1000  # 6000 chars > reasoning_trace 2000 cap
+
+        def fake_dispatch(body, *, on_content=None, on_thinking=None,
+                          abort_check=None, prefer_model='', log_prefix='',
+                          on_retry=None, **kw):
+            if on_thinking:
+                on_thinking(big_think)
+            if on_content:
+                on_content('final out')
+            return ({'role': 'assistant', 'content': 'final out'},
+                    'stop', {'total_tokens': 3})
+
+        def fake_build_body(**kw):
+            return {'model': kw.get('model', 'm'), 'messages': []}
+
+        events = []
+        orig_dispatch = agent_mod._default_dispatch_stream
+        orig_build = agent_mod._default_build_body
+        agent_mod._default_dispatch_stream = fake_dispatch
+        agent_mod._default_build_body = fake_build_body
+        try:
+            defn = build_endpoint_definition(max_iterations=1)
+            # agent_runner=None → engine uses its built-in _default_runner
+            # (the production code path under test).
+            FlowExecutor(defn, agent_runner=None,
+                         on_event=events.append,
+                         all_tools=[], model='m').run()
+        finally:
+            agent_mod._default_dispatch_stream = orig_dispatch
+            agent_mod._default_build_body = orig_build
+
+        completes = [e for e in events if e.get('type') == 'step_complete']
+        traces = [e for e in events if e.get('type') == 'step_trace']
+        self.assertTrue(completes)
+        self.assertTrue(traces)
+        # The engine captured the FULL streamed thinking (not the 2000-char
+        # reasoning_trace cap) onto step_complete + step_trace.
+        complete_think = [e for e in completes if e.get('thinking')]
+        self.assertTrue(complete_think,
+                        'step_complete should carry accumulated thinking')
+        self.assertIn(big_think, complete_think[0]['thinking'])
+        self.assertGreater(len(complete_think[0]['thinking']), 2000)
+        trace_think = [e for e in traces if e.get('thinking')]
+        self.assertTrue(trace_think,
+                        'step_trace should carry accumulated thinking')
+        self.assertIn(big_think, trace_think[0]['thinking'])
+
+
 if __name__ == '__main__':
     unittest.main()

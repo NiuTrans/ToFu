@@ -35,7 +35,7 @@ import threading
 import time
 from typing import Optional
 
-from lib.database import DOMAIN_SYSTEM, get_thread_db
+from lib.database import DOMAIN_SYSTEM, get_thread_db, suppress_sql_error_log
 from lib.log import audit_log, get_logger
 
 logger = get_logger(__name__)
@@ -157,7 +157,11 @@ def _wait_for_ledger_table(timeout: float = 120.0) -> bool:
         if db_available:
             try:
                 db = get_thread_db(DOMAIN_SYSTEM)
-                db.execute('SELECT 1 FROM billing_ledger LIMIT 0')
+                # Expected-to-fail probe before schema bootstrap — suppress the
+                # DB layer's ERROR log so a slow/absent schema doesn't spam
+                # error.log with self-recovering "no such table" noise.
+                with suppress_sql_error_log():
+                    db.execute('SELECT 1 FROM billing_ledger LIMIT 0')
                 return True
             except Exception as e:
                 logger.debug('[Janitor] billing_ledger not ready yet: %s', e)

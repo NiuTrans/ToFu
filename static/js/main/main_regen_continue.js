@@ -78,6 +78,13 @@ async function regenerateFromUser(idx) {
   // ── Atomic backend call: truncate + translate + task start ──
   const _regenConfig = await _buildConvConfig(conv);
 
+  // ★ Mint the assistant message id BEFORE the POST (same as the send path) so
+  //   live per-round translation frames route to the still-streaming bubble.
+  const _regenAssistantMsgId = (typeof _newClientMsgId === 'function')
+    ? _newClientMsgId()
+    : ('tmp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
+  _regenConfig.assistantMsgId = _regenAssistantMsgId;
+
   // ★ If autoTranslate is on and message has Chinese, show stop button immediately
   const _regenAbortCtrl = new AbortController();
   let _regenAbortReason = '';  // '' | 'timeout' | 'user-stop'
@@ -145,16 +152,17 @@ async function regenerateFromUser(idx) {
       role: "assistant", content: "", thinking: "",
       timestamp: Date.now(), toolRounds: [],
       model: _regenConfig.model || serverModel,
+      _msgId: _regenAssistantMsgId,
     };
     // ★ Endpoint mode: mark as planner so SSE reconnection identifies it correctly
     if (_regenConfig.endpointMode) assistantMsg._isEndpointPlanner = true;
-    _ensureMsgId(assistantMsg);
+    _ensureMsgId(assistantMsg);  // no-op when _msgId already set
     conv.messages.push(assistantMsg);
     conv.activeTaskId = taskId;
     saveConversations(convId);
 
     _removeTranslatingBubble();
-    if (activeConvId === convId) _renderStreamingBubble(conv, _regenConfig);
+    if (activeConvId === convId) _renderStreamingBubble(conv, _regenConfig, _regenAssistantMsgId);
     buildTurnNav(conv);
     connectToTask(convId, taskId);
 
@@ -533,6 +541,13 @@ async function continueAssistant() {
   //   stream handlers to merge prior rounds with newly-streamed ones.
   // ═══════════════════════════════════════════════════════════
   const cfgPayload = await _buildConvConfig(conv);
+  // ★ Continue reuses the SAME assistant message (it already has a stable
+  //   _msgId — server UUID or a tmp_ id). Ship it so the backend stamps
+  //   task['_assistantMsgId'] → live per-round translation frames route to this
+  //   still-streaming bubble (which carries data-msg-id from the renderChat
+  //   above via renderMessage). _ensureMsgId guarantees the id exists.
+  if (typeof _ensureMsgId === 'function') _ensureMsgId(assistantMsg);
+  if (assistantMsg._msgId) cfgPayload.assistantMsgId = assistantMsg._msgId;
   debugLog(
     `Continue: delegating to /api/chat/continue with ${keptRounds.length} kept ` +
     `round(s), preservedContent=${preservedContent.length} chars`,

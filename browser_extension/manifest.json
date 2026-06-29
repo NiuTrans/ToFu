@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Tofu Browser Bridge",
-  "version": "4.3.0",
+  "version": "4.5.0",
   "description": "Bridge between Tofu server and your browser — lets the AI read tabs, extract content, execute JS, manage cookies, capture full-page screenshots, and more.",
 
   "permissions": [
@@ -28,13 +28,24 @@
     "<all_urls>"
   ],
 
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+
   "background": {
     "service_worker": "background.js"
   },
 
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Tofu Browser Bridge"
+    "default_title": "Tofu Browser Bridge",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
   },
 
   "content_security_policy": {

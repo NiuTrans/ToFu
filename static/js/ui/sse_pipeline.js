@@ -342,6 +342,18 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
         const _abortMsg = _abortConv.messages[_abortConv.messages.length - 1];
         if (_abortMsg && _abortMsg.role === 'assistant') {
           _abortMsg.finishReason = 'aborted';
+          /* ★ Defensive mirror of the backend dangling-round sweep
+           *   (orchestrator._finalize_dangling_tool_rounds): flip any tool
+           *   round still 'searching' to 'aborted' so the live DOM doesn't
+           *   keep showing "Running…" until the backend's persisted snapshot
+           *   lands. The authoritative state is still written server-side. */
+          if (Array.isArray(_abortMsg.toolRounds)) {
+            for (const _r of _abortMsg.toolRounds) {
+              if (_r && _r.status === 'searching' && !(_r.results && _r.results.length)) {
+                _r.status = 'aborted';
+              }
+            }
+          }
           console.log(`[connectToTask] User abort — set finishReason='aborted' for conv=${convId.slice(0,8)}`);
         }
       }
@@ -686,6 +698,10 @@ function dispatchSSEEvent(line, ctx) {
         assistantMsg._preferencesApplied = ev.preferencesApplied;
         if (buf) buf._preferencesApplied = ev.preferencesApplied;
       }
+      if (ev.relatedConversations) {
+        assistantMsg._relatedConversations = ev.relatedConversations;
+        if (buf) buf._relatedConversations = ev.relatedConversations;
+      }
       if (ev.preferencesLearned) {
         assistantMsg._preferencesLearned = ev.preferencesLearned;
         if (buf) buf._preferencesLearned = ev.preferencesLearned;
@@ -814,6 +830,8 @@ function dispatchSSEEvent(line, ctx) {
       _handleMemoryPrefetch(ev, _hctx());
     } else if (ev.type === "preferences_applied") {
       _handlePreferencesApplied(ev, _hctx());
+    } else if (ev.type === "related_conversations") {
+      _handleRelatedConversations(ev, _hctx());
     } else if (ev.type === "preference_learned") {
       _handlePreferenceLearned(ev, _hctx());
     } else if (ev.type === "project_external_edit") {
@@ -1079,6 +1097,12 @@ function dispatchSSEEvent(line, ctx) {
         // (the event content has the verdict tag stripped by the backend)
         if (_epCriticMsg) {
           _epCriticMsg.content = ev.content;
+          /* ★ Carry the critic's reasoning onto the message so its thinking
+           *   block survives finalize + DB sync + reload (the flow path now
+           *   sends ev.thinking; the live endpoint path may omit it, hence
+           *   the fallback to the value accumulated from live deltas). */
+          if (ev.thinking !== undefined && ev.thinking !== null)
+            _epCriticMsg.thinking = ev.thinking || _epCriticMsg.thinking || "";
           _epCriticMsg._epApproved = nextPhase === 'stop';
           _epCriticMsg._epNextPhase = nextPhase;
           _epCriticMsg._isStuck = ev.is_stuck || false;

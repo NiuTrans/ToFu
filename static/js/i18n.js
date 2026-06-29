@@ -62,16 +62,67 @@ var _i18n = {
   'sidebar.translatingTag': { zh: '翻译中', en: 'Translating' },
   'sidebar.memoryPrefetch': { zh: '筛选记忆中…', en: 'Filtering memories…' },
   'sidebar.memoryPrefetchTag': { zh: '筛选记忆', en: 'Filtering' },
+  'memPrefetch.surfacing': { zh: '正在检索相关记忆…', en: 'Surfacing relevant memories…' },
+  'memPrefetch.totalN': { zh: '共 {n} 条', en: '{n} total' },
+  'memPrefetch.filtering': { zh: '用轻量模型筛选 {n} 条候选…', en: 'Filtering {n} candidates with cheap model…' },
+  'memPrefetch.none': { zh: '本回合没有相关的历史记忆', en: 'No prior memory relevant to this turn' },
+  'memPrefetch.prefetched': { zh: '已检索 {n} 条记忆', en: 'Prefetched {n} memory' },
+  'memPrefetch.prefetchedN': { zh: '已检索 {n} 条记忆', en: 'Prefetched {n} memories' },
+  'memPrefetch.candidatesN': { zh: '{n} 条候选', en: '{n} candidates' },
+  'memPrefetch.filterLabel': { zh: '筛选', en: 'filter' },
+  'memPrefetch.totalLabel': { zh: '总计', en: 'total' },
+  'memPrefetch.fallback': { zh: '⚠ 回退到 BM25 前 3 条', en: '⚠ fallback to BM25 top-3' },
+  'memPrefetch.skipped': { zh: '已跳过记忆检索', en: 'Memory prefetch skipped' },
+  'memPrefetch.failed': { zh: '记忆检索失败', en: 'Memory prefetch failed' },
+  'memPrefetch.generic': { zh: '记忆检索…', en: 'Memory prefetch…' },
+  'memPrefetch.tag': { zh: '记忆', en: 'memory' },
+  'memPrefetch.tagN': { zh: '{n} 条记忆', en: '{n} memory' },
+  'memPrefetch.tagNs': { zh: '{n} 条记忆', en: '{n} memories' },
+  'memPrefetch.tagNone': { zh: '无相关记忆', en: 'no memory' },
+  'memPrefetch.tagSkipped': { zh: '跳过记忆', en: 'memory skipped' },
+  'memPrefetch.tagFailed': { zh: '记忆失败', en: 'memory failed' },
   'prefs.applied': { zh: '已在本回合提供你的偏好', en: 'Your preferences were in context' },
   'prefs.appliedN': { zh: '本回合提供了 {n} 条偏好', en: '{n} preferences in context this turn' },
   'prefs.fromProfile': { zh: '来自个人偏好档案', en: 'from your profile' },
+  'prefs.tag': { zh: '偏好', en: 'preferences' },
+  'prefs.tagNone': { zh: '偏好', en: 'preferences' },
+  'relatedConvs.tag': { zh: '相关对话', en: 'related' },
+  'relatedConvs.tagN': { zh: '{n} 个相关对话', en: '{n} related chat' },
+  'relatedConvs.tagNs': { zh: '{n} 个相关对话', en: '{n} related chats' },
+  'relatedConvs.sub': { zh: '模型已知晓本项目的这些对话（仅作背景感知）', en: 'siblings of this project the model was made aware of' },
+  'login.awaiting': { zh: '等待手机审批', en: 'Waiting for mobile approval' },
+  'login.awaitingSub': { zh: '请在大象 / 办公 App 中点击「同意」——推送可能需要几秒钟到达', en: 'Tap Approve on your mobile office app — push may take a few seconds to arrive' },
+  'login.approved': { zh: '登录已通过', en: 'Login approved' },
+  'login.denied': { zh: '登录被拒绝', en: 'Login denied' },
+  'login.timeout': { zh: '登录超时', en: 'Login timed out' },
+  'login.finished': { zh: '登录完成', en: 'Login finished' },
   'workspaceRoot.added': { zh: '已添加工作区根目录：{roots}', en: 'Added workspace root: {roots}' },
   'prefs.learned': { zh: '记下了：你偏好', en: 'Noted: you prefer' },
+  'prefs.added': { zh: '已记住', en: 'Remembered' },
+  'prefs.editInSettings': { zh: '可在设置中修改', en: 'editable in Settings' },
   'prefs.learnedReinforced': { zh: '已更新你的偏好档案', en: 'Updated your preference profile' },
   'prefs.pendingHint': { zh: '待你确认后写入', en: 'Awaiting your confirmation' },
   'prefs.confirm': { zh: '确认', en: 'Confirm' },
   'prefs.dismiss': { zh: '忽略', en: 'Dismiss' },
   'prefs.undo': { zh: '撤销', en: 'Undo' },
+  'settings.tabPreferences': { zh: '偏好', en: 'Preferences' },
+  'prefsPanel.title': { zh: '个人偏好档案', en: 'Personal Preference Profile' },
+  'prefsPanel.intro': { zh: '这是助手长期记住的关于你、以及「你希望它如何工作」的信息（语言、语气、编码习惯、禁忌，以及你的角色、技术栈等）。它会在每次对话中自动注入，跨项目生效。助手会在对话中自动学习并更新这些条目，你可以随时在此修改或删除。', en: 'Durable facts the assistant remembers about you and how you like it to work (language, tone, coding conventions, do\'s/don\'ts, plus your role, tech stack, etc.). Injected into every conversation, applies across all projects. The assistant learns and updates these as you talk; edit or remove any of them here.' },
+  'prefsPanel.secPreferences': { zh: '工作偏好', en: 'Working preferences' },
+  'prefsPanel.secAbout': { zh: '关于你', en: 'About you' },
+  'prefsPanel.secOther': { zh: '其他', en: 'Other' },
+  'prefsPanel.addItem': { zh: '添加', en: 'Add' },
+  'prefsPanel.remove': { zh: '删除', en: 'Remove' },
+  'prefsPanel.itemPlaceholder': { zh: '例如：总是用中文回答', en: 'e.g. Always reply in Chinese' },
+  'prefsPanel.sectionEmpty': { zh: '暂无条目', en: 'No entries yet' },
+  'prefsPanel.reload': { zh: '重新加载', en: 'Reload' },
+  'prefsPanel.save': { zh: '保存', en: 'Save' },
+  'prefsPanel.loading': { zh: '加载中…', en: 'Loading…' },
+  'prefsPanel.loadFailed': { zh: '加载失败', en: 'Load failed' },
+  'prefsPanel.saving': { zh: '保存中…', en: 'Saving…' },
+  'prefsPanel.saved': { zh: '已保存', en: 'Saved' },
+  'prefsPanel.saveFailed': { zh: '保存失败', en: 'Save failed' },
+  'prefsPanel.overCap': { zh: '超出长度上限，下次整理时会自动压缩', en: 'Over the size cap — will be auto-distilled on the next consolidation pass' },
   'sidebar.answering': { zh: '回答中', en: 'Answering' },
   'sidebar.copyConvId': { zh: '复制会话ID', en: 'Copy conversation ID' },
   'sidebar.refConv': { zh: '引用此对话', en: 'Reference this conversation' },
@@ -81,6 +132,10 @@ var _i18n = {
   'sidebar.renameConv': { zh: '重命名对话', en: 'Rename conversation' },
   'sidebar.renameConvTitle': { zh: '重命名对话', en: 'Rename Conversation' },
   'sidebar.renameConvPh': { zh: '输入对话标题', en: 'Enter conversation title' },
+  'sidebar.convDeleted': { zh: '对话已删除', en: 'Conversation deleted' },
+  'sidebar.undoDelete': { zh: '撤销', en: 'Undo' },
+  'sidebar.convRestored': { zh: '对话已恢复', en: 'Conversation restored' },
+  'sidebar.deleteFailed': { zh: '无法删除：未能加载对话内容，请重新连接后重试', en: 'Couldn\u2019t delete \u2014 failed to load the conversation; reconnect and try again' },
 
   // ══════════════════════════════════════
   //  Welcome Screen
@@ -442,6 +497,82 @@ var _i18n = {
   'skills.uninstallBtn': { zh: '卸载', en: 'Uninstall' },
   'skills.viewFiles': { zh: '查看文件', en: 'View files' },
   'skills.openHomepage': { zh: '主页', en: 'Homepage' },
+  // JS-rendered (skills.js): catalog/installed cards, pagination, actions, toasts
+  'skills.loadFailed': { zh: '加载失败: {err}', en: 'Load failed: {err}' },
+  'skills.scopeAll': { zh: '全部', en: 'All' },
+  'skills.countInstalled': { zh: '已安装 {n} 个', en: '{n} installed' },
+  'skills.countCatalog': { zh: '市场 {n} 个', en: '{n} in catalog' },
+  'skills.pageInfo': { zh: '显示 {from}–{to} / {total}', en: 'Showing {from}–{to} of {total}' },
+  'skills.noMatch': { zh: '没有匹配的 Skill。', en: 'No matching skills.' },
+  'skills.official': { zh: '官方', en: 'Official' },
+  'skills.by': { zh: '作者：{author}', en: 'by {author}' },
+  'skills.reqBins': { zh: '需要 {bins}', en: 'Requires {bins}' },
+  'skills.reqEnv': { zh: '需要环境变量 {env}', en: 'Requires env vars {env}' },
+  'skills.repo': { zh: '仓库', en: 'Repo' },
+  'skills.installedTag': { zh: '✓ 已安装', en: '✓ Installed' },
+  'skills.emptyInstalled': { zh: '还没有安装任何技能包。可在「市场」标签页一键安装，或拖入 .zip 文件。', en: 'No skill packs installed yet. Install one from the Catalog tab, or drop a .zip file here.' },
+  'skills.statusOn': { zh: '启用', en: 'ON' },
+  'skills.statusOff': { zh: '停用', en: 'OFF' },
+  'skills.scopeIdLine': { zh: 'scope: {scope} · id: {id}', en: 'scope: {scope} · id: {id}' },
+  'skills.enable': { zh: '启用', en: 'Enable' },
+  'skills.disable': { zh: '禁用', en: 'Disable' },
+  // Actions / toasts
+  'skills.installing': { zh: '安装中…', en: 'Installing…' },
+  'skills.downloadingInstalling': { zh: '正在下载并安装 {id} …', en: 'Downloading and installing {id}…' },
+  'skills.installFailed': { zh: '安装失败: {err}', en: 'Install failed: {err}' },
+  'skills.installedToast': { zh: '已安装 "{name}"', en: 'Installed "{name}"' },
+  'skills.installHintSuffix': { zh: ' · 发现安装脚本 {files}（出于安全未自动执行）', en: ' · found install scripts {files} (not auto-run for safety)' },
+  'skills.installHintSuffixUpload': { zh: ' · 安装脚本: {files}', en: ' · install scripts: {files}' },
+  'skills.installError': { zh: '安装异常: {err}', en: 'Install error: {err}' },
+  'skills.uninstallConfirm': { zh: '确定要卸载技能包 "{id}" 吗？整个目录会被删除。', en: 'Uninstall skill pack "{id}"? The entire directory will be deleted.' },
+  'skills.uninstallFailed': { zh: '卸载失败: {err}', en: 'Uninstall failed: {err}' },
+  'skills.uninstalledToast': { zh: '已卸载 {id}', en: 'Uninstalled {id}' },
+  'skills.uninstallError': { zh: '卸载异常: {err}', en: 'Uninstall error: {err}' },
+  'skills.toggleFailed': { zh: '切换失败: {err}', en: 'Toggle failed: {err}' },
+  'skills.noResponse': { zh: '无响应', en: 'no response' },
+  // File browser modal
+  'skills.filesLoading': { zh: '加载中…', en: 'Loading…' },
+  'skills.filesLoadFailed': { zh: '加载失败', en: 'Load failed' },
+  'skills.filesCount': { zh: '{n} 个文件 · {root}', en: '{n} files · {root}' },
+  'skills.filesError': { zh: '异常: {err}', en: 'Error: {err}' },
+  // Drag-and-drop
+  'skills.notZip': { zh: '拖入的不是 .zip 技能包', en: 'The dropped file is not a .zip skill pack' },
+  'skills.installingFile': { zh: '正在安装 {name} …', en: 'Installing {name}…' },
+
+  // ══════════════════════════════════════
+  //  Memory modal (memory.js)
+  // ══════════════════════════════════════
+  'memory.disable': { zh: '停用 Memory', en: 'Disable Memory' },
+  'memory.enable': { zh: '启用 Memory', en: 'Enable Memory' },
+  'memory.loading': { zh: '加载中...', en: 'Loading…' },
+  'memory.loadFailed': { zh: '加载失败', en: 'Load failed' },
+  'memory.retry': { zh: '重试', en: 'Retry' },
+  'memory.noMatch': { zh: '没有匹配「{q}」的记忆', en: 'No memories matching “{q}”' },
+  'memory.matchCount': { zh: '共 {n} 条记忆', en: '{n} memories total' },
+  'memory.emptyTitle': { zh: '还没有积累任何记忆', en: 'No memories accumulated yet' },
+  'memory.emptyHint': { zh: 'AI 在对话中发现有用模式时会自动保存记忆<br>你也可以点击下方「+ 新建」手动添加', en: 'The AI saves a memory automatically when it spots a useful pattern.<br>You can also click “+ New” below to add one manually.' },
+  'memory.renderFailed': { zh: '渲染失败: {name}', en: 'Render failed: {name}' },
+  'memory.scopeGlobal': { zh: '全局', en: 'Global' },
+  'memory.scopeProject': { zh: '项目', en: 'Project' },
+  'memory.toggleOnTip': { zh: '已启用 — 点击禁用', en: 'Enabled — click to disable' },
+  'memory.toggleOffTip': { zh: '已禁用 — 点击启用', en: 'Disabled — click to enable' },
+  'memory.deleteTip': { zh: '删除此记忆', en: 'Delete this memory' },
+  'memory.statTotal': { zh: '总计', en: 'Total' },
+  'memory.statEnabled': { zh: '启用', en: 'Enabled' },
+  'memory.statProject': { zh: '项目', en: 'Project' },
+  'memory.statGlobal': { zh: '全局', en: 'Global' },
+  'memory.deleteConfirm': { zh: '确定要删除这条 Memory 吗？', en: 'Delete this memory?' },
+  'memory.nameBodyRequired': { zh: '名称和内容为必填项', en: 'Name and content are required' },
+  'memory.createFailed': { zh: '创建失败', en: 'Create failed' },
+  'memory.errorPrefix': { zh: '错误: {err}', en: 'Error: {err}' },
+  'memory.notZip': { zh: '拖入的文件不是 .zip 技能包', en: 'The dropped file is not a .zip skill pack' },
+  'memory.installingFile': { zh: '正在安装 {name} …', en: 'Installing {name}…' },
+  'memory.installFailed': { zh: '安装失败: {err}', en: 'Install failed: {err}' },
+  'memory.noResponse': { zh: '无响应', en: 'no response' },
+  'memory.installedPackage': { zh: '已安装技能包 "{name}" (scope={scope})', en: 'Installed skill pack "{name}" (scope={scope})' },
+  'memory.replacedOld': { zh: ' · 已覆盖旧版', en: ' · replaced the old version' },
+  'memory.installHintSuffix': { zh: ' · 发现安装脚本 {files}（出于安全未自动执行）', en: ' · found install scripts {files} (not auto-run for safety)' },
+  'memory.installError': { zh: '安装异常: {err}', en: 'Install error: {err}' },
   'settings.cancel': { zh: '取消', en: 'Cancel' },
   'settings.save': { zh: '保存', en: 'Save' },
 
@@ -1001,8 +1132,6 @@ var _i18n = {
   'memory.project': { zh: '项目', en: 'Project' },
   'memory.global': { zh: '全局', en: 'Global' },
   'memory.searchPh': { zh: '搜索记忆…', en: 'Search memories…' },
-  'memory.emptyTitle': { zh: '还没有积累任何记忆', en: 'No memories accumulated yet' },
-  'memory.emptyHint': { zh: 'AI 在对话中发现有用模式时会自动保存记忆\n你也可以点击下方「+ 新建」手动添加', en: 'AI auto-saves memories when it discovers useful patterns\nYou can also click "+ New" below to add manually' },
   'memory.createNew': { zh: '创建新记忆', en: 'Create New Memory' },
   'memory.namePh': { zh: '记忆名称 (短横线命名, e.g. react-hooks-convention)', en: 'Memory name (kebab-case, e.g. react-hooks-convention)' },
   'memory.descPh': { zh: '简短描述 — 什么时候该使用这条记忆？', en: 'Brief description — when should this memory be used?' },
@@ -1316,6 +1445,135 @@ var _i18n = {
   'toolPanel.hidden': { zh: '隐藏了 {n} 个更早的工具调用 — 点击展开', en: '{n} earlier tool calls hidden — click to expand' },
 
   // ══════════════════════════════════════
+  //  Finish-info / cost-breakdown popover (ui/finish_info.js)
+  // ══════════════════════════════════════
+  // Cache-break flag labels (key === backend cacheBreak key)
+  'finishInfo.cb.system_prompt': { zh: 'System prompt 改变', en: 'System prompt changed' },
+  'finishInfo.cb.tools': { zh: '工具定义改变', en: 'Tool definitions changed' },
+  'finishInfo.cb.model': { zh: '模型切换', en: 'Model switched' },
+  'finishInfo.cb.message_count': { zh: '上下文压缩', en: 'Context compacted' },
+  'finishInfo.cb.server_side': { zh: '服务端缓存失效', en: 'Server-side cache invalidated' },
+  'finishInfo.cb.no_cache_reuse': { zh: '上下文重新计费（缓存未复用）', en: 'Context re-billed (cache not reused)' },
+  'finishInfo.cb.prefix_mutation': { zh: '缓存前缀被改写', en: 'Cached prefix rewritten' },
+  'finishInfo.cbWithVal': { zh: '{label}（{val}）', en: '{label} ({val})' },
+  // List separators (CJK punctuation in zh, ASCII in en)
+  'finishInfo.listSep': { zh: '，', en: ', ' },
+  'finishInfo.listSepSemi': { zh: '；', en: '; ' },
+  'finishInfo.listSepDot': { zh: '、', en: ', ' },
+  // Per-round breakdown table
+  'finishInfo.apiRoundsTitle': { zh: '{n} 轮 API 调用', en: '{n} API rounds' },
+  'finishInfo.fallbackSuffix': { zh: ' 回退', en: ' fallback' },
+  'finishInfo.metaSum': { zh: '（计 {v}）', en: ' (total {v})' },
+  // write-breakdown term chips
+  'finishInfo.wbPrevOutput': { zh: '上一轮回复 {v}', en: 'prev reply {v}' },
+  'finishInfo.wbToolResults': { zh: '工具结果 {v}', en: 'tool results {v}' },
+  'finishInfo.wbContextWrite': { zh: '首次缓存上下文 {v}', en: 'first-cache context {v}' },
+  'finishInfo.wbRecacheBody': { zh: '重新缓存正文 {v}', en: 're-cache body {v}' },
+  'finishInfo.wbEnvelope': { zh: '消息开销 {v}', en: 'msg overhead {v}' },
+  // write-breakdown tooltip (concatenated fragments; each leads with \n· )
+  'finishInfo.wbTipHead': { zh: '本轮 write = {v} tok，是“自上一轮以来新写入缓存的上下文”，不是模型本轮生成的内容。它由以下几部分构成（后端按真实用量计算，相加恰好等于 write）：', en: 'This round\u2019s write = {v} tok \u2014 the context newly written to cache since the previous round, NOT what the model generated this round. It breaks down as (computed by the backend from real usage; the parts sum exactly to write):' },
+  'finishInfo.wbTipPrevOutput': { zh: '\n· 上一轮回复 {v} —— 上一轮模型生成的文本/推理 + 工具调用参数', en: '\n\u00b7 prev reply {v} \u2014 text/reasoning the model generated last round + tool-call arguments' },
+  'finishInfo.wbTipToolResults': { zh: '\n· 工具结果 {v} —— 上一轮各工具返回结果', en: '\n\u00b7 tool results {v} \u2014 results returned by last round\u2019s tools' },
+  'finishInfo.wbTipToolResultsDetail': { zh: '（明细：{detail}；按本地分词统计，与服务端口径略有出入）', en: ' (detail: {detail}; counted with the local tokenizer, slightly differs from the server)' },
+  'finishInfo.wbTipContextWrite': { zh: '\n· 首次缓存上下文 {v} —— 系统提示、工具定义与历史消息首次写入缓存（通常是首轮的前缀预热；本轮 cache 读取未下降，预期下一轮可低价复用，若未命中会在该轮标注为“重新缓存正文”）', en: '\n\u00b7 first-cache context {v} \u2014 system prompt, tool definitions and history written to cache for the first time (usually the first round\u2019s prefix warm-up; this round\u2019s cache read did not drop, so the next round should reuse it cheaply \u2014 a miss would be flagged there as \u201cre-cache body\u201d)' },
+  'finishInfo.wbTipRecacheBody': { zh: '\n· 重新缓存正文 {v} —— 此前已缓存的会话正文未被读回、被重新计费（真实浪费）', en: '\n\u00b7 re-cache body {v} \u2014 previously-cached conversation body was not read back and got re-billed (real waste)' },
+  'finishInfo.wbTipReadDrop': { zh: '；本轮 cache 读取较上一轮下降 {v} tok', en: '; this round\u2019s cache read dropped {v} tok vs the previous round' },
+  'finishInfo.wbTipSeeBreak': { zh: '，详见下方“缓存失效”', en: ', see \u201ccache miss\u201d below' },
+  'finishInfo.wbTipEnvelope': { zh: '\n· 消息开销 {v} —— 每条消息的 JSON/role 信封开销（仅占少量，已封顶）', en: '\n\u00b7 msg overhead {v} \u2014 per-message JSON/role envelope overhead (small, capped)' },
+  'finishInfo.wbTipCapped': { zh: '\n（注：各分项按本地分词统计，与服务端 write 口径略有差异，已按 write 总量校准，为近似值。）', en: '\n(Note: each part is counted with the local tokenizer and differs slightly from the server\u2019s write; calibrated to the write total, approximate.)' },
+  'finishInfo.wbSumApprox': { zh: '↳ write {v} 的来源（约）：{terms}', en: '\u21b3 write {v} sources (approx): {terms}' },
+  'finishInfo.wbSum': { zh: '↳ write {v} 的来源：{terms}', en: '\u21b3 write {v} sources: {terms}' },
+  // Legacy inflow fallback (rounds persisted before writeBreakdown shipped)
+  'finishInfo.inflowTip': { zh: '本轮 write 里含上一轮 {n} 个工具的返回结果（首次写入缓存）。每项 token 数与工具面板徽章一致，按本地分词统计，与服务端 write 口径略有出入。', en: 'This round\u2019s write includes results from last round\u2019s {n} tools (written to cache for the first time). Each token count matches the tool-panel badge, counted with the local tokenizer, slightly differing from the server\u2019s write.' },
+  'finishInfo.inflowLabel': { zh: '↳ 含上一轮工具结果：{detail}', en: '\u21b3 incl. last round\u2019s tool results: {detail}' },
+  // Activity line
+  'finishInfo.actTip': { zh: '本轮模型调用了 {n} 个工具；它们的调用参数与返回结果会在下一轮写入缓存', en: 'The model called {n} tools this round; their arguments and results are written to cache next round' },
+  'finishInfo.actLabel': { zh: '↳ 调用 {n} 个工具：{tools}', en: '\u21b3 called {n} tools: {tools}' },
+  'finishInfo.finalTip': { zh: '本轮没有调用工具，是模型生成的最终回答。这是 API 轮数比工具批次多 1 的原因。', en: 'No tools this round \u2014 this is the model\u2019s final answer. It\u2019s why the API round count is 1 more than the tool-batch count.' },
+  'finishInfo.finalLabel': { zh: '↳ 最终回答（无工具）', en: '\u21b3 Final answer (no tools)' },
+  // write-source note
+  'finishInfo.writeNoteTipTools': { zh: '本轮 write {v} ≈ 上一轮输出 + {n} 个工具的返回结果（首次写入缓存），并非本轮模型新生成', en: 'This round\u2019s write {v} \u2248 last round\u2019s output + results from {n} tools (written to cache for the first time), not newly generated this round' },
+  'finishInfo.writeNoteTipPlain': { zh: '本轮 write {v} 主要是上一轮输出 + 返回内容首次写入缓存，并非本轮模型新生成', en: 'This round\u2019s write {v} is mostly last round\u2019s output + returned content written to cache for the first time, not newly generated this round' },
+  'finishInfo.writeNoteLabel': { zh: 'ⓘ write 来源：上一轮产出 + 工具结果', en: '\u24d8 write source: last round\u2019s output + tool results' },
+  // Inline cache-break line
+  'finishInfo.cacheBreakLabel': { zh: '缓存失效：{reason}', en: 'Cache miss: {reason}' },
+  // Legend (contains <b> HTML — rendered as innerHTML, do NOT escape)
+  'finishInfo.legendXY': { zh: '<b>X → Y</b>：本轮输入 X / 模型生成 Y', en: '<b>X \u2192 Y</b>: input X this round / model generated Y' },
+  'finishInfo.legendCache': { zh: '<b class="cp-hit">cache</b>：复用上文缓存（便宜）', en: '<b class="cp-hit">cache</b>: reused context cache (cheap)' },
+  'finishInfo.legendWrite': { zh: '<b class="cp-write">write</b>：本轮新写入缓存的上下文（贵，预期下一轮可复用——未命中则计为重新缓存正文）；来源＝上一轮回复 ＋ 工具结果 ＋ 首次缓存上下文 ＋ 消息开销，并非模型本轮新生成', en: '<b class="cp-write">write</b>: context newly written to cache this round (expensive, expected to be reused next round \u2014 a miss counts as re-cache body); source = prev reply + tool results + first-cache context + msg overhead, not newly generated this round' },
+  // Aggregate cost rows
+  'finishInfo.thinkingInOutput': { zh: '(含在 output 中)', en: '(included in output)' },
+  'finishInfo.cacheSavings': { zh: 'Cache 节省', en: 'Cache saved' },
+  // Task ID
+  'finishInfo.taskIdTip': { zh: '点击复制任务 ID（用于定位日志 / 提供给排查）\nTask ID: {id}', en: 'Click to copy the task ID (for locating logs / sharing for diagnosis)\nTask ID: {id}' },
+  // Collapsed cache-miss marker tooltip
+  'finishInfo.cacheBreakSummary': { zh: '缓存失效（{n} 轮）：{reasons}', en: 'Cache miss ({n} rounds): {reasons}' },
+  'finishInfo.cacheBreakSummaryPlain': { zh: '缓存失效（{n} 轮）', en: 'Cache miss ({n} rounds)' },
+  // Finish-reason tags
+  'finishInfo.reasonError': { zh: '错误', en: 'Error' },
+  'finishInfo.reasonStopped': { zh: '已停止', en: 'Stopped' },
+  'finishInfo.reasonInterrupted': { zh: '已中断', en: 'Interrupted' },
+  'finishInfo.reasonInterruptedTip': { zh: '生成过程中服务器崩溃。内容已从最近的检查点恢复——可能不完整。', en: 'Server crashed during generation. Content recovered from last checkpoint \u2014 may be incomplete.' },
+  'finishInfo.reasonServerOffline': { zh: '服务器离线', en: 'Server Offline' },
+  'finishInfo.reasonServerOfflineTip': { zh: '生成过程中服务器离线（例如 VSCode 断开、网络中断）。已保存部分回复。', en: 'Server went offline during generation (e.g. VSCode disconnect, network drop). Partial response saved.' },
+  'finishInfo.reconnect': { zh: '重新连接', en: 'Reconnect' },
+  'finishInfo.reconnectTip': { zh: '检查服务器是否已生成完成结果', en: 'Check server for completed result' },
+  'finishInfo.reasonTruncated': { zh: '已截断', en: 'Truncated' },
+  'finishInfo.reasonTool': { zh: '工具', en: 'Tool' },
+  'finishInfo.reasonFiltered': { zh: '已过滤', en: 'Filtered' },
+  'finishInfo.reasonToolLimit': { zh: '工具上限', en: 'Tool limit' },
+  // Fallback tag
+  'finishInfo.fallbackTag': { zh: '回退', en: 'Fallback' },
+  'finishInfo.fallbackReason': { zh: '\n失败原因 / Reason: {reason}', en: '\nReason: {reason}' },
+  'finishInfo.fallbackTip': { zh: '原模型 {from} 失败，已回退到 {to}{reason}', en: 'Original model {from} failed, fell back to {to}{reason}' },
+  // Trace-copy tooltip (debug)
+  'finishInfo.traceCopyTip': { zh: '点击复制 trace_id:\n{ids}', en: 'Click to copy trace_id:\n{ids}' },
+
+  // ══════════════════════════════════════
+  //  File-changes bar (ui/finish_info.js _renderFileChangesHtml)
+  // ══════════════════════════════════════
+  'fileChanges.filesChanged': { zh: '{n} 个文件已修改', en: '{n} file{s} changed' },
+  'fileChanges.inProgress': { zh: '{n} 个进行中', en: '{n} in progress' },
+  'fileChanges.failed': { zh: '{n} 个失败', en: '{n} failed' },
+  'fileChanges.summarySep': { zh: '，', en: ', ' },
+  'fileChanges.undo': { zh: '撤销', en: 'Undo' },
+  'fileChanges.undoAll': { zh: '全部撤销', en: 'Undo All' },
+  'fileChanges.undoTip': { zh: '撤销本轮修改', en: 'Undo this round\u2019s changes' },
+  'fileChanges.undoAllTip': { zh: '撤销所有对话中的所有修改', en: 'Undo all changes across the whole conversation' },
+  // Per-file action verbs (key === backend action; unknown actions render verbatim)
+  'fileChanges.action.created': { zh: '已创建', en: 'created' },
+  'fileChanges.action.modified': { zh: '已修改', en: 'modified' },
+  'fileChanges.action.patched': { zh: '已修补', en: 'patched' },
+  'fileChanges.action.deleted': { zh: '已删除', en: 'deleted' },
+  'fileChanges.action.written': { zh: '已写入', en: 'written' },
+
+  // ══════════════════════════════════════
+  //  Streaming phase indicator (.stream-phase-*)
+  // ══════════════════════════════════════
+  'stream.phase.reasoning': { zh: '推理中', en: 'Reasoning' },
+  'stream.phase.deepThinking': { zh: '深度思考', en: 'Deep thinking' },
+  'stream.phase.chars': { zh: '{n} 字符', en: '{n} chars' },
+  'stream.phase.waitingModel': { zh: '已发送给模型，等待开始回复…', en: 'Sent to the model, waiting for it to start replying…' },
+  'stream.phase.retrying': { zh: '正在重试…', en: 'Retrying…' },
+  'stream.phase.waiting': { zh: '等待中…', en: 'Waiting…' },
+  'stream.thinking.active': { zh: '思考中...', en: 'Thinking...' },
+  'stream.thinking.done': { zh: '思考过程', en: 'Thinking Process' },
+
+  // Swarm agent phase pills (streaming_swarm_panel.js)
+  'swarm.phase.thinking': { zh: '思考中…', en: 'Thinking…' },
+  'swarm.phase.tool_use': { zh: '调用工具中', en: 'Using tools' },
+  'swarm.phase.writing': { zh: '撰写中…', en: 'Writing…' },
+  'swarm.phase.searching': { zh: '搜索中…', en: 'Searching…' },
+  'swarm.phase.coding': { zh: '编码中…', en: 'Coding…' },
+  'swarm.phase.analyzing': { zh: '分析中…', en: 'Analyzing…' },
+  'swarm.phase.complete': { zh: '完成', en: 'Complete' },
+  'swarm.phase.failed': { zh: '失败', en: 'Failed' },
+  'swarm.phase.error': { zh: '错误', en: 'Error' },
+  'swarm.phase.queued': { zh: '排队中', en: 'Queued' },
+  'swarm.phase.running': { zh: '工作中…', en: 'Working…' },
+  'swarm.phase.noResult': { zh: '无结果', en: 'No result' },
+
+  // ══════════════════════════════════════
   //  Queue
   // ══════════════════════════════════════
   'queue.messagesQueued': { zh: '条消息排队中', en: 'messages queued' },
@@ -1463,20 +1721,216 @@ var _i18n = {
   'mcp.retryInMin': { zh: '{n} 分钟后重试', en: 'retry in {n} min' },
   'mcp.retryNow': { zh: '即将重试…', en: 'retrying…' },
   'mcp.retryFailCount': { zh: '已失败 {n} 次', en: '{n} failed attempts' },
+  // Catalog grid / loading / empty states
+  'mcp.loading': { zh: '正在加载…', en: 'Loading…' },
+  'mcp.loadFailed': { zh: '加载 Apps 失败: {err}', en: 'Failed to load Apps: {err}' },
+  'mcp.toolsCount': { zh: '{n} 个工具', en: '{n} tools' },
+  'mcp.installedCount': { zh: '已安装 {n} 个', en: '{n} installed' },
+  'mcp.emptyInstalled': { zh: '还没有安装任何 App。可在「全部」或「未安装」中安装，或点「+ 添加」接入自定义服务器。', en: 'No Apps installed yet. Install one from “All” or “Available”, or click “+ Add” to connect a custom server.' },
+  'mcp.emptyAvailable': { zh: '所有 App 都已安装。', en: 'All Apps are installed.' },
+  'mcp.emptyNoMatch': { zh: '没有匹配的 App。', en: 'No matching Apps.' },
+  // Card status badges + actions
+  'mcp.statusOn': { zh: '已连接', en: 'ON' },
+  'mcp.statusIdle': { zh: '空闲', en: 'IDLE' },
+  'mcp.repo': { zh: '仓库', en: 'Repo' },
+  'mcp.repoTitle': { zh: '源代码仓库', en: 'Source Repository' },
+  'mcp.uninstall': { zh: '卸载', en: 'Uninstall' },
+  'mcp.uninstallTitle': { zh: '断开连接，但保留已填写的凭据，方便下次一键重新启用', en: 'Disconnect but keep saved credentials for easy one-click re-enable' },
+  'mcp.connect': { zh: '连接', en: 'Connect' },
+  'mcp.connectCustomTitle': { zh: '重新连接此自定义服务器', en: 'Reconnect this custom server' },
+  'mcp.connectReinstallTitle': { zh: '编辑凭据并重新连接（已有凭据会回填为默认；留空则沿用）', en: 'Edit credentials and reconnect (existing ones prefill as defaults; leave blank to keep)' },
+  'mcp.purge': { zh: '清除凭据', en: 'Clear credentials' },
+  'mcp.purgeTitle': { zh: '彻底删除配置，包括已保存的凭据', en: 'Permanently delete the config, including saved credentials' },
+  'mcp.install': { zh: '安装', en: 'Install' },
+  'mcp.quickInstallTitle': { zh: '无需配置，点击直接安装并连接；如需修改默认值可在安装后点“连接”', en: 'No config needed — click to install and connect; to change defaults, click “Connect” after install' },
+  'mcp.connectAll': { zh: '全部连接', en: 'Connect All' },
+  // Error detail
+  'mcp.unknownError': { zh: '未知错误', en: 'Unknown error' },
+  'mcp.unknownErrorNoConn': { zh: '未知错误（无法连接到服务器）', en: 'Unknown error (could not connect to the server)' },
+  'mcp.serverOutputLabel': { zh: '服务器输出:', en: 'Server output:' },
+  // Quick install
+  'mcp.quickInstallFailed': { zh: '一键安装失败: {err}\n\n将打开高级设置，可手动调整参数后重试。', en: 'One-click install failed: {err}\n\nOpening advanced settings so you can adjust the parameters and retry.' },
+  // Install modal fields
+  'mcp.savedHint': { zh: '已保存，留空则沿用；填写即覆盖', en: 'Saved — leave blank to keep; fill to override' },
+  'mcp.savedBadge': { zh: '● 已保存', en: '● Saved' },
+  'mcp.selectProvider': { zh: '— 选择服务商 —', en: '— Select provider —' },
+  'mcp.noEnvNeeded': { zh: '无需配置，直接安装即可。', en: 'No configuration needed — just install.' },
+  'mcp.advancedToggle': { zh: '▸ 高级设置（可选，{n} 项）', en: '▸ Advanced settings (optional, {n})' },
+  // Poll / install progress
+  'mcp.installingDeps': { zh: '正在安装依赖…（已等待 {n} 秒，请勿关闭）', en: 'Installing dependencies… (waited {n}s, please keep this open)' },
+  'mcp.installTimeout': { zh: '安装超时（依赖下载耗时过长）。请稍后在“未安装”中重试。', en: 'Install timed out (dependency download took too long). Retry later under “Available”.' },
+  'mcp.installing': { zh: '安装中…', en: 'Installing…' },
+  'mcp.startingFirstInstall': { zh: '正在启动 {name}…（首次安装需下载依赖，可能耗时约一分钟，请勿关闭）', en: 'Starting {name}… (first install downloads dependencies, may take ~a minute, please keep this open)' },
+  'mcp.installingDepsName': { zh: '正在安装 {name} 的依赖…（首次安装可能耗时约一分钟，请勿关闭）', en: 'Installing {name} dependencies… (first install may take ~a minute, please keep this open)' },
+  'mcp.installedSuccess': { zh: '✓ {name} 已安装 — {n} 个工具可用', en: '✓ {name} installed — {n} tools available' },
+  'mcp.installFailedNoConn': { zh: '安装失败（无法连接到服务器）', en: 'Install failed (could not connect to the server)' },
+  'mcp.retry': { zh: '重试', en: 'Retry' },
+  // Uninstall / purge confirms
+  'mcp.uninstallConfirm': { zh: '卸载 {name}？\n\n将断开连接并禁用，但会保留已填写的凭据；下次点击“连接”可一键重新启用，无需再填一遍。\n\n如需彻底清除凭据，请先卸载，再在空闲卡片上点“清除凭据”。', en: 'Uninstall {name}?\n\nIt will be disconnected and disabled, but your saved credentials are kept; click “Connect” next time to re-enable in one click without re-entering them.\n\nTo wipe credentials entirely, uninstall first, then click “Clear credentials” on the idle card.' },
+  'mcp.uninstallFailed': { zh: '卸载失败: {err}', en: 'Uninstall failed: {err}' },
+  'mcp.purgeConfirm': { zh: '清除 {name} 的全部配置和已保存的凭据？\n\n此操作不可恢复，重新启用时需要再次填写所有凭据。', en: 'Clear all config and saved credentials for {name}?\n\nThis cannot be undone — you’ll need to re-enter every credential to re-enable it.' },
+  'mcp.purgeFailed': { zh: '清除失败: {err}', en: 'Clear failed: {err}' },
+  // Connect / reconnect
+  'mcp.connecting': { zh: '连接中…', en: 'Connecting…' },
+  'mcp.connectFailed': { zh: '连接失败: {err}', en: 'Connect failed: {err}' },
+  // Save custom server
+  'mcp.needName': { zh: '请输入服务器名称', en: 'Please enter a server name' },
+  'mcp.needCommand': { zh: '请输入命令 (command)', en: 'Please enter a command' },
+  'mcp.needUrl': { zh: '请输入 SSE URL', en: 'Please enter an SSE URL' },
+  'mcp.saving': { zh: '保存中…', en: 'Saving…' },
+  'mcp.startingName': { zh: '正在启动 {name}…', en: 'Starting {name}…' },
+  'mcp.saveFailedNoConn': { zh: '保存失败（无法连接到服务器）', en: 'Save failed (could not connect to the server)' },
+  'mcp.savedConnected': { zh: '✓ {name} 已保存并连接', en: '✓ {name} saved & connected' },
+
+  // ══════════════════════════════════════
+  //  Relay admin page (relay-admin.js — standalone /admin)
+  // ══════════════════════════════════════
+  // Shared
+  'relayAdmin.loadFailed': { zh: '加载失败：{err}', en: 'Load failed: {err}' },
+  // Users tab
+  'relayAdmin.pwPlaceholder': { zh: '临时密码', en: 'Temporary password' },
+  'relayAdmin.create': { zh: '创建', en: 'Create' },
+  'relayAdmin.colEmail': { zh: '邮箱', en: 'Email' },
+  'relayAdmin.colRole': { zh: '角色', en: 'Role' },
+  'relayAdmin.colStatus': { zh: '状态', en: 'Status' },
+  'relayAdmin.colBalance': { zh: '余额', en: 'Balance' },
+  'relayAdmin.colCreated': { zh: '注册时间', en: 'Registered' },
+  'relayAdmin.colLastLogin': { zh: '最近登录', en: 'Last login' },
+  'relayAdmin.colActions': { zh: '操作', en: 'Actions' },
+  'relayAdmin.topup': { zh: '+充值', en: '+Top up' },
+  'relayAdmin.payments': { zh: '支付', en: 'Payments' },
+  'relayAdmin.disable': { zh: '停用', en: 'Disable' },
+  'relayAdmin.enable': { zh: '启用', en: 'Enable' },
+  'relayAdmin.noUsers': { zh: '还没有用户', en: 'No users yet' },
+  'relayAdmin.needEmailPw': { zh: '需要邮箱和密码', en: 'Email and password are required' },
+  'relayAdmin.createFailed': { zh: '创建失败：{err}', en: 'Create failed: {err}' },
+  'relayAdmin.topupAmount': { zh: '充值金额（credits，正数）：', en: 'Top-up amount (credits, positive):' },
+  'relayAdmin.invalidAmount': { zh: '无效金额', en: 'Invalid amount' },
+  'relayAdmin.topupNote': { zh: '备注（可选）：', en: 'Note (optional):' },
+  'relayAdmin.topupNoteDefault': { zh: '管理员充值', en: 'Admin top-up' },
+  'relayAdmin.topupFailed': { zh: '充值失败：{err}', en: 'Top-up failed: {err}' },
+  'relayAdmin.toggleConfirm': { zh: '将该用户改为 {status}？', en: 'Change this user to {status}?' },
+  'relayAdmin.updateFailed': { zh: '更新失败：{err}', en: 'Update failed: {err}' },
+  // Payments drill-down
+  'relayAdmin.loadingPayments': { zh: '加载支付记录…', en: 'Loading payments…' },
+  'relayAdmin.paymentsOf': { zh: '{email} 的支付记录（{n}）', en: '{email}\u2019s payments ({n})' },
+  'relayAdmin.colTime': { zh: '时间', en: 'Time' },
+  'relayAdmin.colProvider': { zh: '提供商', en: 'Provider' },
+  'relayAdmin.colAmount': { zh: '金额', en: 'Amount' },
+  'relayAdmin.colCurrency': { zh: '币种', en: 'Currency' },
+  'relayAdmin.colCredited': { zh: '入账', en: 'Credited' },
+  'relayAdmin.colExtId': { zh: '外部 ID', en: 'External ID' },
+  'relayAdmin.noPayments': { zh: '无支付记录', en: 'No payments' },
+  'relayAdmin.noPaymentsYet': { zh: '还没有支付记录', en: 'No payments yet' },
+  // Pricing tab
+  'relayAdmin.marginLabel': { zh: '默认利润率（%）：', en: 'Default margin (%):' },
+  'relayAdmin.saveMargin': { zh: '保存利润率', en: 'Save margin' },
+  'relayAdmin.marginDesc': { zh: '基础价 × (1 + 利润率) = 客户最终价。这是本页唯一可调的计费旋钮。', en: 'Base price × (1 + margin) = customer’s final price. This is the only billing knob tunable on this page.' },
+  'relayAdmin.ratesReadonly': { zh: '<strong>模型费率为只读。</strong>费率的唯一真实来源是 <code>lib/pricing.py</code>（单一成本引擎 <code>lib.cost.compute_cost</code> 读取它，显示与扣费同源）；此处不再可编辑，以免出现第二份会漂移的费率表。如需改价请编辑 <code>lib/pricing.py</code>。', en: '<strong>Model rates are read-only.</strong> The single source of truth for rates is <code>lib/pricing.py</code> (the one cost engine <code>lib.cost.compute_cost</code> reads it, so display and billing share a source); they are no longer editable here to avoid a second rate table that would drift. To change prices, edit <code>lib/pricing.py</code>.' },
+  'relayAdmin.colModel': { zh: '模型', en: 'Model' },
+  'relayAdmin.colInput': { zh: '输入(µ/Mtok)', en: 'Input (µ/Mtok)' },
+  'relayAdmin.colOutput': { zh: '输出(µ/Mtok)', en: 'Output (µ/Mtok)' },
+  'relayAdmin.colCacheHit': { zh: '缓存命中(µ/Mtok)', en: 'Cache hit (µ/Mtok)' },
+  'relayAdmin.colCacheWrite': { zh: '缓存写入(µ/Mtok)', en: 'Cache write (µ/Mtok)' },
+  'relayAdmin.defaultModelFallback': { zh: 'default_model (兜底)', en: 'default_model (fallback)' },
+  'relayAdmin.invalidMargin': { zh: '利润率无效', en: 'Invalid margin' },
+  'relayAdmin.marginSaved': { zh: '利润率已保存并热重载。', en: 'Margin saved and hot-reloaded.' },
+  'relayAdmin.saveFailed': { zh: '保存失败：{err}', en: 'Save failed: {err}' },
+  // Codes tab
+  'relayAdmin.codeCountPh': { zh: '个数', en: 'Count' },
+  'relayAdmin.codeAmountPh': { zh: '单张金额(credits)', en: 'Amount each (credits)' },
+  'relayAdmin.codeExpiresPh': { zh: 'N 天后过期', en: 'Expires in N days' },
+  'relayAdmin.codeBatchPh': { zh: '批次名(可选)', en: 'Batch name (optional)' },
+  'relayAdmin.generate': { zh: '生成', en: 'Generate' },
+  'relayAdmin.colCode': { zh: '代码', en: 'Code' },
+  'relayAdmin.colBatch': { zh: '批次', en: 'Batch' },
+  'relayAdmin.colRedeemer': { zh: '使用人', en: 'Redeemed by' },
+  'relayAdmin.codeRedeemed': { zh: '已使用', en: 'Redeemed' },
+  'relayAdmin.codeUnredeemed': { zh: '未使用', en: 'Unredeemed' },
+  'relayAdmin.noCodes': { zh: '还没有兑换码', en: 'No redeem codes yet' },
+  'relayAdmin.invalidParams': { zh: '参数无效', en: 'Invalid parameters' },
+  'relayAdmin.codesGenerated': { zh: '已生成 <strong>{n}</strong> 张兑换码，每张 {amount} credits。', en: 'Generated <strong>{n}</strong> redeem codes, {amount} credits each.' },
+  'relayAdmin.copyAll': { zh: '复制全部', en: 'Copy all' },
+  'relayAdmin.generateFailed': { zh: '生成失败：{err}', en: 'Generate failed: {err}' },
+  // Payments tab
+  'relayAdmin.paymentsDesc': { zh: '显示当前管理员账号的支付记录。如需查看某个用户的支付记录，请在「用户」标签页中筛选（规划中）。', en: 'Shows the current admin account’s payments. To view a specific user’s payments, filter in the “Users” tab (planned).' },
+  // Restricted-mode banner (innerHTML — contains <code>)
+  'relayAdmin.bannerByoOnly': { zh: 'BYO-only：用户必须使用各自注册的模型端点（<code>/api/v1/providers</code> → <code>agents:run</code>），新发放的密钥不含 <code>chat</code> 权限，无法访问平台模型池。', en: 'BYO-only: users must use their own registered model endpoints (<code>/api/v1/providers</code> → <code>agents:run</code>); newly issued keys carry no <code>chat</code> scope and cannot reach the platform model pool.' },
+  'relayAdmin.bannerNoBilling': { zh: '未计费：平台不收取费用，「定价 / 兑换码 / 支付」已隐藏。', en: 'No billing: the platform charges nothing; “Pricing / Codes / Payments” are hidden.' },
+  // ── admin.html static chrome (data-i18n / data-i18n-html) ──
+  'relayAdmin.loadingPlaceholder': { zh: '加载中…', en: 'Loading…' },
+  'relayAdmin.page.navDashboard': { zh: '客户 Dashboard', en: 'Customer Dashboard' },
+  'relayAdmin.page.navBackToTofu': { zh: '返回 Tofu', en: 'Back to Tofu' },
+  'relayAdmin.page.gateTitle': { zh: '需要管理员权限', en: 'Admin access required' },
+  'relayAdmin.page.gateP1': { zh: '本页仅在中转站模式（<code>auth_mode = multi-user</code>）下、且以管理员密钥登录时可用。', en: 'This page is only available in relay mode (<code>auth_mode = multi-user</code>) when logged in with an admin key.' },
+  'relayAdmin.page.gateP2': { zh: '个人 / 自用部署无需此页 —— 在 <a href="/">Tofu 设置</a> 中配置你自己的服务商即可。', en: 'Personal / self-hosted deployments don’t need this page — just configure your own providers in <a href="/">Tofu Settings</a>.' },
+  'relayAdmin.page.bannerPrefix': { zh: '<strong>受限中转模式</strong> —— ', en: '<strong>Restricted relay mode</strong> — ' },
+  'relayAdmin.page.bannerSuffix': { zh: '可在 <code>data/config/relay.json</code> 中调整 <code>billing_enabled</code> / <code>model_relay_enabled</code>（二者互相独立）。', en: 'Adjust <code>billing_enabled</code> / <code>model_relay_enabled</code> in <code>data/config/relay.json</code> (the two are independent).' },
+  'relayAdmin.page.tabUsers': { zh: '用户', en: 'Users' },
+  'relayAdmin.page.tabPricing': { zh: '定价', en: 'Pricing' },
+  'relayAdmin.page.tabCodes': { zh: '兑换码', en: 'Redeem codes' },
+  'relayAdmin.page.tabPayments': { zh: '支付', en: 'Payments' },
+  'relayAdmin.page.usersTitle': { zh: '用户管理', en: 'User management' },
+  'relayAdmin.page.usersDesc': { zh: '管理使用本中转站的用户、调整余额、暂停账号、查看历史。', en: 'Manage the users of this relay — adjust balances, suspend accounts, view history.' },
+  'relayAdmin.page.pricingTitle': { zh: '定价表', en: 'Pricing table' },
+  'relayAdmin.page.pricingDesc': { zh: '每千 token 的微币(µ)单价。修改保存到 <code>data/config/pricing.json</code>，对未来请求立即生效。1 credit = 1,000,000 µ ≈ US $0.001。', en: 'Micro-credit (µ) price per 1K tokens. Changes save to <code>data/config/pricing.json</code> and take effect immediately for future requests. 1 credit = 1,000,000 µ ≈ US $0.001.' },
+  'relayAdmin.page.codesTitle': { zh: '兑换码', en: 'Redeem codes' },
+  'relayAdmin.page.codesDesc': { zh: '批量生成单次有效的兑换码，客户在 <code>/dashboard</code> 输入即可获得对应余额。', en: 'Batch-generate single-use redeem codes; customers enter them at <code>/dashboard</code> to credit their balance.' },
+  'relayAdmin.page.paymentsTitle': { zh: '支付记录', en: 'Payment records' },
+  'relayAdmin.page.paymentsDesc': { zh: '所有 Stripe / Alipay 完成的充值。Webhook 处理是幂等的——同一笔重复回调不会被重复入账。', en: 'All completed Stripe / Alipay top-ups. Webhook handling is idempotent — a duplicate callback for the same payment is never credited twice.' },
+
+  // ══════════════════════════════════════
+  //  Compaction viewer drawer (compaction-viewer.js)
+  // ══════════════════════════════════════
+  // Trigger labels (icon prepended in JS; text keeps the English (kind) suffix)
+  'compactionViewer.trigger.force': { zh: '自动压缩 (force)', en: 'Auto-compaction (force)' },
+  'compactionViewer.trigger.reactive': { zh: '紧急压缩 (reactive)', en: 'Emergency compaction (reactive)' },
+  'compactionViewer.trigger.manual': { zh: '手动压缩 (manual)', en: 'Manual compaction (manual)' },
+  // Header chrome
+  'compactionViewer.title': { zh: '压缩前的上下文快照', en: 'Pre-compaction context snapshot' },
+  'compactionViewer.subtitle': { zh: '这里展示的是<strong>压缩触发瞬间</strong>发送给 LLM 的完整消息列表——包含 system prompt、工具调用、工具结果，以及已经过 L1/L2 处理（如 thinking 剥离、screenshot 替换）的中间态。它<em>不是</em>用户输入的"原始文本"——查看原始对话请使用左侧主窗口。', en: 'This shows the <strong>full message list sent to the LLM at the moment compaction fired</strong> — the system prompt, tool calls, tool results, and the post-L1/L2 intermediate state (thinking stripped, screenshots replaced). It is <em>not</em> your original input text — to see the raw conversation, use the main window on the left.' },
+  'compactionViewer.tabMessages': { zh: '上下文消息', en: 'Context messages' },
+  'compactionViewer.tabSummary': { zh: '压缩结果摘要', en: 'Compaction summary' },
+  'compactionViewer.tabHistory': { zh: '该会话全部快照', en: 'All snapshots for this conversation' },
+  'compactionViewer.loading': { zh: '加载中…', en: 'Loading…' },
+  'compactionViewer.copyJson': { zh: '复制原始 JSON', en: 'Copy raw JSON' },
+  'compactionViewer.download': { zh: '下载完整快照', en: 'Download full snapshot' },
+  // Meta rows
+  'compactionViewer.metaReason': { zh: '触发原因', en: 'Trigger reason' },
+  'compactionViewer.metaType': { zh: '类型', en: 'Type' },
+  'compactionViewer.metaTime': { zh: '发生时间', en: 'Time' },
+  'compactionViewer.metaMsgs': { zh: '消息数', en: 'Messages' },
+  'compactionViewer.metaModel': { zh: '模型', en: 'Model' },
+  'compactionViewer.metaRound': { zh: '回合', en: 'Round' },
+  // Empty / error states
+  'compactionViewer.emptySnapshot': { zh: '（该快照为空）', en: '(This snapshot is empty)' },
+  'compactionViewer.revealImage': { zh: '展开显示 · 可能较大', en: 'Reveal · may be large' },
+  'compactionViewer.noSummary1': { zh: '该快照没有压缩摘要。', en: 'This snapshot has no compaction summary.' },
+  'compactionViewer.noSummary2': { zh: '这通常意味着压缩在 L1 micro-compact 或 reactive image-strip 阶段就完成了，未调用 LLM 生成摘要。', en: 'This usually means compaction finished at the L1 micro-compact or reactive image-strip stage, without calling the LLM to generate a summary.' },
+  'compactionViewer.noHistory': { zh: '该会话暂无压缩记录。', en: 'No compaction records for this conversation yet.' },
+  'compactionViewer.loadFailed': { zh: '加载失败：{err}', en: 'Load failed: {err}' },
+  'compactionViewer.noCompaction': { zh: '该会话尚未触发过上下文压缩。', en: 'This conversation has not triggered context compaction yet.' },
+  'compactionViewer.historyFailed': { zh: '无法获取压缩历史：{err}', en: 'Could not fetch compaction history: {err}' },
+  'compactionViewer.copied': { zh: '已复制 JSON', en: 'JSON copied' },
+  'compactionViewer.copyFailed': { zh: '复制失败：{err}', en: 'Copy failed: {err}' },
 
   // ══════════════════════════════════════
   //  Browser bridge modal
   // ══════════════════════════════════════
-  'browser.stepDownload': { zh: '下载扩展程序', en: 'Download extension' },
-  'browser.stepDownloadDesc': { zh: '点击下方按钮下载 ZIP 文件，然后解压。', en: 'Click the button below to download the ZIP file, then extract it.' },
+  'browser.stepDownload': { zh: '下载并解压扩展', en: 'Download & unzip the extension' },
+  'browser.stepDownloadDesc': { zh: '点击下方按钮下载 ZIP，然后<strong>务必先解压</strong>。', en: 'Click the button below to download the ZIP, then <strong>be sure to unzip it</strong>.' },
   'browser.stepDownloadBtn': { zh: '下载扩展 ZIP', en: 'Download Extension ZIP' },
+  'browser.localTitle': { zh: '在本机运行 Tofu？无需下载', en: 'Running Tofu on this machine? No download needed' },
+  'browser.localDesc': { zh: '在 <code>chrome://extensions/</code> 启用开发者模式后，点击「加载已解压的扩展程序」并直接选择下面这个文件夹：', en: 'In <code>chrome://extensions/</code>, enable Developer mode, click "Load unpacked", and select this folder directly:' },
+  'browser.clickToCopy': { zh: '点击复制', en: 'Click to copy' },
+  'browser.lnaTitle': { zh: 'Chrome 142+ 可能反复弹出「访问本地网络设备」', en: 'Chrome 142+ may repeatedly prompt for "local network access"' },
+  'browser.lnaDesc': { zh: '从 Chrome 142 起，访问本地网络的网页会逐站弹出权限请求，多标签搜索时需反复点击。扩展无法代为授权，请用以下任一方式关闭提示：', en: 'Since Chrome 142, pages touching the local network prompt per-site, so multi-tab searches require repeated clicks. The extension cannot grant this itself — disable the prompt with either method below:' },
+  'browser.lnaFlag': { zh: '<strong>方式一（最快）</strong>：打开 <code>chrome://flags/#local-network-access-check</code> → 设为 <strong>Disabled</strong> → 重启 Chrome。', en: '<strong>Option 1 (fastest)</strong>: open <code>chrome://flags/#local-network-access-check</code> → set it to <strong>Disabled</strong> → restart Chrome.' },
+  'browser.lnaPolicy': { zh: '<strong>方式二（持久）</strong>：放置一个 Chrome 托管策略文件，内容为：', en: '<strong>Option 2 (persistent)</strong>: drop a Chrome managed-policy file with this content:' },
+  'browser.lnaPathLabel': { zh: '放置位置：', en: 'Place it at:' },
   'browser.stepInstall': { zh: '在 Chrome 中安装', en: 'Install in Chrome' },
   'browser.stepVerify': { zh: '验证连接', en: 'Verify connection' },
   'browser.stepVerifyDesc': { zh: '点击工具栏中的扩展图标，应显示 <strong>已连接</strong>。然后在此处开启浏览器功能。', en: 'Click the extension icon in the toolbar — it should show <strong>Connected</strong>. Then turn on the browser feature here.' },
-  'browser.capsTitle': { zh: '浏览器桥接的 AI 功能', en: 'Browser bridge AI capabilities' },
-  'browser.capListTabs': { zh: '列出所有打开的标签页（标题、URL）', en: 'List all open tabs (title, URL)' },
-  'browser.capReadTab': { zh: '读取任意标签页的文本内容，或使用 CSS 选择器', en: 'Read text content of any tab, or use CSS selectors' },
-  'browser.capExecJs': { zh: '在任意标签页中执行 JavaScript（点击、填充表单、提取数据）', en: 'Run JavaScript in any tab (click, fill forms, extract data)' },
   'browser.checkingDots': { zh: '正在检查...', en: 'Checking…' },
 
   // ══════════════════════════════════════
@@ -1643,6 +2097,45 @@ function _onLanguageChange(lang) {
       var _babelPanel = document.querySelector('.paper-tab-panel[data-tab="translate"]');
       if (_babelPanel && _babelPanel.style.display !== 'none' && typeof _initBabelPdfTab === 'function') _initBabelPdfTab();
     } catch (e) { /* paper reader may not be initialised */ }
+  }
+  // Re-render the MCP catalog grid (dynamic panel) when its tab is open.
+  // Uses the cached _mcpCatalog — a pure repaint, no network refetch.
+  if (typeof _renderMcpCatalog === 'function') {
+    var _mcpGrid = document.getElementById('mcpCatalogGrid');
+    if (_mcpGrid && _mcpGrid.offsetParent !== null) {
+      try {
+        if (typeof _renderMcpCategoryBar === 'function') _renderMcpCategoryBar();
+        _renderMcpCatalog();
+        if (typeof _renderMcpInstalled === 'function') _renderMcpInstalled();
+        if (typeof _mcpUpdateToolCount === 'function') _mcpUpdateToolCount();
+      } catch (e) { /* MCP tab may not be initialised */ }
+    }
+  }
+  // Re-render the compaction viewer drawer's JS-rendered content (meta rows +
+  // active tab) when it's open. Its static chrome (data-i18n) is already
+  // handled by the _applyI18n() scan above; this covers the dynamic parts.
+  if (typeof _cvOnLanguageChange === 'function') {
+    try { _cvOnLanguageChange(); } catch (e) { /* drawer may not be open */ }
+  }
+  // Re-render the Skills tab (cards/pagination/actions are JS-rendered from
+  // cached _skillsCatalog/_skillsInstalled) when its grid is visible.
+  if (typeof _skillsRender === 'function') {
+    var _skGrid = document.getElementById('skillsCatalogGrid');
+    if (_skGrid && _skGrid.offsetParent !== null) {
+      try { _skillsRender(); } catch (e) { /* skills tab may not be initialised */ }
+    }
+  }
+  // Re-render the Memory modal (cards/stats/toggle button are JS-rendered from
+  // cached _memoryCache) when the modal is open.
+  var _memModal = document.getElementById('memoryModal');
+  if (_memModal && _memModal.classList.contains('open')) {
+    try {
+      if (typeof _updateMemoryModalBtn === 'function') _updateMemoryModalBtn();
+      if (typeof _renderMemoryCards === 'function' && typeof _memoryCache !== 'undefined') {
+        _updateMemoryStats(_memoryCache);
+        _renderMemoryCards(_memoryCache);
+      }
+    } catch (e) { /* memory modal may not be initialised */ }
   }
   if (typeof _renderProvidersTab === 'function') {
     try { _renderProvidersTab(); } catch (e) { /* tab may not be initialised */ }

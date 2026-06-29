@@ -7,13 +7,27 @@ cryptography>=42.0
 flask>=3.0
 flask-compress>=1.14
 requests>=2.31
+# urllib3 — transitive via requests; pinned explicitly to a floor that clears
+# the redirect-leak CVE trio (CVE-2023-43804 / CVE-2023-45803 Cookie+body leak
+# on cross-origin redirect, CVE-2024-37891 proxy-auth leak), fixed in 1.26.18/.19.
+urllib3>=1.26.19
+# Jinja2 — transitive via flask/quart; pinned to a floor past the sandbox/attr
+# escaping bypasses (CVE-2024-22195/34064/56201/56326, CVE-2025-27516), fixed
+# across 3.1.3–3.1.6. Flask 3.x already supports it.
+Jinja2>=3.1.6
 psutil>=5.9
 # sqlite3 is built into Python — no external package needed
 # tofu-search — standalone multi-engine web search + content fetch pipeline,
 # extracted from this repo's former lib/search + lib/fetch. chatui wires its
 # own LLM routing / browser-extension / auth-source behavior into tofu-search's
 # provider seams via lib/search_bridge.py at startup.
-tofu-search>=0.2.0
+# >=0.3.1: the browser-search fallback now relies on the BrowserProvider.fetch_html
+# seam (the SERP parser lives IN the library); the bridge no longer ships its own
+# parser, so an older tofu-search would leave browser-search dead.
+# >=0.3.2: adds the pre-fetch relevance gate (skips fetching zero-query-overlap
+# SERP junk before it costs a fetch / floods the browser bridge); default-on,
+# so chatui search + Reading-Mode reports stop pulling off-topic pages.
+tofu-search>=0.3.2
 trafilatura>=1.6
 # playwright is optional — powers the JS-rendered fallback in tofu_search.fetch.
 # On Linux, Chromium needs X11/GTK shared libs (libatk, libgbm, libXcomposite, …).

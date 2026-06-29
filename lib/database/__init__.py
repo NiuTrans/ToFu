@@ -54,6 +54,8 @@ from lib.database._core import (  # noqa: F401
     # Database availability
     db_available,
     pg_available,
+    # Opt-in SQL-error log suppression (expected-to-fail probes)
+    suppress_sql_error_log,
     # Sanitization
     strip_null_bytes_deep,
     # SQL translation
@@ -96,6 +98,7 @@ __all__ = [
     'reset_sqlite_for_tests', 'restore_db_state',
     '_column_exists',
     'db_available', 'pg_available',
+    'suppress_sql_error_log',
     '_tune_connection',
     'shutdown_pool',
     'backup_pg_database',

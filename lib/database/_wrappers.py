@@ -188,9 +188,15 @@ class PgCursor:
             # A SQL execution failure is a genuine, often data-affecting error.
             # Log at ERROR so it reaches error.log; the full SQL/params stay at
             # DEBUG (enable via TOFU_DB_LOG_LEVEL=DEBUG) to avoid leaking values.
-            logger.error('[DB] SQL execution failed (%s): %.120s', type(e).__name__, e)
-            logger.debug('[DB] SQL error detail: %s\n  Original: %.200s\n  Translated: %.200s\n  Params: %.200s',
-                         e, sql, translated, str(params)[:200] if params else 'None')
+            # A caller running an expected-to-fail probe (see
+            # suppress_sql_error_log in _core) demotes this to DEBUG.
+            from lib.database._core import _sql_errors_suppressed
+            if _sql_errors_suppressed():
+                logger.debug('[DB] SQL execution failed (%s) [suppressed]: %.120s', type(e).__name__, e)
+            else:
+                logger.error('[DB] SQL execution failed (%s): %.120s', type(e).__name__, e)
+                logger.debug('[DB] SQL error detail: %s\n  Original: %.200s\n  Translated: %.200s\n  Params: %.200s',
+                             e, sql, translated, str(params)[:200] if params else 'None')
             try:
                 self._conn._conn.rollback()
             except Exception as _rb_err:
@@ -361,22 +367,35 @@ class PgConnection:
 
 
 def _split_sql_statements(sql):
-    """Split SQL text into individual statements, respecting string literals."""
+    """Split SQL text into individual statements, respecting string literals.
+
+    A literal single quote inside a string is escaped by doubling it (``''``)
+    in both SQLite and PostgreSQL. Treat ``''`` as an escaped quote (consume
+    both, stay in-string) rather than two delimiters, otherwise a ``;`` inside
+    a literal like ``'it''s; ok'`` would wrongly split the statement and
+    corrupt the DDL/DML.
+    """
     statements = []
     current = []
     in_string = False
-    for ch in sql:
-        if ch == "'" and not in_string:
-            in_string = True
-            current.append(ch)
-        elif ch == "'" and in_string:
-            in_string = False
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch == "'":
+            if in_string and i + 1 < n and sql[i + 1] == "'":
+                # Escaped quote inside a literal — consume both, stay in-string.
+                current.append("''")
+                i += 2
+                continue
+            in_string = not in_string
             current.append(ch)
         elif ch == ';' and not in_string:
             statements.append(''.join(current))
             current = []
         else:
             current.append(ch)
+        i += 1
     remaining = ''.join(current).strip()
     if remaining:
         statements.append(remaining)

@@ -40,6 +40,10 @@ _BUNDLE_FILES = [
     'core/error_envelope.js',
     'core/cross_tab_sync.js',
     'core/conversations.js',
+    # Frontend per-(conv,msg) in-flight translate guard (mirrors the backend
+    # lib/translate/inflight.py). Only references window/Map at load; CALLED at
+    # runtime by translation.js + message_actions.js. Leaf module.
+    'core/translate_guard.js',
     'core/cache_stats.js',
     'core/markdown.js',
     'core/health_stream_timer.js',
@@ -69,6 +73,11 @@ _BUNDLE_FILES = [
     'ui/message_actions.js',
     'ui/edit_message.js',
     'ui/turn_nav.js',
+    # Swarm "Parallel Execution" panel rendering + stuck-panel reconciler,
+    # extracted from ui/streaming_ui.js (2026-06-27). Leaf cluster; its
+    # builders are called from streaming_ui.js + tool_rounds.js via shared
+    # window scope. Load BEFORE streaming_ui.js for clear intent.
+    'ui/streaming_swarm_panel.js',
     'ui/streaming_ui.js',
     # Property-only SSE handlers extracted from dispatchSSEEvent (2026-06).
     # Plain hoisted functions taking (ev, ctx-snapshot); the dispatcher in
@@ -89,6 +98,13 @@ _BUNDLE_FILES = [
     # (ui/chat_render.js) — all loaded above. Pure runtime subscriber.
     'ui/swarm_push.js',
     'ui/send_button.js',
+    # Stream lifecycle + finalize (showStreamingUIForConv / finishStream /
+    # HG-translate helpers), extracted from ui/streaming_ui.js (2026-06-27).
+    # Downstream caller of the render path — calls updateStreamingUI /
+    # renderMessage / ConvView.finalizeStreaming / _attachAutopilotFollowup /
+    # _checkForQueuedTask at RUNTIME, so it MUST load AFTER ui/streaming_ui.js
+    # (and after conv_view.js's deps are present at call time).
+    'ui/stream_lifecycle.js',
     # Unified chatInner controller — depends on renderMessage,
     # _surgicalTruncateDOM, _convRenderFingerprint, renderChat from
     # the ui/ subpackage plus _ensureMsgId from core.js, so it MUST
@@ -104,6 +120,7 @@ _BUNDLE_FILES = [
     'project.js',
     'memory.js',
     'skills.js',
+    'preferences.js',
     'orchestration.js',
     # Task Mode viewer — references _ORCH_ICONS from orchestration.js at
     # runtime, so it MUST come after it.

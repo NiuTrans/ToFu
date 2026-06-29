@@ -53,10 +53,23 @@
   };
 
   const _cvIco = (inner) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px">${inner}</svg>`;
-  const TRIGGER_LABEL = {
-    force:    _cvIco('<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>') + ' 自动压缩 (force)',
-    reactive: _cvIco('<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>') + ' 紧急压缩 (reactive)',
-    manual:   _cvIco('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/>') + ' 手动压缩 (manual)',
+  // Defensive i18n shim — this file is bundled so the global t() is present,
+  // but degrade to a param-substituting key fallback rather than throwing.
+  const _t = (key, params) => (typeof t === 'function')
+    ? t(key, params)
+    : (params ? key.replace(/\{(\w+)\}/g, (_m, k) => (k in params ? params[k] : '{' + k + '}')) : key);
+  // Trigger icons (SVG glyphs) keyed by trigger kind; the human label resolves
+  // at render time via t() so it follows the current UI language.
+  const _TRIGGER_ICON = {
+    force:    _cvIco('<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>'),
+    reactive: _cvIco('<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>'),
+    manual:   _cvIco('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/>'),
+  };
+  /** Resolve the icon + localized label for a trigger kind. Unknown kinds
+   *  render the raw kind verbatim (no icon). */
+  const _triggerLabel = (trig) => {
+    const _known = _TRIGGER_ICON[trig];
+    return _known ? (_known + ' ' + _t('compactionViewer.trigger.' + trig)) : _esc(trig);
   };
 
   // ── Cache: archive id → { messages, archive } ───────────────────────
@@ -83,7 +96,7 @@
       <aside class="compaction-drawer-panel">
         <header class="compaction-drawer-header">
           <div class="compaction-drawer-title-row">
-            <h3 id="compactionViewerTitle">压缩前的上下文快照</h3>
+            <h3 id="compactionViewerTitle" data-i18n="compactionViewer.title">压缩前的上下文快照</h3>
             <button type="button" class="compaction-drawer-close" data-close
                     aria-label="Close">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
@@ -92,7 +105,7 @@
                 <path d="M18 6 6 18M6 6l12 12"/></svg>
             </button>
           </div>
-          <p class="compaction-drawer-subtitle">
+          <p class="compaction-drawer-subtitle" data-i18n-html="compactionViewer.subtitle">
             这里展示的是<strong>压缩触发瞬间</strong>发送给 LLM 的完整消息列表——
             包含 system prompt、工具调用、工具结果，以及已经过 L1/L2 处理（如
             thinking 剥离、screenshot 替换）的中间态。
@@ -101,28 +114,33 @@
           <div class="compaction-drawer-meta"></div>
           <div class="compaction-drawer-tabs" role="tablist">
             <button type="button" class="compaction-tab is-active"
-                    data-tab="messages" role="tab">上下文消息</button>
+                    data-tab="messages" role="tab" data-i18n="compactionViewer.tabMessages">上下文消息</button>
             <button type="button" class="compaction-tab"
-                    data-tab="summary"  role="tab">压缩结果摘要</button>
+                    data-tab="summary"  role="tab" data-i18n="compactionViewer.tabSummary">压缩结果摘要</button>
             <button type="button" class="compaction-tab"
-                    data-tab="history"  role="tab">该会话全部快照</button>
+                    data-tab="history"  role="tab" data-i18n="compactionViewer.tabHistory">该会话全部快照</button>
           </div>
         </header>
         <div class="compaction-drawer-body">
-          <div class="compaction-drawer-loading">加载中…</div>
+          <div class="compaction-drawer-loading" data-i18n="compactionViewer.loading">加载中…</div>
           <div class="compaction-drawer-content"></div>
         </div>
         <footer class="compaction-drawer-footer">
-          <button type="button" class="compaction-drawer-btn" data-action="copy-json">
+          <button type="button" class="compaction-drawer-btn" data-action="copy-json" data-i18n="compactionViewer.copyJson">
             复制原始 JSON
           </button>
-          <button type="button" class="compaction-drawer-btn" data-action="download">
+          <button type="button" class="compaction-drawer-btn" data-action="download" data-i18n="compactionViewer.download">
             下载完整快照
           </button>
         </footer>
       </aside>
     `;
     document.body.appendChild(el);
+    // The drawer is built lazily on first open — AFTER the initial
+    // DOMContentLoaded _applyI18n() pass — so translate its static chrome
+    // (data-i18n attrs) now. Subsequent language flips are handled by
+    // setLanguage()'s whole-DOM _applyI18n(), which re-scans this drawer too.
+    if (typeof _applyI18n === 'function') _applyI18n();
 
     // Close handlers
     el.addEventListener('click', (e) => {
@@ -177,25 +195,25 @@
     const a = _state.activeArchive;
     const el = _ensureDrawer().querySelector('.compaction-drawer-meta');
     const trig = a.trigger || 'force';
-    const trigLabel = TRIGGER_LABEL[trig] || trig;
+    const trigLabel = _triggerLabel(trig);
     const reductionTxt = (a.tokensBefore > 0 && a.tokensAfter > 0)
       ? `-${Math.round((1 - a.tokensAfter / a.tokensBefore) * 100)}%`
       : '—';
     const reasonBlock = a.reason
-      ? `<div class="cd-meta-row cd-meta-reason"><span class="cd-meta-k">触发原因</span><span class="cd-meta-v">${_esc(a.reason)}</span></div>`
+      ? `<div class="cd-meta-row cd-meta-reason"><span class="cd-meta-k">${_esc(_t('compactionViewer.metaReason'))}</span><span class="cd-meta-v">${_esc(a.reason)}</span></div>`
       : '';
     el.innerHTML = `
       <div class="cd-meta-grid">
         <div class="cd-meta-row">
-          <span class="cd-meta-k">类型</span>
-          <span class="cd-meta-v cd-meta-trigger cd-meta-trigger-${_esc(trig)}">${_esc(trigLabel)}</span>
+          <span class="cd-meta-k">${_esc(_t('compactionViewer.metaType'))}</span>
+          <span class="cd-meta-v cd-meta-trigger cd-meta-trigger-${_esc(trig)}">${trigLabel}</span>
         </div>
         <div class="cd-meta-row">
-          <span class="cd-meta-k">发生时间</span>
+          <span class="cd-meta-k">${_esc(_t('compactionViewer.metaTime'))}</span>
           <span class="cd-meta-v">${_esc(_fmtTime(a.createdAt))}</span>
         </div>
         <div class="cd-meta-row">
-          <span class="cd-meta-k">消息数</span>
+          <span class="cd-meta-k">${_esc(_t('compactionViewer.metaMsgs'))}</span>
           <span class="cd-meta-v">${a.msgsBefore || '?'} → ${a.msgsAfter || '?'}</span>
         </div>
         <div class="cd-meta-row">
@@ -203,11 +221,11 @@
           <span class="cd-meta-v">${_fmtTokens(a.tokensBefore)} → ${_fmtTokens(a.tokensAfter)} <em>(${reductionTxt})</em></span>
         </div>
         <div class="cd-meta-row">
-          <span class="cd-meta-k">模型</span>
+          <span class="cd-meta-k">${_esc(_t('compactionViewer.metaModel'))}</span>
           <span class="cd-meta-v">${_esc(a.model || '—')}</span>
         </div>
         <div class="cd-meta-row">
-          <span class="cd-meta-k">回合</span>
+          <span class="cd-meta-k">${_esc(_t('compactionViewer.metaRound'))}</span>
           <span class="cd-meta-v">#${a.roundNum || '?'}${a.taskId ? ` · task ${_esc(String(a.taskId).slice(0, 8))}` : ''}</span>
         </div>
         ${reasonBlock}
@@ -219,7 +237,7 @@
     const el = _ensureDrawer().querySelector('.compaction-drawer-content');
     const messages = (_state && _state.activeMessages) || [];
     if (!messages.length) {
-      el.innerHTML = `<div class="cd-empty">（该快照为空）</div>`;
+      el.innerHTML = `<div class="cd-empty">${_esc(_t('compactionViewer.emptySnapshot'))}</div>`;
       return;
     }
     const parts = messages.map((m, i) => _renderMessage(m, i));
@@ -304,7 +322,7 @@
         <div class="cd-image-head"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg> image_url · ${sizeLabel}${isDataUrl ? ' (base64)' : ''}</div>
         <div class="cd-image-placeholder">
           <button type="button" data-reveal-image
-                  data-img-url="${_esc(url)}">展开显示 · 可能较大</button>
+                  data-img-url="${_esc(url)}">${_esc(_t('compactionViewer.revealImage'))}</button>
         </div>
       </div>`;
     }
@@ -317,8 +335,8 @@
     const a = _state && _state.activeArchive;
     if (!a || !a.summary) {
       el.innerHTML = `<div class="cd-empty">
-        <p>该快照没有压缩摘要。</p>
-        <p>这通常意味着压缩在 L1 micro-compact 或 reactive image-strip 阶段就完成了，未调用 LLM 生成摘要。</p>
+        <p>${_esc(_t('compactionViewer.noSummary1'))}</p>
+        <p>${_esc(_t('compactionViewer.noSummary2'))}</p>
       </div>`;
       return;
     }
@@ -331,7 +349,7 @@
     const el = _ensureDrawer().querySelector('.compaction-drawer-content');
     const list = (_state && _state.listData && _state.listData.compactions) || [];
     if (!list.length) {
-      el.innerHTML = `<div class="cd-empty">该会话暂无压缩记录。</div>`;
+      el.innerHTML = `<div class="cd-empty">${_esc(_t('compactionViewer.noHistory'))}</div>`;
       return;
     }
     const rows = list.map(c => {
@@ -343,7 +361,7 @@
       return `<li class="cd-history-item ${isActive ? 'is-active' : ''}"
                   data-archive-id="${c.id}">
         <div class="cd-history-head">
-          <span class="cd-history-trigger cd-history-trigger-${_esc(trig)}">${_esc(TRIGGER_LABEL[trig] || trig)}</span>
+          <span class="cd-history-trigger cd-history-trigger-${_esc(trig)}">${_triggerLabel(trig)}</span>
           <span class="cd-history-time">${_esc(_fmtTime(c.createdAt))}</span>
         </div>
         <div class="cd-history-stats">
@@ -394,7 +412,7 @@
     } catch (e) {
       console.error('[compaction-viewer] load failed:', e);
       const el = _ensureDrawer().querySelector('.compaction-drawer-content');
-      el.innerHTML = `<div class="cd-empty cd-error">加载失败：${_esc(e.message || String(e))}</div>`;
+      el.innerHTML = `<div class="cd-empty cd-error">${_esc(_t('compactionViewer.loadFailed', { err: (e.message || String(e)) }))}</div>`;
     } finally {
       _showLoading(false);
     }
@@ -434,7 +452,7 @@
       if (!targetId) {
         _showLoading(false);
         const bodyEl = el.querySelector('.compaction-drawer-content');
-        bodyEl.innerHTML = `<div class="cd-empty">该会话尚未触发过上下文压缩。</div>`;
+        bodyEl.innerHTML = `<div class="cd-empty">${_esc(_t('compactionViewer.noCompaction'))}</div>`;
         el.querySelector('.compaction-drawer-meta').innerHTML = '';
         return;
       }
@@ -443,7 +461,7 @@
       console.error('[compaction-viewer] list failed:', e);
       _showLoading(false);
       const bodyEl = el.querySelector('.compaction-drawer-content');
-      bodyEl.innerHTML = `<div class="cd-empty cd-error">无法获取压缩历史：${_esc(e.message || String(e))}</div>`;
+      bodyEl.innerHTML = `<div class="cd-empty cd-error">${_esc(_t('compactionViewer.historyFailed', { err: (e.message || String(e)) }))}</div>`;
     }
   };
 
@@ -456,6 +474,17 @@
     _state = null;
   };
 
+  // Live language-switch hook (called by i18n.js::_onLanguageChange). The
+  // drawer's static chrome re-translates via the whole-DOM _applyI18n() scan;
+  // here we re-render the JS-built meta rows + active tab so they follow the
+  // new language too. No-op when the drawer is closed / has no state.
+  window._cvOnLanguageChange = function () {
+    const el = document.getElementById('compactionViewerDrawer');
+    if (!el || !el.classList.contains('is-open') || !_state) return;
+    if (_state.activeArchive) _renderMeta();
+    _renderActiveTab();
+  };
+
   function _copyJson() {
     if (!_state || !_state.activeMessages) return;
     const txt = JSON.stringify({
@@ -463,10 +492,10 @@
       messages: _state.activeMessages,
     }, null, 2);
     navigator.clipboard.writeText(txt).then(() => {
-      if (window.showToast) window.showToast('✅ 已复制 JSON', 'info');
+      if (window.showToast) window.showToast('✅ ' + _t('compactionViewer.copied'), 'info');
     }, (err) => {
       console.error('[compaction-viewer] copy failed:', err);
-      if (window.showToast) window.showToast('复制失败：' + err.message, 'error');
+      if (window.showToast) window.showToast(_t('compactionViewer.copyFailed', { err: err.message }), 'error');
     });
   }
 

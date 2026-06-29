@@ -1281,7 +1281,7 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
 
     # ── Interactive path: Popen with stdin pipe + stdin detection ──
     return _run_command_interactive(command, full_command, timeout, base, stdin_callback,
-                                    on_chunk=on_chunk)
+                                    on_chunk=on_chunk, task=task)
 
 
 def _safe_on_chunk(on_chunk, stream, text):
@@ -1786,8 +1786,16 @@ def _collect_descendants(parent_pid):
 
 
 def _run_command_interactive(command, full_command, timeout, base, stdin_callback,
-                              on_chunk=None):
+                              on_chunk=None, task=None):
     """Popen-based execution with stdin detection and interactive input.
+
+    When *task* is provided, the subprocess PID/PGID is stored on the task
+    dict (so the abort handler can SIGTERM it directly) and the loop checks
+    ``task['aborted']`` every tick — mirroring ``_run_command_simple``. Without
+    this the interactive path was NOT cooperatively abort-aware: a Stop while a
+    long command ran left an unkillable subprocess and a tool round stuck in
+    "Running…".
+
 
     Uses non-blocking I/O on stdout/stderr.  On Linux, periodically checks
     ``/proc/<pid>/syscall`` to definitively detect when a child process
@@ -1804,6 +1812,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
             cwd=base,
             env=_get_cmd_env(base),
             text=False,  # binary mode for non-blocking I/O
+            start_new_session=True,  # own process group for clean kill
         )
     except (FileNotFoundError, NotADirectoryError) as e:
         # Bad cwd / missing shell binary — user-error, not a bug. Keep log
@@ -1828,6 +1837,17 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
     if not nonblocking_ok:
         logger.warning('run_command: non-blocking pipe setup failed — falling back to polling I/O')
 
+    # Store PID/PGID on task so the abort handler can kill it directly
+    # (mirrors _run_command_simple) — the interactive path was previously
+    # missing this, leaving Stop unable to kill a long interactive command.
+    if task is not None:
+        task['_subprocess_pid'] = proc.pid
+        task['_subprocess_pgid'] = None
+        try:
+            task['_subprocess_pgid'] = os.getpgid(proc.pid)
+        except OSError as _e_audit:
+            logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
+
     # Get the inode of our stdin pipe so we can match it in /proc
     try:
         stdin_pipe_ino = os.fstat(proc.stdin.fileno()).st_ino
@@ -1840,9 +1860,18 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
     start_time = time.monotonic()
     stdin_closed = False
     timed_out = False
+    aborted = False
 
     try:
         while True:
+            # ── abort: user clicked Stop (cooperative, ~0.2s granularity) ──
+            if task and task.get('aborted'):
+                logger.info('[run_command] Task aborted — killing interactive subprocess '
+                            'PID %d: %s', proc.pid, command[:80])
+                _kill_process_tree(proc)
+                aborted = True
+                break
+
             # Check timeout
             elapsed = time.monotonic() - start_time
             if timeout and elapsed > timeout:
@@ -1987,11 +2016,17 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+        if task is not None:
+            task.pop('_subprocess_pid', None)
+            task.pop('_subprocess_pgid', None)
 
     stdout = b''.join(stdout_chunks).decode('utf-8', errors='replace')
     stderr = b''.join(stderr_chunks).decode('utf-8', errors='replace')
-    exit_code = proc.returncode if not timed_out else -1
 
+    if aborted:
+        return _format_run_output(command, stdout, stderr, -1,
+                                  timed_out=False, aborted=True)
+    exit_code = proc.returncode if not timed_out else -1
     logger.info('run_command done (interactive): exit=%d, stdout=%dch, stderr=%dch',
                 exit_code, len(stdout), len(stderr))
     return _format_run_output(command, stdout, stderr, exit_code, timed_out=timed_out)

@@ -59,8 +59,13 @@ function _isRoundSwarm(round) {
   /* Only treat as swarm if the backend flagged it AND there's real swarm content */
   if (!round._swarm) return false;
   /* Must have at least one agent OR meaningful results to render the swarm panel.
-     Even during active spawning, we don't show the panel until agents arrive. */
-  if (!round._swarmAgents?.length && !round.results?.length) return false;
+     Even during active spawning, we don't show the panel until agents arrive.
+     A durable `_swarmSnapshot` (persisted by the backend when the swarm settles)
+     also counts — it's what makes a reloaded fire-and-forget swarm renderable
+     even when the live `_swarmAgents` array and any `results` are absent. */
+  if (!round._swarmAgents?.length
+      && !round.results?.length
+      && !(round._swarmSnapshot && round._swarmSnapshot.agents?.length)) return false;
   return true;
 }
 
@@ -909,6 +914,23 @@ function _renderUnifiedToolLine(round, isSearching) {
        </div>`;
   }
 
+  // ★ Interrupted — the task was aborted (Stop) while this tool round was
+  //   still in-flight. The backend dangling-round sweep
+  //   (orchestrator._finalize_dangling_tool_rounds) stamps status='aborted'
+  //   on rounds the abort short-circuit left in 'searching'. Render a static
+  //   "interrupted" affordance — NO spinner — so it never shows "Running…"
+  //   live or after reload. Real results (if any) fall through to the normal
+  //   done renderers below, since the sweep only marks result-less rounds.
+  if (round.status === "aborted" && !(round.results && round.results.length && !meta.interrupted)) {
+    const cmdText = escapeHtml(round.query || meta.title || td.label || round.toolName || "");
+    return `<div class="ptool-line ptool-interrupted" data-rn="${round.roundNum}">
+         <span class="ptool-icon">${svg}</span>
+         ${rootPill}
+         <span class="ptool-text">${cmdText}</span>
+         <span class="ptool-badge ptool-badge-interrupted">interrupted</span>
+       </div>`;
+  }
+
   if (isSearching) {
     // ★ run_command / code_exec: show running state with full command.
     //   If streaming output has started arriving via tool_progress events,
@@ -1014,6 +1036,48 @@ function _renderUnifiedToolLine(round, isSearching) {
          </div>
          ${descHtml}
          <pre class="ptool-cmd-code"><code>$ ${cmd}</code></pre>
+         ${outputHtml}
+       </div>`;
+  }
+
+  // ★ browser_execute_js — render as an inline code block (JS in, result out),
+  //   mirroring the run_command terminal block. A cramped one-line "12165686:
+  //   (() => {…" row is unreadable; show the full snippet + collapsible result.
+  if (round.toolName === "browser_execute_js") {
+    let jsCode = "";
+    let jsDesc = "";
+    try {
+      const a = typeof round.toolArgs === "string" ? JSON.parse(round.toolArgs) : (round.toolArgs || {});
+      jsCode = (a && a.code) || "";
+      jsDesc = (a && a.description) || "";
+    } catch (_e) { /* malformed toolArgs */ }
+    const isErr = meta.badge === "error";
+    const statusLabel = isErr ? "✗ error" : "✓ ok";
+    const statusCls = isErr ? "ptool-cmd-err" : "ptool-cmd-ok";
+    // The result returned to the model lives in round.toolContent.
+    const out = typeof round.toolContent === "string" ? round.toolContent : "";
+    let outputHtml = "";
+    if (out) {
+      outputHtml = `<div class="ptool-cmd-output-wrap">
+           <div class="ptool-cmd-toggle" onclick="event.stopPropagation();var w=this.parentElement;w.classList.toggle('expanded');this.textContent=w.classList.contains('expanded')?'▾ Collapse':'▸ Show result';">▸ Show result</div>
+           <pre class="ptool-cmd-output"><code>${escapeHtml(out)}</code></pre>
+         </div>`;
+    }
+    const descHtml = jsDesc
+      ? `<div class="ptool-cmd-desc">${escapeHtml(jsDesc)}</div>`
+      : "";
+    const codeHtml = jsCode
+      ? `<pre class="ptool-cmd-code"><code>${escapeHtml(jsCode)}</code></pre>`
+      : "";
+    return `<div class="ptool-cmd-block ptool-cmd-js ${statusCls}" data-rn="${round.roundNum}">
+         <div class="ptool-cmd-header">
+           <span class="ptool-cmd-icon">${svg}</span>
+           ${rootPill}
+           <span class="ptool-cmd-label">${escapeHtml(round.query || "Execute JS")}</span>
+           <span class="ptool-cmd-status">${statusLabel}</span>
+         </div>
+         ${descHtml}
+         ${codeHtml}
          ${outputHtml}
        </div>`;
   }
@@ -1181,7 +1245,7 @@ function _renderUnifiedToolLine(round, isSearching) {
   //   a full data: URL the browser can render directly. inspect_image is the
   //   zoom/rotate/crop viewer — it gets a distinct accent + an "ops" chip
   //   describing the transform (e.g. "crop, 2×").
-  if ((round.toolName === "read_files" || round.toolName === "inspect_image") &&
+  if ((round.toolName === "read_files" || round.toolName === "inspect_image" || round.toolName === "browser_screenshot") &&
       Array.isArray(meta.imageDataUris) && meta.imageDataUris.length) {
     const imgs = meta.imageDataUris.filter((d) => d && d.uri);
     if (imgs.length) {
@@ -2019,70 +2083,36 @@ function _tcPreviewBtn(round) {
  * notification BEFORE the subprocess times out (up to 5 min wait).
  */
 function renderMcpLoginHintHtml(lh) {
+  /* PROMINENT callout shown ONLY while the login is actionable
+   * (awaiting_approval) so the user knows to tap "Approve" on their
+   * mobile-office app before the subprocess times out. Once the login
+   * RESOLVES (approved/denied/timeout/done) this returns '' — the
+   * resolution folds into the quiet turn-provenance strip instead
+   * (see _mcpLoginSegment / renderTurnProvenanceHtml). */
   if (!lh) return '';
   const phase = lh.phase || 'awaiting_approval';
+  if (phase !== 'awaiting_approval') return '';
   const user = lh.username || '';
-  let icon = Icon('smartphone', 14);
-  let state = 'running';
-  let headline = '';
-  let sub = '';          // short subtitle (non-technical)
-  let snippetBlock = ''; // optional <pre> with the raw CLI response
-  /* Helper: format the stashed snippet for in-chip display.
-   * Prefer a tidy pretty-printed JSON block when the snippet parses
-   * as JSON, else show the raw text verbatim. Always shown in full —
-   * no slicing or ellipsis — because the user explicitly asked for
-   * "incomplete displays are not allowed". */
-  const _formatSnippet = (raw) => {
-    if (!raw) return '';
-    let text = String(raw).trim();
-    try {
-      const trimmed = text.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
-      const parsed = JSON.parse(trimmed);
-      text = JSON.stringify(parsed, null, 2);
-    } catch (_e) { /* leave raw */ }
-    return `<pre class="mp-snippet">${escapeHtml(text)}</pre>`;
-  };
-  if (phase === 'awaiting_approval') {
-    headline = user
-      ? `Waiting for mobile approval · ${user}`
-      : 'Waiting for mobile approval';
-    sub = 'Tap Approve on your mobile office app — push may take a few seconds to arrive';
-  } else if (phase === 'approved') {
-    state = 'done';
-    icon = '✓';
-    headline = user ? `Login approved · ${user}` : 'Login approved';
-    sub = 'Session is live';
-  } else if (phase === 'denied') {
-    state = 'failed';
-    icon = '✕';
-    headline = 'Login denied';
-    sub = 'Approval was rejected or cancelled on the phone';
-    snippetBlock = _formatSnippet(lh.snippet);
-  } else if (phase === 'timeout') {
-    state = 'failed';
-    icon = Icon('alarm', 14);
-    headline = 'Login timed out';
-    sub = 'No approval received in time — try again';
-    snippetBlock = _formatSnippet(lh.snippet);
-  } else {
-    state = 'done';
-    headline = 'Login finished';
-    snippetBlock = _formatSnippet(lh.snippet);
-  }
-  return `<div class="mem-prefetch-chip mp-${state} mp-login-hint">` +
-    `<span class="mp-icon">${icon}</span>` +
+  const _t = (typeof t === "function") ? t : (k => k);
+  const headline = user
+    ? `${_t('login.awaiting')} · ${user}`
+    : _t('login.awaiting');
+  const sub = _t('login.awaitingSub');
+  return `<div class="mem-prefetch-chip mp-running mp-login-hint">` +
+    `<span class="mp-icon">${Icon('smartphone', 14)}</span>` +
     `<span class="mp-text"><span class="mp-headline">${escapeHtml(headline)}</span>` +
-    (sub ? `<span class="mp-sub">${escapeHtml(sub)}</span>` : '') +
-    snippetBlock +
+    `<span class="mp-sub">${escapeHtml(sub)}</span>` +
     `</span>` +
-    (state === 'running'
-      ? `<span class="mp-dots"><span>.</span><span>.</span><span>.</span></span>`
-      : '') +
+    `<span class="mp-dots"><span>.</span><span>.</span><span>.</span></span>` +
     `</div>`;
 }
 
-function renderMemoryPrefetchHtml(mp) {
-  if (!mp) return "";
+/* ── Memory-prefetch segment for the unified turn-provenance strip ──
+   Returns {state, segHtml, detailHtml} or null. The collapsed segment is
+   icon + small count; full labels + the picked-memory list live in
+   detailHtml (revealed when the strip is expanded). */
+function _memPrefetchSegment(mp) {
+  if (!mp) return null;
   const phase = mp.phase || "started";
   const selected = mp.selected || 0;
   const candidates = mp.candidates || 0;
@@ -2090,52 +2120,69 @@ function renderMemoryPrefetchHtml(mp) {
   const rerankMs = mp.rerankMs || 0;
   const totalMs = mp.totalMs || 0;
   const fellBack = !!mp.fellBack;
+  const _t = (typeof t === "function") ? t : (k => k);
 
-  // ── Build a short headline ──
-  let icon = Icon('brain', 14);
+  let icon = Icon('brain', 13);
   let state = "running";
-  let headline = "";
+  let count = "";        // tiny count shown beside the icon when collapsed
+  let headline = "";     // full label shown in the expanded detail
   let sub = "";
   if (phase === "started") {
-    headline = "Surfacing relevant memories…";
-    sub = (mp.totalMemories ? `${mp.totalMemories} total` : "") + " · BM25";
-  } else if (phase === "bm25_done") {
-    headline = `Filtering ${candidates} candidates with cheap model…`;
-    sub = `BM25 ${bm25Ms}ms`;
-  } else if (phase === "rerank_started") {
-    headline = `Filtering ${candidates} candidates with cheap model…`;
+    headline = _t("memPrefetch.surfacing");
+    sub = (mp.totalMemories ? _t("memPrefetch.totalN", { n: mp.totalMemories }) : "") + " · BM25";
+  } else if (phase === "bm25_done" || phase === "rerank_started") {
+    count = candidates ? String(candidates) : "";
+    headline = _t("memPrefetch.filtering", { n: candidates });
     sub = `BM25 ${bm25Ms}ms`;
   } else if (phase === "done") {
     state = "done";
     if (selected === 0) {
-      headline = "No prior memory relevant to this turn";
-      sub = `${candidates||0} candidates · BM25 ${bm25Ms}ms · filter ${rerankMs}ms`;
+      headline = _t("memPrefetch.none");
+      sub = `${_t("memPrefetch.candidatesN", { n: candidates || 0 })} · BM25 ${bm25Ms}ms · ${_t("memPrefetch.filterLabel")} ${rerankMs}ms`;
     } else {
-      headline = `Prefetched ${selected} memor${selected === 1 ? "y" : "ies"}`;
+      count = String(selected);
+      headline = _t(selected === 1 ? "memPrefetch.prefetched" : "memPrefetch.prefetchedN", { n: selected });
       const parts = [];
-      if (candidates) parts.push(`${candidates} candidates`);
+      if (candidates) parts.push(_t("memPrefetch.candidatesN", { n: candidates }));
       parts.push(`BM25 ${bm25Ms}ms`);
-      if (rerankMs) parts.push(`filter ${rerankMs}ms`);
-      if (totalMs) parts.push(`total ${totalMs}ms`);
-      if (fellBack) parts.push("⚠ fallback to BM25 top-3");
+      if (rerankMs) parts.push(`${_t("memPrefetch.filterLabel")} ${rerankMs}ms`);
+      if (totalMs) parts.push(`${_t("memPrefetch.totalLabel")} ${totalMs}ms`);
+      if (fellBack) parts.push(_t("memPrefetch.fallback"));
       sub = parts.join(" · ");
     }
   } else if (phase === "skipped") {
     state = "skipped";
-    headline = "Memory prefetch skipped";
+    headline = _t("memPrefetch.skipped");
     sub = mp.reason || "";
   } else if (phase === "failed") {
     state = "failed";
-    icon = "⚠️";
-    headline = "Memory prefetch failed";
+    icon = Icon('alertTriangle', 13);
+    headline = _t("memPrefetch.failed");
     sub = mp.reason || "";
   } else {
-    headline = "Memory prefetch…";
+    headline = _t("memPrefetch.generic");
     sub = phase;
   }
 
-  // ── Optional detail panel listing picked memories ──
-  let details = "";
+  // Collapsed label: a short word beside the icon so the strip reads as
+  // text, not just glyphs (e.g. "3 memories", "no memories", "filtering").
+  let segLabel;
+  if (state === "running") segLabel = _t("memPrefetch.tag");
+  else if (phase === "done" && selected > 0)
+    segLabel = _t(selected === 1 ? "memPrefetch.tagN" : "memPrefetch.tagNs", { n: selected });
+  else if (phase === "done") segLabel = _t("memPrefetch.tagNone");
+  else if (state === "skipped") segLabel = _t("memPrefetch.tagSkipped");
+  else if (state === "failed") segLabel = _t("memPrefetch.tagFailed");
+  else segLabel = _t("memPrefetch.tag");
+
+  const segHtml =
+    `<span class="tp-seg tp-seg-mem tp-${state}">${icon}` +
+    (count ? `<span class="tp-count">${escapeHtml(count)}</span>` : "") +
+    `<span class="tp-label">${escapeHtml(segLabel)}</span>` +
+    (state === "running" ? `<span class="mp-dots"><span>.</span><span>.</span><span>.</span></span>` : "") +
+    `</span>`;
+
+  let memList = "";
   if (phase === "done" && selected > 0 && Array.isArray(mp.memories) && mp.memories.length > 0) {
     const items = mp.memories.map(m => {
       const nm = escapeHtml(m.name || "?");
@@ -2146,59 +2193,196 @@ function renderMemoryPrefetchHtml(mp) {
              (ds ? `<div class="mp-mem-desc">${ds}</div>` : "") +
              `</li>`;
     }).join("");
-    details = `<ul class="mp-mem-list">${items}</ul>`;
+    memList = `<ul class="mp-mem-list">${items}</ul>`;
   }
-
-  const expandable = !!details;
-  return `<div class="mem-prefetch-chip mp-${state}${expandable ? ' mp-expandable' : ''}"${expandable ? ' onclick="this.classList.toggle(\'mp-expanded\')"' : ''}>` +
-    `<span class="mp-icon">${icon}</span>` +
-    `<span class="mp-text"><span class="mp-headline">${escapeHtml(headline)}</span>` +
-    (sub ? `<span class="mp-sub">${escapeHtml(sub)}</span>` : "") +
-    `</span>` +
-    (state === "running" ? `<span class="mp-dots"><span>.</span><span>.</span><span>.</span></span>` : "") +
-    (expandable ? `<span class="mp-chevron">▾</span>` : "") +
-    (details ? `<div class="mp-details">${details}</div>` : "") +
-    `</div>`;
+  const detailHtml =
+    `<div class="tp-detail-row tp-detail-mem mp-${state}">` +
+      `<div class="mp-text"><span class="mp-headline">${escapeHtml(headline)}</span>` +
+      (sub ? `<span class="mp-sub">${escapeHtml(sub)}</span>` : "") +
+      memList +
+      `</div></div>`;
+  return { state, segHtml, detailHtml };
 }
 
-function renderPreferencesAppliedHtml(pa) {
-  /* Quiet, collapsed-by-default "preferences applied" chip. Same visual
-     family as the memory-prefetch chip (mem-prefetch-chip) so the two read
-     as siblings. Shows that the assistant injected the user's bounded
-     preference profile this turn; expands to list which preferences were in
-     play. Backend payload: {chars, items:[...]}. See
-     lib/memory/user_profile.py + EventType.PREFERENCES_APPLIED. */
-  if (!pa) return "";
+/* ── Preferences-applied segment for the unified turn-provenance strip ──
+   Backend payload: {chars, items:[...]}. See lib/memory/user_profile.py +
+   EventType.PREFERENCES_APPLIED. */
+function _prefsAppliedSegment(pa) {
+  if (!pa) return null;
   const items = Array.isArray(pa.items) ? pa.items : [];
   const n = items.length;
   const _t = (typeof t === "function") ? t : (k => k);
   const headline = (n > 0)
     ? _t("prefs.appliedN").replace("{n}", n)
     : _t("prefs.applied");
-  let details = "";
+
+  const segLabel = (n > 0) ? _t("prefs.tag") : _t("prefs.tagNone");
+  const segHtml =
+    `<span class="tp-seg tp-seg-prefs tp-done">${Icon('sliders', 13)}` +
+    (n > 0 ? `<span class="tp-count">${escapeHtml(String(n))}</span>` : "") +
+    `<span class="tp-label">${escapeHtml(segLabel)}</span>` +
+    `</span>`;
+
+  let prefList = "";
   if (n > 0) {
-    const lis = items.map(it =>
-      `<li>${escapeHtml(it)}</li>`).join("");
-    details = `<ul class="mp-mem-list pa-list">${lis}</ul>`;
+    const lis = items.map(it => `<li>${escapeHtml(it)}</li>`).join("");
+    prefList = `<ul class="mp-mem-list pa-list">${lis}</ul>`;
   }
-  const expandable = !!details;
-  return `<div class="mem-prefetch-chip pa-chip mp-done${expandable ? ' mp-expandable' : ''}"` +
-    `${expandable ? ' onclick="this.classList.toggle(\'mp-expanded\')"' : ''}>` +
-    `<span class="mp-icon">${Icon('sliders', 14)}</span>` +
-    `<span class="mp-text"><span class="mp-headline">${escapeHtml(headline)}</span>` +
-    (pa.chars ? `<span class="mp-sub">${_t("prefs.fromProfile")}</span>` : "") +
-    `</span>` +
-    (expandable ? `<span class="mp-chevron">▾</span>` : "") +
-    (details ? `<div class="mp-details">${details}</div>` : "") +
+  const detailHtml =
+    `<div class="tp-detail-row tp-detail-prefs pa-chip">` +
+      `<div class="mp-text"><span class="mp-headline">${escapeHtml(headline)}</span>` +
+      (pa.chars ? `<span class="mp-sub">${_t("prefs.fromProfile")}</span>` : "") +
+      prefList +
+      `</div></div>`;
+  return { segHtml, detailHtml };
+}
+
+/* ── Related-conversations segment for the unified turn-provenance strip ──
+   Backend payload: {count, items:[{id,title,summary}], toolsAvailable}.
+   The model was told these siblings exist (ambient cross-conv awareness, see
+   lib/conversations/project_summary.build_project_digest); we surface the same
+   set so the user can SEE — and click into — what the model was made aware of.
+   See EventType.RELATED_CONVERSATIONS. */
+function _relatedConvsSegment(rc) {
+  if (!rc) return null;
+  const items = Array.isArray(rc.items) ? rc.items : [];
+  const n = items.length || rc.count || 0;
+  if (n <= 0) return null;
+  const _t = (typeof t === "function") ? t : (k => k);
+  const label = _t(n === 1 ? "relatedConvs.tagN" : "relatedConvs.tagNs", { n });
+
+  const segHtml =
+    `<span class="tp-seg tp-seg-convs tp-done">${Icon('messageSquare', 13)}` +
+    `<span class="tp-count">${escapeHtml(String(n))}</span>` +
+    `<span class="tp-label">${escapeHtml(_t("relatedConvs.tag"))}</span>` +
+    `</span>`;
+
+  let convList = "";
+  if (items.length) {
+    const lis = items.map(it => {
+      const id = escapeHtml(it.id || "");
+      const title = escapeHtml(it.title || "(untitled)");
+      const summary = escapeHtml(it.summary || "");
+      // Clickable when we have an id — openConversation is the global opener.
+      const titleHtml = id
+        ? `<a class="rc-conv-link" href="#" onclick="event.stopPropagation();try{loadConversation('${id}')}catch(e){};return false;">${title}</a>`
+        : `<span class="rc-conv-title">${title}</span>`;
+      return `<li>${titleHtml}` +
+             (summary ? `<div class="rc-conv-summary">${summary}</div>` : "") +
+             `</li>`;
+    }).join("");
+    convList = `<ul class="mp-mem-list rc-list">${lis}</ul>`;
+  }
+  const detailHtml =
+    `<div class="tp-detail-row tp-detail-convs mp-done">` +
+      `<div class="mp-text"><span class="mp-headline">${escapeHtml(label)}</span>` +
+      `<span class="mp-sub">${escapeHtml(_t("relatedConvs.sub"))}</span>` +
+      convList +
+      `</div></div>`;
+  return { state: "done", segHtml, detailHtml };
+}
+
+/* ── Resolved-MCP-login segment for the unified turn-provenance strip ──
+   Only RESOLVED states (approved/denied/timeout/done) demote into the strip;
+   while awaiting_approval the login keeps its own prominent callout (see
+   renderMcpLoginHintHtml). */
+function _mcpLoginSegment(lh) {
+  if (!lh) return null;
+  const phase = lh.phase || 'awaiting_approval';
+  if (phase === 'awaiting_approval') return null;  // stays a standalone callout
+  const user = lh.username || '';
+  const _t = (typeof t === "function") ? t : (k => k);
+
+  let icon, state, headline;
+  if (phase === 'approved') {
+    icon = Icon('check', 13); state = 'done';
+    headline = user ? `${_t('login.approved')} · ${user}` : _t('login.approved');
+  } else if (phase === 'denied') {
+    icon = Icon('ban', 13); state = 'failed';
+    headline = _t('login.denied');
+  } else if (phase === 'timeout') {
+    icon = Icon('alarm', 13); state = 'failed';
+    headline = _t('login.timeout');
+  } else {
+    icon = Icon('check', 13); state = 'done';
+    headline = _t('login.finished');
+  }
+
+  let snippet = '';
+  if (lh.snippet && (phase === 'denied' || phase === 'timeout')) {
+    let text = String(lh.snippet).trim();
+    try {
+      const trimmed = text.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
+      text = JSON.stringify(JSON.parse(trimmed), null, 2);
+    } catch (_e) { /* leave raw */ }
+    snippet = `<pre class="mp-snippet">${escapeHtml(text)}</pre>`;
+  }
+
+  const segHtml = `<span class="tp-seg tp-seg-login tp-${state}">${icon}` +
+    `<span class="tp-label">${escapeHtml(headline)}</span></span>`;
+  const detailHtml =
+    `<div class="tp-detail-row tp-detail-login mp-${state}">` +
+      `<div class="mp-text"><span class="mp-headline">${escapeHtml(headline)}</span>` +
+      snippet +
+      `</div></div>`;
+  return { state, segHtml, detailHtml };
+}
+
+/* ── UNIFIED turn-provenance strip ───────────────────────────────────
+   Replaces the old stack of separate boxes (memory-prefetch +
+   preferences-applied + resolved login) with ONE quiet, collapsible
+   strip at the head of the assistant turn. Collapsed = icons + small
+   counts; click anywhere on the strip → expands to show full labels,
+   the picked-memory list, and which preferences were in context.
+   The awaiting-approval login callout is rendered SEPARATELY and stays
+   prominent (see renderMcpLoginHintHtml) — only resolved logins fold in
+   here as a small segment.
+   Called from both the streaming path (streaming_ui.js) and the
+   finished-message path (chat_render.js) so the strip is identical
+   live and after reload. */
+function renderTurnProvenanceHtml(msg) {
+  if (!msg) return "";
+  const segs = [_mcpLoginSegment(msg._mcpLoginHint),
+                _memPrefetchSegment(msg._memoryPrefetch),
+                _prefsAppliedSegment(msg._preferencesApplied),
+                _relatedConvsSegment(msg._relatedConversations)]
+                .filter(Boolean);
+  if (segs.length === 0) return "";
+
+  const running = segs.some(s => s.state === "running");
+  const failed = segs.some(s => s.state === "failed");
+  const stripState = failed ? "tp-has-failed" : (running ? "tp-running" : "tp-done");
+  const segHtml = segs.map(s => s.segHtml).join("");
+  const detailHtml = segs.map(s => s.detailHtml).join("");
+
+  return `<div class="turn-prov ${stripState} tp-expandable" onclick="this.classList.toggle('tp-expanded')">` +
+    `<span class="tp-segs">${segHtml}</span>` +
+    `<span class="tp-chevron">${Icon('chevronDown', 12)}</span>` +
+    `<div class="tp-details">${detailHtml}</div>` +
     `</div>`;
 }
 
+/* ── Back-compat shims ───────────────────────────────────────────────
+   Older call sites / persisted-message render paths may still reference
+   the per-chip builders. Route them through the unified strip so a stray
+   caller never resurrects the old stacked boxes. */
+function renderMemoryPrefetchHtml(mp) {
+  return mp ? renderTurnProvenanceHtml({ _memoryPrefetch: mp }) : "";
+}
+function renderPreferencesAppliedHtml(pa) {
+  return pa ? renderTurnProvenanceHtml({ _preferencesApplied: pa }) : "";
+}
+
 function renderPreferenceLearnedHtml(learned) {
-  /* "Noted: you prefer X" moment(s) from the layer-3 consolidation pass.
-     learned: [{kind:'reinforced'|'pending', summary, pending, id}]. A pending
-     (new) preference shows Confirm / Dismiss; a reinforced one shows Undo-style
-     info only (it was auto-applied — low-risk tightening of an existing pref).
-     Backed by EventType.PREFERENCE_LEARNED + POST /api/v1/profile/pending. */
+  /* "Remembered: X" moment(s) from the layer-3 consolidation pass.
+     learned: [{kind:'added'|'reinforced'|'pending', summary, pending, id}].
+     New preferences/identity facts are now AUTO-APPLIED and the user is simply
+     INFORMED (kind 'added'); a reinforced one is a low-risk tightening of an
+     existing entry. Both are informational only — no confirm/dismiss — and the
+     hint points the user to Settings where they can edit or remove the entry.
+     The legacy 'pending' branch (propose-then-confirm) is retained for old
+     persisted messages that still carry staged proposals.
+     Backed by EventType.PREFERENCE_LEARNED. */
   if (!Array.isArray(learned) || !learned.length) return "";
   const _t = (typeof t === "function") ? t : (k => k);
   const rows = learned.map(p => {
@@ -2214,9 +2398,12 @@ function renderPreferenceLearnedHtml(learned) {
         `<button class="pl-btn pl-dismiss" onclick="window.resolvePreference&&resolvePreference(this,'${pid}',false)">${_t("prefs.dismiss")}</button>` +
         `</span></div>`;
     }
+    const lead = (p.kind === "added")
+      ? `${_t("prefs.added")}: ` : `${_t("prefs.learnedReinforced")}: `;
     return `<div class="pl-row pl-reinforced">` +
       `<span class="pl-lead">${Icon('check', 13)}</span>` +
-      `<span class="pl-text">${_t("prefs.learnedReinforced")}: <b>${sum}</b></span>` +
+      `<span class="pl-text">${lead}<b>${sum}</b>` +
+      `<span class="pl-hint">${_t("prefs.editInSettings")}</span></span>` +
       `</div>`;
   }).join("");
   return `<div class="pref-learned-box">${rows}</div>`;

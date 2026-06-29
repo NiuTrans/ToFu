@@ -394,6 +394,14 @@ def test_chat_poll_unknown_task_404(client):
 def _standalone():
     """Run a quick verification without pytest. Returns exit code."""
     print('=== Tofu restart smoke test ===\n')
+    # ⚠️ DATA-LOSS GUARD: standalone mode does NOT load conftest, so the
+    # force-sqlite shim + pytest_configure gate never ran. Refuse to boot the
+    # real app against a non-test DB here too (the keystone principle).
+    try:
+        from tests.conftest import _assert_test_database
+    except Exception:
+        from conftest import _assert_test_database  # when run from tests/ cwd
+    _assert_test_database('test_restart_smoke._standalone')
     os.environ.setdefault('TUNNEL_TOKEN', _TEST_TUNNEL_TOKEN)
     try:
         import hypercorn  # noqa: F401

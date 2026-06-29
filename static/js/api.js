@@ -286,6 +286,16 @@
     catalogInstall: (skillId, scope) => post('/api/v1/memory/catalog/install', { skill_id: skillId, scope: scope || 'project' }, { parse: 'response' }),
   };
 
+  // profile (personal-preference profile) ---------------------------
+  const profile = {
+    get:           ()         => get('/api/v1/profile'),
+    save:          (body)     => put('/api/v1/profile', { body: body || '' }),
+    saveItems:     (items)    => put('/api/v1/profile', { items: items || [] }),
+    resolvePending: (id, accept, text) =>
+      post(`/api/v1/profile/pending/${encodeURIComponent(id)}`,
+           { accept: !!accept, text: text }, { parse: 'response' }),
+  };
+
   // timer -----------------------------------------------------------
   const timer = {
     list:     ()              => get('/api/v1/timer/list'),
@@ -682,7 +692,17 @@
     // ApiError (carrying .body) so the UI can show the real reason
     // instead of a generic "无法连接" after the call silently nulls out.
     catalogInstall:   (id, env)                    =>
+      // Returns fast: either {status:'ready'} (connected) or HTTP 202
+      // {status:'installing'} when a cold `pip install` was kicked off in the
+      // background. The UI then polls installStatus until ready/error, so the
+      // request no longer blocks for minutes (a proxy could cut it).
       post('/api/v1/mcp/catalog/install', { id, env: env || {} }),
+    // Poll an in-flight async install. 202 while installing, 200 ready (with
+    // tool list), 500 error — all carry a {status} field. parse:'response'
+    // so the caller inspects HTTP status + body.
+    catalogInstallStatus: (id)                     =>
+      request('/api/v1/mcp/catalog/install/status',
+              { method: 'GET', query: { id }, parse: 'response', onError: 'null' }),
     catalogUninstall: (id, purge)                  =>
       post('/api/v1/mcp/catalog/uninstall',
            { id, ...(purge ? { purge: true } : {}) }, { onError: 'null' }),
@@ -968,7 +988,7 @@
     ApiError,
     _resolve,         // exposed for SSE/WS path building
     // domains
-    folders, orchestrations, memory, timer, scheduler, optimizer, compactions,
+    folders, orchestrations, memory, profile, timer, scheduler, optimizer, compactions,
     conversations, text, translate, chat, images, pdf, doc, artifacts,
     health, pricing, clientError, serverConfig, browser, project, daily, paper,
     features, providers, dispatch, oauth, mcp, update, trading, authSources,

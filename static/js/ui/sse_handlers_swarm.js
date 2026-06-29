@@ -171,7 +171,15 @@ function _handleSwarmAgent(ev, c) {
            onto it splits one swarm across two panels. progress / complete /
            error events return null and become no-ops, preventing accidental
            cross-panel writes. */
-        if (_swarm_evtype === "swarm_agent_phase") {
+        /* #6: terminal/phase events for an agent whose card doesn't exist yet
+           (its start/phase event raced behind this one) resolve to the ACTIVE
+           panel so the handler can CREATE the card rather than drop the event.
+           progress stays no-op (it only refines an existing card). NEVER the
+           first `_swarm` round — that may be a stale ghost spawn; prefer the
+           active panel, else the most recent spawn (this wave). */
+        if (_swarm_evtype === "swarm_agent_phase"
+            || _swarm_evtype === "swarm_agent_complete"
+            || _swarm_evtype === "swarm_agent_error") {
           const rounds = assistantMsg.toolRounds || [];
           const active = rounds.find(r => r._swarm && (r._swarmActive || r._asyncRunning));
           if (active) return active;
@@ -261,7 +269,8 @@ function _handleSwarmAgent(ev, c) {
       } else if (_swarm_evtype === "swarm_agent_complete") {
       /* Individual agent finished */
       const sr = _findOwningSwarmRound();
-      if (sr && sr._swarmAgents) {
+      if (sr) {
+        if (!sr._swarmAgents) sr._swarmAgents = [];
         let agent = sr._swarmAgents.find(a => a.id === ev.agentId);
         /* Fallback: match by objective if ID doesn't match (ID remap) */
         if (!agent && ev.objective) {
@@ -271,6 +280,16 @@ function _handleSwarmAgent(ev, c) {
             a.status !== "done" && a.status !== "failed"
           );
           if (agent) agent.id = ev.agentId;
+        }
+        /* #6: out-of-order SSE — `complete` arrived before any `start`/`phase`
+           event created this agent's card. Don't drop the terminal result;
+           create the card now so the agent shows its real outcome instead of
+           vanishing until the swarm_phase:complete sweep. Keyed by agentId. */
+        if (!agent && ev.agentId) {
+          agent = { id: ev.agentId, role: ev.role || "agent", model: ev.model || "",
+                    objective: ev.objective || "", status: "running", phase: "running",
+                    preview: "", tools: [], _idConfirmed: true };
+          sr._swarmAgents.push(agent);
         }
         if (agent) {
           agent.status = ev.status === "failed" ? "failed" : "done";
@@ -287,8 +306,17 @@ function _handleSwarmAgent(ev, c) {
 
       } else if (_swarm_evtype === "swarm_agent_error") {
       const sr = _findOwningSwarmRound();
-      if (sr && sr._swarmAgents) {
-        const agent = sr._swarmAgents.find(a => a.id === ev.agentId);
+      if (sr) {
+        if (!sr._swarmAgents) sr._swarmAgents = [];
+        let agent = sr._swarmAgents.find(a => a.id === ev.agentId);
+        /* #6: terminal error raced ahead of start/phase — create the card so
+           the failure is shown, not dropped. */
+        if (!agent && ev.agentId) {
+          agent = { id: ev.agentId, role: ev.role || "agent", model: ev.model || "",
+                    objective: ev.objective || "", status: "failed", phase: "error",
+                    preview: "", tools: [], _idConfirmed: true };
+          sr._swarmAgents.push(agent);
+        }
         if (agent) {
           agent.status = "failed";
           agent.phase = "error";

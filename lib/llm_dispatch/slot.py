@@ -81,6 +81,11 @@ class Slot:
                 'thinking_format=%r is not one of %s (nor a registered '
                 'tofu.providers plugin dialect)' % (
                     self.thinking_format, sorted(THINKING_FORMATS)))
+        # Seed the recovery ceiling from the constructor rpm_limit (the
+        # dispatcher overrides it via set_rpm_ceiling when it reseeds from
+        # benchmark data). 0.0 means "not provided" → use the current limit.
+        if self.rpm_limit_max <= 0:
+            self.rpm_limit_max = self.rpm_limit
 
     # ── Provider routing ──
     base_url: str = ''              # provider-specific base URL (empty = use global default)
@@ -104,6 +109,17 @@ class Slot:
 
     # ── Rate limiting ──
     rpm_limit: float = 60           # estimated max requests per minute
+    # Ceiling for rpm_limit RECOVERY. A 429 decays rpm_limit by 20%
+    # (``record_error(is_rate_limit=True)``); sustained success recovers it
+    # (``record_success``) but never above this ceiling. Seeded from the
+    # constructor value in ``__post_init__`` and re-seeded by the dispatcher
+    # whenever it authoritatively (re)sets ``rpm_limit`` from benchmark data
+    # (see ``set_rpm_ceiling``). 0.0 = "not yet seeded" → first ``__post_init__``
+    # sets it. Without this the floor decayed toward 5 for the whole process
+    # lifetime, so a key that took transient 429s became permanently
+    # cold-preferred — the slow-bleed form of the per-key cache thrash the
+    # conversation-sticky warm-key hold fixes at the cooldown layer.
+    rpm_limit_max: float = 0.0
     rpm_window: list = field(default_factory=list)  # timestamps of recent requests
     _5h_window: list = field(default_factory=list, repr=False)  # timestamps for 5-hour quota tracking
 
@@ -178,6 +194,21 @@ class Slot:
             self.total_requests += 1
 
 
+    def set_rpm_ceiling(self, rpm: float):
+        """Authoritatively (re)set the RPM limit AND its recovery ceiling.
+
+        Called by the dispatcher when seeding ``rpm_limit`` from benchmark data
+        (``rpm_effective``). Sets both ``rpm_limit`` and ``rpm_limit_max`` so a
+        later benchmarked-DOWN value isn't silently undone by recovery toward a
+        stale higher ceiling, and a benchmarked-UP value raises the ceiling the
+        recovery path can climb back to. Use this instead of assigning
+        ``rpm_limit`` directly whenever the new value is a fresh authoritative
+        estimate (not a 429 decay).
+        """
+        with self._lock:
+            self.rpm_limit = max(5, rpm)
+            self.rpm_limit_max = self.rpm_limit
+
     def release(self):
         """Release a reserved inflight slot WITHOUT recording success/failure.
 
@@ -205,6 +236,20 @@ class Slot:
             self.inflight = max(0, self.inflight - 1)
             self.consecutive_errors = 0
             self.last_success_time = time.time()
+
+            # ── RPM-limit recovery ──
+            # A 429 decays rpm_limit by 20% with no built-in way back up, so a
+            # key that took transient per-minute throttling would stay
+            # permanently deprioritized (its score() RPM-pressure penalty never
+            # relaxes) — making a warm/sticky key chronically cold-preferred. A
+            # genuine success is evidence the key has real capacity, so recover
+            # multiplicatively (mirroring the *0.8 decay) toward the seeded
+            # ceiling. Capped at rpm_limit_max so it can never drift above the
+            # configured/benchmarked limit. Recovery is gentler than decay
+            # (1.1x up vs 0.8x down) so a key that keeps 429ing doesn't ratchet
+            # back to full and immediately overload again.
+            if self.rpm_limit < self.rpm_limit_max:
+                self.rpm_limit = min(self.rpm_limit_max, self.rpm_limit * 1.1)
 
             # Update EMA
             self.latency_ema = (self.ema_alpha * latency_ms +

@@ -32,8 +32,8 @@ def _handle_list_tabs(fn_args):
             active_mark = ' * (active)' if t.get('active') else ''
             url = t.get('url', '')
             title = t.get('title', '(no title)')
-            # Cache tab ID → title for display strings
-            update_tab_title(t.get('id'), title)
+            # Cache tab ID → title + URL for display strings
+            update_tab_title(t.get('id'), title, url=url)
             lines.append(f'  Tab {t["id"]}: {title}{active_mark}')
             lines.append(f'    URL: {url}')
         return '\n'.join(lines)
@@ -56,9 +56,9 @@ def _handle_read_tab(fn_args):
             return f'Error: {result["error"]}'
         title = result.get('title', '')
         url = result.get('url', '')
-        # Cache tab ID → title for display strings
-        if title:
-            update_tab_title(tab_id, title)
+        # Cache tab ID → title + URL for display strings
+        if title or url:
+            update_tab_title(tab_id, title, url=url)
         if result.get('elements'):
             elements = result['elements']
             lines = [f'Tab: {title}', f'URL: {url}',
@@ -126,9 +126,14 @@ def _handle_screenshot(fn_args):
     # the caller explicitly opts out so older extensions keep working.
     if fn_args.get('fullPage') is False:
         params['fullPage'] = False
-    # Full-page captures can take longer (lazy-load triggering + CDP attach)
+    # Full-page captures can take longer (lazy-load triggering + CDP attach).
+    # The extension allows 55s for ANY screenshot_tab (COMMAND_TIMEOUT_OVERRIDES
+    # in background.js), so the server-side wait must not give up first — a 15s
+    # viewport budget made the server report a timeout while the extension was
+    # still legitimately attaching CDP / walking its fallback chain. Keep both
+    # values safely under the extension's 55s cap.
     full_page_requested = fn_args.get('fullPage', True) is not False
-    timeout = 60 if full_page_requested else 15
+    timeout = 60 if full_page_requested else 30
     result, error = send_browser_command('screenshot_tab', params, timeout=timeout)
     if error:
         return f'Error taking screenshot: {error}'
@@ -172,10 +177,13 @@ def _handle_screenshot(fn_args):
                     img = img.resize((width, height), Image.LANCZOS)
                     compression_applied = True
 
-                # Convert to JPEG for smaller size (quality=70)
+                # Convert to JPEG for smaller size (quality=70). optimize=True
+                # adds a second Huffman-optimization pass that ~doubles encode
+                # time on large full-page captures for a few % size gain — not
+                # worth it on the hot screenshot path.
                 output = io.BytesIO()
                 img = img.convert('RGB')  # Remove alpha for JPEG
-                img.save(output, format='JPEG', quality=70, optimize=True)
+                img.save(output, format='JPEG', quality=70)
                 output.seek(0)
 
                 compressed_b64 = base64.b64encode(output.read()).decode('ascii')
@@ -255,6 +263,10 @@ def _handle_create_tab(fn_args):
     if error:
         return f'Error creating tab: {error}'
     if isinstance(result, dict):
+        # Cache the URL immediately so subsequent tool rows (wait / screenshot /
+        # execute_js on this new tab) render a hostname label instead of the
+        # opaque numeric tab id.
+        update_tab_title(result.get('id'), result.get('title'), url=result.get('url') or url)
         return f'Created new tab #{result.get("id", "?")} -> {url}'
     return json.dumps(result, ensure_ascii=False, indent=2)
 
@@ -291,8 +303,9 @@ def _handle_navigate(fn_args):
     if isinstance(result, dict):
         # Cache tab title from navigation result
         nav_title = result.get('title', '')
-        if nav_title:
-            update_tab_title(result.get('id', tab_id), nav_title)
+        nav_url = result.get('url', '') or url
+        if nav_title or nav_url:
+            update_tab_title(result.get('id', tab_id), nav_title, url=nav_url)
         return f'Navigated tab #{result.get("id", tab_id)} -> {result.get("url", url)} (status: {result.get("status", "?")})'
     return json.dumps(result, ensure_ascii=False, indent=2)
 
@@ -313,9 +326,9 @@ def _handle_get_interactive_elements(fn_args):
         elements = result.get('elements', [])
         title = result.get('title', '')
         url = result.get('url', '')
-        # Cache tab ID → title for display strings
-        if title:
-            update_tab_title(tab_id, title)
+        # Cache tab ID → title + URL for display strings
+        if title or url:
+            update_tab_title(tab_id, title, url=url)
         total = result.get('total', len(elements))
         lines = [f'Tab: {title}', f'URL: {url}',
                  f'Interactive elements ({len(elements)} shown, {total} total):\n']
@@ -454,8 +467,9 @@ def _handle_summarize_page(fn_args):
         return f'Error summarizing page: {error}'
     if isinstance(result, dict):
         sum_title = result.get('title', 'Untitled')
-        if sum_title and sum_title != 'Untitled':
-            update_tab_title(tab_id, sum_title)
+        sum_url = result.get('url', '')
+        if (sum_title and sum_title != 'Untitled') or sum_url:
+            update_tab_title(tab_id, sum_title if sum_title != 'Untitled' else None, url=sum_url)
         lines = [f"Page Summary: {sum_title}"]
         lines.append(f"   URL: {result.get('url', '')}")
         lines.append(f"   Framework: {result.get('framework', 'Unknown')}")

@@ -134,6 +134,56 @@ def test_sse_handler_files_registered():
         ), f'index.html must include a <script> tag for static/js/{h}.'
 
 
+def test_streaming_swarm_panel_registered():
+    """The swarm-panel cluster split out of ui/streaming_ui.js (2026-06-27)
+    must be in _BUNDLE_FILES AND index.html, loaded BEFORE streaming_ui.js
+    (whose _syncToolRoundsDOM/updateStreamingUI call _buildSwarmPanelHTML /
+    _buildSwarmInboxChipsHTML at runtime).
+
+    The generic ``test_bundle_audit_parity`` regex does NOT match ``ui/``
+    subdir paths, so this explicit check guards the split."""
+    from lib.js_bundler import _BUNDLE_FILES
+
+    sib = 'ui/streaming_swarm_panel.js'
+    assert sib in _BUNDLE_FILES, (
+        f'{sib} (split from ui/streaming_ui.js) must be in _BUNDLE_FILES.'
+    )
+    assert _BUNDLE_FILES.index(sib) < _BUNDLE_FILES.index('ui/streaming_ui.js'), (
+        f'{sib} must load BEFORE ui/streaming_ui.js.'
+    )
+
+    with open(os.path.join(PROJECT_ROOT, 'index.html'), encoding='utf-8') as f:
+        html = f.read()
+    assert re.search(
+        r'<script[^>]+src="static/js/' + re.escape(sib) + r'[^"]*"', html
+    ), f'index.html must include a <script> tag for static/js/{sib} (dev fallback).'
+
+
+def test_stream_lifecycle_registered():
+    """The stream-lifecycle cluster split out of ui/streaming_ui.js
+    (2026-06-27) must be in _BUNDLE_FILES AND index.html, loaded AFTER
+    streaming_ui.js (finishStream/showStreamingUIForConv call updateStreamingUI
+    at runtime).
+
+    The generic ``test_bundle_audit_parity`` regex does NOT match ``ui/``
+    subdir paths, so this explicit check guards the split."""
+    from lib.js_bundler import _BUNDLE_FILES
+
+    sib = 'ui/stream_lifecycle.js'
+    assert sib in _BUNDLE_FILES, (
+        f'{sib} (split from ui/streaming_ui.js) must be in _BUNDLE_FILES.'
+    )
+    assert _BUNDLE_FILES.index('ui/streaming_ui.js') < _BUNDLE_FILES.index(sib), (
+        f'{sib} must load AFTER ui/streaming_ui.js.'
+    )
+
+    with open(os.path.join(PROJECT_ROOT, 'index.html'), encoding='utf-8') as f:
+        html = f.read()
+    assert re.search(
+        r'<script[^>]+src="static/js/' + re.escape(sib) + r'[^"]*"', html
+    ), f'index.html must include a <script> tag for static/js/{sib} (dev fallback).'
+
+
 def test_bundle_audit_parity():
     """Every static/js/<name>.js referenced in index.html must appear in
     _BUNDLE_FILES — guards against the trap CLAUDE.md §3.2.1 documents."""

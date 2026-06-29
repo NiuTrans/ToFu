@@ -79,9 +79,12 @@ def _get_cached_or_compute(conv_id: str, category: str,
 
 _TIMESTAMP_PREFIX = 'Current date and time: '
 
-# Idempotency marker for the personal-preference profile block. Mirrors the
-# constant in lib/memory/user_profile.py — kept in sync there.
+# Idempotency markers for the personal-preference profile blocks. Mirror the
+# constants in lib/memory/user_profile.py — kept in sync there. The core tier
+# (always-on) carries _PROFILE_MARKER; the relevance-gated detail tier carries
+# the distinct _PROFILE_DETAIL_MARKER so the two never collide.
 _PROFILE_MARKER = '[USER PREFERENCE PROFILE]'
+_PROFILE_DETAIL_MARKER = '[USER PREFERENCE PROFILE — relevant detail]'
 
 
 def inject_search_addendum_to_user(messages: list, search_enabled: bool,
@@ -237,7 +240,8 @@ def _insert_user_context_message(messages, body: str) -> None:
     })
 
 
-def _append_user_profile_block(messages, block: str) -> bool:
+def _append_user_profile_block(messages, block: str,
+                               marker: str = _PROFILE_MARKER) -> bool:
     """Append the preference-profile block to the cache-safe tail.
 
     Placement priority (cache-stability matters):
@@ -247,6 +251,10 @@ def _append_user_profile_block(messages, block: str) -> bool:
          a profile edit re-writes only that already-dynamic segment.
       2. Otherwise (project mode off → no _isMeta msg) append to the FIRST
          real user message — still the tail, still NOT messages[0].
+
+    ``marker`` is the idempotency substring this block carries (the core tier
+    uses :data:`_PROFILE_MARKER`; the relevance-gated detail tier passes its
+    own distinct marker so the two never block each other).
 
     Returns True if the block was injected, False if no suitable user message
     was found (in which case the caller skips the notify_compaction).
@@ -258,12 +266,12 @@ def _append_user_profile_block(messages, block: str) -> bool:
     for m in messages:
         c = m.get('content', '')
         if isinstance(c, str):
-            if _PROFILE_MARKER in c:
+            if marker in c:
                 return False
         elif isinstance(c, list):
             for blk in c:
                 if isinstance(blk, dict) and blk.get('type') == 'text' \
-                        and _PROFILE_MARKER in blk.get('text', ''):
+                        and marker in blk.get('text', ''):
                     return False
 
     target_idx = None
@@ -540,46 +548,89 @@ def _inject_system_contexts(messages, project_path, project_enabled,
     #   cached prefix on every preference edit; see the memory-count-hint and
     #   timestamp-placement A/B lessons). Gated on memory_enabled so the
     #   Memory toggle's "off → no proactive memory plumbing" semantics hold.
-    if memory_enabled and _PROFILE_MARKER not in _existing:
+    # Preferences are a DISTINCT personal capability from the memory store
+    # (see lib/agent_core/personal_scope). The UI keeps the historical
+    # behaviour (profile rides the Memory toggle) via the memory_enabled
+    # fallback; a headless caller that enabled the memory store does NOT get
+    # the operator's personal profile unless it ALSO opts into preferences.
+    from lib.agent_core.personal_scope import resolve_preferences_enabled
+    _prefs_enabled = resolve_preferences_enabled(
+        task.get('config') if task else None, memory_enabled=memory_enabled)
+    if _prefs_enabled and _PROFILE_MARKER not in _existing:
+        # Identity scope: captured onto the task at creation from the request's
+        # AuthContext.user_id (multi-user tenant) — '' for open/private mode →
+        # the single global profile, so personal installs are byte-identical.
+        _profile_scope = (task.get('_profileScope', '') if task else '') or ''
+        # TIERED injection (relevance gating). The CORE tier (work-style /
+        # standing instructions, e.g. ## Preferences) is byte-stable across
+        # turns and always injected — the always-on, cache-friendly block. The
+        # DETAIL tier (identity / project-specific facts, e.g. ## About the
+        # user) is scored by BM25 against THIS turn's last-user text and only
+        # the relevant bullets are injected, as a SEPARATE block. Both ride the
+        # same _isMeta tail (the BP4 5-min-TTL seam) — the core stays
+        # byte-stable there so it keeps its cache hit, while the detail block
+        # varying per turn is exactly the cache-safe pattern <relevant_memories>
+        # already uses. See render_profile_tiers + lib/memory/relevance.score_items.
         try:
-            from lib.memory.user_profile import load_profile, render_profile_block
-            _profile_body = load_profile()
-            _profile_block = render_profile_block(_profile_body)
+            from lib.memory.user_profile import load_profile, render_profile_tiers
+            _profile_body = load_profile(_profile_scope)
+            _query = _extract_last_user_text(messages)
+            _core_block, _detail_block = render_profile_tiers(
+                _profile_body, _profile_scope, query=_query)
         except Exception as e:
             logger.warning('[Inject] conv=%s user-profile load failed: %s',
                            (_cid or '?')[:8], e)
-            _profile_body, _profile_block = '', None
-        if _profile_block:
-            _profile_injected = _append_user_profile_block(messages,
-                                                           _profile_block)
-            if _profile_injected:
-                _existing = _system_text(messages)
-                # Stash on the task so the orchestrator can emit a
-                # `preferences_applied` event + persist the chip payload.
-                if task is not None:
-                    try:
-                        from lib.memory.user_profile import profile_summary_for_event
-                        task['_appliedPreferences'] = {
-                            'chars': len(_profile_body),
-                            'items': profile_summary_for_event(_profile_body),
-                        }
-                    except Exception as e:
-                        logger.debug('[Inject] profile summary stash failed: %s', e)
-                # CRITICAL: we mutated a message that, after the first tool
-                # round, sits INSIDE the cached prefix (messages[0:N-2]).
-                # Tell cache_tracking this is an expected, legitimate
-                # mutation so detect_cache_break does NOT log a false
-                # `PREFIX MUTATION DETECTED` every round. See
-                # .tofu/skills/cache-tracking-prefix-mutation-mutators.md.
-                if _cid:
-                    try:
-                        from lib.tasks_pkg.cache_tracking import notify_compaction
-                        notify_compaction(_cid)
-                    except Exception as e:
-                        logger.debug('[Inject] notify_compaction unavailable: %s', e)
-                logger.info('[Inject] conv=%s user-profile applied '
-                            '(%d chars) on _isMeta tail',
-                            (_cid or '?')[:8], len(_profile_body))
+            _profile_body, _core_block, _detail_block = '', None, None
+        _profile_injected = False
+        if _core_block:
+            _profile_injected = _append_user_profile_block(
+                messages, _core_block, marker=_PROFILE_MARKER)
+        # Detail tier rides the same tail with its OWN marker (so the core
+        # marker doesn't suppress it, and vice versa). Only present on a
+        # relevant turn — absent entirely otherwise.
+        _detail_injected = False
+        if _detail_block:
+            _detail_injected = _append_user_profile_block(
+                messages, _detail_block, marker=_PROFILE_DETAIL_MARKER)
+        if _profile_injected or _detail_injected:
+            _existing = _system_text(messages)
+            # Stash on the task so the orchestrator can emit a
+            # `preferences_applied` event + persist the chip payload.
+            if task is not None:
+                try:
+                    from lib.memory.user_profile import applied_profile_items
+                    _applied = applied_profile_items(
+                        _profile_body, _profile_scope, query=_query)
+                    # The chip shows EXACTLY what was injected: the full
+                    # always-on core + only the relevance-selected detail
+                    # bullets — never an arbitrary first-N slice. `items` is
+                    # the flat union (back-compat for the existing chip);
+                    # `core`/`detail` let the UI group them.
+                    task['_appliedPreferences'] = {
+                        'chars': len(_profile_body),
+                        'items': _applied['core'] + _applied['detail'],
+                        'core': _applied['core'],
+                        'detail': _applied['detail'],
+                        'detail_injected': _detail_injected,
+                    }
+                except Exception as e:
+                    logger.debug('[Inject] profile summary stash failed: %s', e)
+            # CRITICAL: we mutated a message that, after the first tool
+            # round, sits INSIDE the cached prefix (messages[0:N-2]).
+            # Tell cache_tracking this is an expected, legitimate
+            # mutation so detect_cache_break does NOT log a false
+            # `PREFIX MUTATION DETECTED` every round. See
+            # .tofu/skills/cache-tracking-prefix-mutation-mutators.md.
+            if _cid:
+                try:
+                    from lib.tasks_pkg.cache_tracking import notify_compaction
+                    notify_compaction(_cid)
+                except Exception as e:
+                    logger.debug('[Inject] notify_compaction unavailable: %s', e)
+            logger.info('[Inject] conv=%s user-profile applied '
+                        '(%d chars, core=%s detail=%s) on _isMeta tail',
+                        (_cid or '?')[:8], len(_profile_body),
+                        _profile_injected, _detail_injected)
 
     # ★ 3. Compact memory accumulation instructions + memory count hint
     #   Both the HOW-TO-USE instructions and the dynamic count hint
@@ -726,11 +777,24 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
     #   model is AMBIENTLY aware that siblings exist and can get_conversation()
     #   into one. Read-only/cached (never generates a summary on this hot path);
     #   own cache-block because the sibling list changes as the project grows.
-    _DIGEST_MARKER = 'related conversation(s) you can'
+    # Marker is the substring BOTH header variants share (tool-enabled and
+    # tool-free), so the idempotency probe matches regardless of which header
+    # build_project_digest emitted — see its conv_tools_available docstring.
+    _DIGEST_MARKER = 'related conversation(s)'
     if project_enabled and project_path and _DIGEST_MARKER not in _existing:
+        # The digest's header advertises list_conversations / get_conversation
+        # ONLY when those tools are actually registered this turn. They register
+        # only once the user @-attached a conversation (registry._build_conv_ref
+        # gates on has_conv_ref), so on a plain project turn we must NOT tell the
+        # model to call tools absent from its schema — mirrors the
+        # using-tools-section-filters-by-registered-tools guardrail.
+        _conv_tools_available = bool(
+            tool_names and {'list_conversations', 'get_conversation'} & tool_names)
         try:
             from lib.conversations.project_summary import build_project_digest
-            _digest = build_project_digest(project_path, current_conv_id=_cid or None)
+            _digest = build_project_digest(
+                project_path, current_conv_id=_cid or None,
+                conv_tools_available=_conv_tools_available)
         except Exception as e:
             logger.debug('[Inject] project digest build failed conv=%s: %s',
                          (_cid or '?')[:8], e)
@@ -742,6 +806,23 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
             _existing = _system_text(messages)
             logger.info('[Inject] conv=%s project digest injected (%d chars)',
                         (_cid or '?')[:8], len(_digest))
+            # Stash the SAME siblings (structured) so the frontend can show a
+            # "related conversations" provenance segment — making the ambient
+            # context the model received auditable, mirroring the prefs chip.
+            if task is not None:
+                try:
+                    from lib.conversations.project_summary import (
+                        project_digest_entries)
+                    _entries = project_digest_entries(
+                        project_path, current_conv_id=_cid or None)
+                    if _entries:
+                        task['_relatedConversations'] = {
+                            'count': len(_entries),
+                            'items': _entries,
+                            'toolsAvailable': _conv_tools_available,
+                        }
+                except Exception as e:
+                    logger.debug('[Inject] related-convs stash failed: %s', e)
 
     # ★ 4.5 Current date.
     #   In append mode the date is already inlined by build_static_prompt()'s

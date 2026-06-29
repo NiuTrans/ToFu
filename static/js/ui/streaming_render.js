@@ -153,10 +153,7 @@ function _maybeAutoTranslateVu(convId, conv, entry) {
     if (!conv || !entry || !entry.msg) return;
     const msg = entry.msg;
     if (!msg.content || msg.translatedContent || msg._translateDone) return;
-    const convAutoTranslate = conv.autoTranslate !== undefined
-      ? !!conv.autoTranslate
-      : (typeof autoTranslate !== 'undefined' ? !!autoTranslate : false);
-    if (!convAutoTranslate) return;
+    if (!convAutoTranslate(conv)) return;
     if (typeof _startAutoTranslateForMsg !== 'function') return;
     /* idx is the message's current position; _findVuMsgById gives a stable
      * lookup but the pipeline needs the array index for surgical re-render. */

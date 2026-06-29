@@ -80,6 +80,42 @@ try:
     _SLOW_QUERY_MS = int(getenv_compat('TOFU_DB_SLOW_QUERY_MS', default='2000'))
 except (ValueError, TypeError) as e:
     logger.debug('[DB] Invalid TOFU_DB_SLOW_QUERY_MS, defaulting to 2000ms: %s', e)
+# ── Opt-in SQL-error log suppression ─────────────────────────────────────
+# Some callers run a query that is EXPECTED to fail as part of normal control
+# flow — e.g. an existence probe for a table that may not be created yet
+# (lib/billing/janitor.py's startup gate polls ``SELECT 1 FROM billing_ledger``
+# until the schema is bootstrapped). Such a probe still raises (the caller
+# handles it), but the cursor wrappers would otherwise log every failure at
+# ERROR, spamming error.log with self-recovering "no such table" noise. A
+# caller wraps the probe in ``with suppress_sql_error_log():`` to demote that
+# one query's failure log to DEBUG. Thread-local so it never affects other
+# threads' genuine errors.
+_sql_log_local = threading.local()
+
+
+def _sql_errors_suppressed() -> bool:
+    return getattr(_sql_log_local, 'suppress', False)
+
+
+class suppress_sql_error_log:
+    """Context manager: demote SQL-execution-failure logs to DEBUG on this
+    thread for queries that are expected to fail as normal control flow.
+
+    The exception is still raised — only the ERROR-level log line is
+    suppressed (re-emitted at DEBUG so it remains visible under
+    ``TOFU_DB_LOG_LEVEL=DEBUG``).
+    """
+
+    def __enter__(self):
+        self._prev = getattr(_sql_log_local, 'suppress', False)
+        _sql_log_local.suppress = True
+        return self
+
+    def __exit__(self, *exc):
+        _sql_log_local.suppress = self._prev
+        return False
+
+
     _SLOW_QUERY_MS = 2000
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -506,9 +542,12 @@ class _SqliteCursorWrapper:
             if _sql_upper.startswith(('INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP')):
                 self._conn._dirty = True
         except Exception as e:
-            logger.error('[DB] SQL execution failed (%s): %.120s', type(e).__name__, e)
-            logger.debug('[DB] SQL error detail: %s\n  SQL: %.200s\n  Params: %.200s',
-                         e, sql, str(params)[:200] if params else 'None')
+            if _sql_errors_suppressed():
+                logger.debug('[DB] SQL execution failed (%s) [suppressed]: %.120s', type(e).__name__, e)
+            else:
+                logger.error('[DB] SQL execution failed (%s): %.120s', type(e).__name__, e)
+                logger.debug('[DB] SQL error detail: %s\n  SQL: %.200s\n  Params: %.200s',
+                             e, sql, str(params)[:200] if params else 'None')
             raise
         if _SLOW_QUERY_MS:
             _elapsed_ms = (time.monotonic() - _t0) * 1000

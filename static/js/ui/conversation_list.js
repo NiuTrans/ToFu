@@ -387,8 +387,8 @@ function _teardownConvVirtual() {
  * date-group header, a conversation row, or the collapsed-"older" toggle.
  * `filtered` is recency-sorted so each date bucket is one contiguous run.
  * The ">30 days" bucket is collapsed behind a toggle unless expanded (or the
- * active conv lives in it, in which case it's force-expanded so its row is
- * always visible).
+ * active conv lives in it, or it's the ONLY populated group — in those cases
+ * it's force-expanded so its rows are always visible and clickable).
  *
  * @returns {Array<{type:'header'|'conv'|'older'|'older-collapse', key?:string, conv?:object, count?:number}>}
  */
@@ -404,6 +404,14 @@ function _buildConvPlan(filtered) {
     ? (() => { const a = filtered.find(c => c.id === activeConvId); return a ? _convDateGroupKey(a.updatedAt || a.createdAt) : null; })()
     : null;
 
+  /* ★ Never auto-collapse the ONLY populated group. The "older" (>30d) bucket
+   * starts collapsed, but for a user whose conversations are ALL older than 30
+   * days that would hide every row behind a single collapsed header — the
+   * sidebar looks empty and clicks land on nothing (no .conv-item is rendered).
+   * When a single group holds all the rows, force it expanded regardless of
+   * its remembered collapsed state, so there is always something to click. */
+  const _soleGroupKey = Object.keys(counts).length === 1 ? Object.keys(counts)[0] : null;
+
   /** @type {Array<{type:'header'|'conv', key?:string, count?:number, collapsed?:boolean, conv?:object}>} */
   const plan = [];
   let curGroup = null;
@@ -411,7 +419,7 @@ function _buildConvPlan(filtered) {
   for (const c of filtered) {
     const key = _convDateGroupKey(c.updatedAt || c.createdAt);
     if (key !== curGroup) {
-      curCollapsed = _collapsedConvGroups.has(key) && key !== activeKey;
+      curCollapsed = _collapsedConvGroups.has(key) && key !== activeKey && key !== _soleGroupKey;
       plan.push({ type: 'header', key, count: counts[key], collapsed: curCollapsed });
       curGroup = key;
     }

@@ -82,6 +82,7 @@ from lib.billing.wallet import (
     reserve_release,
     settle,
 )
+from lib.billing.wallet_janitor import sweep_stale_reserves
 
 __all__ = [
     # pricing
@@ -96,6 +97,7 @@ __all__ = [
     'BillingError', 'InsufficientFunds',
     'debit', 'deposit', 'get_balance', 'get_wallet',
     'reserve', 'reserve_release', 'settle',
+    'sweep_stale_reserves',
     # users
     'create_user', 'find_user', 'get_user', 'list_users',
     'set_user_status', 'update_user_role',

@@ -42,7 +42,20 @@ def _setup_table():
         conn.commit()
     finally:
         _pool_put(conn)
-    yield
+    try:
+        yield
+    finally:
+        # Always reap the scratch table — it is NOT part of the real schema
+        # (no Core define_table), so it must never persist in whatever DB the
+        # session resolved to. conftest now FORCES a throwaway sqlite DB, but
+        # dropping here is belt-and-suspenders: a leaked _aio_test in
+        # production PG is exactly the test-residue this teardown prevents.
+        conn = _pool_get()
+        try:
+            conn.execute('DROP TABLE IF EXISTS _aio_test')
+            conn.commit()
+        finally:
+            _pool_put(conn)
 
 
 @pytest.mark.unit

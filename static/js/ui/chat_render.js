@@ -92,7 +92,13 @@ function renderChat(conv, forceScroll) {
    * was already cached, the prefetch returns false and we don't paint. */
   if (typeof _prefetchConvCosts === 'function') {
     _prefetchConvCosts(conv).then((didFetch) => {
-      if (didFetch && conv.id === activeConvId && typeof renderChat === 'function') {
+      // ★ Skip the re-render while this conv is actively streaming. A
+      //   forceScroll=true re-render hits Guard 1c → showStreamingUIForConv →
+      //   _forceScrollToBottom, yanking the user back to the bottom. The
+      //   streaming bubble's cost/finish bar is owned by the live stream UI,
+      //   not this static render — see the file-changes loop fix below.
+      if (didFetch && conv.id === activeConvId && typeof renderChat === 'function'
+          && !activeStreams.has(conv.id)) {
         // Bypass the fingerprint guard — cache changed even though
         // _convRenderFingerprint didn't.
         renderChat(conv, true);
@@ -106,7 +112,17 @@ function renderChat(conv, forceScroll) {
    * biggest source of post-migration render lag (after cost). */
   if (typeof _prefetchConvFileChanges === 'function') {
     _prefetchConvFileChanges(conv).then((didFetch) => {
-      if (didFetch && conv.id === activeConvId && typeof renderChat === 'function') {
+      // ★ FIX (continuous fc-bar flash + scroll-jam): while the conv is
+      //   streaming, the in-progress message's toolRounds keep growing, so the
+      //   coarse _fcFingerprint keeps changing → the prefetch keeps returning
+      //   didFetch=true → renderChat(conv,true) → Guard 1c →
+      //   showStreamingUIForConv → _forceScrollToBottom, in a tight loop that
+      //   replays the fcPulse/fcFileIn animations and pins the view to the
+      //   bottom. The streaming bubble's file-changes bar is rendered by the
+      //   live `fc` zone (updateStreamingUI), so this static re-render is both
+      //   redundant and harmful mid-stream. Defer it until the stream ends.
+      if (didFetch && conv.id === activeConvId && typeof renderChat === 'function'
+          && !activeStreams.has(conv.id)) {
         renderChat(conv, true);
       }
     });
@@ -399,18 +415,17 @@ function renderMessage(msg, idx) {
       : "Continued automatically after sub-agents finished";
     body += `<div class="proactive-banner"><span class="pb-text">↻ <span class="pb-name">${escapeHtml(_acLabel)}</span></span></div>`;
   }
-  // ── MCP login-hint + Memory Prefetch indicator (finished message) ──
-  if (!isUser && msg._mcpLoginHint) {
+  // ── Turn provenance (finished message) ──
+  //   The awaiting-approval login keeps its own prominent callout; memory
+  //   prefetch + preferences + any RESOLVED login fold into one quiet,
+  //   collapsible strip (renderTurnProvenanceHtml). Learned-preference cards
+  //   (with Confirm/Dismiss) stay separate.
+  if (!isUser) {
     body += renderMcpLoginHintHtml(msg._mcpLoginHint);
-  }
-  if (!isUser && msg._memoryPrefetch) {
-    body += renderMemoryPrefetchHtml(msg._memoryPrefetch);
-  }
-  if (!isUser && msg._preferencesApplied) {
-    body += renderPreferencesAppliedHtml(msg._preferencesApplied);
-  }
-  if (!isUser && msg._preferencesLearned) {
-    body += renderPreferenceLearnedHtml(msg._preferencesLearned);
+    body += renderTurnProvenanceHtml(msg);
+    if (msg._preferencesLearned) {
+      body += renderPreferenceLearnedHtml(msg._preferencesLearned);
+    }
   }
   /* ★ Autopilot VU bubble, still streaming and not yet showing content —
    * render a live "composing…" pulse so the eagerly-created bubble isn't

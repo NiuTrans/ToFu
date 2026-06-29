@@ -102,7 +102,8 @@ def auto_translate_user(text, config, conv_id=None):
         did not produce usable output — the caller surfaces this to the user
         so the silent original-text fallback is no longer invisible.
     """
-    auto_translate = config.get('autoTranslate', False)
+    from lib.conv_config import resolve_auto_translate
+    auto_translate = resolve_auto_translate(config)
     if not auto_translate or not text:
         return text, None, None, None
 
@@ -265,7 +266,8 @@ def translate_user_text_to_english(text, config):
     ``usage`` is the engine's usage dict (carries ``_dispatch.model`` plus
     token counts) or ``None`` when no translation happened / it failed.
     """
-    if not config.get('autoTranslate', False) or not text:
+    from lib.conv_config import resolve_auto_translate
+    if not resolve_auto_translate(config) or not text:
         return text, None, None, None
 
     source_lang = (config.get('translateSourceLang') or '').strip()

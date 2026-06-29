@@ -46,6 +46,7 @@ declare var flashGaugeForArchive: any;   // static/js/context-bar.js — window.
 declare var _resolveContextLimit: any;   // static/js/context-bar.js — window.*
 declare var openCompactionViewer: any;   // static/js/compaction-viewer.js — window.*
 declare var closeCompactionViewer: any;  // static/js/compaction-viewer.js — window.*
+declare var _cvOnLanguageChange: any;    // static/js/compaction-viewer.js — window.* (called by i18n.js _onLanguageChange)
 declare var refreshRelayAdminTabs: any;  // static/js/relay-admin.js — window.*
 declare var relayAdminCreateUser: any;   // static/js/relay-admin.js — window.*
 declare var relayAdminMintCodes: any;    // static/js/relay-admin.js — window.*
@@ -91,6 +92,9 @@ interface Element {
   offsetTop: any; offsetParent: any; readOnly: any; type: any;
   // app-specific expando refs stashed on DOM nodes by the renderer
   _msgRef: any; _rawTools: any; _rawMessages: any; _toolsRef: any;
+  // _wired: one-time event-wiring latch (main_toolbar_ui.js); _qaCls/_qaSig:
+  // paper-reader QA-node className/innerHTML diff cache (paper-reader.js)
+  _wired: any; _qaCls: any; _qaSig: any;
 }
 interface EventTarget {
   value: any; checked: any; disabled: any; dataset: any;
@@ -109,8 +113,8 @@ interface GlobalEventHandlers {
 interface Event { dataTransfer: any; }
 // ResizeObserver entry: app reads contentBoxSize[0].inlineSize off the union.
 interface ResizeObserverSize { inlineSize: any; blockSize: any; }
-// app-specific expando stashed on toast <div>s + finish-info anchor ref
-interface HTMLDivElement { _dismissed: any; _anchor: any; }
+// app-specific expando stashed on toast <div>s + finish-info anchor ref + paper-reader tracking
+interface HTMLDivElement { _dismissed: any; _anchor: any; _readWords: any; _readTotalMin: any; }
 // app-specific expando stashed on a thrown Error (oauth upstream status passthrough)
 interface Error { _upstreamStatus: any; }
 // app-specific expando properties assigned to `window` inside IIFEs. tsc can't
@@ -122,6 +126,7 @@ interface Error { _upstreamStatus: any; }
 interface Window {
   __RELAY_ADMIN_PAGE: any; __RELAY_BILLING_ENABLED: any; __RELAY_MODEL_ENABLED: any;
   relayAdminSwitch: any; relayAdminSaveMargin: any; relayAdminViewPayments: any;
+  _cvOnLanguageChange: any;
   _swReconcileTicker: any;
   buildTurnCtxSnapshot: any; renderTurnCtxNote: any;
   reconcileTurnCtxCapsule: any; refreshMcpRailState: any;

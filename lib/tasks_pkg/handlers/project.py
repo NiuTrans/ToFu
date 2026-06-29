@@ -357,11 +357,11 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         if _img_descriptors is None:
             _img_descriptors = [_screenshot_to_descriptor(tool_content, filename)]
         meta = {
-            'toolName': fn_name, 'title': f'🖼️ {filename}',
+            'toolName': fn_name, 'title': filename,
             'snippet': f'{filename} ({fmt}, {size_info})',
             'source': 'Project', 'fetched': True,
             'fetchedChars': comp_size, 'url': '',
-            'badge': f'🖼️ {fmt}',
+            'badge': fmt,
             # Inline-render payload — frontend (tool_rounds.js) draws an
             # <img> per descriptor. Each carries a full data: URL.
             'imageDataUris': [d for d in _img_descriptors if d.get('uri')],

@@ -212,6 +212,14 @@ if __name__ == '__main__':
     print('=== Async Server Smoke Test ===')
     print()
 
+    # ⚠️ DATA-LOSS GUARD: standalone mode skips conftest (no force-sqlite, no
+    # pytest_configure gate), so guard the real-app boot against a non-test DB.
+    try:
+        from tests.conftest import _assert_test_database as _adb
+    except Exception:
+        from conftest import _assert_test_database as _adb  # run from tests/ cwd
+    _adb('test_server_async.__main__')
+
     # 1. Check dependencies
     try:
         import quart

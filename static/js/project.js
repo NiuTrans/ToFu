@@ -99,7 +99,7 @@ async function submitHumanGuidanceFreeText(guidanceId) {
   // ★ Auto-translate CN→EN: if autoTranslate is ON and text contains Chinese,
   //   translate before sending to backend — same as sendMessage() flow.
   const conv = conversations.find(c => c.id === activeConvId);
-  const _hgAutoTrans = conv ? (conv.autoTranslate !== undefined ? !!conv.autoTranslate : true) : !!autoTranslate;
+  const _hgAutoTrans = convAutoTranslate(conv);
   const hasChinese = /[\u4e00-\u9fff\u3400-\u4dbf]/.test(text);
   let finalText = text;
 

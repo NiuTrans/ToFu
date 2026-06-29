@@ -46,6 +46,7 @@ isn't a known alias passes through to the orchestrator unchanged.
   | search          | searchMode         | 'multi'/'single'/  |
   |                 |                    | 'off'              |
   | memory          | memoryEnabled      | bool               |
+  | preferences     | preferencesEnabled | bool               |
   | swarm           | swarmEnabled       | bool               |
   | mcp             | mcpEnabled         | bool               |
   | browser         | browserEnabled     | bool               |
@@ -173,6 +174,7 @@ _ALIAS_SETTERS = {
     'thinking':       _set_thinking,
     'search':         _set_search,
     'memory':         lambda c, v: c.__setitem__('memoryEnabled', bool(v)),
+    'preferences':    lambda c, v: c.__setitem__('preferencesEnabled', bool(v)),
     'swarm':          lambda c, v: c.__setitem__('swarmEnabled', bool(v)),
     'mcp':            lambda c, v: c.__setitem__('mcpEnabled', bool(v)),
     'browser':        lambda c, v: c.__setitem__('browserEnabled', bool(v)),
@@ -245,6 +247,16 @@ def _build_cfg(model_id: str, raw_config: dict | None,
     # final authority on what's valid; we treat unknown keys as
     # forward-compat extensions.
     cfg.update(merged)
+
+    # ── App-personal capabilities fail closed on the headless surface ──
+    # The `memory` alias (→ memoryEnabled) and `preferences` alias (→
+    # preferencesEnabled), or tools='*', explicitly opt the caller in above.
+    # Absent an opt-in, force the fail-closed headless default so the
+    # operator's personal memory store / preference profile is NEVER spliced
+    # into a BYO caller's prompt. setdefault = explicit opt-in still wins.
+    # Single source of truth: lib/agent_core/personal_scope.
+    from lib.agent_core.personal_scope import apply_headless_personal_defaults
+    apply_headless_personal_defaults(cfg)
     return cfg
 
 

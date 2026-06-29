@@ -82,6 +82,10 @@ BROWSER_TOOL_EXECUTE_JS = {
                 "code": {
                     "type": "string",
                     "description": "JavaScript code to execute in the page context"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "ALWAYS provide a short one-line summary (in the user's language) of what this JS does and why. It is rendered as a caption above the code in the UI so the user can grasp the intent at a glance without parsing the script. E.g. 'Extract the flight prices from the results grid', 'Read the logged-in user id from window state'."
                 }
             },
             "required": ["tab_id", "code"]
@@ -100,7 +104,8 @@ BROWSER_TOOL_SCREENSHOT = {
             "Returns the screenshot as an IMAGE you can actually SEE and analyze visually (not base64 text!).\n"
             "Use this to: 1) Understand page layout; 2) See Canvas-rendered content (charts, graphs, DAG diagrams); "
             "3) Verify click/navigation results; 4) Read text from images when DOM extraction fails.\n"
-            "Set fullPage=false for a fast viewport-only capture (no debugger banner, useful for repeated snapshots). "
+            "Prefer the default full-page capture so you don't miss content below the fold. "
+            "Only set fullPage=false when you specifically need just the current viewport. "
             "Large images are auto-compressed to JPEG."
         ),
         "parameters": {

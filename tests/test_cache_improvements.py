@@ -858,6 +858,210 @@ class TestCleanupCacheState:
 #  7. Integration: _task_id passthrough in body
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Precise prefix-mutation attribution (point 2: name the exact culprit)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestPrefixCulpritAttribution:
+    """detect_cache_break must name the EXACT (message_index, field) that
+    changed inside the cache prefix — not collapse it into a guessed
+    'stochastic server-side miss OR TTL OR silent edit' string."""
+
+    def _msgs(self, q_text, a_text, tail_text):
+        return [
+            {'role': 'system', 'content': 'sys'},
+            {'role': 'user', 'content': q_text},
+            {'role': 'assistant', 'content': a_text},
+            {'role': 'user', 'content': tail_text},
+        ]
+
+    def test_content_change_named(self):
+        """A content edit on prefix msg[1] is reported as msg[1].content."""
+        from lib.tasks_pkg.cache_tracking import detect_cache_break
+
+        m1 = self._msgs('turn 1 question', 'turn 1 answer', 'tail A')
+        detect_cache_break('cul-1', m1, None, 'claude-opus-4',
+                           usage={'cache_creation_input_tokens': 88000,
+                                  'cache_read_input_tokens': 51000})
+        m2 = self._msgs('turn 1 question [EDITED]', 'turn 1 answer', 'tail B')
+        r2 = detect_cache_break('cul-1', m2, None, 'claude-opus-4',
+                                usage={'cache_creation_input_tokens': 89000,
+                                       'cache_read_input_tokens': 51000})
+        assert r2 is not None and 'prefix_mutation' in r2
+        cause = r2['prefix_mutation']
+        assert 'msg[1].content' in cause, cause
+        # The guessing-ladder fallback strings must NOT appear.
+        assert 'stochastic' not in cause.lower()
+
+    def test_tool_calls_field_distinguished_from_content(self):
+        """Mutating a tool_calls argument names msg[i].tool_calls, not content."""
+        from lib.tasks_pkg.cache_tracking import detect_cache_break
+
+        def _m(args, tail):
+            return [
+                {'role': 'system', 'content': 'sys'},
+                {'role': 'user', 'content': 'do it'},
+                {'role': 'assistant', 'content': '',
+                 'tool_calls': [{'id': 'tc1', 'type': 'function',
+                                 'function': {'name': 'grep_search',
+                                              'arguments': args}}]},
+                {'role': 'tool', 'tool_call_id': 'tc1', 'content': 'result'},
+                {'role': 'user', 'content': tail},
+            ]
+
+        m1 = _m('{"pattern": "foo"}', 'tail A')
+        detect_cache_break('cul-2', m1, None, 'claude-opus-4',
+                           usage={'cache_creation_input_tokens': 88000,
+                                  'cache_read_input_tokens': 51000})
+        # Same content text, but tool_call arguments mutated → must be named
+        # as tool_calls, not content.
+        m2 = _m('{"pattern": "bar"}', 'tail B')
+        r2 = detect_cache_break('cul-2', m2, None, 'claude-opus-4',
+                                usage={'cache_creation_input_tokens': 89000,
+                                       'cache_read_input_tokens': 51000})
+        assert r2 is not None and 'prefix_mutation' in r2
+        cause = r2['prefix_mutation']
+        assert 'tool_calls' in cause, cause
+
+    def test_stable_prefix_no_culprit(self):
+        """Byte-identical prefix → no break, no fabricated culprit."""
+        from lib.tasks_pkg.cache_tracking import detect_cache_break
+
+        m1 = self._msgs('q', 'a', 'tail A')
+        detect_cache_break('cul-3', m1, None, 'claude-opus-4',
+                           usage={'cache_creation_input_tokens': 88000,
+                                  'cache_read_input_tokens': 51000})
+        m2 = self._msgs('q', 'a', 'tail A')
+        r2 = detect_cache_break('cul-3', m2, None, 'claude-opus-4',
+                                usage={'cache_creation_input_tokens': 1200,
+                                       'cache_read_input_tokens': 140000})
+        assert r2 is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  L1 compaction must NOT mask a real break (point 2: notify only in-prefix)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestL1DoesNotMaskRealBreak:
+    """run_compaction_pipeline must only raise compaction_pending for
+    mutations that touch the cached prefix. A benign out-of-prefix L1
+    pass (saved>0, compacted=False) must leave detection ENABLED so a
+    co-occurring real break (prefix mutation / read drop) still surfaces."""
+
+    def _msgs(self, q_text, tail_text):
+        return [
+            {'role': 'system', 'content': 'sys'},
+            {'role': 'user', 'content': q_text},
+            {'role': 'assistant', 'content': 'answer'},
+            {'role': 'user', 'content': tail_text},
+        ]
+
+    def test_pipeline_l1_only_does_not_set_pending(self, monkeypatch):
+        """saved>0 with compacted=False / adv_saved=0 must NOT notify."""
+        import lib.tasks_pkg.compaction._pipeline as pl
+        from lib.tasks_pkg.cache_tracking import _cache_states, CacheState
+
+        # Seed a cache state so we can observe compaction_pending.
+        st = CacheState()
+        st.call_count = 1
+        _cache_states['l1m-1'] = st
+
+        # L1 reports saved>0; L2/advanced do nothing.
+        monkeypatch.setattr(pl, 'micro_compact', lambda *a, **k: 5000)
+        monkeypatch.setattr(pl, 'force_compact_if_needed', lambda *a, **k: False)
+
+        task = {'convId': 'l1m-1', 'config': {}}
+        pl.run_compaction_pipeline(self._msgs('q', 'tail'), 1, task=task)
+        assert st.compaction_pending is False, (
+            'benign out-of-prefix L1 must not raise compaction_pending')
+
+    def test_pipeline_l2_compaction_does_set_pending(self, monkeypatch):
+        """A real L2 force-compact (compacted=True) MUST still notify."""
+        import lib.tasks_pkg.compaction._pipeline as pl
+        from lib.tasks_pkg.cache_tracking import _cache_states, CacheState
+
+        st = CacheState()
+        st.call_count = 1
+        _cache_states['l1m-2'] = st
+
+        monkeypatch.setattr(pl, 'micro_compact', lambda *a, **k: 0)
+        monkeypatch.setattr(pl, 'force_compact_if_needed', lambda *a, **k: True)
+        # _reinject runs after compacted=True; make it a no-op.
+        monkeypatch.setattr(pl, '_reinject_system_contexts_after_compact',
+                            lambda *a, **k: None)
+
+        task = {'convId': 'l1m-2', 'config': {}}
+        pl.run_compaction_pipeline(self._msgs('q', 'tail'), 1, task=task)
+        assert st.compaction_pending is True
+
+    def test_real_break_surfaces_despite_cooccurring_l1(self, monkeypatch):
+        """End-to-end: a prefix mutation on the SAME round as a benign L1
+        pass must still be reported (not masked)."""
+        import lib.tasks_pkg.compaction._pipeline as pl
+        from lib.tasks_pkg.cache_tracking import detect_cache_break
+
+        monkeypatch.setattr(pl, 'micro_compact', lambda *a, **k: 5000)
+        monkeypatch.setattr(pl, 'force_compact_if_needed', lambda *a, **k: False)
+        task = {'convId': 'l1m-3', 'config': {}}
+
+        # Round 1: establish prefix.
+        m1 = self._msgs('turn 1 question', 'tail A')
+        pl.run_compaction_pipeline(m1, 1, task=task)
+        detect_cache_break('l1m-3', m1, None, 'claude-opus-4',
+                           usage={'cache_creation_input_tokens': 88000,
+                                  'cache_read_input_tokens': 51000})
+
+        # Round 2: a benign L1 pass runs AND the prefix is mutated + big write.
+        m2 = self._msgs('turn 1 question [EDITED]', 'tail B')
+        pl.run_compaction_pipeline(m2, 2, task=task)
+        r2 = detect_cache_break('l1m-3', m2, None, 'claude-opus-4',
+                                usage={'cache_creation_input_tokens': 89000,
+                                       'cache_read_input_tokens': 51000})
+        assert r2 is not None and 'prefix_mutation' in r2, (
+            'L1 saved>0 wrongly masked the real prefix-mutation break')
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  sort_tool_results must not reorder inside the cache prefix (point 3)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestSortToolResultsPrefixGate:
+    """A tool-result run inside the cached prefix must be left in place;
+    only the out-of-prefix tail may be sorted."""
+
+    def test_prefix_run_not_reordered(self, monkeypatch):
+        import lib.tasks_pkg.cache_tracking as ct
+
+        # Pretend the first 4 messages are inside the cache prefix.
+        monkeypatch.setattr(ct, 'get_cache_prefix_count', lambda cid: 4)
+        messages = [
+            {'role': 'system', 'content': 'sys'},
+            {'role': 'assistant', 'tool_calls': [{'id': 'b'}]},
+            {'role': 'tool', 'tool_call_id': 'b', 'content': 'B'},
+            {'role': 'tool', 'tool_call_id': 'a', 'content': 'A'},
+            {'role': 'tool', 'tool_call_id': 'z', 'content': 'Z'},
+            {'role': 'tool', 'tool_call_id': 'y', 'content': 'Y'},
+        ]
+        ct.sort_tool_results(messages, conv_id='gate-1')
+        # Indices 2,3 are inside the prefix → must stay B,A (unsorted).
+        assert messages[2]['tool_call_id'] == 'b'
+        assert messages[3]['tool_call_id'] == 'a'
+
+    def test_tail_run_still_sorted(self, monkeypatch):
+        import lib.tasks_pkg.cache_tracking as ct
+
+        # No prefix tracked → sort everywhere (legacy behaviour).
+        monkeypatch.setattr(ct, 'get_cache_prefix_count', lambda cid: 0)
+        messages = [
+            {'role': 'assistant', 'tool_calls': [{'id': 'z'}]},
+            {'role': 'tool', 'tool_call_id': 'z', 'content': 'Z'},
+            {'role': 'tool', 'tool_call_id': 'a', 'content': 'A'},
+        ]
+        ct.sort_tool_results(messages, conv_id='gate-2')
+        assert messages[1]['tool_call_id'] == 'a'
+        assert messages[2]['tool_call_id'] == 'z'
+
+
 class TestTaskIdPassthrough:
     """_task_id is passed through body and cleaned up properly."""
 

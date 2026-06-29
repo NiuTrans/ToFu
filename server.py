@@ -481,7 +481,15 @@ _LOG_FMT = '%(asctime)s [%(levelname)s] %(name)s [%(threadName)s]: %(message)s'
 _LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
 _formatter = logging.Formatter(_LOG_FMT, datefmt=_LOG_DATEFMT)
 
-_BIZ_PREFIXES = ('lib.', 'routes.', 'server')
+# 'tofu_search' is the extracted search/fetch library (sibling package). Its
+# loggers carry first-class business diagnostics — the per-engine result
+# counts, the streaming-fetch race-to-N decisions, the LLM content-filter
+# reductions, and the step-by-step pipeline timing breakdown that explains WHY
+# a search took N seconds. Treat it as business (→ app.log INFO, error.log
+# WARNING+), NOT vendor: routing it to vendor.log at WARNING-only (the old
+# behaviour) discarded all the INFO pipeline detail an operator needs to
+# diagnose a slow/failed search.
+_BIZ_PREFIXES = ('lib.', 'routes.', 'server', 'tofu_search')
 
 class _BizOnly(logging.Filter):
     def filter(self, record):
@@ -1506,19 +1514,34 @@ if __name__ == '__main__':
                 from lib.mcp.client import get_bridge
                 from lib.mcp.config import load_mcp_config
                 mcp_config = load_mcp_config()
-                if mcp_config:
-                    enabled = sum(1 for c in mcp_config.values() if c.get('enabled', True))
-                    if enabled > 0:
-                        import threading
-                        def _mcp_auto():
-                            try:
-                                bridge = get_bridge()
-                                result = bridge.connect_all()
-                                total = sum(len(v) for v in result.values())
-                                _server_log.info('[MCP] Auto-connect: %d servers, %d tools', len(result), total)
-                            except Exception as e:
-                                _server_log.error('[MCP] Auto-connect failed: %s', e, exc_info=True)
-                        threading.Thread(target=_mcp_auto, name='mcp-auto-connect', daemon=True).start()
+                enabled = sum(1 for c in (mcp_config or {}).values()
+                              if c.get('enabled', True))
+                import threading
+
+                def _mcp_auto():
+                    # Pre-warm vendored launchers (pip install off the event
+                    # loop) so a later App-Store install click is just the
+                    # fast handshake, never a cold pip that would freeze the
+                    # MCP loop. Runs even with zero configured servers — that
+                    # is exactly the fresh-install case we want fast.
+                    try:
+                        from lib.mcp.client import prewarm_all_vendored
+                        warmed = prewarm_all_vendored()
+                        if warmed:
+                            _server_log.info('[MCP] Pre-warm: %s', warmed)
+                    except Exception as e:
+                        _server_log.warning('[MCP] Pre-warm failed: %s', e)
+                    if enabled <= 0:
+                        return
+                    try:
+                        bridge = get_bridge()
+                        result = bridge.connect_all()
+                        total = sum(len(v) for v in result.values())
+                        _server_log.info('[MCP] Auto-connect: %d servers, %d tools', len(result), total)
+                    except Exception as e:
+                        _server_log.error('[MCP] Auto-connect failed: %s', e, exc_info=True)
+
+                threading.Thread(target=_mcp_auto, name='mcp-auto-connect', daemon=True).start()
             except Exception as e:
                 _server_log.warning('[MCP] Auto-connect setup failed: %s', e)
 

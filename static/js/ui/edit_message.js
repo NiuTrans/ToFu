@@ -149,7 +149,7 @@ function saveEditOnly(idx) {
   // ★ Always set content to edited text first
   msg.content = t;
   // ★ Use per-conv autoTranslate (not global) — matches sendMessage behavior
-  const _convAutoTranslate = conv.autoTranslate !== undefined ? !!conv.autoTranslate : !!autoTranslate;
+  const _convAutoTranslate = convAutoTranslate(conv);
   // ★ Autopilot (virtual-user) / endpoint-critic messages are role=user but
   //   DISPLAY-translated: `content` = the model-language original (shown in the
   //   原文 toggle), `translatedContent` = the UI-language rendering shown in the
@@ -388,6 +388,16 @@ async function saveEditAndResend(idx) {
   // ── Atomic backend call: truncate + edit + translate + task start ──
   const _regenConfig = await _buildConvConfig(conv);
 
+  // ★ Mint the assistant message id BEFORE the POST (same as send/regenerate)
+  //   and ship it so the backend stamps task['_assistantMsgId'] → live
+  //   per-round translation frames route to the still-streaming bubble. Without
+  //   this, edit-and-resend silently lost the live preview and translated only
+  //   at completion.
+  const _editAssistantMsgId = (typeof _newClientMsgId === 'function')
+    ? _newClientMsgId()
+    : ('tmp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
+  _regenConfig.assistantMsgId = _editAssistantMsgId;
+
   // ★ If autoTranslate is on and edited text has Chinese, show stop button immediately
   const _editAbortCtrl = new AbortController();
   let _editAbortReason = '';  // '' | 'timeout' | 'user-stop'
@@ -449,16 +459,17 @@ async function saveEditAndResend(idx) {
       role: "assistant", content: "", thinking: "",
       timestamp: Date.now(), toolRounds: [],
       model: _regenConfig.model || serverModel,
+      _msgId: _editAssistantMsgId,
     };
     // ★ Endpoint mode: mark as planner so SSE reconnection identifies it correctly
     if (_regenConfig.endpointMode) assistantMsg._isEndpointPlanner = true;
-    _ensureMsgId(assistantMsg);
+    _ensureMsgId(assistantMsg);  // no-op when _msgId already set
     conv.messages.push(assistantMsg);
     conv.activeTaskId = taskId;
     saveConversations(convId);
 
     _removeTranslatingBubble();
-    if (activeConvId === convId) _renderStreamingBubble(conv, _regenConfig);
+    if (activeConvId === convId) _renderStreamingBubble(conv, _regenConfig, _editAssistantMsgId);
     buildTurnNav(conv);
     connectToTask(convId, taskId);
 

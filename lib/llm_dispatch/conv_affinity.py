@@ -55,6 +55,8 @@ logger = get_logger(__name__)
 
 __all__ = [
     'sticky_routing_enabled',
+    'sticky_hold_enabled',
+    'sticky_hold_budget_ms',
     'get_conv_affinity',
     'set_conv_affinity',
     'clear_conv_affinity',
@@ -68,6 +70,36 @@ def sticky_routing_enabled() -> bool:
     """Whether conversation-sticky routing is active (env-gated, default on)."""
     val = os.environ.get('TOFU_CONV_STICKY_ROUTING', '1')
     return val.strip().lower() not in ('0', 'false', 'no', 'off', '')
+
+
+def sticky_hold_enabled() -> bool:
+    """Whether to briefly WAIT for a conv's warm key during a short 429 cooldown.
+
+    When the conversation's sticky key is the only thing the prompt-cache prefix
+    is warm on, migrating to a cold key on a transient (sub-second) rate-limit
+    cooldown costs a full ``cache_creation`` re-write — far more than waiting out
+    the per-minute throttle window. With this on (default), the dispatch retry
+    loop holds for the warm key up to :func:`sticky_hold_budget_ms` instead of
+    immediately rebinding to a cold key. Disable with ``TOFU_CONV_STICKY_HOLD=0``.
+    """
+    val = os.environ.get('TOFU_CONV_STICKY_HOLD', '1')
+    return val.strip().lower() not in ('0', 'false', 'no', 'off', '')
+
+
+def sticky_hold_budget_ms() -> float:
+    """Max time (ms) to wait for a conv's warm key on a short 429 cooldown.
+
+    Caps how long :func:`sticky_hold_enabled` will hold. A remaining cooldown
+    longer than this budget is treated as a genuine failure cooldown (the slot
+    fell into the consecutive-error backoff / quota-exhaustion path, not the
+    0.5s rate-limit nudge) and is NOT waited on — the loop rebinds as before.
+    Default 1500ms. Tune with ``TOFU_CONV_STICKY_HOLD_MS``.
+    """
+    try:
+        ms = float(os.environ.get('TOFU_CONV_STICKY_HOLD_MS', '1500'))
+        return ms if ms > 0 else 1500.0
+    except (ValueError, TypeError):
+        return 1500.0
 
 
 def _ttl_seconds() -> float:

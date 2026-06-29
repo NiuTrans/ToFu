@@ -20,8 +20,11 @@ Two pieces:
     returns a compact, bounded list (top ``DIGEST_MAX_SIBLINGS``) of the most
     recently-updated *other* conversations of the same project, each rendered
     as ``title — summary [id]``. Injected always-on in project mode by
-    ``lib/tasks_pkg/system_context.py`` so the model knows the siblings exist
-    and can ``get_conversation(id)`` to drill in.
+    ``lib/tasks_pkg/system_context.py`` so the model knows the siblings exist.
+    Its header only instructs the model to ``get_conversation(id)`` /
+    ``list_conversations()`` when those tools are actually registered for the
+    turn (``conv_tools_available``); otherwise the siblings are surfaced for
+    ambient awareness only, naming no tool the model cannot call.
 
 Design notes / tradeoffs are documented in ``docs/CROSS_CONV_AWARENESS.md``.
 """
@@ -332,21 +335,23 @@ def _persist_summary(conv_id: str, summary: str, msg_count: int) -> None:
                            conv_id[:8], e)
 
 
-def build_project_digest(project_path: str, current_conv_id: str | None = None,
-                         limit: int = DIGEST_MAX_SIBLINGS) -> str:
-    """Build a bounded digest of sibling conversations of the same project.
+def project_digest_entries(project_path: str,
+                           current_conv_id: str | None = None,
+                           limit: int = DIGEST_MAX_SIBLINGS) -> list[dict]:
+    """Return the bounded sibling-conversation list as structured dicts.
 
-    Returns a compact block listing up to ``limit`` of the most recently
-    updated OTHER conversations of ``project_path`` that have a summary (or at
-    least a title), each as ``• "title" — summary [id]``. Returns '' when there
-    are no usable siblings (so the caller can skip injection entirely).
+    The structured backbone of :func:`build_project_digest`: up to ``limit`` of
+    the most recently-updated OTHER conversations of ``project_path`` that have
+    a title (and, when available, a cached summary), each as
+    ``{'id', 'title', 'summary'}``. ``summary`` is '' when none is cached.
 
-    Does NOT generate summaries (that's ``ensure_summary``'s job, run lazily on
-    the trigger paths) — it only reads what's already cached, so it stays fast
-    and side-effect-free on the hot prompt-assembly path.
+    Read-only and side-effect-free (never generates a summary). Returns ``[]``
+    on no project / no siblings / DB error. Used both to render the prompt
+    digest text and to stash the same data for the frontend provenance chip,
+    so the two can never disagree about which siblings were surfaced.
     """
     if not project_path:
-        return ''
+        return []
     limit = max(1, min(int(limit or DIGEST_MAX_SIBLINGS), DIGEST_MAX_SIBLINGS))
     try:
         db = get_thread_db(DOMAIN_CHAT)
@@ -357,9 +362,9 @@ def build_project_digest(project_path: str, current_conv_id: str | None = None,
             (DEFAULT_USER_ID, project_path, _DIGEST_SCAN_LIMIT)).fetchall()
     except Exception as e:
         logger.warning('[ProjSummary] digest query failed: %s', e)
-        return ''
+        return []
 
-    entries = []
+    out: list[dict] = []
     for r in rows:
         cid = r['id']
         if current_conv_id and cid == current_conv_id:
@@ -367,29 +372,74 @@ def build_project_digest(project_path: str, current_conv_id: str | None = None,
         title = (r['title'] or '(untitled)').strip()
         settings = safe_json(r['settings'], default={}, label='projsummary-digest')
         ps = settings.get('projectSummary') if isinstance(settings, dict) else None
-        summary = ps.get('text') if isinstance(ps, dict) else ''
-        if summary:
-            entries.append(f'• "{title}" — {summary} [{cid}]')
+        summary = (ps.get('text') if isinstance(ps, dict) else '') or ''
+        out.append({'id': cid, 'title': title, 'summary': summary})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def build_project_digest(project_path: str, current_conv_id: str | None = None,
+                         limit: int = DIGEST_MAX_SIBLINGS,
+                         conv_tools_available: bool = True) -> str:
+    """Build a bounded digest of sibling conversations of the same project.
+
+    Returns a compact block listing up to ``limit`` of the most recently
+    updated OTHER conversations of ``project_path`` that have a summary (or at
+    least a title), each as ``• "title" — summary [id]``. Returns '' when there
+    are no usable siblings (so the caller can skip injection entirely).
+
+    Does NOT generate summaries (that's ``ensure_summary``'s job, run lazily on
+    the trigger paths) — it only reads what's already cached, so it stays fast
+    and side-effect-free on the hot prompt-assembly path.
+
+    Args:
+        conv_tools_available: Whether the ``list_conversations`` /
+            ``get_conversation`` tools are registered for THIS turn. When True
+            the header instructs the model to call them to drill in. When False
+            (the common case — the conv-ref tools only register once the user
+            @-attached a conversation; see ``lib/tools/registry.py``
+            ``_build_conv_ref``) the header is tool-free: the siblings are
+            surfaced for ambient awareness ONLY, naming no tool the model can't
+            actually call. Defaults to True for back-compat with direct callers.
+            Both header variants share the substring ``related conversation(s)``
+            so the injection-side idempotency probe (``_DIGEST_MARKER`` in
+            ``lib/tasks_pkg/system_context.py``) matches either one.
+    """
+    structured = project_digest_entries(project_path, current_conv_id, limit)
+    if not structured:
+        return ''
+    entries = []
+    for e in structured:
+        if e.get('summary'):
+            entries.append(f'• "{e["title"]}" — {e["summary"]} [{e["id"]}]')
         else:
             # No summary yet (not referenced/summarized) — still surface the
             # title so the model knows the sibling exists.
-            entries.append(f'• "{title}" [{cid}]')
-        if len(entries) >= limit:
-            break
+            entries.append(f'• "{e["title"]}" [{e["id"]}]')
 
-    if not entries:
-        return ''
-
-    header = (
-        f'This project has {len(entries)} related conversation(s) you can '
-        f'consult. Use list_conversations(scope="project") to search them and '
-        f'get_conversation(conversation_id="<id>") to read one in full when '
-        f'relevant to the user\'s request:')
+    if conv_tools_available:
+        header = (
+            f'This project has {len(entries)} related conversation(s) you can '
+            f'consult. Use list_conversations(scope="project") to search them and '
+            f'get_conversation(conversation_id="<id>") to read one in full when '
+            f'relevant to the user\'s request:')
+    else:
+        # Tool-free variant: the conv-ref tools (list_conversations /
+        # get_conversation) are NOT registered this turn, so the model cannot
+        # call them — never instruct it to. Surface the siblings for ambient
+        # awareness only. Shares the substring "related conversation(s)" with
+        # the tool-enabled header so the idempotency probe matches either.
+        header = (
+            f'For ambient awareness: this project has {len(entries)} related '
+            f'conversation(s). You cannot open them this turn, but knowing they '
+            f"exist may inform your answer:")
     return header + '\n' + '\n'.join(entries)
 
 
 __all__ = [
     'ensure_summary', 'generate_summary', 'build_project_digest',
+    'project_digest_entries',
     'SUMMARY_MAX_CHARS', 'SUMMARY_STALE_GROWTH', 'SUMMARY_MIN_MESSAGES',
     'DIGEST_MAX_SIBLINGS',
 ]

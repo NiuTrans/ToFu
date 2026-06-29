@@ -8,6 +8,7 @@ import orjson
 
 from flask import Blueprint, Response, jsonify, request
 
+from lib.agent_core.events import EventType, build_event
 from lib.database import DOMAIN_CHAT, get_db
 from lib.log import audit_log, get_logger
 from lib.api_response import api_bad_request, api_internal_error, api_not_found, api_ok
@@ -731,7 +732,8 @@ def chat_regenerate():
 
         # 3. Auto-translate if needed
         text = user_msg.get('content', '')
-        auto_translate = config.get('autoTranslate', False)
+        from lib.conv_config import resolve_auto_translate
+        auto_translate = resolve_auto_translate(config)
         # Track whether we mutated user_msg so the response tells the frontend
         # to refresh its local copy (otherwise a later full-conv sync would PUT
         # the stale pre-restore content back into the DB).
@@ -1175,12 +1177,12 @@ async def chat_stream(task_id):
                                 (task_id,)
                             ).fetchone()
                             if row_local:
-                                state_local = {
-                                    'type': 'state',
-                                    'content': row_local['content'] or '',
-                                    'thinking': row_local['thinking'] or '',
-                                    'status': row_local['status'],
-                                }
+                                state_local = build_event(
+                                    EventType.STATE,
+                                    content=row_local['content'] or '',
+                                    thinking=row_local['thinking'] or '',
+                                    status=row_local['status'],
+                                )
                                 if row_local['tool_rounds']:
                                     try:
                                         state_local['toolRounds'] = json.loads(row_local['tool_rounds'])
@@ -1195,7 +1197,7 @@ async def chat_stream(task_id):
                                     from lib.error_envelope import from_json as _err_from_json
                                     state_local['error'] = _err_from_json(row_local['error'])
                                 yield f'data: {json.dumps(state_local, ensure_ascii=False)}\n\n'
-                            done_evt_local = {'type': 'done'}
+                            done_evt_local = build_event(EventType.DONE)
                             if row_local:
                                 if row_local['metadata']:
                                     try:
@@ -1234,10 +1236,10 @@ async def chat_stream(task_id):
                 (task_id,)
             ).fetchone())
         if row:
-            state = {
-                'type': 'state', 'content': row['content'],
-                'thinking': row['thinking'], 'status': row['status'],
-            }
+            state = build_event(
+                EventType.STATE, content=row['content'],
+                thinking=row['thinking'], status=row['status'],
+            )
             if row['error']:
                 from lib.error_envelope import from_json as _err_from_json
                 state['error'] = _err_from_json(row['error'])
@@ -1259,7 +1261,7 @@ async def chat_stream(task_id):
                         'apiRounds', 'modifiedFiles', 'modifiedFileList'):
                 if meta.get(key):
                     state[key] = meta[key]
-            done_evt = {'type': 'done'}
+            done_evt = build_event(EventType.DONE)
             for key in ('finishReason', 'usage', 'preset', 'toolSummary',
                         'model', 'provider_id', 'thinkingDepth',
                         'apiRounds', 'modifiedFiles', 'modifiedFileList'):
@@ -1333,6 +1335,24 @@ async def chat_stream(task_id):
         """
         return task['status'] != 'running' and not task.get('_autopilot_deciding')
 
+    def _apply_autopilot_baton(evt):
+        """Stamp the autopilot follow-up baton onto a SYNTHESIZED done event.
+
+        The orchestrator's REAL done event carries
+        ``autopilotNextTaskId``/``autopilotVuMessage`` directly, but every
+        late/synthetic done built here uses ``extract_task_meta()`` which does
+        NOT include them.  If a synthetic done is ever sent for an autopilot
+        turn (cold replay, resume, or a residual status-flip race), copy the
+        baton from the transport-agnostic stash so the frontend still attaches
+        to the spawned follow-up instead of stranding it.  Mirrors the
+        ``chat_poll`` baton surfacing below.
+        """
+        _ap = task.get('_autopilot_followup')
+        if _ap:
+            evt['autopilotNextTaskId'] = _ap['next_task_id']
+            evt['autopilotVuMessage'] = _ap['vu_msg']
+        return evt
+
     async def generate():
         nonlocal _events_sent
         for _ in range(4):
@@ -1372,20 +1392,21 @@ async def chat_stream(task_id):
             # Advance cursor past replayed events for live streaming loop
             cursor = resume_from + len(missed_evts)
             if _task_terminal() and not missed_evts:
-                late_done = {'type': 'done'}
+                late_done = build_event(EventType.DONE)
                 late_meta = _extract_task_meta(task)
                 late_done.update(late_meta)
                 if task['error']:
                     late_done['error'] = task['error']
+                _apply_autopilot_baton(late_done)
                 yield f'id: {cursor}\ndata: {json.dumps(late_done, ensure_ascii=False)}\n\n'
                 return
         else:
             # Fresh connection path: send full state snapshot
             with task['events_lock']:
-                state = {
-                    'type': 'state', 'content': task['content'],
-                    'thinking': task['thinking'], 'status': task['status'],
-                }
+                state = build_event(
+                    EventType.STATE, content=task['content'],
+                    thinking=task['thinking'], status=task['status'],
+                )
                 if task['error']:
                     state['error'] = task['error']
                 if task['toolRounds']:
@@ -1400,6 +1421,8 @@ async def chat_stream(task_id):
                     state['memoryPrefetch'] = task['_memoryPrefetch']
                 if task.get('_preferencesApplied'):
                     state['preferencesApplied'] = task['_preferencesApplied']
+                if task.get('_relatedConversations'):
+                    state['relatedConversations'] = task['_relatedConversations']
                 if task.get('_preferencesLearned'):
                     state['preferencesLearned'] = task['_preferencesLearned']
                 # ★ Endpoint mode: include phase and completed turns for reconnection
@@ -1437,10 +1460,11 @@ async def chat_stream(task_id):
             yield f'data: {_state_payload}\n\n'
 
             if _task_terminal():
-                done_evt = {'type': 'done'}
+                done_evt = build_event(EventType.DONE)
                 done_evt.update(meta)
                 if task['error']:
                     done_evt['error'] = task['error']
+                _apply_autopilot_baton(done_evt)
                 yield f'id: {cursor}\ndata: {json.dumps(done_evt, ensure_ascii=False)}\n\n'
                 return
 
@@ -1460,8 +1484,9 @@ async def chat_stream(task_id):
                 # Send an informational event (NOT 'done') so the frontend shows a toast,
                 # then close the SSE stream. The frontend detects the stream closed
                 # without a 'done' event → _trySSE returns false → _pollFallback kicks in.
-                timeout_notice = {'type': 'sse_timeout',
-                                  'message': 'SSE connection reached maximum duration. Switching to polling — task is still running.'}
+                timeout_notice = build_event(
+                    EventType.SSE_TIMEOUT,
+                    message='SSE connection reached maximum duration. Switching to polling — task is still running.')
                 yield f'data: {json.dumps(timeout_notice, ensure_ascii=False)}\n\n'
                 return
 
@@ -1487,7 +1512,7 @@ async def chat_stream(task_id):
                                _done_fr, _done_err_summary)
                     return
             if _task_terminal() and not new_evts:
-                late_done = {'type': 'done'}
+                late_done = build_event(EventType.DONE)
                 late_meta = _extract_task_meta(task)
                 late_done.update(late_meta)
                 if task['error']:
@@ -1513,6 +1538,7 @@ async def chat_stream(task_id):
                         'finishReason=%s model=%s error=%s',
                         task_id[:8], _late_fr,
                         late_meta.get('model', '?'), _err_summary)
+                _apply_autopilot_baton(late_done)
                 yield f'id: {cursor}\ndata: {json.dumps(late_done, ensure_ascii=False)}\n\n'
                 return
             # ★ SSE reader dedup: if a newer SSE reader connected, exit this one
@@ -1721,6 +1747,9 @@ def chat_poll(task_id):
         # ★ Preferences-applied chip (persists through poll fallback + reload)
         if task.get('_preferencesApplied'):
             r['preferencesApplied'] = task['_preferencesApplied']
+        # ★ Related-conversations chip (persists through poll fallback + reload)
+        if task.get('_relatedConversations'):
+            r['relatedConversations'] = task['_relatedConversations']
         # ★ Preferences-learned moment(s) (persist through poll + reload)
         if task.get('_preferencesLearned'):
             r['preferencesLearned'] = task['_preferencesLearned']

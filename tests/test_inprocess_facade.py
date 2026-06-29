@@ -120,6 +120,14 @@ class TestRouteKernelParity:
             legacy['responseFormat'] = body.get('response_format')
         if body.get('user'):
             legacy.setdefault('user', body['user'])
+        # The kernel also forces fail-closed headless defaults for every
+        # app-personal capability (memory store + preference profile) so the
+        # operator's personal state never rides a headless call. Mirror that
+        # here — single source of truth: lib/agent_core/personal_scope.
+        from lib.agent_core.personal_scope import (
+            apply_headless_personal_defaults,
+        )
+        apply_headless_personal_defaults(legacy)
 
         kernel = build_chat_config(
             'm', {},

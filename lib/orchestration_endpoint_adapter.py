@@ -181,6 +181,12 @@ class EndpointEventAdapter:
         out = ev.get('output')
         if out is None:
             out = ev.get('preview') or ''
+        # Full streamed reasoning for this node (emitted by the engine's
+        # default SubAgent runner). Carried onto the finalized message AND
+        # the finalizing SSE events so the thinking block survives finalize +
+        # DB sync + reload — mirroring the live endpoint path
+        # (lib/tasks_pkg/endpoint.py:706/720/866/1172).
+        thinking = ev.get('thinking') or ''
         # The MESSAGE axis the engine resolved for this node (user|assistant).
         # Older events without it fall back to role-based classification so
         # this adapter keeps working against an un-upgraded engine.
@@ -192,13 +198,15 @@ class EndpointEventAdapter:
             self._push({
                 'role': 'assistant',
                 'content': out,
+                'thinking': thinking,
                 'timestamp': _now(),
                 '_isEndpointPlanner': True,
                 '_epPlannerIteration': self._planner_iteration,
             })
             self._pending_replan = False
             # Finalize the planner bubble live.
-            self._stream({'type': 'endpoint_planner_done', 'content': out})
+            self._stream({'type': 'endpoint_planner_done', 'content': out,
+                          'thinking': thinking})
         elif emits == 'user':
             # A "user-side" turn — a critic verdict (endpoint) OR a virtual
             # user reply (autopilot). Both render on the user side and carry
@@ -208,6 +216,7 @@ class EndpointEventAdapter:
             self._push({
                 'role': 'user',
                 'content': out,
+                'thinking': thinking,
                 'timestamp': _now(),
                 '_isEndpointReview': True,
                 '_epIteration': self._iteration,
@@ -217,7 +226,7 @@ class EndpointEventAdapter:
             # Finalize the critic/VU bubble live.
             self._stream({'type': 'endpoint_critic_msg',
                           'iteration': self._iteration, 'content': out,
-                          'next_phase': next_phase})
+                          'thinking': thinking, 'next_phase': next_phase})
         else:
             # An assistant-side producer turn (worker / specialist). The
             # iteration was already counted at step_start; the worker bubble
@@ -226,6 +235,7 @@ class EndpointEventAdapter:
             self._push({
                 'role': 'assistant',
                 'content': out,
+                'thinking': thinking,
                 'timestamp': _now(),
                 '_epIteration': self._iteration,
                 '_epStateChangingCount': ev.get('state_changing', 0),

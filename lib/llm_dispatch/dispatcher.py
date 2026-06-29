@@ -8,6 +8,7 @@ best-for-model, etc.).
 import json
 import os
 import threading
+import time
 
 from lib.log import get_logger
 
@@ -622,7 +623,7 @@ class LLMDispatcher:
                     # All requests got 429 — this key has no quota for this model
                     dead_slots.append(slot)
                     continue
-                slot.rpm_limit = max(5, rpm_val)
+                slot.set_rpm_ceiling(rpm_val)
 
             # Seed latency from benchmark (use speed data first, then latency)
             speed = entry.get('speed', {})
@@ -922,11 +923,16 @@ class LLMDispatcher:
             if _sticky and chosen is not None:
                 # A churn signal worth grepping: the conv had a sticky key but
                 # the picker landed elsewhere (cooled down / excluded), which
-                # costs a fresh per-key prompt-cache write this round.
+                # costs a fresh per-key prompt-cache write this round. Logged at
+                # INFO (not DEBUG) because this is the exact event that re-bills
+                # the prompt cache — production app.log is INFO+, so a DEBUG line
+                # left us blind to the most expensive routing decision.
                 if _sticky_key and chosen.key_name != _sticky_key:
-                    logger.debug('[Dispatch] conv=%s sticky key %s unavailable '
-                                 '— rebinding to %s (model=%s)', _sticky[:8],
-                                 _sticky_key, chosen.key_name, chosen.model)
+                    logger.info('[Dispatch] conv=%s sticky key %s unavailable '
+                                '— rebinding to %s (model=%s); prompt cache will '
+                                'be re-written on the new key',
+                                _sticky[:8], _sticky_key, chosen.key_name,
+                                chosen.model)
                 record_conv_key(_sticky, chosen.key_name)
 
             # ── Isolation observability ──
@@ -1088,6 +1094,57 @@ class LLMDispatcher:
                     continue
                 return True
         return False
+
+
+    def sticky_cooldown_remaining_s(self, conv_id: str, prefer_model=None,
+                                    *, exclude_keys=None, exclude_pairs=None):
+        """Seconds until ``conv_id``'s warm sticky key becomes pickable again.
+
+        Returns ``(remaining_seconds, key_name)`` when the conversation has a
+        recorded sticky key, that key has a slot in ``prefer_model``'s alias
+        group, the slot is NOT hard-excluded, and its ONLY disqualifier is a
+        live cooldown (``now < cooldown_until``). Returns ``None`` when there is
+        no warm key worth waiting for (no affinity, key excluded, or the slot is
+        already eligible — in which case the normal picker will land on it).
+
+        Used by the dispatch retry loop to decide whether to briefly HOLD for
+        the conv's warm key (preserving its prompt-cache prefix) instead of
+        rebinding to a cold key. The caller gates the returned ``remaining`` on
+        a budget, which is what distinguishes a transient 0.5s rate-limit nudge
+        (worth waiting) from a long consecutive-error / quota cooldown (not).
+        """
+        if not conv_id:
+            return None
+        sticky_key = get_preferred_key(conv_id)
+        if not sticky_key:
+            return None
+        ex_keys = exclude_keys or set()
+        ex_pairs = exclude_pairs or set()
+        if sticky_key in ex_keys:
+            return None
+        alias_set = self._alias_set(prefer_model) if prefer_model else None
+        now = time.time()
+        best_remaining = None
+        with self._lock:
+            for s in self.slots:
+                if s.key_name != sticky_key:
+                    continue
+                if alias_set is not None and s.model not in alias_set:
+                    continue
+                if (s.key_name, s.model) in ex_pairs:
+                    continue
+                if not self._is_chat_compatible(s):
+                    continue
+                remaining = s.cooldown_until - now
+                if remaining <= 0:
+                    # The warm key is already eligible — no need to wait; the
+                    # normal picker will choose it. Signal "nothing to hold for".
+                    return None
+                if best_remaining is None or remaining < best_remaining:
+                    best_remaining = remaining
+        if best_remaining is None:
+            return None
+        return (best_remaining, sticky_key)
 
     def summarize_slots(self, capability: str = None) -> str:
         """Return a compact one-line summary of all slots for logging.

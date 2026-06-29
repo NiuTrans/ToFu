@@ -38,6 +38,43 @@ _timers_lock = threading.Lock()
 _last_cmd_outputs: dict[str, str] = {}
 _cmd_outputs_lock = threading.Lock()
 
+# ── Boot-time resume guardrails (env-tunable) ───────────────────────────────
+# A timer that is still ``active`` long after its own poll budget should have
+# elapsed is, by definition, failing to make progress (e.g. its poll_count
+# never advanced because a DB error swallowed the increment). Resuming such a
+# zombie on every restart caused the 2026-06-26 search storm. On resume we
+# auto-expire any active timer older than a generous age cap, and we cap how
+# many timers a single boot will re-spawn so a leaked batch can never flood the
+# poll workers again.
+import os as _os
+
+
+def _resume_max_age_seconds(timer: dict[str, Any]) -> float:
+    """Max wall-clock age (seconds) before an active timer is force-expired.
+
+    Defaults to the larger of 24h and 1.5× the timer's own theoretical poll
+    budget (poll_interval × max_polls), so a legitimately long timer is never
+    expired prematurely. Override the 24h floor via TOFU_TIMER_MAX_AGE_HOURS.
+    """
+    try:
+        floor_hours = float(_os.environ.get('TOFU_TIMER_MAX_AGE_HOURS', '24'))
+    except (TypeError, ValueError):
+        floor_hours = 24.0
+    floor = max(floor_hours, 0.0) * 3600.0
+    try:
+        budget = float(timer.get('poll_interval') or 60) * float(timer.get('max_polls') or 0)
+    except (TypeError, ValueError):
+        budget = 0.0
+    return max(floor, budget * 1.5)
+
+
+def _resume_concurrency_cap() -> int:
+    """Max number of timers a single server boot will re-spawn (0 = unlimited)."""
+    try:
+        return int(_os.environ.get('TOFU_TIMER_RESUME_CAP', '20'))
+    except (TypeError, ValueError):
+        return 20
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  CRUD
@@ -252,11 +289,16 @@ def _build_poll_tools(tools_config: dict) -> list | None:
         project_path = tools_config.get('projectPath', '')
         project_enabled = bool(project_path)
 
-        # ★ Search + Fetch — almost always useful
-        search_mode = tools_config.get('searchMode', 'multi')
+        # ★ Search + Fetch — ONLY when the timer's tools_config EXPLICITLY
+        #   enables them. A bare watcher (tools_config={}) must NOT get
+        #   web_search: an ungrounded "is X done?" instruction makes cheap
+        #   poll models hallucinate a query and surf the web (the 2026-06-26
+        #   search-storm bug). Default search OFF; the watcher reads files /
+        #   runs its check_command for grounding instead.
+        search_mode = tools_config.get('searchMode', '')
         if search_mode:
             tool_list.append(SEARCH_TOOL_MULTI)
-        if tools_config.get('fetchEnabled', True) or search_mode:
+        if tools_config.get('fetchEnabled', False) or search_mode:
             tool_list.append(FETCH_URL_TOOL)
 
         # ★ read_files — always on (handles relative + absolute paths)
@@ -339,7 +381,19 @@ def _execute_poll_tool(tool_call: dict, timer_id: str,
     try:
         from lib.tasks_pkg.executor import _execute_tool_one
 
-        # Build minimal task proxy — no SSE events needed for timer polls
+        # Build minimal task proxy — no SSE events needed for timer polls.
+        # ★ _suppressEvents: tool handlers call _finalize_tool_round →
+        #   append_event. There is NO SSE consumer for a poll (the UI renders
+        #   the per-poll timeline from tool_trace instead), and this proxy is
+        #   NOT registered in _chat_runtime, so without suppression every
+        #   tool's tool_start/tool_progress/tool_result would flow through
+        #   append_event's legacy fallback. That mints seq from len(events)=0
+        #   on each poll (fresh list above) and persists rows keyed
+        #   (timer_id, 0), (timer_id, 1) into task_events — which then COLLIDE
+        #   on the composite PK on every subsequent poll, spamming the
+        #   "event_id collision … cold replay will be missing this event"
+        #   data-loss canary (4000+ hits observed). Suppressing the leak loses
+        #   nothing: the poll proxy's events are discarded, never replayed.
         task_proxy = {
             'id': timer_id,
             'convId': '',
@@ -348,6 +402,7 @@ def _execute_poll_tool(tool_call: dict, timer_id: str,
             'events_lock': _threading.Lock(),
             'toolRounds': [],
             'phase': None,
+            '_suppressEvents': True,
         }
 
         tc_id = tool_call.get('id', uuid.uuid4().hex[:8])
@@ -745,10 +800,14 @@ def start_timer_loop(timer_id: str) -> None:
                 continue
 
             # Skipped polls (unchanged command output) — no LLM call,
-            # no DB record, no SSE event — just silently wait.
+            # no DB record, no SSE event — just silently wait. We STILL
+            # increment poll_count so a timer whose check_command output never
+            # changes deterministically reaches max_polls and retires, instead
+            # of polling forever (zombie-timer leak).
             if skipped:
                 logger.debug('[Timer:%s] Poll #%d skipped (output unchanged)',
                              tid, this_poll_num)
+                _increment_poll_count(tid, 'skipped', 'output unchanged')
                 continue
 
             decision = 'ready' if ready else ('parse_error' if parse_error else 'wait')
@@ -828,6 +887,25 @@ def _mark_exhausted(timer_id: str) -> None:
         _last_cmd_outputs.pop(timer_id, None)
 
 
+def _mark_expired(timer_id: str) -> None:
+    """Mark a timer as expired (over-age zombie auto-retired on resume)."""
+    try:
+        from lib.database import DOMAIN_SYSTEM, get_thread_db
+        db = get_thread_db(DOMAIN_SYSTEM)
+        now = datetime.now().isoformat()
+        db.execute(
+            "UPDATE timer_watchers SET status='expired', updated_at=? WHERE id=?",
+            [now, timer_id]
+        )
+        db.commit()
+    except Exception as e:
+        logger.warning('[Timer:%s] Failed to mark expired: %s', timer_id, e, exc_info=True)
+    with _timers_lock:
+        _active_timers.pop(timer_id, None)
+    with _cmd_outputs_lock:
+        _last_cmd_outputs.pop(timer_id, None)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  Resume on server restart
 # ═════════════════════════════════════════════════════════════════════════════
@@ -841,23 +919,63 @@ def resume_active_timers() -> int:
         from lib.database import DOMAIN_SYSTEM, get_thread_db
         db = get_thread_db(DOMAIN_SYSTEM)
         rows = db.execute(
-            "SELECT id FROM timer_watchers WHERE status='active'"
+            "SELECT * FROM timer_watchers WHERE status='active' "
+            "ORDER BY created_at ASC"
         ).fetchall()
+        rows = [dict(r) for r in rows]
 
+        now = datetime.now()
+        cap = _resume_concurrency_cap()
+
+        # ── Pass 1: age-sweep — expire zombies that outlived their budget ──
+        survivors: list[dict] = []
+        expired = 0
+        for timer in rows:
+            created_raw = timer.get('created_at') or ''
+            age = None
+            try:
+                if created_raw:
+                    age = (now - datetime.fromisoformat(created_raw)).total_seconds()
+            except (TypeError, ValueError) as _pe:
+                logger.debug('[Timer:%s] Unparseable created_at=%r: %s',
+                             timer.get('id'), created_raw, _pe)
+            if age is not None and age > _resume_max_age_seconds(timer):
+                _mark_expired(timer['id'])
+                expired += 1
+                logger.warning('[Timer:%s] Auto-expired on resume — age %.0fh exceeds '
+                               'budget (poll_count=%s/%s)', timer['id'], age / 3600.0,
+                               timer.get('poll_count'), timer.get('max_polls'))
+                continue
+            survivors.append(timer)
+
+        if expired:
+            logger.warning('[Timer] Auto-expired %d over-age zombie timer(s) on startup',
+                           expired)
+
+        # ── Pass 2: re-spawn survivors, capped ─────────────────────────────
         count = 0
-        for row in rows:
-            timer_id = row['id']
+        skipped = 0
+        for timer in survivors:
+            timer_id = timer['id']
             # NB: must NOT hold _timers_lock across start_timer_loop() — that
             # function re-acquires the (non-reentrant) _timers_lock to register
             # the thread, so calling it while holding the lock self-deadlocks
             # the resume thread and pins _timers_lock forever.
             with _timers_lock:
                 already_active = timer_id in _active_timers
-            if not already_active:
-                start_timer_loop(timer_id)
-                count += 1
-                logger.info('[Timer:%s] Resumed on server startup', timer_id)
+            if already_active:
+                continue
+            if cap > 0 and count >= cap:
+                skipped += 1
+                continue
+            start_timer_loop(timer_id)
+            count += 1
+            logger.info('[Timer:%s] Resumed on server startup', timer_id)
 
+        if skipped:
+            logger.warning('[Timer] Resume cap (%d) reached — %d active timer(s) NOT '
+                           'resumed this boot (will retry next restart). Set '
+                           'TOFU_TIMER_RESUME_CAP to raise.', cap, skipped)
         if count > 0:
             logger.info('[Timer] Resumed %d active timer(s) on startup', count)
         return count

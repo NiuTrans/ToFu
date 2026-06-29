@@ -414,6 +414,11 @@ from lib.mcp.vendored import repo_root as _repo_root
 # ``_install_lock``.
 _install_attempted: set[str] = set()
 _install_lock = threading.Lock()
+# Per-command serialization so two concurrent callers (e.g. the startup
+# pre-warm racing a user "Install" click) never run ``pip install`` of the
+# SAME source at once — the second waits, then sees ``_install_attempted`` and
+# just re-resolves. The registry dict itself is guarded by ``_install_lock``.
+_install_cmd_locks: dict[str, threading.Lock] = {}
 # Last auto-install failure reason per command, surfaced in the connect error
 # so the user sees WHY zero-touch install failed (pip stderr / no source /
 # timeout) instead of a generic "not on PATH" dead-end. Set under _install_lock.
@@ -720,14 +725,26 @@ def _try_autoinstall_launcher(command: str) -> str | None:
         return None
     src, editable = found
 
+    # Grab (or create) the per-command lock, then hold it across the whole
+    # check-then-pip section so a concurrent caller for the SAME command waits
+    # here instead of launching a second simultaneous pip on the same source.
     with _install_lock:
-        if command in _install_attempted:
-            # pip already RAN for this command this process. Re-resolve in
-            # case a concurrent caller succeeded, but never pip again. (The
-            # guard is only set AFTER a real pip run below, so a transient
-            # pre-pip error never wedges the command permanently.)
-            return _resolve_launcher(command)
+        cmd_lock = _install_cmd_locks.setdefault(command, threading.Lock())
 
+    with cmd_lock:
+        with _install_lock:
+            if command in _install_attempted:
+                # pip already RAN for this command this process (possibly by
+                # the caller we just waited behind). Re-resolve in case it
+                # succeeded, but never pip again. (The guard is only set AFTER
+                # a real pip run below, so a transient pre-pip error never
+                # wedges the command permanently.)
+                return _resolve_launcher(command)
+        return _run_pip_install(command, src, editable)
+
+
+def _run_pip_install(command: str, src: str, editable: bool) -> str | None:
+    """Actually shell out to pip for ``command``; caller holds its cmd lock."""
     pip_args = [sys.executable, '-m', 'pip', 'install', '--no-input']
     if editable:
         pip_args.append('-e')
@@ -782,6 +799,155 @@ def _try_autoinstall_launcher(command: str) -> str | None:
                 'script is still not next to the interpreter — check the '
                 "package's [project.scripts] entry.")
     return resolved
+
+
+
+def is_vendored_launcher(command: str) -> bool:
+    """True when ``command`` is a bare, registered vendored MCP launcher.
+
+    Used by the install route to decide whether a slow pip pre-warm is even
+    possible before attempting the (fast) connect. No-op for npx/uvx commands
+    and anything with a path separator.
+    """
+    if not command or os.sep in command or (os.altsep and os.altsep in command):
+        return False
+    return _find_vendored_source(command) is not None
+
+
+def prewarm_vendored_launcher(command: str) -> tuple[bool, str]:
+    """Ensure a vendored launcher is importable BEFORE connect.
+
+    Intended to run in a normal worker thread (e.g. the Flask request handler
+    for ``/catalog/install``), NOT on the MCP event loop — so the blocking
+    ``pip install`` here is fine and never freezes live MCP traffic.
+
+    Returns ``(ready, detail)``:
+      * ``(True, path)``  — launcher already resolvable, or pip install succeeded.
+      * ``(True, '')``    — already on PATH (nothing to do).
+      * ``(False, why)``  — install attempted and failed; ``why`` is the
+        captured pip stderr / reason (also stored in ``_install_last_error``).
+
+    Safe to call even for non-vendored commands: returns ``(True, '')`` so the
+    caller just proceeds to connect.
+    """
+    import shutil as _shutil
+    if not command or os.sep in command:
+        return True, ''
+    if _shutil.which(command):
+        return True, ''
+    resolved = _resolve_launcher(command)
+    if resolved:
+        return True, resolved
+    if _find_vendored_source(command) is None:
+        # Not something we can pip-install — let connect surface the hint.
+        return True, ''
+    resolved = _try_autoinstall_launcher(command)
+    if resolved:
+        return True, resolved
+    with _install_lock:
+        why = _install_last_error.get(command, '')
+    return False, why
+
+
+
+def prewarm_all_vendored() -> dict[str, str]:
+    """Pip-install every registered vendored launcher that isn't resolvable yet.
+
+    Meant to run ONCE in a background thread at startup so the App-Store
+    "Install" click is normally just the sub-second MCP handshake instead of
+    a cold pip install. Blocking (pip) — never call from the event loop.
+
+    Returns ``{command: 'ok' | reason}`` for the launchers that needed work
+    (already-resolvable ones are skipped silently).
+    """
+    _reload_vendored_if_changed()
+    out: dict[str, str] = {}
+    for command in list(_VENDORED_LAUNCHERS.keys()):
+        try:
+            import shutil as _shutil
+            if _shutil.which(command) or _resolve_launcher(command):
+                continue
+            if _find_vendored_source(command) is None:
+                continue
+            ready, detail = prewarm_vendored_launcher(command)
+            out[command] = 'ok' if ready else (detail or 'install failed')
+        except Exception as e:  # never let pre-warm crash boot
+            logger.warning('[MCP] pre-warm of %r failed: %s', command, e)
+            out[command] = f'error: {e}'
+    return out
+
+
+
+# ── Async install jobs (route returns immediately; UI polls) ──────────
+#
+# Why: a cold ``pip install`` of a vendored server can take minutes. Even
+# though our bundled Hypercorn server has no per-request kill timer, the app
+# explicitly supports running behind reverse proxies (cloud-IDE / notebook;
+# see server.py `_detect_reverse_proxy`) whose own response timeouts WOULD
+# cut a multi-minute synchronous POST — re-introducing the exact "install
+# times out" symptom one layer down, and leaving a half-installed package.
+# So the install route kicks the pip pre-warm off into a background thread
+# and returns ``{status:'installing'}`` at once; the front end polls
+# ``/catalog/install/status`` until it flips to ``ready`` / ``error``.
+#
+# State is a tiny in-process dict (single-process server). Each entry::
+#   {state: 'installing'|'ready'|'error', detail: str, started: float, ended: float}
+_install_jobs: dict[str, dict] = {}
+_install_jobs_lock = threading.Lock()
+
+
+def get_install_job(command: str) -> dict | None:
+    """Return a snapshot of the install job for ``command`` (or None)."""
+    with _install_jobs_lock:
+        job = _install_jobs.get(command)
+        return dict(job) if job is not None else None
+
+
+def start_install_job(command: str) -> dict:
+    """Start (or re-attach to) a background pip pre-warm for ``command``.
+
+    Idempotent: if a job is already ``installing`` it is returned as-is
+    (re-clicking Install never spawns a second pip — the per-command lock in
+    ``_try_autoinstall_launcher`` would serialize them anyway, but we avoid
+    even queuing a redundant thread). If the launcher already resolves we
+    return ``ready`` immediately without touching pip.
+
+    Returns the job snapshot dict.
+    """
+    import shutil as _shutil
+    # Fast path: already importable → no job needed.
+    if not command or os.sep in command or _shutil.which(command) or _resolve_launcher(command):
+        snap = {'state': 'ready', 'detail': '', 'started': time.time(), 'ended': time.time()}
+        with _install_jobs_lock:
+            _install_jobs[command] = snap
+        return dict(snap)
+
+    with _install_jobs_lock:
+        existing = _install_jobs.get(command)
+        if existing is not None and existing.get('state') == 'installing':
+            return dict(existing)
+        job = {'state': 'installing', 'detail': '', 'started': time.time(), 'ended': 0.0}
+        _install_jobs[command] = job
+
+    def _worker():
+        try:
+            ready, detail = prewarm_vendored_launcher(command)
+        except Exception as e:  # defensive — never let the thread die silently
+            ready, detail = False, f'install crashed: {e}'
+            logger.error('[MCP] install job for %r crashed: %s', command, e, exc_info=True)
+        with _install_jobs_lock:
+            _install_jobs[command] = {
+                'state': 'ready' if ready else 'error',
+                'detail': detail,
+                'started': job['started'],
+                'ended': time.time(),
+            }
+        logger.info('[MCP] install job for %r finished: %s',
+                    command, 'ready' if ready else f'error ({detail})')
+
+    threading.Thread(target=_worker, name=f'mcp-install:{command}', daemon=True).start()
+    with _install_jobs_lock:
+        return dict(_install_jobs[command])
 
 
 def _resolve_launcher(command: str) -> str | None:
@@ -1359,7 +1525,21 @@ class MCPBridge:
                             # server, pip-install it into Tofu's own env now
                             # so onboarding is zero-touch (no PATH edits, no
                             # manual install). One attempt per process.
-                            resolved = _try_autoinstall_launcher(command)
+                            #
+                            # CRITICAL: ``_try_autoinstall_launcher`` runs a
+                            # BLOCKING ``subprocess.run`` (pip, up to 300s). We
+                            # are on the shared MCP event loop here, so calling
+                            # it inline would freeze EVERY other server's
+                            # keepalive / tool-calls / connects for the whole
+                            # install. Offload to a worker thread (mirrors
+                            # ``_reconnect_server``'s ``run_in_executor``) so a
+                            # cold install never stalls the loop. Normally this
+                            # path isn't even reached — the install ROUTE
+                            # pre-warms the launcher in a Flask worker thread
+                            # first (see ``prewarm_vendored_launcher``).
+                            owner_loop = asyncio.get_running_loop()
+                            resolved = await owner_loop.run_in_executor(
+                                None, _try_autoinstall_launcher, command)
                         if resolved:
                             command = resolved
                         else:

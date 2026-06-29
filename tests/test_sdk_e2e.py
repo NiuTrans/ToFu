@@ -39,6 +39,12 @@ _STATE = {'app': None, 'admin_token': None, 'user_token': None,
 def _boot_real_server():
     if _STATE['app'] is not None:
         return _STATE
+    # ⚠️ DATA-LOSS GUARD (2026-06-28): this helper imports server.py and boots
+    # its OWN Hypercorn — it bypasses conftest's live_server fixture, so it
+    # must call the keystone DB guard itself. Refuse to boot the real app
+    # against a non-test DB (the incident was a live server on production PG).
+    from tests.conftest import _assert_test_database
+    _assert_test_database('test_sdk_e2e._boot_real_server')
     _STATE['tmp'] = tempfile.TemporaryDirectory()
     tmp = _STATE['tmp'].name
 

@@ -402,6 +402,165 @@ def test_preference_learned_event_registered():
     assert 'preference_learned' in event_types()
 
 
+# ───────── per-user scoping (multi-user isolation) ─────────
+
+def test_empty_scope_uses_global_file_unchanged(tmp_data_dir):
+    """scope='' must resolve to the EXACT legacy global path — no migration,
+    byte-identical for every open/private personal install."""
+    from lib.memory import user_profile as up
+    from lib.agent_artifacts import USER_PROFILE_FILE
+    p = up.profile_path('')
+    assert p.endswith(os.path.join('memories', USER_PROFILE_FILE))
+    assert 'profiles' not in p  # NOT under the per-tenant subtree
+    # Default arg == explicit '' .
+    assert up.profile_path() == up.profile_path('')
+
+
+def test_scoped_path_isolated_and_traversal_proof(tmp_data_dir):
+    from lib.memory import user_profile as up
+    a = up.profile_path('user-42')
+    b = up.profile_path('user-99')
+    g = up.profile_path('')
+    assert a != b != g and a != g
+    assert os.path.join('memories', 'profiles') in a
+    # A hostile user_id can never escape the profiles subtree.
+    evil = up.profile_path('../../../../etc/passwd')
+    base = os.path.realpath(os.path.join(os.path.dirname(g), 'profiles'))
+    assert os.path.realpath(evil).startswith(base)
+
+
+def test_profiles_do_not_leak_across_scopes(tmp_data_dir):
+    from lib.memory import user_profile as up
+    up.save_profile('## About the user\n- Tenant A is a data scientist', scope='userA')
+    up.save_profile('## About the user\n- Tenant B is a frontend dev', scope='userB')
+    assert 'data scientist' in up.load_profile('userA')
+    assert 'data scientist' not in up.load_profile('userB')
+    assert 'frontend dev' in up.load_profile('userB')
+    # The global (open/private) profile is untouched by either tenant.
+    assert up.load_profile('') == ''
+
+
+def test_resolve_profile_scope_from_authcontext():
+    from lib.memory import user_profile as up
+    from lib.api_keys import AuthContext, local_admin_context
+    # Open mode synthetic admin → no tenant binding → global scope.
+    assert up.resolve_profile_scope(local_admin_context()) == ''
+    # Private-mode Bearer key without user_id → global scope.
+    assert up.resolve_profile_scope(AuthContext(key_id='k_x')) == ''
+    # Multi-user login key carries user_id → that is the scope.
+    assert up.resolve_profile_scope(AuthContext(key_id='k_y', user_id='42')) == '42'
+    # Robust to None / junk.
+    assert up.resolve_profile_scope(None) == ''
+
+
+def test_consolidation_writes_to_task_scope(tmp_data_dir, monkeypatch):
+    """The daemon reads scope off the task and writes the tenant's file, not
+    the global one."""
+    import json as _json
+    from lib.memory import user_profile as up
+    from lib.memory import profile_consolidate as pc
+
+    def _fake_dispatch(messages, **kw):
+        return (_json.dumps({'actions': [
+            {'kind': 'new', 'header': 'About the user',
+             'text': 'Is a backend engineer', 'evidence': 'said so'}]}), {})
+
+    monkeypatch.setattr('lib.llm_dispatch.dispatch_chat', _fake_dispatch)
+    msgs = [
+        {'role': 'user', 'content': 'fyi I work as a backend engineer, and this '
+         'is a sufficiently long message to clear the 200-char surface threshold '
+         'so the consolidation pass actually runs the cheap model here please.'},
+        {'role': 'assistant', 'content': 'noted, I will remember that for you.'},
+    ]
+    pc.run_profile_consolidation(msgs, task={'_profileScope': 'tenant7'})
+    assert 'backend engineer' in up.load_profile('tenant7')
+    assert up.load_profile('') == ''  # global profile NOT touched
+
+
+# ───────── structured per-item view (settings UI) ─────────
+
+def test_parse_items_groups_by_header(tmp_data_dir):
+    from lib.memory import user_profile as up
+    up.save_profile('## Preferences\n- Replies in Chinese\n- Concise\n'
+                    '## About the user\n- Backend engineer')
+    items = up.parse_items()
+    assert {'header': 'Preferences', 'text': 'Replies in Chinese'} in items
+    assert {'header': 'Preferences', 'text': 'Concise'} in items
+    assert {'header': 'About the user', 'text': 'Backend engineer'} in items
+    assert len(items) == 3
+
+
+def test_serialize_items_roundtrips(tmp_data_dir):
+    from lib.memory import user_profile as up
+    items = [
+        {'header': 'Preferences', 'text': 'Replies in Chinese'},
+        {'header': 'About the user', 'text': 'Backend engineer'},
+        {'header': 'Preferences', 'text': 'Concise'},  # regroups under header
+    ]
+    body = up.serialize_items(items)
+    # Items regroup under their header.
+    assert '## Preferences' in body and '## About the user' in body
+    reparsed = up.parse_items(body)
+    texts = {(i['header'], i['text']) for i in reparsed}
+    assert ('Preferences', 'Replies in Chinese') in texts
+    assert ('Preferences', 'Concise') in texts
+    assert ('About the user', 'Backend engineer') in texts
+
+
+def test_save_items_drops_empty_and_persists(tmp_data_dir):
+    from lib.memory import user_profile as up
+    res = up.save_items([
+        {'header': 'Preferences', 'text': '  Replies in Chinese '},
+        {'header': 'Preferences', 'text': ''},      # dropped
+        {'header': 'About the user', 'text': 'Likes Rust'},
+    ])
+    assert res['saved']
+    items = up.parse_items()
+    assert len(items) == 2
+    assert all(i['text'] for i in items)
+
+
+def test_save_items_empty_clears(tmp_data_dir):
+    from lib.memory import user_profile as up
+    up.save_profile('- something')
+    up.save_items([])
+    assert up.load_profile() == ''
+
+
+# ───────── auto-apply: new prefs/identity are written, not staged ─────────
+
+def test_consolidation_auto_applies_new_preference(tmp_data_dir, monkeypatch):
+    """A 'new' action is now WRITTEN immediately (no staging) and surfaced as
+    a 'added' learned chip — the user is informed, not asked."""
+    import json as _json
+    from lib.memory import user_profile as up
+    from lib.memory import profile_consolidate as pc
+
+    def _fake_dispatch(messages, **kw):
+        return (_json.dumps({'actions': [
+            {'kind': 'new', 'header': 'About the user',
+             'text': 'Is a backend engineer', 'evidence': 'said so'}]}), {})
+
+    monkeypatch.setattr('lib.llm_dispatch.dispatch_chat', _fake_dispatch)
+    msgs = [
+        {'role': 'user', 'content': 'just so you know, I work as a backend '
+         'engineer, this is a sufficiently long message to clear the surface '
+         'threshold (200 chars) so the consolidation pass actually runs the '
+         'cheap model here instead of skipping the turn as too short to bother.'},
+        {'role': 'assistant', 'content': 'good to know, I will keep that in mind.'},
+    ]
+    learned = pc.run_profile_consolidation(msgs)
+    # Written straight into the profile under the right header.
+    body = up.load_profile()
+    assert 'Is a backend engineer' in body
+    assert '## About the user' in body
+    # Surfaced as an informational 'added' chip — never 'pending'.
+    assert learned and learned[0]['kind'] == 'added'
+    assert learned[0]['pending'] is False
+    # Nothing staged behind a confirm gate.
+    assert up.load_pending() == []
+
+
 # ───────── REQUIRED: consolidation is OFF the synchronous done path ─────────
 
 def test_consolidation_spawn_does_not_block_done(monkeypatch):
@@ -471,6 +630,243 @@ def test_consolidation_gated_off_spawns_nothing(monkeypatch):
     import time as _time
     _time.sleep(0.2)
     assert calls['n'] == 0
+
+
+# ───────── tiered profile: relevance gating (core always-on, detail gated) ─────────
+
+_TIERED_PROFILE = (
+    '## Preferences\n'
+    '- Uses ruff for Python linting\n'
+    '- Prefers measurement-first optimization\n'
+    '## About the user\n'
+    '- Builds Spanish-to-Chinese translation using TDD\n'
+    '- Maintains the FMG grader for CJK patch scoring\n'
+    '- Works with DolphinFS storage on large data engines'
+)
+
+
+def test_split_profile_tiers_separates_core_and_detail(tmp_data_dir):
+    """## Preferences → always-on core; other sections → relevance-gated detail."""
+    from lib.memory import user_profile as up
+    up.save_profile(_TIERED_PROFILE)
+    core, detail = up.split_profile_tiers()
+    # Core carries only the work-style header + its bullets.
+    assert '## Preferences' in core
+    assert 'Uses ruff for Python linting' in core
+    assert 'Prefers measurement-first optimization' in core
+    # Detail tier is the identity facts, header-tagged, one item per bullet.
+    assert 'About the user' not in core
+    assert any('Spanish-to-Chinese translation' in d for d in detail)
+    assert any('FMG grader' in d for d in detail)
+    assert len(detail) == 3
+    # Every detail item keeps its section header for context.
+    assert all(d.startswith('About the user: ') for d in detail)
+
+
+def test_headerless_leading_bullets_default_to_core(tmp_data_dir):
+    """A bullet with no preceding ## is a standing instruction → core."""
+    from lib.memory import user_profile as up
+    up.save_profile('- Always answer in Chinese\n## About the user\n- Likes Rust')
+    core, detail = up.split_profile_tiers()
+    assert 'Always answer in Chinese' in core
+    assert any('Likes Rust' in d for d in detail)
+
+
+def test_render_tiers_core_always_present_detail_gated(tmp_data_dir):
+    """Core block is emitted regardless of query; detail only when relevant."""
+    from lib.memory import user_profile as up
+    up.save_profile(_TIERED_PROFILE)
+
+    # Relevant turn → detail surfaces the matching identity fact.
+    core, detail = up.render_profile_tiers(
+        query='fix the spanish to chinese translation tests')
+    assert core is not None and '[USER PREFERENCE PROFILE]' in core
+    assert 'Uses ruff' in core                       # core present
+    assert detail is not None
+    assert 'Spanish-to-Chinese translation' in detail
+    assert 'FMG grader' not in detail                # only the relevant bullet
+    assert '[USER PREFERENCE PROFILE — relevant detail]' in detail
+
+    # Irrelevant turn → core still present, NO detail block at all.
+    core2, detail2 = up.render_profile_tiers(
+        query='make this button border slightly rounder in CSS')
+    assert core2 == core                             # byte-identical core
+    assert detail2 is None
+
+    # Empty query → no detail (nothing to relevance-match).
+    core3, detail3 = up.render_profile_tiers(query='')
+    assert core3 == core
+    assert detail3 is None
+
+
+def test_core_block_is_byte_stable_across_queries(tmp_data_dir):
+    """The always-on core must not vary with the turn — that's its whole point
+    (cache stability). Different queries → identical core block."""
+    from lib.memory import user_profile as up
+    up.save_profile(_TIERED_PROFILE)
+    cores = {up.render_profile_tiers(query=q)[0]
+             for q in ('translation', 'css tweak', 'FMG grader', '', 'random')}
+    assert len(cores) == 1                            # exactly one distinct core
+
+
+def _tiered_messages():
+    """Post-first-round message list with the _isMeta carrier, for the full
+    _inject_system_contexts path."""
+    return [
+        {'role': 'system', 'content': [{'type': 'text',
+            'text': 'IMPORTANT: You must NEVER generate or guess URLs static'}]},
+        {'role': 'user', 'content': '[PROJECT CO-PILOT MODE] ctx', '_isMeta': True},
+        {'role': 'user', 'content': '__QUERY__'},
+    ]
+
+
+def _isMeta_text(messages):
+    """Concatenated text of the _isMeta carrier (where profile blocks land)."""
+    for m in messages:
+        if m.get('role') == 'user' and m.get('_isMeta'):
+            c = m.get('content', '')
+            if isinstance(c, str):
+                return c
+            return ''.join(b.get('text', '') for b in c if isinstance(b, dict))
+    return ''
+
+
+def test_inject_tiered_relevance_gating_end_to_end(tmp_data_dir):
+    """The headline acceptance test (per the brief): through the real
+    _inject_system_contexts, the core profile is ALWAYS on the _isMeta tail,
+    the detail tier appears ONLY on a relevant turn, and is ABSENT on an
+    irrelevant turn — with neither ever touching messages[0]."""
+    from lib.tasks_pkg.system_context import _inject_system_contexts
+    from lib.memory import user_profile as up
+    up.save_profile(_TIERED_PROFILE)
+
+    def _run(query):
+        msgs = _tiered_messages()
+        msgs[2]['content'] = query
+        task = {'config': {'preferencesEnabled': True}}
+        _inject_system_contexts(
+            msgs, project_path='', project_enabled=False,
+            memory_enabled=True, search_enabled=False, swarm_enabled=False,
+            has_real_tools=True, conv_id='', task=task)
+        return msgs
+
+    # ── Relevant turn (translation) ──
+    m_rel = _run('please fix the spanish to chinese translation tests for peru terms')
+    meta_rel = _isMeta_text(m_rel)
+    sys_rel = m_rel[0]['content'][0]['text']
+    # Core present on the tail; detail present with the matching fact.
+    assert '[USER PREFERENCE PROFILE]' in meta_rel
+    assert 'Uses ruff' in meta_rel                              # core
+    assert '[USER PREFERENCE PROFILE — relevant detail]' in meta_rel
+    assert 'Spanish-to-Chinese translation' in meta_rel        # gated-in
+    assert 'FMG grader' not in meta_rel                        # gated-out
+    # Profile NEVER touches the system prefix.
+    assert 'USER PREFERENCE PROFILE' not in sys_rel
+
+    # ── Irrelevant turn (CSS) ──
+    m_irr = _run('make the submit button border a little rounder in the css')
+    meta_irr = _isMeta_text(m_irr)
+    assert '[USER PREFERENCE PROFILE]' in meta_irr              # core still on
+    assert 'Uses ruff' in meta_irr
+    # NO detail block, none of the identity facts leaked in.
+    assert '[USER PREFERENCE PROFILE — relevant detail]' not in meta_irr
+    assert 'Spanish-to-Chinese translation' not in meta_irr
+    assert 'FMG grader' not in meta_irr
+    assert 'DolphinFS' not in meta_irr
+
+    # Core block byte-identical between the two turns (cache-stable).
+    def _core_segment(meta):
+        start = meta.index('[USER PREFERENCE PROFILE]')
+        end = meta.index('</system-reminder>', start)
+        return meta[start:end]
+    assert _core_segment(meta_rel) == _core_segment(meta_irr)
+
+
+def test_inject_tiered_detail_is_cache_safe(tmp_data_dir):
+    """Re-injecting the tiered blocks each round + notify_compaction must NOT
+    flag prefix_mutation — same guarantee the single-block version had, now
+    with the per-turn detail block riding the same tail."""
+    from lib.tasks_pkg.cache_tracking import (detect_cache_break,
+                                              notify_compaction, _cache_states)
+    from lib.tasks_pkg.system_context import _append_user_profile_block
+    from lib.memory import user_profile as up
+    up.save_profile(_TIERED_PROFILE)
+    core, detail = up.render_profile_tiers(
+        query='fix the spanish to chinese translation')
+    assert core and detail
+    conv = 'prof-tier-cache'
+    _cache_states.pop(conv, None)
+
+    def _round(tail):
+        m = [
+            {'role': 'system', 'content': 'static system prompt'},
+            {'role': 'user', 'content': '[PROJECT CO-PILOT MODE] ctx',
+             '_isMeta': True},
+            {'role': 'user', 'content': 'do the thing'},
+            {'role': 'assistant', 'content': 'working'},
+            {'role': 'tool', 'content': tail},
+        ]
+        _append_user_profile_block(m, core, marker='[USER PREFERENCE PROFILE]')
+        _append_user_profile_block(
+            m, detail, marker='[USER PREFERENCE PROFILE — relevant detail]')
+        return m
+
+    m1 = _round('tool 1')
+    notify_compaction(conv)
+    assert detect_cache_break(conv, m1, None, 'claude-opus-4',
+        usage={'cache_creation_input_tokens': 50000,
+               'cache_read_input_tokens': 20000}) is None
+    for i, tail in enumerate(['tool 2', 'tool 3'], start=2):
+        m = _round(tail)
+        notify_compaction(conv)
+        r = detect_cache_break(conv, m, None, 'claude-opus-4',
+            usage={'cache_creation_input_tokens': 2000,
+                   'cache_read_input_tokens': 70000})
+        assert r is None or 'prefix_mutation' not in r, (
+            f'round {i} falsely flagged: {r}')
+    assert _cache_states[conv].total_breaks == 0
+
+
+# ───────── chip honesty: applied_profile_items mirrors the injected tiers ─────────
+
+def test_applied_profile_items_mirrors_injection(tmp_data_dir):
+    """The chip payload (applied_profile_items) must equal EXACTLY what
+    render_profile_tiers injects: full core + only the relevance-selected
+    detail — never an arbitrary first-N slice. This is the "frontend shows the
+    real data" guarantee."""
+    from lib.memory import user_profile as up
+    up.save_profile(_TIERED_PROFILE)
+
+    # Relevant turn → core (all) + the matching detail bullet only.
+    applied = up.applied_profile_items(
+        _TIERED_PROFILE, query='fix the spanish to chinese translation tests')
+    assert applied['core'] == ['Uses ruff for Python linting',
+                               'Prefers measurement-first optimization']
+    assert applied['detail'] == [
+        'About the user: Builds Spanish-to-Chinese translation using TDD']
+    assert 'FMG grader' not in ' '.join(applied['detail'])  # irrelevant excluded
+
+    # The chip's detail MUST be a subset of the injected detail block (agree).
+    _core_blk, _detail_blk = up.render_profile_tiers(
+        _TIERED_PROFILE, query='fix the spanish to chinese translation tests')
+    assert _detail_blk is not None
+    for d in applied['detail']:
+        assert d in _detail_blk
+
+    # Irrelevant turn → core present, detail EMPTY (matches absent detail block).
+    applied_irr = up.applied_profile_items(
+        _TIERED_PROFILE, query='make the button border rounder in css')
+    assert applied_irr['core']                 # core always reported
+    assert applied_irr['detail'] == []         # nothing irrelevant in the chip
+    _c2, _d2 = up.render_profile_tiers(
+        _TIERED_PROFILE, query='make the button border rounder in css')
+    assert _d2 is None                         # ...and none injected either
+
+
+def test_applied_profile_items_empty_profile(tmp_data_dir):
+    from lib.memory import user_profile as up
+    a = up.applied_profile_items('', query='anything')
+    assert a == {'core': [], 'detail': []}
 
 
 def test_consolidation_daemon_emits_preference_learned(monkeypatch):

@@ -216,6 +216,26 @@ function _handlePreferencesApplied(ev, c) {
 
 }
 
+function _handleRelatedConversations(ev, c) {
+  const convId = c.convId;
+  const assistantMsg = c.assistantMsg, buf = c.buf;
+      /* ── Related-conversations indicator ──────────────────────────────
+       * Emitted once at task start by the orchestrator when the bounded
+       * cross-conversation project digest was injected for ambient
+       * awareness (lib/tasks_pkg/system_context.py ★4.4). Drives the quiet
+       * "related conversations" provenance segment so the user can SEE — and
+       * audit — the same sibling conversations the model was told about.
+       * Payload: {count, items:[{id,title,summary}], toolsAvailable}. */
+      assistantMsg._relatedConversations = {
+        count: ev.count || 0,
+        items: Array.isArray(ev.items) ? ev.items : [],
+        toolsAvailable: !!ev.toolsAvailable,
+      };
+      if (buf) buf._relatedConversations = assistantMsg._relatedConversations;
+      twUpdate(convId);
+
+}
+
 function _handlePreferenceLearned(ev, c) {
   const convId = c.convId;
   const assistantMsg = c.assistantMsg, buf = c.buf;

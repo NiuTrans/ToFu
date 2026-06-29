@@ -94,8 +94,11 @@ artifact:
     daemon thread (used by hot paths).
   - `generate_summary(messages)` — the cheap-model call (outcome-weighted
     transcript: first 2 turns + last 6, capped ~4 KB).
-  - `build_project_digest(project_path, current_conv_id, limit)` — read-only,
-    side-effect-free; never generates, only reads cached summaries.
+  - `build_project_digest(project_path, current_conv_id, limit,
+    conv_tools_available)` — read-only, side-effect-free; never generates, only
+    reads cached summaries. `conv_tools_available` switches the header between
+    the tool-instructing variant ("Use list_conversations / get_conversation …")
+    and a tool-free ambient-awareness variant — see decision 7.
 - `lib/tasks_pkg/manager.py::_maybe_refresh_project_summary` — **Trigger A**:
   post-reply, project-mode-only, non-blocking.
 - `lib/conv_ref.py::get_conversation` — **Trigger B**: on first read of a
@@ -130,6 +133,17 @@ artifact:
    message, or prompt assembly.
 6. **Title fallback.** A sibling with no summary yet still appears in the
    digest by title — the model is told it exists even before it's summarized.
+7. **The header never advertises tools that aren't registered.** The digest is
+   injected on *every* project turn (gate: `project_enabled`), but the conv-ref
+   tools register only when the user @-attached a conversation (gate:
+   `has_conv_ref` — Layer 0). These gates are independent, so on a plain
+   project turn the old header told the model to call `list_conversations` /
+   `get_conversation` that were absent from its schema (the same class as the
+   `using-tools-section-filters-by-registered-tools` bug). Fix: the injection
+   site (`system_context.py` step 4.4) computes `conv_tools_available` from the
+   turn's `tool_names` and passes it to `build_project_digest`, which emits the
+   tool-free header when those tools aren't present. Ambient awareness (the
+   point of Layer 2) survives either way; phantom tool advice does not.
 
 ### Cost ceiling
 

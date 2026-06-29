@@ -94,6 +94,9 @@ function switchSettingsTab(tabId) {
   document.querySelectorAll('.settings-tab-panel').forEach(function(p) {
     p.classList.toggle('active', p.id === 'settingsTab_' + tabId);
   });
+  if (tabId === 'preferences' && typeof _populatePreferencesTab === 'function') {
+    _populatePreferencesTab();
+  }
 }
 
 async function _loadServerConfig() {
@@ -253,6 +256,7 @@ function openSettings() {
     _populateMtProviderSection(cfg);
     _populateMcpTab();
     if (typeof _populateSkillsTab === 'function') _populateSkillsTab();
+    if (typeof _populatePreferencesTab === 'function') _populatePreferencesTab();
   });
 }
 

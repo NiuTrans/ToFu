@@ -51,6 +51,20 @@ function _handleCrossTabMsg(msg) {
       }
       break;
     }
+    case "conv_restored": {
+      /* ★ Another tab undid a deletion → refresh from server to pick the
+       *   re-created conversation back up (mirrors conv_saved). */
+      clearTimeout(_crossTabMergeTimer);
+      _crossTabMergeTimer = setTimeout(() => {
+        if (
+          document.visibilityState === "visible" &&
+          activeStreams.size === 0 &&
+          _editingMsgIdx === null
+        )
+          loadConversationsFromServer();
+      }, 600);
+      break;
+    }
   }
 }
 /* ★ No longer listening to localStorage 'storage' events for conversations.

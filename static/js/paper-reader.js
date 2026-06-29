@@ -1449,6 +1449,36 @@ function _setPaperMobileView(view) {
 //  ★ Tab 1: Q&A
 // ══════════════════════════════════════════════════════
 
+/** Build the inner HTML for one Q&A message bubble. */
+function _qaMsgInnerHtml(msg) {
+  var isUser = msg.role === 'user';
+  var inner = '';
+  // Tool-activity panel (web_search / fetch_url) — reuse chat's renderer so
+  // the look matches the report tab + chat bubbles.
+  if (!isUser && Array.isArray(msg.toolRounds) && msg.toolRounds.length &&
+      typeof renderToolRoundsHTML === 'function') {
+    inner += '<div class="paper-qa-tools">' +
+      renderToolRoundsHTML(msg.toolRounds, msg.status === 'running') + '</div>';
+  }
+  if (isUser) {
+    inner += '<div class="paper-qa-msg-content">' + escapeHtml(msg.content) + '</div>';
+  } else if (msg.content) {
+    inner += '<div class="paper-qa-msg-content">' +
+      (typeof renderMarkdown === 'function' ? renderMarkdown(msg.content) : escapeHtml(msg.content)) +
+      '</div>';
+  } else if (msg.status === 'running') {
+    // Thinking / searching, no prose yet — show a small pulse.
+    inner += '<div class="paper-qa-msg-content paper-qa-thinking">' +
+      '<span class="thinking-dot"></span></div>';
+  }
+  return inner;
+}
+
+// Reconcile the Q&A message list in place. Streaming polls call this every
+// ~700ms; rebuilding the whole innerHTML each time tore down and recreated
+// every bubble (flicker + scroll jump + markdown re-parse). Instead we keep
+// one DOM node per message and only rewrite a node whose rendered content
+// actually changed — during streaming that's just the last assistant bubble.
 function _renderPaperQA() {
   var container = document.getElementById('paperQAMessages');
   if (!container) return;
@@ -1460,33 +1490,33 @@ function _renderPaperQA() {
       '<p class="paper-qa-hint">' + escapeHtml(_ttq('paper.qaEmptyHint')) + '</p></div>';
     return;
   }
-  var html = '';
+  // Drop the empty-state placeholder (or any stale non-message node) before reconciling.
+  var first = container.firstElementChild;
+  if (first && !first.classList.contains('paper-qa-msg')) container.innerHTML = '';
+
+  var nearBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < 80;
+  var changed = false;
+
+  // Remove surplus nodes (e.g. history was trimmed or a paper switch left extras).
+  while (container.children.length > _paperQAHistory.length) {
+    container.removeChild(container.lastElementChild);
+    changed = true;
+  }
+
   for (var j = 0; j < _paperQAHistory.length; j++) {
     var msg = _paperQAHistory[j];
-    var isUser = msg.role === 'user';
-    var inner = '';
-    // Tool-activity panel (web_search / fetch_url) — reuse chat's renderer so
-    // the look matches the report tab + chat bubbles.
-    if (!isUser && Array.isArray(msg.toolRounds) && msg.toolRounds.length &&
-        typeof renderToolRoundsHTML === 'function') {
-      inner += '<div class="paper-qa-tools">' +
-        renderToolRoundsHTML(msg.toolRounds, msg.status === 'running') + '</div>';
+    var cls = 'paper-qa-msg ' + (msg.role === 'user' ? 'paper-qa-user' : 'paper-qa-assistant');
+    var inner = _qaMsgInnerHtml(msg);
+    var node = container.children[j];
+    if (!node) {
+      node = document.createElement('div');
+      container.appendChild(node);
     }
-    if (isUser) {
-      inner += '<div class="paper-qa-msg-content">' + escapeHtml(msg.content) + '</div>';
-    } else if (msg.content) {
-      inner += '<div class="paper-qa-msg-content">' +
-        (typeof renderMarkdown === 'function' ? renderMarkdown(msg.content) : escapeHtml(msg.content)) +
-        '</div>';
-    } else if (msg.status === 'running') {
-      // Thinking / searching, no prose yet — show a small pulse.
-      inner += '<div class="paper-qa-msg-content paper-qa-thinking">' +
-        '<span class="thinking-dot"></span></div>';
-    }
-    html += '<div class="paper-qa-msg ' + (isUser ? 'paper-qa-user' : 'paper-qa-assistant') + '">' + inner + '</div>';
+    if (node._qaCls !== cls) { node.className = cls; node._qaCls = cls; }
+    if (node._qaSig !== inner) { node.innerHTML = inner; node._qaSig = inner; changed = true; }
   }
-  container.innerHTML = html;
-  container.scrollTop = container.scrollHeight;
+
+  if (changed && nearBottom) container.scrollTop = container.scrollHeight;
 }
 
 /** Recover paper text by asking the server to re-parse the already-stored PDF.
@@ -2009,6 +2039,167 @@ function _frameFigures(article) {
   }
 }
 
+/* ── Glossary hover-definitions ───────────────────────────────────────
+ * The report opens with a "Core Terminology" table. A reader deep in the
+ * Method or Experiments section has long forgotten those definitions, so the
+ * report stops being self-contained exactly where it matters most. We parse
+ * that table once, then turn LATER mentions of each term into a subtly
+ * underlined span whose definition appears on hover/focus — no scrolling back.
+ * To keep it from becoming visual noise we decorate each term at most once
+ * per top-level (h2) section. */
+
+/** Find the "Core Terminology / 核心术语" table, tag it, and return its rows
+ *  as [{term, def}]. Returns [] when the report has no such table. */
+function _extractGlossary(article) {
+  var tables = article.querySelectorAll('table');
+  for (var ti = 0; ti < tables.length; ti++) {
+    var table = tables[ti];
+    var head = table.querySelector('thead th, tr:first-child th');
+    var first = (head && head.textContent || '').trim().toLowerCase();
+    // The prompt fixes the first column header to "Term" (EN) / "术语" (ZH).
+    if (first !== 'term' && first.indexOf('术语') < 0) continue;
+    table.classList.add('paper-glossary');
+    var rows = table.querySelectorAll('tbody tr');
+    var out = [];
+    for (var ri = 0; ri < rows.length; ri++) {
+      var cells = rows[ri].querySelectorAll('td');
+      if (cells.length < 2) continue;
+      var term = (cells[0].textContent || '').trim();
+      var def = (cells[1].textContent || '').replace(/\s+/g, ' ').trim();
+      if (!term || !def) continue;
+      // Skip the prompt's own placeholder rows: "(term)", "（术语）", "...".
+      if (/^[(（].*[)）]$/.test(term) || term === '...' || term === '…') continue;
+      if (def.length > 260) def = def.slice(0, 257) + '…';
+      out.push({ term: term, def: def });
+    }
+    return out;  // only the first matching table
+  }
+  return [];
+}
+
+/** Expand a glossary term cell into matchable aliases, e.g.
+ *  "Test-Time Scaling (TTS)" → ["Test-Time Scaling", "TTS"],
+ *  "Best@K / Oracle Pass@K / Random@K" → [3 variants],
+ *  "Agentic Rubrics（本文首创）" → ["Agentic Rubrics"] (meta note dropped). */
+function _glossaryAliases(term) {
+  var raw = [];
+  raw.push(term);
+  var base = term.replace(/[(（][^)）]*[)）]/g, '').trim();   // strip parentheticals
+  raw.push(base);
+  var paren = term.match(/[(（]([^)）]+)[)）]/);
+  if (paren) {
+    var inner = paren[1].trim();
+    // Drop meta annotations the prompt may add; keep real abbreviations.
+    if (!/本文首创|首创|借鉴|新增|高\/低|效用|introduced|borrowed|coined/i.test(inner)) raw.push(inner);
+  }
+  base.split(/\s*[\/、，]\s*/).forEach(function (p) { raw.push(p); });
+
+  var seen = {}, out = [];
+  for (var i = 0; i < raw.length; i++) {
+    var a = (raw[i] || '').trim();
+    if (!a) continue;
+    var key = a.toLowerCase();
+    if (seen[key]) continue;
+    var hasCjk = /[\u3400-\u4dbf\u4e00-\u9fff]/.test(a);
+    var isAbbrev = /^[A-Z0-9][A-Z0-9@+\-]{1,}$/.test(a);   // e.g. TTS, RL, Best@K
+    // Length gate: CJK ≥2 chars, Latin ≥3 chars (abbreviations ≥2).
+    if (hasCjk) { if (a.length < 2) continue; }
+    else if (!isAbbrev && a.length < 3) continue;
+    seen[key] = true;
+    out.push(a);
+  }
+  return out;
+}
+
+function _escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+/** Decorate later mentions of glossary terms with hover-definition spans. */
+function _decorateGlossaryTerms(article, glossary) {
+  if (!glossary || !glossary.length || typeof document === 'undefined') return;
+
+  // Build alias → {row, def} map and a combined matcher (longest alias first
+  // so "Oracle Pass@K" wins over a bare "Oracle").
+  var map = {}, aliases = [];
+  for (var r = 0; r < glossary.length; r++) {
+    var al = _glossaryAliases(glossary[r].term);
+    for (var j = 0; j < al.length; j++) {
+      var key = al[j].toLowerCase();
+      if (map[key]) continue;       // first row to claim an alias keeps it
+      map[key] = { row: r, def: glossary[r].def };
+      aliases.push(al[j]);
+    }
+  }
+  if (!aliases.length) return;
+  aliases.sort(function (a, b) { return b.length - a.length; });
+  var re;
+  try {
+    re = new RegExp(aliases.map(_escapeRegExp).join('|'), 'gi');
+  } catch (e) {
+    console.warn('[Paper:Glossary] regex build failed:', e);
+    return;
+  }
+
+  var SKIP = { H1: 1, H2: 1, H3: 1, H4: 1, H5: 1, H6: 1, CODE: 1, PRE: 1,
+               A: 1, FIGCAPTION: 1, SCRIPT: 1, STYLE: 1, BUTTON: 1 };
+  var seen = {};   // row → already decorated in the current section
+
+  function decorateText(node) {
+    var text = node.nodeValue;
+    if (!text || text.length < 2 || !/\S/.test(text)) return;
+    re.lastIndex = 0;
+    var picks = [], m, pos = 0;
+    while ((m = re.exec(text))) {
+      var matched = m[0], idx = m.index, key = matched.toLowerCase();
+      var entry = map[key];
+      if (re.lastIndex === idx) re.lastIndex++;   // zero-width safety
+      if (!entry || seen[entry.row]) continue;
+      // Latin word-boundary guard (avoid matching inside a larger word).
+      var headLatin = /[A-Za-z0-9]/.test(matched.charAt(0));
+      var tailLatin = /[A-Za-z0-9]/.test(matched.charAt(matched.length - 1));
+      if (headLatin && idx > 0 && /[A-Za-z0-9]/.test(text.charAt(idx - 1))) continue;
+      if (tailLatin && /[A-Za-z0-9]/.test(text.charAt(idx + matched.length))) continue;
+      if (idx < pos) continue;       // overlaps a prior pick
+      picks.push({ idx: idx, len: matched.length, text: matched, def: entry.def });
+      seen[entry.row] = true;
+      pos = idx + matched.length;
+    }
+    if (!picks.length) return;
+    var frag = document.createDocumentFragment(), cursor = 0;
+    for (var p = 0; p < picks.length; p++) {
+      var pk = picks[p];
+      if (pk.idx > cursor) frag.appendChild(document.createTextNode(text.slice(cursor, pk.idx)));
+      var span = document.createElement('span');
+      span.className = 'paper-term';
+      span.setAttribute('tabindex', '0');
+      span.setAttribute('data-def', pk.def);
+      span.setAttribute('aria-label', pk.text + ': ' + pk.def);
+      span.textContent = pk.text;
+      frag.appendChild(span);
+      cursor = pk.idx + pk.len;
+    }
+    if (cursor < text.length) frag.appendChild(document.createTextNode(text.slice(cursor)));
+    node.parentNode.replaceChild(frag, node);
+  }
+
+  function walk(node) {
+    var children = Array.prototype.slice.call(node.childNodes);
+    for (var i = 0; i < children.length; i++) {
+      var c = children[i];
+      if (c.nodeType === 3) { decorateText(c); continue; }
+      if (c.nodeType !== 1) continue;
+      var tag = c.tagName;
+      if (tag === 'H1' || tag === 'H2') seen = {};   // new section → re-allow terms
+      if (SKIP[tag]) continue;
+      if (c.classList && (c.classList.contains('paper-glossary') ||
+          c.classList.contains('paper-term') || c.classList.contains('katex'))) continue;
+      walk(c);
+    }
+  }
+
+  try { walk(article); }
+  catch (e) { console.warn('[Paper:Glossary] decoration failed:', e); }
+}
+
 /** Assign stable ids to h2/h3 and return the TOC entry list. */
 function _indexHeadings(article) {
   var heads = article.querySelectorAll('h2, h3');
@@ -2373,6 +2564,7 @@ function _renderFinalReport(container, text, meta) {
   article.innerHTML = renderMarkdown(text || '');
   _decorateCallouts(article);
   _frameFigures(article);
+  _decorateGlossaryTerms(article, _extractGlossary(article));
   var finishTag = _renderReportFinishTag(meta);
   if (finishTag) {
     var tagWrap = document.createElement('div');

@@ -152,7 +152,21 @@ def _config_schema() -> dict:
             'fetchEnabled': {'type': 'boolean', 'default': True},
             'projectPath': {'type': 'string'},
             'codeExecEnabled': {'type': 'boolean'},
-            'memoryEnabled': {'type': 'boolean', 'default': True},
+            'memoryEnabled': {'type': 'boolean', 'default': True,
+                               'description': 'Proactive memory-store '
+                               'injection. UI default ON; on the headless API '
+                               '(agent/run, chat/completions, compat) it fails '
+                               'CLOSED (default off) — opt in explicitly. The '
+                               'search_memories/create_memory tools are '
+                               'unaffected. See personal_scope.'},
+            'preferencesEnabled': {'type': 'boolean',
+                                    'description': "Inject the operator's "
+                                    'personal preference profile. Decoupled '
+                                    'from memoryEnabled. UI falls back to the '
+                                    'Memory toggle; headless fails CLOSED so '
+                                    'the operator\'s personal preferences are '
+                                    'never spliced into an API caller\'s '
+                                    'prompt. See personal_scope.'},
             'browserEnabled': {'type': 'boolean'},
             'desktopEnabled': {'type': 'boolean'},
             'swarmEnabled': {'type': 'boolean'},

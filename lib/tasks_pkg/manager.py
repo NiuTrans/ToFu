@@ -116,6 +116,15 @@ def create_task(conv_id, messages, config):
     )
     task.update({
         'convId': conv_id, 'messages': messages, 'config': config,
+        # ★ Stable assistant message id, minted CLIENT-SIDE before the send
+        #   POST and shipped in config.assistantMsgId. The frontend stamps the
+        #   same id on the streaming bubble (data-msg-id), so live progressive
+        #   translation frames (incremental._Acc._push_progressive) can route
+        #   to the still-streaming message — which has no DB index yet. Also
+        #   reused as the final commit's msg_id so the in-stream preview and the
+        #   committed translation address the SAME message. Empty for non-UI /
+        #   external callers → live preview is simply skipped (no regression).
+        '_assistantMsgId': (config or {}).get('assistantMsgId') or '',
         # Override TaskRuntime defaults with chat-specific shape:
         'status': 'running',          # chat tasks start running, not pending
         'content': '', 'thinking': '', 'error': None,
@@ -133,6 +142,20 @@ def create_task(conv_id, messages, config):
         # '_force_rotate_pair' is set transiently by analyse_stream_result
         # and consumed (cleared) by stream_llm_response on the next call.
     })
+    # ★ Identity scope for the personal-preference profile. Resolved HERE,
+    #   in the request thread, because the post-turn consolidation runs in a
+    #   detached daemon with no request context. The scope is the multi-user
+    #   tenant's user_id (populated only by login); open/private mode leave it
+    #   empty → the single global profile (personal-install semantic, no
+    #   migration). Best-effort: any failure (no request ctx) → '' = global.
+    try:
+        from lib.memory.user_profile import resolve_profile_scope
+        from routes.api_v1.auth import current_auth
+        task['_profileScope'] = resolve_profile_scope(current_auth())
+    except Exception as e:
+        logger.debug('[Task %s] profile scope resolve failed: %s', task_id[:8], e)
+        task['_profileScope'] = ''
+
     # ★ Register as the LATEST task for this conversation — freshness guard
     if conv_id:
         with _conv_latest_task_lock:
@@ -475,12 +498,27 @@ def _merge_tool_rounds(task):
 
     Single source of truth for the ``_checkpointToolRounds + toolRounds``
     concatenation that the final-persist, partial-checkpoint, and both
-    conversation-sync paths all need.  Returns ``task['toolRounds']`` directly
-    when there is no checkpoint prefix (no needless copy), else a fresh list.
+    conversation-sync paths all need.
+
+    Returns a list of SHALLOW-COPIED round dicts. The copy is load-bearing for
+    thread-safety: the swarm driver thread stamps ``_swarmSnapshot`` onto a
+    live round dict (master._persist_agent_snapshot) while THIS path may be
+    running ``json_dumps_pg(messages)`` on the same rounds from the
+    orchestrator thread. Serializing a by-reference dict that another thread
+    mutates raises ``RuntimeError: dictionary changed size during iteration``
+    (silently swallowed by the sync's except → checkpoint dropped) or persists
+    a half-stamped round. A shallow ``dict(r)`` copy is cheap — it duplicates
+    only the key→value references (the multi-KB ``toolContent`` string is
+    shared, not copied) — and gives json a stable dict to walk. The
+    ``_swarmSnapshot`` value (a dict) is copied by-reference, which is correct:
+    the stamp REPLACES that key with a fresh object rather than mutating it
+    in place, so the snapshot a given serialize sees is always internally
+    consistent.
     """
     cp = task.get('_checkpointToolRounds') or []
     cur = task.get('toolRounds') or []
-    return (list(cp) + cur) if cp else cur
+    merged = (list(cp) + cur) if cp else cur
+    return [dict(r) if isinstance(r, dict) else r for r in merged]
 
 
 # Static column order for the task_results upsert — shared by the final-result
@@ -1059,6 +1097,10 @@ def _sync_result_to_conversation(task, meta):
         if task.get('_preferencesApplied'):
             last_msg['_preferencesApplied'] = task['_preferencesApplied']
 
+        # related-conversations chip: persist so the chip survives reload
+        if task.get('_relatedConversations'):
+            last_msg['_relatedConversations'] = task['_relatedConversations']
+
         # preferences-learned: persist the "Noted: you prefer X" moment(s)
         if task.get('_preferencesLearned'):
             last_msg['_preferencesLearned'] = task['_preferencesLearned']
@@ -1169,6 +1211,21 @@ def _sync_result_to_conversation(task, meta):
             except Exception as te:
                 logger.warning('%s conv=%s Auto-translate trigger failed (non-fatal): %s',
                                pfx, conv_id, te)
+        else:
+            # No content / errored task: the safety net is skipped, so if the
+            # tool loop spun up an incremental accumulator (per-round segments
+            # translated in the background) it would otherwise dangle until its
+            # 300s idle-timeout and log a misleading "finalize never called"
+            # warning. Tear it down explicitly. No-op when no accumulator
+            # exists (autoTranslate off — the common case).
+            try:
+                from lib.translate import cancel_incremental
+                if cancel_incremental(task):
+                    logger.info('%s conv=%s cancelled incremental accumulator '
+                                '(task ended with no content / error=%s)',
+                                pfx, conv_id, bool(error))
+            except Exception as ce:
+                logger.debug('%s conv=%s cancel_incremental failed: %s', pfx, conv_id, ce)
 
     except Exception as e:
         logger.error('%s conv=%s ❌ Failed to sync result to conversation: %s',
@@ -1294,6 +1351,21 @@ def _sync_partial_to_conversation(task):
 
             last_msg = messages[-1]
             if last_msg.get('role') != 'assistant':
+                # Do NOT materialize a brand-new trailing assistant row from a
+                # thinking-only first checkpoint.  A turn that streams a stray
+                # reasoning fragment and then dies (server crash) would otherwise
+                # leave an empty husk ({content:'', thinking:'I'}) with no
+                # finishReason — which renders as a blank bubble with no finish
+                # tag and slips past the frontend ghost-cleanup (the stray
+                # `thinking` defeats its `!thinking` guard).  Wait until there's
+                # real CONTENT before appending the row; thinking accumulated by
+                # then is written alongside it, so nothing is dropped.  Updating
+                # an EXISTING assistant row (frontend placeholder) is unaffected.
+                if not content:
+                    logger.debug('[Checkpoint] conv=%s deferring trailing assistant '
+                                 'row — thinking-only first checkpoint (no content yet)',
+                                 conv_id[:8])
+                    return
                 last_msg = {'role': 'assistant', 'content': '', 'thinking': ''}
                 messages.append(last_msg)
 
@@ -1337,6 +1409,7 @@ def _sync_partial_to_conversation(task):
                 ('apiRounds', 'apiRounds'),
                 ('_memoryPrefetch', '_memoryPrefetch'),
                 ('_preferencesApplied', '_preferencesApplied'),
+                ('_relatedConversations', '_relatedConversations'),
                 ('_preferencesLearned', '_preferencesLearned'),
             ):
                 v = task.get(src_key)

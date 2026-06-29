@@ -65,6 +65,15 @@ from .commit import (
 from .incremental import (
     submit_round_segment,
     finalize_incremental,
+    cancel_incremental,
+)
+
+# Per-message in-flight dedup guard (pre-spawn double-fire prevention)
+from .inflight import (
+    claim_inflight,
+    release_inflight,
+    is_inflight,
+    msg_key,
 )
 
 # PPTX file translation
@@ -96,7 +105,9 @@ __all__ = [
     # commit
     '_commit_translation_to_db', '_commit_translation_inner', '_get_commit_lock',
     # incremental per-round translation
-    'submit_round_segment', 'finalize_incremental',
+    'submit_round_segment', 'finalize_incremental', 'cancel_incremental',
+    # in-flight dedup guard
+    'claim_inflight', 'release_inflight', 'is_inflight', 'msg_key',
     # pptx
     '_do_translate_pptx', '_ensure_pptx_upload_dir',
     '_PPTX_UPLOAD_DIR', '_MAX_PPTX_BYTES',

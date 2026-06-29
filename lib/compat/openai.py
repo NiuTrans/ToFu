@@ -67,8 +67,15 @@ def translate_openai_request(body: dict) -> tuple[list[dict], dict, dict]:
     if 'tools' in body:
         cfg.setdefault('searchMode', 'off')
         cfg.setdefault('fetchEnabled', False)
-        cfg.setdefault('memoryEnabled', False)
         cfg.setdefault('mcpEnabled', False)
+
+    # App-personal capabilities (memory store + preference profile) fail
+    # closed on this headless compat surface regardless of whether tools were
+    # supplied — the operator's personal state must never ride an OpenAI-compat
+    # call. setdefault = an explicit caller cfg still wins. Single source of
+    # truth: lib/agent_core/personal_scope.
+    from lib.agent_core.personal_scope import apply_headless_personal_defaults
+    apply_headless_personal_defaults(cfg)
 
     # Reasoning / thinking — OpenAI's `reasoning_effort` (o-series) maps
     # to our `thinkingDepth`.

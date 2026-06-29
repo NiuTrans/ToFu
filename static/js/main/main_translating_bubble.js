@@ -47,11 +47,13 @@ function _removeTranslatingBubble() {
  * Render the streaming assistant bubble in the chat DOM.
  * Shared by sendMessage and regenerateFromUser flows.
  */
-function _renderStreamingBubble(conv, sendConfig) {
+function _renderStreamingBubble(conv, sendConfig, msgId) {
   const inner = document.getElementById("chatInner");
   if (!inner) return;
   const role = _streamingBubbleRole(conv, sendConfig);
-  inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(role));
+  // Stamp the assistant message id (data-msg-id) on the bubble so live
+  // per-round translation partials can be routed to it while it streams.
+  inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(role, null, null, msgId || null));
   const el = document.getElementById('streaming-msg');
   if (el) {
     el.classList.add('message-new');

@@ -2030,6 +2030,49 @@ def _restore_from_sql_dump_if_present(base_dir, pg_port, pg_user, pg_dbname):
                        dump_path)
         return
 
+    # ⚠️ DATA-LOSS GUARD (2026-06-28 incident hardening): this dump is a
+    # ``pg_dumpall --clean --if-exists`` — applying it DROPs and recreates
+    # EVERY database in the dump. That is safe ONLY against a freshly-initdb'd
+    # cluster (the intended export→first-boot flow). If the target already
+    # holds real conversations (e.g. self-heal Stage 2 restored over a cluster
+    # that actually had data, or a stale dump was left in place), a blind
+    # restore would silently replace newer data with the snapshot. Refuse to
+    # clobber a populated target: quarantine the dump aside instead of
+    # applying it, and log loudly so an operator can decide.
+    try:
+        probe = subprocess.run(
+            [psql_bin, '-h', '127.0.0.1', '-p', str(pg_port), '-U', pg_user,
+             '-d', pg_dbname, '-tAc',
+             "SELECT count(*) FROM conversations"],
+            capture_output=True, text=True,
+            env={**os.environ, 'PGCONNECT_TIMEOUT': '10', 'PGGSSENCMODE': 'disable'},
+            timeout=30,
+        )
+        existing_convs = int((probe.stdout or '0').strip() or '0') if probe.returncode == 0 else 0
+    except Exception as e:
+        # Table absent / DB empty / probe failed → treat as a clean target
+        # (the normal first-boot case). Don't block the intended restore.
+        logger.debug('[DB] restore pre-check probe failed (assuming empty target): %s', e)
+        existing_convs = 0
+
+    if existing_convs > 0:
+        quarantine = dump_path + '.skipped-nonempty-target'
+        logger.critical(
+            '[DB] REFUSING to apply %s: target DB %r already has %d '
+            'conversations. A --clean restore would DROP and replace them '
+            '(potential data loss). Moving the dump aside to %s; apply it '
+            'manually if you are SURE. Set TOFU_FORCE_DUMP_RESTORE=1 to '
+            'override.',
+            dump_path, pg_dbname, existing_convs, quarantine)
+        if os.environ.get('TOFU_FORCE_DUMP_RESTORE') != '1':
+            try:
+                os.replace(dump_path, quarantine)
+            except OSError as e:
+                logger.error('[DB] Could not quarantine dump %s: %s', dump_path, e)
+            return
+        logger.warning('[DB] TOFU_FORCE_DUMP_RESTORE=1 — applying restore over '
+                       'a populated DB at operator request')
+
     logger.info('[DB] Restoring data from %s (%.1f MB) — this may take a moment…',
                 dump_path, size / (1024 * 1024))
     try:

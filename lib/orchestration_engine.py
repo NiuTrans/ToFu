@@ -561,6 +561,10 @@ class FlowExecutor:
             res = {'output': '', 'status': 'failed', 'error': str(e)}
         out = str(res.get('output') or '')
         st = res.get('status') or 'completed'
+        # Full streamed reasoning the runner accumulated (default SubAgent
+        # runner). Carried through step_complete + step_trace so the turn's
+        # finalized message / Task-Mode trace keep the thinking block.
+        thinking = str(res.get('thinking') or '')
 
         # Count deliverables (state-changing tool calls) the runner reports.
         sc_count, explore_count, sc_names, reported = self._count_deliverables(res)
@@ -577,7 +581,8 @@ class FlowExecutor:
             output=out, status=st, error=res.get('error') or '',
             elapsed=_elapsed, emits=emits,
             isolation='shared' if shared else 'fresh',
-            sc_count=sc_count, explore_count=explore_count, sc_names=sc_names)
+            sc_count=sc_count, explore_count=explore_count, sc_names=sc_names,
+            thinking=thinking)
 
         # Publish this node's typed outputs so downstream wired inputs can
         # read them. A node with no declared io.outputs exposes its turn as
@@ -611,6 +616,7 @@ class FlowExecutor:
 
         self._emit({'type': 'step_complete', 'node_id': nid, 'role': role,
                     'status': st, 'preview': out[:200], 'output': out,
+                    'thinking': thinking,
                     'emits': emits, 'state_changing': sc_count})
         return self._append_context(context, role, out)
 
@@ -1358,6 +1364,13 @@ class FlowExecutor:
         role = node.get('role', 'general')
         emits = resolve_emits(node)
 
+        # Accumulate the FULL streamed thinking for this node so the turn's
+        # finalized message can carry it (identical to a first-class agent
+        # turn). We capture it from the live stream rather than from
+        # SubAgentResult.reasoning_trace because the latter is truncated to
+        # 2000 chars/round — the live chunks are the complete reasoning.
+        _thinking_parts: list[str] = []
+
         def _stream_sink(kind: str, chunk: str, *, phase: str = '', **meta):
             # 'content'/'thinking' → a step_delta (streamed output chunk).
             # 'phase' → a step_phase (transient status: "waiting for model…" /
@@ -1371,6 +1384,8 @@ class FlowExecutor:
                             'emits': emits, 'phase': phase or 'working',
                             'detail': chunk, **meta})
             else:
+                if kind == 'thinking' and chunk:
+                    _thinking_parts.append(chunk)
                 self._emit({'type': 'step_delta', 'node_id': nid, 'role': role,
                             'emits': emits, 'kind': kind, 'chunk': chunk})
 
@@ -1391,6 +1406,10 @@ class FlowExecutor:
             # tool_log = [{round, tool, args_brief}, ...] — fed to the
             # engine's deliverables counter (state-changing vs exploratory).
             'tool_log': result.tool_log or [],
+            # Full streamed reasoning for this node — carried through
+            # step_complete / step_trace so the turn's finalized message
+            # keeps its thinking block (parity with a first-class agent turn).
+            'thinking': ''.join(_thinking_parts),
         }
 
     # ── plumbing ────────────────────────────────────────────────────
@@ -1408,7 +1427,7 @@ class FlowExecutor:
                     output: str, status: str, error: str, elapsed: float,
                     emits: str, isolation: str, sc_count: int = 0,
                     explore_count: int = 0, sc_names: list | None = None,
-                    subflow: bool = False) -> None:
+                    subflow: bool = False, thinking: str = '') -> None:
         """Append one durable per-node trace entry.
 
         Captures everything the canvas/inspector overlay needs to explain a
@@ -1436,6 +1455,8 @@ class FlowExecutor:
                 'input_truncated': len(eff_context or '') > _TRACE_INPUT_CHARS,
                 'output': (output or '')[:_TRACE_OUTPUT_CHARS],
                 'output_truncated': len(output or '') > _TRACE_OUTPUT_CHARS,
+                'thinking': (thinking or '')[:_TRACE_OUTPUT_CHARS],
+                'thinking_truncated': len(thinking or '') > _TRACE_OUTPUT_CHARS,
                 'status': status,
                 'error': error or '',
                 'elapsed': round(elapsed, 2),

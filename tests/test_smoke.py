@@ -40,7 +40,10 @@ class TestImportValidation:
     _SUB_PACKAGES = [
         "lib",
         "tofu_search.fetch",
+        "lib.daily_report",
+        "lib.feishu",
         "lib.llm_dispatch",
+        "lib.optimizer",
         "lib.project_mod",
         "lib.scheduler",
         "lib.swarm",

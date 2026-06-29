@@ -19,7 +19,7 @@ MAX_SCHEDULED_TASKS = 100
 
 # Task types that execute arbitrary code and are gated by
 # lib.SCHEDULER_ALLOW_CODE_EXEC. 'prompt'/'agent' are LLM-only;
-# 'pg_backup'/'optimizer' ignore their command field.
+# 'pg_backup'/'optimizer'/'reserve_reclaim' ignore their command field.
 _CODE_EXEC_TASK_TYPES = frozenset({'command', 'python'})
 
 
@@ -332,6 +332,22 @@ class ScheduledTaskManager:
             except Exception as e:
                 logger.error('[Scheduler] pg_backup task failed: %s', e, exc_info=True)
                 return False, 'PG backup error (see logs)'
+
+        elif task_type == 'reserve_reclaim':
+            # Billing janitor: release reservations orphaned by a crash/abort
+            # before settle (lib.billing.wallet_janitor.sweep_stale_reserves).
+            # ``command`` is informational only. No-op when billing is inactive
+            # (the sweep simply finds nothing to reclaim).
+            try:
+                from lib.billing.wallet_janitor import sweep_stale_reserves
+                summary = sweep_stale_reserves()
+                return True, (f"reclaimed {summary.get('reclaimed', 0)}/"
+                              f"{summary.get('candidates', 0)} hold(s), "
+                              f"{summary.get('reclaimed_micro', 0)}µ "
+                              f"(errors={summary.get('errors', 0)})")
+            except Exception as e:
+                logger.error('[Scheduler] reserve_reclaim task failed: %s', e, exc_info=True)
+                return False, 'Reserve reclaim error (see logs)'
 
         elif task_type == 'optimizer':
             # Daily Optimizer: runs lib.optimizer.run_once() in-process.
@@ -646,6 +662,47 @@ class ScheduledTaskManager:
             logger.debug('[Scheduler] Could not auto-register PostgreSQL Backup '
                          '(will retry after schema ready): %s', e)
 
+    def _ensure_default_reserve_reclaim_task(self):
+        """Idempotently register the billing reserve-reclaim cron task.
+
+        Runs ``lib.billing.wallet_janitor.sweep_stale_reserves()`` every 5
+        minutes. This is the money-correctness safety net: a request that
+        crashes between ``reserve(-estimate)`` and ``settle`` would otherwise
+        leave the hold subtracted from the user's usable balance forever. The
+        sweep releases such orphans (older than TOFU_BILLING_RESERVE_TTL,
+        default 30 min) via the idempotent ``reserve_release`` path. Matched
+        by exact name so subsequent boots never create duplicates. No-op when
+        billing is inactive.
+        """
+        try:
+            db = self._get_db()
+            row = db.execute(
+                "SELECT id FROM scheduled_tasks WHERE name=?",
+                ['Billing Reserve Reclaim']).fetchone()
+            if row:
+                logger.debug('[Scheduler] Billing Reserve Reclaim task already '
+                             'present — skipping auto-registration')
+                return
+            task = self.create_task(
+                name='Billing Reserve Reclaim',
+                schedule='*/5 * * * *',
+                command='lib.billing.wallet_janitor.sweep_stale_reserves()',  # informational
+                task_type='reserve_reclaim',
+                description='Releases billing reservations orphaned by a crash/'
+                            'abort before settle (older than '
+                            'TOFU_BILLING_RESERVE_TTL, default 30 min). '
+                            'Money-correctness safety net. Auto-registered by '
+                            'lib.scheduler.manager.',
+                notify_on_failure=True,
+                notify_on_success=False,
+                max_runtime=300,
+            )
+            logger.info('[Scheduler] Auto-registered Billing Reserve Reclaim '
+                        'task id=%s', task.get('id'))
+        except Exception as e:
+            logger.debug('[Scheduler] Could not auto-register Billing Reserve '
+                         'Reclaim (will retry after schema ready): %s', e)
+
     def start(self):
         """Start the background scheduler thread."""
         if self._running:
@@ -779,6 +836,12 @@ def start_scheduler_worker():
             mgr._ensure_default_pg_backup_task()
         except Exception as e:
             logger.debug('[Scheduler] pg-backup-task bootstrap failed: %s', e)
+
+        # Register the billing reserve-reclaim task (money-correctness net).
+        try:
+            mgr._ensure_default_reserve_reclaim_task()
+        except Exception as e:
+            logger.debug('[Scheduler] reserve-reclaim-task bootstrap failed: %s', e)
 
         try:
             from lib.scheduler.timer import resume_active_timers

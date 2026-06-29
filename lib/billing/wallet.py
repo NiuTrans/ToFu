@@ -21,8 +21,10 @@ A typical billable LLM request goes through THREE ledger rows:
 
 Steps (2) and (3) live in :func:`settle`; they are committed in the
 same transaction so the user never observes a transient over-debit.
-A janitor sweep (TODO: separate file) cancels orphaned reserves
-older than ``stale_reserve_ttl`` (default 30 min).
+Reservations orphaned by a crash/abort before settle are reclaimed by
+:func:`lib.billing.wallet_janitor.sweep_stale_reserves` (run on a timer
+by the scheduler) once they are older than ``TOFU_BILLING_RESERVE_TTL``
+(default 30 min).
 """
 
 from __future__ import annotations

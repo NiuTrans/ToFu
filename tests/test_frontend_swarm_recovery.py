@@ -57,7 +57,15 @@ win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 win._TOOL_DISPLAY = global._TOOL_DISPLAY = {};
 
+eval(fs.readFileSync(process.argv[4], 'utf8'));  // ui/streaming_swarm_panel.js (swarm builders moved here 2026-06-27)
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // ui/streaming_ui.js
+// ui/tool_rounds.js defines _isRoundSwarm (the panel render GATE). Guarded:
+// it pulls in a lot of unrelated render helpers, but only _isRoundSwarm is
+// needed here and it's a self-contained function declaration. A load error
+// must not fail the whole harness — the gate check below is conditional.
+try { eval(fs.readFileSync(process.argv[5], 'utf8')); } catch (e) {
+  console.error('[harness] tool_rounds.js load skipped: ' + (e && e.message));
+}
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -125,6 +133,79 @@ check('no_result_status_unknown', agentsNoResults.every(a => a.status === 'unkno
 const htmlNoRes = _buildSwarmPanelHTML(spawnRound, [spawnRound]);
 check('no_result_shows_no_result_pill', htmlNoRes.includes('No result'));
 
+// ── 4. DURABLE SNAPSHOT (root-cause fix): a reloaded FIRE-AND-FORGET spawn
+//      round — NO live _swarmAgents, NO await_agents sibling — carries only
+//      the backend-persisted _swarmSnapshot. It must render REAL agent cards
+//      (status/preview/tokens/modifiedFiles), NOT 'unknown' stubs. This is the
+//      exact case the old recovery path could never satisfy. ──
+const fafSpawnRound = {
+  roundNum: 1, toolName: 'spawn_agents', _swarm: true, status: 'done',
+  toolContent: JSON.stringify({
+    status: 'async_launched', swarm_id: 'sw-faf',
+    agents: [
+      { id: 'aa11', role: 'researcher', objective: 'Survey A', output_file: '/x/a.log' },
+      { id: 'bb22', role: 'coder', objective: 'Patch B', output_file: '/x/b.log' },
+    ],
+  }),
+  // The durable snapshot the backend wrote on settle (lib/swarm/snapshot.py).
+  _swarmSnapshot: {
+    settled: true, agentCount: 2, totalTokens: 1600,
+    agents: [
+      { id: 'aa11', role: 'researcher', model: 'm', objective: 'Survey A',
+        status: 'done', elapsed: 1.2, tokens: 700, preview: 'A FINDINGS BODY',
+        modifiedFiles: 0, error: '' },
+      { id: 'bb22', role: 'coder', model: 'm', objective: 'Patch B',
+        status: 'done', elapsed: 2.5, tokens: 900, preview: 'B PATCH BODY',
+        modifiedFiles: 2, error: '' },
+    ],
+  },
+};
+// Only the spawn round survives — no sibling await/get rounds at all.
+const fafRounds = [fafSpawnRound];
+const fafAgents = _recoverSwarmAgents(fafSpawnRound, fafRounds);
+check('faf_recovers_both', fafAgents.length === 2);
+const fafById = {}; for (const a of fafAgents) fafById[a.id] = a;
+check('faf_real_status_not_unknown',
+  fafById['aa11'] && fafById['aa11'].status === 'done'
+  && fafById['bb22'] && fafById['bb22'].status === 'done');
+check('faf_preview_from_snapshot',
+  fafById['aa11'] && fafById['aa11'].preview === 'A FINDINGS BODY');
+check('faf_modified_files', fafById['bb22'] && fafById['bb22'].modifiedFiles === 2);
+const fafHtml = _buildSwarmPanelHTML(fafSpawnRound, fafRounds);
+check('faf_panel_complete_pill', fafHtml.includes('Complete'));
+check('faf_panel_renders_body', fafHtml.includes('B PATCH BODY') && fafHtml.includes('sw-agent'));
+check('faf_panel_pencil_pill', fafHtml.includes('sw-a-edited'));   // bb22 edited 2 files
+// The gate must consider a snapshot-only round renderable.
+if (typeof _isRoundSwarm === 'function') {
+  check('faf_isRoundSwarm_true', _isRoundSwarm(fafSpawnRound) === true);
+}
+
+// ── 5. SETTLED SNAPSHOT clears the stale-guard footguns (#9) ──
+//   A round saved mid-flight (_swarmActive:true, ancient _swarmStartTime, no
+//   _swarmEndTime) but carrying a settled:true snapshot must, after one
+//   _buildSwarmPanelHTML, be stamped settled: _swarmActive cleared +
+//   _swarmEndTime set — so the 30-min stale guard and the 1Hz ticker can
+//   NEVER mis-fire it to "Stale"/runaway-timer. ──
+const settledStaleRound = {
+  roundNum: 1, toolName: 'spawn_agents', _swarm: true, status: 'searching',
+  _swarmActive: true, _asyncRunning: true,
+  _swarmStartTime: Date.now() - (40 * 60 * 1000),   // 40 min ago — past _SW_STALE_MS
+  toolContent: JSON.stringify({ status: 'async_launched', swarm_id: 'sw-set',
+    agents: [{ id: 'zz1', role: 'coder', objective: 'O' }] }),
+  _swarmSnapshot: {
+    settled: true, version: 100001, agentCount: 1, totalTokens: 10,
+    agents: [{ id: 'zz1', role: 'coder', objective: 'O', status: 'done',
+               elapsed: 1.0, tokens: 10, preview: 'OK', modifiedFiles: 0, error: '' }],
+  },
+};
+const setHtml = _buildSwarmPanelHTML(settledStaleRound, [settledStaleRound]);
+check('settled_clears_active', settledStaleRound._swarmActive === false
+  && settledStaleRound._asyncRunning === false);
+check('settled_stamps_endtime', !!settledStaleRound._swarmEndTime);
+check('settled_renders_complete_not_stale',
+  setHtml.includes('Complete') && !setHtml.includes('Stale'));
+check('settled_no_live_ticker', !setHtml.includes('data-sw-start'));
+
 console.log(out.join('\n'));
 """
 
@@ -140,6 +221,8 @@ def test_swarm_panel_recovery_from_sibling_rounds():
             ['node', harness,
              os.path.join(JS_DIR, 'ui', 'streaming_ui.js'),   # argv[2]
              ROOT,                                            # argv[3]
+             os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js'),  # argv[4]
+             os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),            # argv[5]
              ],
             capture_output=True, text=True, timeout=60,
         )
@@ -152,4 +235,4 @@ def test_swarm_panel_recovery_from_sibling_rounds():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'Swarm recovery failures:\n' + output
-    assert output.count('PASS') >= 13, f'expected >=13 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 25, f'expected >=25 PASS lines, got:\n{output}'

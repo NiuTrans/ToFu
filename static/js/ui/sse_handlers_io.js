@@ -42,7 +42,7 @@ function _handleHumanGuidance(ev, c) {
       //   This mirrors the finishStream auto-translate flow for assistant messages.
       //   Fire-and-forget: translates asynchronously, re-renders card when done.
       const _hgConv = conversations.find(c => c.id === convId);
-      const _hgAutoTrans = _hgConv ? (_hgConv.autoTranslate !== undefined ? !!_hgConv.autoTranslate : true) : !!autoTranslate;
+      const _hgAutoTrans = convAutoTranslate(_hgConv);
       if (_hgAutoTrans && ev.question) {
         _autoTranslateHumanGuidance(convId, ev.roundNum, ev.question, ev.responseType, ev.options || []);
       }

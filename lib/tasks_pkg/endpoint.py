@@ -1329,8 +1329,22 @@ def _finalize(task, accumulated_content, total_usage, iteration,
     with task['content_lock']:
         task['content'] = accumulated_content
     task['usage'] = total_usage
-    task['status'] = 'done'
-    task['finishReason'] = 'stop'
+    # A worker turn that returned an error (stop_reason='error') or a
+    # user/superseded abort (stop_reason='aborted') breaks out of the loop and
+    # falls through here.  Surfacing those as a clean status='done'/finish='stop'
+    # masks a real failure (often with empty content) and silently drops
+    # task['error'] set by the failed turn.  Mirror the single-turn orchestrator
+    # contract (orchestrator.py:1932) and the FATAL path below: report the
+    # true terminal state and carry the error envelope onto the DONE event.
+    if stop_reason == 'error':
+        task['status'] = 'error'
+        task['finishReason'] = 'error'
+    elif stop_reason == 'aborted':
+        task['status'] = 'aborted'
+        task['finishReason'] = 'aborted'
+    else:
+        task['status'] = 'done'
+        task['finishReason'] = 'stop'
     # ★ Clear _endpoint_phase once the loop is finalized.  Without this the
     #   state snapshot (see routes/chat.py) still reports endpointPhase='reviewing'
     #   after approval, which the frontend's reconnect paths misinterpret as
@@ -1351,9 +1365,11 @@ def _finalize(task, accumulated_content, total_usage, iteration,
     done_evt = build_event(
         EventType.DONE,
         usage=total_usage,
-        finishReason='stop',
+        finishReason=task['finishReason'],
         endpointReason=stop_reason,
     )
+    if task.get('error'):
+        done_evt['error'] = task['error']
     if task.get('preset'):
         done_evt['preset'] = task['preset']
     if task.get('model'):

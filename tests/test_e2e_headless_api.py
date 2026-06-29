@@ -42,6 +42,11 @@ _STATE = {'app': None, 'tmp': None, 'admin': None, 'user': None,
 def _setup_once():
     if _STATE['app'] is not None:
         return _STATE
+    # ⚠️ DATA-LOSS GUARD (2026-06-28): imports server.py + builds the real app
+    # OUTSIDE the conftest flask_app/live_server fixtures, so it must call the
+    # keystone DB guard itself before touching the real app/DB.
+    from tests.conftest import _assert_test_database
+    _assert_test_database('test_e2e_headless_api._setup_once')
     _STATE['tmp'] = tempfile.TemporaryDirectory()
     tmp = _STATE['tmp'].name
     # Patch the API-key + usage stores to a tempdir BEFORE booting server.

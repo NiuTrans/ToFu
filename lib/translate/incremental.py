@@ -95,7 +95,8 @@ def _gate(task) -> bool:
     if task.get('_autopilot_kick') or task.get('_inline_messages'):
         return False
     cfg = task.get('config') or {}
-    if not cfg.get('autoTranslate'):
+    from lib.conv_config import resolve_auto_translate
+    if not resolve_auto_translate(cfg):
         return False
     return True
 
@@ -106,6 +107,13 @@ class _Acc:
     def __init__(self, task):
         self.task_id = task['id']
         self.conv_id = task.get('convId') or ''
+        # Stable assistant message id, minted client-side and threaded through
+        # task['_assistantMsgId'] at task start (see create_task). Required to
+        # route LIVE progressive-partial push frames to the still-streaming
+        # bubble — the message has no DB index yet mid-task. Empty when the
+        # caller didn't supply one (old frontend / non-UI start path): we then
+        # simply skip the live preview and still finalize at task end.
+        self.msg_id = task.get('_assistantMsgId') or ''
         self.q: queue.Queue = queue.Queue()
         self.segments: dict[int, str] = {}   # round_num -> translated text
         self.originals: dict[int, str] = {}  # round_num -> original text
@@ -129,9 +137,12 @@ class _Acc:
             try:
                 item = self.q.get(timeout=_WORKER_IDLE_TIMEOUT)
             except queue.Empty:
-                logger.warning('[IncTranslate] task=%s worker idle-timeout — '
-                               'abandoning (finalize never called; likely an '
-                               'error/superseded task)', self.task_id[:8])
+                logger.warning('[IncTranslate] task=%s conv=%s worker idle-timeout '
+                               'after %.0fs — abandoning (%d segments translated; '
+                               'neither finalize nor cancel arrived — task likely '
+                               'errored, aborted, or superseded)',
+                               self.task_id[:8], (self.conv_id or '?')[:8],
+                               _WORKER_IDLE_TIMEOUT, len(self.segments))
                 self._cleanup()
                 return
             try:
@@ -142,6 +153,13 @@ class _Acc:
                 elif kind == 'fin':
                     _, conv_id, msg_idx, content, msg_id = item
                     self._do_finalize(conv_id, msg_idx, content, msg_id, *helpers)
+                    self._cleanup()
+                    return
+                elif kind == 'cancel':
+                    logger.info('[IncTranslate] task=%s cancelled before finalize '
+                                '(%d segments translated, discarded) — caller skipped '
+                                'translation or task ended without content',
+                                self.task_id[:8], len(self.segments))
                     self._cleanup()
                     return
             except Exception as e:
@@ -163,6 +181,7 @@ class _Acc:
                 with self.lock:
                     self.originals[round_num] = original
                     self.segments[round_num] = original
+                self._push_progressive()
                 return
             body, nt_blocks = extract_nt(original)
             if not body.strip():
@@ -182,6 +201,11 @@ class _Acc:
             logger.debug('[IncTranslate] task=%s round=%d segment translated '
                          '(%d→%d chars)', self.task_id[:8], round_num,
                          len(original), len(translated))
+            # ★ Live progressive display: the moment this round's segment is
+            #   translated, push the translated-so-far as a partial frame so the
+            #   user watches the Chinese fill in round-by-round during the task,
+            #   instead of waiting for the whole reply to finish.
+            self._push_progressive()
         except Exception as e:
             logger.warning('[IncTranslate] task=%s round=%d segment translate '
                            'failed: %s', self.task_id[:8], round_num, e)
@@ -193,8 +217,26 @@ class _Acc:
 
     def _do_finalize(self, conv_id, msg_idx, content, msg_id, system_prompt,
                      translate_fn, extract_nt, reattach_nt):
-        from lib.translate.commit import _commit_translation_to_db
         content = content or ''
+        # The safety net handed us ownership of the per-(conv,msgId) in-flight
+        # guard (it set _guard_owned_by_worker before finalize). Release it when
+        # this finalize returns — by any path — so a legitimate later
+        # re-translate (e.g. message edited) can claim it again.
+        try:
+            self._do_finalize_inner(conv_id, msg_idx, content, msg_id,
+                                    system_prompt, translate_fn, extract_nt,
+                                    reattach_nt)
+        finally:
+            try:
+                from lib.translate.inflight import release_inflight
+                release_inflight(conv_id, msg_id, msg_idx)
+            except Exception as e:
+                logger.debug('[IncTranslate] task=%s release_inflight failed: %s',
+                             self.task_id[:8], e)
+
+    def _do_finalize_inner(self, conv_id, msg_idx, content, msg_id, system_prompt,
+                           translate_fn, extract_nt, reattach_nt):
+        from lib.translate.commit import _commit_translation_to_db
         # Surface the live spinner while we assemble / translate any tail.
         self._push({'type': 'running', 'status': 'running',
                     'statusKind': 'started', 'statusMessage': ''},
@@ -289,6 +331,37 @@ class _Acc:
             return None
         return joined_trans
 
+    def _assemble_progressive(self):
+        """Join currently-translated segments in round order for a LIVE preview.
+
+        Unlike :meth:`_assemble`, there is NO coverage gate — this is a
+        best-effort partial shown WHILE the task is still streaming (covers only
+        the rounds closed so far), not the committed final translation.
+        """
+        with self.lock:
+            if not self.segments:
+                return ''
+            rounds = sorted(self.segments.keys())
+            return '\n\n'.join(self.segments[rn] for rn in rounds
+                               if self.segments[rn].strip())
+
+    def _push_progressive(self):
+        """Emit a live ``running``/``partial`` frame with the translated-so-far.
+
+        Routed by the task-time assistant ``msg_id`` (the only stable handle to
+        the still-streaming bubble — it has no DB index yet). No-op when that id
+        is unknown, so a non-UI / old-frontend start path silently degrades to
+        the existing end-of-task display with zero regression.
+        """
+        if not self.conv_id or not self.msg_id:
+            return
+        partial = self._assemble_progressive()
+        if not partial:
+            return
+        self._push({'type': 'running', 'status': 'running',
+                    'statusKind': 'in_progress', 'partial': partial},
+                   self.conv_id, None, self.msg_id)
+
     def _push(self, payload, conv_id, msg_idx, msg_id):
         if not conv_id:
             return
@@ -352,5 +425,36 @@ def finalize_incremental(task, conv_id, msg_idx, content, msg_id=None) -> bool:
         return True
     except Exception as e:
         logger.warning('[IncTranslate] finalize_incremental failed task=%s: %s',
+                       (task or {}).get('id', '?')[:8], e)
+        return False
+
+
+def cancel_incremental(task) -> bool:
+    """Stop a per-task accumulator's worker WITHOUT finalizing.
+
+    Call this whenever the task ends without the incremental translation being
+    committed — the caller decided to skip translation (autoTranslate off,
+    content already translated / already in the target language, a frontend
+    task owns it) OR the task errored / produced no content so
+    :func:`finalize_incremental` will never run. Without this the worker thread
+    sits idle until ``_WORKER_IDLE_TIMEOUT`` (300s) and then logs a misleading
+    "finalize never called" warning, and the pre-translated segments are
+    silently discarded.
+
+    Returns True if an accumulator was found and signalled to cancel, False if
+    there was none (the common case — most tasks have autoTranslate off).
+    """
+    try:
+        tid = task.get('id') if task else None
+        if not tid:
+            return False
+        with _acc_lock:
+            acc = _accumulators.get(tid)
+        if acc is None:
+            return False
+        acc.q.put(('cancel',))
+        return True
+    except Exception as e:
+        logger.warning('[IncTranslate] cancel_incremental failed task=%s: %s',
                        (task or {}).get('id', '?')[:8], e)
         return False

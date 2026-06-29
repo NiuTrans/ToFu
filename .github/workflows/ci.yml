@@ -35,3 +35,53 @@ jobs:
           pip install -e ".[test]"
       - name: Run tests
         run: pytest -ra
+
+  # ── Frontend tests (jsdom harnesses + tsc --checkJs ratchet) ──
+  # The Python `test` job above has no Node, so every tests/test_frontend_*.py
+  # silently pytest.skip()s there. This job installs Node + the JS dev-deps so
+  # the jsdom harnesses and the type-check ratchet actually execute. `-ra`
+  # surfaces any residual skips so a missing dep can't hide a whole suite again.
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install JS dev-deps
+        run: npm ci || npm install
+      - name: Install package + test extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+      - name: Run frontend tests
+        run: pytest tests/test_frontend_*.py -ra
+
+  # ── End-to-end smoke (real Quart/Hypercorn app + real headless Chromium) ──
+  # Boots the actual app on an ephemeral port with a STUB LLM (no API key /
+  # no network) and drives a real browser to it — asserting the served bundle
+  # loaded, streaming rendered, and a tool round rendered. This is the only
+  # lane that catches INTEGRATION-class bugs (bundler allowlist, SSE→render)
+  # that jsdom unit harnesses structurally cannot. CI runners are root, so
+  # `playwright install --with-deps chromium` installs the GUI libs cleanly;
+  # the conftest LD_LIBRARY_PATH bootstrap is a no-op there (libs already on
+  # the system) and the rootless-conda fallback for shared dev nodes.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package + test extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+          pip install playwright
+      - name: Install Chromium + system deps
+        run: python -m playwright install --with-deps chromium
+      - name: Run E2E smoke test
+        run: pytest tests/test_e2e_smoke.py -m visual -ra

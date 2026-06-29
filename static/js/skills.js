@@ -28,7 +28,7 @@ async function _populateSkillsTab() {
   } catch (e) {
     debugLog('[Skills] Failed to load: ' + e.message, 'error');
     var grid = document.getElementById('skillsCatalogGrid');
-    if (grid) grid.innerHTML = '<p class="stg-empty">加载失败: ' + escapeHtml(e.message) + '</p>';
+    if (grid) grid.innerHTML = '<p class="stg-empty">' + escapeHtml(t('skills.loadFailed', { err: e.message })) + '</p>';
   }
 }
 
@@ -80,7 +80,7 @@ function _skillsRenderPagination(total, pageSize) {
   var from = (cur - 1) * pageSize + 1;
   var to = Math.min(total, cur * pageSize);
   var html = '<div class="skills-pagination">';
-  html += '<span class="skills-page-info">显示 ' + from + '–' + to + ' / ' + total + '</span>';
+  html += '<span class="skills-page-info">' + escapeHtml(t('skills.pageInfo', { from: from, to: to, total: total })) + '</span>';
   html += '<div class="skills-page-ctrls">';
   var prevDis = cur <= 1 ? ' disabled' : '';
   var nextDis = cur >= pages ? ' disabled' : '';
@@ -110,9 +110,9 @@ function _skillsRender() {
 function _skillsRenderHeader() {
   var total = document.getElementById('skillsTotalCount');
   var cat = document.getElementById('skillsCatalogCount');
-  if (total) total.textContent = _skillsInstalled.length + ' installed';
+  if (total) total.textContent = t('skills.countInstalled', { n: _skillsInstalled.length });
   if (cat) {
-    cat.textContent = _skillsCatalog.length + ' in catalog';
+    cat.textContent = t('skills.countCatalog', { n: _skillsCatalog.length });
     cat.style.display = _skillsScope === 'catalog' ? '' : 'none';
   }
 }
@@ -131,7 +131,7 @@ function _skillsRenderCategoryBar() {
     var c = e.category || 'Other';
     cats[c] = (cats[c] || 0) + 1;
   });
-  var html = '<button class="mcp-cat-pill' + (_skillsActiveCategory === 'all' ? ' active' : '') + '" onclick="_skillsSetCategory(\'all\')">全部 <span class="mcp-cat-count">' + _skillsCatalog.length + '</span></button>';
+  var html = '<button class="mcp-cat-pill' + (_skillsActiveCategory === 'all' ? ' active' : '') + '" onclick="_skillsSetCategory(\'all\')">' + escapeHtml(t('skills.scopeAll')) + ' <span class="mcp-cat-count">' + _skillsCatalog.length + '</span></button>';
   var order = ['Documents', 'Coding', 'Creative', 'Infrastructure', 'Productivity', 'Research', 'Other'];
   order.forEach(function (c) {
     if (!cats[c]) return;
@@ -156,7 +156,7 @@ function _skillsRenderCatalog() {
   if (!grid) return;
   var items = _skillsFilteredCatalog();
   if (!items.length) {
-    grid.innerHTML = '<p class="stg-empty">没有匹配的 Skill。</p>';
+    grid.innerHTML = '<p class="stg-empty">' + escapeHtml(t('skills.noMatch')) + '</p>';
     return;
   }
   // Featured first, then alphabetical
@@ -183,19 +183,19 @@ function _skillsRenderCatalogCard(e) {
   html += '<div class="mcp-app-icon">' + iconHtml + '</div>';
   html += '<div class="mcp-app-name"><span class="mcp-app-name-text">' + escapeHtml(e.name) + '</span>';
   if (e.author && /anthropic/i.test(e.author)) {
-    html += '<span class="skill-badge-official">Official</span>';
+    html += '<span class="skill-badge-official">' + escapeHtml(t('skills.official')) + '</span>';
   }
   html += '</div>';
   if (e.author) {
-    html += '<div class="skill-author">by ' + escapeHtml(e.author) + '</div>';
+    html += '<div class="skill-author">' + escapeHtml(t('skills.by', { author: e.author })) + '</div>';
   }
   html += '<div class="mcp-app-desc">' + escapeHtml(e.description || '') + '</div>';
 
   // Requirements warning
   var reqs = e.requires || {};
   var warnBits = [];
-  if (Array.isArray(reqs.bins) && reqs.bins.length) warnBits.push('需要 ' + reqs.bins.join(', '));
-  if (Array.isArray(reqs.env) && reqs.env.length) warnBits.push('需要环境变量 ' + reqs.env.join(', '));
+  if (Array.isArray(reqs.bins) && reqs.bins.length) warnBits.push(t('skills.reqBins', { bins: reqs.bins.join(', ') }));
+  if (Array.isArray(reqs.env) && reqs.env.length) warnBits.push(t('skills.reqEnv', { env: reqs.env.join(', ') }));
   if (warnBits.length) {
     html += '<div class="skill-badge-warn">⚠ ' + escapeHtml(warnBits.join(' · ')) + '</div>';
   }
@@ -205,18 +205,18 @@ function _skillsRenderCatalogCard(e) {
   if (e.homepage) {
     html += '<a class="mcp-app-repo" href="' + escapeHtml(e.homepage) + '" target="_blank" rel="noopener" title="Homepage">' +
       '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>' +
-      ' Repo</a>';
+      ' ' + escapeHtml(t('skills.repo')) + '</a>';
   } else {
     html += '<span></span>';
   }
   html += '<div class="skill-card-actions">';
   if (installed) {
     var memId = e.installed_memory_id || e.id;
-    html += '<span class="skill-installed-tag">✓ 已安装</span>';
-    html += '<button class="btn btn-secondary btn-xs" onclick="_skillsViewFiles(\'' + escapeHtml(memId) + '\')">查看文件</button>';
-    html += '<button class="btn btn-secondary btn-xs" onclick="_skillsUninstall(\'' + escapeHtml(memId) + '\')">卸载</button>';
+    html += '<span class="skill-installed-tag">' + escapeHtml(t('skills.installedTag')) + '</span>';
+    html += '<button class="btn btn-secondary btn-xs" onclick="_skillsViewFiles(\'' + escapeHtml(memId) + '\')">' + escapeHtml(t('skills.viewFiles')) + '</button>';
+    html += '<button class="btn btn-secondary btn-xs" onclick="_skillsUninstall(\'' + escapeHtml(memId) + '\')">' + escapeHtml(t('skills.uninstallBtn')) + '</button>';
   } else {
-    html += '<button class="btn btn-primary btn-xs" onclick="_skillsCatalogInstall(\'' + escapeHtml(e.id) + '\', this)">安装</button>';
+    html += '<button class="btn btn-primary btn-xs" onclick="_skillsCatalogInstall(\'' + escapeHtml(e.id) + '\', this)">' + escapeHtml(t('skills.installBtn')) + '</button>';
   }
   html += '</div>';
   html += '</div></div>';
@@ -234,7 +234,7 @@ function _skillsRenderInstalled() {
     return true;
   });
   if (!items.length) {
-    grid.innerHTML = '<p class="stg-empty">还没有安装任何技能包。可在「市场」标签页一键安装，或拖入 .zip 文件。</p>';
+    grid.innerHTML = '<p class="stg-empty">' + escapeHtml(t('skills.emptyInstalled')) + '</p>';
     return;
   }
   items.sort(function (a, b) { return (b.updated || '').localeCompare(a.updated || ''); });
@@ -248,17 +248,17 @@ function _skillsRenderInstalled() {
     var html2 = '<div class="mcp-app-card skill-card is-installed">';
     html2 += '<div class="mcp-app-icon">' + Icon('package', 26) + '</div>';
     html2 += '<div class="mcp-app-name"><span class="mcp-app-name-text">' + escapeHtml(m.name) + '</span>';
-    html2 += '<span class="mcp-app-status ' + (m.enabled ? 'on' : 'off') + '"><span class="dot"></span>' + (m.enabled ? 'ON' : 'OFF') + '</span>';
+    html2 += '<span class="mcp-app-status ' + (m.enabled ? 'on' : 'off') + '"><span class="dot"></span>' + escapeHtml(m.enabled ? t('skills.statusOn') : t('skills.statusOff')) + '</span>';
     html2 += '</div>';
-    html2 += '<div class="skill-author">scope: ' + escapeHtml(m.scope) + ' · id: ' + escapeHtml(m.id) + '</div>';
+    html2 += '<div class="skill-author">' + escapeHtml(t('skills.scopeIdLine', { scope: m.scope, id: m.id })) + '</div>';
     html2 += '<div class="mcp-app-desc">' + escapeHtml(m.description || '') + '</div>';
     if (ineligible && Array.isArray(m.ineligible_reasons) && m.ineligible_reasons.length) {
       html2 += '<div class="skill-badge-warn">⚠ ' + escapeHtml(m.ineligible_reasons.join(' · ')) + '</div>';
     }
     html2 += '<div class="skill-card-footer"><span></span><div class="skill-card-actions">';
-    html2 += '<button class="btn btn-secondary btn-xs" onclick="_skillsViewFiles(\'' + escapeHtml(m.id) + '\')">查看文件</button>';
-    html2 += '<button class="btn btn-secondary btn-xs" onclick="_skillsToggleEnabled(\'' + escapeHtml(m.id) + '\', this)">' + (m.enabled ? '禁用' : '启用') + '</button>';
-    html2 += '<button class="btn btn-secondary btn-xs" onclick="_skillsUninstall(\'' + escapeHtml(m.id) + '\')">卸载</button>';
+    html2 += '<button class="btn btn-secondary btn-xs" onclick="_skillsViewFiles(\'' + escapeHtml(m.id) + '\')">' + escapeHtml(t('skills.viewFiles')) + '</button>';
+    html2 += '<button class="btn btn-secondary btn-xs" onclick="_skillsToggleEnabled(\'' + escapeHtml(m.id) + '\', this)">' + escapeHtml(m.enabled ? t('skills.disable') : t('skills.enable')) + '</button>';
+    html2 += '<button class="btn btn-secondary btn-xs" onclick="_skillsUninstall(\'' + escapeHtml(m.id) + '\')">' + escapeHtml(t('skills.uninstallBtn')) + '</button>';
     html2 += '</div></div></div>';
     return html2;
   }).join('');
@@ -268,41 +268,41 @@ function _skillsRenderInstalled() {
 // ── Actions ───────────────────────────────────────────────────
 
 async function _skillsCatalogInstall(skillId, btn) {
-  if (btn) { btn.disabled = true; btn.textContent = '安装中…'; }
-  _skillsToast('正在下载并安装 ' + skillId + ' …');
+  if (btn) { btn.disabled = true; btn.textContent = t('skills.installing'); }
+  _skillsToast(t('skills.downloadingInstalling', { id: skillId }));
   try {
     var r = await Api.memory.catalogInstall(skillId, 'project');
     var d = (r ? await r.json().catch(function () { return {}; }) : {});
     if (!r || !r.ok) {
-      _skillsToast('安装失败: ' + (d.error || r.statusText), 'error');
-      if (btn) { btn.disabled = false; btn.textContent = '安装'; }
+      _skillsToast(t('skills.installFailed', { err: (d.error || r.statusText) }), 'error');
+      if (btn) { btn.disabled = false; btn.textContent = t('skills.installBtn'); }
       return;
     }
     var hints = d.install_hints || [];
-    var msg = '已安装 "' + d.memory.name + '"';
-    if (hints.length) msg += ' · 发现安装脚本 ' + hints.map(function (h) { return h.file; }).join(', ') + '（出于安全未自动执行）';
+    var msg = t('skills.installedToast', { name: d.memory.name });
+    if (hints.length) msg += t('skills.installHintSuffix', { files: hints.map(function (h) { return h.file; }).join(', ') });
     _skillsToast(msg, 'success');
     debugLog('[Skills] Installed: ' + d.memory.name, 'success');
     await _populateSkillsTab();
   } catch (e) {
-    _skillsToast('安装异常: ' + e.message, 'error');
-    if (btn) { btn.disabled = false; btn.textContent = '安装'; }
+    _skillsToast(t('skills.installError', { err: e.message }), 'error');
+    if (btn) { btn.disabled = false; btn.textContent = t('skills.installBtn'); }
   }
 }
 
 async function _skillsUninstall(memoryId) {
-  if (!await showConfirm('确定要卸载技能包 "' + memoryId + '" 吗？整个目录会被删除。', { danger: true })) return;
+  if (!await showConfirm(t('skills.uninstallConfirm', { id: memoryId }), { danger: true })) return;
   try {
     var r = await Api.memory.remove(memoryId);
     if (!r || !r.ok) {
       var d = (r ? await r.json().catch(function () { return {}; }) : {});
-      _skillsToast('卸载失败: ' + (d.error || (r && r.statusText) || 'no response'), 'error');
+      _skillsToast(t('skills.uninstallFailed', { err: (d.error || (r && r.statusText) || t('skills.noResponse')) }), 'error');
       return;
     }
-    _skillsToast('已卸载 ' + memoryId, 'success');
+    _skillsToast(t('skills.uninstalledToast', { id: memoryId }), 'success');
     await _populateSkillsTab();
   } catch (e) {
-    _skillsToast('卸载异常: ' + e.message, 'error');
+    _skillsToast(t('skills.uninstallError', { err: e.message }), 'error');
   }
 }
 
@@ -312,7 +312,7 @@ async function _skillsToggleEnabled(memoryId, btn) {
     if (!r || !r.ok) throw new Error('HTTP ' + (r ? r.status : 'no response'));
     await _populateSkillsTab();
   } catch (e) {
-    _skillsToast('切换失败: ' + e.message, 'error');
+    _skillsToast(t('skills.toggleFailed', { err: e.message }), 'error');
   }
 }
 
@@ -325,16 +325,16 @@ async function _skillsViewFiles(memoryId) {
   var listEl = document.getElementById('skillsFilesList');
   if (!overlay || !listEl) return;
   titleEl.textContent = memoryId;
-  descEl.textContent = '加载中…';
+  descEl.textContent = t('skills.filesLoading');
   listEl.innerHTML = '';
   overlay.style.display = 'flex';
   try {
     var d = await Api.memory.files(memoryId);
     if (!d) {
-      descEl.textContent = '加载失败';
+      descEl.textContent = t('skills.filesLoadFailed');
       return;
     }
-    descEl.textContent = d.count + ' 个文件 · ' + d.root;
+    descEl.textContent = t('skills.filesCount', { n: d.count, root: d.root });
     var _fkSvg = function(inner) { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>'; };
     var iconMap = {
       skill: _fkSvg('<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/>'),
@@ -353,7 +353,7 @@ async function _skillsViewFiles(memoryId) {
     }).join('');
     listEl.innerHTML = html;
   } catch (e) {
-    descEl.textContent = '异常: ' + e.message;
+    descEl.textContent = t('skills.filesError', { err: e.message });
   }
 }
 
@@ -416,7 +416,7 @@ function _skillsAttachDropZone() {
         return;
       }
     }
-    _skillsToast('拖入的不是 .zip 技能包', 'error');
+    _skillsToast(t('skills.notZip'), 'error');
   });
 }
 
@@ -428,7 +428,7 @@ function _skillsInstallFromInput(input) {
 }
 
 async function _skillsUploadZip(file) {
-  _skillsToast('正在安装 ' + file.name + ' …');
+  _skillsToast(t('skills.installingFile', { name: file.name }));
   var fd = new FormData();
   fd.append('file', file);
   fd.append('scope', 'project');
@@ -436,16 +436,16 @@ async function _skillsUploadZip(file) {
     var r = await Api.memory.install(fd);
     var d = (r ? await r.json().catch(function () { return {}; }) : {});
     if (!r || !r.ok) {
-      _skillsToast('安装失败: ' + (d.error || (r && r.statusText) || 'no response'), 'error');
+      _skillsToast(t('skills.installFailed', { err: (d.error || (r && r.statusText) || t('skills.noResponse')) }), 'error');
       return;
     }
     var hints = d.install_hints || [];
-    var msg = '已安装 "' + d.memory.name + '"';
-    if (hints.length) msg += ' · 安装脚本: ' + hints.map(function (h) { return h.file; }).join(', ');
+    var msg = t('skills.installedToast', { name: d.memory.name });
+    if (hints.length) msg += t('skills.installHintSuffixUpload', { files: hints.map(function (h) { return h.file; }).join(', ') });
     _skillsToast(msg, 'success');
     await _populateSkillsTab();
   } catch (e) {
-    _skillsToast('安装异常: ' + e.message, 'error');
+    _skillsToast(t('skills.installError', { err: e.message }), 'error');
   }
 }
 

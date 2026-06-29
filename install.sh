@@ -1087,33 +1087,38 @@ else
     fi
 fi
 
-# ── Optional: bundled internal MCP servers (hope-mcp, xuecheng-mcp) ──
-# personal/internal exports include sibling repos under vendor/<name>/.
-# Install them so the MCP tab's "Install" button (which spawns
-# `<name>-mcp` on PATH) works out of the box. Skipped silently if
-# vendor/ doesn't exist (opensource exports / fresh git clone).
-if [[ -d "${INSTALL_DIR}/vendor" ]]; then
-    step "Installing bundled internal MCP servers"
-    _BUNDLED_MCPS=()
-    for _mcp in hope-mcp xuecheng-mcp llm-mcp; do
-        _path="${INSTALL_DIR}/vendor/${_mcp}"
-        if [[ -d "$_path" && -f "$_path/pyproject.toml" ]]; then
-            _BUNDLED_MCPS+=("$_path")
-        fi
-    done
-    if [[ ${#_BUNDLED_MCPS[@]} -eq 0 ]]; then
-        info "No bundled MCP repos under vendor/ — skipping"
-    elif ! python -c "import pip" 2>/dev/null; then
-        warn "pip not available — cannot install bundled MCP servers"
-        warn "Manual recovery later: pip install ${_BUNDLED_MCPS[*]}"
+# ── Optional: bundled internal MCP servers (hope-mcp, xuecheng-mcp, llm-mcp) ──
+# These private servers aren't on PyPI, so the MCP tab's "Install" button
+# (which spawns `<name>-mcp` on PATH) can't fetch them — we must pip-install
+# the source here. Sources, in priority order:
+#   1. vendor/<name>/   — personal/internal EXPORTS bundle the source here.
+#   2. ../<name>/        — a DEV checkout: sibling repos next to this one.
+# Covering the sibling case means a developer clone (no vendor/) also gets the
+# launchers on PATH, so click-to-install is a fast handshake, not a cold pip.
+# Skipped silently if neither source exists (opensource exports).
+step "Installing bundled internal MCP servers"
+_BUNDLED_MCPS=()
+for _mcp in hope-mcp xuecheng-mcp llm-mcp; do
+    _vendor_path="${INSTALL_DIR}/vendor/${_mcp}"
+    _sibling_path="$(cd "${INSTALL_DIR}/.." 2>/dev/null && pwd)/${_mcp}"
+    if [[ -f "${_vendor_path}/pyproject.toml" ]]; then
+        _BUNDLED_MCPS+=("$_vendor_path")
+    elif [[ -f "${_sibling_path}/pyproject.toml" ]]; then
+        _BUNDLED_MCPS+=("$_sibling_path")
+    fi
+done
+if [[ ${#_BUNDLED_MCPS[@]} -eq 0 ]]; then
+    info "No bundled MCP repos (vendor/ or sibling checkout) — skipping"
+elif ! python -c "import pip" 2>/dev/null; then
+    warn "pip not available — cannot install bundled MCP servers"
+    warn "Manual recovery later: pip install ${_BUNDLED_MCPS[*]}"
+else
+    info "Installing: ${_BUNDLED_MCPS[*]}"
+    if _safe_pip_install --upgrade "${_BUNDLED_MCPS[@]}"; then
+        ok "Bundled MCP servers installed (hope-mcp / xuecheng-mcp / llm-mcp now on PATH)"
     else
-        info "Installing: ${_BUNDLED_MCPS[*]}"
-        if _safe_pip_install --upgrade "${_BUNDLED_MCPS[@]}"; then
-            ok "Bundled MCP servers installed (hope-mcp / xuecheng-mcp now on PATH)"
-        else
-            warn "Bundled MCP install failed — Settings → MCP install buttons may fail"
-            warn "Retry manually: pip install ${_BUNDLED_MCPS[*]}"
-        fi
+        warn "Bundled MCP install failed — Settings → MCP install buttons may fail"
+        warn "Retry manually: pip install ${_BUNDLED_MCPS[*]}"
     fi
 fi
 

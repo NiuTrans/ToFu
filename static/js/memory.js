@@ -40,10 +40,10 @@ function _updateMemoryModalBtn() {
   const btn = document.getElementById("memoryModalToggleBtn");
   if (!btn) return;
   if (memoryEnabled) {
-    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 11-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg> 停用 Memory';
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 11-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg> ' + _esc(t('memory.disable'));
     btn.className = "memory-action-btn memory-btn-off";
   } else {
-    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/><path d="M12 5v14"/></svg> 启用 Memory';
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/><path d="M12 5v14"/></svg> ' + _esc(t('memory.enable'));
     btn.className = "memory-action-btn memory-btn-on";
   }
 }
@@ -83,7 +83,7 @@ async function refreshMemoryList(scope) {
   scope = scope || activeTab?.dataset?.scope || "all";
 
   // Show loading skeleton
-  list.innerHTML = '<div class="memory-loading"><div class="memory-loading-dot"></div><div class="memory-loading-dot"></div><div class="memory-loading-dot"></div><span>加载中...</span></div>';
+  list.innerHTML = '<div class="memory-loading"><div class="memory-loading-dot"></div><div class="memory-loading-dot"></div><div class="memory-loading-dot"></div><span>' + _esc(t('memory.loading')) + '</span></div>';
 
   try {
     const d = await Api.memory.list(scope);
@@ -96,9 +96,9 @@ async function refreshMemoryList(scope) {
     console.error("[Memory] Fetch error:", e);
     list.innerHTML = `<div class="memory-empty">
       <span class="memory-empty-icon"></span>
-      <div class="memory-empty-title">加载失败</div>
+      <div class="memory-empty-title">${_esc(t('memory.loadFailed'))}</div>
       <div style="margin-top:4px;font-size:12px;opacity:.7">${_esc(e.message)}</div>
-      <button class="memory-retry-btn" onclick="refreshMemoryList()">重试</button>
+      <button class="memory-retry-btn" onclick="refreshMemoryList()">${_esc(t('memory.retry'))}</button>
     </div>`;
   }
 }
@@ -121,15 +121,15 @@ function _renderMemoryCards(memories) {
     if (_memoryFilter && memories.length) {
       list.innerHTML = `<div class="memory-empty">
         <span class="memory-empty-icon"></span>
-        <div class="memory-empty-title">没有匹配「${_esc(_memoryFilter)}」的记忆</div>
-        <div style="margin-top:4px;font-size:12px;opacity:.7">共 ${memories.length} 条记忆</div>
+        <div class="memory-empty-title">${_esc(t('memory.noMatch', { q: _memoryFilter }))}</div>
+        <div style="margin-top:4px;font-size:12px;opacity:.7">${_esc(t('memory.matchCount', { n: memories.length }))}</div>
       </div>`;
     } else {
       list.innerHTML = `<div class="memory-empty">
         <span class="memory-empty-icon"></span>
-        <div class="memory-empty-title">还没有积累任何记忆</div>
+        <div class="memory-empty-title">${_esc(t('memory.emptyTitle'))}</div>
         <div style="margin-top:6px;font-size:12px;opacity:.7;line-height:1.7">
-          AI 在对话中发现有用模式时会自动保存记忆<br>你也可以点击下方「+ 新建」手动添加
+          ${t('memory.emptyHint')}
         </div>
       </div>`;
     }
@@ -146,7 +146,7 @@ function _renderMemoryCards(memories) {
       console.error("[Memory] Render error for", sk.name, e);
       const errDiv = document.createElement("div");
       errDiv.className = "memory-card memory-card-error";
-      errDiv.textContent = `渲染失败: ${sk.name}`;
+      errDiv.textContent = t('memory.renderFailed', { name: sk.name });
       frag.appendChild(errDiv);
     }
   });
@@ -176,7 +176,7 @@ function _buildMemoryCardEl(sk) {
 
   const scopeBadge = document.createElement("span");
   scopeBadge.className = "memory-card-scope " + sk.scope;
-  scopeBadge.textContent = sk.scope === "global" ? "全局" : "项目";
+  scopeBadge.textContent = sk.scope === "global" ? t('memory.scopeGlobal') : t('memory.scopeProject');
   header.appendChild(scopeBadge);
 
   // Package badge (SKILL.md directory package)
@@ -196,7 +196,7 @@ function _buildMemoryCardEl(sk) {
   // Toggle switch (iOS-style pill)
   const toggle = document.createElement("span");
   toggle.className = "memory-toggle-switch" + (sk.enabled ? " on" : "");
-  toggle.title = sk.enabled ? "已启用 — 点击禁用" : "已禁用 — 点击启用";
+  toggle.title = sk.enabled ? t('memory.toggleOnTip') : t('memory.toggleOffTip');
   const track = document.createElement("span");
   track.className = "memory-toggle-track";
   const thumb = document.createElement("span");
@@ -209,7 +209,7 @@ function _buildMemoryCardEl(sk) {
   // Delete button
   const delBtn = document.createElement("button");
   delBtn.className = "memory-delete-btn";
-  delBtn.title = "删除此记忆";
+  delBtn.title = t('memory.deleteTip');
   delBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
   delBtn.onclick = function(e) { e.stopPropagation(); deleteMemory(sk.id); };
   actions.appendChild(delBtn);
@@ -260,10 +260,10 @@ function _updateMemoryStats(memories) {
   const project = memories.filter(s => s.scope === "project").length;
   const global = memories.filter(s => s.scope === "global").length;
   el.innerHTML = `
-    <div class="memory-stat"><span class="memory-stat-num">${total}</span><span class="memory-stat-label">总计</span></div>
-    <div class="memory-stat"><span class="memory-stat-num memory-stat-active">${enabled}</span><span class="memory-stat-label">启用</span></div>
-    <div class="memory-stat"><span class="memory-stat-num">${project}</span><span class="memory-stat-label">项目</span></div>
-    <div class="memory-stat"><span class="memory-stat-num">${global}</span><span class="memory-stat-label">全局</span></div>`;
+    <div class="memory-stat"><span class="memory-stat-num">${total}</span><span class="memory-stat-label">${_esc(t('memory.statTotal'))}</span></div>
+    <div class="memory-stat"><span class="memory-stat-num memory-stat-active">${enabled}</span><span class="memory-stat-label">${_esc(t('memory.statEnabled'))}</span></div>
+    <div class="memory-stat"><span class="memory-stat-num">${project}</span><span class="memory-stat-label">${_esc(t('memory.statProject'))}</span></div>
+    <div class="memory-stat"><span class="memory-stat-num">${global}</span><span class="memory-stat-label">${_esc(t('memory.statGlobal'))}</span></div>`;
 }
 
 function _esc(s) {
@@ -305,7 +305,7 @@ async function toggleMemoryEnabled(id) {
   if (card) card.classList.toggle('is-disabled', !newEnabled);
   if (toggle) {
     toggle.classList.toggle('on', newEnabled);
-    toggle.title = newEnabled ? '已启用 — 点击禁用' : '已禁用 — 点击启用';
+    toggle.title = newEnabled ? t('memory.toggleOnTip') : t('memory.toggleOffTip');
   }
   if (cacheItem) cacheItem.enabled = newEnabled;
   _updateMemoryStats(_memoryCache);
@@ -322,14 +322,14 @@ async function toggleMemoryEnabled(id) {
     if (card) card.classList.toggle('is-disabled', newEnabled);
     if (toggle) {
       toggle.classList.toggle('on', !newEnabled);
-      toggle.title = !newEnabled ? '已启用 — 点击禁用' : '已禁用 — 点击启用';
+      toggle.title = !newEnabled ? t('memory.toggleOnTip') : t('memory.toggleOffTip');
     }
     if (cacheItem) cacheItem.enabled = !newEnabled;
     _updateMemoryStats(_memoryCache);
   }
 }
 async function deleteMemory(id) {
-  if (!await showConfirm("确定要删除这条 Memory 吗？", { danger: true })) return;
+  if (!await showConfirm(t('memory.deleteConfirm'), { danger: true })) return;
   const card = document.querySelector(`.memory-card[data-id="${id}"]`);
   // Animate out immediately
   if (card) {
@@ -361,7 +361,7 @@ async function createMemoryFromModal() {
   const scope = document.getElementById("memoryNewScope").value;
   const tags = document.getElementById("memoryNewTags").value.split(",").map(t => t.trim()).filter(Boolean);
   const status = document.getElementById("memoryModalStatus");
-  if (!name || !body) { status.textContent = "名称和内容为必填项"; return; }
+  if (!name || !body) { status.textContent = t('memory.nameBodyRequired'); return; }
   try {
     const r = await Api.memory.create({ name, description: desc, body, scope, tags });
     if (r && r.ok) {
@@ -384,9 +384,9 @@ async function createMemoryFromModal() {
       debugLog(`Memory created: ${name}`, "success");
     } else {
       const e = await r.json();
-      status.textContent = e.error || "Failed";
+      status.textContent = e.error || t('memory.createFailed');
     }
-  } catch (e) { status.textContent = "Error: " + e.message; }
+  } catch (e) { status.textContent = t('memory.errorPrefix', { err: e.message }); }
 }
 
 // ══════════════════════════════════════════════════════
@@ -447,7 +447,7 @@ function _attachMemoryDropZone() {
         return;
       }
     }
-    _showInstallToast("拖入的文件不是 .zip 技能包", true);
+    _showInstallToast(t('memory.notZip'), true);
   });
 }
 
@@ -463,7 +463,7 @@ async function _uploadSkillPackage(file) {
   const tabScope = activeTab?.dataset?.scope;
   const scope = (tabScope === "global") ? "global" : "project";
 
-  _showInstallToast(`正在安装 ${file.name} …`);
+  _showInstallToast(t('memory.installingFile', { name: file.name }));
   const fd = new FormData();
   fd.append("file", file);
   fd.append("scope", scope);
@@ -472,18 +472,19 @@ async function _uploadSkillPackage(file) {
     const r = await Api.memory.install(fd);
     const d = (r ? await r.json().catch(() => ({})) : {});
     if (!r || !r.ok) {
-      _showInstallToast(`安装失败: ${d.error || (r && r.statusText) || 'no response'}`, true);
-      debugLog("Skill install failed: " + (d.error || (r && r.statusText) || 'no response'), "error");
+      const _err = d.error || (r && r.statusText) || t('memory.noResponse');
+      _showInstallToast(t('memory.installFailed', { err: _err }), true);
+      debugLog("Skill install failed: " + _err, "error");
       return;
     }
 
     const mem = d.memory || {};
     const hints = d.install_hints || [];
-    let msg = `已安装技能包 "${mem.name}" (scope=${mem.scope})`;
-    if (d.replaced) msg += " · 已覆盖旧版";
+    let msg = t('memory.installedPackage', { name: mem.name, scope: mem.scope });
+    if (d.replaced) msg += t('memory.replacedOld');
     if (hints.length) {
       const files = hints.map(h => h.file).join(", ");
-      msg += ` · 发现安装脚本 ${files}（出于安全未自动执行）`;
+      msg += t('memory.installHintSuffix', { files: files });
     }
     _showInstallToast(msg);
     debugLog(msg, "success");
@@ -499,7 +500,7 @@ async function _uploadSkillPackage(file) {
     }
     _updateMemoryStats(_memoryCache);
   } catch (e) {
-    _showInstallToast("安装异常: " + e.message, true);
+    _showInstallToast(t('memory.installError', { err: e.message }), true);
     debugLog("Skill install error: " + e.message, "error");
   }
 }

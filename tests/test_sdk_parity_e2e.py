@@ -41,6 +41,11 @@ _STATE = {'app': None, 'tmp': None, 'admin': None, 'user': None,
 def _setup_once():
     if _STATE['app'] is not None:
         return _STATE
+    # ⚠️ DATA-LOSS GUARD (2026-06-28): imports server.py independently of the
+    # conftest fixtures, so it must call the keystone DB guard itself before
+    # touching the real app/DB.
+    from tests.conftest import _assert_test_database
+    _assert_test_database('test_sdk_parity_e2e._setup_once')
     _STATE['tmp'] = tempfile.TemporaryDirectory()
     tmp = _STATE['tmp'].name
     from lib import api_keys, usage_tracker

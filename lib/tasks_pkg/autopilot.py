@@ -1019,11 +1019,17 @@ def _run_autopilot_kick(task: dict) -> None:
                         '(TASK_DONE / no eligible context)', tid,
                         task.get('convId', '')[:8])
     except Exception as e:
-        logger.error('[Autopilot kick %s] hook raised: %s', tid, e, exc_info=True)
-    finally:
+        # Failure → no baton will arrive; clear the latch so the stream can
+        # finalize.  The success path keeps it set until AFTER append_event
+        # (below) so the SSE generator never sees a terminal task before the
+        # baton-carrying done event is buffered (same window as the
+        # natural-stop path in orchestrator._finalize_and_emit_done).
         task['_autopilot_deciding'] = False
+        logger.error('[Autopilot kick %s] hook raised: %s', tid, e, exc_info=True)
 
     append_event(task, done_evt)
+    # Baton is now buffered — safe to let _task_terminal() report finished.
+    task['_autopilot_deciding'] = False
     persist_task_result(task)
 
 

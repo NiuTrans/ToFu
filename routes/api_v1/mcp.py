@@ -405,8 +405,6 @@ def get_catalog_v1():
     tags=['mcp'],
 )
 def install_from_catalog_v1():
-    from lib.mcp import get_bridge
-    from lib.mcp.client import MCPConnectError
     from lib.mcp.config import load_mcp_config, upsert_server as cfg_upsert
     from lib.mcp.registry import build_server_config, get_catalog_entry
 
@@ -443,13 +441,58 @@ def install_from_catalog_v1():
     cfg_upsert(server_id, server_cfg)
     logger.info('[MCP.v1] catalog install: %s', server_id)
 
+    # For a vendored internal launcher that isn't on PATH yet, the first
+    # install does a cold `pip install` that can take MINUTES. We do NOT block
+    # this request on it — a multi-minute synchronous POST would be cut by a
+    # reverse proxy's response timeout (the app supports cloud-IDE proxies)
+    # and would leave a half-installed package. Instead we start a background
+    # install job and return `status:'installing'` immediately; the front end
+    # polls /catalog/install/status, which performs the (fast) connect once
+    # pip finishes. Launchers already on PATH skip straight to connect.
+    command = server_cfg.get('command', '') if server_cfg.get('transport', 'stdio') != 'sse' else ''
+    if command:
+        from lib.mcp.client import is_vendored_launcher, start_install_job
+        if is_vendored_launcher(command):
+            job = start_install_job(command)
+            if job.get('state') == 'installing':
+                return jsonify({
+                    'ok': True,
+                    'status': 'installing',
+                    'id': server_id,
+                    'message': f'{entry["name"]} 正在安装依赖…',
+                }), 202
+            if job.get('state') == 'error':
+                from lib.mcp.client import _launcher_install_hint
+                logger.error('[MCP.v1] catalog install: install of %s failed: %s',
+                             server_id, job.get('detail'))
+                return jsonify({
+                    'ok': False,
+                    'error': _launcher_install_hint(command),
+                    'config_saved': True,
+                    'stderr_tail': job.get('detail') or '',
+                }), 500
+            # state == 'ready' → fall through to the fast connect below.
+
+    return _connect_after_install(server_id, server_cfg, entry['name'])
+
+
+def _connect_after_install(server_id, server_cfg, display_name):
+    """Do the (fast) MCP handshake for an installed server + surface errors.
+
+    Shared by the synchronous install path (launcher already on PATH) and the
+    async status poll (launcher just finished pip-installing).
+    """
+    from lib.mcp import get_bridge
+    from lib.mcp.client import MCPConnectError
+
     bridge = get_bridge()
     try:
         tools = bridge.connect_server(server_id, server_cfg)
         _invalidate_tool_latches(f'catalog install {server_id}')
         return jsonify({
             'ok': True,
-            'message': f'{entry["name"]} installed and connected',
+            'status': 'ready',
+            'message': f'{display_name} installed and connected',
             'tools_count': len(tools),
             'tool_names': [t.name for t in tools],
         })
@@ -470,6 +513,62 @@ def install_from_catalog_v1():
             'error': f'Config saved but connection failed: {e}',
             'config_saved': True,
         }), 500
+
+
+@api_v1_mcp_bp.route('/api/v1/mcp/catalog/install/status', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Poll an async catalog install',
+    description=(
+        'Query ``?id=<server>``. Returns ``{status: installing|ready|error}``. '
+        'When the background pip finishes successfully this endpoint performs '
+        'the (fast) MCP handshake and returns the connected tool list, mirroring '
+        'the synchronous install response.'
+    ),
+    tags=['mcp'],
+)
+def install_status_v1():
+    from flask import request
+
+    from lib.mcp.client import (
+        _launcher_install_hint, get_install_job,
+    )
+    from lib.mcp.config import load_mcp_config
+    from lib.mcp.registry import get_catalog_entry
+
+    server_id = (request.args.get('id') or '').strip()
+    if not server_id:
+        return api_bad_request('server id is required', field='id')
+
+    server_cfg = load_mcp_config().get(server_id)
+    if server_cfg is None:
+        return jsonify({'ok': False, 'error': f'Unknown server: {server_id}'}), 404
+
+    command = (server_cfg.get('command', '')
+               if server_cfg.get('transport', 'stdio') != 'sse' else '')
+    job = get_install_job(command) if command else None
+
+    # No job recorded (e.g. server restarted mid-install) — treat as unknown
+    # and let the client re-POST install to restart cleanly.
+    if job is None:
+        return jsonify({'ok': True, 'status': 'unknown', 'id': server_id})
+
+    state = job.get('state')
+    if state == 'installing':
+        return jsonify({'ok': True, 'status': 'installing', 'id': server_id}), 202
+    if state == 'error':
+        return jsonify({
+            'ok': False,
+            'status': 'error',
+            'error': _launcher_install_hint(command),
+            'config_saved': True,
+            'stderr_tail': job.get('detail') or '',
+        }), 500
+
+    # state == 'ready' → perform the fast handshake now.
+    entry = get_catalog_entry(server_id)
+    display_name = entry['name'] if entry else server_id
+    return _connect_after_install(server_id, server_cfg, display_name)
 
 
 @api_v1_mcp_bp.route('/api/v1/mcp/catalog/uninstall', methods=['POST'])

@@ -38,6 +38,13 @@ def _table_exists(conn, table):
     return cur.fetchone() is not None
 
 
+def _count_rows(conn, table):
+    """Return the row count of a table (orphan-heal row guard)."""
+    cur = conn._conn.cursor()
+    cur.execute(f'SELECT count(*) FROM {table}')
+    return int(cur.fetchone()[0])
+
+
 def _read_meta(conn, key):
     """Read a value from the core-owned ``schema_meta`` table.
 
@@ -639,6 +646,12 @@ def _init_system_schema(conn):
     cur.execute('CREATE INDEX IF NOT EXISTS idx_ledger_user_ts ON billing_ledger(user_id, ts DESC)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_ledger_ref ON billing_ledger(ref_type, ref_id)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_ledger_kind ON billing_ledger(kind)')
+    # Partial index serving the reserve-reclaim janitor's GROUP BY (user_id,
+    # ref_id) over only reserve-type rows. billing_ledger is append-only and
+    # grows forever; without this the 5-minute sweep would seq-scan the whole
+    # table. The WHERE clause keeps the index tiny (only reservations).
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ledger_reserve_sweep "
+                "ON billing_ledger(user_id, ref_id) WHERE ref_type = 'reserve'")
 
     # billing_wallets + billing_redeem_codes: migrated onto Core.
     from lib.database._core_schema import (
@@ -678,6 +691,12 @@ def init_db(_new_pg_connection, _STATEMENT_TIMEOUT_MS):
     conn = None
     try:
         conn = _new_pg_connection()
+
+        # ── Self-heal orphan tables (runs BEFORE the version fast-path so
+        #    already-current deployments still converge). Drops tables left by
+        #    removed subsystems / leaked tests that have no Core definition.
+        from lib.database._orphan_heal import heal_orphan_tables
+        heal_orphan_tables(conn, table_exists=_table_exists, count_rows=_count_rows)
 
         # ── Fast path: check if schema is already at current version AND
         #    the set of optional domains is unchanged. The domain set is part

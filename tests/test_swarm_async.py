@@ -502,6 +502,77 @@ class TestAwaitAgents(unittest.TestCase):
         self.assertFalse(result['timed_out'])
         self.assertIn('note', result)
 
+    def test_await_breaks_when_swarm_terminated_with_stranded_agent(self):
+        """Root cause of 'panel shows all done but the await tool keeps
+        spinning to the hard-cap timeout': once the driver thread has
+        exited (``_terminated``), an agent still in ``to_wait`` that never
+        landed in ``_results_by_id`` (e.g. a cancel_pending'd / dropped
+        spec) can NEVER complete — yet the panel's swarm_phase:complete
+        sweep already marked every card done. The wait loop must break on
+        ``_terminated`` and return PROMPTLY (not timed_out), reporting the
+        stranded id as still_running, instead of blocking for the full
+        window."""
+        spec_done = SubTaskSpec(role='general', objective='done one', id='ok')
+        spec_lost = SubTaskSpec(role='general', objective='lost one', id='lost')
+        orch = MasterOrchestrator(
+            task_id=self.task_id, conv_id='c1',
+            specs=[spec_done, spec_lost],
+        )
+        # Build the scheduler WITHOUT running the driver, so we can model the
+        # exact desync state deterministically.
+        orch._scheduler = orch._build_scheduler()
+        # 'ok' completed and is recorded; 'lost' is still 'running' from the
+        # await snapshot's POV but will never produce a result.
+        result_ok = SubAgentResult(
+            status=SubAgentStatus.COMPLETED.value,
+            final_answer='ok answer', elapsed_seconds=0.1,
+            total_tokens=10, rounds_used=1)
+        with orch._lock:
+            orch._results_by_id['ok'] = (spec_done, result_ok)
+        orch._scheduler._running['lost'] = spec_lost
+        # The driver has exited (scheduler drained / aborted) — terminal.
+        orch._terminated = True
+
+        t0 = time.time()
+        result = orch.await_agents(mode='all', ids=None, timeout_seconds=10)
+        elapsed = time.time() - t0
+
+        self.assertLess(elapsed, 2.0,
+                        f'must break on _terminated, not block; took {elapsed:.2f}s')
+        self.assertFalse(result['timed_out'],
+                         'a terminated swarm is not a wall-clock timeout')
+        completed_ids = {p['agent_id'] for p in result['completed']}
+        self.assertIn('ok', completed_ids)
+        self.assertIn('lost', result['still_running'],
+                      'stranded agent reported as still_running, not awaited')
+        self.assertIn('note', result)
+        self.assertIn('lost', result['note'])
+
+    def test_await_terminated_but_all_done_is_clean(self):
+        """Guard: the _terminated break must NOT manufacture a spurious
+        note/timeout when every requested agent actually completed before
+        the driver exited (the normal happy path)."""
+        spec_a = SubTaskSpec(role='general', objective='A', id='a')
+        orch = MasterOrchestrator(
+            task_id=self.task_id, conv_id='c1', specs=[spec_a])
+        orch._scheduler = orch._build_scheduler()
+        res = SubAgentResult(
+            status=SubAgentStatus.COMPLETED.value, final_answer='x',
+            elapsed_seconds=0.1, total_tokens=5, rounds_used=1)
+        with orch._lock:
+            orch._results_by_id['a'] = (spec_a, res)
+        orch._terminated = True  # driver already exited, nothing stranded
+
+        result = orch.await_agents(mode='all', ids=None, timeout_seconds=10)
+        self.assertFalse(result['timed_out'])
+        self.assertEqual(result['still_running'], [])
+        self.assertEqual({p['agent_id'] for p in result['completed']}, {'a'})
+
+
+# ═════════════════════════════════════════════════════════
+#  get_agent_result
+# ═════════════════════════════════════════════════════════
+
 
 # ═════════════════════════════════════════════════════════
 #  get_agent_result

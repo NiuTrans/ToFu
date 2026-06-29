@@ -94,6 +94,9 @@ win._applyProjectData = global._applyProjectData = spy('_applyProjectData');
 win.syncConversationToServer = global.syncConversationToServer = spy('syncConversationToServer');
 win._autoTranslateHumanGuidance = global._autoTranslateHumanGuidance = spy('_autoTranslateHumanGuidance');
 global.autoTranslate = win.autoTranslate = false;
+win.convAutoTranslate = global.convAutoTranslate = (c) =>
+  (c && c.autoTranslate !== undefined) ? !!c.autoTranslate
+    : (typeof autoTranslate !== 'undefined' && autoTranslate !== undefined ? !!autoTranslate : false);
 win.updateContextBar = global.updateContextBar = spy('updateContextBar');
 if (typeof global.requestAnimationFrame !== 'function') {
   global.requestAnimationFrame = win.requestAnimationFrame = (fn) => { try { fn(); } catch (_) {} return 0; };
@@ -212,17 +215,24 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
     ctx.assistantMsg.content === '');
 }
 
-// ── 7. endpoint_critic_msg finalizes critic + sets approval ──
+// ── 7. endpoint_critic_msg finalizes critic + sets approval + KEEPS thinking ──
 {
-  const { ctx } = setup();
+  const { conv, ctx } = setup();
   T.dispatchSSEEvent(line({ type: 'state', endpointMode: true,
     endpointPhase: 'reviewing', endpointIteration: 1,
     endpointTurns: [{ role: 'assistant', content: 'w', _epIteration: 1, _msgId: 'mid-w2' }],
     content: 'review' }), ctx);
   T.dispatchSSEEvent(line({ type: 'endpoint_critic_msg', content: 'Looks good',
-    next_phase: 'stop' }), ctx);
+    thinking: 'CRITIC-REASONING', next_phase: 'stop' }), ctx);
   check('critic_msg_clears_phase', ctx.epCriticPhase === false);
   check('critic_msg_clears_buf_refs', ctx.epCriticMsg === null && ctx.epCriticBuf === null);
+  /* ★ Thinking-persistence: the critic bubble's thinking must survive
+   *   finalize (the flow path now sends ev.thinking; sse_pipeline must
+   *   apply it). _epCriticMsg is nulled, so read the persisted critic
+   *   message in conv.messages. */
+  const criticMsg = conv.messages.find(m => m._isEndpointReview);
+  check('critic_msg_keeps_thinking', !!criticMsg &&
+    criticMsg.thinking === 'CRITIC-REASONING');
 }
 
 // ── 8. tool_complete stamps toolContent/tokens on the matching round ──
@@ -511,6 +521,37 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
   check('stranded_agent_phase_advanced', r2 && r2.phase === 'done');
 }
 
+// ── 26. OUT-OF-ORDER SSE (#6): swarm_agent_complete arrives BEFORE the
+//        agent's start/phase event ever created its card. The terminal
+//        result must NOT be dropped — the handler must CREATE the card so the
+//        agent shows its real outcome (regression: pre-fix the complete event
+//        no-op'd when no matching agent existed, so the card vanished until
+//        the swarm_phase:complete sweep). ──
+{
+  const { ctx } = setup();
+  // Real spawn panel exists + is active (spawning landed), but agent 'oo2'
+  // has NOT been announced via start/phase yet.
+  T.dispatchSSEEvent(line({ type: 'tool_start', roundNum: 1, toolCallId: 'ooR',
+    toolName: 'spawn_agents', _swarm: true }), ctx);
+  T.dispatchSSEEvent(line({ type: 'swarm_phase', phase: 'spawning',
+    agents: [{ agentId: 'oo1', role: 'coder', objective: 'first' }] }), ctx);
+  // complete for 'oo2' races ahead of its start — must create the card.
+  T.dispatchSSEEvent(line({ type: 'swarm_agent_complete', agentId: 'oo2',
+    role: 'researcher', objective: 'second', status: 'completed',
+    preview: 'OO2 RESULT', elapsed: 1.5, tokens: 42, modifiedFiles: 1 }), ctx);
+  const panel = ctx.assistantMsg.toolRounds.find(r => r._swarm && r._swarmActive);
+  const oo2 = (panel._swarmAgents || []).find(a => a.id === 'oo2');
+  check('ooo_complete_creates_card', !!oo2);
+  check('ooo_complete_real_status', oo2 && oo2.status === 'done' &&
+    oo2.preview === 'OO2 RESULT' && oo2.modifiedFiles === 1);
+  // And an error racing ahead of start creates a failed card too.
+  T.dispatchSSEEvent(line({ type: 'swarm_agent_error', agentId: 'oo3',
+    role: 'coder', error: 'boom' }), ctx);
+  const oo3 = (panel._swarmAgents || []).find(a => a.id === 'oo3');
+  check('ooo_error_creates_failed_card', !!oo3 && oo3.status === 'failed' &&
+    oo3.phase === 'error');
+}
+
 console.log(out.join('\n'));
 """
 
@@ -543,5 +584,5 @@ def test_sse_dispatch_characterization():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'SSE dispatch characterization failures:\n' + output
-    # 26 scenario groups, ~54 individual checks.
-    assert output.count('PASS') >= 52, f'expected >=52 PASS lines, got:\n{output}'
+    # 26 scenario groups, ~59 individual checks.
+    assert output.count('PASS') >= 57, f'expected >=57 PASS lines, got:\n{output}'

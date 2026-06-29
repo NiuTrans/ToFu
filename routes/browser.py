@@ -98,7 +98,13 @@ async def browser_poll():
     from lib.browser import mark_poll, resolve_batch, wait_for_commands_async
     data = await async_parse_body()
     client_id = data.get('clientId') or None
-    mark_poll(client_id)
+    try:
+        chrome_major = int(data.get('chromeMajor') or 0)
+    except (ValueError, TypeError) as e:
+        logger.debug('[Browser] non-numeric chromeMajor from client=%s: %s',
+                     (client_id or 'anon')[:12], e)
+        chrome_major = 0
+    mark_poll(client_id, chrome_major=chrome_major)
     results = data.get('results', [])
     if results:
         logger.info('[Browser] poll received %d result(s) from client=%s: cmd_ids=%s',

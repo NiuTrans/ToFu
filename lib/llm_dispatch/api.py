@@ -925,6 +925,49 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
         #   (502/timeout may be transient; give recovered slots another chance).
         state.maybe_reset_exclusions(log_prefix, 'dispatch_stream')
 
+        # ★ Warm-key hold (pre-pick): if this conversation has a sticky key
+        #   whose prompt-cache prefix is warm but that key is in a SHORT
+        #   rate-limit cooldown, briefly wait it out BEFORE picking — otherwise
+        #   the picker rebinds to a cold key and re-bills a full cache_creation
+        #   (~100K tokens) to dodge a sub-second per-minute throttle. The
+        #   warm-cache saving dwarfs the wait. Bounded by the hold budget and
+        #   capped to ONE hold per dispatch call (``_warm_held``) so a key stuck
+        #   in a longer cooldown can't stall the loop — after one hold it falls
+        #   through to the normal cold-key rebind. Flag-gated + reversible.
+        if not getattr(state, '_warm_held', False):
+            try:
+                from lib.llm_dispatch.conv_affinity import (
+                    get_conv_affinity,
+                    sticky_hold_budget_ms,
+                    sticky_hold_enabled,
+                    sticky_routing_enabled,
+                )
+                if sticky_routing_enabled() and sticky_hold_enabled():
+                    _conv = get_conv_affinity()
+                    if _conv:
+                        _hold = dispatcher.sticky_cooldown_remaining_s(
+                            _conv, prefer_model=prefer_model,
+                            exclude_keys=state.eff_exclude_keys() or set(),
+                            exclude_pairs=state.eff_exclude_pairs() or set())
+                        if _hold is not None:
+                            _remaining_s, _warm_key = _hold
+                            _budget_s = sticky_hold_budget_ms() / 1000.0
+                            if 0 < _remaining_s <= _budget_s:
+                                _wait = min(_remaining_s + 0.05, _budget_s)
+                                logger.info(
+                                    '%s dispatch_stream: holding %.2fs for '
+                                    'conv=%s warm key %s (short 429 cooldown) '
+                                    'to keep prompt cache warm',
+                                    log_prefix, _wait, _conv[:8], _warm_key)
+                                if abort_check and abort_check():
+                                    from lib.llm import AbortedError as _AE
+                                    raise _AE('Aborted during warm-key hold')
+                                time.sleep(_wait)
+                                state._warm_held = True
+            except ImportError as _imp_err:
+                logger.debug('%s warm-key hold unavailable: %s',
+                             log_prefix, _imp_err)
+
         slot = dispatcher.pick_and_reserve(
             capability=capability,
             prefer_model=prefer_model,

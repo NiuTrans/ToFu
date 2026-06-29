@@ -511,6 +511,59 @@ class TestMemoryPrefetch:
 
         mock_fn.assert_called_once()
 
+    def test_digest_header_tool_free_when_conv_tools_absent(self):
+        """The project-digest reminder must NOT advertise list_conversations /
+        get_conversation when those tools are not registered for the turn.
+
+        Regression for the dual-gate bug: the digest injected on every project
+        turn (project_enabled) but the conv-ref tools only register on an
+        @-attach (has_conv_ref) — so a plain project turn told the model to
+        call tools absent from its schema. The header is now tool-aware.
+        """
+        from lib.tasks_pkg.system_context import _inject_system_contexts
+
+        messages = [{'role': 'system', 'content': 'Base'}]
+        with patch('lib.project_mod.get_context_for_prompt', return_value=''), \
+             patch('lib.conversations.project_summary.build_project_digest') as mock_digest:
+            mock_digest.return_value = 'For ambient awareness: this project has 2 related conversation(s).'
+            _inject_system_contexts(
+                messages, '/tmp/proj', True,       # project_enabled
+                False, False, False,               # memory, search, swarm
+                has_real_tools=True,
+                conv_id='',
+                task=None,
+                tool_names={'read_files', 'web_search'},  # NO conv-ref tools
+            )
+        # build_project_digest must have been called with conv_tools_available=False.
+        assert mock_digest.called
+        _, kwargs = mock_digest.call_args
+        assert kwargs.get('conv_tools_available') is False
+        # And the injected text names no phantom tool.
+        text = self._all_text(messages)
+        assert 'list_conversations' not in text
+        assert 'get_conversation' not in text
+
+    def test_digest_header_advertises_tools_when_conv_tools_present(self):
+        """When the conv-ref tools ARE registered, the digest is built with
+        conv_tools_available=True so the header can instruct their use."""
+        from lib.tasks_pkg.system_context import _inject_system_contexts
+
+        messages = [{'role': 'system', 'content': 'Base'}]
+        with patch('lib.project_mod.get_context_for_prompt', return_value=''), \
+             patch('lib.conversations.project_summary.build_project_digest') as mock_digest:
+            mock_digest.return_value = 'This project has 1 related conversation(s) you can consult.'
+            _inject_system_contexts(
+                messages, '/tmp/proj', True,
+                False, False, False,
+                has_real_tools=True,
+                conv_id='',
+                task=None,
+                tool_names={'read_files', 'list_conversations', 'get_conversation'},
+            )
+        assert mock_digest.called
+        _, kwargs = mock_digest.call_args
+        assert kwargs.get('conv_tools_available') is True
+
     def test_skills_prefetch_consumed(self):
         """Memory count hint is injected into the system message by _inject_system_contexts.
 

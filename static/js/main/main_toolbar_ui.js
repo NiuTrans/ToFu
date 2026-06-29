@@ -464,6 +464,8 @@ async function _checkBrowserStatus() {
   const badge = document.getElementById("browserBadge");
   try {
     const d = await Api.browser.status();
+    _applyBrowserLocalShortcut(d && d.extensionPath);
+    _applyBrowserLnaWarning(d && d.chromeMajor);
     if (d && d.connected) {
       dot?.classList.replace("disconnected", "connected") ||
         dot?.classList.add("connected");
@@ -473,6 +475,9 @@ async function _checkBrowserStatus() {
        * correct device's extension, not a random one. */
       const clients = d.clients || [];
       const clientCount = clients.length;
+      /* secondsAgo is null until the first poll lands — render a fallback
+       * instead of the literal string "nulls ago". */
+      const ago = (d.secondsAgo != null) ? `${d.secondsAgo}s ago` : "just now";
       if (clientCount > 0) {
         /* Use the first connected client (most recently active) */
         const activeClient = clients[0];
@@ -481,10 +486,10 @@ async function _checkBrowserStatus() {
         txt &&
           (txt.textContent = clientCount > 1
             ? `${clientCount} extensions connected (using ${shortId}…)`
-            : `Extension connected (${shortId}…, ${d.secondsAgo}s ago)`);
+            : `Extension connected (${shortId}…, ${ago})`);
       } else {
         txt &&
-          (txt.textContent = `Extension connected (${d.secondsAgo}s ago)`);
+          (txt.textContent = `Extension connected (${ago})`);
       }
       badge?.classList.remove("disconnected");
     } else {
@@ -504,6 +509,71 @@ async function _checkBrowserStatus() {
 }
 function downloadBrowserExtension() {
   window.open(apiUrl("/api/browser/download"), "_blank");
+}
+
+/* ★ When Tofu runs on the user's own machine the unpacked extension already
+ * sits on disk — show its absolute path so they can "Load unpacked" it
+ * directly with NO download/unzip. The path is click-to-copy. */
+function _applyBrowserLocalShortcut(extPath) {
+  const box = document.getElementById("browserLocalShortcut");
+  const code = document.getElementById("browserExtPath");
+  if (!box || !code) return;
+  if (!extPath) {
+    box.style.display = "none";
+    return;
+  }
+  box.style.display = "";
+  code.textContent = extPath;
+  code.onclick = function () {
+    if (typeof _safeClipboardWrite === "function") {
+      _safeClipboardWrite(extPath)
+        .then(() => code.classList.add("copied"))
+        .catch(() => {});
+    }
+  };
+}
+
+/* ★ Chrome 142+ ships "Local Network Access" prompts on by default, which fire
+ * per-site during multi-tab searches. The extension can't grant this itself,
+ * so when the CONNECTED extension reports Chromium >= 142 we surface guidance
+ * to disable the prompt at the browser level (flag or managed policy). */
+function _applyBrowserLnaWarning(chromeMajor) {
+  const box = document.getElementById("browserLnaWarning");
+  if (!box) return;
+  if (!chromeMajor || chromeMajor < 142) {
+    box.style.display = "none";
+    return;
+  }
+  box.style.display = "";
+  // Click-to-copy the policy JSON.
+  const pol = document.getElementById("browserLnaPolicy");
+  if (pol && !pol._wired) {
+    pol._wired = true;
+    pol.onclick = function () {
+      if (typeof _safeClipboardWrite === "function") {
+        _safeClipboardWrite(pol.textContent)
+          .then(() => pol.classList.add("copied"))
+          .catch(() => {});
+      }
+    };
+  }
+  // Show the OS-specific managed-policy directory (best-effort, from the UA of
+  // the browser viewing this page — usually the same machine as the bridge).
+  const pathEl = document.getElementById("browserLnaPath");
+  if (pathEl) {
+    const ua = (navigator.userAgent || "").toLowerCase();
+    let dir = "";
+    if (ua.includes("windows")) {
+      dir = "HKLM\\SOFTWARE\\Policies\\Google\\Chrome\\ (via registry / Group Policy)";
+    } else if (ua.includes("mac os") || ua.includes("macintosh")) {
+      dir = "defaults write com.google.Chrome LocalNetworkAccessAllowedForUrls -array '*'";
+    } else {
+      dir = "/etc/opt/chrome/policies/managed/tofu-lna.json";
+    }
+    const label = (typeof t === "function") ? t("browser.lnaPathLabel") : "Place it at:";
+    pathEl.style.display = "";
+    pathEl.innerHTML = label + " <code>" + dir.replace(/</g, "&lt;") + "</code>";
+  }
 }
 
 // ══════════════════════════════════════════════════════

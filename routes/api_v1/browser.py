@@ -34,20 +34,46 @@ api_v1_browser_bp = Blueprint('api_v1_browser', __name__)
     description=(
         'Returns a snapshot of the extension bridge: ``connected``, '
         '``lastPoll`` (epoch seconds), ``secondsAgo``, the per-client '
-        '``clients`` array, and pending/total command counts.'
+        '``clients`` array, ``chromeMajor`` (highest Chromium major version '
+        'across connected clients, for LNA-prompt guidance), and '
+        'pending/total command counts.'
     ),
     tags=['capabilities'],
 )
 def browser_status():
+    import os
+
     from lib.browser import (
         _commands, _commands_lock, _last_poll_time,
         get_connected_clients, is_extension_connected,
     )
     connected = is_extension_connected()
     clients = get_connected_clients()
+    # Highest Chromium major across connected clients. Chrome 142+ enforces the
+    # "Local Network Access" permission prompt by default; the UI uses this to
+    # surface guidance for the browser actually running the bridge.
+    chrome_major = max((c.get('chrome_major', 0) or 0 for c in clients), default=0)
     with _commands_lock:
         pending_count = sum(1 for c in _commands.values() if not c.get('picked_up'))
         total_count = len(_commands)
+    # Absolute on-disk path of the unpacked extension. Only meaningful when
+    # the browser viewing this UI is on the SAME machine as the server — a
+    # remote peer (LAN IP, Docker port-map, tunnel, cloud IDE) loads the
+    # extension into THEIR local Chrome, where this server-side path does not
+    # exist. So gate on _remote_is_loopback() (real socket peer, not a
+    # spoofable X-Forwarded-For); remote callers fall through to the
+    # download-and-unzip steps. Keep the isdir() check too.
+    from .auth import _remote_is_loopback
+    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    ext_dir = os.path.join(base_dir, 'browser_extension')
+    extension_path = None
+    if os.path.isdir(ext_dir):
+        if _remote_is_loopback():
+            extension_path = ext_dir
+        else:
+            logger.debug('[Browser] suppressing extensionPath for non-loopback '
+                         'peer %s — remote Chrome cannot load the server-side folder',
+                         request.remote_addr)
     return jsonify({
         'connected': connected,
         'lastPoll': _last_poll_time,
@@ -55,6 +81,8 @@ def browser_status():
         'clients': clients,
         'pendingCommands': pending_count,
         'totalCommands': total_count,
+        'extensionPath': extension_path,
+        'chromeMajor': chrome_major,
     })
 
 

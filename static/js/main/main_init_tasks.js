@@ -8,6 +8,36 @@
    scope — no imports / exports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
+/**
+ * Classify a TRAILING assistant message left behind by an interrupted turn.
+ *
+ * A "ghost tail" is an assistant turn that carries NO settled output: empty
+ * content, no finishReason, no usage, no error, and no REAL tool round (an
+ * empty / still-`searching` round does not count). Such a turn started but
+ * never finalized.
+ *
+ * Returns:
+ *   'delete'      — truly empty (not even a thinking fragment): remove it.
+ *   'interrupted' — has a stray `thinking` fragment (and maybe _memoryPrefetch)
+ *                   but no content/finishReason: stamp finishReason='interrupted'
+ *                   so it renders honestly instead of as a blank, tag-less bubble
+ *                   (and recovered thinking + provenance are preserved).
+ *   null          — not a ghost tail; leave it alone.
+ *
+ * Pure function (no DOM / network) so it is unit-testable in isolation and
+ * shared by the Case-D reconcile path in initActiveTasks().
+ */
+function _classifyGhostTail(lastMsg) {
+  if (!lastMsg || lastMsg.role !== 'assistant') return null;
+  if (lastMsg.content || lastMsg.finishReason || lastMsg.usage || lastMsg.error) return null;
+  const hasRealRound = Array.isArray(lastMsg.toolRounds)
+    && lastMsg.toolRounds.some(r =>
+      r && (r.status === 'done' || r.toolContent
+        || (Array.isArray(r.results) && r.results.length)));
+  if (hasRealRound) return null;
+  return lastMsg.thinking ? 'interrupted' : 'delete';
+}
+
 // ── Init ──
 async function initActiveTasks() {
   try {
@@ -132,17 +162,17 @@ async function initActiveTasks() {
         continue;
       }
 
-      /* Case D: No activeTaskId, no running server task — clean up ghost empty assistant messages
-         (only for locally-loaded convs, not server-only shells) */
-      if (!conv._needsLoad) {
+      /* Case D: No activeTaskId, no running server task — reconcile a ghost
+         trailing assistant message left behind by an interrupted turn
+         (only for locally-loaded convs, not server-only shells, and never
+         while a stream is live for this conv — Cases A/B/C already consumed
+         active-task convs, but assert it explicitly as belt-and-suspenders). */
+      if (!conv._needsLoad && !activeStreams.has(conv.id)) {
         const lastMsg = conv.messages[conv.messages.length - 1];
-        if (
-          lastMsg &&
-          lastMsg.role === "assistant" &&
-          !lastMsg.content &&
-          !lastMsg.thinking &&
-          !lastMsg.error
-        ) {
+        const _ghost = _classifyGhostTail(lastMsg);
+        if (_ghost === 'delete') {
+          /* Truly empty (not even a thinking fragment) — nothing to show, so
+             remove it. A stream started but never produced ANY token. */
           console.warn(
             `[initActiveTasks CaseD] Removing ghost empty assistant message from conv ${conv.id.slice(0, 8)} ` +
             `(msgs=${conv.messages.length}, lastTimestamp=${lastMsg.timestamp ? new Date(lastMsg.timestamp).toISOString() : 'none'}). ` +
@@ -151,6 +181,22 @@ async function initActiveTasks() {
           conv.messages.pop();
           saveConversations(null);  // recovery cleanup, not new activity — don't bump updatedAt
           syncConversationToServer(conv, { allowTruncate: true });
+        } else if (_ghost === 'interrupted') {
+          /* Has a stray `thinking` fragment (and possibly _memoryPrefetch) but
+             no content/finishReason — an interrupted turn whose task is gone.
+             DON'T delete (that discards recovered reasoning + provenance);
+             STAMP finishReason='interrupted' so it renders honestly with the
+             "Interrupted" finish badge instead of a blank, tag-less bubble.
+             Without this the trailing husk slips past the delete branch (its
+             `thinking` defeats the `!thinking` guard) and is orphaned forever. */
+          console.warn(
+            `[initActiveTasks CaseD] Stamping interrupted on ghost thinking-only assistant message in conv ${conv.id.slice(0, 8)} ` +
+            `(thinking=${(lastMsg.thinking || '').length}chars, msgs=${conv.messages.length}). ` +
+            `Interrupted turn whose task is gone — preserving recovered thinking.`,
+          );
+          lastMsg.finishReason = 'interrupted';
+          saveConversations(null);  // recovery reconcile, not new activity — don't bump updatedAt
+          syncConversationToServer(conv);
         }
       }
 

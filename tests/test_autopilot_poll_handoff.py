@@ -217,3 +217,33 @@ def test_sse_normal_done_task_closes_promptly(flask_client, put_task):
     body = _sse_collect(flask_client, 'sse-plain-done-1', max_chars=20000)
     assert '"type": "done"' in body or '"type":"done"' in body, body[:600]
     assert 'autopilotNextTaskId' not in body
+
+
+@pytest.mark.api
+def test_sse_synthetic_done_carries_baton(flask_client, put_task):
+    """Belt-and-braces: a SYNTHESIZED done must still carry the autopilot baton.
+
+    Reproduces the post-fix-1 residual / cold-replay race: the autopilot hook
+    already stamped ``task['_autopilot_followup']`` and cleared
+    ``_autopilot_deciding`` (so ``_task_terminal()`` is True), but there is NO
+    buffered done event in ``task['events']`` for the generator to replay (it
+    was cleaned up, or the orchestrator's append landed on a different reader).
+    The fresh-connection snapshot branch then synthesizes a done from
+    ``extract_task_meta()`` — which omits the baton.  Without the
+    ``_apply_autopilot_baton`` stamp this synthetic done strands the spawned
+    follow-up and the conversation goes idle until manual regen.
+
+    Asserts the synthesized done carries ``autopilotNextTaskId`` even though no
+    real done event was ever appended.
+    """
+    task = _make_full_task('sse-synth-baton-1', status='done',
+                           content='done', finishReason='stop')
+    task['_autopilot_deciding'] = False
+    task['_autopilot_followup'] = {
+        'next_task_id': 'next-task-dddd', 'vu_msg': _VU_MSG,
+    }
+    put_task(task)
+    body = _sse_collect(flask_client, 'sse-synth-baton-1', max_chars=20000)
+    assert '"type": "done"' in body or '"type":"done"' in body, body[:600]
+    assert 'next-task-dddd' in body, \
+        f'synthetic done dropped the autopilot baton: {body[:800]}'

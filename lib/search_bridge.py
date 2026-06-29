@@ -19,7 +19,6 @@ idempotent and degrades gracefully if any sub-system is unavailable.
 
 import os
 import re
-from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import lib as _lib
 
@@ -112,63 +111,41 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
             logger.warning('[Bridge] browser fetch_url failed for %s: %s', url[:80], e)
             return None
 
-    def search(self, query, *, max_results=8):
-        """Reproduce the old browser DDG-HTML search-and-parse fallback."""
+    def fetch_html(self, url, *, timeout=20):
+        """Return the RAW HTML of ``url`` fetched through the extension.
+
+        tofu-search's ``search_via_browser`` calls this with a DuckDuckGo SERP
+        URL and parses the returned HTML with its own engine-grade bs4 parser.
+        chatui only owns the transport (the extension WebSocket) — the SERP
+        parsing lives in the library, not duplicated here.
+        """
         try:
             from lib.browser import is_extension_connected, send_browser_command
         except Exception as e:
-            logger.debug('[Bridge] browser search import failed: %s', e)
-            return []
+            logger.debug('[Bridge] browser fetch_html import failed: %s', e)
+            return None
         if not is_extension_connected():
-            return []
-        from tofu_search.search._common import clean_text
-        search_url = 'https://html.duckduckgo.com/html/?q=' + quote_plus(query)
+            return None
         try:
             result, error = send_browser_command('fetch_url', {
-                'url': search_url, 'maxChars': 200000, 'timeoutMs': 20000,
-            }, timeout=25)
+                'url': url, 'maxChars': 200000,
+                'timeoutMs': max(timeout, 20) * 1000,
+            }, timeout=max(timeout, 25))
             if error or not isinstance(result, dict):
-                logger.warning('[Bridge] browser search fetch failed: %s', str(error)[:200])
-                return []
+                logger.warning('[Bridge] browser fetch_html failed for %s: %s',
+                               url[:80], str(error)[:200])
+                return None
             html = result.get('html', '') or result.get('text', '')
             if not html or len(html) < 100:
-                return []
-            results = []
-            blocks = html.split('class="result results_links')
-            link_re = re.compile(r'<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>', re.DOTALL)
-            snip_re = re.compile(r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>', re.DOTALL)
-            for block in blocks[1:]:
-                if len(results) >= max_results:
-                    break
-                lm = link_re.search(block)
-                if not lm:
-                    continue
-                raw_url = lm.group(1)
-                title = re.sub(r'<[^>]+>', '', lm.group(2)).strip()
-                snippet = ''
-                sm = snip_re.search(block)
-                if sm:
-                    snippet = re.sub(r'<[^>]+>', '', sm.group(1)).strip()
-                if '/y.js?' in raw_url and 'ad_' in raw_url:
-                    continue
-                url = raw_url
-                if 'uddg=' in raw_url:
-                    try:
-                        url = unquote(parse_qs(urlparse(raw_url).query).get('uddg', [raw_url])[0])
-                    except Exception as _parse_err:
-                        logger.debug('[Bridge] DDG uddg URL parse failed: %s', _parse_err)
-                if url.startswith('http'):
-                    results.append({
-                        'title': clean_text(title)[:200],
-                        'snippet': clean_text(snippet)[:500],
-                        'url': url,
-                        'source': 'DuckDuckGo (via browser)',
-                    })
-            logger.info('[Bridge] browser DDG parse got %d results', len(results))
-            return results
+                logger.info('[Bridge] browser fetch_html got %d chars (too short) for %s',
+                            len(html or ''), url[:80])
+                return None
+            logger.info('[Bridge] browser fetch_html got %d HTML chars for %s',
+                        len(html), url[:80])
+            return html
         except Exception as e:
-            logger.error('[Bridge] browser search failed: %s', e, exc_info=True)
-            return []
+            logger.error('[Bridge] browser fetch_html failed: %s', e, exc_info=True)
+            return None
 
 
 # ═══════════════════════════════════════════════════════
@@ -201,6 +178,7 @@ class _ChatuiAuthSourceProvider(tofu_search.AuthSourceProvider):
 
 def sync_search_config():
     """Push chatui's live FETCH_* settings into tofu-search's global config."""
+    filter_enabled = getattr(_lib, 'LLM_CONTENT_FILTER_ENABLED', True)
     tofu_search.configure(
         llm_function=_chatui_llm,
         fetch_top_n=_lib.FETCH_TOP_N,
@@ -210,10 +188,17 @@ def sync_search_config():
         fetch_max_chars_pdf=_lib.FETCH_MAX_CHARS_PDF,
         fetch_max_bytes=_lib.FETCH_MAX_BYTES,
         skip_domains=set(_lib.SKIP_DOMAINS),
-        filter_enabled=getattr(_lib, 'LLM_CONTENT_FILTER_ENABLED', True),
+        filter_enabled=filter_enabled,
         filter_min_chars=int(os.environ.get('FETCH_FILTER_MIN_CHARS', '3000')),
         filter_timeout=int(os.environ.get('FETCH_FILTER_TIMEOUT', '300')),
     )
+    logger.info('[Bridge] tofu-search config synced: top_n=%d timeout=%ds '
+                'max_chars(search=%d direct=%d pdf=%d) filter=%s model=%r',
+                _lib.FETCH_TOP_N, _lib.FETCH_TIMEOUT,
+                _lib.FETCH_MAX_CHARS_SEARCH, _lib.FETCH_MAX_CHARS_DIRECT,
+                _lib.FETCH_MAX_CHARS_PDF,
+                'on' if filter_enabled else 'off',
+                _FILTER_MODEL or 'dispatch-default')
 
 
 def install_search_bridge():

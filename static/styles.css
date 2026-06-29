@@ -2065,6 +2065,23 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-send-btn:activ
 .paper-callout-takeaway{background:rgba(168,85,247,.08);border-color:rgba(168,85,247,.32)}
 .paper-callout-takeaway::before{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a855f7' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 11l3 3L22 4'/%3E%3Cpath d='M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11'/%3E%3C/svg%3E")}
 
+/* ── Glossary hover-definitions ── */
+/* Later mentions of a Core-Terminology term get a subtle dotted underline and
+   reveal their definition on hover/focus, so the report stays self-contained
+   wherever the reader is. */
+.paper-report-article .paper-term{border-bottom:1px dashed var(--text-tertiary);cursor:help;position:relative;outline:none;transition:border-color .15s,color .15s}
+.paper-report-article .paper-term:hover,.paper-report-article .paper-term:focus-visible{border-bottom-color:var(--accent);color:var(--accent)}
+.paper-report-article .paper-term::after{
+  content:attr(data-def);position:absolute;left:0;bottom:calc(100% + 8px);z-index:40;
+  width:max-content;max-width:320px;padding:9px 12px;border-radius:8px;
+  background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-light);
+  box-shadow:0 6px 24px rgba(0,0,0,.35);font-size:12.5px;font-weight:400;line-height:1.5;
+  white-space:normal;text-align:left;pointer-events:none;opacity:0;transform:translateY(3px);
+  transition:opacity .15s ease,transform .15s ease}
+.paper-report-article .paper-term:hover::after,.paper-report-article .paper-term:focus-visible::after{opacity:1;transform:translateY(0)}
+/* Keep the popover from spilling off the right edge of narrow viewports. */
+@media(max-width:640px){.paper-report-article .paper-term::after{max-width:240px}}
+
 /* ── Framed figures ── */
 .paper-report-article figure.paper-figure{margin:20px 0;text-align:center}
 .paper-report-article figure.paper-figure img{margin:0 auto}
@@ -8206,6 +8223,20 @@ input.settings-mono {
 }
 
 
+/* ── Interrupted tool round — task aborted (Stop) while this round was
+      in-flight; the backend dangling-round sweep marks status='aborted'. ── */
+.ptool-interrupted {
+  background: rgba(148, 163, 184, 0.04);
+  border-color: rgba(148, 163, 184, 0.12);
+  opacity: 0.75;
+}
+.ptool-badge-interrupted {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.22);
+}
+
+
 /* ═══════════════════════════════════════════
    ★ Scanning live-progress animation
    ═══════════════════════════════════════════ */
@@ -13471,27 +13502,44 @@ input.settings-mono {
 .browser-status-dot.disconnected{background:#888}
 .browser-status-text{color:var(--text-primary,#e0e0e0)}
 
+.browser-local-shortcut{padding:12px 16px;border-radius:10px;margin-bottom:16px;background:rgba(34,197,94,0.07);border:1px solid rgba(34,197,94,0.2)}
+.browser-local-shortcut strong{display:block;font-size:13px;color:var(--text-primary,#e0e0e0);margin-bottom:4px}
+.browser-local-shortcut p{font-size:12px;line-height:1.5;color:var(--text-secondary,#888);margin:0 0 8px}
+.browser-local-shortcut code{background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:4px;font-size:12px;font-family:'JetBrains Mono',monospace}
+.browser-local-shortcut code.copyable-url{position:relative;font-size:12px;color:#22c55e;transition:background-color .2s ease,box-shadow .2s ease,color .2s ease}
+.browser-local-shortcut code.copyable-url:hover{background:rgba(34,197,94,0.15);box-shadow:0 0 0 2px rgba(34,197,94,0.2)}
+.browser-local-shortcut code.copyable-url::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 6px);left:8px;font-size:11px;padding:3px 8px;border-radius:5px;background:#1e293b;color:#e2e8f0;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .15s}
+.browser-local-shortcut code.copyable-url:hover::after{opacity:1}
+.browser-local-shortcut code.copyable-url.copied{background:rgba(34,197,94,0.18);color:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,0.25)}
+
+.browser-lna-warning{padding:12px 16px;border-radius:10px;margin-bottom:16px;background:rgba(245,158,11,0.07);border:1px solid rgba(245,158,11,0.25)}
+.browser-lna-warning strong{display:block;font-size:13px;color:#f59e0b;margin-bottom:4px}
+.browser-lna-warning p{font-size:12px;line-height:1.5;color:var(--text-secondary,#888);margin:0 0 8px}
+.browser-lna-warning code{background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:4px;font-size:12px;font-family:'JetBrains Mono',monospace}
+.browser-lna-warning code.copyable-url{position:relative;color:#f59e0b;transition:background-color .2s ease,box-shadow .2s ease,color .2s ease}
+.browser-lna-warning code.copyable-url:hover{background:rgba(245,158,11,0.15);box-shadow:0 0 0 2px rgba(245,158,11,0.2)}
+.browser-lna-warning code.copyable-url::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 6px);left:8px;font-size:11px;padding:3px 8px;border-radius:5px;background:#1e293b;color:#e2e8f0;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .15s}
+.browser-lna-warning code.copyable-url:hover::after{opacity:1}
+.browser-lna-warning code.copyable-url.copied{background:rgba(245,158,11,0.18);color:#f59e0b;box-shadow:0 0 0 2px rgba(245,158,11,0.25)}
+.browser-lna-path{font-size:12px;line-height:1.5;color:var(--text-secondary,#888);margin:8px 0 0}
+[data-theme="light"] .browser-local-shortcut{background:rgba(22,163,74,0.06);border-color:rgba(22,163,74,0.18)}
+[data-theme="light"] .browser-local-shortcut code.copyable-url{color:#16a34a}
 .browser-setup-steps{display:flex;flex-direction:column;gap:12px;margin-bottom:16px}
 .setup-step{display:flex;gap:12px;align-items:flex-start}
 .step-num{width:24px;height:24px;border-radius:50%;background:rgba(56,189,248,0.15);color:#38bdf8;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px}
 .step-content{flex:1;font-size:13px;line-height:1.5}
 .step-content strong{display:block;color:var(--text-primary,#e0e0e0);margin-bottom:2px}
+.step-content p strong{display:inline;margin-bottom:0}
 .step-content p{color:var(--text-secondary,#888);margin:0 0 6px}
 .step-content code{background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:4px;font-size:12px;font-family:'JetBrains Mono',monospace}
 .step-content code.copyable-url{transition:background-color .2s ease,box-shadow .2s ease,color .2s ease;color:#38bdf8}.step-content code.copyable-url:hover{background:rgba(56,189,248,0.15);box-shadow:0 0 0 2px rgba(56,189,248,0.2)}.step-content code.copyable-url::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);font-size:11px;padding:3px 8px;border-radius:5px;background:#1e293b;color:#e2e8f0;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .15s}.step-content code.copyable-url:hover::after{opacity:1}.step-content code.copyable-url.copied{background:rgba(34,197,94,0.15);color:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,0.2)}.step-content code.copyable-url.copied::after{background:#166534;color:#bbf7d0}
 [data-theme="light"] .step-content code.copyable-url{color:#0284c7}[data-theme="light"] .step-content code.copyable-url:hover{background:rgba(2,132,199,0.1);box-shadow:0 0 0 2px rgba(2,132,199,0.15)}[data-theme="light"] .step-content code.copyable-url.copied{background:rgba(22,163,74,0.1);color:#16a34a}
-
-.browser-capabilities{margin-bottom:16px;padding:12px 16px;border-radius:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06)}
-.browser-capabilities h4{font-size:13px;margin:0 0 8px;color:var(--text-primary,#e0e0e0)}
-.browser-capabilities ul{margin:0;padding-left:18px;font-size:12px;line-height:1.8;color:var(--text-secondary,#888)}
-.browser-capabilities li strong{color:var(--text-primary,#e0e0e0);font-family:'JetBrains Mono',monospace;font-size:11px}
 
 #browserToggle.active{background:rgba(56,189,248,0.15);color:#38bdf8;border-color:rgba(56,189,248,0.3)}
 
 [data-theme="light"] .browser-status-box{background:rgba(2,132,199,0.04);border-color:rgba(2,132,199,0.12)}
 [data-theme="light"] .step-num{background:rgba(2,132,199,0.1);color:#0284c7}
 [data-theme="light"] .step-content code{background:rgba(0,0,0,0.05)}
-[data-theme="light"] .browser-capabilities{background:rgba(0,0,0,0.02);border-color:rgba(0,0,0,0.06)}
 [data-theme="light"] #browserToggle.active{background:rgba(2,132,199,0.1);color:#0284c7;border-color:rgba(2,132,199,0.25)}
 
 /* ── Desktop Agent toggle ── */
@@ -14954,6 +15002,26 @@ input.settings-mono {
   background: var(--bg-tertiary);
 }
 
+/* Undo action button (delete-conversation recovery toast) */
+.toast-undo-btn {
+  align-self: center;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--toast-accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--toast-accent) 40%, transparent);
+  color: var(--toast-accent);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.toast-undo-btn:hover {
+  background: color-mix(in srgb, var(--toast-accent) 28%, transparent);
+  border-color: var(--toast-accent);
+}
+
 /* Timer progress bar at bottom */
 .toast-progress {
   position: absolute;
@@ -15342,15 +15410,17 @@ input.settings-mono {
    * This keeps the toolbar to ~4 items on a 360px screen. */
   .input-area{padding:6px 8px calc(8px + env(safe-area-inset-bottom,0px));max-width:100%!important;overflow:hidden!important;border-top:1px solid var(--border)}
   .input-inner{max-width:100%!important;overflow:hidden!important;padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px)}
-  .input-box{border-radius:16px;margin-top:6px}
-  textarea{font-size:16px;padding:10px 14px 8px;min-height:40px;max-height:140px}
-  .send-btn{width:44px;height:44px;padding:0;border-radius:12px}
+  .input-box{border-radius:16px;margin-top:8px}
+  textarea{font-size:16px;padding:12px 14px 10px;min-height:44px;max-height:140px}
+  /* All toolbar controls share a single 40px touch-target height so the row
+   * reads as one consistent band instead of mismatched 32/36/44px pills. */
+  .send-btn{width:40px;height:40px;padding:0;border-radius:12px}
 
   /* --- Toolbar: single compact row --- */
-  .input-actions{padding:4px 8px 6px;gap:4px;overflow:hidden!important;flex-wrap:nowrap}
+  .input-actions{padding:8px 10px 10px;gap:8px;overflow:hidden!important;flex-wrap:nowrap}
   .input-actions::before{display:none}
-  .input-actions-scroll{gap:4px;flex-shrink:1;min-width:0;overflow:visible}
-  .input-actions-right{margin-left:auto;gap:6px;flex-shrink:0;align-items:center}
+  .input-actions-scroll{gap:8px;flex-shrink:1;min-width:0;overflow:visible}
+  .input-actions-right{margin-left:auto;gap:8px;flex-shrink:0;align-items:center}
   .input-group{flex-shrink:1;min-width:0}
 
   /* --- Hide submenus & standalone action btns on mobile ---
@@ -15359,26 +15429,27 @@ input.settings-mono {
   #submenuAI,#submenuTools,#submenuMode,
   #imageGenModeBtn,#projectToggle{display:none!important}
 
-  /* --- Model picker: compact --- */
-  .preset-toggle{padding:4px 8px 4px 6px;gap:3px;max-width:120px;overflow:hidden}
-  .preset-toggle .ps-label{font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* --- Model picker: compact, 40px tall to match the other controls --- */
+  .preset-toggle{height:40px;padding:0 10px;gap:5px;max-width:150px;overflow:hidden;box-sizing:border-box;align-items:center}
+  .preset-toggle .ps-label{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .preset-toggle .ps-arrow{display:none}
   .preset-toggle .ps-icon{flex-shrink:0}
-  #modelGroup{gap:4px;flex-shrink:1;min-width:0;overflow:visible;display:flex;align-items:center;flex-wrap:nowrap}
+  #modelGroup{gap:8px;flex-shrink:1;min-width:0;overflow:visible;display:flex;align-items:center;flex-wrap:nowrap}
 
   /* --- Thinking depth: hidden in toolbar, available in bottom sheet --- */
   .thinking-depth-bar{display:none!important}
 
-  /* --- Search toggle: clean icon-only pill --- */
-  .search-mode-toggle{padding:6px 10px;gap:4px;flex-shrink:0;border-radius:10px;min-width:auto;min-height:44px}
+  /* --- Search toggle: clean icon-only pill, square 40px to match the row --- */
+  .search-mode-toggle{width:40px;height:40px;padding:0;gap:0;flex-shrink:0;border-radius:12px;min-width:40px;min-height:40px;box-sizing:border-box;justify-content:center}
   .search-mode-toggle .sm-label{display:none}
   .search-mode-toggle .sm-mode-pill{display:none}
-  .search-mode-toggle .sm-icon svg{width:16px;height:16px}
+  .search-mode-toggle .sm-icon{display:flex}
+  .search-mode-toggle .sm-icon svg{width:17px;height:17px}
 
   /* --- "More" button — visible only on mobile --- */
-  .mobile-more-btn{display:flex!important;width:36px;height:36px;align-items:center;justify-content:center;
-    background:none;border:1px solid var(--border);border-radius:10px;cursor:pointer;
-    color:var(--text-secondary);flex-shrink:0;
+  .mobile-more-btn{display:flex!important;width:40px;height:40px;align-items:center;justify-content:center;
+    background:none;border:1px solid var(--border);border-radius:12px;cursor:pointer;
+    color:var(--text-secondary);flex-shrink:0;box-sizing:border-box;
     transition:background .15s,color .15s;padding:0;-webkit-tap-highlight-color:transparent}
   .mobile-more-btn svg{width:18px;height:18px}
   .mobile-more-btn:active{background:var(--bg-hover)}
@@ -15386,7 +15457,7 @@ input.settings-mono {
 
 
   /* --- Attach file button — shown on mobile as flex child in input-row --- */
-  .attach-btn{display:flex!important;width:36px;height:36px;min-width:36px;align-self:flex-end;margin:0 0 2px 4px;border-radius:12px}
+  .attach-btn{display:flex!important;width:40px;height:40px;min-width:40px;align-self:flex-end;margin:0 0 2px 4px;border-radius:12px;box-sizing:border-box;align-items:center;justify-content:center}
   .attach-btn svg{width:20px;height:20px}
 
   /* --- Bottom sheet for submenus/actions (shared mobile pattern) --- */
@@ -15488,8 +15559,14 @@ input.settings-mono {
   [data-theme="tofu"] .input-row::before,
   [data-theme="tofu"] .input-row::after{display:none!important}   /* D-pad + dots */
   [data-theme="tofu"] .input-inner::before{display:none!important} /* speech bubble */
-  [data-theme="tofu"] textarea{min-height:40px!important;padding:10px 14px 8px!important;font-size:15px!important}
-  [data-theme="tofu"] .input-actions{padding:4px 8px 6px!important;gap:4px!important}
+  [data-theme="tofu"] textarea{min-height:44px!important;padding:12px 14px 10px!important;font-size:15px!important}
+  [data-theme="tofu"] .input-actions{padding:8px 10px 10px!important;gap:8px!important}
+  /* Tofu theme sets its own padding/height on these controls (specificity
+   * 0,2,0) which beats the plain mobile rules above — re-assert the unified
+   * 40px square sizing at matching specificity so the row stays consistent. */
+  [data-theme="tofu"] .search-mode-toggle{width:40px!important;height:40px!important;min-width:40px!important;padding:0!important;justify-content:center}
+  [data-theme="tofu"] .preset-toggle{height:40px!important;padding:0 10px!important;box-sizing:border-box}
+  [data-theme="tofu"] .send-btn{width:40px!important;height:40px!important}
   [data-theme="tofu"] .input-actions::before{display:none!important}
   [data-theme="tofu"] .input-actions-scroll .input-group:not(:last-child)::after{display:none!important}
   /* Tofu theme bottom sheet styling */
@@ -15502,9 +15579,13 @@ input.settings-mono {
   [data-theme="tofu"] .mobile-more-btn{border-color:rgba(194,188,164,0.5);color:#5C4A33;border-radius:6px}
   [data-theme="tofu"] .attach-btn{color:#5C4A33;border-radius:8px}
 
-  /* Input footer: simplified */
-  .input-footer{padding:4px 0 0}
-  .input-hint{font-size:10px}
+  /* Input footer: hidden on mobile.
+   * The hint only describes desktop affordances (Enter/Ctrl+Enter to send,
+   * Shift+Enter newline, drag-and-drop file upload) — none of which apply on
+   * a touch device, where sending is the ⏎ button and files come via the
+   * attach (+) button. Removing it also frees vertical space, reducing the
+   * cramped feel of the composer. */
+  .input-footer{display:none!important}
 
   /* --- Turn navigation: hide on mobile (scroll with thumb instead) --- */
   .turn-nav{display:none!important}
@@ -16827,6 +16908,140 @@ input.settings-mono {
    to the same semantic color pattern the tool panel uses: amber for
    in-flight, green for success, red for failure, slate for skip. */
 
+/* ── Unified turn-provenance strip ──────────────────────────────────
+   ONE quiet line at the head of an assistant turn that merges the old
+   stacked boxes (memory-prefetch + preferences-applied + resolved
+   login). Collapsed = icon segments + tiny counts; click → reveals the
+   full labels, the picked-memory list, and which preferences were in
+   context. The awaiting-approval login keeps its own prominent callout
+   (.mem-prefetch-chip.mp-login-hint, defined below) and is NOT part of
+   this strip. */
+.turn-prov{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  margin:0 0 8px 0;padding:3px 4px;
+  border:1px solid transparent;border-radius:var(--radius-sm);
+  font-size:11.5px;line-height:1.4;color:var(--text-secondary);
+  transition:background .15s ease,border-color .15s ease;
+}
+.turn-prov.tp-expandable{cursor:pointer;user-select:none}
+.turn-prov.tp-expandable:hover{
+  background:rgba(148,163,184,0.06);
+  border-color:rgba(148,163,184,0.16);
+}
+/* Whole-strip state cue: a quiet 2px left accent bar. Amber gently
+   pulses while a segment is still in-flight; green/red hairline once
+   the turn's provenance has settled. The base border is transparent and
+   already reserves the box, so toggling the left color causes no
+   layout shift. Hover background (above) is intentionally left intact. */
+.turn-prov.tp-running,
+.turn-prov.tp-done,
+.turn-prov.tp-has-failed{border-left-width:2px}
+.turn-prov.tp-running{border-left-color:rgba(245,158,11,0.7);animation:tp-strip-pulse 2s ease-in-out infinite}
+.turn-prov.tp-done{border-left-color:rgba(52,211,153,0.55)}
+.turn-prov.tp-has-failed{border-left-color:rgba(248,113,113,0.65)}
+@keyframes tp-strip-pulse{0%,100%{border-left-color:rgba(245,158,11,0.7)}50%{border-left-color:rgba(245,158,11,0.25)}}
+[data-theme="light"] .turn-prov.tp-running{border-left-color:rgba(245,158,11,0.8)}
+[data-theme="light"] .turn-prov.tp-done{border-left-color:rgba(5,150,105,0.55)}
+[data-theme="light"] .turn-prov.tp-has-failed{border-left-color:rgba(220,38,38,0.6)}
+[data-theme="tofu"] .turn-prov.tp-running{border-left-color:rgba(196,149,106,0.8)}
+[data-theme="tofu"] .turn-prov.tp-done{border-left-color:rgba(94,138,80,0.6)}
+[data-theme="tofu"] .turn-prov.tp-has-failed{border-left-color:rgba(168,90,74,0.65)}
+[data-theme="tofu"] .turn-prov.tp-running{animation:tp-strip-pulse-tofu 2s ease-in-out infinite}
+@keyframes tp-strip-pulse-tofu{0%,100%{border-left-color:rgba(196,149,106,0.8)}50%{border-left-color:rgba(196,149,106,0.3)}}
+/* Collapsed icon segments */
+.turn-prov .tp-segs{display:inline-flex;align-items:center;gap:10px;flex:1;min-width:0}
+.turn-prov .tp-seg{
+  display:inline-flex;align-items:center;gap:3px;
+  color:var(--text-tertiary,rgba(148,163,184,0.7));
+}
+.turn-prov .tp-seg .tp-count{
+  font-family:'JetBrains Mono','SF Mono',Menlo,monospace;
+  font-size:10.5px;font-weight:600;letter-spacing:-0.02em;
+}
+/* Short text annotation beside each collapsed icon — turns the strip from a
+   row of bare glyphs into a quiet, readable label row (e.g. "3 memories ·
+   preferences · 2 related chats"). UI sans-serif (NOT mono — mono is reserved
+   for metric numbers/counts), tertiary tone so it stays subordinate. */
+.turn-prov .tp-seg .tp-label{
+  font-size:11px;font-weight:500;letter-spacing:-0.01em;
+  white-space:nowrap;
+}
+/* A subtle dot separator between segments so the labels don't run together. */
+.turn-prov .tp-segs .tp-seg + .tp-seg::before{
+  content:"·";margin-right:7px;color:var(--text-tertiary,rgba(148,163,184,0.4));
+  font-weight:600;
+}
+.turn-prov .tp-seg.tp-done{color:rgba(52,211,153,0.85)}
+.turn-prov .tp-seg.tp-running{color:#f59e0b}
+.turn-prov .tp-seg.tp-failed{color:#f87171}
+.turn-prov .tp-seg.tp-skipped{color:rgba(148,163,184,0.55)}
+.turn-prov .tp-seg .mp-dots{margin-left:1px}
+/* Chevron (SVG) */
+.turn-prov .tp-chevron{
+  display:inline-flex;align-items:center;flex-shrink:0;
+  color:var(--text-tertiary,rgba(148,163,184,0.55));
+  transition:transform .2s ease;
+}
+.turn-prov.tp-expanded .tp-chevron{transform:rotate(180deg)}
+/* Expanded detail rows */
+.turn-prov .tp-details{display:none;flex-basis:100%;margin-top:6px}
+.turn-prov.tp-expanded .tp-details{display:block}
+.turn-prov .tp-detail-row{
+  display:flex;align-items:flex-start;gap:8px;
+  padding:7px 10px;margin-top:6px;
+  border:1px solid rgba(148,163,184,0.16);border-radius:6px;
+  background:rgba(148,163,184,0.04);
+}
+.turn-prov .tp-detail-row:first-child{margin-top:0}
+/* Detail rows no longer carry a leading icon (it duplicated the collapsed
+   segment's glyph, which stays visible when the strip is expanded). The
+   per-segment status colour now rides a 2px left accent bar on the row so the
+   expanded detail keeps its visual cue without the redundant glyph. */
+.turn-prov .tp-detail-row{border-left-width:2px;border-left-style:solid;border-left-color:rgba(148,163,184,0.3)}
+.turn-prov .tp-detail-row .mp-text{display:flex;flex-direction:column;min-width:0;gap:2px;flex:1}
+.turn-prov .tp-detail-row .mp-headline{
+  font-weight:600;color:var(--text-primary,#e4e4e7);font-size:12px;
+}
+.turn-prov .tp-detail-row .mp-sub{
+  font-size:10.5px;opacity:0.7;
+  font-family:'JetBrains Mono','SF Mono',Menlo,monospace;
+}
+/* Status accents on the expanded detail rows (left accent bar). */
+.turn-prov .tp-detail-row.mp-done{border-left-color:#34d399}
+.turn-prov .tp-detail-row.mp-running{border-left-color:#f59e0b}
+.turn-prov .tp-detail-row.mp-failed{border-left-color:#f87171}
+.turn-prov .tp-detail-row.mp-skipped{border-left-color:rgba(148,163,184,0.5)}
+.turn-prov .tp-detail-prefs{border-left-color:rgba(45,212,191,0.85)}
+.turn-prov .tp-detail-login.mp-done{border-left-color:#34d399}
+.turn-prov .tp-detail-login.mp-failed{border-left-color:#f87171}
+/* Related-conversations segment — a calm indigo so it reads as a sibling of
+   the memory (amber) / prefs (teal) segments but stays distinct. */
+.turn-prov .tp-seg.tp-seg-convs{color:rgba(129,140,248,0.9)}
+.turn-prov .tp-detail-convs{border-left-color:rgba(129,140,248,0.9)}
+.turn-prov .rc-list{margin:6px 0 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:5px}
+.turn-prov .rc-list li{font-size:11.5px;line-height:1.35}
+.turn-prov .rc-conv-link{
+  color:var(--accent,#818cf8);text-decoration:none;font-weight:600;cursor:pointer;
+}
+.turn-prov .rc-conv-link:hover{text-decoration:underline}
+.turn-prov .rc-conv-title{font-weight:600;color:var(--text-primary,#e4e4e7)}
+.turn-prov .rc-conv-summary{
+  font-size:10.5px;opacity:0.72;margin-top:1px;color:var(--text-secondary);
+}
+[data-theme="tofu"] .turn-prov .tp-seg.tp-seg-convs{color:#7C6FA8}
+[data-theme="tofu"] .turn-prov .tp-detail-convs{border-left-color:#7C6FA8}
+[data-theme="light"] .turn-prov .tp-detail-row .mp-headline{color:#1f2937}
+[data-theme="light"] .turn-prov .tp-detail-row{background:rgba(100,116,139,0.05);border-color:rgba(100,116,139,0.16)}
+[data-theme="light"] .turn-prov.tp-expandable:hover{background:rgba(100,116,139,0.07);border-color:rgba(100,116,139,0.2)}
+[data-theme="tofu"] .turn-prov .tp-detail-row{background:rgba(196,149,106,0.06);border-color:rgba(196,149,106,0.22)}
+[data-theme="tofu"] .turn-prov .tp-detail-row .mp-headline{color:#4A3F2F}
+[data-theme="tofu"] .turn-prov .tp-detail-row .mp-sub{color:#736750}
+[data-theme="tofu"] .turn-prov.tp-expandable:hover{background:rgba(196,149,106,0.1);border-color:rgba(196,149,106,0.3)}
+[data-theme="tofu"] .turn-prov .tp-seg.tp-done{color:#5E8A50}
+[data-theme="tofu"] .turn-prov .tp-seg.tp-running{color:#C4956A}
+[data-theme="tofu"] .turn-prov .tp-seg.tp-failed{color:#A85A4A}
+[data-theme="tofu"] .turn-prov .tp-detail-prefs{border-left-color:#5E8A50}
+
 .mem-prefetch-chip{
   display:inline-flex;align-items:center;gap:8px;
   padding:7px 11px;margin:0 0 8px 0;
@@ -16868,14 +17083,16 @@ input.settings-mono {
 }
 .pref-learned-box .pl-row{
   display:flex;align-items:center;gap:8px;flex-wrap:wrap;
-  padding:8px 11px;border-radius:var(--radius-sm);
-  background:rgba(45,212,191,0.05);
-  border:1px solid rgba(45,212,191,0.22);
+  padding:7px 10px;border-radius:6px;
+  background:rgba(148,163,184,0.04);
+  border:1px solid rgba(148,163,184,0.16);
   font-size:12px;line-height:1.45;color:var(--text-secondary);
 }
+/* Pending rows (with Confirm/Dismiss) keep a faint indigo accent so the
+   actionable card stands out from the informational ones. */
 .pref-learned-box .pl-row.pl-pending{
-  background:rgba(99,102,241,0.06);
-  border-color:rgba(99,102,241,0.3);
+  background:rgba(99,102,241,0.05);
+  border-color:rgba(99,102,241,0.22);
 }
 .pref-learned-box .pl-lead{flex-shrink:0;display:flex;align-items:center;color:rgba(45,212,191,0.85)}
 .pref-learned-box .pl-pending .pl-lead{color:rgba(129,140,248,0.95)}
@@ -16891,16 +17108,84 @@ input.settings-mono {
   transition:background .15s ease,border-color .15s ease;
 }
 .pref-learned-box .pl-confirm{
-  background:rgba(99,102,241,0.18);border-color:rgba(99,102,241,0.4);
-  color:#c7d2fe;
+  background:rgba(99,102,241,0.85);border-color:rgba(99,102,241,0.95);
+  color:#ffffff;
 }
-.pref-learned-box .pl-confirm:hover{background:rgba(99,102,241,0.3)}
+.pref-learned-box .pl-confirm:hover{background:rgba(99,102,241,1)}
 .pref-learned-box .pl-dismiss{
   background:transparent;border-color:rgba(148,163,184,0.3);
   color:var(--text-secondary);
 }
 .pref-learned-box .pl-dismiss:hover{background:rgba(148,163,184,0.12)}
 .pref-learned-box .pl-resolved{opacity:0.75}
+
+/* ── Preferences settings tab — pending-proposal rows ── */
+.prefs-pending-list{display:flex;flex-direction:column;gap:8px;margin:6px 0 4px 0}
+.prefs-pending-row{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:8px 12px;border-radius:8px;
+  background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.18);
+}
+.prefs-pending-text{flex:1;min-width:0;color:var(--text-primary,#e4e4e7);font-size:12.5px}
+.prefs-pending-text b{font-weight:600}
+.prefs-pending-evidence{font-size:10.5px;opacity:0.65;margin-top:2px}
+.prefs-pending-actions{display:flex;gap:6px;flex-shrink:0}
+
+/* ── Preferences settings tab — per-item editable list ── */
+.prefs-list{display:flex;flex-direction:column;gap:16px;margin:10px 0 4px 0}
+.pref-section{display:flex;flex-direction:column;gap:6px}
+.pref-section-head{
+  display:flex;align-items:center;justify-content:space-between;
+  padding-bottom:4px;margin-bottom:2px;
+  border-bottom:1px solid var(--border-subtle,rgba(148,163,184,0.16));
+}
+.pref-section-title{
+  font-size:12px;font-weight:600;letter-spacing:0.02em;
+  color:var(--text-secondary,#a1a1aa);text-transform:uppercase;
+}
+.pref-add-btn{
+  display:flex;align-items:center;gap:4px;
+  font:inherit;font-size:11px;font-weight:600;cursor:pointer;
+  padding:3px 9px;border-radius:6px;
+  background:transparent;border:1px solid var(--border-subtle,rgba(148,163,184,0.28));
+  color:var(--text-secondary,#a1a1aa);
+  transition:background .15s ease,border-color .15s ease,color .15s ease;
+}
+.pref-add-btn:hover{
+  background:rgba(99,102,241,0.1);border-color:rgba(99,102,241,0.5);
+  color:var(--text-primary,#e4e4e7);
+}
+.pref-add-btn svg{display:block}
+.pref-item-row{
+  display:flex;align-items:center;gap:10px;
+  padding:7px 11px;border-radius:8px;
+  background:var(--surface-2,rgba(148,163,184,0.05));
+  border:1px solid var(--border-subtle,rgba(148,163,184,0.14));
+  transition:border-color .15s ease;
+}
+.pref-item-row:focus-within{border-color:rgba(99,102,241,0.5)}
+.pref-item-dot{
+  flex-shrink:0;width:5px;height:5px;border-radius:50%;
+  background:rgba(99,102,241,0.7);
+}
+.pref-item-input{
+  flex:1;min-width:0;font:inherit;font-size:13px;line-height:1.5;
+  background:transparent;border:none;outline:none;padding:0;
+  color:var(--text-primary,#e4e4e7);
+}
+.pref-item-input::placeholder{color:var(--text-tertiary,rgba(148,163,184,0.5))}
+.pref-item-del{
+  flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  width:24px;height:24px;border-radius:6px;cursor:pointer;
+  background:transparent;border:none;color:var(--text-tertiary,rgba(148,163,184,0.55));
+  transition:background .15s ease,color .15s ease;
+}
+.pref-item-del:hover{background:rgba(229,72,77,0.12);color:var(--danger,#e5484d)}
+.pref-item-del svg{display:block}
+.pref-section-empty{
+  font-size:12px;color:var(--text-tertiary,rgba(148,163,184,0.6));
+  padding:4px 2px;font-style:italic;
+}
 
 /* Icon + text column */
 .mem-prefetch-chip .mp-icon{
@@ -18778,6 +19063,13 @@ body.artifact-panel-open {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.artifact-lib-noresult {
+  padding: 14px 8px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--text-tertiary, #888);
 }
 
 .artifact-lib-row {

@@ -104,20 +104,30 @@ _clients_lock = threading.Lock()
 _last_poll_time = 0
 
 
-def mark_poll(client_id=None):
-    """Record a poll from a client (or anonymous legacy client)."""
+def mark_poll(client_id=None, chrome_major=0):
+    """Record a poll from a client (or anonymous legacy client).
+
+    Args:
+        client_id: Stable per-device extension id, or None for a legacy client.
+        chrome_major: Chromium major version reported by the extension (0 if
+            unknown). Stored so the UI can surface Chrome 142+ Local Network
+            Access prompt guidance for the browser actually running the bridge.
+    """
     global _last_poll_time
     now = time.time()
     _last_poll_time = now
     if client_id:
         with _clients_lock:
             if client_id not in _clients:
-                _clients[client_id] = {'first_seen': now, 'last_poll': now, 'name': '', 'poll_count': 1}
+                _clients[client_id] = {'first_seen': now, 'last_poll': now, 'name': '',
+                                       'poll_count': 1, 'chrome_major': chrome_major or 0}
                 logger.info('[Browser] New client registered: %s (total clients: %d)',
                             client_id[:12], len(_clients))
             else:
                 _clients[client_id]['last_poll'] = now
                 _clients[client_id]['poll_count'] = _clients[client_id].get('poll_count', 0) + 1
+                if chrome_major:
+                    _clients[client_id]['chrome_major'] = chrome_major
 
 
 def get_connected_clients():
@@ -129,6 +139,7 @@ def get_connected_clients():
              'seconds_ago': round(now - info['last_poll'], 1),
              'name': info.get('name', ''),
              'poll_count': info.get('poll_count', 0),
+             'chrome_major': info.get('chrome_major', 0),
              'first_seen': info.get('first_seen', 0)}
             for cid, info in _clients.items()
             if now - info['last_poll'] < 15

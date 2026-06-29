@@ -18,6 +18,8 @@ import pytest
 import lib.scheduler.timer as timer_mod
 from lib.database import DOMAIN_SYSTEM, get_thread_db
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture(scope='module', autouse=True)
 def _ensure_schema():
@@ -42,6 +44,23 @@ def _ensure_schema():
                 db.execute(f"ALTER TABLE timer_poll_log ADD COLUMN {col} "
                            f"TEXT NOT NULL DEFAULT ''")
                 db.commit()
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_created_timers():
+    """Delete every timer this test module creates, so no ``active`` row leaks
+    into the (possibly shared/production) DB and gets resurrected by
+    ``resume_active_timers()`` on the next server restart — the 2026-06-26
+    zombie-timer search-storm root cause. Pattern-gated to this module's
+    synthetic conv id, so it can never touch a real user's timer.
+    """
+    yield
+    try:
+        db = get_thread_db(DOMAIN_SYSTEM)
+        db.execute("DELETE FROM timer_watchers WHERE conv_id='conv-parsefail'")
+        db.commit()
+    except Exception:
+        pass
 
 
 def _make_timer():

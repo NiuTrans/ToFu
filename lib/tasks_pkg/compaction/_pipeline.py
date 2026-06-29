@@ -201,9 +201,31 @@ def run_compaction_pipeline(messages: list, current_round: int,
                     logger.error('[Pipeline] advanced_compact failed: %s',
                                  e, exc_info=True)
 
-    # Notify cache tracker that compaction occurred so the expected
-    # cache_read token drop isn't flagged as a cache break.
-    if (saved > 0 or compacted or adv_saved > 0) and conv_id:
+    # Notify cache tracker ONLY for mutations that actually touch the cached
+    # PREFIX, so the expected cache_read drop isn't flagged as a break.
+    #
+    # ★ Default L1 (micro_compact, saved>0) is cache-SAFE by construction:
+    #   every built-in step gates on ``ctx.is_in_cache_prefix(idx)`` and skips
+    #   messages[0:get_cache_prefix_count]. It edits only COLD results that
+    #   have NOT yet been cached (or, idempotently, ones already byte-identical
+    #   in the prefix). So it does NOT cause a drop and must NOT raise
+    #   compaction_pending — doing so blanket-suppresses detect_cache_break on
+    #   exactly the transient rounds (cold start, post-eviction, big fan-out)
+    #   where a REAL break is most likely, masking it. (See memory
+    #   l1-compaction-notify-masks-detection.)
+    #
+    #   We DO notify for:
+    #     * L2 force-compact (``compacted``) — rebuilds/drops prefix messages.
+    #     * advanced structural compaction (``adv_saved``) — drops whole turns.
+    #     * the aggressive arm (``ignore_cache_prefix``) — L1 then edits INSIDE
+    #       the prefix, so a drop is genuinely expected.
+    _ignore_prefix = False
+    if task:
+        _cc = (task.get('config') or {}).get('compaction')
+        if isinstance(_cc, dict):
+            _ignore_prefix = bool(_cc.get('ignore_cache_prefix', False))
+    _touched_prefix = bool(compacted) or adv_saved > 0 or (saved > 0 and _ignore_prefix)
+    if _touched_prefix and conv_id:
         try:
             from lib.tasks_pkg.cache_tracking import notify_compaction
             notify_compaction(conv_id)

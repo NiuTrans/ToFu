@@ -20,6 +20,10 @@ import pytest
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MOD_PATH = os.path.join(_REPO, 'debug', 'triage_errors.py')
 
+# debug/ is not shipped in opensource builds — skip the whole module there.
+if not os.path.exists(_MOD_PATH):
+    pytest.skip('debug/triage_errors.py not shipped in opensource', allow_module_level=True)
+
 
 def _load_module():
     spec = importlib.util.spec_from_file_location('_triage_errors_under_test', _MOD_PATH)

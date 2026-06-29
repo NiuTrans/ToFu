@@ -25,37 +25,41 @@ def _badge_list_tabs(meta, fn_name, display_text, chars, is_screenshot):
 def _badge_read_tab(meta, fn_name, display_text, chars, is_screenshot):
     meta['badge'] = f'{chars:,} chars'
 
-def _badge_ok_or_error(icon_ok, icon_fail='❌ error'):
-    """Factory for simple ok/fail badge handlers."""
+def _badge_ok_or_error(label_ok, label_fail='error'):
+    """Factory for simple ok/fail badge handlers.
+
+    Badges are plain text (no emoji) per CLAUDE.md §3.4 — the frontend
+    renders the per-tool SVG icon and colors the badge by ok/fail class.
+    """
     def _handler(meta, fn_name, display_text, chars, is_screenshot):
         # Tool results no longer include emoji prefixes; error strings
         # start with 'Error:' or contain ' error:' / ' failed:'.
         ok = not display_text.startswith('Error')
-        meta['badge'] = icon_ok if ok else icon_fail
+        meta['badge'] = label_ok if ok else label_fail
     return _handler
 
 def _badge_screenshot(meta, fn_name, display_text, chars, is_screenshot):
-    meta['badge'] = '📸 captured' if is_screenshot else '❌ failed'
+    meta['badge'] = 'captured' if is_screenshot else 'failed'
 
-def _badge_regex_count(pattern, icon, unit, fallback='done'):
+def _badge_regex_count(pattern, unit, fallback='done'):
     """Factory for badges that extract a count via regex."""
     def _handler(meta, fn_name, display_text, chars, is_screenshot):
         m = re.search(pattern, display_text[:200])
-        meta['badge'] = f'{icon} {m.group(1)} {unit}' if m else f'{icon} {fallback}' if icon else fallback
+        meta['badge'] = f'{m.group(1)} {unit}'.strip() if m else fallback
     return _handler
 
 _BROWSER_BADGE_DISPATCH = {
     'browser_list_tabs':                _badge_list_tabs,
     'browser_read_tab':                 _badge_read_tab,
-    'browser_execute_js':               _badge_ok_or_error('✅ ok', '❌ error'),
+    'browser_execute_js':               _badge_ok_or_error('ok', 'error'),
     'browser_screenshot':               _badge_screenshot,
-    'browser_get_interactive_elements': _badge_regex_count(r'(\d+) shown', '🔍', 'elements'),
-    'browser_click':                    _badge_ok_or_error('🖱️ clicked', '❌ failed'),
-    'browser_get_cookies':              _badge_regex_count(r'(\d+) cookies?', '🍪', ''),
-    'browser_get_history':              _badge_regex_count(r'(\d+) results?', '', 'results', fallback='done'),
-    'browser_create_tab':               _badge_ok_or_error('➕ opened', '❌ failed'),
-    'browser_close_tab':                _badge_ok_or_error('✖ closed', '❌ failed'),
-    'browser_navigate':                 _badge_ok_or_error('🔗 done', '❌ failed'),
+    'browser_get_interactive_elements': _badge_regex_count(r'(\d+) shown', 'elements'),
+    'browser_click':                    _badge_ok_or_error('clicked', 'failed'),
+    'browser_get_cookies':              _badge_regex_count(r'(\d+) cookies?', 'cookies'),
+    'browser_get_history':              _badge_regex_count(r'(\d+) results?', 'results'),
+    'browser_create_tab':               _badge_ok_or_error('opened', 'failed'),
+    'browser_close_tab':                _badge_ok_or_error('closed', 'failed'),
+    'browser_navigate':                 _badge_ok_or_error('done', 'failed'),
 }
 
 
@@ -68,7 +72,7 @@ def _handle_browser_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
 
     is_screenshot = isinstance(tool_content, dict) and tool_content.get('__screenshot__')
     if is_screenshot:
-        display_text = f'📸 Screenshot captured ({tool_content.get("format", "png")})'
+        display_text = f'Screenshot captured ({tool_content.get("format", "png")})'
     else:
         display_text = tool_content if isinstance(tool_content, str) else json.dumps(tool_content, ensure_ascii=False)
 
@@ -107,6 +111,17 @@ def _handle_browser_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         'snippet': display_text[:120].replace('\n', ' '),
         'badge': f'{chars} chars',
     }
+    # ── Screenshot: render the captured image inline in the timeline ──
+    # The extension returns a full ``data:<mime>;base64,...`` URL; expose it
+    # via ``imageDataUris`` (the same field read_files/inspect_image use) so
+    # the frontend draws an <img> instead of a useless "N chars" row.
+    if is_screenshot and tool_content.get('dataUrl'):
+        fmt = tool_content.get('format', 'png')
+        meta['imageDataUris'] = [{
+            'uri': tool_content['dataUrl'],
+            'format': fmt,
+            'filename': f'screenshot.{fmt}',
+        }]
     badge_fn = _BROWSER_BADGE_DISPATCH.get(fn_name)
     if badge_fn is not None:
         badge_fn(meta, fn_name, display_text, chars, is_screenshot)

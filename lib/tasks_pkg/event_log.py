@@ -226,9 +226,26 @@ def has_terminal_event(task_id):
 
 
 def _opportunistic_prune(db):
-    """Delete events for tasks that have been terminal for > EVENT_TTL_MS.
+    """Delete stale task_events rows in two passes, both bounded by EVENT_TTL_MS.
 
-    Uses task_results.completed_at as the terminal timestamp.
+    Pass 1 (terminal tasks): rows whose ``task_id`` JOINs a ``task_results``
+    row in a terminal status with ``completed_at`` older than the TTL. This
+    is the normal lifecycle reaper — uses ``task_results.completed_at`` as the
+    authoritative terminal timestamp.
+
+    Pass 2 (ORPHANED rows): rows whose ``task_id`` has NO ``task_results`` row
+    at all and whose own ``task_events.ts_ms`` is older than the TTL. Pass 1
+    structurally cannot see these — its JOIN drops any row without a matching
+    ``task_results`` entry — so without Pass 2 they would never be reaped
+    (permanent litter). Orphans arise whenever something runs the tool
+    executor on a task dict whose id is not registered in the chat
+    TaskRuntime and which never writes a task_results row: e.g. the 2026-06-28
+    timer-poll-proxy collision bug left ~160 orphaned ``(tmr_*, 0/1)`` rows
+    (the first, successful write of each colliding pair). The ``ts_ms <
+    cutoff`` age guard is the safety mechanism — it guarantees we never reap
+    events of a legitimately in-flight unregistered task, since any single
+    poll's lifetime and the SSE-reconnect window are far under EVENT_TTL_MS.
+    This also future-proofs the reaper against any new orphaned-id writer.
     """
     cutoff = int((time.time() * 1000) - EVENT_TTL_MS)
     try:
@@ -253,3 +270,24 @@ def _opportunistic_prune(db):
             db.rollback()
         except Exception as re:
             logger.debug('[EventLog] rollback after prune failure: %s', re)
+
+    # ── Pass 2: orphaned rows (no task_results row), aged out by own ts_ms ──
+    try:
+        cur = db.execute(
+            "DELETE FROM task_events WHERE ts_ms < ? "
+            "  AND NOT EXISTS ("
+            "    SELECT 1 FROM task_results tr WHERE tr.task_id = task_events.task_id"
+            "  )",
+            (cutoff,)
+        )
+        db.commit()
+        rc = getattr(cur, 'rowcount', 0) or 0
+        if rc > 0:
+            logger.info('[EventLog] Pruned %d orphaned event row(s) with no task_results '
+                        '(cutoff=%d)', rc, cutoff)
+    except Exception as e:
+        logger.debug('[EventLog] orphan prune query failed: %s', e)
+        try:
+            db.rollback()
+        except Exception as re:
+            logger.debug('[EventLog] rollback after orphan prune failure: %s', re)

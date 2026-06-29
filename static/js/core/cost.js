@@ -39,9 +39,12 @@ if (!config.thinkingDepth) config.thinkingDepth = config.defaultThinkingDepth;
 // the backend's better policy never applied. Now: 0 = follow server policy.
 // Users who *intentionally* set a tighter cap keep their value.
 if (config.imageMaxWidth === 1024) config.imageMaxWidth = 0;
-// Auto-translate: send Chinese→English to LLM, show bilingual
+// Auto-translate: send Chinese→English to LLM, show bilingual.
+// Default OPT-IN (OFF) — matches the backend canonical
+// lib.conv_config.AUTO_TRANSLATE_DEFAULT so the toolbar toggle display and
+// every trigger path agree (the historical three-way default split).
 let autoTranslate = JSON.parse(
-  localStorage.getItem("claude_auto_translate") || "true",
+  localStorage.getItem("claude_auto_translate") || "false",
 );
 
 let projectState = {

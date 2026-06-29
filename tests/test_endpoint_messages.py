@@ -360,7 +360,7 @@ class TestVerdictParsing:
 #  Test: Single iteration (planner → worker → critic STOP)
 # ═══════════════════════════════════════════════════════════
 
-@pytest.mark.unit
+@pytest.mark.slow  # runs the full endpoint loop (real orchestration) — integration-grade, not a fast unit
 class TestEndpointSingleIteration:
     """Test a single-iteration endpoint: planner → worker → critic(STOP).
 
@@ -506,7 +506,7 @@ class TestEndpointSingleIteration:
 #  Test: Multi-iteration (worker → critic CONTINUE → worker → critic STOP)
 # ═══════════════════════════════════════════════════════════
 
-@pytest.mark.unit
+@pytest.mark.slow  # runs the full multi-iteration endpoint loop — integration-grade
 class TestEndpointMultiIteration:
     """Test multi-iteration endpoint with CONTINUE then STOP.
 
@@ -614,7 +614,7 @@ class TestEndpointMultiIteration:
 #  Test: Endpoint turns stored on task correctly
 # ═══════════════════════════════════════════════════════════
 
-@pytest.mark.unit
+@pytest.mark.slow  # runs the full endpoint loop — integration-grade
 class TestEndpointTurnsPersistence:
     """Test that endpoint turns are correctly accumulated on the task dict."""
 
@@ -877,7 +877,7 @@ class TestEndpointWithPriorContext:
 #  Test: Full integration — endpoint + follow-up
 # ═══════════════════════════════════════════════════════════
 
-@pytest.mark.unit
+@pytest.mark.slow  # runs the full endpoint loop — integration-grade
 class TestEndpointFollowUpIntegration:
     """Integration test: run endpoint, then verify follow-up message shape.
 
@@ -949,7 +949,7 @@ class TestEndpointFollowUpIntegration:
 #  Test: Stuck detection — message shapes remain valid
 # ═══════════════════════════════════════════════════════════
 
-@pytest.mark.unit
+@pytest.mark.slow  # runs the endpoint loop to the stuck guard — integration-grade
 class TestEndpointStuckDetection:
     """Test that stuck detection works and message shapes remain valid."""
 
@@ -1010,7 +1010,7 @@ class TestEndpointStuckDetection:
 #  Test: Message role alternation across all scenarios
 # ═══════════════════════════════════════════════════════════
 
-@pytest.mark.unit
+@pytest.mark.slow  # runs multiple full endpoint loops — integration-grade
 class TestNoConsecutiveUserMessagesEver:
     """Exhaustive test: no scenario produces consecutive user messages in API calls.
 
@@ -1166,7 +1166,7 @@ class TestNoConsecutiveUserMessagesEver:
 #  Test: Planner replaces user message in working messages
 # ═══════════════════════════════════════════════════════════
 
-@pytest.mark.unit
+@pytest.mark.slow  # runs the full endpoint loop — integration-grade
 class TestPlannerReplacesUserMessage:
     """Verify that the planner's output replaces the original user message
     in the working messages sent to the worker and critic."""

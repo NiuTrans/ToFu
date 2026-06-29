@@ -10,10 +10,16 @@ Run:  pytest tests/test_visual_e2e.py -m visual
 Screenshots saved to: tests/screenshots/
 
 NOTE: The ``page`` fixture (conftest.py) automatically cleans up any
-conversations created during each test so E2E runs don't leave ghost
+conversations created during each test (snapshot-diff of conversation ids
+→ browser-side ``deleteConversation``), backed by a session-autouse
+pattern-purge of known test-only rows, so E2E runs don't leave ghost
 entries in the production database.  Tests that create their own page/
 context (e.g. TestResponsive) should use ``_cleanup_test_convs()`` if
 they send messages.
+
+These tests need Playwright + a Chromium build (``pip install playwright
+&& playwright install chromium``); when either is missing the ``browser``
+fixture skips the test rather than erroring.
 """
 from __future__ import annotations
 
@@ -43,6 +49,14 @@ def _cleanup_test_convs(page, server_url: str, ids_before: set[str]):
         # ... run test ...
         _cleanup_test_convs(page, live_server, ids_before)
     """
+    # ⚠️ MASS-DELETION GUARD (2026-06-28): an empty ``ids_before`` (the caller
+    # snapshotted before the ``conversations`` global was ready) would make
+    # ``ids_after - ids_before`` the ENTIRE sidebar — deleting every real
+    # conversation. Refuse to run the diff-delete when the baseline is empty;
+    # a test that genuinely starts from zero convs has nothing to clean up
+    # anyway, so skipping is always safe.
+    if not ids_before:
+        return
     try:
         ids_after = set(page.evaluate("conversations.map(c => c.id)") or [])
     except Exception:
