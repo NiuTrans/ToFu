@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from lib.agent_core.events import EventType, build_event
-from lib.log import get_logger
+from lib.log import audit_log, get_logger
 from lib.protocols import TaskEventSink
 
 logger = get_logger(__name__)
@@ -32,8 +32,8 @@ from lib.tasks_pkg.tool_display import _build_tool_round_entry
 from lib.tasks_pkg.tool_hooks import run_post_hooks, run_pre_hooks
 from lib.token_counter import count_text
 from lib.tool_input_repair import (
-    build_rejection_message, classify_tool_call, report_hallucinated,
-    resolve_tool_name, schema_hint, validate_then_repair,
+    HALLUCINATION_ABORT_THRESHOLD,
+    ingest_tool_call,
 )
 from lib.tools import build_project_tool_meta
 from lib.model_info import model_supports_vision
@@ -52,6 +52,7 @@ _REPAIR_PATTERN_LABELS = {
     'bare_string_to_array': 'wrapped string in array',
     'empty_placeholder_unwrap': 'unwrapped object to array',
     'leaked_tool_call_syntax': 'stripped leaked tool-call markup',
+    'param_alias': 'renamed wrong-harness arg key',
 }
 
 
@@ -151,6 +152,7 @@ _IDEMPOTENT_TOOLS_BASE = frozenset({
     'browser_summarize_page', 'browser_get_app_state',
     'browser_get_interactive_elements',
     'list_conversations', 'get_conversation',
+    'project_charter_read', 'project_board_read',
 })
 
 # ── Concurrency safety partitioning ──
@@ -445,8 +447,6 @@ _TOOL_EXEC_LABELS = {
 }
 
 
-# _repair_json now lives in lib.utils — no lazy import wrapper needed.
-from lib.utils import repair_json as _repair_json
 
 
 def tool_label(tn: str) -> str:
@@ -599,146 +599,105 @@ def parse_tool_calls(
         if not fn_name.replace('_', '').replace('-', '').isalnum():
             logger.warning('[Task %s] Skipping malformed tool name (non-alphanumeric): %.80s', tid, fn_name)
             continue
-        # ── Tool-NAME repair (alias resolution) ──
-        # The model sometimes calls a tool by a name from another harness
-        # (read_file→read_files, bash→run_command, Grep→grep_search, …).
-        # Rewrite well-known synonyms to the canonical Tofu tool so the call
-        # executes instead of dying on a hard "Unknown tool" wall. Only
-        # confident 1:1 mappings are applied; anything unrecognized is then
-        # classified as a hallucination and rejected (see below).
-        #
-        # ``_known`` (not ``tool_registry``) is the membership oracle so MCP /
-        # swarm / memory / custom tools are recognised — and never aliased over
-        # nor mis-flagged as fake.
-        _hallucinated = None
-        if fn_name not in _known:
-            _resolved, _alias_kind = resolve_tool_name(fn_name, known=_known)
-            if _alias_kind and _resolved != fn_name:
-                logger.info('[Task %s] Aliased tool name %r → %r (%s)',
-                            tid, fn_name, _resolved, _alias_kind)
-                _tool_name_aliased = fn_name
-                fn_name = _resolved
-                # Rewrite the name in-place so the persisted assistant message
-                # carries the canonical tool name — otherwise replay/continue
-                # would re-trigger the same alias every turn and the stored
-                # tool_call name would mismatch the executed tool.
-                fn_obj['name'] = _resolved
+        # ── Unified tool-call ingestion ──
+        # ONE seam does name-drop guard → name-alias (read_file→read_files,
+        # WebFetch→fetch_url, …) → JSON decode+repair → schema/param repair →
+        # hallucination reject. Shared verbatim with the swarm sub-agent and
+        # timer-poll dispatch paths (lib/tool_input_repair.ingest_tool_call), so
+        # a guard added here can never again skip those paths. ``_known`` (not
+        # ``tool_registry``) is the membership oracle so MCP / swarm / memory /
+        # custom tools are recognised — never aliased over nor mis-flagged.
+        # The chat-specific PRESENTATION layered on the result below (UI
+        # auto-fixed badge, phantom-empty-args skip, autopilot loop-break, raw-
+        # args diagnostic log) stays here — it's not shared behaviour.
+        _ingested = ingest_tool_call(
+            tool_call=tc, known_tools=_known,
+            model=task.get('model', '') or '',
+            conv_id=task.get('convId', '') or '',
+        )
+        # Drop guard: streaming artefacts (antml:thinking, XML-corrupted names)
+        # — skip entirely (not executed, not rejected). Preserves the prior
+        # per-reason WARNING for grep parity.
+        if _ingested.dropped:
+            if _ingested.drop_reason == 'internal_artifact':
+                logger.warning('[Task %s] Skipping spurious/internal tool call name: %s', tid, fn_name)
+            elif _ingested.drop_reason == 'malformed':
+                logger.warning('[Task %s] Skipping malformed tool name (non-alphanumeric): %.80s', tid, fn_name)
             else:
-                _tool_name_aliased = None
-                # ── Unified hallucination rejection ──
-                # No exact match and no confident alias → the model invented a
-                # tool that does not exist this turn (e.g. `search_web` when
-                # only `web_search` is registered). Classify it once, here, so
-                # there is a SINGLE rejection path: the call is never executed,
-                # the round is stamped `rejected` for distinct UI styling, and
-                # the model gets a standardized actionable message back.
-                _hallucinated = classify_tool_call(fn_name, _known)
-                if _hallucinated:
-                    logger.warning(
-                        '[Task %s] conv=%s Rejected hallucinated tool %r '
-                        '(suggestions=%s)',
-                        tid, task.get('convId', ''), fn_name,
-                        _hallucinated.get('suggestions'))
-                    report_hallucinated(fn_name, _hallucinated,
-                                        model=task.get('model', '') or '')
-        else:
-            _tool_name_aliased = None
+                logger.warning('[Task %s] Skipping tool call with missing function name: %s', tid, tc)
+            continue
+        _tool_name_aliased = _ingested.raw_name if _ingested.alias_kind else None
+        if _ingested.alias_kind:
+            logger.info('[Task %s] Aliased tool name %r → %r (%s)',
+                        tid, _ingested.raw_name, _ingested.fn_name, _ingested.alias_kind)
+        fn_name = _ingested.fn_name
+        # Persist the canonical name onto the tool_call so replay/Continue
+        # doesn't re-trigger the alias and the stored name matches the executed
+        # tool.
+        fn_obj['name'] = fn_name
+        _hallucinated = _ingested.rejection
+        if _hallucinated:
+            logger.warning(
+                '[Task %s] conv=%s Rejected hallucinated tool %r '
+                '(suggestions=%s, repeat=%d)',
+                tid, task.get('convId', '') or '', fn_name,
+                _hallucinated.get('suggestions'), _ingested.repeat_count)
+
         # Guard against phantom tool calls: valid name but empty arguments,
         # AND another tool call with the SAME name has real arguments.
         # This avoids dropping legitimate no-arg tools
         # that appear alongside other tool calls.
         _raw_check = (fn_obj.get('arguments', '') or '').strip()
-        if not _raw_check and fn_name in _names_with_real_args:
+        if not _raw_check and fn_name in _names_with_real_args and not _hallucinated:
             logger.warning('[Task %s] Skipping phantom tool call %s (tc_id=%s) '
                            'with empty arguments — duplicate of another %s call '
                            'with real args',
                            tid, fn_name, tc.get('id', '?')[:12], fn_name)
             continue
         tc_id = tc.get('id') or f'call_{uuid.uuid4().hex[:12]}'
-        _args_parse_error = None
         # Harness self-repair tracking — surfaced to the UI so the user knows
         # the displayed/executed args were auto-corrected from a malformed
         # model output.  ``_json_repaired`` = recovered truncated/invalid JSON;
         # ``_repair_log`` = schema-shape coercions (stringified_json, …).
-        _json_repaired = False
-        _repair_log = None
+        _json_repaired = _ingested.json_repaired
+        _repair_log = _ingested.repair_log or None
+        _args_parse_error = _ingested.parse_error
+        fn_args = _ingested.fn_args
 
-        # ── Hallucinated tool → short-circuit before arg parsing ──
-        # A fake tool will never execute, so don't bother parsing/repairing its
-        # arguments. Setting _args_parse_error routes it through the existing
-        # "return error to the LLM, skip execution" branch in
-        # execute_tool_pipeline — now carrying the standardized rejection text.
+        # ── Autopilot loop breaker (chat-only presentation on the reject) ──
+        # A no-suggestion phantom re-emitted under autopilot is a token-burning
+        # loop the model can't escape (module_buffer_manager ×7). Abort gates on
+        # HALLUCINATION_ABORT_THRESHOLD, DELIBERATELY HIGHER than the escalate
+        # threshold: the model first gets ~2 rounds holding the injected real-
+        # tool list to self-correct; abort is the true last resort. Only fires
+        # for pure inventions (no nearby real tool to suggest).
         if _hallucinated:
-            _args_parse_error = build_rejection_message(_hallucinated)
-
-        # ── Parse arguments (with repair fallback) ──
-        try:
-            raw_args = fn_obj.get('arguments', '') or ''
-            fn_args = json.loads(raw_args) if raw_args.strip() else {}
-        except (json.JSONDecodeError, TypeError, KeyError) as e:
-            try:
-                raw = fn_obj.get('arguments', '{}')
-                fn_args = _repair_json(raw if isinstance(raw, str) else '{}')
-                _json_repaired = True
-                # Successful repair — the LLM streamed slightly-malformed JSON
-                # (common with long code blobs in write_file). _repair_json
-                # recovered it and the tool call proceeds normally. Debug so
-                # error.log stays clean; only unrecovered failures below
-                # warrant a warning.
-                logger.debug(
-                    '[Task %s] conv=%s Repaired malformed JSON for tool=%s tc_id=%s at round %d: original_err=%s',
-                    tid, task.get('convId', ''), fn_name, tc_id, round_num, e)
-
-            except Exception as e:
-                # Capture the raw offending argument string so the failure is
-                # diagnosable after the fact. Without this, error.log records
-                # only the char offset ("Expecting ':' delimiter ... char 132")
-                # and the malformed text is discarded — making every
-                # structural-JSON failure impossible to reconstruct.
-                _raw_for_log = raw_args if isinstance(raw_args, str) else str(raw_args)
-                _err_pos = getattr(e, 'pos', None)
-                if isinstance(_err_pos, int):
-                    _lo = max(0, _err_pos - 40)
-                    _around = _raw_for_log[_lo:_err_pos + 40]
-                    _window = ' near=...%r...' % _around
-                else:
-                    _window = ''
-                logger.warning(
-                    '[Task %s] conv=%s Failed to parse tool args for tool=%s tc_id=%s at round %d: %s | '
-                    'raw_args(%d chars)=%.800r%s',
-                    tid, task.get('convId', ''), fn_name, tc_id, round_num, e,
-                    len(_raw_for_log), _raw_for_log, _window, exc_info=True)
-
-                fn_args = {}
-                _hint = schema_hint(fn_name)
-                _args_parse_error = (
-                    f'ERROR: Your tool call for `{fn_name}` had malformed JSON '
-                    f'arguments — {e}. Please retry with valid JSON.'
-                    + (f' {_hint}' if _hint else '')
-                )
-
-        # ── Schema-driven shape repair (Awais open-model-harness patterns) ──
-        # Runs only when JSON parse succeeded. Repairs:
-        #   null_omission, stringified_json, stringified_primitive,
-        #   bare_string_to_array, empty_placeholder_unwrap.
-        # Valid inputs are never touched. Tools without an indexed schema
-        # pass through unchanged. See lib/tool_input_repair.py.
-        if not _args_parse_error and isinstance(fn_args, dict):
-            try:
-                fn_args, _repair_log = validate_then_repair(
-                    fn_name, fn_args,
-                    model=task.get('model', '') or '',
-                )
-                if _repair_log:
-                    logger.debug(
-                        '[Task %s] tool=%s tc_id=%s: repaired %d arg(s) %s',
-                        tid, fn_name, tc_id[:12], len(_repair_log), _repair_log,
-                    )
-            except Exception as _re:
-                logger.warning(
-                    '[Task %s] tool=%s tc_id=%s: input-repair pass failed (passing args through): %s',
-                    tid, fn_name, tc_id[:12], _re, exc_info=True,
-                )
+            _repeat_n = _ingested.repeat_count
+            if (_repeat_n >= HALLUCINATION_ABORT_THRESHOLD
+                    and not (_hallucinated.get('suggestions') or [])):
+                try:
+                    from lib.tasks_pkg.autopilot import is_autopilot_enabled
+                    if is_autopilot_enabled(task):
+                        logger.warning(
+                            '[Task %s] conv=%s Autopilot loop breaker: tool %r '
+                            'invented %d× in a row — aborting task to stop the loop',
+                            tid, task.get('convId', ''), fn_name, _repeat_n)
+                        audit_log('hallucination_loop_break',
+                                  tool=fn_name,
+                                  repeat=_repeat_n,
+                                  conv_id=task.get('convId', '') or '',
+                                  task_id=task.get('id', '') or '',
+                                  model=task.get('model', '') or '')
+                        task['aborted'] = True
+                        task['_abort_reason'] = 'hallucination_loop'
+                except Exception as _e_brk:
+                    logger.debug('[Task %s] autopilot loop-breaker check '
+                                 'skipped: %s', tid, _e_brk)
+        elif _repair_log:
+            logger.debug(
+                '[Task %s] tool=%s tc_id=%s: repaired %d arg(s) %s',
+                tid, fn_name, tc_id[:12], len(_repair_log), _repair_log,
+            )
 
         # ── Build a UI-facing repair summary (None when nothing was fixed) ──
         _repair_summary = _build_repair_summary(
@@ -1592,13 +1551,20 @@ def execute_tool_pipeline(
                                                 _re_fn or '?', _re_rn, _ev_err)
                                 break
 
-    # Emit snapshot AFTER tool results appended
+    # Emit snapshot AFTER tool results appended — WIRE-FORM view (same single
+    # source of truth as the orchestrator's pre-LLM and final snapshots), so
+    # the panel reflects exactly what the model will receive next round. Runs
+    # on an independent copy via apply_wire_sanitize (does not mutate messages).
     try:
-        snapshot = _strip_base64_for_snapshot(messages)
+        from lib.tasks_pkg.wire_messages import apply_wire_sanitize
+        _wire = apply_wire_sanitize(
+            messages, conv_id=task.get('convId', ''),
+            provider_id=task.get('provider_id') or '')
+        snapshot = _strip_base64_for_snapshot(_wire)
         snap_evt = build_event(
             EventType.MESSAGES_SNAPSHOT,
             round=round_num + 1,
-            label=f'Round {round_num + 1} 工具结果后 · {len(messages)}条',
+            label=f'Round {round_num + 1} 工具结果后 · {len(snapshot)}条',
             messages=snapshot,
         )
         if tool_list:

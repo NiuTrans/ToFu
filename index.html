@@ -252,6 +252,10 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
             <span data-i18n="paper.tabReport">Report</span>
           </button>
+          <button class="paper-tab-btn" data-tab="review" onclick="_switchPaperTab('review')">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+            <span data-i18n="paper.tabReview">Review</span>
+          </button>
           <button class="paper-tab-btn" data-tab="translate" onclick="_switchPaperTab('translate')">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 21h4l1-4h8l1 4h4"/><path d="M5 17l2-8h10l2 8"/><path d="M8 9l1-4h6l1 4"/></svg>
             <span data-i18n="paper.tabBabel">Babel PDF</span>
@@ -286,6 +290,13 @@
                 <!-- Populated by _populatePaperReportModelDropdown() -->
               </div>
             </div>
+            <!-- EN / 中 segmented control: per-paper report generation language
+                 (persisted). Switching regenerates/loads in the new language
+                 (cached separately per (paper_hash, lang)). -->
+            <div class="paper-report-lang-toggle" id="reportLangToggle" data-i18n-title="paper.reportLangTitle" title="Report language">
+              <button type="button" class="paper-report-lang-opt" data-lang="en" onclick="_setReportLang('en','report')">EN</button>
+              <button type="button" class="paper-report-lang-opt" data-lang="zh" onclick="_setReportLang('zh','report')">中</button>
+            </div>
             <button class="paper-report-btn paper-report-stop-btn" id="paperReportStopBtn" onclick="_stopPaperReport()" data-i18n-title="paper.reportStop" title="Stop generation" style="display:none">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
               <span data-i18n="paper.reportStop">Stop</span>
@@ -318,6 +329,71 @@
             </div>
           </div>
         </div>
+        <!-- Review Panel — venue-aware peer review, reuses the report engine -->
+        <div class="paper-tab-panel" data-tab="review" style="display:none">
+          <div class="paper-report-toolbar">
+            <div class="paper-report-model-picker" id="paperReviewVenuePicker">
+              <button class="paper-report-model-btn" onclick="_toggleReviewVenueDropdown(event)" data-i18n-title="paper.reviewSelectVenueTitle" title="Select target conference">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M5 21V7l8-4v18"/><path d="M19 21V11l-6-4"/><path d="M9 9v.01M9 12v.01M9 15v.01M9 18v.01"/></svg>
+                <span id="paperReviewVenueLabel" data-i18n="paper.reviewSelectVenue">Select venue</span>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="paper-report-model-dropdown" id="paperReviewVenueDropdown">
+                <!-- Populated by _populateReviewVenueDropdown() -->
+              </div>
+            </div>
+            <div class="paper-report-model-picker" id="paperReviewModelPicker">
+              <button class="paper-report-model-btn" onclick="_togglePaperReviewModelDropdown(event)" data-i18n-title="paper.reportSelectModelTitle" title="Select model for review generation">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+                <span id="paperReviewModelLabel" data-i18n="paper.reportSelectModel">Select model</span>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="paper-report-model-dropdown" id="paperReviewModelDropdown">
+                <!-- Populated by _populatePaperReportModelDropdown(reviewView) -->
+              </div>
+            </div>
+            <button class="paper-report-btn paper-report-stop-btn" id="paperReviewStopBtn" onclick="_stopPaperReview()" data-i18n-title="paper.reportStop" title="Stop generation" style="display:none">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
+              <span data-i18n="paper.reportStop">Stop</span>
+            </button>
+            <button class="paper-report-btn" id="paperReviewRegenBtn" onclick="_regeneratePaperReview()" data-i18n-title="paper.reportRegenerate" title="Regenerate">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              <span data-i18n="paper.reportRegenerate">Regenerate</span>
+            </button>
+            <!-- Review is generated + cached + exported in English (submission
+                 language). The EN/中 control is a READING toggle: '中' shows an
+                 on-demand translated view (canonical English is never touched),
+                 'EN' restores the original. Always available (both directions),
+                 independent of the app UI language. Managed by
+                 _syncReviewTranslateBtn; per-paper choice persisted. -->
+            <div class="paper-report-lang-toggle" id="reviewLangToggle" data-i18n-title="paper.reviewTranslateTitle" title="Review reading language">
+              <button type="button" class="paper-report-lang-opt" data-lang="en" onclick="_setReportLang('en','review')">EN</button>
+              <button type="button" class="paper-report-lang-opt" data-lang="zh" onclick="_setReportLang('zh','review')">中</button>
+            </div>
+            <button class="paper-report-btn" onclick="_copyPaperReview()" data-i18n-title="paper.reportCopy" title="Copy">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span id="paperReviewCopyLabel" data-i18n="paper.reportCopy">Copy</span>
+            </button>
+            <div class="paper-report-export" id="paperReviewExportMenu">
+              <button class="paper-report-btn" onclick="_togglePaperReviewExportMenu(event)" data-i18n-title="paper.reportExport" title="Export">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span data-i18n="paper.reportExport">Export</span>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="paper-report-export-dropdown" id="paperReviewExportDropdown">
+                <button class="paper-report-export-item" onclick="_exportPaperReview('md')" data-i18n="paper.reportExportMd">Markdown (.md)</button>
+                <button class="paper-report-export-item" onclick="_exportPaperReview('html')" data-i18n="paper.reportExportHtml">Standalone HTML</button>
+                <button class="paper-report-export-item" onclick="_exportPaperReview('pdf')" data-i18n="paper.reportExportPdf">Print / Save as PDF</button>
+              </div>
+            </div>
+          </div>
+          <div class="paper-report-content" id="paperReviewContent">
+            <div class="paper-report-empty">
+              <p data-i18n="paper.reviewEmptyTitle">Pick a target conference, then switch to this tab to generate a peer review</p>
+              <p class="paper-report-hint" data-i18n="paper.reviewEmptyHint">The model reviews against the venue's real scorecard and verifies code/data claims via web search</p>
+            </div>
+          </div>
+        </div>
         <!-- Babel PDF Panel -->
         <div class="paper-tab-panel" data-tab="translate" style="display:none">
           <div class="paper-translate-content" id="paperTranslateContent">
@@ -338,8 +414,51 @@
       </div>
     </div>
   </div>
+  <!-- Project Collaboration Bar — a slim line under the top bar (project mode
+       only, shown only when there's collaborative state to surface). Populated
+       by presence.js from the 'presence' + 'project' push channels; clicking
+       it opens the Project Brain panel. Replaces the old crowding presence
+       strip that sat above the messages. -->
+  <div class="presence-strip collab-bar" id="presenceStrip" hidden></div>
 
   <div class="chat-wrapper">
+    <!-- ═══ Project Brain — cross-conversation Activity Feed (Pillar #1) ═══
+         A slide-in overlay panel, opened from the project bar. Three columns
+         (Charter / Board / Activity); only Activity is live in Pillar #1.
+         Populated by project-brain.js (registered in _BUNDLE_FILES). -->
+    <div class="project-brain-overlay" id="projectBrainOverlay" hidden onclick="if(event.target===this)closeProjectBrain()">
+      <div class="project-brain-panel" role="dialog" aria-modal="true">
+        <div class="project-brain-head">
+          <span class="project-brain-title">
+            <span class="project-brain-title-ico" id="projectBrainHeadIcon"></span>
+            <span data-i18n="projectBrain.title">Project Brain</span>
+          </span>
+          <button class="project-brain-close" onclick="closeProjectBrain()" title="Close">✕</button>
+        </div>
+        <div class="project-brain-columns">
+          <div class="project-brain-col project-brain-col-charter">
+            <div class="project-brain-col-head" data-i18n="projectBrain.charter">Charter</div>
+            <div class="project-brain-col-body" id="projectBrainCharterBody">
+              <div class="pb-charter-empty" data-i18n="projectBrain.charterEmpty">No charter yet</div>
+            </div>
+          </div>
+          <div class="project-brain-col project-brain-col-board">
+            <div class="project-brain-col-head" data-i18n="projectBrain.board">Board</div>
+            <div class="project-brain-col-body" id="projectBrainBoardBody">
+              <div class="pb-board-empty" data-i18n="projectBrain.boardEmpty">Board is empty</div>
+            </div>
+          </div>
+          <div class="project-brain-col project-brain-col-activity">
+            <div class="project-brain-col-head" data-i18n="projectBrain.activity">Activity</div>
+            <div class="project-brain-col-body">
+              <div class="pb-activity-list" id="projectBrainActivityList">
+                <div class="pb-activity-empty" data-i18n="projectBrain.activityEmpty">No activity yet</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="chat-container" id="chatContainer">
       <div class="chat-inner" id="chatInner">
         <div class="welcome" id="welcome">
@@ -371,6 +490,7 @@
             <span class="autoapply-dot"></span>
             <span class="autoapply-label">Manual</span>
           </button>
+          <button class="project-brain-toggle" id="projectBrainBtn" onclick="toggleProjectBrain()" data-i18n-title="projectBrain.open" title="Project Brain"></button>
           <button class="project-bar-close" onclick="clearProject()">✕</button>
         </div>
         <div class="image-previews" id="imagePreviews"></div>
@@ -680,7 +800,7 @@
         </button>
         <button class="settings-tab" data-tab="preferences" onclick="switchSettingsTab('preferences')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
-          <span data-i18n="settings.tabPreferences">偏好</span>
+          <span data-i18n="settings.tabPreferences">记忆与偏好</span>
         </button>
         <!-- Relay-admin tabs (用户/定价/兑换码/支付) moved to the standalone
              /admin console (static/admin.html). Settings is now pure
@@ -1421,9 +1541,19 @@
             </div>
           </div>
           <div id="prefsStatus" class="settings-desc" style="font-size:12px;margin-top:6px;"></div>
+
+          <!-- ═══ Memories section (unified into this tab) ═══ -->
+          <div class="settings-section-divider"></div>
+          <div class="settings-row" style="justify-content:space-between;align-items:center;">
+            <div class="settings-section-title" data-i18n="memPrefs.memTitle">积累的记忆</div>
+            <button class="btn btn-secondary btn-sm" onclick="openMemoryModal()" data-i18n="memPrefs.manageAll">管理全部</button>
+          </div>
+          <p class="settings-desc" data-i18n="memPrefs.memIntro">
+            助手在对话中自动沉淀的经验与教训（项目约定、踩过的坑、工作流）。会按相关性在对话中检索注入。点击「管理全部」可新建、导入或拖入技能包。
+          </p>
+          <div id="prefsMemoryList" class="memory-list memory-list-embedded"></div>
         </div>
 
-        <!-- ═══ Skills Tab ═══ -->
         <!-- ═══ Skills Tab ═══ -->
         <div class="settings-tab-panel" id="settingsTab_skills">
           <!-- Header: title · counts · scope tabs · search -->
@@ -1690,6 +1820,9 @@
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
             </button>
             <div class="pm-breadcrumb" id="browseCrumbs"></div>
+            <button class="pm-eye-btn" onclick="mpNewFolder()" id="browseNewFolderBtn" title="New folder here">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
+            </button>
             <button class="pm-eye-btn" onclick="toggleHiddenDirs()" id="browseHiddenBtn" title="Show hidden folders">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
             </button>
@@ -2223,6 +2356,10 @@
 <script defer src="static/js/info-rail.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- mobile_panels.js — mobile portaling of timer/optimizer panels + mobile flow picker (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
 <script defer src="static/js/mobile_panels.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- presence.js — cross-conversation live-presence strip (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
+<script defer src="static/js/presence.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- project-brain.js — Pillar #1 cross-conversation Activity Feed tab (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
+<script defer src="static/js/project-brain.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script>
 // Feature flags — show/hide optional modules
 var _featureFlags = {};

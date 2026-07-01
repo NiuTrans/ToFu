@@ -13,8 +13,10 @@ This file retains:
     for backward compat
 """
 import os
+import shutil
+import time
 
-from lib.log import get_logger
+from lib.log import audit_log, get_logger
 from lib.project_mod.config import (
     CODE_EXTENSIONS,
 )
@@ -142,6 +144,124 @@ def browse_directory(path_str=None, show_hidden=False):
         'filesCount': files_count,
         'showHidden': show_hidden,
     }
+
+
+def create_directory(parent_str, name):
+    """Create a new sub-directory under *parent_str* for the folder browser UI.
+
+    Backs the "New folder" action of the project path panel so a user can
+    scaffold a project directory without leaving the app.
+
+    Args:
+        parent_str: Absolute path of the parent directory (``~`` is expanded).
+            Must already exist and be a directory.
+        name: New folder name. A single path segment only — separators and
+            ``..`` are rejected so a create can never escape *parent_str*.
+
+    Returns:
+        dict with ``path`` (the created dir) on success, or ``error`` on
+        failure. Never raises for the expected cases (invalid name, missing
+        parent, permission denied, already exists).
+    """
+    from lib.project_mod.write_tools import _is_forbidden_create_path
+
+    if not parent_str:
+        return {'error': 'No parent directory provided'}
+    abs_parent = os.path.abspath(os.path.expanduser(parent_str))
+    if not os.path.isdir(abs_parent):
+        return {'error': f'Not a directory: {abs_parent}'}
+
+    clean = (name or '').strip()
+    # A folder name must be a single, non-navigating path segment. Reject any
+    # separator or parent-ref so the create is confined to abs_parent.
+    if (not clean or clean in ('.', '..')
+            or '/' in clean or '\\' in clean or os.sep in clean
+            or (os.altsep and os.altsep in clean)):
+        return {'error': 'Invalid folder name — use a single name without slashes'}
+
+    abs_path = os.path.join(abs_parent, clean)
+    # Defense in depth: the resolved path must still live directly under parent.
+    if os.path.dirname(abs_path) != abs_parent:
+        return {'error': 'Invalid folder name'}
+    if _is_forbidden_create_path(abs_path):
+        return {'error': f'Refusing to create a folder at a system path: {abs_path}'}
+    if os.path.exists(abs_path):
+        return {'error': f'Already exists: {clean}'}
+
+    try:
+        os.mkdir(abs_path)
+    except PermissionError:
+        logger.warning('[Tools] create_directory permission denied: %s', abs_path)
+        return {'error': f'Permission denied: {abs_parent}'}
+    except OSError as e:
+        logger.warning('[Tools] create_directory failed for %s: %s', abs_path, e)
+        return {'error': f'Cannot create folder: {e}'}
+
+    audit_log('project_folder_create', path=abs_path)
+    logger.info('[Tools] create_directory: %s', abs_path)
+    return {'ok': True, 'path': abs_path, 'name': clean, 'parent': abs_parent}
+
+
+def delete_directory(path_str):
+    """Move a directory to the recoverable trash bin for the folder browser UI.
+
+    Backs the "Delete folder" action of the project path panel. Rather than an
+    irreversible ``rmtree``, the target is MOVED into a ``.tofu_trash`` bin
+    (same recoverable-delete convention as the ``rm`` shim in run_command), so
+    a mis-click can be undone from the filesystem.
+
+    Args:
+        path_str: Absolute path of the directory to delete (``~`` expanded).
+
+    Returns:
+        dict with ``trashed`` (the trash location) on success, or ``error``.
+        Refuses forbidden system paths, registered workspace roots, and any
+        path that is not an existing directory.
+    """
+    from lib.agent_artifacts import TRASH_DIR
+    from lib.project_mod.config import get_roots
+    from lib.project_mod.write_tools import _is_forbidden_create_path
+
+    if not path_str:
+        return {'error': 'No path provided'}
+    abs_path = os.path.abspath(os.path.expanduser(path_str))
+    if not os.path.isdir(abs_path):
+        return {'error': f'Not a directory: {abs_path}'}
+    if os.path.islink(abs_path):
+        return {'error': 'Refusing to delete a symlink'}
+    if _is_forbidden_create_path(abs_path):
+        return {'error': f'Refusing to delete a system path: {abs_path}'}
+
+    # Never delete a directory that is currently a registered workspace root —
+    # remove it from the workspace first. Guards against nuking the open project.
+    try:
+        root_paths = {os.path.realpath(rs['path']) for rs in get_roots().values()}
+    except Exception as e:
+        logger.debug('[Tools] delete_directory root snapshot failed: %s', e)
+        root_paths = set()
+    if os.path.realpath(abs_path) in root_paths:
+        return {'error': 'This folder is an active workspace root — '
+                         'remove it from the workspace before deleting.'}
+
+    # Move into a timestamped trash bin beside the parent so it stays on the
+    # same filesystem (a rename, not a cross-device copy) and is recoverable.
+    parent = os.path.dirname(abs_path)
+    trash_root = os.path.join(parent, TRASH_DIR)
+    dest_dir = os.path.join(trash_root, str(int(time.time() * 1000)))
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, os.path.basename(abs_path))
+        shutil.move(abs_path, dest)
+    except PermissionError:
+        logger.warning('[Tools] delete_directory permission denied: %s', abs_path)
+        return {'error': f'Permission denied: {abs_path}'}
+    except OSError as e:
+        logger.warning('[Tools] delete_directory failed for %s: %s', abs_path, e)
+        return {'error': f'Cannot delete folder: {e}'}
+
+    audit_log('project_folder_delete', path=abs_path, trashed=dest)
+    logger.info('[Tools] delete_directory: %s → %s', abs_path, dest)
+    return {'ok': True, 'path': abs_path, 'trashed': dest, 'parent': parent}
 
 
 # ═══════════════════════════════════════════════════════

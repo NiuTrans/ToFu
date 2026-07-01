@@ -1075,6 +1075,29 @@ def _init_database():
     except Exception as e:
         _server_log.warning('Stale task recovery failed: %s', e)
 
+    # ── Presence: reconcile the on-disk live-peer registry. A server that
+    #    crashed mid-run left ghost peers marked "active" in each project's
+    #    .tofu/presence/registry.json; with no live tasks yet, every persisted
+    #    peer is a ghost and is reaped, so the "who's working" strip never lies
+    #    after a restart. Then start the background sweep timer.
+    try:
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.presence import reconcile_on_startup, start_sweeper
+        _roots: list[str] = []
+        try:
+            db = get_thread_db(DOMAIN_CHAT)
+            rows = db.execute(
+                "SELECT DISTINCT json_extract(settings, '$.projectPath') AS p "
+                "FROM conversations WHERE user_id=1 "
+                "AND json_extract(settings, '$.projectPath') IS NOT NULL").fetchall()
+            _roots = [r['p'] for r in rows if r['p']]
+        except Exception as _re:
+            _server_log.debug('Presence root discovery failed: %s', _re)
+        reconcile_on_startup(_roots)
+        start_sweeper()
+    except Exception as e:
+        _server_log.warning('Presence startup reconciliation failed: %s', e)
+
     # Resume swarm sub-agents that were mid-flight when the server stopped.
     # DB-backed round-level resume (see lib/swarm/persistence.py): rehydrates
     # each conversation-scoped session and re-spawns its unfinished agents

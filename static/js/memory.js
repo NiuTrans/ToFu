@@ -76,9 +76,17 @@ function filterMemoryList(query) {
   _renderMemoryCards(_memoryCache);
 }
 
-async function refreshMemoryList(scope) {
-  const list = document.getElementById("memoryList");
-  if (!list) { console.error("[Memory] #memoryList not found!"); return; }
+// _memoryListTargetId lets the same render path drive either the standalone
+// modal (#memoryList, default) or the embedded Settings → Memory & Preferences
+// section (#prefsMemoryList). It's set for the duration of one refresh so the
+// downstream _renderMemoryCards / empty-state writers target the right node.
+let _memoryListTargetId = "memoryList";
+function _memoryListEl() { return document.getElementById(_memoryListTargetId); }
+
+async function refreshMemoryList(scope, targetId) {
+  _memoryListTargetId = targetId || "memoryList";
+  const list = _memoryListEl();
+  if (!list) { console.error(`[Memory] #${_memoryListTargetId} not found!`); return; }
   const activeTab = document.querySelector(".memory-tab.active");
   scope = scope || activeTab?.dataset?.scope || "all";
 
@@ -104,7 +112,7 @@ async function refreshMemoryList(scope) {
 }
 
 function _renderMemoryCards(memories) {
-  const list = document.getElementById("memoryList");
+  const list = _memoryListEl ? _memoryListEl() : document.getElementById("memoryList");
   if (!list) return;
 
   // Apply filter

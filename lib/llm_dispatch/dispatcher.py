@@ -164,20 +164,19 @@ class LLMDispatcher:
         use the saved config (which the user can then edit in Settings).
         """
         try:
-            import json as _json
+            from lib import _SERVER_CONFIG_PATH
+            from lib.json_store import update_json_atomic
 
-            from lib import _SERVER_CONFIG_PATH, _load_server_config
+            def _mutate(config):
+                if not isinstance(config, dict):
+                    config = {}
+                config['providers'] = providers
+                # Don't set presets — let the system use the first model
+                if 'presets' not in config:
+                    config['presets'] = {}
+                return config
 
-            config = _load_server_config()
-            config['providers'] = providers
-            # Don't set presets — let the system use the first model
-            if 'presets' not in config:
-                config['presets'] = {}
-
-            os.makedirs(os.path.dirname(_SERVER_CONFIG_PATH), exist_ok=True)
-            with open(_SERVER_CONFIG_PATH, 'w') as f:
-                _json.dump(config, f, indent=2, ensure_ascii=False)
-
+            update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
             logger.info('[Dispatch] Saved auto-discovered config to %s',
                        _SERVER_CONFIG_PATH)
         except Exception as e:
@@ -232,13 +231,19 @@ class LLMDispatcher:
                     break
 
         if migrated:
-            # Persist so migration only runs once
+            # Persist so migration only runs once (locked RMW so a concurrent
+            # Settings save isn't clobbered).
             try:
                 from lib import _SERVER_CONFIG_PATH
-                config['providers'] = providers
-                os.makedirs(os.path.dirname(_SERVER_CONFIG_PATH), exist_ok=True)
-                with open(_SERVER_CONFIG_PATH, 'w') as f:
-                    json.dump(config, f, indent=2, ensure_ascii=False)
+                from lib.json_store import update_json_atomic
+
+                def _mutate(cfg):
+                    if not isinstance(cfg, dict):
+                        cfg = {}
+                    cfg['providers'] = providers
+                    return cfg
+
+                update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
                 logger.info('[Dispatch] Persisted extra_headers migration '
                            'to %s', _SERVER_CONFIG_PATH)
             except Exception as e:

@@ -61,6 +61,16 @@ USER_PROFILE_FILE = '.tofu_user_profile.md'
 # Staged, not-yet-confirmed preference proposals from the consolidation pass
 # (propose-then-confirm gate). JSON list; lives next to the profile.
 USER_PROFILE_PENDING_FILE = '.tofu_user_profile_pending.json'
+# Live cross-conversation presence registry ("who is working in this project
+# right now"). Lives UNDER the existing ``.tofu/`` dir (so the ``.tofu*``
+# gitignore glob + every artifact consumer already cover it without change):
+# ``<root>/.tofu/presence/registry.json``. The authoritative copy is in-memory
+# alongside the push hub (single-server contract); this file is the
+# crash-recoverable + human-inspectable write-through mirror. Regenerable
+# runtime state — safe to delete (a stale entry is reaped on the next server
+# startup reconciliation / sweep). Written by ``lib/presence/registry.py``.
+PRESENCE_SUBDIR = 'presence'          # under FILE_HISTORY_ROOT_DIR (.tofu/)
+PRESENCE_REGISTRY_FILE = 'registry.json'
 
 # Explicit set of the artifacts known TODAY — useful for documentation,
 # tests, and consumers that want to enumerate rather than prefix-match.
@@ -99,6 +109,7 @@ __all__ = [
     'ARTIFACT_PREFIX',
     'FILE_HISTORY_ROOT_DIR', 'TRASH_DIR', 'SANDBOX_DIR', 'ENV_MARKER_FILE',
     'USER_PROFILE_FILE', 'USER_PROFILE_PENDING_FILE',
+    'PRESENCE_SUBDIR', 'PRESENCE_REGISTRY_FILE',
     'KNOWN_ARTIFACT_NAMES', 'GITIGNORE_PATTERN',
     'is_agent_artifact',
 ]

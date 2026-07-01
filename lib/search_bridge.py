@@ -19,6 +19,7 @@ idempotent and degrades gracefully if any sub-system is unavailable.
 
 import os
 import re
+from urllib.parse import urlparse
 
 import lib as _lib
 
@@ -91,6 +92,39 @@ def _chatui_llm(messages, **kwargs):
 #  Browser seam — lib.browser extension
 # ═══════════════════════════════════════════════════════
 
+# Extensions the browser extension MUST NOT be handed: it fetches by opening a
+# real Chrome tab and scraping innerText/outerHTML, so a binary URL (PDF,
+# archive, media, Office doc) yields no extractable text AND makes Chrome's
+# download manager grab the file onto the USER's machine (the source-paper PDFs
+# that mysteriously appeared in Downloads). These are handled server-side
+# instead — PDFs via _extract_pdf_text, others simply reported as unfetchable.
+# NOTE: `.svg` is deliberately absent (it's text — extractable in-tab).
+_BROWSER_UNRENDERABLE_EXTS = (
+    '.pdf',
+    '.zip', '.tar', '.gz', '.tgz', '.rar', '.7z', '.bz2', '.xz',
+    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.ico',
+    '.mp4', '.mp3', '.wav', '.avi', '.mov', '.webm', '.mkv', '.flac', '.ogg',
+    '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    '.exe', '.dmg', '.iso', '.apk', '.bin',
+    '.woff', '.woff2', '.ttf', '.otf', '.eot',
+)
+
+
+def _is_browser_unrenderable(url: str) -> bool:
+    """True when ``url`` points at a binary asset the extension can't render.
+
+    Opening such a URL in a browser tab downloads it to the user's machine
+    (Chrome's download manager) and returns no text, so these URLs must never
+    reach the browser fallback — they're fetched/parsed server-side instead.
+    """
+    try:
+        path = urlparse(url).path.lower().rstrip('/')
+    except Exception as e:
+        logger.debug('[Bridge] unrenderable-URL parse failed for %s: %s', url[:80], e)
+        return False
+    return path.endswith(_BROWSER_UNRENDERABLE_EXTS)
+
+
 class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
     """Routes tofu-search browser fallbacks through chatui's extension."""
 
@@ -103,6 +137,12 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
             return False
 
     def fetch_url(self, url, *, max_chars=None, timeout=15):
+        # A PDF/binary URL opened in a real Chrome tab downloads to the user's
+        # machine and yields no text — refuse it so the fetch is reported as a
+        # plain failure (PDFs are parsed server-side, not via the extension).
+        if _is_browser_unrenderable(url):
+            logger.info('[Bridge] browser fetch_url SKIP (binary/PDF, would download to client) — %s', url[:100])
+            return None
         try:
             from lib.browser import fetch_url_via_browser
             return fetch_url_via_browser(url, max_chars=max_chars or 50000,
@@ -119,6 +159,9 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
         chatui only owns the transport (the extension WebSocket) — the SERP
         parsing lives in the library, not duplicated here.
         """
+        if _is_browser_unrenderable(url):
+            logger.info('[Bridge] browser fetch_html SKIP (binary/PDF, would download to client) — %s', url[:100])
+            return None
         try:
             from lib.browser import is_extension_connected, send_browser_command
         except Exception as e:

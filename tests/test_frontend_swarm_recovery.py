@@ -55,6 +55,18 @@ global.setTimeout = win.setTimeout = (fn) => 0;
 // Globals the file touches at load / render time.
 win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// i18n shim: the panel's agent-card renderer calls t("swarm.phase.*").
+// Return the real English labels (mirrors static/js/i18n.js) so the
+// panel renders the same user-visible text production ships.
+const _SWARM_PHASE_EN = {
+  'swarm.phase.thinking': 'Thinking…', 'swarm.phase.tool_use': 'Using tools',
+  'swarm.phase.writing': 'Writing…', 'swarm.phase.searching': 'Searching…',
+  'swarm.phase.coding': 'Coding…', 'swarm.phase.analyzing': 'Analyzing…',
+  'swarm.phase.complete': 'Complete', 'swarm.phase.failed': 'Failed',
+  'swarm.phase.error': 'Error', 'swarm.phase.queued': 'Queued',
+  'swarm.phase.running': 'Working…', 'swarm.phase.noResult': 'No result',
+};
+win.t = global.t = (k) => _SWARM_PHASE_EN[k] || String(k || '').split('.').pop();
 win._TOOL_DISPLAY = global._TOOL_DISPLAY = {};
 
 eval(fs.readFileSync(process.argv[4], 'utf8'));  // ui/streaming_swarm_panel.js (swarm builders moved here 2026-06-27)

@@ -66,11 +66,19 @@ function _renderMsgInPlace(convId, idx, msg) {
   if (typeof renderMessage !== 'function') return;
   const el = document.getElementById(`msg-${idx}`);
   // No surgical target: the bubble isn't laid out yet (conversation still
-  // loading) or the index drifted.  Do NOT full-renderChat here — that
-  // rebuilds the whole DOM and resets scroll to the top (the "jumps to the
-  // beginning" bug).  The msg object is already mutated in memory + DB, so
-  // the next natural render (or scroll-into-view) shows the translation.
-  if (!el) return;
+  // loading), the index drifted, or this msg is currently the live
+  // #streaming-msg (no #msg-N node yet). Don't silently swallow it — that's a
+  // deterministic missed-render (a state change applied to memory/DB that the
+  // screen never reflects). Fall through to a scroll-preserving full re-render
+  // of the active conv so the spinner/terminal state is actually painted.
+  if (!el) {
+    console.warn(`[Translate] _renderMsgInPlace: no #msg-${idx} node ` +
+      `(conv=${convId.slice(0,8)}) — falling back to renderChat(scroll-preserving)`);
+    const _conv = (typeof conversations !== 'undefined')
+      ? conversations.find(c => c.id === convId) : null;
+    if (_conv && typeof renderChat === 'function') renderChat(_conv, false);
+    return;
+  }
   const ct = document.getElementById('chatContainer');
   const inner = document.getElementById('chatInner');
   const sv = ct ? ct.scrollTop : -1;
@@ -296,13 +304,21 @@ function _renderStreamingTranslatePreview(convId, msgId, partial) {
 
   let zone = body.querySelector('[data-zone="translatePreview"]');
   if (!zone) {
+    /* Legacy path: no fixed zone present (e.g. a body that predates the
+     * _ensureStreamZones translatePreview slot). Create + append it. */
     zone = document.createElement('div');
     zone.setAttribute('data-zone', 'translatePreview');
+    body.appendChild(zone);
+  }
+  /* Build the inner structure once. The zone may arrive EMPTY — either freshly
+   * appended above, or pre-created as a fixed _ensureStreamZones slot that
+   * survived a body rebuild — so key off the inner .md-content, not the zone
+   * element, to decide whether to populate it. */
+  if (!zone.querySelector('.md-content')) {
     zone.className = 'translate-preview translate-stream-preview has-preview';
     zone.innerHTML = '<div class="translate-loading-head"><span class="translate-spinner"></span>'
       + `<span class="translate-loading-label">${(typeof t === 'function' ? t('translate.translatingToCN') : '翻译中…')}</span></div>`
       + '<div class="md-content"></div><span class="translate-caret"></span>';
-    body.appendChild(zone);
   }
   const mdEl = zone.querySelector('.md-content');
   if (mdEl && zone._lastPartial !== partial) {
@@ -747,7 +763,49 @@ async function _resumePendingTranslations(convId) {
     return;
   }
 
-  // ── Phase 0: detect the LAST assistant msg that should have been translated but wasn't ──
+  // ── Phase 0 (self-heal): clear ZOMBIE pending-translate state on ANY message ──
+  // The server-driven auto-translate path sets msg._translateDone=false (+ a
+  // _translatePartial preview) via the push 'running' frame but NEVER sets
+  // _translateTaskId — the SERVER owns the task, there is no client poll loop.
+  // If the terminal 'done' frame is dropped (push hub has no replay) AND the
+  // watchdog never healed it, the message is stranded with
+  //   _translateDone===false  &&  no _translateTaskId  &&  no translatedContent
+  // — a permanent "翻译中…" spinner. NO other resume path recovers it: the
+  // Phase-0b scan below only inspects the LAST assistant, and Phase 1 only
+  // collects messages that HAVE a _translateTaskId. So a zombie on a
+  // non-last assistant (the reported "卡住" screenshot) spins forever across
+  // reloads. Scan EVERY message; prefer the server-committed translation,
+  // else drop the stuck markers so the original text shows instead.
+  let _zombieHealed = false;
+  for (let i = 0; i < conv.messages.length; i++) {
+    const m = conv.messages[i];
+    if (!m) continue;
+    if (m._translateDone !== false) continue;            // only the pending state
+    if (m._translateTaskId) continue;                    // an owner exists → Phase 1 / poll loop drives it
+    if (m.translatedContent) continue;                   // already translated
+    if (m._igResult || m._isImageGen || m._igResults) continue;  // nothing to translate
+    console.warn(`[TranslateTask] 🧟 Zombie pending-translate on msg ${i} ` +
+      `(conv=${convId.slice(0,8)}, no taskId + no translatedContent) — self-healing`);
+    const _zField = m._translateField || 'translatedContent';
+    const recovered = await _tryRecoverFromServer(convId, i, m, _zField);
+    if (recovered) {
+      console.log(`%c[TranslateTask] ✓ zombie msg ${i} recovered server translation`, 'color:#22c55e');
+      _zombieHealed = true;
+      continue;
+    }
+    // No server-committed translation — clear the stuck indicator so the user
+    // sees the (untranslated) original instead of an eternal spinner. The
+    // content is intact; a manual click can re-trigger translation.
+    delete m._translateDone;
+    delete m._translatePartial;
+    delete m._translateStatus;
+    delete m._translateStatusKind;
+    _renderMsgInPlace(convId, i, m);
+    _zombieHealed = true;
+  }
+  if (_zombieHealed && typeof saveConversations === 'function') saveConversations(convId);
+
+  // ── Phase 0b: detect the LAST assistant msg that should have been translated but wasn't ──
   // (e.g. page closed before finishStream could start the task, OR the conv was
   //  frozen autoTranslate=OFF at send-time but the global toggle is ON now)
   // Only check the last assistant message — don't retroactively translate old history.

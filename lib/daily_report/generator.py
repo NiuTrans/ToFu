@@ -6,14 +6,10 @@ Updates the shared ``_active_jobs`` registry with progress stages
 which the status-poll endpoint surfaces to the frontend.
 """
 
-import random
-
 from lib.log import get_logger
 
 from .conversations import _analyse_conversations, _extract_convs_for_date
-from .llm import _pick_persona
-from .prompts import _QUOTES
-from .storage import _load_report, _save_report, _update_job
+from .storage import _save_report, _update_job
 
 logger = get_logger(__name__)
 
@@ -45,19 +41,12 @@ def _generate_in_background(date_str, force):
         convs = _extract_convs_for_date(date_str, progress_cb=_extraction_progress)
 
         if not convs:
-            result = {
-                'tasks': [],
-                'quote': random.choice(_QUOTES),
-                'persona': _pick_persona({}),
-                'stats': {'totalConversations': 0},
-            }
-            # Merge manual tasks from existing report
-            existing = _load_report(date_str)
-            if existing:
-                manual = [t for t in existing.get('tasks', []) if t.get('_todo')]
-                if manual:
-                    result['tasks'] = manual
-            if result['tasks']:
+            # Delegate to the empty-convs path of _analyse_conversations so
+            # carryover + manual-state preservation (_merge_manual_state) are
+            # applied consistently instead of a bare tasks-only merge here.
+            result = _analyse_conversations([], date_str)
+            if (result.get('streams') or result.get('tomorrow')
+                    or result.get('tasks')):
                 _save_report(date_str, result)
             _update_job(date_str, 'done')
             logger.info('[DailyReport] Background generation %s: no convs found', date_str)
@@ -70,14 +59,10 @@ def _generate_in_background(date_str, force):
             'current': 0, 'total': len(convs),
         })
 
+        # Manual-state preservation (status overrides, TODO check-offs,
+        # manual TODOs, legacy _todo tasks) is centralized in
+        # _analyse_conversations → _merge_manual_state.
         result = _analyse_conversations(convs, date_str)
-
-        # Merge manual tasks from existing report
-        existing = _load_report(date_str)
-        if existing and existing.get('tasks'):
-            manual = [t for t in existing['tasks'] if t.get('_todo')]
-            if manual:
-                result.setdefault('tasks', []).extend(manual)
 
         # Phase 3: Save
         _update_job(date_str, 'generating', progress={

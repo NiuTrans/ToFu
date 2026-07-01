@@ -101,6 +101,19 @@ class TestPhaseSemantics(unittest.TestCase):
         }]))
         self.assertIn('list_conversations', _names(tl))
 
+    def test_charter_tools_register_in_project_mode(self):
+        # Charter tools (Pillar #2) ride the same project-mode gate as the
+        # conv-ref tools — present in project mode, absent otherwise.
+        tl_proj, _ = assemble_tool_list(_ctx(
+            project_path='/tmp/x', project_enabled=True))
+        names = _names(tl_proj)
+        self.assertIn('project_charter_read', names)
+        self.assertIn('project_charter_propose', names)
+        # No project → no charter tools (a charter is per-project).
+        tl_none, _ = assemble_tool_list(_ctx())
+        self.assertNotIn('project_charter_read', _names(tl_none))
+        self.assertNotIn('project_charter_propose', _names(tl_none))
+
     def test_conv_ref_not_triggered_by_assistant_prose(self):
         # REGRESSION: a conversation *about* the feature, where the assistant
         # quotes the bare token, must NOT self-enable the tools. (This is the

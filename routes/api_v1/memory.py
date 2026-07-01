@@ -50,12 +50,21 @@ _CATALOG_DL_TIMEOUT = 60                         # seconds
 
 
 def _project_path() -> str:
-    """Resolve the project_path from the request, falling back to root."""
+    """Resolve the project_path from the request, falling back to root.
+
+    The query-string branch is decoded-until-stable via the shared
+    ``decode_proxy_path_arg`` seam: a reverse proxy (VS Code ``/proxy/<port>/``)
+    can double-encode an already-encoded path, so a GET ``?project_path=…``
+    would otherwise arrive as a literal ``%2F…`` string and mis-scope the
+    memory list. The JSON-body branch is unaffected (bodies aren't URL-encoded)
+    so it takes precedence unchanged.
+    """
     explicit = None
     if request.is_json and request.get_json(silent=True):
         explicit = (request.get_json(silent=True) or {}).get('project_path')
     if not explicit:
-        explicit = request.args.get('project_path')
+        from lib.request_parser import decode_proxy_path_arg
+        explicit = decode_proxy_path_arg('project_path')
     return explicit or _PROJECT_ROOT
 
 

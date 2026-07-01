@@ -258,6 +258,13 @@ def _transform_messages(
             continue
         if msg.get('_epIteration'):
             continue
+        # NOTE: autopilot run summaries are NO LONGER messages — they live in
+        # the conversation sidecar (settings.autopilotSummaries[runId]), human-
+        # only, so there is nothing to skip here. Any legacy `_isAutopilotSummary`
+        # assistant row from before the sidecar migration is still skipped below
+        # as a defensive guard so old conversations don't replay the report.
+        if msg.get('_isAutopilotSummary'):
+            continue
 
         role = msg.get('role', '')
 
@@ -325,6 +332,7 @@ def _build_user_message(msg: dict) -> dict:
 
     # 6. Inline PDF text
     pdf_texts = msg.get('pdfTexts') or []
+    _pdf_chars_before = len(text_content)
     for pdf in pdf_texts:
         name = pdf.get('name', 'document.pdf')
         pages = pdf.get('pages', '?')
@@ -335,6 +343,9 @@ def _build_user_message(msg: dict) -> dict:
             f'PDF Document: {name} ({pages} pages, {text_len / 1024:.1f}KB)\n'
             f'{"═" * 50}\n{text}'
         )
+    if pdf_texts:
+        logger.debug('[Context] inject block=pdf_inline docs=%d chars=%d',
+                     len(pdf_texts), len(text_content) - _pdf_chars_before)
 
     # 7. Build multimodal image blocks
     images = msg.get('images') or []
@@ -370,6 +381,9 @@ def _build_user_message(msg: dict) -> dict:
 
         if text_content:
             content_blocks.append({'type': 'text', 'text': text_content})
+        _n_img = sum(1 for b in content_blocks if b.get('type') == 'image_url')
+        logger.debug('[Context] inject block=images count=%d blocks=%d',
+                     _n_img, len(content_blocks))
         return {'role': 'user', 'content': content_blocks}
     else:
         return {'role': 'user', 'content': text_content}

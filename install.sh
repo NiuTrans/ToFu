@@ -710,6 +710,14 @@ CONDA_PKGS=(
     "flask>=3.0"
     "flask-compress>=1.14"
     "requests>=2.31"
+    # jinja2 / urllib3 / pyyaml — transitive deps (jinja2←flask/quart,
+    # urllib3←requests, pyyaml used directly by routes/api_docs.py for the
+    # YAML OpenAPI spec). Pinned in requirements.txt to CVE-clearing floors;
+    # listed here so the drift guard passes and clean envs get the fixed
+    # versions instead of whatever the resolver happens to pull transitively.
+    "jinja2>=3.1.6"
+    "urllib3>=1.26.19"
+    "pyyaml>=6.0"
     "psutil>=5.9"
     "playwright>=1.40"
     "pillow>=10.0"
@@ -1054,12 +1062,38 @@ fi
 # --no-deps is safe: its deps (requests / trafilatura / bs4 / lxml /
 # python-dateutil) are installed above, and --no-deps keeps pip from
 # shadowing conda's lxml 6.
-if python -c "import tofu_search" 2>/dev/null; then
-    ok "tofu-search already importable — skipping"
+# A bare "import tofu_search" is NOT a safe skip condition: an OLDER copy that
+# predates a server symbol (e.g. a colleague's pre-existing env stuck on an
+# earlier release) imports fine yet is missing the names server.py / handlers
+# import, so the server still dies at boot with
+#   "ImportError: cannot import name '<symbol>' from 'tofu_search'".
+# Skip ONLY when the installed build (a) meets the requirements.txt floor AND
+# (b) exposes the exact symbols the server imports. Floor is read from
+# requirements.txt so it stays in sync with the drift guard above.
+_TS_FLOOR="$(grep -iE '^[[:space:]]*tofu-search[[:space:]]*>=' "${INSTALL_DIR:-$PWD}/requirements.txt" 2>/dev/null | sed -E 's/.*>=[[:space:]]*//; s/[^0-9.].*//' | head -1)"
+[[ -z "$_TS_FLOOR" ]] && _TS_FLOOR="0.4.0"
+_TS_SKIP_PROBE="$(cat <<PYEOF
+import sys
+try:
+    import tofu_search as ts
+    from tofu_search import fetch_page_content, looks_like_text_asset, perform_web_search  # noqa: F401
+except Exception:
+    sys.exit(1)
+def _v(s):
+    out = []
+    for p in (str(s).split('+')[0].split('.') + ['0', '0', '0'])[:3]:
+        d = ''.join(ch for ch in p if ch.isdigit())
+        out.append(int(d) if d else 0)
+    return tuple(out)
+sys.exit(0 if _v(getattr(ts, '__version__', '0')) >= _v('${_TS_FLOOR}') else 2)
+PYEOF
+)"
+if python -c "$_TS_SKIP_PROBE" 2>/dev/null; then
+    ok "tofu-search satisfies floor ${_TS_FLOOR} with required symbols — skipping"
 elif ! python -c "import pip" 2>/dev/null; then
     warn "pip not available — cannot install tofu-search (server will fail to boot)"
 else
-    step "Installing tofu-search (required search/fetch pipeline)"
+    step "Installing/upgrading tofu-search (required search/fetch pipeline; need >= ${_TS_FLOOR} with server symbols)"
     _TOFU_SEARCH_WHL=""
     if [[ -d "${INSTALL_DIR}/vendor" ]]; then
         _TOFU_SEARCH_WHL="$(ls -1 "${INSTALL_DIR}"/vendor/tofu_search-*.whl 2>/dev/null | sort -V | tail -1)"
@@ -1070,18 +1104,18 @@ else
             ok "tofu-search installed from bundled wheel"
         else
             warn "Bundled tofu-search wheel install failed — falling back to PyPI"
-            _safe_pip_install --no-deps --upgrade "tofu-search>=0.2.0" \
+            _safe_pip_install --no-deps --upgrade "tofu-search>=${_TS_FLOOR}" \
                 && ok "tofu-search installed from PyPI" \
                 || fail "tofu-search install failed — the server will not boot. Retry: pip install tofu-search"
         fi
     else
         info "No bundled wheel — installing from PyPI"
-        if _safe_pip_install --no-deps --upgrade "tofu-search>=0.2.0"; then
+        if _safe_pip_install --no-deps --upgrade "tofu-search>=${_TS_FLOOR}"; then
             ok "tofu-search installed from PyPI"
         else
             warn "tofu-search install from PyPI failed."
             warn "  If you are behind a corp mirror that lacks tofu-search, retry with public PyPI:"
-            warn "    pip install --index-url https://pypi.org/simple/ 'tofu-search>=0.2.0'"
+            warn "    pip install --index-url https://pypi.org/simple/ 'tofu-search>=${_TS_FLOOR}'"
             fail "tofu-search install failed — the server will not boot without it."
         fi
     fi
@@ -1251,7 +1285,7 @@ fi
 # so install.sh never prints "Installation complete!" on a broken env again.
 info "Verifying lxml + trafilatura + htmldate + justext + transitive deps import correctly..."
 
-_TOFU_IMPORT_PROBE='import lxml.etree, lxml_html_clean, trafilatura, htmldate, justext, courlan, dateparser, babel, tld, pytz, regex, tzlocal, tofu_search.search, tofu_search.fetch; print("lxml", lxml.__version__, "trafilatura", trafilatura.__version__, "htmldate", htmldate.__version__, "justext", justext.__version__)'
+_TOFU_IMPORT_PROBE='import lxml.etree, lxml_html_clean, trafilatura, htmldate, justext, courlan, dateparser, babel, tld, pytz, regex, tzlocal, tofu_search.search, tofu_search.fetch; from tofu_search import fetch_page_content, looks_like_text_asset, perform_web_search; import tofu_search as _ts; print("lxml", lxml.__version__, "trafilatura", trafilatura.__version__, "htmldate", htmldate.__version__, "justext", justext.__version__, "tofu_search", getattr(_ts, "__version__", "?"))'
 _TOFU_IMPORT_ERR="$(mktemp -t tofu_import_err.XXXXXX)"
 
 if python -c "$_TOFU_IMPORT_PROBE" 2>"$_TOFU_IMPORT_ERR"; then

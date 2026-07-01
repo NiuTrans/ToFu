@@ -44,6 +44,7 @@ from .cost import (
     _load_cached_day_costs,
     _persist_day_cost,
     invalidate_day_cost_cache,
+    invalidate_cost_cache_for_messages,
     _get_monthly_costs,
 )
 
@@ -56,6 +57,7 @@ from .todos import (
     _get_yesterday_todo_accountability,
     _mark_yesterday_todos_done,
     _close_yesterday_remaining_todos,
+    _merge_manual_state,
 )
 
 # Conversation extraction + analysis
@@ -94,12 +96,14 @@ __all__ = [
     '_calendar_cache', '_CALENDAR_CACHE_TTL', '_LEGACY_PRESET_TO_MODEL',
     '_qwen_cny', '_calc_msg_cost_cny', '_scan_costs_in_range',
     '_load_cached_day_costs', '_persist_day_cost',
-    'invalidate_day_cost_cache', '_get_monthly_costs',
+    'invalidate_day_cost_cache', 'invalidate_cost_cache_for_messages',
+    '_get_monthly_costs',
     # todos
     '_normalize_todo_text', '_fuzzy_todo_match',
     '_get_yesterday_carryover', '_get_today_inherited_todos',
     '_get_yesterday_todo_accountability',
     '_mark_yesterday_todos_done', '_close_yesterday_remaining_todos',
+    '_merge_manual_state',
     # conversations
     '_safe_int_ts', '_build_transcript_from_messages',
     '_extract_convs_for_date', '_count_convs_for_date',

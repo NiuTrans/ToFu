@@ -20,7 +20,13 @@ function _ensureStreamZones(body) {
     '<div data-zone="thinking"></div>' +
     '<div data-zone="content"></div>' +
     '<div data-zone="fc"></div>' +
-    '<div data-zone="status"></div>';
+    '<div data-zone="status"></div>' +
+    /* Live per-round translation preview. A FIXED zone (not an after-the-fact
+     * append) so it survives a body rebuild: when this body is recreated mid
+     * stream the empty zone is recreated with it, and _renderStreamingTranslate
+     * Preview only needs to refill it — the Chinese-so-far can't vanish just
+     * because some other code triggered a full re-render. */
+    '<div data-zone="translatePreview"></div>';
 }
 
 /* ★ Helper: check if user has an active text selection inside the streaming message area */

@@ -10,16 +10,290 @@
 
 /** Per-message fingerprint for surgical DOM diffing.
  *  Must change whenever the rendered HTML for this message would differ. */
+/* ── Autopilot run fold ───────────────────────────────────────────────
+ * Collapse a CONCLUDED autopilot run's VU<->agent transcript into one
+ * <details>, leaving the original human message (above, un-stamped) and the
+ * close-out summary (below) as the visible spine — "human msg → report".
+ *
+ * Grouping keys on the EXPLICIT `data-ap-run` id stamped by renderMessage
+ * (VU turns + summary) — never role-scanning. The interleaved worker
+ * assistant turns between VU turns are NOT individually stamped, so we fold
+ * the contiguous DOM sibling RANGE from the run's first stamped element up to
+ * (but excluding) its `data-ap-summary` element. A run is "concluded" iff its
+ * summary element is present in the DOM; an in-progress run (no summary yet)
+ * stays fully expanded and live.
+ *
+ * Idempotent + surgical-safe: re-running over already-folded DOM is a no-op
+ * (the inner turns live inside `.autopilot-run-fold` and are skipped). The
+ * <details> open/closed state is preserved across re-renders via a per-run
+ * memory so a forced re-render doesn't snap an expanded run shut.
+ */
+const _apFoldOpenState = {};
+
+/* Look up a run's sidecar record (human-only, NOT a chat message). ONE record
+ * per run carries BOTH the terminal fact (status:'concluded', reason) AND the
+ * optional close-out report (content — absent on a manual stop). Stored
+ * backend-side under settings.autopilotSummaries[runId] and mirrored onto
+ * conv.autopilotSummaries by _applySettingsToConv / _handleAutopilotRunConcluded.
+ * Returns {runId, status, reason, content?, translatedContent?, ts, _summaryId}
+ * or null. */
+function _apRunRecord(conv, runId) {
+  if (!conv || !conv.autopilotSummaries || !runId) return null;
+  const rec = conv.autopilotSummaries[runId];
+  return (rec && typeof rec === 'object') ? rec : null;
+}
+
+/* The run's close-out REPORT — only when the record carries report content
+ * (a clean [VU: TASK_DONE]). A manual-stop concluded record has a status but
+ * NO content, so this returns null for it (the run still folds, but shows no
+ * report panel — the "Summarize this run" affordance appears instead). */
+function _apRunSummary(conv, runId) {
+  const rec = _apRunRecord(conv, runId);
+  return (rec && rec.content) ? rec : null;
+}
+
+/* ★ BACKEND-AUTHORITATIVE "run has concluded" — the frontend NEVER infers
+ * run-end from stream / task / pending-carrier state anymore (that inference
+ * WAS the inter-turn-gap mis-fold bug: between turns the stream is briefly
+ * gone AND activeTaskId briefly null, so "nothing in flight" was ALSO true
+ * mid-run → premature fold). A run folds iff:
+ *   (a) the backend wrote a concluded record for it
+ *       (conv.autopilotSummaries[runId].status==='concluded'), delivered via
+ *       the autopilot_run_concluded SSE, the disarm response, or the settings
+ *       round-trip — this covers BOTH a clean [VU: TASK_DONE] (reason=task_done,
+ *       with a report) AND a manual Stop / toggle-off / supersede (reason=
+ *       stopped, no report); OR
+ *   (b) a NEWER run exists after it (structurally over — the backend stamps
+ *       _autopilotRunId on every persisted VU turn, so a later run id in the
+ *       DOM list is itself a backend fact, not a client guess).
+ * The inter-turn gap needs no special-casing now: no concluded record is
+ * written between turns, so the last run simply stays fully expanded until the
+ * backend says the whole run ended. (A legacy pre-migration record that has
+ * `content` but no `status` still folds — treat report-presence as concluded.) */
+function _apRunConcluded(conv, runId, isLast) {
+  const rec = _apRunRecord(conv, runId);
+  if (rec && (rec.status === 'concluded' || rec.content)) return true;  // (a) backend fact
+  if (!isLast) return true;                                             // (b) superseded
+  return false;
+}
+
+function _applyAutopilotRunFolds(inner, conv) {
+  if (!inner) return;
+  if (!conv && typeof getActiveConv === 'function') conv = getActiveConv();
+  try {
+    /* Legacy: pre-sidecar conversations may still carry a summary as a
+     * `data-ap-summary` MESSAGE element. New runs never do (the summary lives
+     * in the sidecar), so this map is empty for them. */
+    const summaries = {};
+    inner.querySelectorAll('.message[data-ap-summary][data-ap-run]').forEach(el => {
+      summaries[el.getAttribute('data-ap-run')] = el;
+    });
+    /* All run ids present (stamped VU turns + any legacy summary). */
+    const runIds = [];
+    inner.querySelectorAll('.message[data-ap-run]').forEach(el => {
+      const r = el.getAttribute('data-ap-run');
+      if (r && runIds.indexOf(r) === -1) runIds.push(r);
+    });
+    if (!runIds.length) return;
+    const lastRunId = runIds[runIds.length - 1];
+
+    for (const runId of runIds) {
+      const _esc = (window.CSS && CSS.escape) ? CSS.escape(runId) : runId;
+      const summaryEl = summaries[runId] || null;
+      const firstStamped = inner.querySelector(
+        `.message[data-ap-run="${_esc}"]:not([data-ap-summary])`
+      );
+      if (!firstStamped) continue;                 // summary-only run, nothing to fold
+      if (firstStamped.closest('.autopilot-run-fold')) continue;  // already folded
+
+      /* ★ Only fold a run once it has truly CONCLUDED (positive signal) —
+       * never mid-run / in the inter-turn gap (see _apRunConcluded). */
+      if (!_apRunConcluded(conv, runId, runId === lastRunId)) continue;
+
+      /* Collect the contiguous sibling range [firstStamped .. before summary).
+       * When there is no summary element, fold the run of consecutive stamped
+       * turns (stop at the first element that isn't part of THIS run). */
+      const range = [];
+      let node = firstStamped;
+      while (node && node !== summaryEl) {
+        const next = node.nextElementSibling;
+        const isMsg = node.classList && node.classList.contains('message');
+        if (isMsg) range.push(node);
+        if (!summaryEl) {
+          /* No summary anchor — bound the fold at the run's own turns plus
+           * the interleaved worker turns. Stop once we pass a message that is
+           * neither this run's stamped turn nor an (un-stamped) assistant
+           * worker turn — i.e. a new human/user turn outside the run. */
+          const nextIsRun = next && next.getAttribute &&
+            next.getAttribute('data-ap-run') === runId;
+          const nextIsWorker = next && next.classList &&
+            next.classList.contains('message') &&
+            !next.classList.contains('user-msg') &&
+            !next.getAttribute('data-ap-run');
+          if (!nextIsRun && !nextIsWorker) { node = null; break; }
+        }
+        node = next;
+      }
+      if (!range.length) continue;
+
+      const turnCount = range.length;
+      const wasOpen = !!_apFoldOpenState[runId];
+      const details = document.createElement('details');
+      details.className = 'autopilot-run-fold';
+      details.setAttribute('data-ap-run-fold', runId);
+      if (wasOpen) details.open = true;
+      const _label = (typeof t === 'function' && t('autopilot.runFold') !== 'autopilot.runFold')
+        ? t('autopilot.runFold') : 'Autopilot run';
+      const _hint = (typeof t === 'function' && t('autopilot.runFoldHint') !== 'autopilot.runFoldHint')
+        ? t('autopilot.runFoldHint') : 'turns — click to expand';
+      const summary = document.createElement('summary');
+      summary.className = 'autopilot-run-fold-summary';
+      const _sumRec = _apRunSummary(conv, runId);
+      let _summaryInner =
+        `<svg class="apf-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>`
+        + `<span class="apf-label">${escapeHtml(_label)}</span>`
+        + `<span class="apf-count">${turnCount}</span>`
+        + `<span class="apf-hint">${escapeHtml(_hint)}</span>`;
+      /* No sidecar summary AND no legacy summary element → manual-stop run:
+       * offer "Summarize this run". */
+      if (!summaryEl && !_sumRec) {
+        const _sumLabel = (typeof t === 'function' && t('autopilot.summarizeRun') !== 'autopilot.summarizeRun')
+          ? t('autopilot.summarizeRun') : 'Summarize this run';
+        _summaryInner += `<button class="apf-summarize-btn" data-ap-run-summarize="${escapeHtml(runId)}" `
+          + `onclick="event.preventDefault();event.stopPropagation();_summarizeAutopilotRun('${escapeHtml(runId)}',this)">`
+          + `${escapeHtml(_sumLabel)}</button>`;
+      }
+      _summaryInner += `<span class="apf-toggle">▼</span>`;
+      summary.innerHTML = _summaryInner;
+      details.appendChild(summary);
+      /* Track open/closed so subsequent re-renders preserve the user's choice. */
+      details.addEventListener('toggle', () => { _apFoldOpenState[runId] = details.open; });
+
+      /* Insert the <details> where the first turn was, then move the range in. */
+      firstStamped.parentNode.insertBefore(details, firstStamped);
+      for (const el of range) details.appendChild(el);
+
+      /* ★ Render the run's close-out SUMMARY as the fold's read-only report
+       * PANEL — a human-only debrief, NOT a chat bubble and NOT in
+       * conv.messages. It sits AFTER the <details> (visible whether the fold
+       * is open or closed) so the spine reads: human msg → [folded run] →
+       * report panel. */
+      if (_sumRec) {
+        const _panel = _buildApSummaryPanel(conv, runId, _sumRec);
+        if (_panel) details.insertAdjacentElement('afterend', _panel);
+      }
+    }
+  } catch (e) {
+    console.warn('[Autopilot fold] failed (non-fatal):', e && e.message);
+  }
+}
+
+/* Build the read-only "Run summary" report panel from a sidecar record.
+ * Deliberately a NON-conversation visual (mirrors the vu-private-zone framing)
+ * so the user reads it as a debrief that serves only them — it is never sent
+ * to the agent and never part of the transcript. Idempotent: re-running over
+ * an already-rendered panel removes the stale one first (keyed by runId). */
+function _buildApSummaryPanel(conv, runId, rec) {
+  try {
+    const _escId = (window.CSS && CSS.escape) ? CSS.escape(runId) : runId;
+    /* Remove any prior panel for this run so a re-render doesn't stack. */
+    const inner = document.getElementById('chatInner');
+    if (inner) {
+      const stale = inner.querySelector(`.autopilot-summary-panel[data-ap-summary-run="${_escId}"]`);
+      if (stale) stale.remove();
+    }
+    const wrap = document.createElement('div');
+    wrap.className = 'autopilot-summary-panel';
+    wrap.setAttribute('data-ap-summary-run', runId);
+    const _title = (typeof t === 'function' && t('autopilot.summaryLabel') !== 'autopilot.summaryLabel')
+      ? t('autopilot.summaryLabel') : 'Run summary report';
+    const _privNote = (typeof t === 'function' && t('autopilot.summaryHumanOnly') !== 'autopilot.summaryHumanOnly')
+      ? t('autopilot.summaryHumanOnly') : 'For you only · not sent to the agent';
+    /* Prefer the translated text for a Chinese UI when present. */
+    const _useTranslated = !!(rec.translatedContent
+      && typeof convAutoTranslate === 'function' && conv && convAutoTranslate(conv));
+    const _body = _useTranslated ? rec.translatedContent : (rec.content || '');
+    const _bodyHtml = (typeof renderMarkdown === 'function')
+      ? renderMarkdown(_body) : escapeHtml(_body);
+    wrap.innerHTML =
+      `<div class="aps-header" title="${escapeHtml(_privNote)}">`
+      + `<svg class="aps-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>`
+      + `<span class="aps-title">${escapeHtml(_title)}</span>`
+      + `<span class="aps-private">${escapeHtml(_privNote)}</span>`
+      + `</div>`
+      + `<div class="aps-body md-content">${_bodyHtml}</div>`;
+    return wrap;
+  } catch (e) {
+    console.warn('[Autopilot summary panel] build failed (non-fatal):', e && e.message);
+    return null;
+  }
+}
+
+/* Click handler for the "Summarize this run" button in a manual-stop fold. */
+async function _summarizeAutopilotRun(runId, btn) {
+  const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
+  if (!conv) return;
+  const _restore = () => {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = (typeof t === 'function' ? t('autopilot.summarizeRun') : 'Summarize this run');
+    }
+  };
+  if (btn) { btn.disabled = true; btn.textContent = (typeof t === 'function' ? t('common.loading') : 'Loading…'); }
+  let cfg = {};
+  try {
+    if (typeof _buildConvConfig === 'function') cfg = await _buildConvConfig(conv);
+  } catch (e) {
+    console.warn('[Autopilot] summarize: _buildConvConfig failed, using defaults:', e && e.message);
+  }
+  try {
+    const res = await Api.chat.summarizeAutopilotRun(conv.id, runId, cfg);
+    if (res && res.ok && res.summary && res.summary.content) {
+      /* ★ The summary is a human-only SIDECAR record (NOT a chat message).
+       * Store it on conv.autopilotSummaries so the fold renders its report
+       * panel — never push it into conv.messages. */
+      if (!conv.autopilotSummaries || typeof conv.autopilotSummaries !== 'object') {
+        conv.autopilotSummaries = {};
+      }
+      conv.autopilotSummaries[res.runId || runId] = res.summary;
+      if (typeof saveConversations === 'function') saveConversations(conv.id);
+      try { if (typeof ConvCache !== 'undefined') ConvCache.put(conv); } catch (e) { /* non-fatal */ }
+      if (typeof renderChat === 'function') renderChat(conv, true);
+    } else {
+      _restore();
+    }
+  } catch (e) {
+    console.warn('[Autopilot] summarize run failed:', e && e.message);
+    _restore();
+  }
+}
+
 function _msgFingerprint(msg) {
   const sr = msg.toolRounds || msg.searchResults;
   /* Count compacted rounds so a tool_compacted SSE landing on an
    * earlier message triggers a re-render of just that message.
    * Iterating toolRounds is cheap (avg 2-10 entries). */
   let compactedCount = 0, compactedToSum = 0;
+  /* Swarm agent state token: a committed (non-streaming) swarm panel is
+   * mutated in place by cross-turn /api/push frames (swarm_push.js). Those
+   * mutations live INSIDE round._swarmAgents, which the rest of this
+   * fingerprint never sees (it only counts sr.length). Without folding agent
+   * status/phase/tokens/preview here, the surgical re-render diffs the
+   * swarm-owning message as "unchanged" and the panel never repaints when an
+   * agent flips running→done. Piggyback on the existing toolRounds loop. */
+  let swarmFp = '';
   if (Array.isArray(msg.toolRounds)) {
     for (const r of msg.toolRounds) {
       if (r.compactionLayer) compactedCount++;
       compactedToSum += (r.compactedToChars | 0);
+      if (r._swarm) {
+        swarmFp += (r._swarmActive ? 'A' : '') + (r._asyncRunning ? 'R' : '')
+                 + (r._swarmEndTime ? 'E' : '') + '|';
+        for (const a of (r._swarmAgents || [])) {
+          swarmFp += (a.status || '') + ',' + (a.phase || '') + ','
+                   + (a.tokens || '') + ',' + ((a.preview || '').length) + ';';
+        }
+      }
     }
   }
   /* Error envelope: include kind + message length so a re-classification
@@ -47,7 +321,10 @@ function _msgFingerprint(msg) {
     (msg.modifiedFiles || 0) + ":" +
     (msg.images ? msg.images.length : 0) + ":" +
     (msg.pdfTexts ? msg.pdfTexts.length : 0) + ":" +
-    "c" + compactedCount + "ts" + compactedToSum;
+    (msg._autopilotRunId || "") + ":" +
+    (msg._isAutopilotSummary ? "S" : "") + ":" +
+    "c" + compactedCount + "ts" + compactedToSum +
+    (swarmFp ? ":sw" + swarmFp : "");
 }
 
 /* ── Tool-round freshness gradient ──
@@ -249,6 +526,7 @@ function renderChat(conv, forceScroll) {
     if (anyChange) {
       buildTurnNav(conv);
     }
+    if (!activeStreams.has(conv.id)) _applyAutopilotRunFolds(inner, conv);
     _lastRenderedFingerprint = fp;
     _lazyConvId = conv.id;
     return;
@@ -290,6 +568,7 @@ function renderChat(conv, forceScroll) {
   }
 
   inner.innerHTML = html;
+  if (!activeStreams.has(conv.id)) _applyAutopilotRunFolds(inner, conv);
   _lastRenderedFingerprint = fp;
 
   /* Observe the sentinel to trigger loading when scrolled up */
@@ -400,6 +679,11 @@ function renderMessage(msg, idx) {
       }
     }
   }
+  // NOTE: the autopilot run summary is NO LONGER a message — it's a human-only
+  // sidecar record (conv.autopilotSummaries[runId]) rendered as the run fold's
+  // read-only report PANEL by _buildApSummaryPanel. A legacy `_isAutopilotSummary`
+  // assistant row from before the sidecar migration still renders as a plain
+  // assistant turn (harmless) — we intentionally no longer special-case it.
   // ── Proactive agent banner ──
   if (msg._proactive) {
     const taskName = msg._proactiveTaskId ? `Task ${(msg._proactiveTaskId || "").slice(0, 8)}` : "Proactive Agent";
@@ -843,6 +1127,14 @@ function renderMessage(msg, idx) {
    * mirror it onto the DOM so future surgical updates can address by id
    * instead of mutable index. */
   const msgIdAttr = (msg && msg._msgId) ? ` data-msg-id="${escapeHtml(msg._msgId)}"` : "";
+  /* ★ Autopilot run fold: stamp the run id on every turn of an autopilot
+   * run (VU turns + the close-out summary) so renderChat's post-render
+   * grouping pass can collapse a CONCLUDED run's VU<->agent transcript into
+   * one <details>, leaving [original human msg → summary] as the visible
+   * spine. Grouping keys on this EXPLICIT id — never role-scanning. */
+  const apRunAttr = (msg && msg._autopilotRunId)
+    ? ` data-ap-run="${escapeHtml(msg._autopilotRunId)}"` : "";
+  const apSummaryAttr = (msg && msg._isAutopilotSummary) ? ` data-ap-summary="1"` : "";
   let actionBtns = "";
   if (typeof idx === "number") {
     const copyH = `<button class="msg-action-btn copy-msg-btn" onclick="event.stopPropagation();copyMessage(${idx})" title="Copy"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy</button>`;
@@ -949,5 +1241,5 @@ function renderMessage(msg, idx) {
    * SVG, badgeHtml, body, branchHtml, actionBtns, the class/attr
    * fragments) is already-trusted HTML, marked raw(). */
   const _classAttr = `${isUser ? ' user-msg' : ''}${msg._isEndpointReview ? ' ep-critic-msg' : ''}${epPlannerCls}${epWorkerCls}${vuCls}`;
-  return String(safeHtml`<div class="message${raw(_classAttr)}"${raw(idAttr)}${raw(msgIdAttr)}${raw(mfpAttr)}><div class="message-avatar">${raw(isUser ? userAvatar : avatarContent)}</div><div class="message-content"><div class="message-header"><span class="message-role">${isUser ? userLabel : roleName}</span>${raw(badgeHtml)}${raw(messageTimeHtml)}</div><div class="message-body">${raw(body)}</div>${raw(branchHtml)}${raw(actionBtns)}</div>${raw(turnCtxHtml)}</div>`);
+  return String(safeHtml`<div class="message${raw(_classAttr)}"${raw(idAttr)}${raw(msgIdAttr)}${raw(apRunAttr)}${raw(apSummaryAttr)}${raw(mfpAttr)}><div class="message-avatar">${raw(isUser ? userAvatar : avatarContent)}</div><div class="message-content"><div class="message-header"><span class="message-role">${isUser ? userLabel : roleName}</span>${raw(badgeHtml)}${raw(messageTimeHtml)}</div><div class="message-body">${raw(body)}</div>${raw(branchHtml)}${raw(actionBtns)}</div>${raw(turnCtxHtml)}</div>`);
 }

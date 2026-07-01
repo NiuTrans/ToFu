@@ -218,18 +218,64 @@ def test_report_abort_endpoint():
         task['status'] = 'running'
 
         async with app.test_client() as client:
-            r = await client.post('/api/v1/paper/report/abort',
-                                   json={'task_id': tid})
+            # Factory-minted route: task_id is a PATH segment (was a body key).
+            r = await client.post(f'/api/v1/paper/report/abort/{tid}')
             assert r.status_code == 200
             assert task['abort_event'].is_set()
 
             # Unknown task → 404
-            r2 = await client.post('/api/v1/paper/report/abort',
-                                    json={'task_id': 'no-such'})
+            r2 = await client.post('/api/v1/paper/report/abort/no-such')
             assert r2.status_code == 404
 
     asyncio.run(_t())
     _ok('HTTP /api/paper/report/abort sets abort_event')
+
+
+def test_all_factory_abort_routes_set_event():
+    """The report/qa/translate ABORT routes are factory-minted
+    (register_task_routes, enable_poll=False). Each must reach the RUNNING
+    task and set its abort_event — the same event AbortSignal.from_event reads.
+
+    NC (proven by hand): replacing ``ok = runtime.abort(task_id)`` with a
+    falsey value in routes/_task_routes.py::_abort makes the abort no-op — the
+    live task's abort_event is never set → this test FAILS (assert False on
+    is_set()). Restoring it byte-identical → passes.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'server', os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                'server.py'))
+    mod = importlib.util.module_from_spec(spec)
+    mod.__name__ = 'server'
+    spec.loader.exec_module(mod)
+    app = mod.app
+
+    import asyncio
+    from routes.paper import (_new_report_task, _new_qa_task,
+                               _new_translate_task)
+
+    cases = [
+        ('report', _new_report_task('rpt_fab', 'phash-fab-r', 'en', 'opus')),
+        ('qa', _new_qa_task('qa_fab', 'phash-fab-q', 'en', 'opus', question='q')),
+        ('translate', _new_translate_task('tr_fab', 'phash-fab-t', 'zh', 'opus')),
+    ]
+
+    async def _t():
+        async with app.test_client() as client:
+            for kind, task in cases:
+                task['status'] = 'running'
+                tid = task['task_id']
+                # Factory route: task_id is a PATH segment.
+                r = await client.post(f'/api/v1/paper/{kind}/abort/{tid}')
+                assert r.status_code == 200, (kind, r.status_code)
+                assert task['abort_event'].is_set(), \
+                    f'{kind} abort did not reach the running task'
+                # Unknown task → 404 through the same factory route.
+                r2 = await client.post(f'/api/v1/paper/{kind}/abort/no-such-{kind}')
+                assert r2.status_code == 404, (kind, r2.status_code)
+
+    asyncio.run(_t())
+    _ok('factory-minted report/qa/translate abort routes set abort_event (+404)')
 
 
 # ─── Paper translate tasks ───────────────────────────────────────
@@ -293,6 +339,63 @@ def test_translate_lookup_endpoint():
     _ok('HTTP /api/paper/translate/lookup works')
 
 
+def test_translate_composite_lang_task_id_is_url_safe():
+    """A composite review key ('review:neurips:zh') must NOT leak its colons
+    into the minted task_id — the id is echoed verbatim into the poll/abort URL
+    and colons arrive DOUBLE-ENCODED ('%253A') over a proxy tunnel, so the poll
+    404s forever and the UI reports "translation failed". The real composite
+    `lang` must still key the dedup index unchanged.
+
+    NC (proven by hand): reverting the mint back to
+    ``task_id = f'tr_..._{lang}'`` in routes/paper.py::start_translate_task
+    puts a ':' in the id → the url_safe assertion FAILS and an immediate
+    same-id poll 404s. The sanitized-slug mint → passes.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'server', os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                'server.py'))
+    mod = importlib.util.module_from_spec(spec)
+    mod.__name__ = 'server'
+    spec.loader.exec_module(mod)
+    app = mod.app
+
+    import asyncio
+    from urllib.parse import quote
+    from routes.paper import _translate_runtime, _translate_index_get
+
+    async def _t():
+        composite = 'review:neurips:zh'
+        async with app.test_client() as client:
+            r = await client.post('/api/v1/paper/translate/start',
+                                   json={'paper_text': 'Hello world.',
+                                         'lang': composite,
+                                         'paper_hash': 'phash-tr-composite',
+                                         'force': True})
+            assert r.status_code == 200, r.status_code
+            data = await r.get_json()
+            tid = data['task_id']
+            # Immediately abort so the background worker doesn't do real LLM work.
+            task = _translate_runtime.get(tid)
+            if task:
+                task['abort_event'].set()
+
+            # (1) The id must be URL-safe: no ':' and thus nothing to double-encode.
+            assert ':' not in tid, f'task_id leaked colons: {tid!r}'
+            assert quote(tid, safe='') == tid, f'task_id not URL-safe: {tid!r}'
+
+            # (2) The REAL composite lang still keys the dedup index.
+            assert _translate_index_get('phash-tr-composite', composite) is not None
+
+            # (3) The exact same id round-trips through the poll URL → NOT 404
+            #     (this is the failure the user hit: poll 404 → "translation failed").
+            pr = await client.get(f'/api/v1/paper/translate/poll?task_id={quote(tid, safe="")}&cursor=0')
+            assert pr.status_code == 200, f'poll {pr.status_code} — id not found round-tripping through URL'
+
+    asyncio.run(_t())
+    _ok('composite review lang mints a URL-safe task_id (no double-encode 404)')
+
+
 def test_translate_poll_endpoint():
     import importlib.util
     spec = importlib.util.spec_from_file_location(
@@ -341,9 +444,11 @@ def main():
         test_report_lookup_endpoint,
         test_report_poll_endpoint,
         test_report_abort_endpoint,
+        test_all_factory_abort_routes_set_event,
         test_translate_runtime_created,
         test_translate_new_task_legacy_fields,
         test_translate_dedup_index,
+        test_translate_composite_lang_task_id_is_url_safe,
         test_translate_lookup_endpoint,
         test_translate_poll_endpoint,
     ]

@@ -389,6 +389,94 @@ def test_api_error_with_bad_request_emits_string():
     _ok('api_error(BadRequest) emits string (not envelope)')
 
 
+# ─── decode_proxy_path_arg (VS Code proxy double-encode fix) ─────
+
+def _decode_arg_via_query(qs, name='path'):
+    """Invoke decode_proxy_path_arg inside a real request context whose query
+    string is ``qs`` (already-URL-encoded, as it would arrive on the wire).
+    Quart decodes the query ONCE (mirroring production), then the helper runs.
+    """
+    from quart import Quart
+    from lib.request_parser import decode_proxy_path_arg
+    app = Quart(__name__)
+    captured = {}
+
+    @app.route('/_t')
+    def _r():
+        captured['v'] = decode_proxy_path_arg(name)
+        return ('', 204)
+
+    async def _t():
+        async with app.test_client() as c:
+            await c.get('/_t?' + qs)
+    asyncio.run(_t())
+    return captured['v']
+
+
+def test_decode_path_plain_and_single_encoded():
+    from urllib.parse import quote
+    P = '/mnt/your-fs'
+    # Single-encoded on the wire → Quart decodes once → clean path, no % left.
+    assert _decode_arg_via_query('path=' + quote(P, safe='')) == P
+    _ok('decode_proxy_path_arg: single-encoded (direct client) → clean path')
+
+
+def test_decode_path_double_and_triple_encoded():
+    from urllib.parse import quote
+    P = '/mnt/your-fs'
+    single = quote(P, safe='')
+    # Double-encoded (VS Code proxy re-encode): wire=%252F, Quart→%2F, helper→P.
+    assert _decode_arg_via_query('path=' + quote(single, safe='')) == P
+    # Triple, for good measure (bounded loop still collapses it).
+    assert _decode_arg_via_query('path=' + quote(quote(single, safe=''), safe='')) == P
+    _ok('decode_proxy_path_arg: double/triple-encoded (proxy) → clean path')
+
+
+def test_decode_path_empty_and_default():
+    assert _decode_arg_via_query('path=') == ''
+    # Missing arg → default.
+    from quart import Quart
+    from lib.request_parser import decode_proxy_path_arg
+    app = Quart(__name__)
+    cap = {}
+
+    @app.route('/_t')
+    def _r():
+        cap['v'] = decode_proxy_path_arg('path', default='FALLBACK')
+        return ('', 204)
+
+    async def _t():
+        async with app.test_client() as c:
+            await c.get('/_t')
+    asyncio.run(_t())
+    assert cap['v'] == 'FALLBACK'
+    _ok('decode_proxy_path_arg: empty → "", missing → default')
+
+
+def test_decode_path_exists_guard_preserves_literal_percent(tmp_path=None):
+    """Edge case: a REAL directory whose name legitimately contains a literal
+    ``%2f``/``%25`` substring must NOT be over-decoded — the os.path.exists
+    short-circuit stops the loop the moment the value is already a real path."""
+    import tempfile
+    from urllib.parse import quote
+    # Create a real dir literally named 'weird%2fname' (a single path segment
+    # containing the percent-encoded-looking substring).
+    base = tempfile.mkdtemp(prefix='tofu-decode-guard-')
+    weird = os.path.join(base, 'weird%2fname')
+    os.makedirs(weird, exist_ok=True)
+    try:
+        # On the wire the client single-encodes it; Quart decodes once →
+        # the helper sees the real existing path 'weird%2fname' (contains %2f)
+        # and must STOP (exists guard), not decode the %2f into a '/'.
+        got = _decode_arg_via_query('path=' + quote(weird, safe=''))
+        assert got == weird, f'exists-guard must preserve the literal %2f dir: {got!r}'
+        assert os.path.exists(got)
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+    _ok('decode_proxy_path_arg: exists-guard preserves a real dir named with %2f')
+
+
 def main():
     print()
     print(_color('═══ request_parser.py Unit Tests ═══', '36'))
@@ -428,6 +516,10 @@ def main():
         test_bad_request_envelope,
         test_safe_route_converts_bad_request_to_400,
         test_api_error_with_bad_request_emits_string,
+        test_decode_path_plain_and_single_encoded,
+        test_decode_path_double_and_triple_encoded,
+        test_decode_path_empty_and_default,
+        test_decode_path_exists_guard_preserves_literal_percent,
     ]
     for fn in tests:
         try:

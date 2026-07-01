@@ -78,7 +78,7 @@ SEARCH_TOOL_MULTI = {
                 },
                 "queries": {
                     "type": "array",
-                    "description": "Array of search queries (for batch mode). All queries run concurrently. Much faster than multiple separate web_search calls.",
+                    "description": "Array of search queries (for batch mode). All queries run concurrently. Much faster than multiple separate web_search calls. Each element MUST be an object like {\"query\": \"...\"} — never a single bare string or a concatenation of queries; for one search use the top-level 'query' field instead.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -165,7 +165,7 @@ def _build_fetch_url_tool():
         }
     properties["urls"] = {
         "type": "array",
-        "description": "Array of URLs to fetch (for batch mode). All fetches run concurrently. Much faster than multiple separate fetch_url calls.",
+        "description": "Array of URLs to fetch (for batch mode). All fetches run concurrently. Much faster than multiple separate fetch_url calls. Each element MUST be an object like {\"url\": \"...\"} — never a single bare string; for one URL use the top-level 'url' field instead.",
         "items": {
             "type": "object",
             "properties": {

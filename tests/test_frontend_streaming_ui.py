@@ -64,8 +64,25 @@ win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 win.renderMarkdown = global.renderMarkdown = (s) => '<p>' + global.escapeHtml(s) + '</p>';
 win._TOOL_DISPLAY = global._TOOL_DISPLAY = {};
-// t() i18n — return the key + n so labels are deterministic.
-win.t = global.t = (k, o) => k + (o && o.n != null ? (':' + o.n) : '');
+// t() i18n — the streaming phase renderer emits user-visible labels via
+// t('stream.phase.*') (migrated from hardcoded English). Return the REAL
+// English strings (mirrors static/js/i18n.js) so phase labels render the
+// same text production ships; fall back to key+n for any unmapped key so the
+// deterministic '{key}:{n}' counter behavior other checks rely on is kept.
+const _STREAM_PHASE_EN = {
+  'stream.phase.reasoning': 'Reasoning',
+  'stream.phase.deepThinking': 'Deep thinking',
+  'stream.phase.chars': '{n} chars',
+  'stream.phase.waitingModel': 'Sent to the model, waiting for it to start replying…',
+  'stream.phase.retrying': 'Retrying…',
+  'stream.phase.waiting': 'Waiting…',
+};
+win.t = global.t = (k, o) => {
+  let v = _STREAM_PHASE_EN[k];
+  if (v === undefined) return k + (o && o.n != null ? (':' + o.n) : '');
+  if (o && o.n != null) v = v.replace('{n}', o.n);
+  return v;
+};
 // Hot-path no-ops / stubs (function-body refs, resolved at call time).
 win.isNearBottom = global.isNearBottom = () => false;
 win.scrollToBottom = global.scrollToBottom = () => {};

@@ -54,6 +54,7 @@ _BACKEND_FILES = [
     'lib/scheduler/executor.py',
     'lib/artifacts/events.py',
     'lib/swarm/events.py',
+    'lib/presence/registry.py',
     # The SSE stream route itself authors the lifecycle snapshot/terminal
     # events on (re)connect / cold replay (state, done, sse_timeout) — via the
     # typed build_event chokepoint, so the contract guard must scan it too.
@@ -81,6 +82,10 @@ _JS_TYPE_RE = re.compile(r"""\.type\s*===\s*['"]([a-z_]+)['"]""")
 _FRONTEND_FILES = [
     'static/js/ui/sse_pipeline.js',
     'static/js/branch.js',
+    # Cross-conversation presence strip — handles the 'presence' push event
+    # (.type === "presence"); proves the type is frontend-handled, not just
+    # backend-emitted.
+    'static/js/presence.js',
 ]
 
 

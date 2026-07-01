@@ -67,7 +67,8 @@ try:
 except ImportError:
     pass
 
-__all__ = ['MAX_PDF_BYTES', 'HAS_PYMUPDF4LLM', 'HAS_PYMUPDF', 'HAS_DOCLING', 'PYMUPDF_LOCK']
+__all__ = ['MAX_PDF_BYTES', 'HAS_PYMUPDF4LLM', 'HAS_PYMUPDF', 'HAS_DOCLING',
+           'PYMUPDF_LOCK', 'PYMUPDF4LLM_UNAVAILABLE_REASON']
 
 # PyMuPDF's C library (MuPDF) is NOT thread-safe. The official docs state:
 # "PyMuPDF does not support running on multiple threads - doing so may cause
@@ -91,13 +92,64 @@ except ImportError as e:
     logger.warning('[PDF] pymupdf not installed — PDF parsing disabled: %s', e)
 
 # ─── pymupdf4llm (preferred for table/header-aware extraction) ───
+# Distinguish two failure modes that BOTH surface as ImportError so the log
+# tells the truth (per CLAUDE.md §2.2 — this is a recoverable degradation to
+# raw-text extraction, so warning level is correct):
+#   • genuinely not installed  → no module spec on the path
+#   • installed but ABI/version-incompatible (e.g. pymupdf4llm pins a newer
+#     pymupdf than is installed) → the package's __init__ raises ImportError
+#     with a version message. Reporting this as "not installed" sent us
+#     chasing a phantom missing dep; it's actually a pin mismatch to fix.
+# PYMUPDF4LLM_UNAVAILABLE_REASON is '' when available, else a human string
+# beginning with 'version/ABI mismatch' or 'not installed'.
+PYMUPDF4LLM_UNAVAILABLE_REASON = ''
+
+
+def _diagnose_pymupdf4llm_failure(exc: ImportError, installed: bool) -> str:
+    """Classify why ``import pymupdf4llm`` raised ImportError.
+
+    Args:
+        exc: The ImportError raised by the import.
+        installed: Whether a module spec for ``pymupdf4llm`` exists on the
+            path (True ⇒ the package IS present, so the failure is a
+            version/ABI incompatibility raised by its ``__init__``; False ⇒
+            genuinely not installed).
+
+    Returns:
+        A human-readable reason string prefixed with ``'version/ABI mismatch'``
+        or ``'not installed'`` so callers can branch on the cause.
+    """
+    if installed:
+        return f'version/ABI mismatch: {exc}'
+    return f'not installed: {exc}'
+
+
+def _pymupdf4llm_installed() -> bool:
+    """True if a module spec for pymupdf4llm exists (independent of whether
+    it imports cleanly)."""
+    import importlib.util as _ilu
+    try:
+        return _ilu.find_spec('pymupdf4llm') is not None
+    except (ImportError, ValueError):
+        return False
+
+
 try:
     import pymupdf4llm  # noqa: F401
     HAS_PYMUPDF4LLM = True
 except ImportError as e:
     pymupdf4llm = None  # type: ignore[assignment]
     HAS_PYMUPDF4LLM = False
-    logger.warning('[PDF] pymupdf4llm not installed — Markdown PDF extraction disabled: %s', e)
+    PYMUPDF4LLM_UNAVAILABLE_REASON = _diagnose_pymupdf4llm_failure(
+        e, _pymupdf4llm_installed())
+    if PYMUPDF4LLM_UNAVAILABLE_REASON.startswith('version'):
+        logger.warning('[PDF] pymupdf4llm installed but failed to import '
+                       '(version/ABI mismatch) — Markdown PDF extraction '
+                       'disabled, falling back to raw text. Pin a compatible '
+                       'pymupdf: %s', e)
+    else:
+        logger.warning('[PDF] pymupdf4llm not installed — Markdown PDF '
+                       'extraction disabled: %s', e)
 
 # ─── Docling (optional, OPT-IN — used by mode='structured') ───
 # Heavy dep (~2 GB with torch). NOT auto-installed; user opts in via

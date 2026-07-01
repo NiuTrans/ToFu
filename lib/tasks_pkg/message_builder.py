@@ -49,6 +49,7 @@ def inject_prefetched_urls(messages, prefetched, task):
     urls_text = '\n\n' + ('═' * 40 + '\n\n').join(url_blocks)
 
     # Walk backwards to find the last user message and append there
+    _spliced = '\n\n[Auto-fetched URL content:]\n' + urls_text
     for i in range(len(messages) - 1, -1, -1):
         if messages[i].get('role') != 'user':
             continue
@@ -56,14 +57,21 @@ def inject_prefetched_urls(messages, prefetched, task):
         if isinstance(mc, str):
             messages[i] = {
                 **messages[i],
-                'content': mc + '\n\n[Auto-fetched URL content:]\n' + urls_text,
+                'content': mc + _spliced,
             }
         elif isinstance(mc, list):
             messages[i] = {
                 **messages[i],
-                'content': mc + [{'type': 'text', 'text': '\n\n[Auto-fetched URL content:]\n' + urls_text}],
+                'content': mc + [{'type': 'text', 'text': _spliced}],
             }
         break
+
+    try:
+        _cid = (task.get('convId') or '') if isinstance(task, dict) else ''
+        logger.debug('[Context] conv=%s inject block=prefetched_urls urls=%d chars=%d',
+                     (_cid or '?')[:8], len(prefetched), len(_spliced))
+    except Exception as _e:
+        logger.debug('[Context] prefetched_urls trace failed: %s', _e)
 
     return len(task.get('toolRounds', []))
 

@@ -63,6 +63,7 @@ from lib.tasks_pkg.system_context import (
     _disabled_prompt_blocks,
     inject_search_addendum_to_user,
 )
+from lib.tasks_pkg.wire_messages import apply_wire_sanitize
 from lib.tasks_pkg.server_message_store import (
     rebuild_messages_with_history as _rebuild_messages_with_history,
     save_messages as _save_messages_to_store,
@@ -406,6 +407,25 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
                          _ap_latch_err)
         task['status'] = 'done'
 
+    # ── Project-brain Activity Feed: 'completed' / 'aborted' pulse ──
+    #   Emitted at the terminal seam, EXCEPT for autopilot follow-up turns
+    #   (config.autopilotRunId set) — those collapse to one 'run_concluded'
+    #   event at run close-out, mirroring the 'started' suppression in
+    #   create_task. Best-effort: a feed failure must NEVER break finalization.
+    try:
+        _cfg_feed = task.get('config') or {}
+        _proj_feed = (project_path or '').strip() if project_enabled else ''
+        if (_proj_feed and task.get('convId')
+                and not (_cfg_feed.get('autopilotRunId') or '').strip()):
+            from lib.conversations.project_feed import emit_project_event
+            _kind_feed = 'aborted' if task.get('aborted') else 'completed'
+            emit_project_event(
+                _proj_feed, task['convId'], _kind_feed,
+                (task.get('lastUserQuery') or '').strip() or ('Turn ' + _kind_feed),
+                task_id=task['id'])
+    except Exception as _feed_e:
+        logger.debug('[%s] project-feed terminal emit skipped: %s', tid, _feed_e)
+
     # ── Cleanup reactive compact tracking (prevent memory leak) ──
     from lib.tasks_pkg.llm_fallback import cleanup_reactive_compact_state
     cleanup_reactive_compact_state(task.get('id', ''))
@@ -587,6 +607,15 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
                     logger.info('[Task %s] modifiedFileList derived across %d roots: '
                                 '%d file(s)%s', task['id'][:8], _n_roots,
                                 len(file_list), ' (ts-fallback)' if _used_ts_fallback else '')
+                # ── Presence: merge this turn's touched files into the peer
+                #    and run notify-only overlap detection against other active
+                #    peers on the same root. Best-effort.
+                try:
+                    from lib.presence import record_files as _presence_record
+                    _presence_record(project_path, task['convId'], file_list)
+                except Exception as _pe:
+                    logger.debug('[Task %s] presence record_files failed: %s',
+                                 task['id'][:8], _pe)
         except Exception as e:
             logger.warning('[Task %s] get_modifications failed for conv=%s model=%s: %s',
                       task['id'][:8], task.get('convId', ''), model, e, exc_info=True)
@@ -976,6 +1005,25 @@ def run_task(task: dict[str, Any]) -> None:
             ensure_project_state(project_path, extra_paths=_extra_paths,
                                  conv_id=_conv_id_for_roots,
                                  readonly_paths=_readonly_paths)
+            # ── Presence: announce this conversation as a live peer of the
+            #    project root (the "who is working here now" feed). Idempotent
+            #    per convId — an autopilot follow-up turn refreshes the SAME
+            #    peer rather than spawning a new one. Best-effort; a presence
+            #    failure must never affect the task.
+            if task.get('convId'):
+                try:
+                    from lib.presence import announce as _presence_announce
+                    _presence_announce(
+                        project_path, task['convId'],
+                        task_id=task['id'],
+                        run_id=cfg.get('autopilotRunId') or '',
+                        title=cfg.get('convTitle') or '',
+                        objective=cfg.get('autopilotObjective') or '',
+                        phase='working',
+                    )
+                except Exception as _pe:
+                    logger.debug('[Task:%s] presence announce failed: %s',
+                                 task['id'][:8], _pe)
             # ── File-history: capture any external (IDE) edits made between rounds.
             #
             #   Runs SILENTLY in a background thread: no phase event, no UI
@@ -1183,6 +1231,8 @@ def run_task(task: dict[str, Any]) -> None:
                     EventType.PREFERENCES_APPLIED,
                     chars=_applied_prefs.get('chars', 0),
                     items=_applied_prefs.get('items', []),
+                    core=_applied_prefs.get('core', []),
+                    detail=_applied_prefs.get('detail', []),
                 ))
                 task['_preferencesApplied'] = dict(_applied_prefs)
             except Exception as _e:
@@ -1480,13 +1530,26 @@ def run_task(task: dict[str, Any]) -> None:
 
             _tools_this_round = tool_list if (tool_list and round_num < max_tool_rounds) else None
 
-            # ★ Emit messages snapshot for debug panel (before LLM call)
+            # ★ Cache-aware tool result ordering: sort consecutive tool results
+            #   by tool_call_id so the prefix is deterministic across rounds
+            #   (important for automatic prefix caching on OpenAI/Qwen).
+            sort_tool_results(messages, conv_id=task.get('convId', ''))
+
+            # ★ Emit messages snapshot for the debug panel (AFTER sort_tool_results
+            #   so the panel reflects the real outbound ordering). The snapshot is
+            #   the WIRE-FORM view — apply_wire_sanitize on an INDEPENDENT copy
+            #   reproduces build_body's OpenAI-form tail (strip/sanitize/orphan/
+            #   merge/empty-fix) without mutating `messages` (build_body re-runs
+            #   these on its own copy at request time). See lib/tasks_pkg/wire_messages.py.
             try:
-                snapshot = _strip_base64_for_snapshot(messages)
+                _wire = apply_wire_sanitize(
+                    messages, conv_id=task.get('convId', ''),
+                    provider_id=task.get('provider_id') or '')
+                snapshot = _strip_base64_for_snapshot(_wire)
                 snap_evt = build_event(
                     EventType.MESSAGES_SNAPSHOT,
                     round=round_num + 1,
-                    label=f'Round {round_num + 1} 请求前 · {len(messages)}条',
+                    label=f'Round {round_num + 1} 请求前 · {len(snapshot)}条',
                     messages=snapshot,
                 )
                 if _tools_this_round:
@@ -1494,11 +1557,6 @@ def run_task(task: dict[str, Any]) -> None:
                 append_event(task, snap_evt)
             except Exception:
                 logger.warning('[Task %s] messages_snapshot failed at round %d model=%s', tid, round_num + 1, model, exc_info=True)
-
-            # ★ Cache-aware tool result ordering: sort consecutive tool results
-            #   by tool_call_id so the prefix is deterministic across rounds
-            #   (important for automatic prefix caching on OpenAI/Qwen).
-            sort_tool_results(messages, conv_id=task.get('convId', ''))
 
             body = build_body(
                 model, messages,
@@ -1542,6 +1600,13 @@ def run_task(task: dict[str, Any]) -> None:
                 model = llm_result['model']
                 preset = llm_result['preset']
                 thinking_enabled = llm_result['thinking_enabled']
+                # Surface the resolved model on the task AS SOON as it's known
+                # (was only set at task finalization), so per-round telemetry
+                # emitted during tool dispatch — e.g. report_hallucinated's
+                # `tool_hallucinated` audit — records the real model instead of
+                # an empty string and the optimizer can cluster by model.
+                if model:
+                    task['model'] = model
 
                 if llm_result['_loop_action'] == 'break':
                     _loop_exit_reason = llm_result['_loop_exit_reason']
@@ -1871,11 +1936,14 @@ def run_task(task: dict[str, Any]) -> None:
                 # a no-tool-call completion), so without this the panel is stuck
                 # on [system?, user].
                 try:
-                    snap = _strip_base64_for_snapshot(messages)
+                    _wire = apply_wire_sanitize(
+                        messages, conv_id=task.get('convId', ''),
+                        provider_id=task.get('provider_id') or '')
+                    snap = _strip_base64_for_snapshot(_wire)
                     snap_evt = build_event(
                         EventType.MESSAGES_SNAPSHOT,
                         round='final',
-                        label=f'最终回复后 · {len(messages)}条',
+                        label=f'最终回复后 · {len(snap)}条',
                         messages=snap)
                     # Carry the tool schema so the panel's tools section
                     # survives — showMessagesInDebug rebuilds _debugCache and
@@ -1952,6 +2020,20 @@ def run_task(task: dict[str, Any]) -> None:
         append_event(task, build_event(EventType.DONE, error=_user_err, finishReason='error'))
         persist_task_result(task)
     finally:
+        # ── Presence: this conversation's turn ended — transition its peer to
+        #    IDLE (keep it; the sweep fades it after the idle window, and an
+        #    autopilot follow-up turn re-announces the SAME peer to ACTIVE, so
+        #    we never flicker gone→active between back-to-back turns). Reads
+        #    config defensively (an early fatal may precede cfg binding). ──
+        try:
+            _fin_cfg = task.get('config') or {}
+            _fin_pp = _fin_cfg.get('projectPath') or ''
+            _fin_cid = task.get('convId') or ''
+            if _fin_pp and _fin_cid:
+                from lib.presence import mark_idle as _presence_mark_idle
+                _presence_mark_idle(_fin_pp, _fin_cid)
+        except Exception as _pe:
+            logger.debug('[Task:%s] presence mark_idle failed: %s', tid, _pe)
         # ── Clear the per-task request-id correlation tag (pooled threads are
         #    reused; a stale tid would mis-attribute the NEXT task's logs). ──
         set_req_id('')

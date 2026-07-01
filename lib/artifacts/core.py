@@ -130,6 +130,35 @@ def _row_to_meta(row, with_content: bool = False) -> dict:
     return out
 
 
+# Whitelist of artifact-meta fields safe to expose over the HTTP API.
+# Anything NOT in this set is internal-only and stripped by ``public_meta``.
+# The notable exclusion is the free-form ``meta`` dict (producer bookkeeping
+# such as word_count / has_scripts / toolName), which the frontend never
+# reads and which could accrue internal fields over time. Add a field here
+# ONLY after confirming it carries nothing environment-specific or sensitive.
+_PUBLIC_META_FIELDS = frozenset({
+    'id', 'conv_id', 'task_id', 'msg_id', 'source', 'source_ref',
+    'format', 'title', 'content_sha256', 'size_bytes', 'version',
+    'parent_id', 'pinned', 'created_at', 'content',
+})
+
+
+def public_meta(meta: dict) -> dict:
+    """Return a copy of an artifact-meta dict with internal-only fields removed.
+
+    Whitelist-based (not blacklist) so a NEW field added to ``_row_to_meta``
+    or stuffed into the row by a producer cannot silently leak over the API:
+    it stays server-side until explicitly added to ``_PUBLIC_META_FIELDS``.
+
+    ``content`` is passed through when present (callers that already fetched
+    the body intend to serve it); content-suppression is the storage layer's
+    job (``get_artifact_meta`` selects ``'' AS content``), not this filter's.
+    """
+    if not meta:
+        return {}
+    return {k: v for k, v in meta.items() if k in _PUBLIC_META_FIELDS}
+
+
 def _find_dedupe_row(db, conv_id: str, content_sha256: str) -> Any:
     """Return existing live row in the same conv with matching sha, or None.
 

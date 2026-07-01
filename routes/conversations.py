@@ -206,12 +206,28 @@ async def debug_messages(conv_id):
     own thread-local DB connection) runs off-loop via ``asyncio.to_thread``.
     """
     import asyncio
-    from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
+    from lib.tasks_pkg.conv_message_builder import _load_messages_from_db
     from lib.tasks_pkg.manager import _strip_base64_for_snapshot
+    from lib.tasks_pkg.wire_messages import build_wire_messages
     system_prompt = request.args.get('systemPrompt', '')
     config = {'systemPrompt': system_prompt}
+
+    def _build():
+        # WIRE-FORM, side-effect-free reconstruction (mode='snapshot'): runs
+        # the SAME pipeline the live snapshot uses — _transform_messages →
+        # _inject_system_contexts (throwaway task, empty conv_id) →
+        # apply_wire_sanitize — so the cold panel matches the hot panel
+        # byte-for-byte given the same provider context. The conv_id is passed
+        # to build_wire_messages ONLY for the tool-result sort's cache-prefix
+        # gate; inject still runs cache-isolated. Per-round memory/date are a
+        # hypothetical first-round (the panel labels this an approximation).
+        raw = _load_messages_from_db(conv_id)
+        if raw is None:
+            return None
+        return build_wire_messages(raw, config, mode='snapshot', conv_id=conv_id)
+
     try:
-        messages = await asyncio.to_thread(build_api_messages_from_db, conv_id, config)
+        messages = await asyncio.to_thread(_build)
         if messages is None:
             return api_not_found('Not found')
         try:
@@ -219,7 +235,7 @@ async def debug_messages(conv_id):
         except Exception as e:
             logger.warning('[debug_messages] strip_base64 failed for conv=%s: %s — '
                            'returning raw messages', conv_id[:8], e)
-        return jsonify({'messages': messages, 'count': len(messages)})
+        return jsonify({'messages': messages, 'count': len(messages), 'approx': True})
     except Exception as e:
         logger.error('[debug_messages] Failed for conv=%s: %s', conv_id[:8], e, exc_info=True)
         return api_internal_error('internal_error')
@@ -714,6 +730,10 @@ def _delete_message_blocking(db, conv_id, msg_idx, mode):
         if msg_idx + 1 < len(messages) and messages[msg_idx + 1].get('role') == 'assistant':
             deleted_indices.append(msg_idx + 1)
 
+    # Capture the messages being removed BEFORE popping, so we can scope the
+    # cost-cache invalidation to only the day(s) they contributed cost to.
+    _deleted_originals = [messages[i] for i in deleted_indices if 0 <= i < len(messages)]
+
     # Remove messages in reverse order to preserve indices
     for i in sorted(deleted_indices, reverse=True):
         messages.pop(i)
@@ -755,11 +775,13 @@ def _delete_message_blocking(db, conv_id, msg_idx, mode):
     update_conversation_fts(db, conv_id, search_text)
 
     _invalidate_meta_cache()
-    # Invalidate persisted per-day cost cache — the deleted message may have
-    # had a usage dict that contributed to a past day's total.
+    # Invalidate persisted per-day cost cache — but ONLY for the day(s) the
+    # deleted messages actually contributed cost to.  A whole-table wipe
+    # would force the next calendar open to live-rescan the entire month.
     try:
-        from lib.daily_report import invalidate_day_cost_cache
-        invalidate_day_cost_cache()
+        from lib.daily_report import invalidate_cost_cache_for_messages
+        invalidate_cost_cache_for_messages(
+            _deleted_originals, conv_start=created_at, conv_end=now_ms)
     except Exception as e:
         logger.debug('[delete_message] day-cost cache invalidation skipped: %s', e)
     logger.info('[delete_message] conv=%s deleted indices=%s mode=%s remaining=%d',
@@ -1109,6 +1131,21 @@ async def delete_conv(conv_id):
 
 
 def _delete_conv_blocking(db, conv_id):
+    # Capture the conv's messages + timestamps BEFORE deleting so we can scope
+    # the cost-cache invalidation to only the day(s) it contributed cost to.
+    _conv_msgs, _conv_created, _conv_updated = [], 0, 0
+    try:
+        _row = db.execute(
+            'SELECT messages, created_at, updated_at FROM conversations '
+            'WHERE id=? AND user_id=?', (conv_id, DEFAULT_USER_ID)
+        ).fetchone()
+        if _row:
+            _conv_msgs = _safe_json(_row['messages'], default=[], label='del-conv-cost')
+            _conv_created = _row['created_at'] or 0
+            _conv_updated = _row['updated_at'] or 0
+    except Exception as _e:
+        logger.debug('[delete_conv] cost-day capture skipped: %s', _e)
+
     c1 = db.execute('DELETE FROM conversations WHERE id=? AND user_id=?', (conv_id, DEFAULT_USER_ID))
     c2 = db.execute('DELETE FROM task_results WHERE conv_id=?', (conv_id,))
     c3 = db.execute('DELETE FROM transcript_archive WHERE conv_id=?', (conv_id,))
@@ -1128,12 +1165,13 @@ def _delete_conv_blocking(db, conv_id):
         c3 = db.execute('DELETE FROM transcript_archive WHERE conv_id=?', (conv_id,))
         db.commit()
     _invalidate_meta_cache()
-    # Invalidate persisted per-day cost cache — a deleted conv may have
-    # contributed to any number of past days, so clear everything and let
-    # the next calendar render re-fill.
+    # Invalidate persisted per-day cost cache — but ONLY for the day(s) this
+    # conversation actually contributed cost to, so other days' cache survives
+    # (a whole-table wipe forces a full-month live rescan on the next open).
     try:
-        from lib.daily_report import invalidate_day_cost_cache
-        invalidate_day_cost_cache()
+        from lib.daily_report import invalidate_cost_cache_for_messages
+        invalidate_cost_cache_for_messages(
+            _conv_msgs, conv_start=_conv_created, conv_end=_conv_updated)
     except Exception as e:
         logger.debug('[delete_conv] day-cost cache invalidation skipped: %s', e)
     logger.info('[delete_conv] Deleted conv %s (rows: conv=%d, tasks=%d, transcripts=%d)',

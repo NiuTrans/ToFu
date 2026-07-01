@@ -179,6 +179,17 @@ _BUNDLE_FILES = [
     # globals declared in core.js + main.js, so they MUST come after main.js).
     'compaction-viewer.js',
     'context-bar.js',
+    # Cross-conversation live-presence strip — pure render subscriber on the
+    # 'presence' push channel. Reads activeConvId / conversations /
+    # getActiveConv (main.js) + _getConvProjectPath (project.js) + t (i18n.js)
+    # at runtime, so it MUST come after main.js. No raw fetch (pushSubscribe
+    # only).
+    'presence.js',
+    # Project Brain — Pillar #1 cross-conversation Activity Feed tab. Reads
+    # loadConversation (main.js) + Api/pushSubscribe + Icon/t at RUNTIME only,
+    # so it MUST come after main.js. No raw fetch (Api.project.feed +
+    # pushSubscribe only). Independent tab, not a toggle.
+    'project-brain.js',
     # Per-turn context note builder/renderer. Reads projectState + toolbar
     # globals + config to snapshot each turn's context, so it MUST come
     # after main.js. Consumed by ui/chat_render.js (renderTurnCtxNote) and

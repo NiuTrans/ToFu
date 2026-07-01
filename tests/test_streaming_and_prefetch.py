@@ -6,7 +6,6 @@
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sys
@@ -275,86 +274,6 @@ class TestStreamingCallback:
 
         assert len(fired) == 1
         assert fired[0]['function']['name'] == 'read_files'
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Test 3: Delta Attachment Tracking
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@pytest.mark.unit
-class TestDeltaAttachments:
-    """Test delta attachment tracking — always returns text, only skips compute.
-
-    CRITICAL DESIGN: In our system each task gets fresh messages from the
-    frontend.  Delta tracking must ALWAYS return the text for injection —
-    it only caches to skip expensive FUSE I/O when content is unchanged.
-    """
-
-    def test_context_hash_consistency(self):
-        """Same text produces same hash."""
-        from lib.tasks_pkg.system_context import _context_hash
-        h1 = _context_hash("hello world")
-        h2 = _context_hash("hello world")
-        assert h1 == h2
-
-    def test_context_hash_different(self):
-        """Different text produces different hash."""
-        from lib.tasks_pkg.system_context import _context_hash
-        h1 = _context_hash("hello world")
-        h2 = _context_hash("hello earth")
-        assert h1 != h2
-
-    def test_first_call_returns_text(self):
-        """First call always computes and returns text."""
-        from lib.tasks_pkg.system_context import _get_cached_or_compute, _last_context_cache
-        key = ('test-conv-delta-1', 'project')
-        _last_context_cache.pop(key, None)
-        result = _get_cached_or_compute('test-conv-delta-1', 'project',
-                                         lambda: 'some context')
-        assert result == 'some context'
-
-    def test_second_identical_call_still_returns_text(self):
-        """Second call with same content STILL returns text (never empty)."""
-        from lib.tasks_pkg.system_context import _get_cached_or_compute, _last_context_cache
-        key = ('test-conv-delta-2', 'skills')
-        _last_context_cache.pop(key, None)
-        _get_cached_or_compute('test-conv-delta-2', 'skills',
-                               lambda: 'skill content A')
-        result = _get_cached_or_compute('test-conv-delta-2', 'skills',
-                                         lambda: 'skill content A')
-        assert result == 'skill content A'  # MUST return, not skip
-
-    def test_changed_content_returns_new_text(self):
-        """Changed content returns the new version."""
-        from lib.tasks_pkg.system_context import _get_cached_or_compute, _last_context_cache
-        key = ('test-conv-delta-3', 'project')
-        _last_context_cache.pop(key, None)
-        _get_cached_or_compute('test-conv-delta-3', 'project', lambda: 'v1')
-        result = _get_cached_or_compute('test-conv-delta-3', 'project',
-                                         lambda: 'v2')
-        assert result == 'v2'
-
-    def test_per_section_independence(self):
-        """Different categories tracked independently."""
-        from lib.tasks_pkg.system_context import _get_cached_or_compute, _last_context_cache
-        for cat in ('project', 'skills'):
-            _last_context_cache.pop(('test-conv-delta-4', cat), None)
-
-        r1 = _get_cached_or_compute('test-conv-delta-4', 'project',
-                                     lambda: 'proj context')
-        r2 = _get_cached_or_compute('test-conv-delta-4', 'skills',
-                                     lambda: 'memory context')
-        assert r1 == 'proj context'
-        assert r2 == 'memory context'
-
-    def test_empty_compute_returns_empty(self):
-        """Empty string from compute returns empty."""
-        from lib.tasks_pkg.system_context import _get_cached_or_compute, _last_context_cache
-        key = ('test-conv-delta-5', 'project')
-        _last_context_cache.pop(key, None)
-        result = _get_cached_or_compute('test-conv-delta-5', 'project',
-                                         lambda: '')
-        assert result == ''
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

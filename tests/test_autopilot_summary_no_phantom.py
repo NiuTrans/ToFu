@@ -1,0 +1,185 @@
+"""tests/test_autopilot_summary_no_phantom.py — the summarize carrier must
+never leak into the active-task registry as a phantom ``status='running'`` task.
+
+ROOT CAUSE (the bug this guards)
+--------------------------------
+``autopilot.summarize_run`` reused ``create_task`` purely as a message
+container for a SYNCHRONOUS reporter sub-turn. ``create_task`` marks a task
+``status='running'`` AND registers it in ``_conv_latest_task[conv_id]``, but the
+carrier is NEVER spawned and NEVER finalized — so it lingered forever
+(``cleanup_old_tasks`` only evicts done/error/aborted). ``GET /api/chat/active``
+then reported a phantom running task for that conv, and the frontend
+orphan-recovery (``initActiveTasks`` Case C / cross-tab reconcile) birthed a
+permanently-stuck "Waiting…" placeholder whose SSE never completes.
+
+THE FIX (two prongs, both asserted here)
+----------------------------------------
+A. ``summarize_run`` creates the carrier with ``conv_id=''`` (matching the
+   VU/reporter convention) so it never claims ``_conv_latest_task``; and calls
+   ``discard_task`` in a ``finally`` so it's popped from the registry the instant
+   the synchronous reporter returns.
+B. ``GET /api/chat/active`` filters out ``_inline_messages`` / ``_vu_subtask``
+   carrier tasks — these never stream, so reconnect must never see them.
+
+SOURCE-LEVEL NEGATIVE CONTROLS (documented; run by hand to prove load-bearing)
+  • Revert (B): drop the ``if not t.get('_inline_messages') ...`` filter in
+    ``routes/chat.py::chat_active`` → ``test_active_excludes_inline_carrier``
+    FAILS (the carrier shows up).
+  • Revert (A): change the carrier back to ``create_task(conv_id, ...)`` AND
+    delete the ``discard_task`` call → ``test_summarize_leaves_no_phantom``
+    FAILS (``_conv_latest_task`` keeps the conv → carrier and a stray running
+    task lingers).
+"""
+
+import pytest
+
+
+# ── Fix B: /api/chat/active hides carrier/holder tasks ─────────────────
+
+@pytest.fixture()
+def put_task():
+    """Insert a synthetic task into the in-memory registry; auto-cleanup."""
+    from lib.tasks_pkg import tasks, tasks_lock
+    added = []
+
+    def _put(task):
+        with tasks_lock:
+            tasks[task['id']] = task
+        added.append(task['id'])
+        return task['id']
+
+    yield _put
+
+    with tasks_lock:
+        for tid in added:
+            tasks.pop(tid, None)
+
+
+@pytest.mark.api
+def test_active_excludes_inline_carrier(flask_client, put_task):
+    """A ``_inline_messages`` carrier must NOT appear in /api/chat/active.
+
+    NEGATIVE CONTROL for fix B: with the filter reverted this carrier appears
+    and the frontend orphan-recovery would spawn a stuck placeholder.
+    """
+    put_task({'id': 'carrier-inline-1', 'convId': 'conv-phantom-1',
+              'status': 'running', '_inline_messages': True})
+    put_task({'id': 'vu-sub-1', 'convId': 'conv-phantom-1',
+              'status': 'running', '_vu_subtask': True})
+    # A real streaming task for the SAME conv MUST still be reported.
+    put_task({'id': 'real-stream-1', 'convId': 'conv-phantom-1',
+              'status': 'running'})
+
+    resp = flask_client.get('/api/v1/chat/active')
+    assert resp.status_code == 200
+    ids = {t['id'] for t in resp.get_json()}
+    assert 'real-stream-1' in ids, 'real streaming task must remain reconnectable'
+    assert 'carrier-inline-1' not in ids, 'inline-messages carrier leaked into /active'
+    assert 'vu-sub-1' not in ids, 'VU sub-task leaked into /active'
+
+
+@pytest.mark.api
+def test_active_keeps_autopilot_kick_carrier(flask_client, put_task):
+    """The autopilot-KICK carrier (``_autopilot_kick``, a REAL streaming task)
+    is NOT an inline/vu holder, so it must still be reported + reconnectable."""
+    put_task({'id': 'kick-carrier-1', 'convId': 'conv-kick-1',
+              'status': 'running', '_autopilot_kick': True})
+    resp = flask_client.get('/api/v1/chat/active')
+    assert resp.status_code == 200
+    ids = {t['id'] for t in resp.get_json()}
+    assert 'kick-carrier-1' in ids, 'autopilot-kick carrier must stay reconnectable'
+
+
+# ── discard_task: carrier removed from registry + conv-latest index ────
+
+def test_discard_task_pops_registry_and_latest_index():
+    from lib.tasks_pkg import create_task, discard_task, tasks, tasks_lock
+    from lib.tasks_pkg.manager import _conv_latest_task, _conv_latest_task_lock
+
+    task = create_task('conv-discard-1', [{'role': 'user', 'content': 'hi'}], {})
+    tid = task['id']
+    # create_task registered it both places.
+    with tasks_lock:
+        assert tid in tasks
+    with _conv_latest_task_lock:
+        assert _conv_latest_task.get('conv-discard-1') == tid
+
+    discard_task(tid, 'conv-discard-1')
+
+    with tasks_lock:
+        assert tid not in tasks, 'discard_task must pop the registry entry'
+    with _conv_latest_task_lock:
+        assert _conv_latest_task.get('conv-discard-1') != tid, \
+            'discard_task must clear the conv-latest index entry it claimed'
+
+
+def test_discard_task_preserves_other_convs_latest():
+    """discard_task must only clear the index entry that points at THIS task."""
+    from lib.tasks_pkg import create_task, discard_task
+    from lib.tasks_pkg.manager import _conv_latest_task, _conv_latest_task_lock
+
+    keep = create_task('conv-keep-1', [{'role': 'user', 'content': 'a'}], {})
+    drop = create_task('conv-drop-1', [{'role': 'user', 'content': 'b'}], {})
+    discard_task(drop['id'], 'conv-drop-1')
+    with _conv_latest_task_lock:
+        assert _conv_latest_task.get('conv-keep-1') == keep['id'], \
+            'discard_task wrongly touched an unrelated conv'
+    # cleanup
+    discard_task(keep['id'], 'conv-keep-1')
+
+
+# ── Fix A: summarize_run leaves no phantom for the conv ────────────────
+
+@pytest.mark.api
+def test_summarize_leaves_no_phantom(flask_client, monkeypatch):
+    """After summarize_run, NO task for the conv lingers in /api/chat/active and
+    the conv has no _conv_latest_task entry.
+
+    NEGATIVE CONTROL for fix A: revert the carrier to create_task(conv_id, ...)
+    and remove discard_task → the conv-latest index keeps the carrier and the
+    registry holds a phantom running task → this test FAILS.
+
+    The reporter sub-turn is stubbed (offline, deterministic).
+    """
+    import lib.tasks_pkg.autopilot as ap
+    from lib.tasks_pkg import tasks, tasks_lock
+    from lib.tasks_pkg.manager import _conv_latest_task, _conv_latest_task_lock
+
+    conv_id = 'conv-summarize-phantom-1'
+
+    # Stub the heavy/IO bits: messages, reporter turn, sidecar persist, objective.
+    monkeypatch.setattr(
+        'lib.tasks_pkg.conv_message_builder.build_api_messages_from_db',
+        lambda cid, cfg, **kw: [{'role': 'user', 'content': 'do X'},
+                                {'role': 'assistant', 'content': 'did X'}])
+    monkeypatch.setattr(ap, 'run_summary_reporter',
+                        lambda carrier: {'text': 'Outcome: met. Done: X.'})
+    monkeypatch.setattr(ap, '_store_run_summary',
+                        lambda c, r, text, translated: {
+                            'runId': r, 'content': text, 'ts': 0,
+                            '_summaryId': 'sum-1'})
+
+    # Snapshot tasks belonging to this conv before.
+    def _conv_tasks():
+        with tasks_lock:
+            return [tid for tid, t in tasks.items() if t.get('convId') == conv_id]
+
+    assert _conv_tasks() == [], 'precondition: no task for this conv yet'
+
+    result = ap.summarize_run(conv_id, run_id='ar-test-1', config={'model': 'm'})
+    assert result.get('ok') is True, result
+
+    # The carrier must be GONE from the registry (no phantom for this conv).
+    assert _conv_tasks() == [], \
+        'summarize_run left a phantom task in the registry for the conv'
+    # And the conv-latest index must not point at any summarize carrier.
+    with _conv_latest_task_lock:
+        assert conv_id not in _conv_latest_task, \
+            'summarize_run left a _conv_latest_task entry for the conv'
+
+    # Belt-and-braces: /api/chat/active reports nothing for this conv.
+    resp = flask_client.get('/api/v1/chat/active')
+    assert resp.status_code == 200
+    conv_active = [t for t in resp.get_json() if t.get('convId') == conv_id]
+    assert conv_active == [], \
+        f'/api/chat/active still reports a task for the conv: {conv_active}'

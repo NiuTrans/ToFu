@@ -196,9 +196,13 @@ def _build_artifact_view_html(artifact: dict) -> str:
 
 
 def _strip_meta_for_response(meta: dict) -> dict:
-    """Return a copy with internal-only fields removed (currently a no-op,
-    placeholder for future field-level sanitization)."""
-    return dict(meta)
+    """Return a copy with internal-only fields removed.
+
+    Delegates to the canonical whitelist filter in lib.artifacts so the
+    public field set lives in ONE place.
+    """
+    from lib.artifacts import public_meta
+    return public_meta(meta)
 
 
 # HTTP headers are ISO-8859-1 by spec — model-supplied titles routinely

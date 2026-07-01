@@ -87,6 +87,127 @@ class TestAttachments:
         inject_attachments(messages, [])
         assert messages == original
 
+    # ── B2: trigger must be message-scan based, NOT cross-task round_num ──
+
+    @staticmethod
+    def _writeful_history(extra_tail_rounds=4):
+        """A realistic cross-task message list: an early write, then several
+        non-write rounds, then a NEW user turn (task 2). The write happened
+        long ago in message terms, so the reminder SHOULD fire."""
+        msgs = [
+            {'role': 'system', 'content': 'sys'},
+            {'role': 'user', 'content': 'implement the feature'},
+            {'role': 'assistant', 'content': None, 'tool_calls': [
+                {'function': {'name': 'write_file',
+                              'arguments': '{"path":"a.py","content":"x"}'}}]},
+            {'role': 'tool', 'content': 'written a.py'},
+        ]
+        # Several non-write rounds (read/grep) — the model "moved on".
+        for i in range(extra_tail_rounds):
+            msgs.append({'role': 'assistant', 'content': None, 'tool_calls': [
+                {'function': {'name': 'read_files',
+                              'arguments': f'{{"reads":[{{"path":"b{i}.py"}}]}}'}}]})
+            msgs.append({'role': 'tool', 'content': f'content of b{i}.py'})
+        # Task-1 wrap-up + a NEW task-2 user turn (round_num resets to a low
+        # value in task 2).
+        msgs.append({'role': 'assistant', 'content': 'task 1 done'})
+        msgs.append({'role': 'user', 'content': 'task 2: now refactor it'})
+        return msgs
+
+    def test_reminder_fires_on_message_scan_low_round_num(self):
+        """B2 reproduction → fixed contract: with an earlier write and a gap
+        of many messages since, the reminder fires REGARDLESS of round_num.
+
+        On the OLD implementation this returns None: compute_turn_attachments
+        gated on ``round_num > 5`` (here round_num=3 from a fresh task 2), and
+        the per-conv ``_attachment_state`` carried a stale ``last_reminder_round``
+        from task 1 that made the throttle gate permanently true. Both are
+        cross-task round-counter bugs the message-scan fix removes."""
+        from lib.tasks_pkg.attachments import compute_turn_attachments
+        msgs = self._writeful_history()
+        result = compute_turn_attachments(
+            msgs, task={}, round_num=3, conv_id='conv-b2',
+            project_path='/proj', project_enabled=True,
+        )
+        assert result, 'reminder must fire on message-scan even at low round_num'
+        assert '## Recently Modified Files' in result[0]
+        # The files it names come from the write/read history.
+        assert 'a.py' in result[0]
+
+    def test_reminder_does_not_fire_right_after_write(self):
+        """No nagging immediately after a write — the model is still on it.
+        A write in the last message means gap≈0 < the min-gap threshold."""
+        from lib.tasks_pkg.attachments import compute_turn_attachments
+        msgs = [
+            {'role': 'system', 'content': 'sys'},
+            {'role': 'user', 'content': 'do it'},
+            {'role': 'assistant', 'content': None, 'tool_calls': [
+                {'function': {'name': 'write_file',
+                              'arguments': '{"path":"a.py","content":"x"}'}}]},
+            {'role': 'tool', 'content': 'written'},
+        ]
+        result = compute_turn_attachments(
+            msgs, task={}, round_num=9, conv_id='conv-b2b',
+            project_path='/proj', project_enabled=True,
+        )
+        assert result == [], 'must not nag right after a write'
+
+    def test_reminder_dedups_no_stacking(self):
+        """B3: once a reminder is in context and NO new write follows it, the
+        reminder must NOT fire again (no stale stacking). The prior reminder
+        message is in the scan window; absent a newer write, return nothing."""
+        from lib.tasks_pkg.attachments import (compute_turn_attachments,
+                                               inject_attachments)
+        msgs = self._writeful_history()
+        first = compute_turn_attachments(
+            msgs, task={}, round_num=3, conv_id='conv-b2c',
+            project_path='/proj', project_enabled=True)
+        assert first  # fires once
+        inject_attachments(msgs, first)  # now the reminder is in context
+        # A few more non-write rounds happen (no writes after the reminder).
+        for i in range(4):
+            msgs.append({'role': 'assistant', 'content': None, 'tool_calls': [
+                {'function': {'name': 'grep_search',
+                              'arguments': '{"pattern":"x"}'}}]})
+            msgs.append({'role': 'tool', 'content': 'match'})
+        second = compute_turn_attachments(
+            msgs, task={}, round_num=5, conv_id='conv-b2c',
+            project_path='/proj', project_enabled=True)
+        assert second == [], 'must not re-fire without a new write since the reminder'
+
+    def test_reminder_refires_after_new_write(self):
+        """After a reminder, a NEW write + gap legitimately re-arms it."""
+        from lib.tasks_pkg.attachments import (compute_turn_attachments,
+                                               inject_attachments)
+        msgs = self._writeful_history()
+        inject_attachments(msgs, compute_turn_attachments(
+            msgs, task={}, round_num=3, conv_id='conv-b2d',
+            project_path='/proj', project_enabled=True))
+        # New write AFTER the reminder, then a gap.
+        msgs.append({'role': 'assistant', 'content': None, 'tool_calls': [
+            {'function': {'name': 'apply_diff',
+                          'arguments': '{"path":"z.py","search":"a","replace":"b"}'}}]})
+        msgs.append({'role': 'tool', 'content': 'patched z.py'})
+        for i in range(4):
+            msgs.append({'role': 'assistant', 'content': None, 'tool_calls': [
+                {'function': {'name': 'read_files',
+                              'arguments': '{"reads":[{"path":"q.py"}]}'}}]})
+            msgs.append({'role': 'tool', 'content': 'q'})
+        again = compute_turn_attachments(
+            msgs, task={}, round_num=7, conv_id='conv-b2d',
+            project_path='/proj', project_enabled=True)
+        assert again, 'a new write after the reminder must re-arm it'
+        assert 'z.py' in again[0]
+
+    def test_no_module_level_round_state(self):
+        """B2 leak fix: the per-conv round-counter dict is gone (message-scan
+        needs no cross-call state, so there is no unbounded module-level dict
+        to leak)."""
+        import lib.tasks_pkg.attachments as att
+        assert not hasattr(att, '_attachment_state'), (
+            '_attachment_state should be removed — the trigger is now a pure '
+            'message scan with no per-conv state to leak')
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

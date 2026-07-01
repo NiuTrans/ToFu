@@ -62,6 +62,7 @@ declare var _translationPolicy: any;     // static/js/main/main_toolbar_ui.js �
 declare var _browserClientId: any;       // static/js/main/main_toolbar_ui.js — window.*
 declare var __sse_test__: any;           // static/js/ui/sse_pipeline.js — window.*
 declare var __swarmPushWired: any;       // static/js/ui/swarm_push.js — window.*
+declare var presenceRefresh: any;        // static/js/presence.js — window.presenceRefresh
 declare var __translatePushWired: any;   // static/js/translation.js — window.*
 declare var ChipInput: any;              // static/js/settings/chip_input.js — window.ChipInput (used in other settings/* files)
 declare var buildTurnCtxSnapshot: any;   // static/js/info-rail.js — window.* (used by send pipeline / edit_message)
@@ -135,6 +136,9 @@ interface Window {
   _setTimerPanelOpen: any; _setOptimizerPanelOpen: any;
   openMobileTimer: any; openMobileOptimizer: any; openMobileFlowPicker: any;
   toggleTimerPanel: any; toggleOptimizerPanel: any;
+  // presence.js — cross-conversation live-presence strip (one-time wire latch
+  // + the conversation-switch re-filter hook).
+  __presenceWired: any; presenceRefresh: any;
 }
 // (FileReader.result stays string|ArrayBuffer — call sites coerce via String()
 //  since merging can't override an existing property's declared type.)

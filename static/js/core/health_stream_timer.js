@@ -165,6 +165,89 @@ function _forceFinishDeadStream(convId) {
   _startOfflineRecoveryPolling();
 }
 
+/**
+ * Self-heal a conversation whose ``activeTaskId`` points at a task that is no
+ * longer running on the server (terminal status, or 404 = the task was
+ * discarded / TTL-evicted / never finalized).  This is the autopilot/summarize
+ * "stuck Waiting… placeholder" recovery: a phantom running task (e.g. the old
+ * summarize carrier) births an empty assistant placeholder + an SSE that never
+ * completes, so the bubble shows "等待中…" forever.  The hard project rule is
+ * that any non-input-box-driven flow must SELF-HEAL — never require a manual
+ * force-refresh.
+ *
+ * Reuses the existing probe→recover mechanism (no second system):
+ *   • If the trailing assistant is an EMPTY ghost (no content / thinking / real
+ *     tool round) → it was an orphan placeholder for a task that produced
+ *     nothing.  Remove it and clear the running predicate
+ *     (``conv.activeTaskId`` + ``activeStreams``).
+ *   • If it DID accumulate content → abort the stale SSE with ``_probeAbort``
+ *     so ``_trySSE`` falls through to ``_pollFallback``, which lands the real
+ *     result and finalizes (the same path the proxy-swallowed-done case uses).
+ *
+ * Returns true when it took recovery action (placeholder reclaimed or SSE
+ * re-routed), false otherwise.  Best-effort, idempotent.
+ *
+ * @param {string} convId
+ * @param {{status?: string, notFound?: boolean}} probe — poll outcome:
+ *        ``notFound`` for a 404, else the task's terminal ``status``.
+ */
+function _healStuckPlaceholder(convId, probe) {
+  const conv = conversations.find(c => c.id === convId);
+  if (!conv) return false;
+  const taskId = conv.activeTaskId;
+  if (!taskId) return false;
+  const last = conv.messages[conv.messages.length - 1];
+  // Empty-ghost predicate (mirrors initActiveTasks `_classifyGhostTail`): an
+  // assistant turn with no settled output and no REAL tool round.
+  const _isEmptyGhost = !!last && last.role === 'assistant'
+    && !last.content && !last.finishReason && !last.usage && !last.error
+    && !(Array.isArray(last.toolRounds) && last.toolRounds.some(r =>
+        r && (r.status === 'done' || r.toolContent
+          || (Array.isArray(r.results) && r.results.length))))
+    && !last.thinking;
+  if (_isEmptyGhost) {
+    console.warn(
+      `[StreamTimer] ★ SELF-HEAL — conv=${convId.slice(0,8)} task=${taskId.slice(0,8)} ` +
+      `is ${probe && probe.notFound ? '404 (gone)' : 'terminal (' + (probe && probe.status) + ')'} ` +
+      `and the trailing assistant is an empty orphan placeholder — reclaiming it ` +
+      `(clearing activeTaskId + activeStreams).`
+    );
+    conv.messages.pop();
+    conv.activeTaskId = null;
+    conv._activeTaskClearedAt = Date.now();
+    const s = activeStreams.get(convId);
+    if (s && s.controller) { try { s.controller.abort(); } catch (e) { /* already detached */ } }
+    activeStreams.delete(convId);
+    twStop(convId);
+    if (typeof saveConversations === 'function') saveConversations(null);
+    if (typeof ConvCache !== 'undefined') { try { ConvCache.put(conv); } catch (e) { /* non-fatal */ } }
+    if (activeConvId === convId && typeof renderChat === 'function') renderChat(conv);
+    if (typeof renderConversationList === 'function') renderConversationList();
+    return true;
+  }
+  // The placeholder DID accumulate content — route the stale SSE to the poll
+  // fallback, exactly like the proxy-swallowed-done probe does.
+  //   • terminal status → _pollFallback re-polls and lands the AUTHORITATIVE
+  //     final result (more than the SSE delivered).
+  //   • 404 (task gone) → _pollFallback's own 404 branch (sse_poll_fallback.js
+  //     ~L60) does NOT blank: it PRESERVES the already-accumulated content,
+  //     twStop + finishStream and returns. So on a 404 we recover NO ADDITIONAL
+  //     content (the task is gone server-side) — we just commit the partial the
+  //     SSE already streamed and clear the running state. No spin, no blank.
+  const stream = activeStreams.get(convId);
+  if (stream && stream.controller) {
+    console.warn(
+      `[StreamTimer] ★ SELF-HEAL — conv=${convId.slice(0,8)} task=${taskId.slice(0,8)} ` +
+      `is ${probe && probe.notFound ? '404' : 'terminal'} with accumulated content — ` +
+      `aborting stale SSE to land the result via poll fallback.`
+    );
+    stream._probeAbort = true;
+    stream.controller.abort();
+    return true;
+  }
+  return false;
+}
+
 async function _updateStreamTimerUI(convId) {
   if (activeConvId !== convId) return;
   const info = _streamTimers.get(convId);
@@ -219,7 +302,19 @@ async function _updateStreamTimerUI(convId) {
       if (!taskId) return;
       try {
         const probeResp = await Api.chat.poll(taskId, { signal: AbortSignal.timeout(5000) });
-        if (!probeResp || !probeResp.ok) return;
+        if (!probeResp) return;
+        if (!probeResp.ok) {
+          /* ★ 404 = the task is GONE from the server (discarded carrier,
+           *   TTL-evicted, or one that never finalized — e.g. the autopilot
+           *   summarize phantom). An open SSE to it will NEVER complete, so the
+           *   bubble would stay "等待中…" forever. Self-heal: reclaim the orphan
+           *   placeholder (or land any partial via poll fallback). This is the
+           *   init-reconcile semantic applied LIVE, without a force-refresh. */
+          if (probeResp.status === 404) {
+            _healStuckPlaceholder(convId, { notFound: true });
+          }
+          return;
+        }
         const probeData = await probeResp.json();
         if (probeData.status && probeData.status !== 'running') {
           console.warn(
@@ -228,13 +323,17 @@ async function _updateStreamTimerUI(convId) {
             `content=${(probeData.content||'').length}chars — ` +
             `aborting stale SSE to trigger poll fallback recovery`
           );
-          // Abort the SSE controller — this causes _trySSE to exit with AbortError.
-          // We set _probeAbort flag so _trySSE knows this is a timer probe (not user stop)
-          // and falls through to _pollFallback instead of treating it as user abort.
-          const stream = activeStreams.get(convId);
-          if (stream && stream.controller) {
-            stream._probeAbort = true;
-            stream.controller.abort();
+          // Unified self-heal: empty orphan placeholder → reclaim; accumulated
+          // content → abort stale SSE with _probeAbort so _trySSE falls through
+          // to _pollFallback (which lands the authoritative result).
+          if (!_healStuckPlaceholder(convId, { status: probeData.status })) {
+            // Defensive fallback (no conv / no trailing ghost matched): keep the
+            // original direct-abort so a terminal task never streams forever.
+            const stream = activeStreams.get(convId);
+            if (stream && stream.controller) {
+              stream._probeAbort = true;
+              stream.controller.abort();
+            }
           }
         } else {
           // Task is still running — silence is expected (LLM thinking, tool executing).

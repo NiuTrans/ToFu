@@ -229,7 +229,7 @@ Grounded against the current filesystem (2026-06-28).
 | `trading.html` | Legacy trading SPA shell (core trading code now lives in the external `tofu-trading` plugin) |
 | `healthcheck.py` · `install.{py,sh,ps1}` | Install / health helpers |
 
-### 3.2 `lib/` — core libraries (27 top-level sub-packages + 81 top-level modules)
+### 3.2 `lib/` — core libraries (27 top-level sub-packages + 83 top-level modules)
 
 **Sub-packages** (27 directories under `lib/` carrying an `__init__.py`,
 excluding the `tests/` test package). The `tasks_pkg/handlers/` row below is a
@@ -282,18 +282,19 @@ Sub-packages: **`compaction/`** (3-layer context compaction, now a package) ·
 
 #### 3.2.2 `lib/` top-level modules
 
-All **81** `lib/*.py` modules are accounted for (verified against disk
-2026-06-28, zero invented names). The table below names 73 directly; the
-remaining 8 are documented elsewhere: the six `orchestration*` modules share
-the single `orchestration*.py` row, and the `push.py` + `task_runtime.py`
-compat shims are described in the `agent_core/` package row in §3.2.
+All **83** `lib/*.py` modules are accounted for (`agent_loop.py` added
+2026-07-01; verified against disk, zero invented names). The table below names
+75 directly; the remaining 8 are documented elsewhere: the six `orchestration*`
+modules share the single `orchestration*.py` row, and the `push.py` +
+`task_runtime.py` compat shims are described in the `agent_core/` package row
+in §3.2.
 
 | Module(s) | Purpose |
 |---|---|
 | `log.py` · `log_clean.py` | `get_logger` / `log_context` / `log_exception` / `audit_log`; log-retention cleanup |
 | `agent_core_manifest.py` | Declares `CORE_MODULES` / `REGISTRY_SEAMS` / `CONCRETE_PLUGIN_MODULES` — source of truth for the core/plugin split |
 | `agent_artifacts.py` | `.tofu*` artifact registry (CLAUDE.md §3.6) |
-| `agent_inbox.py` · `agent_options.py` · `agent_verdict.py` | Agent inbox · option resolution · STOP/CONTINUE verdict logic |
+| `agent_inbox.py` · `agent_options.py` · `agent_verdict.py` · `agent_loop.py` | Agent inbox · option resolution · STOP/CONTINUE verdict logic · shared multi-round tool-loop + `AbortSignal` seam (CLAUDE.md §4.6) |
 | `orchestration*.py` | `orchestration` · `orchestration_engine` · `orchestration_composer` · `orchestration_endpoint_adapter` · `orchestration_endpoint_runner` · `orchestration_runs` — multi-step DAG orchestration |
 | `model_info.py` · `context_limits.py` · `pricing.py` · `cost.py` · `cost_estimator.py` | Per-model caps · context limits · pricing tables · cost accounting |
 | `api_response.py` · `request_parser.py` · `error_envelope.py` · `error_fingerprint.py` · `llm_error_format.py` · `llm_errors.py` | Unified JSON responses · typed body parsing · error shaping |

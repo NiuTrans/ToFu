@@ -721,6 +721,70 @@ ORCHESTRATION_RUN_EVENTS = define_table(
     sa.PrimaryKeyConstraint('run_id', 'seq'),
 )
 
+# project_events — append-only cross-conversation activity feed ("project
+# brain" pulse), keyed on project_path. Composite PK (project_path, seq): seq
+# is a per-project monotonic counter so the frontend can do Last-Event-ID
+# style incremental fetch without a global sequence. No FK to conversations —
+# a project_path is a string key, not a row (mirrors recent_projects). payload
+# is kind-specific extra json (TEXT). See lib/conversations/project_feed.py.
+PROJECT_EVENTS = define_table(
+    'project_events',
+    sa.Column('project_path', sa.Text, nullable=False),
+    sa.Column('seq', sa.Integer, nullable=False),
+    sa.Column('event_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('conv_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('task_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('kind', sa.Text, nullable=False, server_default='note'),
+    sa.Column('title', sa.Text, nullable=False, server_default=''),
+    sa.Column('summary', sa.Text, nullable=False, server_default=''),
+    sa.Column('payload', sa.Text, nullable=False, server_default="{}"),
+    sa.Column('ts', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.PrimaryKeyConstraint('project_path', 'seq'),
+)
+
+# project_charter — the "north star" per project (Pillar #2 of the project
+# brain). ONE row per project_path (single TEXT PK, upsert semantics): the
+# living goal/north-star (`content`) + the COMMITTED key decisions
+# (`decisions`, a JSON array). Agents may only PROPOSE amendments (which land
+# in project_events as kind='proposed_decision'); the actual commit is
+# human-gated and bumps `version` (optimistic lock) so two concurrent commits
+# can't silently clobber. See lib/conversations/project_charter.py.
+PROJECT_CHARTER = define_table(
+    'project_charter',
+    sa.Column('project_path', sa.Text, primary_key=True),
+    sa.Column('content', sa.Text, nullable=False, server_default=''),
+    sa.Column('decisions', sa.Text, nullable=False, server_default="[]"),
+    sa.Column('updated_by_conv', sa.Text, nullable=False, server_default=''),
+    sa.Column('updated_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('version', sa.Integer, nullable=False, server_default=sa.text('0')),
+)
+
+# project_tasks — the coordination BOARD (Pillar #3 of the project brain).
+# Coarse, human-meaningful epics per project_path: conversations POST work they
+# discover, CLAIM an epic (a SOFT, TTL-expiring lease — advisory, never a hard
+# lock, so a crashed/abandoned conversation can never deadlock the board), and
+# COMPLETE it. status ∈ {open, claimed, done}; lease_expires_at is checked
+# at-READ-time (an expired claim reads as open — no background reaper).
+# depends_on is a JSON array of task ids (intra-board dependency — NOT a second
+# namespace). See lib/conversations/project_board.py.
+PROJECT_TASKS = define_table(
+    'project_tasks',
+    sa.Column('id', sa.Text, primary_key=True),
+    sa.Column('project_path', sa.Text, nullable=False, server_default=''),
+    sa.Column('title', sa.Text, nullable=False, server_default=''),
+    sa.Column('status', sa.Text, nullable=False, server_default='open'),
+    sa.Column('owner_conv_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('lease_expires_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('created_by_conv', sa.Text, nullable=False, server_default=''),
+    sa.Column('depends_on', sa.Text, nullable=False, server_default="[]"),
+    # dispatched: 1 when the CURRENT claim was minted by brain-driven dispatch
+    # (the heartbeat/completion sweep) rather than a human/agent claim — surfaced
+    # as a "brain-dispatched" badge on the board card. Reset to 0 on complete.
+    sa.Column('dispatched', sa.Integer, nullable=False, server_default=sa.text('0')),
+    sa.Column('created_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('updated_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+)
+
 # optimizer_proposals — nightly self-tuning proposals. Single TEXT PK;
 # confidence is DOUBLE PRECISION/REAL.
 OPTIMIZER_PROPOSALS = define_table(

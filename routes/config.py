@@ -29,21 +29,22 @@ _SERVER_CONFIG_PATH = _config_path('server_config.json')
 
 def _read_server_config():
     """Read server_config.json and return as dict (empty dict on failure)."""
-    try:
-        if os.path.isfile(_SERVER_CONFIG_PATH):
-            with open(_SERVER_CONFIG_PATH) as f:
-                return json.load(f)
-    except Exception as e:
-        logger.warning('[ServerConfig] Failed to read server_config.json: %s', e)
-    return {}
+    from lib.json_store import read_json
+    cfg = read_json(_SERVER_CONFIG_PATH, default={})
+    return cfg if isinstance(cfg, dict) else {}
 
 
 def _write_server_config(data):
-    """Write server_config.json, creating directories as needed."""
+    """Atomically replace server_config.json (locked). Returns True/False.
+
+    Back-compat whole-file writer. Callers that read-modify-write should
+    prefer the mutator form of ``update_json_atomic`` (see
+    ``save_server_config``) so the RMW is serialised against the background
+    writers (context_limits / model_info / dispatcher / health_local).
+    """
     try:
-        os.makedirs(os.path.dirname(_SERVER_CONFIG_PATH), exist_ok=True)
-        with open(_SERVER_CONFIG_PATH, 'w') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        from lib.json_store import update_json_atomic
+        update_json_atomic(_SERVER_CONFIG_PATH, lambda _cur: data, default={})
         logger.info('[ServerConfig] Saved server_config.json')
         return True
     except Exception as e:
@@ -970,103 +971,125 @@ def save_server_config():
     """
     import lib as _lib
     from lib.log import audit_log
+    from lib.json_store import update_json_atomic
 
     data = parse_body()
-    existing = _read_server_config()
     changes = []
     dispatch_reset_needed = False
 
-    if 'providers' in data and isinstance(data['providers'], list):
-        existing['providers'] = data['providers']
-        total_models = sum(len(p.get('models', [])) for p in data['providers'])
-        changes.append('providers (%d with %d models)' % (len(data['providers']), total_models))
-        dispatch_reset_needed = True
-        existing.pop('models_registry', None)
+    # The whole read-modify-write runs inside ONE ``update_json_atomic``
+    # mutator so it is serialised (per-path thread lock + cross-process
+    # flock) against the background writers of this SAME file
+    # (context_limits / model_info / dispatcher discovery / health_local).
+    # Reading at the top and writing at the bottom — as this used to do —
+    # would make each individual write atomic but still lose a concurrent
+    # writer's update that landed in the read→write gap. The mutator sees
+    # the FRESH on-disk config under the lock, so learned model_limits /
+    # context limits added meanwhile are preserved. Interleaved
+    # side-effects (feishu/proxy/search hot-reload) keep their original
+    # positions so behaviour is unchanged.
+    def _mutate(existing):
+        nonlocal dispatch_reset_needed
+        if not isinstance(existing, dict):
+            existing = {}
 
-    if 'presets' in data and isinstance(data['presets'], dict):
-        existing['presets'] = data['presets']
-        changes.append('presets')
-        dispatch_reset_needed = True
+        if 'providers' in data and isinstance(data['providers'], list):
+            existing['providers'] = data['providers']
+            total_models = sum(len(p.get('models', [])) for p in data['providers'])
+            changes.append('providers (%d with %d models)' % (len(data['providers']), total_models))
+            dispatch_reset_needed = True
+            existing.pop('models_registry', None)
 
-    if 'models' in data and isinstance(data['models'], dict):
-        old_models = existing.get('models', {})
-        existing['models'] = {**old_models, **data['models']}
-        for k, v in data['models'].items():
-            if old_models.get(k) != v:
-                changes.append('models.%s' % k)
-                dispatch_reset_needed = True
+        if 'presets' in data and isinstance(data['presets'], dict):
+            existing['presets'] = data['presets']
+            changes.append('presets')
+            dispatch_reset_needed = True
 
-    if 'search' in data and isinstance(data['search'], dict):
-        existing['search'] = data['search']
-        # LLM content filter is a separate module-level flag
-        if 'llm_content_filter' in data['search']:
-            _lib.LLM_CONTENT_FILTER_ENABLED = bool(data['search']['llm_content_filter'])
-            from lib.search_bridge import sync_search_config
-            sync_search_config()
-            logger.info('[Config] LLM content filter → %s', _lib.LLM_CONTENT_FILTER_ENABLED)
-        changes.append('search.*')
+        if 'models' in data and isinstance(data['models'], dict):
+            old_models = existing.get('models', {})
+            existing['models'] = {**old_models, **data['models']}
+            for k, v in data['models'].items():
+                if old_models.get(k) != v:
+                    changes.append('models.%s' % k)
+                    dispatch_reset_needed = True
 
-    if 'hidden_models' in data and isinstance(data['hidden_models'], list):
-        existing['hidden_models'] = data['hidden_models']
-        changes.append('hidden_models')
+        if 'search' in data and isinstance(data['search'], dict):
+            existing['search'] = data['search']
+            # LLM content filter is a separate module-level flag
+            if 'llm_content_filter' in data['search']:
+                _lib.LLM_CONTENT_FILTER_ENABLED = bool(data['search']['llm_content_filter'])
+                from lib.search_bridge import sync_search_config
+                sync_search_config()
+                logger.info('[Config] LLM content filter → %s', _lib.LLM_CONTENT_FILTER_ENABLED)
+            changes.append('search.*')
 
-    if 'hidden_ig_models' in data and isinstance(data['hidden_ig_models'], list):
-        existing['hidden_ig_models'] = data['hidden_ig_models']
-        changes.append('hidden_ig_models')
+        if 'hidden_models' in data and isinstance(data['hidden_models'], list):
+            existing['hidden_models'] = data['hidden_models']
+            changes.append('hidden_models')
 
-    if 'model_defaults' in data and isinstance(data['model_defaults'], dict):
-        existing['model_defaults'] = data['model_defaults']
-        md = data['model_defaults']
-        if md.get('default_model'):
-            existing.setdefault('presets', {})['opus'] = md['default_model']
-            existing.setdefault('models', {})['LLM_MODEL'] = md['default_model']
-        existing.setdefault('models', {})['fallback_model'] = md.get('fallback_model', '')
-        changes.append('model_defaults')
-        dispatch_reset_needed = True
+        if 'hidden_ig_models' in data and isinstance(data['hidden_ig_models'], list):
+            existing['hidden_ig_models'] = data['hidden_ig_models']
+            changes.append('hidden_ig_models')
 
-    if 'proxy_bypass_domains' in data and isinstance(data['proxy_bypass_domains'], list):
-        existing['proxy_bypass_domains'] = data['proxy_bypass_domains']
-        from lib.proxy import set_bypass_domains
-        set_bypass_domains(data['proxy_bypass_domains'])
-        changes.append('proxy_bypass_domains')
+        if 'model_defaults' in data and isinstance(data['model_defaults'], dict):
+            existing['model_defaults'] = data['model_defaults']
+            md = data['model_defaults']
+            if md.get('default_model'):
+                existing.setdefault('presets', {})['opus'] = md['default_model']
+                existing.setdefault('models', {})['LLM_MODEL'] = md['default_model']
+            existing.setdefault('models', {})['fallback_model'] = md.get('fallback_model', '')
+            changes.append('model_defaults')
+            dispatch_reset_needed = True
 
-    if 'proxy_config' in data and isinstance(data['proxy_config'], dict):
-        pc = data['proxy_config']
-        existing['proxy_config'] = {
-            'http_proxy': (pc.get('http_proxy') or '').strip(),
-            'https_proxy': (pc.get('https_proxy') or '').strip(),
-        }
-        existing['proxy_config'].pop('no_proxy', None)
-        from lib.proxy import set_proxy_config
-        set_proxy_config(
-            http_proxy=existing['proxy_config']['http_proxy'],
-            https_proxy=existing['proxy_config']['https_proxy'],
-        )
-        changes.append('proxy_config')
+        if 'proxy_bypass_domains' in data and isinstance(data['proxy_bypass_domains'], list):
+            existing['proxy_bypass_domains'] = data['proxy_bypass_domains']
+            from lib.proxy import set_bypass_domains
+            set_bypass_domains(data['proxy_bypass_domains'])
+            changes.append('proxy_bypass_domains')
 
-    if 'feishu' in data and isinstance(data['feishu'], dict):
-        existing['feishu'] = data['feishu']
-        changes.append('feishu')
-        # Hot-reload Feishu state
-        _hot_reload_feishu(data['feishu'])
+        if 'proxy_config' in data and isinstance(data['proxy_config'], dict):
+            pc = data['proxy_config']
+            existing['proxy_config'] = {
+                'http_proxy': (pc.get('http_proxy') or '').strip(),
+                'https_proxy': (pc.get('https_proxy') or '').strip(),
+            }
+            existing['proxy_config'].pop('no_proxy', None)
+            from lib.proxy import set_proxy_config
+            set_proxy_config(
+                http_proxy=existing['proxy_config']['http_proxy'],
+                https_proxy=existing['proxy_config']['https_proxy'],
+            )
+            changes.append('proxy_config')
 
-    if 'mt_provider' in data and isinstance(data['mt_provider'], dict):
-        mt = data['mt_provider']
-        existing['mt_provider'] = {
-            'provider': (mt.get('provider') or 'niutrans').strip(),
-            'api_url': (mt.get('api_url') or '').strip(),
-            'api_key': (mt.get('api_key') or '').strip(),
-            'app_id': (mt.get('app_id') or '').strip(),
-            'enabled': bool(mt.get('enabled', False)),
-        }
-        changes.append('mt_provider')
-        logger.info('[Config] MT provider updated: provider=%s, enabled=%s',
-                    existing['mt_provider']['provider'],
-                    existing['mt_provider']['enabled'])
+        if 'feishu' in data and isinstance(data['feishu'], dict):
+            existing['feishu'] = data['feishu']
+            changes.append('feishu')
+            # Hot-reload Feishu state
+            _hot_reload_feishu(data['feishu'])
 
-    # ── Persist to disk ──
-    if not _write_server_config(existing):
-        logger.error('[ServerConfig] Failed to write config file to %s', _SERVER_CONFIG_PATH)
+        if 'mt_provider' in data and isinstance(data['mt_provider'], dict):
+            mt = data['mt_provider']
+            existing['mt_provider'] = {
+                'provider': (mt.get('provider') or 'niutrans').strip(),
+                'api_url': (mt.get('api_url') or '').strip(),
+                'api_key': (mt.get('api_key') or '').strip(),
+                'app_id': (mt.get('app_id') or '').strip(),
+                'enabled': bool(mt.get('enabled', False)),
+            }
+            changes.append('mt_provider')
+            logger.info('[Config] MT provider updated: provider=%s, enabled=%s',
+                        existing['mt_provider']['provider'],
+                        existing['mt_provider']['enabled'])
+
+        return existing
+
+    # ── Persist to disk (locked read-modify-write) ──
+    try:
+        update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
+        logger.info('[ServerConfig] Saved server_config.json')
+    except Exception as e:
+        logger.error('[ServerConfig] Failed to write config file to %s: %s',
+                     _SERVER_CONFIG_PATH, e, exc_info=True)
         return api_internal_error('Failed to write config file')
 
     # ── Hot-reload: update all module-level variables from disk ──

@@ -282,7 +282,7 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
           : (_hasPartial ? 'Resuming…' : 'Connecting…');
         const _reconTime = new Date(assistantMsg.timestamp || Date.now())
           .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-        inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(_reconRole, _reconStatus, _reconTime));
+        inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(_reconRole, _reconStatus, _reconTime, assistantMsg._msgId || null));
         /* Pre-populate streaming-body with whatever content was already
          * persisted, so the user sees real progress before SSE arrives.
          * The first delta from _trySSE will replace .stream-status with
@@ -303,6 +303,16 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
               }
               _html += `<div class="stream-status"><div class="pulse"></div> Resuming…</div>`;
               _body.innerHTML = _html;
+              /* ★ Repaint the live translation preview after this reconnect
+               *   rebuild, same as showStreamingUIForConv. The innerHTML
+               *   assignment above wiped any translatePreview zone; without
+               *   this the Chinese-so-far stays blank until the next server
+               *   push frame (one per tool round, 20-40s away). The bubble's
+               *   data-msg-id was stamped above, so the repaint targets it. */
+              if (assistantMsg._translatePartial && assistantMsg._msgId
+                  && typeof _renderStreamingTranslatePreview === 'function') {
+                _renderStreamingTranslatePreview(convId, assistantMsg._msgId, assistantMsg._translatePartial);
+              }
               console.info(
                 `[connectToTask] 🔁 Pre-populated bubble — content=${(assistantMsg.content||'').length}c ` +
                 `thinking=${(assistantMsg.thinking||'').length}c ` +
@@ -646,7 +656,7 @@ function dispatchSSEEvent(line, ctx) {
               : (ev.endpointPhase === 'planning' ? 'planner' : 'worker');
             const _reconStatus = _epCriticPhase ? 'Reviewing…'
               : (ev.endpointPhase === 'planning' ? 'Planning…' : 'Thinking…');
-            if (inner) inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML(_reconRole, _reconStatus));
+            if (inner) inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML(_reconRole, _reconStatus, undefined, assistantMsg._msgId || null));
             buildTurnNav(conv);
           }
         }
@@ -733,6 +743,15 @@ function dispatchSSEEvent(line, ctx) {
        *   autopilot_vu_cancel — VU bailed out (TASK_DONE / aborted /
        *     real-user-message-arrived); remove any in-memory bubble. */
       _handleAutopilotVuEvent(convId, ev);
+      return false;
+    } else if (ev.type === "autopilot_run_concluded") {
+      /* ★ The single BACKEND-AUTHORITATIVE "this autopilot run is over" fact —
+       * a clean [VU: TASK_DONE] (with a report) OR a manual stop (no report).
+       * Stores the human-only sidecar record on conv.autopilotSummaries[runId]
+       * (NEVER conv.messages); the fold gate keys on its concluded status.
+       * (The handler still tolerates the legacy `ev.summary`/`ev.summaryMessage`
+       * FIELD shapes for a record delivered by an older backend.) */
+      _handleAutopilotRunConcluded(convId, ev);
       return false;
     } else if (ev.type === "delta") {
       if (_epCriticPhase) {
@@ -926,7 +945,7 @@ function dispatchSSEEvent(line, ctx) {
           // 3. Create a streaming element for the critic (DOM — only if active)
           if (_isActiveConv) {
             const inner = document.getElementById("chatInner");
-            if (inner) inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('critic'));
+            if (inner) inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('critic', undefined, undefined, _epCriticMsg._msgId || null));
           }
 
           // 4. Create a separate stream buffer for the critic
@@ -1004,7 +1023,7 @@ function dispatchSSEEvent(line, ctx) {
             // Create streaming element — only if this conv is active
             if (_isActiveConv) {
               const inner = document.getElementById("chatInner");
-              if (inner) inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('worker', 'Thinking…'));
+              if (inner) inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('worker', 'Thinking…', undefined, assistantMsg._msgId || null));
               buildTurnNav(conv);
               _forceScrollToBottom();
             }
@@ -1144,7 +1163,7 @@ function dispatchSSEEvent(line, ctx) {
 
           if (activeConvId === convId) {
             const inner = document.getElementById("chatInner");
-            if (inner) inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('planner', 'Replanning…'));
+            if (inner) inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('planner', 'Replanning…', undefined, assistantMsg._msgId || null));
             const banner = document.getElementById("ep-iter-banner");
             if (banner) banner.textContent = `Replanning…`;
           }
@@ -1197,7 +1216,7 @@ function dispatchSSEEvent(line, ctx) {
         // DOM operations — only if this conv is currently viewed
         if (activeConvId === convId) {
           const inner = document.getElementById("chatInner");
-          if (inner) inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('worker', 'Thinking…'));
+          if (inner) inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('worker', 'Thinking…', undefined, assistantMsg._msgId || null));
 
           // Update banner & turn-nav
           const banner = document.getElementById("ep-iter-banner");

@@ -358,22 +358,47 @@ def _execute_poll_tool(tool_call: dict, timer_id: str,
     import threading as _threading
 
     fn_info = tool_call.get('function', {})
-    fn_name = fn_info.get('name', '?')
-    fn_args_raw = fn_info.get('arguments', '{}')
     t0 = time.time()
 
-    logger.debug('[Timer:%s] Tool call: %s args=%.300s', timer_id, fn_name, fn_args_raw)
-
+    # ── Unified tool-call ingestion ──
+    # Timer polls dispatch to the executor DIRECTLY, bypassing the main chat
+    # dispatcher's parse_tool_calls — so they funnel through the SAME ingestion
+    # seam for name-alias (WebFetch→fetch_url …), JSON decode+repair, and
+    # schema/param repair. Hallucination rejection is DISABLED here: the poll's
+    # live tool set (which may include image-gen tools whose names aren't in the
+    # built-in schema index) isn't passed to this function, so an unknown name
+    # must fall through to the executor's honest error rather than risk
+    # rejecting a legitimate poll tool. Alias resolution uses the built-in
+    # schema index (known=None) — the alias targets are all built-ins.
     try:
-        fn_args = json.loads(fn_args_raw) if isinstance(fn_args_raw, str) else fn_args_raw
-    except json.JSONDecodeError:
-        try:
-            from lib.utils import repair_json as _repair_json
-            fn_args = _repair_json(fn_args_raw if isinstance(fn_args_raw, str) else '{}')
-        except Exception as e:
-            logger.warning('[Timer:%s] Invalid JSON args for %s: %s', timer_id, fn_name, e)
-            return (f'Invalid JSON arguments for {fn_name}: {fn_args_raw[:200]}',
-                    time.time() - t0, True)
+        from lib.tool_input_repair import ingest_tool_call as _ingest
+        _ing = _ingest(tool_call, reject_hallucinated=False)
+    except Exception as _ie:
+        logger.warning('[Timer:%s] tool-call ingestion failed (dispatching raw): %s',
+                        timer_id, _ie)
+        _ing = None
+
+    if _ing is not None and _ing.dropped:
+        return (f'Error: ignored malformed tool name '
+                f'{fn_info.get("name", "?")!r} ({_ing.drop_reason}).',
+                time.time() - t0, True)
+    if _ing is not None:
+        if _ing.alias_kind:
+            logger.info('[Timer:%s] Aliased tool name %r → %r (%s)',
+                        timer_id, _ing.raw_name, _ing.fn_name, _ing.alias_kind)
+        fn_name = _ing.fn_name
+        fn_info['name'] = fn_name
+        if _ing.parse_error:
+            logger.warning('[Timer:%s] Invalid JSON args for %s: %s',
+                           timer_id, fn_name, _ing.parse_error)
+            return (_ing.parse_error, time.time() - t0, True)
+        fn_args = _ing.fn_args
+    else:
+        # Ingestion itself failed — fall back to the raw name + empty args.
+        fn_name = fn_info.get('name', '?')
+        fn_args = {}
+
+    logger.debug('[Timer:%s] Tool call: %s args=%.300s', timer_id, fn_name, str(fn_args)[:300])
 
     if not isinstance(fn_args, dict):
         fn_args = {}

@@ -54,6 +54,24 @@ TOOL_CALL = [
     'data: [DONE]',
 ]
 
+# Standalone tool call whose `arguments` delta never arrives → empty string.
+# Must be normalized to '{}' so a later replay to Gemini's OpenAI-compat proxy
+# does not 400 with "Expected function 'arguments' ... to be populated".
+EMPTY_ARGS_TOOL_CALL = [
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tc_0","function":{"name":"get_status","arguments":""}}]}}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+    'data: [DONE]',
+]
+
+# Two same-named calls: one with real args, one empty → the empty one is a
+# phantom duplicate and must be DROPPED entirely (not normalized to '{}').
+PHANTOM_DUP_TOOL_CALL = [
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tc_0","function":{"name":"grep_search","arguments":"{\\"pattern\\":\\"foo\\"}"}}]}}]}',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"tc_1","function":{"name":"grep_search","arguments":""}}]}}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+    'data: [DONE]',
+]
+
 MINIMAX_THINK = [
     'data: {"choices":[{"delta":{"content":"<think>reason"}}]}',
     'data: {"choices":[{"delta":{"content":"ing</think>answer"}}]}',
@@ -210,6 +228,32 @@ def test_tool_call_accumulation():
     msg, fr, usage = _run_sync(TOOL_CALL)
     assert fr == 'tool_calls'
     assert msg['tool_calls'][0]['function']['name'] == 'grep_search'
+    assert msg['tool_calls'][0]['function']['arguments'] == '{"pattern":"foo"}'
+
+
+def test_empty_args_tool_call_normalized_to_empty_object():
+    """A standalone no-arg tool call must replay with arguments='{}' (not '').
+
+    Regression for the Gemini HTTP 400 "Expected function 'arguments' ... to
+    be populated" that killed follow-up turns (esp. swarm sub-agents, which
+    replay the streamed assistant msg verbatim).
+    """
+    msg, fr, usage = _run_sync(EMPTY_ARGS_TOOL_CALL)
+    assert fr == 'tool_calls'
+    assert len(msg['tool_calls']) == 1
+    assert msg['tool_calls'][0]['function']['name'] == 'get_status'
+    assert msg['tool_calls'][0]['function']['arguments'] == '{}'
+    # Parity: the async shell normalizes identically.
+    msg_a, _, _ = _run_async(EMPTY_ARGS_TOOL_CALL)
+    assert msg_a['tool_calls'][0]['function']['arguments'] == '{}'
+
+
+def test_phantom_duplicate_still_dropped_not_normalized():
+    """Empty-args duplicate of a real same-named call is dropped, not kept as '{}'."""
+    msg, fr, usage = _run_sync(PHANTOM_DUP_TOOL_CALL)
+    assert fr == 'tool_calls'
+    # The empty phantom must be filtered out — only the real call survives.
+    assert len(msg['tool_calls']) == 1
     assert msg['tool_calls'][0]['function']['arguments'] == '{"pattern":"foo"}'
 
 

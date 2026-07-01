@@ -669,7 +669,11 @@ function toggleAutopilot() {
     const _conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
     if (_conv && typeof Api !== 'undefined' && Api.chat && Api.chat.disarmAutopilot) {
       Api.chat.disarmAutopilot(_conv.id)
-        .then(() => { if (typeof _refreshServerQueue === 'function') _refreshServerQueue(_conv.id); })
+        .then((resp) => {
+          /* Fold the just-concluded run instantly even with no live stream. */
+          if (typeof _applyDisarmResponse === 'function') _applyDisarmResponse(_conv.id, resp);
+          if (typeof _refreshServerQueue === 'function') _refreshServerQueue(_conv.id);
+        })
         .catch((e) => console.warn('[Autopilot] disarm failed:', e && e.message));
     }
   }

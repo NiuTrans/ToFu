@@ -136,6 +136,16 @@
       if (typeof activeConvId !== "undefined" && activeConvId === convId
           && (typeof activeStreams === "undefined" || !activeStreams.has(convId))
           && typeof renderChat === "function") {
+        /* Bypass renderChat's Guard 2 fingerprint skip. That guard keys on
+           _convRenderFingerprint, which inspects ONLY the last message — but
+           a detached swarm's panel often sits on an EARLIER message (the user
+           got intermediate replies while agents kept running). Clearing the
+           cached fingerprint forces renderChat past the guard into the
+           surgical per-message diff path, where _msgFingerprint (now
+           swarm-aware) repaints exactly the panel whose agent state changed.
+           forceScroll stays false so a user reading scrolled-up history is
+           NOT yanked to the bottom on every background agent update. */
+        if (typeof _lastRenderedFingerprint !== "undefined") _lastRenderedFingerprint = "";
         renderChat(conv, false);
       }
     } catch (e) {

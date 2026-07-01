@@ -648,6 +648,20 @@ class SSEAccumulator:
                         self.log_prefix, fn_name, tc_entry.get('id', '?')[:12], fn_name,
                     )
                     continue
+                # ── Normalize empty/whitespace arguments to '{}' ──
+                # A genuine no-arg tool call (or one whose args delta never
+                # arrived) survives the phantom filter above with arguments=''.
+                # OpenAI/Anthropic tolerate that (the executor does
+                # ``json.loads(args or '{}')``), but Gemini's OpenAI-compat
+                # proxy REJECTS a replayed assistant tool_call with empty
+                # arguments — HTTP 400 "Expected function 'arguments' in a(n)
+                # 'assistant' message to be populated." — killing the whole
+                # follow-up turn. We emit '{}' (valid empty JSON object) so the
+                # message replays cleanly across every provider. Equivalent to
+                # the empty→'{}' coercion the DB-history replay builders already
+                # apply (conv_message_builder / message_builder).
+                if not fn_args_str.strip():
+                    tc_entry['function']['arguments'] = '{}'
                 _filtered[idx] = tc_entry
             self.tool_calls_acc = _filtered
 

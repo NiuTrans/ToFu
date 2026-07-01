@@ -26,8 +26,8 @@ from flask import Blueprint, jsonify, request
 from lib.api_response import api_bad_request, api_internal_error, api_not_found
 from lib.artifacts import (
     ArtifactNotFoundError, delete_artifact, get_artifact_meta,
-    list_artifacts, list_pinned_or_recent, list_versions, scan_message,
-    set_pinned,
+    list_artifacts, list_pinned_or_recent, list_versions, public_meta,
+    scan_message, set_pinned,
 )
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
@@ -41,8 +41,12 @@ api_v1_artifacts_bp = Blueprint('api_v1_artifacts', __name__)
 
 
 def _strip_meta(meta: dict) -> dict:
-    """Sanitize an artifact meta row before returning it (placeholder)."""
-    return dict(meta)
+    """Sanitize an artifact meta row before returning it over the API.
+
+    Delegates to the canonical whitelist filter in lib.artifacts so the
+    public field set is defined in ONE place (next to the row schema).
+    """
+    return public_meta(meta)
 
 
 @api_v1_artifacts_bp.route('/api/v1/artifacts', methods=['GET'])
@@ -73,7 +77,8 @@ async def list_artifacts_v1():
         limit = 50
     limit = max(1, min(limit, 200))
     items = list_pinned_or_recent(limit=limit)
-    return jsonify({'count': len(items), 'artifacts': items})
+    return jsonify({'count': len(items),
+                    'artifacts': [_strip_meta(m) for m in items]})
 
 
 @api_v1_artifacts_bp.route('/api/v1/artifacts/<artifact_id>', methods=['GET'])
@@ -99,7 +104,8 @@ async def list_versions_v1(artifact_id):
     chain = list_versions(artifact_id)
     if not chain:
         return api_not_found('not_found')
-    return jsonify({'count': len(chain), 'versions': chain})
+    return jsonify({'count': len(chain),
+                    'versions': [_strip_meta(m) for m in chain]})
 
 
 @api_v1_artifacts_bp.route('/api/v1/artifacts/<artifact_id>/pin',
@@ -201,7 +207,7 @@ async def scan_conv_v1():
         'conv_id': conv_id,
         'scanned': scanned,
         'created': len(created_meta),
-        'artifacts': created_meta,
+        'artifacts': [_strip_meta(m) for m in created_meta],
     })
 
 

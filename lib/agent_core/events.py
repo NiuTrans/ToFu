@@ -65,6 +65,7 @@ class EventCategory:
     AUTOPILOT = 'autopilot'        # autonomous-loop value-unit events
     ARTIFACT = 'artifact'          # artifact creation
     SCHEDULER = 'scheduler'        # timer / proactive
+    PRESENCE = 'presence'          # cross-conversation live presence / coordination
     TRANSPORT = 'transport'        # stream-level signals (ping, timeout)
 
 
@@ -162,6 +163,9 @@ class EventType:
     AUTOPILOT_VU_EVENT = 'autopilot_vu_event'
     AUTOPILOT_VU_DONE = 'autopilot_vu_done'
     AUTOPILOT_VU_CANCEL = 'autopilot_vu_cancel'
+    AUTOPILOT_RUN_CONCLUDED = 'autopilot_run_concluded'
+    # ── presence (cross-conversation live coordination) ──
+    PRESENCE = 'presence'
     # ── artifact / scheduler / transport ──
     ARTIFACT = 'artifact'
     TIMER_POLL_CHECK = 'timer_poll_check'
@@ -260,7 +264,9 @@ _SPECS: tuple[EventSpec, ...] = (
               '"preferences applied" chip so the user can see the assistant '
               'is honouring their stored preferences.',
               fields={'chars': 'profile size in chars',
-                      'items': 'list of preference bullet lines (for the chip)'}),
+                      'items': 'flat list of injected bullets (core + relevant detail) for the chip',
+                      'core': 'always-on core-tier bullets injected this turn',
+                      'detail': 'relevance-selected detail-tier bullets (empty on an irrelevant turn)'}),
     EventSpec(EventType.PREFERENCE_LEARNED, _C.CONTEXT,
               'A preference was learned/reinforced by the post-turn '
               'consolidation pass. Surfaces a "Noted: you prefer X" moment; '
@@ -360,6 +366,57 @@ _SPECS: tuple[EventSpec, ...] = (
               'Autopilot value-unit completed.', fields={}),
     EventSpec(EventType.AUTOPILOT_VU_CANCEL, _C.AUTOPILOT,
               'Autopilot value-unit cancelled.', fields={'reason': 'why'}),
+    EventSpec(EventType.AUTOPILOT_RUN_CONCLUDED, _C.AUTOPILOT,
+              'An autopilot run reached its terminal boundary — the single '
+              'BACKEND-AUTHORITATIVE "this run is over" fact the frontend folds '
+              'on. Emitted on BOTH close-out paths, symmetrically: a clean '
+              '[VU: TASK_DONE] (reason=task_done, usually with a close-out '
+              'report) AND a manual stop / toggle-off / new-message supersede '
+              '(reason=stopped, no report). The frontend NEVER infers run-end '
+              'from stream/task state anymore — it folds the run\'s VU<->agent '
+              'transcript iff a concluded record exists, and shows the report '
+              '(when present) as the fold\'s read-only PANEL. The record is '
+              'human-only: it lives in the conversation SIDECAR '
+              '(settings.autopilotSummaries[runId]), NEVER as a chat message, so '
+              'it never enters the transcript nor the LLM context. Also durably '
+              'persisted server-side, so a disarm with no live stream still '
+              'folds on the next load.',
+              fields={'runId': 'autopilot run id grouping the folded turns',
+                      'record': 'the sidecar run record {runId, status:'
+                                '"concluded", reason:"task_done"|"stopped", '
+                                'content?, translatedContent?, ts, _summaryId} '
+                                '— NOT a message (no role, no _msgId); content '
+                                'is absent on a manual stop'}),
+    # ───────────────────────── presence ─────────────────────────
+    EventSpec(EventType.PRESENCE, _C.PRESENCE,
+              'Cross-conversation live-presence delta — the "who is working in '
+              'this project right now" feed (the shared-document cursor analog). '
+              'Broadcast to ALL push clients (taskId="*"); the frontend filters '
+              'by the root it is displaying. The backend is the single source of '
+              'truth: every status word (active|idle) and conflict string is '
+              'fully formed server-side — the frontend NEVER derives liveness '
+              'from mere presence, only renders what this frame carries. Emitted '
+              'on announce / heartbeat / file-set change / idle / depart and on '
+              'a detected file-set overlap between two active peers (notify-only, '
+              'no locking).',
+              fields={'kind': 'update|depart|conflict|snapshot',
+                      'root': 'project root path this peer/conflict belongs to',
+                      'peer': '(update/depart) {convId, agentId, parentTitle, '
+                              'taskId, runId, title, objective, status, '
+                              'statusLabel, phase, currentFile, files, '
+                              'lastBeatTs, startedTs}. agentId="" = a '
+                              'conversation peer; agentId set = a SUB-AGENT '
+                              'peer that the frontend nests under its parent '
+                              'conversation (grouped by convId). parentTitle = '
+                              'the parent conversation title for the nested-row '
+                              'label.',
+                      'peers': '(snapshot) full active-peer list for the root',
+                      'conflict': '(conflict) fully-formed advisory '
+                                  '{path, message, peers:[peerKey…]} where a '
+                                  'peerKey is convId or convId#agentId — so a '
+                                  'sub-agent-vs-sub-agent overlap within ONE '
+                                  'conversation is flagged like a cross-'
+                                  'conversation one'}),
     # ───────────────── artifact / scheduler / transport ─────────────────
     EventSpec(EventType.ARTIFACT, _C.ARTIFACT,
               'An artifact (document/canvas) was created or updated.',

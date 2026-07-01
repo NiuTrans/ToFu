@@ -461,6 +461,19 @@ class ScheduledTaskManager:
             else:
                 self._run_and_record(task)
 
+        # ── Project Brain heartbeat (Pillar #5 sweep) ──
+        #   After the due-task pass, dispatch any genuinely-pickable board epics
+        #   on idle projects — this is what STARTS work when nothing just
+        #   completed and no human is typing (incl. the cold-start first epic).
+        #   Reuses THIS existing 30s tick (no new thread/global); idempotent via
+        #   claim-on-dispatch + busy-guard; best-effort so a sweep failure can
+        #   never break the scheduler loop.
+        try:
+            from lib.conversations.project_dispatch import sweep_all_active_projects
+            sweep_all_active_projects()
+        except Exception as e:
+            logger.warning('[Scheduler] project-brain dispatch sweep skipped: %s', e)
+
     def _run_and_record(self, task):
         """Run task and record result in DB."""
         task_id = task['id']

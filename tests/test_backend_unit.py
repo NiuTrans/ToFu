@@ -231,16 +231,16 @@ class TestBuildBody:
                           stream=False)
         assert body["response_format"] == {"type": "text"}
 
-    def test_unknown_model_no_clamping(self):
+    def test_unknown_model_clamped_to_default(self):
         from lib.llm import build_body
+        from lib.model_info import _DEFAULT_UNKNOWN_MAX_OUTPUT
 
-        # An unknown model is not subject to the per-model output-ceiling
-        # clamp (_clamp_max_tokens). 500000 stays well under the 1M default
-        # context window, so the context-window clamp
-        # (_clamp_completion_to_context_window) leaves it untouched too.
+        # An unknown model IS now clamped to the conservative default output
+        # ceiling (so the first request doesn't over-ask and earn a 400),
+        # rather than passing 500000 straight through.
         body = build_body("unknown-model-xyz", self.DUMMY_MSGS,
                          max_tokens=500000, stream=False)
-        assert body["max_tokens"] == 500000
+        assert body["max_tokens"] == _DEFAULT_UNKNOWN_MAX_OUTPUT
         assert "thinking" not in body
         assert "enable_thinking" not in body
 

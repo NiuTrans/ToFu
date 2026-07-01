@@ -317,24 +317,18 @@ sort_tool_results(messages)
 latch_extended_ttl(task_id)
 ```
 
-### 1.6 Delta Attachment — 增量上下文追踪
+### 1.6 上下文预加载（Memory Prefetch）
 
-每个 task 从前端收到**全新的 messages 列表**（不包含之前注入的 project/memory context）。但我们不需要每次都重新计算：
+每个 task 从前端收到**全新的 messages 列表**（不包含之前注入的 project/memory
+context），所以每个 task 都必须重新加载并注入 project/memory context。FUSE 慢
+I/O 的兜底**完全由预加载 future 承担**：在工具组装期间用 2 线程池并行预加载
+project context 和 memory context，`_inject_system_contexts` 在需要时消费已就绪的
+结果（未就绪则同步回退）。
 
-```python
-# Delta tracking: 对 context 做 MD5 hash
-# 如果 hash 没变，复用上次的计算结果（跳过 FUSE I/O）
-# 但 text 仍然注入——只是跳过了计算
-_last_context_cache: dict[tuple[str, str], tuple[str, str]] = {}
-
-def _get_cached_or_compute(conv_id, category, compute_fn):
-    h = _context_hash(text)
-    prev = _last_context_cache.get(key)
-    if prev and prev[0] == h:
-        return prev[1]  # 命中——跳过了昂贵的 FUSE I/O
-```
-
-配合**Memory Prefetch**：在工具组装期间，2 线程池并行预加载 project context 和 memory context：
+> **历史注记**：曾有一个 `_get_cached_or_compute` / `_last_context_cache` 的
+> conv 级 hash 缓存，号称"hash 未变就跳过 FUSE I/O"。实际上它**先无条件调用
+> `compute_fn()` 再做 hash**，根本省不掉计算，只是个永不淘汰的模块级 dict 泄漏，
+> 已于 2026-06 删除（真正的 FUSE 兜底是下面的预加载 future）。
 
 ```python
 _prefetch_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='mem-prefetch')
@@ -865,7 +859,6 @@ V1 swarm 用 "等所有 agent 完成再启动下一波"。一个慢 agent 拖住
 | **Micro-compact** | microCompact (edit outside cache prefix) | cache-aware micro_compact | ✅ 已对齐 |
 | **Session Memory** | SessionMemory/ + CacheSafeParams | background dispatch_chat | ✅ 已对齐（架构不同） |
 | **Memory System** | CLAUDE.md + @include | .chatui/skills/ + BM25 | ✅ 已对齐 |
-| **Delta Attachments** | Per-section hash tracking | _get_cached_or_compute | ✅ 已对齐 |
 | **Memory Prefetch** | startRelevantMemoryPrefetch() | 2-thread prefetch pool | ✅ 已对齐 |
 | **Prompt Cache Detection** | promptCacheBreakDetection.ts | cache_tracking.py | ✅ 已对齐 |
 | **Todo Tracking** | TodoWriteTool + continuation enforcer | ❌ 无 | 🔜 Backlog |

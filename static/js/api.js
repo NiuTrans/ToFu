@@ -514,6 +514,12 @@
     // Returns {taskId} or throws ApiError (409 when a task is already running).
     kickAutopilot: (convId, config) => post('/api/v1/chat/autopilot/kick',
                                             { convId, config }),
+    // Summarize a concluded autopilot run — on-demand close-out report for a
+    // run that ended without a clean TASK_DONE (Stop / new user message).
+    // Returns {ok, summary, runId} (summary = human-only sidecar record,
+    // NOT a chat message) or throws ApiError.
+    summarizeAutopilotRun: (convId, runId, config) =>
+      post('/api/v1/chat/autopilot/summarize', { convId, runId, config }),
     // Active-tasks listing — used on init to reconnect SSE streams.
     active:       (opts)        => get('/api/v1/chat/active', Object.assign({ onError: 'null' }, opts || {})),
     activeResponse: (opts)      => request('/api/v1/chat/active', Object.assign({ method: 'GET', parse: 'response', onError: 'null' }, opts || {})),
@@ -806,9 +812,37 @@
       request('/api/v1/project/undo-all',
               { method: 'POST', json: {}, parse: 'response' }),
     browse:        (path, showHidden) => post('/api/v1/project/browse', { path, showHidden: !!showHidden }),
+    mkdir:         (parent, name)     =>
+      request('/api/v1/project/mkdir',
+              { method: 'POST', json: { parent, name }, parse: 'response' }),
+    rmdir:         (path)             =>
+      request('/api/v1/project/rmdir',
+              { method: 'POST', json: { path }, parse: 'response' }),
     write:         (path, content)    => post('/api/v1/project/write', { path, content }),
     writeApproval: (approvalId, approved) =>
       post('/api/v1/project/write-approval', { approvalId, approved }),
+    // Project-brain Activity Feed (read-only). Keyed on the explicit `path`
+    // the caller holds — never the server's global active project.
+    feed:          (path, sinceSeq) =>
+      get('/api/v1/project/feed',
+          { query: { path, since: sinceSeq || 0 }, onError: 'null' }),
+    // Project-brain Charter (north star). read-only get + human-gated commit.
+    charter:       (path) =>
+      get('/api/v1/project/charter', { query: { path }, onError: 'null' }),
+    commitCharter: (path, body) =>
+      post('/api/v1/project/charter/commit', Object.assign({ path }, body || {})),
+    // Unresolved proposals (single source for "awaiting you") + durable reject.
+    charterPending: (path) =>
+      get('/api/v1/project/charter/pending', { query: { path }, onError: 'null' }),
+    dismissProposal: (path, proposalId, body) =>
+      post('/api/v1/project/charter/dismiss',
+           Object.assign({ path, proposalId }, body || {})),
+    // Project-brain Board (coordination kanban). read-only.
+    board:         (path) =>
+      get('/api/v1/project/board', { query: { path }, onError: 'null' }),
+    // Collaboration-bar one-shot summary (board + decisions + peer→epic join).
+    brainSummary:  (path) =>
+      get('/api/v1/project/brain/summary', { query: { path }, onError: 'null' }),
   };
 
   // paper-reader (library + report + translate + QA) ---------------
@@ -823,35 +857,46 @@
     // upload + chat + fetch-arxiv-stream stay on /api/paper/* (multipart / SSE
     // carve-outs — not v1 envelope shape).
     upload:         (formData)            => request('/api/paper/upload', { method: 'POST', body: formData, timeout: 0 }),
-    fetchArxivStream: (url, opts)         =>
+    fetchArxivStream: (url, paperId, opts) =>
       request('/api/paper/fetch-arxiv-stream',
-              Object.assign({ method: 'POST', json: { url }, parse: 'response', timeout: 0 }, opts || {})),
+              Object.assign({ method: 'POST', json: { url, paper_id: paperId || '' }, parse: 'response', timeout: 0 }, opts || {})),
     searchArxiv:    (query, maxResults)   =>
       post('/api/v1/paper/search-arxiv', { query, max_results: maxResults || 10 }, { onError: 'null' }),
     chatStream:     (body, opts)          =>
       request('/api/paper/chat',
               Object.assign({ method: 'POST', json: body, parse: 'response', timeout: 0 }, opts || {})),
     reparse:        (filename)            => post('/api/v1/paper/reparse', { filename }),
-    reportStart:    (body, opts)          => post('/api/v1/paper/report/start', body, opts || {}),
+    // timeout:0 — /start does synchronous prep (image-manifest extraction,
+    // injection sanitize, prompt build) that legitimately runs 10–40s before
+    // it spawns the background task and returns. The default 30s client
+    // timeout would fire an AbortController mid-prep, surfacing a phantom
+    // "Failed" while the server task keeps running orphaned. The task is then
+    // polled; no client-side deadline belongs on the start round-trip.
+    reportStart:    (body, opts)          => post('/api/v1/paper/report/start', body, Object.assign({ timeout: 0 }, opts || {})),
     reportPoll:     (taskId, cursor)      =>
       request('/api/v1/paper/report/poll',
               { method: 'GET', query: { task_id: taskId, cursor }, parse: 'response', onError: 'null' }),
     reportLookup:   (paperHash, lang, opts) =>
       post('/api/v1/paper/report/lookup', { paper_hash: paperHash, lang }, Object.assign({ onError: 'null' }, opts || {})),
     reportCache:    (cacheBody)           => post('/api/v1/paper/report/cache', cacheBody, { onError: 'null' }),
-    reportAbort:    (taskId)              => post('/api/v1/paper/report/abort', { task_id: taskId }, { onError: 'null', parse: 'none' }),
+    reportAbort:    (taskId)              => post(`/api/v1/paper/report/abort/${encodeURIComponent(taskId)}`, {}, { onError: 'null', parse: 'none' }),
+    // Review Mode reuses ALL the report endpoints above — the report `lang`
+    // arg carries the composite cache key ``review:<venue>:<uilang>`` opaquely.
+    // Only the venue list needs its own (read-only) endpoint.
+    reviewVenues:   ()                    =>
+      request('/api/v1/paper/review/venues', { method: 'GET', onError: 'null' }),
     // Agentic Q&A — server-owned TaskRuntime task (web_search/fetch_url, full
     // report + section-aware paper context). Polls like the report task.
     qaStart:        (body)                => post('/api/v1/paper/qa/start', body),
     qaPoll:         (taskId, cursor)      =>
       request('/api/v1/paper/qa/poll',
               { method: 'GET', query: { task_id: taskId, cursor }, parse: 'response', onError: 'null' }),
-    qaAbort:        (taskId)              => post('/api/v1/paper/qa/abort', { task_id: taskId }, { onError: 'null', parse: 'none' }),
+    qaAbort:        (taskId)              => post(`/api/v1/paper/qa/abort/${encodeURIComponent(taskId)}`, {}, { onError: 'null', parse: 'none' }),
     translateStart: (body)                => post('/api/v1/paper/translate/start', body),
     translatePoll:  (taskId, cursor)      =>
       request('/api/v1/paper/translate/poll',
               { method: 'GET', query: { task_id: taskId, cursor }, parse: 'response', onError: 'null' }),
-    translateAbort: (taskId)              => post('/api/v1/paper/translate/abort', { task_id: taskId }, { onError: 'null', parse: 'none' }),
+    translateAbort: (taskId)              => post(`/api/v1/paper/translate/abort/${encodeURIComponent(taskId)}`, {}, { onError: 'null', parse: 'none' }),
     translateCache: (paperHash, lang)     => post('/api/v1/paper/translate/cache', { paper_hash: paperHash, lang }, { onError: 'null' }),
     // URL builder for the report-export endpoint (md/html/pdf). Returned
     // URL is a full link so the caller can use window.open() / anchor.href.
@@ -934,7 +979,7 @@
   const pdf = {
     parse:     (formData)            => request('/api/pdf/parse', { method: 'POST', body: formData, timeout: 0 }),
     vlmStart:  (formData)            => request('/api/pdf/vlm-parse', { method: 'POST', body: formData, timeout: 0 }),
-    vlmPoll:   (taskId)              => get(`/api/pdf/vlm-parse/${encodeURIComponent(taskId)}`, { onError: 'null' }),
+    vlmPoll:   (taskId)              => get(`/api/v1/pdf/vlm-parse/${encodeURIComponent(taskId)}`, { onError: 'null' }),
     vlmTasks:  (filename)            => get('/api/v1/pdf/vlm-tasks', { query: { filename }, onError: 'null' }),
   };
 

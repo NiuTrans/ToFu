@@ -38,6 +38,13 @@ Repair patterns, applied in this order (ordering is load-bearing):
    ``actual == expected`` early-return, so well-formed string fields
    (e.g. ``write_file`` ``content``) are never touched.
 
+Before the per-value type-walk, a separate **parameter-key alias** pass
+(:func:`_apply_param_aliases`) renames wrong-harness argument KEYS to their
+canonical schema keys (e.g. Claude Code's *Edit* keys
+``{file_path, old_string, new_string}`` → ``apply_diff``'s
+``{path, search, replace}``). This is what stops the empty ``File not found:``
+failure when the model calls the right tool with another harness's arg names.
+
 **Critical:** ``stringified_json`` MUST run before ``bare_string_to_array``
 — otherwise ``'["a","b"]'`` would be wrapped to ``['["a","b"]']``,
 double-wrapping a recoverable input into garbage.
@@ -195,6 +202,7 @@ _TOOL_NAME_ALIASES: dict[str, str] = {
     'search_replace': 'apply_diff',
     'replace': 'apply_diff',
     'edits': 'apply_diffs',
+    'multiedit': 'apply_diffs',  # Claude Code's batch-edit tool
     'insert': 'insert_content',
     # ── shell ──
     'bash': 'run_command',
@@ -208,11 +216,254 @@ _TOOL_NAME_ALIASES: dict[str, str] = {
     # ── fetch / search ──
     'fetch': 'fetch_url',
     'fetch_page': 'fetch_url',
+    'webfetch': 'fetch_url',  # Claude Code's web-fetch tool
     'browse': 'fetch_url',
     'open_url': 'fetch_url',
     'websearch': 'web_search',
     'google': 'web_search',
+    # ── ask the user ──
+    # Claude Code's native tool is ``AskUserQuestion`` (matched
+    # case-insensitively). These only resolve when ``ask_human`` is in the
+    # session's tool set (human-guidance enabled) — never invented.
+    'askuserquestion': 'ask_human',
+    'ask_user': 'ask_human',
+    'ask_user_question': 'ask_human',
+    'ask': 'ask_human',
 }
+
+
+# ══════════════════════════════════════════
+#  Parameter-KEY alias resolution
+# ══════════════════════════════════════════
+#
+# Distinct from the tool-NAME alias layer above: here the tool name is already
+# correct, but the model emits the argument KEYS using another harness's naming.
+# The canonical case (conv-debug screenshot): a model calls ``apply_diff`` — the
+# right tool — but with Claude Code's built-in *Edit* tool keys
+# ``{file_path, old_string, new_string}`` instead of Tofu's ``{path, search,
+# replace}``. Every alias key is dropped on the floor by the schema walk (it
+# only iterates DECLARED properties), so ``path`` resolves to ``''`` and the
+# tool returns the baffling ``File not found:`` (empty — no path) seen in the
+# debug panel. The model can't self-correct because the error names no key.
+#
+# This map renames a known wrong key → the canonical key, per tool, BEFORE the
+# type-walk. Strict guards keep it safe (see :func:`_apply_param_aliases`):
+# rename only when the canonical key is ABSENT and the alias key is NOT itself a
+# declared property — so a legitimate call is never touched and we never clobber
+# a real value. Only 1:1 unambiguous synonyms belong here.
+_PARAM_ALIASES: dict[str, dict[str, str]] = {
+    # Claude Code *Edit* / OpenAI str-replace keys → apply_diff schema
+    'apply_diff': {
+        'file_path': 'path', 'filepath': 'path', 'filename': 'path',
+        'old_string': 'search', 'old_str': 'search', 'oldText': 'search',
+        'new_string': 'replace', 'new_str': 'replace', 'newText': 'replace',
+    },
+    'apply_diffs': {'file_path': 'path', 'filepath': 'path'},
+    # write_file: Claude *Write* uses file_path/content; others vary the body key
+    'write_file': {
+        'file_path': 'path', 'filepath': 'path', 'filename': 'path',
+        'file_text': 'content', 'contents': 'content', 'text': 'content',
+        'data': 'content',
+    },
+    'insert_content': {
+        'file_path': 'path', 'filepath': 'path', 'filename': 'path',
+        'text': 'content',
+    },
+    'insert_contents': {'file_path': 'path', 'filepath': 'path'},
+    'read_files': {
+        'file_path': 'path', 'filepath': 'path', 'filename': 'path',
+        'paths': 'reads', 'file_paths': 'reads', 'files': 'reads',
+    },
+    'list_dir': {'file_path': 'path', 'directory': 'path', 'dir': 'path',
+                 'dir_path': 'path'},
+    'grep_search': {'regex': 'pattern', 'query': 'pattern', 'search': 'pattern'},
+    'find_files': {'glob': 'pattern', 'name': 'pattern', 'file_path': 'path'},
+    'run_command': {'cmd': 'command', 'shell_command': 'command',
+                    'script': 'command'},
+    'fetch_url': {'link': 'url'},
+}
+
+
+def _apply_param_aliases(
+    tool_name: str, args: dict[str, Any], expected: dict[str, str],
+) -> tuple[dict[str, Any], RepairLog]:
+    """Rename wrong-harness argument keys to their canonical schema keys.
+
+    Runs BEFORE the per-value type repair. For each ``alias -> canonical``
+    entry of ``tool_name``: rename ``args[alias]`` to ``args[canonical]`` only
+    when ALL of the following hold, so a valid call is never disturbed:
+
+    * ``canonical`` is a real declared property of the tool (in ``expected``);
+    * ``canonical`` is ABSENT from ``args`` (never overwrite a real value);
+    * ``alias`` is present and is NOT itself a declared property of the tool
+      (so we never rename a legitimate parameter away).
+
+    Args:
+        tool_name: Canonical tool name (already alias-resolved upstream).
+        args: The (copied) argument dict — mutated in place.
+        expected: ``{property: json_type}`` for this tool.
+
+    Returns:
+        ``(args, log)`` where ``log`` lists ``(canonical_key, 'param_alias')``
+        for each rename applied. Empty when nothing matched.
+    """
+    alias_map = _PARAM_ALIASES.get(tool_name)
+    if not alias_map:
+        return args, []
+    log: RepairLog = []
+    for alias, canonical in alias_map.items():
+        if canonical not in expected:
+            continue
+        if alias not in args or canonical in args or alias in expected:
+            continue
+        args[canonical] = args.pop(alias)
+        log.append((canonical, 'param_alias'))
+    return args, log
+
+
+# ══════════════════════════════════════════
+#  Structural transforms (cross-harness shape reshape)
+# ══════════════════════════════════════════
+#
+# Distinct from BOTH alias layers above: here the model called the RIGHT
+# (already name-resolved) tool but emitted another harness's whole-payload
+# STRUCTURE, not just renamed keys. The canonical cases are Claude Code's
+# ``MultiEdit`` (one top-level ``file_path`` + an ``edits[]`` whose items carry
+# no path) and ``AskUserQuestion`` (a ``questions[]`` array wrapping the
+# prompt). A flat key-rename can't express either — they need a nested reshape.
+#
+# Each transform is shape-GUARDED: it fires only when the args clearly match
+# the FOREIGN shape and NOT the canonical one, so a correct native call is
+# never disturbed. Transforms run at the TOP of :func:`validate_then_repair`,
+# BEFORE the param-key alias pass and the per-value type-walk (which then mop
+# up any residual key/type mismatch inside the reshaped payload).
+
+
+def _transform_multiedit_to_apply_diffs(
+    args: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Reshape a Claude Code *MultiEdit* payload into ``apply_diffs`` args.
+
+    MultiEdit:  ``{file_path, edits: [{old_string, new_string, replace_all?}]}``
+    apply_diffs: ``{edits: [{path, search, replace, replace_all?}], description?}``
+
+    The single top-level ``file_path`` is pushed down into every edit (our
+    batch tool is multi-file, so each edit carries its own ``path``), and the
+    per-edit ``old_string``/``new_string`` keys are renamed to ``search`` /
+    ``replace``. Fires only when ``edits`` is a non-empty list AND either a
+    top-level file path is present OR an edit uses the MultiEdit item keys —
+    so a native ``apply_diffs`` call (no top-level path, items already
+    ``{path, search, replace}``) is returned untouched.
+    """
+    edits = args.get('edits')
+    if not isinstance(edits, list) or not edits:
+        return args, False
+    shared_path = ''
+    for k in ('file_path', 'filepath', 'filename', 'path'):
+        v = args.get(k)
+        if isinstance(v, str) and v:
+            shared_path = v
+            break
+    looks_multiedit = any(
+        isinstance(e, dict) and any(
+            k in e for k in ('old_string', 'old_str', 'oldText',
+                             'new_string', 'new_str', 'newText'))
+        for e in edits
+    )
+    if not looks_multiedit and not shared_path:
+        return args, False
+    _item_renames = (('old_string', 'search'), ('old_str', 'search'),
+                     ('oldText', 'search'), ('new_string', 'replace'),
+                     ('new_str', 'replace'), ('newText', 'replace'),
+                     ('file_path', 'path'), ('filepath', 'path'),
+                     ('filename', 'path'))
+    new_edits: list[Any] = []
+    for e in edits:
+        if not isinstance(e, dict):
+            new_edits.append(e)
+            continue
+        ne = dict(e)
+        for src, dst in _item_renames:
+            if src in ne and dst not in ne:
+                ne[dst] = ne.pop(src)
+        if shared_path and not ne.get('path'):
+            ne['path'] = shared_path
+        new_edits.append(ne)
+    out = {k: v for k, v in args.items()
+           if k not in ('file_path', 'filepath', 'filename', 'path')}
+    out['edits'] = new_edits
+    return out, True
+
+
+def _transform_askuserquestion_to_ask_human(
+    args: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Reshape a Claude Code *AskUserQuestion* payload into ``ask_human`` args.
+
+    AskUserQuestion: ``{questions: [{question, header?, options?[]}]}`` (an
+    array — Claude Code can batch several questions). ``ask_human`` asks ONE
+    question: ``{question, response_type, options?: [{label, description}]}``.
+
+    Lifts ``questions[0]`` to the top level (a lossy-but-actionable reshape —
+    asking the first question beats a hard rejection; a second question, if
+    any, is dropped with a debug log). Fires only when ``questions`` is a
+    non-empty list AND no native top-level ``question`` is already present.
+    """
+    if args.get('question'):
+        return args, False
+    questions = args.get('questions')
+    if not isinstance(questions, list) or not questions:
+        return args, False
+    q0 = questions[0]
+    if not isinstance(q0, dict):
+        return args, False
+    question = q0.get('question') or q0.get('header') or ''
+    if not question:
+        return args, False
+    if len(questions) > 1:
+        logger.debug('[ToolRepair] AskUserQuestion→ask_human: dropping %d extra '
+                     'question(s) (ask_human is single-question)', len(questions) - 1)
+    out: dict[str, Any] = {'question': question}
+    options = q0.get('options')
+    if isinstance(options, list) and options:
+        norm: list[Any] = []
+        for o in options:
+            if isinstance(o, dict):
+                norm.append(o)
+            elif isinstance(o, str):
+                norm.append({'label': o})
+        out['options'] = norm
+        out['response_type'] = 'choice'
+    else:
+        out['response_type'] = q0.get('response_type') or 'free_text'
+    return out, True
+
+
+# Registry keyed by the CANONICAL (already name-resolved) tool name.
+_STRUCTURAL_TRANSFORMS: dict[str, Any] = {
+    'apply_diffs': _transform_multiedit_to_apply_diffs,
+    'ask_human': _transform_askuserquestion_to_ask_human,
+}
+
+
+def _apply_structural_transform(
+    tool_name: str, args: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Run the registered cross-harness shape transform for ``tool_name``.
+
+    Returns ``(maybe_reshaped_args, changed)``. Total / never raises — a
+    transform that throws is logged and treated as a no-op so dispatch is
+    never blocked by a repair attempt.
+    """
+    fn = _STRUCTURAL_TRANSFORMS.get(tool_name)
+    if fn is None:
+        return args, False
+    try:
+        return fn(args)
+    except Exception as e:
+        logger.warning('[ToolRepair] structural transform for %s failed '
+                       '(passing through): %s', tool_name, e)
+        return args, False
 
 
 def resolve_tool_name(name: str, known: set[str] | None = None) -> tuple[str, str | None]:
@@ -494,6 +745,19 @@ def validate_then_repair(
     repaired: dict[str, Any] = dict(fn_args)
     log: RepairLog = []
 
+    # ── Structural transform (right tool, wrong-harness whole-payload shape) ──
+    # Runs FIRST: reshapes a foreign payload structure (Claude Code MultiEdit /
+    # AskUserQuestion) into our schema BEFORE the key-alias + type passes mop up
+    # any residual mismatch inside the reshaped result.
+    repaired, _shape_changed = _apply_structural_transform(tool_name, repaired)
+    if _shape_changed:
+        log.append((tool_name, 'structural_transform'))
+
+    # ── Parameter-KEY alias rename (right tool, wrong-harness arg names) ──
+    # Must run BEFORE the type-walk so a renamed key is then type-checked too.
+    repaired, _alias_log = _apply_param_aliases(tool_name, repaired, expected)
+    log.extend(_alias_log)
+
     for key, exp_type in expected.items():
         if key not in repaired:
             continue
@@ -522,6 +786,59 @@ def validate_then_repair(
         )
 
     return repaired, log
+
+
+def parse_and_repair_tool_args(
+    tool_name: str,
+    args_raw: Any,
+    *,
+    model: str = '',
+) -> tuple[dict[str, Any], RepairLog]:
+    """Decode a tool call's raw ``arguments`` AND run the schema repair pass.
+
+    The one-call front door for any agent loop that is NOT the main chat
+    dispatcher (paper report / Q&A, and any future secondary harness):
+    JSON-decode the raw ``arguments`` payload, then :func:`validate_then_repair`
+    against the tool's declared schema. Keeping this here — next to the repair
+    logic itself — means every harness coerces a schema-violating shape the
+    SAME way, with no inline reimplementation to drift.
+
+    The bug this exists to kill: a model that emits e.g.
+    ``{"queries": "<long string>"}`` (a bare string where the schema declares
+    an array of objects) must NOT be iterated character-by-character by
+    downstream consumers (the "507 punctuation searches" report bug). The
+    ``bare_string_to_array`` repair turns it into a single-element array.
+
+    The main chat dispatcher (``lib/tasks_pkg/tool_dispatch.py``) keeps its own
+    richer inline path because it additionally tracks malformed-JSON recovery
+    for a UI "auto-fixed" badge and builds a model-facing retry message; this
+    helper is the simpler ``(dict, log)`` contract its secondary callers need.
+
+    Args:
+        tool_name: Name of the tool being called.
+        args_raw: The raw ``arguments`` — a JSON string (as the model emits)
+            or an already-decoded dict.
+        model: Optional model id for audit telemetry.
+
+    Returns:
+        ``(fn_args_dict, repair_log)``. Never raises — a JSON parse failure or
+        a non-dict payload yields ``({}, [])`` so the caller can surface an
+        honest "no arguments" error.
+    """
+    try:
+        fn_args = (json.loads(args_raw) if isinstance(args_raw, str)
+                   else (args_raw or {}))
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning('[ToolRepair] Bad JSON args for %s: %s', tool_name, e)
+        return {}, []
+    if not isinstance(fn_args, dict):
+        return {}, []
+    try:
+        return validate_then_repair(tool_name, fn_args, model=model)
+    except Exception as e:
+        logger.warning('[ToolRepair] repair pass failed for %s (passing through): %s',
+                       tool_name, e)
+        return fn_args, []
 
 
 def schema_hint(tool_name: str) -> str:
@@ -629,12 +946,97 @@ def classify_tool_call(name: str, known: set[str]) -> dict[str, Any] | None:
     }
 
 
-def build_rejection_message(descriptor: dict[str, Any]) -> str:
+# ══════════════════════════════════════════
+#  Repeat-rejection circuit breaker
+# ══════════════════════════════════════════
+#
+# A model that invents a tool with NO similar real tool (suggestions==[]) gets
+# a rejection that can't point it anywhere — so under autopilot it re-emits the
+# SAME fake call every round (the screenshot bug: ``module_buffer_manager`` ×7,
+# ~30–50s apart, pure token burn). The flat ``build_rejection_message`` text
+# ("use the exact names") gives no actionable target. The breaker tracks how
+# many times a given fake name has been rejected within ONE conversation and,
+# after a threshold, ESCALATES the rejection to enumerate the real tools the
+# model may actually call. The count is keyed ``(convId, tool_name)`` so it
+# spans autopilot follow-up tasks (separate task ids, same conversation).
+
+# Escalate (inject the live tool list) starting at the Nth consecutive
+# rejection of the same name. N=2 → the first repeat already gets the list.
+REJECTION_ESCALATE_THRESHOLD = 2
+# Autopilot hard-abort threshold — DELIBERATELY HIGHER than the escalate
+# threshold. Decoupling matters: if abort fired at the same count as the
+# tool-list injection, the autopilot task would die in the SAME round the list
+# was injected, so the model would never get a turn to USE the list — the
+# graceful-recovery path would be dead code exactly where it's needed most.
+# With ABORT=4 vs ESCALATE=2, the model gets ~2 rounds holding the enumerated
+# tool list to self-correct before abort kicks in as a true last resort. Worst
+# case converges at 4 rounds (still bounded) instead of 7+.
+HALLUCINATION_ABORT_THRESHOLD = 4
+# Cap the enumerated tool list so a 170-tool MCP session doesn't dump a wall of
+# names into the result — list the built-ins/common ones, truncate the rest.
+_REJECTION_TOOL_LIST_CAP = 60
+
+# In-memory repeat counter: {(conv_id, tool_name): consecutive_reject_count}.
+# Bounded by distinct fake names per conversation (tiny); entries are best-
+# effort and never persisted — a process restart resetting them is harmless.
+_REJECT_COUNTS: dict[tuple[str, str], int] = {}
+_REJECT_COUNTS_MAX = 4096
+
+
+def record_rejection(conv_id: str, tool_name: str) -> int:
+    """Increment and return the consecutive-rejection count for a fake name.
+
+    Keyed ``(conv_id, tool_name)`` so the count survives across autopilot
+    follow-up tasks (which share the conversation but get fresh task ids).
+    Total / never raises. A soft cap evicts arbitrary entries if the map ever
+    grows pathologically (it won't in practice — distinct fake names per conv
+    are few).
+    """
+    if not tool_name:
+        return 0
+    key = (conv_id or '', tool_name)
+    n = _REJECT_COUNTS.get(key, 0) + 1
+    _REJECT_COUNTS[key] = n
+    if len(_REJECT_COUNTS) > _REJECT_COUNTS_MAX:
+        try:
+            for _k in list(_REJECT_COUNTS.keys())[:_REJECT_COUNTS_MAX // 2]:
+                _REJECT_COUNTS.pop(_k, None)
+        except Exception as e:
+            logger.debug('[ToolRepair] reject-count eviction skipped: %s', e)
+    return n
+
+
+def clear_rejection(conv_id: str, tool_name: str) -> None:
+    """Reset the consecutive-rejection count for one ``(conv_id, tool_name)``.
+
+    Called when the same name is NO LONGER rejected (the model corrected
+    itself), so a later unrelated reuse starts the count fresh rather than
+    inheriting a stale streak.
+    """
+    if not tool_name:
+        return
+    _REJECT_COUNTS.pop((conv_id or '', tool_name), None)
+
+
+def build_rejection_message(descriptor: dict[str, Any], *,
+                            repeat_count: int = 1,
+                            known_tools: set[str] | None = None) -> str:
     """Build the standardized model-facing rejection text for a fake tool call.
 
     One source of truth for the message returned to the LLM (as the tool
     result) so it can self-correct, instead of the ad-hoc per-site strings
     that existed before. Mentions the closest real tools when known.
+
+    Args:
+        descriptor: ``classify_tool_call`` output (``attempted`` + ``suggestions``).
+        repeat_count: How many times this fake name has been rejected in a row
+            within the conversation (1 = first time). At or above
+            :data:`REJECTION_ESCALATE_THRESHOLD`, AND only when there are no
+            ``suggestions`` (a pure invention with no nearby real tool to point
+            at), the message ESCALATES to enumerate ``known_tools`` so the model
+            has a concrete, correctable target instead of looping the same name.
+        known_tools: The live REAL-tool set for this turn. Used only for the
+            escalation path.
     """
     attempted = descriptor.get('attempted') or '?'
     suggestions = descriptor.get('suggestions') or []
@@ -645,8 +1047,27 @@ def build_rejection_message(descriptor: dict[str, Any]) -> str:
     if suggestions:
         hint = ', '.join(f'`{s}`' for s in suggestions)
         msg += f' Did you mean one of: {hint}? '
-    else:
-        msg += ' '
+        msg += 'Call only tools from the provided tool list, using their exact names.'
+        return msg
+
+    # No suggestion to offer. On repeated invention of the SAME phantom name,
+    # stop repeating the useless generic line — enumerate the real tools so the
+    # model has a concrete target (the only way to break a no-suggestion loop).
+    if repeat_count >= REJECTION_ESCALATE_THRESHOLD and known_tools:
+        names = sorted(known_tools)
+        shown = names[:_REJECTION_TOOL_LIST_CAP]
+        listed = ', '.join(f'`{n}`' for n in shown)
+        if len(names) > len(shown):
+            listed += f', … (+{len(names) - len(shown)} more)'
+        msg += (
+            f' You have now called this non-existent tool {repeat_count} times — '
+            f'STOP calling `{attempted}`. The ONLY tools you may call this turn are: '
+            f'{listed}. Pick one of these exact names, or if none fits, reply to '
+            f'the user in plain text WITHOUT a tool call.'
+        )
+        return msg
+
+    msg += ' '
     msg += 'Call only tools from the provided tool list, using their exact names.'
     return msg
 
@@ -666,6 +1087,24 @@ def report_hallucinated(name: str, descriptor: dict[str, Any], *, model: str = '
     )
 
 
+def report_tool_name_aliased(attempted: str, resolved: str, alias_kind: str,
+                             *, model: str = '') -> None:
+    """Emit a ``tool_name_aliased`` audit event when a wrong name was rewritten.
+
+    Quantifies which cross-harness tool names (Claude Code's ``Read`` / ``Bash``
+    / ``MultiEdit`` / ``AskUserQuestion`` …) models actually emit, broken down
+    by model — the data needed to decide whether a presentation-level schema
+    rename (per model family) would pay off, vs. keeping the alias layer.
+    """
+    audit_log(
+        'tool_name_aliased',
+        attempted=attempted,
+        resolved=resolved,
+        kind=alias_kind,
+        model=model,
+    )
+
+
 def report_invalid(tool_name: str, fn_args: Any, *, reason: str, model: str = '') -> None:
     """Emit ``tool_input_invalid`` audit when arguments couldn't be repaired.
 
@@ -682,6 +1121,258 @@ def report_invalid(tool_name: str, fn_args: Any, *, reason: str, model: str = ''
     )
 
 
-__all__ = ['validate_then_repair', 'report_invalid', 'resolve_tool_name', 'schema_hint',
+# ══════════════════════════════════════════
+#  Unified tool-call ingestion seam
+# ══════════════════════════════════════════
+#
+# THE single front door every dispatch path funnels a raw ``tool_call`` through
+# before executing it. Historically the ingestion preamble (name-drop guards,
+# name-alias, JSON decode + repair, schema/param repair, hallucination reject)
+# was hand-reimplemented at four sites — the main chat dispatcher
+# (``lib/tasks_pkg/tool_dispatch.py::parse_tool_calls``), the paper report/QA
+# engines (via ``parse_and_repair_tool_args``, which only did decode+schema),
+# the swarm sub-agent (``lib/swarm/agent.py``), and the timer poll
+# (``lib/scheduler/timer.py``). Each covered only a SUBSET, so a guard added to
+# one path silently skipped the others (the ``WebFetch`` unknown-tool wall on
+# the swarm/timer paths; missing schema/param repair on both). This function is
+# the ONE place all five stages live so parity is structural, not a checklist.
+#
+# It is pure orchestration over the existing primitives — it adds NO new repair
+# logic. Presentation concerns (UI "auto-fixed" badges, SSE early-announce,
+# autopilot loop-break, phantom empty-arg dedup) stay in the caller; they read
+# the returned descriptor and layer their own behaviour on top.
+
+# Names to DROP outright (never a real tool call): proxy artefacts like
+# ``antml:thinking`` / ``__internal`` and XML-corrupted names. Mirrors the
+# guards at the top of ``parse_tool_calls``. A dropped call must be skipped by
+# the caller, NOT executed and NOT rejected-as-hallucination (it's a streaming
+# artefact, not a model decision).
+def _tool_name_drop_reason(name: str) -> str | None:
+    """Return why a tool name must be dropped, or None if it's dispatchable.
+
+    * ``''`` / non-str → 'missing'
+    * contains ``:`` or leading ``__`` → 'internal_artifact' (proxy leak, e.g.
+      ``antml:thinking``)
+    * not ``[A-Za-z0-9_-]+`` → 'malformed' (XML/HTML corruption, e.g.
+      ``list_dir">.</parameter>``)
+    """
+    if not name or not isinstance(name, str):
+        return 'missing'
+    if ':' in name or name.startswith('__'):
+        return 'internal_artifact'
+    if not name.replace('_', '').replace('-', '').isalnum():
+        return 'malformed'
+    return None
+
+
+class IngestedToolCall:
+    """Normalized result of funnelling one raw ``tool_call`` through the pipe.
+
+    Attributes:
+        raw_name: The tool name exactly as the model emitted it.
+        fn_name: The dispatchable name AFTER alias resolution (== raw_name when
+            no alias fired). Meaningless when ``drop_reason`` is set.
+        fn_args: The decoded + repaired argument dict (``{}`` on parse failure).
+        alias_kind: ``'alias'`` / ``'casefold'`` when the name was rewritten,
+            else ``None``.
+        json_repaired: True when ``repair_json`` recovered malformed JSON.
+        repair_log: The :data:`RepairLog` from ``validate_then_repair`` (schema/
+            param coercions), empty when nothing was touched.
+        parse_error: A model-facing error string when the args were unparseable
+            OR the call was rejected as a hallucination — the caller returns
+            this to the LLM and skips execution. ``None`` on success.
+        rejection: The ``classify_tool_call`` descriptor when the name is a
+            hallucination (``{kind,attempted,suggestions,_repeat_count}``), else
+            ``None``. Presence signals a rejected (never-executed) call.
+        drop_reason: Non-None when the name is a streaming artefact that must be
+            SKIPPED entirely (not executed, not rejected).
+        repeat_count: Consecutive-rejection streak for this name in the conv
+            (1 = first), for the caller's loop-breaker. 0 when not a rejection.
+    """
+
+    __slots__ = ('raw_name', 'fn_name', 'fn_args', 'alias_kind', 'json_repaired',
+                 'repair_log', 'parse_error', 'rejection', 'drop_reason',
+                 'repeat_count')
+
+    def __init__(self, *, raw_name='', fn_name='', fn_args=None, alias_kind=None,
+                 json_repaired=False, repair_log=None, parse_error=None,
+                 rejection=None, drop_reason=None, repeat_count=0):
+        self.raw_name = raw_name
+        self.fn_name = fn_name
+        self.fn_args = fn_args if fn_args is not None else {}
+        self.alias_kind = alias_kind
+        self.json_repaired = json_repaired
+        self.repair_log = repair_log or []
+        self.parse_error = parse_error
+        self.rejection = rejection
+        self.drop_reason = drop_reason
+        self.repeat_count = repeat_count
+
+    @property
+    def dropped(self) -> bool:
+        return self.drop_reason is not None
+
+    @property
+    def rejected(self) -> bool:
+        return self.rejection is not None
+
+    @property
+    def ok(self) -> bool:
+        """True when the call is dispatchable (not dropped, not rejected, no
+        unrecoverable parse error)."""
+        return not self.dropped and not self.rejected and self.parse_error is None
+
+    def __repr__(self) -> str:
+        if self.dropped:
+            return f'<IngestedToolCall DROP {self.raw_name!r} ({self.drop_reason})>'
+        if self.rejected:
+            return f'<IngestedToolCall REJECT {self.raw_name!r}>'
+        tag = f'{self.raw_name!r}'
+        if self.alias_kind:
+            tag += f'→{self.fn_name!r}'
+        return f'<IngestedToolCall {tag} args={len(self.fn_args)}keys>'
+
+
+def ingest_tool_call(
+    tool_call: dict[str, Any],
+    *,
+    known_tools: set[str] | None = None,
+    model: str = '',
+    conv_id: str = '',
+    reject_hallucinated: bool = True,
+    emit_audit: bool = True,
+) -> IngestedToolCall:
+    """Funnel one raw ``tool_call`` through the full ingestion pipe.
+
+    The stages, in order (each delegates to an existing primitive — this adds
+    no new repair logic):
+
+    1. **Drop guard** — :func:`_tool_name_drop_reason`. Streaming artefacts
+       (``antml:thinking``, XML-corrupted names) → ``drop_reason`` set, caller
+       SKIPS. Not executed, not rejected.
+    2. **Name alias** — :func:`resolve_tool_name` against ``known_tools``.
+       A confident 1:1 rewrite sets ``alias_kind`` + emits ``tool_name_aliased``.
+    3. **JSON decode + repair** — ``json.loads`` then ``repair_json`` fallback
+       for truncated/malformed args. Unrecoverable → ``parse_error`` (with a
+       :func:`schema_hint`) and ``fn_args={}``.
+    4. **Schema/param repair** — :func:`validate_then_repair` (structural
+       transforms, param-key alias, the six value-repair patterns). Skipped
+       when step 3 failed. Never touches valid inputs.
+    5. **Hallucination reject** — when the (post-alias) name is not in
+       ``known_tools`` and ``reject_hallucinated`` is set:
+       :func:`classify_tool_call` + :func:`record_rejection` (streak) →
+       ``rejection`` descriptor + a :func:`build_rejection_message` as
+       ``parse_error`` so the caller returns it to the LLM and skips execution.
+       When the name IS real, :func:`clear_rejection` resets any prior streak.
+
+    Args:
+        tool_call: The raw ``{'function': {'name', 'arguments'}, 'id'?}`` dict.
+        known_tools: The live REAL-tool set for this turn (built-ins + MCP +
+            swarm + memory + custom). Used as the membership oracle for BOTH
+            alias resolution and hallucination classification. ``None`` falls
+            back to the schema-indexed built-ins (correct for the timer path,
+            whose alias targets are all built-ins).
+        model: Model id for audit telemetry.
+        conv_id: Conversation id — keys the rejection streak so it spans
+            autopilot follow-up tasks.
+        reject_hallucinated: When False, an unknown name is NOT rejected — it
+            passes through so the caller's own unknown-tool path handles it
+            (e.g. a harness that wants the executor's raw error). Default True.
+        emit_audit: When False, suppress the ``tool_name_aliased`` /
+            ``tool_hallucinated`` audit events (e.g. a dry-run / test).
+
+    Returns:
+        An :class:`IngestedToolCall`. Check ``.dropped`` → skip; ``.rejection``
+        / ``.parse_error`` → return the error to the LLM, skip execution;
+        else dispatch ``.fn_name`` with ``.fn_args``.
+    """
+    fn_obj = (tool_call or {}).get('function') or {}
+    raw_name = fn_obj.get('name', '') or ''
+
+    # ── Stage 1: drop guard ──
+    drop = _tool_name_drop_reason(raw_name)
+    if drop:
+        return IngestedToolCall(raw_name=raw_name, fn_name=raw_name,
+                                drop_reason=drop)
+
+    known = known_tools if known_tools is not None else set(_schemas().keys())
+
+    # ── Stage 2: name alias ──
+    fn_name = raw_name
+    alias_kind = None
+    if raw_name not in known:
+        resolved, alias_kind = resolve_tool_name(raw_name, known=known)
+        if alias_kind and resolved != raw_name:
+            fn_name = resolved
+            if emit_audit:
+                report_tool_name_aliased(raw_name, resolved, alias_kind, model=model)
+        else:
+            alias_kind = None
+
+    # ── Stage 5a: hallucination check (before wasting a parse on a fake tool) ──
+    # Done here (post-alias, pre-parse) so a rejected call never parses/repairs
+    # args it will never use — mirrors the chat dispatcher's short-circuit.
+    if reject_hallucinated and fn_name not in known:
+        descriptor = classify_tool_call(fn_name, known)
+        if descriptor is not None:
+            repeat_n = record_rejection(conv_id, fn_name)
+            descriptor['_repeat_count'] = repeat_n
+            if emit_audit:
+                report_hallucinated(fn_name, descriptor, model=model)
+            msg = build_rejection_message(descriptor, repeat_count=repeat_n,
+                                          known_tools=known)
+            return IngestedToolCall(
+                raw_name=raw_name, fn_name=fn_name, alias_kind=alias_kind,
+                rejection=descriptor, parse_error=msg, repeat_count=repeat_n)
+    elif fn_name in known:
+        # Real tool → reset any stale rejection streak for this name.
+        clear_rejection(conv_id, fn_name)
+
+    # ── Stage 3: JSON decode + repair ──
+    raw_args = fn_obj.get('arguments', '') or ''
+    json_repaired = False
+    parse_error = None
+    fn_args: dict[str, Any] = {}
+    try:
+        if isinstance(raw_args, dict):
+            fn_args = raw_args
+        else:
+            _s = raw_args if isinstance(raw_args, str) else ''
+            fn_args = json.loads(_s) if _s.strip() else {}
+    except (json.JSONDecodeError, TypeError, KeyError) as e:
+        try:
+            from lib.utils import repair_json as _repair_json
+            fn_args = _repair_json(raw_args if isinstance(raw_args, str) else '{}')
+            json_repaired = True
+        except Exception:
+            _hint = schema_hint(fn_name)
+            parse_error = (
+                f'ERROR: Your tool call for `{fn_name}` had malformed JSON '
+                f'arguments — {e}. Please retry with valid JSON.'
+                + (f' {_hint}' if _hint else ''))
+            fn_args = {}
+    if not isinstance(fn_args, dict):
+        fn_args = {}
+
+    # ── Stage 4: schema / param repair ──
+    repair_log: RepairLog = []
+    if parse_error is None:
+        try:
+            fn_args, repair_log = validate_then_repair(fn_name, fn_args, model=model)
+        except Exception as e:
+            logger.warning('[ingest] validate_then_repair failed for %s '
+                           '(passing args through): %s', fn_name, e)
+
+    return IngestedToolCall(
+        raw_name=raw_name, fn_name=fn_name, fn_args=fn_args,
+        alias_kind=alias_kind, json_repaired=json_repaired,
+        repair_log=repair_log, parse_error=parse_error)
+
+
+__all__ = ['validate_then_repair', 'parse_and_repair_tool_args', 'report_invalid',
+           'resolve_tool_name', 'schema_hint',
            'classify_tool_call', 'suggest_tool_names', 'build_rejection_message',
-           'report_hallucinated', 'RepairLog']
+           'record_rejection', 'clear_rejection', 'REJECTION_ESCALATE_THRESHOLD',
+           'HALLUCINATION_ABORT_THRESHOLD',
+           'report_hallucinated', 'report_tool_name_aliased', 'RepairLog',
+           'ingest_tool_call', 'IngestedToolCall']

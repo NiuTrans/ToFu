@@ -34,7 +34,13 @@ def _run_translate_task(task, paper_text):
     """
     task['status'] = 'running'
     lang = task['lang']
-    target_name = _LANG_NAMES.get(lang, lang)
+    # `lang` is normally a bare code ('zh'/'ja'/…) but a caller may pass a
+    # COMPOSITE cache key (e.g. a review translation keyed 'review:neurips:zh')
+    # to keep it out of the whole-paper translation cache. The human
+    # target-language name comes from the FINAL ':'-segment; the composite key
+    # itself remains the distinct (paper_hash, lang) cache row.
+    real_lang = lang.rsplit(':', 1)[-1] if ':' in lang else lang
+    target_name = _LANG_NAMES.get(real_lang, real_lang)
     model = task['model'] or None
 
     # Paragraph-aware chunking: greedy fill up to _TRANSLATE_CHUNK_SIZE,

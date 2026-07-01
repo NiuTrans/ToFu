@@ -19,8 +19,26 @@ var _prefsItems = [];        // working copy: [{header, text}]
 var _PREFS_SECTIONS = ['Preferences', 'About the user'];
 
 // Called from openSettings() and switchSettingsTab('preferences').
+// The tab now unifies the preference profile AND the memory list (see the
+// "Memory & Preferences" section in index.html). Both are refreshed here so
+// the user sees their durable personal state in one place.
 async function _populatePreferencesTab() {
   await refreshPreferences();
+  _refreshPrefsMemorySection();
+}
+
+// Render the embedded memory list into the unified tab's #prefsMemoryList
+// container, reusing the modal's render path (refreshMemoryList target arg).
+// Heavy management (create / install / drag-drop) still lives in the full
+// memory modal, reachable via the "manage all" button.
+function _refreshPrefsMemorySection() {
+  if (typeof refreshMemoryList !== 'function') return;
+  if (!document.getElementById('prefsMemoryList')) return;
+  try {
+    refreshMemoryList('all', 'prefsMemoryList');
+  } catch (e) {
+    debugLog && debugLog('[Prefs] memory section refresh failed: ' + e.message, 'warn');
+  }
 }
 
 async function refreshPreferences() {

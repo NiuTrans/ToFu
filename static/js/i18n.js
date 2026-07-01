@@ -57,6 +57,8 @@ var _i18n = {
   'sidebar.newChatAppear': { zh: '新对话会出现在这里，或从文件夹中移出对话', en: 'New chats will appear here, or move conversations out of folders' },
   'sidebar.clickNewChat': { zh: '点击 New Chat 创建对话，或拖拽对话到此标签', en: 'Click New Chat to create a conversation, or drag one here' },
   'sidebar.feishuConv': { zh: '飞书对话', en: 'Feishu conversation' },
+  'sidebar.summaryBadge': { zh: '已生成摘要 · 点击查看', en: 'Summary available · click to view' },
+  'sidebar.summaryTitle': { zh: '对话摘要', en: 'Conversation summary' },
   'sidebar.awaitingInput': { zh: '等待你的输入', en: 'Awaiting your input' },
   'sidebar.translating': { zh: '翻译中…', en: 'Translating…' },
   'sidebar.translatingTag': { zh: '翻译中', en: 'Translating' },
@@ -85,6 +87,8 @@ var _i18n = {
   'prefs.appliedN': { zh: '本回合提供了 {n} 条偏好', en: '{n} preferences in context this turn' },
   'prefs.fromProfile': { zh: '来自个人偏好档案', en: 'from your profile' },
   'prefs.tag': { zh: '偏好', en: 'preferences' },
+  'prefs.tagN': { zh: '{n} 条偏好', en: '{n} preference' },
+  'prefs.tagNs': { zh: '{n} 条偏好', en: '{n} preferences' },
   'prefs.tagNone': { zh: '偏好', en: 'preferences' },
   'relatedConvs.tag': { zh: '相关对话', en: 'related' },
   'relatedConvs.tagN': { zh: '{n} 个相关对话', en: '{n} related chat' },
@@ -105,7 +109,10 @@ var _i18n = {
   'prefs.confirm': { zh: '确认', en: 'Confirm' },
   'prefs.dismiss': { zh: '忽略', en: 'Dismiss' },
   'prefs.undo': { zh: '撤销', en: 'Undo' },
-  'settings.tabPreferences': { zh: '偏好', en: 'Preferences' },
+  'settings.tabPreferences': { zh: '记忆与偏好', en: 'Memory & Preferences' },
+  'memPrefs.memTitle': { zh: '积累的记忆', en: 'Accumulated memories' },
+  'memPrefs.memIntro': { zh: '助手在对话中自动沉淀的经验与教训（项目约定、踩过的坑、工作流）。会按相关性在对话中检索注入。点击「管理全部」可新建、导入或拖入技能包。', en: 'Experience and lessons the assistant accumulates during conversations (project conventions, pitfalls, workflows). Retrieved by relevance and injected into conversations. Click "Manage all" to create, import, or drag in skill packages.' },
+  'memPrefs.manageAll': { zh: '管理全部', en: 'Manage all' },
   'prefsPanel.title': { zh: '个人偏好档案', en: 'Personal Preference Profile' },
   'prefsPanel.intro': { zh: '这是助手长期记住的关于你、以及「你希望它如何工作」的信息（语言、语气、编码习惯、禁忌，以及你的角色、技术栈等）。它会在每次对话中自动注入，跨项目生效。助手会在对话中自动学习并更新这些条目，你可以随时在此修改或删除。', en: 'Durable facts the assistant remembers about you and how you like it to work (language, tone, coding conventions, do\'s/don\'ts, plus your role, tech stack, etc.). Injected into every conversation, applies across all projects. The assistant learns and updates these as you talk; edit or remove any of them here.' },
   'prefsPanel.secPreferences': { zh: '工作偏好', en: 'Working preferences' },
@@ -178,6 +185,11 @@ var _i18n = {
   'autopilot.composing': { zh: 'Autopilot 正在生成下一条用户回复…', en: 'Autopilot is composing the next reply…' },
   'autopilot.sentToAgent': { zh: '作为下一条消息发送给智能体', en: 'Sent to the agent as the next message' },
   'autopilot.privateNotSent': { zh: '私有过程 · 不发送给智能体', en: 'Private · not sent to the agent' },
+  'autopilot.runFold': { zh: '自动驾驶运行', en: 'Autopilot run' },
+  'autopilot.runFoldHint': { zh: '轮交互 · 点击展开', en: 'turns — click to expand' },
+  'autopilot.summaryLabel': { zh: '运行总结报告', en: 'Run summary report' },
+  'autopilot.summaryHumanOnly': { zh: '仅供查看 · 不发送给智能体', en: 'For you only · not sent to the agent' },
+  'autopilot.summarizeRun': { zh: '总结这次运行', en: 'Summarize this run' },
   'tool.hallucinated': { zh: '非真实工具', en: 'not a real tool' },
   'tool.hallucinatedTip': { zh: '模型调用了本轮不存在的工具，已被拒绝、未执行。', en: "The model called a tool that doesn't exist this turn — it was rejected and never run." },
   'tool.didYouMean': { zh: '是否想用', en: 'did you mean' },
@@ -460,6 +472,9 @@ var _i18n = {
   'toolset.dismissDesc': { zh: '撤销改动，把工具开关恢复到不破坏缓存的状态', en: 'Revert the change — restore toggles to the cache-safe tool set' },
   'toolset.applied': { zh: '工具改动已应用，下一轮重建缓存', en: 'Tool changes applied — cache rebuilds next round' },
   'toolset.applyFailed': { zh: '应用失败', en: 'Apply failed' },
+  'debug.approxTitle': { zh: '重建的近似态（非某一具体轮次）', en: 'Reconstructed approximation (not a specific turn)' },
+  'debug.approxMemDate': { zh: '记忆 <relevant_memories> 与日期按"新一轮首轮"重建，非历史某轮的真实取值。', en: 'Memory <relevant_memories> and date are reconstructed as a hypothetical first-round, not a specific historical turn.' },
+  'debug.approxTransport': { zh: '传输层变换（图片解析/降采样、provider 报文重组）未在此展开。', en: 'Transport-layer transforms (image resolve/downscale, provider body reshape) are not expanded here.' },
   'debug.copyAll': { zh: '复制全部', en: 'Copy all' },
   'debug.preview': { zh: '预览', en: 'Preview' },
   'debug.previewCompare': { zh: '对比预览', en: 'Compare preview' },
@@ -468,6 +483,10 @@ var _i18n = {
   'debug.aiCompress': { zh: 'AI压缩', en: 'AI Compress' },
   'debug.aiCompressDesc': { zh: '用 AI 智能压缩，去除冗余保留关键信息', en: 'AI smart compression, remove redundancy, keep key info' },
   'debug.keepOriginal': { zh: '保持原文', en: 'Keep original' },
+  'debug.brainCharter': { zh: '章程', en: 'charter' },
+  'debug.brainBoard': { zh: '任务板', en: 'board' },
+  'debug.brainBadgeTitle': { zh: '本条 system 消息注入了项目大脑上下文（模型实际可见）', en: 'This system message carries injected Project Brain context (visible to the model)' },
+  'debug.brainSummaryTitle': { zh: '本次任务向模型注入的项目大脑上下文块', en: 'Project Brain context blocks injected into the model this task' },
 
   // ══════════════════════════════════════
   //  Settings — Tabs
@@ -1212,6 +1231,7 @@ var _i18n = {
   'paper.delete': { zh: '删除', en: 'Delete' },
   'paper.tabQA': { zh: '问答', en: 'Q&A' },
   'paper.tabReport': { zh: '报告', en: 'Report' },
+  'paper.tabReview': { zh: '审稿', en: 'Review' },
   'paper.tabBabel': { zh: 'Babel PDF', en: 'Babel PDF' },
   'paper.viewPdf': { zh: '原文', en: 'PDF' },
   'paper.viewReader': { zh: '阅读', en: 'Reader' },
@@ -1225,6 +1245,7 @@ var _i18n = {
   'paper.zoomIn': { zh: '放大', en: 'Zoom in' },
   'paper.send': { zh: '发送（回车）', en: 'Send (Enter)' },
   // Report tab
+  'paper.reportLangTitle': { zh: '报告语言（按论文记忆）', en: 'Report language (remembered per paper)' },
   'paper.reportSelectModelTitle': { zh: '选择生成报告的模型', en: 'Select model for report generation' },
   'paper.reportSelectModel': { zh: '选择模型', en: 'Select model' },
   'paper.reportRegenerate': { zh: '重新生成', en: 'Regenerate' },
@@ -1240,6 +1261,17 @@ var _i18n = {
   'paper.reportExportPdf': { zh: '打印 / 存为 PDF', en: 'Print / Save as PDF' },
   'paper.reportEmptyTitle': { zh: '点击「重新生成」或切换到此标签以生成分析报告', en: 'Click Regenerate or switch to this tab to generate an analysis report' },
   'paper.reportEmptyHint': { zh: '模型会联网搜索补充背景与相关工作', en: 'The model will search the web for additional context and related work' },
+  // Review tab (peer-review mode)
+  'paper.reviewSelectVenue': { zh: '选择会议', en: 'Select venue' },
+  'paper.reviewSelectVenueTitle': { zh: '选择目标会议（评审表单与评分量表）', en: 'Select target conference (review form & rating scale)' },
+  'paper.reviewEmptyTitle': { zh: '先选择目标会议，再切换到此标签以生成审稿意见', en: 'Pick a target conference, then switch to this tab to generate a peer review' },
+  'paper.reviewEmptyHint': { zh: '模型会按该会议真实评审表打分，并联网核验代码/数据是否真的公开', en: "The model reviews against the venue's real scorecard and verifies code/data claims via web search" },
+  // Review is generated in English (submission language); zh UI can read a translation.
+  'paper.reviewTranslate': { zh: '翻译', en: 'Translate' },
+  'paper.reviewTranslating': { zh: '翻译中…', en: 'Translating…' },
+  'paper.reviewShowOriginal': { zh: '显示原文', en: 'Show original' },
+  'paper.reviewTranslateTitle': { zh: '审稿始终以英文生成、缓存、导出（投稿语言）；选「中」可切换中文阅读视图，选「EN」恢复原文', en: 'Review is always generated, cached & exported in English (submission language); pick 中 to read in Chinese, EN to restore the original' },
+  'paper.reviewTranslateFailed': { zh: '翻译失败', en: 'Translation failed' },
   'paper.reportNoText': { zh: '暂无论文文本，请先加载 PDF。', en: 'No paper text available. Load a PDF first.' },
   'paper.retry': { zh: '重试', en: 'Retry' },
   // Reading-time estimate + progress bar (Report tab)
@@ -1380,6 +1412,10 @@ var _i18n = {
   'folder.deleted': { zh: '文件夹已删除', en: 'Folder deleted' },
   'folder.rename': { zh: '重命名', en: 'Rename' },
   'folder.deleteAction': { zh: '删除文件夹', en: 'Delete folder' },
+  'folder.createInHint': { zh: '在此目录中新建文件夹：\n{dir}', en: 'Create a new folder in:\n{dir}' },
+  'folder.deleteFailed': { zh: '删除失败', en: 'Delete failed' },
+  'folder.deleteDirConfirm': { zh: '确定删除文件夹“{name}”吗？', en: 'Delete the folder "{name}"?' },
+  'folder.deleteDirHint': { zh: '文件夹将被移入 .tofu_trash 回收站，可从文件系统恢复。', en: 'The folder is moved to a .tofu_trash bin and can be recovered from the filesystem.' },
 
   // ══════════════════════════════════════
   //  Translation
@@ -1969,6 +2005,64 @@ var _i18n = {
   'dialog.confirm': { zh: '确定', en: 'OK' },
   'dialog.cancel': { zh: '取消', en: 'Cancel' },
   'dialog.ok': { zh: '好的', en: 'OK' },
+
+  // ══════════════════════════════════════
+  //  Cross-conversation presence ("who's working here")
+  // ══════════════════════════════════════
+  'presence.title': { zh: '其他对话正在协作', en: 'Others working here' },
+  'presence.untitled': { zh: '(未命名对话)', en: '(untitled)' },
+  'presence.justNow': { zh: '刚刚', en: 'just now' },
+  'presence.secsAgo': { zh: '{n} 秒前', en: '{n}s ago' },
+  'presence.minsAgo': { zh: '{n} 分钟前', en: '{n}m ago' },
+
+  // ── Project Collaboration Bar (replaces the old presence strip) ──
+  'collab.project': { zh: '项目', en: 'Project' },
+  'collab.openBrain': { zh: '打开项目大脑', en: 'Open Project Brain' },
+  'collab.decisionsAwaiting': { zh: '{n} 项决策待你审批', en: '{n} decisions awaiting you' },
+  'collab.epicsInProgress': { zh: '{n} 个 epic 推进中', en: '{n} epics in progress' },
+  'collab.epicsOpen': { zh: '{n} 个待认领', en: '{n} open' },
+  'collab.peersOnline': { zh: '{n} 个会话在线', en: '{n} conversations online' },
+  'collab.peerAdvancing': { zh: '推进', en: 'advancing' },
+  'collab.conflicts': { zh: '{n} 处文件冲突', en: '{n} file conflicts' },
+
+  // ══════════════════════════════════════
+  //  Project Brain — cross-conversation Activity Feed (Pillar #1)
+  // ══════════════════════════════════════
+  'projectBrain.title': { zh: '项目大脑', en: 'Project Brain' },
+  'projectBrain.open': { zh: '打开项目大脑', en: 'Open Project Brain' },
+  'projectBrain.charter': { zh: '章程', en: 'Charter' },
+  'projectBrain.board': { zh: '任务板', en: 'Board' },
+  'projectBrain.activity': { zh: '动态', en: 'Activity' },
+  'projectBrain.charterSoon': { zh: '北极星 · 即将推出', en: 'North star — coming soon' },
+  'projectBrain.boardSoon': { zh: '协作任务板 · 即将推出', en: 'Coordination board — coming soon' },
+  'projectBrain.activityEmpty': { zh: '暂无动态', en: 'No activity yet' },
+  'projectBrain.charterEmpty': { zh: '尚无章程', en: 'No charter yet' },
+  'projectBrain.boardEmpty': { zh: '任务板为空', en: 'Board is empty' },
+  'projectBrain.committedDecisions': { zh: '已确认的决策', en: 'Committed decisions' },
+  'projectBrain.pendingProposals': { zh: '提议中（待你审核）', en: 'Proposed (awaiting your review)' },
+  'projectBrain.commit': { zh: '确认', en: 'Commit' },
+  'projectBrain.committing': { zh: '确认中…', en: 'Committing…' },
+  'projectBrain.reject': { zh: '驳回', en: 'Reject' },
+  'projectBrain.laneOpen': { zh: '待认领', en: 'Open' },
+  'projectBrain.laneClaimed': { zh: '推进中', en: 'In progress' },
+  'projectBrain.laneDone': { zh: '已完成', en: 'Done' },
+  'projectBrain.dispatched': { zh: '自动', en: 'auto' },
+  'projectBrain.dispatchedTitle': { zh: '由项目大脑自动启动', en: 'Started autonomously by the project brain' },
+  'projectBrain.kind.started': { zh: '开始', en: 'Started' },
+  'projectBrain.kind.completed': { zh: '完成', en: 'Completed' },
+  'projectBrain.kind.aborted': { zh: '已中止', en: 'Aborted' },
+  'projectBrain.kind.run_concluded': { zh: '自动运行收尾', en: 'Run concluded' },
+  'projectBrain.kind.blocked': { zh: '受阻', en: 'Blocked' },
+  'projectBrain.kind.decided': { zh: '决策', en: 'Decided' },
+  'projectBrain.kind.proposed_decision': { zh: '提议决策', en: 'Proposed decision' },
+  'projectBrain.kind.claimed': { zh: '认领', en: 'Claimed' },
+  'projectBrain.kind.dismissed': { zh: '驳回提议', en: 'Dismissed' },
+  'projectBrain.kind.note': { zh: '备注', en: 'Note' },
+  'projectBrain.legendTitle': { zh: '图例', en: 'Legend' },
+  'projectBrain.justNow': { zh: '刚刚', en: 'just now' },
+  'projectBrain.minutesAgo': { zh: '{n} 分钟前', en: '{n}m ago' },
+  'projectBrain.hoursAgo': { zh: '{n} 小时前', en: '{n}h ago' },
+  'projectBrain.daysAgo': { zh: '{n} 天前', en: '{n}d ago' },
 };
 
 /**
@@ -2073,24 +2167,28 @@ function _onLanguageChange(lang) {
       // Prefer the stream painter when a stream exists (handles tool rounds /
       // thinking too); reset its dedup markers so the body actually re-renders.
       // Otherwise repaint a cached/finished report directly.
-      if (typeof _paperReportStream !== 'undefined' && _paperReportStream) {
-        _paperReportStream._lastRenderedLen = -1;
-        _paperReportStream._lastRenderedStatus = '';
-        _paperReportStream._lastToolKey = '';
-        var _rcS = document.getElementById('paperReportContent');
-        var _prevTopS = _rcS ? _rcS.scrollTop : 0;
-        if (typeof _paintReportFromState === 'function') _paintReportFromState();
-        if (_rcS) _rcS.scrollTop = _prevTopS;
-      } else {
-        var _rc = document.getElementById('paperReportContent');
-        if (_rc && typeof _paperReportCache !== 'undefined' && _paperReportCache
-            && typeof _renderFinalReport === 'function') {
-          // _renderFinalReport rebuilds innerHTML (resets scrollTop to 0).
-          // Preserve the reader's scroll position across the relabel.
-          var _prevTop = _rc.scrollTop;
-          _renderFinalReport(_rc, _paperReportCache);
-          _rc.scrollTop = _prevTop;
-        }
+      if (typeof _reportView === 'function') {
+        ['report', 'review'].forEach(function(_kind) {
+          var _v = _reportView(_kind);
+          if (_v.stream) {
+            _v.stream._lastRenderedLen = -1;
+            _v.stream._lastRenderedStatus = '';
+            _v.stream._lastToolKey = '';
+            var _rcS = document.getElementById(_v.containerId);
+            var _prevTopS = _rcS ? _rcS.scrollTop : 0;
+            if (typeof _paintReportFromState === 'function') _paintReportFromState(_v);
+            if (_rcS) _rcS.scrollTop = _prevTopS;
+          } else {
+            var _rc = document.getElementById(_v.containerId);
+            if (_rc && _v.cache && typeof _renderFinalReport === 'function') {
+              // _renderFinalReport rebuilds innerHTML (resets scrollTop to 0).
+              // Preserve the reader's scroll position across the relabel.
+              var _prevTop = _rc.scrollTop;
+              _renderFinalReport(_rc, _v.cache, undefined, _v);
+              _rc.scrollTop = _prevTop;
+            }
+          }
+        });
       }
       // Refresh the Babel PDF tab if it is the active panel (rebuilds its
       // static chrome — subtitle, Original button, empty state).

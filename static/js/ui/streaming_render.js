@@ -400,6 +400,117 @@ function _handleAutopilotVuEvent(convId, ev) {
 }
 
 /**
+ * Apply a BACKEND-AUTHORITATIVE autopilot run-concluded record onto a conv.
+ *
+ * ONE record per run (`{runId, status:'concluded', reason:'task_done'|
+ * 'stopped', content?, translatedContent?, ts, _summaryId}`) carries BOTH the
+ * terminal fold-fact AND the optional close-out report (a manual stop has no
+ * `content`). It is human-only: stored backend-side under
+ * `settings.autopilotSummaries[runId]`, mirrored here onto
+ * `conv.autopilotSummaries[runId]`, and NEVER entered into `conv.messages`
+ * (transcript) nor the LLM context. Idempotent + monotonic: a re-delivery
+ * (reconnect / cold-replay / settings round-trip) overwrites the same runId
+ * entry, but a bare `stopped` record NEVER clobbers an existing `task_done`
+ * record that already carries a report.
+ *
+ * Shared by the SSE `autopilot_run_concluded` handler AND the disarm response
+ * (which returns the same record so an idle disarm — no live stream — folds
+ * instantly without a reload). Returns true iff a record was applied.
+ */
+function _applyAutopilotRunConcluded(conv, rec, runId) {
+  if (!conv || !rec || typeof rec !== 'object') return false;
+  runId = runId || rec.runId;
+  if (!runId) return false;
+  if (!conv.autopilotSummaries || typeof conv.autopilotSummaries !== 'object') {
+    conv.autopilotSummaries = {};
+  }
+  const prior = conv.autopilotSummaries[runId];
+  /* Monotonic merge: a manual `stopped` record must not erase an earlier
+   * clean `task_done` record's report/verdict (they can race on close-out). */
+  const priorIsCleanReport = !!(prior && prior.reason === 'task_done' && prior.content);
+  const incomingIsBareStop = (rec.reason === 'stopped') && !rec.content;
+  if (priorIsCleanReport && incomingIsBareStop) return false;
+  conv.autopilotSummaries[runId] = {
+    runId,
+    status: rec.status || 'concluded',
+    reason: rec.reason || (prior && prior.reason) || 'task_done',
+    content: rec.content || (prior && prior.content) || '',
+    translatedContent: rec.translatedContent || (prior && prior.translatedContent) || '',
+    ts: rec.ts || Date.now(),
+    _summaryId: rec._summaryId || (prior && prior._summaryId) || '',
+  };
+  return true;
+}
+
+/**
+ * Handle the `autopilot_run_concluded` SSE event: the single BACKEND fact that
+ * an autopilot run reached its terminal boundary — a clean [VU: TASK_DONE]
+ * (reason=task_done, with a report) OR a manual stop (reason=stopped, no
+ * report). Receiving it is what lets `_applyAutopilotRunFolds` fold the run
+ * (the gate keys on `conv.autopilotSummaries[runId].status==='concluded'` —
+ * see `_apRunConcluded`); the report, when present, renders as the fold's
+ * read-only PANEL. The record is human-only — never a chat message.
+ *
+ * Tolerates the legacy shape (`ev.summary`/`ev.summaryMessage`) during rollout.
+ */
+/**
+ * Apply a disarm response's ``runConcluded`` record to the conv and re-render.
+ *
+ * The disarm endpoint (toggle-OFF / queue-cancel) is the manual-stop arm of
+ * the conclude contract: it returns the SAME backend-authoritative record the
+ * SSE ``autopilot_run_concluded`` event carries. Because a disarm can happen
+ * when there is NO live SSE stream (the reply already finished — the idle case)
+ * the client would otherwise never receive the concluded fact until a reload;
+ * applying the response body here makes the run fold instantly. No-op when the
+ * response carried no record (nothing was an autopilot run to conclude).
+ */
+function _applyDisarmResponse(convId, resp) {
+  try {
+    const rec = resp && resp.runConcluded;
+    if (!rec) return;
+    const conv = conversations.find(c => c.id === convId);
+    if (!conv) return;
+    if (!_applyAutopilotRunConcluded(conv, rec, rec.runId)) return;
+    if (typeof saveConversations === 'function') saveConversations(convId);
+    try { if (typeof ConvCache !== 'undefined') ConvCache.put(conv); }
+    catch (e) { /* non-fatal */ }
+    if (activeConvId === convId && typeof renderChat === 'function') {
+      renderChat(conv, true);
+    }
+  } catch (e) {
+    console.warn('[Autopilot] apply disarm response failed:', e && e.message);
+  }
+}
+
+function _handleAutopilotRunConcluded(convId, ev) {
+  const conv = conversations.find(c => c.id === convId);
+  if (!conv) {
+    console.debug(`[Autopilot run] conv=${convId.slice(0,8)} not found — dropping`);
+    return;
+  }
+  /* New shape: `record`. Legacy rollout shapes: `summary` / `summaryMessage`. */
+  const rec = ev.record || ev.summary || ev.summaryMessage;
+  const runId = ev.runId || (rec && rec.runId);
+  if (!rec || !runId) {
+    console.warn('[Autopilot run] missing concluded record / runId', ev);
+    return;
+  }
+  if (!_applyAutopilotRunConcluded(conv, rec, runId)) return;
+  const _stored = conv.autopilotSummaries[runId] || {};
+  console.info(
+    `[Autopilot run] ✓ run=${(runId||'').slice(0,12)} concluded ` +
+    `(reason=${_stored.reason}, ${(_stored.content||'').length} report chars, ` +
+    `NOT a message) for conv=${convId.slice(0,8)}`
+  );
+  if (typeof saveConversations === "function") saveConversations(convId);
+  try { if (typeof ConvCache !== "undefined") ConvCache.put(conv); }
+  catch (e) { /* non-fatal */ }
+  if (activeConvId === convId && typeof renderChat === "function") {
+    renderChat(conv, true);
+  }
+}
+
+/**
  * Build the HTML string for a streaming bubble (#streaming-msg).
  * @param {'worker'|'planner'|'critic'|'autopilot'} role  - which phase / avatar
  * @param {string} [status]   - status text shown inside the pulse

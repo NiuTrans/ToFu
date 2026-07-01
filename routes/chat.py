@@ -93,10 +93,22 @@ def chat_active():
         # (the orchestrator, external/eval harnesses, tests). A malformed
         # entry missing optional keys must not 500 this status endpoint, so
         # read every field defensively.
+        #
+        # ★ Exclude non-streaming CARRIER/HOLDER tasks (``_inline_messages`` /
+        #   ``_vu_subtask``): the autopilot VU + reporter sub-turns and the
+        #   summarize carrier use ``create_task`` purely as a message container
+        #   and never stream a ``done`` event. If the frontend sees one here it
+        #   runs orphan-recovery (initActiveTasks Case C / cross-tab reconcile),
+        #   pushes an empty assistant placeholder, and connects an SSE that
+        #   never completes → a permanently-stuck "Waiting…" bubble. Reconnect
+        #   only ever makes sense for real UI-streaming tasks, so hide carriers.
+        #   (The autopilot-kick carrier sets ``_autopilot_kick``, NOT these
+        #   flags, so it is still reported and reconnectable.)
         result = [{'id': t.get('id', ''), 'convId': t.get('convId', ''),
                    'status': t.get('status', ''),
                    'aborted': bool(t.get('aborted'))}
-                  for t in tasks.values()]
+                  for t in tasks.values()
+                  if not t.get('_inline_messages') and not t.get('_vu_subtask')]
     return jsonify(result)
 
 
@@ -139,10 +151,11 @@ def chat_start():
 
     cleanup_old_tasks()
 
-    # ★ Abort stale running tasks for this conversation before starting a new one
-    from lib.tasks_pkg import abort_running_tasks_for_conv
-    abort_running_tasks_for_conv(conv_id)
-
+    # ★ Supersede (abort any stale running task for this conv) is now an
+    #   invariant of create_task(supersede=True, the default) — no explicit
+    #   pre-abort needed here. The ordering-critical explicit sweeps in
+    #   _start_task_for_conv (before build_api_messages_from_db) and
+    #   chat_abort_conv remain, because those must run BEFORE their DB read.
     task = create_task(conv_id, messages, cfg)
     # Human-attended UI task: a user is watching and can answer the write-
     # approval prompt, so Manual mode actually gates here (see
@@ -601,7 +614,10 @@ def chat_branch_start():
 
         cleanup_old_tasks()
 
-        task = create_task(conv_id, api_messages, cfg)
+        # ★ supersede=False: a branch is a DELIBERATE concurrency axis — it must
+        #   run alongside the main task and sibling branches, so it must NOT
+        #   abort other running tasks for this conv (see create_task docstring).
+        task = create_task(conv_id, api_messages, cfg, supersede=False)
         task['_attended'] = True
         task_id = task['id']
         _cfg_model = cfg.get('model', '?')

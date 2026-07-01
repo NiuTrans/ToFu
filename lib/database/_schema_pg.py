@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 #  Schema Version Cache — Skip redundant DDL on subsequent startups
 # ═══════════════════════════════════════════════════════════════════════
 
-_SCHEMA_VERSION = 29  # Increment when tables/columns/indexes change
+_SCHEMA_VERSION = 33  # Increment when tables/columns/indexes change
 
 
 def _column_exists(conn, table, column):
@@ -601,6 +601,21 @@ def _init_system_schema(conn):
     cur.execute('CREATE INDEX IF NOT EXISTS idx_orch_runs_status ON orchestration_runs(status, updated_at DESC)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_orch_runs_orch ON orchestration_runs(orch_id, created_at DESC)')
     create_if_absent(conn, ORCHESTRATION_RUN_EVENTS, table_exists=_table_exists)
+
+    # ── Project Events: cross-conversation activity feed ("project brain"
+    #    pulse). Mirror of the SQLite block. Append-only, keyed on
+    #    project_path; seq monotonic per project. See
+    #    lib/conversations/project_feed.py. ──
+    from lib.database._core_schema import PROJECT_EVENTS, PROJECT_CHARTER, PROJECT_TASKS
+    create_if_absent(conn, PROJECT_EVENTS, table_exists=_table_exists)
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_project_events_path_ts ON project_events(project_path, ts DESC)')
+    # Project Charter: the north-star doc (Pillar #2). One row per project_path.
+    create_if_absent(conn, PROJECT_CHARTER, table_exists=_table_exists)
+    # Project Board: coordination tasks (Pillar #3). Per project_path.
+    create_if_absent(conn, PROJECT_TASKS, table_exists=_table_exists)
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_project_tasks_path_status ON project_tasks(project_path, status)')
+    # Migration: dispatched flag (brain-dispatched claim badge). Added 2026-07.
+    cur.execute('ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS dispatched INTEGER NOT NULL DEFAULT 0')
 
     # ── Daily Optimizer tables (see lib/optimizer/) ──
     # optimizer_proposals + optimizer_action_log: migrated onto Core.

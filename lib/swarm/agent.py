@@ -42,6 +42,7 @@ from lib.swarm.registry import (
     scope_tools_for_role,
 )
 from lib.swarm.tools import ARTIFACT_TOOLS
+from lib.tool_input_repair import ingest_tool_call
 
 logger = get_logger(__name__)
 
@@ -54,6 +55,18 @@ DEFAULT_TOOL_RESULT_MAX_CHARS = 30_000
 
 # Max parallel tool calls per round
 MAX_PARALLEL_TOOLS = int(os.environ.get('TOOL_MAX_PARALLEL_WORKERS', '16'))
+
+# File-edit tools whose touched path is recorded on this sub-agent's presence
+# peer (→ cross-peer overlap detection). Maps tool name → the action label
+# shown in the presence strip. Read-only tools / run_command are excluded
+# (run_command's edits aren't reliably attributable from args alone).
+_PRESENCE_EDIT_ACTIONS = {
+    'write_file': 'written',
+    'apply_diff': 'patched',
+    'apply_diffs': 'patched',
+    'insert_content': 'inserted',
+    'insert_contents': 'inserted',
+}
 
 # Patterns that suggest the agent has reached a final answer
 # (used for early-stop detection on content without tool calls)
@@ -132,6 +145,9 @@ class SubAgent:
         # Cleanup state
         self._started = False
         self._cleaned_up = False
+        # Presence: throttle anchor for the streaming heartbeat (one bump per
+        # ~5s of token flow). 0.0 → the first chunk beats immediately.
+        self._last_presence_beat = 0.0
 
         # Durable-resume key. Set by the master orchestrator's _make_agent
         # factory (like ``output_file``). When present, the agent checkpoints
@@ -325,6 +341,89 @@ class SubAgent:
     #  Execution
     # ─────────────────────────────────────────────────
 
+    def _presence_conv_id(self) -> str:
+        return (self.parent_task or {}).get('convId') or ''
+
+    def _presence_announce(self, phase: str = 'working') -> None:
+        """Register this sub-agent as a live presence peer of the project root.
+
+        Keyed by ``(parent convId, agent_id)`` so N concurrent sub-agents of
+        ONE conversation are N distinct peers that group under the parent
+        conversation (the composite key in lib/presence/registry.py). No-op
+        when there's no project root or convId. Best-effort.
+        """
+        conv_id = self._presence_conv_id()
+        if not (self.project_path and conv_id):
+            return
+        try:
+            from lib.presence import announce as _announce
+            _announce(
+                self.project_path, conv_id,
+                agent_id=self.agent_id,
+                task_id=self.parent_task.get('id', ''),
+                title=self.spec.role,
+                objective=self.spec.objective or '',
+                parent_title=(self.parent_task.get('config') or {}).get('convTitle') or '',
+                phase=phase,
+            )
+        except Exception as _pe:
+            logger.debug('[%s] presence announce failed: %s', self.agent_id, _pe)
+
+    def _presence_heartbeat(self, phase: str = 'generating') -> None:
+        conv_id = self._presence_conv_id()
+        if not (self.project_path and conv_id):
+            return
+        try:
+            from lib.presence import heartbeat as _heartbeat
+            _heartbeat(self.project_path, conv_id, agent_id=self.agent_id, phase=phase)
+        except Exception as _pe:
+            logger.debug('[%s] presence heartbeat failed: %s', self.agent_id, _pe)
+
+    def _presence_record_file(self, rel_path: str, action: str = 'edited') -> None:
+        conv_id = self._presence_conv_id()
+        if not (self.project_path and conv_id and rel_path):
+            return
+        try:
+            from lib.presence import record_files as _record_files
+            _record_files(self.project_path, conv_id,
+                          [{'path': rel_path, 'action': action}],
+                          agent_id=self.agent_id)
+        except Exception as _pe:
+            logger.debug('[%s] presence record_file failed: %s', self.agent_id, _pe)
+
+    def _presence_idle(self) -> None:
+        conv_id = self._presence_conv_id()
+        if not (self.project_path and conv_id):
+            return
+        try:
+            from lib.presence import mark_idle as _mark_idle
+            _mark_idle(self.project_path, conv_id, agent_id=self.agent_id)
+        except Exception as _pe:
+            logger.debug('[%s] presence idle failed: %s', self.agent_id, _pe)
+
+    @staticmethod
+    def _presence_edited_path(fn_name: str, fn_args: dict) -> str:
+        """Extract the project-relative path a file-edit tool just wrote.
+
+        Returns '' for non-edit tools. Handles the single-path tools
+        (write_file / apply_diff / insert_content — ``path`` arg) and the batch
+        tools (apply_diffs / insert_contents — first entry of the ``edits``
+        array). The swarm path reads from the tool ARGS rather than
+        commit_round's journal, which attributes by the shared parent taskId
+        and so can't separate sibling sub-agents.
+        """
+        if fn_name not in _PRESENCE_EDIT_ACTIONS:
+            return ''
+        p = fn_args.get('path')
+        if isinstance(p, str) and p.strip():
+            return p.strip()
+        edits = fn_args.get('edits')
+        if isinstance(edits, list):
+            for e in edits:
+                if isinstance(e, dict) and isinstance(e.get('path'), str) and e['path'].strip():
+                    return e['path'].strip()
+        return ''
+
     def run(self) -> SubAgentResult:
         """Execute the sub-agent synchronously. Returns SubAgentResult."""
         start_time = time.time()
@@ -336,6 +435,10 @@ class SubAgent:
         if _browser_cid:
             from lib.browser import _set_active_client
             _set_active_client(_browser_cid)
+
+        # ★ Presence: register this sub-agent as a live peer (groups under the
+        #   parent conversation). Mirror of the orchestrator's announce@start.
+        self._presence_announce(phase='working')
 
         logger.info('[Agent:%s] ========== RUN START ==========', self.agent_id)
         logger.info('[Agent:%s] role=%s model=%s max_rounds=%d tools=%s',
@@ -400,6 +503,11 @@ class SubAgent:
 
         # Cleanup
         self._cleanup()
+
+        # ★ Presence: this sub-agent finished — transition its peer to IDLE
+        #   (kept, then faded by the sweep). Mirror of the orchestrator's
+        #   mark_idle@done in run_task's finally.
+        self._presence_idle()
 
         # NOTE: Do NOT emit AGENT_COMPLETE here — the MasterOrchestrator's
         # on_agent_complete callback already emits swarm_agent_complete with
@@ -533,10 +641,23 @@ class SubAgent:
                                  self.agent_id, _e)
                 _log_buffer.clear()
 
+            def _beat_on_stream():
+                # ★ Presence heartbeat (throttled, ~5s — mirrors the
+                #   conversation path's checkpoint-throttle). Token flow IS
+                #   work, so a long single-LLM sub-agent generation with no
+                #   tool rounds keeps its peer ACTIVE instead of flapping to
+                #   idle. One bump per interval, never per token.
+                _now = time.time()
+                if _now - self._last_presence_beat >= 5.0:
+                    self._last_presence_beat = _now
+                    self._presence_heartbeat(phase='generating')
+
             def on_content(chunk):
                 content_parts.append(chunk)
                 if _output_path and chunk:
                     _log_buffer.append(chunk)
+                if chunk:
+                    _beat_on_stream()
                 if self.stream_sink and chunk:
                     try:
                         self.stream_sink('content', chunk)
@@ -548,6 +669,8 @@ class SubAgent:
                 thinking_parts.append(chunk)
                 if _output_path and chunk:
                     _log_buffer.append(chunk)
+                if chunk:
+                    _beat_on_stream()
                 if self.stream_sink and chunk:
                     try:
                         self.stream_sink('thinking', chunk)
@@ -767,32 +890,67 @@ class SubAgent:
                     'content': results.get(tc_id, '(no result)'),
                 })
 
+    def _known_tool_names(self) -> set[str]:
+        """Live set of REAL tool names available to THIS sub-agent this turn.
+
+        Derived from the role-scoped ``self.tools`` schema list (built-ins +
+        MCP + swarm/artifact tools injected for this agent). Used as the
+        membership oracle for :func:`resolve_tool_name` so an alias never maps
+        onto a tool the agent doesn't actually have, and a legitimate
+        dynamically-injected tool is never mis-aliased. The three
+        locally-handled artifact tools are always included.
+        """
+        names: set[str] = {'store_artifact', 'read_artifact', 'list_artifacts'}
+        for t in (self.tools or []):
+            if isinstance(t, dict):
+                n = (t.get('function') or {}).get('name')
+                if n:
+                    names.add(n)
+        return names
+
     def _execute_single_tool(self, tool_call: dict, round_num: int) -> str:
         """Execute a single tool call and return the result string."""
         fn_info = tool_call.get('function', {})
-        fn_name = fn_info.get('name', '?')
-        fn_args_raw = fn_info.get('arguments', '{}')
+        _raw_name = fn_info.get('name', '?')
         tc_id = tool_call.get('id') or str(uuid.uuid4())[:8]
         tool_start = time.time()
 
-        logger.debug('[Agent:%s] Round %d → TOOL_CALL %s args_raw=%s',
-                     self.agent_id, round_num, fn_name,
-                     (fn_args_raw if isinstance(fn_args_raw, str) else str(fn_args_raw))[:300])
+        # ── Unified tool-call ingestion ──
+        # The sub-agent path dispatches to the executor DIRECTLY, bypassing the
+        # main chat dispatcher's parse_tool_calls — so it must funnel each call
+        # through the SAME ingestion seam so name-alias (WebFetch→fetch_url …),
+        # JSON decode+repair, AND schema/param repair (previously missing here)
+        # all apply identically. Hallucination rejection is enabled: an invented
+        # name is returned to the sub-agent as an actionable error instead of
+        # the executor's raw "unknown tool" wall. The membership oracle is THIS
+        # agent's role-scoped tool set.
+        _ingested = ingest_tool_call(
+            tool_call,
+            known_tools=self._known_tool_names(),
+            model=self.model or '',
+            conv_id=self._presence_conv_id(),
+        )
+        if _ingested.dropped:
+            logger.warning('[Agent:%s] Dropping tool call %r (%s)',
+                           self.agent_id, _raw_name, _ingested.drop_reason)
+            return f'Error: ignored malformed tool name {_raw_name!r} ({_ingested.drop_reason}).'
+        if _ingested.alias_kind:
+            logger.info('[Agent:%s] Aliased tool name %r → %r (%s)',
+                        self.agent_id, _raw_name, _ingested.fn_name, _ingested.alias_kind)
+        fn_name = _ingested.fn_name
+        fn_info['name'] = fn_name  # persist canonical name onto the tool_call
+        if _ingested.rejected:
+            logger.warning('[Agent:%s] Rejected hallucinated tool %r (suggestions=%s)',
+                           self.agent_id, _raw_name, _ingested.rejection.get('suggestions'))
+            return _ingested.parse_error
+        if _ingested.parse_error:
+            logger.warning('[Agent:%s] Unparseable args for %s: %s',
+                           self.agent_id, fn_name, _ingested.parse_error)
+            return _ingested.parse_error
+        fn_args = _ingested.fn_args
 
-        try:
-            fn_args = json.loads(fn_args_raw) if isinstance(fn_args_raw, str) else fn_args_raw
-        except json.JSONDecodeError:
-            # Attempt best-effort JSON repair
-            try:
-                from lib.utils import repair_json as _repair_json
-                fn_args = _repair_json(fn_args_raw if isinstance(fn_args_raw, str) else '{}')
-                logger.debug('[Agent:%s] Repaired malformed JSON for %s', self.agent_id, fn_name)
-            except Exception as e:
-                logger.warning('[%s] Invalid JSON args for %s: %s: %s', self.agent_id, fn_name, fn_args_raw[:100], e, exc_info=True)
-                return f'Invalid JSON arguments for {fn_name}: {fn_args_raw[:200]}'
-
-        if not isinstance(fn_args, dict):
-            fn_args = {}
+        logger.debug('[Agent:%s] Round %d → TOOL_CALL %s args=%s',
+                     self.agent_id, round_num, fn_name, str(fn_args)[:300])
 
         # Log the tool call
         self.result.tool_log.append({
@@ -855,6 +1013,16 @@ class SubAgent:
                          self.agent_id, fn_name, tool_elapsed, len(truncated))
             logger.debug('[Agent:%s] Tool %s result preview: %s',
                          self.agent_id, fn_name, truncated[:300])
+            # ★ Presence: if this was a file-edit tool, record the touched path
+            #   on this sub-agent's peer so cross-peer overlap detection can flag
+            #   two sub-agents (or a sub-agent + a sibling conversation)
+            #   clobbering the same file. We read the path straight from the
+            #   tool args (the swarm path can't use commit_round's journal,
+            #   which attributes by the shared parent taskId). Only on success
+            #   (an error already returned above via the except).
+            _edited = self._presence_edited_path(fn_name, fn_args)
+            if _edited:
+                self._presence_record_file(_edited, action=_PRESENCE_EDIT_ACTIONS.get(fn_name, 'edited'))
             _emit_finish('done', preview=truncated)
             return truncated
         except Exception as e:

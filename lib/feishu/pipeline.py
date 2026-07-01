@@ -55,12 +55,11 @@ def run_task_pipeline(user_id: str, text: str,
     Parameters
     ----------
     send_progress_fn : callable, optional
-        Called with intermediate text during long operations (e.g., tool use).
-        Currently not wired up — reserved for streaming progress in Feishu.
+        Called with a one-line progress string each time a long-running tool
+        starts during the task (e.g. ``"Running web_search: …"``), so a Feishu
+        consumer can post intermediate progress while the task runs. Wired
+        through to ``run_task_sync(progress_fn=...)``.
     """
-    if send_progress_fn:
-        logger.debug('[Feishu] send_progress_fn provided but not yet wired up')
-
     # ── Build conversation history ──
     append_message(user_id, 'user', text)
     history = get_history(user_id)
@@ -97,7 +96,7 @@ def run_task_pipeline(user_id: str, text: str,
 
     # ── Execute pipeline ──
     from lib.tasks_pkg.endpoint import run_task_sync
-    result = run_task_sync(config)
+    result = run_task_sync(config, progress_fn=send_progress_fn)
 
     if not result:
         result = '(无回复)'

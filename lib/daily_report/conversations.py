@@ -24,6 +24,7 @@ from .todos import (
     _get_yesterday_carryover,
     _get_yesterday_todo_accountability,
     _mark_yesterday_todos_done,
+    _merge_manual_state,
 )
 
 logger = get_logger(__name__)
@@ -290,7 +291,7 @@ def _analyse_conversations(convs, target_date):
             {'id': f'todo-{_uuid.uuid4().hex[:8]}', 'text': t, 'done': False}
             for t in carryover[:12] if t
         ]
-        return {
+        empty_result = {
             'ok': True,
             'streams': [],
             'tomorrow': tomorrow_items,
@@ -300,6 +301,16 @@ def _analyse_conversations(convs, target_date):
             'persona': _pick_persona(stats),
             'stats': stats,
         }
+        # Preserve manual edits on the empty-convs regen path too (a day with
+        # no convs today may still carry the user's manually-added TODOs).
+        try:
+            _existing = _load_report(target_date)
+            if _existing:
+                _merge_manual_state(empty_result, _existing)
+        except Exception as e:
+            logger.warning('[DailyReport] Manual-state merge (empty) failed for %s: %s',
+                           target_date, e)
+        return empty_result
 
     # ── Normalize field names ──
     for c in convs:
@@ -508,7 +519,7 @@ def _analyse_conversations(convs, target_date):
                 target_date, elapsed, len(convs), len(final_streams),
                 done_cnt, ip_cnt, blk_cnt, len(tomorrow_items))
 
-    return {
+    result = {
         'ok': True,
         'streams': final_streams,
         'tomorrow': tomorrow_items,
@@ -520,3 +531,20 @@ def _analyse_conversations(convs, target_date):
         'stats': stats,
         'error': error_msg,
     }
+
+    # ── Preserve the user's manual edits across regeneration ──
+    # A regen is a fresh LLM analysis; without this it silently clobbers
+    # manual stream-status overrides, TODO check-offs, and manually-added
+    # TODOs that the edit endpoints persisted into the prior report.
+    # Centralized here (single source of truth) so POST / backfill / async
+    # generator all inherit it. Only meaningful on a regen (existing report
+    # present); on first generation existing is None → no-op.
+    try:
+        _existing = _load_report(target_date)
+        if _existing:
+            _merge_manual_state(result, _existing)
+    except Exception as e:
+        logger.warning('[DailyReport] Manual-state merge failed for %s: %s',
+                       target_date, e)
+
+    return result

@@ -35,7 +35,66 @@ using their own ad-hoc checks; this module covers the 90% case of
 
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
+
+# Encoded tokens that betray a still-percent-encoded value: a path separator
+# (%2f '/', %5c '\') or a bare percent (%25) that a proxy left behind.
+_ENCODED_MARKERS = ('%2f', '%5c', '%25')
+_MAX_REDECODE_PASSES = 3
+
+
+def decode_proxy_path_arg(name: str = 'path', *,
+                          default: str = '') -> str:
+    """Read a filesystem-path query arg, defensively undoing DOUBLE-encoding.
+
+    A reverse proxy in front of the app — notably the VS Code web IDE proxy
+    (``/proxy/<port>/``) — can RE-ENCODE an already-percent-encoded query
+    value. The frontend Api client encodes a path exactly once
+    (``/mnt/x`` → ``%2Fmnt%2Fx``); the proxy turns that into ``%252Fmnt%252Fx``.
+    Quart then decodes ONCE, so the route receives the literal string
+    ``%2Fmnt%2Fx`` — which matches no DB rows and blanks the Project Brain
+    panel even though the data exists. Scalar params (``since=0``, ``limit=20``)
+    have no ``%`` so the proxy re-encode is a no-op for them; only path-valued
+    args break, which is why this is applied specifically to path args.
+
+    Fix: while the value STILL looks percent-encoded (contains ``%2f`` / ``%5c``
+    / ``%25``, case-insensitive) AND does NOT already resolve to an existing
+    filesystem path, ``unquote`` it again — bounded to a few passes.
+
+    Edge case (documented tradeoff): a real directory whose name contains a
+    literal ``%2f`` / ``%25`` substring would be over-decoded by a naive
+    heuristic. The ``os.path.exists`` short-circuit fixes the common form of
+    that — if the current value is already a real path we stop immediately,
+    even when it contains an encoded marker. The residual risk (a
+    NON-existent target path that legitimately contains ``%2f``, e.g. a
+    board/charter key for a project dir that isn't mounted on THIS host) is
+    accepted as vanishingly rare: absolute POSIX/Windows paths do not contain
+    literal ``%2f`` sequences in practice, and the loop is hard-bounded to
+    ``_MAX_REDECODE_PASSES`` so it can never spin.
+    """
+    from urllib.parse import unquote
+
+    from flask import request
+    raw = (request.args.get(name) or '').strip()
+    if not raw:
+        return default
+    for _ in range(_MAX_REDECODE_PASSES):
+        low = raw.lower()
+        if not any(m in low for m in _ENCODED_MARKERS):
+            break
+        # Already a real path? Then the encoded marker is a genuine part of the
+        # name — stop, don't corrupt it.
+        try:
+            if os.path.exists(raw):
+                break
+        except (OSError, ValueError):
+            pass  # unusual path value; fall through to decode attempt
+        decoded = unquote(raw)
+        if decoded == raw:
+            break
+        raw = decoded.strip()
+    return raw
 
 
 class BadRequest(ValueError):
@@ -319,7 +378,7 @@ def optional_dict(body: dict, field: str, *,
 
 
 __all__ = [
-    'BadRequest', 'parse_body', 'async_parse_body',
+    'BadRequest', 'parse_body', 'async_parse_body', 'decode_proxy_path_arg',
     'require_str', 'optional_str',
     'require_int', 'optional_int',
     'require_bool', 'optional_bool',

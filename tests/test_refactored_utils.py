@@ -194,9 +194,34 @@ class TestClampMaxTokens:
         assert _clamp_max_tokens('gpt-4o', 100000) == 32768
         assert _clamp_max_tokens('gemini-2.5-pro', 200000) == 65536
 
-    def test_unknown_model_passthrough(self):
+    def test_unknown_model_clamped_to_default(self):
+        """An unrecognised family is clamped to the conservative default
+        ceiling so the FIRST request doesn't over-ask and earn a 400."""
+        from lib.model_info import _DEFAULT_UNKNOWN_MAX_OUTPUT, _clamp_max_tokens
+        assert _clamp_max_tokens('unknown-model-xyz', 999999) == _DEFAULT_UNKNOWN_MAX_OUTPUT
+        # Below the default ceiling still passes through untouched.
+        assert _clamp_max_tokens('unknown-model-xyz', 4096) == 4096
+
+    def test_claude_not_swept_into_default(self):
+        """Claude is detectable but must keep its 128000 ceiling — NOT be
+        swept into the conservative unknown-family default. Long-form paths
+        deliberately pass max_tokens=128000 to Claude."""
         from lib.model_info import _clamp_max_tokens
-        assert _clamp_max_tokens('unknown-model-xyz', 999999) == 999999
+        assert _clamp_max_tokens('claude-sonnet-4-20250514', 128000) == 128000
+        assert _clamp_max_tokens('aws.claude-opus-4.6', 200000) == 128000
+
+    def test_learned_limit_still_takes_min_for_unknown(self):
+        """An auto-learned per-model limit must still lower an unknown model's
+        clamp below the default ceiling."""
+        import lib.model_info as mi
+        from lib.model_info import _clamp_max_tokens
+        saved = dict(mi._LEARNED_MODEL_LIMITS)
+        try:
+            mi._LEARNED_MODEL_LIMITS['unknown-model-xyz'] = 8000
+            assert _clamp_max_tokens('unknown-model-xyz', 999999) == 8000
+        finally:
+            mi._LEARNED_MODEL_LIMITS.clear()
+            mi._LEARNED_MODEL_LIMITS.update(saved)
 
     def test_qwen_variant_limits(self):
         from lib.model_info import _qwen_max_output

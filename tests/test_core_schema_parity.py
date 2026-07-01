@@ -46,6 +46,9 @@ from lib.database._core_schema import (
     SWARM_AGENTS as _SWARM_AGENTS,
     ORCHESTRATION_RUNS as _ORCHESTRATION_RUNS,
     ORCHESTRATION_RUN_EVENTS as _ORCHESTRATION_RUN_EVENTS,
+    PROJECT_EVENTS as _PROJECT_EVENTS,
+    PROJECT_CHARTER as _PROJECT_CHARTER,
+    PROJECT_TASKS as _PROJECT_TASKS,
     OPTIMIZER_PROPOSALS as _OPTIMIZER_PROPOSALS,
     OPTIMIZER_ACTION_LOG as _OPTIMIZER_ACTION_LOG,
     RATE_LIMIT_EVENTS as _RATE_LIMIT_EVENTS,
@@ -1161,6 +1164,94 @@ LIVE_SQLITE_ORCHESTRATION_RUN_EVENTS = """
     )
 """
 
+# project_events — composite PK (project_path, seq).
+LIVE_PG_PROJECT_EVENTS = """
+    CREATE TABLE project_events (
+        project_path TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        event_id TEXT NOT NULL DEFAULT '',
+        conv_id TEXT NOT NULL DEFAULT '',
+        task_id TEXT NOT NULL DEFAULT '',
+        kind TEXT NOT NULL DEFAULT 'note',
+        title TEXT NOT NULL DEFAULT '',
+        summary TEXT NOT NULL DEFAULT '',
+        payload TEXT NOT NULL DEFAULT '{}',
+        ts BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (project_path, seq)
+    )
+"""
+# project_charter — single TEXT PK (project_path), upsert semantics.
+LIVE_PG_PROJECT_CHARTER = """
+    CREATE TABLE project_charter (
+        project_path TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        decisions TEXT NOT NULL DEFAULT '[]',
+        updated_by_conv TEXT NOT NULL DEFAULT '',
+        updated_at BIGINT NOT NULL DEFAULT 0,
+        version INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (project_path)
+    )
+"""
+# project_tasks — coordination board; single TEXT PK (id).
+LIVE_PG_PROJECT_TASKS = """
+    CREATE TABLE project_tasks (
+        id TEXT NOT NULL,
+        project_path TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'open',
+        owner_conv_id TEXT NOT NULL DEFAULT '',
+        lease_expires_at BIGINT NOT NULL DEFAULT 0,
+        created_by_conv TEXT NOT NULL DEFAULT '',
+        depends_on TEXT NOT NULL DEFAULT '[]',
+        dispatched INTEGER NOT NULL DEFAULT 0,
+        created_at BIGINT NOT NULL DEFAULT 0,
+        updated_at BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (id)
+    )
+"""
+LIVE_SQLITE_PROJECT_TASKS = """
+    CREATE TABLE project_tasks (
+        id TEXT NOT NULL,
+        project_path TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'open',
+        owner_conv_id TEXT NOT NULL DEFAULT '',
+        lease_expires_at INTEGER NOT NULL DEFAULT 0,
+        created_by_conv TEXT NOT NULL DEFAULT '',
+        depends_on TEXT NOT NULL DEFAULT '[]',
+        dispatched INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (id)
+    )
+"""
+LIVE_SQLITE_PROJECT_CHARTER = """
+    CREATE TABLE project_charter (
+        project_path TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        decisions TEXT NOT NULL DEFAULT '[]',
+        updated_by_conv TEXT NOT NULL DEFAULT '',
+        updated_at INTEGER NOT NULL DEFAULT 0,
+        version INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (project_path)
+    )
+"""
+LIVE_SQLITE_PROJECT_EVENTS = """
+    CREATE TABLE project_events (
+        project_path TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        event_id TEXT NOT NULL DEFAULT '',
+        conv_id TEXT NOT NULL DEFAULT '',
+        task_id TEXT NOT NULL DEFAULT '',
+        kind TEXT NOT NULL DEFAULT 'note',
+        title TEXT NOT NULL DEFAULT '',
+        summary TEXT NOT NULL DEFAULT '',
+        payload TEXT NOT NULL DEFAULT '{}',
+        ts INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (project_path, seq)
+    )
+"""
+
 # optimizer_proposals — single PK; confidence is DOUBLE PRECISION/REAL.
 LIVE_PG_OPTIMIZER_PROPOSALS = """
     CREATE TABLE optimizer_proposals (
@@ -1424,6 +1515,18 @@ def test_orchestration_runs_parity():
 def test_orchestration_run_events_parity():
     _assert_parity(_ORCHESTRATION_RUN_EVENTS, LIVE_PG_ORCHESTRATION_RUN_EVENTS,
                    LIVE_SQLITE_ORCHESTRATION_RUN_EVENTS)
+
+
+def test_project_events_parity():
+    _assert_parity(_PROJECT_EVENTS, LIVE_PG_PROJECT_EVENTS, LIVE_SQLITE_PROJECT_EVENTS)
+
+
+def test_project_charter_parity():
+    _assert_parity(_PROJECT_CHARTER, LIVE_PG_PROJECT_CHARTER, LIVE_SQLITE_PROJECT_CHARTER)
+
+
+def test_project_tasks_parity():
+    _assert_parity(_PROJECT_TASKS, LIVE_PG_PROJECT_TASKS, LIVE_SQLITE_PROJECT_TASKS)
 
 
 def test_optimizer_proposals_parity():

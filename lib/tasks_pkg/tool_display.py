@@ -42,7 +42,6 @@ def _tool_display_web_search(fn_name, fn_args, tc_id, tc_args_str):
     """
     queries = fn_args.get('queries')
     if queries and isinstance(queries, list):
-        n = len(queries)
         full_list = []
         for s in queries:
             if isinstance(s, dict):
@@ -52,6 +51,13 @@ def _tool_display_web_search(fn_name, fn_args, tc_id, tc_args_str):
             else:
                 q = '?'
             full_list.append(q)
+        n = len(full_list)
+        # A single-element batch (common after the bare-string→array repair,
+        # or when the model wraps one query) reads as a plain single search —
+        # ``1 searches:`` is grammatically wrong and wastes a line.
+        if n == 1:
+            return full_list[0], {'toolName': 'web_search',
+                                  '_batchQueries': full_list}
         # One query per line so the frontend wraps long terms instead of
         # squashing them onto one elided line. Indent each line with "• "
         # so the count header reads naturally.
@@ -111,7 +117,6 @@ def _tool_display_fetch_url(fn_name, fn_args, tc_id, tc_args_str):
     """
     urls = fn_args.get('urls')
     if urls and isinstance(urls, list):
-        n = len(urls)
         full_list = []
         for s in urls:
             if isinstance(s, dict):
@@ -121,6 +126,16 @@ def _tool_display_fetch_url(fn_name, fn_args, tc_id, tc_args_str):
             else:
                 u = '?'
             full_list.append(u)
+        n = len(full_list)
+        # Single-element batch → plain single fetch (see web_search above).
+        if n == 1:
+            target_url = full_list[0]
+            is_pdf_hint = target_url.lower().rstrip('/').endswith('.pdf')
+            short = _short_url(target_url)
+            display_query = f'{"PDF " if is_pdf_hint else ""}{short}'
+            return target_url, {'toolName': 'fetch_url',
+                                '_display_query': display_query,
+                                '_batchUrls': full_list}
         lines = '\n'.join(f'• {u}' for u in full_list)
         display = f'{n} URLs:\n{lines}'
         return display, {
@@ -997,6 +1012,34 @@ def _resolve_tool_root_name(fn_name, fn_args, conv_id=None):
                 if rp == primary_path:
                     return rn
     return ''
+
+
+def tool_round_label(fn_name, fn_args):
+    """Return the human-readable tool-round label chat would render for a call.
+
+    Public, side-effect-free entry point over the same ``_tool_display_*``
+    dispatch table the chat orchestrator uses, so secondary agent surfaces
+    (paper report / Q&A) get IDENTICAL, string/dict-safe labels — including
+    the multi-line batch rendering (``N searches:\\n• …``) and the empty-list
+    guards — instead of reimplementing them. Prefers the richer
+    ``_display_query`` (multi-line) over the compact form when the handler
+    supplies one.
+
+    Args:
+        fn_name: Tool name.
+        fn_args: The DECODED + repaired arguments dict (run it through
+            ``lib.tool_input_repair.parse_and_repair_tool_args`` first).
+
+    Returns:
+        The display string. Falls back to the tool name on any handler error.
+    """
+    handler = _TOOL_DISPLAY_DISPATCH.get(fn_name, _tool_display_generic)
+    try:
+        display_query, extra = handler(fn_name, fn_args, '', '')
+    except Exception as e:
+        logger.warning('[ToolDisplay] tool_round_label handler for %s raised: %s', fn_name, e)
+        return fn_name
+    return extra.get('_display_query', display_query)
 
 
 def _build_tool_round_entry(fn_name, fn_args, tc_id, tc_args_str, tool_round_num,

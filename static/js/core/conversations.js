@@ -304,6 +304,13 @@ async function syncConversationToServer(conv, { allowTruncate = false } = {}) {
        *   Without this, Case E is skipped for shell convs → orphan stuck forever. */
       lastMsgRole: lastMsg?.role || null,
       lastMsgTimestamp: lastMsg?.timestamp || null,
+      /* ★ Preserve the human-only autopilot run-record sidecar across the
+       * full-conv PUT. Each record carries the concluded status/reason + the
+       * optional close-out report. The PUT rebuilds the entire settings column
+       * from this whitelist, so omitting this would clobber a backend-written
+       * record on the next sync. The autopilot_run_concluded SSE event (and the
+       * disarm response) populate conv.autopilotSummaries BEFORE this sync. */
+      ...(conv.autopilotSummaries ? { autopilotSummaries: conv.autopilotSummaries } : {}),
     };
     /* ★ FIX: Pre-send staleness check — if conv.messages grew since lightMsgs
      * was captured (due to sendMessage/startAssistantResponse running while we
@@ -400,6 +407,8 @@ function _applySettingsToConv(conv, settings) {
     conv.humanGuidanceEnabled = settings.humanGuidanceEnabled;
   if (settings.imageGenModel)
     conv.imageGenModel = settings.imageGenModel;
+  if (settings.projectSummary !== undefined)
+    conv.projectSummary = settings.projectSummary;
   if (settings.projectPath !== undefined)
     conv.projectPath = settings.projectPath;
   if (settings.projectPaths !== undefined)
@@ -413,6 +422,11 @@ function _applySettingsToConv(conv, settings) {
   if (settings.folderId !== undefined) conv.folderId = settings.folderId;
   if (settings.source) conv.source = settings.source;
   if (settings.feishuUser) conv.feishuUser = settings.feishuUser;
+  /* ★ Autopilot run summaries — human-only sidecar (runId → {content,
+   * translatedContent?, ts}). NOT chat messages; rendered as the run fold's
+   * read-only report panel. Round-trips via the settings column. */
+  if (settings.autopilotSummaries !== undefined)
+    conv.autopilotSummaries = settings.autopilotSummaries;
   /* ★ Persist last message info for Case E orphan detection on _needsLoad shells */
   if (settings.lastMsgRole) conv.lastMsgRole = settings.lastMsgRole;
   if (settings.lastMsgTimestamp) conv.lastMsgTimestamp = settings.lastMsgTimestamp;

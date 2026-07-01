@@ -21,6 +21,71 @@ const _myday = {
   _costDays: {},       // { dayNum: {cost, conversations} } — server-side cost data per day
 };
 
+/* ═══════ Persistent per-day report cache (IndexedDB) ═══════
+   The server is the SOURCE OF TRUTH; this is a local READ cache only, so a
+   reopen / day-click paints INSTANTLY from cache and then revalidates against
+   the server in the background.  Mirrors the idb-cache.js pattern (read-through
+   + write-after-server-confirms).  Falls back gracefully when IDB is
+   unavailable — callers just get null and hit the network as before. */
+const _mydayIDB = (function () {
+  const DB_NAME = 'tofu_myday_cache';
+  const STORE = 'reports';
+  const VER = 1;
+  let _dbp = null;
+  function _open() {
+    if (_dbp) return _dbp;
+    _dbp = new Promise((resolve) => {
+      try {
+        if (typeof indexedDB === 'undefined') { resolve(null); return; }
+        const rq = indexedDB.open(DB_NAME, VER);
+        rq.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'date' });
+        };
+        rq.onsuccess = (e) => resolve(e.target.result);
+        rq.onerror = () => { console.warn('[MyDay] report cache open failed'); resolve(null); };
+      } catch (e) { console.warn('[MyDay] report cache init error:', e && e.message); resolve(null); }
+    });
+    return _dbp;
+  }
+  function get(date) {
+    return _open().then((db) => {
+      if (!db) return null;
+      return new Promise((resolve) => {
+        try {
+          const rq = db.transaction(STORE, 'readonly').objectStore(STORE).get(date);
+          rq.onsuccess = () => resolve(rq.result ? rq.result.report : null);
+          rq.onerror = () => resolve(null);
+        } catch (e) { resolve(null); }
+      });
+    });
+  }
+  function put(date, report) {
+    return _open().then((db) => {
+      if (!db) return;
+      return new Promise((resolve) => {
+        try {
+          const tx = db.transaction(STORE, 'readwrite');
+          tx.objectStore(STORE).put({ date: date, report: report, cachedAt: Date.now() });
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        } catch (e) { resolve(); }
+      });
+    });
+  }
+  return { get: get, put: put };
+})();
+
+/* Set both the in-memory + persistent cache from an authoritative server
+   report.  Every place that receives a fresh full report routes through here
+   so the IDB copy stays in lockstep with what the server returned. */
+function _mydaySetCache(dateStr, report) {
+  if (!report) return;
+  report._full = true;
+  _myday.cache[dateStr] = report;
+  try { _mydayIDB.put(dateStr, report); } catch (e) { /* cache is optional */ }
+}
+
 function openDailyReport() {
   const modal = document.getElementById('dailyReportModal');
   modal.classList.add('open');
@@ -247,37 +312,54 @@ async function _mydaySelectDay(day) {
     return;
   }
 
-  // Check cache first — if we have a full report, show it
+  // ── INSTANT PAINT ──
+  // 1) In-memory full report → render immediately, still revalidate below.
+  // 2) Else IndexedDB (survives page reload) → paint from cache, then reconcile.
+  // 3) Else skeleton. The first paint NEVER blocks on the network.
+  let painted = false;
   if (_myday.cache[dateStr] && _myday.cache[dateStr]._full) {
     _mydayRenderTasks(_myday.cache[dateStr]);
-    return;
+    painted = true;
+  } else {
+    try {
+      const cachedReport = await _mydayIDB.get(dateStr);
+      // Guard: the user may have clicked another day while IDB read was in flight.
+      if (cachedReport && _myday.selectedDateStr === dateStr) {
+        cachedReport._full = true;
+        _myday.cache[dateStr] = cachedReport;
+        _mydayRenderTasks(cachedReport);
+        painted = true;
+      }
+    } catch (e) { console.warn('[MyDay] report cache read failed:', e); }
   }
+  if (!painted && _myday.selectedDateStr === dateStr) _mydayShowSkeleton();
 
-  // Check server for existing report or running job
-  _mydayShowSkeleton();
+  // ── BACKGROUND REVALIDATE ──
+  // Reconcile the (possibly cached) view with the server's authoritative state.
   try {
     const data = await Api.daily.status(dateStr);
+    if (_myday.selectedDateStr !== dateStr) return; // user navigated away
     if (data) {
       if (data.status === 'done' && data.report) {
-        data.report._full = true;
-        _myday.cache[dateStr] = data.report;
-        if (_myday.selectedDateStr === dateStr) _mydayRenderTasks(data.report);
+        _mydaySetCache(dateStr, data.report);
+        _mydayRenderTasks(data.report);
         return;
       }
       if (data.status === 'generating') {
         // Already running on server — start polling
         _mydayStartPolling(dateStr);
-        if (_myday.selectedDateStr === dateStr)
-          _mydayShowProgressUI(dateStr, data.progress);
+        _mydayShowProgressUI(dateStr, data.progress);
         return;
       }
     }
+    // Server says idle/no-report. If we painted from cache, KEEP that view
+    // (a stale cached report still beats a blank prompt); otherwise prompt.
+    if (!painted) _mydayRenderWaiting(dateStr);
   } catch (e) {
     console.warn('[MyDay] Status check failed:', e);
+    // Offline / error: keep the cached paint; only prompt if we had nothing.
+    if (!painted && _myday.selectedDateStr === dateStr) _mydayRenderWaiting(dateStr);
   }
-
-  // Nothing cached, nothing running → show waiting/generate prompt
-  if (_myday.selectedDateStr === dateStr) _mydayRenderWaiting(dateStr);
 }
 
 /* ═══════ Header update ═══════ */
@@ -395,8 +477,7 @@ function _mydayStartPolling(dateStr) {
       if (data.status === 'done') {
         _mydayStopPolling(dateStr);
         if (data.report) {
-          data.report._full = true;
-          _myday.cache[dateStr] = data.report;
+          _mydaySetCache(dateStr, data.report);
         }
         // Refresh display if user is viewing this date
         if (_myday.selectedDateStr === dateStr) {
@@ -533,8 +614,7 @@ async function _mydayTriggerGenerate() {
 
     if (data.status === 'done' && data.report) {
       // Already cached — instant result
-      data.report._full = true;
-      _myday.cache[dateStr] = data.report;
+      _mydaySetCache(dateStr, data.report);
       if (_myday.selectedDateStr === dateStr) _mydayRenderTasks(data.report);
       if (refreshBtn) refreshBtn.classList.remove('spinning');
       _mydayRenderCalendar();
@@ -570,8 +650,7 @@ async function _mydayTriggerGenerateForDate(dateStr, force) {
     const data = await resp.json();
 
     if (data.status === 'done' && data.report) {
-      data.report._full = true;
-      _myday.cache[dateStr] = data.report;
+      _mydaySetCache(dateStr, data.report);
       if (_myday.selectedDateStr === dateStr) _mydayRenderTasks(data.report);
       if (refreshBtn) refreshBtn.classList.remove('spinning');
       _mydayRenderCalendar();
@@ -852,6 +931,7 @@ async function _mydayToggleStreamStatus(streamId) {
     if (body && body.ok && body.status) {
       stream.status = body.status;
       if (body.status === 'done') stream.remaining = null;
+      try { _mydayIDB.put(dateStr, cached); } catch (e) { /* cache optional */ }
     } else {
       console.warn('[MyDay] Stream status toggle failed:', resp && resp.status);
       stream.status = oldStatus;
@@ -887,6 +967,8 @@ async function _mydayToggleTodo(todoId) {
       console.warn('[MyDay] Todo toggle failed:', resp && resp.status);
       item.done = !newDone;
       _mydayRenderTasks(cached);
+    } else {
+      try { _mydayIDB.put(dateStr, cached); } catch (e) { /* cache optional */ }
     }
   } catch (e) {
     console.warn('[MyDay] Todo toggle error:', e);
@@ -967,8 +1049,7 @@ async function _mydayAddTodo() {
     if (!resp || !resp.ok) throw new Error(`HTTP ${resp ? resp.status : 'no response'}`);
     const data = await resp.json();
     if (data.report) {
-      data.report._full = true;
-      _myday.cache[dateStr] = data.report;
+      _mydaySetCache(dateStr, data.report);
       _mydayRenderTasks(data.report);
     }
   } catch (e) {
@@ -987,8 +1068,7 @@ async function _mydayDeleteTask(taskId) {
     if (!resp || !resp.ok) throw new Error(`HTTP ${resp ? resp.status : 'no response'}`);
     const data = await resp.json();
     if (data.report) {
-      data.report._full = true;
-      _myday.cache[dateStr] = data.report;
+      _mydaySetCache(dateStr, data.report);
       _mydayRenderTasks(data.report);
     }
   } catch (e) {

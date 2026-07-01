@@ -73,6 +73,107 @@ def _fuzzy_todo_match(text_a, text_b, threshold=0.35):
     return False
 
 
+def _merge_manual_state(result, existing):
+    """Preserve the user's manual edits across a report REGENERATION.
+
+    A regenerated report is a fresh LLM analysis; without this merge it
+    silently clobbers three kinds of user-owned state that the manual-edit
+    endpoints persisted into the previous report JSON:
+
+      1. **Manual stream status overrides** — ``update_task_status`` stamps
+         ``_manual=True`` + a cycled status onto a stream. Streams get a
+         brand-new ``stream-<uuid>`` id on every regen, so there is no stable
+         id to match on; we fuzzy-match by title (the pragmatic identity for
+         an LLM-derived work-stream) and carry the status + ``_manual`` flag.
+      2. **TODO check-off state** — ``toggle_tomorrow_todo`` sets ``done`` on a
+         ``tomorrow[]`` item. The fresh analysis rebuilds ``tomorrow[]`` from
+         scratch, so we fuzzy-match text and carry ``done`` forward.
+      3. **Manually-added TODOs** — ``add_manual_task`` appends a ``_manual``
+         item to ``tomorrow[]``. If the new analysis didn't re-propose it, we
+         re-append it verbatim (preserving its id / done / ``_manual``).
+
+    Also preserves legacy ``tasks[]`` manual todos (``_todo``) — the merge the
+    route handlers used to do ad-hoc, now centralized here so every caller of
+    ``_analyse_conversations`` (POST / backfill / async generator) gets it.
+
+    Mutates and returns ``result`` in place. No-op when ``existing`` is falsy.
+    """
+    if not existing or not isinstance(existing, dict):
+        return result
+
+    # 1) Manual stream status overrides.
+    #    Identity is conv_ids overlap FIRST (the stable identity — the same
+    #    conversations grouped together is the same work stream, regardless of
+    #    how the LLM reworded the title on regen), with a strict normalized
+    #    title match as fallback for streams that carry no conv_ids. We do NOT
+    #    use the loose CJK fuzzy matcher here — it would bleed an override onto
+    #    an unrelated stream (false positives on short/latin titles).
+    manual_streams = [s for s in existing.get('streams', [])
+                      if isinstance(s, dict) and s.get('_manual')]
+    if manual_streams:
+        for new_s in result.get('streams', []):
+            new_ids = set(new_s.get('conv_ids') or [])
+            new_title_n = _normalize_todo_text(new_s.get('title', ''))
+            for old_s in manual_streams:
+                old_ids = set(old_s.get('conv_ids') or [])
+                old_title_n = _normalize_todo_text(old_s.get('title', ''))
+                matched = False
+                if new_ids and old_ids:
+                    matched = bool(new_ids & old_ids)
+                elif new_title_n and old_title_n:
+                    matched = (new_title_n == old_title_n)
+                if matched:
+                    new_s['status'] = old_s.get('status', new_s.get('status'))
+                    new_s['_manual'] = True
+                    if new_s['status'] == 'done':
+                        new_s['remaining'] = None
+                    break
+
+    old_tomorrow = [t for t in existing.get('tomorrow', []) if isinstance(t, dict)]
+    new_tomorrow = result.setdefault('tomorrow', [])
+
+    def _same_todo(a, b):
+        """Strict TODO identity: normalized equality or containment (len>3).
+
+        Deliberately stricter than ``_fuzzy_todo_match`` — for state
+        PRESERVATION a false positive (marking an unrelated item done, or
+        swallowing a manual TODO) is worse than a false negative (losing one
+        edit), so we avoid the Jaccard/LCS signals that trip on short latin text.
+        """
+        na, nb = _normalize_todo_text(a), _normalize_todo_text(b)
+        if not na or not nb:
+            return False
+        if na == nb:
+            return True
+        return len(na) > 3 and len(nb) > 3 and (na in nb or nb in na)
+
+    # 2) Carry done-state onto matching new TODO items.
+    done_texts = [t.get('text', '') for t in old_tomorrow if t.get('done')]
+    if done_texts:
+        for new_t in new_tomorrow:
+            nt_text = new_t.get('text', '')
+            if any(_same_todo(nt_text, dt) for dt in done_texts):
+                new_t['done'] = True
+
+    # 3) Re-append manually-added TODOs the fresh analysis didn't re-propose.
+    new_texts = [t.get('text', '') for t in new_tomorrow]
+    for old_t in old_tomorrow:
+        if not old_t.get('_manual'):
+            continue
+        ot_text = old_t.get('text', '')
+        if any(_same_todo(ot_text, nt) for nt in new_texts):
+            continue  # LLM already re-proposed an equivalent item
+        new_tomorrow.append(dict(old_t))  # preserve id + done + _manual
+
+    # 4) Legacy manual tasks[] (``_todo``).
+    manual_tasks = [t for t in existing.get('tasks', [])
+                    if isinstance(t, dict) and t.get('_todo')]
+    if manual_tasks:
+        result.setdefault('tasks', []).extend(manual_tasks)
+
+    return result
+
+
 def _get_yesterday_carryover(target_date, _prev=None):
     """Load yesterday's unfinished TODO items and blocked streams.
 

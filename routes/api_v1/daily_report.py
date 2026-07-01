@@ -138,14 +138,10 @@ async def generate_daily_report():
         }
         return jsonify(empty_result)
 
+    # Manual-state preservation (status overrides, TODO check-offs, manual
+    # TODOs, legacy _todo tasks) is centralized in _analyse_conversations →
+    # _merge_manual_state, so POST / backfill / async generator all inherit it.
     result = _analyse_conversations(convs, target_date)
-
-    # Merge manual tasks from existing report if any
-    existing = _load_report(target_date)
-    if existing and existing.get('tasks'):
-        manual_tasks = [t for t in existing['tasks'] if t.get('_todo')]
-        if manual_tasks:
-            result.setdefault('tasks', []).extend(manual_tasks)
 
     # Persist if analysis succeeded
     if (result.get('streams') or result.get('tomorrow')) and not result.get('error'):
@@ -613,6 +609,9 @@ async def add_manual_task():
         'id': todo_id,
         'text': task_text[:60],
         'done': False,
+        # Mark as user-authored so a report regeneration preserves it
+        # (see lib/daily_report/todos.py::_merge_manual_state).
+        '_manual': True,
     })
     _save_report(date_str, report)
     logger.info('[DailyReport] TODO added to %s: %s (id=%s)', date_str, task_text[:60], todo_id)

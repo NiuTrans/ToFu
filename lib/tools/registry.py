@@ -842,12 +842,37 @@ def _build_image_gen(ctx: ToolContext) -> list[dict]:
 
 
 def _build_conv_ref(ctx: ToolContext) -> list[dict]:
-    # Only when the user @-mentioned a conversation AND some base tool exists.
-    if ctx.has_conv_ref and ctx.current_count > 0:
+    # CONV_REF_TOOLS = [list_conversations, get_conversation] — BOTH are
+    # read-only (discover siblings + open one). Register them in two cases:
+    #   (a) the user @-mentioned a conversation (the classic explicit path), OR
+    #   (b) we're in project mode — the always-on cross-conv digest
+    #       (system_context.py ★4.4) names sibling conversations for ambient
+    #       awareness, so the model must be ABLE to open a surfaced sibling
+    #       rather than being told about phantom tools. Gating only on
+    #       has_conv_ref meant the digest header advertised tools absent from
+    #       the schema on a plain project turn (the conv_tools_available
+    #       branch). Registering them in project mode closes that gap.
+    # Both branches require at least one base tool (current_count > 0): with no
+    # tools at all there's no schema to extend.
+    if ctx.current_count <= 0:
+        return []
+    if ctx.has_conv_ref or (ctx.project_enabled and ctx.project_path):
         from lib.tools import CONV_REF_TOOLS
-        logger.debug('[Task %s] 💬 Conversation @mention detected — conv_ref '
-                     'tools enabled', ctx.tid)
-        return list(CONV_REF_TOOLS)
+        logger.debug('[Task %s] 💬 conv_ref tools enabled (has_conv_ref=%s '
+                     'project=%s)', ctx.tid, ctx.has_conv_ref,
+                     bool(ctx.project_enabled and ctx.project_path))
+        tools = list(CONV_REF_TOOLS)
+        # Project Charter tools (Pillar #2): the shared north star. Only in
+        # project mode (a charter is per-project) — read + propose. Commit is
+        # human-gated and is NEVER exposed as an agent tool.
+        if ctx.project_enabled and ctx.project_path:
+            from lib.tools import BOARD_TOOLS, CHARTER_TOOLS
+            tools += list(CHARTER_TOOLS)
+            # Project Board tools (Pillar #3): the coordination board — the
+            # mechanism that makes conversations auto-coordinate (claim/avoid
+            # duplicating). Project-scoped, same gate.
+            tools += list(BOARD_TOOLS)
+        return tools
     return []
 
 

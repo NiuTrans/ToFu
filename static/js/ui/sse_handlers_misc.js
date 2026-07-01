@@ -210,6 +210,8 @@ function _handlePreferencesApplied(ev, c) {
       assistantMsg._preferencesApplied = {
         chars: ev.chars || 0,
         items: Array.isArray(ev.items) ? ev.items : [],
+        core: Array.isArray(ev.core) ? ev.core : undefined,
+        detail: Array.isArray(ev.detail) ? ev.detail : undefined,
       };
       if (buf) buf._preferencesApplied = assistantMsg._preferencesApplied;
       twUpdate(convId);

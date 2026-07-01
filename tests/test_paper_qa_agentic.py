@@ -174,9 +174,9 @@ def test_engine_triggers_web_search_for_external_question():
         ('The most cited follow-up is the Vision Transformer (ICLR 2021).', []),
     ])
 
-    def _fake_tool(name, args, user_question=''):
+    def _fake_tool(name, args, user_question='', abort=None):
         tool_calls_seen.append(name)
-        return ('Search results: ViT, Reformer, Performer …', [{'title': 'ViT'}], None)
+        return ('Search results: ViT, Reformer, Performer …', [{'title': 'ViT'}], None, None, None)
 
     qe._execute_report_tool = _fake_tool
     try:
@@ -210,7 +210,7 @@ def test_engine_discards_interim_draft_with_tool_call():
                                                      'arguments': '{"query":"x"}'}}]),
         ('FINAL ANSWER.', []),
     ])
-    qe._execute_report_tool = lambda *a, **k: ('results', [], None)
+    qe._execute_report_tool = lambda *a, **k: ('results', [], None, None, None)
     try:
         task = _new_qa_task('qa_t3', 'abcdef0000000000000000000000aa12', 'en', None,
                             question='q')
@@ -286,8 +286,8 @@ def test_qa_http_endpoints_wired():
             r3 = await client.get('/api/v1/paper/qa/poll?task_id=nope&cursor=0')
             assert r3.status_code == 404
 
-            # abort unknown → 404
-            r4 = await client.post('/api/v1/paper/qa/abort', json={'task_id': 'nope'})
+            # abort unknown → 404 (factory-minted route: task_id is a path segment)
+            r4 = await client.post('/api/v1/paper/qa/abort/nope')
             assert r4.status_code == 404
 
     try:

@@ -340,6 +340,20 @@ function _buildSwarmPanelHTML(round, allRounds) {
     statusPill = `<span class="sw-status-pill sw-pill-async" title="Sub-agents are still working in the background — updates arrive automatically as the conversation continues."><span class="sw-async-dot"></span>${n} running async</span>`;
   } else if (failed > 0 && done === 0) {
     statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} Failed</span>`;
+  } else if (finished === 0 && total > 0
+             && !(round._swarmSnapshot && round._swarmSnapshot.settled)) {
+    /* No agent has reported a terminal result (done/failed) AND we have no
+       authoritative settled snapshot. This is a reloaded-but-still-running
+       panel whose live `_swarmActive` flag was lost, OR one the reconciler
+       just settled (which sets _swarmEndTime but leaves unreported agents
+       `unknown`): the agents are in `unknown`/`pending` limbo (e.g. wedged on
+       upstream gateway 500s), NOT finished. Rendering a green "Complete" here
+       is the false-positive that contradicts the per-agent "No result" cards.
+       NOTE: this must NOT also require `!_swarmEndTime` — _settleStuckSwarmRound
+       freezes _swarmEndTime, so gating on it would let a reconciled all-unknown
+       panel fall through to the green "Complete" else-branch. Show
+       "Unconfirmed" instead. */
+    statusPill = `<span class="sw-status-pill sw-pill-stale" title="This panel was reloaded while its agents were still working and lost its live connection; no agent has reported a final result yet. It will reconcile automatically when the server is reachable.">${_SW_STATUS_SVG.stale} Unconfirmed</span>`;
   } else {
     statusPill = `<span class="sw-status-pill sw-pill-done">${_SW_STATUS_SVG.done} Complete</span>`;
   }

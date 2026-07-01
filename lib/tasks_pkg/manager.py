@@ -69,7 +69,23 @@ tasks_lock = _chat_runtime._lock  # type: ignore[attr-defined]
 _conv_latest_task = {}   # conv_id → task_id
 _conv_latest_task_lock = threading.Lock()
 
-def create_task(conv_id, messages, config):
+def create_task(conv_id, messages, config, *, supersede=True):
+    """Create (and register) a chat task.
+
+    ``supersede`` (default True) makes superseding the INVARIANT of task
+    creation: after registering as the conversation's latest task, any OTHER
+    still-running task for the same ``conv_id`` is force-aborted (via
+    ``abort_running_tasks_for_conv``). This is the single source of truth for
+    the "a new task supersedes the old one" rule — every background path that
+    creates a task (queue ``dispatch_next_queued``, scheduler/proactive/timer
+    ``inject_and_run_task``) is automatically covered, instead of each entry
+    point having to remember to call the abort sweep.
+
+    Pass ``supersede=False`` for a DELIBERATE concurrency axis that must run
+    alongside its siblings under the same conv_id — currently only
+    ``chat_branch_start`` (a branch is an intentional parallel turn and must
+    NOT abort the main task or sibling branches).
+    """
     task_id = str(uuid.uuid4())
     # ── Extract the user's original question from the last user message ──
     # This is passed to the content filter alongside the search query so
@@ -156,12 +172,66 @@ def create_task(conv_id, messages, config):
         logger.debug('[Task %s] profile scope resolve failed: %s', task_id[:8], e)
         task['_profileScope'] = ''
 
+    # ★ Project-brain Activity Feed: a 'started' pulse, EXCEPT for autopilot
+    #   follow-up turns (config.autopilotRunId set) — a deep autopilot run is
+    #   dozens of tasks and would flood the feed; those collapse to a single
+    #   'run_concluded' event at run close-out (autopilot._emit_run_concluded).
+    #   Best-effort: emit_project_event never raises, but guard the lookup too
+    #   so feed wiring can NEVER break task creation.
+    try:
+        _cfg = config or {}
+        _proj = (_cfg.get('projectPath') or '').strip()
+        if _proj and conv_id and not (_cfg.get('autopilotRunId') or '').strip():
+            from lib.conversations.project_feed import emit_project_event
+            emit_project_event(
+                _proj, conv_id, 'started',
+                (last_user_query or '').strip() or 'New turn started',
+                task_id=task_id)
+    except Exception as e:
+        logger.debug('[Task %s] project-feed started emit skipped: %s',
+                     task_id[:8], e)
+
     # ★ Register as the LATEST task for this conversation — freshness guard
     if conv_id:
         with _conv_latest_task_lock:
             _conv_latest_task[conv_id] = task_id
+        # ★ Supersede invariant (see docstring): abort any other running task
+        #   for this conv so "a new task replaced the old one without aborting
+        #   it" is structurally impossible. Registered as latest FIRST so the
+        #   superseded tasks' freshness guard classifies their late writes as
+        #   expected (superseded_by_new_task), not as the unexpected-WARNING
+        #   never-aborted branch. Best-effort: never let it break creation.
+        if supersede:
+            try:
+                abort_running_tasks_for_conv(conv_id, exclude_task_id=task_id)
+            except Exception as e:
+                logger.warning('[Task %s] supersede abort sweep failed: %s',
+                               task_id[:8], e, exc_info=True)
     logger.info('[Task %s] Created for conv=%s lastUserQuery=%r', task_id[:8], conv_id, last_user_query[:80])
     return task
+
+
+def discard_task(task_id: str, conv_id: str | None = None) -> None:
+    """Remove a non-streaming carrier/holder task from the active registry.
+
+    Some flows use ``create_task`` purely as a message container for a
+    synchronous reporter sub-turn (e.g. ``autopilot.summarize_run``) — the
+    carrier is NEVER spawned and NEVER reaches a terminal status, so it would
+    otherwise linger forever as a phantom ``status='running'`` row that
+    ``/api/chat/active`` reports and the frontend orphan-recovery turns into a
+    permanently-stuck "Waiting…" placeholder. (TTL cleanup only evicts
+    done/error/aborted tasks, so a never-finalized carrier is immortal.)
+
+    This drops the task from ``tasks`` AND clears any ``_conv_latest_task``
+    entry it claimed, so the carrier is invisible to every reconnect path. Safe
+    to call unconditionally (idempotent, best-effort).
+    """
+    with tasks_lock:
+        tasks.pop(task_id, None)
+    if conv_id:
+        with _conv_latest_task_lock:
+            if _conv_latest_task.get(conv_id) == task_id:
+                del _conv_latest_task[conv_id]
 
 def abort_running_tasks_for_conv(conv_id: str, exclude_task_id: str | None = None) -> int:
     """Abort all running tasks for a conversation, except the excluded one.
@@ -174,6 +244,7 @@ def abort_running_tasks_for_conv(conv_id: str, exclude_task_id: str | None = Non
     new task and may overwrite the conversation with stale content.
     """
     aborted = 0
+    _aborted_tasks = []
     with tasks_lock:
         for tid, t in tasks.items():
             if (t.get('convId') == conv_id
@@ -184,6 +255,7 @@ def abort_running_tasks_for_conv(conv_id: str, exclude_task_id: str | None = Non
                 t['_abort_timestamp'] = time.time()
                 t['_abort_reason'] = 'superseded_by_new_task'
                 aborted += 1
+                _aborted_tasks.append(t)
                 logger.info(
                     '[Task %s] conv=%s ⚠️ AUTO-ABORTED: superseded by new task %s — '
                     'content=%dchars elapsed=%.1fs',
@@ -203,10 +275,50 @@ def abort_running_tasks_for_conv(conv_id: str, exclude_task_id: str | None = Non
                            elapsed_s=round(time.time() - t.get('created_at', time.time()), 2))
                 except Exception as _aerr:
                     logger.debug('[Manager] audit_log task_abort failed: %s', _aerr)
+    # ★ Zombie-task terminal floor (outside tasks_lock — this does DB I/O).
+    #   An aborted task normally reaches a terminal task_results row only when
+    #   ITS OWN thread runs finalize/persist. A thread that is wedged (e.g. a
+    #   stream that never received a token, 0 events for hours) never gets
+    #   there, so on a server restart (in-memory tasks cleared) a poll finds
+    #   neither memory nor DB → 404 and the user loses the turn. Writing an
+    #   aborted floor NOW guarantees a durable terminal state regardless of
+    #   whether the thread ever unwedges. Idempotent: if the thread later does
+    #   finalize, persist_task_result overwrites this floor with the real
+    #   final content/status (last-writer-wins, keyed on task_id).
+    for _t in _aborted_tasks:
+        _write_aborted_terminal_floor(_t)
     if aborted:
         logger.info('[Manager] conv=%s Auto-aborted %d stale task(s) before starting new task %s',
                     conv_id[:8], aborted, (exclude_task_id or '?')[:8])
     return aborted
+
+
+def _write_aborted_terminal_floor(task) -> None:
+    """Persist a terminal ``status='aborted'`` row to ``task_results`` for a
+    just-aborted task, so a later poll (even after a restart that cleared the
+    in-memory registry) resolves to a terminal state instead of a 404.
+
+    Best-effort and idempotent — reuses the shared ``_upsert_task_row`` (keyed
+    on task_id), so a subsequent real finalize by the task's own thread simply
+    overwrites this floor with the authoritative final content/status. Only the
+    partial content accumulated so far is written; that is strictly better than
+    losing the turn to a 404.
+    """
+    try:
+        conv_id = task.get('convId', '') or ''
+        tr_json = (None if _tool_rounds_have_dedicated_home(task)
+                   else json.dumps(_merge_tool_rounds(task), ensure_ascii=False))
+        meta = build_result_meta(task)
+        meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
+        error_json = _err_to_json(task['error']) if task.get('error') is not None else None
+        _upsert_task_row(task, conv_id, content=task.get('content') or '',
+                         thinking=task.get('thinking') or '', status='aborted',
+                         error_json=error_json, tr_json=tr_json, meta_json=meta_json)
+        logger.debug('[Task %s] conv=%s Wrote aborted terminal floor to task_results',
+                     task['id'][:8], conv_id[:8])
+    except Exception as e:
+        logger.warning('[Task %s] Failed to write aborted terminal floor: %s',
+                       task.get('id', '?')[:8], e, exc_info=True)
 
 
 def _assign_message_ids(messages):
@@ -546,7 +658,8 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
         'task_id': task['id'], 'conv_id': conv_id,
         'content': content, 'thinking': thinking,
         'error': error_json, 'status': status, 'tool_rounds': tr_json,
-        'metadata': meta_json, 'created_at': int(task['created_at'] * 1000),
+        'metadata': meta_json,
+        'created_at': int(task.get('created_at', time.time()) * 1000),
         'completed_at': int(time.time() * 1000),
     }, insert_cols=list(_TASK_RESULTS_COLS), retry=True)
 
@@ -1490,7 +1603,16 @@ def recover_stale_tasks_on_startup():
             "SELECT task_id, conv_id, content, thinking FROM task_results WHERE status='running'"
         ).fetchall()
 
+        # conv_id → task_id of the interrupted task carrying the MOST recovered
+        # text.  task_results.conv_id is BACKEND-AUTHORITATIVE (create_task stamps
+        # it), unlike the frontend-synced settings.activeTaskId which is null/stale
+        # after a mid-stream crash (the PUT that persists it may never have landed).
+        # Keying the merge off THIS map is what lets a crash-interrupted turn be
+        # recovered into conversations.messages even when activeTaskId was lost —
+        # the root fix for "Continue starts a brand-new agent from scratch".
+        interrupted_task_by_conv = {}
         if stale_rows:
+            _best_recovered_len = {}
             for row in stale_rows:
                 tid = row['task_id']
                 cid = row['conv_id'] or ''
@@ -1499,41 +1621,72 @@ def recover_stale_tasks_on_startup():
                 logger.info('[Startup] Marking stale task %s (conv=%s) as interrupted: '
                             'content=%dchars thinking=%dchars',
                             tid[:8], cid[:8], clen, tlen)
+                if cid:
+                    _tot = clen + tlen
+                    if _tot >= _best_recovered_len.get(cid, -1):
+                        _best_recovered_len[cid] = _tot
+                        interrupted_task_by_conv[cid] = tid
             db.execute("UPDATE task_results SET status='interrupted' WHERE status='running'")
             db.commit()
-            logger.info('[Startup] Marked %d stale running task(s) as interrupted', len(stale_rows))
+            logger.info('[Startup] Marked %d stale running task(s) as interrupted '
+                        '(%d owning conv(s) identified via task_results.conv_id)',
+                        len(stale_rows), len(interrupted_task_by_conv))
 
-        # ── Step 2: Clear activeTaskId from all conversation settings ──
-        # Find conversations that still have activeTaskId set. json_extract is
-        # translated to `settings::jsonb->>'activeTaskId'` on PG (index-backed by
-        # idx_conv_active_task) and runs natively on SQLite — both backends probe
-        # the JSON key directly instead of a leading-wildcard full-table scan.
+        # ── Step 2+3: Merge recovered content into conversations + clear stale
+        #    activeTaskId.  Drive off TWO sources, UNIONed by conv_id:
+        #      (a) conversations still carrying settings.activeTaskId — clear the
+        #          now-dead pointer (json_extract is index-backed on PG via
+        #          idx_conv_active_task and native on SQLite).
+        #      (b) conversations that OWN an interrupted task via
+        #          task_results.conv_id — AUTHORITATIVE; recovers the turn even
+        #          when activeTaskId was never persisted (the mid-stream-crash
+        #          case that used to orphan the interrupted content entirely).
         conv_rows = db.execute(
             "SELECT id, settings, messages FROM conversations WHERE user_id=1 "
             "AND json_extract(settings, '$.activeTaskId') IS NOT NULL"
         ).fetchall()
+        conv_by_id = {r['id']: r for r in conv_rows}
+
+        _missing_ids = [c for c in interrupted_task_by_conv if c not in conv_by_id]
+        if _missing_ids:
+            _ph = ','.join('?' for _ in _missing_ids)
+            for r in db.execute(
+                "SELECT id, settings, messages FROM conversations WHERE user_id=1 "
+                f"AND id IN ({_ph})", tuple(_missing_ids)
+            ).fetchall():
+                conv_by_id[r['id']] = r
+            logger.info('[Startup] %d interrupted-owning conv(s) had NO activeTaskId '
+                        '(recovered via task_results.conv_id): %s',
+                        len(_missing_ids), [c[:8] for c in _missing_ids])
 
         cleared = 0
-        for crow in conv_rows:
-            cid = crow['id']
+        for cid, crow in conv_by_id.items():
             try:
                 settings = json.loads(crow['settings'] or '{}')
             except (json.JSONDecodeError, TypeError) as _e_audit:
                 logger.debug('[manager] recover_stale_tasks_on_startup caught %s: %s', type(_e_audit).__name__, _e_audit)
                 continue
             atid = settings.get('activeTaskId')
-            if not atid:
+            # Authoritative merge source: the interrupted task OWNED by this conv
+            # (task_results.conv_id) wins over the frontend-synced activeTaskId
+            # pointer — the interrupted task is the one that actually holds the
+            # recovered content/thinking/toolRounds.
+            merge_task_id = interrupted_task_by_conv.get(cid) or atid
+            if not merge_task_id and not atid:
                 continue
-            # Clear activeTaskId
-            settings['activeTaskId'] = None
+            # Clear the dead pointer if present.
+            if atid:
+                settings['activeTaskId'] = None
             settings_json = json.dumps(settings, ensure_ascii=False)
 
-            # ── Step 3: If there's interrupted task data, ensure it's in the
-            #    conversation messages (the checkpoint may have partial content) ──
-            task_row = db.execute(
-                "SELECT content, thinking, tool_rounds, metadata FROM task_results WHERE task_id=?",
-                (atid,)
-            ).fetchone()
+            # ── Merge interrupted task data into the conversation messages
+            #    (the checkpoint may carry partial content the UI never saw) ──
+            task_row = None
+            if merge_task_id:
+                task_row = db.execute(
+                    "SELECT content, thinking, tool_rounds, metadata FROM task_results WHERE task_id=?",
+                    (merge_task_id,)
+                ).fetchone()
 
             messages_json = None
             if task_row:
@@ -1619,18 +1772,21 @@ def recover_stale_tasks_on_startup():
                     (settings_json, now_ms, cid)
                 )
             cleared += 1
-            logger.info('[Startup] Cleared activeTaskId=%s from conv=%s '
-                        '(messages_updated=%s)',
-                        atid[:8], cid[:8], bool(messages_json))
+            logger.info('[Startup] Recovered conv=%s from task=%s '
+                        '(activeTaskId_cleared=%s messages_updated=%s)',
+                        cid[:8],
+                        merge_task_id[:8] if merge_task_id else 'none',
+                        bool(atid), bool(messages_json))
 
         if cleared:
             db.commit()
-            logger.info('[Startup] Cleared activeTaskId from %d conversation(s)', cleared)
+            logger.info('[Startup] Recovered %d conversation(s) (merged interrupted '
+                        'content + cleared any dead activeTaskId)', cleared)
 
         total = len(stale_rows) + cleared
         if total:
             logger.info('[Startup] ✅ Stale task recovery complete: %d task(s) interrupted, '
-                        '%d conv(s) cleaned', len(stale_rows), cleared)
+                        '%d conv(s) recovered', len(stale_rows), cleared)
             # Invalidate meta cache so first frontend request gets clean data
             try:
                 from lib.conversations import invalidate_meta_cache
@@ -1676,6 +1832,119 @@ def cleanup_old_tasks():
                 del _conv_latest_task[cid]
     if n:
         logger.debug('[Manager] cleanup_old_tasks removed %d tasks', n)
+    # ★ Stuck-task backstop (rides the same tick). cleanup_stale only evicts
+    #   FINISHED tasks, so a purely-wedged running task (never superseded) would
+    #   otherwise live forever with no terminal state. See reap_stuck_running_tasks.
+    try:
+        reap_stuck_running_tasks()
+    except Exception as e:
+        logger.warning('[Manager] reap_stuck_running_tasks failed: %s', e, exc_info=True)
+
+
+# Age (seconds) after which a running task that has produced ZERO output
+# (no events, no content, no thinking) is considered wedged and force-failed.
+# Env-tunable; 0 disables the backstop. Default 30 min — comfortably longer
+# than any legitimate pre-first-token wait (queueing, long tool prep).
+def _stuck_task_max_silent_secs() -> int:
+    import os
+    try:
+        return int(os.environ.get('TOFU_STUCK_TASK_MAX_SILENT_SECS', '') or '1800')
+    except (ValueError, TypeError):
+        return 1800
+
+
+def reap_stuck_running_tasks() -> int:
+    """Force-terminate running tasks that are wedged with zero output.
+
+    Targets the "pure stuck" case the supersede/abort path does NOT cover: a
+    task that was never superseded but whose thread is wedged before producing
+    anything (the exact shape of the incident that motivated this — a stream
+    that received 0 tokens, emitted 0 events, for hours). Left alone, such a
+    task stays ``status='running'`` in memory forever and, having never
+    finalized, has NO terminal ``task_results`` row → after a restart a poll
+    404s and the turn is lost.
+
+    Discriminator (deliberately conservative to avoid killing a task that is
+    legitimately BLOCKED ON HUMAN INPUT — ask_user / write-approval / stdin):
+    such a task has already emitted at least one event (the phase / tool_call
+    for the prompt), so we require **zero events AND zero content AND zero
+    thinking** plus an age past the silence threshold. A human-waiting task
+    fails the zero-events test and is never reaped.
+
+    Marks the task aborted (reason ``stuck_no_output``) and writes an error
+    terminal floor so a poll resolves to a terminal state instead of a 404.
+    Returns the number of tasks reaped.
+    """
+    max_silent = _stuck_task_max_silent_secs()
+    if max_silent <= 0:
+        return 0
+    now = time.time()
+    stuck = []
+    with tasks_lock:
+        for tid, t in tasks.items():
+            if t.get('status') != 'running' or t.get('aborted'):
+                continue
+            # Zero output so far?
+            if (t.get('content') or '') or (t.get('thinking') or ''):
+                continue
+            try:
+                with t['events_lock']:
+                    n_events = len(t['events'])
+            except Exception:
+                # No events structure (legacy/malformed) — treat as no output.
+                n_events = 0
+            if n_events > 0:
+                continue
+            age = now - t.get('created_at', now)
+            if age < max_silent:
+                continue
+            t['aborted'] = True
+            t['_abort_timestamp'] = now
+            t['_abort_reason'] = 'stuck_no_output'
+            t['status'] = 'error'
+            from lib.error_envelope import make_envelope as _make_env
+            t['error'] = _make_env(
+                'internal',
+                detail=('Task produced no output for %d seconds and was '
+                        'terminated as stuck.' % int(age)),
+                model=(t.get('config') or {}).get('model', '') or '',
+                context='stuck-task-reaper',
+                source='lib.tasks_pkg.manager',
+            )
+            t['finishReason'] = 'error'
+            t['finished_at'] = now
+            stuck.append(t)
+    for t in stuck:
+        logger.warning('[Task %s] conv=%s ⚠️ STUCK — 0 events/0 content for %.0fs, '
+                       'force-failed and writing terminal floor',
+                       t['id'][:8], (t.get('convId') or '')[:8],
+                       now - t.get('created_at', now))
+        _write_stuck_terminal_floor(t)
+    if stuck:
+        logger.warning('[Manager] reap_stuck_running_tasks force-failed %d wedged task(s)',
+                       len(stuck))
+    return len(stuck)
+
+
+def _write_stuck_terminal_floor(task) -> None:
+    """Persist a terminal ``status='error'`` row for a reaped stuck task so a
+    later poll (even post-restart) resolves terminally instead of 404.
+
+    Best-effort; reuses the shared ``_upsert_task_row`` (keyed on task_id).
+    """
+    try:
+        conv_id = task.get('convId', '') or ''
+        meta = build_result_meta(task)
+        meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
+        error_json = _err_to_json(task['error']) if task.get('error') is not None else None
+        _upsert_task_row(task, conv_id, content=task.get('content') or '',
+                         thinking=task.get('thinking') or '', status='error',
+                         error_json=error_json, tr_json=None, meta_json=meta_json)
+        logger.debug('[Task %s] conv=%s Wrote stuck terminal floor to task_results',
+                     task['id'][:8], conv_id[:8])
+    except Exception as e:
+        logger.warning('[Task %s] Failed to write stuck terminal floor: %s',
+                       task.get('id', '?')[:8], e, exc_info=True)
 
 # ── Streaming checkpoint interval (seconds) ──
 # During LLM token streaming, we periodically persist partial content to
@@ -1740,6 +2009,20 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
                 checkpoint_task_partial(task)
             except Exception as e:
                 logger.debug('%s streaming checkpoint failed (non-fatal): %s', pfx, e)
+            # ── Presence heartbeat (throttled, rides the checkpoint cadence).
+            #    Token flow IS work — a long single-LLM turn with no tool rounds
+            #    must keep the peer ACTIVE, not flap to idle. One bump per
+            #    checkpoint interval (~5s), inside the ACTIVE_TTL window, so no
+            #    per-token writes. Best-effort.
+            _cfg = task.get('config') or {}
+            _pp = _cfg.get('projectPath') or ''
+            _cid = task.get('convId') or ''
+            if _pp and _cid:
+                try:
+                    from lib.presence import heartbeat as _presence_heartbeat
+                    _presence_heartbeat(_pp, _cid, phase='generating')
+                except Exception as e:
+                    logger.debug('%s presence heartbeat failed (non-fatal): %s', pfx, e)
 
     def _on_thinking(td):
         _log_ttft_once()

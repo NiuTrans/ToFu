@@ -189,9 +189,14 @@ def test_append_event_legacy_dict_fallback():
 def test_abort_running_tasks_for_conv():
     from lib.tasks_pkg.manager import (create_task, abort_running_tasks_for_conv,
                                           tasks)
-    t1 = create_task('cv-abort', [{'role': 'user', 'content': 'a'}], {})
-    t2 = create_task('cv-abort', [{'role': 'user', 'content': 'b'}], {})
-    t3 = create_task('cv-abort', [{'role': 'user', 'content': 'c'}], {})
+    # supersede=False: this test exercises the STANDALONE abort sweep in
+    # isolation, so it needs 3 genuinely-concurrent running tasks as its
+    # precondition. With the default supersede=True, creating t2/t3 would
+    # auto-abort the earlier ones (the new invariant, covered separately by
+    # test_create_task_supersedes_prior_running_task).
+    t1 = create_task('cv-abort', [{'role': 'user', 'content': 'a'}], {}, supersede=False)
+    t2 = create_task('cv-abort', [{'role': 'user', 'content': 'b'}], {}, supersede=False)
+    t3 = create_task('cv-abort', [{'role': 'user', 'content': 'c'}], {}, supersede=False)
     # All running, none aborted
     assert all(not t['aborted'] for t in (t1, t2, t3))
 

@@ -54,12 +54,18 @@ function showStreamingUIForConv(convId) {
   const lastMsg = _last;
   const _smTime = new Date(lastMsg?.timestamp || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   if (_lastIsStreamingBubble) {
+    /* ★ Carry the message's stable _msgId onto the rebuilt bubble's
+     *   data-msg-id. Without it, the live per-round translation preview
+     *   (_renderStreamingTranslatePreview, routed by data-msg-id) can no
+     *   longer target this bubble after any mid-stream full re-render, so
+     *   the Chinese stops filling in until the task ends. */
+    const _smMsgId = lastMsg._msgId || null;
     if (lastMsg.role === "assistant" && lastMsg._isEndpointPlanner) {
-      html += _streamingBubbleHTML('planner', 'Planning…', _smTime);
+      html += _streamingBubbleHTML('planner', 'Planning…', _smTime, _smMsgId);
     } else if (lastMsg.role === "assistant") {
-      html += _streamingBubbleHTML('worker', 'Streaming…', _smTime);
+      html += _streamingBubbleHTML('worker', 'Streaming…', _smTime, _smMsgId);
     } else if (lastMsg._isEndpointReview) {
-      html += _streamingBubbleHTML('critic', 'Reviewing…', _smTime);
+      html += _streamingBubbleHTML('critic', 'Reviewing…', _smTime, _smMsgId);
     }
   }
   inner.innerHTML = html;
@@ -84,6 +90,17 @@ function showStreamingUIForConv(convId) {
       _memoryPrefetch: buf?._memoryPrefetch || lastMsg._memoryPrefetch,
       _mcpLoginHint: buf?._mcpLoginHint,
     });
+    /* ★ Repaint the live translation preview immediately after the bubble is
+     *   rebuilt. The body's innerHTML was just replaced, destroying any
+     *   translatePreview zone, and the next server push frame may be 20-40s
+     *   away (one per tool round). Re-render the last partial we stashed on
+     *   the message so the Chinese-so-far survives the rebuild instead of
+     *   blanking until the next round closes. No-op when nothing was
+     *   translated yet or this isn't the streaming bubble. */
+    if (lastMsg._translatePartial && lastMsg._msgId
+        && typeof _renderStreamingTranslatePreview === 'function') {
+      _renderStreamingTranslatePreview(convId, lastMsg._msgId, lastMsg._translatePartial);
+    }
     /* ★ FIX: After page refresh, SSE data may arrive AFTER this initial render.
      *   Schedule a deferred re-render (300ms) so that any SSE state event that
      *   arrives during the connection setup window gets rendered — without this,
@@ -185,8 +202,8 @@ function finishStream(convId) {
      *   the done event.  Our local conv.messages doesn't have it yet (it
      *   gets pushed by _attachAutopilotFollowup right after this), so a
      *   full-conv PUT here would overwrite the VU message in the DB. */
-    const _fsHasQueued = pendingMessageQueue.has(convId)
-      && pendingMessageQueue.get(convId).length > 0;
+    const _fsHasQueued = (typeof _dispatchableQueueCount === 'function')
+      && _dispatchableQueueCount(convId) > 0;
     /* Locate the autopilot carrier by flag, not by tail position — Phase-2
      * reconciliation can move it off conv.messages[length-1]. */
     const _fsApCarrier = _findAutopilotPendingCarrier(conv);
@@ -199,7 +216,7 @@ function finishStream(convId) {
         `backend has the complete content, frontend only has a truncated snapshot`);
     } else if (_fsHasQueued) {
       console.info(`[finishStream] 🚧 Skipping syncConversationToServer — ` +
-        `queue has ${pendingMessageQueue.get(convId).length} item(s) for conv=${convId.slice(0,8)}; ` +
+        `queue has ${_dispatchableQueueCount(convId)} dispatchable item(s) for conv=${convId.slice(0,8)}; ` +
         `backend owns the next DB write via dispatch_next_queued()`);
     } else if (_fsAutopilotInbound) {
       console.info(`[finishStream] 🤖 Skipping syncConversationToServer — ` +
@@ -373,8 +390,8 @@ function finishStream(convId) {
   //   dispatch poll to fire ASAP so the user sees the new task start without
   //   lag.  When there's no queue, keep the 500ms debounce to avoid hammering
   //   /api/chat/active on every normal stream end.
-  const _hasQueued = pendingMessageQueue.has(convId)
-    && pendingMessageQueue.get(convId).length > 0;
+  const _hasQueued = (typeof _dispatchableQueueCount === 'function')
+    && _dispatchableQueueCount(convId) > 0;
   if (_hasQueued && activeConvId === convId) {
     try {
       const inner = document.getElementById('chatInner');

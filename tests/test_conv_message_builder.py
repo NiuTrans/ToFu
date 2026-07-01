@@ -160,6 +160,87 @@ class TestTransformMessages:
         # After merge: user, assistant(Done+Revised)
         assert len(result) == 2
 
+    def test_skip_autopilot_summary(self):
+        """LEGACY GUARD: post-sidecar, the autopilot run close-out report is no
+        longer a message at all — it lives in the conversation sidecar
+        (settings.autopilotSummaries[runId]), human-only. But a legacy
+        ``_isAutopilotSummary`` assistant row written BEFORE the sidecar
+        migration may still exist in an old conversation; it must still be
+        excluded from API context (it redundantly restates the run transcript).
+
+        Reproduces the post-run follow-up: [human, agent, VU(user), agent,
+        legacy-summary(assistant), follow-up human]. The legacy summary must be
+        excluded from the built messages while every real turn survives."""
+        raw = [
+            {'role': 'user', 'content': 'Build the exporter.'},
+            {'role': 'assistant', 'content': 'Built it.'},
+            {'role': 'user', 'content': 'keep going', '_isVirtualUser': True},
+            {'role': 'assistant', 'content': 'Refined and verified.'},
+            {'role': 'assistant', 'content': '# Run summary\nObjective met. Built X, tests pass.',
+             '_isAutopilotSummary': True, '_autopilotRunId': 'ar-deadbeef'},
+            {'role': 'user', 'content': 'Now add CSV export too.'},
+        ]
+        result = _transform_messages(raw, {})
+        joined = '\n'.join(str(m.get('content', '')) for m in result)
+        # The summary report text must NOT appear anywhere in API context.
+        assert 'Run summary' not in joined
+        assert 'Objective met' not in joined
+        # The real turns survive (VU reply + agent work + follow-up).
+        assert 'Build the exporter.' in joined
+        assert 'Refined and verified.' in joined
+        assert 'Now add CSV export too.' in joined
+        # No message carries the summary marker into the API payload.
+        for m in result:
+            assert '_isAutopilotSummary' not in m
+            assert '_autopilotRunId' not in m
+
+    def test_skip_autopilot_summary_multi_run_no_stacking(self):
+        """LEGACY GUARD: a multi-run conversation that predates the sidecar
+        migration must NOT stack one full report per run into the prompt —
+        every legacy _isAutopilotSummary row is skipped."""
+        raw = [
+            {'role': 'user', 'content': 'Run A objective.'},
+            {'role': 'assistant', 'content': 'A work.'},
+            {'role': 'assistant', 'content': 'REPORT-A body.',
+             '_isAutopilotSummary': True, '_autopilotRunId': 'ar-1'},
+            {'role': 'user', 'content': 'Run B objective.'},
+            {'role': 'assistant', 'content': 'B work.'},
+            {'role': 'assistant', 'content': 'REPORT-B body.',
+             '_isAutopilotSummary': True, '_autopilotRunId': 'ar-2'},
+            {'role': 'user', 'content': 'Follow-up.'},
+        ]
+        result = _transform_messages(raw, {})
+        joined = '\n'.join(str(m.get('content', '')) for m in result)
+        assert 'REPORT-A' not in joined
+        assert 'REPORT-B' not in joined
+        assert 'A work.' in joined
+        assert 'B work.' in joined
+
+    def test_sidecar_summary_not_in_messages_at_all(self):
+        """POST-SIDECAR contract: the run summary is NOT a message — it lives in
+        the conversation sidecar (settings.autopilotSummaries), so it simply
+        does not appear in the raw message list and the builder passes every
+        real turn through untouched. This is the post-migration normal case:
+        the transcript carries [human, agent, VU, agent, follow-up], with the
+        debrief held entirely out-of-band."""
+        raw = [
+            {'role': 'user', 'content': 'Build the exporter.'},
+            {'role': 'assistant', 'content': 'Built it.'},
+            {'role': 'user', 'content': 'keep going', '_isVirtualUser': True},
+            {'role': 'assistant', 'content': 'Refined and verified.'},
+            {'role': 'user', 'content': 'Now add CSV export too.'},
+        ]
+        result = _transform_messages(raw, {})
+        joined = '\n'.join(str(m.get('content', '')) for m in result)
+        # Every real turn survives.
+        assert 'Build the exporter.' in joined
+        assert 'Refined and verified.' in joined
+        assert 'Now add CSV export too.' in joined
+        # No message carries a summary marker (there is no summary message).
+        for m in result:
+            assert '_isAutopilotSummary' not in m
+            assert '_autopilotRunId' not in m
+
     def test_merge_consecutive_same_role(self):
         raw = [
             {'role': 'user', 'content': 'A'},

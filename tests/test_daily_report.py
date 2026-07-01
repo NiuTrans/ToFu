@@ -96,6 +96,66 @@ class TestCostMath:
 
 
 # ═══════════════════════════════════════════════════════════
+#  1b. cost.py — SCOPED cache invalidation (regression: a delete
+#      must only drop the day(s) it touched, never the whole table)
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestScopedCostInvalidation:
+    def _msg(self, y, m, d, hour=12):
+        import datetime as _dt
+        ts = int(_dt.datetime(y, m, d, hour).timestamp() * 1000)
+        return {"role": "assistant", "timestamp": ts,
+                "usage": {"prompt_tokens": 100, "completion_tokens": 50}}
+
+    def test_cost_days_only_counts_usage_messages(self):
+        msgs = [
+            self._msg(2026, 6, 10),
+            {"role": "user", "content": "no usage", "timestamp": 1},  # no usage → ignored
+            self._msg(2026, 6, 11),
+        ]
+        days = cost._cost_days_for_messages(msgs)
+        assert days == {"2026-06-10", "2026-06-11"}
+
+    def test_cost_days_timestampless_uses_conv_span(self):
+        # A usage message with no timestamp falls back to conv_start's day.
+        import datetime as _dt
+        cs = int(_dt.datetime(2026, 6, 9, 8).timestamp() * 1000)
+        msg = {"role": "assistant", "usage": {"prompt_tokens": 10}}
+        days = cost._cost_days_for_messages([msg], conv_start=cs)
+        assert days == {"2026-06-09"}
+
+    def test_cost_days_handles_non_list_and_empty(self):
+        assert cost._cost_days_for_messages(None) == set()
+        assert cost._cost_days_for_messages([]) == set()
+        assert cost._cost_days_for_messages(["garbage", 123]) == set()
+
+    def test_invalidate_scoped_hits_only_touched_days(self):
+        """The delete path must call per-day invalidation, NEVER the whole-table wipe."""
+        calls = []
+        # Patch the day-level invalidator so we can see exactly which days it targets.
+        with mock.patch.object(cost, "invalidate_day_cost_cache",
+                               side_effect=lambda d=None: calls.append(d)):
+            touched = cost.invalidate_cost_cache_for_messages(
+                [self._msg(2026, 6, 10), self._msg(2026, 6, 10, hour=20)])
+        # Two messages, same day → one dedup'd day invalidated.
+        assert touched == {"2026-06-10"}
+        assert calls == ["2026-06-10"]
+        # Critically: never invoked with None (the whole-table nuke).
+        assert None not in calls
+
+    def test_invalidate_scoped_no_usage_is_noop(self):
+        calls = []
+        with mock.patch.object(cost, "invalidate_day_cost_cache",
+                               side_effect=lambda d=None: calls.append(d)):
+            touched = cost.invalidate_cost_cache_for_messages(
+                [{"role": "user", "content": "hi", "timestamp": 1}])
+        # No usage anywhere → nothing invalidated (and never the whole-table wipe).
+        assert touched == set()
+        assert calls == []
+
+
+# ═══════════════════════════════════════════════════════════
 #  2. conversations.py — transcript building + timestamp coercion
 # ═══════════════════════════════════════════════════════════
 
@@ -262,6 +322,127 @@ class TestTodoFuzzyMatch:
             "2026-06-28", yesterday_done=[], todo_status=[("x", False)],
             _prev=prev, _defer_save=True)
         assert changed == 0
+
+
+# ═══════════════════════════════════════════════════════════
+#  3b. todos.py — _merge_manual_state (regression: a report
+#      REGENERATION must NOT clobber the user's manual edits)
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestMergeManualState:
+    def test_manual_stream_status_survives_regen_by_conv_ids(self):
+        """User cycled a stream to 'blocked'; a fresh analysis (new uuid ids,
+        LLM-reworded title, default 'in_progress') must preserve the manual
+        status. Identity = conv_ids overlap (title may change on regen)."""
+        existing = {"streams": [
+            {"id": "stream-OLD", "title": "Parser refactor",
+             "status": "blocked", "_manual": True, "conv_ids": ["c1", "c2"]},
+        ]}
+        fresh = {"streams": [
+            {"id": "stream-NEW", "title": "Rework the parsing layer",
+             "status": "in_progress", "conv_ids": ["c1"]},
+            {"id": "stream-NEW2", "title": "Write docs", "status": "done",
+             "conv_ids": ["c9"]},
+        ], "tomorrow": []}
+        todos._merge_manual_state(fresh, existing)
+        s = [x for x in fresh["streams"] if x["id"] == "stream-NEW"][0]
+        assert s["status"] == "blocked"   # manual override preserved via conv_ids
+        assert s["_manual"] is True
+        # Unrelated stream (no conv_id overlap) keeps its fresh status.
+        assert [x for x in fresh["streams"]
+                if x["id"] == "stream-NEW2"][0]["status"] == "done"
+
+    def test_manual_stream_no_false_positive_without_overlap(self):
+        """A manual override must NOT bleed onto a stream it doesn't share
+        conv_ids or an exact normalized title with."""
+        existing = {"streams": [
+            {"id": "s-old", "title": "Fix billing", "status": "blocked",
+             "_manual": True, "conv_ids": ["c1"]},
+        ]}
+        fresh = {"streams": [
+            {"id": "s-new", "title": "Write docs", "status": "done",
+             "conv_ids": ["c2"]},
+        ], "tomorrow": []}
+        todos._merge_manual_state(fresh, existing)
+        assert fresh["streams"][0]["status"] == "done"       # untouched
+        assert "_manual" not in fresh["streams"][0]
+
+    def test_todo_checkoff_survives_regen(self):
+        existing = {"streams": [], "tomorrow": [
+            {"id": "todo-1", "text": "ship the fix", "done": True},
+        ]}
+        fresh = {"streams": [], "tomorrow": [
+            {"id": "todo-NEW", "text": "ship the fix", "done": False},
+        ]}
+        todos._merge_manual_state(fresh, existing)
+        assert fresh["tomorrow"][0]["done"] is True   # check-off preserved
+
+    def test_manual_added_todo_survives_regen(self):
+        """A manually-added TODO the LLM didn't re-propose must be re-appended."""
+        existing = {"streams": [], "tomorrow": [
+            {"id": "todo-manual", "text": "call the dentist",
+             "done": False, "_manual": True},
+        ]}
+        fresh = {"streams": [], "tomorrow": [
+            {"id": "todo-NEW", "text": "unrelated LLM item", "done": False},
+        ]}
+        todos._merge_manual_state(fresh, existing)
+        texts = [t["text"] for t in fresh["tomorrow"]]
+        assert "call the dentist" in texts   # manual TODO not lost
+        manual = [t for t in fresh["tomorrow"] if t["text"] == "call the dentist"][0]
+        assert manual["_manual"] is True and manual["id"] == "todo-manual"
+
+    def test_manual_added_todo_not_duplicated_when_reproposed(self):
+        existing = {"streams": [], "tomorrow": [
+            {"id": "todo-manual", "text": "fix the login bug",
+             "done": False, "_manual": True},
+        ]}
+        fresh = {"streams": [], "tomorrow": [
+            {"id": "todo-NEW", "text": "fix the login bug problem", "done": False},
+        ]}
+        todos._merge_manual_state(fresh, existing)
+        # Fuzzy-matches the re-proposed item → NOT re-appended (no dup).
+        matching = [t for t in fresh["tomorrow"]
+                    if "login bug" in t["text"]]
+        assert len(matching) == 1
+
+    def test_legacy_todo_tasks_preserved(self):
+        existing = {"streams": [], "tomorrow": [],
+                    "tasks": [{"id": "todo-x", "text": "legacy", "_todo": True}]}
+        fresh = {"streams": [], "tomorrow": [], "tasks": []}
+        todos._merge_manual_state(fresh, existing)
+        assert any(t.get("_todo") for t in fresh["tasks"])
+
+    def test_no_existing_is_noop(self):
+        fresh = {"streams": [{"id": "s", "title": "t", "status": "done"}],
+                 "tomorrow": []}
+        out = todos._merge_manual_state(fresh, None)
+        assert out is fresh and fresh["streams"][0]["status"] == "done"
+
+    def test_analyse_conversations_invokes_merge_on_regen(self):
+        """End-to-end at the _analyse_conversations seam: a manual status
+        override in the prior report survives a regen (the data-loss bug)."""
+        convs = [{"id": "c1", "rounds": 1}]
+        fake_llm = mock.Mock(return_value=(
+            [{"title": "Ship feature X", "summary": "", "status": "in_progress",
+              "conv_ids": ["c1"]}],
+            [], [], None))
+        prior = {"streams": [
+            {"id": "stream-OLD", "title": "Ship feature X",
+             "status": "done", "_manual": True, "conv_ids": ["c1"]}],
+            "tomorrow": []}
+        with mock.patch.object(conversations, "_run_llm_analysis", fake_llm), \
+                mock.patch.object(conversations, "_get_yesterday_carryover", return_value=[]), \
+                mock.patch.object(conversations, "_get_yesterday_todo_accountability", return_value=[]), \
+                mock.patch.object(conversations, "_mark_yesterday_todos_done", return_value=(None, 0)), \
+                mock.patch.object(conversations, "_close_yesterday_remaining_todos",
+                                  return_value=([], None, 0)), \
+                mock.patch.object(conversations, "_load_report", return_value=prior):
+            res = conversations._analyse_conversations(convs, "2026-06-28")
+        ship = [s for s in res["streams"] if s["title"] == "Ship feature X"][0]
+        # Without the merge this would be 'in_progress' (LLM value) — the bug.
+        assert ship["status"] == "done" and ship.get("_manual") is True
 
 
 # ═══════════════════════════════════════════════════════════

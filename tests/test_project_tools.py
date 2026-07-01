@@ -473,3 +473,116 @@ class TestLargeFileRangeRead:
         r = _read_project_file(d, 'big.txt', 96)
         assert 'File too large' not in r
         assert 'line-00000095' in r
+
+
+# ═══════════════════════════════════════════════════════════
+#  create_directory / delete_directory — folder-browser CRUD
+#  Backs the project path panel's "New folder" / "Delete folder" so a
+#  user can scaffold/remove a project dir without leaving the app.
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestCreateDirectory:
+    def _tmp(self):
+        import tempfile
+        return tempfile.mkdtemp()
+
+    def test_create_ok(self):
+        import os
+        from lib.project_mod import create_directory
+        d = self._tmp()
+        r = create_directory(d, 'newproj')
+        assert r.get('ok'), r
+        assert os.path.isdir(os.path.join(d, 'newproj'))
+        assert r['path'] == os.path.join(d, 'newproj')
+
+    def test_reject_slash_name(self):
+        from lib.project_mod import create_directory
+        assert create_directory(self._tmp(), 'a/b').get('error')
+
+    def test_reject_parent_ref_escape(self):
+        # '..' must never let a create escape the parent dir.
+        import os
+        from lib.project_mod import create_directory
+        d = self._tmp()
+        r = create_directory(d, '../escape')
+        assert r.get('error')
+        assert not os.path.exists(os.path.join(os.path.dirname(d), 'escape'))
+
+    def test_reject_empty_name(self):
+        from lib.project_mod import create_directory
+        assert create_directory(self._tmp(), '   ').get('error')
+
+    def test_reject_duplicate(self):
+        from lib.project_mod import create_directory
+        d = self._tmp()
+        create_directory(d, 'dup')
+        assert 'exists' in create_directory(d, 'dup').get('error', '').lower()
+
+    def test_missing_parent(self):
+        import os
+        from lib.project_mod import create_directory
+        r = create_directory(os.path.join(self._tmp(), 'nope'), 'x')
+        assert r.get('error')
+
+    def test_reject_system_path_parent(self):
+        # Creating directly under a forbidden system root is refused.
+        from lib.project_mod import create_directory
+        assert create_directory('/', 'etchack').get('error')
+
+
+@pytest.mark.unit
+class TestDeleteDirectory:
+    def _tmp(self):
+        import tempfile
+        return tempfile.mkdtemp()
+
+    def test_delete_moves_to_trash(self):
+        import os
+        from lib.project_mod import delete_directory
+        d = self._tmp()
+        target = os.path.join(d, 'gone')
+        os.mkdir(target)
+        r = delete_directory(target)
+        assert r.get('ok'), r
+        assert not os.path.exists(target)          # removed from original spot
+        assert os.path.exists(r['trashed'])        # recoverable in trash bin
+        assert '.tofu_trash' in r['trashed']
+
+    def test_reject_non_directory(self):
+        import os
+        from lib.project_mod import delete_directory
+        d = self._tmp()
+        f = os.path.join(d, 'file.txt')
+        open(f, 'w').close()
+        assert delete_directory(f).get('error')
+
+    def test_reject_system_path(self):
+        from lib.project_mod import delete_directory
+        assert 'system path' in delete_directory('/etc').get('error', '').lower()
+
+    def test_reject_active_workspace_root(self):
+        # A directory registered as a workspace root must not be deletable.
+        import os
+        from lib.project_mod import delete_directory
+        from lib.project_mod.config import _make_root_state, _roots
+        d = self._tmp()
+        root = os.path.join(d, 'openproj')
+        os.mkdir(root)
+        _roots['tp_open_root'] = _make_root_state(root)
+        try:
+            r = delete_directory(root)
+            assert r.get('error') and 'workspace root' in r['error'].lower()
+            assert os.path.isdir(root)  # untouched
+        finally:
+            _roots.pop('tp_open_root', None)
+
+    def test_reject_symlink(self):
+        import os
+        from lib.project_mod import delete_directory
+        d = self._tmp()
+        real = os.path.join(d, 'real'); os.mkdir(real)
+        link = os.path.join(d, 'link'); os.symlink(real, link)
+        r = delete_directory(link)
+        assert r.get('error') and 'symlink' in r['error'].lower()
+        assert os.path.isdir(real)

@@ -1413,7 +1413,48 @@ def _finalize(task, accumulated_content, total_usage, iteration,
 # ══════════════════════════════════════════════════════════
 #  run_task_sync — synchronous wrapper for Feishu/API consumers
 # ══════════════════════════════════════════════════════════
-def run_task_sync(config: dict, *, timeout: float = 600) -> str:
+def _format_progress_event(ev: dict) -> str:
+    """Render a task event into a one-line progress string for a non-streaming
+    consumer (Feishu bot), or '' when the event is not progress-worthy.
+
+    Only ``tool_start`` is surfaced — it's the glanceable "the bot is doing
+    something" signal. Everything else (deltas, usage, snapshots) is noise for
+    a chat-bot progress ping.
+    """
+    if not isinstance(ev, dict):
+        return ''
+    if ev.get('type') == EventType.TOOL_START:
+        name = ev.get('toolName') or 'tool'
+        query = (ev.get('query') or '').strip()
+        return f'Running {name}: {query}' if query else f'Running {name}…'
+    return ''
+
+
+def _drain_progress(task: dict, cursor: int, progress_fn) -> int:
+    """Forward any task events appended since ``cursor`` to ``progress_fn``.
+
+    Returns the new cursor. Errors raised by ``progress_fn`` are swallowed
+    (logged at debug) — progress reporting must never break the task.
+    """
+    try:
+        with task['events_lock']:
+            new = list(task['events'][cursor:])
+    except Exception as e:
+        logger.debug('[run_task_sync] progress drain failed (ignored): %s', e)
+        return cursor
+    advanced = cursor + len(new)
+    for ev in new:
+        line = _format_progress_event(ev)
+        if not line:
+            continue
+        try:
+            progress_fn(line)
+        except Exception as e:
+            logger.debug('[run_task_sync] progress_fn raised (ignored): %s', e)
+    return advanced
+
+
+def run_task_sync(config: dict, *, timeout: float = 600, progress_fn=None) -> str:
     """Run a task synchronously and return the final content string.
 
     This is the entry point for non-streaming consumers (Feishu bot,
@@ -1428,6 +1469,11 @@ def run_task_sync(config: dict, *, timeout: float = 600) -> str:
         Task config dict with 'model', 'messages', and optional tool settings.
     timeout : float
         Maximum seconds to wait (default 600 = 10 min).
+    progress_fn : callable, optional
+        Called with a one-line progress string each time a long-running tool
+        starts (e.g. ``"Running web_search: latest news"``). Lets a
+        non-streaming consumer stream intermediate progress while the task
+        runs. Exceptions from the callback are swallowed (logged at debug).
 
     Returns
     -------
@@ -1463,7 +1509,25 @@ def run_task_sync(config: dict, *, timeout: float = 600) -> str:
                               name=f'run_task_sync-{task["id"][:8]}')
     worker.start()
 
-    finished = done_event.wait(timeout=timeout)
+    if progress_fn is None:
+        finished = done_event.wait(timeout=timeout)
+    else:
+        # Poll for new events while waiting so a non-streaming consumer can
+        # forward live tool-start progress. ``done_event.wait(0.5)`` returns
+        # True the instant the worker finishes, so this adds at most ~0.5s of
+        # post-completion latency and zero overhead once done.
+        import time as _time
+        _deadline = _time.monotonic() + timeout
+        _cursor = 0
+        finished = False
+        while True:
+            if done_event.wait(timeout=0.5):
+                _cursor = _drain_progress(task, _cursor, progress_fn)
+                finished = True
+                break
+            _cursor = _drain_progress(task, _cursor, progress_fn)
+            if _time.monotonic() >= _deadline:
+                break
 
     if not finished:
         task['aborted'] = True

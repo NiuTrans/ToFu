@@ -166,6 +166,74 @@ VU_PROMPT_VERSION = hashlib.sha256(
 logger.info('[Autopilot] VU prompt v%s loaded', VU_PROMPT_VERSION)
 
 
+# ──────────────────────────────────────────────────────────────────
+#  Summary reporter — one read-only synthesis turn at TASK_DONE
+# ──────────────────────────────────────────────────────────────────
+
+_REPORTER_ROLE_PROMPT = (
+    'The autopilot run you just drove has reached its objective. Your '
+    'job now is to write ONE comprehensive close-out report of the whole '
+    'run, addressed to the human who set the objective. You are no longer '
+    'the simulated user — you are the agent reporting back what was '
+    'attempted and accomplished.\n\n'
+    'WHO YOU ARE WRITING FOR: a human who did NOT watch the run, does not '
+    'see the transcript, and does not know this codebase\'s internal '
+    'names, tool names, or IDs. The report is the ONLY thing they will '
+    'read. It MUST therefore be fully SELF-CONTAINED and understandable '
+    'on its own — a reader with no prior context should finish it knowing '
+    'what you set out to do, what actually happened, and where things '
+    'stand.\n\n'
+    'TRANSLATE, DO NOT TRANSCRIBE. The conversation above is the FULL '
+    'transcript of the run (the original objective, every simulated-user '
+    'instruction, and the agent\'s work and tool results). It is your '
+    'evidence, NOT your template. Do not replay it turn-by-turn or dump '
+    'tool calls. For every point, say in plain language WHAT was done and '
+    'WHY it mattered toward the objective — the meaning, not the '
+    'mechanics.\n\n'
+    'HARD RULES (a report that breaks these has failed):\n'
+    '  - Never paste raw tool-call names, function signatures, internal '
+    'identifiers (task IDs, run IDs, hashes), stack traces, or control '
+    'markers like "[VU: TASK_DONE]" as if the reader knows them.\n'
+    '  - When you must name a concrete artifact (a file, a command, a '
+    'test), give it a one-line plain-language gloss of what it is and why '
+    'it was touched — never a bare path or command with no explanation.\n'
+    '  - Expand or drop jargon and abbreviations; if a term is '
+    'unavoidable, define it in-line the first time.\n'
+    '  - Prefer a short narrative of the meaningful decisions over an '
+    'exhaustive step log. Omit routine/mechanical steps that carry no '
+    'information for the reader.\n\n'
+    'Do not run any tools and do not start new work — just synthesise '
+    'what is already in the transcript. Be honest: this is a debrief, not '
+    'a victory lap. If the objective was only partially met or the '
+    'evidence is thin, say so directly.\n\n'
+    'Structure the report in the human\'s language with these sections '
+    '(use Markdown headings):\n'
+    '1. **Objective** — in one or two plain sentences, what the run was '
+    'asked to achieve. Written so it makes sense with zero prior context.\n'
+    '2. **Outcome** — lead with the verdict against the objective: was it '
+    'met, partially met, or not met, and in one line, why.\n'
+    '3. **What was done** — the meaningful steps and decisions, in plain '
+    'language, condensed. Each artifact you mention gets a short gloss of '
+    'what it is / why it mattered — not a bare list of files or commands.\n'
+    '4. **Verification** — what was actually checked (tests that ran and '
+    'their results, behaviour confirmed, outputs read back) versus merely '
+    'claimed. State results in words, not just exit codes.\n'
+    '5. **Gaps & risks** — what is NOT done, known limitations, '
+    'follow-ups worth doing, or assumptions that remain unverified. If '
+    'there are none, say so plainly.\n\n'
+    'Keep it tight and skimmable — bullets over prose where it helps, but '
+    'every bullet must be a self-explanatory sentence, not a fragment of '
+    'transcript. Output ONLY the report (Markdown), no preamble, no role '
+    'labels.'
+)
+
+# Content-derived reporter version marker — same stale-process-detection
+# discipline as VU_PROMPT_VERSION (a directive carrying an old marker was
+# produced by a server still running a pre-edit import-time constant).
+REPORTER_PROMPT_VERSION = hashlib.sha256(
+    _REPORTER_ROLE_PROMPT.encode('utf-8')).hexdigest()[:8]
+
+
 def _extract_objective(messages: list) -> str:
     """Return the original objective = the FIRST real user message text.
 
@@ -244,6 +312,343 @@ def _get_or_persist_objective(conv_id: str, messages: list) -> str:
         logger.warning('[Autopilot] objective resolve failed conv=%s: %s — '
                        'deriving from live messages', conv_id[:8], e)
         return _extract_objective(messages)
+
+
+def _get_or_persist_run_id(conv_id: str) -> str:
+    """Resolve the immutable autopilot run id for a conversation.
+
+    The run id is the EXPLICIT boundary that lets the frontend group a whole
+    autopilot run ``[VU turn … summary]`` into one collapsible fold without
+    role-scanning the flat message list (which breaks on edits, branches, and
+    back-to-back runs). It is minted ONCE per run and pinned to
+    ``settings.autopilotRunId`` alongside ``settings.autopilotObjective`` — both
+    are cleared together when the run concludes (``disarm`` / TASK_DONE), so the
+    next run gets a fresh id.
+
+    Read-through cache: returns the persisted value if present; otherwise mints
+    a new uuid, persists it, and returns it. Failures are non-fatal — returns a
+    fresh (unpersisted) id so stamping still works for the current turn.
+    """
+    new_id = 'ar-' + uuid.uuid4().hex[:12]
+    if not conv_id:
+        return new_id
+    try:
+        from lib.database import (
+            DOMAIN_CHAT,
+            db_execute_with_retry,
+            get_thread_db,
+        )
+        db = get_thread_db(DOMAIN_CHAT)
+        srow = db.execute(
+            'SELECT settings FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)
+        ).fetchone()
+        settings = {}
+        if srow:
+            try:
+                settings = json.loads(srow[0] or '{}')
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug('[Autopilot] runId: settings parse failed '
+                             'conv=%s: %s', conv_id[:8], e)
+                settings = {}
+        existing = (settings.get('autopilotRunId') or '').strip()
+        if existing:
+            return existing
+        if srow is not None:
+            settings['autopilotRunId'] = new_id
+            db_execute_with_retry(
+                db,
+                'UPDATE conversations SET settings=? WHERE id=? AND user_id=1',
+                (json.dumps(settings, ensure_ascii=False), conv_id),
+            )
+            logger.info('[Autopilot] conv=%s minted runId=%s', conv_id[:8], new_id)
+        return new_id
+    except Exception as e:
+        logger.warning('[Autopilot] runId resolve failed conv=%s: %s — '
+                       'using ephemeral id', conv_id[:8], e)
+        return new_id
+
+
+def _clear_run_id(conv_id: str) -> None:
+    """Clear the pinned run id + objective when a run concludes.
+
+    Called on TASK_DONE (after the summary is generated) so the NEXT autopilot
+    run on the same conversation mints a fresh ``autopilotRunId`` and re-derives
+    its objective. Best-effort — a stale pin only means the next run reuses the
+    old id (cosmetic), so failures are swallowed at debug level.
+    """
+    if not conv_id:
+        return
+    try:
+        from lib.database import (
+            DOMAIN_CHAT,
+            db_execute_with_retry,
+            get_thread_db,
+        )
+        db = get_thread_db(DOMAIN_CHAT)
+        srow = db.execute(
+            'SELECT settings FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)
+        ).fetchone()
+        if not srow:
+            return
+        try:
+            settings = json.loads(srow[0] or '{}')
+        except (json.JSONDecodeError, TypeError):
+            return
+        changed = False
+        for k in ('autopilotRunId', 'autopilotObjective'):
+            if settings.pop(k, None) is not None:
+                changed = True
+        if changed:
+            db_execute_with_retry(
+                db,
+                'UPDATE conversations SET settings=? WHERE id=? AND user_id=1',
+                (json.dumps(settings, ensure_ascii=False), conv_id),
+            )
+            logger.info('[Autopilot] conv=%s cleared runId+objective (run concluded)',
+                        conv_id[:8])
+    except Exception as e:
+        logger.debug('[Autopilot] _clear_run_id failed conv=%s: %s', conv_id[:8], e)
+
+
+def run_summary_reporter(task: dict) -> dict | None:
+    """Run ONE read-only LLM turn that summarises the concluded autopilot run.
+
+    Called from ``maybe_run_autopilot`` at the TASK_DONE boundary (the VU just
+    emitted ``[VU: TASK_DONE]``). Mirrors :func:`run_virtual_user`'s sub-task
+    pattern — a fresh ``_run_single_turn`` over the parent's full message list
+    plus a trailing directive — but with the REPORTER role and ALL tools
+    stripped (search/fetch/project/code_exec/browser/memory/swarm/scheduler/…
+    off → ``_assemble_tool_list`` returns no tools). The run's transcript
+    already contains every tool result the VU and workers produced, so the
+    reporter only needs to synthesise; spending another verification budget is
+    redundant.
+
+    Returns ``{'text': str}`` on success (non-empty report), or ``None`` when
+    there is nothing useful to report (empty output / sub-task error / abort).
+    """
+    tid = task['id'][:8]
+    if task.get('aborted'):
+        return None
+    parent_messages = task.get('messages') or []
+    if not parent_messages:
+        return None
+
+    objective = _get_or_persist_objective(task.get('convId') or '',
+                                           parent_messages)
+    objective_block = ''
+    if objective:
+        objective_block = (
+            '=== ORIGINAL OBJECTIVE (the north star this run was driven '
+            'toward) ===\n'
+            f'{objective}\n'
+            '=== End objective ===\n\n'
+        )
+
+    reporter_messages = [dict(m) for m in parent_messages]
+    reporter_messages.append({
+        'role': 'user',
+        'content': (
+            f'{objective_block}'
+            f'=== Your role for THIS turn: Run Reporter '
+            f'[prompt v{REPORTER_PROMPT_VERSION}] ===\n'
+            f'{_REPORTER_ROLE_PROMPT}\n'
+            '=== End reporter role ===\n\n'
+            'Write the close-out report now.'
+        ),
+        '_isReporterDirective': True,
+        '_reporterPromptVersion': REPORTER_PROMPT_VERSION,
+    })
+
+    from lib.tasks_pkg import create_task
+    from lib.tasks_pkg.orchestrator import _run_single_turn
+
+    sub_cfg = dict(task.get('config') or {})
+    for stale_key in (
+        'excludeLast', 'toolHistory', 'contentPrefix',
+        'checkpointToolRounds', 'checkpointUsage', 'checkpointApiRounds',
+        'checkpointModifiedFiles', 'checkpointModifiedFileList',
+    ):
+        sub_cfg.pop(stale_key, None)
+    sub_cfg['endpointMode'] = False
+    sub_cfg['autopilot'] = False
+    # Read-only: strip every tool-enabling feature so the reporter purely
+    # synthesises the existing transcript (no new state changes, cheap).
+    sub_cfg['searchMode'] = 'off'
+    sub_cfg['fetchEnabled'] = False
+    sub_cfg['projectPath'] = ''
+    sub_cfg['codeExecEnabled'] = False
+    sub_cfg['browserEnabled'] = False
+    sub_cfg['desktopEnabled'] = False
+    sub_cfg['memoryEnabled'] = False
+    sub_cfg['swarmEnabled'] = False
+    sub_cfg['imageGenEnabled'] = False
+    sub_cfg['humanGuidanceEnabled'] = False
+    sub_cfg['schedulerEnabled'] = False
+    sub_cfg.pop('tools', None)
+
+    sub_task = create_task('', reporter_messages, sub_cfg)
+    sub_task['_inline_messages'] = True
+    sub_task['_vu_subtask'] = True
+    sub_task['_autopilotParent'] = task.get('id', '')
+
+    try:
+        result = _run_single_turn(sub_task)
+    except Exception as e:
+        logger.warning('[Autopilot %s] Summary reporter sub-task raised: %s — '
+                       'skipping report', tid, e, exc_info=True)
+        return None
+
+    if task.get('aborted'):
+        return None
+    err = result.get('error')
+    if err:
+        logger.warning('[Autopilot %s] Summary reporter error: %.200s — '
+                       'skipping report', tid, err)
+        return None
+
+    text = (result.get('content') or '').strip()
+    if not text:
+        logger.info('[Autopilot %s] Summary reporter produced empty output — '
+                    'skipping report', tid)
+        return None
+    logger.info('[Autopilot %s] Summary report ready (%d chars)', tid, len(text))
+    return {'text': text}
+
+
+def _store_run_record(conv_id: str, run_id: str, *,
+                      reason: str,
+                      text: str = '',
+                      translated: str = '') -> dict | None:
+    """Persist the SINGLE authoritative per-run record in the SIDECAR.
+
+    ONE record per run carries BOTH facts the frontend needs — that the run has
+    ``status='concluded'`` (with its ``reason``) AND the optional close-out
+    ``content`` (a manual stop has none). There is deliberately no second map
+    and no ``status='running'`` record: only the TERMINAL fact is persisted, so
+    the frontend's ``syncConversationToServer`` (which rebuilds the whole
+    ``settings`` column from a whitelist) can never clobber a mid-run marker it
+    doesn't yet hold.
+
+    Stored under ``settings.autopilotSummaries[run_id]`` (kept for the existing
+    read/write/IDB whitelist + reload round-trip), which surfaces to the
+    frontend as ``conv.autopilotSummaries[run_id]`` without ever becoming a chat
+    turn. The frontend gates the run fold on ``rec.status==='concluded'`` and
+    renders ``content`` (when present) as the fold's read-only report panel.
+
+    Read-modify-write is idempotent per run: re-concluding merges (a later
+    ``task_done`` with a report supersedes an earlier bare ``stopped`` marker,
+    and never downgrades a report back to empty). Returns the stored record
+    (``{runId, status, reason, content?, translatedContent?, ts, _summaryId}``),
+    or ``None`` on failure. The record has NO ``role`` and NO ``_msgId`` — it is
+    not a message.
+    """
+    try:
+        from lib.database import (
+            DOMAIN_CHAT,
+            db_execute_with_retry,
+            get_thread_db,
+        )
+    except Exception as e:
+        logger.warning('[Autopilot] run record: DB import failed: %s', e)
+        return None
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT settings FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)
+        ).fetchone()
+        if not row:
+            logger.warning('[Autopilot] run record: conv=%s not found', conv_id[:8])
+            return None
+        try:
+            settings = json.loads(row[0] or '{}') if row[0] else {}
+            if not isinstance(settings, dict):
+                settings = {}
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning('[Autopilot] run record: conv=%s settings parse failed: %s',
+                           conv_id[:8], e)
+            settings = {}
+        summaries = settings.get('autopilotSummaries')
+        if not isinstance(summaries, dict):
+            summaries = {}
+        prior = summaries.get(run_id) if isinstance(summaries.get(run_id), dict) else {}
+        # Never downgrade a run that already carries a report to an empty one:
+        # a later manual-stop conclude on a run that cleanly reported keeps the
+        # report + upgrades the reason only if the new one is task_done.
+        content = text or (prior.get('content') or '')
+        translated_final = translated or (prior.get('translatedContent') or '')
+        # 'task_done' is the strongest reason and never downgrades: a manual
+        # stop that races a clean close-out keeps the clean verdict.
+        reason_final = ('task_done'
+                        if prior.get('reason') == 'task_done' else reason)
+        record = {
+            'runId': run_id,
+            'status': 'concluded',
+            'reason': reason_final,
+            'ts': int(time.time() * 1000),
+            '_summaryId': prior.get('_summaryId') or str(uuid.uuid4()),
+        }
+        if content:
+            record['content'] = content
+        if translated_final:
+            record['translatedContent'] = translated_final
+        summaries[run_id] = record
+        settings['autopilotSummaries'] = summaries
+        db_execute_with_retry(
+            db,
+            'UPDATE conversations SET settings=? WHERE id=? AND user_id=1',
+            (json.dumps(settings, ensure_ascii=False), conv_id),
+        )
+        logger.info('[Autopilot] conv=%s ✅ Stored concluded run record in sidecar '
+                    '(reason=%s, %d report chars, run=%s, NOT a message)',
+                    conv_id[:8], reason, len(content), run_id)
+        return record
+    except Exception as e:
+        logger.error('[Autopilot] conv=%s run record sidecar store failed: %s',
+                     conv_id[:8], e, exc_info=True)
+        return None
+
+
+def _store_run_summary(conv_id: str, run_id: str, text: str,
+                       translated: str = '') -> dict | None:
+    """Persist a CLEAN close-out run (VU emitted [VU: TASK_DONE]) + its report.
+
+    Thin wrapper over :func:`_store_run_record` with ``reason='task_done'`` —
+    the record carries both the concluded status and the human-only report.
+    Kept as the summary-writing entry point; see ``_store_run_record`` for the
+    single-source-of-truth persistence + no-clobber rationale.
+    """
+    return _store_run_record(conv_id, run_id, reason='task_done',
+                             text=text, translated=translated)
+
+
+def _translate_summary_sync(text: str) -> str:
+    """Best-effort synchronous EN→ZH translation of a summary for display.
+
+    The summary lives in the sidecar (not the message list), so the
+    index-based ``_maybe_auto_translate_assistant`` safety net does not apply.
+    We translate it inline here via the shared free-text engine and stash the
+    result on the sidecar record, so a Chinese UI reads the debrief in Chinese.
+    Returns the translated text, or ``''`` on skip/failure (caller stores the
+    original only).
+    """
+    if not text:
+        return ''
+    try:
+        from lib.text_lang import is_predominantly_chinese
+        if is_predominantly_chinese(text):
+            return ''  # already Chinese — no-op
+        from lib.translate import _build_translate_prompt, _translate_freetext
+        system_prompt = _build_translate_prompt('Chinese', 'English')
+        translated, _u = _translate_freetext(
+            text, system_prompt, chunk_label=':ap-summary',
+            source='English', target='Chinese')
+        return (translated or '').strip()
+    except Exception as e:
+        logger.debug('[Autopilot] summary translate skipped: %s', e)
+        return ''
 
 
 def is_autopilot_enabled(task: dict) -> bool:
@@ -612,7 +1017,8 @@ def _successor_already_running(task: dict, conv_id: str) -> bool:
 
 def _append_vu_message_to_conv(conv_id: str, vu_msg_id: str,
                                 text: str,
-                                rounds: list | None = None) -> dict | None:
+                                rounds: list | None = None,
+                                run_id: str = '') -> dict | None:
     """Append the VU's reply as a user message in the conversation DB.
 
     Called ONLY after the VU has successfully produced a reply (i.e.
@@ -670,6 +1076,8 @@ def _append_vu_message_to_conv(conv_id: str, vu_msg_id: str,
             '_msgId': vu_msg_id,
             '_isVirtualUser': True,
         }
+        if run_id:
+            vu_msg['_autopilotRunId'] = run_id
         if rounds:
             vu_msg['toolRounds'] = rounds
         messages.append(vu_msg)
@@ -796,6 +1204,246 @@ def _start_followup_task(task: dict, conv_id: str) -> str | None:
     return new_task_id
 
 
+def _emit_run_concluded(conv_id: str, run_id: str, text: str,
+                        config: dict | None) -> None:
+    """Emit ONE project-brain 'run_concluded' Activity event for a finished run.
+
+    Autopilot per-turn 'started'/'completed' events are SUPPRESSED at the task
+    seams (config.autopilotRunId set), so a deep run surfaces in the feed as a
+    single human-meaningful pulse here, at run close-out — keyed on the run's
+    project (config.projectPath). Best-effort: never raises into the caller.
+    """
+    try:
+        proj = ((config or {}).get('projectPath') or '').strip()
+        if not proj or not conv_id:
+            return
+        from lib.conversations.project_feed import emit_project_event
+        summary = (text or '').strip().splitlines()[0] if text else ''
+        emit_project_event(
+            proj, conv_id, 'run_concluded',
+            summary or 'Autopilot run concluded',
+            payload={'runId': run_id})
+    except Exception as e:
+        logger.debug('[Autopilot] run_concluded feed emit skipped: %s', e)
+
+
+def conclude_run(conv_id: str, reason: str = 'stopped',
+                 run_id: str = '') -> dict | None:
+    """Record the BACKEND-AUTHORITATIVE 'this autopilot run is over' fact.
+
+    The single close-out seam for the paths that end a run WITHOUT a clean
+    ``[VU: TASK_DONE]`` — a manual Stop, the toggle-OFF / queue-cancel disarm,
+    or a superseding real user message. Historically these were "dumb": they
+    cleared the marker but emitted NO run-level signal, so the frontend was
+    forced to INFER run-end from stream/task absence (the inter-turn-gap
+    heuristic that caused premature folds). This makes the terminal fact
+    explicit and durable instead.
+
+    Writes ONE concluded record (no report ``content`` — a manual stop has
+    none) to the sidecar via :func:`_store_run_record`, then clears the run pin
+    (``autopilotRunId`` + objective) so the next run is fresh — exactly the
+    clean-close-out ordering. Idempotent: concluding an already-concluded run
+    just refreshes the record (and never downgrades a ``task_done`` verdict).
+
+    ``run_id`` may be passed explicitly; when omitted it is resolved from the
+    most recent VU turn's ``_autopilotRunId`` so an already-disarmed run still
+    folds. Returns the stored record, or ``None`` when there is no run to
+    conclude (no run id resolvable → nothing was ever an autopilot run).
+    """
+    if not conv_id:
+        return None
+    if not run_id:
+        run_id = _resolve_recent_run_id(conv_id)
+    if not run_id:
+        logger.debug('[Autopilot] conclude_run: conv=%s no run id — nothing to '
+                     'conclude', conv_id[:8])
+        return None
+    record = _store_run_record(conv_id, run_id, reason=reason)
+    _clear_run_id(conv_id)
+    return record
+
+
+def _resolve_recent_run_id(conv_id: str) -> str:
+    """Return the most recent VU turn's ``_autopilotRunId`` for a conversation.
+
+    Prefers the still-pinned ``settings.autopilotRunId`` (the live run); falls
+    back to scanning the message tail for the newest ``_autopilotRunId`` stamp
+    (an already-disarmed run whose pin was cleared). Returns '' when the
+    conversation has no autopilot run at all. Best-effort — failures return ''.
+    """
+    if not conv_id:
+        return ''
+    try:
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT settings, messages FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)
+        ).fetchone()
+        if not row:
+            return ''
+        try:
+            settings = json.loads(row[0] or '{}') if row[0] else {}
+        except (json.JSONDecodeError, TypeError):
+            settings = {}
+        pinned = (settings.get('autopilotRunId') or '').strip()
+        if pinned:
+            return pinned
+        try:
+            msgs = json.loads(row[1] or '[]') if row[1] else []
+        except (json.JSONDecodeError, TypeError):
+            msgs = []
+        for m in reversed(msgs):
+            if isinstance(m, dict) and (m.get('_autopilotRunId') or '').strip():
+                return m['_autopilotRunId'].strip()
+    except Exception as e:
+        logger.debug('[Autopilot] _resolve_recent_run_id failed conv=%s: %s',
+                     conv_id[:8], e)
+    return ''
+
+
+def _emit_run_summary(task: dict, conv_id: str, run_id: str) -> dict | None:
+    """Generate, persist (sidecar), translate and emit the run close-out summary.
+
+    Ties together the read-only reporter turn (:func:`run_summary_reporter`),
+    SIDECAR persistence (:func:`_store_run_summary` — NOT the message list),
+    a synchronous best-effort EN→ZH translation for display, and the
+    ``autopilot_run_concluded`` SSE event (reason=task_done, carrying the report
+    ``record``) so the frontend folds the run and shows the summary as the run
+    fold's read-only report panel (human-only — it never enters the chat
+    transcript nor the LLM context). This is the clean-close-out arm of the
+    symmetric conclude contract; :func:`conclude_run` is the manual-stop arm.
+
+    Returns the stored sidecar record, or ``None`` when no report was produced
+    (empty / errored / aborted) — folding then keys on ``run_id`` alone and
+    shows the last VU turn as the tail.
+    """
+    from lib.tasks_pkg.manager import append_event
+
+    tid = task['id'][:8]
+    report = run_summary_reporter(task)
+    if report is None:
+        return None
+
+    # The reporter composes in the assistant's language; honour the per-conv
+    # autoTranslate by translating SYNCHRONOUSLY for display (the summary is in
+    # the sidecar, so the index-based auto-translate safety net can't reach it).
+    translated = ''
+    try:
+        from lib.conv_config import resolve_auto_translate
+        if resolve_auto_translate(task.get('config') or {}):
+            translated = _translate_summary_sync(report['text'])
+    except Exception as e:
+        logger.debug('[Autopilot %s] summary translate skipped: %s', tid, e)
+
+    record = _store_run_summary(conv_id, run_id, report['text'], translated)
+    if record is None:
+        return None
+
+    _emit_run_concluded(conv_id, run_id, report['text'], task.get('config'))
+
+    try:
+        append_event(task, build_event(
+            EventType.AUTOPILOT_RUN_CONCLUDED,
+            runId=run_id,
+            record=record,
+        ))
+    except Exception as e:
+        logger.debug('[Autopilot %s] run-concluded emit failed: %s', tid, e)
+    return record
+
+
+def summarize_run(conv_id: str, run_id: str = '', config: dict | None = None) -> dict:
+    """On-demand close-out report for a concluded (e.g. manually-stopped) run.
+
+    Backs the "Summarize this run" affordance for autopilot runs that ended
+    WITHOUT a clean ``[VU: TASK_DONE]`` (Stop / a new user message) — those get
+    no auto-summary, so the user can request one after the fact. The run is
+    finished and lives in conversation history, so we build a read-only
+    reporter sub-task over the FULL conversation and store the summary in the
+    sidecar (human-only — NOT appended to the message list).
+
+    ``run_id`` groups the resulting summary into the run's fold. When omitted,
+    it is resolved from the most recent VU turn's ``_autopilotRunId`` so an
+    already-disarmed run (pin cleared) still folds correctly.
+
+    Returns ``{ok, summary?, runId?, error?}`` — ``summary`` is the human-only
+    SIDECAR record (NOT a chat message). Synchronous (the caller is an explicit
+    user click, not the hot loop).
+    """
+    if not conv_id:
+        return {'ok': False, 'error': 'conv_id is required'}
+
+    from lib.tasks_pkg import create_task
+    from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
+
+    # Resolve run_id from the most recent VU turn if not provided.
+    if not run_id:
+        try:
+            from lib.database import DOMAIN_CHAT, get_thread_db
+            db = get_thread_db(DOMAIN_CHAT)
+            row = db.execute(
+                'SELECT messages FROM conversations WHERE id=? AND user_id=1',
+                (conv_id,)
+            ).fetchone()
+            if row:
+                msgs = json.loads(row[0] or '[]')
+                for m in reversed(msgs):
+                    if isinstance(m, dict) and m.get('_autopilotRunId'):
+                        run_id = m['_autopilotRunId']
+                        break
+        except Exception as e:
+            logger.debug('[Autopilot] summarize_run: runId resolve failed: %s', e)
+    if not run_id:
+        run_id = 'ar-' + uuid.uuid4().hex[:12]
+
+    cfg = dict(config or {})
+    api_messages = build_api_messages_from_db(conv_id, cfg)
+    if not api_messages:
+        return {'ok': False, 'error': 'conversation_empty'}
+
+    # Reuse the reporter via a throwaway carrier task holding the messages.
+    # ``run_summary_reporter`` is SYNCHRONOUS and runs its OWN ``conv_id=''``
+    # sub-task; this carrier is only a read-only parameter bundle (messages +
+    # config + convId for objective resolution), never spawned, never finalized.
+    #
+    # CRITICAL: create it with ``conv_id=''`` — matching the VU/reporter
+    # sub-task convention (see run_virtual_user ~L733: "convId='' keeps it out
+    # of the latest-task registry"). With the real conv_id it would (1) be
+    # marked ``status='running'`` and claim ``_conv_latest_task[conv_id]`` BEFORE
+    # we can flag it ``_inline_messages`` (a registration WINDOW), and (2) never
+    # reach a terminal status, so it lingers forever (TTL cleanup only evicts
+    # done/error/aborted) — ``/api/chat/active`` then reports a phantom running
+    # task for this conv and the frontend orphan-recovery spawns a permanently
+    # stuck "Waiting…" placeholder. ``conv_id=''`` means no conv ever maps to it
+    # via the convId-keyed orphan-recovery, atomically (no window). The summary
+    # write uses the REAL conv_id via _store_run_summary below; objective
+    # resolution falls back to deriving from the messages (which already carry
+    # the original request). discard_task then pops it from the registry too.
+    from lib.tasks_pkg import discard_task
+    carrier = create_task('', api_messages, cfg)
+    carrier['_inline_messages'] = True
+    try:
+        report = run_summary_reporter(carrier)
+    finally:
+        discard_task(carrier['id'])
+    if report is None:
+        return {'ok': False, 'error': 'empty_report'}
+    translated = ''
+    try:
+        from lib.conv_config import resolve_auto_translate
+        if resolve_auto_translate(cfg):
+            translated = _translate_summary_sync(report['text'])
+    except Exception as e:
+        logger.debug('[Autopilot] summarize_run translate skipped: %s', e)
+    record = _store_run_summary(conv_id, run_id, report['text'], translated)
+    if record is None:
+        return {'ok': False, 'error': 'persist_failed'}
+    _emit_run_concluded(conv_id, run_id, report['text'], cfg)
+    audit_log('autopilot_manual_summary', conv_id=conv_id, run_id=run_id)
+    return {'ok': True, 'summary': record, 'runId': run_id}
+
+
 def maybe_run_autopilot(task: dict) -> dict | None:
     """End-of-turn hook: run the VU and spawn a follow-up task if eligible.
 
@@ -870,6 +1518,9 @@ def maybe_run_autopilot(task: dict) -> dict | None:
     # in-memory bubble and leaves NO trace on disk — preserving the
     # "no ghost empty VU at the bottom" guarantee.
     vu_msg_id = str(uuid.uuid4())
+    # Resolve the explicit run boundary up front so it can be stamped on
+    # BOTH the VU turn (below) and the summary report (TASK_DONE branch).
+    run_id = _get_or_persist_run_id(conv_id)
 
     try:
         append_event(task, build_event(
@@ -886,11 +1537,33 @@ def maybe_run_autopilot(task: dict) -> dict | None:
         # ends and the queue-bar sentinel disappears.  (Abort/error leave the
         # marker intact — a transient failure shouldn't silently disarm.)
         if task.get('_vu_emitted_done'):
+            # The run reached its objective. Generate ONE read-only summary
+            # report (the visible tail of the now-foldable run) BEFORE
+            # disarming, then clear the run pin so the next run is fresh.
+            summary_rec = None
+            try:
+                summary_rec = _emit_run_summary(task, conv_id, run_id)
+            except Exception as e:
+                logger.warning('[Autopilot %s] summary generation failed '
+                               '(non-fatal): %s', tid, e, exc_info=True)
+            # A clean [VU: TASK_DONE] ALWAYS concludes the run — even when the
+            # reporter produced nothing (empty/errored). Without this, an
+            # empty-report clean close-out would write no concluded record and
+            # the run could never fold. When _emit_run_summary DID write a
+            # (reason=task_done, with-report) record, this is a harmless
+            # idempotent refresh that keeps the report.
+            if summary_rec is None:
+                try:
+                    _store_run_record(conv_id, run_id, reason='task_done')
+                except Exception as e:
+                    logger.warning('[Autopilot %s] concluded-record fallback '
+                                   'failed (non-fatal): %s', tid, e, exc_info=True)
             try:
                 from lib.message_queue import clear_autopilot_marker
                 clear_autopilot_marker(conv_id)
             except Exception as e:
                 logger.debug('[Autopilot %s] marker clear failed: %s', tid, e)
+            _clear_run_id(conv_id)
         # Tell the frontend to discard any in-memory bubble it may
         # have lazily created from inner stream events; nothing was
         # ever persisted.
@@ -933,7 +1606,7 @@ def maybe_run_autopilot(task: dict) -> dict | None:
     # evaluated a few lines earlier), so do it here too — idempotent.
     _presync_parent_reply(task)
     vu_msg = _append_vu_message_to_conv(
-        conv_id, vu_msg_id, vu_text, rounds=vu_rounds,
+        conv_id, vu_msg_id, vu_text, rounds=vu_rounds, run_id=run_id,
     )
     if vu_msg is None:
         return None
@@ -1267,9 +1940,30 @@ def disarm_autopilot(conv_id: str) -> dict:
                 cfg['autopilot'] = False
                 cleared_ids.append(tid)
 
-    logger.info('[Autopilot] Disarmed conv=%s (markerCleared=%s, tasks=%s)',
-                conv_id[:8], marker_cleared, [t[:8] for t in cleared_ids])
+    # ★ Symmetric close-out — the manual-stop arm of the conclude contract.
+    #   Historically disarm was "dumb": it cleared the marker/flag but emitted
+    #   NO run-level fact, forcing the frontend to INFER run-end from stream
+    #   absence (the inter-turn-gap heuristic behind premature folds). Now we
+    #   write the BACKEND-AUTHORITATIVE concluded record (reason=stopped, no
+    #   report) so the fold keys on a durable fact — and return it so the
+    #   calling client (which may have NO live SSE stream, the idle-disarm
+    #   case) can fold instantly without a reload. Self-guards: no run id →
+    #   None (nothing was ever an autopilot run to conclude).
+    concluded = None
+    try:
+        concluded = conclude_run(conv_id, reason='stopped')
+    except Exception as e:
+        logger.warning('[Autopilot] disarm: conclude_run failed for conv=%s: %s',
+                       conv_id[:8], e, exc_info=True)
+
+    logger.info('[Autopilot] Disarmed conv=%s (markerCleared=%s, tasks=%s, concluded=%s)',
+                conv_id[:8], marker_cleared, [t[:8] for t in cleared_ids],
+                bool(concluded))
     audit_log('autopilot_disarmed', conv_id=conv_id,
-              marker_cleared=marker_cleared, task_ids=cleared_ids)
-    return {'disarmed': marker_cleared or bool(cleared_ids),
-            'markerCleared': marker_cleared, 'taskIds': cleared_ids}
+              marker_cleared=marker_cleared, task_ids=cleared_ids,
+              concluded=bool(concluded))
+    result = {'disarmed': marker_cleared or bool(cleared_ids),
+              'markerCleared': marker_cleared, 'taskIds': cleared_ids}
+    if concluded is not None:
+        result['runConcluded'] = concluded
+    return result

@@ -172,7 +172,7 @@ def _ensure_paper_images(filename, phash):
     return _extract_paper_figures(filepath, phash)
 
 
-def _inject_images_into_report(report_md, images, lang='en'):
+def _inject_images_into_report(report_md, images, lang='en', appendix=True):
     """Auto-insert extracted figures/tables into the report markdown.
 
     LLMs frequently ignore "please embed ``![caption](url)``" instructions in
@@ -189,6 +189,12 @@ def _inject_images_into_report(report_md, images, lang='en'):
         report_md: The generated report Markdown.
         images: Manifest entries ``[{url, caption, page, source, ...}]``.
         lang: 'zh' or 'en' — controls the appendix heading.
+        appendix: When True (default, the explainer-report case) every
+            unreferenced figure is appended as an appendix gallery so nothing
+            is lost. When False (Review Mode) the appendix is SUPPRESSED —
+            only figures the text actually cites (``Figure N``) are placed
+            inline; a peer review should not be padded with a wall of every
+            extracted figure. Inline placement is unaffected either way.
 
     Returns:
         Enriched report Markdown, or the original string on failure / no-op.
@@ -290,9 +296,11 @@ def _inject_images_into_report(report_md, images, lang='en'):
             paras.insert(i + 1, ''.join(by_para[i]))
         out = ''.join(paras)
 
-        # Append any unreferenced images as an appendix gallery.
+        # Append any unreferenced images as an appendix gallery — UNLESS the
+        # caller opted out (Review Mode), where a wall of every extracted
+        # figure would be exactly the kind of padding the review must avoid.
         unplaced = [p for pi, p in enumerate(parsed) if pi not in placed]
-        if unplaced:
+        if unplaced and appendix:
             title = '图表附录' if lang == 'zh' else 'Figures & Tables (Appendix)'
             blurb = ('论文中未在报告正文中显式引用的图表：'
                      if lang == 'zh'

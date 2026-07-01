@@ -13,7 +13,7 @@ from lib.swarm.tools import SWARM_TOOL_NAMES
 from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round, tool_registry
 from lib.tasks_pkg.handlers._adapter import simple_call
 from lib.tasks_pkg.manager import append_event
-from lib.tools import CONV_REF_TOOL_NAMES
+from lib.tools import BOARD_TOOL_NAMES, CHARTER_TOOL_NAMES, CONV_REF_TOOL_NAMES
 
 logger = get_logger(__name__)
 
@@ -329,6 +329,46 @@ def _handle_conv_ref_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cf
         executor=_run,
         source='Conversations', module_tag='ConvRef',
         title=f'{fn_name}: {detail}',
+    )
+
+
+@tool_registry.tool_set(CHARTER_TOOL_NAMES, category='conversations',
+                        description='Read / propose to the project charter (north star)')
+def _handle_charter_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
+    current_conv_id = task.get('convId', '')
+
+    def _run(_fn_name, _fn_args):
+        from lib.conversations.project_charter import execute_charter_tool
+        return execute_charter_tool(
+            _fn_name, _fn_args,
+            current_conv_id=current_conv_id,
+            project_path=project_path if project_enabled else '')
+
+    verb = 'read' if fn_name == 'project_charter_read' else 'propose'
+    return simple_call(
+        task, fn_name, fn_args, rn, round_entry, tc_id,
+        executor=_run,
+        source='Charter', module_tag='Charter', badge=verb,
+    )
+
+
+@tool_registry.tool_set(BOARD_TOOL_NAMES, category='conversations',
+                        description='Read / post / claim / complete / block project board epics')
+def _handle_board_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
+    current_conv_id = task.get('convId', '')
+
+    def _run(_fn_name, _fn_args):
+        from lib.conversations.project_board import execute_board_tool
+        return execute_board_tool(
+            _fn_name, _fn_args,
+            current_conv_id=current_conv_id,
+            project_path=project_path if project_enabled else '')
+
+    _verb = fn_name.replace('project_board_', '', 1)
+    return simple_call(
+        task, fn_name, fn_args, rn, round_entry, tc_id,
+        executor=_run,
+        source='Board', module_tag='Board', badge=_verb,
     )
 
 

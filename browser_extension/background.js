@@ -1771,6 +1771,15 @@ async function cmdFetchUrl(params) {
     throw new Error(`Cannot fetch protected URL: ${url}`);
   }
 
+  // Refuse binary assets by extension. Navigating a tab to a PDF/zip/media URL
+  // makes Chrome's download manager save it to the user's machine (and yields
+  // no scrapable text) — these are fetched/parsed server-side, never here.
+  // (The server-side bridge already filters these, but a redirect could still
+  // land us on one, so guard defensively.)
+  if (isBinaryAssetUrl(url)) {
+    throw new Error(`Refusing to open binary asset in a tab (would download): ${url}`);
+  }
+
   // Create a background tab (not active, so it doesn't steal focus)
   let tab;
   try {
@@ -1857,6 +1866,17 @@ async function cmdNotify(params) {
 
 function isProtectedUrl(url) {
   return /^(chrome|chrome-extension|about|chrome-search|devtools):/.test(url);
+}
+
+// Binary assets that Chrome downloads (instead of rendering) when a tab
+// navigates to them, and which yield no scrapable text. Mirrors the
+// server-side _BROWSER_UNRENDERABLE_EXTS list in lib/search_bridge.py.
+// `.svg` is intentionally excluded (it renders as text/markup).
+function isBinaryAssetUrl(url) {
+  let path;
+  try { path = new URL(url).pathname.toLowerCase().replace(/\/+$/, ''); }
+  catch { return false; }
+  return /\.(pdf|zip|tar|gz|tgz|rar|7z|bz2|xz|jpg|jpeg|png|gif|webp|bmp|ico|mp4|mp3|wav|avi|mov|webm|mkv|flac|ogg|docx?|xlsx?|pptx?|exe|dmg|iso|apk|bin|woff2?|ttf|otf|eot)$/.test(path);
 }
 
 function updateBadge(state) {

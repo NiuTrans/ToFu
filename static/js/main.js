@@ -631,6 +631,12 @@ function _restoreConvToolState(conv) {
   }
   if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
   if (typeof updateContextBar === 'function') updateContextBar();
+  /* ★ Re-filter the cross-conversation presence strip to this conversation's
+   *   project root immediately on switch (else it lags up to one 5s tick). */
+  if (typeof presenceRefresh === 'function') presenceRefresh();
+  /* ★ If the Project Brain panel is open, re-resolve its feed to the new
+   *   conversation's project (two projects must never bleed into one view). */
+  if (typeof projectBrainRefresh === 'function') projectBrainRefresh();
   /* ★ Reflow toolbar after restoring conv tool state (toolbar width may differ). */
   _scheduleReflow();
 }

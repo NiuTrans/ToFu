@@ -1,7 +1,11 @@
 """lib/pdf_parser/core.py — Unified PDF parsing entry point (text + images)."""
 
 from lib.log import get_logger
-from lib.pdf_parser._common import HAS_PYMUPDF4LLM, PYMUPDF_LOCK
+from lib.pdf_parser._common import (
+    HAS_PYMUPDF4LLM,
+    PYMUPDF4LLM_UNAVAILABLE_REASON,
+    PYMUPDF_LOCK,
+)
 
 logger = get_logger(__name__)
 
@@ -81,7 +85,12 @@ def parse_pdf(pdf_bytes: bytes, *,
             if is_scanned:
                 warnings.append('PDF appears scanned / image-only; text may be incomplete.')
             if not HAS_PYMUPDF4LLM:
-                warnings.append('pymupdf4llm not installed; tables/headers not preserved.')
+                if PYMUPDF4LLM_UNAVAILABLE_REASON.startswith('version'):
+                    warnings.append('pymupdf4llm unavailable (version/ABI '
+                                    'mismatch); tables/headers not preserved.')
+                else:
+                    warnings.append('pymupdf4llm not installed; '
+                                    'tables/headers not preserved.')
 
             # ── Images (figures & tables) ──
             images = []

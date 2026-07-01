@@ -162,29 +162,31 @@ _LEARNED, _META = _load()
 
 
 def _persist():
-    """Write the in-memory dicts to server_config.json. Caller holds _lock."""
-    try:
-        from lib.config_dir import config_path
-        cfg_path = config_path('server_config.json')
-        cfg = {}
-        if os.path.isfile(cfg_path):
-            try:
-                with open(cfg_path) as f:
-                    cfg = json.load(f)
-            except (json.JSONDecodeError, ValueError) as e:
-                logger.warning('[CtxLimits] server_config.json unreadable, '
-                               'rewriting from scratch: %s', e)
-                cfg = {}
+    """Write the in-memory dicts to server_config.json. Caller holds _lock.
+
+    Uses ``update_json_atomic`` so this read-modify-write is serialised
+    (per-path thread lock + cross-process flock) against the OTHER
+    concurrent writers of this shared file (routes/config.py save,
+    model_info._learn_model_limit, dispatcher discovery, health_local).
+    A plain atomic write still loses updates when two writers touch
+    different keys of the same file at once.
+    """
+    from lib.config_dir import config_path
+    from lib.json_store import update_json_atomic
+    cfg_path = config_path('server_config.json')
+
+    def _mutate(cfg):
+        if not isinstance(cfg, dict):
+            cfg = {}
         cfg['model_context_limits'] = dict(_LEARNED)
         # Only persist metadata for keys that still have a learned value.
         cfg['model_context_limits_meta'] = {
             k: v for k, v in _META.items() if k in _LEARNED
         }
-        os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
-        tmp_path = cfg_path + '.tmp'
-        with open(tmp_path, 'w') as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, cfg_path)
+        return cfg
+
+    try:
+        update_json_atomic(cfg_path, _mutate, default={})
     except Exception as e:
         logger.error('[CtxLimits] Failed to persist learned context limits: %s',
                      e, exc_info=True)

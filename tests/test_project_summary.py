@@ -165,6 +165,57 @@ class TestProjectSummaryEngine:
         assert ps.build_project_digest('', limit=10) == ''
         assert ps.build_project_digest('/tmp/nonexistent_proj_zzz', limit=10) == ''
 
+    def test_digest_relevance_gating_and_recency_floor(self):
+        # Seed topically-distinct siblings in a dedicated project so BM25 can
+        # discriminate. A query mentioning one topic must surface THAT sibling
+        # first; an off-topic query must still return the recency floor.
+        now = int(time.time() * 1000)
+        tag = f'relgate-{now}'
+        proj = f'/tmp/projsum_{tag}'
+
+        def _mk(cid, title, summary, ts):
+            settings = {'projectPath': proj,
+                        'projectSummary': {'text': summary, 'generated_at': ts,
+                                           'msg_count_at_gen': 8}}
+            from lib.database._core_schema import CONVERSATIONS, upsert
+            upsert(self.db, CONVERSATIONS, {
+                'id': cid, 'user_id': 1, 'title': title,
+                'messages': json.dumps([]), 'created_at': ts, 'updated_at': ts,
+                'settings': json.dumps(settings), 'msg_count': 8,
+                'search_text': title,
+            }, insert_cols=['id', 'user_id', 'title', 'messages', 'created_at',
+                            'updated_at', 'settings', 'msg_count', 'search_text'],
+               retry=True)
+            self.ids.append(cid)
+            return cid
+
+        # ts ascending → c_recent is the most-recently-updated (recency floor).
+        c_db = _mk(f'{tag}-db', 'PostgreSQL migration',
+                   'Migrated the database layer from SQLite to PostgreSQL.', now + 1)
+        c_css = _mk(f'{tag}-css', 'Sidebar styling',
+                    'Tweaked the CSS for the conversation sidebar chips.', now + 2)
+        c_recent = _mk(f'{tag}-recent', 'Latest unrelated work',
+                       'Refactored the scheduler timer loop.', now + 3)
+
+        # Relevant query → the matching sibling appears.
+        entries = ps.project_digest_entries(
+            proj, query='fix a bug in the postgresql database migration')
+        ids = [e['id'] for e in entries]
+        assert c_db in ids, 'relevant sibling must be surfaced'
+        assert ids[0] == c_db, 'most-relevant sibling must rank first'
+
+        # Off-topic query (nothing matches) → recency floor still returns
+        # something, led by the most-recent sibling.
+        off = ps.project_digest_entries(
+            proj, query='quantum chromodynamics lattice gauge theory')
+        off_ids = [e['id'] for e in off]
+        assert off_ids, 'off-topic turn must NOT be empty (recency floor)'
+        assert c_recent in off_ids, 'recency floor keeps the most-recent sibling'
+
+        # No query → pure recency (back-compat), most-recent first.
+        recency = ps.project_digest_entries(proj)
+        assert [e['id'] for e in recency][:3] == [c_recent, c_css, c_db]
+
     def test_digest_header_advertises_tools_only_when_available(self):
         # When the conv-ref tools ARE registered, the header instructs the
         # model to call them. When they are NOT, the header must name no tool

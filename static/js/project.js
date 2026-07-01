@@ -1084,12 +1084,16 @@ async function browseDirectory(path) {
         var icon = d.hasCode
           ? '<svg class="fi-folder" width="16" height="16" viewBox="0 0 24 24" fill="rgba(245,158,11,0.14)" stroke="#f59e0b" stroke-width="1.8" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
           : '<svg class="fi-folder" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" opacity="0.55"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+        var safeName = d.name.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
         return (
           '<div class="folder-item' + hidden + added +
           '" onclick="browseDirectory(\'' + safePath + '\')" title="Open ' + escapeHtml(d.name) + '">' +
           '<span class="folder-icon">' + icon + "</span>" +
           '<span class="folder-name">' + escapeHtml(d.name) + "</span>" +
           badge + items +
+          '<button class="folder-del-btn" onclick="event.stopPropagation();mpDeleteFolder(\'' + safePath + '\',\'' + safeName + '\')" title="Delete folder">' +
+          '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>' +
+          '</button>' +
           '<button class="folder-add-btn" onclick="event.stopPropagation();mpAddBrowsedPath(\'' + safePath + '\')" title="Add to workspace">' +
           '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>' +
           '</button>' +
@@ -1162,6 +1166,62 @@ function mpAddBrowsedPath(path) {
 
 function browseParent() {
   if (_browseState.parent) browseDirectory(_browseState.parent);
+}
+
+/* Create a new sub-folder inside the directory the browser is currently
+   showing, then refresh so the new folder appears in the list. */
+async function mpNewFolder() {
+  const parent = _browseState.path;
+  if (!parent) return;
+  const name = await showPrompt(t('folder.createInHint', { dir: parent }), {
+    title: t('folder.createTitle'),
+    placeholder: t('folder.namePh'),
+    okText: t('folder.create'),
+  });
+  if (name == null) return; // cancelled
+  const clean = name.trim();
+  if (!clean) return;
+  try {
+    const resp = await Api.project.mkdir(parent, clean);
+    const data = resp ? await resp.json().catch(() => ({})) : {};
+    if (resp && resp.ok && data.ok) {
+      if (typeof showToast === 'function') showToast(t('folder.created'), 'success');
+      browseDirectory(parent);
+    } else {
+      await showAlert((data && data.error) || t('folder.createFailed'),
+        { title: t('folder.createFailed') });
+    }
+  } catch (e) {
+    await showAlert(e.message || t('folder.createFailed'),
+      { title: t('folder.createFailed') });
+  }
+}
+
+/* Delete a folder shown in the browser (moved to a recoverable trash bin),
+   then refresh the current directory. */
+async function mpDeleteFolder(path, name) {
+  if (!path) return;
+  if (!await showConfirm(
+    t('folder.deleteDirConfirm', { name: name || path }) + '\n' +
+    t('folder.deleteDirHint'),
+    { danger: true, title: t('folder.deleteTitle') })) return;
+  try {
+    const resp = await Api.project.rmdir(path);
+    const data = resp ? await resp.json().catch(() => ({})) : {};
+    if (resp && resp.ok && data.ok) {
+      if (typeof showToast === 'function') showToast(t('folder.deleted'), 'success');
+      // Drop it from the workspace list too, if it was staged there.
+      const idx = _mpFolders.indexOf(path);
+      if (idx !== -1) { _mpFolders.splice(idx, 1); _mpReadOnly.delete(path); _mpRenderTags(); }
+      browseDirectory(_browseState.path);
+    } else {
+      await showAlert((data && data.error) || t('folder.deleteFailed'),
+        { title: t('folder.deleteFailed') });
+    }
+  } catch (e) {
+    await showAlert(e.message || t('folder.deleteFailed'),
+      { title: t('folder.deleteFailed') });
+  }
 }
 
 function toggleHiddenDirs() {

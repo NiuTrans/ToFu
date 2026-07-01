@@ -4,7 +4,43 @@ Kept separate from the engine so the prompt can evolve without churning
 the engine module.
 """
 
+from datetime import datetime, timezone
+
 from lib.tools.search import FETCH_URL_TOOL, SEARCH_TOOL_MULTI
+
+
+def date_anchor_clause(ui_lang: str) -> str:
+    """Return a system-message clause stating TODAY's date.
+
+    The report / review prompts are built as a self-contained ``messages``
+    list that (unlike the main chat path) never inherits the ``Current date:``
+    system block. Without a "now" anchor the model conflates the paper's
+    PUBLICATION date (printed in the paper text) with the present, and then
+    wrongly claims no follow-up work exists yet "at the time of writing" — even
+    though generation happens months later. This clause supplies today's date
+    and explicitly breaks that misconception so the follow-up search actually
+    happens. Changes once per UTC day (cache-stable within a day).
+    """
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    if ui_lang == 'zh':
+        return (
+            f"今天的日期是 {today}（UTC）。\n"
+            "注意：论文正文里印的发表/上线日期是**过去**的时间点，绝不是"
+            "“现在”。你此刻是在该发表日期**之后**（往往已数月）撰写这篇报告——"
+            "在这段间隔里很可能已经出现了引用、扩展或质疑本文的后续工作。"
+            "因此**禁止**写“截至写作时尚无可检索的后续论文”这类话；请以今天为基准，"
+            "用 web_search 实际去检索自论文发表以来出现的后续工作。\n\n"
+        )
+    return (
+        f"Today's date is {today} (UTC).\n"
+        "Note: any publication / release date printed in the paper text is a "
+        "PAST point in time, NOT 'now'. You are writing this report AFTER that "
+        "date (often by months), and follow-up work that cites, extends, or "
+        "critiques this paper has very likely appeared in the interval. Do NOT "
+        "write anything like 'no follow-up papers are searchable at the time of "
+        "writing' — anchor on today's date and actually use web_search to find "
+        "post-publication follow-ups.\n\n"
+    )
 
 
 _REPORT_PROMPT_EN = """\

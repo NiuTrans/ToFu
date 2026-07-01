@@ -43,6 +43,7 @@ from lib.artifacts.core import (
     list_artifacts,
     list_pinned_or_recent,
     list_versions,
+    public_meta,
     set_pinned,
 )
 from lib.artifacts.events import emit_artifact_event
@@ -61,6 +62,7 @@ __all__ = [
     'list_artifacts',
     'list_pinned_or_recent',
     'list_versions',
+    'public_meta',
     'scan_message',
     'set_pinned',
 ]

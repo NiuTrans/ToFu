@@ -2107,6 +2107,34 @@ function renderMcpLoginHintHtml(lh) {
     `</div>`;
 }
 
+/* ── Safe inline-markdown for the provenance strip ──────────────────
+   The preference bullets (and some memory descriptions) carry lightweight
+   markdown — `**bold**`, `*italic*`, `` `code` ``. Rendering them through a
+   bare escapeHtml() showed the literal asterisks/backticks ("markdown 渲染,
+   字体不好看"). We can't pipe them through the full block renderer
+   (renderMarkdown wraps in <p>, runs the code-fence/table/KaTeX pipeline —
+   overkill and layout-breaking for a one-line bullet). Instead: escape
+   first (XSS-safe), THEN unescape only the three inline emphasis spans.
+   Order matters — code spans are tokenised first so `*` inside them stays
+   literal. */
+function _tpInlineMd(text) {
+  let s = escapeHtml(String(text == null ? "" : text));
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (_m, c) => {
+    codes.push(c);
+    return "\x01CODE" + (codes.length - 1) + "\x02";
+  });
+  // Bold before italic so `**x**` isn't half-eaten by the single-* rule.
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+  s = s.replace(/\x01CODE(\d+)\x02/g, (_m, i) => `<code>${codes[+i]}</code>`);
+  return s;
+}
+
+/* ── Memory-prefetch segment for the unified turn-provenance strip ──
+   Returns {state, segHtml, detailHtml} or null. The collapsed segment is
+   icon + small count; full labels + the picked-memory list live in
+   detailHtml (revealed when the strip is expanded). */
 /* ── Memory-prefetch segment for the unified turn-provenance strip ──
    Returns {state, segHtml, detailHtml} or null. The collapsed segment is
    icon + small count; full labels + the picked-memory list live in
@@ -2177,7 +2205,6 @@ function _memPrefetchSegment(mp) {
 
   const segHtml =
     `<span class="tp-seg tp-seg-mem tp-${state}">${icon}` +
-    (count ? `<span class="tp-count">${escapeHtml(count)}</span>` : "") +
     `<span class="tp-label">${escapeHtml(segLabel)}</span>` +
     (state === "running" ? `<span class="mp-dots"><span>.</span><span>.</span><span>.</span></span>` : "") +
     `</span>`;
@@ -2187,7 +2214,7 @@ function _memPrefetchSegment(mp) {
     const items = mp.memories.map(m => {
       const nm = escapeHtml(m.name || "?");
       const sc = escapeHtml(m.scope || "");
-      const ds = escapeHtml(m.description || "");
+      const ds = m.description ? _tpInlineMd(m.description) : "";
       return `<li><span class="mp-mem-name">${nm}</span>` +
              (sc ? ` <span class="mp-mem-scope">${sc}</span>` : "") +
              (ds ? `<div class="mp-mem-desc">${ds}</div>` : "") +
@@ -2216,16 +2243,17 @@ function _prefsAppliedSegment(pa) {
     ? _t("prefs.appliedN").replace("{n}", n)
     : _t("prefs.applied");
 
-  const segLabel = (n > 0) ? _t("prefs.tag") : _t("prefs.tagNone");
+  const segLabel = (n > 0)
+    ? _t(n === 1 ? "prefs.tagN" : "prefs.tagNs", { n })
+    : _t("prefs.tagNone");
   const segHtml =
     `<span class="tp-seg tp-seg-prefs tp-done">${Icon('sliders', 13)}` +
-    (n > 0 ? `<span class="tp-count">${escapeHtml(String(n))}</span>` : "") +
     `<span class="tp-label">${escapeHtml(segLabel)}</span>` +
     `</span>`;
 
   let prefList = "";
   if (n > 0) {
-    const lis = items.map(it => `<li>${escapeHtml(it)}</li>`).join("");
+    const lis = items.map(it => `<li>${_tpInlineMd(it)}</li>`).join("");
     prefList = `<ul class="mp-mem-list pa-list">${lis}</ul>`;
   }
   const detailHtml =
@@ -2251,10 +2279,10 @@ function _relatedConvsSegment(rc) {
   const _t = (typeof t === "function") ? t : (k => k);
   const label = _t(n === 1 ? "relatedConvs.tagN" : "relatedConvs.tagNs", { n });
 
+  const segLabel = _t(n === 1 ? "relatedConvs.tagN" : "relatedConvs.tagNs", { n });
   const segHtml =
     `<span class="tp-seg tp-seg-convs tp-done">${Icon('messageSquare', 13)}` +
-    `<span class="tp-count">${escapeHtml(String(n))}</span>` +
-    `<span class="tp-label">${escapeHtml(_t("relatedConvs.tag"))}</span>` +
+    `<span class="tp-label">${escapeHtml(segLabel)}</span>` +
     `</span>`;
 
   let convList = "";

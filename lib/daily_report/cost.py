@@ -364,6 +364,70 @@ def invalidate_day_cost_cache(date_str=None):
                        date_str, e)
 
 
+def _cost_days_for_messages(messages, conv_start=0, conv_end=0):
+    """Return the set of ``'YYYY-MM-DD'`` days a message list contributes cost to.
+
+    Only messages carrying a ``usage`` dict affect the per-day aggregate, so
+    those are the only days whose cache is stale after an edit/delete. The
+    timestamp resolution mirrors :func:`_scan_costs_in_range` (message
+    timestamp, else conversation-span fallback) so the invalidated days line
+    up with the persisted aggregates.
+
+    Args:
+        messages: List of message dicts (or anything non-list → empty set).
+        conv_start: Conversation created_at (epoch-ms) fallback for
+            timestamp-less messages.
+        conv_end: Conversation updated_at (epoch-ms) fallback.
+
+    Returns:
+        set[str] of day strings.
+    """
+    from .conversations import _safe_int_ts
+
+    if not isinstance(messages, list):
+        return set()
+    cs = _safe_int_ts(conv_start or conv_end or 0)
+    days: set = set()
+    for msg in messages:
+        if not isinstance(msg, dict) or not msg.get('usage'):
+            continue
+        ts = _safe_int_ts(msg.get('timestamp', 0))
+        if not ts:
+            ts = cs
+        if not ts:
+            continue
+        d = _dt.datetime.fromtimestamp(ts / 1000)
+        days.add(f'{d.year:04d}-{d.month:02d}-{d.day:02d}')
+    return days
+
+
+def invalidate_cost_cache_for_messages(messages, conv_start=0, conv_end=0):
+    """Scoped cost-cache invalidation for a delete/edit of specific messages.
+
+    Removes ONLY the persisted per-day entries the given messages touch,
+    instead of nuking the whole table. This is what conversation/message
+    deletes must call: wiping all days forces the next calendar open to
+    live-rescan the entire month (~10s), so a single delete would otherwise
+    permanently defeat the persistent cost cache.
+
+    Args:
+        messages: The messages being removed (or the whole conversation's
+            messages when a conversation is deleted).
+        conv_start: Conversation created_at (epoch-ms) — timestamp fallback.
+        conv_end: Conversation updated_at (epoch-ms) — timestamp fallback.
+
+    Returns:
+        set[str] of the day strings that were invalidated.
+    """
+    day_strs = _cost_days_for_messages(messages, conv_start, conv_end)
+    for date_str in day_strs:
+        invalidate_day_cost_cache(date_str)
+    if day_strs:
+        logger.debug('[DailyReport] Scoped cost invalidation for %d day(s): %s',
+                     len(day_strs), sorted(day_strs))
+    return day_strs
+
+
 def _get_monthly_costs(year, month):
     """Return per-day cost breakdown for a month, using persistent cache.
 

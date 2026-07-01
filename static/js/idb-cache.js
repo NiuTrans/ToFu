@@ -191,6 +191,9 @@ var ConvCache = (function () {
       autoTranslate: conv.autoTranslate,
       pinned: conv.pinned, pinnedAt: conv.pinnedAt,
       folderId: conv.folderId,
+      /* Human-only autopilot run-summary sidecar — keep it in the cache so a
+       * reload renders the run fold's report panel without a server round-trip. */
+      autopilotSummaries: conv.autopilotSummaries,
     };
   }
 

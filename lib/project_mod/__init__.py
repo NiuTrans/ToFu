@@ -46,6 +46,7 @@ __all__ = [
     'tool_create_project', 'tool_run_command',
     'execute_tool', 'execute_standalone_command',
     'project_tool_display', 'browse_directory',
+    'create_directory', 'delete_directory',
     # Context
     'get_context_for_prompt',
 ]
@@ -126,6 +127,8 @@ from lib.project_mod.scanner import (
 # ── Tools ──
 from lib.project_mod.tools import (
     browse_directory,
+    create_directory,
+    delete_directory,
     execute_standalone_command,
     execute_tool,
     project_tool_display,

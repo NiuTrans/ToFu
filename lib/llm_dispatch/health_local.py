@@ -228,24 +228,32 @@ def _check_ephemeral_endpoints() -> dict:
 
 
 def _persist_provider_models(prov_id: str, models: list[dict]) -> bool:
-    """Update server_config.json with refreshed model list for one provider."""
+    """Update server_config.json with refreshed model list for one provider.
+
+    Uses ``update_json_atomic`` so this read-modify-write is serialised
+    against the other concurrent writers of this shared file. The provider
+    is re-found in the FRESH on-disk config under the lock, so a concurrent
+    Settings save that just added/removed a provider is not clobbered.
+    Returns True iff the provider was found and its models persisted.
+    """
     try:
-        import json as _json
+        from lib import _SERVER_CONFIG_PATH
+        from lib.json_store import update_json_atomic
 
-        from lib import _SERVER_CONFIG_PATH, _load_server_config
+        found = {'ok': False}
 
-        cfg = _load_server_config()
-        providers = cfg.get('providers') or []
-        for p in providers:
-            if p.get('id') == prov_id:
-                p['models'] = models
-                break
-        else:
-            return False
-        os.makedirs(os.path.dirname(_SERVER_CONFIG_PATH), exist_ok=True)
-        with open(_SERVER_CONFIG_PATH, 'w') as f:
-            _json.dump(cfg, f, indent=2, ensure_ascii=False)
-        return True
+        def _mutate(cfg):
+            if not isinstance(cfg, dict):
+                return None
+            for p in (cfg.get('providers') or []):
+                if p.get('id') == prov_id:
+                    p['models'] = models
+                    found['ok'] = True
+                    return cfg
+            return None  # provider gone — no write
+
+        update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
+        return found['ok']
     except Exception as e:
         logger.warning('[HealthLocal] Failed to persist models for %s: %s',
                        prov_id, e, exc_info=True)

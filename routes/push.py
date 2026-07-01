@@ -18,8 +18,9 @@ Protocol:
 """
 
 import asyncio
+import os
 
-from flask import Blueprint
+from flask import Blueprint, jsonify, request
 from quart import websocket
 
 from lib.log import get_logger
@@ -28,6 +29,76 @@ from lib.push import PushClient, hub
 logger = get_logger(__name__)
 
 push_bp = Blueprint('push', __name__)
+
+
+@push_bp.route('/api/push/debug/presence', methods=['POST'])
+def debug_presence():
+    """Emit synthetic cross-conversation presence frames (DEBUG ONLY).
+
+    Gated OFF by default — only active when ``TOFU_PRESENCE_DEBUG=1``. The
+    presence push hub is an in-process singleton, so a standalone script
+    cannot light up a live browser by itself; this endpoint runs the registry
+    mutations INSIDE the server process so their broadcasts reach connected
+    WebSocket clients. Used by ``debug/presence_smoke.py --live`` to eyeball
+    the "who's working" strip without orchestrating two real conversations.
+
+    Body: ``{root: "<abs path>", action: "scenario"|"subagents"|"clear"}``.
+    ``scenario`` announces two sibling-CONVERSATION peers touching a shared file
+    (cross-conversation conflict); ``subagents`` announces ONE conversation with
+    two SUB-AGENTS clobbering the same file (within-conversation conflict +
+    nested rows); both leave the peers ACTIVE so the strip stays lit. ``clear``
+    departs everything.
+    """
+    if os.environ.get('TOFU_PRESENCE_DEBUG') not in ('1', 'true', 'yes'):
+        return jsonify({'ok': False, 'error': 'presence debug disabled '
+                        '(set TOFU_PRESENCE_DEBUG=1 to enable)'}), 403
+    body = request.get_json(silent=True) or {}
+    root = (body.get('root') or '').strip()
+    action = (body.get('action') or 'scenario').strip()
+    if not root:
+        return jsonify({'ok': False, 'error': 'root is required'}), 400
+    from lib import presence
+    if action == 'clear':
+        presence.depart(root, 'dbg-peer-1')
+        presence.depart(root, 'dbg-peer-2')
+        presence.depart(root, 'dbg-swarm', agent_id='agent-coder-1')
+        presence.depart(root, 'dbg-swarm', agent_id='agent-coder-2')
+        presence.depart(root, 'dbg-swarm')
+        return jsonify({'ok': True, 'action': 'clear', 'root': root})
+    if action == 'subagents':
+        # ONE conversation, TWO sub-agents clobbering the SAME file → a
+        # within-conversation conflict advisory + nested rows on the strip.
+        presence.announce(root, 'dbg-swarm', task_id='dbg-task-3',
+                          title='Swarm session', objective='parallel refactor',
+                          phase='working')
+        for aid in ('agent-coder-1', 'agent-coder-2'):
+            presence.announce(root, 'dbg-swarm', agent_id=aid, task_id='dbg-task-3',
+                              title='coder', parent_title='Swarm session',
+                              phase='working')
+            presence.record_files(root, 'dbg-swarm',
+                                  [{'path': 'lib/llm/stream.py', 'action': 'patched'}],
+                                  agent_id=aid)
+        snap = presence.snapshot(root)
+        logger.info('[Push] debug presence SUB-AGENT scenario fired root=%s peers=%d',
+                    root, len(snap.get('peers') or []))
+        return jsonify({'ok': True, 'action': 'subagents', 'root': root,
+                        'activePeers': len(snap.get('peers') or [])})
+    # scenario: two peers, a shared-file conflict, both left active.
+    presence.announce(root, 'dbg-peer-1', task_id='dbg-task-1',
+                      title='Refactor the parser', objective='make it ship',
+                      phase='working')
+    presence.announce(root, 'dbg-peer-2', task_id='dbg-task-2',
+                      title='Tune the LLM stream', objective='cut TTFT',
+                      phase='working')
+    presence.record_files(root, 'dbg-peer-1',
+                          [{'path': 'lib/llm/stream.py', 'action': 'patched'}])
+    presence.record_files(root, 'dbg-peer-2',
+                          [{'path': 'lib/llm/stream.py', 'action': 'patched'}])
+    snap = presence.snapshot(root)
+    logger.info('[Push] debug presence scenario fired root=%s peers=%d',
+                root, len(snap.get('peers') or []))
+    return jsonify({'ok': True, 'action': 'scenario', 'root': root,
+                    'activePeers': len(snap.get('peers') or [])})
 
 
 @push_bp.websocket('/api/push')

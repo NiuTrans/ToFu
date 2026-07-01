@@ -723,8 +723,16 @@ def _handle_spawn_agents(fn_args: dict, *,
     push_conv_id = (task.get('convId') or cfg.get('convId') or '')
 
     def _emit(ev: dict):
+        # The SSE sink belongs to the SPAWNING turn and can raise once that
+        # turn detaches (its stream is closed). Isolate it so a dead SSE sink
+        # can NEVER prevent the push mirror below from running — otherwise the
+        # frame at the live→detached boundary (often the terminal
+        # swarm_phase:complete) is lost and the panel sticks on "running".
         if on_event:
-            on_event(ev)
+            try:
+                on_event(ev)
+            except Exception as e:
+                logger.debug('[Swarm:%s] SSE emit failed (turn likely detached): %s', task_id, e)
         if push_conv_id:
             try:
                 from lib.agent_core.push import push_event
@@ -838,9 +846,12 @@ def _handle_spawn_agents(fn_args: dict, *,
             except Exception as e:
                 logger.debug('[Swarm:%s] followup session persist failed: %s',
                              swarm_key, e)
-        if on_event and accepted_specs:
+        if accepted_specs:
             # objective is for the UI agent card — full text, CSS wraps it.
-            on_event({
+            # Use _emit (not on_event) so a follow-up wave spawned AFTER the
+            # turn detached is mirrored to the conv-scoped push channel too —
+            # otherwise its new agent cards never reach the detached panel.
+            _emit({
                 'type': 'swarm_phase', 'phase': 'spawn_more',
                 'content': f'🚀 Spawning {len(accepted_specs)} more agent(s) (live)…',
                 'agents': [

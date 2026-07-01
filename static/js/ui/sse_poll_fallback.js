@@ -61,7 +61,13 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
           finishStream(convId);
           return;
         }
-        throw new Error(`Poll HTTP ${resp.status}`);
+        /* ★ resp===null means Api.chat.poll swallowed a network failure
+         *   (onError:'null' — VS Code tunnel drop / fetch threw). Dereferencing
+         *   resp.status here would itself throw the misleading TypeError
+         *   "Cannot read properties of null (reading 'status')" that was
+         *   surfacing at ERROR level in the client-error log. Feed the circuit
+         *   breaker a clean network-failure message instead. */
+        throw new Error(resp ? `Poll HTTP ${resp.status}` : 'Poll network error (no response)');
       }
       _consecutiveErrors = 0; // ★ Reset on any successful response
       const data = await resp.json();

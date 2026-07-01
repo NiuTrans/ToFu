@@ -1,0 +1,300 @@
+"""jsdom test for the Review-tab first-entry venue race.
+
+Bug (2026-06-30): ``_switchPaperTab('review')`` called the ASYNC
+``_populateReviewVenueDropdown()`` WITHOUT awaiting it, then synchronously ran
+``_loadOrGenerateReport(reviewView)``. On the FIRST entry the venue list isn't
+loaded yet and ``_paperReviewVenue===''`` → the generation langKey resolved to
+``review:generic:en`` (the ``_paperReviewVenue || 'generic'`` fallback), while
+the async dropdown a moment later snapped the label to the first venue
+(NeurIPS). Result: the dropdown showed "NeurIPS" but the review actually
+generated/persisted under ``review:generic`` — label/key skew, and the user
+never got to pick the venue before generation.
+
+Fix: the review branch awaits ``_populateReviewVenueDropdown()`` (which now
+resolves the per-paper venue: persisted → first → registry) BEFORE
+``_loadOrGenerateReport``. So the displayed venue and the generation langKey
+are always consistent on first entry.
+
+The harness loads the REAL shipped ``static/js/paper-reader.js`` under jsdom,
+drives a first-entry review tab switch, and asserts:
+  • exactly one /report/start fired with a venue-specific langKey
+    (``review:neurips:en``), NOT ``review:generic:en``;
+  • the displayed venue label key matches the langKey's venue (no skew);
+  • the SILENT auto-default is NOT persisted, but an EXPLICIT user pick is and
+    is restored over the registry-first default after a simulated refresh.
+
+Source-level negative control: a sed-style patch reverts the await to the old
+fire-and-forget ordering (``_populateReviewVenueDropdown(); _loadOrGenerate…``)
+→ the skew reappears (langKey venue = generic ≠ label NeurIPS) and the test
+FAILS; the original file is restored byte-identical afterwards.
+
+Skips cleanly when node + jsdom aren't installed.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.normpath(os.path.join(HERE, '..'))
+JS_DIR = os.path.join(ROOT, 'static', 'js')
+PAPER_JS = os.path.join(JS_DIR, 'paper-reader.js')
+
+
+def _node_deps_available() -> bool:
+    if not shutil.which('node'):
+        return False
+    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
+
+
+_HARNESS = r"""
+const fs = require('fs');
+const path = require('path');
+const ROOT = process.argv[3];
+const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
+// Build the minimal DOM the review branch touches: tab buttons + panels +
+// the review container + venue label/dropdown + report container.
+const dom = new JSDOM(
+  '<!DOCTYPE html><body>' +
+  '<div id="sidebar" class="collapsed"></div>' +
+  '<button class="paper-tab-btn" data-tab="qa"></button>' +
+  '<button class="paper-tab-btn" data-tab="report"></button>' +
+  '<button class="paper-tab-btn" data-tab="review"></button>' +
+  '<div class="paper-tab-panel" data-tab="qa"></div>' +
+  '<div class="paper-tab-panel" data-tab="report"></div>' +
+  '<div class="paper-tab-panel" data-tab="review">' +
+  '  <span id="paperReviewVenueLabel"></span>' +
+  '  <div id="paperReviewVenueDropdown"></div>' +
+  '  <div id="paperReviewModelDropdown"></div>' +
+  '  <span id="paperReviewModelLabel"></span>' +
+  '  <div id="paperReviewContent"></div>' +
+  '</div>' +
+  '<div id="paperReportContent"></div>' +
+  '</body>',
+  { url: 'http://localhost/' });
+const win = dom.window;
+global.window = win;
+global.document = win.document;
+global.localStorage = win.localStorage;
+global.console = console;
+win.escapeHtml = global.escapeHtml = (s) =>
+  String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+win.t = global.t = (k) => k;
+
+const calls = { start: [] };
+global.Api = win.Api = { paper: {
+  libraryList: async () => ({ ok: true, papers: [{ id: 'paper-1', title: 'P', paperHash: 'phash-1' }] }),
+  // Venue list: NeurIPS first (so the resolved venue is 'neurips', NOT generic).
+  // Api.paper.reviewVenues() uses the default JSON parse → it resolves to the
+  // parsed {ok, venues} BODY, not a raw Response. (An earlier mock returned a
+  // Response-shaped stub with .json(), which masked the real bug where the
+  // frontend called resp.json() on the already-parsed object.)
+  reviewVenues: async () => {
+    // Model real network latency (a macrotask hop). Without this the parsed
+    // body resolves in the same microtask flush as the caller, masking the
+    // fire-and-forget race the negative control must reproduce.
+    await new Promise(r => setTimeout(r, 5));
+    return { ok: true, venues: [
+      { key: 'neurips', name: 'NeurIPS' },
+      { key: 'iclr', name: 'ICLR' },
+      { key: 'acl', name: 'ACL (ARR)' },
+    ] };
+  },
+  reportLookup: async () => ({ ok: false }),
+  reportCache:  async () => ({ ok: false }),
+  reportStart:  async (body) => { calls.start.push(body); return { ok: true, task_id: 'rvw_new_1', paper_hash: 'phash-1' }; },
+  reportPoll:   async () => ({ ok: true, status: 'done', report: 'REVIEW', next_cursor: 0, events: [] }),
+  reportAbort:  async () => ({ ok: true }),
+}};
+
+localStorage.setItem('paper_active_id', 'paper-1');
+localStorage.setItem('paper_library_migrated_v1', '1');
+
+eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper-reader.js (real, shipped)
+
+const out = [];
+function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+
+// Stubs for unrelated subsystems the switch path would otherwise hit.
+_getActivePaperEntry = () => ({ id: 'paper-1', title: 'P' });
+_saveActivePaperState = () => {};
+_renderReportSkeleton = (c) => { if (c) c.innerHTML = '<div class="skeleton"></div>'; };
+_syncReportToolbar = () => {};
+_renderPaperQA = () => {};
+_populatePaperReportModelDropdown = () => {};
+_renderFinalReport = (c, txt) => { if (c) c.innerHTML = '<pre>' + escapeHtml(txt || '') + '</pre>'; };
+if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSidebar = () => {}; }
+
+(async () => {
+  for (let i = 0; i < 10; i++) { await new Promise(r => setTimeout(r, 0)); }
+  // Fresh first-entry state: paper loaded, NO venue chosen yet, Review never opened.
+  _activePaperId = 'paper-1';
+  _paperParsedText = 'x'.repeat(500);
+  _paperHash = 'phash-1';
+  _paperReviewModel = 'some-model';
+  _paperReviewVenue = '';
+  _paperReviewVenues = [];
+  _i18nLang = 'en';
+  localStorage.removeItem('paper_review_venue_by_id');
+
+  // FIRST entry into the Review tab.
+  _switchPaperTab('review');
+  // Let the awaited venue resolution + start round-trip settle.
+  for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 0)); }
+
+  // Exactly one generation fired.
+  check('one_start', calls.start.length === 1);
+  const langKey = calls.start.length ? (calls.start[0].lang || '') : '';
+  // DECISIVE: the langKey venue must be the resolved real venue, NOT generic.
+  check('langkey_not_generic', langKey === 'review:neurips:en');
+  // The displayed venue label key must MATCH the langKey venue (no skew).
+  const labelKey = _paperReviewVenue;  // what the dropdown selection set
+  const langVenue = langKey.split(':')[1] || '';
+  check('label_matches_langkey', labelKey === langVenue && labelKey === 'neurips');
+  // The label text reflects the resolved venue too.
+  check('label_text_resolved',
+        document.getElementById('paperReviewVenueLabel').textContent === 'NeurIPS');
+  // The SILENT auto-default must NOT be persisted — only a deliberate user
+  // pick should be remembered (otherwise merely viewing a paper pins it to
+  // the current default).
+  let map0 = {};
+  try { map0 = JSON.parse(localStorage.getItem('paper_review_venue_by_id') || '{}'); } catch (e) {}
+  check('silent_default_not_persisted', map0['paper-1'] === undefined);
+
+  // ── Now an EXPLICIT user pick (ICLR) MUST persist + reload that venue. ──
+  calls.start.length = 0;
+  _selectReviewVenue('iclr');                       // user clicks ICLR
+  for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 0)); }
+  let map1 = {};
+  try { map1 = JSON.parse(localStorage.getItem('paper_review_venue_by_id') || '{}'); } catch (e) {}
+  check('explicit_pick_persisted', map1['paper-1'] === 'iclr');
+  // The switch re-generated for the new venue's distinct cache key.
+  check('explicit_pick_regenerated',
+        calls.start.length === 1 && calls.start[0].lang === 'review:iclr:en');
+
+  // ── Simulate a hard refresh: wipe ALL in-session review state (venue,
+  //    stream, cache — a real reload loses these), re-enter Review. The
+  //    PERSISTED venue (iclr) must win over the registry-first default. ──
+  calls.start.length = 0;
+  _paperReviewVenue = '';            // session venue gone (as after reload)
+  _paperReviewStream = null;         // local poll state gone
+  _paperReviewCache = '';            // in-memory report gone
+  _switchPaperTab('qa');             // leave then re-enter
+  _switchPaperTab('review');
+  for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 0)); }
+  check('persisted_venue_restored_after_refresh', _paperReviewVenue === 'iclr');
+  check('restored_langkey_uses_persisted',
+        calls.start.length >= 1 && calls.start[calls.start.length - 1].lang === 'review:iclr:en');
+
+  console.log(out.join('\n'));
+  process.exit(0);
+})();
+"""
+
+
+def _write_harness() -> str:
+    harness = os.path.join(HERE, '_review_venue_race_harness.js')
+    with open(harness, 'w') as f:
+        f.write(_HARNESS)
+    return harness
+
+
+def _run_harness(paper_js_path: str):
+    harness = _write_harness()
+    try:
+        proc = subprocess.run(
+            ['node', harness, paper_js_path, ROOT],
+            capture_output=True, text=True, timeout=60,
+        )
+    finally:
+        try:
+            os.remove(harness)
+        except OSError:
+            pass
+    return proc
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_review_first_entry_resolves_venue_before_generating():
+    proc = _run_harness(PAPER_JS)
+    out = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'
+    fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'review venue-race failures:\n' + out
+    assert out.count('PASS') >= 9, f'expected >=9 PASS lines, got:\n{out}'
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_source_level_negative_control_unawaited_ordering_reintroduces_skew():
+    """Revert the fix (await → fire-and-forget) and prove the skew reappears.
+
+    We patch a COPY of paper-reader.js so the review branch no longer awaits
+    the venue resolution before generating — exactly the pre-fix ordering. The
+    harness must then FAIL (langKey venue = generic ≠ displayed NeurIPS). The
+    real shipped file is never modified.
+    """
+    src = open(PAPER_JS, encoding='utf-8').read()
+
+    # The fixed branch awaits venue resolution via a .then chain. Replacing
+    # that whole chain with the old fire-and-forget pair (populate WITHOUT
+    # awaiting, then load synchronously) reintroduces the race. The marker is
+    # the exact fixed block — patch produces valid JS (no dangling .then).
+    marker = (
+        "        _populateReviewVenueDropdown()\n"
+        "          .then(function() { _loadOrGenerateReport(_view); })\n"
+        "          .catch(function(e) {\n"
+        "            console.warn('[Paper:Review] venue resolve failed, loading with fallback:', e);\n"
+        "            _loadOrGenerateReport(_view);\n"
+        "          });")
+    assert marker in src, 'fix marker not found — test is stale, update the marker'
+    broken = src.replace(
+        marker,
+        "        _populateReviewVenueDropdown();\n"
+        "        _loadOrGenerateReport(_view);",
+        1,
+    )
+    assert broken != src, 'negative-control patch was a no-op'
+
+    tmp = os.path.join(HERE, '_paper_reader_unawaited.js')
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(broken)
+    try:
+        # Sanity: the patched copy must still be valid JS.
+        chk = subprocess.run(['node', '--check', tmp], capture_output=True, text=True, timeout=30)
+        assert chk.returncode == 0, f'patched JS invalid: {chk.stderr}'
+        proc = _run_harness(tmp)
+        out = proc.stdout.strip()
+        # With the await removed, the first-entry race resurfaces: the langKey
+        # is built before the venue resolves → generic, while the label later
+        # becomes NeurIPS → label_matches_langkey / langkey_not_generic FAIL.
+        assert proc.returncode == 0, f'node crashed: {proc.stderr}\n{out}'
+        assert 'FAIL langkey_not_generic' in out or 'FAIL label_matches_langkey' in out, \
+            'reverting the await did NOT reintroduce the skew — fix may be non-load-bearing:\n' + out
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+    # The real file is untouched (we only ever wrote a temp copy).
+    assert open(PAPER_JS, encoding='utf-8').read() == src, 'shipped file was modified!'
+
+
+if __name__ == '__main__':
+    import sys
+    if not _node_deps_available():
+        print('SKIP — node + jsdom not available')
+        sys.exit(0)
+    test_review_first_entry_resolves_venue_before_generating()
+    print('positive: PASS')
+    test_source_level_negative_control_unawaited_ordering_reintroduces_skew()
+    print('negative-control: PASS')
+    print('ALL PASSED')

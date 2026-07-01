@@ -6,6 +6,8 @@ Routes (legacy snake_case path → new hyphen-case path):
   GET    /api/v1/project/status             — current project state
   DELETE /api/v1/project                    — clear active project
   POST   /api/v1/project/browse             — list a directory
+  POST   /api/v1/project/mkdir              — create a new folder
+  POST   /api/v1/project/rmdir              — delete a folder (→ trash bin)
   GET    /api/v1/project/recent             — list recent project paths
   POST   /api/v1/project/recent             — save a recent path
   DELETE /api/v1/project/recent             — clear recent list
@@ -49,6 +51,17 @@ def _active_project_path(explicit: str = '') -> str:
         return explicit
     from lib.project_mod.config import _state
     return _state.get('path', '') or ''
+
+
+def _decoded_path_arg(name: str = 'path') -> str:
+    """Read a project path query arg, defensively undoing proxy double-encoding.
+
+    Thin wrapper over the shared ``lib.request_parser.decode_proxy_path_arg``
+    seam — the single source of truth for the VS Code-proxy re-encode fix,
+    used by every route that reads a filesystem path from the query string.
+    """
+    from lib.request_parser import decode_proxy_path_arg
+    return decode_proxy_path_arg(name)
 
 
 # ── State / lifecycle ────────────────────────────────────────────────
@@ -134,6 +147,54 @@ def project_browse():
     show_hidden = data.get('showHidden', False)
     from lib.project_mod import browse_directory
     result = browse_directory(path, show_hidden=show_hidden)
+    if result.get('error'):
+        return jsonify(result), 400
+    return jsonify(result)
+
+
+@api_v1_project_bp.route('/api/v1/project/mkdir', methods=['POST'])
+@require_auth
+@rate_limit(limit=20, per=60)
+@api_meta(
+    summary='Create a new folder',
+    description=('Body: ``{parent, name}``. Creates ``name`` (a single '
+                 'non-navigating segment) under the existing ``parent`` '
+                 'directory. Used by the file picker\'s "New folder" action.'),
+    tags=['project'],
+)
+def project_mkdir():
+    data = parse_body()
+    parent = (data.get('parent') or '').strip()
+    name = (data.get('name') or '').strip()
+    if not parent:
+        return api_bad_request('parent is required', field='parent')
+    if not name:
+        return api_bad_request('name is required', field='name')
+    from lib.project_mod import create_directory
+    result = create_directory(parent, name)
+    if result.get('error'):
+        return jsonify(result), 400
+    return jsonify(result)
+
+
+@api_v1_project_bp.route('/api/v1/project/rmdir', methods=['POST'])
+@require_auth
+@rate_limit(limit=20, per=60)
+@api_meta(
+    summary='Delete a folder (moved to a recoverable trash bin)',
+    description=('Body: ``{path}``. Moves the directory into a ``.tofu_trash`` '
+                 'bin rather than an irreversible delete. Refuses system '
+                 'paths and active workspace roots. Used by the file picker\'s '
+                 '"Delete folder" action.'),
+    tags=['project'],
+)
+def project_rmdir():
+    data = parse_body()
+    path = (data.get('path') or '').strip()
+    if not path:
+        return api_bad_request('path is required', field='path')
+    from lib.project_mod import delete_directory
+    result = delete_directory(path)
     if result.get('error'):
         return jsonify(result), 400
     return jsonify(result)
@@ -305,8 +366,9 @@ def project_rescan():
     tags=['project'],
 )
 def project_gitignore_suggestions():
-    project_path = _active_project_path(
-        (request.args.get('projectPath') or '').strip())
+    # GET route → the projectPath query arg can be proxy-double-encoded, same
+    # as the project-brain reads. Decode-until-stable before resolving.
+    project_path = _active_project_path(_decoded_path_arg('projectPath'))
     if not project_path:
         return api_bad_request('No active project')
     try:
@@ -380,6 +442,229 @@ def project_gitignore_dismiss():
         return api_internal_error(
             e, source='api_v1.project.gitignore_dismiss')
 
+
+
+# ── Project Brain: Activity Feed (read-only) ─────────────────────────
+
+@api_v1_project_bp.route('/api/v1/project/feed', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Read the cross-conversation project activity feed',
+    description=(
+        'Read-only "project brain" pulse. Query: ``path`` (REQUIRED — the '
+        'project root the caller already holds; this route NEVER consults the '
+        'process-global active-project singleton, so concurrent conversations '
+        'on different projects can never thrash each other), ``since`` '
+        '(optional seq; returns events with seq > since for incremental '
+        'fetch). Returns ``{events: [...newest-first...], maxSeq}``.'
+    ),
+    tags=['project'],
+)
+def project_feed():
+    # CRITICAL: key STRICTLY on the explicit ``path`` query param. Do NOT fall
+    # back to _active_project_path()/_state — that global is mutated by UI
+    # actions and reading it here would reintroduce the read/write-badge
+    # flip-flop thrash (see project-global-state-thrash-flipflop). The feed is
+    # per-project data addressed by the path the frontend already has in hand.
+    project_path = _decoded_path_arg()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    try:
+        since = int(request.args.get('since') or 0)
+    except (ValueError, TypeError):
+        since = 0
+    try:
+        limit = int(request.args.get('limit') or 100)
+    except (ValueError, TypeError):
+        limit = 100
+    try:
+        from lib.conversations.project_feed import read_project_feed
+        return api_ok(read_project_feed(project_path, since_seq=since,
+                                        limit=limit))
+    except Exception as e:
+        logger.error('[Project.v1] feed read failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.feed')
+
+
+# ── Project Brain: Charter + Board (read + human-commit) ─────────────
+
+@api_v1_project_bp.route('/api/v1/project/charter', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Read the project charter (north star + committed decisions)',
+    description=(
+        'Read-only. Query: ``path`` (REQUIRED — keyed strictly on the explicit '
+        'path, never the global singleton). Returns ``{content, decisions, '
+        'version, updated_by_conv, updated_at, exists}``.'),
+    tags=['project'],
+)
+def project_charter():
+    project_path = _decoded_path_arg()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    try:
+        from lib.conversations.project_charter import read_charter
+        return api_ok(read_charter(project_path))
+    except Exception as e:
+        logger.error('[Project.v1] charter read failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.charter')
+
+
+@api_v1_project_bp.route('/api/v1/project/charter/commit', methods=['POST'])
+@require_auth
+@rate_limit(limit=20, per=60)
+@api_meta(
+    summary='HUMAN-GATED commit of a charter change',
+    description=(
+        'The human gate for the charter north star — an agent can only PROPOSE '
+        '(project_charter_propose); only this route COMMITS. Body: ``{path, '
+        'content?, add_decision?, expected_version?, updated_by_conv?}``. '
+        'Optimistic-locked: a stale ``expected_version`` is rejected with '
+        '``version_conflict``. On success emits a ``decided`` activity event.'),
+    tags=['project'],
+)
+def project_charter_commit():
+    data = parse_body()
+    project_path = (data.get('path') or '').strip()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    content = data.get('content')
+    add_decision = data.get('add_decision')
+    if content is None and not add_decision:
+        return api_bad_request('provide content and/or add_decision')
+    expected_version = data.get('expected_version')
+    if expected_version is not None:
+        try:
+            expected_version = int(expected_version)
+        except (ValueError, TypeError):
+            return api_bad_request('expected_version must be an int',
+                                   field='expected_version')
+    try:
+        from lib.conversations.project_charter import commit_charter
+        result = commit_charter(
+            project_path, content=content, add_decision=add_decision,
+            expected_version=expected_version,
+            updated_by_conv=(data.get('updated_by_conv') or '').strip(),
+            resolves_proposal=(data.get('resolves_proposal') or '').strip())
+        if not result.get('ok'):
+            # version_conflict is a real, recoverable client outcome → 409.
+            if result.get('error') == 'version_conflict':
+                return jsonify(result), 409
+            return jsonify(result), 400
+        return api_ok(result)
+    except Exception as e:
+        logger.error('[Project.v1] charter commit failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.charter_commit')
+
+
+@api_v1_project_bp.route('/api/v1/project/board', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Read the project coordination board',
+    description=(
+        'Read-only. Query: ``path`` (REQUIRED, keyed strictly on the explicit '
+        'path). Returns ``{tasks: [...], open, claimed, done}`` with each '
+        "task's EFFECTIVE status (an expired claim reads as open)."),
+    tags=['project'],
+)
+def project_board():
+    project_path = _decoded_path_arg()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    try:
+        from lib.conversations.project_board import read_board
+        return api_ok(read_board(project_path))
+    except Exception as e:
+        logger.error('[Project.v1] board read failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.board')
+
+
+@api_v1_project_bp.route('/api/v1/project/charter/pending', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='List UNRESOLVED charter proposals (awaiting the human)',
+    description=(
+        'Read-only. Query: ``path`` (REQUIRED). Returns ``{pending: [...]}`` — '
+        'proposed_decision events NOT yet resolved by a matching commit or '
+        'dismiss (by proposalId). This is the single source both the collab '
+        'bar count and the Charter panel read, so the count decrements the '
+        'moment a human commits/rejects.'),
+    tags=['project'],
+)
+def project_charter_pending():
+    project_path = _decoded_path_arg()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    try:
+        from lib.conversations.project_charter import pending_proposals
+        return api_ok({'pending': pending_proposals(project_path)})
+    except Exception as e:
+        logger.error('[Project.v1] charter pending failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.charter_pending')
+
+
+@api_v1_project_bp.route('/api/v1/project/charter/dismiss', methods=['POST'])
+@require_auth
+@rate_limit(limit=20, per=60)
+@api_meta(
+    summary='Durably DISMISS (reject) a pending charter proposal',
+    description=(
+        'The human-reject gate. Body: ``{path, proposalId, summary?}``. Emits '
+        'a ``dismissed`` activity event carrying the resolved ``proposalId`` '
+        'so the proposal drops out of the pending set permanently (not a local '
+        'DOM dismiss that evaporates on reload).'),
+    tags=['project'],
+)
+def project_charter_dismiss():
+    data = parse_body()
+    project_path = (data.get('path') or '').strip()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    proposal_id = (data.get('proposalId') or '').strip()
+    if not proposal_id:
+        return api_bad_request('proposalId is required', field='proposalId')
+    try:
+        from lib.conversations.project_charter import dismiss_proposal
+        result = dismiss_proposal(
+            project_path, (data.get('updated_by_conv') or '').strip(),
+            proposal_id, summary=(data.get('summary') or '').strip())
+        if not result.get('ok'):
+            return jsonify(result), 400
+        return api_ok(result)
+    except Exception as e:
+        logger.error('[Project.v1] charter dismiss failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.charter_dismiss')
+
+
+@api_v1_project_bp.route('/api/v1/project/brain/summary', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='One-shot Project Brain summary for the collaboration bar',
+    description=(
+        'Read-only, cheap aggregation across Board + Activity Feed + presence, '
+        'keyed strictly on the explicit ``path``. Returns ``{epicsOpen, '
+        'epicsClaimed, epicsDone, pendingDecisions, activePeers, peerEpics, '
+        'charterExists}``, where ``peerEpics`` maps an active peer conv_id → '
+        'the title of the epic it is currently advancing (a live claim).'),
+    tags=['project'],
+)
+def project_brain_summary():
+    project_path = _decoded_path_arg()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    try:
+        from lib.conversations.project_brain_summary import build_brain_summary
+        return api_ok(build_brain_summary(project_path))
+    except Exception as e:
+        logger.error('[Project.v1] brain summary failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.brain_summary')
 
 
 # ── Direct file write (Apply Code button) ────────────────────────────

@@ -621,6 +621,25 @@ async function sendMessage() {
 //  ★ Pending Message Queue — dispatch, UI, cancel
 // ══════════════════════════════════════════════════════
 
+/**
+ * Count of DISPATCHABLE queued messages for a conversation.
+ *
+ * Mirrors the backend's `_get_queue_depth` (lib/message_queue.py), which
+ * excludes the autopilot armed-marker sentinel (kind='autopilot').  That
+ * sentinel is a persistent flag consumed by the end-of-turn autopilot hook,
+ * NOT a turn that ever gets dequeued & dispatched as a task.  Every frontend
+ * gate that means "is there pending work the backend will start next?" MUST
+ * use this — using the raw Map length instead makes an armed-but-idle
+ * autopilot look like a permanently stuck queued message (ghost "Dispatching…"
+ * bubble + a doomed ~15s _checkForQueuedTask retry loop).
+ */
+function _dispatchableQueueCount(convId) {
+  const q = pendingMessageQueue.has(convId) ? pendingMessageQueue.get(convId) : null;
+  if (!q || q.length === 0) return 0;
+  return q.filter((it) => it && it.kind !== 'autopilot').length;
+}
+if (typeof window !== 'undefined') window._dispatchableQueueCount = _dispatchableQueueCount;
+
 // ★ REMOVED: _dispatchQueuedMessage() — dead code.
 // Queue dispatch is now handled server-side by dispatch_next_queued() in
 // lib/message_queue.py. The frontend polls for auto-dispatched tasks via
@@ -912,7 +931,11 @@ function renderPendingQueueUI(convId) {
 function cancelAutopilotMarker(convId) {
   if (typeof Api !== 'undefined' && Api.chat && Api.chat.disarmAutopilot) {
     Api.chat.disarmAutopilot(convId)
-      .then(() => { if (typeof _refreshServerQueue === 'function') _refreshServerQueue(convId); })
+      .then((resp) => {
+        /* Fold the just-concluded run instantly even with no live stream. */
+        if (typeof _applyDisarmResponse === 'function') _applyDisarmResponse(convId, resp);
+        if (typeof _refreshServerQueue === 'function') _refreshServerQueue(convId);
+      })
       .catch((e) => console.warn('[Autopilot] disarm (queue cancel) failed:', e && e.message));
   }
   /* Reflect the cancel in the toolbar toggle for the active conv. */
@@ -1096,7 +1119,7 @@ async function _checkForQueuedTask(convId, _retryCount = 0) {
       // Retry if there are queued items, OR if autopilot is on (the
       // backend may still be running the VU LLM call to produce the
       // synthetic user reply, then will spawn a follow-up task).
-      const _hasQueueItems = pendingMessageQueue.has(convId) && pendingMessageQueue.get(convId).length > 0;
+      const _hasQueueItems = _dispatchableQueueCount(convId) > 0;
       const _autopilotOn = !!(_conv && _conv.autopilotEnabled);
       const _shouldRetry = _hasQueueItems || _autopilotOn;
       // ★ Extended retry schedule — covers slow aborts (mid-tool, slow LLM

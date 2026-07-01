@@ -202,6 +202,146 @@ def test_stringified_array_truncated_recovered():
 
 
 # ═════════════════════════════════════════════════════
+#  Parameter-KEY alias repair (_apply_param_aliases via validate_then_repair)
+# ═════════════════════════════════════════════════════
+
+
+def test_param_alias_edit_keys_to_apply_diff():
+    """Conv-debug screenshot: apply_diff called with Claude *Edit* keys.
+
+    {file_path, old_string, new_string} must be renamed to {path, search,
+    replace} BEFORE the type-walk, so the executor gets a real path instead
+    of '' (the empty 'File not found:' bug)."""
+    out, log = validate_then_repair(
+        'apply_diff',
+        {'file_path': 'tests/foo.py',
+         'old_string': 'window = sse_src[pos:pos + 600]',
+         'new_string': 'window = sse_src[pos:pos + 900]'},
+    )
+    assert out == {'path': 'tests/foo.py',
+                   'search': 'window = sse_src[pos:pos + 600]',
+                   'replace': 'window = sse_src[pos:pos + 900]'}
+    assert set(log) == {('path', 'param_alias'), ('search', 'param_alias'),
+                        ('replace', 'param_alias')}
+
+
+def test_param_alias_valid_keys_untouched():
+    """A correct apply_diff call must NOT be touched by the alias pass."""
+    args = {'path': 'a.py', 'search': 'x', 'replace': 'y'}
+    out, log = validate_then_repair('apply_diff', args)
+    assert out == args
+    assert log == []
+
+
+def test_param_alias_does_not_overwrite_canonical():
+    """If both the canonical AND the alias key are present, keep canonical."""
+    out, log = validate_then_repair(
+        'apply_diff',
+        {'path': 'real.py', 'file_path': 'bogus.py', 'search': 'x', 'replace': 'y'},
+    )
+    assert out['path'] == 'real.py'
+    assert 'file_path' not in out or out.get('path') == 'real.py'
+    assert ('path', 'param_alias') not in log
+
+
+def test_param_alias_write_file_body_keys():
+    """write_file: file_path→path and file_text→content."""
+    out, log = validate_then_repair(
+        'write_file',
+        {'file_path': 'a.py', 'file_text': 'print(1)\n'},
+    )
+    assert out == {'path': 'a.py', 'content': 'print(1)\n'}
+    assert set(log) == {('path', 'param_alias'), ('content', 'param_alias')}
+
+
+def test_param_alias_then_type_repair_combined():
+    """A renamed key is STILL type-checked: read_files paths→reads (string)
+    then bare_string_to_array wraps it into the expected array."""
+    out, log = validate_then_repair('read_files', {'paths': 'lib/server.py'})
+    assert out == {'reads': ['lib/server.py']}
+    assert ('reads', 'param_alias') in log
+    assert ('reads', 'bare_string_to_array') in log
+
+
+def test_param_alias_unknown_tool_no_table():
+    """A tool with no alias table passes through untouched."""
+    args = {'file_path': 'a.py'}
+    out, log = validate_then_repair('list_dir', {'path': 'x'})
+    assert out == {'path': 'x'} and log == []
+    # grep_search has a table but only renames into declared keys
+    out2, log2 = validate_then_repair('grep_search', {'regex': 'foo'})
+    assert out2 == {'pattern': 'foo'}
+    assert ('pattern', 'param_alias') in log2
+
+
+# ═════════════════════════════════════════════════════
+#  Structural transforms (cross-harness whole-payload reshape)
+# ═════════════════════════════════════════════════════
+
+
+def test_multiedit_reshaped_to_apply_diffs():
+    """Claude Code MultiEdit: top-level file_path pushed into each edit, and
+    old_string/new_string renamed to search/replace."""
+    out, log = validate_then_repair(
+        'apply_diffs',
+        {'file_path': 'lib/server.py',
+         'edits': [
+             {'old_string': 'a = 1', 'new_string': 'a = 2'},
+             {'old_string': 'b = 3', 'new_string': 'b = 4', 'replace_all': True},
+         ]},
+    )
+    assert out == {'edits': [
+        {'path': 'lib/server.py', 'search': 'a = 1', 'replace': 'a = 2'},
+        {'path': 'lib/server.py', 'search': 'b = 3', 'replace': 'b = 4',
+         'replace_all': True},
+    ]}
+    assert ('apply_diffs', 'structural_transform') in log
+    assert 'file_path' not in out
+
+
+def test_native_apply_diffs_not_reshaped():
+    """A correct apply_diffs call (no top-level path, items already
+    {path,search,replace}) must NOT be touched by the transform."""
+    args = {'edits': [{'path': 'a.py', 'search': 'x', 'replace': 'y'}]}
+    out, log = validate_then_repair('apply_diffs', args)
+    assert out == args
+    assert log == []
+
+
+def test_askuserquestion_reshaped_to_ask_human():
+    """Claude Code AskUserQuestion: questions[0] lifted to the top level,
+    options preserved and response_type set to 'choice'."""
+    out, log = validate_then_repair(
+        'ask_human',
+        {'questions': [
+            {'question': 'Which palette?',
+             'options': [{'label': 'Dark'}, 'Light']},
+        ]},
+    )
+    assert out['question'] == 'Which palette?'
+    assert out['response_type'] == 'choice'
+    assert out['options'] == [{'label': 'Dark'}, {'label': 'Light'}]
+    assert ('ask_human', 'structural_transform') in log
+
+
+def test_askuserquestion_free_text_when_no_options():
+    out, log = validate_then_repair(
+        'ask_human',
+        {'questions': [{'question': 'What is your goal?'}]},
+    )
+    assert out == {'question': 'What is your goal?', 'response_type': 'free_text'}
+    assert ('ask_human', 'structural_transform') in log
+
+
+def test_native_ask_human_not_reshaped():
+    """A correct ask_human call (top-level question present) is untouched."""
+    args = {'question': 'Q?', 'response_type': 'free_text'}
+    out, log = validate_then_repair('ask_human', args)
+    assert out == args
+    assert log == []
+
+
+# ═════════════════════════════════════════════════════
 #  Tool-NAME repair (resolve_tool_name)
 # ═════════════════════════════════════════════════════
 
@@ -249,6 +389,30 @@ def test_resolve_camelcase_via_alias():
     """'Read'/'Grep' hit the lowercase static alias before casefold."""
     assert resolve_tool_name('Read', known=_KNOWN) == ('read_files', 'alias')
     assert resolve_tool_name('Grep', known=_KNOWN) == ('grep_search', 'alias')
+
+
+def test_resolve_claude_code_native_names():
+    """Claude Code's native tool names that DON'T match ours case-foldingly
+    must alias to the canonical Tofu tool (lets the model use the names it is
+    most fluent in). Matched case-insensitively, so the CamelCase native form
+    resolves via the lowercase alias entry."""
+    known = _KNOWN | {'ask_human'}
+    cases = {
+        'AskUserQuestion': 'ask_human',
+        'MultiEdit': 'apply_diffs',
+        'WebFetch': 'fetch_url',
+    }
+    for wrong, canonical in cases.items():
+        name, kind = resolve_tool_name(wrong, known=known)
+        assert name == canonical, f'{wrong!r} -> {name!r}, expected {canonical!r}'
+        assert kind == 'alias'
+
+
+def test_resolve_ask_human_only_when_registered():
+    """The ask_human aliases must NOT be invented when human-guidance is off
+    (ask_human absent from the session tool set)."""
+    assert resolve_tool_name('AskUserQuestion', known=_KNOWN) == (
+        'AskUserQuestion', None)
 
 
 def test_resolve_never_invents_unknown_target():

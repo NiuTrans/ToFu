@@ -733,9 +733,10 @@ def _isMeta_text(messages):
 
 def test_inject_tiered_relevance_gating_end_to_end(tmp_data_dir):
     """The headline acceptance test (per the brief): through the real
-    _inject_system_contexts, the core profile is ALWAYS on the _isMeta tail,
-    the detail tier appears ONLY on a relevant turn, and is ABSENT on an
-    irrelevant turn — with neither ever touching messages[0]."""
+    _inject_system_contexts, the core profile is ALWAYS on the _isMeta carrier
+    (byte-stable), the detail tier rides the TRUE tail (last user message),
+    appears ONLY on a relevant turn, and is ABSENT on an irrelevant turn — with
+    neither ever touching messages[0]."""
     from lib.tasks_pkg.system_context import _inject_system_contexts
     from lib.memory import user_profile as up
     up.save_profile(_TIERED_PROFILE)
@@ -750,31 +751,44 @@ def test_inject_tiered_relevance_gating_end_to_end(tmp_data_dir):
             has_real_tools=True, conv_id='', task=task)
         return msgs
 
+    def _last_user(msgs):
+        for m in reversed(msgs):
+            if m.get('role') == 'user':
+                c = m.get('content', '')
+                return (''.join(b.get('text', '') for b in c
+                                if isinstance(b, dict))
+                        if isinstance(c, list) else c)
+        return ''
+
     # ── Relevant turn (translation) ──
     m_rel = _run('please fix the spanish to chinese translation tests for peru terms')
     meta_rel = _isMeta_text(m_rel)
+    tail_rel = _last_user(m_rel)
     sys_rel = m_rel[0]['content'][0]['text']
-    # Core present on the tail; detail present with the matching fact.
+    # Core present on the carrier; detail present on the TAIL with the fact.
     assert '[USER PREFERENCE PROFILE]' in meta_rel
-    assert 'Uses ruff' in meta_rel                              # core
-    assert '[USER PREFERENCE PROFILE — relevant detail]' in meta_rel
-    assert 'Spanish-to-Chinese translation' in meta_rel        # gated-in
-    assert 'FMG grader' not in meta_rel                        # gated-out
+    assert 'Uses ruff' in meta_rel                              # core (carrier)
+    assert '[USER PREFERENCE PROFILE — relevant detail]' not in meta_rel  # NOT carrier
+    assert '[USER PREFERENCE PROFILE — relevant detail]' in tail_rel       # on tail
+    assert 'Spanish-to-Chinese translation' in tail_rel        # gated-in
+    assert 'FMG grader' not in tail_rel                        # gated-out
     # Profile NEVER touches the system prefix.
     assert 'USER PREFERENCE PROFILE' not in sys_rel
 
     # ── Irrelevant turn (CSS) ──
     m_irr = _run('make the submit button border a little rounder in the css')
     meta_irr = _isMeta_text(m_irr)
-    assert '[USER PREFERENCE PROFILE]' in meta_irr              # core still on
+    tail_irr = _last_user(m_irr)
+    assert '[USER PREFERENCE PROFILE]' in meta_irr             # core still on carrier
     assert 'Uses ruff' in meta_irr
-    # NO detail block, none of the identity facts leaked in.
-    assert '[USER PREFERENCE PROFILE — relevant detail]' not in meta_irr
-    assert 'Spanish-to-Chinese translation' not in meta_irr
-    assert 'FMG grader' not in meta_irr
-    assert 'DolphinFS' not in meta_irr
+    # NO detail block anywhere, none of the identity facts leaked in.
+    assert '[USER PREFERENCE PROFILE — relevant detail]' not in tail_irr
+    assert 'Spanish-to-Chinese translation' not in tail_irr
+    assert 'FMG grader' not in tail_irr
+    assert 'DolphinFS' not in tail_irr
 
-    # Core block byte-identical between the two turns (cache-stable).
+    # Core block byte-identical between the two turns (cache-stable) — the
+    # whole point of keeping it on the carrier rather than the volatile tail.
     def _core_segment(meta):
         start = meta.index('[USER PREFERENCE PROFILE]')
         end = meta.index('</system-reminder>', start)
@@ -869,6 +883,211 @@ def test_applied_profile_items_empty_profile(tmp_data_dir):
     assert a == {'core': [], 'detail': []}
 
 
+def test_chip_fires_on_carried_over_profile_turn(tmp_data_dir):
+    """REGRESSION: the prefs chip must appear on EVERY turn where the profile
+    is in context — not only the turn that freshly injected it.
+
+    The bug: `_appliedPreferences` was stashed only inside `if _profile_injected
+    or _detail_injected:`. `_append_user_profile_block` returns False when the
+    marker is already present, which is exactly what happens on turn 2+ when the
+    profile-carrying message is REUSED from the server-side message store
+    (keepToolHistory) / rebuilt history. So the chip vanished on follow-up
+    turns of the same conversation ("sometimes appears, sometimes doesn't").
+    The fix decouples the chip stash (fires whenever the profile is in context)
+    from the cache-mutation bookkeeping (only on a fresh append)."""
+    from lib.tasks_pkg.system_context import _inject_system_contexts
+    from lib.memory import user_profile as up
+    up.save_profile(_TIERED_PROFILE)
+
+    def _run(msgs):
+        task = {'config': {'preferencesEnabled': True}}
+        _inject_system_contexts(
+            msgs, project_path='', project_enabled=False,
+            memory_enabled=True, search_enabled=False, swarm_enabled=False,
+            has_real_tools=True, conv_id='c1', task=task)
+        return msgs, task.get('_appliedPreferences')
+
+    # Turn 1: fresh messages → profile injected, chip set.
+    m1, ap1 = _run([
+        {'role': 'system', 'content': [{'type': 'text', 'text': 'static sys'}]},
+        {'role': 'user', 'content': 'fix the spanish to chinese translation'},
+    ])
+    assert ap1 is not None and ap1['items']
+    # The profile block is now embedded in the (reused) user message.
+    assert any('[USER PREFERENCE PROFILE]' in str(m.get('content'))
+               for m in m1)
+
+    # Turn 2: REUSE the now-profile-carrying messages + a new user turn —
+    # exactly what rebuild_messages_with_history hands the orchestrator.
+    m2, ap2 = _run(m1 + [
+        {'role': 'assistant', 'content': 'done'},
+        {'role': 'user', 'content': 'now a css tweak'},
+    ])
+    # The chip MUST still be set even though nothing was freshly injected.
+    assert ap2 is not None, 'prefs chip vanished on the carried-over turn (the bug)'
+    assert ap2['core']                      # core always reported
+    # Turn-2 query is irrelevant → detail empty, but the chip still shows core.
+    assert ap2['detail'] == []
+
+
+def test_detail_tier_refreshed_per_turn_not_frozen(tmp_data_dir):
+    """REGRESSION (the core feature): the relevance-gated DETAIL block must be
+    REFRESHED on every turn, not frozen on the first turn's match.
+
+    The bug: the detail tier was append-once (same as the byte-stable core).
+    A follow-up turn reuses the profile-carrying message from the prior turn
+    (server message store / rebuilt history), so the OLD detail block is still
+    embedded; append-once bailed on the existing marker and never injected the
+    NEW turn's relevant bullet. So across a conversation the detail froze on
+    turn 1's match — exactly when relevance gating matters most. The fix
+    strips the stale detail block and re-appends this turn's selection (or
+    removes it when this turn has no match)."""
+    from lib.tasks_pkg.system_context import (_inject_system_contexts,
+                                              _PROFILE_DETAIL_MARKER)
+    from lib.memory import user_profile as up
+    up.save_profile(
+        '## Preferences\n- Uses ruff\n'
+        '## About the user\n'
+        '- Builds Spanish-to-Chinese translation using TDD\n'
+        '- Maintains the FMG grader for CJK patch scoring')
+
+    def _last_user_text(msgs):
+        # Detail rides the LAST user message (the true volatile tail).
+        for m in reversed(msgs):
+            if m.get('role') == 'user':
+                c = m.get('content', '')
+                return (''.join(b.get('text', '') for b in c
+                                if isinstance(b, dict))
+                        if isinstance(c, list) else c)
+        return ''
+
+    def _carrier_text(msgs):
+        # Core rides the FIRST user message (the _isMeta carrier in non-project
+        # mode — here the first user msg).
+        for m in msgs:
+            if m.get('role') == 'user':
+                c = m.get('content', '')
+                return (''.join(b.get('text', '') for b in c
+                                if isinstance(b, dict))
+                        if isinstance(c, list) else c)
+        return ''
+
+    def _run(msgs):
+        _inject_system_contexts(
+            msgs, project_path='', project_enabled=False,
+            memory_enabled=True, search_enabled=False, swarm_enabled=False,
+            has_real_tools=True, conv_id='c1',
+            task={'config': {'preferencesEnabled': True}})
+        return msgs
+
+    # Turn 1 — translation. Detail = the translation bullet only, on the tail.
+    m1 = _run([
+        {'role': 'system', 'content': [{'type': 'text', 'text': 'sys'}]},
+        {'role': 'user', 'content': 'help with the spanish to chinese translation'},
+    ])
+    tail1 = _last_user_text(m1)
+    assert 'Spanish-to-Chinese' in tail1
+    assert 'FMG' not in tail1
+
+    # Turn 2 — FMG, REUSING turn-1 messages (the carried-over scenario). The
+    # NEW user turn is the new tail; the prior turn's detail (frozen on the
+    # now-historical turn-1 message) must NOT leak the new turn's selection.
+    m2 = _run(m1 + [
+        {'role': 'assistant', 'content': 'ok'},
+        {'role': 'user', 'content': 'now the FMG grader scores CJK patches wrong'},
+    ])
+    tail2 = _last_user_text(m2)
+    assert 'FMG' in tail2, 'turn-2 relevant fact never reached the model (the bug)'
+    assert 'Spanish-to-Chinese' not in tail2, 'new tail must carry only this turn'
+    # Exactly one detail block on the new tail — not stale + new stacked.
+    assert tail2.count(_PROFILE_DETAIL_MARKER) == 1
+    # Core tier rides the carrier (byte-stable, still present) — untouched.
+    assert 'Uses ruff' in _carrier_text(m2)
+    # NOTE: in this non-project setup there is no separate _isMeta carrier —
+    # turn-1's single user message was BOTH first and last, so it legitimately
+    # froze turn-1's detail. That frozen prior-turn block is the accepted
+    # <relevant_memories>-style tradeoff and is left untouched. The "detail
+    # never on the prefix-resident _isMeta carrier" guarantee is proven by
+    # test_detail_block_rides_true_tail_not_isMeta_carrier (real carrier).
+
+    # Turn 3 — irrelevant CSS. New tail carries NO detail block; core stays.
+    m3 = _run(m2 + [
+        {'role': 'assistant', 'content': 'ok'},
+        {'role': 'user', 'content': 'make the button border rounder in css'},
+    ])
+    tail3 = _last_user_text(m3)
+    assert _PROFILE_DETAIL_MARKER not in tail3, 'irrelevant turn must add no detail'
+    assert 'Uses ruff' in _carrier_text(m3)        # core survives
+
+
+def test_detail_refresh_is_cache_safe(tmp_data_dir):
+    """Swapping the detail block on the _isMeta tail each turn (via the real
+    ★2.5 path through _inject_system_contexts) must NOT trip a prefix_mutation
+    cache break — the tail is the cache-safe seam and notify_compaction is
+    called whenever it's mutated. The CORE block stays byte-stable across the
+    swaps (its append-once idempotency is untouched)."""
+    from lib.tasks_pkg.cache_tracking import (detect_cache_break,
+                                              notify_compaction, _cache_states)
+    from lib.tasks_pkg.system_context import _inject_system_contexts
+    from lib.memory import user_profile as up
+    up.save_profile(
+        '## Preferences\n- Uses ruff\n'
+        '## About the user\n'
+        '- Builds Spanish-to-Chinese translation using TDD\n'
+        '- Maintains the FMG grader for CJK patch scoring')
+    conv = 'prof-detail-swap'
+    _cache_states.pop(conv, None)
+
+    def _core_segment(msgs):
+        # Extract the byte-stable CORE block from the carrier for comparison.
+        for m in msgs:
+            if m.get('role') == 'user':
+                c = m.get('content', '')
+                txt = (''.join(b.get('text', '') for b in c
+                               if isinstance(b, dict))
+                       if isinstance(c, list) else c)
+                if '[USER PREFERENCE PROFILE]' in txt:
+                    s = txt.index('[USER PREFERENCE PROFILE]')
+                    e = txt.index('</system-reminder>', s)
+                    return txt[s:e]
+        return None
+
+    def _round(query, tail):
+        msgs = [
+            {'role': 'system', 'content': 'static system prompt'},
+            {'role': 'user', 'content': query},
+            {'role': 'assistant', 'content': 'working'},
+            {'role': 'tool', 'content': tail},
+        ]
+        _inject_system_contexts(
+            msgs, project_path='', project_enabled=False,
+            memory_enabled=True, search_enabled=False, swarm_enabled=False,
+            has_real_tools=True, conv_id=conv,
+            task={'config': {'preferencesEnabled': True}})
+        return msgs
+
+    # Round 1 — translation query.
+    m1 = _round('spanish to chinese translation', 'tool 1')
+    core1 = _core_segment(m1)
+    notify_compaction(conv)
+    assert detect_cache_break(conv, m1, None, 'claude-opus-4',
+        usage={'cache_creation_input_tokens': 50000,
+               'cache_read_input_tokens': 20000}) is None
+
+    # Rounds 2 & 3 — DIFFERENT queries → the detail block swaps each round.
+    for i, q in enumerate(['the FMG grader CJK patch scoring', 'css tweak'], start=2):
+        m = _round(q, f'tool {i}')
+        notify_compaction(conv)
+        r = detect_cache_break(conv, m, None, 'claude-opus-4',
+            usage={'cache_creation_input_tokens': 2000,
+                   'cache_read_input_tokens': 70000})
+        assert r is None or 'prefix_mutation' not in r, (
+            f'round {i} falsely flagged prefix_mutation: {r}')
+        # The CORE block must be byte-identical despite the detail swap.
+        assert _core_segment(m) == core1
+    assert _cache_states[conv].total_breaks == 0
+
+
 def test_consolidation_daemon_emits_preference_learned(monkeypatch):
     """The daemon body produces preference_learned events + stashes on task."""
     from lib.tasks_pkg import commit_round as cr
@@ -894,3 +1113,112 @@ def test_consolidation_daemon_emits_preference_learned(monkeypatch):
     assert len(pl) == 1
     assert pl[0]['kind'] == 'pending' and pl[0]['id'] == 'abc123'
     assert pl[0]['pending'] is True
+
+
+# ───────── B4: detail tier must ride the TRUE tail, not the _isMeta carrier ─────────
+
+_B4_PROFILE = (
+    '## Preferences\n'
+    '- Uses ruff for Python linting\n'
+    '- Prefers measurement-first optimization\n'
+    '## About the user\n'
+    '- Builds Spanish-to-Chinese translation using TDD\n'
+    '- Maintains the FMG grader for CJK patch scoring'
+)
+
+
+def _b4_messages(query):
+    """Realistic project-mode list: system + index-1 _isMeta CLAUDE.md carrier
+    (large, cache-prefix-resident) + the real user turn as the TRUE tail."""
+    big_claude_md = '[PROJECT CO-PILOT MODE]\n' + ('CLAUDE.md context line\n' * 200)
+    return [
+        {'role': 'system', 'content': [{'type': 'text',
+            'text': 'IMPORTANT: You must NEVER generate or guess URLs static'}]},
+        {'role': 'user', 'content': big_claude_md, '_isMeta': True},
+        {'role': 'user', 'content': query},
+    ]
+
+
+def _carrier_segment(messages):
+    """Text of the index-1 _isMeta carrier (the cache-prefix-resident block)."""
+    for m in messages:
+        if m.get('role') == 'user' and m.get('_isMeta'):
+            c = m.get('content', '')
+            if isinstance(c, str):
+                return c
+            return ''.join(b.get('text', '') for b in c if isinstance(b, dict))
+    return ''
+
+
+def _last_user_text(messages):
+    """Text of the LAST user message — the true volatile tail."""
+    for m in reversed(messages):
+        if m.get('role') == 'user':
+            c = m.get('content', '')
+            if isinstance(c, str):
+                return c
+            return ''.join(b.get('text', '') for b in c if isinstance(b, dict))
+    return ''
+
+
+def test_detail_block_rides_true_tail_not_isMeta_carrier(tmp_data_dir):
+    """B4 (the headline cache bug): the relevance-gated DETAIL block must ride
+    the TRUE tail (last user message), NEVER the index-1 _isMeta carrier that
+    holds the large CLAUDE.md context.
+
+    The carrier sits inside the cached prompt prefix (messages[0:N-2] after the
+    first tool round). Because the detail selection changes per turn, putting
+    it on the carrier rewrites the carrier bytes each turn → the whole prefix
+    from messages[1] onward (CLAUDE.md + tools + history) re-bills within the
+    5m TTL window. The fix: only the byte-stable CORE rides the carrier; the
+    per-turn DETAIL rides the volatile tail like <relevant_memories> does.
+
+    This test encodes the FIXED contract, so it FAILS against the current
+    implementation — that failure IS the reproduction of the cross-turn
+    prefix invalidation.
+    """
+    from lib.tasks_pkg.system_context import (_inject_system_contexts,
+                                              _PROFILE_MARKER,
+                                              _PROFILE_DETAIL_MARKER)
+    from lib.memory import user_profile as up
+    up.save_profile(_B4_PROFILE)
+
+    def _run(query):
+        msgs = _b4_messages(query)
+        _inject_system_contexts(
+            msgs, project_path='', project_enabled=False,
+            memory_enabled=True, search_enabled=False, swarm_enabled=False,
+            has_real_tools=True, conv_id='b4',
+            task={'config': {'preferencesEnabled': True}})
+        return msgs
+
+    # Two turns with DIFFERENT relevant detail selections.
+    m_t1 = _run('please fix the spanish to chinese translation tests')
+    m_t2 = _run('the FMG grader scores CJK patches wrong, debug it')
+
+    car1, car2 = _carrier_segment(m_t1), _carrier_segment(m_t2)
+    tail1, tail2 = _last_user_text(m_t1), _last_user_text(m_t2)
+
+    # 1. Core ALWAYS rides the carrier (always-on, byte-stable).
+    assert _PROFILE_MARKER in car1 and _PROFILE_MARKER in car2
+
+    # 2. DETAIL must NOT be on the carrier — it belongs on the volatile tail.
+    assert _PROFILE_DETAIL_MARKER not in car1, (
+        'detail block is on the index-1 _isMeta carrier (B4 bug) — it rewrites '
+        'the cached prefix every turn')
+    assert _PROFILE_DETAIL_MARKER not in car2
+
+    # 3. DETAIL rides the TRUE tail (the last user message), with the per-turn
+    #    relevant fact.
+    assert _PROFILE_DETAIL_MARKER in tail1
+    assert 'Spanish-to-Chinese translation' in tail1
+    assert _PROFILE_DETAIL_MARKER in tail2
+    assert 'FMG grader' in tail2
+
+    # 4. THE CACHE GUARANTEE: the carrier is BYTE-IDENTICAL across the two
+    #    turns despite the differing detail selection. This is the direct
+    #    cross-turn prefix-stability proof (readDrop=0 equivalent) — it cannot
+    #    be masked by notify_compaction the way detect_cache_break can.
+    assert car1 == car2, (
+        'index-1 carrier bytes changed between turns → cross-turn prompt-cache '
+        'prefix invalidation (the B4 cost)')

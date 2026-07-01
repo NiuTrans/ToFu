@@ -15,7 +15,7 @@ __all__ = [
     'spawn_task', 'set_agent_executor',
     # manager (eager)
     'tasks', 'tasks_lock',
-    'create_task', 'append_event', 'persist_task_result', 'cleanup_old_tasks',
+    'create_task', 'discard_task', 'append_event', 'persist_task_result', 'cleanup_old_tasks',
     'stream_llm_response',
     'abort_running_tasks_for_conv',
     'recover_stale_tasks_on_startup',
@@ -111,6 +111,7 @@ from lib.tasks_pkg.manager import (
     append_event,
     cleanup_old_tasks,
     create_task,
+    discard_task,
     load_endpoint_turns_from_conversation,
     load_tool_rounds_from_conversation,
     persist_task_result,

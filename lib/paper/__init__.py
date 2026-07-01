@@ -21,7 +21,24 @@ from .prompts import (
     _REPORT_PROMPT_EN,
     _REPORT_PROMPT_ZH,
     _REPORT_TOOLS,
+    date_anchor_clause,
 )
+
+# Review Mode — venue registry + compound-key parser + review prompts
+from .review import (
+    DEFAULT_VENUE,
+    REVIEW_VENUES,
+    build_review_prompt,
+    build_review_tool_instruction,
+    is_review_lang,
+    list_venues,
+    make_review_lang,
+    parse_report_lang,
+    smarten_quotes,
+)
+
+# Prompt-injection hardening for untrusted paper text
+from .injection_guard import injection_notice, sanitize_paper_text, wrap_untrusted
 
 # LLM streaming + tool execution
 from .llm_stream import _stream_llm_sse
@@ -108,6 +125,13 @@ __all__ = [
     'BASE_DIR', 'PAPER_DIR', 'PAPER_IMG_DIR', '_paper_hash', '_safe_hash_dir',
     # prompts
     '_REPORT_PROMPT_EN', '_REPORT_PROMPT_ZH', '_REPORT_TOOLS', '_MAX_REPORT_TOOL_ROUNDS',
+    'date_anchor_clause',
+    # review mode
+    'REVIEW_VENUES', 'DEFAULT_VENUE', 'parse_report_lang', 'is_review_lang',
+    'make_review_lang', 'list_venues', 'build_review_prompt',
+    'build_review_tool_instruction', 'smarten_quotes',
+    # injection guard
+    'sanitize_paper_text', 'wrap_untrusted', 'injection_notice',
     # llm + tools
     '_stream_llm_sse', '_execute_report_tool',
     # images

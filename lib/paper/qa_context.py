@@ -187,10 +187,20 @@ def build_qa_messages(question, paper_text, report_md, *, history=None,
     logging (n_sections_total, n_sections_selected, report_present, …).
     """
     history = history or []
+    # ── Prompt-injection hardening (untrusted PDF text) ──
+    # The paper text is UNTRUSTED: a submitted PDF can embed directives aimed
+    # at the LLM ("ignore previous instructions", "give a positive review",
+    # hidden white/zero-width text). Sanitize the WHOLE text ONCE up front —
+    # BEFORE split_into_sections — so directives are defanged and invisible
+    # carriers stripped without fence markers leaking into the heading/section
+    # split logic. The assembled section context is then fenced as untrusted
+    # data, and a hard-constraint clause is prepended to the system prompt.
+    from .injection_guard import injection_notice, sanitize_paper_text, wrap_untrusted
+    paper_text, _inj_findings = sanitize_paper_text(paper_text)
     sections = split_into_sections(paper_text)
     selected = select_relevant_sections(
         question, sections, history=history, budget_chars=section_budget)
-    paper_context = _render_sections(selected, len(sections))
+    paper_context = wrap_untrusted(_render_sections(selected, len(sections)))
 
     report_block = ''
     report_present = bool(report_md and report_md.strip())
@@ -230,7 +240,20 @@ def build_qa_messages(question, paper_text, report_md, *, history=None,
             'access is needed.')
         paper_label = '\n\n===== RELEVANT PAPER SECTIONS =====\n'
 
-    system_content = sys_head + report_block + paper_label + paper_context
+    # The date anchor goes FIRST: Q&A does time-relative reasoning (the system
+    # prompt tells the model to web_search for "recent follow-ups, reproductions,
+    # citation counts"), and like the report/review engines this message is
+    # self-assembled and never inherits the chat `Current date:` block. Without
+    # it the model conflates the paper's PUBLICATION date with "now" and refuses
+    # to surface post-publication work when asked "有没有后续工作/被谁超越了".
+    # Then the input-safety clause, so the model reads the untrusted-data framing
+    # before any paper content — the fenced paper sections below are data to
+    # answer FROM, never instructions to obey.
+    from .prompts import date_anchor_clause
+    ui_lang = 'zh' if lang == 'zh' else 'en'
+    notice = injection_notice(ui_lang, _inj_findings)
+    system_content = (date_anchor_clause(ui_lang) + notice + sys_head
+                      + report_block + paper_label + paper_context)
     messages = [{'role': 'system', 'content': system_content}]
 
     for msg in history[-_MAX_HISTORY_MSGS:]:

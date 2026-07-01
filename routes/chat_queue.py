@@ -176,6 +176,37 @@ def chat_autopilot_disarm():
     return api_ok(result)
 
 
+@api_v1_chat_bp.route('/api/v1/chat/autopilot/summarize', methods=['POST'], endpoint='ui_chat_autopilot_summarize')
+@require_scope('chat')
+def chat_autopilot_summarize():
+    """Generate an on-demand close-out report for a concluded autopilot run.
+
+    For runs that ended WITHOUT a clean ``[VU: TASK_DONE]`` (the user clicked
+    Stop or sent a new message) no auto-summary is produced; this backs the
+    "Summarize this run" affordance so the user can request one after the fact.
+
+    Body: ``{convId, runId?, config?}``. Returns ``{ok, summary, runId}`` on
+    success (``summary`` is the sidecar record — human-only, NOT a chat
+    message), or 409/400 with ``{error}`` when there is nothing to summarize.
+    """
+    data = parse_body()
+    conv_id = (data.get('convId') or '').strip()
+    if not conv_id:
+        from lib.api_response import api_bad_request
+        return api_bad_request('convId is required', field='convId')
+    run_id = (data.get('runId') or '').strip()
+    config = data.get('config') or {}
+
+    from lib.tasks_pkg.autopilot import summarize_run
+    result = summarize_run(conv_id, run_id, config)
+    audit_log('autopilot_summarize_request', conv_id=conv_id,
+              run_id=result.get('runId'), ok=result.get('ok'))
+    if not result.get('ok'):
+        from lib.api_response import api_conflict
+        return api_conflict(result.get('error') or 'cannot_summarize')
+    return api_ok(result)
+
+
 @api_v1_chat_bp.route('/api/v1/chat/autopilot/kick', methods=['POST'], endpoint='ui_chat_autopilot_kick')
 @require_scope('chat')
 def chat_autopilot_kick():

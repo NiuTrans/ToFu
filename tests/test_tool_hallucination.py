@@ -23,11 +23,14 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.tool_input_repair import (
-    build_rejection_message, classify_tool_call, suggest_tool_names,
+    HALLUCINATION_ABORT_THRESHOLD, REJECTION_ESCALATE_THRESHOLD,
+    build_rejection_message, classify_tool_call, clear_rejection,
+    record_rejection, suggest_tool_names,
 )
 from lib.tasks_pkg.tool_dispatch import (
     _known_tool_names, parse_tool_calls, execute_tool_pipeline,
 )
+import lib.tool_input_repair as _tir
 
 
 _KNOWN = {'web_search', 'fetch_url', 'read_files', 'grep_search', 'find_files'}
@@ -175,6 +178,170 @@ class TestPipelinePreservesRejected(unittest.TestCase):
         self.assertIsNotNone(meta)
         self.assertIn('rejected', meta)
         self.assertEqual(meta['rejected']['attempted'], 'search_web')
+
+
+class TestRepeatRejectionEscalation(unittest.TestCase):
+    """The circuit breaker for a no-suggestion phantom looped N× (the
+    screenshot's module_buffer_manager ×7)."""
+
+    def setUp(self):
+        # The repeat counter is process-global; isolate each test.
+        _tir._REJECT_COUNTS.clear()
+
+    def tearDown(self):
+        _tir._REJECT_COUNTS.clear()
+
+    def test_first_rejection_is_generic_no_tool_list(self):
+        d = classify_tool_call('module_buffer_manager', _KNOWN)
+        msg = build_rejection_message(d, repeat_count=1, known_tools=_KNOWN)
+        self.assertIn('not a real tool', msg)
+        # First strike: NO enumerated tool list, no "STOP calling".
+        self.assertNotIn('ONLY tools you may call', msg)
+        self.assertNotIn('`web_search`', msg)
+
+    def test_repeat_rejection_injects_real_tool_list(self):
+        d = classify_tool_call('module_buffer_manager', _KNOWN)
+        msg = build_rejection_message(
+            d, repeat_count=REJECTION_ESCALATE_THRESHOLD, known_tools=_KNOWN)
+        # Escalated: enumerates the real tools so the model has a target.
+        self.assertIn('ONLY tools you may call', msg)
+        self.assertIn('STOP calling', msg)
+        self.assertIn('`web_search`', msg)
+        self.assertIn('`read_files`', msg)
+
+    def test_escalation_only_when_no_suggestions(self):
+        # A name WITH a near suggestion never gets the tool-list dump even on
+        # repeat — it already has a concrete correction direction.
+        d = classify_tool_call('search_web', _KNOWN)
+        self.assertTrue(d['suggestions'])
+        msg = build_rejection_message(
+            d, repeat_count=REJECTION_ESCALATE_THRESHOLD + 2, known_tools=_KNOWN)
+        self.assertIn('web_search', msg)
+        self.assertNotIn('ONLY tools you may call', msg)
+
+    def test_record_and_clear_rejection_counts(self):
+        self.assertEqual(record_rejection('c1', 'foo'), 1)
+        self.assertEqual(record_rejection('c1', 'foo'), 2)
+        # Distinct conv → independent streak.
+        self.assertEqual(record_rejection('c2', 'foo'), 1)
+        clear_rejection('c1', 'foo')
+        self.assertEqual(record_rejection('c1', 'foo'), 1)
+
+    def test_dispatch_injects_tool_list_on_repeat(self):
+        """The screenshot scenario: same phantom across consecutive rounds —
+        the >=Nth rejection message carries the real tool list."""
+        task = _make_task(['web_search', 'read_files', 'grep_search'])
+        last_err = None
+        for _ in range(REJECTION_ESCALATE_THRESHOLD):
+            parsed, _ = parse_tool_calls(
+                _assistant([_tc('module_buffer_manager', '{}')]),
+                task, round_num=0, tool_round_num=0, project_enabled=False,
+            )
+            last_err = parsed[0][6]
+        self.assertIsNotNone(last_err)
+        self.assertIn('ONLY tools you may call', last_err)
+        self.assertIn('`read_files`', last_err)
+
+    def test_real_tool_call_resets_streak(self):
+        task = _make_task(['web_search', 'read_files'])
+        # Two phantom rejections build a streak.
+        for _ in range(2):
+            parse_tool_calls(
+                _assistant([_tc('phantomzz', '{}')]),
+                task, round_num=0, tool_round_num=0, project_enabled=False,
+            )
+        self.assertEqual(_tir._REJECT_COUNTS.get(('convhallu', 'phantomzz')), 2)
+        # Now a REAL tool by that very name would reset — simulate by calling
+        # the same string as a registered tool.
+        task2 = _make_task(['phantomzz', 'read_files'])
+        task2['convId'] = 'convhallu'
+        parse_tool_calls(
+            _assistant([_tc('phantomzz', '{}')]),
+            task2, round_num=0, tool_round_num=0, project_enabled=False,
+        )
+        self.assertNotIn(('convhallu', 'phantomzz'), _tir._REJECT_COUNTS)
+
+
+class TestAutopilotLoopBreaker(unittest.TestCase):
+    """Under autopilot, a repeated no-suggestion phantom aborts the task so the
+    follow-up loop ends instead of burning rounds.
+
+    CRITICAL decoupling (2026-06-30): the tool-list INJECTION threshold
+    (REJECTION_ESCALATE_THRESHOLD=2) and the hard-ABORT threshold
+    (HALLUCINATION_ABORT_THRESHOLD=4) MUST differ — otherwise the task would
+    abort in the SAME round the list is injected and the model would never get
+    a turn to USE it (graceful recovery = dead code under autopilot)."""
+
+    def setUp(self):
+        _tir._REJECT_COUNTS.clear()
+
+    def tearDown(self):
+        _tir._REJECT_COUNTS.clear()
+
+    def _autopilot_task(self, tool_names):
+        t = _make_task(tool_names)
+        t['config'] = {'autopilot': True}
+        return t
+
+    def _reject_once(self, task):
+        parsed, _ = parse_tool_calls(
+            _assistant([_tc('module_buffer_manager', '{}')]),
+            task, round_num=0, tool_round_num=0, project_enabled=False,
+        )
+        return parsed[0][6]  # the rejection message (_args_parse_error)
+
+    def test_decoupled_injection_lives_before_abort(self):
+        """The decoupling proof: rounds 2 & 3 inject the real tool list AND keep
+        the task ALIVE; only round 4 (HALLUCINATION_ABORT_THRESHOLD) aborts."""
+        # Sanity: the thresholds must actually be decoupled for this to mean
+        # anything (a coupled config would make this test vacuous).
+        self.assertGreater(HALLUCINATION_ABORT_THRESHOLD,
+                           REJECTION_ESCALATE_THRESHOLD)
+        task = self._autopilot_task(['web_search', 'read_files', 'grep_search'])
+        # Rounds 2..(abort-1): tool list injected, task still alive.
+        for n in range(REJECTION_ESCALATE_THRESHOLD,
+                       HALLUCINATION_ABORT_THRESHOLD):
+            # Replay so the streak reaches exactly n this iteration.
+            _tir._REJECT_COUNTS[('convhallu', 'module_buffer_manager')] = n - 1
+            msg = self._reject_once(task)
+            self.assertIn('ONLY tools you may call', msg,
+                          f'round {n}: expected the injected tool list')
+            self.assertIn('`read_files`', msg)
+            self.assertFalse(task.get('aborted'),
+                             f'round {n}: task must stay ALIVE so the model can '
+                             f'use the injected list (abort at {HALLUCINATION_ABORT_THRESHOLD})')
+        # The abort round: streak hits HALLUCINATION_ABORT_THRESHOLD → abort.
+        _tir._REJECT_COUNTS[('convhallu', 'module_buffer_manager')] = \
+            HALLUCINATION_ABORT_THRESHOLD - 1
+        self._reject_once(task)
+        self.assertTrue(task.get('aborted'))
+        self.assertEqual(task.get('_abort_reason'), 'hallucination_loop')
+
+    def test_no_abort_at_escalate_threshold(self):
+        """At exactly the escalate threshold (2), the task must NOT abort —
+        this is the regression guard for the original coupled bug."""
+        task = self._autopilot_task(['web_search', 'read_files'])
+        for _ in range(REJECTION_ESCALATE_THRESHOLD):
+            self._reject_once(task)
+        self.assertFalse(task.get('aborted'))
+
+    def test_autopilot_aborts_at_abort_threshold(self):
+        task = self._autopilot_task(['web_search', 'read_files'])
+        for _ in range(HALLUCINATION_ABORT_THRESHOLD):
+            self._reject_once(task)
+        self.assertTrue(task.get('aborted'))
+        self.assertEqual(task.get('_abort_reason'), 'hallucination_loop')
+
+    def test_non_autopilot_never_aborts(self):
+        task = _make_task(['web_search', 'read_files'])  # no autopilot config
+        for _ in range(HALLUCINATION_ABORT_THRESHOLD + 2):
+            self._reject_once(task)
+        self.assertFalse(task.get('aborted'))
+
+    def test_first_strike_does_not_abort(self):
+        task = self._autopilot_task(['web_search'])
+        self._reject_once(task)
+        self.assertFalse(task.get('aborted'))
 
 
 if __name__ == '__main__':

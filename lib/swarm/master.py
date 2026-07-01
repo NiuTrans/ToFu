@@ -1077,6 +1077,21 @@ class MasterOrchestrator:
         # agents that out-ran the window so the cause is grep-able without a
         # debugger; a clean satisfy is INFO.
         if timed_out:
+            # Per-stuck-agent live state so the timeout line is SELF-CONTAINED:
+            # an operator can see WHAT each still-running agent is doing (its
+            # round count + model) without cross-referencing the LLM stream
+            # log. A zero-progress agent (rounds=0 after the full cap) is the
+            # tell-tale of an upstream stall (e.g. gateway HTTP 500 pool
+            # timeout) — it never produced a single round.
+            stuck_detail = []
+            with self._lock:
+                for sid in still_running:
+                    ag = self._agents.get(sid)
+                    rounds = getattr(getattr(ag, 'result', None), 'rounds_used', 0) if ag else 0
+                    model = getattr(ag, 'model', '') if ag else ''
+                    stuck_detail.append(
+                        f'{sid}(rounds={rounds}'
+                        + (f',model={model}' if model else '') + ')')
             logger.warning(
                 '[Master:%s] await_agents TIMEOUT mode=%s — satisfied=%d/%d, '
                 'still_running=%s. Agents are NOT cancelled; they keep running '
@@ -1086,6 +1101,12 @@ class MasterOrchestrator:
                 self.task_id, mode, len(completed_payloads),
                 len(completed_payloads) + len(still_running),
                 still_running or 'none')
+            if stuck_detail:
+                logger.warning(
+                    '[Master:%s] await_agents TIMEOUT stuck-agent state: %s '
+                    '(rounds=0 ⇒ agent never produced a round — likely wedged '
+                    'on an upstream/model stall, not merely slow)',
+                    self.task_id, '; '.join(stuck_detail))
         else:
             logger.info(
                 '[Master:%s] await_agents EXIT mode=%s satisfied — completed=%s '

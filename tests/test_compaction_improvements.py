@@ -352,74 +352,13 @@ class TestDeltaAttachments:
     across turns and delta tracking prevents DUPLICATE injection.
     """
 
-    def test_first_call_computes_and_returns(self):
-        from lib.tasks_pkg.system_context import _get_cached_or_compute, _last_context_cache
-        _last_context_cache.clear()
-        call_count = [0]
-        def compute():
-            call_count[0] += 1
-            return 'Project context v1'
-        result = _get_cached_or_compute('conv1', 'project', compute)
-        assert result == 'Project context v1'
-        assert call_count[0] == 1
-
-    def test_second_identical_call_still_returns_text(self):
-        """Even when hash matches, text is ALWAYS returned (for injection)."""
-        from lib.tasks_pkg.system_context import _get_cached_or_compute, _last_context_cache
-        _last_context_cache.clear()
-        text = 'Project context v1'
-        _get_cached_or_compute('conv2', 'project', lambda: text)
-        # Second call — compute_fn is still called (we always compute to
-        # check the hash), but the result is returned from cache
-        result = _get_cached_or_compute('conv2', 'project', lambda: text)
-        assert result == text  # MUST return text, not empty/None
-
-    def test_changed_content_updates_cache(self):
-        from lib.tasks_pkg.system_context import _get_cached_or_compute, _last_context_cache
-        _last_context_cache.clear()
-        _get_cached_or_compute('conv3', 'project', lambda: 'v1')
-        result = _get_cached_or_compute('conv3', 'project', lambda: 'v2 updated')
-        assert result == 'v2 updated'
-
-    def test_different_categories_independent(self):
-        from lib.tasks_pkg.system_context import _get_cached_or_compute, _last_context_cache
-        _last_context_cache.clear()
-        r1 = _get_cached_or_compute('conv4', 'project', lambda: 'proj ctx')
-        r2 = _get_cached_or_compute('conv4', 'skills', lambda: 'skills ctx')
-        assert r1 == 'proj ctx'
-        assert r2 == 'skills ctx'
-
-    def test_different_convs_independent(self):
-        from lib.tasks_pkg.system_context import _get_cached_or_compute, _last_context_cache
-        _last_context_cache.clear()
-        r1 = _get_cached_or_compute('conv_a', 'project', lambda: 'ctx')
-        r2 = _get_cached_or_compute('conv_b', 'project', lambda: 'ctx')
-        assert r1 == 'ctx'
-        assert r2 == 'ctx'
-
-    def test_context_hash_consistency(self):
-        from lib.tasks_pkg.system_context import _context_hash
-        text = 'Hello World'
-        h1 = _context_hash(text)
-        h2 = _context_hash(text)
-        assert h1 == h2
-        assert len(h1) == 16  # md5[:16]
-
-    def test_empty_compute_returns_empty(self):
-        from lib.tasks_pkg.system_context import _get_cached_or_compute, _last_context_cache
-        _last_context_cache.clear()
-        result = _get_cached_or_compute('conv5', 'project', lambda: '')
-        assert result == ''
-
     def test_context_always_injected_on_fresh_messages(self):
         """Simulate the real scenario: 2 tasks in same conversation.
         Both should have project context in their system message."""
         from lib.tasks_pkg.system_context import (
             _append_to_system_message,
             _inject_system_contexts,
-            _last_context_cache,
         )
-        _last_context_cache.clear()
 
         # Task 1: fresh messages from frontend
         msgs1 = [{'role': 'system', 'content': 'You are helpful'},

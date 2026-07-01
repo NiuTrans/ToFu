@@ -57,6 +57,9 @@ global.setTimeout = win.setTimeout = (fn) => 0;
 
 win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// i18n shim: the panel's agent-card renderer calls t("swarm.phase.*").
+// Echo the key's last segment so assertions can match on a stable token.
+win.t = global.t = (k) => String(k || '').split('.').pop();
 win._TOOL_DISPLAY = global._TOOL_DISPLAY = {};
 
 eval(fs.readFileSync(process.argv[4], 'utf8'));  // ui/streaming_swarm_panel.js (swarm builders moved here 2026-06-27)
@@ -110,6 +113,41 @@ const settledRound = {
 const settledHtml = _buildSwarmPanelHTML(settledRound, [settledRound]);
 check('settled_not_stale', !settledHtml.includes('Stale'));
 check('settled_shows_complete', settledHtml.includes('Complete'));
+
+// ── 3b. A FRESH reloaded panel whose agents are all unknown/pending (live
+//        _swarmActive lost on reload, no terminal result, no settled snapshot,
+//        no end time) must NOT render a false green "Complete" — it is still
+//        running upstream (e.g. wedged on gateway 500s). Render "Unconfirmed".
+const limboRound = {
+  roundNum: 1, _swarm: true, _swarmActive: false, status: 'done',
+  _swarmStartTime: FRESH,   // fresh ⇒ NOT stale; would otherwise hit final else→Complete
+  _swarmAgents: [
+    { id: 'u1', role: 'researcher', objective: 'x', status: 'unknown', phase: 'unknown' },
+    { id: 'u2', role: 'coder', objective: 'y', status: 'unknown', phase: 'unknown' },
+  ],
+};
+const limboHtml = _buildSwarmPanelHTML(limboRound, [limboRound]);
+check('limbo_not_false_complete', !limboHtml.includes('Complete'));
+check('limbo_shows_unconfirmed', limboHtml.includes('Unconfirmed'));
+
+// ── 3c. RECONCILED limbo: _settleStuckSwarmRound froze _swarmEndTime but left
+//        the unreported agents 'unknown' (backend session evicted → no status).
+//        The Unconfirmed branch must STILL fire — it must NOT also require
+//        `!_swarmEndTime`, or a reconciled all-unknown panel falls through to a
+//        false green "Complete" beside "No result" cards. (Bug: settle sets
+//        _swarmEndTime, so gating Unconfirmed on its absence reintroduced the
+//        false-positive the prior fix targeted.) ──
+const reconciledLimboRound = {
+  roundNum: 1, _swarm: true, _swarmActive: false, _asyncRunning: false, status: 'done',
+  _swarmStartTime: OLD, _swarmEndTime: OLD + 30000,   // settle froze the end time
+  _swarmAgents: [
+    { id: 'u1', role: 'researcher', objective: 'x', status: 'unknown', phase: 'unknown' },
+    { id: 'u2', role: 'coder', objective: 'y', status: 'unknown', phase: 'unknown' },
+  ],
+};
+const reconciledLimboHtml = _buildSwarmPanelHTML(reconciledLimboRound, [reconciledLimboRound]);
+check('reconciled_limbo_not_false_complete', !reconciledLimboHtml.includes('Complete'));
+check('reconciled_limbo_shows_unconfirmed', reconciledLimboHtml.includes('Unconfirmed'));
 
 // ── 4. _tickSwarmTimers freezes a runaway [data-sw-start], ticks a fresh one ──
 document.body.innerHTML =
@@ -167,4 +205,4 @@ def test_swarm_stale_panel_guard_and_reconcile():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'Swarm stale-panel failures:\n' + output
-    assert output.count('PASS') >= 15, f'expected >=15 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 19, f'expected >=19 PASS lines, got:\n{output}'

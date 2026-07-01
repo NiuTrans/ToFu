@@ -42,7 +42,11 @@ function updateSendButton() {
   const streaming = branchStreaming || mainStreaming || anyBranchStreaming || translating;
 
   if (streaming) {
-    const queueCount = (conv && pendingMessageQueue.has(conv.id)) ? pendingMessageQueue.get(conv.id).length : 0;
+    /* Count only DISPATCHABLE queued messages — the autopilot armed-marker
+     * sentinel is never dispatched as a task, so it must not inflate the
+     * badge (see _dispatchableQueueCount in main_send_pipeline.js). */
+    const queueCount = (conv && typeof _dispatchableQueueCount === 'function')
+      ? _dispatchableQueueCount(conv.id) : 0;
     btn.className = "send-btn stop-btn";
     btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>`
       + (queueCount > 0 ? `<span class="queue-badge">${queueCount}</span>` : '');

@@ -63,6 +63,12 @@ DIGEST_MAX_SIBLINGS = 10
 # usable summary without a second query).
 _DIGEST_SCAN_LIMIT = 24
 
+# When the digest is relevance-gated (a query is supplied), keep at least this
+# many of the MOST-RECENT siblings unconditionally, unioned with the BM25
+# matches — so an off-topic or brand-new turn still surfaces *something* rather
+# than an empty digest.
+_DIGEST_RECENCY_FLOOR = 3
+
 # Serializes the read-modify-write of a conversation's settings.projectSummary
 # so two concurrent generators for the same conv don't clobber each other.
 _summary_write_lock = threading.Lock()
@@ -337,13 +343,26 @@ def _persist_summary(conv_id: str, summary: str, msg_count: int) -> None:
 
 def project_digest_entries(project_path: str,
                            current_conv_id: str | None = None,
-                           limit: int = DIGEST_MAX_SIBLINGS) -> list[dict]:
+                           limit: int = DIGEST_MAX_SIBLINGS,
+                           query: str | None = None) -> list[dict]:
     """Return the bounded sibling-conversation list as structured dicts.
 
     The structured backbone of :func:`build_project_digest`: up to ``limit`` of
-    the most recently-updated OTHER conversations of ``project_path`` that have
-    a title (and, when available, a cached summary), each as
-    ``{'id', 'title', 'summary'}``. ``summary`` is '' when none is cached.
+    the OTHER conversations of ``project_path`` that have a title (and, when
+    available, a cached summary), each as ``{'id', 'title', 'summary'}``.
+    ``summary`` is '' when none is cached.
+
+    Selection strategy:
+      • Always scan the ``_DIGEST_SCAN_LIMIT`` most-recently-updated siblings.
+      • When ``query`` is falsy → return the top ``limit`` by pure recency
+        (back-compat: this is what every prior caller got).
+      • When ``query`` is present → BM25-rank the candidates by ``title +
+        summary`` relevance (reusing :func:`lib.memory.relevance.score_items`,
+        the same CJK-aware scorer the preference-detail tier uses) and return
+        the relevant matches UNIONED with a small recency floor
+        (``_DIGEST_RECENCY_FLOOR`` most-recent kept unconditionally), so an
+        off-topic or fresh turn is never empty. Result order: relevance-first,
+        then the recency-floor remainder; total capped at ``limit``.
 
     Read-only and side-effect-free (never generates a summary). Returns ``[]``
     on no project / no siblings / DB error. Used both to render the prompt
@@ -364,7 +383,9 @@ def project_digest_entries(project_path: str,
         logger.warning('[ProjSummary] digest query failed: %s', e)
         return []
 
-    out: list[dict] = []
+    # Candidate list, recency-ordered (the SQL already sorts updated_at DESC),
+    # excluding the current conversation.
+    candidates: list[dict] = []
     for r in rows:
         cid = r['id']
         if current_conv_id and cid == current_conv_id:
@@ -373,15 +394,51 @@ def project_digest_entries(project_path: str,
         settings = safe_json(r['settings'], default={}, label='projsummary-digest')
         ps = settings.get('projectSummary') if isinstance(settings, dict) else None
         summary = (ps.get('text') if isinstance(ps, dict) else '') or ''
-        out.append({'id': cid, 'title': title, 'summary': summary})
-        if len(out) >= limit:
+        candidates.append({'id': cid, 'title': title, 'summary': summary})
+
+    if not candidates:
+        return []
+
+    # No query → pure recency (unchanged legacy behaviour).
+    if not query or not query.strip():
+        return candidates[:limit]
+
+    # Relevance-gate: BM25 over "title + summary" per candidate.
+    try:
+        from lib.memory.relevance import score_items
+        docs = [f'{c["title"]} {c["summary"]}'.strip() for c in candidates]
+        scored = score_items(query, docs)  # [(idx, score)], score>0, desc
+    except Exception as e:
+        logger.debug('[ProjSummary] digest relevance scoring failed: %s', e)
+        return candidates[:limit]
+
+    ordered: list[dict] = []
+    seen: set[str] = set()
+    # 1) Relevance-ranked positive matches first.
+    for idx, _score in scored:
+        c = candidates[idx]
+        if c['id'] in seen:
+            continue
+        seen.add(c['id'])
+        ordered.append(c)
+        if len(ordered) >= limit:
+            return ordered
+    # 2) Recency floor: keep the most-recent few unconditionally so a fresh /
+    #    off-topic turn is never empty (candidates is already recency-ordered).
+    for c in candidates[:_DIGEST_RECENCY_FLOOR]:
+        if c['id'] in seen:
+            continue
+        seen.add(c['id'])
+        ordered.append(c)
+        if len(ordered) >= limit:
             break
-    return out
+    return ordered[:limit]
 
 
 def build_project_digest(project_path: str, current_conv_id: str | None = None,
                          limit: int = DIGEST_MAX_SIBLINGS,
-                         conv_tools_available: bool = True) -> str:
+                         conv_tools_available: bool = True,
+                         query: str | None = None) -> str:
     """Build a bounded digest of sibling conversations of the same project.
 
     Returns a compact block listing up to ``limit`` of the most recently
@@ -406,7 +463,8 @@ def build_project_digest(project_path: str, current_conv_id: str | None = None,
             so the injection-side idempotency probe (``_DIGEST_MARKER`` in
             ``lib/tasks_pkg/system_context.py``) matches either one.
     """
-    structured = project_digest_entries(project_path, current_conv_id, limit)
+    structured = project_digest_entries(project_path, current_conv_id, limit,
+                                        query=query)
     if not structured:
         return ''
     entries = []

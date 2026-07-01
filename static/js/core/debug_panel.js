@@ -136,6 +136,37 @@ function _fmtKB(n) {
   if (n < 1024) return n + "B";
   return (n / 1024).toFixed(1) + "KB";
 }
+/* ── Project-Brain injection sniff (observability of the "brain") ──
+ * The AUTHORITATIVE signal that this task injected the project charter /
+ * board is the exact marker string the MODEL actually saw in the wire-form
+ * `messages` snapshot: `[PROJECT CHARTER]` / `[PROJECT BOARD]`. We sniff
+ * ONLY those markers in the message content — no separate frontend heuristic,
+ * no state reverse-engineering. Returns e.g. {charter:true, board:false} or
+ * null when neither is present. `_debugMsgText` flattens string|array content
+ * (system blocks are commonly wrapped as an array of text blocks). */
+function _debugMsgText(msg) {
+  if (!msg) return "";
+  if (typeof msg.content === "string") return msg.content;
+  if (Array.isArray(msg.content)) {
+    let s = "";
+    for (const b of msg.content) {
+      if (b && typeof b === "object" && b.type === "text") s += (b.text || "") + "\n";
+    }
+    return s;
+  }
+  return "";
+}
+function _debugBrainInfo(msg) {
+  if (!msg) return null;
+  // Only system messages carry the injected charter/board blocks.
+  if (msg.role !== "system") return null;
+  const text = _debugMsgText(msg);
+  if (!text) return null;
+  const charter = text.indexOf("[PROJECT CHARTER]") !== -1;
+  const board = text.indexOf("[PROJECT BOARD]") !== -1;
+  if (!charter && !board) return null;
+  return { charter, board };
+}
 function toggleDebug() {
   debugVisible = !debugVisible;
   document
@@ -175,7 +206,7 @@ function closeDebug() {
 function restoreDebugForConv(convId) {
   const cached = _debugCache[convId];
   if (cached && cached.messages && cached.messages.length > 0) {
-    showMessagesInDebug(cached.messages, cached.label, false, undefined, cached.tools);
+    showMessagesInDebug(cached.messages, cached.label, false, undefined, cached.tools, cached.approx);
     return;
   }
   const conv = conversations.find((c) => c.id === convId);
@@ -207,6 +238,8 @@ function restoreDebugForConv(convId) {
           `${data.count} msgs (server)`,
           false,
           convId,
+          undefined,
+          !!data.approx,
         );
       } else {
         clearDebug();
@@ -220,13 +253,20 @@ function restoreDebugForConv(convId) {
 }
 // ★ Render full messages array into debug panel — supports incremental updates
 //   isUpdate=true → streaming update, preserve collapse states, only patch changed blocks
-function showMessagesInDebug(messages, label, isUpdate, forConvId, tools) {
+//   approx=true → COLD-path reconstruction (the /debug-messages endpoint, which
+//     rebuilds the wire form from the DB with a hypothetical first-round for the
+//     per-round memory/date). Renders the amber "reconstructed approximation"
+//     chip so the human knows they are NOT looking at a precise capture of a
+//     specific round. The live SSE snapshot path (the real wire form) passes
+//     approx=false/undefined and must NEVER show this chip.
+function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx) {
   const cid =
     forConvId || (typeof activeConvId !== "undefined" ? activeConvId : null);
   // Cache for conversation switching
   if (cid) {
     _debugCache[cid] = { messages, label };
     if (tools) _debugCache[cid].tools = tools;
+    _debugCache[cid].approx = !!approx;
   }
   // Only render if this conv is currently active (or no conv specified)
   if (
@@ -241,12 +281,16 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools) {
   let _totalTokens = 0;
   let _compactedCount = 0;
   let _toolMsgCount = 0;
+  let _brainCharter = false;
+  let _brainBoard = false;
   for (const m of messages) {
     _totalTokens += _debugMsgTokens(m);
     if (m && m.role === "tool") {
       _toolMsgCount++;
       if (_debugCompactionInfo(m)) _compactedCount++;
     }
+    const bi = _debugBrainInfo(m);
+    if (bi) { _brainCharter = _brainCharter || bi.charter; _brainBoard = _brainBoard || bi.board; }
   }
   const title = document.getElementById("debugTitle");
   if (title) {
@@ -257,7 +301,44 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools) {
       ? ` · ~${_totalTokens >= 1000
           ? (_totalTokens / 1000).toFixed(1) + 'K'
           : _totalTokens}tok` : '';
-    title.innerHTML = `${Icon('inbox', 14)} Messages (${messages.length})${toolsSuffix}${compactedSuffix}${tokSuffix}${label ? " — " + escapeHtml(String(label)) : ""}`;
+    /* Project-Brain injection counter — a 🧠 (SVG, §3.4) tally of which brain
+     * blocks the model saw this task, sniffed from the authoritative markers. */
+    let brainSuffix = '';
+    if (_brainCharter || _brainBoard) {
+      const parts = [];
+      if (_brainCharter) parts.push(t('debug.brainCharter'));
+      if (_brainBoard) parts.push(t('debug.brainBoard'));
+      brainSuffix =
+        ` · <span class="debug-brain-summary" title="${escapeHtml(t('debug.brainSummaryTitle'))}">` +
+        `${Icon('brain', 11)} ${escapeHtml(parts.join('/'))}</span>`;
+    }
+    title.innerHTML = `${Icon('inbox', 14)} Messages (${messages.length})${toolsSuffix}${compactedSuffix}${brainSuffix}${tokSuffix}${label ? " — " + escapeHtml(String(label)) : ""}`;
+  }
+  /* ── Amber "reconstructed approximation" chip (cold path only) ──
+   * Gated STRICTLY on the endpoint's approx flag, never on the panel in
+   * general — the live SSE snapshot is the real wire form and must show no
+   * chip. Discloses the two cold-path approximations the human can't see
+   * otherwise: (a) memory/date are a hypothetical first-round, (b)
+   * transport-layer transforms are not expanded. SVG glyph only (§3.4). */
+  {
+    const _panel = document.getElementById("debugContent");
+    let _chip = _panel ? _panel.parentNode.querySelector(".debug-approx-chip") : null;
+    if (approx && _panel) {
+      if (!_chip) {
+        _chip = document.createElement("div");
+        _chip.className = "debug-approx-chip";
+        _panel.parentNode.insertBefore(_chip, _panel);
+      }
+      _chip.innerHTML =
+        `<div class="debug-approx-head">${Icon('alertTriangle', 13)} ` +
+        `${escapeHtml(t('debug.approxTitle'))}</div>` +
+        `<ul class="debug-approx-list">` +
+        `<li>${escapeHtml(t('debug.approxMemDate'))}</li>` +
+        `<li>${escapeHtml(t('debug.approxTransport'))}</li>` +
+        `</ul>`;
+    } else if (_chip) {
+      _chip.remove();
+    }
   }
   // Helper: syntax-color JSON (full, no truncation)
   function colorJson(obj, depth) {
@@ -340,6 +421,20 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools) {
       badge.innerHTML = `${Icon('archive', 11)} ${escapeHtml(compInfo.layer)} ${fromKB}→${toKB}`;
       badge.title = `Tool result compacted (${compInfo.layer}) — original ${fromKB}, now ${toKB}`;
       header.appendChild(badge);
+    }
+    // Project-Brain injection badge — sniffed from the authoritative markers
+    // the model actually saw. Names which brain blocks this system msg carries.
+    const brainInfo = _debugBrainInfo(msg);
+    if (brainInfo) {
+      block.classList.add("debug-msg-brain");
+      const bParts = [];
+      if (brainInfo.charter) bParts.push(t('debug.brainCharter'));
+      if (brainInfo.board) bParts.push(t('debug.brainBoard'));
+      const bBadge = document.createElement("span");
+      bBadge.className = "debug-brain-badge";
+      bBadge.innerHTML = `${Icon('brain', 11)} ${escapeHtml(bParts.join('/'))}`;
+      bBadge.title = t('debug.brainBadgeTitle');
+      header.appendChild(bBadge);
     }
     const summary = document.createElement("span");
     summary.className = "debug-msg-summary";

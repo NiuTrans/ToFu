@@ -25,75 +25,94 @@ What we CAN implement:
 
 from __future__ import annotations
 
-from typing import Any
-
 from lib.log import get_logger
 
 logger = get_logger(__name__)
 
+# Tool names that count as a "write" for the reminder trigger.
+_WRITE_TOOLS = frozenset({
+    'write_file', 'apply_diff', 'apply_diffs',
+    'insert_content', 'insert_contents',
+})
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Per-conversation attachment state
-# ═══════════════════════════════════════════════════════════════════════════════
+# Marker that uniquely identifies a previously-injected reminder in history.
+_REMINDER_MARKER = '## Recently Modified Files'
 
-_attachment_state: dict[str, dict[str, Any]] = {}
-"""Per-conv_id state tracking: last_write_round, last_reminder_round."""
-
-
-def _get_state(conv_id: str) -> dict[str, Any]:
-    """Get or create per-conversation attachment state."""
-    if conv_id not in _attachment_state:
-        _attachment_state[conv_id] = {
-            'last_write_round': -1,
-            'last_reminder_round': -1,
-            'rounds_since_write': 0,
-        }
-    return _attachment_state[conv_id]
+# Minimum number of messages that must separate the most recent write from
+# the conversation tail before the reminder fires. Small enough to nudge the
+# model after it "moves on", large enough not to nag mid-edit-burst.
+_MIN_GAP_MESSAGES = 6
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Attachment 1: Recently Modified Files Reminder
 # ═══════════════════════════════════════════════════════════════════════════════
+#
+# TRIGGER IS A PURE MESSAGE SCAN — no per-conversation round counters.
+#
+# The previous implementation kept a module-level ``_attachment_state`` keyed
+# by conv_id and gated on ``round_num``. That had two defects (B2/B3):
+#   • DEAD FEATURE across tasks. ``round_num`` resets to 0 every task, but the
+#     per-conv state persisted, so a stale ``last_reminder_round`` (pushed high
+#     in task 1) made ``(round_num - last_reminder_round) < 5`` permanently
+#     true in task 2 → the reminder never fired again for that conversation.
+#   • UNBOUNDED LEAK. The state dict was never evicted.
+# Both vanish when the trigger is derived purely from the message list (which
+# the orchestrator already carries the full, cross-task history of): the
+# messages ARE the state, so there is no counter to desync and no dict to leak.
 
-def _get_modified_files_attachment(messages: list, project_path: str,
-                                    conv_id: str, round_num: int) -> str | None:
-    """Generate a reminder about recently modified files.
 
-    Inspired by Claude Code's TODO reminder pattern: fires after N turns
-    since last write, then every M turns.  Reminds the model what files
-    were changed so it can verify its work.
+def _msg_has_write(msg: dict) -> bool:
+    """True if *msg* is an assistant turn that called a write tool."""
+    for tc in msg.get('tool_calls', []) or []:
+        if (tc.get('function') or {}).get('name', '') in _WRITE_TOOLS:
+            return True
+    return False
 
-    Only fires every 5+ rounds after a write operation.
+
+def _msg_has_reminder(msg: dict) -> bool:
+    """True if *msg* is a previously-injected modified-files reminder."""
+    content = msg.get('content', '')
+    if isinstance(content, str):
+        return _REMINDER_MARKER in content
+    if isinstance(content, list):
+        return any(isinstance(b, dict) and b.get('type') == 'text'
+                   and _REMINDER_MARKER in b.get('text', '')
+                   for b in content)
+    return False
+
+
+def _get_modified_files_attachment(messages: list, project_path: str) -> str | None:
+    """Generate a reminder about recently modified files, or None.
+
+    Fires when, scanning the message list, ALL hold:
+      1. A write tool was called at some point (there is something to verify).
+      2. The most recent write is at least ``_MIN_GAP_MESSAGES`` messages back
+         from the tail — i.e. the model has "moved on" (not mid-edit-burst).
+      3. No reminder has been injected SINCE that most recent write — otherwise
+         we'd stack duplicate reminders every turn (B3). A new write AFTER the
+         last reminder legitimately re-arms the trigger.
+
+    Purely a function of the message list — no round_num, no per-conv state.
     """
-    state = _get_state(conv_id)
+    last_write_idx = -1
+    last_reminder_idx = -1
+    for i, msg in enumerate(messages):
+        if _msg_has_write(msg):
+            last_write_idx = i
+        if _msg_has_reminder(msg):
+            last_reminder_idx = i
 
-    # Scan messages for recent write tool calls
-    has_write_in_recent = False
-    for msg in messages[-10:]:  # last 10 messages
-        for tc in msg.get('tool_calls', []):
-            fn_name = tc.get('function', {}).get('name', '')
-            if fn_name in ('write_file', 'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents'):
-                has_write_in_recent = True
-                state['last_write_round'] = round_num
-                state['rounds_since_write'] = 0
-                break
-
-    if has_write_in_recent:
-        state['rounds_since_write'] = 0
-    else:
-        state['rounds_since_write'] += 1
-
-    # Don't fire if no writes happened, or if we just wrote
-    if state['last_write_round'] < 0:
+    # (1) nothing written yet → nothing to remind about.
+    if last_write_idx < 0:
         return None
-    if state['rounds_since_write'] < 5:
+    # (2) still mid-edit (write too close to the tail) → don't nag.
+    if (len(messages) - 1 - last_write_idx) < _MIN_GAP_MESSAGES:
         return None
-    if (round_num - state.get('last_reminder_round', -999)) < 5:
+    # (3) a reminder already followed the most recent write → don't restack.
+    if last_reminder_idx > last_write_idx:
         return None
 
-    state['last_reminder_round'] = round_num
-
-    # Extract modified file paths from messages
     from lib.tasks_pkg.compaction import _extract_recently_accessed_files
     files = _extract_recently_accessed_files(messages, max_files=5)
     if not files:
@@ -102,7 +121,7 @@ def _get_modified_files_attachment(messages: list, project_path: str,
     file_list = '\n'.join(f'  - {f}' for f in files)
     return (
         '<system-reminder>\n'
-        '## Recently Modified Files\n'
+        f'{_REMINDER_MARKER}\n'
         'Files that were modified earlier in this conversation. '
         'Consider re-reading them if you need to verify current state:\n'
         f'{file_list}\n'
@@ -131,16 +150,20 @@ def compute_turn_attachments(
     """
     attachments = []
 
-    # 1. Modified files reminder
-    if project_enabled and project_path and round_num > 5:
-        files_reminder = _get_modified_files_attachment(
-            messages, project_path, conv_id, round_num)
+    # 1. Modified files reminder. Trigger is a pure message scan (see
+    #    _get_modified_files_attachment) — no round_num gate, so it works
+    #    across tasks where round_num resets to 0.
+    if project_enabled and project_path:
+        files_reminder = _get_modified_files_attachment(messages, project_path)
         if files_reminder:
             attachments.append(files_reminder)
 
     if attachments:
-        logger.debug('[Attachments] conv=%s round=%d injecting %d attachment(s)',
-                     conv_id[:8] if conv_id else '?', round_num, len(attachments))
+        _chars = sum(len(a) for a in attachments)
+        logger.debug('[Context] conv=%s round=%d inject block=modified_files '
+                     'count=%d chars=%d',
+                     conv_id[:8] if conv_id else '?', round_num,
+                     len(attachments), _chars)
 
     return attachments
 

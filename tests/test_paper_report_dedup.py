@@ -83,7 +83,7 @@ def test_interim_draft_discarded():
 
     # Stub the actual tool execution (no network).
     orig_tool = re_mod._execute_report_tool
-    re_mod._execute_report_tool = lambda *a, **k: ('search results here', [], None)
+    re_mod._execute_report_tool = lambda *a, **k: ('search results here', [], None, None, None)
     try:
         task = _make_task('rpt_dedup_1')
         re_mod._run_report_task(task, [
@@ -109,7 +109,7 @@ def test_delta_reset_event_emitted():
                                             'arguments': '{"query": "x"}'}}]
     _patch_dispatch([(REPORT_BODY, tool_call), (REPORT_BODY, [])])
     orig_tool = re_mod._execute_report_tool
-    re_mod._execute_report_tool = lambda *a, **k: ('results', [], None)
+    re_mod._execute_report_tool = lambda *a, **k: ('results', [], None, None, None)
     try:
         task = _make_task('rpt_dedup_2')
         re_mod._run_report_task(task, [
@@ -153,7 +153,7 @@ def test_tool_round_no_draft_then_final():
     # Round 1: tool call, NO content (well-behaved model). Round 2: report.
     _patch_dispatch([('', tool_call), (REPORT_BODY, [])])
     orig_tool = re_mod._execute_report_tool
-    re_mod._execute_report_tool = lambda *a, **k: ('results', [], None)
+    re_mod._execute_report_tool = lambda *a, **k: ('results', [], None, None, None)
     try:
         task = _make_task('rpt_dedup_4')
         re_mod._run_report_task(task, [

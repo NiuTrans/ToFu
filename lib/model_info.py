@@ -389,9 +389,22 @@ _MODEL_MAX_OUTPUT = {
     'ernie':   (is_ernie,   _ernie_max_output),   # per-model lookup
     'gpt':     (is_gpt,     32768),
     'glm':     (is_glm,     131072),
-
-    # Claude: 128000 output limit — matches build_body default, so no clamp needed
+    # Claude: 128000 output limit — matches build_body's default. Listed
+    # EXPLICITLY (rather than relying on no-clamp passthrough) so Claude is
+    # NOT swept into the conservative unknown-family default below — long-form
+    # paths deliberately pass max_tokens=128000 to Claude.
+    'claude':  (is_claude,  128000),
 }
+
+# Conservative default output ceiling for model families we don't recognise.
+# Without it, an unknown model used on a long-form path (max_tokens=128000)
+# sends the full value and earns a guaranteed HTTP 400 on the FIRST call,
+# relying on the post-400 auto-learn (_learn_model_limit) to recover — i.e.
+# "the first call always fails". Clamping unknown models to the common family
+# floor (16384, == the Qwen/Doubao/ERNIE minimum) lets the first call succeed;
+# if a model actually supports more, add its family entry or let auto-learn
+# raise it after a 400.
+_DEFAULT_UNKNOWN_MAX_OUTPUT = 16384
 
 
 # ── Auto-learned model limits (persisted to server_config.json) ──────────
@@ -426,17 +439,25 @@ def _clamp_max_tokens(model: str, max_tokens: int) -> int:
 
     Checks both family-level limits (_MODEL_MAX_OUTPUT) and
     auto-learned per-model limits (_LEARNED_MODEL_LIMITS).
-    Takes the minimum of all applicable limits.
+    Takes the minimum of all applicable limits. An unrecognised family is
+    clamped to _DEFAULT_UNKNOWN_MAX_OUTPUT so the first request doesn't
+    over-ask and get rejected.
     """
     limit = max_tokens
+    matched_family = False
     # Check family-level limits
     for _name, (check_fn, family_limit) in _MODEL_MAX_OUTPUT.items():
         if check_fn(model):
             # family_limit can be an int or a callable(model) → int
             effective_limit = family_limit(model) if callable(family_limit) else family_limit
             limit = min(limit, effective_limit)
+            matched_family = True
             break
-    # Check auto-learned model-specific limits
+    # Unknown family — apply the conservative default ceiling so we don't ship
+    # an over-large max_tokens and eat a guaranteed 400 on the first call.
+    if not matched_family:
+        limit = min(limit, _DEFAULT_UNKNOWN_MAX_OUTPUT)
+    # Check auto-learned model-specific limits (may lower the limit further)
     learned = _LEARNED_MODEL_LIMITS.get(model)
     if learned:
         limit = min(limit, learned)
@@ -460,18 +481,21 @@ def _learn_model_limit(model: str, limit: int):
         _LEARNED_MODEL_LIMITS[model] = limit
         logger.warning('[ModelInfo] ⚙️ Auto-learned max_tokens for model=%s: %d (was: %s). '
                        'Persisting to config.', model, limit, old or 'unknown')
-        # Persist to server_config.json
+        # Persist to server_config.json via the locked read-modify-write so
+        # a concurrent Settings save / context-limit learn doesn't clobber
+        # this model_limits update (and vice-versa).
         try:
             from lib.config_dir import config_path
+            from lib.json_store import update_json_atomic
             cfg_path = config_path('server_config.json')
-            cfg = {}
-            if os.path.isfile(cfg_path):
-                with open(cfg_path) as f:
-                    cfg = json.load(f)
-            cfg.setdefault('model_limits', {})[model] = limit
-            os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
-            with open(cfg_path, 'w') as f:
-                json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+            def _mutate(cfg):
+                if not isinstance(cfg, dict):
+                    cfg = {}
+                cfg.setdefault('model_limits', {})[model] = limit
+                return cfg
+
+            update_json_atomic(cfg_path, _mutate, default={})
             logger.info('[ModelInfo] Persisted model limit to %s', cfg_path)
         except Exception as e:
             logger.error('[ModelInfo] Failed to persist model limit for %s: %s',

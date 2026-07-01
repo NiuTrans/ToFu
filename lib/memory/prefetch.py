@@ -776,10 +776,15 @@ def run_memory_prefetch(messages: list,
         return []
 
     total_ms = int((time.time() - t_start) * 1000)
+    # Send the FULL description to the frontend so the expanded provenance
+    # strip can show it in full (the chip used to hard-cap at 120 chars,
+    # which clipped the very text the user wants to read on expand). The
+    # description is already bounded at write time (~120 chars by convention)
+    # but may legitimately run longer; the chip wraps it, so no UI cap here.
     selection_summary = [
         {'name': m.get('name', ''),
          'scope': m.get('scope', ''),
-         'description': m.get('description', '')[:120]}
+         'description': m.get('description', '')}
         for m in selected_memories
     ]
 
