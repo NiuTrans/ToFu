@@ -169,15 +169,29 @@ TOFU_INSTALL_LOG="${_TOFU_LOG_DIR}/install-$(date +%Y%m%d_%H%M%S).log"
 # Strip ANSI colour escapes BEFORE tee'ing into the file so the log is
 # readable as plain text (terminals still see the coloured stream).
 # Uses process substitution: terminal gets raw, log gets sed-stripped.
+#
+# PORTABILITY: `stdbuf` ships with GNU coreutils and is ABSENT on stock
+# macOS/BSD; `sed -u` (unbuffered) is a GNU extension BSD sed rejects.
+# Using either unconditionally makes this `exec` redirect fail on macOS,
+# which aborts the whole install before a single package is fetched
+# (symptom: empty tofu dir). So probe for both and degrade gracefully.
+_TOFU_STDBUF=""
+if command -v stdbuf &>/dev/null; then
+    _TOFU_STDBUF="stdbuf -oL"
+fi
+_TOFU_SED_U=""
+if command -v sed &>/dev/null && echo x | sed -u '' &>/dev/null; then
+    _TOFU_SED_U="-u"
+fi
 if command -v sed &>/dev/null; then
-    exec > >(stdbuf -oL tee >(stdbuf -oL sed -u $'s/\x1b\\[[0-9;]*[a-zA-Z]//g' >> "$TOFU_INSTALL_LOG")) 2>&1
+    exec > >($_TOFU_STDBUF tee >($_TOFU_STDBUF sed $_TOFU_SED_U $'s/\x1b\\[[0-9;]*[a-zA-Z]//g' >> "$TOFU_INSTALL_LOG")) 2>&1
 else
-    exec > >(stdbuf -oL tee -a "$TOFU_INSTALL_LOG") 2>&1
+    exec > >($_TOFU_STDBUF tee -a "$TOFU_INSTALL_LOG") 2>&1
 fi
 # Record key metadata at the top of the log for future debugging.
 {
     echo "──────────────────────────────────────────────"
-    echo "tofu install.sh — $(date -Iseconds)"
+    echo "tofu install.sh — $(date -Iseconds 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "host:    $(hostname 2>/dev/null || echo unknown)"
     echo "user:    $(whoami 2>/dev/null || echo unknown)"
     echo "args:    $0 $*"
@@ -399,7 +413,7 @@ if [[ -z "$CONDA_BIN" ]]; then
         MF_URLS=("${_USER_MIRRORS[@]}" "${MF_URLS[@]}")
     fi
     if [[ "${_SKIP_MINIFORGE_DOWNLOAD:-0}" -ne 1 ]]; then
-    TMP_INSTALLER="$(mktemp -t miniforge.XXXXXX.sh)"
+    TMP_INSTALLER="$(mktemp "${TMPDIR:-/tmp}/miniforge.XXXXXX")"
     # Don't override the global EXIT trap (which is the install-log reminder);
     # use a RETURN-style cleanup at the end of this branch.
     # Force IPv4 — many corp networks return AAAA records but have no v6
@@ -980,7 +994,7 @@ fi
 #   without user intervention.
 _safe_pip_install() {
     local _log
-    _log="$(mktemp -t tofu_pip.XXXXXX)"
+    _log="$(mktemp "${TMPDIR:-/tmp}/tofu_pip.XXXXXX")"
     local _rc=0
     (
         # Some hosts force --user globally via the PIP_USER env var OR a
@@ -1096,7 +1110,7 @@ else
     step "Installing/upgrading tofu-search (required search/fetch pipeline; need >= ${_TS_FLOOR} with server symbols)"
     _TOFU_SEARCH_WHL=""
     if [[ -d "${INSTALL_DIR}/vendor" ]]; then
-        _TOFU_SEARCH_WHL="$(ls -1 "${INSTALL_DIR}"/vendor/tofu_search-*.whl 2>/dev/null | sort -V | tail -1)"
+        _TOFU_SEARCH_WHL="$(ls -1 "${INSTALL_DIR}"/vendor/tofu_search-*.whl 2>/dev/null | { sort -V 2>/dev/null || sort; } | tail -1)"
     fi
     if [[ -n "$_TOFU_SEARCH_WHL" ]]; then
         info "Installing bundled wheel: ${_TOFU_SEARCH_WHL##*/}"
@@ -1286,7 +1300,7 @@ fi
 info "Verifying lxml + trafilatura + htmldate + justext + transitive deps import correctly..."
 
 _TOFU_IMPORT_PROBE='import lxml.etree, lxml_html_clean, trafilatura, htmldate, justext, courlan, dateparser, babel, tld, pytz, regex, tzlocal, tofu_search.search, tofu_search.fetch; from tofu_search import fetch_page_content, looks_like_text_asset, perform_web_search; import tofu_search as _ts; print("lxml", lxml.__version__, "trafilatura", trafilatura.__version__, "htmldate", htmldate.__version__, "justext", justext.__version__, "tofu_search", getattr(_ts, "__version__", "?"))'
-_TOFU_IMPORT_ERR="$(mktemp -t tofu_import_err.XXXXXX)"
+_TOFU_IMPORT_ERR="$(mktemp "${TMPDIR:-/tmp}/tofu_import_err.XXXXXX")"
 
 if python -c "$_TOFU_IMPORT_PROBE" 2>"$_TOFU_IMPORT_ERR"; then
     ok "Import check passed"
@@ -1299,7 +1313,7 @@ else
     # resolver can't downgrade conda's lxml 6 (the original reason we used
     # --no-deps). Constraint files apply to ALL packages pip considers,
     # not just direct asks, so any lxml downgrade attempt is blocked.
-    _TOFU_PIP_CONSTRAINT="$(mktemp -t tofu_pip_constraint.XXXXXX)"
+    _TOFU_PIP_CONSTRAINT="$(mktemp "${TMPDIR:-/tmp}/tofu_pip_constraint.XXXXXX")"
     {
         echo "lxml>=6"
         echo "libxml2>=2.14"   # ignored if not on PyPI; harmless
