@@ -173,6 +173,24 @@ function _swarmResultsByAgent(allRounds) {
   return map;
 }
 
+/* Collect every agentId proven complete by a persisted inbox-inject row.
+   `_handleSwarmInboxInject` (sse_handlers_lifecycle.js) pushes a synthetic
+   `_inboxInject` tool round carrying `inboxAgentIds` into the message's
+   toolRounds — and unlike the live-only `_swarmAgents` map, those rows are
+   persisted (survive reload). An inbox-inject for agent X means the model
+   RECEIVED X's `<swarm-update>` result, so X is definitively done. Returns a
+   Set of such agentIds. */
+function _swarmInjectedAgentIds(allRounds) {
+  const ids = new Set();
+  if (!Array.isArray(allRounds)) return ids;
+  for (const r of allRounds) {
+    if (!r || !r._inboxInject) continue;
+    const list = Array.isArray(r.inboxAgentIds) ? r.inboxAgentIds : [];
+    for (const id of list) if (id) ids.add(id);
+  }
+  return ids;
+}
+
 function _recoverSwarmAgents(round, allRounds) {
   /* ★ Durable snapshot (root-cause fix) — preferred source after reload.
      The backend writes `round._swarmSnapshot` onto the spawn round when the
@@ -217,19 +235,34 @@ function _recoverSwarmAgents(round, allRounds) {
      recovered panel shows real status + result, not objective-only stubs. */
   const results = _swarmResultsByAgent(allRounds);
   const enriched = Object.keys(results).length > 0;
+  /* ★ Inbox-inject completion proof (root-cause fix — conv mr2ysg473scxv8).
+     A `<swarm-update>` drained into the model's context is DEFINITIVE proof
+     that agent X finished — and unlike the live `_swarmAgents` map it SURVIVES
+     reload, persisted as synthetic `_inboxInject` tool rows (see
+     sse_handlers_lifecycle.js `_handleSwarmInboxInject`, which stamps
+     `inboxAgentIds` onto rounds pushed into `toolRounds`). Without this, a
+     fire-and-forget swarm (no await_agents/get_agent_result sibling rounds,
+     no _swarmSnapshot) recovered every agent as `unknown` → the panel showed
+     0/N + "Unconfirmed" + 无结果 even though the chips proved the agents
+     finished and were injected. Treat an injected agentId as authoritative
+     `done` when no stronger sibling-result status exists. */
+  const injectedDone = _swarmInjectedAgentIds(allRounds);
   if (list.length === 0) {
     console.warn("[Swarm] _recoverSwarmAgents: spawn handle had no agents[] — panel body will be empty (round", round && round.roundNum, ")");
   } else {
     console.warn("[Swarm] _recoverSwarmAgents: rebuilt", list.length,
-      "agent(s) from persisted handle (results cross-referenced from sibling rounds:", enriched, "; round",
+      "agent(s) from persisted handle (results cross-referenced from sibling rounds:", enriched,
+      "; inbox-injected done:", injectedDone.size, "; round",
       round && round.roundNum, ")");
   }
   return list.map((a) => {
     const id = a.id || "";
     const res = results[id] || {};
-    // No result row for this agent → it never reported back; keep it visibly
-    // unfinished rather than faking a green "done".
-    const status = res.status || "unknown";
+    // Precedence: an explicit sibling-round result (await/get_agent_result)
+    // wins; else an inbox-inject for this id is authoritative `done`; else it
+    // never reported back → keep it visibly unfinished rather than faking a
+    // green "done".
+    const status = res.status || (injectedDone.has(id) ? "done" : "unknown");
     return {
       id,
       role: res.role || a.role || "agent",

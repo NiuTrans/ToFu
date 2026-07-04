@@ -35,6 +35,36 @@ const _CACHE_CAUSE_PHRASES = [
   // leaves the remainder untranslated (e.g. the bare 'stochastic server-side
   // cache miss' alias would eat the prefix of the full sentence). Each block
   // below is sorted full-sentence → clause → short alias.
+  // ── Wire-fingerprint verdicts (2026-07: PROVEN vs UNPROVEN — see
+  //    lib/tasks_pkg/wire_fingerprint.py + _resolve_break_cause). The miss is
+  //    only called server-side as FACT when the post-translation wire bytes
+  //    were confirmed byte-identical to the previous round; otherwise it is
+  //    honestly hedged UNPROVEN. FULL sentences precede their clauses. ──
+  ['server-side cache miss — PROVEN: the wire bytes were byte-identical to the previous round (only the body past the static prefix was not read back)',
+   '服务端缓存未命中——已实证：本轮发出的字节与上一轮逐字节相同（仅静态前缀之后的正文未被读回）'],
+  ['server-side cache miss — PROVEN: the wire bytes were byte-identical to the previous round (whole prefix not reused)',
+   '服务端缓存未命中——已实证：本轮发出的字节与上一轮逐字节相同（整段前缀未被复用）'],
+  ['likely server-side cache miss (UNPROVEN — no wire fingerprint; body re-billed, static prefix still cached)',
+   '疑似服务端缓存未命中（未证实——无线上指纹；正文重新计费，静态前缀仍命中）'],
+  ['prefix not reused — likely server-side miss or TTL expiry (UNPROVEN — no wire fingerprint)',
+   '前缀未被复用——疑似服务端未命中或 TTL 过期（未证实——无线上指纹）'],
+  ['prefix not reused — likely server-side miss, TTL expiry, or a silent prefix byte change (UNPROVEN — no wire fingerprint)',
+   '前缀未被复用——疑似服务端未命中、TTL 过期，或前缀字节被静默改动（未证实——无线上指纹）'],
+  // clauses / short aliases (after the full sentences above)
+  ['the wire bytes were byte-identical to the previous round', '本轮发出的字节与上一轮逐字节相同'],
+  ['only the body past the static prefix was not read back', '仅静态前缀之后的正文未被读回'],
+  ['whole prefix not reused', '整段前缀未被复用'],
+  ['UNPROVEN — no wire fingerprint', '未证实——无线上指纹'],
+  ['server-side cache miss — PROVEN', '服务端缓存未命中——已实证'],
+  ['likely server-side miss or TTL expiry', '疑似服务端未命中或 TTL 过期'],
+  ['likely server-side miss, TTL expiry, or a silent prefix byte change', '疑似服务端未命中、TTL 过期，或前缀字节被静默改动'],
+  ['likely server-side cache miss', '疑似服务端缓存未命中'],
+  ['UNPROVEN', '未证实'],
+  ['PROVEN', '已实证'],
+  // The named-culprit suffix appended to prefix_mutation causes:
+  //   "… [changed: user:abc.content, tool_result(c1).tool_result]"
+  ['likely cause of the miss', '很可能就是本次未命中的原因'],
+  ['changed: ', '改动: '],
   // ── Current cause strings (2026-06-23: stochastic server miss, verified
   //    by identical-prompt live replay — see lib/tasks_pkg/cache_tracking.py) ──
   ['stochastic server-side cache miss (body re-billed; static prefix still cached) — a per-request gateway miss reproduced at <5min gaps with identical input',
@@ -129,6 +159,45 @@ function _cacheBreakReason(cb) {
     // Unknown key with no descriptive value → omit (don't invent a cause).
   }
   return bits.join(t('finishInfo.listSep'));
+}
+
+/** Classify a cache-break dict into ONE of three user-facing fault states so
+ * the popover can visually distinguish them (the whole point of the 2026-07
+ * traceability upgrade — the user must SEE whose fault the miss was):
+ *   'culprit' — WE mutated the cached prefix; the cause names the exact
+ *               msg.field. Actionable, our fault. (prefix_mutation key, OR any
+ *               client-side change: system_prompt/tools/model/message_count.)
+ *   'proven'  — the wire bytes were PROVEN byte-identical → genuinely
+ *               server-side, NOT our fault, nothing to fix.
+ *   'unproven'— server-side is only a guess (no wire fingerprint captured).
+ *   ''        — no break.
+ * Keyed off the backend cause text so it can never drift from what
+ * _cacheBreakReason renders. */
+function _cacheBreakState(cb) {
+  if (!cb || typeof cb !== 'object') return '';
+  const keys = Object.keys(cb);
+  if (!keys.length) return '';
+  // A named prefix mutation, or any concrete client-side change, is OUR fault.
+  if ('prefix_mutation' in cb) return 'culprit';
+  if (keys.some(k => k === 'system_prompt' || k === 'tools'
+                  || k === 'model' || k === 'message_count')) return 'culprit';
+  // Otherwise inspect the server_side / no_cache_reuse cause text.
+  const txt = String(cb.server_side || cb.no_cache_reuse || '');
+  if (txt.includes('PROVEN') && !txt.includes('UNPROVEN')) return 'proven';
+  if (txt.includes('UNPROVEN')) return 'unproven';
+  // A cause we can't classify (legacy string) → treat as unproven guess.
+  return txt ? 'unproven' : '';
+}
+
+/** Extract the named culprit list from a prefix_mutation cause, or ''.
+ * Backend appends "[changed: key.field, …]" — pull it out so the popover can
+ * show WHICH message broke cache, front-and-center, not buried in the sentence.
+ */
+function _cacheBreakCulprits(cb) {
+  if (!cb || typeof cb !== 'object') return '';
+  const txt = String(cb.prefix_mutation || cb.no_cache_reuse || cb.server_side || '');
+  const m = txt.match(/\[changed:\s*([^\]]+)\]/);
+  return m ? m[1].trim() : '';
 }
 
 /**
@@ -228,6 +297,10 @@ function _buildCostPopover(ctx) {
       const _model = _disp.model || rd.model || '';
       // Cache-break reason stamped by the backend onto this round.
       const cbReason = _cacheBreakReason(rd.cacheBreak);
+      // Fault STATE (proven-server / unproven / our-culprit) + the named
+      // culprit list, so the popover shows WHOSE fault and WHICH message.
+      const cbState = _cacheBreakState(rd.cacheBreak);
+      const cbCulprits = _cacheBreakCulprits(rd.cacheBreak);
 
       html += `<div class="cp-round">`;
       html += `<div class="cp-round-head">`;
@@ -336,7 +409,18 @@ function _buildCostPopover(ctx) {
       if (_keyStr) metaBits.push(`<span class="cp-key" title="${escapeHtml('Key: ' + _keyStr + (_model ? '  ·  Model: ' + _model : ''))}">${_CP_KEY_SVG}${escapeHtml(_keyStr)}</span>`);
       if (_dbg && ru.trace_id) metaBits.push(`<span class="cp-trace">${escapeHtml(ru.trace_id.slice(0, 8))}</span>`);
       if (metaBits.length) html += `<div class="cp-round-meta">${metaBits.join('')}</div>`;
-      if (cbReason) html += `<div class="cp-round-break">${_CP_WARN_SVG}${t('finishInfo.cacheBreakLabel', { reason: cbReason })}</div>`;
+      if (cbReason) {
+        // State-tagged line: green-ish 'proven server' (not our fault),
+        // amber 'unproven' (unknown), red 'culprit' (our fault, actionable).
+        const _stCls = cbState ? ` cp-break-${cbState}` : '';
+        const _stLabel = cbState ? `<span class="cp-break-badge cp-break-badge-${cbState}">${t('finishInfo.cbState.' + cbState)}</span>` : '';
+        html += `<div class="cp-round-break${_stCls}">${_CP_WARN_SVG}${_stLabel}${t('finishInfo.cacheBreakLabel', { reason: cbReason })}</div>`;
+        // The named culprit — WHICH message(s) broke cache — surfaced on its
+        // own line so the user can act on it, not hunt error.log.
+        if (cbCulprits) {
+          html += `<div class="cp-break-culprit">${t('finishInfo.cbCulpritLabel', { culprits: escapeHtml(cbCulprits) })}</div>`;
+        }
+      }
       html += `</div>`;
     });
     html += `</div>`;
@@ -697,29 +781,106 @@ function renderFinishInfo(msg) {
 // one fetch per genuine state change.
 //
 // `_extractFileChangesFromRoundsAsync` returns a Promise<Array>.
-// `_extractedFileChangesCache` caches the LAST computed result so
-// synchronous render paths can read the cached entry while a fresh
-// fetch is in flight.
-const _extractedFileChangesCache = new Map();  // fp → files[]
-let _extractedFileChangesPending = new Map();   // fp → Promise<files[]>
+//
+// ★ ISOLATION BY CONSTRUCTION (not by hash). The derived list is cached
+//   ON THE OWNING MESSAGE OBJECT via a WeakMap — a message can only ever
+//   read ITS OWN entry, so a stale/colliding fingerprint can never surface
+//   another conversation's file list. (Derivation itself is backend
+//   single-source-of-truth: lib/tool_changes.py via
+//   POST /api/v1/messages/extract-file-changes — the frontend never
+//   re-parses toolRounds.) The stored fp is only a per-message STALENESS
+//   token: "is the list I cached still the one this message's toolRounds
+//   would produce?". The pending map is a global keyed by fp PURELY to
+//   dedup concurrent identical in-flight requests — it holds Promises, is
+//   never read as a message's rendered result, and identical inputs yield
+//   identical output, so coalescing is safe and leak-free.
+const _fcResultByMsg = new WeakMap();          // msg → { fp, files }
+let _extractedFileChangesPending = new Map();   // fp → Promise<files[]> (dedup only)
+
+// Tools whose rounds carry file-change info (mirror of
+// lib/tool_changes.py `_WRITE_TOOLS` + the separately-handled run_command).
+const _FC_FP_WRITE_TOOLS = new Set([
+  'write_file', 'apply_diff', 'apply_diffs',
+  'insert_content', 'insert_contents', 'run_command',
+]);
 
 function _fcFingerprint(toolRounds) {
   if (!toolRounds || !toolRounds.length) return '';
-  // Coarse fingerprint — enough to detect changes worth refetching.
-  const last = toolRounds[toolRounds.length - 1];
-  return toolRounds.length + ':' + (last.status || '') + ':' +
-         (last.toolName || '') + ':' +
-         ((last.results && last.results.length) || 0);
+  // ★ CONTENT-FAITHFUL fingerprint = a per-message STALENESS token: "does
+  //   the file list I cached on this message still match what its current
+  //   toolRounds would produce?". The authoritative cache is now
+  //   owner-scoped (`_fcResultByMsg` WeakMap), so this fp is NOT a global
+  //   cross-conversation cache key anymore — it also serves as the dedup
+  //   key for coalescing identical in-flight requests. Either way the
+  //   invariant is `same fingerprint ⟺ same extractor inputs ⟹ same
+  //   output`, so it must reflect EVERY field lib/tool_changes.py
+  //   consumes, across ALL rounds — not just the last. (Historically a
+  //   coarse key + a global content-keyed cache let two same-shape
+  //   messages in different conversations alias each other's file list.)
+  //
+  //   Projected fields only (NOT the whole toolArgs — write_file's args
+  //   carry the entire file `content`, which must never bloat a cache
+  //   key): the path / edits[].path the extractor reads from toolArgs,
+  //   and results[0]'s fileChanges / writeOk / badge / title.
+  const parts = [];
+  for (let i = 0; i < toolRounds.length; i++) {
+    const r = toolRounds[i];
+    if (!r) continue;
+    const tn = r.toolName || '';
+    if (!_FC_FP_WRITE_TOOLS.has(tn)) continue;
+    let args = r.toolArgs;
+    if (typeof args === 'string') {
+      try { args = JSON.parse(args); } catch (_) { args = null; }
+    }
+    const argPaths = [];
+    if (args && typeof args === 'object') {
+      if (Array.isArray(args.edits)) {
+        for (const e of args.edits) if (e && e.path) argPaths.push(e.path);
+      }
+      if (args.path) argPaths.push(args.path);
+    }
+    const res0 = r.results && r.results[0];
+    let resSig = '';
+    if (res0 && typeof res0 === 'object') {
+      const fcPaths = Array.isArray(res0.fileChanges)
+        ? res0.fileChanges
+            .map(fc => (fc && fc.path ? fc.path + '>' + (fc.action || '') : ''))
+            .join(',')
+        : '';
+      resSig = fcPaths + '\u00a7' + (res0.writeOk === false ? '0' : '1') +
+               '\u00a7' + (res0.badge || '') + '\u00a7' + (res0.title || '');
+    }
+    parts.push(i + '\u00a7' + tn + '\u00a7' + (r.status || '') +
+               '\u00a7' + argPaths.join(',') + '\u00a7' + resSig);
+  }
+  // No write-capable rounds → both messages extract to [] — sharing a
+  // cache entry is correct (identical empty output). Distinct suffix keeps
+  // it separate from the "has writes" keyspace.
+  return toolRounds.length + '|' + parts.join('~');
 }
 
-async function _extractFileChangesFromRoundsAsync(toolRounds) {
+async function _extractFileChangesFromRoundsAsync(toolRounds, msg) {
   if (!toolRounds || !toolRounds.length) return [];
   const fp = _fcFingerprint(toolRounds);
-  if (_extractedFileChangesCache.has(fp)) {
-    return _extractedFileChangesCache.get(fp);
+  // Per-message cache hit (owner-scoped, staleness-checked).
+  if (msg) {
+    const owned = _fcResultByMsg.get(msg);
+    if (owned && owned.fp === fp) return owned.files;
   }
+  // Coalesce identical concurrent requests (dedup only — the Promise is
+  // never a message's rendered result; it just avoids duplicate POSTs).
   const inflight = _extractedFileChangesPending.get(fp);
-  if (inflight) return inflight;
+  const store = (files) => {
+    // Only write the result onto the message that ASKED for it, and only
+    // if its toolRounds still match the fp we fetched for (guards against a
+    // reused/mutated message object). No global content-keyed store, so no
+    // cross-conversation aliasing is possible.
+    if (msg && _fcFingerprint(msg.toolRounds) === fp) {
+      _fcResultByMsg.set(msg, { fp, files });
+    }
+    return files;
+  };
+  if (inflight) return inflight.then(store);
 
   const promise = (async () => {
     try {
@@ -730,14 +891,7 @@ async function _extractFileChangesFromRoundsAsync(toolRounds) {
         }
         return [];
       }
-      const files = Array.isArray(body.files) ? body.files : [];
-      _extractedFileChangesCache.set(fp, files);
-      // Cap the cache so it doesn't grow unbounded over a long session.
-      if (_extractedFileChangesCache.size > 64) {
-        const firstKey = _extractedFileChangesCache.keys().next().value;
-        _extractedFileChangesCache.delete(firstKey);
-      }
-      return files;
+      return Array.isArray(body.files) ? body.files : [];
     } catch (err) {
       if (typeof debugLog === 'function') {
         debugLog(`[FileChanges] extract failed: ${err && err.message}`, 'warn');
@@ -748,15 +902,15 @@ async function _extractFileChangesFromRoundsAsync(toolRounds) {
     }
   })();
   _extractedFileChangesPending.set(fp, promise);
-  return promise;
+  return promise.then(store);
 }
 
 /**
  * Batch-prefetch file-change lists for every message in a conversation
  * that needs server-side derivation (i.e. lacks `modifiedFileList`).
- * Seeds `_extractedFileChangesCache` so the synchronous render paths
- * inside `renderFileChangesBar` hit the cache instead of firing one
- * POST per message.
+ * Writes each result onto its OWNING message (the `_fcResultByMsg`
+ * WeakMap) so the synchronous render paths inside `renderFileChangesBar`
+ * hit the per-message cache instead of firing one POST per message.
  *
  * Returns a Promise<boolean>: true if fresh entries landed (caller
  * should force a re-render), false if everything was already cached.
@@ -765,68 +919,66 @@ async function _prefetchConvFileChanges(conv) {
   if (!conv || !conv.messages || !conv.messages.length) return false;
   const items = [];
   const fps = [];
-  const _seen = new Set();
+  const owners = [];          // fps[i] → [msg, ...] messages sharing that fp
+  const _fpIndex = new Map(); // fp → position in fps/items/owners
   for (const m of conv.messages) {
     if (!m || m.modifiedFileList && m.modifiedFileList.length) continue;
     if (!Array.isArray(m.toolRounds) || !m.toolRounds.length) continue;
     const fp = _fcFingerprint(m.toolRounds);
-    if (!fp || _seen.has(fp)) continue;
-    if (_extractedFileChangesCache.has(fp)) continue;
-    if (_extractedFileChangesPending.has(fp)) continue;
-    _seen.add(fp);
-    items.push({ toolRounds: m.toolRounds });
-    fps.push(fp);
+    if (!fp) continue;
+    // Already resolved for THIS message (owner-scoped, staleness-checked)?
+    const owned = _fcResultByMsg.get(m);
+    if (owned && owned.fp === fp) continue;
+    // Coalesce identical requests within this batch — one POST per fp,
+    // fanned out to every owning message afterward.
+    let idx = _fpIndex.get(fp);
+    if (idx === undefined) {
+      idx = fps.length;
+      _fpIndex.set(fp, idx);
+      fps.push(fp);
+      items.push({ toolRounds: m.toolRounds });
+      owners.push([]);
+    }
+    owners[idx].push(m);
   }
   if (!items.length) return false;
-  // Per-fp resolvers so concurrent single-shot fetches that hit the
-  // pending map get a Promise<files[]> with the right shape (the
-  // single-shot contract from _extractFileChangesFromRoundsAsync).
-  const _resolvers = fps.map(() => {
-    /** @type {(v:any)=>void} */
-    let resolve = () => {};
-    const p = new Promise((r) => { resolve = r; });
-    return { p, resolve };
-  });
-  for (let i = 0; i < fps.length; i++) {
-    _extractedFileChangesPending.set(fps[i], _resolvers[i].p);
-  }
   try {
     const body = await Api.conversations.extractFileChangesBatch(items);
     const results = body && Array.isArray(body.results) ? body.results : [];
     for (let i = 0; i < fps.length; i++) {
       const files = Array.isArray(results[i]) ? results[i] : [];
-      _extractedFileChangesCache.set(fps[i], files);
-      _resolvers[i].resolve(files);
-    }
-    while (_extractedFileChangesCache.size > 64) {
-      const firstKey = _extractedFileChangesCache.keys().next().value;
-      _extractedFileChangesCache.delete(firstKey);
+      const fp = fps[i];
+      // Write onto each owning message, re-checking its current fp so a
+      // mutation between request and response never mis-stamps a message.
+      for (const m of owners[i]) {
+        if (_fcFingerprint(m.toolRounds) === fp) {
+          _fcResultByMsg.set(m, { fp, files });
+        }
+      }
     }
     return true;
   } catch (err) {
     if (typeof debugLog === 'function') {
       debugLog(`[FileChanges] batch prefetch failed: ${err && err.message}`, 'warn');
     }
-    for (const r of _resolvers) r.resolve([]);
     return false;
-  } finally {
-    for (const fp of fps) _extractedFileChangesPending.delete(fp);
   }
 }
 window._prefetchConvFileChanges = _prefetchConvFileChanges;
 
 /**
- * Synchronous accessor — returns the cached file-change list for a given
- * toolRounds blob, or `null` if not yet fetched. Render paths read this
- * to render the bar on the SAME tick the rounds change, then the async
- * fetch (kicked off in parallel) refreshes the cache for the NEXT tick.
+ * Synchronous accessor — returns the cached file-change list for a
+ * message, or `null` if not yet fetched (or stale). Owner-scoped: reads
+ * ONLY this message's own WeakMap entry, and only if the stored
+ * fingerprint still matches its current toolRounds. Render paths read
+ * this to render the bar on the SAME tick the rounds change, then the
+ * async fetch (kicked off in parallel) refreshes it for the NEXT tick.
  */
-function _extractFileChangesFromRoundsCached(toolRounds) {
-  if (!toolRounds || !toolRounds.length) return null;
-  const fp = _fcFingerprint(toolRounds);
-  return _extractedFileChangesCache.has(fp)
-    ? _extractedFileChangesCache.get(fp)
-    : null;
+function _extractFileChangesFromRoundsCached(msg) {
+  if (!msg || !Array.isArray(msg.toolRounds) || !msg.toolRounds.length) return null;
+  const owned = _fcResultByMsg.get(msg);
+  if (!owned) return null;
+  return owned.fp === _fcFingerprint(msg.toolRounds) ? owned.files : null;
 }
 
 /**
@@ -844,7 +996,7 @@ function renderFileChangesBar(msg, msgIdx) {
   }
   // Fallback: extract from toolRounds via /api/v1/messages/extract-file-changes.
   if (!msg.toolRounds || !msg.toolRounds.length) return '';
-  const cached = _extractFileChangesFromRoundsCached(msg.toolRounds);
+  const cached = _extractFileChangesFromRoundsCached(msg);
   if (cached !== null) {
     if (!cached.length) return '';
     return _renderFileChangesHtml(cached, false, msgIdx);
@@ -852,7 +1004,7 @@ function renderFileChangesBar(msg, msgIdx) {
   // No cached entry yet — kick off an async fetch and trigger a re-render
   // when it lands. Returning empty for THIS render tick is fine; the bar
   // appears on the next tick.
-  _extractFileChangesFromRoundsAsync(msg.toolRounds).then(() => {
+  _extractFileChangesFromRoundsAsync(msg.toolRounds, msg).then(() => {
     // Re-render the message list once the cache is fresh.
     const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
     if (conv && typeof renderChat === 'function') renderChat(conv);

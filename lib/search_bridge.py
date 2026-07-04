@@ -219,9 +219,26 @@ class _ChatuiAuthSourceProvider(tofu_search.AuthSourceProvider):
 #  Config sync + install
 # ═══════════════════════════════════════════════════════
 
+def _resolve_proxy_url() -> str:
+    """Return chatui's effective HTTPS/HTTP proxy URL, or '' when none.
+
+    Prefers the Settings-resolved value from ``lib.proxy`` (which also mirrors
+    the env vars) so tofu-search's adaptive dual-attempt tries the SAME proxy
+    chatui itself uses, independent of env-var casing quirks.
+    """
+    try:
+        from lib.proxy import get_proxy_config
+        cfg = get_proxy_config()
+        return (cfg.get('https_proxy') or cfg.get('http_proxy') or '').strip()
+    except Exception as e:
+        logger.debug('[Bridge] proxy resolve failed: %s', e)
+        return ''
+
+
 def sync_search_config():
     """Push chatui's live FETCH_* settings into tofu-search's global config."""
     filter_enabled = getattr(_lib, 'LLM_CONTENT_FILTER_ENABLED', True)
+    proxy_url = _resolve_proxy_url()
     tofu_search.configure(
         llm_function=_chatui_llm,
         fetch_top_n=_lib.FETCH_TOP_N,
@@ -234,14 +251,16 @@ def sync_search_config():
         filter_enabled=filter_enabled,
         filter_min_chars=int(os.environ.get('FETCH_FILTER_MIN_CHARS', '3000')),
         filter_timeout=int(os.environ.get('FETCH_FILTER_TIMEOUT', '300')),
+        proxy_url=proxy_url,
     )
     logger.info('[Bridge] tofu-search config synced: top_n=%d timeout=%ds '
-                'max_chars(search=%d direct=%d pdf=%d) filter=%s model=%r',
+                'max_chars(search=%d direct=%d pdf=%d) filter=%s model=%r proxy=%s',
                 _lib.FETCH_TOP_N, _lib.FETCH_TIMEOUT,
                 _lib.FETCH_MAX_CHARS_SEARCH, _lib.FETCH_MAX_CHARS_DIRECT,
                 _lib.FETCH_MAX_CHARS_PDF,
                 'on' if filter_enabled else 'off',
-                _FILTER_MODEL or 'dispatch-default')
+                _FILTER_MODEL or 'dispatch-default',
+                'set' if proxy_url else 'env/none')
 
 
 def install_search_bridge():

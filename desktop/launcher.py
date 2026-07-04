@@ -296,6 +296,24 @@ def main():
         runpy.run_module('server', run_name='__main__')
         return
 
+    # ── Playwright-install mode (frozen self-relaunch) ──
+    # A PyInstaller --onedir bundle has NO standalone python.exe — the only
+    # executable is THIS one. So `sys.executable -m playwright install` cannot
+    # work (main() would just boot a second app). Instead post_install.py
+    # relaunches us with TOFU_PLAYWRIGHT_INSTALL=1, and here we drive the
+    # bundled playwright package in-process to fetch its Chromium binary.
+    if os.environ.get('TOFU_PLAYWRIGHT_INSTALL') == '1':
+        try:
+            from playwright.__main__ import main as _pw_main
+            sys.argv = ['playwright', 'install', 'chromium']
+            _pw_main()
+        except SystemExit:
+            raise
+        except Exception as e:
+            _log('Playwright install failed: %s' % e)
+            sys.exit(1)
+        return
+
     # ── GUI process: crisp rendering before any window is created ──
     _enable_dpi_awareness()
 

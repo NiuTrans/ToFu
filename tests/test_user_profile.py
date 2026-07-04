@@ -198,7 +198,8 @@ def test_profile_injection_is_cache_safe(tmp_data_dir):
             f'round {i} falsely flagged prefix_mutation: {r}')
 
     # No breaks accumulated.
-    assert _cache_states[conv].total_breaks == 0
+    from lib.tasks_pkg.cache_tracking import _state_key as _sk
+    assert _cache_states[_sk(conv)].total_breaks == 0
 
 
 def test_without_notify_would_flag(tmp_data_dir):
@@ -394,7 +395,8 @@ def test_profile_edit_between_tasks_is_cache_safe(tmp_data_dir):
         assert rB is None or 'prefix_mutation' not in rB, (
             f'task B round {i} falsely flagged prefix_mutation: {rB}')
 
-    assert _cache_states[conv].total_breaks == 0
+    from lib.tasks_pkg.cache_tracking import _state_key as _sk
+    assert _cache_states[_sk(conv)].total_breaks == 0
 
 
 def test_preference_learned_event_registered():
@@ -838,7 +840,8 @@ def test_inject_tiered_detail_is_cache_safe(tmp_data_dir):
                    'cache_read_input_tokens': 70000})
         assert r is None or 'prefix_mutation' not in r, (
             f'round {i} falsely flagged: {r}')
-    assert _cache_states[conv].total_breaks == 0
+    from lib.tasks_pkg.cache_tracking import _state_key as _sk
+    assert _cache_states[_sk(conv)].total_breaks == 0
 
 
 # ───────── chip honesty: applied_profile_items mirrors the injected tiers ─────────
@@ -1085,7 +1088,8 @@ def test_detail_refresh_is_cache_safe(tmp_data_dir):
             f'round {i} falsely flagged prefix_mutation: {r}')
         # The CORE block must be byte-identical despite the detail swap.
         assert _core_segment(m) == core1
-    assert _cache_states[conv].total_breaks == 0
+    from lib.tasks_pkg.cache_tracking import _state_key as _sk
+    assert _cache_states[_sk(conv)].total_breaks == 0
 
 
 def test_consolidation_daemon_emits_preference_learned(monkeypatch):

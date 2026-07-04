@@ -392,9 +392,10 @@ Your review is read by the authors AND the Area Chair. It must be substantive en
 the authors know exactly what to fix and the AC can make a decision from it alone.
 
 ## ⛔ Anti-slop rules — these are HARD constraints, not suggestions
+- **Write like a human reviewer, not a report generator.** A real reviewer's Summary and Strengths are written in their OWN words at a natural level of abstraction — they do NOT read like a forensic audit with a table/figure/§ citation stapled to every clause. Save the microscope for the Weaknesses, where that specificity earns its keep. (Per-section guidance is given inline below — follow it over any instinct to make every sentence maximally specific.)
 - **Do NOT pad.** No filler, no restating the task, no "this is an interesting paper" throat-clearing. Every sentence must carry information a decision depends on.
 - **Summarize the paper ONCE, briefly.** Outside the Summary section you are FORBIDDEN from re-narrating what the paper does. Reviewers who re-describe the method in the Strengths/Weaknesses sections are wasting the AC's time.
-- **Every strength and every weakness MUST be anchored to concrete evidence** — a specific table, figure, equation, section, or number from the paper (e.g. "Table 3 shows +1.2 F1 but the baseline in row 2 is under-tuned (no LR sweep, §4.2)"). A point with no anchor is deleted.
+- **Weaknesses: precise, not numerous — find the REAL problems and the hidden flaws.** The worth of a review is a small number (typically 2–4) of decisive, well-argued weaknesses that actually bear on the accept/reject decision — an unsound claim, an unfair or under-tuned baseline, a confound the experiments never rule out, a gap between what is claimed and what is shown, the one missing ablation the central claim rests on. Do NOT pad to a quota with cosmetic nitpicks (typos, "more datasets would be nice", "the writing could be clearer"): burying a real problem under ten trivial ones is how an AC misses it. Rank strictly by decision-impact and cut the long tail. **Every weakness MUST be anchored to concrete evidence** — a specific table, figure, equation, section, or number (e.g. "Table 3's +1.2 F1 is within the ±0.9 std it reports, so the headline gain is not clearly significant"). A weakness with no anchor is deleted.
 - **Banned phrases.** Never write "significantly improves", "substantially better", "novel approach", "promising results", "comprehensive experiments", "the authors should" without a concrete what/where. Vague praise and vague criticism are equally useless. Replace "improves significantly" with the actual delta and the comparison point.
 - **Reviewer questions must be ACTIONABLE.** Each question must be answerable by the authors with a specific experiment, ablation, clarification, or number — not a rhetorical musing. Bad: "Have the authors considered other settings?" Good: "What is the result on {{benchmark}} when the auxiliary loss weight λ in Eq. 4 is set to 0 — does the gain survive?"
 - **Rating and confidence MUST be justified.** A score with no one-line reason tied to the evidence above is unacceptable. Calibrate honestly: most papers are borderline; reserve the extremes.
@@ -414,13 +415,13 @@ Produce the review in this exact structure:
 # Review
 
 ## Summary
-3–6 sentences. What problem, what method (one line), what is claimed, and the headline result with its number, benchmark, and comparison point. This is the ONLY place you describe the paper.
+A neutral 3–5 sentence paraphrase of the paper in YOUR OWN words — the way a reviewer opens a review to show the authors they were understood: the problem, the core idea of the method (a sentence or two), and the nature of the main result. Write it as prose a person would write; you do NOT need to pack in exact numbers, benchmark names, or deltas here — a high-level characterization is what a real Summary looks like (save the precise figures for the Weaknesses, where they do work). This is the ONLY place you describe the paper.
 
 ## Strengths
-3–6 bullet points. Each: the strength + the SPECIFIC evidence (table/figure/§/number) that establishes it + why it matters for the field. No generic praise.
+2–4 bullet points in a reviewer's natural voice. State the genuine merits — a well-motivated problem, a clean or simple idea, a thorough evaluation, a useful released artifact — at the level a person would actually write them. Be honest rather than exhaustive: if the paper has one real strength, list one. Do NOT bolt a table/figure/§ citation onto every strength; cite a specific number only where it genuinely sharpens the point. Do NOT manufacture strengths to look balanced.
 
 ## Weaknesses
-4–8 bullet points, ordered most-to-least decision-relevant. Each: the precise weakness + the evidence/omission that reveals it + its impact on the paper's claims + (where possible) the concrete experiment or change that would resolve it. This is the most important section — be specific and fair.
+The heart of the review. Raise ONLY the weaknesses that are real and that matter to the decision — quality and precision over quantity (typically 2–4; more only if the paper genuinely has that many distinct, decisive problems). Order them most-to-least decision-relevant. For each: the precise weakness, the evidence or omission that reveals it, its impact on the paper's claims, and — where possible — the concrete experiment or change that would resolve it. Prefer one deeply-argued deal-breaker over five shallow observations, and be willing to name a flaw the authors themselves may not have noticed. Be specific and fair.
 
 ## Questions to the Authors
 3–6 numbered, ACTIONABLE questions (each answerable with a specific number / ablation / clarification). These are the questions whose answers would move your rating.
@@ -453,9 +454,10 @@ _REVIEW_PROMPT_ZH = """\
 你的评审会被作者**和**领域主席同时阅读。它必须足够实质，让作者清楚知道要改什么，也让 AC 仅凭它就能做出决策。
 
 ## ⛔ 反注水规则——这些是**硬约束**，不是建议
+- **像人类审稿人一样写，而不是像报告生成器。** 真实审稿人的 Summary 与 Strengths 是用他/她**自己的话**、在一个自然的抽象层次上写的——绝不会像一份法证审计那样，给每个分句都钉上一个表/图/§ 引用。把显微镜留给 Weaknesses，那里的"具体"才真正值钱。（各节的具体要求见下方内联说明——请遵循它，而不是本能地把每句都写到最具体。）
 - **禁止注水。** 不要废话、不要复述任务、不要"这是一篇有趣的论文"之类的开场白。每一句都必须承载决策所依赖的信息。
 - **全文只在 Summary 里复述论文一次，且简短。** Summary 之外**禁止**再复述论文做了什么。在优点/缺点里重新描述方法，是在浪费 AC 的时间。
-- **每一条优点、每一条缺点都必须锚定到具体证据**——论文里某个具体的表/图/公式/小节/数字（例如"表 3 显示 +1.2 F1，但第 2 行的基线没调好（无学习率扫描，见 §4.2）"）。没有锚点的条目一律删除。
+- **缺点：宁精勿多——去找真问题和暗病。** 一份评审的价值，在于少数（通常 2–4 条）有决定性、论证扎实、真正影响接收/拒稿的缺点：一个站不住的主张、一个不公平或没调好的基线、实验从未排除的混淆因素、"声称"与"证明"之间的落差、核心主张所依赖却缺失的那个消融。**绝不**为了凑数堆砌表面瑕疵（错别字、"多几个数据集会更好"、"写作可以更清楚"）——把一个真问题埋在十个琐碎问题里，正是 AC 漏掉它的原因。严格按对决策的影响排序，砍掉长尾。**每一条缺点都必须锚定到具体证据**——某个具体的表/图/公式/小节/数字（例如"表 3 的 +1.2 F1 落在它自己报告的 ±0.9 标准差之内，因此这个头部增益并不显著"）。没有锚点的缺点一律删除。
 - **禁用措辞。** 绝不写"显著提升""大幅更优""新颖的方法""结果令人鼓舞""实验充分""作者应当……"却不给出具体的"改什么/在哪"。空泛的表扬和空泛的批评一样无用。把"显著提升"换成真实的提升幅度和对比参照点。
 - **给作者的问题必须可执行。** 每个问题都要能被作者用一个具体的实验、消融、澄清或数字回答——不是修辞式的空想。差："作者是否考虑过其他设置？"；好："当式(4)的辅助损失权重 λ 设为 0 时，在 {{benchmark}} 上的结果是多少——增益还在吗？"
 - **评分与置信度必须给理由。** 一个没有挂钩上文证据、没有一句话理由的分数不可接受。诚实校准：多数论文都在边缘，极端分要留着慎用。
@@ -475,13 +477,13 @@ _REVIEW_PROMPT_ZH = """\
 # 评审意见
 
 ## 概述（Summary）
-3–6 句。什么问题、什么方法（一句话）、声称了什么、以及带数字/基准/对比参照点的头部结果。这是你**唯一**可以复述论文的地方。
+用**你自己的话**、3–5 句中性地转述这篇论文——就像审稿人在开头向作者表明"我读懂了你"：问题是什么、方法的核心想法（一两句）、以及主要结果的性质。写成一个人会写的散文；**不必**在这里堆砌精确数字、基准名或提升幅度——一个较高层次的概括才是真实 Summary 的样子（把精确数字留到 Weaknesses，在那里它们才有用武之地）。这是你**唯一**可以复述论文的地方。
 
 ## 优点（Strengths）
-3–6 条。每条：优点本身 + 确立它的**具体证据**（表/图/§/数字）+ 它对领域为何重要。不要泛泛表扬。
+2–4 条，用审稿人自然的口吻。写出真实的优点——问题动机充分、想法干净/简单、评估充分、发布了有用的产物——写到一个人真正会写的程度即可。宁可诚实，不必求全：如果论文只有一个真优点，就只列一个。**不要**给每条优点都钉上表/图/§ 引用；只在具体数字确实能让论点更锋利时才给。**不要**为了显得"平衡"而硬造优点。
 
 ## 缺点（Weaknesses）
-4–8 条，按对决策的影响从大到小排列。每条：精确的缺点 + 暴露它的证据/缺失 + 它对论文主张的影响 +（尽量给出）能解决它的具体实验或修改。这是最重要的一节——要具体、公允。
+评审的核心。只提出**真实且影响决策**的缺点——质量与精度高于数量（通常 2–4 条；只有当论文确实有那么多相互独立、有决定性的问题时才更多）。按对决策的影响从大到小排列。每条给出：精确的缺点、暴露它的证据或缺失、它对论文主张的影响、以及（尽量）能解决它的具体实验或修改。宁可把一个致命问题论证透彻，也不要罗列五个浮于表面的观察，并敢于指出作者自己可能都没注意到的缺陷。要具体、公允。
 
 ## 给作者的问题（Questions to the Authors）
 3–6 个带编号、**可执行**的问题（每个都能用具体的数字/消融/澄清回答）。这些应是"答案会改变你评分"的问题。

@@ -808,9 +808,9 @@
     undo:          (body)     =>
       request('/api/v1/project/undo',
               { method: 'POST', json: body, parse: 'response' }),
-    undoAll:       ()         =>
+    undoAll:       (body)     =>
       request('/api/v1/project/undo-all',
-              { method: 'POST', json: {}, parse: 'response' }),
+              { method: 'POST', json: body || {}, parse: 'response' }),
     browse:        (path, showHidden) => post('/api/v1/project/browse', { path, showHidden: !!showHidden }),
     mkdir:         (parent, name)     =>
       request('/api/v1/project/mkdir',
@@ -840,9 +840,41 @@
     // Project-brain Board (coordination kanban). read-only.
     board:         (path) =>
       get('/api/v1/project/board', { query: { path }, onError: 'null' }),
+    // Board HUMAN mutations. All key strictly on the explicit `path`; `convId`
+    // is the displayed conversation acting as the human's proxy. `post` needs
+    // it (becomes created_by_conv → dispatch target); complete/block/reopen
+    // tolerate an empty convId (lifecycle actions on an existing epic, no
+    // dispatch target — feed event + audit record a blank actor honestly).
+    boardPost:     (path, { title, convId, dependsOn } = {}) =>
+      post('/api/v1/project/board/post',
+           { path, title, convId, depends_on: dependsOn || [] }),
+    boardComplete: (path, taskId, convId) =>
+      post('/api/v1/project/board/complete', { path, taskId, convId: convId || '' }),
+    boardBlock:    (path, taskId, convId, reason) =>
+      post('/api/v1/project/board/block',
+           { path, taskId, convId: convId || '', reason: reason || '' }),
+    boardReopen:   (path, taskId, convId) =>
+      post('/api/v1/project/board/reopen', { path, taskId, convId: convId || '' }),
     // Collaboration-bar one-shot summary (board + decisions + peer→epic join).
     brainSummary:  (path) =>
       get('/api/v1/project/brain/summary', { query: { path }, onError: 'null' }),
+    // LIVE peer/team roster (presence ⋈ task ⋈ claimed-epic). convId optional
+    // — when present it's excluded so a conv never lists itself as a peer.
+    brainPeers:    (path, convId) =>
+      get('/api/v1/project/brain/peers',
+          { query: { path, convId: convId || '' }, onError: 'null' }),
+    // Per-conversation brain INFLUENCE — how THIS conv is affected by the
+    // brain (charter bound by, epics owned vs avoided, decisions awaiting).
+    brainInfluence: (path, convId) =>
+      get('/api/v1/project/brain/influence',
+          { query: { path, convId }, onError: 'null' }),
+    // HUMAN nudge to a sibling conversation — the operator (acting via the
+    // displayed conv `convId`) sends advisory `text` to `toConvId`. Reuses
+    // send_peer_message server-side (same rate limit + self-send guard).
+    // Throws ApiError on refusal so the composer can surface rate_limited.
+    brainPeerMessage: (path, convId, toConvId, text) =>
+      post('/api/v1/project/brain/peer-message',
+           { path, convId: convId || '', toConvId, text }),
   };
 
   // paper-reader (library + report + translate + QA) ---------------

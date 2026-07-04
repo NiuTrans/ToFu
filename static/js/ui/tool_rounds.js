@@ -55,6 +55,22 @@ function _isRoundBrowser(round) {
 function _isRoundImageGen(round) {
   return round.toolName === "generate_image";
 }
+/* ★ Project-brain / conversation-reference tools. These return prose (a
+   board listing, the charter text, a conversation digest, peer status) in
+   `round.toolContent` plus a short `snippet`, but historically fell through
+   to the bare generic tool line that shows only icon+name+badge — hiding all
+   the actual content. `_isRoundConvMeta` routes them to a dedicated
+   collapsible block that renders the full content as Markdown. */
+const _CONV_META_TOOLS = new Set([
+  "project_board_read", "project_board_post", "project_board_claim",
+  "project_board_complete", "project_board_block",
+  "project_charter_read", "project_charter_propose",
+  "list_conversations", "get_conversation",
+  "project_peer_status", "project_message", "project_intervene",
+]);
+function _isRoundConvMeta(round) {
+  return _CONV_META_TOOLS.has(round.toolName);
+}
 function _isRoundSwarm(round) {
   /* Only treat as swarm if the backend flagged it AND there's real swarm content */
   if (!round._swarm) return false;
@@ -240,6 +256,11 @@ const _webToolSvg = {
   // Backend no longer prepends 💬/📋 to the label; these SVGs are the icon.
   get_conversation: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22z"/></svg>',
   list_conversations: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="13" y2="13"/></svg>',
+  // Project-brain tools — board (kanban columns), charter (compass/north-star),
+  // peer (linked people). Inline SVG per the icon convention (§3.4).
+  project_board_read: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="18" rx="1"/><rect x="14" y="3" width="7" height="11" rx="1"/></svg>',
+  project_charter_read: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>',
+  project_peer_status: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
   // Async-swarm bookkeeping tools (spawn_agents gets the full panel instead).
   await_agents: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
   get_agent_result: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>',
@@ -272,6 +293,14 @@ function _getToolSvg(round) {
   if (_isRoundBrowser(round)) return _browserToolSvg[icon] || _browserToolSvg.tabs;
   // MCP bridge tools are named ``mcp__server__tool`` — collapse to the plug icon.
   if ((round.toolName || "").startsWith("mcp__")) return _webToolSvg.mcp;
+  // Project-brain sibling tools share their family icon (post/claim/complete/
+  // block → board; propose → charter; message/intervene → peer).
+  if (_isRoundConvMeta(round)) {
+    const tn = round.toolName || "";
+    if (tn.startsWith("project_board_")) return _webToolSvg.project_board_read;
+    if (tn.startsWith("project_charter_")) return _webToolSvg.project_charter_read;
+    if (tn === "project_message" || tn === "project_intervene") return _webToolSvg.project_peer_status;
+  }
   return _webToolSvg[icon] || _webToolSvg[round.toolName] || _webToolSvg.generic;
 }
 
@@ -671,6 +700,160 @@ function _renderMemoryBlock(round, svg, q, compactionLabelHtml, rootPill, badgeH
          ${badgeHtml}
        </summary>
        <div class="ptool-memory-body">${inner}</div>
+     </details>`;
+}
+
+/* ★ Project-brain / conversation-meta block — a collapsible card that renders
+   the tool's full prose output (board listing, charter text, conversation
+   digest, peer status) as Markdown. These tools return their real payload in
+   `round.toolContent`; the previous generic renderer showed only a name +
+   badge, so the user saw NOTHING of the content. This block surfaces it.
+
+   Header: family SVG icon + label + a source chip (Board / Charter /
+   Conversations / Peer) + the action badge (read/post/…). Body: the full
+   `toolContent` rendered as Markdown, falling back to the meta snippet when
+   toolContent hasn't landed yet (e.g. mid-stream before tool_complete). */
+const _CONV_META_SOURCE_LABEL = {
+  Board: "Board", Charter: "Charter", Conversations: "Conversations",
+  ConvRef: "Conversations", Peer: "Peer",
+};
+/* ── Structured per-tool renderers (Phase 3) ──────────────────────────
+   Each renders off the STRUCTURED meta the backend attaches (boardSnapshot /
+   boardTransition / peerStatus / charterProposal) — NOT re-parsed prose. They
+   return an inner-HTML string (the body of the convmeta card), or '' to fall
+   back to the generic Markdown dump. */
+
+/** Mini-kanban for project_board_read: counts + per-lane epic titles. */
+function _renderBoardSnapshot(snap) {
+  if (!snap) return "";
+  const _t = (typeof t === "function") ? t : (k, d) => d;
+  const lanes = snap.lanes || {};
+  const laneDef = [
+    ["open", _t("projectBrain.laneOpen", "Open")],
+    ["claimed", _t("projectBrain.laneClaimed", "In progress")],
+    ["done", _t("projectBrain.laneDone", "Done")],
+  ];
+  let html = '<div class="ptool-board-mini">';
+  for (const [key, label] of laneDef) {
+    const epics = lanes[key] || [];
+    const count = (snap[key] != null) ? snap[key] : epics.length;
+    let cards = epics.map(function (e) {
+      const owner = e.owner
+        ? `<span class="ptool-board-mini-owner">${escapeHtml(String(e.owner).slice(0, 8))}</span>` : "";
+      const disp = e.dispatched
+        ? `<span class="ptool-board-mini-auto" title="${escapeHtml(_t("projectBrain.dispatchedTitle", "Started autonomously by the project brain"))}">${(typeof Icon === "function") ? Icon("rocket", 10) : ""}</span>` : "";
+      return `<div class="ptool-board-mini-card ptool-board-mini-${escapeHtml(key)}"><span class="ptool-board-mini-title">${escapeHtml(e.title || e.id || "")}</span>${owner}${disp}</div>`;
+    }).join("");
+    if (!cards) cards = '<div class="ptool-board-mini-empty">—</div>';
+    html += `<div class="ptool-board-mini-lane"><div class="ptool-board-mini-head">${escapeHtml(label)} <span class="ptool-board-mini-count">${count}</span></div>${cards}</div>`;
+  }
+  html += "</div>";
+  return html;
+}
+
+/** Explicit transition line for a board mutation (verb + epic + new status). */
+function _renderBoardTransition(tr) {
+  if (!tr || !tr.verb) return "";
+  const _t = (typeof t === "function") ? t : (k, d) => d;
+  const verbLabel = _t("projectBrain.boardVerb." + tr.verb, tr.verb);
+  const title = tr.title || tr.taskId || "";
+  const statusLabel = tr.status
+    ? `<span class="ptool-board-tr-status ptool-board-mini-${escapeHtml(tr.status)}">${escapeHtml(_t("projectBrain.lane" + tr.status.charAt(0).toUpperCase() + tr.status.slice(1), tr.status))}</span>`
+    : "";
+  return `<div class="ptool-board-transition">` +
+    `<span class="ptool-board-tr-verb">${escapeHtml(verbLabel)}</span>` +
+    `<span class="ptool-board-tr-title">${escapeHtml(title)}</span>` +
+    (tr.status ? `<span class="ptool-board-tr-arrow">${(typeof Icon === "function") ? Icon("chevronDown", 12) : "→"}</span>${statusLabel}` : "") +
+    `</div>`;
+}
+
+/** Live peer cards for project_peer_status: conv id + status + round + epic. */
+function _renderPeerStatus(ps) {
+  if (!ps) return "";
+  const _t = (typeof t === "function") ? t : (k, d) => d;
+  const peers = ps.peers || [];
+  if (!peers.length) {
+    return `<div class="ptool-peer-empty">${escapeHtml(_t("projectBrain.peerNone", "No active peers right now."))}</div>`;
+  }
+  let html = '<div class="ptool-peer-list">';
+  for (const p of peers) {
+    const who = p.title || ("conv " + String(p.convId || "").slice(0, 8));
+    const sub = p.agentId ? `<span class="ptool-peer-agent">${escapeHtml("sub-agent " + p.agentId)}</span>` : "";
+    const bits = [];
+    if (p.statusLabel) bits.push(escapeHtml(p.statusLabel));
+    if (p.round) bits.push(_t("projectBrain.peerRound", "round {n}").replace("{n}", p.round));
+    if (p.currentFile) bits.push(escapeHtml(p.currentFile));
+    const epic = p.claimedEpic
+      ? `<div class="ptool-peer-epic">${(typeof Icon === "function") ? Icon("package", 11) : ""}<span>${escapeHtml(p.claimedEpic)}</span></div>` : "";
+    html += `<div class="ptool-peer-card">` +
+      `<div class="ptool-peer-who">${(typeof Icon === "function") ? Icon("messageCircle", 12) : ""}<span>${escapeHtml(who)}</span>${sub}</div>` +
+      (bits.length ? `<div class="ptool-peer-detail">${bits.join(" · ")}</div>` : "") +
+      epic + `</div>`;
+  }
+  html += "</div>";
+  return html;
+}
+
+/** Charter proposal card: the proposed text + a "pending human review" affordance. */
+function _renderCharterProposal(cp) {
+  if (!cp || !cp.proposal) return "";
+  const _t = (typeof t === "function") ? t : (k, d) => d;
+  const titleLine = cp.title
+    ? `<div class="ptool-charter-prop-title">${escapeHtml(cp.title)}</div>` : "";
+  return `<div class="ptool-charter-proposal">` +
+    titleLine +
+    `<div class="ptool-charter-prop-text">${escapeHtml(cp.proposal)}</div>` +
+    `<div class="ptool-charter-prop-pending">` +
+    `${(typeof Icon === "function") ? Icon("hourglass", 11) : ""}` +
+    `<span>${escapeHtml(_t("projectBrain.proposalPending", "Awaiting human review — commit or reject in the Project Brain panel"))}</span>` +
+    `</div></div>`;
+}
+
+/** Pick the structured body for a conv-meta round, or '' to fall back. */
+function _structuredConvMetaBody(round, meta) {
+  if (meta.boardSnapshot) return _renderBoardSnapshot(meta.boardSnapshot);
+  if (meta.boardTransition) return _renderBoardTransition(meta.boardTransition);
+  if (meta.peerStatus) return _renderPeerStatus(meta.peerStatus);
+  if (meta.charterProposal) return _renderCharterProposal(meta.charterProposal);
+  return "";
+}
+
+function _renderConvMetaBlock(round, svg, q, badgeHtml) {
+  const meta = (round.results || [])[0] || {};
+  const _t = (typeof t === "function") ? t : (k, d) => d;
+  const source = meta.source || "";
+  const sourceLabel = _CONV_META_SOURCE_LABEL[source] || source || "";
+  const sourceChip = sourceLabel
+    ? `<span class="ptool-convmeta-src">${escapeHtml(sourceLabel)}</span>`
+    : "";
+  // ★ Structured renderer first (driven off backend meta, not re-parsed prose).
+  //   When a structured body is available it replaces the raw Markdown dump;
+  //   otherwise we fall back to the full toolContent (charter_read text,
+  //   conversation digests, peer message/intervene results, etc.).
+  const structured = _structuredConvMetaBody(round, meta);
+  let bodyHtml;
+  if (structured) {
+    bodyHtml = `<div class="ptool-convmeta-structured">${structured}</div>`;
+  } else {
+    // Full content preferred; snippet is the mid-stream / pre-complete fallback.
+    const content = (typeof round.toolContent === "string" && round.toolContent.trim())
+      ? round.toolContent
+      : (typeof meta.snippet === "string" ? meta.snippet : "");
+    bodyHtml = content.trim()
+      ? `<div class="ptool-convmeta-content md-content">${renderMarkdown(content)}</div>`
+      : `<div class="ptool-convmeta-empty">${escapeHtml(_t("tool.noContent", "No content returned."))}</div>`;
+  }
+  // Open by default for the common single read (board/charter) so the user
+  // sees the content without a click; collapsible to tuck it away.
+  const openAttr = " open";
+  return `<details class="ptool-convmeta-block"${openAttr} data-rn="${round.roundNum}">
+       <summary class="ptool-line ptool-convmeta-header">
+         <span class="ptool-icon">${svg}</span>
+         <span class="ptool-text">${q}</span>
+         ${sourceChip}
+         ${badgeHtml}
+       </summary>
+       <div class="ptool-convmeta-body">${bodyHtml}</div>
      </details>`;
 }
 
@@ -1613,6 +1796,16 @@ function _renderUnifiedToolLine(round, isSearching) {
          </summary>
          <div class="ptool-batch-done-list">${itemsHtml}</div>
        </details>`;
+  }
+
+  // ★ Project-brain / conversation-meta tools — render their full prose
+  //   output in a collapsible Markdown card instead of the bare generic line
+  //   (which hid all the content). Only when the round has settled (done);
+  //   the in-flight "searching…" state is handled by the generic active
+  //   branch above.
+  if (_isRoundConvMeta(round) && round.status !== "rejected") {
+    const convMetaHtml = _renderConvMetaBlock(round, svg, q, badgeHtml);
+    if (convMetaHtml) return convMetaHtml;
   }
 
   return `<div class="ptool-line">

@@ -154,9 +154,18 @@ function _applyAutopilotRunFolds(inner, conv) {
         + `<span class="apf-label">${escapeHtml(_label)}</span>`
         + `<span class="apf-count">${turnCount}</span>`
         + `<span class="apf-hint">${escapeHtml(_hint)}</span>`;
-      /* No sidecar summary AND no legacy summary element → manual-stop run:
-       * offer "Summarize this run". */
-      if (!summaryEl && !_sumRec) {
+      /* Report affordances live IN the fold's summary card (not as a separate
+       * panel below it): a run WITH a close-out report gets a "View report"
+       * button that opens the debrief in a sub-window; a manual-stop run with
+       * NO report gets "Summarize this run" instead. */
+      if (_sumRec && _sumRec.content) {
+        const _viewLabel = (typeof t === 'function' && t('autopilot.viewReport') !== 'autopilot.viewReport')
+          ? t('autopilot.viewReport') : 'View report';
+        _summaryInner += `<button class="apf-report-btn" data-ap-run-report="${escapeHtml(runId)}" `
+          + `onclick="event.preventDefault();event.stopPropagation();_openApSummaryModal('${escapeHtml(runId)}')">`
+          + `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>`
+          + `${escapeHtml(_viewLabel)}</button>`;
+      } else if (!summaryEl && !_sumRec) {
         const _sumLabel = (typeof t === 'function' && t('autopilot.summarizeRun') !== 'autopilot.summarizeRun')
           ? t('autopilot.summarizeRun') : 'Summarize this run';
         _summaryInner += `<button class="apf-summarize-btn" data-ap-run-summarize="${escapeHtml(runId)}" `
@@ -173,38 +182,42 @@ function _applyAutopilotRunFolds(inner, conv) {
       firstStamped.parentNode.insertBefore(details, firstStamped);
       for (const el of range) details.appendChild(el);
 
-      /* ★ Render the run's close-out SUMMARY as the fold's read-only report
-       * PANEL — a human-only debrief, NOT a chat bubble and NOT in
-       * conv.messages. It sits AFTER the <details> (visible whether the fold
-       * is open or closed) so the spine reads: human msg → [folded run] →
-       * report panel. */
-      if (_sumRec) {
-        const _panel = _buildApSummaryPanel(conv, runId, _sumRec);
-        if (_panel) details.insertAdjacentElement('afterend', _panel);
-      }
+      /* ★ The run's close-out REPORT is no longer rendered as an
+       * always-visible panel below the fold. It is a human-only debrief
+       * surfaced on demand via the "View report" button in the fold summary
+       * (→ _openApSummaryModal), keeping the transcript spine compact:
+       * human msg → [folded run]. Any stale panel from a previous render of
+       * the old layout is cleaned up here. */
+      const _stalePanel = details.parentNode
+        && details.nextElementSibling
+        && details.nextElementSibling.classList
+        && details.nextElementSibling.classList.contains('autopilot-summary-panel')
+        ? details.nextElementSibling : null;
+      if (_stalePanel) _stalePanel.remove();
     }
   } catch (e) {
     console.warn('[Autopilot fold] failed (non-fatal):', e && e.message);
   }
 }
 
-/* Build the read-only "Run summary" report panel from a sidecar record.
- * Deliberately a NON-conversation visual (mirrors the vu-private-zone framing)
- * so the user reads it as a debrief that serves only them — it is never sent
- * to the agent and never part of the transcript. Idempotent: re-running over
- * an already-rendered panel removes the stale one first (keyed by runId). */
-function _buildApSummaryPanel(conv, runId, rec) {
+/* Open the run's close-out REPORT in a read-only sub-window (modal overlay).
+ * The report is a human-only debrief (mirrors the vu-private-zone framing) —
+ * never sent to the agent, never part of the transcript. Reached from the
+ * "View report" button in the autopilot run fold's summary card. Idempotent:
+ * a second call replaces any open report modal. Closes on overlay click, the
+ * × button, or Escape. */
+function _openApSummaryModal(runId) {
   try {
-    const _escId = (window.CSS && CSS.escape) ? CSS.escape(runId) : runId;
-    /* Remove any prior panel for this run so a re-render doesn't stack. */
-    const inner = document.getElementById('chatInner');
-    if (inner) {
-      const stale = inner.querySelector(`.autopilot-summary-panel[data-ap-summary-run="${_escId}"]`);
-      if (stale) stale.remove();
+    const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
+    const rec = _apRunRecord(conv, runId);
+    if (!rec || !rec.content) {
+      console.warn('[Autopilot report] no report content for run', runId);
+      return;
     }
-    const wrap = document.createElement('div');
-    wrap.className = 'autopilot-summary-panel';
-    wrap.setAttribute('data-ap-summary-run', runId);
+    /* Drop any previously-open report modal. */
+    const prev = document.getElementById('apReportModal');
+    if (prev) prev.remove();
+
     const _title = (typeof t === 'function' && t('autopilot.summaryLabel') !== 'autopilot.summaryLabel')
       ? t('autopilot.summaryLabel') : 'Run summary report';
     const _privNote = (typeof t === 'function' && t('autopilot.summaryHumanOnly') !== 'autopilot.summaryHumanOnly')
@@ -215,19 +228,39 @@ function _buildApSummaryPanel(conv, runId, rec) {
     const _body = _useTranslated ? rec.translatedContent : (rec.content || '');
     const _bodyHtml = (typeof renderMarkdown === 'function')
       ? renderMarkdown(_body) : escapeHtml(_body);
-    wrap.innerHTML =
-      `<div class="aps-header" title="${escapeHtml(_privNote)}">`
-      + `<svg class="aps-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>`
-      + `<span class="aps-title">${escapeHtml(_title)}</span>`
-      + `<span class="aps-private">${escapeHtml(_privNote)}</span>`
+
+    const overlay = document.createElement('div');
+    overlay.id = 'apReportModal';
+    overlay.className = 'ap-report-overlay';
+    overlay.setAttribute('data-ap-report-run', runId);
+    overlay.innerHTML =
+      `<div class="ap-report-modal" role="dialog" aria-modal="true">`
+      + `<div class="ap-report-head">`
+      + `<svg class="aps-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>`
+      + `<span class="ap-report-title">${escapeHtml(_title)}</span>`
+      + `<span class="ap-report-private">${escapeHtml(_privNote)}</span>`
+      + `<button class="ap-report-close" aria-label="Close" title="Close">`
+      + `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`
+      + `</button>`
       + `</div>`
-      + `<div class="aps-body md-content">${_bodyHtml}</div>`;
-    return wrap;
+      + `<div class="ap-report-body md-content">${_bodyHtml}</div>`
+      + `</div>`;
+
+    const close = () => {
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('.ap-report-close').addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+
+    document.body.appendChild(overlay);
   } catch (e) {
-    console.warn('[Autopilot summary panel] build failed (non-fatal):', e && e.message);
-    return null;
+    console.warn('[Autopilot report modal] open failed (non-fatal):', e && e.message);
   }
 }
+if (typeof window !== 'undefined') window._openApSummaryModal = _openApSummaryModal;
 
 /* Click handler for the "Summarize this run" button in a manual-stop fold. */
 async function _summarizeAutopilotRun(runId, btn) {
@@ -678,6 +711,29 @@ function renderMessage(msg, idx) {
           </span></div>`;
       }
     }
+    // ── Peer-message provenance banner ──
+    // A KIND_PEER_MSG turn injected by a sibling conversation (via
+    // project_message / advisory project_intervene) is a real user-role turn,
+    // so WITHOUT this it would render byte-identical to something the human
+    // typed. Surface it distinctly + attribute the sender so the arrival is
+    // observable (backend stamps `_peerMessage` + `_fromConv` in
+    // message_queue.dispatch_next_queued).
+    if (msg._peerMessage) {
+      const _fromShort = escapeHtml((msg._fromConv || "").slice(0, 8) || "peer");
+      // A human operator nudge (backend stamps `_peerHuman`) is attributed to
+      // the operator, not a peer conversation — distinct label + styling class.
+      const _isHuman = !!msg._peerHuman;
+      const _labelKey = _isHuman ? "peer.operatorBanner" : "peer.messageBanner";
+      const _fallback = _isHuman
+        ? "Message from the project operator"
+        : "Message from a peer conversation";
+      const _pmLabel = (typeof t === "function" && t(_labelKey) !== _labelKey)
+        ? t(_labelKey)
+        : _fallback;
+      body += `<div class="peer-msg-banner${_isHuman ? " peer-msg-banner-operator" : ""}" title="${escapeHtml(msg._fromConv || "")}">`
+            + `<span class="peer-msg-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>`
+            + `<span class="peer-msg-text">${_pmLabel} <span class="peer-msg-from">conv ${_fromShort}</span></span></div>`;
+    }
   }
   // NOTE: the autopilot run summary is NO LONGER a message — it's a human-only
   // sidecar record (conv.autopilotSummaries[runId]) rendered as the run fold's
@@ -717,7 +773,7 @@ function renderMessage(msg, idx) {
   if (msg._isVirtualUser && msg._streamingVu && !msg.content
       && !(msg.toolRounds && msg.toolRounds.length) && !msg.thinking) {
     body += `<div class="stream-status vu-composing"><div class="pulse"></div> `
-          + `${escapeHtml(typeof t === "function" ? t("autopilot.composing") : "Autopilot is composing the next reply…")}</div>`;
+          + `${escapeHtml(typeof t === "function" ? t("autopilot.warming") : "Autopilot…")}</div>`;
   }
   const rounds = getToolRoundsFromMsg(msg);
   /* ★ Autopilot VU provenance: the VU's tool investigation + private

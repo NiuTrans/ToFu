@@ -726,7 +726,6 @@ window._vlmParseEntry = async function(file, entry, isAlive, onUpdate) {
     }
   }
 };
-// _startVlmParse is no longer needed — VLM auto-starts inside parsePdfToServer().
 
 // ══════════════════════════════════════════════════════
 //  ★ Preview functions

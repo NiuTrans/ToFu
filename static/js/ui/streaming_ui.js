@@ -138,7 +138,7 @@ function updateStreamingUI(msg) {
     const _fcFp = _fcFingerprint(rounds);
     if (fcZone._roundsFp !== _fcFp) {
       fcZone._roundsFp = _fcFp;
-      _extractFileChangesFromRoundsAsync(rounds).then(liveFiles => {
+      _extractFileChangesFromRoundsAsync(rounds, msg).then(liveFiles => {
         // Bail if a newer fingerprint has superseded this one.
         if (fcZone._roundsFp !== _fcFp) return;
         const fcKey = liveFiles.map(f =>

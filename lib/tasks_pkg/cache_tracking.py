@@ -45,7 +45,8 @@ import threading
 import time
 from typing import Any
 
-from lib.log import get_logger
+from lib.log import audit_log, get_logger
+from lib.tasks_pkg.wire_fingerprint import diff_canonical
 
 logger = get_logger(__name__)
 
@@ -74,14 +75,18 @@ class CacheState:
         'last_cache_write_tokens',
         'last_update_time', 'call_count',
         'compaction_pending',
+        'history_rewrite_pending',
         # v2: detailed diagnostics
         'per_tool_hashes',
         'prefix_content_hash',
         'prefix_content_count',
         'prefix_field_hashes',
+        # Authoritative post-translation wire fingerprint (see wire_fingerprint.py)
+        'wire_fp', 'wire_static',
         'total_cache_read', 'total_cache_write',
         'total_breaks', 'total_input_tokens',
         'first_call_time',
+        'pending_l2_roi',
     )
 
     def __init__(self):
@@ -94,12 +99,28 @@ class CacheState:
         self.last_update_time: float = 0.0
         self.call_count: int = 0
         self.compaction_pending: bool = False
+        # Set by notify_history_rewrite() when a backend reconcile /
+        # committed-dict projection edited committed messages. Unlike
+        # compaction_pending it feeds NO break gate and does NOT skip the wire
+        # diff — it only NAMES the cause (see detect_cache_break).
+        self.history_rewrite_pending: bool = False
+        # Phase-C L2 ROI: the 'saved' half of one force-summary event, stashed
+        # at compaction time and completed with the FOLLOWING round's re-billed
+        # cache_write in detect_cache_break. None when no L2 event is pending.
+        self.pending_l2_roi: dict | None = None
         # v2 fields
         self.per_tool_hashes: dict[str, str] = {}  # tool_name → hash
         self.prefix_content_hash: str = ''
         self.prefix_content_count: int = 0
         # Per-message, per-field prefix hashes (precise culprit attribution).
         self.prefix_field_hashes: list[dict] = []
+        # Authoritative post-translation wire fingerprint from the PREVIOUS
+        # round (list of per-msg canonical entries) + the static-floor hash.
+        # When present, these are the ground truth for prefix-mutation
+        # attribution — they reflect the actual bytes sent, not a client-side
+        # reconstruction. See lib/tasks_pkg/wire_fingerprint.py.
+        self.wire_fp: list | None = None
+        self.wire_static: str = ''
         self.total_cache_read: int = 0
         self.total_cache_write: int = 0
         self.total_breaks: int = 0
@@ -107,10 +128,28 @@ class CacheState:
         self.first_call_time: float = 0.0
 
 
-_cache_states: dict[str, CacheState] = {}
-"""Per-conv_id cache state."""
+_cache_states: dict[tuple, CacheState] = {}
+"""Cache state keyed by ``(conv_id, thread_id)`` — see ``_state_key``."""
 
 _cache_lock = threading.Lock()
+
+
+def _state_key(conv_id: str) -> tuple:
+    """Key ``_cache_states`` per ``(conv_id, thread)``.
+
+    N concurrent agent loops running under ONE conversation (swarm / flow /
+    orchestration fan-out) previously shared a single ``conv_id``-keyed
+    ``CacheState`` and clobbered each other's prefix baseline every round —
+    the root cause of the incoherent ``PREFIX MUTATION DETECTED`` spam
+    (call-counts / message-lengths jumping between threads) and the cache
+    cost misattribution. A single task runs its whole round loop on one
+    worker thread, so the thread id is a stable per-agent discriminator
+    across rounds while distinct concurrent agents get distinct threads →
+    distinct, non-colliding state. All same-thread callers
+    (``detect_cache_break`` post-round, ``notify_compaction`` /
+    ``get_cache_prefix_count`` in the pipeline) resolve to the same entry.
+    """
+    return (conv_id, threading.get_ident())
 
 
 def _md5(text: str) -> str:
@@ -329,6 +368,17 @@ def _diff_prefix_fields(old: list, new: list, max_report: int = 6) -> list:
 # variation and aren't worth alerting on.
 _MIN_CACHE_MISS_TOKENS = 2000
 
+# ── Single-source editable-tail bound ──
+# The number of trailing messages a backend writer (turn-end tail rewrite,
+# reconcile) may mutate WITHOUT busting the cache. Equivalently: the cache
+# prefix treated as immutable is messages[0 : len - EDITABLE_TAIL_COUNT].
+# ``get_cache_prefix_count`` (what the cache assumes stable) and the
+# reconcile prefix guard (what a writer is allowed to touch) BOTH read this
+# ONE number, so "immutable prefix" and "mutable suffix" can never silently
+# diverge. The value is 2 because the Anthropic tail breakpoint + the moving
+# str↔block wrap keep the last user+assistant pair in flux each round.
+EDITABLE_TAIL_COUNT = 2
+
 # Minimum fresh cache_write (with zero cache_read) required to flag a
 # "cache written but never read back" miss. Set well above the tiny-prompt
 # alternating-WRITE/HIT noise floor (system+tools < 4096 tokens) so we only
@@ -391,16 +441,22 @@ def _resolve_break_cause(
     *, client_changes: dict, prefix_mutation_break: bool,
     elapsed: float, cache_read: int, prefix_mutated: bool,
     prefix_culprits: list | None = None,
+    wire_proven_identical: bool = False,
+    history_rewrite: bool = False,
 ) -> str:
     """Build the single most-specific human cause string for a confirmed break.
 
-    Pure string logic extracted verbatim from ``detect_cache_break``'s Report
-    phase (the disambiguation ladder).  Precedence: explicit client changes →
-    prefix-byte mutation (with the EXACT changed ``msg[i].field`` list when
-    known) → TTL expiry → narrowed stochastic-server-miss reasoning keyed on
-    whether a read remained and whether the prefix bytes mutated. Only when
-    the prefix bytes are PROVABLY identical does it fall back to the TTL /
-    stochastic-server guess.
+    Precedence: explicit client changes → prefix-byte mutation (with the EXACT
+    changed ``key.field`` list when known) → TTL expiry → server-side miss.
+
+    The server-side verdict is now GATED on evidence, not reached by
+    elimination. ``wire_proven_identical`` is True only when the authoritative
+    post-translation wire fingerprint (see ``wire_fingerprint.py``) showed the
+    actual sent bytes were byte-for-byte identical to the previous round. Only
+    then may we state the miss is server-side as a PROVEN fact. When no wire
+    fingerprint was captured (non-Claude / capture failure) we fall back to the
+    legacy, honestly-hedged "stochastic server OR silent byte change" wording —
+    the elimination guess, explicitly marked unproven.
     """
     _culprits = ', '.join(prefix_culprits) if prefix_culprits else ''
     if client_changes:
@@ -410,31 +466,42 @@ def _resolve_break_cause(
                  '(non-idempotent history edit) — the whole body '
                  'was re-billed uncached')
         return f'{_base} [changed: {_culprits}]' if _culprits else _base
+    # ── Backend history rewrite ──
+    # A reconcile / committed-dict projection edited or deleted a committed
+    # message. This is a KNOWN backend cause, not an L2 compaction and not a
+    # server-side miss — name it so it is not laundered into either.
+    if history_rewrite:
+        _base = ('backend history rewrite (reconcile / committed-dict '
+                 'projection) edited or deleted a cached message — the '
+                 'prefix was re-billed uncached')
+        return f'{_base} [changed: {_culprits}]' if _culprits else _base
     if elapsed > 300:
         return 'TTL expiry (>5min gap, prompt unchanged)'
+    # ── PROVEN server-side miss ──
+    # The wire fingerprint confirmed our sent bytes were IDENTICAL to last
+    # round, so the miss cannot be client-caused. This is the ONLY path allowed
+    # to assert "server-side" as fact.
+    if wire_proven_identical:
+        if cache_read > _MIN_CACHE_MISS_TOKENS:
+            return ('server-side cache miss — PROVEN: the wire bytes were '
+                    'byte-identical to the previous round (only the body past '
+                    'the static prefix was not read back)')
+        return ('server-side cache miss — PROVEN: the wire bytes were '
+                'byte-identical to the previous round (whole prefix not reused)')
+    # ── Wire fingerprint UNAVAILABLE → legacy elimination guess (unproven) ──
     if cache_read > _MIN_CACHE_MISS_TOKENS:
-        # The static system+tools prefix still read back, so the cache was NOT
-        # wholesale evicted — only the conversation body past the static floor
-        # was not reused. Verified 2026-06-23 via an identical-prompt live
-        # replay (aws.claude-opus-4.8): byte-identical input at 3s gaps still
-        # missed on ~2/11 calls. So this is a STOCHASTIC per-request server-side
-        # cache miss, NOT "BP4 advancement" (Anthropic readback is automatic up
-        # to the longest match; a moving tail marker does not lose an earlier
-        # write).
-        return ('stochastic server-side cache miss (body re-billed; '
-                'static prefix still cached) — a per-request gateway '
-                'miss reproduced at <5min gaps with identical input')
+        return ('likely server-side cache miss (UNPROVEN — no wire '
+                'fingerprint; body re-billed, static prefix still cached)')
     if not prefix_mutated:
-        return ('prefix not reused — stochastic server-side cache '
-                'miss or TTL expiry (prefix bytes unchanged)')
+        return ('prefix not reused — likely server-side miss or TTL expiry '
+                '(UNPROVEN — no wire fingerprint)')
     # Prefix bytes DID change but the write was below the surfacing floor.
     # We still know exactly which field moved — name it instead of guessing.
     if _culprits:
         return ('prefix bytes changed between turns '
                 f'[changed: {_culprits}] — likely cause of the miss')
-    return ('prefix not reused — stochastic server-side '
-            'cache miss, TTL expiry, or a silent prefix '
-            'byte change')
+    return ('prefix not reused — likely server-side miss, TTL expiry, '
+            'or a silent prefix byte change (UNPROVEN — no wire fingerprint)')
 
 
 def detect_cache_break(
@@ -465,11 +532,12 @@ def detect_cache_break(
 
     now = time.time()
 
+    _key = _state_key(conv_id)
     with _cache_lock:
-        prev = _cache_states.get(conv_id)
+        prev = _cache_states.get(_key)
         if prev is None:
             prev = CacheState()
-            _cache_states[conv_id] = prev
+            _cache_states[_key] = prev
 
         # ── Phase 1: Detect WHAT changed (client-side hashes) ──
         sys_hash = _hash_system_prompt(messages)
@@ -488,7 +556,7 @@ def detect_cache_break(
         #   Fix: compare hash(messages[0:prev_prefix]) against saved hash,
         #   then save hash(messages[0:new_prefix]) for next round.
         _prev_prefix_count = prev.prefix_content_count if prev.call_count > 0 else 0
-        _new_prefix_count = max(0, msg_count - 2)
+        _new_prefix_count = max(0, msg_count - EDITABLE_TAIL_COUNT)
         _prev_prefix_hash = _hash_prefix_content(messages, _prev_prefix_count)
         prefix_hash = _hash_prefix_content(messages, _new_prefix_count)
         # Per-field hashes of the SAME (prev) range — lets us name the exact
@@ -496,6 +564,14 @@ def detect_cache_break(
         _cur_field_hashes_prevrange = _hash_prefix_fields(
             messages, _prev_prefix_count)
         prefix_field_hashes = _hash_prefix_fields(messages, _new_prefix_count)
+
+        # Capture the history-rewrite signal (set by notify_history_rewrite
+        # when the backend reconcile / committed-dict projection edited
+        # committed messages). Read here for LABELING only; unlike compaction
+        # it feeds NO break gate and does NOT skip the authoritative wire diff
+        # below, so it can NEVER flip _wire_proven_identical to True. Cleared
+        # in Phase 2 alongside compaction_pending.
+        _was_history_rewrite = prev.history_rewrite_pending
 
         client_changes = {}
         _prefix_mutated = False
@@ -514,10 +590,14 @@ def detect_cache_break(
                     client_changes['tools'] = 'changed (ordering or meta)'
             if model != prev.model:
                 client_changes['model'] = f'{prev.model} → {model}'
-            # Message count going DOWN indicates compaction/truncation
+            # Message count going DOWN indicates compaction/truncation OR a
+            # backend history rewrite (reconcile / committed-dict projection).
+            # Distinguish them so a reconcile deletion is not mislabeled as an
+            # L2 compaction it never was.
             if msg_count < prev.message_count:
+                _lbl = 'history rewrite' if _was_history_rewrite else 'compacted'
                 client_changes['message_count'] = (
-                    f'{prev.message_count} → {msg_count} (compacted)')
+                    f'{prev.message_count} → {msg_count} ({_lbl})')
 
             # ★ Diagnostic: prefix content mutation detection
             # Compare hash of the SAME range (prev prefix count) to detect
@@ -568,6 +648,62 @@ def detect_cache_break(
                     '[CacheTrack] conv=%s Expected cache drop after compaction: '
                     '%d → %d tokens',
                     conv_id[:8], prev_cache_read, cache_read)
+        # Clear the history-rewrite signal (captured above). Deliberately does
+        # NOT gate the wire diff or any break classifier — a backend edit that
+        # changed prefix bytes MUST still be caught and named, not silenced.
+        if prev.history_rewrite_pending:
+            prev.history_rewrite_pending = False
+
+        # ── Phase-C: complete a pending L2 ROI record ──
+        # An L2 force-summary event stashed its 'saved' half via
+        # record_l2_compaction. THIS round is the one whose prompt was rebuilt
+        # from the summarized prefix, so its cache_write is the tokens re-billed
+        # BECAUSE the summary busted the prefix. Pair the two halves and emit
+        # ONE structured metric with both sides populated, then clear it.
+        if prev.pending_l2_roi is not None:
+            _roi = prev.pending_l2_roi
+            prev.pending_l2_roi = None
+            # THIS round's prompt was rebuilt from the summarized prefix, so its
+            # cache_write is the OBSERVED re-billed half. outcome='paired'.
+            _emit_l2_roi(conv_id, _roi, cache_write_rebilled=int(cache_write),
+                         cache_read_next=int(cache_read), now=now)
+
+        # ── Authoritative wire-fingerprint prefix diff ──
+        # `usage['_wire_fp']` is the post-translation, envelope-agnostic
+        # fingerprint of the ACTUAL bytes sent this round (captured in
+        # prepare_request — the only point after add_cache_breakpoints AND
+        # openai_body_to_anthropic). Diffing it against the previous round's
+        # stored fingerprint is GROUND TRUTH for prefix mutation, unlike the
+        # `_hash_prefix_content` reconstruction above which is blind to the
+        # build_body / breakpoint / anthropic-translation transforms. When
+        # present it OVERRIDES the reconstruction's verdict:
+        #   * identical  → our bytes did NOT change → any miss is PROVABLY
+        #                  server-side (the "stochastic" label is now earned,
+        #                  not reached by elimination).
+        #   * differ     → names the exact msg.field WE mutated → client-caused.
+        _cur_wire_fp = None
+        _wire_static = ''
+        if usage:
+            _cur_wire_fp = usage.get('_wire_fp')
+            _wire_static = usage.get('_wire_static') or ''
+        _wire_available = _cur_wire_fp is not None
+        _wire_prefix_changed = False
+        _wire_culprits: list = []
+        if (_wire_available and prev.call_count > 0
+                and prev.wire_fp is not None and not _was_compaction):
+            # Compare only the region that existed last round (its full length);
+            # this round appends new tail messages we don't diff against.
+            _shared = len(prev.wire_fp)
+            _wire_culprits = diff_canonical(
+                prev.wire_fp[:_shared], (_cur_wire_fp or [])[:_shared])
+            _wire_prefix_changed = bool(_wire_culprits)
+            if _wire_prefix_changed:
+                logger.warning(
+                    '[CacheTrack] conv=%s call=%d ⚠ WIRE PREFIX CHANGED: the '
+                    'ACTUAL sent bytes differ from last round — client-caused '
+                    'miss. changed=[%s]',
+                    conv_id[:8], prev.call_count + 1,
+                    ', '.join(_wire_culprits[:8]) or '?')
 
         # ── Phase-2 break classification (pure; see _classify_break) ──
         #   api_break        — cache_read dropped from a prior high read.
@@ -591,6 +727,9 @@ def detect_cache_break(
         prev.prefix_content_hash = prefix_hash
         prev.prefix_content_count = _new_prefix_count
         prev.prefix_field_hashes = prefix_field_hashes
+        if _wire_available:
+            prev.wire_fp = _cur_wire_fp
+            prev.wire_static = _wire_static
         prev.model = model
         prev.message_count = msg_count
         prev.last_cache_read_tokens = cache_read
@@ -607,6 +746,18 @@ def detect_cache_break(
             prompt_tokens = (usage.get('prompt_tokens')
                              or usage.get('input_tokens') or 0)
         prev.total_input_tokens += prompt_tokens + cache_write + cache_read
+
+        # ★ When the authoritative wire fingerprint is available it REPLACES
+        #   the client-side reconstruction as the prefix-mutation signal — it
+        #   reflects the real sent bytes, so it neither misses a transform the
+        #   reconstruction is blind to (downscale re-encode, anthropic re-dump)
+        #   nor cries wolf on a benign wrapping the reconstruction over-counts.
+        #   The reconstruction (_prefix_mutated) is used ONLY as a fallback when
+        #   no wire fingerprint was captured (non-Claude / capture failure).
+        if _wire_available:
+            _prefix_mutated = _wire_prefix_changed
+            _prefix_culprits = _wire_culprits
+        _wire_proven_identical = _wire_available and not _wire_prefix_changed
 
         # ★ A silent prefix-byte mutation only counts as a CONFIRMED, surfaced
         #   break when it actually cost money this round (a real cache_write).
@@ -642,6 +793,8 @@ def detect_cache_break(
                 elapsed=elapsed, cache_read=cache_read,
                 prefix_mutated=_prefix_mutated,
                 prefix_culprits=_prefix_culprits,
+                wire_proven_identical=_wire_proven_identical,
+                history_rewrite=_was_history_rewrite,
             )
 
             # ★ Prefix mutation is the most ACTIONABLE and most CERTAIN cause —
@@ -738,7 +891,7 @@ def get_session_cache_stats(conv_id: str) -> dict[str, Any] | None:
     effectiveness across the entire conversation session.
     """
     with _cache_lock:
-        state = _cache_states.get(conv_id)
+        state = _cache_states.get(_state_key(conv_id))
         if not state or state.call_count == 0:
             return None
         total_input = state.total_input_tokens
@@ -769,9 +922,126 @@ def notify_compaction(conv_id: str) -> None:
     if not conv_id:
         return
     with _cache_lock:
-        state = _cache_states.get(conv_id)
+        state = _cache_states.get(_state_key(conv_id))
         if state:
             state.compaction_pending = True
+
+
+def notify_history_rewrite(conv_id: str) -> None:
+    """Signal that the backend REWROTE committed history this round.
+
+    Call this after a backend reconcile (``reconcile_conversation_messages``)
+    or a committed-dict projection edited/deleted messages in
+    ``conversations.messages`` that were part of the cached prefix.
+
+    Deliberately the OPPOSITE of ``notify_compaction``: it does NOT suppress
+    break detection and does NOT skip the authoritative wire diff. Its ONLY
+    effect is to let ``detect_cache_break`` NAME the cause as a backend history
+    rewrite instead of mislabeling it ``(compacted)`` or laundering it into a
+    false ``server-side — PROVEN`` verdict. The real cache cost is still
+    detected, attributed to the exact changed ``key.field``, and surfaced.
+    """
+    if not conv_id:
+        return
+    with _cache_lock:
+        state = _cache_states.get(_state_key(conv_id))
+        if state:
+            state.history_rewrite_pending = True
+
+
+def _emit_l2_roi(conv_id: str, roi: dict, *,
+                 cache_write_rebilled: int | None,
+                 cache_read_next: int | None = None,
+                 now: float | None = None) -> None:
+    """Emit ONE ``l2_cache_roi`` audit metric for a stashed L2 event.
+
+    Two outcomes, BOTH signal (only a silent drop is bias):
+      * ``cache_write_rebilled`` is an int → OUTCOME 'paired': we observed the
+        following round's re-billed write. ``net_tokens`` = dropped − re-billed.
+      * ``cache_write_rebilled`` is None → OUTCOME 'no_following_round': the
+        session ended (cleanup / task teardown) OR a second L2 event superseded
+        this one before a round paired it. The re-billed half is UNOBSERVED;
+        ``net_tokens`` is None so the retune analysis can exclude it from the
+        net distribution while still counting the fire. This is what keeps the
+        dataset unbiased against late/last-round L2 events.
+
+    Pure emit — the caller owns clearing ``pending_l2_roi``. Best-effort:
+    instrumentation must never raise into a cache/cleanup path.
+    """
+    try:
+        _t = now if now is not None else time.time()
+        _dropped = int(roi.get('tokens_dropped', 0))
+        _read_lost = int(roi.get('cache_read_at_event', 0))
+        _observed = cache_write_rebilled is not None
+        _net = (_dropped - int(cache_write_rebilled)) if _observed else None
+        audit_log(
+            'l2_cache_roi',
+            conv_id=conv_id[:12],
+            outcome='paired' if _observed else 'no_following_round',
+            tokens_dropped=_dropped,
+            tokens_before=int(roi.get('tokens_before', 0)),
+            tokens_after=int(roi.get('tokens_after', 0)),
+            msgs_before=int(roi.get('msgs_before', 0)),
+            msgs_after=int(roi.get('msgs_after', 0)),
+            cache_read_busted=_read_lost,
+            cache_write_rebilled=(int(cache_write_rebilled) if _observed else None),
+            cache_read_next=(int(cache_read_next) if cache_read_next is not None else None),
+            net_tokens=_net,
+            gap_s=round(_t - float(roi.get('event_time', _t)), 2),
+        )
+        logger.info(
+            '[CacheTrack] conv=%s L2 ROI (%s): dropped=%d tokens, '
+            're-billed=%s + busted read=%d → net=%s',
+            conv_id[:8], 'paired' if _observed else 'no_following_round',
+            _dropped,
+            (str(int(cache_write_rebilled)) if _observed else 'UNOBSERVED'),
+            _read_lost, (str(_net) if _observed else 'n/a'))
+    except Exception as _roi_e:
+        logger.debug('[CacheTrack] L2 ROI emit failed: %s', _roi_e)
+
+
+def record_l2_compaction(conv_id: str, *, tokens_before: int, tokens_after: int,
+                         msgs_before: int, msgs_after: int) -> None:
+    """Record the 'saved' half of ONE L2 (force-summary) compaction event.
+
+    Phase-C instrumentation (measure, don't tune). The ROI of an L2 event has
+    two halves separated in time:
+      * SAVED   — ``tokens_before - tokens_after`` (prefix tokens the summary
+                  dropped) + the ``cache_read`` that was in flight when it fired
+                  (the cached prefix the bust discarded); captured HERE.
+      * REBILLED — the ``cache_write`` on the FOLLOWING round (the fresh prefix
+                  the summary forced to be re-written); completed in
+                  ``detect_cache_break`` when that round's usage arrives.
+
+    Stashes the saved half on ``CacheState.pending_l2_roi``; the next
+    ``detect_cache_break`` pairs it with the re-billed half and emits ONE
+    ``audit_log('l2_cache_roi', ...)`` with BOTH sides populated. No-op when no
+    cache state exists yet (cold conv — nothing was cached to bust, so ROI is
+    trivially the saved tokens with zero re-bill).
+    """
+    if not conv_id:
+        return
+    with _cache_lock:
+        state = _cache_states.get(_state_key(conv_id))
+        if state is None:
+            return
+        # A second L2 event in the same round-gap would clobber the first's
+        # unpaired record → the first event's ROI is silently lost. Flush it
+        # first (re-billed half unobserved) so it is counted, not dropped.
+        if state.pending_l2_roi is not None:
+            _emit_l2_roi(conv_id, state.pending_l2_roi, cache_write_rebilled=None)
+            state.pending_l2_roi = None
+        state.pending_l2_roi = {
+            'tokens_dropped': max(0, int(tokens_before) - int(tokens_after)),
+            'tokens_before': int(tokens_before),
+            'tokens_after': int(tokens_after),
+            'msgs_before': int(msgs_before),
+            'msgs_after': int(msgs_after),
+            # The cached prefix that was in flight and is now busted by the
+            # summary — this read will NOT recur next round.
+            'cache_read_at_event': int(state.last_cache_read_tokens),
+            'event_time': time.time(),
+        }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -800,7 +1070,8 @@ def _count_active_on_model(model: str, exclude_conv: str = '') -> int:
     """
     cutoff = time.time() - 60  # consider "active" if called within last 60s
     count = 0
-    for cid, state in _cache_states.items():
+    for key, state in _cache_states.items():
+        cid = key[0]
         if cid == exclude_conv:
             continue
         if (state.model == model
@@ -990,7 +1261,7 @@ def get_cache_prefix_count(conv_id: str) -> int:
     add_cache_breakpoints places markers at the conversation tail.
     """
     with _cache_lock:
-        state = _cache_states.get(conv_id)
+        state = _cache_states.get(_state_key(conv_id))
         # ★ Gate on WRITE as well as READ. The previous round may have only
         #   WRITTEN the prefix (cache_read=0, large cache_write) — e.g. round 1
         #   of a fresh conversation. That prefix is fully cached and reusable
@@ -999,9 +1270,9 @@ def get_cache_prefix_count(conv_id: str) -> int:
         #   write, letting L1 mutate the just-written prefix → guaranteed miss.
         if state and (state.last_cache_read_tokens > 1000
                       or state.last_cache_write_tokens > 1000):
-            # Cache was active — protect the prefix
-            # Use message_count - 2 (keep last 2 messages editable)
-            return max(0, state.message_count - 2)
+            # Cache was active — protect the prefix. Keep the last
+            # EDITABLE_TAIL_COUNT messages editable (single-sourced bound).
+            return max(0, state.message_count - EDITABLE_TAIL_COUNT)
     return 0
 
 
@@ -1030,11 +1301,25 @@ def cleanup_cache_state(conv_id: str) -> None:
     inactivity to prevent unbounded memory growth.
     """
     with _cache_lock:
-        removed = _cache_states.pop(conv_id, None)
+        # State is keyed per (conv_id, thread) — a conversation may have
+        # several entries when its agent loops ran on different worker
+        # threads (swarm / flow fan-out). Drop them all.
+        _keys = [k for k in _cache_states if k[0] == conv_id]
+        removed = None
+        for k in _keys:
+            removed = _cache_states.pop(k, None)
+            # Flush any L2 ROI event that fired but never got a following round
+            # to observe its re-bill — otherwise late/last-round L2 events (the
+            # MOST likely ones, since context grows monotonically) are silently
+            # dropped, biasing the retune dataset. Marked 'no_following_round'.
+            if removed is not None and removed.pending_l2_roi is not None:
+                _emit_l2_roi(conv_id, removed.pending_l2_roi,
+                             cache_write_rebilled=None)
+                removed.pending_l2_roi = None
         if removed:
-            logger.debug('[CacheTrack] Cleaned up state for conv=%s '
-                         '(calls=%d, total_breaks=%d)',
-                         conv_id[:8], removed.call_count,
+            logger.debug('[CacheTrack] Cleaned up %d state(s) for conv=%s '
+                         '(last calls=%d, total_breaks=%d)',
+                         len(_keys), conv_id[:8], removed.call_count,
                          removed.total_breaks)
     _release_multiroot_sticky(conv_id)
 
@@ -1055,15 +1340,22 @@ def cleanup_stale_cache_states(max_age_s: float = 3600) -> int:
     cutoff = time.time() - max_age_s
     removed = 0
     with _cache_lock:
-        stale_ids = [
-            cid for cid, state in _cache_states.items()
+        stale_keys = [
+            key for key, state in _cache_states.items()
             if state.last_update_time < cutoff
         ]
-        for cid in stale_ids:
-            del _cache_states[cid]
+        for key in stale_keys:
+            _stale = _cache_states.pop(key, None)
+            # Same anti-bias flush as cleanup_cache_state: a stale-evicted conv
+            # whose last cache-relevant act was an L2 fire must still emit its
+            # ROI (re-bill unobserved), not drop it.
+            if _stale is not None and _stale.pending_l2_roi is not None:
+                _emit_l2_roi(key[0], _stale.pending_l2_roi,
+                             cache_write_rebilled=None)
+                _stale.pending_l2_roi = None
             removed += 1
-    for cid in stale_ids:
-        _release_multiroot_sticky(cid)
+    for key in stale_keys:
+        _release_multiroot_sticky(key[0])
     if removed:
         logger.info('[CacheTrack] Cleaned up %d stale cache states '
                     '(older than %ds, %d remaining)',
@@ -1085,7 +1377,8 @@ def get_cache_diagnostics() -> dict[str, Any]:
         total_breaks = 0
         total_reads = 0
         total_writes = 0
-        for cid, state in _cache_states.items():
+        for key, state in _cache_states.items():
+            cid = key[0]
             age = now - state.last_update_time if state.last_update_time else 0
             convs.append({
                 'conv_id': cid[:8],

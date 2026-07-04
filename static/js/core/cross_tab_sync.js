@@ -77,16 +77,15 @@ document.addEventListener("visibilitychange", () => {
      *   browser throttles it to ~1s intervals.  This ensures the UI is
      *   fully caught up the instant the user sees the tab. */
     if (activeStreams.size > 0 && activeConvId && streamBufs.has(activeConvId)) {
-      const buf = streamBufs.get(activeConvId);
-      if (buf) {
-        updateStreamingUI({
-          thinking: buf.thinking,
-          content: buf.content,
-          toolRounds: buf.toolRounds,
-          phase: buf.phase,
-          _memoryPrefetch: buf._memoryPrefetch,
-          _mcpLoginHint: buf._mcpLoginHint,
-        });
+      /* ★ Message-checkpoint fallback (see _streamFrameArg in
+       *   health_stream_timer.js): switching a background tab back into a
+       *   mid-stream conv whose buffer hasn't been seeded yet must render the
+       *   persisted checkpoint, not paint "等待中…" over it (same class of wipe
+       *   the _twFlush raw-buffer read caused). */
+      const arg = (typeof _streamFrameArg === 'function')
+        ? _streamFrameArg(activeConvId) : null;
+      if (arg) {
+        updateStreamingUI(arg);
         scrollToBottom();
       }
     } else if (activeStreams.size === 0 && _editingMsgIdx === null) {

@@ -275,9 +275,7 @@ function _updateMemoryStats(memories) {
 }
 
 function _esc(s) {
-  const d = document.createElement("div");
-  d.textContent = s;
-  return d.innerHTML;
+  return escapeHtml(s);
 }
 function _renderMemoryBody(md) {
   if (typeof marked !== "undefined") {

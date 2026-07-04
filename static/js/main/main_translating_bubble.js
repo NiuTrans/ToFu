@@ -28,7 +28,7 @@ function _renderTranslatingBubble() {
     <div class="message-content">
       <div class="message-header">
         <span class="message-role">Agent</span>
-        <span class="message-time">${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+        <span class="message-time">${formatClockTime()}</span>
       </div>
       <div class="message-body">
         <div class="stream-status"><div class="pulse"></div> ${t('sidebar.translating')}</div>

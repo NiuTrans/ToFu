@@ -13,10 +13,24 @@ An installer (Inno Setup / create-dmg) wraps this into a single .exe/.dmg.
 """
 
 import os
+import shutil
 import sys
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 block_cipher = None
+
+# ── UPX: only enable when the compressor is actually installed ──
+# UPX shrinks the bundle, but the CI runners do NOT install it. With upx=True
+# and no upx binary PyInstaller merely warns and skips — harmless. The real
+# hazard is a HALF-configured runner where UPX exists but mangles native
+# Windows DLLs (VCRUNTIME140.dll, python3xx.dll, Qt), producing an exe that
+# crashes only on a clean machine. So we gate on presence AND keep the known
+# fragile DLLs out of compression.
+_UPX_AVAILABLE = shutil.which('upx') is not None
+_UPX_EXCLUDE = [
+    'vcruntime140.dll', 'vcruntime140_1.dll', 'python3.dll',
+    'python312.dll', 'python311.dll', 'msvcp140.dll',
+]
 
 # ── Project root ──
 # SPECPATH is the directory containing this spec file, which IS the project
@@ -66,11 +80,17 @@ hidden_imports += [
 ]
 
 # ── Data files to bundle ──
-datas = [
+# Each entry is (source, dest). Some sources are OPTIONAL — a missing source in
+# `datas` is a HARD ERROR that aborts the whole build (PyInstaller raises
+# "Unable to find file …"). ``trading.html`` in particular was moved to the
+# external tofu-trading plugin and no longer exists in-tree, so listing it
+# unconditionally broke every build. We therefore filter to existing paths and
+# log what we drop, instead of crashing.
+_candidate_datas = [
     # Frontend
     (os.path.join(ROOT, 'static'), 'static'),
     (os.path.join(ROOT, 'index.html'), '.'),
-    (os.path.join(ROOT, 'trading.html'), '.'),
+    (os.path.join(ROOT, 'trading.html'), '.'),   # optional (legacy plugin shell)
 
     # Version file
     (os.path.join(ROOT, 'VERSION'), '.'),
@@ -81,6 +101,13 @@ datas = [
     # Provider templates (loaded at runtime by lib/llm_dispatch)
     # Bundled inside static/ already — no extra entry needed
 ]
+
+datas = []
+for _src, _dst in _candidate_datas:
+    if os.path.exists(_src):
+        datas.append((_src, _dst))
+    else:
+        print('[tofu.spec] SKIP missing data file: %s' % _src)
 
 # Collect data files from packages that ship non-Python assets
 datas += collect_data_files('trafilatura', include_py_files=False)
@@ -143,7 +170,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=_UPX_AVAILABLE,
     console=False,          # No terminal window on Windows/macOS
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -159,8 +186,8 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
-    upx_exclude=[],
+    upx=_UPX_AVAILABLE,
+    upx_exclude=_UPX_EXCLUDE,
     name='Tofu',
 )
 

@@ -335,8 +335,19 @@ def reactive_compact(messages: list, task: dict | None = None,
 
 def _head_truncate(messages: list, task: dict | None = None,
                    byte_target: int | None = None,
-                   reported_token_count: int | None = None):
-    """Last-resort head truncation: drop the oldest non-system messages."""
+                   reported_token_count: int | None = None,
+                   *, event_name: str = 'reactive_head_truncate') -> int:
+    """Last-resort head truncation: drop the oldest non-system messages.
+
+    ``event_name`` labels the ``audit_log`` entry. It defaults to
+    ``reactive_head_truncate`` so every existing (reactive) call site is
+    byte-identical; the proactive-pipeline fallback passes
+    ``proactive_head_truncate`` so the two escape hatches are
+    distinguishable in audit.log.
+
+    Returns the number of messages dropped (0 if nothing could be shed —
+    e.g. fewer than ``system_end + 4`` messages remain).
+    """
     system_end = 0
     for i, msg in enumerate(messages):
         if msg.get('role') == 'system':
@@ -359,11 +370,11 @@ def _head_truncate(messages: list, task: dict | None = None,
             # Last-resort truncation permanently discards conversation context;
             # record what was lost so it's queryable per-conv in audit.log
             # rather than only inferable from a transient WARNING.
-            audit_log('reactive_head_truncate',
+            audit_log(event_name,
                       conv=(task.get('convId', '') if task else ''),
                       dropped_msgs=dropped, mode='byte_target',
                       wire_mb=round(_estimate_wire_bytes(messages) / 1048576, 2))
-        return
+        return dropped
 
     context_limit = _get_context_limit(task)
     target = int(context_limit * 0.60)
@@ -391,8 +402,9 @@ def _head_truncate(messages: list, task: dict | None = None,
                        '(tokens now ~%d, target ~%d, reported_api=%s)',
                        dropped, _estimate_total_tokens(messages), target_measure,
                        f'{reported_token_count:,}' if reported_token_count else 'n/a')
-        audit_log('reactive_head_truncate',
+        audit_log(event_name,
                   conv=(task.get('convId', '') if task else ''),
                   dropped_msgs=dropped, mode='token_target',
                   tokens_after=_estimate_total_tokens(messages),
                   target=target_measure)
+    return dropped

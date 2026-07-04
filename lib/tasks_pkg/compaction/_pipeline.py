@@ -172,7 +172,18 @@ def run_compaction_pipeline(messages: list, current_round: int,
 
     # Force compact if context near capacity (chatui L2) — unless the arm
     # opted out to run its own summarizer as the sole context manager.
-    compacted = False if _disable_force else force_compact_if_needed(messages, task=task)
+    #
+    # ``_allow_head_truncate_fallback=True`` is the deterministic OOM guard:
+    # when the L2 summary LLM can't run (no 'cheap' slot / saturated single
+    # model / input too big) AND the context is critically over the usable
+    # window, force_compact falls through to _head_truncate right here rather
+    # than returning False and looping the oversized prompt (the reactive
+    # net never fires proactively — the max_tokens clamp prevents the API
+    # rejection that would trigger it). Only the PROACTIVE pipeline passes
+    # this; reactive_compact keeps its own Phase-4 head-truncate and must NOT
+    # double-truncate, so it does not set the flag.
+    compacted = False if _disable_force else force_compact_if_needed(
+        messages, task=task, _allow_head_truncate_fallback=True)
 
     # Post-compact: re-inject system contexts if compaction dropped them
     if compacted:

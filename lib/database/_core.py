@@ -126,16 +126,54 @@ class suppress_sql_error_log:
 _BACKEND = 'sqlite'  # default, upgraded to 'pg' below if possible
 
 
+def _require_pg() -> bool:
+    """True when the deployment has declared PG mandatory (Epic D1).
+
+    Reads ``TOFU_REQUIRE_PG`` at call time. When True, the DB bootstrap must
+    fail-CLOSED rather than degrade to the write-serializing SQLite fallback.
+    """
+    from lib.env_compat import getenv_compat as _ge
+    return (_ge('TOFU_REQUIRE_PG', default='') or '').strip().lower() in ('1', 'true', 'yes')
+
+
+def _assert_pg_available_or_raise(pg_ok: bool, pgdata: str = '') -> None:
+    """Epic D1: if PG is mandatory (``TOFU_REQUIRE_PG``) but unavailable,
+    raise instead of falling back to SQLite. Pure + testable — the module-load
+    guard delegates here. No-op when PG is available or the flag is unset (so
+    the single-box SQLite fallback is byte-identical)."""
+    if pg_ok or not _require_pg():
+        return
+    try:
+        from lib.log import audit_log
+        audit_log('pg_required_but_unavailable', pgdata=pgdata)
+    except Exception as _ae:
+        logger.debug('[DB] audit_log for TOFU_REQUIRE_PG failed: %s', _ae)
+    logger.critical(
+        '[DB] TOFU_REQUIRE_PG=1 but PostgreSQL is unavailable — REFUSING to '
+        'start on the SQLite fallback (it serializes all writes under one file '
+        'lock and cannot serve a scaled deployment). Provision/repair PG '
+        '(see logs/postgresql.log) or unset TOFU_REQUIRE_PG for single-box.')
+    raise RuntimeError(
+        'TOFU_REQUIRE_PG=1 and PostgreSQL is unavailable — refusing to fall '
+        'back to SQLite for a scale-declared deployment.')
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Config
 # ═══════════════════════════════════════════════════════════════════════
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# The WRITABLE base dir (parent of the data/ + logs/ roots). In a frozen
+# desktop build this is a user-writable location rather than the read-only
+# _internal/ bundle — see lib/runtime_paths. base_dir is also handed to the
+# PG bootstrap (which places data/pg_backups + logs/postgresql.log under it).
+from lib.runtime_paths import data_root  # noqa: E402
+
+_DB_DIR = data_root()
+BASE_DIR = os.path.dirname(_DB_DIR)
 
 # SQLite path (used as fallback): ``data/tofu.db``.
 from lib.env_compat import getenv_compat  # noqa: E402
 
-_DB_DIR = os.path.join(BASE_DIR, 'data')
 _DEFAULT_DB_FILE = os.path.join(_DB_DIR, 'tofu.db')
 _explicit_db_path = getenv_compat('TOFU_DB_PATH', default='')
 DB_PATH = _explicit_db_path or _DEFAULT_DB_FILE
@@ -1056,6 +1094,35 @@ def get_db(domain=DOMAIN_CHAT):
     return db
 
 
+def get_read_db(domain=DOMAIN_CHAT):
+    """Read-only DB lane (Epic D3 scaffold).
+
+    Returns a connection suitable for LAG-TOLERANT read-only queries (sidebar
+    list, old-conversation load, search). Today it is an ALIAS of
+    :func:`get_db` — the read-replica routing lands only when
+    ``TOFU_PG_READ_REPLICAS`` is provisioned AND the infra sign-off from the
+    Epic D design (§5) is granted, so the single-box / current behaviour is
+    byte-identical. Call sites can adopt ``get_read_db`` incrementally NOW; the
+    routing turns on later without touching them.
+
+    Lag discipline (design D3 §2.3): NEVER use this for a read that must see a
+    just-written row (e.g. immediately after ``chat_send`` persists, or a task
+    poll of a freshly-persisted result) — those MUST stay on :func:`get_db`
+    (the primary). Only lag-tolerant reads may adopt this lane.
+    """
+    from lib.env_compat import getenv_compat as _ge
+    _replicas = (_ge('TOFU_PG_READ_REPLICAS', default='') or '').strip()
+    if not _replicas or _BACKEND != 'pg':
+        # Unset, or SQLite single-box → identical to the primary lane.
+        return get_db(domain)
+    # NOTE: replica-pool routing is the §10-gated infra follow-up (D3). Until
+    # the replica pool exists, fall back to the primary so behaviour is safe
+    # and unchanged; the seam is in place for the routing to slot in.
+    logger.debug('[DB] get_read_db: TOFU_PG_READ_REPLICAS set but replica pool '
+                 'not yet wired — using primary (D3 infra follow-up)')
+    return get_db(domain)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Thread-Local Connections
 # ═══════════════════════════════════════════════════════════════════════
@@ -1881,7 +1948,11 @@ _FORCE_SQLITE = getenv_compat('TOFU_DB_BACKEND', default='').lower() == 'sqlite'
 
 db_available = False
 pg_available = False
-_PGDATA = os.path.join(BASE_DIR, 'data', 'pgdata')
+# Live cluster location: local disk when the FUSE-backup split engages, else
+# the legacy <data>/pgdata (byte-identical on a vanilla local-disk box).
+# See lib/database/db_paths.py + the JOURNAL durability-redesign entry.
+from lib.database.db_paths import resolve_pgdata_dir  # noqa: E402
+_PGDATA = resolve_pgdata_dir(_DB_DIR)
 
 if _FORCE_SQLITE:
     _BACKEND = 'sqlite'
@@ -1977,7 +2048,19 @@ else:
             )
         except Exception as _pe:
             logger.debug('[DB] pgdata existence probe failed: %s', _pe)
-        if _pgdata_exists:
+        # Local-primary cold-start hazard: the RESOLVED _PGDATA may be an empty
+        # local dir that SHOULD have been seeded/restored from a recoverable
+        # source on FUSE (a populated legacy pgdata or a logical dump). If such
+        # a source exists but the resolved cluster came up empty, serving SQLite
+        # would look like data loss just as much as the pgdata-exists case —
+        # fire the same fail-loud guard.
+        _recoverable_source = False
+        try:
+            from lib.database.db_paths import has_recoverable_source
+            _recoverable_source = has_recoverable_source(_DB_DIR)
+        except Exception as _re:
+            logger.debug('[DB] recoverable-source probe failed: %s', _re)
+        if _pgdata_exists or _recoverable_source:
             logger.critical(
                 '[DB] PostgreSQL cluster EXISTS at %s but bootstrap FAILED — '
                 'NOT falling back transparently. Your conversations are most '
@@ -1999,6 +2082,13 @@ else:
                     'and TOFU_DB_STRICT_PG is set — refusing to fall back to an '
                     'empty SQLite and risk masking the real data. Recover PG '
                     '(see logs/postgresql.log) or unset TOFU_DB_STRICT_PG.')
+
+        # ── Epic D1: fail-CLOSED PG guarantee for scaled deployments ──
+        # Delegates to the testable _assert_pg_available_or_raise helper: when
+        # TOFU_REQUIRE_PG is set and PG is unavailable, raise instead of
+        # degrading to write-serializing SQLite. Unset → byte-identical
+        # graceful fallback below.
+        _assert_pg_available_or_raise(False, _PGDATA)
 
         _BACKEND = 'sqlite'
         db_available = True

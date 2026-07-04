@@ -1051,3 +1051,479 @@ def test_NC_row_timestamp_is_load_bearing():
             pass
     with open(_BRAIN_SRC, encoding='utf-8') as f:
         assert f.read() == original, 'shipped project-brain.js must be byte-identical'
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Board HUMAN action controls (Phase 1 step 4): complete/block on
+#  open+claimed cards; REOPEN on claimed AND done cards (the "break a
+#  stuck live claim" + "revive" lever). Clicking reopen calls
+#  Api.project.boardReopen(path, taskId, convId) with the resolved
+#  displayed-conv id. Renders into the REAL index.html board fragment.
+# ════════════════════════════════════════════════════════════════════
+
+_HARNESS_BOARD_ACTIONS = r"""
+const fs = require('fs');
+const path = require('path');
+const SRC = process.argv[2];
+const ROOT = process.argv[3];
+const FRAG = process.argv[4];
+const fragment = fs.readFileSync(FRAG, 'utf8');
+const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
+const dom = new JSDOM('<!DOCTYPE html><body>' + fragment + '</body>', { url: 'http://localhost/' });
+const win = dom.window;
+global.window = win; global.document = win.document; global.console = console;
+
+win.Icon = global.Icon = (name) => '<svg data-icon="' + name + '"></svg>';
+win.t = global.t = (k) => k;
+win.escapeHtml = global.escapeHtml = (s) => String(s == null ? '' : s);
+win.loadConversation = global.loadConversation = () => {};
+win.getActiveConv = global.getActiveConv = () => ({ id: 'c1', projectPath: '/proj/real' });
+win._getConvProjectPath = global._getConvProjectPath = (c) => (c && c.projectPath) || '';
+win.pushSubscribe = global.pushSubscribe = () => {};
+win.pushUnsubscribe = global.pushUnsubscribe = () => {};
+// The displayed conversation id the human mutation is attributed to.
+win.activeConvId = global.activeConvId = 'cDISPLAYED';
+// Silence the block-reason prompt (not exercised here).
+win.prompt = global.prompt = () => '';
+
+// Capture board mutation calls.
+const calls = { reopen: [], complete: [], block: [], post: [] };
+win.Api = global.Api = { project: {
+  feed: (p) => Promise.resolve({ maxSeq: 0, events: [] }),
+  charter: (p) => Promise.resolve({ exists: false, version: 0, content: '', decisions: [] }),
+  charterPending: (p) => Promise.resolve({ pending: [] }),
+  board: (p) => Promise.resolve({
+    open: 1, claimed: 1, done: 1, tasks: [
+      { id: 'pt_open1', title: 'OPEN CARD', status: 'open', owner_conv_id: '', depends_on: [] },
+      { id: 'pt_cl1', title: 'CLAIMED CARD', status: 'claimed', owner_conv_id: 'cOWNER', depends_on: [] },
+      { id: 'pt_done1', title: 'DONE CARD', status: 'done', owner_conv_id: '', depends_on: [] },
+    ] }),
+  boardReopen: (p, taskId, convId) => { calls.reopen.push({ p, taskId, convId }); return Promise.resolve({ ok: true, from: 'claimed' }); },
+  boardComplete: (p, taskId, convId) => { calls.complete.push({ p, taskId, convId }); return Promise.resolve({ ok: true }); },
+  boardBlock: (p, taskId, convId, reason) => { calls.block.push({ p, taskId, convId, reason }); return Promise.resolve({ ok: true }); },
+  boardPost: (p, body) => { calls.post.push({ p, body }); return Promise.resolve({ ok: true, id: 'pt_new' }); },
+  brainInfluence: (p, c) => Promise.resolve({ convId: c, charter: {}, board: {}, pendingDecisions: [] }),
+} };
+
+eval(fs.readFileSync(SRC, 'utf8'));  // project-brain.js
+
+const out = [];
+function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+
+const PB = win.ProjectBrain;
+check('renderBoard_exposed', PB && typeof PB.renderBoard === 'function');
+
+// Render the board directly with a done + claimed + open card.
+PB.renderBoard({ open: 1, claimed: 1, done: 1, tasks: [
+  { id: 'pt_open1', title: 'OPEN CARD', status: 'open', owner_conv_id: '', depends_on: [] },
+  { id: 'pt_cl1', title: 'CLAIMED CARD', status: 'claimed', owner_conv_id: 'cOWNER', depends_on: [] },
+  { id: 'pt_done1', title: 'DONE CARD', status: 'done', owner_conv_id: '', depends_on: [] },
+] });
+const board = win.document.getElementById('projectBrainBoardBody');
+
+function cardOf(id) { return board.querySelector('.pb-board-card[data-task-id="' + id + '"]'); }
+function reopenBtn(id) { var c = cardOf(id); return c ? c.querySelector('.pb-board-act-reopen') : null; }
+
+// Reopen control MUST render on BOTH claimed and done cards (the lever must
+// appear on claimed too — "break a stuck live claim").
+check('reopen_on_claimed', !!reopenBtn('pt_cl1'));
+check('reopen_on_done', !!reopenBtn('pt_done1'));
+// Open card has NO reopen (it's already open) but HAS complete + block.
+check('no_reopen_on_open', !reopenBtn('pt_open1'));
+check('complete_on_open', !!cardOf('pt_open1').querySelector('.pb-board-act-complete'));
+check('block_on_open', !!cardOf('pt_open1').querySelector('.pb-board-act-block'));
+// "New epic" affordance present + enabled (there IS a displayed conv).
+const newBtn = board.querySelector('#pbBoardNewBtn');
+check('new_epic_present', !!newBtn);
+check('new_epic_enabled', newBtn && !newBtn.disabled);
+
+// Click reopen on the CLAIMED card → boardReopen(path, taskId, convId).
+const rb = reopenBtn('pt_cl1');
+if (rb) {
+  rb.click();
+  Promise.resolve().then(()=>{}).then(() => {
+    check('reopen_called', calls.reopen.length === 1);
+    check('reopen_task_id', calls.reopen.length && calls.reopen[0].taskId === 'pt_cl1');
+    check('reopen_path', calls.reopen.length && calls.reopen[0].p === '/proj/real');
+    check('reopen_carries_conv', calls.reopen.length && calls.reopen[0].convId === 'cDISPLAYED');
+    console.log(out.join('\n'));
+  });
+} else {
+  console.log(out.join('\n'));
+}
+"""
+
+
+def _run_board_actions(brain_src):
+    frag = _extract_panel_fragment()
+    frag_file = os.path.join(HERE, '_pb_ba_fragment.html')
+    harness = os.path.join(HERE, '_pb_ba_harness.js')
+    with open(frag_file, 'w', encoding='utf-8') as f:
+        f.write(frag)
+    with open(harness, 'w', encoding='utf-8') as f:
+        f.write(_HARNESS_BOARD_ACTIONS)
+    try:
+        proc = subprocess.run(
+            ['node', harness, brain_src, ROOT, frag_file],
+            capture_output=True, text=True, timeout=60)
+    finally:
+        for p in (frag_file, harness):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    return output
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_board_human_actions_render_and_reopen_calls_api():
+    """The reopen control renders on BOTH claimed and done cards; clicking it
+    calls Api.project.boardReopen with the resolved displayed-conv id. Complete
+    + block render on open/claimed; the New-epic affordance is present."""
+    output = _run_board_actions(_BRAIN_SRC)
+    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'board-action render failures:\n' + output
+    for must in ('PASS reopen_on_claimed', 'PASS reopen_on_done',
+                 'PASS no_reopen_on_open', 'PASS complete_on_open',
+                 'PASS block_on_open', 'PASS new_epic_present',
+                 'PASS new_epic_enabled', 'PASS reopen_called',
+                 'PASS reopen_task_id', 'PASS reopen_path',
+                 'PASS reopen_carries_conv'):
+        assert must in output, output
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_NC_reopen_control_is_load_bearing():
+    """Frontend NC (double-neuter): remove the reopen-control branch in
+    _boardCard → the reopen button no longer renders on claimed/done cards →
+    reopen_on_claimed + reopen_on_done FAIL. Byte-identical restore."""
+    with open(_BRAIN_SRC, encoding='utf-8') as f:
+        original = f.read()
+    anchor = ("    if (t.status === 'claimed' || t.status === 'done') {\n"
+              "      acts.push(_boardActionBtn('reopen', 'refresh', "
+              "'projectBrain.actReopen', 'Reopen'));\n"
+              "    }")
+    assert anchor in original, 'reopen-control anchor not found'
+    patched = original.replace(
+        anchor, "    // NC (reopen control disabled)", 1)
+    copy_path = os.path.join(HERE, '_pb_reopen_nc_copy.js')
+    try:
+        with open(copy_path, 'w', encoding='utf-8') as f:
+            f.write(patched)
+        output = _run_board_actions(copy_path)
+        assert 'FAIL reopen_on_claimed' in output and 'FAIL reopen_on_done' in output, \
+            ('NC: disabling the reopen-control branch must make '
+             'reopen_on_claimed + reopen_on_done FAIL:\n' + output)
+        # discriminating: complete/block still render (only reopen removed).
+        assert 'PASS complete_on_open' in output, \
+            'NC must be surgical — complete control unaffected:\n' + output
+    finally:
+        try:
+            os.remove(copy_path)
+        except OSError:
+            pass
+    with open(_BRAIN_SRC, encoding='utf-8') as f:
+        assert f.read() == original, 'shipped project-brain.js must be byte-identical'
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Truncation fix (frontend): renderCharter must render + commit the FULL
+#  payload.proposal text, NOT the 280-char feed-row summary. This is the
+#  frontend half of the summary-first bug the backend test covers.
+# ════════════════════════════════════════════════════════════════════
+
+# A proposal whose FULL payload text differs from (and is far longer than) the
+# short feed-row summary — so a summary-first renderer is discriminated.
+_FULL_PROPOSAL = ('FULL-HEAD ' + ('z' * 600) + ' FULL-TAIL-SENTINEL')
+
+_HARNESS_FULLTEXT = r"""
+const fs = require('fs');
+const path = require('path');
+const SRC = process.argv[2];
+const ROOT = process.argv[3];
+const FRAG = process.argv[4];
+const FULL = process.argv[5];
+const fragment = fs.readFileSync(FRAG, 'utf8');
+const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
+const dom = new JSDOM('<!DOCTYPE html><body>' + fragment + '</body>', { url: 'http://localhost/' });
+const win = dom.window;
+global.window = win; global.document = win.document; global.console = console;
+win.Icon = global.Icon = (name) => '<svg data-icon="' + name + '"></svg>';
+win.t = global.t = (k) => k;
+win.escapeHtml = global.escapeHtml = (s) => String(s == null ? '' : s);
+win.loadConversation = global.loadConversation = () => {};
+win.getActiveConv = global.getActiveConv = () => ({ id: 'c1', projectPath: '/proj/real' });
+win._getConvProjectPath = global._getConvProjectPath = (c) => (c && c.projectPath) || '';
+win.pushSubscribe = global.pushSubscribe = () => {};
+win.pushUnsubscribe = global.pushUnsubscribe = () => {};
+
+const committed = [];
+// The pending proposal: a SHORT feed summary (the 280-char cap) but the FULL
+// text in payload.proposal — exactly the shape pending_proposals now returns.
+win.Api = global.Api = { project: {
+  feed: (p) => Promise.resolve({ maxSeq: 0, events: [] }),
+  charter: (p) => Promise.resolve({ exists: true, version: 7, content: 'NS',
+    decisions: [], updated_by_conv: 'cA', updated_at: 1 }),
+  charterPending: (p) => Promise.resolve({ pending: [
+    { proposalId: 'prop_full', event_id: 'pp9', conv_id: 'cZ', title: 'Conv Z',
+      summary: FULL, payload: { proposal: FULL } },
+  ] }),
+  dismissProposal: (p, pid) => Promise.resolve({ ok: true }),
+  board: (p) => Promise.resolve({ open: 0, claimed: 0, done: 0, tasks: [] }),
+  commitCharter: (p, body) => { committed.push({ p: p, body: body }); return Promise.resolve({ ok: true, version: 8 }); },
+} };
+
+eval(fs.readFileSync(SRC, 'utf8'));  // project-brain.js
+
+const out = [];
+function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+
+win.openProjectBrain();
+Promise.resolve().then(()=>{}).then(()=>{}).then(()=>{}).then(()=>{}).then(() => {
+  const charter = win.document.getElementById('projectBrainCharterBody');
+  const cHtml = charter.innerHTML;
+  // The FULL proposal tail must be rendered (not clipped to a short summary).
+  check('proposal_full_rendered', cHtml.indexOf('FULL-TAIL-SENTINEL') !== -1);
+  const commitBtn = charter.querySelector('.pb-proposal-commit');
+  check('commit_control_present', !!commitBtn);
+  // The commit button's data-text must carry the FULL proposal.
+  check('commit_data_text_full',
+    !!commitBtn && (commitBtn.getAttribute('data-text') || '').indexOf('FULL-TAIL-SENTINEL') !== -1);
+  if (commitBtn) {
+    commitBtn.click();
+    Promise.resolve().then(()=>{}).then(() => {
+      // And the commit route receives the FULL text (so the stored decision
+      // is not the 280-char summary).
+      check('commit_carries_full_text', committed.length &&
+        (committed[0].body.add_decision || '').indexOf('FULL-TAIL-SENTINEL') !== -1);
+      console.log(out.join('\n'));
+    });
+  } else {
+    console.log(out.join('\n'));
+  }
+});
+"""
+
+
+def _run_fulltext(brain_src):
+    frag = _extract_panel_fragment()
+    frag_file = os.path.join(HERE, '_pb_full_fragment.html')
+    harness = os.path.join(HERE, '_pb_full_harness.js')
+    with open(frag_file, 'w', encoding='utf-8') as f:
+        f.write(frag)
+    with open(harness, 'w', encoding='utf-8') as f:
+        f.write(_HARNESS_FULLTEXT)
+    try:
+        proc = subprocess.run(
+            ['node', harness, brain_src, ROOT, frag_file, _FULL_PROPOSAL],
+            capture_output=True, text=True, timeout=60)
+    finally:
+        for p in (frag_file, harness):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    return output
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_charter_renders_and_commits_full_proposal_text():
+    """renderCharter must render the FULL payload.proposal (not the 280-char
+    feed summary) and the commit control must carry that full text — the
+    frontend half of the truncated-decision fix."""
+    output = _run_fulltext(_BRAIN_SRC)
+    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'full-text render failures:\n' + output
+    for must in ('PASS proposal_full_rendered', 'PASS commit_data_text_full',
+                 'PASS commit_carries_full_text'):
+        assert must in output, output
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_NC_charter_summary_first_truncates_rendered_proposal():
+    """Frontend NC (double-neuter): revert renderCharter's ptext to
+    summary-FIRST in a COPY. Because THIS harness feeds an identical summary +
+    payload, we ALSO shorten the stubbed summary via a second surgical patch of
+    the harness is overkill — instead the NC targets the SHIPPED renderer: with
+    payload-first removed, ptext falls back to p.summary only if p.payload is
+    absent. To bite deterministically we neuter to read p.summary EXCLUSIVELY
+    and feed a shorter summary at runtime.  Byte-identical restore."""
+    with open(_BRAIN_SRC, encoding='utf-8') as f:
+        original = f.read()
+    anchor = ("        var ptext = (p.payload && p.payload.proposal) "
+              "|| p.summary || '';")
+    assert anchor in original, 'ptext anchor not found'
+    # Neuter: use ONLY p.summary (ignore the full payload). Combined with a
+    # harness that supplies a SHORT summary + FULL payload, this drops the tail.
+    patched = original.replace(
+        anchor, "        var ptext = p.summary || '';  // NC (summary-only)", 1)
+    copy_path = os.path.join(HERE, '_pb_full_nc_copy.js')
+    # A harness variant whose pending summary is SHORT (no sentinel) but payload
+    # is FULL — so summary-only rendering loses FULL-TAIL-SENTINEL.
+    nc_harness = _HARNESS_FULLTEXT.replace(
+        "summary: FULL, payload: { proposal: FULL } },",
+        "summary: 'SHORT-SUMMARY', payload: { proposal: FULL } },")
+    nc_harness_path = os.path.join(HERE, '_pb_full_nc_harness.js')
+    frag = _extract_panel_fragment()
+    frag_file = os.path.join(HERE, '_pb_full_nc_fragment.html')
+    try:
+        with open(copy_path, 'w', encoding='utf-8') as f:
+            f.write(patched)
+        with open(nc_harness_path, 'w', encoding='utf-8') as f:
+            f.write(nc_harness)
+        with open(frag_file, 'w', encoding='utf-8') as f:
+            f.write(frag)
+        proc = subprocess.run(
+            ['node', nc_harness_path, copy_path, ROOT, frag_file, _FULL_PROPOSAL],
+            capture_output=True, text=True, timeout=60)
+        output = proc.stdout.strip()
+        assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+        assert 'FAIL proposal_full_rendered' in output \
+            and 'FAIL commit_carries_full_text' in output, \
+            ('NC: summary-only ptext must drop the full-text tail:\n' + output)
+    finally:
+        for p in (copy_path, nc_harness_path, frag_file):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    with open(_BRAIN_SRC, encoding='utf-8') as f:
+        assert f.read() == original, 'shipped project-brain.js must be byte-identical'
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Two-bars disambiguation: the conv-influence BAR deep-links to the
+#  Influence lens (openProjectBrainInfluence → un-hide + flash), instead of
+#  just opening the panel at the top like the project-wide collab bar.
+# ════════════════════════════════════════════════════════════════════
+
+_HARNESS_DEEPLINK = r"""
+const fs = require('fs');
+const path = require('path');
+const SRC = process.argv[2];
+const ROOT = process.argv[3];
+const FRAG = process.argv[4];
+const fragment = fs.readFileSync(FRAG, 'utf8');
+const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
+const dom = new JSDOM('<!DOCTYPE html><body>' +
+  '<button class="conv-influence-bar" id="convInfluenceBar" hidden></button>' +
+  fragment + '</body>', { url: 'http://localhost/' });
+const win = dom.window;
+global.window = win; global.document = win.document; global.console = console;
+win.Icon = global.Icon = (name) => '<svg data-icon="' + name + '"></svg>';
+win.t = global.t = (k) => k;
+win.escapeHtml = global.escapeHtml = (s) => String(s == null ? '' : s);
+win.loadConversation = global.loadConversation = () => {};
+win.pushSubscribe = global.pushSubscribe = () => {};
+win.pushUnsubscribe = global.pushUnsubscribe = () => {};
+win.activeConvId = global.activeConvId = 'convA';
+win.getActiveConv = global.getActiveConv = () => ({ id: 'convA', title: 'A', projectPath: '/proj/real' });
+win._getConvProjectPath = global._getConvProjectPath = (c) => (c && c.projectPath) || '';
+
+// convA is bound by a charter (so the lens is non-empty → banner un-hides).
+const INF = { projectPath: '/proj/real', convId: 'convA',
+  charter: { exists: true, injected: true, content: 'NS', decisions: ['D1'] },
+  board: { injected: true, mine: [], avoid: [], open: [] }, pendingDecisions: [] };
+win.Api = global.Api = { project: {
+  feed: (p) => Promise.resolve({ maxSeq: 0, events: [] }),
+  charter: (p) => Promise.resolve({ exists: true, version: 1, content: 'NS', decisions: [{ text: 'D1' }] }),
+  charterPending: (p) => Promise.resolve({ pending: [] }),
+  board: (p) => Promise.resolve({ open: 0, claimed: 0, done: 0, tasks: [] }),
+  brainInfluence: (p, cid) => Promise.resolve(INF),
+} };
+
+eval(fs.readFileSync(SRC, 'utf8'));  // project-brain.js
+
+const out = [];
+function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+check('deeplink_exposed', typeof win.openProjectBrainInfluence === 'function');
+
+// Simulate the bar's onclick deep-link.
+win.openProjectBrainInfluence();
+// openProjectBrain runs synchronously (un-hides overlay); influence loads on a
+// microtask, then the flash fires on a 120ms setTimeout. Wait it out.
+setTimeout(() => {
+  const overlay = win.document.getElementById('projectBrainOverlay');
+  const banner = win.document.getElementById('projectBrainInfluence');
+  check('overlay_open', overlay && overlay.hidden === false);
+  check('influence_banner_visible', banner && banner.hidden === false);
+  // The deep-link flash class must have been applied to the lens.
+  check('lens_flashed', banner && banner.classList.contains('pb-influence-flash'));
+  console.log(out.join('\n'));
+}, 400);
+"""
+
+
+def _run_deeplink(brain_src):
+    frag = _extract_panel_fragment()
+    frag_file = os.path.join(HERE, '_pb_dl_fragment.html')
+    harness = os.path.join(HERE, '_pb_dl_harness.js')
+    with open(frag_file, 'w', encoding='utf-8') as f:
+        f.write(frag)
+    with open(harness, 'w', encoding='utf-8') as f:
+        f.write(_HARNESS_DEEPLINK)
+    try:
+        proc = subprocess.run(
+            ['node', harness, brain_src, ROOT, frag_file],
+            capture_output=True, text=True, timeout=60)
+    finally:
+        for p in (frag_file, harness):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    return output
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_conv_influence_bar_deeplinks_to_lens():
+    """The conv-influence bar's deep-link (openProjectBrainInfluence) opens the
+    panel AND un-hides + flashes the Influence lens — so the two stacked bars
+    take you to DIFFERENT places (project-wide columns vs. this-conv lens)."""
+    output = _run_deeplink(_BRAIN_SRC)
+    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'deep-link failures:\n' + output
+    for must in ('PASS deeplink_exposed', 'PASS overlay_open',
+                 'PASS influence_banner_visible', 'PASS lens_flashed'):
+        assert must in output, output
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_NC_deeplink_flash_is_load_bearing():
+    """Frontend NC (double-neuter): remove the flash-class add in
+    openProjectBrainInfluence → the lens is no longer flashed → lens_flashed
+    FAILS while the panel still opens. Byte-identical restore."""
+    with open(_BRAIN_SRC, encoding='utf-8') as f:
+        original = f.read()
+    anchor = "      banner.classList.add('pb-influence-flash');"
+    assert anchor in original, 'flash-add anchor not found'
+    patched = original.replace(anchor, "      void 0;  // NC (flash disabled)", 1)
+    copy_path = os.path.join(HERE, '_pb_dl_nc_copy.js')
+    try:
+        with open(copy_path, 'w', encoding='utf-8') as f:
+            f.write(patched)
+        output = _run_deeplink(copy_path)
+        assert 'FAIL lens_flashed' in output, \
+            ('NC: removing the flash-add must make lens_flashed FAIL:\n' + output)
+        # discriminating: the panel still opens (only the flash was removed).
+        assert 'PASS overlay_open' in output and 'PASS influence_banner_visible' in output, \
+            'NC must be surgical — the panel still opens:\n' + output
+    finally:
+        try:
+            os.remove(copy_path)
+        except OSError:
+            pass
+    with open(_BRAIN_SRC, encoding='utf-8') as f:
+        assert f.read() == original, 'shipped project-brain.js must be byte-identical'

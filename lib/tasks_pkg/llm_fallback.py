@@ -44,6 +44,51 @@ _reactive_compact_attempts: dict[str, int] = {}
 _REACTIVE_COMPACT_MAX_RETRIES = 2
 
 
+def _flag_empty_stop_for_retry(assistant_msg: dict, finish_reason, task: dict,
+                               round_num: int, usage: dict) -> bool:
+    """Recognise a round-0 empty/whitespace-only ``stop`` and flag it for RETRY.
+
+    Replaces the old "empty stop on round 0 ⇒ content_filter" heuristic, which
+    was too aggressive: it declared a terminal content-policy block (NO retry)
+    on any 200-OK ``finish=stop`` that produced no visible content. But a
+    GENUINE policy violation arrives as :class:`ContentFilterError` (HTTP 450),
+    handled separately and terminal. A plain empty stop is a TRANSIENT gateway
+    artifact — proven by ``debug/repro_conv_empty_stop.py``, which replays the
+    exact large request that empty-stopped in production and gets clean content
+    6/6 times.
+
+    The stream layer (``lib/llm/_sse_core.py``) only sets the
+    ``_empty_stop`` / ``_stream_anomaly`` flags when ``finish=stop AND not
+    content AND chunk_count > 0`` — so a whitespace-only body (``content`` is
+    truthy) or a zero-chunk clean-``[DONE]`` close slips through UNFLAGGED and
+    the empty_stop retry bucket (cap 2, in ``analyse_stream_result``) never
+    fires. This helper closes that gap: when the round is a bare empty stop on
+    the FIRST round that the stream layer did NOT already flag, it sets the
+    ``_empty_stop`` + ``_stream_anomaly`` flags on ``usage`` (mutated in place)
+    so ``analyse_stream_result`` retries it via the empty_stop / zero_byte
+    bucket. Only after those retries are exhausted does it surface honestly as
+    ``abnormal_stop`` — never as a fabricated content-policy block.
+
+    Returns ``True`` iff it flagged this round for retry (so the caller can log
+    it). Round > 0 is left alone (empty content after tool calls is legitimate).
+    """
+    if finish_reason != 'stop':
+        return False
+    if round_num != 0:
+        return False
+    if (assistant_msg.get('content', '') or '').strip():
+        return False
+    if (task.get('content') or '').strip() or (task.get('thinking') or '').strip():
+        return False
+    # Already flagged by the stream layer → the existing retry machinery picks
+    # it up unchanged; nothing to add.
+    if usage.get('_stream_anomaly'):
+        return False
+    usage['_empty_stop'] = True
+    usage['_stream_anomaly'] = True
+    return True
+
+
 def cleanup_reactive_compact_state(task_id: str):
     """Remove reactive compact tracking for a finished task.
 
@@ -194,29 +239,21 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             on_tool_call_ready=on_tool_call_ready)
         last_finish_reason = finish_reason
 
-        # Detect safety-filter block: empty content on first round only.
-        # Later rounds may legitimately have empty content after tool calls.
-        # IMPORTANT: skip when the stream layer flagged a transport anomaly
-        # (zero-byte close, missing [DONE]) — that's a gateway hiccup, not
-        # a safety block.  ``analyse_stream_result`` will route it to the
-        # zero-byte retry path (``_PREMATURE_RETRY_MAX_ZERO_BYTE`` = 16).
-        _stream_anom = bool((usage or {}).get('_stream_anomaly'))
-        if (finish_reason == 'stop'
-                and not assistant_msg.get('content', '').strip()
-                and not task['content'].strip()
-                and not task['thinking'].strip()
-                and round_num == 0
-                and not _stream_anom):
-            last_finish_reason = 'content_filter'
-            logger.warning('[%s] 🚫 CONTENT_FILTER detected at round %d: model returned stop '
-                           'with empty content on first round — likely safety-blocked. model=%s',
-                           tid, round_num, model)
-        elif (finish_reason == 'stop'
-                and not assistant_msg.get('content', '').strip()
-                and round_num == 0
-                and _stream_anom):
-            logger.info('[%s] 🔄 Round 0 empty stop with stream anomaly — deferring to '
-                        'zero-byte retry path (NOT content_filter). model=%s', tid, model)
+        # Round-0 empty stop → flag for the empty_stop/zero_byte RETRY bucket,
+        # NOT a terminal content_filter. A genuine policy block is HTTP 450
+        # (ContentFilterError, handled below and terminal); a plain empty stop
+        # is a transient gateway artifact (proven by debug/repro_conv_empty_stop.py).
+        # When the stream layer already flagged an anomaly, analyse_stream_result
+        # retries it unchanged; when it slipped through unflagged (whitespace-only
+        # body, or a zero-chunk clean [DONE]), the helper sets the flags so the
+        # retry bucket still fires. Only after retries are exhausted does it
+        # surface as abnormal_stop.
+        if usage is not None and _flag_empty_stop_for_retry(
+                assistant_msg, finish_reason, task, round_num, usage):
+            logger.warning('[%s] ⚠️ Round-0 EMPTY STOP (model=%s) — flagging for '
+                           'empty_stop retry (NOT content_filter; a real policy '
+                           'block would be HTTP 450). Will retry then surface as '
+                           'abnormal_stop if it persists.', tid, model)
 
         # Log output-token truncation so operators can tune max_tokens
         if finish_reason in ('length', 'max_tokens'):
@@ -531,17 +568,12 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                 task, fallback_body, tag=f'R{round_num+1}-FALLBACK')
             last_finish_reason = finish_reason
 
-            _fb_stream_anom = bool((usage or {}).get('_stream_anomaly'))
-            if (finish_reason == 'stop'
-                    and not assistant_msg.get('content', '').strip()
-                    and not task['content'].strip()
-                    and not task['thinking'].strip()
-                    and round_num == 0
-                    and not _fb_stream_anom):
-                last_finish_reason = 'content_filter'
-                logger.warning('[%s] 🚫 CONTENT_FILTER detected at round %d (fallback model=%s): '
-                               'stop with empty content on first round — likely safety-blocked',
-                               tid, round_num, _FALLBACK_MODEL)
+            if usage is not None and _flag_empty_stop_for_retry(
+                    assistant_msg, finish_reason, task, round_num, usage):
+                logger.warning('[%s] ⚠️ Round-0 EMPTY STOP (fallback model=%s) — '
+                               'flagging for empty_stop retry (NOT content_filter). '
+                               'Will surface as abnormal_stop if it persists.',
+                               tid, _FALLBACK_MODEL)
 
             if finish_reason in ('length', 'max_tokens'):
                 _fb_trace = (usage or {}).get('trace_id', 'N/A')

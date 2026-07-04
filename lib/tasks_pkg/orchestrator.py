@@ -77,6 +77,40 @@ from lib.tasks_pkg.tool_dispatch import (
 )
 
 
+# ── Inter-round narration discard ──────────────────────────────────────────
+def _discard_pretool_prose(task: dict[str, Any], round_num: int) -> None:
+    """Drop the prose an LLM round streamed BEFORE issuing tool calls.
+
+    The chat loop accumulates every content delta into a single
+    ``task['content']`` via ``_on_content``. When a round ends in TOOL CALLS
+    (not a final answer), any text it streamed first is inter-round narration
+    ("Now let me check the utility functions.") — NOT the deliverable. It is
+    already preserved elsewhere: in the tool-call message's ``content``
+    (replayed to the API next round) and snapshotted onto the tool round's
+    ``assistantContent`` (UI / Continue replay). If we leave it in
+    ``task['content']`` it gets concatenated in front of the terminal round's
+    real answer, leaking scaffolding into the deliverable.
+
+    Two things are required (mirrors the paper-engine ``delta_reset``
+    precedent):
+
+    1. **Backend**: clear ``task['content']`` / ``task['thinking']`` so the
+       final assembled answer contains ONLY the terminal round's text.
+    2. **Client**: the DELTA frames for this prose were ALREADY streamed and
+       mirrored into the live bubble, so a backend-only reset would leave the
+       narration on screen (and a racing sync could persist it). Emit
+       ``DELTA_RESET`` so the client clears accumulated content/thinking —
+       but KEEPS this turn's tool rounds (unlike ``retry_reset``).
+
+    Continue's ``contentPrefix`` path re-seeds ``task['content']`` explicitly
+    (and later), so this reset is safe there too.
+    """
+    with task['content_lock']:
+        task['content'] = ''
+        task['thinking'] = ''
+    append_event(task, build_event(EventType.DELTA_RESET, round=round_num))
+
+
 # ── Suspicious-completion detection ────────────────────────────────────────
 def _check_suspicious_completion(task, last_finish_reason, _loop_exit_reason,
                                   tool_call_happened, round_num, model,
@@ -240,6 +274,138 @@ def _finalize_dangling_tool_rounds(task: dict[str, Any]) -> int:
     return finalized
 
 
+def _maybe_auto_retry_turn(task: dict[str, Any], cfg: dict[str, Any]) -> bool:
+    """Auto-re-run a settled-but-transiently-failed turn; return True if retrying.
+
+    Reads the typed error envelope on ``task['error']`` and asks
+    :func:`lib.tasks_pkg.turn_retry.should_auto_retry_turn` whether a whole-turn
+    re-run is worthwhile.  When it is, this:
+
+      1. emits ``retry_reset`` so the client clears the failed attempt's partial
+         bubble (deltas append client-side — without this the re-streamed
+         output would stack on the old text);
+      2. emits ``phase:retrying`` with the attempt/backoff detail (the same
+         transient-status contract the inner stream-retry path uses);
+      3. sleeps the backoff (interruptible by user abort);
+      4. resets the per-turn task accumulators to a clean 'running' state
+         (mirroring ``_run_single_turn``) while KEEPING ``task['messages']`` —
+         which already holds every completed tool round as history, so the
+         re-run resumes after them and never double-executes a tool;
+      5. re-invokes :func:`run_task`.
+
+    Returns True iff a retry was launched (caller must ``return`` without
+    finalizing).  Returns False when the error is not auto-retryable, the
+    budget is exhausted, the caller opted out, or the user aborted during the
+    backoff — in which case the caller finalizes and surfaces the error as
+    usual, so manual Retry still works.
+    """
+    from lib.tasks_pkg.turn_retry import (
+        auto_turn_retry_max,
+        should_auto_retry_turn,
+    )
+
+    tid = task['id'][:8]
+    err = task.get('error')
+    attempt = int(task.get('_auto_turn_retry_count') or 0)
+    retry, backoff_s = should_auto_retry_turn(err, attempt, cfg)
+    if not retry:
+        return False
+
+    _kind = err.get('kind', '?') if isinstance(err, dict) else '?'
+    _cap = auto_turn_retry_max(cfg)
+    _next = attempt + 1
+
+    from lib.log import audit_log
+    audit_log('turn_auto_retry', tid=tid, conv=task.get('convId', ''),
+              kind=_kind, attempt=_next, max=_cap,
+              backoff_s=round(backoff_s, 2),
+              model=task.get('model', '') or (cfg.get('model', '')))
+    logger.warning(
+        '[%s] ⟳ TURN AUTO-RETRY (%d/%d): transient error kind=%s — re-running '
+        'the whole turn after %.1fs backoff (transparent, no user action). '
+        'conv=%s',
+        tid, _next, _cap, _kind, backoff_s, task.get('convId', ''))
+
+    # ── (1) Tell the client to clear the failed attempt's partial bubble ──
+    #     retry_reset is non-terminal; the task stays 'running'.
+    _detail = (f'⚠️ 请求失败（{_kind}），正在自动重试整轮 '
+               f'({_next}/{_cap}）… / Transient error — auto-retrying the turn')
+    try:
+        append_event(task, build_event(
+            EventType.RETRY_RESET, attempt=_next, max=_cap, kind=_kind))
+        # (2) transient status bar (same contract as inner stream retries)
+        append_event(task, build_event(
+            EventType.PHASE, phase='retrying', detail=_detail,
+            attempt=_next, max=_cap, bucket='turn'))
+    except Exception as _ev_err:
+        logger.debug('[%s] auto-retry event emit failed (non-fatal): %s',
+                     tid, _ev_err)
+
+    # ── (3) Backoff (abort-aware) ──
+    if backoff_s > 0:
+        from lib.tasks_pkg.stream_handler import _interruptible_sleep
+        _interruptible_sleep(backoff_s, task)
+    if task.get('aborted'):
+        # User hit Stop during the backoff — do NOT re-run; let the caller
+        # finalize (it will render as aborted).
+        logger.info('[%s] auto-retry aborted during backoff — finalizing', tid)
+        return False
+
+    # ── (4) Reset per-turn accumulators to a clean running state ──
+    #     Restore the PRISTINE turn input (run_task mutated task['messages']
+    #     with injected system context + the failed attempt's partial rounds
+    #     on write-back; re-running from that would double-inject and replay a
+    #     half-finished round). Re-running from the original input is exactly
+    #     the semantics of a manual Retry. Keep the retry counter (bumped
+    #     below). Mirrors _run_single_turn's reset otherwise.
+    _pristine = task.get('_turn_input_messages')
+    if _pristine is not None:
+        task['messages'] = list(_pristine)
+    task['_auto_turn_retry_count'] = _next
+    with task['content_lock']:
+        task['content'] = ''
+        task['thinking'] = ''
+    task['usage'] = {}
+    task['status'] = 'running'
+    task['error'] = None
+    task['finishReason'] = None
+    task['toolRounds'] = []
+    # Clear per-phase inner-retry counters so the re-run starts with a fresh
+    # inner budget (the stream-anomaly retries are per-attempt, not lifetime).
+    task.pop('_premature_retry_count_phase', None)
+    task.pop('_force_rotate_pair', None)
+
+    # ── (5) Re-run the whole turn ──
+    try:
+        run_task(task)
+    except Exception as _rerun_err:
+        # A re-run that raises lands here (the recursive run_task's own FATAL
+        # handler already emitted a done+error for it in most cases, but a
+        # raise that escapes must not crash this frame). Surface a generic
+        # error so the turn still terminates cleanly.
+        logger.error('[%s] auto-retry re-run raised: %s', tid, _rerun_err,
+                     exc_info=True)
+        from lib.error_envelope import make_envelope as _make_env
+        task['error'] = _make_env(
+            'internal',
+            detail=f'Auto-retry re-run failed: {_rerun_err}',
+            model=task.get('model', ''),
+            context='turn-auto-retry',
+            source='orchestrator',
+            raw=str(_rerun_err),
+        )
+        task['status'] = 'error'
+        task['finishReason'] = 'error'
+        try:
+            append_event(task, build_event(
+                EventType.DONE, error=task['error'], finishReason='error'))
+            persist_task_result(task)
+        except Exception as _fin_err:
+            logger.error('[%s] auto-retry terminal finalize failed: %s',
+                         tid, _fin_err, exc_info=True)
+    return True
+
+
 def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, thinking_depth: str | None, cfg: dict[str, Any],
                             last_finish_reason, last_usage, accumulated_usage, api_rounds,
                             tool_call_happened, messages, original_messages,
@@ -253,6 +419,22 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     the 'done' event with full diagnostic information.
     """
     tid = task['id'][:8]
+
+    # ── Turn-level auto-retry over TRANSIENT terminal errors ──
+    # Before finalizing a failed turn, check whether the settled error is a
+    # transient transport/dispatch failure worth transparently re-running the
+    # WHOLE turn for (429 / no_slot / timeout / network / premature_close /
+    # abnormal_stop / server_offline / tool_timeout).  If so — and the budget
+    # is not exhausted and the caller didn't opt out — reset per-turn state,
+    # tell the client to clear the partial bubble (retry_reset), back off, and
+    # re-run run_task.  This spares the user from manually clicking Retry on
+    # each of many parallel conversations that hit a passing gateway blip.
+    # Endpoint-managed turns are excluded (the Planner→Worker→Critic loop owns
+    # its own retry/replan semantics); the raise/FATAL path is also excluded
+    # because it never reaches finalize.
+    if not task.get('_endpoint_managed') and not task.get('aborted'):
+        if _maybe_auto_retry_turn(task, cfg):
+            return
 
     # ── Fallback: synthesize answer from search results if main loop produced nothing ──
     if not task['content'].strip() and tool_call_happened and all_search_results_text and not task['aborted']:
@@ -730,18 +912,31 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     #    feeding that truncated copy to the follow-up.  Syncing here first
     #    makes the VU and follow-up layer on top of the complete reply; the
     #    later persist sync becomes a harmless no-op skip.
-    from lib.tasks_pkg.autopilot import is_autopilot_enabled
-    if is_autopilot_enabled(task) and task.get('convId'):
+    # ── Phase 1 (parity-gap closure): commit the parent's FINAL assistant
+    #    message to the conversation DB *before* the done event is emitted,
+    #    for EVERY path — not only when autopilot is on.  Historically this
+    #    sync ran only in the autopilot branch here; the non-autopilot path
+    #    committed later via persist_task_result() AFTER append_event(done),
+    #    so the terminal event a client received was NOT the committed record
+    #    (it was a parallel reconstruction, and the DB row did not yet exist).
+    #    `_sync_result_to_conversation` stamps `task['_committedMsg']` with the
+    #    EXACT dict it wrote (re-SELECT-post-CAS), which the done event then
+    #    ships verbatim below.  The trailing persist_task_result() sync becomes
+    #    a harmless idempotent no-op (freshness/content guard).  Skip paths
+    #    (freshness/inline/CAS-exhaustion) leave `_committedMsg` unset → no
+    #    committedMessage rides the event → the client keeps its transient
+    #    buffer (the Phase-2 offline fallback).
+    if task.get('convId'):
         try:
             from lib.tasks_pkg.manager import (
                 _sync_result_to_conversation,
                 build_result_meta,
             )
             _sync_result_to_conversation(task, build_result_meta(task))
-        except Exception as _pre_ap_err:
-            logger.warning('[Autopilot] pre-hook conv sync failed: %s — '
-                           'follow-up may see a truncated parent reply',
-                           _pre_ap_err, exc_info=True)
+        except Exception as _pre_emit_err:
+            logger.warning('[Task %s] pre-emit conv sync failed: %s — '
+                           'terminal event will fall back to transient buffer',
+                           tid, _pre_emit_err, exc_info=True)
     task['_autopilot_deciding'] = True
     try:
         from lib.tasks_pkg.autopilot import maybe_run_autopilot
@@ -829,6 +1024,16 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         logger.debug('[Task:%s] completion summary log failed: %s',
                      task['id'][:8], _se)
 
+    # ── Phase 1: ship the EXACT committed conversation dict on the terminal
+    #    event so the frontend can project the settled bubble verbatim
+    #    (single source of truth — no keep-longer / snapshot reconstruction).
+    #    `_committedMsg` was stamped by the pre-emit sync above with the row
+    #    actually written (or the fresh row's authoritative tail on a genuine
+    #    frontend-won race). Absent only on skip paths, where the client keeps
+    #    its transient buffer.
+    if task.get('_committedMsg'):
+        done_evt['committedMessage'] = task['_committedMsg']
+
     append_event(task, done_evt)
     # The baton-carrying done event is now in task['events'] — only NOW is it
     # safe to let _task_terminal() (routes/chat.py) report the task finished.
@@ -885,6 +1090,15 @@ def run_task(task: dict[str, Any]) -> None:
         from lib.tasks_pkg.autopilot import _run_autopilot_kick
         _run_autopilot_kick(task)
         return
+    # ★ Pristine turn-input snapshot for turn-level auto-retry.
+    #   run_task mutates a LOCAL copy of messages (system-context injection,
+    #   tool-history rebuild, completed tool rounds) and writes it back to
+    #   task['messages'] on exit — so on a transient-error re-run we must
+    #   restore the ORIGINAL input first, or the re-run would double-inject
+    #   system blocks and replay a half-finished round. Captured ONCE and
+    #   preserved across every retry attempt (see _maybe_auto_retry_turn).
+    if not task.get('_endpoint_managed') and '_turn_input_messages' not in task:
+        task['_turn_input_messages'] = list(task.get('messages') or [])
     # ★ Timing: thread picked the task up. Compare against '_t_created'
     #   (set in create_task) to measure how long the user "waited" before the
     #   background worker even started — i.e. thread-pool / queue latency.
@@ -1149,6 +1363,50 @@ def run_task(task: dict[str, Any]) -> None:
             messages=task['messages'],
             conv_id=task.get('convId', ''),
         )
+
+        # ★ Pending-swarm follow-up tools (root fix for the get_agent_result /
+        #   await_agents "非真实工具" rejection desync — conv mr2ysg473scxv8).
+        #   The swarm inbox drain below (~L1607) is UNGATED: it injects a
+        #   <swarm-update> instructing the model to call await_agents /
+        #   get_agent_result even when swarmEnabled is false (e.g. a manual
+        #   "continue" turn after an interrupted spawn turn). If a swarm is
+        #   live-or-pending for THIS conversation, those tools MUST be real for
+        #   this turn, or the model obeys the injected instruction and gets
+        #   rejected as a hallucinator — stranding the completed agent work.
+        #   `_start_autocontinue_turn` already forces swarmEnabled=True; this
+        #   covers the ordinary continue turn, which had no such protection.
+        #   Runs AFTER assembly (and after latch_tool_list) so it BYPASSES the
+        #   per-conversation tool-schema latch — correctness of the pending
+        #   turn wins over prompt-cache stability.
+        if not swarm_enabled:
+            try:
+                from lib.swarm.integration import (
+                    has_live_or_pending_swarm as _has_pending_swarm,
+                )
+                from lib.swarm.tools import (
+                    resolve_turn_swarm_tools as _resolve_turn_swarm_tools,
+                )
+                _pending = _has_pending_swarm(task)
+                tool_list, _forced_swarm = _resolve_turn_swarm_tools(
+                    tool_list, swarm_enabled=False,
+                    has_pending_or_live=_pending)
+                if _forced_swarm:
+                    has_real_tools = True
+                    # If assembly produced NO tools (max_tool_rounds=0), the
+                    # forced swarm tools would be dead on arrival — lift the
+                    # cap to the same "unlimited" the assembler uses.
+                    if not max_tool_rounds:
+                        max_tool_rounds = 999_999_999
+                    logger.warning(
+                        '[Task %s] conv=%s 🐝 swarm_enabled=False but a '
+                        'live-or-pending swarm exists — force-enabling swarm '
+                        'tools %s for this turn so the injected <swarm-update> '
+                        'can be acted on (bypassing tool-schema latch)',
+                        task['id'][:8], task.get('convId', '') or '',
+                        _forced_swarm)
+            except Exception as _e:
+                logger.warning('[Task %s] pending-swarm tool force-enable '
+                               'skipped: %s', task['id'][:8], _e)
 
         # Stash the assembled tool schema on the task so the compaction
         # token-gate can account for its cost. The tool-schema JSON ships
@@ -1761,6 +2019,11 @@ def run_task(task: dict[str, Any]) -> None:
             if assistant_msg.get('thinking_signature'): clean_msg['thinking_signature'] = assistant_msg['thinking_signature']
             messages.append(clean_msg)
 
+            # ★ Discard the inter-round narration this round streamed before
+            #   its tool calls (backend reset + client DELTA_RESET). See
+            #   _discard_pretool_prose for the full rationale.
+            _discard_pretool_prose(task, round_num)
+
             # ★ Incremental auto-translate: this round's prose segment is now
             #   self-contained (the model finished its commentary and is about
             #   to call tools). Translate it in the background so it's ready by
@@ -2017,6 +2280,22 @@ def run_task(task: dict[str, Any]) -> None:
         task['error'] = _user_err; task['status'] = 'error'; task['finishReason'] = 'error'
         if task.get('_endpoint_managed'):
             return   # let endpoint.py handle the error
+        # ── Turn-level auto-retry (raise path) ──
+        # A transient first-round error (e.g. a 429 with no fallback, or a
+        # network reset before any tool ran) RAISES past _finalize_and_emit_done
+        # to here rather than error-breaking, so it would otherwise never reach
+        # the finalize-seam auto-retry guard. Apply the same self-heal here: if
+        # the classified error is transient and the budget remains, re-run the
+        # whole turn transparently instead of surfacing it for a manual click.
+        if not task.get('aborted'):
+            try:
+                _rt_cfg = task.get('config') or {}
+                if _maybe_auto_retry_turn(task, _rt_cfg):
+                    return
+            except Exception as _ar_err:
+                logger.warning('[Orchestrator] fatal-path auto-retry check '
+                               'failed (surfacing original error): %s', _ar_err,
+                               exc_info=True)
         append_event(task, build_event(EventType.DONE, error=_user_err, finishReason='error'))
         persist_task_result(task)
     finally:

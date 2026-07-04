@@ -72,12 +72,38 @@ def anthropic_headers(api_key: str, extra_headers: dict = None) -> dict:
 
 def _media_type_and_data(url: str):
     """Split a ``data:`` URI into (media_type, base64_data). Returns None on
-    a non-data URL."""
+    a non-data URL.
+
+    Boundary reconciliation: this is the LAST transform before the Anthropic
+    Messages API, which HARD-REJECTS a request whose declared ``media_type``
+    disagrees with the actual image bytes (HTTP 400 "messages.N.content.0.
+    image.source.base64: The image was specified using the image/jpeg media
+    type, but the image does not appear to be in that format."). Every upstream
+    feeder (``build_body`` → ``_validate_image_blocks``, both dispatch swap-path
+    branches) already reconciles, but to make the strict path self-consistent
+    REGARDLESS of which seam fed it, we sniff the real MIME from the base64
+    prefix here and prefer it over the declared header. Best-effort: if the
+    bytes can't be decoded/recognized, keep the declared header unchanged.
+    """
     if not url.startswith('data:'):
         return None
     try:
         header, data = url.split(',', 1)
         media_type = header[len('data:'):].split(';', 1)[0] or 'image/png'
+        try:
+            import base64 as _b64
+
+            from lib.llm.body import sniff_image_mime
+            _sample = _b64.b64decode(data[:1364])
+            _true = sniff_image_mime(_sample)
+            if _true and _true != media_type:
+                logger.warning(
+                    '[AnthropicOut] Reconciled image media type %r → %r at the '
+                    'Anthropic boundary (bytes sniffed as %s)',
+                    media_type, _true, _true)
+                media_type = _true
+        except Exception as _se:
+            logger.debug('[AnthropicOut] media-type sniff skipped: %s', _se)
         return media_type, data
     except (ValueError, IndexError) as e:
         logger.debug('[AnthropicOut] malformed data URI: %s', e)

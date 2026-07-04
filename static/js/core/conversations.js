@@ -182,10 +182,20 @@ async function syncConversationToServer(conv, { allowTruncate = false } = {}) {
       console.log(`[syncToServer] Skipped — conv ${conv.id.slice(0,8)} has 0 messages (nothing to sync)`);
       return;
     }
-    /* Guard: never overwrite server with fewer messages (data loss prevention).
-     * Also never sync a completely empty conversation if _needsLoad is still set
-     * (means we haven't successfully loaded from server yet). */
-    if (conv._serverMsgCount && conv.messages.length < conv._serverMsgCount) {
+    /* Guard: never ACCIDENTALLY overwrite the server with fewer messages (data
+     * loss prevention against the async stale-overwrite race — see the
+     * `stale-async-sync-overwrite-msg-regression` skill).
+     *
+     * ★ FIX: honour `allowTruncate`. A caller that passes `allowTruncate:true`
+     * has DELIBERATELY reduced conv.messages (a ghost/buried-ghost sweep, a
+     * Case-D delete, or an edit/regen truncation) and MUST be allowed to
+     * persist the shorter list — otherwise this guard fires FIRST (it ran
+     * before consulting the flag) and the removal is swept from the DOM every
+     * load but never persisted, so buried ghosts RESURRECT on every reload.
+     * The stale-overwrite race path never sets allowTruncate, so the guard
+     * still protects it. Mirrors the Layer-1 staleness check below and the
+     * backend `allow_truncate` bypass (routes/conversations.py). */
+    if (!allowTruncate && conv._serverMsgCount && conv.messages.length < conv._serverMsgCount) {
       console.warn(`[syncToServer] ⚠️ SKIPPED sync for conv=${conv.id.slice(0,8)} — local ${conv.messages.length} msgs < server ${conv._serverMsgCount} msgs. ` +
         `This guard prevents overwriting server data, but local changes (including streamed content) will NOT be persisted to server!`);
       return;
@@ -430,6 +440,12 @@ function _applySettingsToConv(conv, settings) {
   /* ★ Persist last message info for Case E orphan detection on _needsLoad shells */
   if (settings.lastMsgRole) conv.lastMsgRole = settings.lastMsgRole;
   if (settings.lastMsgTimestamp) conv.lastMsgTimestamp = settings.lastMsgTimestamp;
+  /* ★ Phase 3: server-authoritative ghost reconcile marker. When the backend's
+   *   recover_stale_tasks_on_startup swept buried ghosts / classified the tail,
+   *   it stamps settings._reconciledAt. The frontend Case-D defers to it (skips
+   *   its own content-length classification) so lifecycle state is inferred in
+   *   ONE place — the backend. */
+  if (settings._reconciledAt) conv._reconciledAt = settings._reconciledAt;
   /* ★ Restore activeTaskId from server settings — enables Case B recovery
    *   even on a fresh browser session (no localStorage).
    *   Guard: if activeTaskId was cleared locally during this session
@@ -444,8 +460,72 @@ function _applySettingsToConv(conv, settings) {
     }
   }
 }
+/**
+ * Paint the sidebar from the IndexedDB cache BEFORE (or without) a server
+ * round-trip, so first paint shows real conversations with zero network
+ * dependency — critical on a flaky tunnel/mobile network.
+ *
+ * Honesty note: `ConvCache.put()` only stores conversations that have
+ * messages, so this reflects conversations OPENED on this device, NOT the
+ * full server list. It is a best-effort head-start; the server list (when it
+ * arrives) is the source of truth and reconciles these shells in-place via
+ * the id-keyed merge in loadConversationsFromServer(). A cached-only conv the
+ * server does not confirm (e.g. deleted elsewhere) is pruned by that merge's
+ * existing empty-local-only sweep. The boot path never put()s the meta-only
+ * server shells, so the cache never learns about un-opened conversations —
+ * acceptable by design.
+ *
+ * @returns {Promise<number>} count of shells added from cache
+ */
+async function hydrateSidebarFromCache() {
+  try {
+    if (typeof ConvCache === 'undefined' || !ConvCache.isAvailable()) return 0;
+    const metas = await ConvCache.getAllMeta();
+    if (!metas || !metas.length) return 0;
+    const known = new Set(conversations.map(c => c.id));
+    let added = 0;
+    for (const m of metas) {
+      if (!m.id || known.has(m.id)) continue;
+      const nc = {
+        id: m.id,
+        title: m.title || 'Untitled',
+        messages: [],
+        _serverMsgCount: m.msgCount || 0,
+        _needsLoad: (m.msgCount || 0) > 0,
+        _fromCache: true,
+        createdAt: m.updatedAt || m.cachedAt || Date.now(),
+        updatedAt: m.updatedAt || m.cachedAt || Date.now(),
+        activeTaskId: null,
+      };
+      _applySettingsToConv(nc, m.settings);
+      conversations.push(nc);
+      added++;
+    }
+    if (added) {
+      conversations.sort(_convSorter);
+      if (typeof renderConversationList === 'function') renderConversationList();
+      console.log(`[hydrateSidebarFromCache] painted ${added} cached conversation(s) before server load`);
+    }
+    return added;
+  } catch (e) {
+    debugLog(`hydrateSidebarFromCache failed: ${e.message}`, 'warn');
+    return 0;
+  }
+}
+
 let _convMetaEtag = null;   // ETag for 304 Not Modified support
+/* ★ Observable-outcome signal for the boot-reconnect trigger. Because
+ *   loadConversationsFromServer SWALLOWS its errors (try/catch → debugLog,
+ *   resolves normally), the caller cannot decide "did the server load actually
+ *   succeed?" from a thrown exception. This flag is the truth: true only on a
+ *   real 200-with-data merge OR a legitimate 304 (unchanged list); false on a
+ *   throw (tunnel drop / Failed to fetch) or a non-OK response. A 200 with an
+ *   empty list is ALSO success (the server was reached — it just has no convs).
+ *   main.js gates _bootReconnectWithBackoff on !serverLoadOk(). */
+let _lastServerLoadOk = false;
+function serverLoadOk() { return _lastServerLoadOk; }
 async function loadConversationsFromServer(prefetchId) {
+  _lastServerLoadOk = false;   // pessimistic — flipped true only at a genuine-success exit
   try {
     /* ── Fast path: only metadata for sidebar (no messages) ── */
     /** @type {Record<string,string>} */
@@ -466,8 +546,8 @@ async function loadConversationsFromServer(prefetchId) {
       }
       break;
     }
-    if (resp.status === 304) return;   // nothing changed — skip all work
-    if (!resp.ok) return;
+    if (resp.status === 304) { _lastServerLoadOk = true; return; }   // unchanged list — legitimate success
+    if (!resp.ok) return;   // non-OK — leave _lastServerLoadOk=false (triggers reconnect)
     let serverConvs, prefetchedConv = null;
     if (prefetchId) {
       /* Combo response: { conversations: [...], prefetched: {...} | null } */
@@ -479,6 +559,7 @@ async function loadConversationsFromServer(prefetchId) {
       serverConvs = await resp.json();
     }
     console.log(`[loadConversationsFromServer] Got ${serverConvs.length} convs from server, local has ${conversations.length}`);
+    _lastServerLoadOk = true;   // server reached + responded with a list (empty is still a valid answer)
     if (!serverConvs.length) return;
     const localMap = new Map(conversations.map((c) => [c.id, c]));
     let merged = false,

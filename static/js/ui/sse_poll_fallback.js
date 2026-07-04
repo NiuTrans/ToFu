@@ -40,6 +40,13 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
   let _consecutiveErrors = 0;     // ★ Circuit breaker: track consecutive network failures
   const _MAX_CONSECUTIVE_ERRORS = 10; // ★ After 10 failures (~5s), do health check
   let _rttEma = 300; // ★ Item 8: exponential moving average of poll RTT (ms), seed 300ms
+  /* ★ Epic C sharded-backend affinity re-route: bounded count of SSE re-open
+   *   attempts triggered by a `reconnect:true` poll hint (see the guard in the
+   *   loop below). Capped so a pathological setup where SSE never re-attaches
+   *   cannot spin the re-open path forever — after the cap we fall through and
+   *   keep polling (the bubble stays live, terminal/offline paths still apply). */
+  let _reconnectAttempts = 0;
+  const _MAX_RECONNECT_ATTEMPTS = 3;
   while (true) {
     if (stream.controller.signal.aborted) {
       console.warn(`[_pollFallback] ABORTED at iteration ${_pollIter} — conv=${convId.slice(0,8)}`);
@@ -87,6 +94,46 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
             finishStream(convId);
             return;
           }
+        }
+      }
+
+      /* ★ Epic C sharded-backend affinity hint. Under TOFU_RUNTIME_STATE_BACKEND
+       *   =redis the poll endpoint (routes/chat.py) returns status='running'
+       *   PLUS reconnect:true when the DB has a live 'running' checkpoint but
+       *   the task is absent from THIS replica's memory — it is (probably) alive
+       *   on another replica. Polling here would report 'running' forever
+       *   against a replica that has no live task, so the bubble hangs. Re-open
+       *   the SSE stream instead: taskId affinity re-routes us to the owning
+       *   replica. If SSE now attaches it takes over (return); if it still
+       *   fails, resume polling — bounded by _MAX_RECONNECT_ATTEMPTS so we never
+       *   loop the re-open path forever. (inproc default never sets reconnect, so
+       *   this whole block is dead code on a single-box install.) */
+      if (data.reconnect === true && data.status === 'running'
+          && typeof _trySSE === 'function'
+          && !stream.controller.signal.aborted) {
+        if (_reconnectAttempts < _MAX_RECONNECT_ATTEMPTS) {
+          _reconnectAttempts++;
+          console.warn(`[_pollFallback] ↻ reconnect hint (sharded) — taskId=${taskId.slice(0,8)} ` +
+            `likely on another replica; re-opening SSE (attempt ${_reconnectAttempts}/${_MAX_RECONNECT_ATTEMPTS})`);
+          let _sseTookOver = false;
+          try {
+            _sseTookOver = await _trySSE(convId, taskId, stream, assistantMsg);
+          } catch (e) {
+            if (e && e.name === 'AbortError') { twStop(convId); finishStream(convId); return; }
+            console.warn(`[_pollFallback] reconnect SSE re-open threw: ${e && e.message} — resuming poll`);
+          }
+          if (stream.controller.signal.aborted) { twStop(convId); finishStream(convId); return; }
+          if (_sseTookOver) {
+            /* SSE re-attached and ran to completion on the owning replica; it
+             *   owns finishStream/twStop. Nothing left to poll. */
+            console.info(`[_pollFallback] ✅ SSE re-attached after reconnect hint — conv=${convId.slice(0,8)}; poll yielding`);
+            return;
+          }
+          /* SSE still couldn't attach — fall through to keep polling; the next
+           *   poll may either re-emit the hint (retried, bounded) or the task
+           *   may migrate/settle. */
+        } else {
+          console.warn(`[_pollFallback] reconnect hint exhausted (${_MAX_RECONNECT_ATTEMPTS}) for taskId=${taskId.slice(0,8)} — continuing to poll this replica`);
         }
       }
 

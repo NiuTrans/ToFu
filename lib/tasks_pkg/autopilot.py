@@ -1801,6 +1801,86 @@ def kick_autopilot(conv_id: str, config: dict | None = None) -> dict:
     return {'taskId': task['id']}
 
 
+def resume_armed_autopilot_after_crash(
+        extra_conv_ids: list[str] | None = None) -> list[str]:
+    """Re-kick every autopilot run left armed when the server died.
+
+    When the server dies while an autopilot follow-up is in flight, the
+    end-of-turn hook (:func:`maybe_run_autopilot`) never finished: no VU reply
+    was persisted, no follow-up spawned, and no ``done`` baton was emitted.
+    Startup recovery (:func:`recover_stale_tasks_on_startup`) restores the
+    interrupted assistant reply into the conversation, but it does NOT resume
+    the loop — so the run is left settled-but-armed and only continues on the
+    user's next manual send. This bridges that gap.
+
+    SCOPE — the DURABLE armed-marker is the AUTHORITATIVE source, NOT the set of
+    crash-recovered tasks. We enumerate :func:`list_armed_autopilot_convs` (every
+    conv carrying a ``KIND_AUTOPILOT`` marker row, which survives restart) and
+    re-kick each. This deliberately catches the armed-but-idle case that a
+    recovered-tasks-only gate would MISS: a conversation armed from idle whose
+    carrier never spawned, or whose reply already finished before the crash, has
+    an armed marker but was never an interrupted task — so it is absent from
+    ``recovered_conv_ids`` yet must still resume. ``extra_conv_ids`` (the
+    recovery set) is unioned in for belt-and-braces, but the marker scan is what
+    guarantees completeness.
+
+    Only conversations with an armed marker are resumed — a run that concluded
+    cleanly (``[VU: TASK_DONE]``) or was disarmed cleared its marker, so it is
+    correctly left alone. ``kick_autopilot`` itself refuses (``taskId=None``) if
+    a live non-VU task is already running for the conv, so calling it
+    unconditionally is safe — no double-driving. Best-effort per conv: one
+    failure never aborts the batch.
+
+    Returns the list of conv_ids for which a resume carrier was spawned.
+    """
+    resumed: list[str] = []
+    try:
+        from lib.message_queue import (
+            get_autopilot_marker_config,
+            has_autopilot_marker,
+            list_armed_autopilot_convs,
+        )
+    except Exception as e:
+        logger.warning('[Autopilot] resume-after-crash: message_queue import '
+                       'failed: %s', e)
+        return resumed
+
+    # Authoritative: every conv with a durable armed marker. Union the recovery
+    # set only for logging symmetry — has_autopilot_marker re-gates each below,
+    # so a recovered conv WITHOUT a marker (clean-closed / disarmed) is skipped.
+    try:
+        armed = set(list_armed_autopilot_convs())
+    except Exception as e:
+        logger.warning('[Autopilot] resume-after-crash: marker scan failed: %s', e)
+        armed = set()
+    candidates = armed | {c for c in (extra_conv_ids or []) if c}
+
+    for conv_id in candidates:
+        if not conv_id:
+            continue
+        try:
+            if not has_autopilot_marker(conv_id):
+                continue
+            cfg = get_autopilot_marker_config(conv_id) or {}
+            res = kick_autopilot(conv_id, cfg)
+            new_tid = res.get('taskId')
+            if new_tid:
+                resumed.append(conv_id)
+                logger.info('[Autopilot] Resumed armed run after crash for '
+                            'conv=%s → carrier %s', conv_id[:8], new_tid[:8])
+                audit_log('autopilot_resume_after_crash',
+                          conv_id=conv_id, task_id=new_tid)
+            else:
+                logger.info('[Autopilot] resume-after-crash skipped conv=%s '
+                            '(%s)', conv_id[:8], res.get('error', 'no task'))
+        except Exception as e:
+            logger.warning('[Autopilot] resume-after-crash failed for conv=%s: '
+                           '%s', conv_id[:8], e, exc_info=True)
+    return resumed
+
+
+# ──────────────────────────────────────────────────────────────────
+#  Runtime arming — turn autopilot on for an ALREADY-RUNNING task
 # ──────────────────────────────────────────────────────────────────
 #  Runtime arming — turn autopilot on for an ALREADY-RUNNING task
 # ──────────────────────────────────────────────────────────────────

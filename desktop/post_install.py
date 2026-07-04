@@ -25,8 +25,18 @@ if getattr(sys, 'frozen', False):
 else:
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-DATA_DIR = os.path.join(os.path.dirname(sys.executable) if getattr(sys, 'frozen', False)
-                        else BASE_DIR, 'data')
+# Resolve the WRITABLE data dir. Prefer the shared resolver (lib/runtime_paths)
+# so the first-launch marker + component checks land in the SAME place the
+# server writes to (honours $TOFU_DATA_DIR, falls back to a per-user dir when
+# the exe sibling is read-only, e.g. a Program Files install).
+try:
+    if BASE_DIR not in sys.path:
+        sys.path.insert(0, BASE_DIR)
+    from lib.runtime_paths import data_root as _data_root
+    DATA_DIR = _data_root()
+except Exception:
+    DATA_DIR = os.path.join(os.path.dirname(sys.executable) if getattr(sys, 'frozen', False)
+                            else BASE_DIR, 'data')
 
 # Marker file to track first-launch prompt
 _FIRST_LAUNCH_MARKER = os.path.join(DATA_DIR, '.components_prompted')
@@ -81,31 +91,33 @@ class PlaywrightChromium(Component):
             return False
 
     def install(self, progress_callback=None) -> tuple[bool, str]:
-        """Download and install Playwright Chromium browser."""
+        """Download and install Playwright Chromium browser.
+
+        A PyInstaller --onedir bundle contains NO standalone ``python.exe`` —
+        ``sys.executable`` is ``Tofu.exe`` and ``Tofu.exe -m playwright …`` would
+        just boot a second app. So when frozen we relaunch ``Tofu.exe`` with
+        ``TOFU_PLAYWRIGHT_INSTALL=1``, which the launcher recognises and turns
+        into an in-process ``playwright install chromium``. From source we use
+        the interpreter's ``-m playwright`` directly.
+        """
         try:
             if progress_callback:
                 progress_callback(self.name, 'Downloading Chromium...')
 
-            # Find the python executable in our frozen bundle or env
-            python_exe = sys.executable
+            env = os.environ.copy()
+            if getattr(sys, 'frozen', False):
+                cmd = [sys.executable]
+                env['TOFU_PLAYWRIGHT_INSTALL'] = '1'
+            else:
+                cmd = [sys.executable, '-m', 'playwright', 'install', 'chromium']
 
-            # Run playwright install chromium
             result = subprocess.run(
-                [python_exe, '-m', 'playwright', 'install', 'chromium'],
-                capture_output=True, text=True, timeout=600
+                cmd, env=env, capture_output=True, text=True, timeout=600
             )
 
             if result.returncode == 0:
                 return True, 'Chromium browser installed successfully.'
-            else:
-                # Try alternative: direct playwright CLI
-                result2 = subprocess.run(
-                    [python_exe, '-m', 'playwright', 'install', '--with-deps', 'chromium'],
-                    capture_output=True, text=True, timeout=600
-                )
-                if result2.returncode == 0:
-                    return True, 'Chromium browser installed successfully (with system deps).'
-                return False, f'Installation failed: {result.stderr or result2.stderr}'
+            return False, f'Installation failed: {result.stderr or result.stdout}'
 
         except subprocess.TimeoutExpired:
             return False, 'Download timed out (10 min). Check your network connection.'

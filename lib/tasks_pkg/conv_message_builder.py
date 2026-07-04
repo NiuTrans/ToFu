@@ -357,6 +357,29 @@ def _build_user_message(msg: dict) -> dict:
             img_url = ''
             if img.get('base64'):
                 media_type = img.get('mediaType', 'image/png')
+                # Source guard: the stored ``mediaType`` is a DB value written
+                # by the upload path and is NOT trusted — a PNG saved with
+                # mediaType='image/jpeg' (or vice-versa) is where the mislabeled
+                # data URI is BORN. Sniff the real format from the base64 prefix
+                # and correct it here so the DB never even emits a mismatched
+                # URL. The Anthropic Messages API HARD-REJECTS a media-type/bytes
+                # mismatch (HTTP 400 "messages.N.content.0.image.source.base64:
+                # The image was specified using the image/jpeg media type, but the
+                # image does not appear to be in that format."). Best-effort: on
+                # any decode failure keep the stored type; payload is untouched.
+                try:
+                    import base64 as _b64
+
+                    from lib.llm.body import sniff_image_mime
+                    _sniffed = sniff_image_mime(_b64.b64decode(img['base64'][:1364]))
+                    if _sniffed and _sniffed != media_type:
+                        logger.warning(
+                            '[MsgBuilder] Corrected mislabeled stored image '
+                            'mediaType %r → %r (bytes sniffed as %s) before '
+                            'building data URI', media_type, _sniffed, _sniffed)
+                        media_type = _sniffed
+                except Exception as _mte:
+                    logger.debug('[MsgBuilder] image mediaType sniff skipped: %s', _mte)
                 img_url = f'data:{media_type};base64,{img["base64"]}'
             elif img.get('url'):
                 # Pass through — backend _validate_image_blocks resolves

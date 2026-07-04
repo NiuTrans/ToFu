@@ -129,6 +129,31 @@ def test_review_prompt_has_anti_slop_constraints():
     _ok('review prompt encodes anti-slop HARD constraints (anchored evidence, banned phrases, fetch_url verify)')
 
 
+def test_review_prompt_human_reviewer_voice_and_precise_weaknesses():
+    """The 2026-07 tuning: Summary/Strengths must be in a human reviewer's
+    voice (NOT a forensic per-clause audit), and Weaknesses must be PRECISE
+    (a small number of decisive/hidden flaws) rather than a padded quota."""
+    from lib.paper import build_review_prompt
+    p = build_review_prompt('neurips', 'en').lower()
+    # Human-reviewer framing exists as an explicit constraint.
+    assert 'write like a human reviewer' in p
+    # Summary/Strengths are NO LONGER forced to carry a number/benchmark on
+    # every clause — they explicitly permit a high-level, own-words voice.
+    assert 'your own words' in p and 'do not need to pack in exact numbers' in p
+    # Weaknesses: quality/precision over quantity + hunt real & hidden flaws.
+    assert 'precise, not numerous' in p
+    assert 'quality and precision over quantity' in p
+    assert 'hidden flaw' in p or 'flaw the authors themselves may not have noticed' in p
+    # The anchoring HARD constraint now lives on Weaknesses specifically.
+    assert 'a weakness with no anchor is deleted' in p
+    # ZH parity.
+    pz = build_review_prompt('iclr', 'zh')
+    assert '像人类审稿人一样写' in pz
+    assert '用你自己的话' in pz or '用**你自己的话**' in pz
+    assert '宁精勿多' in pz and '真问题' in pz
+    _ok('review prompt: human-reviewer voice for Summary/Strengths + precise-not-numerous Weaknesses')
+
+
 # ─── Cache-key non-pollution ─────────────────────────────────────
 
 def test_make_review_lang_distinct_from_report_key():
@@ -378,6 +403,7 @@ def main():
         test_review_prompt_picks_venue_scorecard,
         test_review_prompt_ui_language,
         test_review_prompt_has_anti_slop_constraints,
+        test_review_prompt_human_reviewer_voice_and_precise_weaknesses,
         test_make_review_lang_distinct_from_report_key,
         test_engine_review_injects_with_real_uilang_and_persists_composite_key,
         test_review_appendix_suppressed_report_keeps_it,

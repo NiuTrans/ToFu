@@ -3709,9 +3709,38 @@ async function _loadOrGenerateReport(view) {
     console.warn('[Paper:Report] Cache lookup failed:', e);
   }
 
-  // (4) No cache, no running task — start a new one
+  // (4) No cache, no running task — DO NOT auto-start. Show a manual-start
+  // prompt so the user can first adjust the model / language / venue in the
+  // toolbar, then click Generate. (User preference: never auto-generate on
+  // tab open, otherwise the settings can't be tuned before the run begins.)
   if (_activePaperId !== startPaperId) return;
-  _generatePaperReport(false, view);
+  _renderReportStartPrompt(view);
+}
+
+/** Manual-start prompt: rendered when a paper is loaded but no report/review
+ *  exists yet (no cache, no running task). The toolbar (model / language /
+ *  venue) is already visible and tunable; the user clicks Generate to begin.
+ *  This is the seam that keeps generation user-initiated. */
+function _renderReportStartPrompt(view) {
+  view = view || _reportView('report');
+  var container = document.getElementById(view.containerId);
+  if (!container) return;
+  _syncReportToolbar(false, view);
+  var isReview = view.kind === 'review';
+  var genFn = isReview ? '_generatePaperReview()' : '_generatePaperReport()';
+  var _tt = (typeof t === 'function') ? t : function(k) { return k; };
+  var title = _tt(isReview ? 'paper.reviewEmptyTitle' : 'paper.reportEmptyTitle');
+  var hint = _tt(isReview ? 'paper.reviewEmptyHint' : 'paper.reportEmptyHint');
+  var btnLabel = _tt(isReview ? 'paper.reviewGenerate' : 'paper.reportGenerate');
+  container.innerHTML =
+    '<div class="paper-report-empty">' +
+      '<p>' + escapeHtml(title) + '</p>' +
+      '<p class="paper-report-hint">' + escapeHtml(hint) + '</p>' +
+      '<button class="paper-report-generate-btn" onclick="' + genFn + '">' +
+        '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>' +
+        '<span>' + escapeHtml(btnLabel) + '</span>' +
+      '</button>' +
+    '</div>';
 }
 
 /** Review-Mode entry: load-or-generate against the review view-context. */
@@ -3744,10 +3773,19 @@ function _populatePaperReportModelDropdown(view) {
   });
 
   // No "Default (auto)" option — generation should always use a specific,
-  // user-visible model. Auto-select the first visible chat model if nothing
-  // has been chosen yet, so the "Default" label is never ambiguous.
+  // user-visible model. When nothing has been chosen yet, default to the
+  // model the user picked in the frontend toolbar preset (config.model, then
+  // the configured serverModel), so Reading/Review Mode stays consistent with
+  // the rest of the app. Fall back to the first visible chat model only when
+  // that preset isn't among the available chat models.
   if (!view.model && chatModels.length > 0) {
-    _selectPaperReportModel(chatModels[0].model_id, view);
+    var availableIds = {};
+    for (var ci = 0; ci < chatModels.length; ci++) availableIds[chatModels[ci].model_id] = true;
+    var preset = (typeof config !== 'undefined' && config && config.model)
+      ? config.model
+      : ((typeof serverModel !== 'undefined' && serverModel) ? serverModel : '');
+    var seed = (preset && availableIds[preset]) ? preset : chatModels[0].model_id;
+    _selectPaperReportModel(seed, view);
   }
 
   // Group by provider

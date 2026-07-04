@@ -160,5 +160,138 @@ class NonLinkableToolTest(unittest.TestCase):
         self.assertFalse(extra.get('_mcpLinks'))
 
 
+class BatchCommitPathDisplayTest(unittest.TestCase):
+    """batch_commit / batch_delete / push_files carry paths inside a
+    ``files``/``paths`` list, invisible to the flat arg scan — so the title
+    line used to degrade to ``main @ owner/repo`` with no paths shown."""
+
+    def test_batch_commit_lists_every_path(self):
+        args = {
+            'owner': 'rangehow', 'repo': 'ToFu', 'branch': 'main',
+            'message': 'x',
+            'files': [
+                {'path': 'lib/tasks_pkg/tool_display.py', 'content': '...'},
+                {'path': 'static/js/ui/tool_rounds.js', 'content': '...'},
+            ],
+            'delete_paths': ['old/legacy.py'],
+        }
+        disp, extra = _tool_display_mcp(
+            'mcp__github-batch__batch_commit', args, 't', '{}',
+        )
+        # Every path appears, one per line; deletes get a − marker.
+        self.assertIn('lib/tasks_pkg/tool_display.py', disp)
+        self.assertIn('static/js/ui/tool_rounds.js', disp)
+        self.assertIn('− old/legacy.py', disp)
+        self.assertIn('3 files', disp)
+        self.assertIn('@ rangehow/ToFu', disp)
+        # The multiline form is exposed as _display_query so it survives into
+        # the SSE tool_start event (which prefers _display_query).
+        self.assertEqual(extra.get('_display_query'), disp)
+        # NC: the OLD behaviour showed the branch as the resource and no path.
+        self.assertNotIn('main @ rangehow/ToFu', disp.split('\n')[0])
+
+    def test_batch_delete_lists_paths(self):
+        disp, _extra = _tool_display_mcp(
+            'mcp__github-batch__batch_delete',
+            {'owner': 'a', 'repo': 'b', 'branch': 'main', 'message': 'm',
+             'paths': ['x.py', 'y.py']},
+            't', '{}',
+        )
+        self.assertIn('− x.py', disp)
+        self.assertIn('− y.py', disp)
+        self.assertIn('@ a/b', disp)
+
+    def test_official_push_files_lists_paths(self):
+        disp, _extra = _tool_display_mcp(
+            'mcp__github__push_files',
+            {'owner': 'a', 'repo': 'b', 'branch': 'main', 'message': 'm',
+             'files': [{'path': 'README.md', 'content': '# hi'}]},
+            't', '{}',
+        )
+        self.assertIn('README.md', disp)
+        self.assertIn('1 file', disp)
+
+    def test_non_batch_mcp_call_unaffected(self):
+        # A flat-arg call still routes through _mcp_arg_suffix unchanged.
+        disp, _extra = _tool_display_mcp(
+            'mcp__github__create_issue',
+            {'owner': 'a', 'repo': 'b', 'title': 'Bug', 'issue_number': 5},
+            't', '{}',
+        )
+        self.assertNotIn('\n', disp)
+        self.assertIn('Bug', disp)
+
+
+class PostBuildTitleTest(unittest.TestCase):
+    """The persisted results-row title (handlers/mcp.py::_post_build) must use
+    the SAME compose_mcp_display helper as the live tool-line — otherwise a
+    batch_commit title regresses to the branch-only ``main @ owner/repo`` once
+    the commit completes (dual-source drift)."""
+
+    def _run_post_build(self, fn_name, fn_args, tool_content='ok'):
+        """Drive the REAL _post_build closure without a live MCP bridge.
+
+        Monkeypatches ``get_bridge`` (so handle_mcp_tool can build the
+        closure) and stubs ``simple_call`` to capture the ``post_build``
+        callback, then invokes it against a fresh ``meta`` dict. Returns the
+        resulting ``meta``.
+        """
+        import lib.mcp as mcp_pkg
+        import lib.tasks_pkg.handlers.mcp as mcp_handler
+
+        class _FakeBridge:
+            def get_tool_info(self, name):
+                server, tool = name.replace('mcp__', '', 1).split('__', 1)
+                return {'server_name': server, 'tool_name': tool}
+
+        captured = {}
+
+        def _fake_simple_call(task, fn, args, rn, round_entry, tc_id,
+                              *, executor, source, module_tag, extra,
+                              post_build=None, **_kw):
+            captured['post_build'] = post_build
+            return tc_id, 'ok', False
+
+        orig_get_bridge = mcp_pkg.get_bridge
+        orig_simple_call = mcp_handler.simple_call
+        mcp_pkg.get_bridge = lambda: _FakeBridge()
+        mcp_handler.simple_call = _fake_simple_call
+        try:
+            mcp_handler.handle_mcp_tool(
+                {}, {}, fn_name, 't', fn_args, 1, {}, {}, None, False,
+            )
+            meta = {}
+            captured['post_build'](meta, tool_content, fn_args)
+            return meta
+        finally:
+            mcp_pkg.get_bridge = orig_get_bridge
+            mcp_handler.simple_call = orig_simple_call
+
+    def test_batch_commit_title_has_paths(self):
+        meta = self._run_post_build(
+            'mcp__github-batch__batch_commit',
+            {'owner': 'rangehow', 'repo': 'ToFu', 'branch': 'main',
+             'message': 'm',
+             'files': [{'path': 'lib/x.py', 'content': '...'},
+                       {'path': 'static/y.js', 'content': '...'}],
+             'delete_paths': ['old/z.py']},
+        )
+        title = meta['title']
+        self.assertIn('lib/x.py', title)
+        self.assertIn('static/y.js', title)
+        self.assertIn('− old/z.py', title)
+        self.assertIn('3 files', title)
+        # NC: the OLD (drifted) _post_build produced this branch-only title.
+        self.assertNotEqual(title, 'github-batch/batch_commit — main @ rangehow/ToFu')
+
+    def test_flat_arg_title_unchanged(self):
+        meta = self._run_post_build(
+            'mcp__github__create_issue',
+            {'owner': 'a', 'repo': 'b', 'title': 'Bug', 'issue_number': 5},
+        )
+        self.assertEqual(meta['title'], 'github/create_issue — Bug @ a/b')
+        self.assertEqual(meta['badge'], 'github')
+
+
 if __name__ == '__main__':
     unittest.main()

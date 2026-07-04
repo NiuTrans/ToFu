@@ -248,9 +248,11 @@ function _showCurlHelper(provider, code, state, reason) {
   var copyBtn = document.getElementById('oauth' + capP + 'CurlCopy');
   if (copyBtn) {
     copyBtn.onclick = function() {
-      ta.select(); document.execCommand('copy');
-      var b = this; b.textContent = '已复制';
-      setTimeout(function() { b.textContent = '复制命令'; }, 1500);
+      var b = this;
+      _safeClipboardWrite(ta.value).then(function() {
+        b.textContent = '已复制';
+        setTimeout(function() { b.textContent = '复制命令'; }, 1500);
+      }).catch(function(e) { debugLog('[OAuth] copy failed: ' + e.message, 'warn'); });
     };
   }
   // Repurpose the paste input for the JSON result.

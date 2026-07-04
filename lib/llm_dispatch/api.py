@@ -651,8 +651,17 @@ def _adapt_stream_body_for_slot(slot, body_or_messages, is_body, *,
                 provider_id=slot.provider_id or '')
         _readjust_thinking_params(body, slot.model, slot.thinking_format or '')
         from lib.llm import _downscale_oversized_images, _strip_trailing_assistant_for_claude, is_claude
+        from lib.llm.body import _validate_image_blocks
         if is_claude(slot.model) and body.get('messages'):
             _strip_trailing_assistant_for_claude(body['messages'], slot.model)
+            # Reconcile any mislabeled image data-URI media type BEFORE the
+            # downscale pass. On this pre-built-body swap path (dispatch
+            # swapped the model onto Claude), build_body's _validate_image_blocks
+            # never ran, so a stored data:image/jpeg URI holding PNG bytes would
+            # reach the strict Anthropic Messages API and 400 the turn. Run it
+            # here so the swap path has the same self-consistency guarantee as
+            # the fresh-build path.
+            _validate_image_blocks(body['messages'])
             _downscale_oversized_images(body['messages'], slot.model)
         from lib.llm.body import _inject_gemini_thought_signatures
         from lib.model_info import is_gemini as _is_gemini

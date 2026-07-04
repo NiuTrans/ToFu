@@ -183,7 +183,11 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
 // ── 4. Non-data / id lines + bad JSON are no-ops (return falsy) ──
 {
   const { ctx } = setup();
-  check('id_line_noop', !T.dispatchSSEEvent('id: 42', ctx) && ctx.lastEventId === '42');
+  // An `id:` line no longer COMMITS the cursor immediately — it only stashes
+  // a pending id (committed once the paired data event applies, see #27). So
+  // lastEventId stays unchanged after a lone id line.
+  check('id_line_noop', !T.dispatchSSEEvent('id: 42', ctx) && ctx.lastEventId == null);
+  check('id_line_stashes_pending', ctx.pendingEventId === '42');
   check('comment_line_noop', !T.dispatchSSEEvent(': keepalive', ctx));
   check('bad_json_noop', !T.dispatchSSEEvent('data: {not json', ctx));
 }
@@ -552,6 +556,80 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
     oo3.phase === 'error');
 }
 
+// ── 27. CURSOR-COMMIT CONTRACT (resume-loss bug fix): the Last-Event-ID
+//        cursor must be committed only AFTER the paired data event is
+//        applied, never on the lone id line. Wire order is `id: N` then
+//        `data: {...}`. A drop between the two must NOT advance the cursor
+//        past the unapplied delta (which the resume `event_id > cursor`
+//        would then silently skip). ──
+{
+  const { ctx } = setup();
+  // (a) id then its paired data → cursor commits to that id, buf advances.
+  T.dispatchSSEEvent('id: 5', ctx);
+  check('cursor_not_committed_before_data', ctx.lastEventId == null &&
+    ctx.pendingEventId === '5');
+  T.dispatchSSEEvent(line({ type: 'delta', content: 'A' }), ctx);
+  check('cursor_committed_after_data', ctx.lastEventId === '5' &&
+    ctx.pendingEventId == null && ctx.assistantMsg.content === 'A');
+  // (b) next id arrives but its data line is DROPPED (never delivered).
+  //     The cursor must stay at 5 — NOT advance to 6 — so a resume re-sends
+  //     event 6 rather than skipping it.
+  T.dispatchSSEEvent('id: 6', ctx);
+  check('dropped_data_leaves_cursor', ctx.lastEventId === '5' &&
+    ctx.pendingEventId === '6');
+  // (c) the retried event 6 finally applies → cursor advances to 6, and the
+  //     delta is applied exactly once (no loss).
+  T.dispatchSSEEvent('id: 6', ctx);
+  T.dispatchSSEEvent(line({ type: 'delta', content: 'B' }), ctx);
+  check('retried_event_applied_once', ctx.lastEventId === '6' &&
+    ctx.assistantMsg.content === 'AB');
+}
+
+// ── 28. PHASE 1 (parity-gap closure): a `done` event carrying
+//        `committedMessage` PROJECTS IT VERBATIM onto the settled bubble —
+//        the single source of truth for settled state. content/thinking go
+//        through keep-longer; toolRounds + terminal metadata are taken
+//        verbatim from the committed DB dict. ──
+{
+  const { am, ctx } = setup();
+  // Client streamed a short partial; the backend committed the fuller answer.
+  T.dispatchSSEEvent(line({ type: 'delta', content: 'short partial' }), ctx);
+  const committed = {
+    role: 'assistant',
+    content: 'THE FULL COMMITTED ANSWER from the DB, longer than the partial',
+    thinking: 'committed reasoning',
+    toolRounds: [{ roundNum: 1, toolCallId: 'x', status: 'done', results: [] }],
+    finishReason: 'stop', usage: { total_tokens: 77 }, model: 'db-model',
+    cost: { costCny: 0.01 }, apiRounds: [{ round: 1 }],
+  };
+  const ret = T.dispatchSSEEvent(line({ type: 'done', finishReason: 'stop',
+    committedMessage: committed }), ctx);
+  check('committed_done_returns_true', ret === true);
+  check('committed_projects_content_verbatim',
+    am.content === 'THE FULL COMMITTED ANSWER from the DB, longer than the partial');
+  check('committed_projects_thinking_verbatim', am.thinking === 'committed reasoning');
+  check('committed_projects_toolrounds_verbatim',
+    Array.isArray(am.toolRounds) && am.toolRounds.length === 1 &&
+    am.toolRounds[0].toolCallId === 'x');
+  check('committed_projects_metadata',
+    am.finishReason === 'stop' && am.model === 'db-model' &&
+    am.usage && am.usage.total_tokens === 77 && am.cost && am.cost.costCny === 0.01);
+  check('committed_stamps_projection_flag', am._committedProjection === true);
+}
+
+// ── 29. OFFLINE FALLBACK (Phase-2 invariant, verified here): a `done` WITHOUT
+//        `committedMessage` (server died before commit / skip path) must NOT
+//        blank the bubble — the transient streamed content is preserved as the
+//        terminal fallback. ──
+{
+  const { am, ctx } = setup();
+  T.dispatchSSEEvent(line({ type: 'delta', content: 'streamed partial answer' }), ctx);
+  const ret = T.dispatchSSEEvent(line({ type: 'done', finishReason: 'stop' }), ctx);
+  check('no_committed_done_returns_true', ret === true);
+  check('no_committed_keeps_streamed_content', am.content === 'streamed partial answer');
+  check('no_committed_no_projection_flag', am._committedProjection === undefined);
+}
+
 console.log(out.join('\n'));
 """
 
@@ -584,5 +662,5 @@ def test_sse_dispatch_characterization():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'SSE dispatch characterization failures:\n' + output
-    # 26 scenario groups, ~59 individual checks.
-    assert output.count('PASS') >= 57, f'expected >=57 PASS lines, got:\n{output}'
+    # 29 scenario groups, ~74 individual checks.
+    assert output.count('PASS') >= 72, f'expected >=72 PASS lines, got:\n{output}'

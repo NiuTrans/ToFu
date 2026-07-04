@@ -59,83 +59,101 @@ def _default_max_inflight() -> int:
     return max(0, n)
 
 
-class AdmissionController:
-    """Bounds concurrent in-flight agent tasks with an asyncio.Semaphore.
+def _admit_slot_ttl() -> float:
+    """Lease TTL for an admission slot (seconds) — the crash-only backstop.
 
-    The semaphore is created lazily on first use so it binds to the
-    running event loop (Hypercorn's), not whatever loop happened to be
-    current at import time. ``max_inflight=0`` means unbounded.
+    Generous (default 1h) because a slot is normally released EAGERLY on the
+    task's terminal event (``on_terminal`` → :meth:`release`); the TTL only
+    reclaims a slot whose owning replica crashed mid-task. Override via
+    ``TOFU_ADMIT_SLOT_TTL``.
     """
+    try:
+        n = float(os.environ.get('TOFU_ADMIT_SLOT_TTL', '') or '3600')
+    except (ValueError, TypeError):
+        n = 3600.0
+    return max(1.0, n)
+
+
+class AdmissionController:
+    """Bounds concurrent in-flight agent tasks via the shared lease store.
+
+    Re-keyed (Build Order step 2) onto ``lib.runtime_state_store`` via the
+    ATOMIC bounded ``acquire_slot`` primitive: the in-flight COUNT is
+    authoritative in the store, so under ``TOFU_RUNTIME_STATE_BACKEND=redis``
+    the ceiling is ``N``-invariant across replicas and a crashed replica's
+    slots reclaim by lease TTL; under the default ``inproc`` backend the
+    behaviour is byte-equivalent to the old in-process semaphore. The atomic
+    acquire means concurrent admits can never overshoot the ceiling.
+
+    The public contract is unchanged — ``try_acquire()`` / ``release()`` take
+    no id (6 call sites rely on that). Since ``release()`` has no id, THIS
+    replica tracks the slot keys it minted in an in-process LIFO and releases
+    one per ``release()`` call. That bookkeeping is intentionally per-replica
+    (a replica only releases its OWN slots; a crashed replica's slots reclaim
+    by TTL) — it does NOT undermine the cross-replica count, which lives in the
+    store. ``max_inflight=0`` means unbounded.
+    """
+
+    _KIND = 'admit'
 
     def __init__(self, max_inflight: Optional[int] = None):
         self.max_inflight = (_default_max_inflight()
                              if max_inflight is None else max(0, max_inflight))
-        self._sem: Optional[asyncio.Semaphore] = None
         self._lock = threading.Lock()
-        self._in_flight = 0
+        self._held: list[str] = []  # this replica's minted slot keys (LIFO)
+        self._ttl = _admit_slot_ttl()
 
-    def _ensure_sem(self) -> Optional[asyncio.Semaphore]:
-        if self.max_inflight <= 0:
-            return None
-        if self._sem is None:
-            with self._lock:
-                if self._sem is None:
-                    self._sem = asyncio.Semaphore(self.max_inflight)
-        return self._sem
+    def _store(self):
+        from lib.runtime_state_store import get_store
+        return get_store()
 
     def try_acquire(self) -> bool:
         """Acquire a slot without blocking.
 
         Returns True if a slot was granted (caller MUST later call
-        :meth:`release`), False if the server is at capacity (caller
-        should return 503). Always True when unbounded.
+        :meth:`release`), False if the server is at capacity (503). Always
+        True when unbounded. Atomic — no check-then-act overshoot.
         """
-        sem = self._ensure_sem()
-        if sem is None:
+        import uuid
+        slot_key = uuid.uuid4().hex
+        ok = self._store().acquire_slot(
+            self._KIND, slot_key, limit=self.max_inflight, ttl=self._ttl,
+            count_prefix='')
+        if ok:
             with self._lock:
-                self._in_flight += 1
-            return True
-        if sem.locked() or sem._value <= 0:  # type: ignore[attr-defined]
-            return False
-        # Non-blocking acquire: _value > 0 was just observed; decrement.
-        # Semaphore.acquire() returns an already-done future when a permit
-        # is free, so this never actually suspends here.
-        try:
-            sem._value -= 1  # type: ignore[attr-defined]
-        except Exception as e:  # pragma: no cover — defensive
-            logger.warning('[Admission] semaphore decrement failed: %s', e)
-            return False
-        with self._lock:
-            self._in_flight += 1
-        return True
+                self._held.append(slot_key)
+        return ok
 
     def release(self) -> None:
-        """Return a slot. Idempotent-safe against over-release."""
+        """Return a slot. Idempotent-safe against over-release (pops one of
+        THIS replica's minted slot keys and deletes it from the store)."""
         with self._lock:
-            if self._in_flight > 0:
-                self._in_flight -= 1
-        sem = self._sem
-        if sem is not None:
-            try:
-                sem.release()
-            except ValueError as e:
-                # Released more than acquired — log, don't crash.
-                logger.warning('[Admission] over-release ignored: %s', e)
+            slot_key = self._held.pop() if self._held else None
+        if slot_key is None:
+            # Over-release (more releases than acquires on this replica) — the
+            # store count is already correct; nothing to delete. Log at debug.
+            logger.debug('[Admission] release with no held slot — over-release')
+            return
+        try:
+            self._store().release_slot(self._KIND, slot_key, '')
+        except Exception as e:
+            logger.warning('[Admission] slot release failed: %s', e)
 
     @property
     def in_flight(self) -> int:
-        with self._lock:
-            return self._in_flight
+        # Authoritative cross-replica count (store); fail-open → 0.
+        return self._store().count_slots(self._KIND, '')
 
     @property
     def capacity(self) -> int:
         return self.max_inflight
 
     def stats(self) -> dict:
+        inflight = self.in_flight
         return {
-            'in_flight': self.in_flight,
+            'in_flight': inflight,
             'capacity': self.max_inflight,
-            'available': (max(0, self.max_inflight - self.in_flight)
+            'available': (max(0, self.max_inflight - inflight)
                           if self.max_inflight > 0 else -1),
         }
 

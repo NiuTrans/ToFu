@@ -46,10 +46,18 @@ jobs:
       - id: ver
         run: |
           if [ -n "${{ inputs.version_override }}" ]; then
-            echo "version=${{ inputs.version_override }}" >> "$GITHUB_OUTPUT"
+            VER="${{ inputs.version_override }}"
           else
-            echo "version=$(cat VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+            VER="$(cat VERSION | tr -d '[:space:]')"
           fi
+          # Fail fast: an empty version silently produces a malformed installer
+          # named "Tofu-Setup--win64.exe" with a blank AppVersion.
+          if [ -z "$VER" ]; then
+            echo "::error::Could not determine version (VERSION file empty and no override)."
+            exit 1
+          fi
+          echo "Resolved version: $VER"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
 
   # ── Windows ──────────────────────────────────────────────────
   build-windows:
@@ -73,57 +81,103 @@ jobs:
       - name: Generate icons
         run: python scripts/gen_desktop_icons.py
 
+      - name: Verify build inputs
+        shell: bash
+        run: |
+          # The Inno SetupIconFile is a HARD requirement — a missing icon aborts
+          # the compile. Fail here with a clear message instead of a cryptic
+          # ISCC error later.
+          test -f static/icons/tofu.ico || {
+            echo "::error::static/icons/tofu.ico not generated — gen_desktop_icons.py failed."
+            exit 1
+          }
+          echo "Icon present: $(ls -l static/icons/tofu.ico)"
+
       - name: Build with PyInstaller
         run: pyinstaller tofu.spec
+
+      - name: Verify PyInstaller output
+        shell: bash
+        run: |
+          test -f "dist/Tofu/Tofu.exe" || {
+            echo "::error::PyInstaller did not produce dist/Tofu/Tofu.exe."
+            exit 1
+          }
+          echo "Built: $(ls -l dist/Tofu/Tofu.exe)"
 
       - name: Create Inno Setup script
         shell: bash
         env:
           APP_VERSION: ${{ needs.version.outputs.version }}
         run: |
-          cat > installer.iss << 'INNO_EOF'
+          set -euo pipefail
+          # Unquoted heredoc so bash expands $APP_VERSION directly — no fragile
+          # post-hoc sed pass. APP_VERSION is guaranteed non-empty by the
+          # `version` job (which fails fast otherwise).
+          #
+          # Design notes (fixes for previously-broken installer):
+          #   * PrivilegesRequired=lowest paired with a PER-USER install dir
+          #     ({localappdata}\Programs\Tofu) — a standard user can write there
+          #     with no UAC elevation, and the app's portable data/ + logs/ dirs
+          #     (created next to the exe) are therefore writable too. The old
+          #     {autopf}=Program Files dir was NOT writable under `lowest`, so
+          #     the app crashed on first launch trying to create data/.
+          #   * NO [Run] step shells out to a bundled python.exe — PyInstaller
+          #     --onedir has no standalone python.exe (the interpreter is inside
+          #     Tofu.exe). Chromium/PostgreSQL are offered by the app's OWN
+          #     first-launch dialog (desktop/post_install.py), which invokes the
+          #     frozen interpreter correctly. The installer just ships files and
+          #     launches the app.
+          cat > installer.iss << INNO_EOF
           [Setup]
           AppName=Tofu
           AppVersion=${APP_VERSION}
           AppPublisher=Tofu Project
           AppPublisherURL=https://github.com/rangehow/ToFu
-          DefaultDirName={autopf}\Tofu
+          DefaultDirName={localappdata}\\Programs\\Tofu
           DefaultGroupName=Tofu
-          UninstallDisplayIcon={app}\Tofu.exe
+          DisableProgramGroupPage=yes
+          UninstallDisplayIcon={app}\\Tofu.exe
           OutputDir=installer_output
           OutputBaseFilename=Tofu-Setup-${APP_VERSION}-win64
           Compression=lzma2/ultra64
           SolidCompression=yes
           ArchitecturesAllowed=x64compatible
           ArchitecturesInstallIn64BitMode=x64compatible
-          SetupIconFile=static\icons\tofu.ico
+          SetupIconFile=static\\icons\\tofu.ico
           PrivilegesRequired=lowest
           WizardStyle=modern
 
           [Files]
-          Source: "dist\Tofu\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+          Source: "dist\\Tofu\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 
           [Icons]
-          Name: "{group}\Tofu"; Filename: "{app}\Tofu.exe"
-          Name: "{autodesktop}\Tofu"; Filename: "{app}\Tofu.exe"; Tasks: desktopicon
+          Name: "{autoprograms}\\Tofu"; Filename: "{app}\\Tofu.exe"
+          Name: "{autodesktop}\\Tofu"; Filename: "{app}\\Tofu.exe"; Tasks: desktopicon
 
           [Tasks]
           Name: desktopicon; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
-          Name: installbrowser; Description: "Download Browser Engine (~150 MB, recommended for web fetching)"; GroupDescription: "Optional Components (downloaded after install):"; Flags: checkedonce
-          Name: installpg; Description: "Set up PostgreSQL database (~50 MB, recommended)"; GroupDescription: "Optional Components (downloaded after install):"; Flags: checkedonce
 
           [Run]
-          Filename: "{app}\Tofu.exe"; Description: "Launch Tofu"; Flags: nowait postinstall skipifsilent
-          Filename: "{app}\_internal\python.exe"; Parameters: "-m playwright install chromium"; Description: "Downloading Browser Engine..."; StatusMsg: "Installing Chromium browser engine..."; Flags: runhidden postinstall skipifnotsilent; Tasks: installbrowser
+          Filename: "{app}\\Tofu.exe"; Description: "Launch Tofu"; Flags: nowait postinstall skipifsilent
           INNO_EOF
 
-          # Substitute env vars in the iss file
-          sed -i "s/\${APP_VERSION}/$APP_VERSION/g" installer.iss
+          echo "── Generated installer.iss ──"
+          cat installer.iss
 
       - name: Build installer with Inno Setup
         uses: Minionguyjpro/Inno-Setup-Action@v1.2.4
         with:
           path: installer.iss
+
+      - name: Verify installer output
+        shell: bash
+        run: |
+          ls -l installer_output/ || true
+          test -n "$(ls installer_output/*.exe 2>/dev/null)" || {
+            echo "::error::Inno Setup did not produce an installer .exe."
+            exit 1
+          }
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4

@@ -5,15 +5,254 @@ connections per host, causing 18 JS files to download in 3-4 serial waves.
 With the bundle, the browser fetches 1 file (gzip ~250KB) in a single request.
 
 The bundle is rebuilt at startup and whenever any source file changes.
-No npm/webpack/build step required — pure Python concatenation.
+No npm/webpack/build step required — pure Python concatenation + a
+conservative, dependency-free minify pass (``_minify_js``, see below).
 """
 import hashlib
 import os
+import shutil
+import subprocess
 import time
 
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+
+def _minify_js(src: str) -> str:
+    r"""Conservatively strip comments + non-semantic whitespace from JS.
+
+    A single forward char-scan that tracks lexical state — string literals
+    (``'`` / ``"``), template literals (`` ` `` incl. ``${ }`` interpolation
+    with its own brace depth), and regex literals — so a ``//`` or ``/* */``
+    that lives INSIDE one of those is never mistaken for a comment. Outside
+    those contexts it drops line (``//``) and block (``/* */``) comments.
+
+    LINE-PRESERVING by design: newlines are kept (only blank lines, leading
+    indentation, and trailing whitespace are dropped). Keeping ``\n`` means the
+    transform can only ever DELETE comment bytes and horizontal whitespace —
+    never move code across a line boundary — so it introduces NO
+    Automatic-Semicolon-Insertion hazard and can never fuse two tokens. This is
+    the same fail-safe philosophy as ``lib/css_bundler._minify_css``; the
+    regex-vs-divide call is deliberately conservative (when unsure, treat ``/``
+    as division and leave the bytes intact) so a misjudgement can only leave a
+    comment un-stripped, never corrupt real code.
+
+    Returns the source UNCHANGED on any unexpected condition (never raises).
+    ``build_bundle`` still runs the ``node --check`` gate on the concatenated
+    result, so even a latent minifier bug degrades to "serve the un-minified
+    fallback", never a white screen.
+    """
+    out = []
+    i = 0
+    n = len(src)
+    quote = ''            # inside '...' / "..." → the delimiter char
+    in_template = 0       # template-literal nesting depth
+    template_expr = []    # per open template: brace depth inside ${ } (0 = raw text)
+    in_regex = False
+    in_line_comment = False
+    in_block_comment = False
+    last_sig = ''         # last emitted significant char (regex-vs-divide hint)
+
+    def _regex_allowed(prev):
+        # A '/' begins a regex (not division) when the previous significant
+        # token is one after which a VALUE is expected. Conservative: unknown
+        # → treat as divide (safe — leaves bytes intact).
+        if prev == '':
+            return True
+        return prev in '(,=:[!&|?{};+-*%^~<>'
+
+    while i < n:
+        c = src[i]
+        nxt = src[i + 1] if i + 1 < n else ''
+
+        if in_line_comment:
+            if c == '\n':
+                in_line_comment = False
+                out.append(c)
+            i += 1
+            continue
+        if in_block_comment:
+            if c == '*' and nxt == '/':
+                in_block_comment = False
+                i += 2
+            else:
+                if c == '\n':
+                    out.append('\n')   # keep line count stable
+                i += 1
+            continue
+        if quote:
+            out.append(c)
+            if c == '\\' and i + 1 < n:
+                out.append(nxt)
+                i += 2
+                continue
+            if c == quote:
+                quote = ''
+                last_sig = c
+            i += 1
+            continue
+        if in_regex:
+            out.append(c)
+            if c == '\\' and i + 1 < n:
+                out.append(nxt)
+                i += 2
+                continue
+            if c == '/':
+                in_regex = False
+                last_sig = c
+            i += 1
+            continue
+        if in_template:
+            depth = template_expr[-1]
+            if depth == 0:
+                # Raw template text — preserve verbatim.
+                out.append(c)
+                if c == '\\' and i + 1 < n:
+                    out.append(nxt)
+                    i += 2
+                    continue
+                if c == '`':
+                    in_template -= 1
+                    template_expr.pop()
+                    last_sig = c
+                    i += 1
+                    continue
+                if c == '$' and nxt == '{':
+                    out.append(nxt)
+                    template_expr[-1] = 1
+                    i += 2
+                    continue
+                i += 1
+                continue
+            else:
+                # Inside ${ ... } — ordinary JS. Track brace depth + nested
+                # templates, then fall through to shared token handling.
+                if c == '{':
+                    template_expr[-1] += 1
+                    out.append(c)
+                    last_sig = c
+                    i += 1
+                    continue
+                if c == '}':
+                    template_expr[-1] -= 1
+                    out.append(c)
+                    last_sig = c
+                    i += 1
+                    continue
+                if c == '`':
+                    in_template += 1
+                    template_expr.append(0)
+                    out.append(c)
+                    last_sig = c
+                    i += 1
+                    continue
+                # else: shared handling below
+
+        # ── Not inside string/regex/comment (or inside a template ${} expr) ──
+        if c == '/' and nxt == '/':
+            in_line_comment = True
+            i += 2
+            continue
+        if c == '/' and nxt == '*':
+            in_block_comment = True
+            i += 2
+            continue
+        if c in '"\'':
+            quote = c
+            out.append(c)
+            last_sig = c
+            i += 1
+            continue
+        if c == '`':
+            in_template += 1
+            template_expr.append(0)
+            out.append(c)
+            last_sig = c
+            i += 1
+            continue
+        if c == '/':
+            if _regex_allowed(last_sig):
+                in_regex = True
+                out.append(c)
+                i += 1
+                continue
+            out.append(c)
+            last_sig = c
+            i += 1
+            continue
+        out.append(c)
+        if not c.isspace():
+            last_sig = c
+        i += 1
+
+    stripped = ''.join(out)
+
+    # Per-line cleanup: drop blank lines + leading/trailing whitespace. Pure
+    # per-line — cannot fuse tokens across a line boundary.
+    lines = [s for s in (ln.strip() for ln in stripped.split('\n')) if s]
+    return '\n'.join(lines)
+
+# Git merge-conflict markers. An interrupted / conflicted self-update
+# `git pull` can leave one of these embedded in a JS source file; glued
+# into the bundle it produces the classic "Uncaught SyntaxError:
+# Unexpected token '<'/'='/'-'" that white-screens the whole app.
+_CONFLICT_MARKERS = ('<<<<<<< ', '=======\n', '>>>>>>> ')
+
+
+def _scan_source_corruption(name, content):
+    """Detect corruption classes that would break the concatenated bundle.
+
+    These are the failure modes that ship a syntactically broken bundle from
+    an otherwise-healthy install: a git merge-conflict marker left by an
+    interrupted `git pull`, or a NUL byte from a truncated / partial file
+    write. A file flagged here is SKIPPED (not glued into the bundle), so one
+    corrupt file degrades to "that module is absent" instead of
+    "the entire app fails to boot".
+
+    Args:
+        name: Source file name (for logging).
+        content: The file's text content.
+
+    Returns:
+        A human-readable reason string if corrupt, else None.
+    """
+    if '\x00' in content:
+        return 'contains NUL byte (truncated / partial write)'
+    # A bare conflict marker at line start is unambiguous corruption. Check
+    # line-anchored so a legitimate string like ">>>>>>> " inside code is not
+    # false-flagged unless it actually begins a line.
+    for line in content.splitlines():
+        if line.startswith('<<<<<<< ') or line.startswith('>>>>>>> '):
+            return 'git merge-conflict marker (%.20s...)' % line
+        if line == '=======':
+            return 'git merge-conflict marker (=======)'
+    return None
+
+
+def _node_syntax_ok(bundle_path):
+    """Best-effort syntax gate on the final bundle using `node --check`.
+
+    Returns (ok, detail). If node is not installed (the common case on a
+    fresh install), returns (True, '') — we do NOT fail the bundle just
+    because we cannot validate it; the per-source corruption scan is the
+    dependency-free primary defense.
+    """
+    node = shutil.which('node')
+    if not node:
+        return True, ''
+    try:
+        proc = subprocess.run(
+            [node, '--check', bundle_path],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception as e:
+        logger.debug('[Bundle] node --check unavailable: %s', e)
+        return True, ''
+    if proc.returncode == 0:
+        return True, ''
+    detail = (proc.stderr or proc.stdout or '').strip()
+    return False, detail
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JS_DIR = os.path.join(BASE_DIR, 'static', 'js')
@@ -190,16 +429,44 @@ _BUNDLE_FILES = [
     # so it MUST come after main.js. No raw fetch (Api.project.feed +
     # pushSubscribe only). Independent tab, not a toggle.
     'project-brain.js',
+    # Project Brain — Team/Peers column. The cohesion surface: LIVE sibling
+    # roster (presence ⋈ task ⋈ claimed-epic via Api.project.brainPeers) + the
+    # peer-message thread (extracted from the feed). Reads Api/Icon/t/
+    # loadConversation + window.ProjectBrain._state at RUNTIME, so it MUST come
+    # after project-brain.js (which owns _state). No raw fetch.
+    'project-brain-peers.js',
     # Per-turn context note builder/renderer. Reads projectState + toolbar
     # globals + config to snapshot each turn's context, so it MUST come
     # after main.js. Consumed by ui/chat_render.js (renderTurnCtxNote) and
     # main/main_send_pipeline.js (buildTurnCtxSnapshot).
     'info-rail.js',
+    # Real-time network-latency signal indicator in the topbar. Pure runtime
+    # subscriber on push.js's RTT probe (pushOnLatency) + reads t() at render
+    # time, so it MUST come after main.js (and after push.js, loaded far above).
+    'net-latency.js',
     # Mobile popover portaling (timer/optimizer) + mobile flow picker.
     # MUST come after timer.js / optimizer.js / main_toolbar_ui.js — it wraps
     # their globals (toggleTimerPanel / toggleOptimizerPanel / setActiveFlow).
     'mobile_panels.js',
 ]
+
+# ── Load-bearing modules ──────────────────────────────────────────────
+# If ANY of these is corrupt or missing, a bundle built from "whatever
+# remains" boots into a silently-crippled app (e.g. a skipped push.js kills
+# live updates, the "N running" badge, and translate status with NO error and
+# nothing actionable in the logs). For a critical file we therefore REFUSE to
+# ship a partial bundle and return None, so routes/common.py falls back to the
+# individual <script> tags where index.html's load-guard SURFACES the failure
+# to the user. Non-critical files keep the skip-and-continue degradation.
+# INVARIANT: every entry MUST be in _BUNDLE_FILES (guarded by
+# tests/test_bundle_corruption_guard.py) so a rename can't silently empty it.
+_CRITICAL_FILES = frozenset({
+    'i18n.js',   # t() — used by every module
+    'core.js',   # foundational module state (apiUrl, conversations, config, …)
+    'api.js',    # unified backend HTTP client (Api.*)
+    'push.js',   # live server-push channel (pushSubscribe / notifications)
+    'main.js',   # boot orchestrator IIFE
+})
 
 # Global state
 _bundle_filename = None   # e.g. 'bundle-a3f8b2c1.js'
@@ -245,6 +512,7 @@ def build_bundle():
     parts = []
     total_size = 0
     missing = []
+    corrupt = []
 
     included = 0
     for name in _BUNDLE_FILES:
@@ -252,16 +520,53 @@ def build_bundle():
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 content = f.read()
-            # Wrap each file in a comment header + newline separator
-            # This helps with debugging stack traces
-            parts.append(f'// ═══ {name} ═══\n')
-            parts.append(content)
-            parts.append('\n')
-            total_size += len(content)
-            included += 1
         except OSError as e:
+            if name in _CRITICAL_FILES:
+                logger.critical('[Bundle] CRITICAL source file %s is MISSING (%s) — '
+                                'refusing to ship a crippled bundle; falling back to '
+                                'individual <script> tags', name, e)
+                return None
             logger.warning('[Bundle] Missing source file %s: %s', name, e)
             missing.append(name)
+            continue
+
+        # Reject a corrupt source file BEFORE it can poison the bundle. A
+        # single conflict marker / truncated file would otherwise glue a
+        # stray token into the concatenation and white-screen every user
+        # (the "Uncaught SyntaxError: Unexpected token" install failure).
+        reason = _scan_source_corruption(name, content)
+        if reason:
+            if name in _CRITICAL_FILES:
+                logger.critical('[Bundle] CRITICAL source file %s is CORRUPT (%s) — '
+                                'refusing to ship a crippled bundle; falling back to '
+                                'individual <script> tags', name, reason)
+                return None
+            logger.error('[Bundle] Skipping CORRUPT source file %s: %s', name, reason)
+            corrupt.append(name)
+            continue
+
+        # Conservatively minify (comment + whitespace strip). Fail-open: any
+        # minifier edge case falls back to the raw content for THAT file, so
+        # one tricky file can never blank the app — and the final node --check
+        # gate still validates the concatenated result either way. Runs AFTER
+        # the corruption scan (which must see the original bytes).
+        try:
+            emit = _minify_js(content)
+        except Exception as e:
+            logger.warning('[Bundle] minify failed for %s, using raw: %s', name, e)
+            emit = content
+
+        # Wrap each file in a comment header + newline separator
+        # This helps with debugging stack traces.
+        parts.append(f'// ═══ {name} ═══\n')
+        parts.append(emit)
+        # Boundary guard: a leading newline ensures a trailing line-comment
+        # in `content` can't swallow the next file's header, and the `;`
+        # terminates any statement whose file forgot a trailing semicolon so
+        # adjacent files can never glue into one broken expression.
+        parts.append('\n;\n')
+        total_size += len(emit)
+        included += 1
 
     # A missing file is almost always a stale manifest entry (a JS file
     # renamed / removed without updating _BUNDLE_FILES). We deliberately
@@ -277,6 +582,10 @@ def build_bundle():
         logger.error('[Bundle] %d file(s) missing from _BUNDLE_FILES, '
                      'building without them: %s',
                      len(missing), ', '.join(missing))
+    if corrupt:
+        logger.error('[Bundle] %d source file(s) were CORRUPT and skipped: %s '
+                     '— re-run the installer/self-update or `git checkout` them',
+                     len(corrupt), ', '.join(corrupt))
     if included == 0:
         logger.error('[Bundle] Cannot build bundle — no source files found')
         return None
@@ -301,12 +610,29 @@ def build_bundle():
         logger.error('[Bundle] Failed to write %s: %s', bundle_path, e)
         return None
 
+    # Final syntax gate (best-effort — no-op when node is absent). If the
+    # concatenation is somehow still not parseable, DON'T serve it: a broken
+    # bundle white-screens the app with no recovery, whereas returning None
+    # makes routes/common.py fall back to the individual <script> tags in
+    # index.html (a slower but WORKING page). Loud CRITICAL so the exact
+    # offending line is diagnosable from logs/error.log.
+    ok, detail = _node_syntax_ok(bundle_path)
+    if not ok:
+        logger.critical('[Bundle] Built bundle %s FAILED syntax check — refusing to '
+                        'serve it (falling back to individual scripts). Detail: %.500s',
+                        filename, detail)
+        try:
+            os.remove(bundle_path)
+        except OSError as e:
+            logger.debug('[Bundle] could not remove bad bundle %s: %s', bundle_path, e)
+        return None
+
     _clean_old_bundles(filename)
     _bundle_filename = filename
     _bundle_mtime = _source_max_mtime()
 
     elapsed = time.time() - t0
-    logger.info('[Bundle] Built %s (%d files, %dKB raw) in %.1fms',
+    logger.info('[Bundle] Built %s (%d files, %dKB minified) in %.1fms',
                 filename, len(_BUNDLE_FILES), total_size // 1024, elapsed * 1000)
     return filename
 

@@ -334,6 +334,33 @@ def get_active_session(task_id: str) -> MasterOrchestrator | None:
     return _get_session(task_id)
 
 
+def has_live_or_pending_swarm(task: dict | None) -> bool:
+    """True when a swarm is live OR has undrained <swarm-update>s for *task*.
+
+    The orchestrator calls this each turn to decide whether the swarm
+    follow-up tools (``await_agents`` / ``get_agent_result`` / ``spawn_agents``)
+    MUST be in this turn's schema even when ``swarmEnabled`` is false — so a
+    ``<swarm-update>`` (drained UNGATED) that instructs the model to collect
+    results can never point at a tool the turn wasn't given (the hallucination-
+    rejection desync from conv ``mr2ysg473scxv8``).
+
+    Resolved off the conversation-scoped swarm key (``swarm_key_for``), so a
+    later "continue" turn with a fresh task_id still sees its own conversation's
+    live session / pending inbox. Best-effort — any lookup error is treated as
+    "no swarm" (fail-open to the normal swarmEnabled gate) and logged.
+    """
+    try:
+        key = swarm_key_for(task)
+        if not key:
+            return False
+        if _get_session(key) is not None:
+            return True
+        return agent_inbox.has_pending(key)
+    except Exception as e:  # never let this break tool assembly
+        logger.warning('[Swarm] has_live_or_pending_swarm probe failed: %s', e)
+        return False
+
+
 def get_swarm_status(task_id: str) -> dict | None:
     """Return swarm status for a task, or None if no active swarm."""
     session = _get_session(task_id)
