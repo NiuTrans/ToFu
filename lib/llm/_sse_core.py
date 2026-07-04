@@ -179,6 +179,27 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     raw_dumper = RawSSEDumper(body.get('model', ''), trace_id, body)
     raw_dumper.start()
 
+    # ── Wire fingerprint (cache-miss traceability) ──
+    # This is the ONLY point that sees the FINAL, post-translation messages
+    # exactly as they go on the wire (after add_cache_breakpoints AND, on the
+    # anthropic path, openai_body_to_anthropic). Canonicalise them into an
+    # envelope-agnostic fingerprint and stash it on the RawSSEDumper (which
+    # travels into SSEAccumulator → finalize, where it is relayed into `usage`
+    # like trace_id). Stashing it on the dumper — NOT on `body` — keeps the
+    # ephemeral fingerprint OFF the wire (body is what requests/httpx serialise).
+    # detect_cache_break then PROVES a server-side miss (bytes identical) vs.
+    # names a client-caused culprit. Best-effort: never block a request.
+    raw_dumper.wire_fp = None
+    raw_dumper.wire_static = ''
+    try:
+        from lib.tasks_pkg.wire_fingerprint import (
+            canonical_messages, static_prefix_hash,
+        )
+        raw_dumper.wire_fp = canonical_messages(body.get('messages') or [])
+        raw_dumper.wire_static = static_prefix_hash(body.get('messages') or [])
+    except Exception as _wfe:
+        logger.debug('%s wire fingerprint capture failed: %s', log_prefix, _wfe)
+
     return RequestPlan(url=url, hdrs=hdrs, body=body, trace_id=trace_id,
                        raw_dumper=raw_dumper, codex_translator=codex_translator,
                        t0=t0, anthropic_translator=anthropic_translator)
@@ -769,6 +790,16 @@ class SSEAccumulator:
             usage['resp_trace_id'] = resp_trace
         usage['stream_elapsed_ms'] = round(_stream_elapsed_s * 1000)
         usage['_chunks_received'] = chunk_count
+
+        # ── Relay the post-translation wire fingerprint into `usage` ──
+        # Captured in prepare_request (the only point seeing the final wire
+        # bytes) and carried on the RawSSEDumper. detect_cache_break reads these
+        # to distinguish a PROVEN server-side miss (fingerprint identical to
+        # last round) from a client-caused one (names the changed msg.field).
+        _wfp = getattr(self.raw_dumper, 'wire_fp', None)
+        if _wfp is not None:
+            usage['_wire_fp'] = _wfp
+            usage['_wire_static'] = getattr(self.raw_dumper, 'wire_static', '')
 
         # Stream anomaly flags
         _has_anomaly = False

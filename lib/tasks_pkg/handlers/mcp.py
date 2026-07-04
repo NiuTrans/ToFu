@@ -62,11 +62,17 @@ def handle_mcp_tool(
     tool_name = info['tool_name'] if info else fn_name
 
     # Surface the most informative arg (file_path, name, section_title,
-    # short project_id, owner/repo, …) so the title shown in the UI tells
-    # users *which resource* the call touches — instead of every
-    # create_file / edit_file looking identical.
-    from lib.tasks_pkg.tool_display import _mcp_arg_suffix
-    arg_suffix = _mcp_arg_suffix(fn_args)
+    # short project_id, owner/repo, batch file paths, …) so the title shown
+    # in the UI tells users *which resource* the call touches — instead of
+    # every create_file / edit_file looking identical.
+    #
+    # ★ Single source of truth: use compose_mcp_display (the SAME helper the
+    #   live tool-round line uses in tool_display._tool_display_mcp), NOT a
+    #   direct _mcp_arg_suffix call — otherwise batch-file tools (batch_commit
+    #   / push_files) whose paths live inside a list regress to a branch-only
+    #   ``server/tool — main @ owner/repo`` title once execution completes.
+    from lib.tasks_pkg.tool_display import compose_mcp_display
+    base_display, _ = compose_mcp_display(fn_name, fn_args)
 
     def _post_build(meta, tool_content, _fn_args):
         """Upgrade badge/title with MCP server/tool pair + arg context.
@@ -84,19 +90,19 @@ def handle_mcp_tool(
         except Exception as e:  # noqa: BLE001
             logger.debug('[MCP] project-name ingest failed for %s: %s', fn_name, e)
 
-        # ── Rebuild arg suffix AFTER ingest so this very call can benefit
+        # ── Rebuild the display AFTER ingest so this very call can benefit
         #    from the name it just learned (e.g. the create_project call
-        #    itself now renders as ``… — My Paper`` rather than ``— My Paper``
-        #    @ 69f21…cca7`` where the short-ID would otherwise still be
-        #    cached-free).
-        from lib.tasks_pkg.tool_display import _mcp_arg_suffix
-        fresh_suffix = _mcp_arg_suffix(fn_args) or arg_suffix
+        #    itself now renders as ``… — My Paper`` rather than a short-ID).
+        #    Same compose_mcp_display helper as the live line → no drift, incl.
+        #    the batch-file (one-path-per-line) form.
+        from lib.tasks_pkg.tool_display import compose_mcp_display
+        fresh_display, _ = compose_mcp_display(fn_name, fn_args)
+        fresh_display = fresh_display or base_display
 
         is_error = isinstance(tool_content, str) and tool_content.startswith(
             ('❌', 'MCP Error', 'MCP tool error', 'MCP server not connected'))
         meta['badge'] = server_name if not is_error else f'{server_name} (error)'
-        base_title = f'{server_name}/{tool_name}'
-        meta['title'] = f'{base_title} — {fresh_suffix}' if fresh_suffix else base_title
+        meta['title'] = fresh_display
 
     return simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,

@@ -86,8 +86,11 @@ let activeConvId = sessionStorage.getItem('tofu_activeConvId') || null,
   streamBufs = new Map(),
   pendingImages = [],
   pdfProcessing = 0;  // counter: # of in-flight PDF text-parses (see upload.js)
-/** ★ Message queue: when user sends while streaming, messages are queued here
- *  and auto-dispatched when the current stream finishes.
+/** Message-queue MIRROR of server state (read-only on the client).
+ *  The backend is the single source of truth: sending always POSTs to
+ *  /api/chat/send, and the server decides queue-vs-dispatch. This Map is
+ *  populated ONLY by _refreshServerQueue() (main_send_pipeline.js) to drive
+ *  the queued-message UI — the client never optimistically enqueues here.
  *  Key = convId, Value = Array of { text, images, pdfTexts, replyQuotes, convRefs, timestamp } */
 let pendingMessageQueue = new Map();
 let _editingMsgIdx = null,
@@ -144,7 +147,6 @@ let thinkingEnabled = true,
   searchMode = "multi",
   debugVisible = false,
   sidebarSearchQuery = "";
-let _browserStatusInterval = null;
 let serverModel = "aws.claude-opus-4.8";
 let config = JSON.parse(
   localStorage.getItem("claude_client_config") ||
@@ -163,6 +165,14 @@ let config = JSON.parse(
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+/* Shared HH:MM clock formatter for message-bubble timestamps. Accepts an
+ * epoch-ms timestamp (or falsy → now) and returns a locale HH:MM string.
+ * Extracted from 5 copy-pasted `new Date(...).toLocaleTimeString([], {...})`
+ * sites (streaming bubbles / translating bubble / SSE reconnect). */
+function formatClockTime(ts) {
+  return new Date(ts || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 /* Client-side stable message id (Step 1 of unified chatInner rendering).

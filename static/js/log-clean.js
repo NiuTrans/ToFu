@@ -103,11 +103,7 @@ function hideLogCleanBanner() {
 }
 
 function _escForBanner(s) {
-  if (typeof escapeHtml === 'function') return escapeHtml(s);
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return escapeHtml(s);
 }
 
 // ── Active textarea resolution ──────────────────────────────────
@@ -225,9 +221,7 @@ function previewLogClean() {
     ).join('') +
     '</div>';
 
-  const _esc = (typeof escapeHtml === 'function')
-    ? escapeHtml
-    : (s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'));
+  const _esc = escapeHtml;
 
   const previewHtml = `
     <div class="log-clean-compare">

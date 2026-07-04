@@ -637,6 +637,9 @@ function _restoreConvToolState(conv) {
   /* ★ If the Project Brain panel is open, re-resolve its feed to the new
    *   conversation's project (two projects must never bleed into one view). */
   if (typeof projectBrainRefresh === 'function') projectBrainRefresh();
+  /* ★ Re-pull the always-visible per-conversation Brain Influence bar with
+   *   the NEW convId so it re-renders for this conversation (or hides). */
+  if (typeof convInfluenceRefresh === 'function') convInfluenceRefresh();
   /* ★ Reflow toolbar after restoring conv tool state (toolbar width may differ). */
   _scheduleReflow();
 }
@@ -973,7 +976,9 @@ function _resetToolsToDefaults() {
   /* ★ DB-first boot: conversations[] starts empty and is populated by
    *   loadConversationsFromServer() inside initActiveTasks().
    *   The sidebar shows a brief loading indicator (~16ms) until the
-   *   server responds.  This eliminates all localStorage desync bugs. */
+   *   server responds.  This eliminates all localStorage desync bugs.
+   *   On failure we fall back to the IndexedDB cache + a backoff retry
+   *   (see _bootReconnectWithBackoff below). */
   /* ★ Restore last active conversation from sessionStorage (if any).
    *   If the conv exists on the server, we'll navigate to it after loading.
    *   Otherwise, fall back to the most recent conversation. */
@@ -991,7 +996,29 @@ function _resetToolsToDefaults() {
     _vlmRestoreState().catch(e => console.warn('[VLM-Restore] Failed:', e));
   }
 
+  /* ★ Paint the sidebar from the IndexedDB cache IMMEDIATELY, before the
+   *   server round-trip. On a flaky tunnel / mobile network the boot fetch
+   *   can throw (`Failed to fetch`) and previously left a dead "Loading…"
+   *   placeholder. Cache-first first-paint shows real (opened) conversations
+   *   with zero network dependency; the server list reconciles them in-place
+   *   when it arrives (id-keyed merge). */
+  if (typeof hydrateSidebarFromCache === 'function') {
+    hydrateSidebarFromCache().catch(e => debugLog(`cache hydrate: ${e.message}`, 'warn'));
+  }
+
   initActiveTasks().then(() => {
+    /* ★ Decide reconnect by OBSERVABLE OUTCOME, not by a thrown error.
+     *   loadConversationsFromServer swallows Failed to fetch (try/catch →
+     *   debugLog) and RESOLVES, so the .catch below never fires on the tunnel
+     *   drop it targets. serverLoadOk() is the truth: false on throw / !resp.ok
+     *   (→ reconnect), true on a real 200-with-data OR a legitimate 304. */
+    const _ok = (typeof serverLoadOk === 'function') ? serverLoadOk() : true;
+    if (!_ok) {
+      debugLog('[boot] server load did not succeed — starting reconnect backoff', 'warn');
+      _bootReconnectWithBackoff();
+    } else {
+      _clearBootReconnectBanner();
+    }
     renderConversationList();
     /* ★ Try to restore the last active conversation from before refresh */
     const restoredConv = _restoredConvId && conversations.find(c => c.id === _restoredConvId);
@@ -1009,8 +1036,11 @@ function _resetToolsToDefaults() {
     if (activeConvId) _resumePendingTranslations(activeConvId);
   }).catch(e => {
     debugLog(`Boot load failed: ${e.message}`, 'warn');
-    /* Even if server load fails, the app is still usable — user can create new chats */
+    /* Even if server load fails, the app is still usable — user can create new
+     *   chats, and cached conversations are already painted. Show a visible,
+     *   non-blocking "reconnecting" state and retry with backoff. */
     renderConversationList();
+    _bootReconnectWithBackoff();
   });
   if (typeof _initSelectionPopup === "function") _initSelectionPopup();
   loadProjectStatus();
@@ -1022,7 +1052,13 @@ function _resetToolsToDefaults() {
      * main-thread work; running it on a bare timer adds input delay (poor INP)
      * when a click lands mid-poll. requestIdleCallback defers it until the main
      * thread is free. Fallback to a plain call where rIC is unavailable. */
-    const _poll = () => loadConversationsFromServer();
+    const _poll = () => {
+      if (window._bootLoadInFlight) return;  // don't stack with boot-reconnect backoff
+      window._bootLoadInFlight = true;
+      Promise.resolve(loadConversationsFromServer())
+        .catch(e => debugLog(`[poll] ${e.message}`, 'warn'))
+        .finally(() => { window._bootLoadInFlight = false; });
+    };
     if (typeof requestIdleCallback === "function")
       requestIdleCallback(_poll, { timeout: 5000 });
     else
@@ -1058,4 +1094,81 @@ function _resetToolsToDefaults() {
   }
   // Signal to loading-guard stubs that all scripts have loaded (MUST run even on error)
   if (typeof _markScriptsLoaded === 'function') _markScriptsLoaded();
+
+  /* ── Boot reconnect: visible non-blocking banner + guarded backoff retry ──
+   *
+   * When the initial conversation load fails (common through a flaky VS Code
+   * port-forward tunnel on mobile), the sidebar has already been painted from
+   * the IndexedDB cache. We show a small, dismissible banner explaining that
+   * we're showing CACHED conversations and reconnecting — NOT that the list is
+   * complete — then retry loadConversationsFromServer() with exponential
+   * backoff. On success the id-keyed merge reconciles the cached shells and
+   * the banner clears.
+   *
+   * Concurrency: _bootLoadInFlight guards against stacking with the 60s
+   * refresh timer / cross-tab triggers so a flaky tunnel can't spawn a pile of
+   * overlapping fetches. */
+  function _showBootReconnectBanner() {
+    if (document.getElementById('boot-reconnect-banner')) return;
+    const banner = document.createElement('div');
+    banner.id = 'boot-reconnect-banner';
+    banner.style.cssText =
+      'position:fixed;top:0;left:0;right:0;z-index:9999;' +
+      'background:#b45309;color:#fff;padding:8px 14px;font-size:13px;' +
+      'text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.3);' +
+      'display:flex;align-items:center;justify-content:center;gap:8px;';
+    /* SVG glyph per CLAUDE.md §3.4 — no emoji for UI status. */
+    banner.innerHTML =
+      '<span style="display:inline-flex"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>' +
+      '<span>离线，显示缓存的对话，正在重连…<span style="opacity:.75"> Offline — showing cached conversations, reconnecting…</span></span>';
+    document.body.prepend(banner);
+  }
+
+  function _clearBootReconnectBanner() {
+    const b = document.getElementById('boot-reconnect-banner');
+    if (b) b.remove();
+  }
+
+  async function _bootReconnectWithBackoff() {
+    /* Idempotent: the boot promise's .then(!ok) and .catch both call this, and
+     *   though a promise settles once (so a single boot can't double-fire), we
+     *   don't want to depend on that invariant — a second entry (future caller,
+     *   re-boot path) must NOT spawn a concurrent backoff loop / second banner.
+     *   window-scoped so it survives even if this IIFE is re-evaluated. */
+    if (window._bootReconnectStarted) {
+      debugLog('[boot-reconnect] already running — not starting a second loop', 'warn');
+      return;
+    }
+    window._bootReconnectStarted = true;
+    _showBootReconnectBanner();
+    const _delays = [2000, 4000, 8000, 15000, 30000];
+    try {
+      for (let i = 0; i < _delays.length; i++) {
+        await new Promise(r => setTimeout(r, _delays[i]));
+        if (window._bootLoadInFlight) continue;  // another load (timer/cross-tab) is running
+        window._bootLoadInFlight = true;
+        try {
+          await loadConversationsFromServer();
+          /* The call swallows errors + resolves, so success is the observable
+           *   flag, not the absence of a throw. */
+          if (typeof serverLoadOk !== 'function' || serverLoadOk()) {
+            _clearBootReconnectBanner();
+            renderConversationList();
+            debugLog(`[boot-reconnect] recovered on attempt ${i + 1}`, 'success');
+            return;
+          }
+          debugLog(`[boot-reconnect] attempt ${i + 1}: still not reachable`, 'warn');
+        } catch (e) {
+          debugLog(`[boot-reconnect] attempt ${i + 1} threw: ${e.message}`, 'warn');
+        } finally {
+          window._bootLoadInFlight = false;
+        }
+      }
+      debugLog('[boot-reconnect] gave up after backoff; 60s timer will keep trying', 'warn');
+    } finally {
+      /* Release the idempotency latch so a LATER genuine failure (or the 60s
+       *   timer detecting a fresh drop) can restart the backoff loop. */
+      window._bootReconnectStarted = false;
+    }
+  }
 })();

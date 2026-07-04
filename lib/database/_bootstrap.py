@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
@@ -1151,8 +1152,35 @@ _MANAGED_PG_MAX_CONNECTIONS = int(
     getenv_compat('TOFU_PG_MAX_CONNECTIONS', default='1100'))
 
 
-def _build_managed_pg_config():
+def _tier_b_enabled():
+    """True when Tier B (WAL archive + PITR) is opted in."""
+    return getenv_compat('TOFU_DB_TIER_B', default='0').lower() in ('1', 'true', 'yes')
+
+
+def _pgdata_is_resolved_primary(pgdata):
+    """True when *pgdata* is the LOCAL primary the split resolves to (post-flip).
+
+    Tier B archiving must engage ONLY against the local primary — never the
+    legacy FUSE cluster while resolution is still on legacy (pre-seed). Writing
+    archive_mode into the soon-to-be-retired legacy cluster would waste FUSE
+    writes and muddy the §3a WAL-tail timestamp.
+    """
+    try:
+        from lib.database.db_paths import resolve_pgdata_dir
+        from lib.runtime_paths import data_root
+        return os.path.abspath(pgdata) == os.path.abspath(resolve_pgdata_dir(data_root()))
+    except Exception as e:
+        logger.debug('[DB] primary-resolution probe failed: %s', e)
+        return False
+
+
+def _build_managed_pg_config(archive_enabled=False):
     """Return the body (settings only) of the managed postgresql.conf block.
+
+    Args:
+        archive_enabled: When True, emit Tier B ``archive_mode=on`` +
+            ``archive_command``. Caller passes this only for the resolved LOCAL
+            primary when TOFU_DB_TIER_B is opted in (never the legacy cluster).
 
     Durability is deliberately kept SAFE (fsync + synchronous_commit on,
     full_page_writes on) — the cluster lives on a shared FUSE mount where a
@@ -1187,7 +1215,15 @@ def _build_managed_pg_config():
         'effective_cache_size = 2GB',
         'work_mem = 8MB',
         'maintenance_work_mem = 128MB',
-    ]
+    ] + ([
+        # ── Tier B: continuous WAL archiving to the DolphinFS durability
+        # target (only on the resolved local primary; see B1/B2). The shim is
+        # FUSE-stall-safe (hard timeout, non-zero-to-retain). Invoked as a
+        # module so it inherits our env/paths and takes no shell string.
+        'archive_mode = on',
+        "archive_command = '%s -m lib.database.wal_archive archive %%p %%f'"
+        % (sys.executable or 'python3'),
+    ] if archive_enabled else [])
 
 
 def _ensure_managed_pg_config(pgdata):
@@ -1202,7 +1238,10 @@ def _ensure_managed_pg_config(pgdata):
     if not os.path.isfile(conf_path):
         return False
 
-    settings = _build_managed_pg_config()
+    # Tier B archiving engages ONLY when opted in AND this pgdata is the
+    # resolved local primary (never the legacy cluster pre-flip).
+    archive_enabled = _tier_b_enabled() and _pgdata_is_resolved_primary(pgdata)
+    settings = _build_managed_pg_config(archive_enabled=archive_enabled)
     block_lines = [_MANAGED_BLOCK_BEGIN, *settings, _MANAGED_BLOCK_END]
     new_block = '\n'.join(block_lines) + '\n'
 
@@ -1288,6 +1327,7 @@ def backup_pg_database(retention_days=None):
         when the dump was skipped or failed.
     """
     from lib.database._core import BASE_DIR, _BACKEND, PG_PORT, PG_USER
+    from lib.database.db_paths import resolve_backup_root
 
     if _BACKEND != 'pg':
         return {'ok': False, 'reason': 'not_pg'}
@@ -1309,7 +1349,7 @@ def backup_pg_database(retention_days=None):
             logger.warning('[DB-Backup] pg_dumpall not found on PATH — skipping backup')
             return {'ok': False, 'reason': 'pg_dumpall_missing'}
 
-    backup_dir = os.path.join(BASE_DIR, 'data', 'pg_backups')
+    backup_dir = resolve_backup_root(os.path.join(BASE_DIR, 'data'))
     try:
         os.makedirs(backup_dir, exist_ok=True)
     except OSError as e:
@@ -1382,7 +1422,8 @@ def backup_pg_database(retention_days=None):
 
 def _latest_pg_backup(base_dir):
     """Return the path to the most recent data/pg_backups/pg_dumpall_*.sql, or None."""
-    backup_dir = os.path.join(base_dir, 'data', 'pg_backups')
+    from lib.database.db_paths import resolve_backup_root
+    backup_dir = resolve_backup_root(os.path.join(base_dir, 'data'))
     try:
         candidates = [
             os.path.join(backup_dir, fn) for fn in os.listdir(backup_dir)
@@ -1395,6 +1436,210 @@ def _latest_pg_backup(base_dir):
     if not candidates:
         return None
     return max(candidates, key=os.path.getmtime)
+
+
+
+def _tier_b_wal_end_ts(base_dir):
+    """Recoverable end-timestamp of the Tier B WAL archive, or None if absent.
+
+    This is the mtime of the LAST archived WAL segment in
+    ``$TOFU_DB_BACKUP_ROOT/wal/`` — the true PITR replay ceiling (NOT the base
+    backup time; recovery reaches the last replayable segment).
+    """
+    try:
+        from lib.database.db_paths import resolve_backup_root
+        wal_dir = os.path.join(resolve_backup_root(os.path.join(base_dir, 'data')), 'wal')
+        segs = [os.path.join(wal_dir, fn) for fn in os.listdir(wal_dir)
+                if not fn.startswith('.') and not fn.endswith('.tmp')]
+        segs = [s for s in segs if os.path.isfile(s)]
+        if not segs:
+            return None
+        return max(os.path.getmtime(s) for s in segs)
+    except OSError as e:
+        logger.debug('[DB-Restore] no WAL archive end-ts: %s', e)
+        return None
+
+
+def _tier_a_dump_end_ts(base_dir):
+    """Recoverable end-timestamp of the latest Tier A logical dump, or None."""
+    latest = _latest_pg_backup(base_dir)
+    if not latest:
+        return None
+    try:
+        return os.path.getmtime(latest)
+    except OSError as e:
+        logger.debug('[DB-Restore] no dump end-ts: %s', e)
+        return None
+
+
+def _select_restore_channel(base_dir):
+    """§3a: pick the channel with the NEWER recoverable end (never by tier).
+
+    Compares Tier A (latest logical dump completion) vs Tier B (last archived
+    WAL segment). Restores the NEWER. When the two ends diverge by more than
+    ``TOFU_DB_RESTORE_DIVERGENCE_WARN_S`` (default 6h) logs CRITICAL + audit —
+    a large gap means one durability channel is BROKEN and must surface; the
+    restore still proceeds with the newer channel.
+
+    Returns:
+        ('tier_b', wal_end_ts) | ('tier_a', dump_end_ts) | (None, None).
+    """
+    a_ts = _tier_a_dump_end_ts(base_dir)
+    b_ts = _tier_b_wal_end_ts(base_dir)
+    if a_ts is None and b_ts is None:
+        return None, None
+
+    # Divergence guard (only meaningful when BOTH channels exist).
+    if a_ts is not None and b_ts is not None:
+        warn_s = int(getenv_compat('TOFU_DB_RESTORE_DIVERGENCE_WARN_S', default='21600'))
+        gap = abs(a_ts - b_ts)
+        if gap > warn_s:
+            chosen = 'tier_b' if b_ts >= a_ts else 'tier_a'
+            logger.critical('[DB-Restore] durability channel DIVERGENCE: Tier A end=%.0f '
+                            'vs Tier B end=%.0f (gap=%.0fs > %ds) — one channel is '
+                            'likely BROKEN. Restoring the NEWER (%s); investigate the '
+                            'stale channel.', a_ts, b_ts, gap, warn_s, chosen)
+            try:
+                from lib.log import audit_log
+                audit_log('db_restore_channel_divergence', tier_a_end=a_ts,
+                          tier_b_end=b_ts, chosen=chosen, gap_s=round(gap))
+            except Exception as _ae:
+                logger.debug('[DB-Restore] divergence audit failed: %s', _ae)
+
+    if b_ts is not None and (a_ts is None or b_ts >= a_ts):
+        return 'tier_b', b_ts
+    return 'tier_a', a_ts
+
+
+
+def _base_backup_dir(base_dir):
+    from lib.database.db_paths import resolve_backup_root
+    return os.path.join(resolve_backup_root(os.path.join(base_dir, 'data')), 'base')
+
+
+def _latest_base_backup(base_dir):
+    """Path to the most recent pg_basebackup dir under $BACKUP_ROOT/base/, or None."""
+    bdir = _base_backup_dir(base_dir)
+    try:
+        cands = [os.path.join(bdir, d) for d in os.listdir(bdir)
+                 if os.path.isdir(os.path.join(bdir, d))
+                 and os.path.isfile(os.path.join(bdir, d, 'PG_VERSION'))]
+    except OSError as e:
+        logger.debug('[DB-BaseBackup] no base dir %s: %s', bdir, e)
+        return None
+    if not cands:
+        return None
+    return max(cands, key=os.path.getmtime)
+
+
+def basebackup_pg_cluster():
+    """Tier B: take a self-contained ``pg_basebackup -X stream`` of the primary.
+
+    ``-X stream`` (owner decision) makes each base INDEPENDENTLY restorable even
+    if the WAL archive has a gap; archived WAL is layered on top for the
+    seconds-RPO tail. Engaged only when Tier B is opted in AND the split is
+    active. PG-only; no-op otherwise. Returns a dict summary.
+    """
+    from lib.database._core import BASE_DIR, _BACKEND, PG_PORT, PG_USER
+    from lib.database.db_paths import local_data_split_enabled
+    if _BACKEND != 'pg':
+        return {'ok': False, 'reason': 'not_pg'}
+    if not _tier_b_enabled():
+        return {'ok': False, 'reason': 'tier_b_off'}
+    if not local_data_split_enabled(os.path.join(BASE_DIR, 'data')):
+        return {'ok': False, 'reason': 'split_inactive'}
+    pg_basebackup = _find_pg_binary('pg_basebackup')
+    if not shutil.which(pg_basebackup) and not os.path.isfile(pg_basebackup):
+        logger.warning('[DB-BaseBackup] pg_basebackup not found — skipping')
+        return {'ok': False, 'reason': 'binary_missing'}
+    bdir = _base_backup_dir(BASE_DIR)
+    stamp = time.strftime('%Y%m%d_%H%M%S')
+    out = os.path.join(bdir, stamp)
+    try:
+        os.makedirs(bdir, exist_ok=True)
+        proc = subprocess.run(
+            [pg_basebackup, '-h', '127.0.0.1', '-p', str(PG_PORT), '-U', PG_USER,
+             '-D', out, '-X', 'stream', '--checkpoint=fast', '--no-password'],
+            capture_output=True, text=True,
+            env={**os.environ, 'PGCONNECT_TIMEOUT': '10', 'PGGSSENCMODE': 'disable'},
+            timeout=int(getenv_compat('TOFU_DB_BASEBACKUP_TIMEOUT', default='3600')),
+        )
+        if proc.returncode != 0:
+            logger.error('[DB-BaseBackup] pg_basebackup failed (rc=%d): %s',
+                         proc.returncode, (proc.stderr or '').strip()[:300])
+            shutil.rmtree(out, ignore_errors=True)
+            return {'ok': False, 'reason': 'basebackup_failed'}
+    except Exception as e:
+        logger.error('[DB-BaseBackup] pg_basebackup raised: %s', e, exc_info=True)
+        shutil.rmtree(out, ignore_errors=True)
+        return {'ok': False, 'reason': str(e)}
+    logger.info('[DB-BaseBackup] Wrote base backup %s', out)
+    return {'ok': True, 'path': out}
+
+
+def _recover_via_pitr(local_pgdata, base_dir, pg_port, pg_user, pg_password, pg_dbname):
+    """Tier B cold-start: restore latest base + replay archived WAL (PITR).
+
+    Lays the latest ``-X stream`` base into ``local_pgdata``, writes
+    ``recovery.signal`` + a ``restore_command`` pointing at our WAL-restore shim
+    + ``recovery_target_timeline='latest'``, then starts PG so it replays the
+    archived WAL to the last segment (the seconds-RPO tail) and promotes.
+
+    Returns dict {PG_HOST,PG_PORT,PG_DSN} on a verified recovery, else None.
+    """
+    base = _latest_base_backup(base_dir)
+    if not base:
+        logger.warning('[DB-PITR] no base backup present — cannot PITR')
+        return None
+    if os.path.exists(local_pgdata) and os.listdir(local_pgdata):
+        logger.error('[DB-PITR] target %s not empty — refusing to overlay', local_pgdata)
+        return None
+    try:
+        os.makedirs(os.path.dirname(local_pgdata), exist_ok=True)
+        shutil.copytree(base, local_pgdata)
+    except Exception as e:
+        logger.error('[DB-PITR] could not lay down base %s: %s', base, e)
+        return None
+    # recovery config: replay archived WAL via our restore shim.
+    restore_cmd = ("%s -m lib.database.wal_archive restore %%f %%p"
+                   % (sys.executable or 'python3'))
+    try:
+        with open(os.path.join(local_pgdata, 'postgresql.auto.conf'), 'a') as f:
+            f.write("\nrestore_command = '%s'\n" % restore_cmd)
+            f.write("recovery_target_timeline = 'latest'\n")
+        open(os.path.join(local_pgdata, 'recovery.signal'), 'w').close()
+    except OSError as e:
+        logger.error('[DB-PITR] could not write recovery config: %s', e)
+        return None
+    # Apply managed tuning to the restored base (do NOT re-initdb — the base IS
+    # the cluster), then start PG so it replays archived WAL and promotes.
+    _ensure_managed_pg_config(local_pgdata)
+    conf_port = _read_our_pg_port(local_pgdata) or pg_port
+    log_path = os.path.join(base_dir, 'logs', 'postgresql.log')
+    logger.info('[DB-PITR] Restoring base %s + replaying archived WAL into %s (port=%d)',
+                base, local_pgdata, conf_port)
+    try:
+        start = subprocess.run(
+            [_find_pg_binary('pg_ctl'), '-D', local_pgdata, '-l', log_path,
+             'start', '-w', '-t', '60'],
+            capture_output=True, text=True, timeout=90)
+        if start.returncode == 0 and _verify_pg_after_start(conf_port, local_pgdata,
+                                                            pg_user, total_wait_s=20):
+            _ensure_database_exists('127.0.0.1', conf_port, pg_dbname, pg_user, local_pgdata)
+            _write_owner_host(local_pgdata)
+            _mark_pg_owned_locally(local_pgdata)
+            dsn = f"host=127.0.0.1 port={conf_port} dbname={pg_dbname}"
+            if pg_user:
+                dsn += f" user={pg_user}"
+            logger.warning('[DB-PITR] PITR recovery SUCCESS — replayed to WAL tail on :%d',
+                           conf_port)
+            return {'PG_HOST': '127.0.0.1', 'PG_PORT': conf_port, 'PG_DSN': dsn}
+        logger.critical('[DB-PITR] PITR start/replay FAILED (rc=%d): %s — quarantining',
+                        start.returncode, (start.stderr or '').strip()[:300])
+    except Exception as e:
+        logger.critical('[DB-PITR] PITR start raised: %s — quarantining', e)
+    _quarantine_corrupt_pgdata(local_pgdata)
+    return None
 
 
 def _quarantine_corrupt_pgdata(pgdata):
@@ -2266,6 +2511,289 @@ def _pgdata_major_compatible(pgdata) -> bool:
     return True
 
 
+def _dump_live_cluster(pg_host, pg_port, pg_user, out_path):
+    """Take a fresh, consistent, lock-free online ``pg_dumpall`` of a LIVE PG.
+
+    A logical dump of a running PostgreSQL is a consistent online backup with
+    ZERO data-loss window (unlike restoring a stale nightly artifact) and no
+    Tier-B machinery. Used as the PREFERRED seed source for the one-time
+    local-primary migration.
+
+    Returns:
+        True on a non-empty dump written to *out_path*, else False.
+    """
+    pg_dumpall = _find_pg_binary('pg_dumpall')
+    if not shutil.which(pg_dumpall) and not os.path.isfile(pg_dumpall):
+        logger.warning('[DB-Seed] pg_dumpall not found — cannot take a live dump')
+        return False
+    try:
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, 'w') as fh:
+            proc = subprocess.run(
+                [pg_dumpall, '-h', pg_host, '-p', str(pg_port), '-U', pg_user,
+                 '--clean', '--if-exists'],
+                stdout=fh, stderr=subprocess.PIPE, text=True,
+                env={**os.environ, 'PGCONNECT_TIMEOUT': '10',
+                     'PGGSSENCMODE': 'disable'},
+                timeout=int(getenv_compat('TOFU_DB_SEED_DUMP_TIMEOUT', default='1800')),
+            )
+        if proc.returncode != 0:
+            logger.warning('[DB-Seed] live pg_dumpall failed (rc=%d): %s',
+                           proc.returncode, (proc.stderr or '').strip()[:300])
+            return False
+        if os.path.getsize(out_path) == 0:
+            logger.warning('[DB-Seed] live pg_dumpall produced an empty file')
+            return False
+        logger.info('[DB-Seed] Live dump written to %s (%.1f MB)',
+                    out_path, os.path.getsize(out_path) / 1e6)
+        return True
+    except Exception as e:
+        logger.error('[DB-Seed] live pg_dumpall raised: %s', e, exc_info=True)
+        return False
+
+
+def _count_convs(pg_host, pg_port, pg_user, pg_dbname):
+    """Row count of the conversations table, or None if unreadable.
+
+    Used as the seed verification sentinel: the restored local cluster must
+    report a count consistent with the source before local is declared canonical.
+    """
+    psql_bin = _find_pg_binary('psql')
+    if not shutil.which(psql_bin) and not os.path.isfile(psql_bin):
+        return None
+    try:
+        proc = subprocess.run(
+            [psql_bin, '-h', pg_host, '-p', str(pg_port), '-U', pg_user,
+             '-d', pg_dbname, '-tAc', 'SELECT count(*) FROM conversations'],
+            capture_output=True, text=True,
+            env={**os.environ, 'PGCONNECT_TIMEOUT': '10', 'PGGSSENCMODE': 'disable'},
+            timeout=30,
+        )
+        if proc.returncode != 0:
+            logger.debug('[DB-Seed] conv-count query failed: %s',
+                         (proc.stderr or '').strip()[:200])
+            return None
+        return int((proc.stdout or '0').strip() or '0')
+    except Exception as e:
+        logger.debug('[DB-Seed] conv-count probe raised: %s', e)
+        return None
+
+
+def _ensure_legacy_up_for_seed(legacy_pgdata, base_dir, pg_user):
+    """Ensure the LEGACY cluster is running so the seed can take a FRESH dump.
+
+    The seed runs at Step -1, before the normal start path, so on a clean/PARK
+    restart the legacy PG is DOWN. Reuse it if already up; otherwise start it via
+    the owned-PG ``pg_ctl start`` path (same mechanism the normal boot uses).
+
+    Returns:
+        The legacy port (int) when the cluster is confirmed up, else None (only
+        then may the caller fall back to the nightly dump).
+    """
+    port = _read_our_pg_port(legacy_pgdata)
+    if port is None:
+        logger.warning('[DB-Seed] legacy postgresql.conf has no port — cannot '
+                       'start legacy for a fresh dump')
+        return None
+    # Already up?
+    try:
+        r = subprocess.run(
+            [_find_pg_binary('pg_isready'), '-h', '127.0.0.1', '-p', str(port),
+             '-d', 'template1'],
+            capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and _verify_pg_data_directory('127.0.0.1', port,
+                                                            legacy_pgdata, pg_user):
+            logger.info('[DB-Seed] legacy cluster already up on :%d (reusing for dump)', port)
+            return port
+    except Exception as e:
+        logger.debug('[DB-Seed] legacy pg_isready probe failed: %s', e)
+    # Down → start it via pg_ctl (do NOT fall back to nightly just because it
+    # wasn't running yet — that is the exact bug this fixes).
+    log_path = os.path.join(base_dir, 'logs', 'postgresql.log')
+    try:
+        start = subprocess.run(
+            [_find_pg_binary('pg_ctl'), '-D', legacy_pgdata, '-l', log_path,
+             'start', '-w', '-t', '30'],
+            capture_output=True, text=True, timeout=45)
+        if start.returncode == 0 and _verify_pg_after_start(port, legacy_pgdata,
+                                                            pg_user, total_wait_s=12):
+            logger.info('[DB-Seed] started legacy cluster on :%d for a fresh dump', port)
+            return port
+        logger.warning('[DB-Seed] could not start legacy cluster for dump (rc=%d): %s',
+                       start.returncode, (start.stderr or '').strip()[:200])
+    except Exception as e:
+        logger.warning('[DB-Seed] starting legacy cluster for dump raised: %s', e)
+    return None
+
+
+def _seed_local_pgdata_from_legacy(local_pgdata, legacy_pgdata, base_dir,
+                                   pg_port, pg_user, pg_password, pg_dbname):
+    """One-time migration: populate an empty LOCAL pgdata from the legacy source.
+
+    This is what makes the local-primary flip SAFE: it runs at most once, BEFORE
+    ``_ensure_pg_running`` picks a cluster, and only actually populates local
+    after a verified restore. Its properties (owner-mandated):
+
+      1. Seed source = a FRESH live ``pg_dumpall`` of the legacy cluster. Because
+         this runs at Step -1 (before the normal start path), the legacy cluster
+         is first STARTED if it is down (via _ensure_legacy_up_for_seed); the
+         nightly dump is used ONLY when legacy genuinely cannot be started — NOT
+         merely because it wasn't up yet. Opt-in via TOFU_DB_SEED_LOCAL=1.
+      2. Idempotent on ``pgdata_is_populated(local)`` — if local already looks
+         initialized, skip entirely (never re-restore over newer local data).
+      3. Verify-before-canonical — after restoring into local, confirm the
+         restored cluster starts and its ``conversations`` count is consistent
+         with the source. On ANY failure: QUARANTINE the half-restored local dir
+         so it can never satisfy the gate, leave legacy canonical, log CRITICAL.
+
+    Returns:
+        True iff local is now a verified, populated cluster (gate will flip to
+        it on the next boot); False on skip / failure (legacy stays canonical).
+    """
+    from lib.database.db_paths import pgdata_is_populated
+
+    # OPT-IN: the seed is a heavy, operator-visible event (a full pg_dumpall +
+    # restore, potentially many GB, running BEFORE the server serves). It must
+    # NOT fire unexpectedly on a routine restart. Default OFF; the operator sets
+    # TOFU_DB_SEED_LOCAL=1 to deliberately trigger the one-time migration. The
+    # gate keeps resolution on the intact legacy cluster until then, so nothing
+    # regresses by requiring an explicit opt-in.
+    if getenv_compat('TOFU_DB_SEED_LOCAL', default='0').lower() not in ('1', 'true', 'yes'):
+        logger.debug('[DB-Seed] not opted in (TOFU_DB_SEED_LOCAL!=1) — skipping '
+                     'one-time local seed; staying on legacy')
+        return False
+
+    # ── Property 2: idempotent — never touch an already-populated local ──
+    if pgdata_is_populated(local_pgdata):
+        logger.debug('[DB-Seed] local pgdata %s already populated — no-op', local_pgdata)
+        return True
+    if not _pg_binaries_present():
+        logger.warning('[DB-Seed] PG binaries absent — cannot seed local; '
+                       'staying on legacy')
+        return False
+
+    from lib.log import audit_log
+    audit_log('db_seed_local_start', local=local_pgdata, legacy=legacy_pgdata)
+
+    # ── Property 1: prefer a FRESH live dump; fall back to latest nightly ──
+    # CRITICAL ordering: the seed runs at Step -1, BEFORE the normal start path,
+    # so on a clean/PARK restart the legacy cluster is DOWN here. We must bring
+    # it UP ourselves before dumping — otherwise a mere "not yet running" would
+    # silently degrade to the stale nightly and defeat the zero-loss guarantee.
+    # Only a legacy cluster that genuinely CANNOT be started falls back to nightly.
+    staged = os.path.join(base_dir, 'data', 'pg_backup.sql')
+    src = 'live'
+    legacy_port = _ensure_legacy_up_for_seed(legacy_pgdata, base_dir, pg_user)
+    live_ok = False
+    if legacy_port is not None:
+        live_ok = _dump_live_cluster('127.0.0.1', legacy_port, pg_user, staged)
+    if not live_ok:
+        latest = _latest_pg_backup(base_dir)
+        if not latest:
+            logger.critical('[DB-Seed] legacy cluster could not be started AND no '
+                            'nightly dump to fall back to — cannot seed local; '
+                            'legacy stays canonical.')
+            audit_log('db_seed_local_failed', reason='no_source')
+            return False
+        try:
+            shutil.copy2(latest, staged)
+            src = 'nightly:%s' % os.path.basename(latest)
+            logger.warning('[DB-Seed] live cluster unreachable — falling back to '
+                           'latest nightly dump %s (may lose since-dump rows)', latest)
+        except OSError as e:
+            logger.critical('[DB-Seed] could not stage nightly dump: %s', e)
+            audit_log('db_seed_local_failed', reason='stage_failed')
+            return False
+
+    # Source conversation count (verification target). Best-effort; None → skip
+    # the numeric equality check but still require the restored cluster to start.
+    src_convs = _count_convs('127.0.0.1', legacy_port, pg_user, pg_dbname) \
+        if legacy_port is not None else None
+
+    # ── §3a channel selection: when Tier B is on, restore via the NEWER of the
+    # two durability channels. tier_b → PITR (base + WAL replay, seconds-RPO);
+    # tier_a (or Tier B off) → the fresh-dump/initdb path below. This is the
+    # real cold-start restore path, driven by the selector — not a standalone fn.
+    if _tier_b_enabled():
+        channel, _end = _select_restore_channel(base_dir)
+        if channel == 'tier_b':
+            logger.info('[DB-Seed] §3a selector chose Tier B (WAL tail newest) — '
+                        'restoring via PITR')
+            result = _recover_via_pitr(local_pgdata, base_dir, pg_port,
+                                       pg_user, pg_password, pg_dbname)
+            if not result:
+                logger.critical('[DB-Seed] PITR restore FAILED — quarantined; '
+                                'legacy stays canonical.')
+                audit_log('db_seed_local_failed', reason='pitr_failed')
+                return False
+            local_port = result['PG_PORT']
+            local_convs = _count_convs('127.0.0.1', local_port, pg_user, pg_dbname)
+            if local_convs is None or (src_convs is not None and local_convs < src_convs):
+                # PITR should recover >= the dump's rows (WAL tail is newer); a
+                # SHORTFALL means the replay didn't reach the tail → not canonical.
+                logger.critical('[DB-Seed] PITR VERIFY FAILED — local convs=%s < '
+                                'source=%s (WAL tail not fully replayed); '
+                                'quarantining, legacy stays canonical.',
+                                local_convs, src_convs)
+                _boot_stop_pg_quietly(local_pgdata)
+                _quarantine_corrupt_pgdata(local_pgdata)
+                audit_log('db_seed_local_failed', reason='pitr_verify', source='tier_b')
+                return False
+            logger.warning('[DB-Seed] SUCCESS via PITR — local recovered to WAL tail '
+                           '(convs=%s). Legacy PRESERVED at %s.', local_convs, legacy_pgdata)
+            audit_log('db_seed_local_success', local_convs=local_convs, source='tier_b')
+            _boot_stop_pg_quietly(local_pgdata)
+            return True
+
+    # ── initdb + restore INTO local (reuses the well-tested bootstrap path) ──
+    logger.info('[DB-Seed] Seeding local pgdata=%s from %s source', local_pgdata, src)
+    result = _bootstrap_pg(local_pgdata, base_dir, '127.0.0.1', pg_port,
+                           pg_user, pg_password, pg_dbname)
+    if not result:
+        logger.critical('[DB-Seed] initdb+restore into local FAILED — quarantining '
+                        'the half-built local dir; legacy stays canonical.')
+        _quarantine_corrupt_pgdata(local_pgdata)
+        audit_log('db_seed_local_failed', reason='bootstrap_failed', source=src)
+        return False
+
+    # ── Property 3: verify BEFORE declaring local canonical ──
+    local_port = result['PG_PORT']
+    local_convs = _count_convs('127.0.0.1', local_port, pg_user, pg_dbname)
+    ok = local_convs is not None
+    if ok and src_convs is not None:
+        ok = local_convs == src_convs
+    if not ok:
+        logger.critical('[DB-Seed] VERIFY FAILED — restored local convs=%s vs '
+                        'source=%s. Quarantining local so it cannot satisfy the '
+                        'gate; legacy stays canonical.', local_convs, src_convs)
+        _boot_stop_pg_quietly(local_pgdata)
+        _quarantine_corrupt_pgdata(local_pgdata)
+        audit_log('db_seed_local_failed', reason='verify_mismatch',
+                  local_convs=local_convs, src_convs=src_convs, source=src)
+        return False
+
+    logger.warning('[DB-Seed] SUCCESS — local seeded + verified (convs=%s, source=%s). '
+                   'Next boot will resolve pgdata to local. Legacy PRESERVED at %s '
+                   '(not deleted — retire only after operator sign-off).',
+                   local_convs, src, legacy_pgdata)
+    audit_log('db_seed_local_success', local_convs=local_convs, source=src)
+    # Stop the just-seeded local PG; _ensure_pg_running (next boot) starts it
+    # through the normal owned-PG path. Leaving it running here would collide
+    # with this boot's legacy cluster on the same DSN.
+    _boot_stop_pg_quietly(local_pgdata)
+    return True
+
+
+def _boot_stop_pg_quietly(pgdata):
+    """Best-effort ``pg_ctl stop -m fast`` for a pgdata we just started."""
+    try:
+        subprocess.run(
+            [_find_pg_binary('pg_ctl'), '-D', pgdata, 'stop', '-m', 'fast', '-w', '-t', '20'],
+            capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        logger.debug('[DB-Seed] quiet stop of %s failed: %s', pgdata, e)
+
+
 def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password, pg_dbname):
     """Ensure PostgreSQL is accessible. Start locally or discover remote instance.
 
@@ -2279,6 +2807,34 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
         if pg_password:
             dsn += f" password={pg_password}"
         return dsn
+
+    # ── Step -1: One-time local-primary seed migration ──
+    # When the local-primary split is engaged but `pgdata` here is the LEGACY
+    # FUSE path (the gate held because local is not yet populated), attempt the
+    # one-time seed of the empty local cluster from this legacy one. On success
+    # the local dir becomes a verified populated cluster and the NEXT boot's
+    # resolve_pgdata_dir flips to it (the two-restart dance). On skip/failure
+    # legacy stays canonical — we proceed to start THIS legacy cluster below,
+    # so serving is never blocked. The seed itself is idempotent + verify-gated.
+    try:
+        from lib.database.db_paths import (
+            local_data_split_enabled, legacy_pgdata_dir, pgdata_is_populated,
+        )
+        _data_dir = os.path.join(base_dir, 'data')
+        _legacy = legacy_pgdata_dir(_data_dir)
+        # Only when split is on AND we were handed the legacy path (gate held).
+        if (local_data_split_enabled(_data_dir)
+                and os.path.abspath(pgdata) == os.path.abspath(_legacy)):
+            _local_root = getenv_compat('TOFU_DB_LOCAL_ROOT', default='').strip() \
+                or '/tmp/tofu'
+            _local_pgdata = os.path.join(os.path.abspath(_local_root), 'pgdata')
+            if not pgdata_is_populated(_local_pgdata):
+                _seed_local_pgdata_from_legacy(
+                    _local_pgdata, _legacy, base_dir, pg_port,
+                    pg_user, pg_password, pg_dbname)
+    except Exception as _se:
+        logger.error('[DB-Seed] seed hook raised (continuing on legacy): %s',
+                     _se, exc_info=True)
 
     # ── Step 0: Early bail if PG binaries are simply not installed ──
     # Unless the user has explicitly set TOFU_PG_HOST to a remote, there's

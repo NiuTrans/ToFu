@@ -534,17 +534,7 @@
     if (!_activeId) return;
     try {
       const text = await _ensureContent(_activeId);
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        // Fallback: temp textarea
-        const ta = document.createElement("textarea");
-        ta.value = text;
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand("copy");
-        ta.remove();
-      }
+      await _safeClipboardWrite(text);
       if (typeof showToast === "function") {
         showToast("", "Copied", "Source copied to clipboard.", 1800);
       }

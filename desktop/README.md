@@ -34,16 +34,37 @@ The installer bundles:
 
 ## First-Launch Experience
 
-On first launch, a dialog asks the user which optional components to download:
+The **installer only ships files and launches the app** — it never shells out to
+download components (a PyInstaller `--onedir` bundle has no standalone
+`python.exe`, so the old installer `[Run]` step that called
+`_internal\python.exe -m playwright install` was dead code that also silently
+downloaded nothing). Instead, on first launch the **app itself** shows a dialog
+asking which optional components to download:
 
 | Component | Size | Default | Purpose |
 |---|---|---|---|
 | **PostgreSQL Database** | ~50 MB | ✅ Recommended | Auto-bootstraps a local PG instance for full concurrency + JSONB + FTS |
 | **Browser Engine (Chromium)** | ~150 MB | ✅ Recommended | Enables JS-rendered page fetching and browser automation |
 
+When frozen, the Chromium download relaunches `Tofu.exe` with
+`TOFU_PLAYWRIGHT_INSTALL=1` (handled in `desktop/launcher.py`), which drives the
+bundled `playwright` package in-process — the correct way to reach the
+interpreter inside a onedir bundle.
+
 Users can skip and install later via the tray menu: **Right-click → Install Components...**
 
 If both are skipped, the app still works — it uses SQLite for storage and skips browser-dependent features.
+
+## Install location & writable data
+
+The Windows installer installs **per-user** to
+`%LOCALAPPDATA%\Programs\Tofu` (`PrivilegesRequired=lowest`, no UAC/admin
+prompt). This matters: the app keeps its `data/` (config, SQLite DB, PostgreSQL
+data dir) and `logs/` **next to the executable**, so the install dir must be
+user-writable. A `Program Files` install under `lowest` privileges is NOT
+writable and used to crash the app on first launch. If the exe dir ever ends up
+read-only anyway, the backend falls back to a per-user data dir
+(`%LOCALAPPDATA%\Tofu`) — see `lib/runtime_paths.py`.
 
 ## Architecture
 

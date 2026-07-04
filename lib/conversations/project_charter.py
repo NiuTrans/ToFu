@@ -38,8 +38,15 @@ from lib.log import audit_log, get_logger
 logger = get_logger(__name__)
 
 # Soft caps so a single charter row stays cheap to inject into every prompt.
+# _DECISION_MAX_CHARS is the SHARED ceiling for BOTH a proposal's full text
+# AND the committed decision derived from it — the two MUST match, or a commit
+# would silently clip a decision that the panel + injected [PROJECT CHARTER]
+# block then render mid-sentence. It is deliberately decoupled from the
+# feed-row cap (project_feed._SUMMARY_MAX_CHARS = 280), which is scoped to the
+# one-line activity summary ONLY and must never bound a committed decision (a
+# charter decision is prompt-injected shared intent).
 _CONTENT_MAX_CHARS = 8000
-_DECISION_MAX_CHARS = 600
+_DECISION_MAX_CHARS = 2400
 _MAX_DECISIONS = 100
 
 
@@ -106,7 +113,7 @@ def propose_amendment(project_path: str, conv_id: str, proposal: str, *,
         return {'ok': False, 'error': 'no project'}
     if not proposal:
         return {'ok': False, 'error': 'empty proposal'}
-    proposal = proposal[:_DECISION_MAX_CHARS * 4]  # generous; summary is capped
+    proposal = proposal[:_DECISION_MAX_CHARS]  # full text; the feed-row summary is capped separately
     # A stable proposal id threaded into the event payload so a later commit /
     # dismiss can resolve THIS proposal by id (not fragile text equality) →
     # the pending count decrements durably once acted on.
@@ -287,10 +294,95 @@ def pending_proposals(project_path: str) -> list[dict]:
         out.append({
             'proposalId': pid or '', 'event_id': e.get('event_id', ''),
             'conv_id': e.get('conv_id', ''), 'title': e.get('title', ''),
-            'summary': e.get('summary', '') or payload.get('proposal', ''),
+            # Payload-FIRST: payload.proposal carries the FULL proposal text;
+            # the event `summary` is only the 280-char feed-row cap. A commit
+            # derives the durable decision from this field, so it must be the
+            # full text — never the truncated feed summary.
+            'summary': payload.get('proposal', '') or e.get('summary', ''),
             'ts': e.get('ts', 0),
         })
     return out
+
+
+def repair_truncated_decisions(project_path: str) -> dict:
+    """Re-source committed decisions that were stored truncated.
+
+    Historically a commit derived its decision text from the feed-row
+    ``summary`` (capped to 280 chars by ``project_feed._SUMMARY_MAX_CHARS``)
+    instead of the full ``proposed_decision`` payload — so decisions landed
+    clipped mid-sentence in the panel AND the injected ``[PROJECT CHARTER]``
+    block. This idempotent repair walks the committed decisions and, for any
+    whose stored ``text`` is a strict PREFIX of a longer proposal payload found
+    in the feed, replaces it with the full payload text (re-capped to the
+    current ``_DECISION_MAX_CHARS``). Bumps ``version`` only when something
+    actually changed. Best-effort — never raises into the caller.
+
+    Returns ``{'ok': bool, 'repaired': int, 'version'?: int, 'error'?: str}``.
+    """
+    if not project_path:
+        return {'ok': False, 'repaired': 0, 'error': 'no project'}
+    from lib.conversations.project_feed import normalize_project_path
+    project_path = normalize_project_path(project_path)
+    try:
+        rec = read_charter(project_path)
+        if not rec.get('exists') or not rec.get('decisions'):
+            return {'ok': True, 'repaired': 0}
+        # Full proposal texts available in the feed (payload.proposal is the
+        # untruncated source), longest-first so a decision matches its longest
+        # available superset.
+        from lib.conversations.project_feed import read_project_feed
+        feed = read_project_feed(project_path, limit=500)
+        proposals = []
+        for e in feed.get('events', []):
+            if e.get('kind') != 'proposed_decision':
+                continue
+            full = ((e.get('payload') or {}).get('proposal') or '').strip()
+            if full:
+                proposals.append(full)
+        proposals.sort(key=len, reverse=True)
+
+        decisions = list(rec['decisions'])
+        repaired = 0
+        for d in decisions:
+            if not isinstance(d, dict):
+                continue
+            cur_txt = (d.get('text') or '').strip()
+            if not cur_txt:
+                continue
+            for full in proposals:
+                # A stored decision that is a strict prefix of a longer full
+                # proposal was clipped from THAT proposal → restore it.
+                if len(full) > len(cur_txt) and full.startswith(cur_txt):
+                    d['text'] = full[:_DECISION_MAX_CHARS]
+                    repaired += 1
+                    break
+        if not repaired:
+            return {'ok': True, 'repaired': 0, 'version': rec['version']}
+
+        db = get_thread_db(DOMAIN_CHAT)
+        new_version = rec['version'] + 1
+        ts = int(time.time() * 1000)
+        decisions_json = json.dumps(decisions, ensure_ascii=False)
+        db.execute(
+            'INSERT INTO project_charter '
+            '(project_path, content, decisions, updated_by_conv, updated_at, version) '
+            'VALUES (?, ?, ?, ?, ?, ?) '
+            'ON CONFLICT(project_path) DO UPDATE SET '
+            'content=excluded.content, decisions=excluded.decisions, '
+            'updated_by_conv=excluded.updated_by_conv, '
+            'updated_at=excluded.updated_at, version=excluded.version',
+            (project_path, rec['content'], decisions_json,
+             rec['updated_by_conv'] or '', ts, new_version))
+        db.commit()
+    except Exception as e:
+        logger.error('[Charter] repair failed proj=%.40r: %s',
+                     project_path, e, exc_info=True)
+        return {'ok': False, 'repaired': 0, 'error': str(e)}
+    audit_log('charter_decisions_repaired', project_path=project_path,
+              repaired=repaired, version=new_version)
+    logger.info('[Charter] repaired %d truncated decision(s) proj=%.40r',
+                repaired, project_path)
+    return {'ok': True, 'repaired': repaired, 'version': new_version}
 
 
 def render_charter_block(project_path: str) -> str:
@@ -358,5 +450,6 @@ def execute_charter_tool(fn_name: str, fn_args: dict, *,
 
 __all__ = [
     'read_charter', 'propose_amendment', 'commit_charter', 'dismiss_proposal',
-    'pending_proposals', 'render_charter_block', 'execute_charter_tool',
+    'pending_proposals', 'repair_truncated_decisions', 'render_charter_block',
+    'execute_charter_tool',
 ]

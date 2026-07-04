@@ -118,6 +118,15 @@ async def push_ws():
                 frame = await client.drain()
                 if frame is None:
                     break
+                # A ping means the 30s drain window elapsed with no traffic —
+                # use it as the subscription-registry heartbeat so a LIVING
+                # subscriber's cross-replica lease (sub:*) never expires under
+                # the 90s TTL (design B.5.2, refresh at ~ttl/3).
+                if frame.get('type') == 'ping':
+                    try:
+                        hub.refresh_subscriptions()
+                    except Exception as e:
+                        logger.debug('[Push] registry heartbeat failed: %s', e)
                 await websocket.send_json(frame)
         except asyncio.CancelledError:
             pass
@@ -125,23 +134,11 @@ async def push_ws():
             logger.debug('[Push] Sender error: %s', e)
 
     async def _receiver():
-        """Receive client commands (subscribe, unsubscribe, abort)."""
+        """Receive client commands (subscribe, unsubscribe, abort, ping)."""
         try:
             while True:
                 raw = await websocket.receive_json()
-                if not raw or not isinstance(raw, dict):
-                    continue
-                action = raw.get('action', '')
-                channel = raw.get('channel', '')
-                task_id = raw.get('taskId', '*')
-
-                if action == 'subscribe' and channel:
-                    hub.subscribe(client, channel, task_id)
-                    logger.debug('[Push] Subscribe: channel=%s taskId=%s', channel, task_id[:8])
-                elif action == 'unsubscribe' and channel:
-                    hub.unsubscribe(client, channel, task_id)
-                elif action == 'abort' and channel == 'chat' and task_id != '*':
-                    _handle_abort(task_id)
+                _handle_client_frame(client, raw)
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -161,6 +158,41 @@ async def push_ws():
         if recv_task and not recv_task.done():
             recv_task.cancel()
         logger.info('[Push] WS disconnected (clients=%d)', hub.client_count)
+
+
+def _handle_client_frame(client: PushClient, raw) -> None:
+    """Dispatch one inbound client command frame.
+
+    Extracted from the ``_receiver`` coroutine so the routing — in particular
+    the latency ``ping`` → ``pong`` echo — is directly unit-testable without a
+    live WebSocket. Never writes the socket directly: outbound frames are
+    ENQUEUED onto the client's queue so ``_sender`` stays the sole writer of
+    the ASGI WebSocket (two coroutines writing it concurrently can
+    interleave/corrupt frames).
+    """
+    if not raw or not isinstance(raw, dict):
+        return
+    action = raw.get('action', '')
+    channel = raw.get('channel', '')
+    task_id = raw.get('taskId', '*')
+
+    if action == 'subscribe' and channel:
+        hub.subscribe(client, channel, task_id)
+        logger.debug('[Push] Subscribe: channel=%s taskId=%s', channel, task_id[:8])
+    elif action == 'unsubscribe' and channel:
+        hub.unsubscribe(client, channel, task_id)
+    elif action == 'abort' and channel == 'chat' and task_id != '*':
+        _handle_abort(task_id)
+    elif action == 'ping':
+        # Round-trip latency probe. Echo the client's timestamp back so the
+        # client can compute RTT = now - t. Pure echo (no shared state) → works
+        # on whatever replica the socket landed on. Route it through the
+        # client's OUTBOUND QUEUE, NOT a direct websocket.send_json: _sender is
+        # the sole writer of this socket (it drains the queue), and two
+        # coroutines writing the same ASGI WebSocket concurrently can
+        # interleave/corrupt frames. QueueFull drops the oldest frame, which is
+        # acceptable for a latency probe.
+        client.enqueue({'channel': 'system', 'type': 'pong', 't': raw.get('t')})
 
 
 def _handle_abort(task_id: str):

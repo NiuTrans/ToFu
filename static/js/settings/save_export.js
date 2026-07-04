@@ -82,8 +82,6 @@ function saveSettings() {
         if (data && data.ok) {
           debugLog('Trading module ' + (newVal ? 'enabled' : 'disabled') + ' — applied', 'success');
           if (typeof _featureFlags !== 'undefined') _featureFlags.trading_enabled = newVal;
-          var btn = document.getElementById('tradingAdvisorBtn');
-          if (btn) btn.style.display = newVal ? 'flex' : 'none';
           // Server tells us whether the toggle takes effect now or only after
           // a restart (blueprint registration is import-time — see A14).
           var hint = document.getElementById('tradingRestartHint');

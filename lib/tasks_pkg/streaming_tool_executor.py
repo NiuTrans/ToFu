@@ -74,6 +74,38 @@ _STREAMABLE_TOOLS = frozenset({
 _INTERNAL_TOOL_PREFIXES = ('antml:', 'anthropic.', '__')
 
 
+def _has_executable_target(fn_name: str, fn_args: dict) -> bool:
+    """True if a streamable read-only call has a usable target to pre-execute.
+
+    Guards against phantom/placeholder calls the model sometimes emits, e.g.
+    ``fetch_url({"reason": "placeholder", "urls": []})`` — an empty ``urls``
+    array is falsy so it falls through to single-URL mode with ``url=''``.
+    Pre-executing that would run ``fetch_page_content('')`` and CACHE a bogus
+    ``"Failed to fetch ."`` result (tagged ``source: "Prefetch"``) that the
+    real handler then never gets a chance to reject cleanly. Returning False
+    here defers the call to the normal handler, which rejects it with a clear
+    "no URL provided" message instead.
+    """
+    if fn_name == 'fetch_url':
+        urls = fn_args.get('urls')
+        if isinstance(urls, list) and any(
+            (isinstance(s, dict) and s.get('url')) or (isinstance(s, str) and s.strip())
+            for s in urls
+        ):
+            return True
+        return bool((fn_args.get('url') or '').strip())
+    if fn_name == 'web_search':
+        queries = fn_args.get('queries')
+        if isinstance(queries, list) and any(
+            (isinstance(s, dict) and s.get('query')) or (isinstance(s, str) and s.strip())
+            for s in queries
+        ):
+            return True
+        return bool((fn_args.get('query') or '').strip())
+    # Project tools (read_files, grep_search, …) — let the handler validate.
+    return True
+
+
 class StreamingToolAccumulator:
     """Accumulates tool calls during streaming and pre-executes read-only ones.
 
@@ -186,7 +218,8 @@ class StreamingToolAccumulator:
                          'for %s: %s', self._tid, fn_name, e)
 
         # ── Pre-execute read-only tools ──
-        if fn_name in _STREAMABLE_TOOLS and fn_args:
+        if (fn_name in _STREAMABLE_TOOLS and fn_args
+                and _has_executable_target(fn_name, fn_args)):
             self._submitted_count += 1
             t0 = time.time()
             logger.info('[%s] StreamingToolExec: pre-executing %s (tc_id=%s) '

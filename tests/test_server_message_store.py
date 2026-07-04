@@ -1048,12 +1048,12 @@ class TestTruncationCachePrefixGate:
             st.message_count = message_count
             st.last_cache_read_tokens = read_tokens
             st.call_count = 1
-            ct._cache_states[conv_id] = st
+            ct._cache_states[ct._state_key(conv_id)] = st
 
     def teardown_method(self, _m):
         from lib.tasks_pkg import cache_tracking as ct
         with ct._cache_lock:
-            ct._cache_states.pop('cp_gate_conv', None)
+            ct._cache_states.pop(ct._state_key('cp_gate_conv'), None)
 
     def _history_with_fat_old_result(self):
         from lib.tasks_pkg.server_message_store import _OLD_RESULT_MAX_CHARS

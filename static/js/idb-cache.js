@@ -226,6 +226,49 @@ var ConvCache = (function () {
   }
 
   /**
+   * List ALL cached conversation meta rows (meta-only — no message join).
+   * Cheap cursor over the conv_meta store; used by the boot path to paint
+   * the sidebar instantly before / without a server round-trip.
+   *
+   * NOTE: `put()` only writes conversations that have messages, so this
+   * reflects conversations OPENED on this device, NOT the full server list.
+   * @returns {Promise<Array<{id,title,updatedAt,cachedAt,settings,msgCount}>>}
+   */
+  function getAllMeta() {
+    if (!_available) return Promise.resolve([]);
+    return _open().then(function (db) {
+      if (!db) return [];
+      return new Promise(function (resolve) {
+        try {
+          var tx = db.transaction(META_STORE, 'readonly');
+          var out = [];
+          var cursorReq = tx.objectStore(META_STORE).openCursor();
+          cursorReq.onsuccess = function (e) {
+            var c = e.target.result;
+            if (c) {
+              var v = c.value;
+              out.push({
+                id: v.id, title: v.title, updatedAt: v.updatedAt,
+                cachedAt: v.cachedAt, settings: v.settings || {},
+                msgCount: v.msgCount || (v.msgOrder ? v.msgOrder.length : 0),
+              });
+              c.continue();
+            }
+          };
+          tx.oncomplete = function () { resolve(out); };
+          tx.onerror = function () {
+            console.warn('[ConvCache] getAllMeta tx error: %o', tx.error);
+            resolve(out);
+          };
+        } catch (e) {
+          console.warn('[ConvCache] getAllMeta exception: %s', e.message);
+          resolve([]);
+        }
+      });
+    });
+  }
+
+  /**
    * Paginated read.
    * @param {string} convId
    * @param {{beforeIdx?:number, afterIdx?:number, limit?:number}} [opts]
@@ -672,6 +715,7 @@ var ConvCache = (function () {
   return {
     get: get,
     getMeta: getMeta,
+    getAllMeta: getAllMeta,
     getMessages: getMessages,
     put: put,
     remove: remove,

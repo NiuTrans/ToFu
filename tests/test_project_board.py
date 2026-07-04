@@ -454,3 +454,264 @@ def test_NC2_avoidance_hint_noop_breaks_injection(flask_app):
     )
     import lib.conversations.project_board as pb
     importlib.reload(pb)
+
+
+
+# ════════════════════════════════════════════════════════════════════
+#  reopen_task — the HUMAN override (done|claimed → open)
+#  A direct status write (NOT a lease mutation): clears owner + lease so the
+#  epic is claimable again; emits a `note` feed event so the transition is
+#  observable. Permitted from done (revive) and claimed (break a stuck claim).
+# ════════════════════════════════════════════════════════════════════
+
+def test_reopen_done_to_open(flask_app):
+    from lib.conversations.project_board import (
+        complete_task, post_task, read_board, reopen_task,
+    )
+    with flask_app.app_context():
+        tid = post_task('/b/reo1', 'cA', 'finished epic')['id']
+        complete_task('/b/reo1', 'cA', tid)
+        res = reopen_task('/b/reo1', 'cHUMAN', tid)
+        board = read_board('/b/reo1')
+    assert res['ok'] and res['from'] == 'done'
+    t = board['tasks'][0]
+    assert t['status'] == 'open' and t['owner_conv_id'] == ''
+    assert board['open'] == 1 and board['done'] == 0
+    assert 'note' in _feed_kinds(flask_app, '/b/reo1')
+
+
+def test_reopen_claimed_clears_owner_and_lease(flask_app):
+    """Reopening a LIVE claimed epic breaks the claim: status→open, owner and
+    lease cleared, so a sibling can pick it up (the human 'break a stuck live
+    claim' lever). The feed note records who previously held it."""
+    from lib.conversations.project_board import (
+        claim_task, post_task, read_board, reopen_task,
+    )
+    from lib.conversations.project_feed import read_project_feed
+    with flask_app.app_context():
+        tid = post_task('/b/reo2', 'cA', 'held epic')['id']
+        claim_task('/b/reo2', 'cOWNER', tid)   # live, unexpired lease
+        res = reopen_task('/b/reo2', 'cHUMAN', tid)
+        board = read_board('/b/reo2')
+        events = read_project_feed('/b/reo2', limit=500)['events']
+    assert res['ok'] and res['from'] == 'claimed'
+    t = board['tasks'][0]
+    assert t['status'] == 'open', 'reopened claim must read open'
+    assert t['owner_conv_id'] == '', 'reopen must clear the owner'
+    assert t['lease_expires_at'] == 0, 'reopen must clear the lease (not a lease mutation)'
+    # The transition is observable and names the previous owner.
+    note = [e for e in events if e['kind'] == 'note'
+            and e.get('payload', {}).get('reopened')]
+    assert note, 'reopen must emit an observable note event'
+    assert note[0]['payload'].get('prevOwner') == 'cOWNER'
+
+
+def test_reopen_already_open_is_refused(flask_app):
+    from lib.conversations.project_board import post_task, reopen_task
+    with flask_app.app_context():
+        tid = post_task('/b/reo3', 'cA', 'open epic')['id']
+        res = reopen_task('/b/reo3', 'cHUMAN', tid)
+    assert res['ok'] is False and res['error'] == 'already_open'
+
+
+def test_reopen_missing_task(flask_app):
+    from lib.conversations.project_board import reopen_task
+    with flask_app.app_context():
+        res = reopen_task('/b/reo4', 'cHUMAN', 'pt_does_not_exist')
+    assert res['ok'] is False and res['error'] == 'task not found'
+
+
+def test_reopened_claim_flips_to_open_in_prev_owner_injection(flask_app):
+    """The stated edge case: after a human reopens a live claim, the previous
+    owner's injected [PROJECT BOARD] block no longer marks the epic '(you)' —
+    it shows as a plain OPEN epic on the owner's NEXT prompt assembly (the
+    block is re-read per turn, so the owner is not interrupted mid-turn)."""
+    from lib.conversations.project_board import (
+        claim_task, post_task, render_board_block, reopen_task,
+    )
+    with flask_app.app_context():
+        tid = post_task('/b/reo5', 'cA', 'Owned epic')['id']
+        claim_task('/b/reo5', 'cOWNER', tid)
+        before = render_board_block('/b/reo5', current_conv_id='cOWNER')
+        reopen_task('/b/reo5', 'cHUMAN', tid)
+        after = render_board_block('/b/reo5', current_conv_id='cOWNER')
+    assert '(you)' in before, 'owner saw the epic as its own before reopen'
+    assert '(you)' not in after, 'after reopen the owner no longer owns it'
+    assert 'Open (unclaimed' in after and 'Owned epic' in after, \
+        'reopened epic appears in the open lane on the next assembly'
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Routes: POST /board/post|complete|block|reopen (human mutations)
+# ════════════════════════════════════════════════════════════════════
+
+def test_route_board_post_uses_conv_as_creator(flask_app, flask_client):
+    """POST /board/post: convId becomes created_by_conv (the dispatch target),
+    so a human-posted epic is dispatchable exactly like an agent-posted one."""
+    import json as _json
+    from lib.conversations.project_board import read_board
+    r = flask_client.post('/api/v1/project/board/post', json={
+        'path': '/b/rpost', 'title': 'Human epic', 'convId': 'cDISPLAYED'})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    tid = _json.loads(r.get_data(as_text=True))['id']
+    with flask_app.app_context():
+        board = read_board('/b/rpost')
+    t = [x for x in board['tasks'] if x['id'] == tid][0]
+    assert t['created_by_conv'] == 'cDISPLAYED', \
+        'displayed conv must be the epic creator (dispatch target)'
+    assert t['status'] == 'open'
+
+
+def test_route_board_post_requires_conv(flask_client):
+    """No conversation context → refused (never invents one / falls to _state)."""
+    r = flask_client.post('/api/v1/project/board/post',
+                          json={'path': '/b/rpost2', 'title': 'x'})
+    assert r.status_code == 400
+    assert 'convId' in r.get_data(as_text=True)
+
+
+def test_route_board_post_requires_path_and_title(flask_client):
+    assert flask_client.post('/api/v1/project/board/post',
+                             json={'title': 'x', 'convId': 'c'}).status_code == 400
+    assert flask_client.post('/api/v1/project/board/post',
+                             json={'path': '/p', 'convId': 'c'}).status_code == 400
+
+
+def test_route_board_complete(flask_app, flask_client):
+    import json as _json
+    from lib.conversations.project_board import post_task, read_board
+    with flask_app.app_context():
+        tid = post_task('/b/rcomp', 'cA', 'epic')['id']
+    r = flask_client.post('/api/v1/project/board/complete', json={
+        'path': '/b/rcomp', 'taskId': tid, 'convId': 'cHUMAN'})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    with flask_app.app_context():
+        assert read_board('/b/rcomp')['done'] == 1
+
+
+def test_route_board_reopen(flask_app, flask_client):
+    import json as _json
+    from lib.conversations.project_board import claim_task, post_task, read_board
+    with flask_app.app_context():
+        tid = post_task('/b/rreo', 'cA', 'epic')['id']
+        claim_task('/b/rreo', 'cOWNER', tid)
+    r = flask_client.post('/api/v1/project/board/reopen', json={
+        'path': '/b/rreo', 'taskId': tid, 'convId': 'cHUMAN'})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    data = _json.loads(r.get_data(as_text=True))
+    assert data['from'] == 'claimed'
+    with flask_app.app_context():
+        board = read_board('/b/rreo')
+    assert board['open'] == 1 and board['claimed'] == 0
+
+
+def test_route_board_mutations_require_path(flask_client):
+    for ep in ('complete', 'block', 'reopen'):
+        r = flask_client.post('/api/v1/project/board/' + ep,
+                              json={'taskId': 't', 'convId': 'c'})
+        assert r.status_code == 400, ep
+
+
+# ════════════════════════════════════════════════════════════════════
+#  NC-4: reopen must CLEAR the owner. No-op the owner-clear in reopen_task
+#  → a reopened claimed epic keeps its owner → the owner-clear test FAILS.
+# ════════════════════════════════════════════════════════════════════
+
+def test_NC4_reopen_owner_clear_noop_breaks(flask_app):
+    import importlib
+
+    def run():
+        import lib.conversations.project_board as pb
+        importlib.reload(pb)
+        with flask_app.app_context():
+            from lib.database import DOMAIN_CHAT, get_thread_db
+            get_thread_db(DOMAIN_CHAT).execute(
+                "DELETE FROM project_tasks WHERE project_path='/nc4'")
+            get_thread_db(DOMAIN_CHAT).commit()
+            tid = pb.post_task('/nc4', 'cA', 'epic')['id']
+            pb.claim_task('/nc4', 'cOWNER', tid)
+            pb.reopen_task('/nc4', 'cHUMAN', tid)
+            board = pb.read_board('/nc4')
+        t = board['tasks'][0]
+        # With the owner-clear no-opped, the row keeps status='claimed' with the
+        # stale owner + lease → the epic reads as still-claimed (the yank fails).
+        assert t['status'] == 'claimed' and t['owner_conv_id'] == 'cOWNER', \
+            'NC-4: with owner-clear disabled, reopen must NOT free the claim'
+
+    _patch_restore(
+        _BOARD_SRC,
+        "        db.execute(\n            \"UPDATE project_tasks SET status='open', owner_conv_id='', \"\n            'lease_expires_at=0, dispatched=0, updated_at=? '\n            'WHERE id=? AND project_path=?',\n            (_now_ms(), task_id, project_path))\n        db.commit()",
+        "        pass  # NC-4 (reopen status/owner write disabled)",
+        run,
+    )
+    import lib.conversations.project_board as pb
+    importlib.reload(pb)
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Route strict-path keying + audit_log. The mutating routes must key
+#  STRICTLY on the explicit `path` body field (never _state) — proven by
+#  the path-required 400s above — AND audit-log the human action. This
+#  drives the REAL route through flask_client and captures audit_log.
+# ════════════════════════════════════════════════════════════════════
+
+def test_route_board_post_audit_logs_and_keys_on_explicit_path(
+        flask_app, flask_client, monkeypatch):
+    """A human post through the REAL route audit-logs with the EXPLICIT path
+    from the body (never the active-project global) and lands the epic under
+    exactly that path."""
+    captured = []
+    monkeypatch.setattr('lib.conversations.project_board.audit_log',
+                        lambda action, **kw: captured.append((action, kw)))
+    from lib.conversations.project_board import read_board
+    r = flask_client.post('/api/v1/project/board/post', json={
+        'path': '/b/raudit', 'title': 'Audited epic', 'convId': 'cH'})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    # audit_log('board_post', ...) fired with the explicit path.
+    posts = [kw for action, kw in captured if action == 'board_post']
+    assert posts, 'board/post must audit_log the human action'
+    assert posts[0].get('project_path') == '/b/raudit', \
+        'audit must record the EXPLICIT path from the body, not a global'
+    # And the epic really landed under that path only.
+    with flask_app.app_context():
+        assert read_board('/b/raudit')['open'] == 1
+
+
+# ════════════════════════════════════════════════════════════════════
+#  NC-5: the human board action must be audit-logged. No-op the
+#  audit_log('board_post', …) call in the engine → the audit capture is
+#  empty → the audit-trail contract test FAILS. Byte-identical restore.
+# ════════════════════════════════════════════════════════════════════
+
+def test_NC5_board_post_audit_noop_breaks(flask_app):
+    import importlib
+
+    from lib import log as _log
+    _orig_audit = _log.audit_log
+
+    def run():
+        captured = []
+        _log.audit_log = lambda action, **kw: captured.append((action, kw))
+        try:
+            import lib.conversations.project_board as pb
+            importlib.reload(pb)   # rebinds `from lib.log import audit_log`
+            with flask_app.app_context():
+                from lib.database import DOMAIN_CHAT, get_thread_db
+                get_thread_db(DOMAIN_CHAT).execute(
+                    "DELETE FROM project_tasks WHERE project_path='/nc5'")
+                get_thread_db(DOMAIN_CHAT).commit()
+                pb.post_task('/nc5', 'cA', 'epic')
+            # With the audit call no-opped, NO board_post audit event fired.
+            assert not [kw for a, kw in captured if a == 'board_post'], \
+                'NC-5: with the audit call disabled, no board_post audit fires'
+        finally:
+            _log.audit_log = _orig_audit
+
+    _patch_restore(
+        _BOARD_SRC,
+        "    audit_log('board_post', project_path=project_path, task_id=task_id, conv_id=conv_id)\n    return {'ok': True, 'id': task_id}",
+        "    return {'ok': True, 'id': task_id}  # NC-5 (audit disabled)",
+        run,
+    )
+    import lib.conversations.project_board as pb
+    importlib.reload(pb)

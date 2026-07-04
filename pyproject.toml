@@ -16,6 +16,18 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "ruff",
+    # In-memory Redis for exercising the redis-backed runtime-state store +
+    # push bus (Epics B/C/D) against a REAL redis-py client without a live
+    # server. Test-only; the runtime `redis` dep it pulls is NOT core.
+    "fakeredis>=2.20",
+]
+# Optional horizontal-scale extra: the cross-replica runtime-state backend
+# (TOFU_RUNTIME_STATE_BACKEND=redis) + push fan-out. Redis is NOT a core
+# dependency — a single-box install runs the inproc default with zero extra
+# packages. `pip install tofu[scale]` pulls the client for a multi-replica
+# deployment.
+scale = [
+    "redis>=4.3",
 ]
 # Optional trading subsystem — extracted into its own package. `pip install
 # tofu[trading]` pulls it in; it self-mounts via the tofu.blueprints /

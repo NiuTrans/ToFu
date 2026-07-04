@@ -38,6 +38,73 @@ function _classifyGhostTail(lastMsg) {
   return lastMsg.thinking ? 'interrupted' : 'delete';
 }
 
+/**
+ * True for a BURIED (non-tail) assistant placeholder that carries NO
+ * user-visible payload at all — the blank bubbles left mid-list by aborted /
+ * failed / empty-stop turns that the user then retried on top of.
+ *
+ * WHY this exists separately from _classifyGhostTail:
+ *   _classifyGhostTail only ever inspected conv.messages[length-1]. Once a
+ *   NEWER turn is appended on top of an empty placeholder, that placeholder is
+ *   no longer the tail, so nothing ever removed it — repeated failed attempts
+ *   STACKED empty "Agent" bubbles in the middle of the transcript (the "chat
+ *   became cluttered, can't tell what happened, can't continue" symptom, conv
+ *   mr3jfcw10pianj had 4 such buried empties at idx 79/80/81/84).
+ *
+ * The buried predicate is intentionally MORE aggressive than the tail one on a
+ * single axis: a buried empty turn is removed EVEN when it carries a settled
+ * finishReason (aborted / interrupted) or usage, because mid-list it renders as
+ * a body-less badge-only bubble — pure clutter — whereas the TAIL keeps its
+ * badge (that's what _classifyGhostTail preserves). It is NOT more aggressive
+ * about content: anything user-visible (content, a thinking fragment, a real
+ * tool round, an error envelope, an image-gen result) keeps the turn. A
+ * thinking-only interrupted turn is preserved (its recovered reasoning renders
+ * a thinking block — not a blank bubble).
+ *
+ * Special turns (endpoint planner/critic/worker, autopilot VU, image-gen) are
+ * never treated as empty clutter even with empty content.
+ *
+ * Pure function (no DOM / network) — unit-testable in isolation.
+ */
+function _isBuriedEmptyGhost(msg) {
+  if (!msg || msg.role !== 'assistant') return false;
+  if (msg._epIteration || msg._isEndpointReview || msg._isEndpointPlanner
+      || msg._isVirtualUser || msg._autopilotRunId
+      || msg._igResult || msg._igResults || msg._igError) return false;
+  if ((msg.content || '').trim()) return false;
+  if ((msg.thinking || '').trim()) return false;   // interrupted-with-reasoning → keep
+  if (msg.error) return false;                       // a rendered error block is meaningful
+  const hasRealRound = Array.isArray(msg.toolRounds)
+    && msg.toolRounds.some(r =>
+      r && (r.status === 'done' || r.toolContent
+        || (Array.isArray(r.results) && r.results.length)));
+  if (hasRealRound) return false;
+  return true;
+}
+
+/**
+ * Remove every BURIED empty-ghost assistant placeholder from conv.messages,
+ * leaving the tail (index -1) alone for _classifyGhostTail to reconcile.
+ *
+ * Splices in reverse so indices stay valid. Returns the number removed (0 →
+ * caller does nothing, so no needless save/sync). Idempotent: a second call on
+ * already-swept messages removes nothing.
+ *
+ * @param {Object} conv
+ * @returns {number} count of buried ghosts removed
+ */
+function _sweepBuriedGhostAssistants(conv) {
+  if (!conv || !Array.isArray(conv.messages) || conv.messages.length < 2) return 0;
+  const msgs = conv.messages;
+  const lastIdx = msgs.length - 1;
+  const removeIdx = [];
+  for (let i = 0; i < lastIdx; i++) {
+    if (_isBuriedEmptyGhost(msgs[i])) removeIdx.push(i);
+  }
+  for (let k = removeIdx.length - 1; k >= 0; k--) msgs.splice(removeIdx[k], 1);
+  return removeIdx.length;
+}
+
 // ── Init ──
 async function initActiveTasks() {
   try {
@@ -167,7 +234,36 @@ async function initActiveTasks() {
          (only for locally-loaded convs, not server-only shells, and never
          while a stream is live for this conv — Cases A/B/C already consumed
          active-task convs, but assert it explicitly as belt-and-suspenders). */
-      if (!conv._needsLoad && !activeStreams.has(conv.id)) {
+      /* ★ Phase 3: DEFER to the backend when it already reconciled this conv.
+       *   recover_stale_tasks_on_startup runs the SAME sweep + tail
+       *   classification server-side (lib/conversations/reconcile.py) and
+       *   persists it in one commit, then stamps settings._reconciledAt (→
+       *   conv._reconciledAt). When present, the frontend must NOT re-infer
+       *   lifecycle state (the separation-of-concerns directive) — the DB the
+       *   frontend just loaded is already clean. This is what makes the
+       *   resurrect + auto-fire regressions structurally impossible on the
+       *   crash-recovery path: no frontend pop / allowTruncate PUT happens. */
+      if (!conv._needsLoad && !activeStreams.has(conv.id) && !conv._reconciledAt) {
+        /* ★ Buried-ghost sweep — remove empty placeholder bubbles left
+         *   MID-LIST by aborted / failed / empty-stop turns the user then
+         *   retried on top of.  _classifyGhostTail below only inspects the
+         *   tail, so without this sweep those buried empties stack up as
+         *   blank "Agent" bubbles and clutter the transcript (conv
+         *   mr3jfcw10pianj: 4 buried empties). Runs BEFORE the tail reconcile
+         *   so the tail's own classification is unaffected.
+         *   NOTE: this frontend path remains as the FALLBACK for convs the
+         *   backend recovery loop did NOT touch (no stale task) until a later
+         *   increment moves reconcile onto the conversation GET path. */
+        const _sweptGhosts = _sweepBuriedGhostAssistants(conv);
+        if (_sweptGhosts > 0) {
+          console.warn(
+            `[initActiveTasks CaseD] 🧹 Swept ${_sweptGhosts} buried empty-ghost ` +
+            `assistant placeholder(s) from conv ${conv.id.slice(0, 8)} ` +
+            `(mid-list blanks from aborted/failed retries). Remaining msgs=${conv.messages.length}`
+          );
+          saveConversations(null);  // cleanup, not new activity — don't bump updatedAt
+          syncConversationToServer(conv, { allowTruncate: true });
+        }
         const lastMsg = conv.messages[conv.messages.length - 1];
         const _ghost = _classifyGhostTail(lastMsg);
         if (_ghost === 'delete') {
@@ -181,6 +277,15 @@ async function initActiveTasks() {
           conv.messages.pop();
           saveConversations(null);  // recovery cleanup, not new activity — don't bump updatedAt
           syncConversationToServer(conv, { allowTruncate: true });
+          /* ★ FIX: after popping the empty ghost the NEW tail may be the
+           *   preceding `user` message. Without this `continue`, execution
+           *   falls straight into the Case-E block below, which sees a recent
+           *   trailing user msg and queues an UNREQUESTED startAssistantResponse
+           *   — re-running (and re-billing) a turn the user never asked to
+           *   re-run, potentially duplicating a completed answer. A ghost
+           *   reconcile must never auto-fire an LLM turn. Cases A/B/C all
+           *   `continue`; Case D's delete branch was the sole leak. */
+          continue;
         } else if (_ghost === 'interrupted') {
           /* Has a stray `thinking` fragment (and possibly _memoryPrefetch) but
              no content/finishReason — an interrupted turn whose task is gone.

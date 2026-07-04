@@ -689,6 +689,38 @@ def _mcp_links(fn_args):
     return links
 
 
+def _mcp_batch_paths(fn_args):
+    """Extract the repo-relative paths from a batch-file MCP call.
+
+    Covers the ``files=[{path, …}]`` / ``delete_paths=[…]`` shape used by
+    ``github-batch/batch_commit``, the ``paths=[…]`` shape of
+    ``github-batch/batch_delete``, and the official ``github/push_files``
+    (``files=[{path, content}]``). These carry the paths INSIDE a list, so the
+    flat ``_MCP_RESOURCE_KEYS`` scan misses them and the title line degrades to
+    just ``branch @ owner/repo``.
+
+    Returns a list of ``(path, is_delete)`` tuples in commit-then-delete order,
+    or ``[]`` when the call has no batch-path shape.
+    """
+    if not isinstance(fn_args, dict):
+        return []
+    out = []
+    files = fn_args.get('files')
+    if isinstance(files, list):
+        for f in files:
+            if isinstance(f, dict) and f.get('path'):
+                out.append((str(f['path']), False))
+            elif isinstance(f, str) and f.strip():
+                out.append((f.strip(), False))
+    for key in ('delete_paths', 'paths'):
+        val = fn_args.get(key)
+        if isinstance(val, list):
+            for p in val:
+                if isinstance(p, str) and p.strip():
+                    out.append((p.strip(), True))
+    return out
+
+
 def _doc_cid(val) -> str:
     """Normalise a Xuecheng ``doc`` arg to its bare numeric contentId, or ''."""
     if val is None:
@@ -698,6 +730,51 @@ def _doc_cid(val) -> str:
     if m:
         return m.group(1)
     return s if s.isdigit() else ''
+
+
+def compose_mcp_display(fn_name, fn_args):
+    """Compose the MCP tool-call display label — the SINGLE source of truth.
+
+    Both the live tool-round line (``_tool_display_mcp``, at ``tool_start``)
+    and the persisted results-row title (``handlers/mcp.py::_post_build``,
+    after execution) call this so the two can NEVER diverge. Previously
+    ``_post_build`` recomputed the label from ``_mcp_arg_suffix`` directly,
+    which has no batch-path awareness — so a ``batch_commit`` line that showed
+    every file at ``tool_start`` regressed to ``batch_commit — main @ owner/repo``
+    the moment the commit finished.
+
+    Returns ``(display, is_multiline)``. When ``is_multiline`` is True the
+    display is the batch-file form (one path per line, ``\\n``-separated) that
+    the frontend renders with ``\\n → <br>``; callers should surface it via
+    ``_display_query`` so it reaches the SSE event verbatim.
+    """
+    from lib.mcp.types import parse_namespaced_name
+    parsed = parse_namespaced_name(fn_name)
+    if parsed:
+        server_name, tool_name = parsed
+        head = f'{server_name}/{tool_name}'
+    else:
+        head = fn_name
+
+    # ── Batch-file commits (github-batch/batch_commit, batch_delete,
+    #    github/push_files): the paths live inside a ``files``/``paths`` list
+    #    that the flat arg scan can't see. Render every path on its own line
+    #    so users see exactly what was touched, scoped to ``owner/repo`` —
+    #    instead of a uniform ``main @ owner/repo``.
+    batch_paths = _mcp_batch_paths(fn_args)
+    if batch_paths:
+        n = len(batch_paths)
+        lines = '\n'.join(
+            f'• {"− " if is_del else ""}{p}' for p, is_del in batch_paths
+        )
+        container = ''
+        if isinstance(fn_args, dict) and fn_args.get('owner') and fn_args.get('repo'):
+            container = f"{fn_args['owner']}/{fn_args['repo']}"
+        scope = f' @ {container}' if container else ''
+        return f'{head} — {n} file{"s" if n != 1 else ""}{scope}:\n{lines}', True
+
+    suffix = _mcp_arg_suffix(fn_args)
+    return (f'{head} — {suffix}' if suffix else head), False
 
 
 def _tool_display_mcp(fn_name, fn_args, tc_id, tc_args_str):
@@ -713,16 +790,13 @@ def _tool_display_mcp(fn_name, fn_args, tc_id, tc_args_str):
     ``_mcpLinks`` map (label → href) is attached so the frontend can render
     that segment as a clickable link instead of an unreadable id jumble.
     """
-    from lib.mcp.types import parse_namespaced_name
-    parsed = parse_namespaced_name(fn_name)
-    if parsed:
-        server_name, tool_name = parsed
-        head = f'{server_name}/{tool_name}'
-    else:
-        head = fn_name
-    suffix = _mcp_arg_suffix(fn_args)
-    display = f'{head} — {suffix}' if suffix else head
     extra = {'toolName': fn_name}
+    display, multiline = compose_mcp_display(fn_name, fn_args)
+    if multiline:
+        # Batch-file form (one path per line) — expose the multiline text via
+        # _display_query so it survives verbatim into the SSE tool_start event.
+        extra['_display_query'] = display
+        return display, extra
     links = _mcp_links(fn_args)
     if links:
         extra['_mcpLinks'] = links

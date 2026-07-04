@@ -47,6 +47,9 @@ function _stdStubs(win) {
     Icon: () => '',
     IconDot: () => '',
     _TOOL_DISPLAY: {},
+    // formatClockTime (core.js) — shared HH:MM formatter used by the streaming
+    // bubble builders; deterministic stub so time strings don't vary per run.
+    formatClockTime: () => '12:00',
     // CSS.escape is used by querySelector-building code.
     CSS: { escape: (s) => s },
   };

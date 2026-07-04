@@ -34,14 +34,15 @@ Note:
 import os
 
 from lib.log import get_logger
+from lib.runtime_paths import data_root
 
 logger = get_logger(__name__)
 
-# ── Project base directory (same as lib/database.py BASE_DIR) ──
-_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
 # ── Per-project config directory ──
-CONFIG_DIR = os.path.join(_BASE_DIR, 'data', 'config')
+# Anchored to the WRITABLE data root (see lib/runtime_paths) so a frozen
+# desktop install writes config under a user-writable dir, not the read-only
+# _internal/ bundle.
+CONFIG_DIR = os.path.join(data_root(), 'config')
 
 
 def _ensure_config_dir():
@@ -65,7 +66,7 @@ def config_path(*parts):
 # is handed the saved path and reads it back via read_files. Lives under the
 # fully-gitignored data/ tree, so it stays isolated per project copy and is
 # never exported.
-FETCHED_DIR = os.path.join(_BASE_DIR, 'data', 'fetched')
+FETCHED_DIR = os.path.join(data_root(), 'fetched')
 
 
 def fetched_path(*parts):

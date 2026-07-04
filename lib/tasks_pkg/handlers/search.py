@@ -524,9 +524,31 @@ def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     if urls and isinstance(urls, list):
         return _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls, rn, round_entry, cfg, project_path, project_enabled, all_tools)
 
-    target_url = fn_args.get('url', '')
+    target_url = (fn_args.get('url') or '').strip()
     user_question = task.get('lastUserQuery', '')
     fetch_reason = fn_args.get('reason', '')
+
+    # ── Guard: no target URL. Models sometimes emit a placeholder call like
+    #    fetch_url({"reason": "placeholder", "urls": []}) — an empty `urls`
+    #    array is falsy so it lands here with url=''. Reject it clearly
+    #    instead of trying to fetch the empty string (which produced the
+    #    confusing "Failed to fetch ." rows). ──
+    if not target_url:
+        logger.warning('[Fetch] fetch_url called with no URL: args=%.200s',
+                       str(fn_args)[:200])
+        tool_content = (
+            'Error: fetch_url requires a non-empty "url" (or a "urls" array '
+            'with at least one entry). No URL was provided, so nothing was '
+            'fetched. Pass the page URL you want to read.'
+        )
+        dr = {
+            'title': 'No URL provided',
+            'snippet': 'fetch_url was called without a url — nothing to fetch',
+            'url': '', 'source': 'N/A',
+            'fetched': False, 'fetchedChars': 0,
+        }
+        _finalize_tool_round(task, rn, round_entry, [dr], query_override='fetch_url')
+        return tc_id, tool_content, False
 
     # ── Guard: reject non-HTTP schemes (file://, ftp://, etc.) ──
     scheme = urlparse(target_url).scheme.lower()

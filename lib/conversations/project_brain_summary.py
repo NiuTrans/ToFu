@@ -60,13 +60,10 @@ def build_brain_summary(project_path: str) -> dict:
         logger.debug('[BrainSummary] board read failed proj=%.40r: %s',
                      project_path, e)
 
-    # owner_conv_id → epic title, for epics whose EFFECTIVE status is claimed
-    # (read_board already reclaimed expired leases to open, so this map only
-    # contains live claims — never a deadlocked one).
-    claim_by_conv = {}
-    for t in board_tasks:
-        if t.get('status') == 'claimed' and t.get('owner_conv_id'):
-            claim_by_conv[t['owner_conv_id']] = t.get('title', '')
+    # owner_conv_id → epic title, for epics whose EFFECTIVE status is claimed.
+    # Single source of the claim→conv join (shared with build_peer_status).
+    from lib.conversations.project_board import claims_by_conv
+    claim_by_conv = claims_by_conv(board_tasks)
 
     # ── Pending decisions = proposals NOT yet resolved by a commit/dismiss ──
     #    The SINGLE source (project_charter.pending_proposals) both this count

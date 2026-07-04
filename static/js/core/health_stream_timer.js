@@ -457,6 +457,49 @@ function twStart(convId) {
   _streamTimers.set(convId, { startTime: now, lastDataTime: now, intervalId, _lastHealthResult: undefined, _healthChecking: false });
   _serverAlive = true; // optimistic on stream start
 }
+/* ★ Build the updateStreamingUI payload for a streaming conv, applying the
+ *   message-checkpoint fallback that EVERY render site must honour: the live
+ *   `streamBufs` buffer is authoritative ONLY once it holds data; before that
+ *   (a fresh `twStart`, a re-entry that skipped the seed, a field-only
+ *   `twUpdate` — e.g. an HG-translation flag flip — or a tab-switch flush) the
+ *   trailing STREAMING message is the source of truth.  Reading `buf.content`
+ *   RAW here is precisely what snapped the bubble back to "等待中…" over
+ *   already-checkpointed content (see the band-aid seeds in
+ *   sse_pipeline.js connectToTask, which this makes correct-by-construction).
+ *
+ *   Safe against the reset events: `retry_reset` / `delta_reset` clear the
+ *   MESSAGE and the buffer together (sse_pipeline.js), so the fallback reads
+ *   "" in that case and never resurrects erased inter-round narration; a
+ *   worker/planner turn rotation pushes a FRESH empty assistant message, so
+ *   the checkpoint is empty there too.  Mirrors showStreamingUIForConv exactly.
+ *   Returns null when there is no buffer for `convId`. */
+function _streamFrameArg(convId) {
+  const buf = streamBufs.get(convId);
+  if (!buf) return null;
+  let ckpt = null;
+  const conv = (typeof conversations !== 'undefined')
+    ? conversations.find(c => c && c.id === convId) : null;
+  if (conv && conv.messages.length) {
+    const last = conv.messages[conv.messages.length - 1];
+    if (last && (last.role === 'assistant' || last._isEndpointReview)) ckpt = last;
+  }
+  /* buf.toolRounds is [] (truthy) even when empty → guard on .length so an
+   * un-seeded buffer falls back to the checkpoint's rounds instead of blanking
+   * the tool panel the message still holds. */
+  const rounds = (buf.toolRounds && buf.toolRounds.length)
+    ? buf.toolRounds
+    : (ckpt && typeof getToolRoundsFromMsg === 'function'
+        ? getToolRoundsFromMsg(ckpt) : (buf.toolRounds || []));
+  return {
+    thinking: buf.thinking || (ckpt && ckpt.thinking) || "",
+    content: buf.content || (ckpt && ckpt.content) || "",
+    toolRounds: rounds,
+    phase: buf.phase,
+    _memoryPrefetch: buf._memoryPrefetch || (ckpt && ckpt._memoryPrefetch),
+    _mcpLoginHint: buf._mcpLoginHint,
+  };
+}
+
 /* ── Coalesced streaming update: multiple SSE events between frames are merged ── */
 let _twRafId = null;
 let _twPendingConvId = null;
@@ -500,16 +543,10 @@ function _twFlush() {
    *   falling back to cid only during init (activeConvId not yet set). */
   const renderCid = (activeConvId && streamBufs.has(activeConvId)) ? activeConvId : cid;
   if (renderCid === activeConvId || (!activeConvId && document.getElementById('streaming-body'))) {
-    const buf = streamBufs.get(renderCid);
-    if (buf)
-      updateStreamingUI({
-        thinking: buf.thinking,
-        content: buf.content,
-        toolRounds: buf.toolRounds,
-        phase: buf.phase,
-        _memoryPrefetch: buf._memoryPrefetch,
-        _mcpLoginHint: buf._mcpLoginHint,
-      });
+    /* ★ Message-checkpoint fallback (see _streamFrameArg): an empty buffer
+     *   must render the persisted message, NOT blank the bubble to "等待中…". */
+    const arg = _streamFrameArg(renderCid);
+    if (arg) updateStreamingUI(arg);
   } else {
     /* ★ DIAGNOSTIC (autopilot-invisible bug): silent-drop signature.
      * Buffer has data but the render guard rejected it — same family

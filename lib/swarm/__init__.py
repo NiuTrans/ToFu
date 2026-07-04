@@ -49,6 +49,7 @@ from lib.swarm.artifact_store import (
 from lib.swarm.integration import (
     execute_swarm_tool,
     get_active_session,
+    has_live_or_pending_swarm,
     rehydrate_swarms_on_startup,
 )
 from lib.swarm.master import MasterOrchestrator
@@ -85,7 +86,10 @@ from lib.swarm.tools import (
     AWAIT_AGENTS_TOOL,
     GET_AGENT_RESULT_TOOL,
     LIST_ARTIFACTS_TOOL,
+    MASTER_CONTROL_TOOLS,
     MASTER_TOOLS,
+    augment_with_swarm_tools,
+    resolve_turn_swarm_tools,
     READ_ARTIFACT_TOOL,
     SPAWN_AGENTS_TOOL,
     STORE_ARTIFACT_TOOL,
@@ -107,6 +111,7 @@ __all__ = [
     'AsyncStreamingScheduler', 'RateLimiter',
     # Integration
     'execute_swarm_tool', 'get_active_session', 'rehydrate_swarms_on_startup',
+    'has_live_or_pending_swarm',
     # Registry
     'AGENT_ROLES', 'MODEL_TIERS',
     'scope_tools_for_role', 'get_tools_for_role',
@@ -115,6 +120,7 @@ __all__ = [
     # Tool defs
     'SPAWN_AGENTS_TOOL', 'AWAIT_AGENTS_TOOL', 'GET_AGENT_RESULT_TOOL',
     'STORE_ARTIFACT_TOOL', 'READ_ARTIFACT_TOOL', 'LIST_ARTIFACTS_TOOL',
-    'MASTER_TOOLS', 'SUB_AGENT_TOOLS', 'ARTIFACT_TOOLS',
+    'MASTER_TOOLS', 'SUB_AGENT_TOOLS', 'ARTIFACT_TOOLS', 'MASTER_CONTROL_TOOLS',
     'SWARM_TOOL_NAMES', 'SWARM_CONTROL_TOOL_NAMES', 'SUB_AGENT_DENYLIST',
+    'augment_with_swarm_tools', 'resolve_turn_swarm_tools',
 ]

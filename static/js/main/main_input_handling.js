@@ -192,6 +192,3 @@ function closeSidebarSearch() {
   renderConversationList();
 }
 
-/* Legacy alias — in case any code calls clearSidebarSearch */
-function clearSidebarSearch() { closeSidebarSearch(); }
-

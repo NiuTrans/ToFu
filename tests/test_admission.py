@@ -19,6 +19,14 @@ from lib.agent_core import admission
 
 class AdmissionControllerTest(unittest.TestCase):
 
+    def setUp(self):
+        # AdmissionController now counts its in-flight slots in the SHARED
+        # runtime_state_store (Build Order step 2). Reset it so each test
+        # starts from a clean global count (the production controller is a
+        # singleton, but tests build fresh controllers that share the store).
+        import lib.runtime_state_store as rss
+        rss.reset_for_test()
+
     def test_try_acquire_bounds_and_releases(self):
         async def go():
             ctrl = admission.AdmissionController(max_inflight=2)

@@ -164,10 +164,6 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
         <span class="topbar-tool-label" data-i18n="topbar.myday">My Day</span>
       </button>
-      <a class="topbar-tool-btn" href="trading.html" target="_blank" id="tradingAdvisorBtn" title="Trading Advisor" style="text-decoration:none;display:none;">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-        <span class="topbar-tool-label" data-i18n="topbar.trading">Trading</span>
-      </a>
       <button class="topbar-tool-btn" onclick="openOrchestration()" title="Orchestration Studio — design multi-agent workflows">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M6 8.5v3a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-3"/><path d="M12 13.5v2"/></svg>
         <span class="topbar-tool-label" data-i18n="topbar.studio">Studio</span>
@@ -182,6 +178,11 @@
           <div class="timer-panel-title"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/></svg> <span data-i18n="timer.panelTitle">Active Counter</span></div>
           <div id="timerPanelContent"><div class="timer-panel-empty" data-i18n="timer.empty">No timers. The AI can create one with timer_create during a task.</div></div>
         </div>
+      </span>
+      <!-- Real-time network latency signal indicator (driven by push.js RTT probe) -->
+      <span class="net-latency-badge" id="netLatencyBadge" data-state="unknown" title="网络延迟">
+        <span class="net-bars"></span>
+        <span class="net-ms">—</span>
       </span>
     </div>
     <!-- Tool-status badges (SEARCH/PROJECT/CODE EXEC/BROWSER/MEMORY) removed:
@@ -324,8 +325,12 @@
           </div>
           <div class="paper-report-content" id="paperReportContent">
             <div class="paper-report-empty">
-              <p data-i18n="paper.reportEmptyTitle">Click Regenerate or switch to this tab to generate an analysis report</p>
-              <p class="paper-report-hint" data-i18n="paper.reportEmptyHint">The model will search the web for additional context and related work</p>
+              <p data-i18n="paper.reportEmptyTitle">Ready — click below to generate the analysis report</p>
+              <p class="paper-report-hint" data-i18n="paper.reportEmptyHint">Adjust the model &amp; language above first if needed; the model will search the web for additional context and related work</p>
+              <button class="paper-report-generate-btn" onclick="_generatePaperReport()">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>
+                <span data-i18n="paper.reportGenerate">Generate report</span>
+              </button>
             </div>
           </div>
         </div>
@@ -389,8 +394,12 @@
           </div>
           <div class="paper-report-content" id="paperReviewContent">
             <div class="paper-report-empty">
-              <p data-i18n="paper.reviewEmptyTitle">Pick a target conference, then switch to this tab to generate a peer review</p>
+              <p data-i18n="paper.reviewEmptyTitle">Pick a target conference above, then click below to generate a peer review</p>
               <p class="paper-report-hint" data-i18n="paper.reviewEmptyHint">The model reviews against the venue's real scorecard and verifies code/data claims via web search</p>
+              <button class="paper-report-generate-btn" onclick="_generatePaperReview()">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>
+                <span data-i18n="paper.reviewGenerate">Generate review</span>
+              </button>
             </div>
           </div>
         </div>
@@ -421,6 +430,16 @@
        strip that sat above the messages. -->
   <div class="presence-strip collab-bar" id="presenceStrip" hidden></div>
 
+  <!-- Per-conversation Brain Influence bar — an ALWAYS-VISIBLE (project mode +
+       has-influence only) inline chip strip docked on the chat view itself,
+       showing how THIS conversation is affected by the brain (bound by
+       charter · N owned by you · M to avoid · K awaiting you). Updates on
+       conversation switch (main.js → convInfluenceRefresh). Clicking opens the
+       full Influence lens in the Project Brain panel. Populated by
+       project-brain.js (renderConvInfluenceBar). -->
+  <button type="button" class="conv-influence-bar" id="convInfluenceBar" hidden
+          title="" onclick="if(typeof openProjectBrainInfluence==='function')openProjectBrainInfluence();else if(typeof openProjectBrain==='function')openProjectBrain();"></button>
+
   <div class="chat-wrapper">
     <!-- ═══ Project Brain — cross-conversation Activity Feed (Pillar #1) ═══
          A slide-in overlay panel, opened from the project bar. Three columns
@@ -434,6 +453,18 @@
             <span data-i18n="projectBrain.title">Project Brain</span>
           </span>
           <button class="project-brain-close" onclick="closeProjectBrain()" title="Close">✕</button>
+        </div>
+        <!-- ═══ Per-conversation Influence lens ═══
+             How the CURRENT conversation is affected by the shared brain:
+             the charter it's bound by, epics it owns vs. must avoid, and
+             decisions awaiting a human. Populated by project-brain.js
+             (renderInfluence). Hidden until an active conv is resolved. -->
+        <div class="project-brain-influence" id="projectBrainInfluence" hidden>
+          <div class="pb-influence-head">
+            <span class="pb-influence-title" data-i18n="projectBrain.influenceTitle">How this conversation is influenced</span>
+            <span class="pb-influence-conv" id="projectBrainInfluenceConv"></span>
+          </div>
+          <div class="pb-influence-body" id="projectBrainInfluenceBody"></div>
         </div>
         <div class="project-brain-columns">
           <div class="project-brain-col project-brain-col-charter">
@@ -454,6 +485,18 @@
               <div class="pb-activity-list" id="projectBrainActivityList">
                 <div class="pb-activity-empty" data-i18n="projectBrain.activityEmpty">No activity yet</div>
               </div>
+            </div>
+          </div>
+          <!-- ═══ Team / Peers column ═══
+               The conversations-as-a-room surface: each active sibling conv
+               (title · what it's advancing · presence dot · current round),
+               plus the peer-message exchanges as an inline thread. Populated
+               by project-brain-peers.js (renderPeers) from the LIVE
+               Api.project.brainPeers roster + the feed's peer notes. -->
+          <div class="project-brain-col project-brain-col-peers">
+            <div class="project-brain-col-head" data-i18n="projectBrain.team">Team</div>
+            <div class="project-brain-col-body" id="projectBrainPeersBody">
+              <div class="pb-peers-empty" data-i18n="projectBrain.peersEmpty">No sibling conversations active</div>
             </div>
           </div>
         </div>
@@ -2360,6 +2403,10 @@
 <script defer src="static/js/presence.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- project-brain.js — Pillar #1 cross-conversation Activity Feed tab (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
 <script defer src="static/js/project-brain.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- project-brain-peers.js — Team/Peers column (registered in lib/js_bundler.py:_BUNDLE_FILES). MUST load after project-brain.js. -->
+<script defer src="static/js/project-brain-peers.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- net-latency.js — topbar network-latency signal indicator (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
+<script defer src="static/js/net-latency.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script>
 // Feature flags — show/hide optional modules
 var _featureFlags = {};
@@ -2369,10 +2416,6 @@ var _featureFlags = {};
     if (!resp.ok) return;
     const flags = await resp.json();
     _featureFlags = flags;
-    if (flags.trading_enabled) {
-      const btn = document.getElementById('tradingAdvisorBtn');
-      if (btn) btn.style.display = 'flex';
-    }
     // Daily Optimizer badge — default ON; hide if explicitly disabled.
     const optBadge = document.getElementById('optimizerBadge');
     if (optBadge) {
@@ -2428,16 +2471,53 @@ function _loadGuardCheck() {
     return;
   }
 }
+// ── Capability-presence assertion ──────────────────────────────────────
+// A crippled boot can be SILENT: if a load-bearing module (e.g. push.js) is
+// dropped from the bundle but the app still boots (_scriptsReady=true),
+// _loadGuardCheck returns early and the user sees a working-looking UI whose
+// live updates / notifications / progress simply never fire. Assert the
+// load-bearing globals exist AFTER boot and surface the same red banner
+// naming the missing capability, so a partial boot is never invisible.
+var _loadBearingCaps = [
+  { fn: 't', label: 'translations (i18n.js)' },
+  { fn: 'apiUrl', label: 'core runtime (core.js)' },
+  { fn: 'pushSubscribe', label: 'live updates & notifications (push.js)' },
+  { fn: 'loadConversation', label: 'app boot (main.js)' }
+];
+var _capabilityChecks = 0;
+function _capabilityCheck() {
+  _capabilityChecks++;
+  // Only meaningful once main.js has booted; before that _loadGuardCheck
+  // owns the "still loading / crashed" states. Wait for readiness, then assert.
+  if (!window._scriptsReady) {
+    if (_capabilityChecks < 5) { setTimeout(_capabilityCheck, 3000); }
+    return;
+  }
+  if (document.getElementById('load-fail-banner')) return; // already surfaced
+  var missing = [];
+  for (var i = 0; i < _loadBearingCaps.length; i++) {
+    if (typeof window[_loadBearingCaps[i].fn] !== 'function') {
+      missing.push(_loadBearingCaps[i].label);
+    }
+  }
+  if (missing.length > 0) {
+    console.error('[LoadGuard] ⚠️ App booted but load-bearing capabilities are missing:', missing);
+    _showLoadBanner('⚠️ App initialization failed. Missing: ' + missing.join(', ')
+      + ' — a required script was dropped from the bundle. <a href="javascript:location.reload()" style="color:#fef08a;text-decoration:underline">Reload</a>.');
+  }
+}
 // DOMContentLoaded fires AFTER all defer scripts have executed (HTML spec),
 // so it is the correct event to check whether init succeeded.
 // We add a short grace period for async init (IndexedDB, fetch, etc.)
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', function() {
     setTimeout(_loadGuardCheck, 2000);
+    setTimeout(_capabilityCheck, 4000);
   });
 } else {
   // DOMContentLoaded already fired (shouldn't happen for inline script, but safety)
   setTimeout(_loadGuardCheck, 2000);
+  setTimeout(_capabilityCheck, 4000);
 }
 function _showLoadBanner(html) {
   if (document.getElementById('load-fail-banner')) return;

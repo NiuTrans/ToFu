@@ -41,7 +41,6 @@ declare var _featureFlags: any;       // index.html inline (var _featureFlags = 
 declare var _markScriptsLoaded: any;  // index.html inline (window._markScriptsLoaded)
 declare var Artifacts: any;           // static/js/artifacts.js — window.Artifacts
 declare var ConvView: any;            // static/js/conv_view.js — window.ConvView
-declare var TradingApp: any;          // static/js/trading/state.js — window.TradingApp
 declare var flashGaugeForArchive: any;   // static/js/context-bar.js — window.*
 declare var _resolveContextLimit: any;   // static/js/context-bar.js — window.*
 declare var openCompactionViewer: any;   // static/js/compaction-viewer.js — window.*
@@ -63,6 +62,11 @@ declare var _browserClientId: any;       // static/js/main/main_toolbar_ui.js �
 declare var __sse_test__: any;           // static/js/ui/sse_pipeline.js — window.*
 declare var __swarmPushWired: any;       // static/js/ui/swarm_push.js — window.*
 declare var presenceRefresh: any;        // static/js/presence.js — window.presenceRefresh
+declare var convInfluenceRefresh: any;   // static/js/project-brain.js — window.convInfluenceRefresh (per-conv influence bar)
+declare var projectBrainRefresh: any;    // static/js/project-brain.js — window.projectBrainRefresh
+declare var openProjectBrain: any;       // static/js/project-brain.js — window.openProjectBrain (called bare in presence.js)
+declare var closeProjectBrain: any;      // static/js/project-brain.js — window.closeProjectBrain
+declare var toggleProjectBrain: any;     // static/js/project-brain.js — window.toggleProjectBrain
 declare var __translatePushWired: any;   // static/js/translation.js — window.*
 declare var ChipInput: any;              // static/js/settings/chip_input.js — window.ChipInput (used in other settings/* files)
 declare var buildTurnCtxSnapshot: any;   // static/js/info-rail.js — window.* (used by send pipeline / edit_message)
@@ -138,7 +142,12 @@ interface Window {
   toggleTimerPanel: any; toggleOptimizerPanel: any;
   // presence.js — cross-conversation live-presence strip (one-time wire latch
   // + the conversation-switch re-filter hook).
-  __presenceWired: any; presenceRefresh: any;
+  __presenceWired: any; presenceRefresh: any; CollabBar: any;
+  // project-brain.js — the panel controls + conversation-switch refresh hooks
+  //  (all assigned via window.* inside the project-brain IIFE).
+  convInfluenceRefresh: any; projectBrainRefresh: any;
+  toggleProjectBrain: any; openProjectBrain: any; closeProjectBrain: any;
+  ProjectBrain: any;
 }
 // (FileReader.result stays string|ArrayBuffer — call sites coerce via String()
 //  since merging can't override an existing property's declared type.)

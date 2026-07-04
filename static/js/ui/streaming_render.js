@@ -245,14 +245,18 @@ function _handleAutopilotVuEvent(convId, ev) {
       conv.messages.push(fresh);
       entry = { msg: fresh, idx: conv.messages.length - 1 };
     } else {
+      /* SETTLED state = pure projection of the ONE backend-authoritative
+       * record (ev.vuMessage — the same dict _append_vu_message_to_conv
+       * wrote to the DB). Rendered VERBATIM: no `|| buf.content` fallback,
+       * because a local-buffer fallback makes the frontend a SECOND source
+       * of truth and a stuck bubble un-diagnosable from one place. An empty
+       * `content` here is a legitimate "keep going" VU reply (the backend
+       * bails to VU_CANCEL, not DONE, when the VU produced nothing) — render
+       * it as-is; if it's ever wrongly empty that's a backend bug to fix at
+       * the source. See .tofu/skills/separation-of-concerns-directive.md. */
       const finalMsg = ev.vuMessage || {};
-      const buf = (typeof streamBufs !== "undefined") ? streamBufs.get(convId) : null;
-      entry.msg.content = finalMsg.content || (buf && buf.content) || entry.msg.content || "";
-      if (Array.isArray(finalMsg.toolRounds) && finalMsg.toolRounds.length) {
-        entry.msg.toolRounds = finalMsg.toolRounds;
-      } else if (buf && Array.isArray(buf.toolRounds) && buf.toolRounds.length) {
-        entry.msg.toolRounds = buf.toolRounds;
-      }
+      entry.msg.content = finalMsg.content || "";
+      entry.msg.toolRounds = Array.isArray(finalMsg.toolRounds) ? finalMsg.toolRounds : [];
       delete entry.msg._streamingVu;
       console.info(
         `[Autopilot VU] ✓ done — finalized vuMsgId=${vuMsgId.slice(0,12)} ` +
@@ -290,8 +294,20 @@ function _handleAutopilotVuEvent(convId, ev) {
 
   let entry = _findVuMsgById(conv, vuMsgId);
   if (!entry) {
+    /* Lazy-create the bubble when a content-bearing frame arrives without a
+     * preceding autopilot_vu_start (reconnect / late-connect / dropped start).
+     * `phase` counts as content-bearing: a rate-limited first-token stall
+     * emits phase-only frames (waiting_model / retrying/限流中) for tens of
+     * seconds BEFORE any delta — if a replay cursor lands inside that window
+     * and we dropped them, the bubble would never materialize and the user
+     * would stare at a dead warm-up state during precisely the window where
+     * the phase chip is the ONLY liveness signal. The `phase` branch below
+     * sets buf.phase + flushes once `entry` exists. Non-rendered interactive
+     * types (stdin_request / write_approval_request / human_guidance_*) still
+     * do NOT create the bubble — the VU IS the user, it hosts no widgets. */
     const _isContentBearing =
       (itype === "tool_start") ||
+      (itype === "phase") ||
       (itype === "delta" && (inner.content || inner.thinking));
     if (!_isContentBearing) {
       return; // silently skip — nothing to show yet
@@ -526,11 +542,11 @@ function _streamingBubbleHTML(role, status, timeStr, msgId) {
     /* Autopilot virtual-user: streams in the USER lane with the same
      * substrate as the worker so its reply renders identically to the
      * agent (incremental markdown, thinking, tool rounds, elapsed bar). */
-    autopilot: { avatar: (typeof _TOFU_CRITIC_SVG !== 'undefined') ? _TOFU_CRITIC_SVG : '✦', label: 'Autopilot', cls: 'vu-user-msg', defaultStatus: (typeof t === 'function' ? t('autopilot.composing') : 'Autopilot is composing the next reply…') },
+    autopilot: { avatar: (typeof _TOFU_CRITIC_SVG !== 'undefined') ? _TOFU_CRITIC_SVG : '✦', label: 'Autopilot', cls: 'vu-user-msg', defaultStatus: (typeof t === 'function' ? t('autopilot.warming') : 'Autopilot…') },
   };
   const c = _cfg[role] || _cfg.worker;
   const st = status || c.defaultStatus;
-  const tm = timeStr || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const tm = timeStr || formatClockTime();
   const extraCls = (role === 'critic' || role === 'autopilot') ? ' user-msg' : '';
   /* safeHtml auto-escapes every interpolation. The avatar is trusted
    * hardcoded SVG/img markup (settings/branding.js) so it is wrapped in

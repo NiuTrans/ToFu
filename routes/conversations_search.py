@@ -23,6 +23,27 @@ logger = get_logger(__name__)
 _SLOW_SEARCH_THRESHOLD_S = 0.3
 
 
+def _head_cap_sql(backend: str) -> str:
+    """Return the backend-appropriate ``search_text`` head-cap SQL fragment.
+
+    Both branches cap the substring scan to the first 10000 chars (so a
+    megabyte-scale TOASTed value isn't decompressed in full), but the spelling
+    is backend-specific and MUST stay so:
+
+      * ``pg``     → ``left(search_text, 10000)`` — matches the expression trgm
+        index ``idx_conv_search_head_trgm`` (``lower(left(...,10000))``)
+        verbatim; any other spelling defeats the planner → full Seq Scan.
+      * anything else (SQLite) → ``substr(search_text, 1, 10000)`` — SQLite has
+        NO ``left()`` builtin, so the PG form raised ``no such function: left``,
+        the ``except`` swallowed it, and the Phase-2 substring fallback silently
+        returned nothing (degraded search on every SQLite deployment).
+        ``substr(x, 1, N)`` is the portable equivalent, semantically identical
+        on both backends.
+    """
+    return ('left(search_text, 10000)' if backend == 'pg'
+            else 'substr(search_text, 1, 10000)')
+
+
 def _log_search_timing(query: str, n_results: int, elapsed: float) -> None:
     """Log search latency — WARNING when slow, DEBUG otherwise."""
     if elapsed >= _SLOW_SEARCH_THRESHOLD_S:
@@ -97,9 +118,10 @@ async def search_convs():
                 logger.debug('[search_convs] FTS5 query failed (will fallback): %s', e)
 
     # ── Phase 2: LIKE fallback for substring matches Phase 1 misses ──
-    # Bound the scan to the first 10000 chars of search_text: full-text already
-    # caught whole-word hits, so this only needs to catch substrings, and the
-    # ``left(...)`` cap avoids decompressing megabyte-scale TOASTed values.
+    # Backend-aware head-cap on search_text (see _head_cap_sql): PG keeps
+    # ``left(...)`` to hit its expression index; SQLite uses portable
+    # ``substr(...)`` because it has no ``left()`` builtin.
+    _head_cap = _head_cap_sql(_BACKEND)
     if len(result_ids) < MAX_RESULTS:
         _like_pattern = '%' + query.replace('%', '\\%').replace('_', '\\_') + '%'
         remaining = MAX_RESULTS - len(result_ids)
@@ -108,15 +130,15 @@ async def search_convs():
                 placeholders = ','.join(['?'] * len(result_ids))
                 rows = await async_fetchall(
                     f"""SELECT id FROM conversations
-                        WHERE user_id=? AND lower(left(search_text, 10000)) LIKE ?
+                        WHERE user_id=? AND lower({_head_cap}) LIKE ?
                           AND id NOT IN ({placeholders})
                         ORDER BY updated_at DESC LIMIT ?""",
                     (DEFAULT_USER_ID, _like_pattern, *result_ids, remaining),
                     domain=DOMAIN_CHAT)
             else:
                 rows = await async_fetchall(
-                    """SELECT id FROM conversations
-                       WHERE user_id=? AND lower(left(search_text, 10000)) LIKE ?
+                    f"""SELECT id FROM conversations
+                       WHERE user_id=? AND lower({_head_cap}) LIKE ?
                        ORDER BY updated_at DESC LIMIT ?""",
                     (DEFAULT_USER_ID, _like_pattern, remaining), domain=DOMAIN_CHAT)
             result_ids.extend(r['id'] for r in rows)

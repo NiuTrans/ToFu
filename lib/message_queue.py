@@ -39,11 +39,17 @@ _dispatch_lock = threading.Lock()
 
 # ── Turn-source kinds + their default priorities (lower = higher) ──
 KIND_REAL = 'real'
+KIND_PEER_MSG = 'peer_msg'
 KIND_WORKFLOW = 'workflow_step'
 KIND_AUTOPILOT = 'autopilot'
 
 _PRIORITY_FOR_KIND = {
     KIND_REAL: 10,
+    # A peer message from a sibling conversation is advisory — the target sees
+    # it on its NEXT turn (dispatchable, never interrupts a live turn). It
+    # sorts AFTER a human 'real' turn (so a human always wins) but BEFORE a
+    # brain-dispatch 'workflow_step' kickoff.
+    KIND_PEER_MSG: 40,
     KIND_WORKFLOW: 50,
     KIND_AUTOPILOT: 90,
 }
@@ -163,6 +169,178 @@ def _get_autopilot_marker(conv_id: str) -> dict | None:
         (conv_id, KIND_AUTOPILOT)
     ).fetchone()
     return {'queueId': row['id']} if row else None
+
+
+def get_autopilot_marker_config(conv_id: str) -> dict | None:
+    """Return the send config stored on the conv's autopilot sentinel, or None.
+
+    The armed-marker row carries the resolved send ``config`` (model / tools /
+    searchMode …) captured at arm time.  Startup autopilot-resume reads it so a
+    crash-recovered run re-kicks with the SAME config the user had selected,
+    not a bare default.  Best-effort — returns None on any failure.
+    """
+    if not conv_id:
+        return None
+    try:
+        _maybe_ensure_table()
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT config FROM message_queue WHERE conv_id=? AND kind=? LIMIT 1',
+            (conv_id, KIND_AUTOPILOT)
+        ).fetchone()
+        if not row:
+            return None
+        return json.loads(row['config'] or '{}')
+    except Exception as e:
+        logger.debug('[Queue] get_autopilot_marker_config failed: %s', e)
+        return None
+
+
+def list_armed_autopilot_convs() -> list[str]:
+    """Return every conv_id that currently carries an autopilot armed-marker.
+
+    The DURABLE source of truth for "which conversations are armed" — a marker
+    survives restart (it is a DB row), so this is what startup autopilot-resume
+    scans to re-kick every armed run, NOT the set of conversations that merely
+    had an in-flight task at crash time. That distinction matters: a conv armed
+    from idle (marker present, no task ever spawned, or the reply already
+    finished before the crash) has an armed marker but was never a "recovered"
+    task — scanning markers catches it; scanning recovered tasks would strand
+    it. Best-effort — returns [] on any failure.
+    """
+    try:
+        _maybe_ensure_table()
+        db = get_thread_db(DOMAIN_CHAT)
+        rows = db.execute(
+            'SELECT DISTINCT conv_id FROM message_queue WHERE kind=?',
+            (KIND_AUTOPILOT,)
+        ).fetchall()
+        return [r['conv_id'] for r in rows if r['conv_id']]
+    except Exception as e:
+        logger.warning('[Queue] list_armed_autopilot_convs failed: %s', e)
+        return []
+
+
+def list_orphaned_dispatchable_convs() -> list[str]:
+    """Return every conv_id carrying a DISPATCHABLE queue row (real / peer /
+    workflow_step — i.e. everything except the autopilot sentinel).
+
+    This is the durable source of truth for "which conversations have a queued
+    turn that no running task will ever drain". A queued human ``real`` row is
+    written by ``/api/chat/send`` when a task is already running, and is drained
+    ONLY by the post-task-completion hook / human-send / brain idle-drain — none
+    of which fire after a server restart, because the task that would have
+    triggered the completion hook died with the process. So on boot these rows
+    are ORPHANED: shown in the queue bar (a DB row survives), never dispatched,
+    no transcript trace = total loss. Startup re-dispatch
+    (:func:`redispatch_orphaned_queue_on_startup`) scans this list to drain
+    them, mirroring the autopilot armed-marker resume.
+
+    Best-effort — returns [] on any failure.
+    """
+    try:
+        _maybe_ensure_table()
+        db = get_thread_db(DOMAIN_CHAT)
+        rows = db.execute(
+            'SELECT DISTINCT conv_id FROM message_queue WHERE kind!=?',
+            (KIND_AUTOPILOT,)
+        ).fetchall()
+        return [r['conv_id'] for r in rows if r['conv_id']]
+    except Exception as e:
+        logger.warning('[Queue] list_orphaned_dispatchable_convs failed: %s', e)
+        return []
+
+
+def redispatch_orphaned_queue_on_startup() -> list[str]:
+    """Re-dispatch every queued turn stranded by a server restart.
+
+    A message enqueued while a task was running lives ONLY in ``message_queue``
+    (never in ``conversations.messages`` — deliberate, so it doesn't render
+    mid-stream). The queue row is durable, but the ONLY things that drain it are
+    the post-task-completion hook, a human send, and the Project-Brain idle
+    drain — NONE of which fire on a fresh boot for a conversation with no live
+    task. So without this scan, a restart leaves the message shown in the queue
+    bar but never processed, with no trace in the transcript = total loss (the
+    ``KIND_REAL`` analogue of the autopilot armed-marker gap that
+    :func:`~lib.tasks_pkg.autopilot.resume_armed_autopilot_after_crash` closes).
+
+    For each conversation with a dispatchable row, we dispatch ONE task via the
+    SAME :func:`dispatch_next_queued` seam every other caller uses — which pops
+    the highest-priority queued row, appends its user message to
+    ``conversations.messages`` (giving it a durable transcript home at last) and
+    spawns the task. We deliberately start only ONE task per conv (not the whole
+    queue) — the normal post-task-completion hook drains the remaining rows in
+    priority order, exactly as in steady-state operation where a conversation
+    only ever has one task running at a time.
+
+    Ordering / safety:
+      • Runs at startup AFTER ``recover_stale_tasks_on_startup`` has marked all
+        crashed tasks ``interrupted`` and cleared dead ``activeTaskId`` pointers,
+        so no conversation has a live in-memory task — draining cannot
+        double-dispatch. A defensive live-task guard is applied per conv anyway.
+      • ``dispatch_next_queued`` takes the non-reentrant ``_dispatch_lock``
+        itself, so we must NOT hold it here.
+      • Best-effort per conv: one failure never aborts the batch.
+
+    Returns the list of task_ids spawned (one per conv that had a queued turn).
+    """
+    spawned: list[str] = []
+    try:
+        convs = list_orphaned_dispatchable_convs()
+    except Exception as e:
+        logger.warning('[Queue] redispatch-on-startup: scan failed: %s', e)
+        return spawned
+
+    if not convs:
+        logger.debug('[Queue] redispatch-on-startup: no orphaned queued turns')
+        return spawned
+
+    logger.info('[Queue] redispatch-on-startup: %d conv(s) have orphaned queued '
+                'turn(s): %s', len(convs), [c[:8] for c in convs])
+
+    for conv_id in convs:
+        if not conv_id:
+            continue
+        # Defensive: never drain a conv that already has a live task (a task
+        # spawned earlier in the same boot, or a racing send). Mirrors
+        # project_dispatch._conv_has_live_task's intent without importing it.
+        try:
+            from lib.tasks_pkg.manager import tasks, tasks_lock
+            with tasks_lock:
+                _live = any(
+                    t.get('convId') == conv_id
+                    and t.get('status') == 'running'
+                    and not t.get('aborted')
+                    for t in tasks.values()
+                )
+            if _live:
+                logger.info('[Queue] redispatch-on-startup: conv=%s already has a '
+                            'live task — leaving its queue for the completion hook',
+                            conv_id[:8])
+                continue
+        except Exception as e:
+            logger.debug('[Queue] redispatch-on-startup live-task probe failed '
+                         'for conv=%s: %s', conv_id[:8], e)
+
+        # Dispatch ONE task for this conv; its completion hook drains the rest
+        # of the queue (single-task-per-conv, as in steady state).
+        try:
+            tid = dispatch_next_queued(conv_id)
+        except Exception as e:
+            logger.warning('[Queue] redispatch-on-startup: dispatch failed for '
+                           'conv=%s: %s', conv_id[:8], e, exc_info=True)
+            continue
+        if tid:
+            spawned.append(tid)
+            from lib.log import audit_log
+            audit_log('queue_redispatch_after_restart', conv_id=conv_id, task_id=tid)
+            logger.info('[Queue] redispatch-on-startup: conv=%s → task %s',
+                        conv_id[:8], tid[:8])
+
+    if spawned:
+        logger.info('[Queue] redispatch-on-startup: spawned %d task(s) from '
+                    'orphaned queue rows', len(spawned))
+    return spawned
 
 
 def has_autopilot_marker(conv_id: str) -> bool:
@@ -441,6 +619,33 @@ def dispatch_next_queued(conv_id: str) -> str | None:
                 user_msg['replyQuotes'] = payload['replyQuotes']
             if payload.get('convRefs'):
                 user_msg['convRefs'] = payload['convRefs']
+            # ── Peer-message attribution: a KIND_PEER_MSG turn is content-wise
+            #    prefixed so the AGENT sees "[Peer message … (conv X)]", but the
+            #    structured markers were being dropped here — the persisted turn
+            #    then looked byte-identical to real user input, so the frontend
+            #    could not visually distinguish/attribute it. Propagate the
+            #    markers onto the message so the arrival is observable + the
+            #    sender is attributable (renderer keys on `_peerMessage`). ──
+            if payload.get('_peerMessage'):
+                user_msg['_peerMessage'] = True
+                user_msg['_fromConv'] = payload.get('_fromConv', '')
+            # A human operator nudge (sent from the Team panel) is stamped so the
+            # receiving banner attributes it to the operator, not to an agent
+            # peer. Distinct provenance, same KIND_PEER_MSG lane. Kept as its own
+            # guard (not nested in the block above) so the peer-marker block can
+            # be neutered independently by its own negative-control test.
+            if payload.get('_peerMessage') and payload.get('_peerHuman'):
+                user_msg['_peerHuman'] = True
+            # ── Brain-dispatch attribution: a Project-Brain autonomous kickoff
+            #    (KIND_WORKFLOW, marked _brainDispatch by dispatch_epic) must be
+            #    distinguishable from human input downstream — the frontend
+            #    shows it started autonomously, and the task itself should not
+            #    be mistaken for a user turn. Propagate the markers onto the
+            #    persisted user turn (mirrors the _peerMessage block). ──
+            if payload.get('_brainDispatch'):
+                user_msg['_brainDispatch'] = True
+                if payload.get('boardTaskId'):
+                    user_msg['_boardTaskId'] = payload.get('boardTaskId')
             conv_ref_texts = payload.get('convRefTexts')
             if not conv_ref_texts and payload.get('convRefs'):
                 try:

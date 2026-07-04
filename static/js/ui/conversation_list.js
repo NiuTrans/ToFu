@@ -8,6 +8,38 @@
    exports / imports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
+/* ── Finish-reason tiers (mirror finish_info.js) — decide the settled
+ *   sidebar state of a turn that carries a finishReason.
+ *   NORMAL: clean completion, no flag.
+ *   ERR:    hard failure → red error state (same bucket as msg.error).
+ *   Everything else that is neither NORMAL nor ERR is treated as an
+ *   INCOMPLETE (interrupted / truncated / stopped) turn → amber state. */
+const _FINISH_NORMAL = new Set(['stop', 'end_turn', 'stop_sequence', 'tool_use', 'tool_calls']);
+const _FINISH_ERR = new Set(['error', 'server_offline']);
+
+/* Is the assistant message at `msgIdx` part of an autopilot run that has
+ * already CONCLUDED (produced a debrief report / carries a concluded record)?
+ * The run id is stamped on the run's virtual-user (role:'user') turns, not on
+ * the assistant turns, so we scan backwards from `msgIdx` for the nearest VU
+ * turn's `_autopilotRunId`, then consult the conv's `autopilotSummaries`
+ * sidecar — the SAME backend-authoritative "run concluded" signal chat_render
+ * uses (record.status==='concluded' OR record.content present). A conv with no
+ * autopilot state returns false immediately (cheap). */
+function _autopilotRunConcluded(c, msgIdx) {
+  const summaries = c && c.autopilotSummaries;
+  if (!summaries || typeof summaries !== 'object' || !c.messages) return false;
+  let runId = null;
+  for (let j = msgIdx; j >= 0; j--) {
+    const mm = c.messages[j];
+    if (mm && mm._autopilotRunId) { runId = mm._autopilotRunId; break; }
+    // Stop at a human (non-VU) user turn — that's the boundary before the run.
+    if (mm && mm.role === 'user' && !mm._isVirtualUser && j !== msgIdx) break;
+  }
+  if (!runId) return false;
+  const rec = summaries[runId];
+  return !!(rec && typeof rec === 'object' && (rec.status === 'concluded' || rec.content));
+}
+
 function stripNoTranslateTags(text) {
   if (!text) return text;
   return text
@@ -556,7 +588,7 @@ function renderConversationList() {
       filtered.map(c => `${c.id}|${c.title}|${c.updatedAt||""}|${c.folderId||""}|${(c.projectSummary && c.projectSummary.text) ? "S" : ""}`).join("\n");
     const _statusHash = filtered.map(c => {
       const f = _convStatusFlags(c);
-      return `${c.id===activeConvId?1:0}${f.streaming?1:0}${f.translating?1:0}${f.memoryPrefetching?1:0}${f.awaitingHuman?1:0}`;
+      return `${c.id===activeConvId?1:0}${f.streaming?1:0}${f.translating?1:0}${f.memoryPrefetching?1:0}${f.awaitingHuman?1:0}${f.errored?1:0}${f.incomplete?1:0}`;
     }).join(",");
     const _fullHash = `${_structHash}|||${_statusHash}`;
     if (_fullHash === _lastConvListHash) return;
@@ -728,7 +760,7 @@ function showConvSummary(badgeEl, ev) {
  * all three agree on exactly when a dot / tag should show.
  *
  * @param {Object} c — conversation object
- * @returns {{streaming:boolean, translating:boolean, memoryPrefetching:boolean, awaitingHuman:boolean}}
+ * @returns {{streaming:boolean, translating:boolean, memoryPrefetching:boolean, awaitingHuman:boolean, errored:boolean, incomplete:boolean}}
  */
 function _convStatusFlags(c) {
   const translating = !!c._translating;
@@ -752,7 +784,51 @@ function _convStatusFlags(c) {
       }
     }
   }
-  return { streaming, translating, memoryPrefetching, awaitingHuman };
+  // ★ Settled final-generation state — the conv is idle (not streaming) and
+  //   its most-recent assistant turn ended abnormally. Two distinct buckets:
+  //     errored    → hard failure (msg.error, or an ERR-tier finishReason)
+  //     incomplete → the turn stopped without finishing and without a hard
+  //                   error (aborted / interrupted / truncated / gateway
+  //                   close / rounds-exhausted …) — "not completed, needs
+  //                   attention". A turn with NO finishReason but with actual
+  //                   content is treated as complete (legacy turns predate the
+  //                   field); a bare placeholder with neither content, error,
+  //                   nor finishReason is a dangling/interrupted generation.
+  //   Only the latest assistant turn defines the final state; errored wins
+  //   over incomplete when both could apply.
+  let errored = false;
+  let incomplete = false;
+  if (!streaming && c.messages) {
+    for (let i = c.messages.length - 1; i >= 0; i--) {
+      const m = c.messages[i];
+      if (m.role !== 'assistant') continue;
+      const fr = m.finishReason;
+      if (m.error || _FINISH_ERR.has(fr)) {
+        errored = true;
+      } else if (fr) {
+        incomplete = !_FINISH_NORMAL.has(fr);
+      } else {
+        // No finishReason: complete only if the turn actually produced output.
+        const hasOutput = !!((m.content && m.content.length) ||
+                             (m.thinking && m.thinking.length) ||
+                             (m.toolRounds && m.toolRounds.length) ||
+                             m._igResults);
+        incomplete = !hasOutput;
+      }
+      // ★ Autopilot exception — an autopilot run's LAST agent turn is stamped
+      //   `interrupted`/`aborted` by the VU loop that stops it, even though the
+      //   run itself concluded (it produced a debrief report). If the run this
+      //   turn belongs to has a concluded summary record, the conversation is
+      //   done from the user's view → don't flag it. Only downgrades the
+      //   "settled abnormal" states; a genuine error envelope still shows.
+      if ((incomplete || errored) && !m.error && _autopilotRunConcluded(c, i)) {
+        incomplete = false;
+        errored = false;
+      }
+      break;
+    }
+  }
+  return { streaming, translating, memoryPrefetching, awaitingHuman, errored, incomplete };
 }
 
 /**
@@ -770,6 +846,10 @@ function _convStatusHtml(f) {
     dotHtml = `<div class="conv-memprefetch-dot" title="${t('sidebar.memoryPrefetch')}"></div>`;
   } else if (f.streaming) {
     dotHtml = '<div class="conv-streaming-dot"></div>';
+  } else if (f.errored) {
+    dotHtml = `<div class="conv-error-dot" title="${t('sidebar.errorState')}"></div>`;
+  } else if (f.incomplete) {
+    dotHtml = `<div class="conv-incomplete-dot" title="${t('sidebar.incompleteState')}"></div>`;
   }
   let statusTag = '';
   if (f.translating) {
@@ -778,6 +858,10 @@ function _convStatusHtml(f) {
     statusTag = `<span class="conv-status-tag conv-status-memprefetch">${t('sidebar.memoryPrefetchTag')}</span>`;
   } else if (f.streaming) {
     statusTag = `<span class="conv-status-tag conv-status-streaming">${t('sidebar.answering')}</span>`;
+  } else if (f.errored) {
+    statusTag = `<span class="conv-status-tag conv-status-error" title="${t('sidebar.errorState')}">${t('sidebar.errorTag')}</span>`;
+  } else if (f.incomplete) {
+    statusTag = `<span class="conv-status-tag conv-status-incomplete" title="${t('sidebar.incompleteState')}">${t('sidebar.incompleteTag')}</span>`;
   }
   return { dotHtml, statusTag };
 }
@@ -795,7 +879,7 @@ function _applyConvItemStatus(row, c) {
 
   /* Leading dot: it's the first child of .conv-item when present (before
    * .conv-text). Reconcile by comparing the current dot markup. */
-  const curDot = row.querySelector(':scope > .conv-translating-dot, :scope > .conv-memprefetch-dot, :scope > .conv-streaming-dot, :scope > .conv-awaiting-human-dot');
+  const curDot = row.querySelector(':scope > .conv-translating-dot, :scope > .conv-memprefetch-dot, :scope > .conv-streaming-dot, :scope > .conv-awaiting-human-dot, :scope > .conv-error-dot, :scope > .conv-incomplete-dot');
   const curDotHtml = curDot ? curDot.outerHTML : '';
   if (curDotHtml !== dotHtml) {
     if (curDot) curDot.remove();

@@ -33,6 +33,65 @@ const _push = (() => {
   // reset the reconnect attempt counter. See onclose.
   const MIN_UPTIME_MS = 5000;
 
+  // ── Round-trip latency probe (network signal indicator) ──────────────
+  // We piggyback a ping/pong on the already-open push socket rather than
+  // opening a second connection: the server echoes {type:'pong', t} for
+  // every {action:'ping', t} we send, and RTT = now - t.
+  const PING_INTERVAL_MS = 4000;   // how often to probe while connected
+  const PING_TIMEOUT_MS = 8000;    // no pong within this ⇒ treat as timed out
+  let _pingTimer = null;
+  let _lastPingSentAt = 0;         // client timestamp of the outstanding ping
+  let _latencyMs = null;           // last measured RTT; null = unknown
+  let _latencyState = 'unknown';   // unknown | good | ok | poor | timeout | offline
+  let _latencyListeners = new Set();
+
+  function _emitLatency() {
+    for (const fn of _latencyListeners) {
+      try { fn({ ms: _latencyMs, state: _latencyState, connected: _connected }); }
+      catch (e) { console.error('[Push] latency listener error:', e); }
+    }
+  }
+
+  function _classify(ms) {
+    if (ms == null) return 'unknown';
+    if (ms < 150) return 'good';
+    if (ms < 400) return 'ok';
+    return 'poor';
+  }
+
+  function _sendPing() {
+    if (!_connected || !_ws) return;
+    // A still-outstanding ping older than the timeout means the pong never
+    // came back — surface that as a timeout before firing the next probe.
+    if (_lastPingSentAt && Date.now() - _lastPingSentAt > PING_TIMEOUT_MS) {
+      _latencyMs = null;
+      _latencyState = 'timeout';
+      _emitLatency();
+    }
+    _lastPingSentAt = Date.now();
+    try { _ws.send(JSON.stringify({ action: 'ping', t: _lastPingSentAt })); }
+    catch (e) { console.debug('[Push] ping send failed:', e); }
+  }
+
+  function _startPinging() {
+    if (_pingTimer) return;
+    _sendPing();
+    _pingTimer = setInterval(_sendPing, PING_INTERVAL_MS);
+  }
+
+  function _stopPinging() {
+    if (_pingTimer) { clearInterval(_pingTimer); _pingTimer = null; }
+    _lastPingSentAt = 0;
+  }
+
+  function _onPong(t) {
+    if (!t || t !== _lastPingSentAt) return;   // stale / mismatched pong
+    _latencyMs = Date.now() - t;
+    _latencyState = _classify(_latencyMs);
+    _lastPingSentAt = 0;
+    _emitLatency();
+  }
+
   function _key(channel, taskId) { return `${channel}:${taskId}`; }
 
   function _buildUrl() {
@@ -43,6 +102,12 @@ const _push = (() => {
 
   function connect() {
     if (_ws && (_ws.readyState === WebSocket.OPEN || _ws.readyState === WebSocket.CONNECTING)) {
+      // Already connected/connecting. If the socket is OPEN, onopen has
+      // already fired (and won't fire again), so a late caller — e.g. the
+      // latency indicator initialising after some other module opened the
+      // socket — would never get pinging started. Kick it off here; it's
+      // idempotent (guarded by _pingTimer).
+      if (_ws.readyState === WebSocket.OPEN && _connected) _startPinging();
       return;
     }
 
@@ -71,6 +136,8 @@ const _push = (() => {
         const [channel, taskId] = key.split(':');
         _ws.send(JSON.stringify({action: 'subscribe', channel, taskId}));
       }
+
+      _startPinging();
     };
 
     _ws.onmessage = (event) => {
@@ -80,6 +147,7 @@ const _push = (() => {
       const channel = frame.channel;
       const taskId = frame.taskId;
 
+      if (frame.type === 'pong') { _onPong(frame.t); return; }
       if (frame.type === 'ping') return;
 
       // Route to specific task handlers
@@ -117,6 +185,10 @@ const _push = (() => {
       _connected = false;
       _connectedAt = 0;
       _ws = null;
+      _stopPinging();
+      _latencyMs = null;
+      _latencyState = 'offline';
+      _emitLatency();
       if (e.code === 1000) return;                  // normal close
       // Permanent close codes — the server is telling us not to come back.
       // Reconnecting just generates noise in the server log and risks IP
@@ -183,7 +255,20 @@ const _push = (() => {
 
   function isConnected() { return _connected; }
 
-  return { connect, subscribe, unsubscribe, send, isConnected };
+  function getLatency() {
+    return { ms: _latencyMs, state: _latencyState, connected: _connected };
+  }
+
+  function onLatency(fn) {
+    if (typeof fn !== 'function') return () => {};
+    _latencyListeners.add(fn);
+    // Push the current reading immediately so a late subscriber isn't blank
+    // until the next probe.
+    try { fn(getLatency()); } catch (e) { console.error('[Push] latency listener error:', e); }
+    return () => _latencyListeners.delete(fn);
+  }
+
+  return { connect, subscribe, unsubscribe, send, isConnected, getLatency, onLatency };
 })();
 
 // Public API
@@ -192,3 +277,5 @@ function pushUnsubscribe(channel, taskId, handler) { _push.unsubscribe(channel, 
 function pushSend(msg) { _push.send(msg); }
 function pushConnect() { _push.connect(); }
 function pushIsConnected() { return _push.isConnected(); }
+function pushGetLatency() { return _push.getLatency(); }
+function pushOnLatency(fn) { return _push.onLatency(fn); }

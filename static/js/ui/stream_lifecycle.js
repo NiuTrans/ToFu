@@ -52,7 +52,7 @@ function showStreamingUIForConv(convId) {
   }
 
   const lastMsg = _last;
-  const _smTime = new Date(lastMsg?.timestamp || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const _smTime = formatClockTime(lastMsg?.timestamp);
   if (_lastIsStreamingBubble) {
     /* ★ Carry the message's stable _msgId onto the rebuilt bubble's
      *   data-msg-id. Without it, the live per-round translation preview
@@ -106,17 +106,26 @@ function showStreamingUIForConv(convId) {
      *   arrives during the connection setup window gets rendered — without this,
      *   the user sees "Waiting…" until the NEXT SSE event triggers twUpdate. */
     const _deferConvId = convId;
+    const _deferLastMsg = lastMsg;
     setTimeout(() => {
       if (activeConvId !== _deferConvId) return;           // user switched away
       if (!activeStreams.has(_deferConvId)) return;         // stream finished
       const dBuf = streamBufs.get(_deferConvId);
       if (!dBuf) return;
+      /* ★ FIX (stuck "等待中…" wipe): fall back to the persisted message when
+       *   the buffer field is empty, exactly like the initial render above.
+       *   A raw `dBuf.content` here re-paints updateStreamingUI({content:''})
+       *   on a freshly-seeded/empty buffer, snapping the bubble from the real
+       *   (checkpointed) English back to the "wait" branch 300ms after load.
+       *   The buffer is authoritative only once it has data; until then the
+       *   message's checkpoint content is the truth. */
       updateStreamingUI({
-        thinking: dBuf.thinking,
-        content: dBuf.content,
-        toolRounds: dBuf.toolRounds,
+        thinking: dBuf.thinking || _deferLastMsg.thinking || "",
+        content: dBuf.content || _deferLastMsg.content || "",
+        toolRounds: (dBuf.toolRounds?.length ? dBuf.toolRounds : null)
+                    || getToolRoundsFromMsg(_deferLastMsg),
         phase: dBuf.phase,
-        _memoryPrefetch: dBuf._memoryPrefetch,
+        _memoryPrefetch: dBuf._memoryPrefetch || _deferLastMsg._memoryPrefetch,
         _mcpLoginHint: dBuf._mcpLoginHint,
       });
     }, 300);
@@ -190,44 +199,29 @@ function finishStream(convId) {
     conv.activeTaskId = null;
     conv._activeTaskClearedAt = Date.now();
     saveConversations(convId);
-    /* ★ Queue-race guard: when there are queued messages, skip the full-conv
-     *   PUT to the server.  The backend's dispatch_next_queued() will append
-     *   the queued user_msg + run the new task; if our PUT lands AFTER it reads
-     *   (but BEFORE it writes), we'd overwrite the queued user message — the
-     *   "invisible" queued-message bug.  Backend's _sync_result_to_conversation
-     *   already persists the aborted assistant state for us in this path.
-     *
-     *   Same hazard for the autopilot follow-up path: the backend already
-     *   appended the synthetic VU user message to conv DB before sending
-     *   the done event.  Our local conv.messages doesn't have it yet (it
-     *   gets pushed by _attachAutopilotFollowup right after this), so a
-     *   full-conv PUT here would overwrite the VU message in the DB. */
-    const _fsHasQueued = (typeof _dispatchableQueueCount === 'function')
-      && _dispatchableQueueCount(convId) > 0;
-    /* Locate the autopilot carrier by flag, not by tail position — Phase-2
-     * reconciliation can move it off conv.messages[length-1]. */
-    const _fsApCarrier = _findAutopilotPendingCarrier(conv);
-    const _fsAutopilotInbound = !!_fsApCarrier;
-    const _fsLastMsg = conv.messages[conv.messages.length - 1];
-    const _fsIsServerOffline = _fsLastMsg && _fsLastMsg.finishReason === 'server_offline';
-    if (_fsIsServerOffline) {
-      console.info(`[finishStream] 📡 Skipping syncConversationToServer — ` +
-        `finishReason=server_offline for conv=${convId.slice(0,8)}; ` +
-        `backend has the complete content, frontend only has a truncated snapshot`);
-    } else if (_fsHasQueued) {
-      console.info(`[finishStream] 🚧 Skipping syncConversationToServer — ` +
-        `queue has ${_dispatchableQueueCount(convId)} dispatchable item(s) for conv=${convId.slice(0,8)}; ` +
-        `backend owns the next DB write via dispatch_next_queued()`);
-    } else if (_fsAutopilotInbound) {
-      console.info(`[finishStream] 🤖 Skipping syncConversationToServer — ` +
-        `autopilot follow-up inbound for conv=${convId.slice(0,8)}; ` +
-        `backend already wrote the VU user message to DB`);
-    } else {
-      syncConversationToServer(conv);
-    }
-    /* ★ Eagerly update IndexedDB cache — syncConversationToServer also does this
-     *   on success, but it may be guarded/skipped in some edge cases.  This ensures
-     *   the cache always has the latest post-stream content for instant reload. */
+    /* ★ Phase 2 (completion-workflow consolidation): NO full-conv PUT here.
+     *   The backend's _sync_result_to_conversation is the SOLE authoritative
+     *   writer of the settled turn into conversations.messages — it commits
+     *   the assistant message BEFORE the terminal `done` event, clears
+     *   settings.activeTaskId, and updates lastMsgRole/lastMsgTimestamp
+     *   (manager.py). The done event ships that exact dict as
+     *   `committedMessage`, which the SSE done handler projects verbatim, so
+     *   the client's in-memory copy already matches the DB. A PUT here only
+     *   RE-uploaded what the backend just wrote — and, worse, RACED it: three
+     *   skip-guards (queue-race, autopilot-inbound, server_offline) existed
+     *   ONLY to suppress this PUT in the exact windows where it would clobber
+     *   a backend write (the queued user_msg from dispatch_next_queued, the
+     *   autopilot VU user_msg, or the complete offline content with a
+     *   truncated snapshot). Removing the PUT makes all three moot — that
+     *   whole race class is gone. Config/toggle changes (autoTranslate, pin,
+     *   folder, tool flags) are persisted by their OWN explicit call sites
+     *   (syncConversationToServerDebounced / PATCH /settings), and the
+     *   autopilotSummaries sidecar is durably written server-side
+     *   (autopilot.py) — none of that state ORIGINATES at turn-end, so
+     *   dropping the turn-end PUT loses nothing. */
+    /* ★ Eagerly update the IndexedDB cache with the (already backend-matched)
+     *   local state for instant reload. This is a LOCAL cache write, not the
+     *   server PUT — it stays. */
     ConvCache.put(conv);
     /* ★ Auto-generate a descriptive title once the first turn completes.
      *   The helper guards itself (skips if user-edited, already attempted, or
@@ -396,7 +390,7 @@ function finishStream(convId) {
     try {
       const inner = document.getElementById('chatInner');
       if (inner && !document.getElementById('streaming-msg')) {
-        const _qTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const _qTime = formatClockTime();
         inner.insertAdjacentHTML('beforeend',
           _streamingBubbleHTML('worker', 'Dispatching queued message…', _qTime));
         if (isNearBottom(80)) scrollToBottom();

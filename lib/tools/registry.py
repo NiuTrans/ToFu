@@ -866,12 +866,17 @@ def _build_conv_ref(ctx: ToolContext) -> list[dict]:
         # project mode (a charter is per-project) — read + propose. Commit is
         # human-gated and is NEVER exposed as an agent tool.
         if ctx.project_enabled and ctx.project_path:
-            from lib.tools import BOARD_TOOLS, CHARTER_TOOLS
+            from lib.tools import BOARD_TOOLS, CHARTER_TOOLS, PEER_TOOLS
             tools += list(CHARTER_TOOLS)
             # Project Board tools (Pillar #3): the coordination board — the
             # mechanism that makes conversations auto-coordinate (claim/avoid
             # duplicating). Project-scoped, same gate.
             tools += list(BOARD_TOOLS)
+            # Project Peer tools (Pillar #6): cross-conversation communication
+            # — live peer status + advisory messaging + advisory/gated
+            # intervention. Same project gate; registered on every project turn
+            # so the model can coordinate without the phantom-tool trap.
+            tools += list(PEER_TOOLS)
         return tools
     return []
 
@@ -1000,8 +1005,16 @@ def _register_builtins() -> None:
                  provides=frozenset({'generate_image'}),
                  category='image', description='Image generation'),
         ToolSpec('conv_ref', _build_conv_ref, phase='base',
-                 provides=frozenset({'list_conversations', 'get_conversation'}),
-                 idempotent_tools=frozenset({'list_conversations', 'get_conversation'}),
+                 provides=frozenset({'list_conversations', 'get_conversation',
+                                     'project_charter_read', 'project_charter_propose',
+                                     'project_board_read', 'project_board_post',
+                                     'project_board_claim', 'project_board_complete',
+                                     'project_board_block',
+                                     'project_peer_status', 'project_message',
+                                     'project_intervene'}),
+                 idempotent_tools=frozenset({'list_conversations', 'get_conversation',
+                                             'project_charter_read', 'project_board_read',
+                                             'project_peer_status'}),
                  category='conversation', description='Conversation reference tools'),
         ToolSpec('human_guidance', _build_human_guidance, phase='base',
                  provides=frozenset({'ask_human'}),

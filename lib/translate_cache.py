@@ -33,8 +33,8 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_CACHE_DIR = os.path.join(_BASE_DIR, 'data', 'translate_cache')
+from lib.runtime_paths import data_root
+_CACHE_DIR = os.path.join(data_root(), 'translate_cache')
 
 _ENABLED = getenv_compat('TOFU_TRANSLATE_CACHE', default='1') != '0'
 _TTL_SECONDS = int(getenv_compat('TOFU_TRANSLATE_CACHE_TTL_DAYS',

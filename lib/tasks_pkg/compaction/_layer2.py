@@ -260,10 +260,49 @@ def _format_messages_for_summary(messages: list) -> str:
     return '\n\n'.join(parts)
 
 
+def _summary_input_char_budget(task: dict | None) -> int:
+    """Char ceiling for the summary LLM's INPUT, sized to the model window.
+
+    The old fixed 200k-char cap was model-agnostic and token-blind: on a
+    small-window model (e.g. 128k qwen/gpt-4) 200k chars of dense or CJK
+    text is ~130k–200k tokens (the heuristic counts 1 token/CJK char) —
+    well OVER the window once the ~1.5k system prompt + `_SUMMARY_MAX_TOKENS`
+    output reserve are added. The summary call then fails ("prompt too
+    long" / dispatch exhausted), which was the root of the proactive-
+    compaction dead-end. Size the input to what the model can actually take:
+    ``usable - output_reserve`` tokens, converted to chars with a
+    conservative ~3 chars/token, and clamp to the historical 200k so large
+    windows behave as before.
+    """
+    try:
+        usable = _usable_context(_get_context_limit(task))
+    except Exception:
+        usable = 96_000
+    input_token_budget = max(4_000, usable - _SUMMARY_MAX_TOKENS - 2_000)
+    # Convert token budget → char budget at ~1 char/token. This is the
+    # CJK-worst-case ratio (the entropy heuristic counts ~1 token per CJK
+    # char), so the char cap is SAFE for Chinese/Japanese input — the exact
+    # case that overflowed a 128k window in production (est_input≈122k on a
+    # 200k-char summary). For latin-heavy text it trims a bit more than
+    # strictly necessary, but the summary is still produced. Clamp to the
+    # historical 200k ceiling, which only binds on large (>=~300k) windows —
+    # so 1M-context models are byte-identical to the old fixed cap.
+    return max(20_000, min(200_000, input_token_budget))
+
+
 def _generate_query_aware_summary(messages: list, current_query: str,
                                    log_prefix: str = '',
-                                   conv_id: str = '') -> str | None:
-    """Call a cheap model to generate a query-aware summary."""
+                                   conv_id: str = '',
+                                   task: dict | None = None) -> str | None:
+    """Call a cheap model to generate a query-aware summary.
+
+    Degrades gracefully so the proactive path actually works on a
+    vanilla/exported deploy: the input is capped to the model's real token
+    window (see ``_summary_input_char_budget``), and if the preferred
+    ``capability='cheap'`` dispatch fails (no model tagged cheap, or the
+    single model is momentarily exhausted) it retries once against any
+    text-capable slot before giving up.
+    """
     from lib.llm_dispatch import dispatch_chat
 
     formatted = _format_messages_for_summary(messages)
@@ -272,32 +311,52 @@ def _generate_query_aware_summary(messages: list, current_query: str,
     logger.info('%s Formatting %d messages for summary (%s), query=%.80s',
                 tag, len(messages), _human_size(len(formatted)), current_query)
 
-    if len(formatted) > 200_000:
+    _char_budget = _summary_input_char_budget(task)
+    if len(formatted) > _char_budget:
         original_len = len(formatted)
+        # Keep the head (early goals/decisions) and a larger tail (recent
+        # working state), eliding the middle — 1/3 head, 2/3 tail.
+        _head = _char_budget // 3
+        _tail = _char_budget - _head
         formatted = (
-            formatted[:50_000]
+            formatted[:_head]
             + '\n\n... [middle of conversation omitted for summary] ...\n\n'
-            + formatted[-100_000:]
+            + formatted[-_tail:]
         )
-        logger.info('%s Input truncated: %s → %s',
-                    tag, _human_size(original_len), _human_size(len(formatted)))
+        logger.info('%s Input truncated to model window: %s → %s (budget %s)',
+                    tag, _human_size(original_len), _human_size(len(formatted)),
+                    _human_size(_char_budget))
 
     user_content = (
         f'## Current User Query\n{current_query}\n\n'
         f'## Conversation History to Compress\n\n{formatted}'
     )
 
-    try:
-        content, usage = dispatch_chat(
+    def _dispatch(capability: str):
+        return dispatch_chat(
             [
                 {'role': 'system', 'content': _SUMMARY_SYSTEM_PROMPT},
                 {'role': 'user', 'content': user_content},
             ],
             max_tokens=_SUMMARY_MAX_TOKENS,
             temperature=0,
-            capability='cheap',
+            capability=capability,
             log_prefix=tag,
         )
+
+    try:
+        try:
+            content, usage = _dispatch('cheap')
+        except Exception as _cheap_e:
+            # Preferred cheap tier failed — retry once against ANY text slot
+            # (a deploy may have no model tagged 'cheap' at all). The
+            # dispatcher already widens 'cheap'→'text' internally when no
+            # cheap slot exists, so this mainly covers a transient cheap-slot
+            # exhaustion; it's cheap insurance and makes the intent explicit.
+            logger.warning('%s cheap-tier summary dispatch failed (%s: %s) — '
+                           'retrying on any text-capable slot',
+                           tag, type(_cheap_e).__name__, _cheap_e)
+            content, usage = _dispatch('text')
 
         if content:
             in_tok = usage.get('prompt_tokens', 0)
@@ -505,7 +564,7 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                 preserved_turns, current_query)
 
     summary_text = _generate_query_aware_summary(
-        old_messages, current_query, pfx, conv_id=conv_id
+        old_messages, current_query, pfx, conv_id=conv_id, task=task
     )
 
     if not summary_text:
@@ -548,6 +607,19 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                 tokens_before, tokens_after, reduction_pct,
                 msg_count_before, len(messages),
                 boundary - len(system_msgs))
+
+    # ── Phase-C: record the 'saved' half of this L2 event's cache ROI ──
+    # The following round's detect_cache_break completes it with the re-billed
+    # cache_write. Best-effort; never let instrumentation break compaction.
+    if conv_id:
+        try:
+            from lib.tasks_pkg.cache_tracking import record_l2_compaction
+            record_l2_compaction(
+                conv_id, tokens_before=int(tokens_before),
+                tokens_after=int(tokens_after),
+                msgs_before=int(msg_count_before), msgs_after=int(len(messages)))
+        except Exception as _roi_e:
+            logger.debug('%s [Compact] record_l2_compaction failed: %s', pfx, _roi_e)
 
     if _archive_id is not None:
         try:
@@ -649,6 +721,59 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
     # head-truncate safety net and looping the same oversized prompt back
     # to the API. Report failure so the caller can fall through.
     if not _meta.get('compacted'):
+        # ★ Deterministic proactive safety net (fix for the OOM fatal loop).
+        #   The summary LLM is the ONLY mechanism the proactive path had; on
+        #   a vanilla/exported deploy the cheap-model dispatch can fail
+        #   outright (no model tagged 'cheap', saturated single model,
+        #   summary input itself too big). Historically force-compact then
+        #   returned False and did nothing, so the context stayed pinned near
+        #   the window every round — and the reactive head-truncate net never
+        #   fired because the max_tokens clamp keeps the request just under
+        #   the hard ceiling (no API rejection). Nothing bounded the context
+        #   → unbounded re-send → OOM (SIGKILL).
+        #
+        #   So when the proactive pipeline opts in (_allow_head_truncate_fallback)
+        #   AND we are genuinely over the usable window, fall through to the
+        #   same last-resort _head_truncate the reactive path already trusts,
+        #   right here. This is bounded, logged (audit_log
+        #   'proactive_head_truncate') context loss — strictly better than a
+        #   process death. The empty-summary→False contract is preserved for
+        #   the NON-critical case (still headroom before the window): we only
+        #   head-truncate when estimated input >= usable window.
+        _allow_ht = bool(kwargs.get('_allow_head_truncate_fallback')
+                         if isinstance(kwargs, dict) else False)
+        if _allow_ht:
+            try:
+                from lib.tasks_pkg.compaction._tokens import (
+                    _count_tokens_authoritative)
+                _est_tokens, _tok_method = _count_tokens_authoritative(
+                    messages, task)
+            except Exception as _ce:
+                logger.debug('%s [ForceCompact] authoritative count failed, '
+                             'using heuristic: %s', pfx, _ce)
+                _est_tokens = _estimate_total_tokens(messages)
+                _tok_method = 'heuristic'
+            _usable = _usable_context(_get_context_limit(task))
+            if _est_tokens >= _usable:
+                logger.warning(
+                    '%s [ForceCompact] Summary failed AND context critically '
+                    'over budget (est=%d via %s >= usable=%d) — falling back '
+                    'to deterministic head-truncate so the context is bounded '
+                    'without depending on the summary LLM',
+                    pfx, _est_tokens, _tok_method, _usable)
+                from lib.tasks_pkg.compaction._reactive import _head_truncate
+                _dropped = _head_truncate(
+                    messages, task,
+                    reported_token_count=_est_tokens,
+                    event_name='proactive_head_truncate')
+                if _dropped:
+                    # Context was bounded — surface as a real compaction so
+                    # the pipeline notifies the cache tracker (prefix changed)
+                    # and the round proceeds with a smaller prompt.
+                    return True
+                logger.warning(
+                    '%s [ForceCompact] Head-truncate dropped 0 messages '
+                    '(too few to shed) — reporting failure', pfx)
         logger.warning('%s [ForceCompact] Compaction did not mutate messages '
                        '(summary empty or refused) — reporting failure so the '
                        'caller can fall back', pfx)

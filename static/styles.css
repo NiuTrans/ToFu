@@ -141,6 +141,8 @@
 .conv-status-translating{color:#14b8a6;background:rgba(20,184,166,0.12)}
 .conv-status-memprefetch{color:#eab308;background:rgba(234,179,8,0.12)}
 .conv-status-streaming{color:var(--accent);background:var(--accent-subtle)}
+.conv-status-error{color:#ef4444;background:rgba(239,68,68,0.12)}
+.conv-status-incomplete{color:#f59e0b;background:rgba(245,158,11,0.12)}
 @keyframes statusTagFadeIn{from{opacity:0;transform:translateX(-4px)}to{opacity:1;transform:translateX(0)}}
 /* ── Overlay action buttons (gradient fade) ── */
 .conv-actions{position:absolute;right:0;top:0;bottom:0;display:flex;align-items:center;gap:1px;padding:0 6px 0 24px;opacity:0;pointer-events:none;transition:opacity 0.15s ease;background:linear-gradient(90deg,transparent 0%,var(--bg-secondary) 40%)}
@@ -165,6 +167,11 @@
 /* ── Awaiting-human dot — amber blinking, more prominent than streaming ── */
 .conv-awaiting-human-dot{width:9px;height:9px;border-radius:50%;background:#f59e0b;flex-shrink:0;animation:hgDotBlink 1s ease-in-out infinite;box-shadow:0 0 6px rgba(245,158,11,0.5)}
 @keyframes hgDotBlink{0%,100%{opacity:1;box-shadow:0 0 6px rgba(245,158,11,0.5)}50%{opacity:0.3;box-shadow:0 0 2px rgba(245,158,11,0.2)}}
+/* ── Error dot — settled failure state, static red with a soft glow (no pulse: the turn is over) ── */
+.conv-error-dot{width:8px;height:8px;border-radius:50%;background:#ef4444;flex-shrink:0;box-shadow:0 0 5px rgba(239,68,68,0.5);animation:errDotFadeIn .3s ease}
+@keyframes errDotFadeIn{from{opacity:0;transform:scale(0.6)}to{opacity:1;transform:scale(1)}}
+/* ── Incomplete dot — settled interrupted/unfinished turn, static amber with a soft glow (no pulse: the turn is over, just needs attention) ── */
+.conv-incomplete-dot{width:8px;height:8px;border-radius:50%;background:#f59e0b;flex-shrink:0;box-shadow:0 0 5px rgba(245,158,11,0.5);animation:errDotFadeIn .3s ease}
 .main{flex:1;display:flex;flex-direction:column;min-width:0;overflow:hidden;max-width:100%}.topbar{height:52px;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 16px;gap:12px;background:var(--bg-secondary);flex-shrink:0}.toggle-sidebar-btn{background:none;border:none;color:var(--text-secondary);cursor:pointer;padding:6px;border-radius:var(--radius-xs);transition:color var(--transition),background-color var(--transition);display:flex;align-items:center}.toggle-sidebar-btn:hover{color:var(--text-primary);background:var(--bg-hover)}.topbar-title{flex:1;font-size:14px;font-weight:500;color:var(--text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.model-badge{font-size:11px;font-weight:600;font-family:'JetBrains Mono',monospace;padding:4px 10px;background:var(--accent-subtle);color:var(--accent);border-radius:20px;white-space:nowrap}
 
 .topbar-folder-badge{font-size:11px;font-weight:500;margin-left:6px;opacity:0.7}.welcome-folder-badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--text-secondary);margin-bottom:8px;padding:4px 12px;border-radius:16px;background:var(--bg-tertiary);border:1px solid var(--border)}.welcome-folder-dot{font-size:10px}
@@ -178,9 +185,9 @@
 .presence-strip[hidden]{display:none}
 .collab-bar-inner{display:flex;align-items:center;gap:8px;width:100%;height:28px;padding:0 16px;background:var(--bg-secondary);border:none;border-bottom:1px solid var(--border);color:var(--text-secondary);font-size:12px;font-family:inherit;cursor:pointer;text-align:left;overflow:hidden;white-space:nowrap;transition:background var(--transition)}
 .collab-bar-inner:hover{background:var(--bg-hover)}
-.collab-brain{display:inline-flex;color:var(--accent);flex:0 0 auto}
+.collab-brain{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:6px;background:var(--accent-subtle);color:var(--accent);flex:0 0 auto}
 .collab-brain-ico{display:block}
-.collab-label{font-weight:600;color:var(--text-secondary);flex:0 0 auto}
+.collab-label{font-weight:600;color:var(--text-secondary);flex:0 0 auto;letter-spacing:.02em}
 .collab-sep{color:var(--text-tertiary);opacity:.5;flex:0 0 auto}
 .collab-seg{flex:0 0 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .collab-seg-decisions{color:#e0a13a;font-weight:600}
@@ -324,7 +331,7 @@
 
 /* ── Engine Breakdown section (inside search results panel) ── */
 .eb-section{border-top:1px solid rgba(59,130,246,0.15);margin-top:4px;padding:0}.eb-toggle{display:flex;align-items:center;gap:6px;padding:8px 14px;font-size:11px;color:var(--text-tertiary);cursor:pointer;user-select:none;transition:background var(--transition)}.eb-toggle:hover{background:rgba(59,130,246,0.04)}.eb-total{font-size:10px;color:var(--text-muted);font-family:'JetBrains Mono',monospace}.eb-arrow{font-size:10px;margin-left:auto;transition:transform .2s ease}.eb-section.eb-expanded .eb-arrow{transform:rotate(90deg)}.eb-content{max-height:0;overflow:hidden;transition:max-height .3s ease}.eb-section.eb-expanded .eb-content{max-height:2000px}.eb-engine{padding:4px 14px 6px}.eb-engine-name{font-size:11px;font-weight:600;color:#60a5fa;margin-bottom:2px}.eb-engine-count{font-weight:400;color:var(--text-tertiary);font-size:10px}.eb-engine-urls{padding-left:8px;border-left:2px solid rgba(59,130,246,0.15)}.eb-url-item{padding:2px 0 2px 8px;font-size:11px;line-height:1.4}.eb-url-item a{color:var(--text-secondary);text-decoration:none}.eb-url-item a:hover{text-decoration:underline;color:#93c5fd}.eb-url-text{font-size:9px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
-.error-block{padding:12px 16px;border:1px solid var(--error-border);border-radius:var(--radius-sm);background:var(--error-bg);font-size:13px;color:var(--error-text);overflow:hidden;word-break:break-word;white-space:pre-wrap;line-height:1.55}.stream-status{font-size:11px;color:var(--text-tertiary);padding:4px 0;display:flex;align-items:center;gap:6px;font-family:'JetBrains Mono',monospace}.stream-status .pulse{width:6px;height:6px;background:var(--thinking-text);border-radius:50%;animation:pulse 1.5s infinite}.stream-phase{display:flex;align-items:center;gap:8px;padding:8px 14px;margin-top:8px;border-radius:var(--radius-sm);background:linear-gradient(135deg,rgba(110,86,207,0.08),rgba(59,130,246,0.08));border:1px solid rgba(110,86,207,0.15);font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--accent);transition:opacity .3s ease}.stream-phase-icon{font-size:14px;flex-shrink:0}.stream-phase-text{flex:1;opacity:0.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.stream-phase-ctx{display:inline;margin-left:6px;opacity:0.6;font-size:11px}.stream-phase-dots{display:inline-flex;gap:1px;margin-left:2px}.stream-phase-dots span{animation:phaseDot 1.4s infinite;opacity:0;font-weight:bold}.stream-phase-dots span:nth-child(2){animation-delay:0.2s}.stream-phase-dots span:nth-child(3){animation-delay:0.4s}@keyframes phaseDot{0%,80%,100%{opacity:0}40%{opacity:1}}@keyframes phaseIconPulse{0%,100%{opacity:0.6;transform:scale(1)}50%{opacity:1;transform:scale(1.1)}}.stream-phase-retrying{background:linear-gradient(135deg,rgba(245,158,11,0.10),rgba(234,179,8,0.06));border-color:rgba(245,158,11,0.20);color:#f59e0b}.stream-phase-retrying .stream-phase-icon{animation:phaseIconPulse 1.5s ease-in-out infinite;font-size:16px}.stream-phase-thinking{background:linear-gradient(135deg,rgba(168,85,247,0.10),rgba(139,92,246,0.06));border-color:rgba(168,85,247,0.20)}.stream-phase-thinking .stream-phase-icon{animation:phaseIconPulse 2s ease-in-out infinite}.stream-phase-counter{display:inline-block;margin-left:8px;padding:1px 7px;border-radius:8px;background:rgba(168,85,247,0.15);font-size:10px;font-weight:600;color:rgba(196,167,255,0.85);letter-spacing:0.3px;min-width:48px;text-align:center;transition:background .2s ease}@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}@keyframes searchOrbit{0%{transform:rotate(0deg) translateX(10px) rotate(0deg)}100%{transform:rotate(360deg) translateX(10px) rotate(-360deg)}}.search-orbit-container{width:22px;height:22px;position:relative;display:inline-block;flex-shrink:0}.search-orbit-center{position:absolute;inset:6px;border-radius:50%;background:var(--search-blue);opacity:.6;animation:pulse 1.2s infinite}.search-orbit-dot{position:absolute;width:4px;height:4px;border-radius:50%;top:50%;left:50%;margin:-2px;animation:searchOrbit 1.2s linear infinite}.search-orbit-dot:nth-child(2){background:#60a5fa}.search-orbit-dot:nth-child(3){background:#a78bfa;animation-delay:-.4s}.search-orbit-dot:nth-child(4){background:#34d399;animation-delay:-.8s}
+.error-block{padding:12px 16px;border:1px solid var(--error-border);border-radius:var(--radius-sm);background:var(--error-bg);font-size:13px;color:var(--error-text);overflow:hidden;word-break:break-word;white-space:pre-wrap;line-height:1.55}.stream-status{font-size:11px;color:var(--text-tertiary);padding:4px 0;display:flex;align-items:center;gap:6px;font-family:'JetBrains Mono',monospace}.stream-status .pulse{width:6px;height:6px;background:var(--thinking-text);border-radius:50%;animation:pulse 1.5s infinite}.stream-phase{display:flex;align-items:flex-start;gap:8px;padding:8px 14px;margin-top:8px;border-radius:var(--radius-sm);background:linear-gradient(135deg,rgba(110,86,207,0.08),rgba(59,130,246,0.08));border:1px solid rgba(110,86,207,0.15);font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--accent);transition:opacity .3s ease}.stream-phase-icon{font-size:14px;flex-shrink:0}.stream-phase-text{flex:1;min-width:0;opacity:0.85;white-space:normal;overflow-wrap:anywhere;word-break:break-word}.stream-phase-ctx{display:inline;margin-left:6px;opacity:0.6;font-size:11px}.stream-phase-dots{display:inline-flex;gap:1px;margin-left:2px}.stream-phase-dots span{animation:phaseDot 1.4s infinite;opacity:0;font-weight:bold}.stream-phase-dots span:nth-child(2){animation-delay:0.2s}.stream-phase-dots span:nth-child(3){animation-delay:0.4s}@keyframes phaseDot{0%,80%,100%{opacity:0}40%{opacity:1}}@keyframes phaseIconPulse{0%,100%{opacity:0.6;transform:scale(1)}50%{opacity:1;transform:scale(1.1)}}.stream-phase-retrying{background:linear-gradient(135deg,rgba(245,158,11,0.10),rgba(234,179,8,0.06));border-color:rgba(245,158,11,0.20);color:#f59e0b}.stream-phase-retrying .stream-phase-icon{animation:phaseIconPulse 1.5s ease-in-out infinite;font-size:16px}.stream-phase-thinking{background:linear-gradient(135deg,rgba(168,85,247,0.10),rgba(139,92,246,0.06));border-color:rgba(168,85,247,0.20)}.stream-phase-thinking .stream-phase-icon{animation:phaseIconPulse 2s ease-in-out infinite}.stream-phase-counter{display:inline-block;margin-left:8px;padding:1px 7px;border-radius:8px;background:rgba(168,85,247,0.15);font-size:10px;font-weight:600;color:rgba(196,167,255,0.85);letter-spacing:0.3px;min-width:48px;text-align:center;transition:background .2s ease}@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}@keyframes searchOrbit{0%{transform:rotate(0deg) translateX(10px) rotate(0deg)}100%{transform:rotate(360deg) translateX(10px) rotate(-360deg)}}.search-orbit-container{width:22px;height:22px;position:relative;display:inline-block;flex-shrink:0}.search-orbit-center{position:absolute;inset:6px;border-radius:50%;background:var(--search-blue);opacity:.6;animation:pulse 1.2s infinite}.search-orbit-dot{position:absolute;width:4px;height:4px;border-radius:50%;top:50%;left:50%;margin:-2px;animation:searchOrbit 1.2s linear infinite}.search-orbit-dot:nth-child(2){background:#60a5fa}.search-orbit-dot:nth-child(3){background:#a78bfa;animation-delay:-.4s}.search-orbit-dot:nth-child(4){background:#34d399;animation-delay:-.8s}
 .debug-panel{position:fixed;bottom:80px;right:16px;width:700px;max-width:calc(100vw - 32px);max-height:70vh;overflow-y:auto;background:rgba(0,0,0,0.94);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#aaa;z-index:50;display:none}.debug-panel.visible{display:block}.debug-panel .debug-line{margin-bottom:4px;word-break:break-all}.debug-panel .debug-line.error{color:var(--error-text)}.debug-panel .debug-line.success{color:#34d399}.debug-panel .debug-line.warn{color:var(--thinking-text)}.debug-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)}.debug-header span{color:var(--text-primary);font-weight:600}.debug-clear{background:none;border:none;color:var(--text-tertiary);cursor:pointer;font-size:10px;font-family:inherit}
 .debug-msg-block{margin:0 0 6px 0;border:1px solid rgba(255,255,255,0.1);border-radius:4px;overflow:hidden}
 .debug-msg-header{display:flex;align-items:center;gap:6px;padding:4px 8px;font-size:11px;font-weight:600;cursor:pointer;user-select:none}
@@ -1010,6 +1017,10 @@ textarea::placeholder{color:var(--text-tertiary)}
 .paper-report-content p > img + em,.paper-report-body p > img + em{display:block;text-align:center;font-size:12px;color:var(--text-tertiary);margin-top:4px}
 .paper-report-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;color:var(--text-tertiary);font-size:13px;gap:6px;text-align:center;padding:40px 28px;line-height:1.6}
 .paper-report-empty b{color:var(--text-secondary)}
+.paper-report-generate-btn{display:inline-flex;align-items:center;gap:8px;margin-top:16px;padding:10px 22px;border:none;border-radius:10px;background:var(--accent);color:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;box-shadow:0 2px 10px rgba(110,86,207,.28);transition:transform .12s ease,box-shadow .12s ease,filter .12s ease}
+.paper-report-generate-btn:hover{filter:brightness(1.06);box-shadow:0 4px 16px rgba(110,86,207,.4);transform:translateY(-1px)}
+.paper-report-generate-btn:active{transform:translateY(0)}
+.paper-report-generate-btn svg{flex-shrink:0}
 
 /* ── Report section progress chips ── */
 .paper-report-progress{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;gap:16px;padding:20px}
@@ -2473,6 +2484,27 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-send-btn:activ
   color:#e8a55d;font-size:10px;line-height:1.45
 }
 .cost-popover .cp-round-break .cp-ico{margin-top:1px}
+/* Fault-state colouring (wire-fingerprint verdict, 2026-07): proven-server =
+   teal (not our fault), unproven = amber (unknown), culprit = red (our fault,
+   actionable). Overrides the default amber .cp-round-break colour. */
+.cost-popover .cp-round-break.cp-break-proven{color:#34d399}
+.cost-popover .cp-round-break.cp-break-unproven{color:#e8a55d}
+.cost-popover .cp-round-break.cp-break-culprit{color:#f87171}
+.cost-popover .cp-break-badge{
+  flex:none;font-size:9px;font-weight:600;padding:0 5px;border-radius:8px;
+  line-height:1.5;border:1px solid currentColor;opacity:.95
+}
+.cost-popover .cp-break-badge-proven{color:#34d399}
+.cost-popover .cp-break-badge-unproven{color:#e8a55d}
+.cost-popover .cp-break-badge-culprit{color:#f87171}
+/* The named culprit — WHICH message broke cache. Monospace so the msg.field
+   keys read clearly; red to match the 'our fault' state. */
+.cost-popover .cp-break-culprit{
+  margin-top:2px;margin-left:15px;color:#f87171;opacity:.92;
+  font-size:10px;line-height:1.45;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  word-break:break-all
+}
 /* What the model did this round (its tool calls). */
 .cost-popover .cp-round-act{
   margin-top:3px;color:var(--text-secondary);opacity:.85;
@@ -6450,6 +6482,33 @@ input.settings-mono {
 .proactive-banner .pb-icon{font-size:16px;flex-shrink:0}
 .proactive-banner .pb-text{color:var(--text-secondary);font-size:11px}
 .proactive-banner .pb-name{color:#a855f7;font-weight:700}
+/* ── Network-latency signal indicator ──
+   Lives INSIDE .topbar-tools, so it mirrors the .topbar-tool-btn shell
+   (height/radius/border/typography) for a consistent control group; only the
+   signal-bars + ms readout carry the semantic state colour. */
+.net-latency-badge{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;border:1px solid transparent;border-radius:8px;background:none;color:var(--text-secondary);font-family:'Plus Jakarta Sans',sans-serif;font-size:12.5px;font-weight:600;line-height:1;white-space:nowrap;flex-shrink:0;user-select:none;cursor:default;transition:color .15s ease,background-color .15s ease,border-color .15s ease}
+.net-latency-badge:hover{color:var(--text-primary);background:var(--bg-hover);border-color:var(--border-light)}
+.net-latency-badge .net-bars{display:inline-flex;align-items:flex-end;gap:2px;height:14px}
+.net-latency-badge .net-bar{width:3px;border-radius:1px;background:currentColor;opacity:0.25;transition:background .2s ease,opacity .2s ease}
+.net-latency-badge .net-bar:nth-child(1){height:5px}
+.net-latency-badge .net-bar:nth-child(2){height:8px}
+.net-latency-badge .net-bar:nth-child(3){height:11px}
+.net-latency-badge .net-bar:nth-child(4){height:14px}
+.net-latency-badge .net-bar.lit{opacity:1}
+.net-latency-badge .net-ms{min-width:36px;text-align:right;font-variant-numeric:tabular-nums;font-size:11px;letter-spacing:-0.2px;color:var(--text-tertiary)}
+/* State-driven colour of the lit bars + label (the semantic signal). */
+.net-latency-badge[data-state="good"] .net-bar.lit{background:#34d399}
+.net-latency-badge[data-state="good"] .net-ms{color:#34d399}
+.net-latency-badge[data-state="ok"] .net-bar.lit{background:#eab308}
+.net-latency-badge[data-state="ok"] .net-ms{color:#eab308}
+.net-latency-badge[data-state="poor"] .net-bar.lit{background:#f97316}
+.net-latency-badge[data-state="poor"] .net-ms{color:#f97316}
+.net-latency-badge[data-state="timeout"] .net-bar.lit{background:#ef4444}
+.net-latency-badge[data-state="timeout"] .net-ms{color:#ef4444}
+.net-latency-badge[data-state="offline"]{opacity:0.65}
+.net-latency-badge[data-state="offline"] .net-ms{color:var(--text-tertiary)}
+/* Narrow viewports: match the tool buttons' tighter padding. */
+@media (max-width:1080px){.net-latency-badge{padding:0 7px}}
 /* ── Timer Watcher badge & panel ── */
 .timer-trigger{position:relative;user-select:none;-webkit-user-select:none}
 .timer-panel{user-select:text;-webkit-user-select:text}
@@ -7849,6 +7908,103 @@ input.settings-mono {
   color: var(--text-tertiary);
   font-style: italic;
 }
+
+/* ── Project-brain / conversation-meta block (board / charter / conv digest /
+   peer) — collapsible card rendering the tool's full prose output. Mirrors
+   the memory block's collapse affordance with its own accent + a source chip. */
+.ptool-convmeta-block {
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ptool-convmeta-block > summary {
+  list-style: none;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 0.12s ease;
+  gap: 7px;
+}
+.ptool-convmeta-block > summary::-webkit-details-marker { display: none; }
+.ptool-convmeta-block > summary::marker { display: none; content: ""; }
+.ptool-convmeta-block > summary:hover {
+  background: var(--accent-subtle);
+}
+.ptool-convmeta-block > summary .ptool-text::after {
+  content: " ▸";
+  font-size: 10px;
+  opacity: 0.5;
+}
+.ptool-convmeta-block[open] > summary .ptool-text::after {
+  content: " ▾";
+}
+.ptool-convmeta-src {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 8px;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  line-height: 1;
+  border-radius: 999px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  white-space: nowrap;
+}
+.ptool-convmeta-body {
+  margin: 4px 0 6px 11px;
+  padding: 12px 14px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  background: var(--accent-subtle);
+  border-radius: 0 8px 8px 0;
+}
+.ptool-convmeta-content {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.ptool-convmeta-content > :first-child { margin-top: 0; }
+.ptool-convmeta-content > :last-child { margin-bottom: 0; }
+.ptool-convmeta-empty {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+/* ── Structured Project-Brain tool renderers (Phase 3) ── */
+.ptool-convmeta-structured { font-size: 12.5px; }
+/* Board mini-kanban */
+.ptool-board-mini { display: flex; flex-direction: column; gap: 10px; }
+.ptool-board-mini-lane { display: flex; flex-direction: column; gap: 5px; }
+.ptool-board-mini-head { display: flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-tertiary); }
+.ptool-board-mini-count { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; padding: 0 5px; font-size: 10px; font-weight: 700; color: var(--text-secondary); background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 8px; }
+.ptool-board-mini-card { display: flex; align-items: center; gap: 6px; padding: 5px 9px; background: var(--bg-secondary); border: 1px solid var(--border); border-left: 2px solid var(--border); border-radius: 5px; }
+.ptool-board-mini-open { border-left-color: var(--pb-amber, #eab308); }
+.ptool-board-mini-claimed { border-left-color: var(--accent); }
+.ptool-board-mini-done { border-left-color: var(--pb-green, #22c55e); opacity: 0.75; }
+.ptool-board-mini-title { flex: 1; overflow-wrap: anywhere; }
+.ptool-board-mini-owner { font-size: 10px; color: var(--accent); font-family: var(--mono, monospace); }
+.ptool-board-mini-auto { display: inline-flex; color: var(--accent); }
+.ptool-board-mini-empty { font-size: 11px; color: var(--text-tertiary); padding: 2px 4px; }
+/* Board transition line */
+.ptool-board-transition { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 12.5px; }
+.ptool-board-tr-verb { font-weight: 700; color: var(--accent); }
+.ptool-board-tr-title { overflow-wrap: anywhere; color: var(--text-primary); }
+.ptool-board-tr-arrow { display: inline-flex; color: var(--text-tertiary); transform: rotate(-90deg); }
+.ptool-board-tr-status { font-size: 10.5px; font-weight: 700; padding: 1px 8px; border-radius: 8px; border: 1px solid var(--border); }
+/* Peer status cards */
+.ptool-peer-list { display: flex; flex-direction: column; gap: 7px; }
+.ptool-peer-card { padding: 7px 10px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; }
+.ptool-peer-who { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--text-primary); }
+.ptool-peer-agent { font-size: 10.5px; font-weight: 400; color: var(--text-tertiary); }
+.ptool-peer-detail { margin-top: 3px; font-size: 11.5px; color: var(--text-secondary); }
+.ptool-peer-epic { margin-top: 4px; display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--accent); }
+.ptool-peer-empty { font-size: 12px; color: var(--text-tertiary); font-style: italic; }
+/* Charter proposal card */
+.ptool-charter-proposal { padding: 9px 11px; background: var(--accent-subtle); border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent); border-radius: 6px; }
+.ptool-charter-prop-title { font-weight: 700; color: var(--text-primary); margin-bottom: 4px; }
+.ptool-charter-prop-text { font-size: 12.5px; line-height: 1.55; color: var(--text-primary); overflow-wrap: anywhere; }
+.ptool-charter-prop-pending { margin-top: 7px; display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-secondary); }
 .ptool-batch-done-summary {
   display: flex;
   /* Top-align so a multi-line description keeps the status glyph / index
@@ -10389,6 +10545,30 @@ input.settings-mono {
 }
 [data-theme="tofu"] .topbar-tool-btn svg,
 [data-theme="tofu"] .update-btn svg{stroke-width:2.2}
+/* Latency badge — mirror the kinako tool-button shell in the tofu theme. */
+[data-theme="tofu"] .net-latency-badge{
+  height:28px;
+  border-radius:4px;
+  border:1.5px solid rgba(194,188,164,0.5);
+  border-top-color:rgba(255,252,246,0.6);
+  border-left-color:rgba(255,252,246,0.6);
+  border-right-color:rgba(168,152,120,0.4);
+  border-bottom-color:rgba(168,152,120,0.4);
+  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
+  box-shadow:0 1px 0 rgba(154,144,122,0.25);
+  color:#7C6A4E;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  font-weight:600;
+  letter-spacing:0.02em
+}
+[data-theme="tofu"] .net-latency-badge:hover{
+  color:#5C4A33;
+  background:linear-gradient(180deg, rgba(250,247,240,0.85) 0%, rgba(240,237,228,0.85) 100%);
+  border-right-color:rgba(168,152,120,0.55);
+  border-bottom-color:rgba(168,152,120,0.55)
+}
+[data-theme="tofu"] .net-latency-badge .net-ms{color:#9A8A6E}
 
 /* ══════════════════════════════════════════════════════
    🕹️ Send btn — pixel art primary action button
@@ -10547,6 +10727,16 @@ input.settings-mono {
   box-shadow:0 0 6px rgba(245,158,11,0.4);
   animation:tofuBreathingAmber 1.5s cubic-bezier(0.45,0.05,0.55,0.95) infinite;
   will-change:transform,opacity
+}
+[data-theme="tofu"] .conv-error-dot{
+  border-radius:50%;
+  width:8px;height:8px;
+  box-shadow:0 0 6px rgba(239,68,68,0.45)
+}
+[data-theme="tofu"] .conv-incomplete-dot{
+  border-radius:50%;
+  width:8px;height:8px;
+  box-shadow:0 0 6px rgba(245,158,11,0.45)
 }
 
 /* ── Welcome screen — pixel tofu block ── */
@@ -14641,6 +14831,24 @@ input.settings-mono {
 .conv-ref-badge:hover{border-color:#c792ea !important}
 .conv-ref-badge .reply-quote-badge-icon{filter:none}
 
+
+/* ── Peer-message provenance banner (chat_render.js) ── */
+/* An advisory turn injected by a sibling conversation of the same project. */
+.peer-msg-banner{
+  display:inline-flex;align-items:center;gap:6px;
+  margin:0 0 8px 0;padding:4px 10px;
+  border:1px solid rgba(130,170,255,.35);
+  background:rgba(130,170,255,.08);
+  border-radius:8px;font-size:12px;line-height:1.3;
+  color:var(--text-secondary, #9aa4b2);
+}
+.peer-msg-banner .peer-msg-icon{display:inline-flex;color:#82aaff}
+.peer-msg-banner .peer-msg-from{color:#82aaff;font-weight:600}
+/* Operator nudge (from the Team panel) — distinct from an agent peer note. */
+.peer-msg-banner.peer-msg-banner-operator{border-color:rgba(126,231,135,.4);background:rgba(126,231,135,.09)}
+.peer-msg-banner.peer-msg-banner-operator .peer-msg-icon,
+.peer-msg-banner.peer-msg-banner-operator .peer-msg-from{color:#7ee787}
+
 /* ── Conversation Reference Picker Popover ── */
 .conv-ref-picker{
   position:fixed;z-index:10000;
@@ -14762,8 +14970,6 @@ input.settings-mono {
 /* ══════════════════════════════════════════
    Trading Advisor 投资持仓顾问
    ══════════════════════════════════════════ */
-
-/* Trading Advisor styles moved to static/trading.css (standalone page) */
 
 /* ══════════════════════════════════════════
    ★ Endpoint Mode (Autonomous AI + Self-Review)
@@ -15001,6 +15207,20 @@ input.settings-mono {
   background:rgba(129,140,248,0.15);
 }
 .autopilot-run-fold-summary .apf-summarize-btn:disabled{opacity:.5;cursor:default;}
+/* "View report" button — opens the close-out debrief in a sub-window. Shares
+ * the summarize button's visual language plus a leading document glyph. */
+.autopilot-run-fold-summary .apf-report-btn{
+  display:inline-flex;align-items:center;gap:5px;
+  font-size:11px;
+  border:1px solid rgba(129,140,248,0.45);
+  background:rgba(129,140,248,0.08);
+  color:#c7d2fe;
+  border-radius:6px;
+  padding:2px 9px;
+  cursor:pointer;
+}
+.autopilot-run-fold-summary .apf-report-btn:hover{background:rgba(129,140,248,0.2);}
+.autopilot-run-fold-summary .apf-report-btn svg{flex-shrink:0;opacity:.9;}
 .autopilot-run-fold-summary .apf-toggle{font-size:9px;opacity:.85;transition:transform .15s ease;}
 .autopilot-run-fold[open] .autopilot-run-fold-summary .apf-toggle{transform:rotate(180deg);}
 
@@ -15022,6 +15242,12 @@ input.settings-mono {
 [data-theme="light"] .autopilot-run-fold-summary .apf-summarize-btn:hover{
   background:rgba(99,102,241,0.1);
 }
+[data-theme="light"] .autopilot-run-fold-summary .apf-report-btn{
+  color:#3730a3;
+  border-color:rgba(99,102,241,0.5);
+  background:rgba(99,102,241,0.06);
+}
+[data-theme="light"] .autopilot-run-fold-summary .apf-report-btn:hover{background:rgba(99,102,241,0.12);}
 /* Tofu theme: indigo clashes with the warm cream palette and is unreadable on
  * --bg-primary (#F5F3ED) — use the kinako ink/accent (#BB9572) family. */
 [data-theme="tofu"] .autopilot-run-fold{
@@ -15040,6 +15266,12 @@ input.settings-mono {
 [data-theme="tofu"] .autopilot-run-fold-summary .apf-summarize-btn:hover{
   background:rgba(187,149,114,0.14);
 }
+[data-theme="tofu"] .autopilot-run-fold-summary .apf-report-btn{
+  color:#5C4A33;
+  border-color:rgba(187,149,114,0.5);
+  background:rgba(187,149,114,0.1);
+}
+[data-theme="tofu"] .autopilot-run-fold-summary .apf-report-btn:hover{background:rgba(187,149,114,0.18);}
 /* Inner turns get a subtle inset so the fold boundary reads clearly. */
 .autopilot-run-fold > .message{margin-left:6px;margin-right:6px;}
 .autopilot-run-fold[open]{padding-bottom:4px;}
@@ -15090,6 +15322,64 @@ input.settings-mono {
   background:rgba(187,149,114,0.08);
 }
 [data-theme="tofu"] .autopilot-summary-panel .aps-header{color:#5C4A33;border-bottom-color:rgba(187,149,114,0.2);}
+
+/* ── Autopilot run-report SUB-WINDOW (modal overlay) ─────────────────
+ * The close-out debrief opened on demand from the run fold's "View report"
+ * button. A read-only, human-only surface (never sent to the agent). */
+.ap-report-overlay{
+  position:fixed;inset:0;z-index:2400;
+  display:flex;align-items:center;justify-content:center;
+  padding:24px;
+  background:rgba(10,10,16,0.55);
+  backdrop-filter:blur(3px);
+  animation:apReportFadeIn .16s ease;
+}
+@keyframes apReportFadeIn{from{opacity:0}to{opacity:1}}
+.ap-report-modal{
+  display:flex;flex-direction:column;
+  width:min(760px,100%);max-height:min(82vh,900px);
+  border:1px solid rgba(129,140,248,0.45);
+  border-radius:12px;
+  background:var(--bg-secondary,#1a1a22);
+  box-shadow:0 18px 60px rgba(0,0,0,0.5);
+  overflow:hidden;
+  animation:apReportRise .18s cubic-bezier(.2,.7,.3,1);
+}
+@keyframes apReportRise{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
+.ap-report-head{
+  display:flex;align-items:center;gap:8px;
+  padding:12px 14px;
+  font-size:13px;font-weight:600;letter-spacing:.02em;
+  color:#a5b4fc;
+  border-bottom:1px solid rgba(129,140,248,0.22);
+  background:rgba(129,140,248,0.07);
+  flex-shrink:0;
+}
+.ap-report-head .aps-icon{flex-shrink:0;opacity:.9;}
+.ap-report-title{flex-shrink:0;}
+.ap-report-private{
+  font-size:10px;font-weight:500;opacity:.72;font-style:italic;
+}
+.ap-report-close{
+  margin-left:auto;flex-shrink:0;
+  display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;padding:0;
+  border:none;border-radius:6px;
+  background:transparent;color:inherit;opacity:.8;cursor:pointer;
+  transition:background .12s ease,opacity .12s ease;
+}
+.ap-report-close:hover{background:rgba(129,140,248,0.2);opacity:1;}
+.ap-report-body{
+  padding:16px 18px 20px 18px;
+  font-size:13.5px;line-height:1.68;
+  overflow-y:auto;
+}
+[data-theme="light"] .ap-report-modal{border-color:rgba(99,102,241,0.4);background:var(--bg-secondary,#fff);}
+[data-theme="light"] .ap-report-head{color:#3730a3;border-bottom-color:rgba(99,102,241,0.18);background:rgba(99,102,241,0.06);}
+[data-theme="light"] .ap-report-close:hover{background:rgba(99,102,241,0.14);}
+[data-theme="tofu"] .ap-report-modal{border-color:rgba(187,149,114,0.55);}
+[data-theme="tofu"] .ap-report-head{color:#5C4A33;border-bottom-color:rgba(187,149,114,0.28);background:rgba(187,149,114,0.1);}
+[data-theme="tofu"] .ap-report-close:hover{background:rgba(187,149,114,0.2);}
 /* Live status chip while the autopilot virtual-user is thinking /
  * running tools.  Indigo accent matches the VU message styling. */
 .stream-phase.stream-phase-autopilot{
@@ -19603,67 +19893,251 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   box-shadow:0 1px 0 rgba(255,255,255,0.03),0 4px 16px -8px rgba(0,0,0,0.6);
 }
 
-/* ═══ Project Brain — cross-conversation Activity Feed (Pillar #1) ═══ */
-.project-brain-toggle{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;background:transparent;border:none;color:var(--text-secondary);cursor:pointer;border-radius:var(--radius-xs);transition:color var(--transition),background var(--transition)}
-.project-brain-toggle:hover{color:var(--accent);background:var(--bg-hover)}
-.project-brain-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.5);backdrop-filter:blur(2px);z-index:9998;display:flex;align-items:stretch;justify-content:flex-end;animation:fadeIn 0.15s ease}
+/* ═══════════════════════════════════════════════════════════════════
+   Project Brain — full visual redesign (2026-07).
+   Design language: layered elevation on the shared theme tokens, an
+   accent hairline that ties the three columns to the panel head, generous
+   card padding, soft one-shot entrance motion (NO pulsing), and full text
+   WRAP everywhere (epics carry multi-sentence descriptions — never clip).
+   Every class name below is load-bearing for project-brain.js — do not
+   rename without updating the JS.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Local design tokens (scoped) so the whole surface stays internally
+   consistent and easy to retune. */
+.project-brain-overlay{
+  --pb-radius:12px; --pb-radius-sm:9px; --pb-radius-chip:999px;
+  --pb-card-bg:color-mix(in srgb,var(--bg-tertiary) 82%,var(--bg-secondary));
+  --pb-card-hover:color-mix(in srgb,var(--bg-hover) 70%,var(--bg-tertiary));
+  --pb-green:#22c55e; --pb-red:#ef4444; --pb-amber:#eab308;
+}
+
+/* Trigger button in the project bar. */
+.project-brain-toggle{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;background:transparent;border:none;color:var(--text-secondary);cursor:pointer;border-radius:var(--radius-xs);transition:color var(--transition),background var(--transition),transform 0.12s ease}
+.project-brain-toggle:hover{color:var(--accent);background:var(--accent-subtle)}
+.project-brain-toggle:active{transform:scale(0.92)}
+
+/* Overlay + sliding panel. */
+.project-brain-overlay{position:fixed;inset:0;background:rgba(6,6,10,0.58);backdrop-filter:blur(4px);z-index:9998;display:flex;align-items:stretch;justify-content:flex-end;animation:fadeIn 0.16s ease}
 .project-brain-overlay[hidden]{display:none}
-.project-brain-panel{background:var(--bg-secondary);border-left:1px solid var(--border-light);width:min(920px,92vw);height:100%;display:flex;flex-direction:column;box-shadow:-16px 0 48px rgba(0,0,0,0.45);animation:pbSlideIn 0.2s cubic-bezier(0.16,1,0.3,1)}
-@keyframes pbSlideIn{from{transform:translateX(24px);opacity:0}to{transform:translateX(0);opacity:1}}
-.project-brain-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border)}
-.project-brain-title{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:600;color:var(--text-primary)}
+.project-brain-panel{position:relative;background:var(--bg-secondary);border-left:1px solid var(--border-light);width:min(960px,94vw);height:100%;display:flex;flex-direction:column;box-shadow:-24px 0 64px rgba(0,0,0,0.5);animation:pbSlideIn 0.24s cubic-bezier(0.16,1,0.3,1)}
+/* Accent hairline running down the panel's leading edge — ties it to the brand. */
+.project-brain-panel::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%;background:linear-gradient(180deg,var(--accent),color-mix(in srgb,var(--accent) 30%,transparent));opacity:0.9}
+@keyframes pbSlideIn{from{transform:translateX(28px);opacity:0}to{transform:translateX(0);opacity:1}}
+
+/* Head. */
+.project-brain-head{display:flex;align-items:center;justify-content:space-between;padding:16px 22px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 7%,var(--bg-tertiary)),var(--bg-secondary))}
+.project-brain-title{display:flex;align-items:center;gap:10px;font-size:15.5px;font-weight:700;letter-spacing:0.01em;color:var(--text-primary)}
 .project-brain-title-ico{display:inline-flex;color:var(--accent)}
-.project-brain-close{background:transparent;border:none;color:var(--text-tertiary);font-size:16px;cursor:pointer;padding:4px 8px;border-radius:var(--radius-xs)}.project-brain-close:hover{color:var(--text-primary);background:var(--bg-hover)}
-.project-brain-columns{flex:1;display:grid;grid-template-columns:1fr 1fr 1.2fr;gap:1px;background:var(--border);overflow:hidden}
+.project-brain-title-ico svg{display:block}
+.project-brain-close{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;background:transparent;border:none;color:var(--text-tertiary);font-size:16px;line-height:1;cursor:pointer;border-radius:var(--radius-xs);transition:color var(--transition),background var(--transition),transform 0.12s ease}
+.project-brain-close:hover{color:var(--text-primary);background:var(--bg-hover)}
+.project-brain-close:active{transform:scale(0.9)}
+
+/* Four-column grid. Hairline gutters via the grid background. */
+.project-brain-columns{flex:1;display:grid;grid-template-columns:1fr 1fr 1.15fr 1fr;gap:1px;background:var(--border);overflow:hidden}
 .project-brain-col{background:var(--bg-secondary);display:flex;flex-direction:column;min-height:0}
-.project-brain-col-head{padding:12px 16px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-secondary);border-bottom:1px solid var(--border);background:var(--bg-tertiary)}
-.project-brain-col-body{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column}
+.project-brain-col-head{display:flex;align-items:center;gap:8px;padding:13px 16px;font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.07em;color:var(--text-secondary);border-bottom:1px solid var(--border);background:color-mix(in srgb,var(--bg-tertiary) 90%,var(--accent));position:sticky;top:0;z-index:1}
+.project-brain-col-head::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--accent);opacity:0.55;flex-shrink:0}
+.project-brain-col-charter .project-brain-col-head::before{background:var(--accent)}
+.project-brain-col-board .project-brain-col-head::before{background:var(--pb-green)}
+.project-brain-col-activity .project-brain-col-head::before{background:var(--pb-amber)}
+.project-brain-col-peers .project-brain-col-head::before{background:var(--accent)}
+.project-brain-col-body{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column}
+.project-brain-col-body::-webkit-scrollbar{width:8px}
+.project-brain-col-body::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.project-brain-col-body::-webkit-scrollbar-thumb:hover{background:var(--border-light)}
 .project-brain-placeholder{display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-tertiary);font-size:13px;text-align:center;padding:24px;font-style:italic}
-.pb-activity-list{display:flex;flex-direction:column;gap:8px;min-height:100%}
-.pb-activity-empty{flex:1;display:flex;align-items:center;justify-content:center;min-height:180px;color:var(--text-tertiary);font-size:13px;text-align:center;padding:24px}
-.pb-activity-row{display:flex;gap:10px;align-items:flex-start;padding:9px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-xs);animation:fadeIn 0.2s ease}
-.pb-activity-icon{display:inline-flex;flex-shrink:0;margin-top:1px;color:var(--text-secondary)}
-.pb-kind-completed .pb-activity-icon,.pb-kind-run_concluded .pb-activity-icon{color:#22c55e}
-.pb-kind-aborted .pb-activity-icon,.pb-kind-blocked .pb-activity-icon,.pb-kind-dismissed .pb-activity-icon{color:#ef4444}
-.pb-kind-started .pb-activity-icon,.pb-kind-claimed .pb-activity-icon{color:var(--accent)}
-.pb-activity-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
-.pb-activity-summary{font-size:13px;color:var(--text-primary);line-height:1.4;word-break:break-word}
+
+/* Empty states — a centered, quiet dashed frame instead of bare text. */
+.pb-activity-empty,.pb-charter-empty,.pb-board-empty,.pb-peers-empty{flex:1;display:flex;align-items:center;justify-content:center;min-height:200px;color:var(--text-tertiary);font-size:13px;text-align:center;padding:24px;margin:2px;border:1px dashed var(--border);border-radius:var(--pb-radius);background:color-mix(in srgb,var(--bg-tertiary) 30%,transparent)}
+.pb-board-lane-empty{color:var(--text-tertiary);font-size:12px;padding:8px 10px;text-align:center;border:1px dashed var(--border);border-radius:var(--pb-radius-sm);background:color-mix(in srgb,var(--bg-tertiary) 25%,transparent)}
+
+/* ── Activity column ── */
+.pb-activity-list{display:flex;flex-direction:column;gap:9px;min-height:100%}
+.pb-activity-row{display:flex;gap:11px;align-items:flex-start;padding:11px 12px;background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius);transition:border-color var(--transition),background var(--transition),transform 0.12s ease;animation:pbRowIn 0.24s cubic-bezier(0.16,1,0.3,1)}
+.pb-activity-row:hover{border-color:var(--border-light);background:var(--pb-card-hover);transform:translateY(-1px)}
+@keyframes pbRowIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.pb-activity-icon{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;flex-shrink:0;border-radius:8px;background:var(--bg-secondary);border:1px solid var(--border);color:var(--text-secondary)}
+.pb-kind-completed .pb-activity-icon,.pb-kind-run_concluded .pb-activity-icon{color:var(--pb-green);background:color-mix(in srgb,var(--pb-green) 12%,transparent);border-color:color-mix(in srgb,var(--pb-green) 32%,transparent)}
+.pb-kind-aborted .pb-activity-icon,.pb-kind-blocked .pb-activity-icon,.pb-kind-dismissed .pb-activity-icon{color:var(--pb-red);background:color-mix(in srgb,var(--pb-red) 12%,transparent);border-color:color-mix(in srgb,var(--pb-red) 30%,transparent)}
+.pb-kind-started .pb-activity-icon,.pb-kind-claimed .pb-activity-icon{color:var(--accent);background:var(--accent-subtle);border-color:color-mix(in srgb,var(--accent) 32%,transparent)}
+.pb-activity-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px}
+.pb-activity-summary{font-size:13px;color:var(--text-primary);line-height:1.45;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
 .pb-activity-time{font-size:10.5px;color:var(--text-tertiary);cursor:help}
-.pb-activity-legend{display:flex;flex-wrap:wrap;gap:4px 10px;padding:8px 10px;margin-bottom:8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-xs)}
-.pb-legend-item{display:inline-flex;align-items:center;gap:4px;font-size:10.5px;color:var(--text-secondary);white-space:nowrap}
-.pb-legend-ico{display:inline-flex;color:var(--text-secondary)}
-.pb-legend-item.pb-kind-completed .pb-legend-ico,.pb-legend-item.pb-kind-run_concluded .pb-legend-ico{color:#22c55e}
-.pb-legend-item.pb-kind-aborted .pb-legend-ico,.pb-legend-item.pb-kind-blocked .pb-legend-ico,.pb-legend-item.pb-kind-dismissed .pb-legend-ico{color:#ef4444}
+
+/* Activity legend — a compact key of the event glyphs. */
+.pb-activity-legend{display:flex;flex-wrap:wrap;gap:5px 12px;padding:10px 12px;margin-bottom:10px;background:color-mix(in srgb,var(--bg-tertiary) 55%,transparent);border:1px solid var(--border);border-radius:var(--pb-radius)}
+.pb-legend-item{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;color:var(--text-secondary);white-space:nowrap}
+.pb-legend-ico{display:inline-flex;color:var(--text-tertiary)}
+.pb-legend-item.pb-kind-completed .pb-legend-ico,.pb-legend-item.pb-kind-run_concluded .pb-legend-ico{color:var(--pb-green)}
+.pb-legend-item.pb-kind-aborted .pb-legend-ico,.pb-legend-item.pb-kind-blocked .pb-legend-ico,.pb-legend-item.pb-kind-dismissed .pb-legend-ico{color:var(--pb-red)}
 .pb-legend-item.pb-kind-started .pb-legend-ico,.pb-legend-item.pb-kind-claimed .pb-legend-ico{color:var(--accent)}
-.pb-conv-chip{align-self:flex-start;max-width:100%;background:var(--bg-hover);border:1px solid var(--border);color:var(--text-secondary);font-size:11px;padding:2px 8px;border-radius:10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:inherit;transition:color var(--transition),border-color var(--transition)}
-.pb-conv-chip:hover{color:var(--accent);border-color:var(--accent)}
 
-/* ═══ Project Brain — Charter + Board columns (Pillar #2/#3 UI) ═══ */
-.pb-charter-empty,.pb-board-empty{flex:1;display:flex;align-items:center;justify-content:center;min-height:180px;color:var(--text-tertiary);font-size:13px;padding:16px 4px;text-align:center}
-.pb-board-lane-empty{color:var(--text-tertiary);font-size:13px;padding:8px 4px;text-align:center}
-.pb-charter-northstar{font-size:13px;line-height:1.5;color:var(--text-primary);white-space:pre-wrap;word-break:break-word;padding:8px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-xs)}
-.pb-charter-section{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-secondary);margin:14px 0 6px}
-.pb-charter-decisions{list-style:none;display:flex;flex-direction:column;gap:5px;margin:0;padding:0}
-.pb-charter-decisions li{font-size:13px;color:var(--text-primary);padding:6px 10px;background:var(--bg-tertiary);border-radius:var(--radius-xs);border-left:2px solid var(--accent)}
-.pb-proposal{background:var(--bg-tertiary);border:1px solid var(--border-light);border-radius:var(--radius-xs);padding:9px 10px;margin-bottom:8px}
-.pb-proposal-text{font-size:13px;color:var(--text-primary);line-height:1.4;margin-bottom:8px;word-break:break-word}
+/* Conversation chip (peer owner links). */
+.pb-conv-chip{display:inline-flex;align-items:center;align-self:flex-start;max-width:100%;background:var(--bg-secondary);border:1px solid var(--border);color:var(--text-secondary);font-size:11px;padding:3px 10px;border-radius:var(--pb-radius-chip);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:inherit;transition:color var(--transition),border-color var(--transition),background var(--transition)}
+.pb-conv-chip:hover{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 50%,transparent);background:var(--accent-subtle)}
+
+/* ── Team / Peers column ── */
+.pb-peers-roster{display:flex;flex-direction:column;gap:9px}
+.pb-peers-roster-head,.pb-peers-thread-head{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-tertiary);margin:2px 0 6px}
+.pb-peer-card{display:flex;gap:10px;align-items:flex-start;padding:11px 12px;background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius);transition:border-color var(--transition),background var(--transition),transform 0.12s ease;animation:pbRowIn 0.24s cubic-bezier(0.16,1,0.3,1)}
+.pb-peer-clickable{cursor:pointer}
+.pb-peer-clickable:hover{border-color:color-mix(in srgb,var(--accent) 45%,transparent);background:var(--pb-card-hover);transform:translateY(-1px)}
+.pb-peer-agent{margin-left:14px;border-style:dashed}
+/* Presence dot — a soft status light. green=running(pulse), amber=idle. */
+.pb-peer-dot{width:9px;height:9px;flex-shrink:0;margin-top:5px;border-radius:50%;background:var(--text-tertiary)}
+.pb-peer-dot[data-state="active"]{background:var(--pb-green);box-shadow:0 0 0 3px color-mix(in srgb,var(--pb-green) 22%,transparent);animation:pbPeerPulse 1.8s ease-in-out infinite}
+.pb-peer-dot[data-state="idle"]{background:var(--pb-amber);box-shadow:0 0 0 3px color-mix(in srgb,var(--pb-amber) 18%,transparent)}
+@keyframes pbPeerPulse{0%,100%{box-shadow:0 0 0 3px color-mix(in srgb,var(--pb-green) 22%,transparent)}50%{box-shadow:0 0 0 5px color-mix(in srgb,var(--pb-green) 8%,transparent)}}
+.pb-peer-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+.pb-peer-who{font-size:13px;font-weight:600;color:var(--text-primary);line-height:1.4;overflow-wrap:anywhere}
+.pb-peer-doing{font-size:11.5px;color:var(--text-secondary);line-height:1.4;overflow-wrap:anywhere}
+/* Peer-message thread — chat-like exchanges between conversations. */
+.pb-peers-thread{margin-top:16px;padding-top:14px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px}
+.pb-peer-msg{padding:9px 11px;background:color-mix(in srgb,var(--bg-tertiary) 45%,transparent);border:1px solid var(--border);border-left:2px solid color-mix(in srgb,var(--accent) 55%,var(--border));border-radius:var(--pb-radius);animation:pbRowIn 0.24s cubic-bezier(0.16,1,0.3,1)}
+.pb-peer-msg-intervene{border-left-color:var(--pb-red);background:color-mix(in srgb,var(--pb-red) 7%,transparent)}
+.pb-peer-msg-head{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--text-tertiary);margin-bottom:4px}
+.pb-peer-msg-head svg{flex-shrink:0}
+.pb-peer-msg-route{font-family:var(--font-mono,monospace);color:var(--text-secondary);font-weight:600}
+.pb-peer-msg-time{margin-left:auto}
+.pb-peer-msg-body{font-size:12.5px;color:var(--text-primary);line-height:1.45;overflow-wrap:anywhere;word-break:break-word}
+/* Per-card nudge composer — the operator messages a sibling conversation. */
+.pb-peer-nudge{margin-top:6px}
+.pb-peer-nudge-toggle{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;font-size:11px;font-weight:600;color:var(--text-secondary);background:transparent;border:1px solid var(--border);border-radius:var(--pb-radius-sm);cursor:pointer;transition:border-color var(--transition),color var(--transition),background var(--transition)}
+.pb-peer-nudge-toggle:hover{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent);background:var(--pb-card-hover)}
+.pb-peer-nudge-toggle svg{flex-shrink:0}
+.pb-peer-nudge-composer{margin-top:7px;display:flex;flex-direction:column;gap:6px}
+.pb-peer-nudge-input{width:100%;box-sizing:border-box;resize:vertical;min-height:44px;padding:7px 9px;font:inherit;font-size:12px;line-height:1.4;color:var(--text-primary);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--pb-radius-sm)}
+.pb-peer-nudge-input:focus{outline:none;border-color:color-mix(in srgb,var(--accent) 55%,transparent)}
+.pb-peer-nudge-actions{display:flex;align-items:center;gap:8px}
+.pb-peer-nudge-status{font-size:11px;color:var(--text-tertiary);margin-right:auto;flex-shrink:0}
+.pb-peer-nudge-status-ok{color:var(--pb-green)}
+.pb-peer-nudge-status-err{color:var(--pb-red)}
+.pb-peer-nudge-cancel,.pb-peer-nudge-send{padding:4px 12px;font-size:11.5px;font-weight:600;border-radius:var(--pb-radius-sm);cursor:pointer;border:1px solid var(--border);transition:opacity var(--transition),background var(--transition),border-color var(--transition)}
+.pb-peer-nudge-cancel{color:var(--text-secondary);background:transparent}
+.pb-peer-nudge-cancel:hover{color:var(--text-primary);border-color:var(--text-tertiary)}
+.pb-peer-nudge-send{color:#fff;background:var(--accent);border-color:var(--accent)}
+.pb-peer-nudge-send:hover{opacity:0.9}
+.pb-peer-nudge-send:disabled{opacity:0.5;cursor:default}
+
+/* ── Charter column ── */
+.pb-charter-northstar{font-size:13px;line-height:1.55;color:var(--text-primary);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;padding:11px 13px;background:var(--pb-card-bg);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--pb-radius)}
+.pb-charter-section{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-tertiary);margin:18px 0 8px}
+.pb-charter-decisions{list-style:none;display:flex;flex-direction:column;gap:6px;margin:0;padding:0}
+.pb-charter-decisions li{font-size:13px;line-height:1.45;color:var(--text-primary);padding:9px 11px;background:var(--pb-card-bg);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--pb-radius-sm);white-space:normal;overflow-wrap:anywhere;word-break:break-word;transition:border-color var(--transition),background var(--transition)}
+.pb-charter-decisions li:hover{background:var(--pb-card-hover)}
+
+/* Charter pending proposals — the human commit/reject gate. */
+.pb-proposal{background:var(--pb-card-bg);border:1px solid color-mix(in srgb,var(--pb-amber) 34%,var(--border));border-radius:var(--pb-radius);padding:11px 12px;margin-bottom:9px;box-shadow:inset 3px 0 0 var(--pb-amber)}
+.pb-proposal-text{font-size:13px;color:var(--text-primary);line-height:1.5;margin-bottom:10px;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
 .pb-proposal-actions{display:flex;gap:8px}
-.pb-proposal-commit{flex:1;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-xs);padding:5px 10px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}.pb-proposal-commit:hover{background:var(--accent-hover)}.pb-proposal-commit:disabled{opacity:0.6;cursor:default}
-.pb-proposal-reject{background:var(--bg-hover);color:var(--text-secondary);border:1px solid var(--border);border-radius:var(--radius-xs);padding:5px 10px;font-size:12px;cursor:pointer;font-family:inherit}.pb-proposal-reject:hover{color:var(--text-primary)}
-.pb-board-lane{margin-bottom:14px}
-.pb-board-lane-head{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-secondary);margin-bottom:6px}
-.pb-board-count{color:var(--text-tertiary);font-weight:400}
-.pb-board-card{background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-xs);padding:8px 10px;margin-bottom:6px}
-.pb-board-card.pb-board-claimed{border-left:2px solid var(--accent)}
-.pb-board-card.pb-board-done{opacity:0.6}
-.pb-board-title{font-size:13px;color:var(--text-primary);margin-bottom:5px;word-break:break-word}
+.pb-proposal-commit{flex:1;background:var(--accent);color:#fff;border:none;border-radius:var(--pb-radius-sm);padding:7px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;transition:background var(--transition),transform 0.1s ease}
+.pb-proposal-commit:hover{background:var(--accent-hover)}
+.pb-proposal-commit:active{transform:scale(0.97)}
+.pb-proposal-commit:disabled{opacity:0.55;cursor:default}
+.pb-proposal-reject{background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);padding:7px 12px;font-size:12px;cursor:pointer;font-family:inherit;transition:color var(--transition),border-color var(--transition)}
+.pb-proposal-reject:hover{color:var(--text-primary);border-color:var(--border-light)}
 
-/* ═══ Project Brain — dispatched badge + collab-bar conflicts (2026-07) ═══ */
-.pb-board-card-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:5px}
-.pb-board-badge{display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:600;padding:1px 6px;border-radius:9px;line-height:1.4}
-.pb-board-badge-dispatched{background:rgba(110,86,207,0.16);color:var(--accent)}
+/* ── Board column ── */
+.pb-board-lane{margin-bottom:18px}
+.pb-board-lane:last-child{margin-bottom:0}
+.pb-board-lane-head{display:flex;align-items:center;gap:7px;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-tertiary);margin-bottom:9px}
+.pb-board-count{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 6px;font-size:10.5px;font-weight:700;color:var(--text-secondary);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--pb-radius-chip)}
+.pb-board-lane-open .pb-board-count{color:var(--pb-amber);border-color:color-mix(in srgb,var(--pb-amber) 34%,transparent);background:color-mix(in srgb,var(--pb-amber) 12%,transparent)}
+.pb-board-lane-claimed .pb-board-count{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,transparent);background:var(--accent-subtle)}
+.pb-board-lane-done .pb-board-count{color:var(--pb-green);border-color:color-mix(in srgb,var(--pb-green) 32%,transparent);background:color-mix(in srgb,var(--pb-green) 12%,transparent)}
+.pb-board-card{background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius);padding:11px 12px;margin-bottom:8px;transition:border-color var(--transition),background var(--transition),transform 0.12s ease}
+.pb-board-card:hover{border-color:var(--border-light);background:var(--pb-card-hover);transform:translateY(-1px)}
+.pb-board-card.pb-board-open{border-left:3px solid var(--pb-amber)}
+.pb-board-card.pb-board-claimed{border-left:3px solid var(--accent)}
+.pb-board-card.pb-board-done{border-left:3px solid var(--pb-green);opacity:0.72}
+.pb-board-title{font-size:13px;line-height:1.5;color:var(--text-primary);white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.pb-board-card-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:9px}
+.pb-board-badge{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;padding:2px 8px;border-radius:var(--pb-radius-chip);line-height:1.5}
+.pb-board-badge-dispatched{background:var(--accent-subtle);color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent)}
 .pb-board-badge-dispatched svg{width:11px;height:11px}
-.collab-seg-conflict{color:#ef4444;font-weight:600}
-.collab-bar-inner.collab-has-conflicts{border-color:rgba(239,68,68,0.4)}
+/* Board human-action controls (post / complete / block / reopen) */
+.pb-board-toolbar{display:flex;justify-content:flex-end;margin-bottom:12px}
+.pb-board-new{display:inline-flex;align-items:center;gap:5px;background:var(--accent-subtle);color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 34%,transparent);border-radius:var(--pb-radius-sm);padding:6px 11px;font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;transition:background var(--transition),border-color var(--transition)}
+.pb-board-new:hover{background:color-mix(in srgb,var(--accent) 18%,transparent)}
+.pb-board-new:disabled{opacity:0.5;cursor:default}
+.pb-board-card-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px;padding-top:9px;border-top:1px solid var(--border)}
+.pb-board-act{display:inline-flex;align-items:center;gap:4px;background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);padding:4px 9px;font-size:11px;font-weight:600;font-family:inherit;cursor:pointer;transition:color var(--transition),border-color var(--transition),background var(--transition)}
+.pb-board-act:hover{color:var(--text-primary);border-color:var(--border-light)}
+.pb-board-act:disabled{opacity:0.55;cursor:default}
+.pb-board-act-complete:hover{color:var(--pb-green);border-color:color-mix(in srgb,var(--pb-green) 40%,transparent)}
+.pb-board-act-block:hover{color:var(--pb-red);border-color:color-mix(in srgb,var(--pb-red) 40%,transparent)}
+.pb-board-act-reopen:hover{color:var(--pb-amber);border-color:color-mix(in srgb,var(--pb-amber) 40%,transparent)}
+
+/* collab-bar conflict styling (shares this block's ownership). */
+.collab-seg-conflict{color:var(--pb-red);font-weight:600}
+.collab-bar-inner.collab-has-conflicts{border-color:color-mix(in srgb,var(--pb-red) 40%,transparent)}
 .collab-conflicts{display:inline-flex;flex-wrap:wrap;gap:6px;margin-left:8px}
-.collab-conflict-line{font-size:11px;color:#ef4444;opacity:0.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px}
+.collab-conflict-line{font-size:11px;color:var(--pb-red);opacity:0.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px}
+
+/* ═══ Per-conversation Influence lens (banner above the columns) ═══ */
+.project-brain-influence{border-bottom:1px solid var(--border);background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 5%,var(--bg-primary)),var(--bg-primary));padding:14px 22px;max-height:40vh;overflow-y:auto;animation:fadeIn 0.2s ease}
+.project-brain-influence[hidden]{display:none}
+.project-brain-influence::-webkit-scrollbar{width:8px}
+.project-brain-influence::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+/* Deep-link flash: when the conv-influence BAR opens the panel, briefly pulse
+   the lens so the user's eye lands on the conv-scoped section (not the top). */
+.project-brain-influence.pb-influence-flash{animation:pbInfluenceFlash 1.3s ease}
+@keyframes pbInfluenceFlash{0%{background:color-mix(in srgb,var(--accent) 26%,var(--bg-primary))}100%{background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 5%,var(--bg-primary)),var(--bg-primary))}}
+.pb-influence-head{display:flex;align-items:baseline;gap:9px;margin-bottom:12px}
+.pb-influence-title{font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent)}
+.pb-influence-conv{font-size:12px;color:var(--text-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.pb-influence-body{display:flex;flex-direction:column;gap:13px}
+.pb-inf-chips{display:flex;flex-wrap:wrap;gap:7px}
+.pb-inf-chip{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:4px 10px;border-radius:var(--pb-radius-chip);line-height:1.4;background:var(--bg-tertiary);border:1px solid var(--border);color:var(--text-secondary)}
+.pb-inf-chip svg{width:12px;height:12px;flex-shrink:0}
+.pb-inf-chip-charter{background:var(--accent-subtle);border-color:color-mix(in srgb,var(--accent) 32%,transparent);color:var(--accent)}
+.pb-inf-chip-mine{background:color-mix(in srgb,var(--pb-green) 14%,transparent);border-color:color-mix(in srgb,var(--pb-green) 34%,transparent);color:var(--pb-green)}
+.pb-inf-chip-avoid{background:color-mix(in srgb,var(--pb-red) 13%,transparent);border-color:color-mix(in srgb,var(--pb-red) 34%,transparent);color:var(--pb-red)}
+.pb-inf-chip-pending{background:color-mix(in srgb,var(--pb-amber) 14%,transparent);border-color:color-mix(in srgb,var(--pb-amber) 36%,transparent);color:var(--pb-amber)}
+.pb-inf-group{display:flex;flex-direction:column;gap:6px}
+.pb-inf-group-head{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-tertiary)}
+.pb-inf-group-head::before{content:'';width:5px;height:5px;border-radius:50%;background:currentColor;opacity:0.6;flex-shrink:0}
+.pb-inf-group-mine .pb-inf-group-head{color:var(--pb-green)}
+.pb-inf-group-avoid .pb-inf-group-head{color:var(--pb-red)}
+.pb-inf-group-open .pb-inf-group-head{color:var(--text-tertiary)}
+.pb-inf-group-charter .pb-inf-group-head{color:var(--accent)}
+.pb-inf-northstar{font-size:12.5px;line-height:1.55;color:var(--text-primary);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;padding:9px 11px;background:var(--pb-card-bg);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--pb-radius-sm)}
+.pb-inf-decisions{list-style:none;display:flex;flex-direction:column;gap:5px;margin:0;padding:0}
+.pb-inf-decisions li{font-size:12.5px;line-height:1.45;color:var(--text-primary);padding:7px 10px;background:var(--pb-card-bg);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--pb-radius-sm);white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.pb-inf-epic{display:flex;align-items:center;gap:9px;font-size:12.5px;line-height:1.45;color:var(--text-primary);padding:9px 11px;background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius-sm);margin-bottom:5px;transition:border-color var(--transition),background var(--transition)}
+.pb-inf-epic:hover{background:var(--pb-card-hover)}
+.pb-inf-epic-title{flex:1;min-width:0;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.pb-inf-epic.pb-inf-mine{border-left:3px solid var(--pb-green)}
+.pb-inf-epic.pb-inf-avoid{border-left:3px solid var(--pb-red)}
+.pb-inf-epic.pb-inf-open{border-left:3px solid var(--text-tertiary)}
+
+/* Always-visible inline per-conversation influence bar (docked on chat view). */
+.conv-influence-bar{position:relative;display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;padding:7px 16px;background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 4%,var(--bg-primary)),var(--bg-primary));border:none;border-bottom:1px solid var(--border-light);cursor:pointer;font-family:inherit;text-align:left;transition:background var(--transition)}
+.conv-influence-bar:hover{background:var(--accent-subtle)}
+.conv-influence-bar[hidden]{display:none}
+.conv-inf-lead{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:var(--accent)}
+.conv-inf-lead svg{width:13px;height:13px}
+.conv-influence-bar .pb-inf-chip{cursor:pointer}
+
+/* ── Hierarchy join: when the project-wide collab bar is visible directly
+   above, the conversation-scoped influence bar reads as its INDENTED sub-row
+   (a └ tree connector + deeper left padding + muted, non-accent lead) so the
+   two stacked bars form ONE "Project → this-chat" hierarchy instead of two
+   competing accent twins. When the collab bar is hidden this selector doesn't
+   match and the influence bar renders as a normal standalone bar (accent lead,
+   original padding) — behaviour unchanged. */
+.presence-strip:not([hidden]) + .conv-influence-bar{padding-left:40px;background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 6%,var(--bg-primary)),color-mix(in srgb,var(--accent) 2%,var(--bg-primary)))}
+/* Tree join: vertical drop aligned under the parent brain-badge centre (~26px),
+   horizontal arm reaching the child map-pin. Accent-tinted so it reads as an
+   intentional connector, not a stray border. */
+.presence-strip:not([hidden]) + .conv-influence-bar::before{content:'';position:absolute;left:25px;top:-1px;bottom:50%;width:12px;border-left:1.5px solid color-mix(in srgb,var(--accent) 38%,var(--border));border-bottom:1.5px solid color-mix(in srgb,var(--accent) 38%,var(--border));border-bottom-left-radius:6px;pointer-events:none}
+.presence-strip:not([hidden]) + .conv-influence-bar .conv-inf-lead{color:var(--text-secondary);font-weight:600}
+.presence-strip:not([hidden]) + .conv-influence-bar .conv-inf-lead svg{color:color-mix(in srgb,var(--accent) 55%,var(--text-tertiary))}
+
+/* ── Responsive: stack the three columns on a narrow panel ── */
+@media (max-width:720px){
+  .project-brain-columns{grid-template-columns:1fr;gap:1px;overflow-y:auto}
+  .project-brain-col{min-height:240px}
+}

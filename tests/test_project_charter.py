@@ -371,6 +371,140 @@ def test_NC3_no_exclude_filter_overcounts(flask_app):
 
 
 # ════════════════════════════════════════════════════════════════════
+#  Truncation fix: a decision carries its FULL text (not the 280-char
+#  feed-row summary), and the cap matches the proposal ceiling.
+# ════════════════════════════════════════════════════════════════════
+
+# A proposal longer than the feed-row cap (280) AND longer than the OLD
+# decision cap (600), so it discriminates BOTH truncation points at once.
+_LONG_PROPOSAL = ('SCALE-OUT ARCHITECTURE decision body. ' + ('x' * 900) +
+                  ' MIDDLE-SENTINEL ' + ('y' * 900) + ' END-SENTINEL-TAIL.')
+
+
+def test_pending_returns_full_proposal_not_feed_summary(flask_app):
+    """pending_proposals must hand back the FULL payload.proposal text (the
+    commit source), NOT the 280-char feed-row summary — the root cause of the
+    truncated-decision bug."""
+    from lib.conversations.project_charter import (
+        pending_proposals, propose_amendment,
+    )
+    p = os.path.abspath('/p/full-pending')
+    with flask_app.app_context():
+        propose_amendment(p, 'cA', _LONG_PROPOSAL)
+        pend = pending_proposals(p)
+    assert len(pend) == 1
+    # The full text survives end-to-end (both sentinels + full length), not the
+    # 280-char feed summary.
+    assert pend[0]['summary'] == _LONG_PROPOSAL[:2400]
+    assert len(pend[0]['summary']) > 280
+    assert 'END-SENTINEL-TAIL.' in pend[0]['summary']
+
+
+def test_commit_from_full_pending_stores_full_decision(flask_app):
+    """The whole chain: propose(long) → pending(full) → commit(full) stores a
+    decision that is NOT clipped at 280 and survives into read + the injected
+    [PROJECT CHARTER] block."""
+    from lib.conversations.project_charter import (
+        commit_charter, pending_proposals, propose_amendment, read_charter,
+        render_charter_block,
+    )
+    p = os.path.abspath('/p/full-commit')
+    with flask_app.app_context():
+        pid = propose_amendment(p, 'cA', _LONG_PROPOSAL)['proposalId']
+        full = pending_proposals(p)[0]['summary']
+        commit_charter(p, add_decision=full, updated_by_conv='human',
+                       resolves_proposal=pid)
+        rec = read_charter(p)
+        block = render_charter_block(p)
+    stored = rec['decisions'][0]['text']
+    assert len(stored) > 280 and len(stored) == len(_LONG_PROPOSAL[:2400])
+    assert 'END-SENTINEL-TAIL.' in stored
+    # And the prompt-injected block carries the full text end-to-end.
+    assert 'END-SENTINEL-TAIL.' in block
+
+
+def test_decision_cap_matches_proposal_ceiling(flask_app):
+    """The committed-decision cap MUST equal the proposal ceiling so a commit
+    never re-clips a full proposal (both are the single _DECISION_MAX_CHARS)."""
+    import lib.conversations.project_charter as pc
+    assert pc._DECISION_MAX_CHARS >= 2400, \
+        'the decision cap must be raised to the proposal ceiling (was 600)'
+
+
+def test_repair_resources_truncated_decision_from_feed(flask_app):
+    """repair_truncated_decisions re-sources a decision that was stored
+    truncated (a strict prefix of a longer proposal payload) back to its full
+    text. Idempotent — a second run repairs nothing."""
+    from lib.conversations.project_charter import (
+        propose_amendment, read_charter, repair_truncated_decisions,
+    )
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    import json as _json
+    import time as _time
+    p = os.path.abspath('/p/repair')
+    with flask_app.app_context():
+        # Seed a feed proposal with the FULL text (payload.proposal).
+        propose_amendment(p, 'cA', _LONG_PROPOSAL)
+        # Simulate the OLD bug: a committed decision stored as the 280-char
+        # PREFIX of that proposal (exactly what the feed-summary commit did).
+        truncated = _LONG_PROPOSAL[:280]
+        db = get_thread_db(DOMAIN_CHAT)
+        decisions = [{'text': truncated, 'by_conv': 'human',
+                      'ts': int(_time.time() * 1000)}]
+        db.execute(
+            'INSERT INTO project_charter (project_path, content, decisions, '
+            'updated_by_conv, updated_at, version) VALUES (?, ?, ?, ?, ?, ?) '
+            'ON CONFLICT(project_path) DO UPDATE SET decisions=excluded.decisions, '
+            'version=excluded.version',
+            (p, '', _json.dumps(decisions), 'human', 1, 1))
+        db.commit()
+        assert len(read_charter(p)['decisions'][0]['text']) == 280
+
+        res = repair_truncated_decisions(p)
+        assert res['ok'] and res['repaired'] == 1
+        rec = read_charter(p)
+        fixed = rec['decisions'][0]['text']
+        assert len(fixed) == len(_LONG_PROPOSAL[:2400]) > 280
+        assert 'END-SENTINEL-TAIL.' in fixed
+        assert rec['version'] == 2  # bumped once
+
+        # Idempotent: nothing left to repair.
+        res2 = repair_truncated_decisions(p)
+        assert res2['ok'] and res2['repaired'] == 0
+
+
+def test_NC_pending_summary_first_reintroduces_truncation(flask_app):
+    """NC: revert pending_proposals to summary-FIRST (the old bug) → a long
+    proposal comes back as the 280-char feed summary, so
+    test_pending_returns_full_proposal_not_feed_summary's length assertion
+    FAILS. Byte-identical restore."""
+    def run():
+        import lib.conversations.project_charter as pc
+        importlib.reload(pc)
+        p = os.path.abspath('/p/nc-trunc')
+        with flask_app.app_context():
+            from lib.database import DOMAIN_CHAT, get_thread_db
+            db = get_thread_db(DOMAIN_CHAT)
+            db.execute('DELETE FROM project_events WHERE project_path=?', (p,))
+            db.commit()
+            pc.propose_amendment(p, 'cA', _LONG_PROPOSAL)
+            pend = pc.pending_proposals(p)
+        # With summary-first restored, the returned text is the 280-char cap.
+        assert len(pend[0]['summary']) == 280, \
+            'NC: summary-first must reintroduce the 280-char truncation'
+        assert 'END-SENTINEL-TAIL.' not in pend[0]['summary']
+
+    _patch_restore(
+        _CHARTER_SRC,
+        "            'summary': payload.get('proposal', '') or e.get('summary', ''),",
+        "            'summary': e.get('summary', '') or payload.get('proposal', ''),  # NC",
+        run,
+    )
+    import lib.conversations.project_charter as pc
+    importlib.reload(pc)
+
+
+# ════════════════════════════════════════════════════════════════════
 #  Source-level NEGATIVE CONTROLS
 # ════════════════════════════════════════════════════════════════════
 

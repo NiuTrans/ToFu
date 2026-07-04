@@ -42,7 +42,9 @@ logger = get_logger(__name__)
 # epic reads as open again so no abandoned conversation can hold it forever.
 DEFAULT_LEASE_TTL_MS = 30 * 60 * 1000  # 30 minutes
 
-_TITLE_MAX_CHARS = 280
+_TITLE_MAX_CHARS = 2000  # epics carry multi-sentence design descriptions; a
+                         # tight cap silently clipped titles mid-word (both in
+                         # the board panel and the injected prompt block)
 _MAX_BOARD_TASKS = 200  # coarse epics only — a guard against runaway posting
 
 
@@ -86,6 +88,26 @@ def _row_to_task(r, now_ms: int) -> dict:
         'created_at': int(r['created_at'] or 0),
         'updated_at': int(r['updated_at'] or 0),
     }
+
+
+def claims_by_conv(board_tasks: list) -> dict:
+    """Map ``owner_conv_id`` → claimed-epic title, for epics whose EFFECTIVE
+    status is ``claimed`` (i.e. a live, unexpired lease).
+
+    This is the SINGLE source of the "which conversation is advancing which
+    epic" join. ``read_board`` already reclaimed expired leases to ``open``, so
+    every entry here is a live claim — never a deadlocked one. Both
+    ``build_brain_summary`` (collab bar) and ``build_peer_status`` (the peer
+    introspection tool) consume it so the two views can never drift. Pure +
+    side-effect-free; safe on any task list.
+    """
+    out = {}
+    for t in (board_tasks or []):
+        if not isinstance(t, dict):
+            continue
+        if t.get('status') == 'claimed' and t.get('owner_conv_id'):
+            out[t['owner_conv_id']] = t.get('title', '')
+    return out
 
 
 def read_board(project_path: str) -> dict:
@@ -259,6 +281,120 @@ def block_task(project_path: str, conv_id: str, task_id: str, reason: str) -> di
     return {'ok': True}
 
 
+def defer_task(project_path: str, conv_id: str, task_id: str,
+               reason: str = '') -> dict:
+    """PARK an epic — set the terminal-ish ``deferred`` status.
+
+    Unlike ``block_task`` (a feed SIGNAL that leaves board status untouched),
+    this is a real STATUS write: ``deferred`` epics are EXCLUDED from
+    ``select_dispatchable`` (they satisfy ``status != 'open'``) so the
+    heartbeat sweep stops re-dispatching them, and — crucially —
+    ``_effective_status`` never reclaims a ``deferred`` epic (its reclaim is
+    specific to ``claimed``), so a parked epic does NOT oscillate
+    ``open→claimed→lease-expires→open`` the way a human-gated epic otherwise
+    would. The epic stays VISIBLE on the board (distinct from ``done``) so the
+    "parked pending a human decision" state is legible.
+
+    Sets ``status='deferred'`` and CLEARS ``owner_conv_id`` + ``lease_expires_at``
+    + the dispatched flag (a parked epic holds no lease). Permitted from
+    ``open`` and ``claimed``; refused for ``done`` (can't park finished work)
+    and ``deferred`` (idempotent no-op → advisory error). The un-park path is
+    ``reopen_task`` (``deferred → open``), the same human lever that revives a
+    done/claimed epic. Emits a ``note`` feed event so the transition is
+    observable. ``{'ok', 'from'?, 'error'?}``.
+    """
+    if not project_path or not task_id:
+        return {'ok': False, 'error': 'missing project/task'}
+    reason = (reason or '').strip()
+    from lib.conversations.project_feed import normalize_project_path
+    project_path = normalize_project_path(project_path)
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT title, status FROM project_tasks '
+            'WHERE id=? AND project_path=?', (task_id, project_path)).fetchone()
+        if not row:
+            return {'ok': False, 'error': 'task not found'}
+        prev_status = row['status'] or 'open'
+        title = row['title'] or ''
+        if prev_status == 'done':
+            return {'ok': False, 'error': 'already_done'}
+        if prev_status == 'deferred':
+            return {'ok': False, 'error': 'already_deferred'}
+        db.execute(
+            "UPDATE project_tasks SET status='deferred', owner_conv_id='', "
+            'lease_expires_at=0, dispatched=0, updated_at=? '
+            'WHERE id=? AND project_path=?',
+            (_now_ms(), task_id, project_path))
+        db.commit()
+    except Exception as e:
+        logger.error('[Board] defer failed proj=%.40r task=%s: %s',
+                     project_path, task_id, e, exc_info=True)
+        return {'ok': False, 'error': str(e)}
+    summary = f'Parked (deferred): {title}' + (f' — {reason}' if reason else '')
+    _emit('note', project_path, conv_id, summary,
+          payload={'taskId': task_id, 'deferred': True, 'from': prev_status,
+                   'reason': reason})
+    audit_log('board_defer', project_path=project_path, task_id=task_id,
+              conv_id=conv_id, from_status=prev_status)
+    return {'ok': True, 'from': prev_status}
+
+
+
+def reopen_task(project_path: str, conv_id: str, task_id: str) -> dict:
+    """Reopen an epic (done|claimed → open) — a HUMAN override.
+
+    A direct status write, NOT a lease mutation: it sets ``status='open'`` and
+    CLEARS ``owner_conv_id`` + ``lease_expires_at`` (+ the dispatched flag), so
+    the epic becomes claimable again. Permitted from both ``done`` (revive
+    finished work) and ``claimed`` (break a wrongly-held or stuck live claim) —
+    the ONE human lever to free an epic without a background reaper.
+
+    A ``note`` feed event is emitted so the transition is OBSERVABLE (never a
+    silent yank). Note the coordination consequence when reopening a live
+    ``claimed`` epic: the previous owner's injected ``[PROJECT BOARD]`` block
+    flips that epic from "(you)" to a plain open epic on its NEXT prompt
+    assembly (the block is re-read per turn, so the owner is not interrupted
+    mid-turn — it simply sees the epic as reclaimable next time, and the feed
+    note records who held it). ``{'ok', 'from'?, 'error'?}``.
+    """
+    if not project_path or not task_id:
+        return {'ok': False, 'error': 'missing project/task'}
+    from lib.conversations.project_feed import normalize_project_path
+    project_path = normalize_project_path(project_path)
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT title, status, owner_conv_id FROM project_tasks '
+            'WHERE id=? AND project_path=?', (task_id, project_path)).fetchone()
+        if not row:
+            return {'ok': False, 'error': 'task not found'}
+        prev_status = row['status'] or 'open'
+        prev_owner = row['owner_conv_id'] or ''
+        title = row['title'] or ''
+        if prev_status == 'open':
+            return {'ok': False, 'error': 'already_open'}
+        db.execute(
+            "UPDATE project_tasks SET status='open', owner_conv_id='', "
+            'lease_expires_at=0, dispatched=0, updated_at=? '
+            'WHERE id=? AND project_path=?',
+            (_now_ms(), task_id, project_path))
+        db.commit()
+    except Exception as e:
+        logger.error('[Board] reopen failed proj=%.40r task=%s: %s',
+                     project_path, task_id, e, exc_info=True)
+        return {'ok': False, 'error': str(e)}
+    summary = f'Reopened: {title}'
+    if prev_status == 'claimed' and prev_owner:
+        summary += f' (was claimed by {prev_owner})'
+    _emit('note', project_path, conv_id, summary,
+          payload={'taskId': task_id, 'reopened': True, 'from': prev_status,
+                   'prevOwner': prev_owner})
+    audit_log('board_reopen', project_path=project_path, task_id=task_id,
+              conv_id=conv_id, from_status=prev_status, prev_owner=prev_owner)
+    return {'ok': True, 'from': prev_status}
+
+
 def _task_title(db, project_path: str, task_id: str):
     row = db.execute('SELECT title FROM project_tasks WHERE id=? AND project_path=?',
                      (task_id, project_path)).fetchone()
@@ -289,7 +425,8 @@ def render_board_block(project_path: str, current_conv_id: str = '') -> str:
     open_t = [t for t in tasks if t['status'] == 'open']
     claimed_t = [t for t in tasks if t['status'] == 'claimed']
     done_t = [t for t in tasks if t['status'] == 'done']
-    if not (open_t or claimed_t or done_t):
+    deferred_t = [t for t in tasks if t['status'] == 'deferred']
+    if not (open_t or claimed_t or done_t or deferred_t):
         return ''
     lines = ['[PROJECT BOARD] — shared coordination board for this project. '
              'Before starting work, CHECK it: claim an open epic so siblings '
@@ -310,6 +447,12 @@ def render_board_block(project_path: str, current_conv_id: str = '') -> str:
         for t in open_t:
             dep = f' (depends on {", ".join(t["depends_on"])})' if t['depends_on'] else ''
             lines.append(f'  • [{t["id"]}] {t["title"]}{dep}')
+    if deferred_t:
+        lines.append('')
+        lines.append('Parked (deferred — NOT auto-dispatched; awaiting a human '
+                     'decision. A human reopens one when it is ready to resume):')
+        for t in deferred_t:
+            lines.append(f'  • [{t["id"]}] {t["title"]}')
     if done_t:
         lines.append('')
         lines.append('Recently done:')
@@ -359,6 +502,20 @@ def execute_board_tool(fn_name: str, fn_args: dict, *,
             return ('Reported blocked (visible in the project activity feed).'
                     if res.get('ok')
                     else f'Error reporting block: {res.get("error", "unknown")}.')
+        if fn_name == 'project_board_defer':
+            res = defer_task(project_path, current_conv_id,
+                             fn_args.get('task_id') or '',
+                             fn_args.get('reason') or '')
+            if res.get('ok'):
+                return ('Parked (deferred). This epic is no longer auto-dispatched '
+                        'by the heartbeat sweep and will NOT oscillate '
+                        'open/claimed; it stays visible on the board until a human '
+                        'reopens it when the blocking decision lands.')
+            if res.get('error') == 'already_deferred':
+                return 'Already parked (deferred) — no change.'
+            if res.get('error') == 'already_done':
+                return 'Cannot park a completed epic.'
+            return f'Error parking epic: {res.get("error", "unknown")}.'
         return f"Error: Unknown board tool '{fn_name}'"
     except Exception as e:
         logger.warning('[Board] tool %s failed: %s', fn_name, e, exc_info=True)
@@ -367,6 +524,7 @@ def execute_board_tool(fn_name: str, fn_args: dict, *,
 
 __all__ = [
     'read_board', 'post_task', 'claim_task', 'complete_task', 'block_task',
-    'render_board_block', 'execute_board_tool', '_effective_status',
-    'DEFAULT_LEASE_TTL_MS',
+    'defer_task', 'reopen_task', 'render_board_block', 'execute_board_tool',
+    '_effective_status',
+    'claims_by_conv', 'DEFAULT_LEASE_TTL_MS',
 ]

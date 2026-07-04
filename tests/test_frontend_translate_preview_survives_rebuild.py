@@ -77,6 +77,9 @@ global.getSelection = win.getSelection = () => ({ isCollapsed: true, rangeCount:
 // ── Globals the streaming-UI + translation code touch at call time ──
 win.escapeHtml = global.escapeHtml = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// formatClockTime (core.js) — new shared dep of showStreamingUIForConv +
+// _streamingBubbleHTML (Commit-2 dedup). Deterministic stub.
+win.formatClockTime = global.formatClockTime = () => '12:00';
 win.renderMarkdown = global.renderMarkdown = (s) => '<p>' + global.escapeHtml(s) + '</p>';
 win.stripNoTranslateTags = global.stripNoTranslateTags = (s) => s;
 win.t = global.t = (k, o) => k + (o && o.n != null ? (':' + o.n) : '');

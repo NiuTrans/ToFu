@@ -23,13 +23,8 @@
 (function () {
   'use strict';
 
-  // ── Reuse global escapeHtml if present, fall back to a tight local one ─
-  const _esc = (window.escapeHtml) ? window.escapeHtml : (s) => {
-    if (s == null) return '';
-    return String(s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  };
+  // Bundled global escapeHtml (core/escape_html.js) — no local re-impl.
+  const _esc = escapeHtml;
 
   const _fmtTokens = (n) => {
     n = Number(n) || 0;

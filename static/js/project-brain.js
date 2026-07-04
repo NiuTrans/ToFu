@@ -394,7 +394,10 @@
         _esc(_t('projectBrain.pendingProposals', 'Proposed (awaiting your review)')) + '</div>');
       for (var j = 0; j < props.length; j++) {
         var p = props[j];
-        var ptext = p.summary || (p.payload && p.payload.proposal) || '';
+        // Payload-FIRST: payload.proposal is the FULL proposal text; p.summary
+        // is only the 280-char feed-row cap. The commit derives its durable
+        // decision from this text, so render (and commit) the full version.
+        var ptext = (p.payload && p.payload.proposal) || p.summary || '';
         var pid = p.proposalId || (p.payload && p.payload.proposalId) || '';
         parts.push(
           '<div class="pb-proposal" data-event-id="' + _esc(p.event_id) +
@@ -497,7 +500,26 @@
 
   // ── Board column ────────────────────────────────────────────────
   // A kanban of open/claimed/done epics. A claimed card shows its owner-conv
-  // chip + a "brain-dispatched" badge when the claim came from dispatch.
+  // chip + a "brain-dispatched" badge when the claim came from dispatch. Each
+  // card carries HUMAN lifecycle controls (backend-authoritative — every click
+  // hits Api.project.board* then refreshBoard, never a local DOM mutation).
+
+  /** Resolve the displayed conversation id — the human's proxy for a board
+   *  mutation (SAME source the influence lens uses). '' when no active conv. */
+  function _boardConvId() {
+    try {
+      return (typeof activeConvId !== 'undefined' && activeConvId) ? activeConvId : '';
+    } catch (_e) { return ''; }
+  }
+
+  /** One action button (SVG icon + label). `act` ∈ complete|block|reopen. */
+  function _boardActionBtn(act, glyph, labelKey, fallback) {
+    return '<button type="button" class="pb-board-act pb-board-act-' + act +
+      '" data-act="' + act + '" title="' + _esc(_t(labelKey, fallback)) + '">' +
+      ((typeof Icon === 'function') ? Icon(glyph, 12) : '') +
+      '<span>' + _esc(_t(labelKey, fallback)) + '</span></button>';
+  }
+
   function _boardCard(t) {
     var owner = t.owner_conv_id || '';
     var ownerChip = owner
@@ -512,10 +534,73 @@
         + '">' + ((typeof Icon === 'function') ? Icon('rocket', 11) : '')
         + '<span>' + _esc(_t('projectBrain.dispatched', 'auto')) + '</span></span>'
       : '';
+    // Human lifecycle controls, gated by status:
+    //   • complete + block on open|claimed (lifecycle of live work)
+    //   • reopen on claimed (break a stuck live claim) AND done (revive)
+    var acts = [];
+    if (t.status === 'open' || t.status === 'claimed') {
+      acts.push(_boardActionBtn('complete', 'check', 'projectBrain.actComplete', 'Done'));
+      acts.push(_boardActionBtn('block', 'ban', 'projectBrain.actBlock', 'Block'));
+    }
+    if (t.status === 'claimed' || t.status === 'done') {
+      acts.push(_boardActionBtn('reopen', 'refresh', 'projectBrain.actReopen', 'Reopen'));
+    }
+    var actionsRow = acts.length
+      ? '<div class="pb-board-card-actions">' + acts.join('') + '</div>' : '';
     return '<div class="pb-board-card pb-board-' + _esc(t.status) + '" data-task-id="' +
       _esc(t.id) + '">' +
       '<div class="pb-board-title">' + _esc(t.title) + '</div>' +
-      '<div class="pb-board-card-meta">' + ownerChip + badge + '</div></div>';
+      '<div class="pb-board-card-meta">' + ownerChip + badge + '</div>' +
+      actionsRow + '</div>';
+  }
+
+  /** Dispatch a per-card human mutation → backend → refreshBoard (no local
+   *  DOM mutation; the board re-renders verbatim from the backend). */
+  function _boardMutate(act, taskId, btn) {
+    var api = (typeof Api !== 'undefined' && Api.project) ? Api.project : null;
+    var path = _state.path || _displayedProjectPath();
+    if (!api || !path || !taskId) return;
+    var convId = _boardConvId();
+    var call = null;
+    if (act === 'complete' && typeof api.boardComplete === 'function') {
+      call = api.boardComplete(path, taskId, convId);
+    } else if (act === 'reopen' && typeof api.boardReopen === 'function') {
+      call = api.boardReopen(path, taskId, convId);
+    } else if (act === 'block' && typeof api.boardBlock === 'function') {
+      var reason = '';
+      if (typeof prompt === 'function') {
+        reason = prompt(_t('projectBrain.blockReasonPrompt', 'Why is this blocked?')) || '';
+      }
+      call = api.boardBlock(path, taskId, convId, reason);
+    }
+    if (!call) return;
+    if (btn) btn.disabled = true;
+    Promise.resolve(call).then(function () {
+      refreshBoard(path);
+      refreshInfluence(path);
+      refreshConvInfluenceBar();
+    }).catch(function (e) {
+      if (typeof console !== 'undefined') console.warn('[ProjectBrain] board ' + act + ' failed', e);
+      if (btn) btn.disabled = false;
+    });
+  }
+
+  /** Prompt for a title and post a new OPEN epic (created_by_conv = displayed
+   *  conv). Disabled entirely when there's no conversation context (the
+   *  backend refuses a blank convId, so the UI must not offer it). */
+  function _boardPostNew() {
+    var api = (typeof Api !== 'undefined' && Api.project) ? Api.project : null;
+    var path = _state.path || _displayedProjectPath();
+    var convId = _boardConvId();
+    if (!api || !path || !convId || typeof api.boardPost !== 'function') return;
+    var title = (typeof prompt === 'function')
+      ? (prompt(_t('projectBrain.newEpicPrompt', 'New epic title')) || '').trim() : '';
+    if (!title) return;
+    Promise.resolve(api.boardPost(path, { title: title, convId: convId })).then(function () {
+      refreshBoard(path);
+    }).catch(function (e) {
+      if (typeof console !== 'undefined') console.warn('[ProjectBrain] board post failed', e);
+    });
   }
 
   function renderBoard(board) {
@@ -540,7 +625,19 @@
         ' <span class="pb-board-count">' + cols[key].length + '</span></div>' +
         cards + '</div>';
     }
+    // "＋ New epic" affordance (SVG plus, no emoji). Disabled with an
+    // explanatory title when there's no conversation context, because the
+    // backend refuses a blank created_by_conv → the UI must not offer it.
+    var hasConv = !!_boardConvId();
+    var newBtn = '<button type="button" class="pb-board-new" id="pbBoardNewBtn"' +
+      (hasConv ? '' : ' disabled') + ' title="' +
+      _esc(hasConv ? _t('projectBrain.newEpic', 'New epic')
+                   : _t('projectBrain.newEpicNoConv',
+                        'Open a conversation to post an epic')) + '">' +
+      ((typeof Icon === 'function') ? Icon('plus', 13) : '') +
+      '<span>' + _esc(_t('projectBrain.newEpic', 'New epic')) + '</span></button>';
     el.innerHTML =
+      '<div class="pb-board-toolbar">' + newBtn + '</div>' +
       lane('open', 'projectBrain.laneOpen') +
       lane('claimed', 'projectBrain.laneClaimed') +
       lane('done', 'projectBrain.laneDone');
@@ -552,6 +649,20 @@
         if (cid && typeof loadConversation === 'function') loadConversation(cid);
       });
     }
+    // "＋ New epic"
+    var nb = el.querySelector('#pbBoardNewBtn');
+    if (nb && !nb.disabled) nb.addEventListener('click', _boardPostNew);
+    // Per-card human lifecycle actions (complete / block / reopen).
+    var actBtns = el.querySelectorAll('.pb-board-act');
+    for (var a = 0; a < actBtns.length; a++) {
+      actBtns[a].addEventListener('click', function (ev) {
+        var btn = ev.currentTarget;
+        var card = btn.closest ? btn.closest('.pb-board-card') : null;
+        var tid = card ? card.getAttribute('data-task-id') : '';
+        var act = btn.getAttribute('data-act');
+        if (tid && act) _boardMutate(act, tid, btn);
+      });
+    }
   }
 
   function refreshBoard(path) {
@@ -561,6 +672,257 @@
       renderBoard(board || {});
     }).catch(function (e) {
       if (typeof console !== 'undefined') console.warn('[ProjectBrain] board load failed', e);
+    });
+  }
+
+  // ── Per-conversation Influence lens ─────────────────────────────
+  // Answers the conversation-scoped question "how is THIS chat affected by
+  // the project brain?" — distinct from the global three columns. The data is
+  // computed BACKEND-side (Api.project.brainInfluence → build_conv_influence),
+  // which reuses the SAME render_charter_block / render_board_block the prompt
+  // injects, so this lens can never drift from what the model actually sees.
+  // The frontend is a pure renderer of that structured verdict.
+
+  /** Build one "chip" segment (icon + count + label) for the influence head. */
+  function _influenceChip(glyph, n, labelKey, fallbackLabel, cls) {
+    if (!n) return '';
+    var label = _t('projectBrain.' + labelKey, fallbackLabel).replace('{n}', n);
+    return '<span class="pb-inf-chip ' + (cls || '') + '">' +
+      ((typeof Icon === 'function') ? Icon(glyph, 12) : '') +
+      '<span>' + _esc(label) + '</span></span>';
+  }
+
+  /** Render one board epic row inside an influence group. */
+  function _influenceEpicRow(t, cls) {
+    var owner = t.owner
+      ? '<button type="button" class="pb-conv-chip" data-conv-id="' + _esc(t.owner) + '">' +
+        _esc(t.owner) + '</button>'
+      : '';
+    return '<div class="pb-inf-epic ' + (cls || '') + '">' +
+      '<span class="pb-inf-epic-title">' + _esc(t.title || t.id) + '</span>' +
+      owner + '</div>';
+  }
+
+  /**
+   * Render the per-conversation influence lens from the backend verdict.
+   * `inf` is the build_conv_influence dict. Renders NOTHING (hides the banner)
+   * when the brain has no effect on this conversation (no charter + empty
+   * board + no pending) — so a solo/empty project adds no visual noise.
+   */
+  function renderInfluence(inf) {
+    var banner = document.getElementById('projectBrainInfluence');
+    var body = document.getElementById('projectBrainInfluenceBody');
+    var convEl = document.getElementById('projectBrainInfluenceConv');
+    if (!banner || !body) return;
+    inf = inf || {};
+    var charter = inf.charter || {};
+    var board = inf.board || {};
+    var mine = board.mine || [];
+    var avoid = board.avoid || [];
+    var open = board.open || [];
+    var pending = inf.pendingDecisions || [];
+    var charterActive = !!charter.injected &&
+      (!!charter.content || (charter.decisions || []).length);
+
+    // Nothing influences this conversation → hide the banner entirely.
+    if (!charterActive && !mine.length && !avoid.length && !open.length &&
+        !pending.length) {
+      banner.hidden = true;
+      body.innerHTML = '';
+      if (convEl) convEl.textContent = '';
+      return;
+    }
+    banner.hidden = false;
+
+    // The conversation this lens is scoped to (title if we can resolve it).
+    if (convEl) {
+      var label = '';
+      try {
+        var conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
+        label = (conv && (conv.title || conv.id)) || inf.convId || '';
+      } catch (_e) { label = inf.convId || ''; }
+      convEl.textContent = label ? ('· ' + label) : '';
+    }
+
+    // Head chips — a one-glance summary of the influence "shape".
+    var chips = '';
+    if (charterActive) {
+      chips += _influenceChip('lightbulb',
+        (charter.decisions || []).length || 1, 'infCharterBound',
+        'bound by charter', 'pb-inf-chip-charter');
+    }
+    chips += _influenceChip('package', mine.length, 'infOwns',
+      '{n} owned by you', 'pb-inf-chip-mine');
+    chips += _influenceChip('alertTriangle', avoid.length, 'infAvoid',
+      '{n} to avoid', 'pb-inf-chip-avoid');
+    chips += _influenceChip('messageSquare', pending.length, 'infPending',
+      '{n} awaiting you', 'pb-inf-chip-pending');
+
+    var parts = [];
+    if (chips) parts.push('<div class="pb-inf-chips">' + chips + '</div>');
+
+    // Charter this conversation is bound by (the shared north star + the
+    // committed decisions the prompt actually injects).
+    if (charterActive) {
+      var cparts = ['<div class="pb-inf-group pb-inf-group-charter">'];
+      cparts.push('<div class="pb-inf-group-head">' +
+        _esc(_t('projectBrain.infCharterHead', 'Bound by the charter')) + '</div>');
+      if (charter.content) {
+        cparts.push('<div class="pb-inf-northstar">' + _esc(charter.content) + '</div>');
+      }
+      var decs = charter.decisions || [];
+      if (decs.length) {
+        cparts.push('<ul class="pb-inf-decisions">');
+        for (var i = 0; i < Math.min(decs.length, 6); i++) {
+          cparts.push('<li>' + _esc(decs[i]) + '</li>');
+        }
+        cparts.push('</ul>');
+      }
+      cparts.push('</div>');
+      parts.push(cparts.join(''));
+    }
+
+    // Board influence — what THIS conv owns vs. must not redo.
+    if (mine.length) {
+      parts.push('<div class="pb-inf-group pb-inf-group-mine">' +
+        '<div class="pb-inf-group-head">' +
+        _esc(_t('projectBrain.infMineHead', 'Epics you are advancing')) + '</div>' +
+        mine.map(function (t) { return _influenceEpicRow(t, 'pb-inf-mine'); }).join('') +
+        '</div>');
+    }
+    if (avoid.length) {
+      parts.push('<div class="pb-inf-group pb-inf-group-avoid">' +
+        '<div class="pb-inf-group-head">' +
+        _esc(_t('projectBrain.infAvoidHead',
+          'Avoid duplicating — advanced by a sibling')) + '</div>' +
+        avoid.map(function (t) { return _influenceEpicRow(t, 'pb-inf-avoid'); }).join('') +
+        '</div>');
+    }
+    if (open.length) {
+      parts.push('<div class="pb-inf-group pb-inf-group-open">' +
+        '<div class="pb-inf-group-head">' +
+        _esc(_t('projectBrain.infOpenHead', 'Open — you could claim')) + '</div>' +
+        open.slice(0, 6).map(function (t) {
+          return _influenceEpicRow(t, 'pb-inf-open');
+        }).join('') +
+        '</div>');
+    }
+    body.innerHTML = parts.join('');
+
+    // conv chips (peer owners) → open that conversation.
+    var chipsEls = body.querySelectorAll('.pb-conv-chip');
+    for (var c = 0; c < chipsEls.length; c++) {
+      chipsEls[c].addEventListener('click', function (ev) {
+        var cid = ev.currentTarget.getAttribute('data-conv-id');
+        if (cid && typeof loadConversation === 'function') loadConversation(cid);
+      });
+    }
+  }
+
+  /** Fetch + render the per-conversation influence lens for (path, active conv). */
+  function refreshInfluence(path) {
+    var api = (typeof Api !== 'undefined' && Api.project) ? Api.project : null;
+    var banner = document.getElementById('projectBrainInfluence');
+    if (!api || !path || typeof api.brainInfluence !== 'function') {
+      if (banner) banner.hidden = true;
+      return;
+    }
+    var convId = (typeof activeConvId !== 'undefined' && activeConvId)
+      ? activeConvId : '';
+    if (!convId) { if (banner) banner.hidden = true; return; }
+    Promise.resolve(api.brainInfluence(path, convId)).then(function (inf) {
+      // Guard against a conversation switch mid-flight.
+      if (typeof activeConvId !== 'undefined' && inf && inf.convId &&
+          inf.convId !== activeConvId) return;
+      renderInfluence(inf || {});
+    }).catch(function (e) {
+      if (typeof console !== 'undefined') console.warn('[ProjectBrain] influence load failed', e);
+      if (banner) banner.hidden = true;
+    });
+  }
+
+  // ── Always-visible per-conversation Influence BAR (docked on chat view) ──
+  // The full Influence lens (renderInfluence) lives inside the Project Brain
+  // overlay, which is closed by default. This bar is the ALWAYS-ON entry point
+  // docked on the conversation view itself: a slim chip strip summarising how
+  // THIS conversation is affected (bound by charter · N owned · M to avoid ·
+  // K awaiting), updated on every conversation switch, hidden when there's no
+  // influence. Same backend-authoritative source (Api.project.brainInfluence);
+  // clicking opens the full lens. NO second client-side computation.
+
+  /** Compute the same influence shape from a verdict → {charterActive, mine, avoid, pending}. */
+  function _influenceShape(inf) {
+    inf = inf || {};
+    var charter = inf.charter || {};
+    var board = inf.board || {};
+    return {
+      charterActive: !!charter.injected &&
+        (!!charter.content || (charter.decisions || []).length),
+      mine: (board.mine || []).length,
+      avoid: (board.avoid || []).length,
+      pending: (inf.pendingDecisions || []).length,
+    };
+  }
+
+  /**
+   * Render the inline conversation-influence bar from a backend verdict.
+   * Hides the bar entirely when nothing influences this conversation (a solo/
+   * empty project adds no chrome). Pure renderer of the structured verdict.
+   */
+  function renderConvInfluenceBar(inf) {
+    var bar = document.getElementById('convInfluenceBar');
+    if (!bar) return;
+    var s = _influenceShape(inf);
+    if (!s.charterActive && !s.mine && !s.avoid && !s.pending) {
+      bar.hidden = true;
+      bar.innerHTML = '';
+      return;
+    }
+    var chips = '';
+    // Lead glyph is a map-pin ("you are here in the project"), deliberately
+    // NOT the brain glyph the collab bar above uses — two identical brains
+    // stacked read as a duplicate. This bar is the conv-scoped sub-lens.
+    chips += '<span class="conv-inf-lead">' +
+      ((typeof Icon === 'function') ? Icon('mapPin', 13) : '') +
+      '<span>' + _esc(_t('projectBrain.barLead', 'This chat')) + '</span></span>';
+    if (s.charterActive) {
+      chips += _influenceChip('lightbulb', 1, 'infCharterBound',
+        'bound by charter', 'pb-inf-chip-charter');
+    }
+    chips += _influenceChip('package', s.mine, 'infOwns',
+      '{n} owned by you', 'pb-inf-chip-mine');
+    chips += _influenceChip('alertTriangle', s.avoid, 'infAvoid',
+      '{n} to avoid', 'pb-inf-chip-avoid');
+    chips += _influenceChip('messageSquare', s.pending, 'infPending',
+      '{n} awaiting you', 'pb-inf-chip-pending');
+    bar.innerHTML = chips;
+    bar.hidden = false;
+    bar.title = _t('projectBrain.barOpenHint', 'How THIS conversation is influenced — click to jump to its lens');
+  }
+
+  /**
+   * Resolve (path, active conv) and refetch the inline influence bar. Called
+   * by main.js on every conversation switch (window.convInfluenceRefresh) and
+   * by the live push refresh. Backend-authoritative — never recomputed here.
+   */
+  function refreshConvInfluenceBar() {
+    var bar = document.getElementById('convInfluenceBar');
+    var api = (typeof Api !== 'undefined' && Api.project) ? Api.project : null;
+    var path = _displayedProjectPath();
+    var convId = (typeof activeConvId !== 'undefined' && activeConvId)
+      ? activeConvId : '';
+    if (!api || typeof api.brainInfluence !== 'function' || !path || !convId) {
+      if (bar) { bar.hidden = true; bar.innerHTML = ''; }
+      return;
+    }
+    Promise.resolve(api.brainInfluence(path, convId)).then(function (inf) {
+      // A conversation switch may have landed mid-flight — drop a stale reply.
+      if (typeof activeConvId !== 'undefined' && inf && inf.convId &&
+          inf.convId !== activeConvId) return;
+      renderConvInfluenceBar(inf || {});
+    }).catch(function (e) {
+      if (typeof console !== 'undefined') console.warn('[ProjectBrain] conv-influence bar load failed', e);
+      if (bar) { bar.hidden = true; bar.innerHTML = ''; }
     });
   }
 
@@ -580,6 +942,9 @@
         _state.cbTimer = null;
         refreshCharter(path);
         refreshBoard(path);
+        refreshInfluence(path);
+        refreshConvInfluenceBar();
+        _refreshPeers(path);
       }, 300);
     };
     pushSubscribe('project', '*', handler);
@@ -611,8 +976,46 @@
       openFeed(path);
       refreshCharter(path);
       refreshBoard(path);
+      refreshInfluence(path);
+      _refreshPeers(path);
       _subscribePanelLive(path);
     }
+  }
+
+  /** Drive the Team/Peers column (project-brain-peers.js) if it's loaded. */
+  function _refreshPeers(path) {
+    if (typeof window.ProjectBrainPeers !== 'undefined' &&
+        window.ProjectBrainPeers &&
+        typeof window.ProjectBrainPeers.refreshPeers === 'function') {
+      window.ProjectBrainPeers.refreshPeers(path);
+    }
+  }
+
+  /**
+   * Deep-link entry for the per-conversation influence BAR: open the panel AND
+   * scroll/flash the Influence lens (the conv-scoped section), rather than
+   * landing at the top on the project-wide columns. This disambiguates the two
+   * stacked bars — the project-wide collab bar opens the panel plainly
+   * (openProjectBrain), while the conversation-scoped bar deep-links HERE to
+   * its own lens, so "why does clicking either just open the same panel?"
+   * becomes "each bar takes me to ITS section".
+   */
+  function openProjectBrainInfluence() {
+    openProjectBrain();
+    var banner = document.getElementById('projectBrainInfluence');
+    if (!banner) return;
+    // The influence data loads on a microtask (brainInfluence Promise); wait a
+    // beat so the banner is un-hidden before we scroll/flash it.
+    setTimeout(function () {
+      if (banner.hidden) return;   // no influence → nothing to deep-link to
+      try { banner.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
+      catch (_e) { /* jsdom / older browsers: best-effort */ }
+      banner.classList.remove('pb-influence-flash');
+      // reflow so re-adding the class re-triggers the animation
+      void banner.offsetWidth;
+      banner.classList.add('pb-influence-flash');
+      setTimeout(function () { banner.classList.remove('pb-influence-flash'); }, 1400);
+    }, 120);
   }
 
   function closeProjectBrain() {
@@ -620,6 +1023,8 @@
     if (overlay) { overlay.hidden = true; overlay.classList.remove('pb-open'); }
     closeFeed();
     _unsubscribePanelLive();
+    var banner = document.getElementById('projectBrainInfluence');
+    if (banner) { banner.hidden = true; }
   }
 
   function toggleProjectBrain() {
@@ -639,10 +1044,22 @@
       openFeed(path);
       refreshCharter(path);
       refreshBoard(path);
+      refreshInfluence(path);
+      _refreshPeers(path);
       _subscribePanelLive(path);
-    } else if (!path) {
+    } else if (path) {
+      // Same project, but the active CONVERSATION may have changed — the
+      // influence lens is conv-scoped, so re-resolve it even when the project
+      // key is unchanged (charter/board are project-scoped and unaffected).
+      // The peer roster also excludes the active conv server-side, so refresh
+      // it too (a conv switch changes who counts as a "peer").
+      refreshInfluence(path);
+      _refreshPeers(path);
+    } else {
       closeFeed();
       _unsubscribePanelLive();
+      var banner = document.getElementById('projectBrainInfluence');
+      if (banner) { banner.hidden = true; }
     }
   }
 
@@ -659,11 +1076,17 @@
     refreshCharter: refreshCharter,
     renderBoard: renderBoard,
     refreshBoard: refreshBoard,
+    renderInfluence: renderInfluence,
+    refreshInfluence: refreshInfluence,
+    renderConvInfluenceBar: renderConvInfluenceBar,
+    refreshConvInfluenceBar: refreshConvInfluenceBar,
     _onPush: _onPush,
     _state: _state,
   };
   window.toggleProjectBrain = toggleProjectBrain;
   window.openProjectBrain = openProjectBrain;
+  window.openProjectBrainInfluence = openProjectBrainInfluence;
   window.closeProjectBrain = closeProjectBrain;
   window.projectBrainRefresh = projectBrainRefresh;
+  window.convInfluenceRefresh = refreshConvInfluenceBar;
 })();

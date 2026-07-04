@@ -36,9 +36,10 @@ from lib.database import _bootstrap as b
 logger = get_logger(__name__)
 
 # Mirror _core._PGDATA without importing _core (which has heavy import-time
-# side effects — it bootstraps PG on import).
-_BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_DEFAULT_PGDATA = os.path.join(_BASE_DIR, 'data', 'pgdata')
+# side effects — it bootstraps PG on import). Uses the writable data root so a
+# frozen desktop build points at the same pgdata the server actually uses.
+from lib.runtime_paths import data_root
+_DEFAULT_PGDATA = os.path.join(data_root(), 'pgdata')
 
 
 def _resolve_pgdata(arg):

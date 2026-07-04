@@ -698,7 +698,15 @@ async function undoAllModifications() {
   )
     return;
   try {
-    const resp = await Api.project.undoAll();
+    // ★ Pin the conversation's own project so undo-all targets the session
+    //   that recorded the changes — NOT whichever project is globally active
+    //   in the UI. Mirrors per-round undo; keeps behaviour independent of UI
+    //   focus when conversations edit different projects concurrently.
+    const conv0 = getActiveConv();
+    const body = {};
+    const convProjectPath = _getConvProjectPath(conv0);
+    if (convProjectPath) body.projectPath = convProjectPath;
+    const resp = await Api.project.undoAll(body);
     const data = resp ? await resp.json().catch(() => ({})) : {};
     if (resp && resp.ok && data.ok) {
       if (typeof showToast === 'function') {
@@ -1179,7 +1187,7 @@ async function mpNewFolder() {
     okText: t('folder.create'),
   });
   if (name == null) return; // cancelled
-  const clean = name.trim();
+  const clean = String(name).trim();
   if (!clean) return;
   try {
     const resp = await Api.project.mkdir(parent, clean);

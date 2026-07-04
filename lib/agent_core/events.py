@@ -118,8 +118,10 @@ class EventType:
     PHASE = 'phase'
     DONE = 'done'
     ERROR = 'error'
+    RETRY_RESET = 'retry_reset'
     # ── content ──
     DELTA = 'delta'
+    DELTA_RESET = 'delta_reset'
     # ── tool ──
     TOOL_START = 'tool_start'
     TOOL_PROGRESS = 'tool_progress'
@@ -197,16 +199,44 @@ _SPECS: tuple[EventSpec, ...] = (
               'Terminal event — the turn finished (success or, with `error`, failure).',
               terminal=True,
               fields={'error': 'error envelope if failed (else absent)',
-                      'finishReason': 'stop|error|aborted|max_turns'}),
+                      'finishReason': 'stop|error|aborted|max_turns',
+                      'committedMessage': '(optional) the EXACT settled assistant '
+                                          'message dict just written to '
+                                          'conversations.messages — the frontend '
+                                          'projects the terminal bubble from THIS '
+                                          'verbatim, no keep-longer/snapshot '
+                                          'reconstruction. Absent on skip paths '
+                                          '(freshness/inline/CAS-exhaustion), where '
+                                          'the client keeps its transient buffer.'}),
     EventSpec(EventType.ERROR, _C.LIFECYCLE,
               'Inline error envelope (non-terminal diagnostics; fatal errors '
               'arrive as a `done` with `error`).',
               fields={'content': 'error text', 'detail': 'structured detail'}),
+    EventSpec(EventType.RETRY_RESET, _C.LIFECYCLE,
+              'A transient-error turn is being auto-re-run from scratch. The '
+              'client MUST clear the live bubble\'s accumulated content / '
+              'thinking (and tool rounds) so the about-to-be-re-streamed deltas '
+              'do not stack on top of the failed attempt\'s partial output. '
+              'Non-terminal: the task stays `running`; a `phase:retrying` '
+              'frame carrying the attempt/backoff detail accompanies it.',
+              fields={'attempt': 'whole-turn retry number (1-based)',
+                      'max': 'retry budget',
+                      'kind': 'error kind that triggered the re-run'}),
     # ───────────────────────── content ─────────────────────────
     EventSpec(EventType.DELTA, _C.CONTENT,
               'Incremental assistant output — append to the live bubble.',
               fields={'content': 'text delta (may be absent)',
                       'thinking': 'reasoning delta (may be absent)'}),
+    EventSpec(EventType.DELTA_RESET, _C.CONTENT,
+              'The just-ended LLM round issued TOOL CALLS, so any prose it '
+              'streamed before those calls was inter-round narration (e.g. '
+              '"Now let me check the utility functions."), NOT the final '
+              'answer. The client MUST clear the live bubble\'s accumulated '
+              'content / thinking so this narration does not get concatenated '
+              'in front of the terminal round\'s real answer. Unlike '
+              '`retry_reset`, it MUST NOT touch tool rounds — the tool calls '
+              'from this turn are legitimate and keep rendering. Non-terminal.',
+              fields={'round': 'the tool-call round number whose prose is dropped'}),
     # ───────────────────────── tool ─────────────────────────
     EventSpec(EventType.TOOL_START, _C.TOOL,
               'A tool call began executing.',

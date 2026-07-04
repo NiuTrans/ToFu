@@ -67,6 +67,123 @@ if _fault_shm_log is None:
     else:
         faulthandler.enable(all_threads=True)
 
+
+# ── Faulthandler-sink hygiene + event-loop stall detection (pure helpers) ──
+# These back the boot-time /dev/shm prune and the loop-stall watchdog wired up
+# inside _serve(). Kept at module scope (not nested in _serve) so they are pure
+# and unit-testable without a running loop — see tests/test_loop_stall_watchdog.py.
+_FAULT_DUMP_PREFIX = 'tofu_faulthandler_'
+_FAULT_DUMP_SUFFIX = '.log'
+
+
+def _pid_alive(pid):
+    """Best-effort liveness probe for *pid* (signal 0). Conservative: an
+    ambiguous OSError (other than 'no such process') reports True so we never
+    delete a dump whose owner might still be running."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OverflowError:
+        return False  # pid out of representable range → cannot be a live process
+    except PermissionError:
+        return True   # exists but owned by another user
+    except OSError:
+        return True   # ambiguous — err on the side of keeping
+    return True
+
+
+def _parse_fault_dump_pid(basename):
+    """Extract the pid from ``tofu_faulthandler_<pid>.log`` (else None)."""
+    if not basename.startswith(_FAULT_DUMP_PREFIX) or not basename.endswith(_FAULT_DUMP_SUFFIX):
+        return None
+    core = basename[len(_FAULT_DUMP_PREFIX):-len(_FAULT_DUMP_SUFFIX)]
+    try:
+        return int(core)
+    except (ValueError, TypeError):
+        return None
+
+
+def _prune_stale_fault_dumps(directory='/dev/shm', keep_basename='',
+                             pid_alive=_pid_alive, logger=None):
+    """Delete ``tofu_faulthandler_<pid>.log`` files in *directory* whose pid is
+    no longer alive. Never touches *keep_basename* (our own live sink) or files
+    that don't match the naming pattern. Returns the number removed.
+
+    server.py opens one such file on every boot but historically never removed
+    old ones, so the /dev/shm sink accumulated thousands of dead-pid files."""
+    import glob as _glob
+    removed = 0
+    pattern = os.path.join(directory, _FAULT_DUMP_PREFIX + '*' + _FAULT_DUMP_SUFFIX)
+    for path in _glob.glob(pattern):
+        base = os.path.basename(path)
+        if keep_basename and base == keep_basename:
+            continue
+        pid = _parse_fault_dump_pid(base)
+        if pid is None or pid_alive(pid):
+            continue
+        try:
+            os.unlink(path)
+            removed += 1
+        except OSError as _rm_err:
+            if logger is not None:
+                logger.debug('[LoopWatch] could not prune %s: %s', path, _rm_err)
+    return removed
+
+
+def _loop_stall_decide(age, threshold, already_dumped):
+    """Pure decision for the loop-stall watchdog.
+
+    Given the heartbeat *age* (seconds since the last on-loop bump), the stall
+    *threshold*, and whether we've *already_dumped* for the current stall
+    episode, return ``(should_dump, next_already_dumped)``. Emits at most one
+    dump per contiguous stall episode and re-arms once the loop recovers."""
+    if threshold <= 0:
+        return (False, already_dumped)   # watchdog disabled
+    if age <= threshold:
+        return (False, False)            # healthy → re-arm for the next episode
+    if already_dumped:
+        return (False, True)             # still stalled, already captured
+    return (True, True)                  # stalled and not yet captured → dump
+
+
+def _should_arm_ctimer(threshold, sink):
+    """Pure gate for the GIL-INDEPENDENT capture path.
+
+    ``faulthandler.dump_traceback_later`` runs from a dedicated C timer thread
+    that does NOT acquire the GIL, so it fires even when the loop is wedged
+    inside a single monolithic GIL-holding C call (the documented ``json.dumps``
+    / catastrophic-regex pit) — the exact case the Python-thread watcher, which
+    must take the GIL to run, is BLIND to. Arm it only when the watchdog is
+    enabled (*threshold* > 0) AND we have a sink with a real file descriptor
+    (``dump_traceback_later`` requires an fd — an in-memory buffer has none)."""
+    if threshold is None or threshold <= 0:
+        return False
+    if sink is None:
+        return False
+    try:
+        sink.fileno()
+    except Exception:
+        return False
+    return True
+
+
+
+# One-shot boot cleanup: prune dead-pid faulthandler dumps from the tmpfs sink
+# so it stays bounded (the file we just opened for THIS pid is preserved).
+if _fault_shm_log is not None:
+    try:
+        _pruned = _prune_stale_fault_dumps(
+            directory='/dev/shm',
+            keep_basename=os.path.basename(_FAULT_SHM_PATH))
+        if _pruned:
+            sys.stderr.write('[boot] pruned %d stale faulthandler dump(s) from /dev/shm\n'
+                             % _pruned)
+    except Exception:
+        pass   # cleanup is best-effort; never block boot on it
+
 # ── Pin mapped pages into RAM (FUSE SIGBUS mitigation) ──
 # All .so files (C extensions, libpython, libc) are dlopen'd via mmap with
 # demand-paged code segments. When those files live on a FUSE mount, a
@@ -474,7 +591,10 @@ BASE_DIR = _PROJ_DIR
 # ── Logging setup (identical to server.py) ──
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 
-LOG_DIR = os.path.join(BASE_DIR, 'logs')
+# LOG_DIR must be WRITABLE. In a frozen desktop build BASE_DIR is the read-only
+# bundle root, so route logs to the writable root (see lib/runtime_paths).
+from lib.runtime_paths import data_root as _tofu_data_root, logs_root as _tofu_logs_root
+LOG_DIR = _tofu_logs_root()
 os.makedirs(LOG_DIR, exist_ok=True)
 
 _LOG_FMT = '%(asctime)s [%(levelname)s] %(name)s [%(threadName)s]: %(message)s'
@@ -1292,7 +1412,7 @@ def _ensure_tls_certs(certfile='', keyfile=''):
             return certfile, keyfile
         _tls_log.warning('[TLS] Provided cert/key files not found: %s, %s', certfile, keyfile)
 
-    cert_dir = os.path.join(BASE_DIR, 'data', 'certs')
+    cert_dir = os.path.join(_tofu_data_root(), 'certs')
     cert_path = os.path.join(cert_dir, 'tofu.pem')
     key_path = os.path.join(cert_dir, 'tofu.key')
 
@@ -1404,7 +1524,7 @@ if __name__ == '__main__':
 
     # ── Instance lock — prevent multiple servers on the same project dir ──
     import socket as _sock_mod
-    _lock_dir = os.path.join(BASE_DIR, 'data')
+    _lock_dir = _tofu_data_root()
     os.makedirs(_lock_dir, exist_ok=True)
     _lock_path = os.path.join(_lock_dir, '.server.lock')
     _instance_lock_fd = None
@@ -1788,6 +1908,118 @@ if __name__ == '__main__':
             loop.create_task(_task_reaper())
             _server_log.info('[Server] Finished-task reaper every %ds',
                              _cleanup_interval)
+
+
+        # ── Event-loop stall watchdog ──
+        # We have no supervisor and faulthandler only fires on C-level fatal
+        # signals, so a wedged event loop (a blocking call on the loop thread,
+        # a starved executor, a FUSE/PG stall) currently goes SILENT: the port
+        # stops accept()ing while the process stays alive, and we get no stack
+        # to diagnose it. This turns that into a captured all-thread dump.
+        #
+        # TWO complementary capture paths:
+        #
+        #  (A) GUARANTEED, GIL-INDEPENDENT — faulthandler.dump_traceback_later.
+        #      The async heartbeat acts as a watchdog PET: on each bump it
+        #      cancels + re-arms a C-timer set to fire in _stall_threshold s.
+        #      While the loop is healthy the timer is petted before it fires;
+        #      when the loop wedges — even inside a single monolithic
+        #      GIL-holding C call (the documented json.dumps / catastrophic-
+        #      regex pit) — the timer's DEDICATED C THREAD fires WITHOUT taking
+        #      the GIL and writes an all-thread dump to the FUSE-resilient
+        #      /dev/shm sink. This is the path that covers the one root cause
+        #      the project has proven can happen.
+        #
+        #  (B) COMPLEMENTARY, human-readable — an off-loop daemon thread watches
+        #      the heartbeat timestamp and, on a stall, emits an ERROR log line
+        #      (with measured duration) + a dump to the FUSE log sink. It works
+        #      for GIL-RELEASING stalls (blocking syscalls: FUSE/PG) but is
+        #      BLIND to a GIL-held wedge (it must take the GIL to run) — hence
+        #      it is a signal, never the sole guarantee. Path (A) is.
+        #
+        # One dump per stall episode; both re-arm on recovery.
+        # Set TOFU_LOOP_STALL_SECS=0 to disable both.
+        try:
+            _stall_threshold = float(
+                os.environ.get('TOFU_LOOP_STALL_SECS', '') or '5')
+        except (ValueError, TypeError):
+            _stall_threshold = 5.0
+        try:
+            _stall_bump_interval = float(
+                os.environ.get('TOFU_LOOP_HEARTBEAT_SECS', '') or '1')
+        except (ValueError, TypeError):
+            _stall_bump_interval = 1.0
+        if _stall_bump_interval <= 0:
+            _stall_bump_interval = 1.0
+
+        # The C-timer must fire AFTER a healthy heartbeat would have petted it,
+        # so its timeout must exceed the bump interval; guarantee headroom.
+        _ctimer_timeout = max(_stall_threshold, _stall_bump_interval * 2.0)
+        _arm_ctimer = _should_arm_ctimer(_stall_threshold, _fault_shm_log)
+
+        _loop_heartbeat = {'ts': time.monotonic()}
+
+        async def _loop_heartbeat_task():
+            # Pet path (A): re-arm the GIL-independent C-timer on every bump.
+            while not _shutdown_requested.is_set():
+                _loop_heartbeat['ts'] = time.monotonic()
+                if _arm_ctimer:
+                    try:
+                        faulthandler.cancel_dump_traceback_later()
+                        # exit=False: capture the hang, do NOT abort the process.
+                        faulthandler.dump_traceback_later(
+                            _ctimer_timeout, repeat=False,
+                            file=_fault_shm_log, exit=False)
+                    except Exception as _ct_err:
+                        _server_log.warning('[LoopWatch] could not arm C-timer: %s', _ct_err)
+                await asyncio.sleep(_stall_bump_interval)
+            if _arm_ctimer:
+                try:
+                    faulthandler.cancel_dump_traceback_later()
+                except Exception:
+                    pass
+
+        def _loop_stall_watch():
+            # Poll fast enough to notice a stall promptly, but never faster
+            # than a fraction of the threshold. Runs off-loop as a daemon.
+            poll = max(0.5, min(_stall_bump_interval, _stall_threshold / 2.0))
+            already_dumped = False
+            while not _shutdown_requested.is_set():
+                _shutdown_requested.wait(poll)
+                if _shutdown_requested.is_set():
+                    break
+                age = time.monotonic() - _loop_heartbeat['ts']
+                should_dump, already_dumped = _loop_stall_decide(
+                    age, _stall_threshold, already_dumped)
+                if not should_dump:
+                    continue
+                _server_log.error(
+                    '[LoopWatch] event loop STALLED ~%.1fs (threshold=%.1fs) — '
+                    'dumping all-thread stacks to faulthandler sinks', age, _stall_threshold)
+                for _sink in (_fault_shm_log, _fault_log):
+                    if _sink is None:
+                        continue
+                    try:
+                        _sink.write('\n=== LOOP STALL pid=%d age=%.1fs at %s ===\n'
+                                    % (os.getpid(), age, time.strftime('%Y-%m-%d %H:%M:%S')))
+                        _sink.flush()
+                        faulthandler.dump_traceback(file=_sink, all_threads=True)
+                        _sink.flush()
+                    except Exception as _dump_err:
+                        _server_log.warning('[LoopWatch] dump to sink failed: %s', _dump_err)
+
+        if _stall_threshold > 0:
+            loop.create_task(_loop_heartbeat_task())
+            _stall_thread = threading.Thread(
+                target=_loop_stall_watch, name='tofu-loopwatch', daemon=True)
+            _stall_thread.start()
+            _server_log.info(
+                '[Server] Loop-stall watchdog armed (threshold=%.1fs, heartbeat=%.1fs, '
+                'GIL-independent C-timer=%s @ %.1fs)',
+                _stall_threshold, _stall_bump_interval,
+                'on' if _arm_ctimer else 'off', _ctimer_timeout)
+        else:
+            _server_log.info('[Server] Loop-stall watchdog disabled (TOFU_LOOP_STALL_SECS=0)')
 
         # Bridge the SIGTERM threading.Event to an async trigger Hypercorn
         # awaits. When set, Hypercorn stops accepting new connections and

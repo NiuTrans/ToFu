@@ -19,7 +19,7 @@ MAX_SCHEDULED_TASKS = 100
 
 # Task types that execute arbitrary code and are gated by
 # lib.SCHEDULER_ALLOW_CODE_EXEC. 'prompt'/'agent' are LLM-only;
-# 'pg_backup'/'optimizer'/'reserve_reclaim' ignore their command field.
+# 'pg_backup'/'pg_basebackup'/'optimizer'/'reserve_reclaim' ignore their command field.
 _CODE_EXEC_TASK_TYPES = frozenset({'command', 'python'})
 
 
@@ -332,6 +332,23 @@ class ScheduledTaskManager:
             except Exception as e:
                 logger.error('[Scheduler] pg_backup task failed: %s', e, exc_info=True)
                 return False, 'PG backup error (see logs)'
+
+        elif task_type == 'pg_basebackup':
+            # Tier B: self-contained pg_basebackup -X stream of the local
+            # primary → $TOFU_DB_BACKUP_ROOT/base/. Opt-in + split-active gated
+            # inside the callee; ``command`` is informational only.
+            try:
+                from lib.database._bootstrap import basebackup_pg_cluster
+                summary = basebackup_pg_cluster()
+                if summary.get('ok'):
+                    return True, f"base backup ok: {summary.get('path')}"
+                reason = summary.get('reason', 'unknown')
+                if reason in ('not_pg', 'tier_b_off', 'split_inactive'):
+                    return True, f'skipped ({reason})'
+                return False, f'base backup failed: {reason}'
+            except Exception as e:
+                logger.error('[Scheduler] pg_basebackup task failed: %s', e, exc_info=True)
+                return False, 'PG base backup error (see logs)'
 
         elif task_type == 'reserve_reclaim':
             # Billing janitor: release reservations orphaned by a crash/abort
@@ -675,6 +692,47 @@ class ScheduledTaskManager:
             logger.debug('[Scheduler] Could not auto-register PostgreSQL Backup '
                          '(will retry after schema ready): %s', e)
 
+    def _ensure_default_pg_basebackup_task(self):
+        """Idempotently register the Tier B base-backup cron task (opt-in).
+
+        Runs ``lib.database._bootstrap.basebackup_pg_cluster()`` on a cadence
+        of ``TOFU_DB_BASEBACKUP_INTERVAL_H`` (default 24h). The callee is a
+        no-op unless ``TOFU_DB_TIER_B=1`` AND the local-primary split is active,
+        so registering it unconditionally is safe. Bases land in
+        ``$TOFU_DB_BACKUP_ROOT/base/`` as ``-X stream`` self-contained backups.
+        """
+        try:
+            db = self._get_db()
+            row = db.execute(
+                "SELECT id FROM scheduled_tasks WHERE name=?",
+                ['PostgreSQL Base Backup']).fetchone()
+            if row:
+                logger.debug('[Scheduler] PostgreSQL Base Backup task already '
+                             'present — skipping auto-registration')
+                return
+            import os as _os
+            interval_h = int(_os.environ.get('TOFU_DB_BASEBACKUP_INTERVAL_H', '24'))
+            interval_h = max(1, min(interval_h, 168))
+            schedule = '30 1 * * *' if interval_h == 24 else '0 */%d * * *' % interval_h
+            task = self.create_task(
+                name='PostgreSQL Base Backup',
+                schedule=schedule,
+                command='lib.database._bootstrap.basebackup_pg_cluster()',  # informational
+                task_type='pg_basebackup',
+                description='Tier B: pg_basebackup -X stream of the local primary '
+                            'to $TOFU_DB_BACKUP_ROOT/base/ (seconds-RPO PITR base). '
+                            'No-op unless TOFU_DB_TIER_B=1 + split active. '
+                            'Auto-registered by lib.scheduler.manager.',
+                notify_on_failure=True,
+                notify_on_success=False,
+                max_runtime=3600,
+            )
+            logger.info('[Scheduler] Auto-registered PostgreSQL Base Backup task id=%s',
+                        task.get('id'))
+        except Exception as e:
+            logger.debug('[Scheduler] Could not auto-register PostgreSQL Base Backup '
+                         '(will retry after schema ready): %s', e)
+
     def _ensure_default_reserve_reclaim_task(self):
         """Idempotently register the billing reserve-reclaim cron task.
 
@@ -849,6 +907,12 @@ def start_scheduler_worker():
             mgr._ensure_default_pg_backup_task()
         except Exception as e:
             logger.debug('[Scheduler] pg-backup-task bootstrap failed: %s', e)
+
+        # Register the Tier B base-backup task (no-op unless opted in).
+        try:
+            mgr._ensure_default_pg_basebackup_task()
+        except Exception as e:
+            logger.debug('[Scheduler] pg-basebackup-task bootstrap failed: %s', e)
 
         # Register the billing reserve-reclaim task (money-correctness net).
         try:

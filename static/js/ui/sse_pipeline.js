@@ -42,6 +42,27 @@ function _clearSseCursor(taskId) {
 }
 
 
+/* ── State-snapshot content-regression guard ─────────────────────────────
+ * A reconnect `state` snapshot replays the server's LAST checkpoint of the
+ * turn. On a flaky network the reconnect can land BEFORE the server has
+ * written a fresh 5s checkpoint (cold-replay race, wrong replica), so the
+ * snapshot's `content`/`thinking` can be EMPTY or SHORTER than what the
+ * client already accumulated from live deltas. Assigning it raw
+ * (`msg.content = ev.content || ""`) then BLANKS an in-progress message —
+ * the "sent and generating, later found completely GONE" symptom.
+ *
+ * The invariant (same as _pollFallback's merge and the 2026-05-31
+ * content-regression detector): a snapshot may only GROW a field, never
+ * shrink it. Returns the longer of the incoming snapshot vs. the value the
+ * message already holds. `field` is 'content' or 'thinking'.
+ */
+function _snapshotLonger(msg, ev, field) {
+  const incoming = (ev && ev[field]) || "";
+  const current = (msg && msg[field]) || "";
+  return incoming.length >= current.length ? incoming : current;
+}
+
+
 /**
  * Connect to an autopilot KICK carrier task (push-a-finished-conv-forward).
 /**
@@ -280,8 +301,7 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
         const _reconStatus = _isEpPlanner
           ? 'Planning…'
           : (_hasPartial ? 'Resuming…' : 'Connecting…');
-        const _reconTime = new Date(assistantMsg.timestamp || Date.now())
-          .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const _reconTime = formatClockTime(assistantMsg.timestamp);
         inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(_reconRole, _reconStatus, _reconTime, assistantMsg._msgId || null));
         /* Pre-populate streaming-body with whatever content was already
          * persisted, so the user sees real progress before SSE arrives.
@@ -328,6 +348,18 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
     }
     twStart(convId);
     const buf = streamBufs.get(convId);
+    /* ★ FIX (stuck "等待中…" on reconnect): seed the fresh stream buffer with
+     *   whatever content/thinking the server already checkpointed onto this
+     *   assistant turn.  twStart() creates an EMPTY buffer; without this the
+     *   buffer stays empty until the first NEW SSE delta arrives, so any
+     *   buffer-driven render (the 300ms deferred re-render in
+     *   showStreamingUIForConv, or a twUpdate triggered by an unrelated field)
+     *   paints updateStreamingUI({content:''}) → the "wait" branch → the bubble
+     *   snaps back to "等待中…" even though the task is mid-generation and the
+     *   English is already persisted.  Mirror assistantMsg → buf exactly like
+     *   the SSE `state`/`delta` handlers do. */
+    if (assistantMsg.content) buf.content = assistantMsg.content;
+    if (assistantMsg.thinking) buf.thinking = assistantMsg.thinking;
     if (assistantMsg.toolRounds)
       buf.toolRounds = [...assistantMsg.toolRounds];
     else if (assistantMsg.searchResults)
@@ -341,6 +373,25 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
       ];
   }
   const stream = activeStreams.get(convId);
+  /* ★ Defensive re-entry seed (strictly additive, decouples the twUpdate path):
+   *   the twStart+seed block above only runs on the FRESH-connection branch
+   *   (`!activeStreams.has(convId)`).  A re-entry that finds an existing stream
+   *   (e.g. an overlapping reconnect race, or a caller that re-invokes
+   *   connectToTask for a conv that already has a live entry) SKIPS twStart and
+   *   its seed — leaving whatever buffer existed.  `_twFlush` (health_stream_timer)
+   *   reads `buf.content` RAW with no message fallback, so an empty buffer there
+   *   would still paint the "等待中…" wait branch over already-checkpointed
+   *   content.  Fill any GAP from the persisted assistant turn — guarded on the
+   *   field being empty so this can NEVER clobber deltas the live `_trySSE`
+   *   closure has been accumulating (that buffer is authoritative once it has
+   *   data). No-op on the fresh path (the block above already seeded it). */
+  const _reentryBuf = streamBufs.get(convId);
+  if (_reentryBuf) {
+    if (!_reentryBuf.content && assistantMsg.content) _reentryBuf.content = assistantMsg.content;
+    if (!_reentryBuf.thinking && assistantMsg.thinking) _reentryBuf.thinking = assistantMsg.thinking;
+    if (!(_reentryBuf.toolRounds && _reentryBuf.toolRounds.length) && assistantMsg.toolRounds && assistantMsg.toolRounds.length)
+      _reentryBuf.toolRounds = [...assistantMsg.toolRounds];
+  }
   let sseWorked = false;
   try {
     sseWorked = await _trySSE(convId, taskId, stream, assistantMsg);
@@ -399,6 +450,7 @@ function dispatchSSEEvent(line, ctx) {
   let _epCriticBuf = ctx.epCriticBuf;
   let _roundThinkingLen = ctx.roundThinkingLen;
   let _lastEventId = ctx.lastEventId;
+  let _pendingEventId = ctx.pendingEventId;
   const convId = ctx.convId, taskId = ctx.taskId, stream = ctx.stream;
   try {
   function _rebindAssistant() {
@@ -432,14 +484,16 @@ function dispatchSSEEvent(line, ctx) {
              epCriticPhase: _epCriticPhase, epCriticMsg: _epCriticMsg,
              epCriticBuf: _epCriticBuf };
   }
-    // ★ Capture id: field for Last-Event-ID reconnection
+    // ★ Capture id: field for Last-Event-ID reconnection.
+    //   The id line PRECEDES its paired data line on the wire, so we only
+    //   STASH it here as pending — the cursor is committed once the paired
+    //   data event has parsed and is about to be applied (see below). This
+    //   guarantees Last-Event-ID never names an event that was not applied:
+    //   a drop between the id and data lines would otherwise advance the
+    //   cursor past an unapplied delta, which the resume (event_id > cursor)
+    //   then silently skips.
     if (line.startsWith("id: ")) {
-      _lastEventId = line.slice(4).trim();
-      // ★ #4: persist cursor so a page RELOAD (which destroys the in-memory
-      //   stream._lastEventId) can still offset-resume instead of replaying a
-      //   full snapshot. Keyed by taskId in sessionStorage (per-tab, cleared
-      //   on tab close). Cleared on terminal done.
-      _saveSseCursor(ctx.taskId, _lastEventId);
+      _pendingEventId = line.slice(4).trim();
       return false;
     }
     if (!line.startsWith("data: ")) return false;
@@ -455,6 +509,17 @@ function dispatchSSEEvent(line, ctx) {
       ev = JSON.parse(ds);
     } catch {
       return false;
+    }
+    // ★ Commit the resume cursor now: the paired data event has parsed and
+    //   is applied SYNCHRONOUSLY below (dispatchSSEEvent has no await between
+    //   here and its return), so once we advance _lastEventId the named event
+    //   is guaranteed to have been applied. Persist it too so a page RELOAD
+    //   (which wipes the in-memory stream._lastEventId) can offset-resume
+    //   instead of replaying a full snapshot; cleared on terminal done.
+    if (_pendingEventId != null) {
+      _lastEventId = _pendingEventId;
+      _saveSseCursor(ctx.taskId, _lastEventId);
+      _pendingEventId = null;
     }
     /* ★ Continue checkpoint: toolRounds to merge with newly streamed ones */
     if (ev.type === "state") {
@@ -495,8 +560,8 @@ function dispatchSSEEvent(line, ctx) {
               }
             }
             if (plannerMsg) {
-              plannerMsg.content = ev.content || plannerMsg.content || "";
-              plannerMsg.thinking = ev.thinking || plannerMsg.thinking || "";
+              plannerMsg.content = _snapshotLonger(plannerMsg, ev, 'content');
+              plannerMsg.thinking = _snapshotLonger(plannerMsg, ev, 'thinking');
               if (ev.toolRounds) plannerMsg.toolRounds = ev.toolRounds;
               assistantMsg = plannerMsg;
               if (buf) {
@@ -549,8 +614,8 @@ function dispatchSSEEvent(line, ctx) {
               _ensureMsgId(plannerMsg);
               conv.messages.push(plannerMsg);
             }
-            plannerMsg.content = ev.content || "";
-            plannerMsg.thinking = ev.thinking || "";
+            plannerMsg.content = _snapshotLonger(plannerMsg, ev, 'content');
+            plannerMsg.thinking = _snapshotLonger(plannerMsg, ev, 'thinking');
             if (ev.toolRounds) plannerMsg.toolRounds = ev.toolRounds;
             assistantMsg = plannerMsg;
             if (buf) {
@@ -623,8 +688,8 @@ function dispatchSSEEvent(line, ctx) {
                 _ensureMsgId(workerMsg);
                 conv.messages.push(workerMsg);
               }
-              workerMsg.content = ev.content || "";
-              workerMsg.thinking = ev.thinking || "";
+              workerMsg.content = _snapshotLonger(workerMsg, ev, 'content');
+              workerMsg.thinking = _snapshotLonger(workerMsg, ev, 'thinking');
               if (ev.toolRounds) workerMsg.toolRounds = ev.toolRounds;
               assistantMsg = workerMsg;
               if (buf) {
@@ -663,15 +728,15 @@ function dispatchSSEEvent(line, ctx) {
         } /* close else (full reconnection) */
       } else if (_epCriticPhase && _epCriticMsg) {
         /* State snapshot during critic phase → update critic msg */
-        _epCriticMsg.content = ev.content || "";
-        _epCriticMsg.thinking = ev.thinking || "";
+        _epCriticMsg.content = _snapshotLonger(_epCriticMsg, ev, 'content');
+        _epCriticMsg.thinking = _snapshotLonger(_epCriticMsg, ev, 'thinking');
         if (_epCriticBuf) {
           _epCriticBuf.content = (_epCriticMsg.content || "").replace(/\[VERDICT:\s*(?:STOP|CONTINUE)\s*\]\s*$/i, "").trimEnd();
           _epCriticBuf.thinking = _epCriticMsg.thinking;
         }
       } else {
-        assistantMsg.content = ev.content || "";
-        assistantMsg.thinking = ev.thinking || "";
+        assistantMsg.content = _snapshotLonger(assistantMsg, ev, 'content');
+        assistantMsg.thinking = _snapshotLonger(assistantMsg, ev, 'thinking');
         if (ev.error) assistantMsg.error = ev.error;
         if (ev.toolRounds) {
           /* Merge: keep checkpoint rounds + new ones from state snapshot */
@@ -794,6 +859,54 @@ function dispatchSSEEvent(line, ctx) {
         }
         twUpdate(convId);
       }
+    } else if (ev.type === "retry_reset") {
+      /* Turn-level auto-retry: the backend is re-running the whole turn after
+       * a transient error. Deltas append client-side (see the "delta" branch
+       * below: assistantMsg.content = (assistantMsg.content||"") + ev.content),
+       * and the JS model value is NEVER reset mid-stream except here — so
+       * without this the about-to-be-re-streamed output would STACK on top of
+       * the failed attempt's partial bubble. Clear the accumulated
+       * content/thinking/toolRounds (and error) so the re-run renders clean.
+       * Non-terminal: the task stays running; a phase:retrying frame follows. */
+      _roundThinkingLen = 0;
+      const _rrTarget = (_epCriticPhase && _epCriticMsg) ? _epCriticMsg : assistantMsg;
+      const _rrBuf = (_epCriticPhase && _epCriticBuf) ? _epCriticBuf : buf;
+      if (_rrTarget) {
+        _rrTarget.content = "";
+        _rrTarget.thinking = "";
+        delete _rrTarget.error;
+        /* Keep any pre-turn checkpoint rounds (Continue), drop this attempt's. */
+        _rrTarget.toolRounds = _rrTarget._continueToolRounds
+          ? _rrTarget._continueToolRounds.slice() : [];
+      }
+      if (_rrBuf) {
+        _rrBuf.content = "";
+        _rrBuf.thinking = "";
+        _rrBuf.toolRounds = _rrTarget ? _rrTarget.toolRounds : [];
+        _rrBuf.phase = null;
+      }
+      twUpdate(convId);
+    } else if (ev.type === "delta_reset") {
+      /* The just-ended LLM round issued TOOL CALLS, so the prose it streamed
+       * before those calls was inter-round narration ("Now let me check the
+       * utility functions."), NOT the final answer. Those content deltas were
+       * already appended to the live bubble (see the "delta" branch:
+       * assistantMsg.content += ev.content). Clear the accumulated
+       * content/thinking so the narration isn't concatenated in front of the
+       * terminal round's real answer. UNLIKE retry_reset, KEEP toolRounds —
+       * the tool calls from this turn are legitimate and keep rendering. */
+      _roundThinkingLen = 0;
+      const _drTarget = (_epCriticPhase && _epCriticMsg) ? _epCriticMsg : assistantMsg;
+      const _drBuf = (_epCriticPhase && _epCriticBuf) ? _epCriticBuf : buf;
+      if (_drTarget) {
+        _drTarget.content = "";
+        _drTarget.thinking = "";
+      }
+      if (_drBuf) {
+        _drBuf.content = "";
+        _drBuf.thinking = "";
+      }
+      twUpdate(convId);
     } else if (ev.type === "phase") {
       _roundThinkingLen = 0; // reset thinking counter on new phase
       /* Each new LLM round starts with a 'phase' event whose phase is
@@ -1404,6 +1517,36 @@ function dispatchSSEEvent(line, ctx) {
       if (ev.taskId) assistantMsg._taskId = ev.taskId;
       /* ★ git-shim: round commit sha for redo/diff references */
       if (ev.gitSha) assistantMsg._gitSha = ev.gitSha;
+      /* ★ Phase 1 (parity-gap closure): when the backend shipped the EXACT
+       *   settled dict it committed to conversations.messages, PROJECT IT
+       *   VERBATIM. This is the single source of truth for the settled bubble
+       *   — no keep-longer/snapshot reconstruction of the DB record.
+       *   `committedMessage` is ABSENT on skip paths (freshness/inline/
+       *   CAS-exhaustion) and when the server died before committing; in that
+       *   case we fall through to the transient-buffer projection below
+       *   (the offline fallback) and the per-field assignments already applied.
+       *   Content/thinking still go through keep-longer as belt-and-braces
+       *   against a rare empty committed dict racing a fuller local stream
+       *   (same monotonic invariant as _snapshotLonger); toolRounds + terminal
+       *   metadata are taken verbatim (backend-authoritative). Note-only
+       *   frontend-local fields (_translate*, _msgId, branches) are preserved
+       *   by copying settled fields onto the existing object, not replacing it. */
+      const _cm = ev.committedMessage;
+      if (_cm && typeof _cm === 'object') {
+        assistantMsg.content = _snapshotLonger(assistantMsg, _cm, 'content');
+        assistantMsg.thinking = _snapshotLonger(assistantMsg, _cm, 'thinking');
+        if (Array.isArray(_cm.toolRounds)) assistantMsg.toolRounds = _cm.toolRounds;
+        for (const _k of ['finishReason', 'usage', 'preset', 'toolSummary',
+                          'model', 'provider_id', 'apiRounds', 'modifiedFiles',
+                          'modifiedFileList', 'cost', '_taskId',
+                          'fallbackModel', 'fallbackFrom', 'fallbackReason',
+                          'fallbackKind', 'error', 'thinkingDepth', '_gitSha',
+                          '_memoryPrefetch', '_preferencesApplied',
+                          '_relatedConversations', '_preferencesLearned']) {
+          if (_cm[_k] != null) assistantMsg[_k] = _cm[_k];
+        }
+        assistantMsg._committedProjection = true;
+      }
       /* ★ Autopilot follow-up arrives in-band on the done event so the
        *   frontend can attach to the next task immediately, without
        *   polling /api/chat/active after the SSE stream has closed.
@@ -1496,6 +1639,7 @@ function dispatchSSEEvent(line, ctx) {
     ctx.epCriticBuf = _epCriticBuf;
     ctx.roundThinkingLen = _roundThinkingLen;
     ctx.lastEventId = _lastEventId;
+    ctx.pendingEventId = _pendingEventId;
   }
 }
 
@@ -1533,6 +1677,7 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
     epCriticBuf: null,
     roundThinkingLen: 0,
     lastEventId: null,
+    pendingEventId: null,
     pinnedMsgId: _pinnedMsgId,
   };
   /* Thin local alias preserving the original call shape. After dispatch we
@@ -1707,7 +1852,7 @@ if (typeof window !== 'undefined') {
         assistantMsg: o.assistantMsg || null,
         buf: o.buf || null,
         epCriticPhase: false, epCriticMsg: null, epCriticBuf: null,
-        roundThinkingLen: 0, lastEventId: null,
+        roundThinkingLen: 0, lastEventId: null, pendingEventId: null,
         pinnedMsgId: (o.assistantMsg && o.assistantMsg._msgId) || null,
       };
     },

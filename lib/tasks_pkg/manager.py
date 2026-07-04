@@ -10,6 +10,7 @@ preserved on top of the runtime by augmenting the task dict after
 ``runtime.create()``.
 """
 
+import copy
 import json
 import threading
 import time
@@ -68,6 +69,45 @@ tasks_lock = _chat_runtime._lock  # type: ignore[attr-defined]
 # _sync_result_to_conversation writes should be rejected.
 _conv_latest_task = {}   # conv_id → task_id
 _conv_latest_task_lock = threading.Lock()
+
+# ── Cross-replica supersede index (Epic C §4.3) ──
+# The freshness guard's "newest task for this conv" must be authoritative
+# ACROSS replicas so a stale task on replica A recognises that replica B
+# started a newer task for the same conv. We MIRROR conv->latest_task_id into
+# the shared runtime_state_store: under inproc the local dict stays the fast
+# authoritative path (byte-identical to before); under redis the store is the
+# fleet source of truth. The actual cross-replica ABORT of the superseded task
+# routes to its owning replica via taskId affinity (LB concern) — this index
+# only decides WHO is newest.
+_LATEST_KIND = 'latest'
+_LATEST_TTL = 3600.0  # a conv's latest-task marker; refreshed on each new task
+
+
+def _record_latest_task(conv_id: str, task_id: str) -> None:
+    with _conv_latest_task_lock:
+        _conv_latest_task[conv_id] = task_id
+    try:
+        from lib.runtime_state_store import get_store
+        get_store().set_value(_LATEST_KIND, conv_id, task_id, _LATEST_TTL)
+    except Exception as e:
+        logger.debug('[Task] supersede index mirror failed conv=%s: %s',
+                     conv_id[:8], e)
+
+
+def _latest_task_for_conv(conv_id: str):
+    """Fleet-authoritative newest task_id for a conv. Prefers the shared store
+    (cross-replica) and falls back to the local dict; the two agree under the
+    inproc backend."""
+    try:
+        from lib.runtime_state_store import get_store
+        v = get_store().get_value(_LATEST_KIND, conv_id)
+        if v:
+            return v
+    except Exception as e:
+        logger.debug('[Task] supersede index read failed conv=%s: %s',
+                     conv_id[:8], e)
+    with _conv_latest_task_lock:
+        return _conv_latest_task.get(conv_id)
 
 def create_task(conv_id, messages, config, *, supersede=True):
     """Create (and register) a chat task.
@@ -193,8 +233,7 @@ def create_task(conv_id, messages, config, *, supersede=True):
 
     # ★ Register as the LATEST task for this conversation — freshness guard
     if conv_id:
-        with _conv_latest_task_lock:
-            _conv_latest_task[conv_id] = task_id
+        _record_latest_task(conv_id, task_id)
         # ★ Supersede invariant (see docstring): abort any other running task
         #   for this conv so "a new task replaced the old one without aborting
         #   it" is structurally impossible. Registered as latest FIRST so the
@@ -873,8 +912,7 @@ def _sync_result_to_conversation(task, meta):
     # down (abort is cooperative), and its _sync_result_to_conversation
     # would overwrite the new task's data. This guard prevents that.
     if conv_id:
-        with _conv_latest_task_lock:
-            latest = _conv_latest_task.get(conv_id)
+        latest = _latest_task_for_conv(conv_id)
         if latest and latest != task['id']:
             _abort_reason = task.get('_abort_reason', '')
             _autopilot_child = task.get('_autopilot_spawned_followup')
@@ -1254,52 +1292,161 @@ def _sync_result_to_conversation(task, meta):
             except (json.JSONDecodeError, TypeError) as e:
                 logger.warning('[Task] Failed to parse/clear activeTaskId from settings for conv=%s: %s', conv_id, e, exc_info=True)
 
-        # ── Optimistic lock: only update if no concurrent write occurred ──
+        # ── Optimistic lock with bounded retry ──
         # Use updated_at as CAS guard to prevent overwriting a fresher
         # frontend sync.  If the row was updated since our SELECT, our
-        # read-modify-write would clobber the frontend's data.
-        # ── Also update search_text for fast conversation search ──
+        # read-modify-write would clobber the frontend's data — so the
+        # UPDATE is conditional on updated_at being unchanged.
+        #
+        # ★ On a CAS MISS we must NOT silently drop the terminal write.
+        #   The old code logged "frontend likely synced first (safe)" and
+        #   returned — but on a FLAKY NETWORK the frontend's finishStream
+        #   sync may itself have failed, so nobody persists the final turn
+        #   → the answer is lost from conversations.messages (survives only
+        #   in task_results). Instead we re-read the fresh row and RETRY,
+        #   mirroring _sync_partial_to_conversation. The retry re-applies
+        #   the SAME content-length guard: if the fresh row already holds
+        #   content at least as long as ours, that is the GENUINE
+        #   frontend-won case and we skip; otherwise we re-merge our result
+        #   onto the fresh tail and re-CAS. (2026-05-31 rejected this as
+        #   out-of-scope — overturned by direct evidence of terminal loss.)
         from lib.conversations import build_search_text
-        search_text = build_search_text(messages)
-        # ── Why use raw db.execute()+commit instead of db_execute_with_retry?
-        #     The retry helper masks rowcount (its docstring says "returns
-        #     None"), and we need the rowcount to detect CAS-miss reliably.
-        #     A re-SELECT of updated_at has a TOCTOU window where a third
-        #     writer landing between our UPDATE and the verify SELECT would
-        #     falsely report CAS-miss — suppressing side-effects (cost
-        #     stamp, auto-translate) that we just durably committed.
-        if settings_json:
-            cur = db.execute(
-                '''UPDATE conversations
-                   SET messages=?, updated_at=?, msg_count=?, settings=?, search_text=?
-                   WHERE id=? AND user_id=1 AND updated_at=?''',
-                (messages_json, now_ms, len(messages), settings_json, search_text, conv_id, _row_updated_at)
-            )
-        else:
-            cur = db.execute(
-                '''UPDATE conversations
-                   SET messages=?, updated_at=?, msg_count=?, search_text=?
-                   WHERE id=? AND user_id=1 AND updated_at=?''',
-                (messages_json, now_ms, len(messages), search_text, conv_id, _row_updated_at)
-            )
-        db.commit()
-        _cas_succeeded = (getattr(cur, 'rowcount', 0) or 0) > 0
+
+        def _apply_result_to_tail(msgs):
+            """Merge the completed result onto the tail assistant of ``msgs``.
+
+            Returns (search_text, wrote) where ``wrote`` is False when the
+            fresh row already holds >= our content (frontend genuinely won —
+            skip). Idempotent: only ever GROWS content/thinking + fills
+            terminal metadata, so re-running per attempt is safe.
+            """
+            if not msgs:
+                return None, False
+            tail = msgs[-1]
+            if tail.get('role') != 'assistant':
+                if task.get('aborted') or task.get('_abort_reason'):
+                    return None, False
+                tail = {'role': 'assistant', 'content': '', 'thinking': ''}
+                msgs.append(tail)
+            _cur_c = len(tail.get('content') or '')
+            _cur_t = len(tail.get('thinking') or '')
+            # Frontend-won guard: fresh row already has >= our content AND
+            # thinking → do not shrink it; skip the write (genuine race win).
+            if _cur_c >= new_content_len and _cur_t >= new_thinking_len and (content or thinking):
+                return None, False
+            if content and len(content) >= _cur_c:
+                tail['content'] = content
+            if thinking and len(thinking) >= _cur_t:
+                tail['thinking'] = thinking
+            if error:
+                tail['error'] = error
+            if tool_rounds:
+                tail['toolRounds'] = tool_rounds
+            for _mk, _dk in (('finishReason', 'finishReason'), ('usage', 'usage'),
+                             ('preset', 'preset'), ('toolSummary', 'toolSummary'),
+                             ('model', 'model'), ('provider_id', 'provider_id'),
+                             ('apiRounds', 'apiRounds'), ('modifiedFiles', 'modifiedFiles'),
+                             ('modifiedFileList', 'modifiedFileList')):
+                if meta.get(_mk):
+                    tail[_dk] = meta[_mk]
+            if meta.get('taskId'):
+                tail['_taskId'] = meta['taskId']
+            if meta.get('fallbackModel'):
+                tail['fallbackModel'] = meta['fallbackModel']
+                tail['fallbackFrom'] = meta.get('fallbackFrom', '')
+                if meta.get('fallbackReason'):
+                    tail['fallbackReason'] = meta['fallbackReason']
+                if meta.get('fallbackKind'):
+                    tail['fallbackKind'] = meta['fallbackKind']
+            _assign_message_ids(msgs)
+            return build_search_text(msgs), True
+
+        _MAX_TERMINAL_CAS = 3
+        _cas_succeeded = False
+        for _attempt in range(_MAX_TERMINAL_CAS):
+            search_text = build_search_text(messages)
+            # ── Why raw db.execute()+commit instead of db_execute_with_retry?
+            #     The retry helper masks rowcount (returns None), and we need
+            #     rowcount to detect CAS-miss reliably.
+            if settings_json:
+                cur = db.execute(
+                    '''UPDATE conversations
+                       SET messages=?, updated_at=?, msg_count=?, settings=?, search_text=?
+                       WHERE id=? AND user_id=1 AND updated_at=?''',
+                    (messages_json, now_ms, len(messages), settings_json, search_text, conv_id, _row_updated_at)
+                )
+            else:
+                cur = db.execute(
+                    '''UPDATE conversations
+                       SET messages=?, updated_at=?, msg_count=?, search_text=?
+                       WHERE id=? AND user_id=1 AND updated_at=?''',
+                    (messages_json, now_ms, len(messages), search_text, conv_id, _row_updated_at)
+                )
+            db.commit()
+            _cas_succeeded = (getattr(cur, 'rowcount', 0) or 0) > 0
+            if _cas_succeeded:
+                break
+            # CAS miss — a concurrent writer bumped updated_at. Re-read the
+            # fresh row and decide whether to retry (we still have more/equal
+            # content) or accept the frontend's write (genuine race win).
+            if _attempt + 1 >= _MAX_TERMINAL_CAS:
+                break
+            time.sleep(0.02 * (_attempt + 1))
+            _fresh = db.execute(
+                'SELECT messages, updated_at FROM conversations WHERE id=? AND user_id=1',
+                (conv_id,)
+            ).fetchone()
+            if not _fresh:
+                break
+            _row_updated_at = _fresh['updated_at']
+            try:
+                _fresh_msgs = json.loads(_fresh[0] or '[]')
+            except (json.JSONDecodeError, TypeError):
+                logger.warning('%s conv=%s CAS-miss re-read: unparseable messages — giving up',
+                               pfx, conv_id)
+                break
+            _fresh_search, _wrote = _apply_result_to_tail(_fresh_msgs)
+            if not _wrote:
+                # Fresh row already holds >= our content → frontend genuinely
+                # won. Stop retrying; this is the safe historical skip case.
+                logger.info('%s conv=%s CAS miss — fresh row already has >= our content '
+                            '(frontend won the race, safe to skip)', pfx, conv_id)
+                _cas_succeeded = False
+                # ── Phase 1: the fresh row's tail is the authoritative committed
+                #    state (it holds >= our content). Ship IT verbatim so the
+                #    terminal event still carries the DB truth even when we
+                #    ourselves didn't write. Metadata (finishReason/usage/…) was
+                #    already merged onto the fresh tail by _apply_result_to_tail.
+                if _fresh_msgs:
+                    task['_committedMsg'] = copy.deepcopy(_fresh_msgs[-1])
+                break
+            messages = _fresh_msgs
+            messages_json = json_dumps_pg(messages)
+            now_ms = int(time.time() * 1000)
+            logger.info('%s conv=%s CAS miss attempt %d/%d — re-applied onto fresh row, retrying',
+                        pfx, conv_id, _attempt + 1, _MAX_TERMINAL_CAS)
+
         # FTS index is only updated when CAS succeeds.  Updating FTS for a
         # write we lost would leave search hits pointing at content we
         # never persisted — search results would surface dead data.
         if _cas_succeeded:
             from lib.conversations import update_conversation_fts
             update_conversation_fts(db, conv_id, search_text)
-        if not _cas_succeeded:
-            logger.info('%s conv=%s Optimistic lock missed — row was updated concurrently '
-                       '(expected_updated_at=%s). '
-                       'Frontend likely synced first; backend sync skipped (safe).',
-                       pfx, conv_id, _row_updated_at)
-        else:
             logger.info('%s conv=%s ✅ Synced result to conversation — content=%dchars thinking=%dchars '
                         'msgs=%d (was: content=%d thinking=%d)',
                         pfx, conv_id, new_content_len, new_thinking_len, len(messages),
                         existing_content_len, existing_thinking_len)
+            # ── Phase 1: expose the EXACT dict just committed so the terminal
+            #    `done` event can ship it verbatim (parity gap closure). This
+            #    is the row we actually wrote (messages[-1] post-CAS), not a
+            #    parallel reconstruction. A deep copy is stashed so later
+            #    mutation of `messages` can't retroactively change the frame.
+            if messages:
+                task['_committedMsg'] = copy.deepcopy(messages[-1])
+        else:
+            logger.info('%s conv=%s Optimistic lock missed after retries — row held by a '
+                       'fresher writer (expected_updated_at=%s). Backend sync skipped.',
+                       pfx, conv_id, _row_updated_at)
 
         # ── Invalidate meta cache so subsequent GET /api/conversations
         #    returns the cleared activeTaskId immediately ──
@@ -1660,6 +1807,7 @@ def recover_stale_tasks_on_startup():
                         len(_missing_ids), [c[:8] for c in _missing_ids])
 
         cleared = 0
+        recovered_conv_ids: list = []
         for cid, crow in conv_by_id.items():
             try:
                 settings = json.loads(crow['settings'] or '{}')
@@ -1755,6 +1903,63 @@ def recover_stale_tasks_on_startup():
                         logger.warning('[Startup] Failed to parse messages for conv=%s: %s',
                                        cid[:8], exc)
 
+            # ── Phase 3: backend-authoritative ghost reconcile ──
+            #   Sweep buried empty-ghost placeholders + classify the trailing
+            #   assistant (delete bare husk / stamp interrupted on a thinking-
+            #   only husk) SERVER-SIDE, so the frontend Case-D no longer INFERS
+            #   lifecycle state. Persisted in THIS SAME commit → there is no
+            #   frontend allowTruncate PUT that could be lost (the resurrect bug
+            #   is structurally impossible), and no frontend pop (the Case-D→
+            #   Case-E auto-fire leak is impossible). Runs on the merged
+            #   messages when we rewrote them above, else on the row's current
+            #   messages. A reconcile that changes anything forces a write even
+            #   when the interrupted-content merge above produced no change.
+            try:
+                from lib.conversations.reconcile import reconcile_conversation_messages
+                _recon_source = None
+                if messages_json:
+                    _recon_source = json.loads(messages_json)
+                else:
+                    try:
+                        _recon_source = json.loads(crow['messages'] or '[]')
+                    except (json.JSONDecodeError, TypeError):
+                        _recon_source = None
+                if _recon_source is not None:
+                    _reconciled, _recon_changed = reconcile_conversation_messages(_recon_source)
+                    if _recon_changed:
+                        messages_json = json_dumps_pg(_reconciled)
+                        logger.info('[Startup] conv=%s reconciled ghost messages '
+                                    '(%d → %d msgs)', cid[:8], len(_recon_source),
+                                    len(_reconciled))
+                        # ── Cache-attribution seam ──
+                        # A reconcile that edits/deletes committed messages is a
+                        # backend history rewrite. Signal it so a subsequent
+                        # detect_cache_break NAMES the cause instead of
+                        # mislabeling it "(compacted)" or laundering a real miss
+                        # into a false "server-side — PROVEN" verdict. Harmless
+                        # at boot (cache state is empty post-restart, no prior
+                        # round to mis-attribute), but this establishes the
+                        # calling convention the future GET-path reconcile MUST
+                        # copy. Unlike notify_compaction it does NOT silence
+                        # detection (see notify_history_rewrite).
+                        try:
+                            from lib.tasks_pkg.cache_tracking import notify_history_rewrite
+                            notify_history_rewrite(cid)
+                        except Exception as _nhr_err:
+                            logger.debug('[Startup] conv=%s notify_history_rewrite '
+                                         'skipped: %s', cid[:8], _nhr_err)
+                        # Mark the conv as server-reconciled so the frontend
+                        # Case-D defers to us (skips its own classification).
+                        try:
+                            _s = json.loads(settings_json or '{}')
+                            _s['_reconciledAt'] = int(time.time() * 1000)
+                            settings_json = json.dumps(_s, ensure_ascii=False)
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+            except Exception as _recon_err:
+                logger.warning('[Startup] conv=%s ghost reconcile failed '
+                               '(non-fatal): %s', cid[:8], _recon_err, exc_info=True)
+
             now_ms = int(time.time() * 1000)
             if messages_json:
                 from lib.conversations import build_search_text
@@ -1772,6 +1977,7 @@ def recover_stale_tasks_on_startup():
                     (settings_json, now_ms, cid)
                 )
             cleared += 1
+            recovered_conv_ids.append(cid)
             logger.info('[Startup] Recovered conv=%s from task=%s '
                         '(activeTaskId_cleared=%s messages_updated=%s)',
                         cid[:8],
@@ -1795,6 +2001,50 @@ def recover_stale_tasks_on_startup():
                 logger.debug('[Startup] meta cache invalidation skipped: %s', e)
         else:
             logger.debug('[Startup] No stale tasks or activeTaskIds found — clean shutdown')
+
+        # ── Resume any autopilot run that was armed when the server died ──
+        #   Recovery above restored the interrupted reply, but the crash killed
+        #   the end-of-turn VU hook mid-flight (no follow-up spawned, no baton).
+        #   The DURABLE armed-marker is authoritative here — resume scans EVERY
+        #   conv carrying a marker (not just recovered tasks), so an armed-but-
+        #   idle conv (marker present, no in-flight task at crash) is resumed
+        #   too. Hence this runs UNCONDITIONALLY (not gated on recovered ids);
+        #   recovered_conv_ids is passed only for logging-symmetry union. Runs
+        #   AFTER the commit so the resumed carrier sees merged messages.
+        try:
+            from lib.tasks_pkg.autopilot import (
+                resume_armed_autopilot_after_crash,
+            )
+            resumed = resume_armed_autopilot_after_crash(recovered_conv_ids)
+            if resumed:
+                logger.info('[Startup] Resumed %d armed autopilot run(s) '
+                            'after crash: %s', len(resumed),
+                            [c[:8] for c in resumed])
+        except Exception as e:
+            logger.warning('[Startup] autopilot resume-after-crash failed '
+                           '(non-fatal): %s', e, exc_info=True)
+
+        # ── Re-dispatch any queued turn stranded by the restart ──
+        #   A message enqueued (via /api/chat/send) while a task was running
+        #   lives ONLY in message_queue, never in conversations.messages, and is
+        #   drained ONLY by the post-task-completion hook / human send / brain
+        #   idle-drain — none of which fire on a fresh boot for an idle conv. So
+        #   without this the message is shown in the queue bar, never processed,
+        #   with no transcript trace = total loss. Runs AFTER the recovery commit
+        #   (so a dispatched task sees merged/recovered messages) and AFTER the
+        #   autopilot resume (a still-armed conv's human 'real' row already sorts
+        #   ahead of the autopilot sentinel via dispatch priority). The DURABLE
+        #   queue row is authoritative — mirrors resume_armed_autopilot_after_crash.
+        try:
+            from lib.message_queue import redispatch_orphaned_queue_on_startup
+            _requeued = redispatch_orphaned_queue_on_startup()
+            if _requeued:
+                logger.info('[Startup] Re-dispatched %d orphaned queued turn(s) '
+                            'after restart: %d task(s) spawned', len(_requeued),
+                            len(_requeued))
+        except Exception as e:
+            logger.warning('[Startup] queue re-dispatch after restart failed '
+                           '(non-fatal): %s', e, exc_info=True)
 
     except Exception as e:
         logger.error('[Startup] Stale task recovery failed (non-fatal): %s', e, exc_info=True)

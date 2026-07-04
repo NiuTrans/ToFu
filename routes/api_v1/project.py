@@ -13,13 +13,27 @@ Routes (legacy snake_case path → new hyphen-case path):
   DELETE /api/v1/project/recent             — clear recent list
   POST   /api/v1/project/write-approval     — resolve a pending write
   POST   /api/v1/project/undo               — per-round / per-conv undo
-  POST   /api/v1/project/undo-all           — wipe-all-modifications undo
+  POST   /api/v1/project/undo-all           — undo all pending mods in one project
   GET    /api/v1/project/gitignore/suggestions — pending suggestions
   POST   /api/v1/project/gitignore/accept   — append dirs to .gitignore
   POST   /api/v1/project/gitignore/dismiss  — drop suggestions
   POST   /api/v1/project/rescan             — refresh file index
   POST   /api/v1/project/redo               — re-apply previously-undone round
   POST   /api/v1/project/write              — direct file write (Apply Code)
+  GET    /api/v1/project/feed               — Project Brain: activity feed (read)
+  GET    /api/v1/project/charter            — Project Brain: charter (read)
+  POST   /api/v1/project/charter/commit     — Project Brain: human-gated charter commit
+  GET    /api/v1/project/charter/pending    — Project Brain: unresolved proposals
+  POST   /api/v1/project/charter/dismiss    — Project Brain: reject a proposal
+  GET    /api/v1/project/board              — Project Brain: coordination board (read)
+  POST   /api/v1/project/board/post         — Project Brain: human posts an epic
+  POST   /api/v1/project/board/complete     — Project Brain: human marks epic done
+  POST   /api/v1/project/board/block        — Project Brain: human flags epic blocked
+  POST   /api/v1/project/board/reopen       — Project Brain: human reopens an epic
+  GET    /api/v1/project/brain/summary      — Project Brain: collab-bar summary
+  GET    /api/v1/project/brain/peers        — Project Brain: LIVE peer/team roster
+  GET    /api/v1/project/brain/influence    — Project Brain: per-conversation influence
+  POST   /api/v1/project/brain/peer-message — Project Brain: human nudges a sibling conversation
 
 All require ``@require_auth``. Mutations that change ``data/config/`` or
 walk the filesystem keep the legacy ``rate_limit(10/60)`` to throttle
@@ -297,8 +311,15 @@ def project_undo():
 
 @api_v1_project_bp.route('/api/v1/project/undo-all', methods=['POST'])
 @require_auth
-@api_meta(summary='Undo all file modifications across all conversations',
-          tags=['project'])
+@api_meta(
+    summary='Undo every pending file modification in ONE project',
+    description=(
+        'Body: ``{projectPath?}``. Reverts all pending modifications recorded '
+        'for a SINGLE project (across every conversation that edited it) — '
+        'NOT a global wipe across all projects. The target project is the '
+        'explicit ``projectPath`` (pinned per-conversation by the frontend) '
+        'and falls back to the UI-active project only when omitted.'),
+    tags=['project'])
 def project_undo_all():
     data = parse_body()
     project_path = _active_project_path(data.get('projectPath', '').strip())
@@ -325,12 +346,21 @@ def project_undo_all():
 def project_redo():
     data = parse_body()
     task_id = (data.get('taskId') or '').strip()
-    project_path = _active_project_path(
-        (data.get('projectPath') or '').strip())
-    if not project_path:
-        return api_bad_request('No active project')
     if not task_id:
         return api_bad_request('taskId is required', field='taskId')
+    # ★ Concurrency-safe resolution, mirroring project_undo: an explicit
+    #   projectPath (pinned per-conversation by the frontend) wins; otherwise
+    #   recover the project that actually recorded this task from its snapshot
+    #   — NEVER fall back to the globally-active project (_state['path']),
+    #   which may point at a different project when conversations edit
+    #   projects concurrently, sending redo to the wrong project.
+    explicit_path = (data.get('projectPath') or '').strip()
+    if not explicit_path:
+        from lib.project_mod import resolve_base_path
+        explicit_path = resolve_base_path(task_id=task_id) or ''
+    project_path = _active_project_path(explicit_path)
+    if not project_path:
+        return api_bad_request('No active project')
     try:
         from lib.project_mod import redo_task_modifications
         result = redo_task_modifications(project_path, task_id)
@@ -583,6 +613,167 @@ def project_board():
         return api_internal_error(e, source='api_v1.project.board')
 
 
+
+def _board_conv_id(data: dict) -> str:
+    """Resolve the acting conversation for a human board mutation.
+
+    A human is NOT a conversation, but the board is keyed on conversations
+    (``created_by_conv`` is the dispatch target; feed events carry a conv_id).
+    The frontend passes the DISPLAYED conversation's id explicitly as the
+    human's proxy. We take it verbatim and NEVER invent one or fall back to a
+    global — a missing conv is refused by the caller.
+    """
+    return (data.get('convId') or data.get('createdByConv') or '').strip()
+
+
+@api_v1_project_bp.route('/api/v1/project/board/post', methods=['POST'])
+@require_auth
+@rate_limit(limit=20, per=60)
+@api_meta(
+    summary='HUMAN posts a new epic to the coordination board',
+    description=(
+        'Body: ``{path, title, convId, depends_on?}``. ``convId`` is the '
+        'displayed conversation acting as the human\'s proxy and becomes the '
+        'epic\'s ``created_by_conv`` (the dispatch target), so a human-posted '
+        'epic is dispatchable exactly like an agent-posted one. Refused (400) '
+        'when no conversation context is supplied — never invents one or falls '
+        'back to the active-project global. Audit-logged.'),
+    tags=['project'],
+)
+def project_board_post():
+    data = parse_body()
+    project_path = (data.get('path') or '').strip()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    title = (data.get('title') or '').strip()
+    if not title:
+        return api_bad_request('title is required', field='title')
+    conv_id = _board_conv_id(data)
+    if not conv_id:
+        return api_bad_request('convId is required (the acting conversation)',
+                               field='convId')
+    depends_on = data.get('depends_on') or []
+    if not isinstance(depends_on, list):
+        depends_on = []
+    try:
+        from lib.conversations.project_board import post_task
+        result = post_task(project_path, conv_id, title, depends_on=depends_on)
+        if not result.get('ok'):
+            return jsonify(result), 400
+        logger.info('[Project.v1] board/post proj=%.40r conv=%s id=%s',
+                    project_path, conv_id[:8], result.get('id'))
+        return api_ok(result)
+    except Exception as e:
+        logger.error('[Project.v1] board/post failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.board_post')
+
+
+@api_v1_project_bp.route('/api/v1/project/board/complete', methods=['POST'])
+@require_auth
+@rate_limit(limit=20, per=60)
+@api_meta(
+    summary='HUMAN marks a board epic done',
+    description=(
+        'Body: ``{path, taskId, convId}``. Reuses the same engine path as the '
+        'agent tool (so completing may trigger dispatch of unblocked '
+        'dependents). Audit-logged.'),
+    tags=['project'],
+)
+def project_board_complete():
+    data = parse_body()
+    project_path = (data.get('path') or '').strip()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    task_id = (data.get('taskId') or '').strip()
+    if not task_id:
+        return api_bad_request('taskId is required', field='taskId')
+    conv_id = _board_conv_id(data)
+    try:
+        from lib.conversations.project_board import complete_task
+        result = complete_task(project_path, conv_id, task_id)
+        if not result.get('ok'):
+            return jsonify(result), 400
+        logger.info('[Project.v1] board/complete proj=%.40r task=%s',
+                    project_path, task_id)
+        return api_ok(result)
+    except Exception as e:
+        logger.error('[Project.v1] board/complete failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.board_complete')
+
+
+@api_v1_project_bp.route('/api/v1/project/board/block', methods=['POST'])
+@require_auth
+@rate_limit(limit=20, per=60)
+@api_meta(
+    summary='HUMAN flags a board epic as blocked',
+    description=(
+        'Body: ``{path, taskId, convId, reason?}``. Emits a ``blocked`` feed '
+        'event (a signal, not a status change). Audit-logged.'),
+    tags=['project'],
+)
+def project_board_block():
+    data = parse_body()
+    project_path = (data.get('path') or '').strip()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    task_id = (data.get('taskId') or '').strip()
+    if not task_id:
+        return api_bad_request('taskId is required', field='taskId')
+    conv_id = _board_conv_id(data)
+    reason = (data.get('reason') or '').strip()
+    try:
+        from lib.conversations.project_board import block_task
+        result = block_task(project_path, conv_id, task_id, reason)
+        if not result.get('ok'):
+            return jsonify(result), 400
+        logger.info('[Project.v1] board/block proj=%.40r task=%s',
+                    project_path, task_id)
+        return api_ok(result)
+    except Exception as e:
+        logger.error('[Project.v1] board/block failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.board_block')
+
+
+@api_v1_project_bp.route('/api/v1/project/board/reopen', methods=['POST'])
+@require_auth
+@rate_limit(limit=20, per=60)
+@api_meta(
+    summary='HUMAN reopens a board epic (done|claimed → open)',
+    description=(
+        'Body: ``{path, taskId, convId}``. A direct status write that clears '
+        'the owner + lease — NOT a lease mutation and NO background reaper. '
+        'Permitted from ``done`` (revive) and ``claimed`` (break a stuck live '
+        'claim). Emits a ``note`` feed event so the transition is observable; '
+        'the previous owner sees the epic flip from "(you)" to open on its '
+        'NEXT prompt assembly (not interrupted mid-turn). Audit-logged.'),
+    tags=['project'],
+)
+def project_board_reopen():
+    data = parse_body()
+    project_path = (data.get('path') or '').strip()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    task_id = (data.get('taskId') or '').strip()
+    if not task_id:
+        return api_bad_request('taskId is required', field='taskId')
+    conv_id = _board_conv_id(data)
+    try:
+        from lib.conversations.project_board import reopen_task
+        result = reopen_task(project_path, conv_id, task_id)
+        if not result.get('ok'):
+            return jsonify(result), 400
+        logger.info('[Project.v1] board/reopen proj=%.40r task=%s from=%s',
+                    project_path, task_id, result.get('from'))
+        return api_ok(result)
+    except Exception as e:
+        logger.error('[Project.v1] board/reopen failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.board_reopen')
+
+
 @api_v1_project_bp.route('/api/v1/project/charter/pending', methods=['GET'])
 @require_auth
 @api_meta(
@@ -665,6 +856,124 @@ def project_brain_summary():
         logger.error('[Project.v1] brain summary failed for %s: %s',
                      project_path, e, exc_info=True)
         return api_internal_error(e, source='api_v1.project.brain_summary')
+
+
+@api_v1_project_bp.route('/api/v1/project/brain/peers', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='LIVE peer status — the conversations-as-a-team roster',
+    description=(
+        'Read-only, LIVE cross-conversation roster: joins presence (who is '
+        'active + phase/file) with the live task registry (current round / '
+        'status) and the board claim map (which epic each peer is advancing). '
+        'Reuses the SAME ``claims_by_conv`` join the collab bar uses, so the '
+        'Team column can never drift from the summary. Query: ``path`` '
+        '(REQUIRED) + ``convId`` (optional — excluded from the roster so a '
+        'conversation never lists itself as a peer). Returns '
+        '``{peers: [...], count}``; each peer carries ``{convId, agentId, '
+        'title, phase, statusLabel, currentFile, round, taskStatus, '
+        'claimedEpic}``. This is LIVE state, NOT conversation history.'),
+    tags=['project'],
+)
+def project_brain_peers():
+    project_path = _decoded_path_arg()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    # convId is OPTIONAL here (unlike influence): a project-wide roster is
+    # meaningful with no active conv. When present it's excluded from the list.
+    conv_id = _decoded_path_arg('convId')
+    try:
+        from lib.conversations.project_peer import build_peer_status
+        return api_ok(build_peer_status(project_path, conv_id or ''))
+    except Exception as e:
+        logger.error('[Project.v1] brain peers failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.brain_peers')
+
+
+@api_v1_project_bp.route('/api/v1/project/brain/influence', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='How the project brain influences ONE conversation',
+    description=(
+        'Read-only, per-conversation view of the brain\'s effect on a single '
+        'chat: the charter it is bound by, the board epics it OWNS (a live '
+        'claim), the epics it must AVOID (a sibling holds an unexpired lease), '
+        'the open epics it could pick up, and the decisions awaiting a human. '
+        'Query: ``path`` (REQUIRED) + ``convId`` (REQUIRED). The two '
+        '``injected`` flags mirror the actual system-context injection gate '
+        'exactly (computed from the SAME render_charter_block / '
+        'render_board_block the prompt uses), so the panel can never drift '
+        'from what the model really sees.'),
+    tags=['project'],
+)
+def project_brain_influence():
+    project_path = _decoded_path_arg()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    conv_id = _decoded_path_arg('convId')
+    if not conv_id:
+        return api_bad_request('convId is required', field='convId')
+    try:
+        from lib.conversations.project_brain_influence import (
+            build_conv_influence,
+        )
+        return api_ok(build_conv_influence(project_path, conv_id))
+    except Exception as e:
+        logger.error('[Project.v1] brain influence failed for %s conv=%s: %s',
+                     project_path, (conv_id or '')[:8], e, exc_info=True)
+@api_v1_project_bp.route('/api/v1/project/brain/peer-message', methods=['POST'])
+@require_auth
+@rate_limit(limit=20, per=60)
+@api_meta(
+    summary='HUMAN sends an advisory nudge to a sibling conversation',
+    description=(
+        'Body: ``{path, convId, toConvId, text}``. The operator, acting via '
+        'the DISPLAYED conversation ``convId`` (their proxy — the board/feed '
+        'are conversation-keyed), sends the advisory note ``text`` to sibling '
+        'conversation ``toConvId``. It is enqueued as a ``KIND_PEER_MSG`` turn '
+        '— seen on the target\'s NEXT turn, NEVER interrupting a live turn — '
+        'framed as operator guidance and stamped ``_peerHuman`` so the target '
+        'attributes it to the operator. Reuses ``send_peer_message`` (the '
+        'single seam): the SAME per-(sender,target) rate limit + self-send '
+        'refusal apply — the human path is not a storm bypass. Returns '
+        '``{ok, queueId}`` or a 400 with ``error`` (``rate_limited`` carries '
+        '``retryAfter``). Refused when no ``convId`` (never invents one).'),
+    tags=['project'],
+)
+def project_brain_peer_message():
+    data = parse_body()
+    project_path = (data.get('path') or '').strip()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    from_conv = _board_conv_id(data)
+    if not from_conv:
+        return api_bad_request('convId is required (the acting conversation)',
+                               field='convId')
+    to_conv = (data.get('toConvId') or data.get('to_conv_id') or '').strip()
+    if not to_conv:
+        return api_bad_request('toConvId is required', field='toConvId')
+    text = (data.get('text') or '').strip()
+    if not text:
+        return api_bad_request('text is required', field='text')
+    try:
+        from lib.conversations.project_peer import send_peer_message
+        res = send_peer_message(project_path, from_conv, to_conv, text,
+                                human=True)
+        if not res.get('ok'):
+            logger.info('[Project.v1] peer-message refused %s→%s: %s',
+                        from_conv[:8], to_conv[:8], res.get('error'))
+            return jsonify(res), 400
+        logger.info('[Project.v1] operator peer-message %s→%s (%d chars)',
+                    from_conv[:8], to_conv[:8], len(text))
+        return api_ok(res)
+    except Exception as e:
+        logger.error('[Project.v1] peer-message failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.brain_peer_message')
+
+
+        return api_internal_error(e, source='api_v1.project.brain_influence')
 
 
 # ── Direct file write (Apply Code button) ────────────────────────────

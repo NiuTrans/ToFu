@@ -87,6 +87,29 @@ class RateDecision:
 _lock = threading.Lock()
 _state: dict[str, dict] = {}
 
+# ── Open-mode per-IP throttle ──
+# Open mode (esp. TOFU_OPEN_MODE_ALLOW_REMOTE=1) hands requests a synthetic
+# admin context with NO real principal to key a per-key bucket on. Without a
+# cap, open+remote is simultaneously unauthenticated AND unthrottled — a single
+# IP can hammer the expensive LLM/search/browser/PDF endpoints. We enforce a
+# coarse per-IP RPM ceiling. Crucially the counter is delegated to the SHARED
+# lib.rate_limit_store seam (record_and_check), NOT a fresh in-process dict, so
+# under TOFU_RATE_LIMIT_BACKEND=db the cap holds ACROSS replicas (behind an
+# N-replica load balancer an in-process cap would silently become rpm×N — the
+# exact "cap scales with replica count" failure the shared store was built to
+# prevent). Cap via TOFU_OPEN_MODE_RPM (default 120/min); 0 disables.
+_OPEN_MODE_ENDPOINT = 'open_mode'  # (endpoint, ip) key namespace in the store
+
+
+def _open_mode_rpm() -> int:
+    """Per-IP requests-per-minute ceiling for open-mode requests, from env."""
+    import os
+    try:
+        n = int(os.environ.get('TOFU_OPEN_MODE_RPM', '') or '120')
+    except (ValueError, TypeError):
+        n = 120
+    return max(0, n)
+
 
 def _state_for(key_id: str, rpm_limit: int, tpd_limit: int) -> dict:
     """Return / lazily create the bucket state for this key."""
@@ -130,12 +153,18 @@ def check_request(auth_ctx, *, request_cost: int = 1) -> RateDecision:
     (e.g. parallel batch endpoint). TPD is NOT decremented here — call
     ``record_tokens()`` after the upstream LLM returns its usage.
     """
+    if auth_ctx is not None and getattr(auth_ctx, 'via_open_mode', False):
+        # Open-mode synthetic context: no real principal, so key a coarse
+        # per-IP RPM bucket instead of bypassing entirely. This closes the
+        # "open+remote = unauthenticated AND unthrottled" hole. The tunnel /
+        # cookie-UI paths (below) remain uncapped — they are the operator's
+        # own local surface.
+        return check_open_mode_request(request_cost=request_cost)
     if (auth_ctx is None or auth_ctx.via_tunnel_token
-            or getattr(auth_ctx, 'via_open_mode', False)
             or not auth_ctx.key_id):
-        # Bypass for unauthenticated (rejected upstream), the UI cookie
-        # path, and open-mode synthetic contexts (no real principal to
-        # rate-limit). Anything that gets here is "no limit configured".
+        # Bypass for unauthenticated (rejected upstream) and the UI cookie /
+        # tunnel path (no real principal to rate-limit). Anything that gets
+        # here is "no limit configured".
         return RateDecision(allowed=True)
     rpm = max(0, int(auth_ctx.rate_limit_rpm or 0))
     tpd = max(0, int(auth_ctx.rate_limit_tpd or 0))
@@ -168,6 +197,53 @@ def check_request(auth_ctx, *, request_cost: int = 1) -> RateDecision:
             rpm_limit=rpm, rpm_remaining=int(max(0, rpm_b.tokens)),
             tpd_limit=tpd, tpd_remaining=int(max(0, tpd_b.tokens)),
         )
+
+
+def check_open_mode_request(*, request_cost: int = 1,
+                            client_ip: str | None = None) -> RateDecision:
+    """Per-IP RPM check for the open-mode synthetic context.
+
+    Keyed by the direct client IP (never a spoofable forwarded header) and
+    delegated to the SHARED ``lib.rate_limit_store`` counter (a sliding
+    60s window), so under ``TOFU_RATE_LIMIT_BACKEND=db`` the cap holds across
+    replicas rather than becoming ``rpm × N``. When ``TOFU_OPEN_MODE_RPM`` is 0
+    the cap is disabled and every request is allowed (legacy behaviour).
+    ``request_cost`` collapses to one recorded event per request (the store is
+    event-count based, not token-bucket); a cost > 1 is treated as a single
+    slot — acceptable for the coarse open-mode ceiling. ``client_ip`` is
+    resolved from the request when not supplied.
+
+    Fail-open: the store itself degrades to ``(True, 0)`` on any DB error, so
+    a throttle failure never takes down the server.
+    """
+    rpm = _open_mode_rpm()
+    if rpm <= 0:
+        return RateDecision(allowed=True)
+    if client_ip is None:
+        try:
+            from flask import request
+            client_ip = (request.remote_addr or 'unknown').split('%', 1)[0]
+        except Exception as e:
+            logger.debug('[RateLimit] open-mode client_ip unavailable: %s', e)
+            client_ip = 'unknown'
+    try:
+        from lib.rate_limit_store import get_store
+        allowed, count = get_store().record_and_check(
+            _OPEN_MODE_ENDPOINT, client_ip, limit=rpm, per_seconds=60)
+    except Exception as e:
+        # Defence in depth — the store is already fail-open, but never let a
+        # throttle-path error bubble into the request.
+        logger.warning('[RateLimit] open-mode store check failed (%s) — '
+                       'failing open', e)
+        return RateDecision(allowed=True, rpm_limit=rpm, rpm_remaining=rpm)
+    remaining = max(0, rpm - count)
+    if not allowed:
+        logger.warning('[RateLimit] open-mode IP %s throttled '
+                       '(rpm cap=%d, count=%d)', client_ip, rpm, count)
+        # Sliding-window store has no exact refill time; advise a full window.
+        return RateDecision(allowed=False, reason='rpm', retry_after_s=60.0,
+                            rpm_limit=rpm, rpm_remaining=0)
+    return RateDecision(allowed=True, rpm_limit=rpm, rpm_remaining=remaining)
 
 
 def record_tokens(key_id: str, n_tokens: int, *, rpm_limit: int = 0,
@@ -207,4 +283,5 @@ def apply_headers(response, decision: RateDecision) -> None:
         logger.debug('[RateLimit] header injection failed: %s', e)
 
 
-__all__ = ['RateDecision', 'check_request', 'record_tokens', 'apply_headers']
+__all__ = ['RateDecision', 'check_request', 'check_open_mode_request',
+           'record_tokens', 'apply_headers']

@@ -153,6 +153,7 @@ _IDEMPOTENT_TOOLS_BASE = frozenset({
     'browser_get_interactive_elements',
     'list_conversations', 'get_conversation',
     'project_charter_read', 'project_board_read',
+    'project_peer_status',
 })
 
 # ── Concurrency safety partitioning ──

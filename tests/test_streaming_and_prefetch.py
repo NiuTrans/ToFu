@@ -111,6 +111,74 @@ class TestStreamingToolAccumulator:
         })
         assert acc.submitted_count == 0
 
+    def test_callback_skips_phantom_fetch_url_empty_urls(self):
+        """A placeholder fetch_url with an empty urls array is NOT pre-executed.
+
+        Regression: the model emitted
+        ``fetch_url({"reason": "placeholder", "urls": []})``. Because ``urls``
+        is falsy it fell through to single-URL mode with url='', pre-executing
+        ``fetch_page_content('')`` and caching a bogus 'Failed to fetch .'
+        (source: Prefetch). The guard must defer it to the normal handler.
+        """
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+        task = self._make_task()
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        acc.on_tool_call_ready({
+            'id': 'tc_phantom',
+            'function': {'name': 'fetch_url',
+                         'arguments': json.dumps({'reason': 'placeholder', 'urls': []})},
+        })
+        assert acc.submitted_count == 0
+
+    def test_callback_skips_fetch_url_no_target(self):
+        """fetch_url with neither url nor urls is not pre-executed."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+        task = self._make_task()
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        acc.on_tool_call_ready({
+            'id': 'tc_nourl',
+            'function': {'name': 'fetch_url', 'arguments': json.dumps({'reason': 'x'})},
+        })
+        assert acc.submitted_count == 0
+
+    def test_callback_skips_web_search_empty_query(self):
+        """web_search with a blank query is not pre-executed."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+        task = self._make_task()
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        acc.on_tool_call_ready({
+            'id': 'tc_blank',
+            'function': {'name': 'web_search', 'arguments': json.dumps({'query': '  '})},
+        })
+        assert acc.submitted_count == 0
+
+    def test_callback_submits_fetch_url_with_real_url(self):
+        """A fetch_url with a real url IS still pre-executed (guard doesn't over-reject)."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+        task = self._make_task()
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        acc._execute_one = MagicMock(return_value='page content')
+        acc.on_tool_call_ready({
+            'id': 'tc_real',
+            'function': {'name': 'fetch_url',
+                         'arguments': json.dumps({'url': 'https://example.com'})},
+        })
+        assert acc.submitted_count == 1
+
+    def test_has_executable_target_helper(self):
+        """_has_executable_target directly: the pure predicate behind the guard."""
+        from lib.tasks_pkg.streaming_tool_executor import _has_executable_target as h
+        assert h('fetch_url', {'urls': []}) is False
+        assert h('fetch_url', {'url': ''}) is False
+        assert h('fetch_url', {'url': 'https://x.com'}) is True
+        assert h('fetch_url', {'urls': [{'url': 'https://x.com'}]}) is True
+        assert h('fetch_url', {'urls': ['https://x.com']}) is True
+        assert h('web_search', {'query': ''}) is False
+        assert h('web_search', {'query': 'hello'}) is True
+        assert h('web_search', {'queries': [{'query': 'hi'}]}) is True
+        # Project tools are always allowed (their handler validates).
+        assert h('grep_search', {'pattern': 'x'}) is True
+
     def test_inject_into_cache_waits_for_unfinished(self):
         """inject_into_cache waits for in-progress futures instead of cancelling."""
         from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator

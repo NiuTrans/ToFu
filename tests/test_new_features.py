@@ -312,16 +312,17 @@ class TestCacheTracking:
             CacheState, _cache_states, get_cache_prefix_count,
         )
         conv_id = 'test-prefix-write-only'
+        from lib.tasks_pkg.cache_tracking import _state_key
         state = CacheState()
         state.last_cache_read_tokens = 0        # nothing read yet
         state.last_cache_write_tokens = 278500  # but a big prefix WAS written
         state.message_count = 6
         state.call_count = 1
-        _cache_states[conv_id] = state
+        _cache_states[_state_key(conv_id)] = state
         try:
             assert get_cache_prefix_count(conv_id) == 4  # max(0, 6 - 2)
         finally:
-            _cache_states.pop(conv_id, None)
+            _cache_states.pop(_state_key(conv_id), None)
 
     def test_no_false_positive_on_message_growth(self):
         """Growing messages (tool rounds) should NOT trigger a cache break
@@ -556,12 +557,13 @@ class TestCacheAwareMicroCompact:
         from lib.tasks_pkg.compaction import micro_compact
 
         conv_id = 'test-cache-mc-1'
+        from lib.tasks_pkg.cache_tracking import _state_key
         # Set up state with active cache
         state = CacheState()
         state.last_cache_read_tokens = 5000
         state.message_count = 5  # simulate 5 messages tracked; prefix = max(0, 5 - 2) = 3
         state.call_count = 5
-        _cache_states[conv_id] = state
+        _cache_states[_state_key(conv_id)] = state
 
         messages = [
             {'role': 'system', 'content': 'system prompt'},
@@ -584,4 +586,4 @@ class TestCacheAwareMicroCompact:
         assert messages[2]['reasoning_content'] == original_thinking_2
 
         # Cleanup
-        _cache_states.pop(conv_id, None)
+        _cache_states.pop(_state_key(conv_id), None)

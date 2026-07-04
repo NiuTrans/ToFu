@@ -74,6 +74,48 @@ def _dumps_yielding(obj) -> str:
         logger.warning('[Chat] orjson snapshot encode failed (%s); '
                        'falling back to stdlib iterencode', e)
         return ''.join(json.JSONEncoder(ensure_ascii=False).iterencode(obj))
+
+
+def _running_checkpoint_verdict(sharded: bool):
+    """Decide how to report a DB checkpoint with status='running' whose task is
+    ABSENT from this replica's memory (Epic C §4.1 / §6.4).
+
+    Returns ``(effective_status, reconnect_hint)``:
+      * sharded (redis, multi-replica): ``('running', True)`` — the task is
+        (probably) alive on another replica; the client re-routes via taskId
+        affinity. NO cross-replica liveness probe, NO DB flip to interrupted.
+      * single-process (inproc): ``('interrupted', False)`` — absent genuinely
+        means the server crashed mid-task; keep the crash-recovery behaviour
+        byte-identical to before Epic C.
+    """
+    if sharded:
+        return ('running', True)
+    return ('interrupted', False)
+
+
+def _loads_yielding(raw):
+    """Parse a (potentially multi-MB) JSON snapshot with minimal GIL-hold.
+
+    The mirror of :func:`_dumps_yielding` for the DECODE direction. The
+    stdlib ``json.loads`` C accelerator holds the GIL for the whole parse,
+    so a multi-MB ``tool_rounds`` blob decoded inside the sync SSE fallback
+    generators (``gen_done`` / ``gen_persisted``) stalls the event loop just
+    as an on-loop encode would — those generators run each ``next()`` in the
+    executor via Quart's ``run_sync_iterable``, but the GIL is still held for
+    the whole call so the loop thread is starved regardless (the same trap
+    documented for ``to_thread(json.dumps)``).
+
+    ``orjson.loads`` parses the same blob several times faster and releases
+    the GIL far sooner, dropping the stall below the danger threshold. It
+    accepts ``str`` or ``bytes``. On the rare input orjson rejects we fall
+    back to stdlib ``json.loads`` so behaviour is never worse than before.
+    """
+    try:
+        return orjson.loads(raw)
+    except (TypeError, ValueError) as e:
+        logger.warning('[Chat] orjson snapshot parse failed (%s); '
+                       'falling back to stdlib json.loads', e)
+        return json.loads(raw)
 # v1 blueprint for the JSON routes (the carve-out /api/chat/stream/<id> stays on chat_bp).
 from routes.api_v1.chat import api_v1_chat_bp  # noqa: E402
 
@@ -166,6 +208,29 @@ def chat_start():
     # entirely — external callers read results from task_results directly.
     if inline_messages:
         task['_inline_messages'] = True
+
+    # ── Admission control (backpressure) ──
+    # Cap concurrent in-flight tasks so a UI spawn storm can't exhaust the
+    # agent-worker pool — the SAME ceiling the headless paths enforce
+    # (controller.try_acquire → 503 + retry_after when full). The slot is
+    # released on the task's terminal event via on_terminal (fires once from
+    # the orchestrator worker thread), so a UI spawn can never permanently
+    # consume capacity. Registered BEFORE spawn so no terminal signal is
+    # missed.
+    from lib.agent_core.admission import controller as _admission, on_terminal
+    if not _admission.try_acquire():
+        _stats = _admission.stats()
+        logger.warning('[Chat] /chat/start refused for conv=%s — at inflight '
+                       'capacity (%d/%d)', conv_id[:8],
+                       _stats['in_flight'], _stats['capacity'])
+        return jsonify({
+            'ok': False,
+            'error': {'kind': 'capacity',
+                      'detail': 'Server is at task capacity. Retry shortly.',
+                      'retry_after_s': 3},
+        }), 503
+    on_terminal(task['id'], lambda _tid: _admission.release())
+
     from lib.tasks_pkg import spawn_task
     _cfg_model = cfg.get('model', '?')
     _cfg_preset = cfg.get('preset', cfg.get('effort', '?'))
@@ -176,6 +241,10 @@ def chat_start():
     except Exception as _spawn_err:
         logger.exception('[Chat] Failed to start thread for task %s conv=%s',
                          task['id'], task['convId'])
+        # spawn failed → no terminal event will fire, so the on_terminal
+        # release above never runs. Release the admission slot here to avoid
+        # permanently leaking capacity on a spawn error.
+        _admission.release()
         from lib.error_envelope import make_envelope as _make_env
         task['status'] = 'error'
         task['error'] = _make_env(
@@ -1144,6 +1213,22 @@ def _warm_resume_serviceable(resume_cursor, n_events):
 @chat_bp.route('/api/chat/stream/<task_id>', methods=['GET'])
 async def chat_stream(task_id):
     import asyncio
+
+    # ── Per-principal concurrent-SSE cap (backpressure) ──
+    # A single process serves every LIVE SSE stream as a long-lived
+    # connection; with no per-principal ceiling one client/IP can open
+    # unbounded streams and exhaust the process. We acquire a slot keyed by
+    # the request principal (user_id → key_id → client IP) ONLY for the live
+    # streaming path (generate_with_disconnect_log) — the transient
+    # DB-snapshot / cold-replay generators below finish in microseconds and
+    # are the reconnect/replay safety valve, so they are intentionally NOT
+    # counted against the cap. The live path acquires just before opening the
+    # stream and releases in its finally, so a dropped/aborted/errored stream
+    # can never leak a slot.
+    from lib.agent_core.principal import principal_key
+    from lib.agent_core.sse_limit import limiter as _sse_limiter
+    _sse_principal = principal_key(current_auth())
+
     with tasks_lock:
         task = tasks.get(task_id)
 
@@ -1201,8 +1286,8 @@ async def chat_stream(task_id):
                                 )
                                 if row_local['tool_rounds']:
                                     try:
-                                        state_local['toolRounds'] = json.loads(row_local['tool_rounds'])
-                                    except (json.JSONDecodeError, TypeError) as _e:
+                                        state_local['toolRounds'] = _loads_yielding(row_local['tool_rounds'])
+                                    except (json.JSONDecodeError, ValueError, TypeError) as _e:
                                         logger.debug('[Chat] cold-replay tool_rounds parse failed: %s', _e)
                                 else:
                                     from lib.tasks_pkg import load_tool_rounds_from_conversation
@@ -1212,7 +1297,7 @@ async def chat_stream(task_id):
                                 if row_local['error']:
                                     from lib.error_envelope import from_json as _err_from_json
                                     state_local['error'] = _err_from_json(row_local['error'])
-                                yield f'data: {json.dumps(state_local, ensure_ascii=False)}\n\n'
+                                yield f'data: {_dumps_yielding(state_local)}\n\n'
                             done_evt_local = build_event(EventType.DONE)
                             if row_local:
                                 if row_local['metadata']:
@@ -1234,7 +1319,7 @@ async def chat_stream(task_id):
                                 if row_local['error']:
                                     from lib.error_envelope import from_json as _err_from_json
                                     done_evt_local['error'] = _err_from_json(row_local['error'])
-                            yield f'data: {json.dumps(done_evt_local, ensure_ascii=False)}\n\n'
+                            yield f'data: {_dumps_yielding(done_evt_local)}\n\n'
                         except Exception as _e:
                             logger.debug('[Chat] cold-replay synthetic done failed: %s', _e)
 
@@ -1261,8 +1346,8 @@ async def chat_stream(task_id):
                 state['error'] = _err_from_json(row['error'])
             if row['tool_rounds']:
                 try:
-                    state['toolRounds'] = json.loads(row['tool_rounds'])
-                except (json.JSONDecodeError, TypeError) as e:
+                    state['toolRounds'] = await asyncio.to_thread(_loads_yielding, row['tool_rounds'])
+                except (json.JSONDecodeError, ValueError, TypeError) as e:
                     logger.warning('[Chat] Failed to parse tool_rounds for task %s: %s', task_id, e, exc_info=True)
             else:
                 from lib.tasks_pkg import load_tool_rounds_from_conversation
@@ -1303,8 +1388,8 @@ async def chat_stream(task_id):
             def gen_done():
                 for _ in range(4):
                     yield ':' + ' ' * 2048 + '\n\n'
-                yield f'data: {json.dumps(state, ensure_ascii=False)}\n\n'
-                yield f'data: {json.dumps(done_evt, ensure_ascii=False)}\n\n'
+                yield f'data: {_dumps_yielding(state)}\n\n'
+                yield f'data: {_dumps_yielding(done_evt)}\n\n'
 
             return Response(gen_done(), mimetype='text/event-stream', headers={
                 'Content-Type': 'text/event-stream; charset=utf-8',
@@ -1567,6 +1652,10 @@ async def chat_stream(task_id):
             if time.time() - last_t > 15:
                 yield ': keepalive\n\n'
                 last_t = time.time()
+                # Heartbeat: re-arm the per-principal SSE slot lease so a
+                # living long stream never expires; the lease TTL only
+                # reclaims a slot whose owner crashed (design §5.2).
+                _sse_limiter.refresh(_sse_token)
             await asyncio.sleep(0.05)
 
     async def generate_with_disconnect_log():
@@ -1580,6 +1669,9 @@ async def chat_stream(task_id):
         except (GeneratorExit, asyncio.CancelledError):
             logger.debug('[Chat] SSE stream closed by client (GeneratorExit)', exc_info=True)
         finally:
+            # Release the per-principal SSE slot FIRST — a dropped / aborted /
+            # errored stream must free its slot before anything else can raise.
+            _sse_limiter.release(_sse_token)
             elapsed = time.time() - _stream_start
             content_len = len(task.get('content') or '')
             _fr = task.get('finishReason') or '?'
@@ -1612,6 +1704,23 @@ async def chat_stream(task_id):
                            'finishReason=%s model=%s provider=%s',
                            task_id[:8], _events_sent, elapsed, content_len,
                            _fr, _model, _provider)
+
+    _sse_token = _sse_limiter.try_acquire(_sse_principal)
+    if _sse_token is None:
+        _active = _sse_limiter.active(_sse_principal)
+        logger.warning('[Chat] SSE stream refused for principal=%s task=%s — '
+                       'at concurrent-stream cap (%d active, cap=%d)',
+                       _sse_principal, task_id[:8], _active, _sse_limiter.cap)
+        resp = jsonify({
+            'ok': False,
+            'error': {'kind': 'rate_limited',
+                      'detail': 'Too many concurrent streams for this '
+                                'principal. Close an existing stream or '
+                                'retry shortly.',
+                      'retry_after_s': 5},
+        })
+        resp.headers['Retry-After'] = '5'
+        return resp, 429
 
     resp = Response(generate_with_disconnect_log(), mimetype='text/event-stream', headers={
         'Content-Type': 'text/event-stream; charset=utf-8',
@@ -1809,17 +1918,45 @@ def chat_poll(task_id):
         #   the server crashed/restarted mid-task. Mark it as 'interrupted'
         #   so the frontend stops polling and recovers the partial content.
         effective_status = row['status']
+        _reconnect_hint = False
         if effective_status == 'running':
-            logger.warning('[Chat] Poll %s — found stale checkpoint (status=running) in DB but task is NOT in memory. '
-                           'Server likely crashed mid-task. Returning status=interrupted with %dchars content, %dchars thinking.',
-                           task_id[:8], _db_content_len, _db_thinking_len)
-            effective_status = 'interrupted'
-            # ★ Update DB so future polls don't re-trigger this warning
+            # ★ Epic C (§4.1 / §6.4): a running checkpoint absent from THIS
+            #   replica's memory means either (a) single-process crash, or
+            #   (b) multi-replica — the task is alive on ANOTHER replica and
+            #   the poll landed here via a stale/misrouted request. We do NOT
+            #   run a cross-replica liveness probe (ratified §6.4). Instead:
+            #   under the sharded (redis) backend, report status='running' +
+            #   reconnect=True so the client re-routes to the owning replica via
+            #   taskId affinity (NOT the false 'interrupted' that would strand a
+            #   live task). Under the single-process (inproc) backend, absent
+            #   genuinely means crashed → keep today's 'interrupted'
+            #   crash-recovery behaviour byte-identical.
+            _sharded = False
             try:
-                db.execute("UPDATE task_results SET status='interrupted' WHERE task_id=?", (task_id,))
-                db.commit()
-            except Exception as e:
-                logger.warning('[Chat] Failed to update stale task %s to interrupted: %s', task_id[:8], e)
+                from lib.env_compat import getenv_compat as _ge
+                _sharded = (_ge('TOFU_RUNTIME_STATE_BACKEND') or 'inproc').strip().lower() == 'redis'
+            except Exception as _e_be:
+                logger.debug('[Chat] backend probe failed: %s', _e_be)
+            _verdict_status, _reconnect_hint = _running_checkpoint_verdict(_sharded)
+            effective_status = _verdict_status
+            if _reconnect_hint:
+                logger.info('[Chat] Poll %s — running checkpoint absent locally under sharded backend; '
+                            'reporting running+reconnect (task likely on another replica — affinity re-route). '
+                            '%dchars content, %dchars thinking.',
+                            task_id[:8], _db_content_len, _db_thinking_len)
+                # Do NOT flip the DB to interrupted — the task is (probably)
+                # alive on its owning replica; flipping would corrupt its state.
+            else:
+                logger.warning('[Chat] Poll %s — found stale checkpoint (status=running) in DB but task is NOT in memory. '
+                               'Server likely crashed mid-task. Returning status=interrupted with %dchars content, %dchars thinking.',
+                               task_id[:8], _db_content_len, _db_thinking_len)
+                # effective_status already 'interrupted' from the verdict.
+                # ★ Update DB so future polls don't re-trigger this warning
+                try:
+                    db.execute("UPDATE task_results SET status='interrupted' WHERE task_id=?", (task_id,))
+                    db.commit()
+                except Exception as e:
+                    logger.warning('[Chat] Failed to update stale task %s to interrupted: %s', task_id[:8], e)
         else:
             logger.debug('[Chat] Poll %s from DB — status=%s content=%dchars thinking=%dchars '
                          'finishReason=%s model=%s error=%s',
@@ -1829,13 +1966,19 @@ def chat_poll(task_id):
             'id': row['task_id'], 'status': effective_status,
             'content': row['content'], 'thinking': row['thinking'],
         }
+        if _reconnect_hint:
+            # Tell the client to re-open the stream (it will land on the
+            # owning replica via taskId affinity) rather than treat this as a
+            # terminal interrupted state.
+            r['reconnect'] = True
+
         if row['error']:
             from lib.error_envelope import from_json as _err_from_json
             r['error'] = _err_from_json(row['error'])
         if row['tool_rounds']:
             try:
-                r['toolRounds'] = json.loads(row['tool_rounds'])
-            except (json.JSONDecodeError, TypeError) as e:
+                r['toolRounds'] = _loads_yielding(row['tool_rounds'])
+            except (json.JSONDecodeError, ValueError, TypeError) as e:
                 logger.warning('[Chat] Failed to parse tool_rounds in poll for task %s: %s', task_id, e, exc_info=True)
         else:
             from lib.tasks_pkg import load_tool_rounds_from_conversation

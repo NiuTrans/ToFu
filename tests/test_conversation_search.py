@@ -26,6 +26,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from routes.conversations import build_search_text
 
+from routes.conversations_search import _head_cap_sql
+
 
 # ═══════════════════════════════════════════════════════════
 #  Unit Tests: build_search_text
@@ -628,3 +630,93 @@ class TestUpsertRetryCrossConnectionVisibility:
         finally:
             db.execute('DELETE FROM conversations WHERE id=?', (conv_id,))
             db.commit()
+
+
+
+# ═══════════════════════════════════════════════════════════
+#  Cross-backend Phase-2 head-cap (SQLite has no left())
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestPhase2HeadCapCrossBackend:
+    """Regression pin for the ``no such function: left`` bug.
+
+    The Phase-2 substring fallback caps the scan to the first 10000 chars of
+    ``search_text``. It previously spelled that cap ``left(search_text, 10000)``
+    unconditionally — but ``left()`` is a PostgreSQL/MySQL builtin that SQLite
+    does NOT have. On every SQLite-fallback deployment the fallback query raised
+    ``OperationalError: no such function: left``, which the ``except`` swallowed
+    at WARNING → the substring search silently returned nothing (degraded search
+    that no test caught, but which fired dozens of times in logs/error.log on
+    the async DB threads).
+
+    The fix (routes/conversations_search.py::_head_cap_sql) makes the head-cap
+    backend-aware: ``left(...)`` on PG (so it still hits the expression index
+    ``idx_conv_search_head_trgm``) and portable ``substr(..., 1, 10000)`` on
+    SQLite.
+    """
+
+    def test_head_cap_maps_by_backend(self):
+        """PG keeps left() (index-matching); everything else uses substr()."""
+        assert _head_cap_sql('pg') == 'left(search_text, 10000)'
+        assert _head_cap_sql('sqlite') == 'substr(search_text, 1, 10000)'
+        # Any non-pg backend string falls to the portable form (fail-safe).
+        assert _head_cap_sql('') == 'substr(search_text, 1, 10000)'
+
+    def test_sqlite_left_form_raises_but_substr_form_works(self):
+        """Execute both head-cap forms against real in-memory SQLite.
+
+        This is the crux of the bug: the PG form is a hard runtime error on
+        SQLite, while the chosen SQLite form runs and correctly bounds the
+        substring match. Proves the fix independent of the (PG) test harness.
+        """
+        import sqlite3
+
+        conn = sqlite3.connect(':memory:')
+        conn.execute('CREATE TABLE conversations '
+                     '(id TEXT, user_id INTEGER, search_text TEXT, updated_at INTEGER)')
+        conn.execute("INSERT INTO conversations VALUES "
+                     "('c1', 1, 'the superbacktesting framework is great', 1)")
+        conn.commit()
+
+        pattern = '%superbacktest%'
+
+        # 1. The OLD unconditional PG form must fail on SQLite (the bug).
+        pg_sql = ('SELECT id FROM conversations WHERE user_id=1 '
+                  f'AND lower({_head_cap_sql("pg")}) LIKE ?')
+        with pytest.raises(sqlite3.OperationalError) as exc:
+            conn.execute(pg_sql, (pattern,)).fetchall()
+        assert 'left' in str(exc.value).lower()
+
+        # 2. The NEW SQLite form runs and finds the substring match.
+        sqlite_sql = ('SELECT id FROM conversations WHERE user_id=1 '
+                      f'AND lower({_head_cap_sql("sqlite")}) LIKE ?')
+        rows = conn.execute(sqlite_sql, (pattern,)).fetchall()
+        assert [r[0] for r in rows] == ['c1'], (
+            'substr() head-cap form must find the substring match on SQLite')
+        conn.close()
+
+    def test_head_cap_bounds_to_10000_chars_on_sqlite(self):
+        """The substr cap actually bounds the scan: a match past char 10000
+        (beyond the cap) is NOT found, mirroring the PG left()-cap semantics."""
+        import sqlite3
+
+        conn = sqlite3.connect(':memory:')
+        conn.execute('CREATE TABLE conversations (id TEXT, search_text TEXT)')
+        # Marker sits AFTER the 10000-char cap → must be excluded.
+        far = 'x' * 10000 + ' needle_far'
+        near = 'needle_near ' + 'y' * 20
+        conn.execute("INSERT INTO conversations VALUES ('far', ?)", (far,))
+        conn.execute("INSERT INTO conversations VALUES ('near', ?)", (near,))
+        conn.commit()
+
+        cap = _head_cap_sql('sqlite')
+        got_far = conn.execute(
+            f'SELECT id FROM conversations WHERE lower({cap}) LIKE ?',
+            ('%needle_far%',)).fetchall()
+        got_near = conn.execute(
+            f'SELECT id FROM conversations WHERE lower({cap}) LIKE ?',
+            ('%needle_near%',)).fetchall()
+        conn.close()
+        assert got_far == [], 'match beyond the 10000-char cap must be excluded'
+        assert [r[0] for r in got_near] == ['near']
