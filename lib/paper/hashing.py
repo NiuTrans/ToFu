@@ -10,9 +10,25 @@ import hashlib
 import os
 import re
 
+from lib.log import get_logger
+
+logger = get_logger(__name__)
+
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-PAPER_DIR = os.path.join(BASE_DIR, 'uploads', 'papers')
+
+# Paper PDFs + extracted figure manifests are USER STATE referenced from the
+# DB (paper_library.pdf_filename, /api/paper/images/ URLs), so they co-locate
+# with the DB under the resolved runtime base rather than the code tree — see
+# lib/runtime_paths.uploads_root(). Byte-identical to <repo>/uploads/papers in
+# the default in-tree layout; falls back to it if runtime_paths is unavailable.
+try:
+    from lib.runtime_paths import uploads_root as _uploads_root
+    PAPER_DIR = os.path.join(_uploads_root(), 'papers')
+except Exception as e:  # pragma: no cover — defensive (keeps import-time robust)
+    logger.debug('[Paper:Hashing] runtime_paths.uploads_root unavailable, '
+                 'falling back to in-tree uploads/papers: %s', e)
+    PAPER_DIR = os.path.join(BASE_DIR, 'uploads', 'papers')
 PAPER_IMG_DIR = os.path.join(PAPER_DIR, 'images')
 os.makedirs(PAPER_DIR, exist_ok=True)
 os.makedirs(PAPER_IMG_DIR, exist_ok=True)

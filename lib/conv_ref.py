@@ -43,7 +43,8 @@ def _keyword_clause(keyword, params):
     like = f'%{keyword}%'
     try:
         from lib.database import _BACKEND
-    except Exception:  # pragma: no cover - import shape guard
+    except Exception as e:  # pragma: no cover - import shape guard
+        logger.debug('[ConvRef] _BACKEND import failed, assuming sqlite: %s', e)
         _BACKEND = 'sqlite'
 
     if _BACKEND == 'pg':

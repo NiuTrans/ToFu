@@ -182,6 +182,49 @@ class DefaultConversationStore:
         db_execute_with_retry(db, 'DELETE FROM transcript_archive WHERE conv_id=?',
                               (conv_id,))
 
+    def prune_archives(self, conv_id, keep):
+        """Ring-buffer retention: keep only the ``keep`` most-recent archive
+        rows for ``conv_id`` (highest ``id`` = newest), delete the rest.
+
+        Every compaction (force + reactive) inserts a full ``messages_json``
+        row, so without retention the table grows unbounded on a long-lived
+        conversation.  Called as a GC-on-insert from ``_archive_transcript``.
+        ``keep <= 0`` is a no-op (unlimited).  Returns the number of rows
+        deleted (0 when under the cap).  Cross-backend: a correlated subselect
+        of the newest ``keep`` ids, deleting anything not in it.
+        """
+        if not conv_id or keep <= 0:
+            return 0
+        from lib.database import (DOMAIN_CHAT, db_execute_with_retry,
+                                  get_thread_db)
+        db = get_thread_db(DOMAIN_CHAT)
+        try:
+            cur = db.execute(
+                'SELECT COUNT(*) FROM transcript_archive WHERE conv_id=?',
+                (conv_id,),
+            )
+            row = cur.fetchone()
+            total = int(row[0] if not isinstance(row, dict) else row.get('count', 0)) if row else 0
+            if total <= keep:
+                return 0
+            # Delete every row for this conv whose id is NOT among the newest
+            # ``keep`` ids.  Subselect avoids OFFSET dialect differences.
+            db_execute_with_retry(db,
+                'DELETE FROM transcript_archive WHERE conv_id=? AND id NOT IN '
+                '(SELECT id FROM transcript_archive WHERE conv_id=? '
+                ' ORDER BY id DESC LIMIT ?)',
+                (conv_id, conv_id, int(keep)),
+            )
+            deleted = total - keep
+            logger.info('[Store] pruned transcript_archive conv=%s: deleted %d '
+                        'oldest row(s), kept %d',
+                        conv_id[:8] if conv_id else '?', deleted, keep)
+            return deleted
+        except Exception as e:
+            logger.warning('[Store] prune_archives failed conv=%s: %s',
+                           conv_id[:8] if conv_id else '?', e)
+            return 0
+
     def sync_conversation_with_search(self, conv_id, messages):
         """Overwrite messages + msg_count + search_text and refresh FTS.
 

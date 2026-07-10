@@ -835,7 +835,7 @@ document.addEventListener('click', function(e) {
   const msgEl = trunc.closest('.message');
   if (msgEl) {
     const msgIdx = parseInt((msgEl.id || '').replace('msg-', ''), 10);
-    const conv = conversations.find(c => c.id === activeConvId);
+    const conv = getActiveConv();
     if (conv && conv.messages && conv.messages[msgIdx]) {
       const msg = conv.messages[msgIdx];
       const allRounds = getToolRoundsFromMsg(msg);

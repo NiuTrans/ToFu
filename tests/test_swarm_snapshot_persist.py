@@ -38,10 +38,14 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Default to a throwaway SQLite DB when run standalone (pytest conftest forces
-# sqlite already; this only matters for the __main__ path).
-os.environ.setdefault('TOFU_DB_BACKEND', 'sqlite')
-os.environ.setdefault('TOFU_DB_PATH', '/tmp/swarm_snapshot_unittest.db')
+# DATA-LOSS GUARD: this module imports lib.* AT MODULE TOP (below), which can
+# transitively freeze _core._BACKEND. A bare `python tests/x.py` skips conftest,
+# and a plain setdefault('TOFU_DB_BACKEND','sqlite') is DEFEATED by the ambient
+# TOFU_DB_BACKEND=postgres in .env. Force sqlite + assert a test DB BEFORE the
+# imports. setUp() calls init_db(), so skip schema bootstrap here.
+if __name__ == '__main__':
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_swarm_snapshot_persist.__main__', init_schema=False)
 
 from lib import agent_inbox
 from lib.swarm.integration import (

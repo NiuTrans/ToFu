@@ -181,6 +181,7 @@ class PgCursor:
             self.description = self._cursor.description
             self.rowcount = self._cursor.rowcount
             self._conn._last_used = time.monotonic()
+            self._conn._last_used_wall = time.time()
             _sql_upper = translated[:30].lstrip().upper()
             if _sql_upper.startswith(('INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP')):
                 self._conn._dirty = True
@@ -219,6 +220,7 @@ class PgCursor:
             self.description = self._cursor.description
             self.rowcount = self._cursor.rowcount
             self._conn._last_used = time.monotonic()
+            self._conn._last_used_wall = time.time()
             # Mark the connection dirty so teardown COMMITs instead of
             # rolling back — otherwise executemany-only writes are silently
             # discarded by close_db()'s clean-reads rollback branch.
@@ -292,6 +294,11 @@ class PgConnection:
         self._dirty = False
         self._created_at = time.monotonic()
         self._last_used = time.monotonic()
+        # Wall-clock twin of _last_used. time.monotonic() FREEZES across an OS
+        # suspend (laptop lid close / VM pause / FUSE stall) while time.time()
+        # keeps advancing, so the health check needs the wall clock to notice a
+        # connection went stale during a suspend (see _test_pg_connection).
+        self._last_used_wall = time.time()
         self.row_factory = None
 
     @property
@@ -302,7 +309,32 @@ class PgConnection:
     def execute(self, sql, params=None):
         cur = self._conn.cursor()
         wrapper = PgCursor(cur, self)
-        return wrapper.execute(sql, params)
+        try:
+            return wrapper.execute(sql, params)
+        except Exception as e:
+            # Transparent one-shot reconnect on a dead-connection error, but
+            # ONLY when this connection has issued no write yet in the current
+            # transaction (self._dirty is False). A connection-level failure
+            # means nothing was committed, so re-running a clean read / the
+            # first statement is idempotent. This rescues the raw db.execute()
+            # read sites (e.g. persist_conv_messages' settings SELECT) that do
+            # NOT route through db_execute_with_retry, so a pooled connection
+            # killed by a suspend / PG restart / network flap becomes a
+            # transparent reconnect instead of a hard 500 on the user's next
+            # Send/Regen. A statement_timeout cancellation (OperationalError
+            # that is NOT a dead-connection signature) is deliberately NOT
+            # retried — only genuine connection death is.
+            etype = type(e).__name__
+            if etype in ('OperationalError', 'InterfaceError') and not self._dirty:
+                from lib.database._core import _pg_error_is_dead, _reconnect_pg_inplace
+                is_dead = (etype == 'InterfaceError') or _pg_error_is_dead(str(e))
+                if is_dead and _reconnect_pg_inplace(self):
+                    logger.warning('[DB] Transparent reconnect after dead connection '
+                                   '(%s) — retrying statement once', etype)
+                    cur = self._conn.cursor()
+                    wrapper = PgCursor(cur, self)
+                    return wrapper.execute(sql, params)
+            raise
 
     def executemany(self, sql, params_list):
         cur = self._conn.cursor()

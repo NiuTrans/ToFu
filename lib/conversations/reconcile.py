@@ -22,8 +22,7 @@ no frontend PUT to lose → the resurrect bug is structurally impossible, and no
 frontend pop → the auto-fire leak is structurally impossible).
 
 The frontend keeps ONLY the network/DOM ORCHESTRATION (reconnect to a live SSE,
-poll a finished task, auto-start an orphaned user turn) — it no longer INFERS
-settled lifecycle state.
+poll a finished task) — it no longer INFERS settled lifecycle state.
 
 Verdict vocabulary (per message, mirrors the JS classifiers byte-for-byte in
 predicate logic):
@@ -67,11 +66,20 @@ def _has_real_round(msg: dict[str, Any]) -> bool:
 
 
 def _is_special_turn(msg: dict[str, Any]) -> bool:
-    """Endpoint / autopilot-VU / image-gen turns are never 'empty clutter'."""
+    """Endpoint / auto-initiated / image-gen turns are never 'empty clutter'.
+
+    Endpoint (planner/critic/worker-iteration) and image-gen markers stay
+    local (they are turn-KIND, not initiator). "Was this auto-initiated?" is
+    resolved through the ONE shared resolver — so autopilot-VU AND every other
+    auto-initiated source (proactive / timer / brain / peer / operator / swarm)
+    is protected from the ghost sweep, not just the two markers this predicate
+    used to hardcode.
+    """
+    from lib.conversations.turn_initiation import is_auto_initiated
     return bool(
         msg.get('_epIteration') is not None and msg.get('_epIteration') != 0
         or msg.get('_isEndpointReview') or msg.get('_isEndpointPlanner')
-        or msg.get('_isVirtualUser') or msg.get('_autopilotRunId')
+        or is_auto_initiated(msg)
         or msg.get('_igResult') or msg.get('_igResults') or msg.get('_igError')
     )
 
@@ -117,6 +125,79 @@ def classify_ghost_tail(msg: dict[str, Any]) -> str | None:
     return 'interrupt' if (msg.get('thinking') or '').strip() else 'delete'
 
 
+def _is_settled_assistant(msg: dict[str, Any]) -> bool:
+    """True if ``msg`` is an assistant turn carrying a genuine settled reply
+    (real content, a finish reason, usage, or a result-bearing tool round).
+
+    NOTE: an assistant whose ONLY payload is an ``error`` does NOT count as a
+    settled reply here — an error husk cannot 'supersede' another error husk.
+    """
+    if not isinstance(msg, dict) or msg.get('role') != 'assistant':
+        return False
+    return bool(
+        (msg.get('content') or '').strip()
+        or msg.get('finishReason')
+        or msg.get('usage')
+        or _has_real_round(msg)
+    )
+
+
+def is_error_husk(msg: dict[str, Any]) -> bool:
+    """A buried PURE-error assistant husk: carries an ``error`` but NO other
+    user-visible payload (empty content, empty thinking, no real tool round,
+    not a special turn).
+
+    This is precisely the ``errAssistant`` the frontend pushes on a
+    timeout/abort of an edit/regen/send (``main_regen_continue.js`` /
+    ``edit_message.js`` / ``main_send_pipeline.js``): ``{role:'assistant',
+    content:'', thinking:'', error:…, toolRounds:[]}``. The buried-ghost sweep
+    (``is_buried_empty_ghost``) deliberately SKIPS it (``if msg.get('error')``),
+    because in isolation an error block is real user-visible information — so
+    when it is NOT superseded it must be kept. It is only clutter when a real
+    reply landed right after it (see ``is_superseded_error_husk``).
+    """
+    if not isinstance(msg, dict) or msg.get('role') != 'assistant':
+        return False
+    if _is_special_turn(msg):
+        return False
+    if not msg.get('error'):
+        return False
+    if (msg.get('content') or '').strip():
+        return False
+    if (msg.get('thinking') or '').strip():
+        return False
+    if _has_real_round(msg):
+        return False
+    return True
+
+
+def is_superseded_error_husk(
+    messages: list[dict[str, Any]], idx: int,
+) -> bool:
+    """True if ``messages[idx]`` is a buried pure-error husk (``is_error_husk``)
+    that is DIRECTLY superseded by a settled assistant reply at ``idx+1``.
+
+    This is the late-recovery artifact: the client's edit/regen/send safety
+    timer fired and pushed a visible error bubble AFTER the ~30s recovery
+    window; the server task then actually appeared, and a later orphan-recovery
+    reconnect appended the REAL assistant right below the error. The result is a
+    persisted ``[user, error-husk, real-assistant]`` — a "user → error-bubble →
+    agent" duplicate for a SINGLE logical exchange. Once the real reply landed,
+    the error bubble is stale clutter and is collapsed away.
+
+    Guard rails (deliberately narrow — only the exact artifact, nothing else):
+      * ``idx+1`` must be a genuinely SETTLED assistant (``_is_settled_assistant``
+        — real content / finishReason / usage / result-bearing round). An error
+        husk followed by ANOTHER error husk, or by a still-empty placeholder, or
+        by a user turn (a different exchange), is NOT collapsed.
+    """
+    if idx < 0 or idx + 1 >= len(messages):
+        return False
+    if not is_error_husk(messages[idx]):
+        return False
+    return _is_settled_assistant(messages[idx + 1])
+
+
 def reconcile_conversation_messages(
     messages: list[dict[str, Any]],
     cache_prefix_count: int = 0,
@@ -124,9 +205,14 @@ def reconcile_conversation_messages(
     """Server-authoritative ghost reconcile for a conversation's message list.
 
     Applies, in order:
-      1. Buried-ghost SWEEP — remove every non-tail assistant that is a buried
+      1. Superseded-error-husk COLLAPSE — remove a buried pure-error husk that
+         is directly followed by a settled assistant reply
+         (``is_superseded_error_husk``); the late-recovery
+         ``[user, error-husk, real-assistant]`` "user → error → agent"
+         duplicate.
+      2. Buried-ghost SWEEP — remove every non-tail assistant that is a buried
          empty ghost (``is_buried_empty_ghost``).
-      2. Tail classification — on the (post-sweep) trailing assistant:
+      3. Tail classification — on the (post-sweep) trailing assistant:
            'delete'    → drop it;
            'interrupt' → stamp ``finishReason='interrupted'`` in place.
 
@@ -152,6 +238,28 @@ def reconcile_conversation_messages(
 
     changed = False
     out = list(messages)
+
+    # ── 0. Superseded-error-husk collapse (the late-recovery artifact) ──
+    #    Remove a buried pure-error husk directly followed by a settled reply:
+    #    [user, error-husk, real-assistant] → [user, real-assistant]. Runs
+    #    FIRST so the following sweep/tail passes see the cleaned list. Honours
+    #    the SAME cache-prefix guard as the sweep — never remove an in-prefix
+    #    message (it would shift prefix bytes and bust the prompt cache).
+    if len(out) >= 2:
+        _guard = max(0, cache_prefix_count)
+        kept: list[dict[str, Any]] = []
+        collapsed = 0
+        for i, m in enumerate(out):
+            if i >= _guard and is_superseded_error_husk(out, i):
+                collapsed += 1
+                continue
+            kept.append(m)
+        if collapsed:
+            out = kept
+            changed = True
+            logger.info('[Reconcile] Collapsed %d superseded error-husk(s) '
+                        '(late-recovery user\u2192error\u2192agent duplicate). '
+                        'Remaining=%d', collapsed, len(out))
 
     # ── 1. Buried-ghost sweep (all but the tail) ──
     if len(out) >= 2:
@@ -199,5 +307,7 @@ def reconcile_conversation_messages(
 __all__ = [
     'is_buried_empty_ghost',
     'classify_ghost_tail',
+    'is_error_husk',
+    'is_superseded_error_husk',
     'reconcile_conversation_messages',
 ]

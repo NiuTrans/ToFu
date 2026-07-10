@@ -85,7 +85,8 @@ def read_charter(project_path: str) -> dict:
         decisions = json.loads(row['decisions']) if row['decisions'] else []
         if not isinstance(decisions, list):
             decisions = []
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug('[Charter] decisions JSON parse failed (using []): %s', e)
         decisions = []
     return {
         'project_path': row['project_path'],
@@ -219,7 +220,184 @@ def commit_charter(project_path: str, *, content: str | None = None,
         logger.debug('[Charter] decided feed-emit skipped (commit persisted): %s', e)
     audit_log('charter_committed', project_path=project_path,
               version=new_version, by_conv=updated_by_conv)
+    # ── Pillar #7: keep the human-facing status lane warm on a committed
+    #    decision (non-blocking; the snapshot's staleness gate elides the LLM
+    #    when nothing material moved). Best-effort — never raises into commit. ──
+    try:
+        from lib.conversations.project_status import build_status_snapshot
+        build_status_snapshot(project_path, trigger='decision_committed',
+                              blocking=False)
+    except Exception as e:
+        logger.debug('[Charter] status snapshot trigger skipped: %s', e)
+    try:
+        from lib.conversations.project_watch import address_open_items
+        address_open_items(project_path, trigger='decision_committed',
+                           blocking=False)
+    except Exception as e:
+        logger.debug('[Charter] watch address trigger skipped: %s', e)
     return {'ok': True, 'version': new_version}
+
+
+def _persist_charter(db, project_path: str, content: str, decisions: list,
+                     updated_by_conv: str, version: int) -> None:
+    """Upsert the single-PK charter row (the same dialect-correct ON CONFLICT
+    pattern commit_charter/repair use). Caller owns the transaction commit."""
+    db.execute(
+        'INSERT INTO project_charter '
+        '(project_path, content, decisions, updated_by_conv, updated_at, version) '
+        'VALUES (?, ?, ?, ?, ?, ?) '
+        'ON CONFLICT(project_path) DO UPDATE SET '
+        'content=excluded.content, decisions=excluded.decisions, '
+        'updated_by_conv=excluded.updated_by_conv, '
+        'updated_at=excluded.updated_at, version=excluded.version',
+        (project_path, content, json.dumps(decisions, ensure_ascii=False),
+         updated_by_conv or '', int(time.time() * 1000), version))
+
+
+def update_decision(project_path: str, index: int, text: str, *,
+                    expected_version: int | None = None,
+                    updated_by_conv: str = '') -> dict:
+    """HUMAN-GATED edit of ONE committed decision, addressed by ``index``.
+
+    The index is resolved against the CURRENT decisions list; ``expected_version``
+    (when provided) must match the row version, so the caller is guaranteed the
+    list is exactly what it rendered (the index can't silently address the wrong
+    decision after a concurrent edit). Bumps ``version`` and emits a ``decided``
+    event. Returns ``{'ok', 'version'?, 'error'?, 'current_version'?}``.
+    """
+    text = (text or '').strip()[:_DECISION_MAX_CHARS]
+    if not project_path:
+        return {'ok': False, 'error': 'no project'}
+    if not text:
+        return {'ok': False, 'error': 'empty decision'}
+    from lib.conversations.project_feed import normalize_project_path
+    project_path = normalize_project_path(project_path)
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        cur = read_charter(project_path)
+        if not cur.get('exists'):
+            return {'ok': False, 'error': 'no charter'}
+        if expected_version is not None and cur['version'] != expected_version:
+            return {'ok': False, 'error': 'version_conflict',
+                    'current_version': cur['version']}
+        decisions = list(cur['decisions'])
+        if index < 0 or index >= len(decisions):
+            return {'ok': False, 'error': 'index_out_of_range',
+                    'current_version': cur['version']}
+        d = decisions[index]
+        if isinstance(d, dict):
+            d = dict(d)
+            d['text'] = text
+            d['edited_by_conv'] = updated_by_conv or ''
+            d['edited_at'] = int(time.time() * 1000)
+        else:
+            d = {'text': text, 'by_conv': updated_by_conv or '',
+                 'ts': int(time.time() * 1000)}
+        decisions[index] = d
+        new_version = cur['version'] + 1
+        _persist_charter(db, project_path, cur['content'], decisions,
+                         updated_by_conv, new_version)
+        db.commit()
+    except Exception as e:
+        logger.error('[Charter] update_decision failed proj=%.40r: %s',
+                     project_path, e, exc_info=True)
+        return {'ok': False, 'error': str(e)}
+    try:
+        from lib.conversations.project_feed import emit_project_event
+        emit_project_event(project_path, updated_by_conv or '', 'decided',
+                           'Decision edited: ' + text,
+                           payload={'version': new_version, 'charterEdit': True})
+    except Exception as e:
+        logger.debug('[Charter] edit feed-emit skipped (persisted): %s', e)
+    audit_log('charter_decision_edited', project_path=project_path,
+              index=index, version=new_version, by_conv=updated_by_conv)
+    return {'ok': True, 'version': new_version}
+
+
+def delete_decision(project_path: str, index: int, *,
+                    expected_version: int | None = None,
+                    updated_by_conv: str = '') -> dict:
+    """HUMAN-GATED removal of ONE committed decision, addressed by ``index``.
+
+    Same optimistic-lock + index-resolution contract as ``update_decision``.
+    Bumps ``version`` and emits a ``decided`` event so the removal is auditable.
+    Returns ``{'ok', 'version'?, 'error'?, 'current_version'?}``.
+    """
+    if not project_path:
+        return {'ok': False, 'error': 'no project'}
+    from lib.conversations.project_feed import normalize_project_path
+    project_path = normalize_project_path(project_path)
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        cur = read_charter(project_path)
+        if not cur.get('exists'):
+            return {'ok': False, 'error': 'no charter'}
+        if expected_version is not None and cur['version'] != expected_version:
+            return {'ok': False, 'error': 'version_conflict',
+                    'current_version': cur['version']}
+        decisions = list(cur['decisions'])
+        if index < 0 or index >= len(decisions):
+            return {'ok': False, 'error': 'index_out_of_range',
+                    'current_version': cur['version']}
+        removed = decisions.pop(index)
+        removed_txt = (removed.get('text') if isinstance(removed, dict)
+                       else str(removed)) or ''
+        new_version = cur['version'] + 1
+        _persist_charter(db, project_path, cur['content'], decisions,
+                         updated_by_conv, new_version)
+        db.commit()
+    except Exception as e:
+        logger.error('[Charter] delete_decision failed proj=%.40r: %s',
+                     project_path, e, exc_info=True)
+        return {'ok': False, 'error': str(e)}
+    try:
+        from lib.conversations.project_feed import emit_project_event
+        emit_project_event(project_path, updated_by_conv or '', 'decided',
+                           'Decision removed: ' + removed_txt,
+                           payload={'version': new_version, 'charterEdit': True})
+    except Exception as e:
+        logger.debug('[Charter] delete feed-emit skipped (persisted): %s', e)
+    audit_log('charter_decision_deleted', project_path=project_path,
+              index=index, version=new_version, by_conv=updated_by_conv)
+    return {'ok': True, 'version': new_version}
+
+
+def delete_charter(project_path: str, *, expected_version: int | None = None,
+                   updated_by_conv: str = '') -> dict:
+    """HUMAN-GATED deletion of the ENTIRE charter row (north star + all
+    committed decisions). Optimistic-locked. Emits a ``decided`` event so the
+    deletion is auditable. Deleting a non-existent charter is a no-op success.
+    Returns ``{'ok', 'error'?, 'current_version'?}``.
+    """
+    if not project_path:
+        return {'ok': False, 'error': 'no project'}
+    from lib.conversations.project_feed import normalize_project_path
+    project_path = normalize_project_path(project_path)
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        cur = read_charter(project_path)
+        if not cur.get('exists'):
+            return {'ok': True, 'deleted': False}
+        if expected_version is not None and cur['version'] != expected_version:
+            return {'ok': False, 'error': 'version_conflict',
+                    'current_version': cur['version']}
+        db.execute('DELETE FROM project_charter WHERE project_path=?',
+                   (project_path,))
+        db.commit()
+    except Exception as e:
+        logger.error('[Charter] delete_charter failed proj=%.40r: %s',
+                     project_path, e, exc_info=True)
+        return {'ok': False, 'error': str(e)}
+    try:
+        from lib.conversations.project_feed import emit_project_event
+        emit_project_event(project_path, updated_by_conv or '', 'decided',
+                           'Charter deleted',
+                           payload={'charterDeleted': True})
+    except Exception as e:
+        logger.debug('[Charter] delete-charter feed-emit skipped (persisted): %s', e)
+    audit_log('charter_deleted', project_path=project_path,
+              by_conv=updated_by_conv)
+    return {'ok': True, 'deleted': True}
 
 
 def dismiss_proposal(project_path: str, conv_id: str, proposal_id: str, *,
@@ -450,6 +628,7 @@ def execute_charter_tool(fn_name: str, fn_args: dict, *,
 
 __all__ = [
     'read_charter', 'propose_amendment', 'commit_charter', 'dismiss_proposal',
+    'update_decision', 'delete_decision', 'delete_charter',
     'pending_proposals', 'repair_truncated_decisions', 'render_charter_block',
     'execute_charter_tool',
 ]

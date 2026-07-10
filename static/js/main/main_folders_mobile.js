@@ -226,7 +226,17 @@ function _confirmDeleteFolder(folderId) {
   `;
   document.body.appendChild(overlay);
 
-  function _closeDialog() { overlay.remove(); }
+  /* This is a DESTRUCTIVE modal with no text input, so (unlike the
+   * create/rename dialogs which hang Escape off their <input>) we bind a
+   * document-level keydown and clean it up on close. Escape dismisses it —
+   * matching the create/rename dialogs — and we focus Cancel by default so
+   * an accidental long-press → delete isn't one stray tap from destruction. */
+  function _closeDialog() {
+    document.removeEventListener('keydown', _onKey);
+    overlay.remove();
+  }
+  function _onKey(e) { if (e.key === 'Escape') { e.preventDefault(); _closeDialog(); } }
+  document.addEventListener('keydown', _onKey);
 
   document.getElementById('_folderDialogOk').addEventListener('click', async () => {
     _closeDialog();
@@ -238,44 +248,56 @@ function _confirmDeleteFolder(folderId) {
     renderConversationList();
     if (typeof showToast === 'function') showToast('', t('folder.deleted'), f.name, 2000);
   });
-  document.getElementById('_folderDialogCancel').addEventListener('click', _closeDialog);
+  const _cancelBtn = document.getElementById('_folderDialogCancel');
+  _cancelBtn.addEventListener('click', _closeDialog);
+  setTimeout(() => _cancelBtn.focus(), 50);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) _closeDialog(); });
 }
 
-/** Initialize folder tab bar interactions */
+/** Toggle the vertical project rail between labeled and icon-only, persisting
+ * the choice (same localStorage key the renderer reads back). */
+const _RAIL_COLLAPSE_KEY = 'tofu_project_rail_collapsed';
+function _toggleProjectRail() {
+  const sidebar = document.getElementById('sidebar');
+  if (!sidebar) return;
+  const collapsed = !sidebar.classList.contains('rail-collapsed');
+  sidebar.classList.toggle('rail-collapsed', collapsed);
+  try { localStorage.setItem(_RAIL_COLLAPSE_KEY, collapsed ? '1' : '0'); }
+  catch (e) { console.warn('[rail] persist collapse failed: %s', e); }
+  // Keep the pre-paint html[data-rail] hint in sync so the NEXT load paints at
+  // the matching (full vs collapsed) rail width — zero CLS across the toggle.
+  try {
+    if (document.documentElement.hasAttribute('data-rail')) {
+      document.documentElement.setAttribute('data-rail', collapsed ? 'collapsed' : 'full');
+    }
+  } catch (e) { /* non-DOM context */ }
+  // Refresh the collapse button's tooltip to match the new state.
+  const btn = document.querySelector('.project-rail-collapse');
+  if (btn) {
+    const tip = collapsed ? t('sidebar.expandRail') : t('sidebar.collapseRail');
+    btn.title = tip;
+    btn.setAttribute('aria-label', tip);
+  }
+}
+
+/** Initialize the project-rail interactions (rail lives in #folderTabs). */
 function _initFolderTabs() {
   const tabsEl = document.getElementById('folderTabs');
   if (!tabsEl) return;
 
-  // ── Expand/collapse toggle for wrapped folder tabs ──
-  tabsEl.addEventListener('click', (e) => {
-    const toggle = e.target.closest('.folder-tabs-toggle');
-    if (!toggle) return;
-    e.stopPropagation();
-    const scrollEl = tabsEl.querySelector('.folder-tabs-scroll');
-    if (!scrollEl) return;
-    _folderTabsExpanded = !_folderTabsExpanded;
-    scrollEl.classList.toggle('expanded', _folderTabsExpanded);
-    // Update label
-    const label = toggle.querySelector('.folder-tabs-toggle-label');
-    if (label) {
-      if (_folderTabsExpanded) {
-        label.textContent = t('sidebar.lessFolders');
-      } else {
-        // Count hidden folder tabs (exclude the "+" add button)
-        const collapsedMax = 94; // matches CSS max-height (3 rows)
-        const tabs = scrollEl.querySelectorAll('.folder-tab:not(.folder-tab-add)');
-        let hidden = 0;
-        tabs.forEach(tab => {
-          if (tab.offsetTop + tab.offsetHeight > collapsedMax) hidden++;
-        });
-        label.textContent = hidden > 0 ? `+${hidden}` : '';
-      }
-    }
-  });
+  // ── Quick "+ New folder" entry point (shown when 0 folders exist) ──
+  const quickAdd = document.getElementById('folderQuickAdd');
+  if (quickAdd) {
+    quickAdd.addEventListener('click', (e) => {
+      e.stopPropagation();
+      _promptCreateFolder(null);
+    });
+  }
 
-  // Click: switch folder tab or create new folder
+  // Click: rail collapse toggle, new-folder footer, or switch project.
   tabsEl.addEventListener('click', (e) => {
+    const collapseBtn = e.target.closest('.project-rail-collapse');
+    if (collapseBtn) { e.stopPropagation(); _toggleProjectRail(); return; }
     const tab = e.target.closest('.folder-tab');
     if (!tab) return;
     e.stopPropagation();
@@ -295,6 +317,39 @@ function _initFolderTabs() {
     e.stopPropagation();
     _showFolderTabMenu(tab.dataset.folderId, e.clientX, e.clientY);
   });
+
+  /* Touch long-press → rename/delete menu. Mobile browsers don't reliably
+   * fire `contextmenu` on a long-press, so on touch devices that menu was
+   * unreachable. A 500ms hold (cancelled by movement or an early release)
+   * opens the same _showFolderTabMenu. `_lpFired` suppresses the click that
+   * a tap-release would otherwise deliver (which switches folders). */
+  if ("ontouchstart" in window) {
+    let _lpTimer = null, _lpFired = false, _lpX = 0, _lpY = 0;
+    const _lpCancel = () => { if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; } };
+    tabsEl.addEventListener('touchstart', (e) => {
+      _lpFired = false;
+      const touch = e.touches[0];
+      const tab = touch && e.target.closest('.folder-tab');
+      if (!tab || tab.classList.contains('folder-tab-add') || !tab.dataset.folderId) return;
+      _lpX = touch.clientX; _lpY = touch.clientY;
+      const fid = tab.dataset.folderId;
+      _lpCancel();
+      _lpTimer = setTimeout(() => {
+        _lpTimer = null; _lpFired = true;
+        _showFolderTabMenu(fid, _lpX, _lpY);
+      }, 500);
+    }, { passive: true });
+    tabsEl.addEventListener('touchmove', (e) => {
+      const touch = e.touches[0];
+      if (touch && (Math.abs(touch.clientX - _lpX) > 10 || Math.abs(touch.clientY - _lpY) > 10)) _lpCancel();
+    }, { passive: true });
+    tabsEl.addEventListener('touchend', _lpCancel, { passive: true });
+    tabsEl.addEventListener('touchcancel', _lpCancel, { passive: true });
+    // Swallow the click that follows a long-press so the folder isn't switched.
+    tabsEl.addEventListener('click', (e) => {
+      if (_lpFired) { _lpFired = false; e.stopPropagation(); e.preventDefault(); }
+    }, true);
+  }
 
   // Drag-and-drop: allow dragging conversations onto folder tabs
   tabsEl.addEventListener('dragover', (e) => {
@@ -417,9 +472,9 @@ function toggleSidebar() {
   sidebar.classList.toggle("collapsed");
   // Mobile only: show/hide backdrop overlay
   if (backdrop) {
-    const isMobile = window.innerWidth <= 768;
+    const isDrawer = isDrawerViewport();
     const isOpen = !sidebar.classList.contains("collapsed");
-    backdrop.classList.toggle("visible", isMobile && isOpen);
+    backdrop.classList.toggle("visible", isDrawer && isOpen);
   }
   /* Sidebar width change affects available space for toolbar */
   setTimeout(_scheduleReflow, 250);  /* after sidebar transition finishes */
@@ -427,7 +482,7 @@ function toggleSidebar() {
 
 /* ── Mobile: auto-collapse sidebar on load ── */
 (function initMobileLayout() {
-  if (window.innerWidth <= 768) {
+  if (isDrawerViewport()) {
     const sidebar = document.getElementById("sidebar");
     if (sidebar && !sidebar.classList.contains("collapsed")) {
       sidebar.classList.add("collapsed");
@@ -515,18 +570,36 @@ function updateMobileDepth() {
   });
 }
 
-/* ── Reflow toolbar on window resize ── */
+/* ── Reflow toolbar on window resize / orientation change ── */
 window.addEventListener('resize', (function() {
   let tid;
+  /* Remember the last drawer-vs-desktop state so we only act on a CROSSING
+   * (a tablet rotating portrait↔landscape, or a resize past the breakpoint) —
+   * not on every keyboard-driven resize event within the same layout class. */
+  let _wasDrawer = (typeof isDrawerViewport === 'function') && isDrawerViewport();
   return function() {
     clearTimeout(tid);
     tid = setTimeout(function() {
       _scheduleReflow();
-      /* Hide mobile backdrop if resized past mobile breakpoint */
-      if (window.innerWidth > 768) {
-        const bd = document.getElementById('sidebarBackdrop');
+      const nowDrawer = isDrawerViewport();
+      const sidebar = document.getElementById("sidebar");
+      const bd = document.getElementById('sidebarBackdrop');
+      if (nowDrawer && !_wasDrawer) {
+        /* Crossed INTO the drawer viewport (e.g. landscape→portrait tablet):
+         * the CSS just turned .sidebar into a fixed slide-over. If it was left
+         * expanded from the desktop split it would now cover the chat with no
+         * backdrop, so collapse it — same guard as initMobileLayout on load. */
+        if (sidebar && !sidebar.classList.contains("collapsed")) {
+          sidebar.classList.add("collapsed");
+        }
         if (bd) bd.classList.remove('visible');
+      } else if (!nowDrawer && _wasDrawer) {
+        /* Crossed OUT to the pinned two-pane layout: drop the drawer backdrop
+         * (and un-collapse so the desktop sidebar is visible again). */
+        if (bd) bd.classList.remove('visible');
+        if (sidebar) sidebar.classList.remove("collapsed");
       }
+      _wasDrawer = nowDrawer;
     }, 120);
   };
 })());
@@ -539,7 +612,18 @@ window.addEventListener('resize', (function() {
   const EDGE_WIDTH = 30;       // px from left edge to start tracking
   const SWIPE_THRESHOLD = 60;  // px to confirm a swipe
 
+  /* A bottom sheet / portaled panel is a modal surface: a horizontal swipe on
+   * it must NOT reach the sidebar-drawer gesture, otherwise the drawer opens
+   * BEHIND the sheet. Covers #mobileSheet, #mobileFlowSheet, the portaled
+   * timer/optimizer panels, and their shared backdrops. */
+  function _isMobileOverlayOpen() {
+    return !!document.querySelector(
+      ".mobile-bottom-sheet.open, .mobile-panel-portaled.visible, " +
+      ".mobile-panel-backdrop.open, .mobile-bottom-sheet-backdrop.open");
+  }
+
   document.addEventListener("touchstart", function(e) {
+    if (_isMobileOverlayOpen()) { tracking = false; return; }
     const t = e.touches[0];
     touchStartX = t.clientX;
     touchStartY = t.clientY;
@@ -590,7 +674,7 @@ window.addEventListener('resize', (function() {
 
   // Mobile: close submenus/dropdowns when tapping outside
   document.addEventListener("click", function(e) {
-    if (window.innerWidth > 768) return;
+    if (!isMobileViewport()) return;
     // Close open toolbar submenus
     document.querySelectorAll(".toolbar-submenu.open").forEach(sub => {
       if (!sub.contains(/** @type {Node} */ (e.target))) sub.classList.remove("open");
@@ -605,7 +689,7 @@ window.addEventListener('resize', (function() {
 (function patchMobileConvSelect() {
   // After the page loads, intercept conversation clicks
   document.addEventListener("click", function(e) {
-    if (window.innerWidth > 768) return;
+    if (!isDrawerViewport()) return;
     const convItem = e.target.closest(".conv-item");
     if (convItem) {
       // Let the real click handler fire first, then close sidebar
@@ -629,7 +713,7 @@ window.addEventListener('resize', (function() {
    * We sample this on every resize so we know the state at keyboard-open time. */
   let _wasNearBottom = true;
   function onViewportResize() {
-    if (window.innerWidth > 768) return;
+    if (!isMobileViewport()) return;
     const vv = window.visualViewport;
     const newH = vv.height;
     if (Math.abs(newH - lastHeight) < 1) return;
@@ -671,7 +755,7 @@ window.addEventListener('resize', (function() {
   window.visualViewport.addEventListener('resize', onViewportResize);
   /* Reset on blur / keyboard dismiss */
   window.visualViewport.addEventListener('scroll', function() {
-    if (window.innerWidth > 768) return;
+    if (!isMobileViewport()) return;
     document.body.style.height = window.visualViewport.height + 'px';
   });
 })();
@@ -683,12 +767,7 @@ const _CLIP_SVG = '<svg class="input-hint-clip" width="13" height="13" viewBox="
 // Turn a hint template containing the literal `{clip}` token into safe HTML:
 // every non-token segment is HTML-escaped, the token becomes the inline SVG.
 function _renderHintHtml(tmpl) {
-  const esc = (typeof escapeHtml === 'function')
-    ? escapeHtml
-    : function(s) { return String(s).replace(/[&<>"']/g, function(c) {
-        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-      }); };
-  return String(tmpl).split('{clip}').map(esc).join(_CLIP_SVG);
+  return String(tmpl).split('{clip}').map(escapeHtml).join(_CLIP_SVG);
 }
 
 function _inputSendHintText() {

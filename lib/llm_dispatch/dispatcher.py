@@ -763,8 +763,11 @@ class LLMDispatcher:
                           reserve=True, strict_model=strict_model)
 
     # Capabilities that are NOT chat-compatible — never dispatch these for
-    # chat/stream/cheap/text/vision/thinking operations.
-    _NON_CHAT_CAPS = frozenset({'embedding', 'image_gen'})
+    # chat/stream/cheap/text/vision/thinking operations. 'transcription'
+    # (audio → text via /audio/transcriptions) is selected directly by
+    # lib/transcription.py scanning the slot pool, never through the chat
+    # picker, so it belongs here alongside embedding / image_gen.
+    _NON_CHAT_CAPS = frozenset({'embedding', 'image_gen', 'transcription', 'audio_chat'})
 
     def _is_chat_compatible(self, slot) -> bool:
         """Return True if the slot is a chat-capable model (not embedding/image_gen only)."""

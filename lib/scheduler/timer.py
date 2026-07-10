@@ -23,6 +23,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from lib.agent_loop import AbortSignal, run_agent_loop
 from lib.log import get_logger, log_context
 
 logger = get_logger(__name__)
@@ -58,12 +59,14 @@ def _resume_max_age_seconds(timer: dict[str, Any]) -> float:
     """
     try:
         floor_hours = float(_os.environ.get('TOFU_TIMER_MAX_AGE_HOURS', '24'))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug('[Timer] TOFU_TIMER_MAX_AGE_HOURS parse failed, using default: %s', e)
         floor_hours = 24.0
     floor = max(floor_hours, 0.0) * 3600.0
     try:
         budget = float(timer.get('poll_interval') or 60) * float(timer.get('max_polls') or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug('[Timer] timer poll-budget computation failed, using 0: %s', e)
         budget = 0.0
     return max(floor, budget * 1.5)
 
@@ -72,7 +75,8 @@ def _resume_concurrency_cap() -> int:
     """Max number of timers a single server boot will re-spawn (0 = unlimited)."""
     try:
         return int(_os.environ.get('TOFU_TIMER_RESUME_CAP', '20'))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug('[Timer] TOFU_TIMER_RESUME_CAP parse failed, using default: %s', e)
         return 20
 
 
@@ -550,26 +554,31 @@ def poll_timer(timer_id: str) -> tuple[bool, str, int, bool, bool, str, str, lis
     total_tokens = 0
     poll_model = ''      # concrete model the dispatcher resolved for this poll
     tool_trace: list = []  # per-tool-call timeline entries for the UI
+    content = ''         # last dispatch's final text (parsed after the loop)
+    _last_round = [0]    # round in flight — for a faithful smart_chat-failure log
 
-    # ── Mini-agent loop: LLM call → tool execution → repeat ─────────
-    for agent_round in range(_MAX_POLL_AGENT_ROUNDS):
-        try:
-            with log_context('timer_poll', logger=logger):
-                content, usage = smart_chat(
-                    messages,
-                    max_tokens=4096 if poll_tools else 256,
-                    temperature=0,
-                    thinking_enabled=False,
-                    tools=poll_tools,
-                    capability='cheap',
-                    log_prefix=f'[Timer:{timer_id}:R{agent_round}]',
-                )
-        except Exception as e:
-            logger.error('[Timer:%s] Poll LLM call failed (round %d): %s',
-                         timer_id, agent_round, e, exc_info=True)
-            return (False, f'LLM error: {e}', total_tokens, False, True,
-                    cmd_output, poll_model, tool_trace, '')
-
+    # ── Mini-agent loop via the shared run_agent_loop primitive ──────
+    # The timer wants tools available on EVERY poll round (no final
+    # tools-off round), so the dispatch adapter ignores the primitive's
+    # per-round ``tools`` arg and always passes ``poll_tools``; with
+    # ``max_tool_rounds = _MAX_POLL_AGENT_ROUNDS - 1`` the loop still runs
+    # exactly _MAX_POLL_AGENT_ROUNDS dispatches (rounds 0..N-1), all
+    # tool-carrying. Polls have no Stop path → AbortSignal.never().
+    def _poll_dispatch(rnd, _tools):
+        nonlocal content, total_tokens, poll_model
+        _last_round[0] = rnd
+        with log_context('timer_poll', logger=logger):
+            _content, usage = smart_chat(
+                messages,
+                max_tokens=4096 if poll_tools else 256,
+                temperature=0,
+                thinking_enabled=False,
+                tools=poll_tools,
+                capability='cheap',
+                log_prefix=f'[Timer:{timer_id}:R{rnd}]',
+            )
+        content = _content or ''
+        tool_calls = []
         if isinstance(usage, dict):
             total_tokens += usage.get('total_tokens', 0)
             # The dispatcher stamps the concrete (key, model) it served on
@@ -579,48 +588,53 @@ def poll_timer(timer_id: str) -> tuple[bool, str, int, bool, bool, str, str, lis
             _disp = usage.get('_dispatch')
             if isinstance(_disp, dict) and _disp.get('model'):
                 poll_model = _disp['model']
+            tool_calls = usage.get('_tool_calls', [])
+        msg = {'role': 'assistant', 'content': _content or None,
+               'tool_calls': tool_calls}
+        return msg, None, usage
 
-        # ── Check for tool calls ─────────────────────────────────────
-        tool_calls = usage.get('_tool_calls', []) if isinstance(usage, dict) else []
+    def _poll_on_tool_round(rnd, msg):
+        tcs = msg.get('tool_calls') or []
+        logger.info('[Timer:%s] Round %d: %d tool call(s) → %s',
+                    timer_id, rnd, len(tcs),
+                    [tc.get('function', {}).get('name', '?') for tc in tcs])
+        # Append assistant message with tool_calls (no content) — same dict
+        # shape the inline loop appended.
+        messages.append(msg)
 
-        if tool_calls:
-            logger.info('[Timer:%s] Round %d: %d tool call(s) → %s',
-                        timer_id, agent_round,
-                        len(tool_calls),
-                        [tc.get('function', {}).get('name', '?') for tc in tool_calls])
+    def _poll_execute(rnd, tc):
+        tc_id = tc.get('id', uuid.uuid4().hex[:8])
+        _fn = tc.get('function', {})
+        result, _elapsed, _is_err = _execute_poll_tool(tc, timer_id, project_path)
+        # Record a timeline entry so the UI can show the poll's tool activity
+        # (name + brief args + duration + ok/error), the same shape the swarm
+        # panel renders per sub-agent.
+        tool_trace.append({
+            'name': _fn.get('name', '?'),
+            'argsBrief': str(_fn.get('arguments', ''))[:120],
+            'elapsed': round(_elapsed, 2),
+            'isError': bool(_is_err),
+        })
+        messages.append({
+            'role': 'tool',
+            'tool_call_id': tc_id,
+            'content': result,
+        })
 
-            # Append assistant message with tool_calls (no content)
-            messages.append({
-                'role': 'assistant',
-                'content': content or None,
-                'tool_calls': tool_calls,
-            })
-
-            # Execute each tool call and append results
-            for tc in tool_calls:
-                tc_id = tc.get('id', uuid.uuid4().hex[:8])
-                _fn = tc.get('function', {})
-                result, _elapsed, _is_err = _execute_poll_tool(tc, timer_id, project_path)
-                # Record a timeline entry so the UI can show the poll's
-                # tool activity (name + brief args + duration + ok/error),
-                # the same shape the swarm panel renders per sub-agent.
-                tool_trace.append({
-                    'name': _fn.get('name', '?'),
-                    'argsBrief': str(_fn.get('arguments', ''))[:120],
-                    'elapsed': round(_elapsed, 2),
-                    'isError': bool(_is_err),
-                })
-                messages.append({
-                    'role': 'tool',
-                    'tool_call_id': tc_id,
-                    'content': result,
-                })
-
-            # Continue the loop — LLM will process tool results
-            continue
-
-        # ── No tool calls → parse JSON decision from content ─────────
-        break
+    try:
+        run_agent_loop(
+            abort=AbortSignal.never(),
+            max_tool_rounds=_MAX_POLL_AGENT_ROUNDS - 1,
+            round_tools=poll_tools,
+            dispatch=_poll_dispatch,
+            execute_tool=_poll_execute,
+            on_tool_round=_poll_on_tool_round,
+        )
+    except Exception as e:
+        logger.error('[Timer:%s] Poll LLM call failed (round %d): %s',
+                     timer_id, _last_round[0], e, exc_info=True)
+        return (False, f'LLM error: {e}', total_tokens, False, True,
+                cmd_output, poll_model, tool_trace, '')
 
     # Parse JSON decision from final content
     raw_content = content or ''

@@ -306,6 +306,22 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
                                 if isinstance(m, dict)
                                 for r in (m.get('toolRounds') or [])
                                 if r.get('compactionLayer') == 'L1'))
+                # Event-driven cross-device sync: the persisted placeholders
+                # rewrote the conversation body (and bumped rev), so push the
+                # post-write rev → a sibling tab with this conv open refetches
+                # the compacted tool rounds without a manual refresh. Only on a
+                # landed CAS write (_affected > 0), never on a skipped one.
+                try:
+                    from lib.conversations import notify_conv_changed
+                    from lib.database import DOMAIN_CHAT, get_thread_db
+                    _l1_db = get_thread_db(DOMAIN_CHAT)
+                    _l1_rev_row = _l1_db.execute(
+                        'SELECT rev FROM conversations WHERE id=? AND user_id=1',
+                        (conv_id,)).fetchone()
+                    notify_conv_changed(conv_id, rev=(_l1_rev_row[0] if _l1_rev_row else None))
+                except Exception as _ne:
+                    logger.debug('[L1-persist] conv=%s conv-changed notify skipped: %s',
+                                 conv_id[:8] if conv_id else '?', _ne)
         except Exception as _e:
             logger.warning('[L1-persist] conv=%s persist failed: %s',
                            conv_id[:8] if conv_id else '?', _e, exc_info=True)

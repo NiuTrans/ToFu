@@ -4,9 +4,9 @@
 > `docs/architecture.html` (visual diagram) and whenever an AI assistant
 > needs a birds-eye view.
 >
-> **Last re-scanned:** 2026-06-28 against `lib/`, `routes/`, `static/js/`,
+> **Last re-scanned:** 2026-07-06 against `lib/`, `routes/`, `static/js/`,
 > `server.py`, `routes/__init__.py`.
-> **VERSION:** 0.9.5
+> **VERSION:** 0.13.0
 
 ---
 
@@ -216,7 +216,7 @@ flowchart TB
 
 ## 3. Directory-level canonical list
 
-Grounded against the current filesystem (2026-06-28).
+Grounded against the current filesystem (2026-07-06).
 
 ### 3.1 Top level
 
@@ -229,12 +229,12 @@ Grounded against the current filesystem (2026-06-28).
 | `trading.html` | Legacy trading SPA shell (core trading code now lives in the external `tofu-trading` plugin) |
 | `healthcheck.py` · `install.{py,sh,ps1}` | Install / health helpers |
 
-### 3.2 `lib/` — core libraries (27 top-level sub-packages + 83 top-level modules)
+### 3.2 `lib/` — core libraries (28 top-level sub-packages + 85 top-level modules)
 
-**Sub-packages** (27 directories under `lib/` carrying an `__init__.py`,
+**Sub-packages** (28 directories under `lib/` carrying an `__init__.py`,
 excluding the `tests/` test package). The `tasks_pkg/handlers/` row below is a
 *nested* sub-package of `tasks_pkg/`, listed for convenience — it is NOT counted
-in the 27.
+in the 28.
 
 | Package | Purpose |
 |---|---|
@@ -258,6 +258,7 @@ in the 27.
 | `optimizer/` | analyzer · proposer · applier · storage · actions/ (**nightly self-tuning**; REST surface at `routes/api_v1/optimizer.py`) |
 | `paper/` | Reading-Mode engine: report_engine · translate_engine · prompts · images · arxiv · tools |
 | `pdf_parser/` | core · text · images · math · vlm · postprocess · _common |
+| `presence/` | Cross-conversation live presence ("who is working here now") — the Project-Brain peer-status registry alongside the push hub |
 | `project_mod/` | `tools` (execute_tool registry) · `run_command` · `read_tools` · `write_tools` · scanner · indexer · modifications · config |
 | `scheduler/` | manager · executor · cron · timer · proactive · tool_defs · _shared |
 | `swarm/` (16 modules) | master · agent · scheduler · planner · registry · rate_limiter · artifact_store · integration · events · tools · types · messages · result_format · protocol · persistence · snapshot — *(`review`/`synthesis` from earlier revisions no longer exist on disk)* |
@@ -267,7 +268,7 @@ in the 27.
 | `tools/` | **Definitions**: project · search · browser · meta · human_guidance · image_gen · code_exec · conversation |
 | `translate/` | Translation engine + cache + provider plumbing |
 
-#### 3.2.1 `lib/tasks_pkg/` — execution package (31 modules + 2 sub-packages)
+#### 3.2.1 `lib/tasks_pkg/` — execution package (35 modules + 2 sub-packages)
 
 `orchestrator` · `manager` · `endpoint` · `endpoint_prompts` · `endpoint_review` ·
 `autopilot` · `entry` · `executor` · `executor_image` · `streaming_tool_executor` ·
@@ -275,16 +276,18 @@ in the 27.
 `stream_handler` · `message_builder` · `conv_message_builder` · `server_message_store` ·
 `persist_registry` · `persistence_store` · `system_context` · `system_prompt_cc` ·
 `model_config` · `attachments` · `approval` · `human_guidance` · `stdin_handler` ·
-`auto_translate` · `commit_round` · `event_log` (durable SSE replay)
+`auto_translate` · `commit_round` · `event_log` (durable SSE replay) ·
+`turn_retry` · `wire_fingerprint` · `wire_messages` · `write_breakdown`
 
 Sub-packages: **`compaction/`** (3-layer context compaction, now a package) ·
 **`handlers/`** (per-tool execution handlers).
 
 #### 3.2.2 `lib/` top-level modules
 
-All **83** `lib/*.py` modules are accounted for (`agent_loop.py` added
-2026-07-01; verified against disk, zero invented names). The table below names
-75 directly; the remaining 8 are documented elsewhere: the six `orchestration*`
+All **85** `lib/*.py` modules are accounted for (`agent_loop.py` added
+2026-07-01; `runtime_state_store.py` / `runtime_paths.py` / `llm_json.py` added
+since; verified against disk, zero invented names). The table below names
+77 directly; the remaining 8 are documented elsewhere: the six `orchestration*`
 modules share the single `orchestration*.py` row, and the `push.py` +
 `task_runtime.py` compat shims are described in the `agent_core/` package row
 in §3.2.
@@ -304,12 +307,14 @@ in §3.2.
 | `conv_config.py` · `conv_ref.py` · `branch_meta.py` · `feature_registry.py` · `features_store.py` | Conversation config · branch metadata · feature flags |
 | `js_bundler.py` · `css_bundler.py` · `openapi.py` | Frontend bundling · OpenAPI spec gen |
 | `self_update.py` · `env_compat.py` · `config_dir.py` · `cross_dc.py` · `fs_keepalive.py` · `proxy.py` · `code_server_excludes.py` | Self-update · env/platform · cross-DC FUSE probe · keepalive · proxy · code-server exclude list |
+| `runtime_state_store.py` · `runtime_paths.py` | Pluggable runtime-state backend (inproc default / redis opt-in via `TOFU_RUNTIME_STATE_BACKEND` — the scale-out lease/counter substrate seam) · runtime path resolution |
+| `llm_json.py` | Robust JSON extraction from LLM output (fence-stripping, lenient parse) |
 | `llm_sanitize.py` | Message sanitization (gateway terms, orphan tool calls, role merging) |
 | `embeddings.py` · `file_reader.py` · `doc_parser.py` · `image_gen.py` · `pptx_translator.py` · `text_lang.py` · `translate_cache.py` | Embeddings · file/doc reading · image gen · translation helpers |
 | `desktop_agent.py` · `desktop_tools.py` | Desktop agent bridge |
 | `dispatch_stats.py` · `usage_tracker.py` · `key_stats.py` · `trajectory.py` · `tool_changes.py` · `tool_input_repair.py` · `message_queue.py` · `search_bridge.py` · `protocols.py` · `utils.py` · `_pkg_utils.py` · `version.py` | Stats · usage · trajectory · tool-input repair · message queue · misc helpers |
 
-### 3.3 `routes/` — Blueprints (top-level + `api_v1/`; 338 `@*_bp.route` decorators)
+### 3.3 `routes/` — Blueprints (top-level + `api_v1/`; 362 `@*_bp.route` decorators)
 
 The headless **`/api/v1/*`** surface is the canonical API (see CLAUDE.md §16).
 `routes/__init__.py::ALL_BLUEPRINTS` wires the core set; optional feature

@@ -461,13 +461,24 @@ def _list_memories_in_dir(dirpath, scope='global'):
 
 
 def _server_data_dir():
-    """Return the server data directory.
+    """Return the server data directory — the SAME writable root the DB and
+    logs use.
 
-    ``$TOFU_DATA_DIR`` when set (desktop builds pin this to the bundle's
-    ``data/`` — see ``desktop/launcher.py``), else ``<project_root>/data``.
-    Resolved fresh on every call so tests can redirect it via the env var.
+    Delegates to ``lib.runtime_paths.data_root()`` so the global memory store
+    always co-locates with ``data/tofu.db`` under one resolved base. This
+    matters once a source checkout defaults its data root OUT of the code tree
+    (``TOFU_DATA_LAYOUT``): recomputing ``<project_root>/data`` here would split
+    global memories back into the tree while the DB moved to the per-user dir —
+    silently orphaning them. Falls back to the legacy in-tree path only if the
+    import fails (should never happen; runtime_paths is dependency-free).
     """
-    return os.environ.get('TOFU_DATA_DIR') or os.path.join(_PROJECT_ROOT, 'data')
+    try:
+        from lib.runtime_paths import data_root
+        return data_root()
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning('[Memory] runtime_paths.data_root() unavailable, '
+                       'falling back to in-tree data/: %s', e)
+        return os.environ.get('TOFU_DATA_DIR') or os.path.join(_PROJECT_ROOT, 'data')
 
 
 def _server_global_memory_dir():
@@ -787,11 +798,22 @@ def merge_memories(memory_ids, name, description, body, tags=None, scope='projec
                           tags=tags, scope=scope, project_path=project_path)
 
     deleted_ids = []
+    failed_ids = []
     for sid in memory_ids:
         if delete_memory(sid, project_path, extra_paths=extra_paths):
             deleted_ids.append(sid)
+        else:
+            failed_ids.append(sid)
+    if failed_ids:
+        # A source that could not be deleted still lives ALONGSIDE the merged
+        # copy → duplicated content. Surface it (delete_memory already logged
+        # the OSError/guard reason) so the half-merge is not silent.
+        logger.warning('[Memory] merge_memories: %d source memory(ies) could not '
+                       'be deleted and remain as duplicates of the merged memory '
+                       '%s: %s', len(failed_ids), merged['id'], ', '.join(failed_ids))
 
-    return {'merged_memory': merged, 'deleted_ids': deleted_ids}
+    return {'merged_memory': merged, 'deleted_ids': deleted_ids,
+            'failed_ids': failed_ids}
 
 
 def toggle_memory(memory_id, enabled=None, project_path=None, extra_paths=None):

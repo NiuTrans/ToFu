@@ -385,7 +385,7 @@ function _editMatrixCell(provIdx, modelIdx, keyIdx) {
   var inheritRpm = (cell.rpm === undefined || cell.rpm === null || cell.rpm === '');
   var inheritCaps = !Array.isArray(cell.capabilities);
   var baseRpm = m.rpm || 30;
-  var allCaps = ['text', 'vision', 'thinking', 'cheap', 'image_gen', 'embedding'];
+  var allCaps = ['text', 'vision', 'thinking', 'cheap', 'image_gen', 'embedding', 'transcription', 'audio_chat'];
   var effCaps = inheritCaps ? (m.capabilities || []) : cell.capabilities;
 
   var title = escapeHtml((m.model_id || '(unnamed)')) + ' &times; ' + escapeHtml(_keyLabel(p, keyIdx));

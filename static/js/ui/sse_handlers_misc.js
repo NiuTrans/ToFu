@@ -284,21 +284,51 @@ async function resolvePreference(btn, pendingId, accept) {
 }
 window.resolvePreference = resolvePreference;
 
+/* Resolve a conversation's display title from its id, with a graceful fallback.
+   Used by background-event toasts to name the SOURCE conversation — critical
+   when the event fires from a conv that is NOT the one on screen. */
+function _toastConvTitle(convId) {
+  const _t = (typeof t === 'function') ? t : (k => k);
+  if (!convId) return '';
+  try {
+    const conv = (typeof conversations !== 'undefined')
+      ? conversations.find(x => x.id === convId) : null;
+    if (conv && conv.title) return conv.title;
+  } catch (e) { console.debug('[toast] conv title lookup failed', e); }
+  return _t('toast.untitledConv');
+}
+
 function _handleProjectExternalEdit(ev, c) {
   const convId = c.convId, taskId = c.taskId;
   const assistantMsg = c.assistantMsg, buf = c.buf;
   const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
-      // ★ Git-shim: external edits captured outside Tofu round boundary.
-      //   Show a brief toast so the user knows we auto-committed their changes.
+      // ★ Git-shim: external edits (an IDE / another tool changed tracked
+      //   files outside a Tofu round). Tofu has AUTO-SNAPSHOTTED them into
+      //   file-history so the next round's diff stays clean and the edits are
+      //   revertible. The old toast was English-only, emoji-prefixed, named no
+      //   conversation, and gave no next step. Make it conversation-aware and
+      //   actionable: say WHERE it came from and WHAT the user can do.
       const files = ev.files || [];
       const sha = (ev.sha || '').slice(0, 7);
       try {
         if (typeof showToast === 'function') {
-          const preview = files.slice(0, 3).join(', ') + (files.length > 3 ? ` +${files.length - 3} more` : '');
-          showToast(`📝 Captured ${files.length} external edit(s) — ${preview}${sha ? ' · ' + sha : ''}`, 'info');
+          const _t = (typeof t === 'function') ? t : (k => k);
+          const n = files.length;
+          const preview = files.slice(0, 3).join(', ')
+            + (n > 3 ? ' ' + _t('externalEdit.moreN', { n: n - 3 }) : '');
+          const title = _t('externalEdit.title', { n, s: n > 1 ? 's' : '' });
+          const detail = sha ? _t('externalEdit.detail', { preview, sha })
+                             : preview;
+          // Full form (icon, title, detail, dur, opts). Icon is empty — the
+          // typed 'info' circle is inferred from the neutral title text.
+          showToast('', title, detail, 7000, {
+            convId,
+            convTitle: _toastConvTitle(convId),
+            hint: _t('externalEdit.hint'),
+          });
         }
       } catch (e) { console.warn('[project_external_edit] toast failed', e); }
-      console.log('[project_external_edit]', { sha, files });
+      console.log('[project_external_edit]', { convId, sha, files });
 
 }
 
@@ -314,17 +344,65 @@ function _handleWorkspaceRootAdded(ev, c) {
        * toast naming the added root(s). Payload: {roots: [{rootName, path}]}. */
       const roots = Array.isArray(ev.roots) ? ev.roots : [];
       if (!roots.length) return;
+      const convId = c && c.convId;
       try {
         if (typeof showToast === 'function') {
+          const _t = (typeof t === 'function') ? t : (k => k);
           const names = roots.map(r => r.rootName || r.path || '?');
-          const preview = names.slice(0, 3).join(', ') + (names.length > 3 ? ` +${names.length - 3} more` : '');
-          const _t = (typeof t === 'function') ? t : null;
-          const msg = _t ? _t('workspaceRoot.added', { roots: preview })
-                         : `Added workspace root: ${preview}`;
-          showToast(msg, 'info');
+          const preview = names.slice(0, 3).join(', ')
+            + (names.length > 3 ? ' ' + _t('externalEdit.moreN', { n: names.length - 3 }) : '');
+          const msg = _t('workspaceRoot.added', { roots: preview });
+          // Full form so we can attach the source-conversation badge + a hint
+          // explaining that the assistant's write auto-expanded the workspace.
+          showToast('', msg, '', 7000, {
+            convId,
+            convTitle: _toastConvTitle(convId),
+            hint: _t('workspaceRoot.hint'),
+          });
         }
       } catch (e) { console.warn('[workspace_root_added] toast failed', e); }
-      console.log('[workspace_root_added]', roots);
+      console.log('[workspace_root_added]', { convId, roots });
+
+      /* ── State parity with the create_project branch ──────────────────
+       * The toast alone left projectState.extraRoots empty, so the new
+       * root never lit up the info-rail / per-turn context note / fc-root
+       * & ptool-root pills, and — not being written into conv.projectPaths
+       * — was PRUNED by the next set_project_paths (page reload / conv
+       * switch / send). Mirror the create_project post-hook in
+       * ui/sse_handlers_tool.js: pull the authoritative status, apply it to
+       * projectState, propagate extraRoots into conv.projectPaths, persist.
+       *
+       * GATE on the emitting conv being the ACTIVE one: the global project
+       * _state a background task's write mutated may reflect a DIFFERENT
+       * conversation's project, so refreshing projectState from an inactive
+       * conv would apply the wrong workspace to the visible bar. */
+      try {
+        const _active = (typeof activeConvId !== 'undefined') ? activeConvId : null;
+        if (convId && _active && convId === _active
+            && typeof Api !== 'undefined' && Api.project
+            && typeof Api.project.status === 'function') {
+          Api.project.status()
+            .then(data => {
+              if (!data) return;
+              if (typeof _applyProjectData === 'function') _applyProjectData(data);
+              const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
+              if (conv && data.path) {
+                const paths = [data.path];
+                if (Array.isArray(data.extraRoots)) {
+                  for (const r of data.extraRoots) {
+                    const pp = typeof r === 'string' ? r : (r && r.path);
+                    if (pp && !paths.includes(pp)) paths.push(pp);
+                  }
+                }
+                conv.projectPath = data.path;
+                conv.projectPaths = paths;
+                if (typeof saveConversations === 'function') saveConversations(conv.id);
+                if (typeof syncConversationToServer === 'function') syncConversationToServer(conv);
+              }
+            })
+            .catch(e => { console.warn('[workspace_root_added] status refresh failed', e); });
+        }
+      } catch (e) { console.warn('[workspace_root_added] state parity failed', e); }
 
 }
 

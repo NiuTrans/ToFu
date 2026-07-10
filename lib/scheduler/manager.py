@@ -491,6 +491,22 @@ class ScheduledTaskManager:
         except Exception as e:
             logger.warning('[Scheduler] project-brain dispatch sweep skipped: %s', e)
 
+        # ── Peer-message idle-drain (Pillar #6 Symptom-A fix) ──
+        #   The workflow sweep above only reconciles KIND_WORKFLOW kickoffs. A
+        #   KIND_PEER_MSG row that landed in an IDLE, non-board conversation is
+        #   drained by nothing in steady state — it would sit in the queue
+        #   widget forever, shown but never rendered as a turn. This drains one
+        #   such row per idle conv via the same dispatch_next_queued seam, so an
+        #   advisory peer note to an idle sibling wakes a fresh turn (rendered
+        #   with the .peer-msg-banner). Global scan (the queue has no project
+        #   column; the per-(sender,target) send-time rate cap already bounds
+        #   how many peer rows can exist). Best-effort.
+        try:
+            from lib.message_queue import drain_idle_peer_messages
+            drain_idle_peer_messages()
+        except Exception as e:
+            logger.warning('[Scheduler] peer-message idle-drain skipped: %s', e)
+
     def _run_and_record(self, task):
         """Run task and record result in DB."""
         task_id = task['id']

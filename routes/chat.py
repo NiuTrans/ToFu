@@ -37,7 +37,7 @@ from lib.chat import (  # noqa: F401
     scan_continue_checkpoint as _scan_continue_checkpoint,
 )
 from lib.idempotency import idempotent_post
-from routes.common import DEFAULT_USER_ID, _invalidate_meta_cache
+from routes.common import DEFAULT_USER_ID, _notify_conv_changed
 
 logger = get_logger(__name__)
 
@@ -306,6 +306,52 @@ def chat_send_translate_status(conv_id):
     translate is currently in flight (or hasn't yet hit its first retry).
     """
     return jsonify(get_send_translate_status(conv_id) or {})
+
+
+def _truncate_conv_history(conv_id):
+    """Discharge every server-side obligation that follows truncating a conv.
+
+    Any route that rewrites a conversation's history to a shorter prefix
+    (regenerate, edit-and-resend) MUST clear the two in-memory side-channels
+    that outlive the DB write, or the next task replays stale state:
+
+      * the message QUEUE — a previous /api/chat/send aborted mid-translate
+        may have left an enqueued message; without clearing it the queue
+        auto-dispatches a phantom turn after this run completes;
+      * the server-side tool-history STORE
+        (lib/tasks_pkg/server_message_store) — a full-fidelity in-memory copy
+        of the prior turns' tool_use/tool_result rounds, keyed by conv_id and
+        driven by keepToolHistory (default ON). On the next task the
+        orchestrator's rebuild_messages_with_history REPLACES the DB-built
+        (now-truncated) messages with that stored copy, which still holds the
+        rounds we just truncated away — so every regen/edit would replay an
+        ever-growing stale context instead of the truncated one. Clearing it
+        forces a clean rebuild from the truncated DB state; the preserved
+        turns' tool history is reconstructed from their stored toolRounds by
+        conv_message_builder, so no real context is lost.
+
+    Folding both into one helper makes the invariant impossible to
+    half-apply: a future truncating route calls this once instead of
+    re-deriving (and forgetting one of) the two clears. Best-effort — each
+    failure is logged, never raised.
+
+    Args:
+        conv_id: The conversation whose history was just truncated.
+    """
+    try:
+        from lib.message_queue import clear_queue
+        _cleared = clear_queue(conv_id)
+        if _cleared:
+            logger.info('[Regen] conv=%s cleared %d stale queued message(s) before regen',
+                        conv_id[:8], _cleared)
+    except Exception as e:
+        logger.warning('[Regen] Failed to clear queue for conv=%s: %s', conv_id[:8], e)
+
+    try:
+        from lib.tasks_pkg.server_message_store import clear as _clear_msg_store
+        _clear_msg_store(conv_id)
+    except Exception as e:
+        logger.warning('[Regen] Failed to clear message store for conv=%s: %s', conv_id[:8], e)
 
 
 def _start_task_for_conv(conv_id, config, data=None):
@@ -588,7 +634,7 @@ def chat_send():
             if is_new:
                 _persist_conv_messages(db, conv_id, messages, title, settings_patch)
 
-            _invalidate_meta_cache()
+            _notify_conv_changed(conv_id, rev=None)
 
             return jsonify({
                 'queued': True,
@@ -616,14 +662,22 @@ def chat_send():
                 return err_resp
             return err_resp
 
-        # 6. Update activeTaskId in settings
+        # 6. Update activeTaskId in settings.
+        #    ★ Settings-ONLY write (not a full-row _persist_conv_messages):
+        #    the only new information here is activeTaskId. Rewriting the whole
+        #    `messages` array with this route's stale user-only tail (and
+        #    bumping updated_at) races the task thread, which may have ALREADY
+        #    checkpointed the assistant slot via _sync_partial_to_conversation —
+        #    clobbering the streamed content back to the pre-start snapshot
+        #    ("Waiting…" on reload). set_conversation_settings does a per-conv
+        #    serialized merge of just this key and never touches messages.
         try:
-            _persist_conv_messages(db, conv_id, messages, title,
-                                   {'activeTaskId': task_id})
+            from lib.conversations import set_conversation_settings
+            set_conversation_settings(conv_id, {'activeTaskId': task_id}, db=db)
         except Exception as e:
             logger.warning('[Send] Failed to update activeTaskId: %s', e)
 
-        _invalidate_meta_cache()
+        _notify_conv_changed(conv_id, rev=None)
 
         return jsonify({
             'taskId': task_id,
@@ -908,38 +962,11 @@ def chat_regenerate():
         # 5. Persist truncated messages to DB
         _persist_conv_messages(db, conv_id, messages, title, settings_patch)
 
-        # 5a. Defensive: clear any messages still sitting in the server-side
-        #     queue for this conv. If a previous /api/chat/send was aborted
-        #     mid-translate but its enqueue still landed (or a different race
-        #     left the queue non-empty), regenerating should start clean —
-        #     otherwise the queue would auto-dispatch a phantom turn after
-        #     this regen completes.
-        try:
-            from lib.message_queue import clear_queue
-            _cleared = clear_queue(conv_id)
-            if _cleared:
-                logger.info('[Regen] conv=%s cleared %d stale queued message(s) before regen',
-                            conv_id[:8], _cleared)
-        except Exception as e:
-            logger.warning('[Regen] Failed to clear queue for conv=%s: %s', conv_id[:8], e)
-
-        # 5b. Clear the server-side tool-history store for this conv. That
-        #     store (lib/tasks_pkg/server_message_store) keeps a full-fidelity
-        #     in-memory copy of the prior turns' tool_use/tool_result history,
-        #     keyed by conv_id and driven by keepToolHistory (default ON).
-        #     On the next task the orchestrator's rebuild_messages_with_history
-        #     REPLACES the DB-built (now-truncated) messages with that stored
-        #     copy — which still contains the rounds we just truncated away.
-        #     Without clearing it, every regen/edit replays an ever-growing
-        #     stale context instead of the truncated one. Clearing forces a
-        #     clean rebuild from the truncated DB state; the preserved turns'
-        #     tool history is reconstructed from their stored toolRounds by
-        #     conv_message_builder, so no real context is lost.
-        try:
-            from lib.tasks_pkg.server_message_store import clear as _clear_msg_store
-            _clear_msg_store(conv_id)
-        except Exception as e:
-            logger.warning('[Regen] Failed to clear message store for conv=%s: %s', conv_id[:8], e)
+        # 5a+5b. Discharge the post-truncation obligations (clear the message
+        #        queue + the in-memory server_message_store) via the single
+        #        helper so the invariant can't be half-applied. See
+        #        _truncate_conv_history for the full rationale.
+        _truncate_conv_history(conv_id)
 
         logger.info('[Regen] conv=%s truncated to idx=%d msgs=%d edited=%s title=%.50s',
                     conv_id[:8], truncate_to, len(messages),
@@ -952,14 +979,15 @@ def chat_regenerate():
                 return err_resp
             return err_resp
 
-        # 7. Update activeTaskId
+        # 7. Update activeTaskId (settings-only — see the note in chat_send:
+        #    a full-row rewrite here would clobber a task-thread checkpoint).
         try:
-            _persist_conv_messages(db, conv_id, messages, title,
-                                   {'activeTaskId': task_id})
+            from lib.conversations import set_conversation_settings
+            set_conversation_settings(conv_id, {'activeTaskId': task_id}, db=db)
         except Exception as e:
             logger.warning('[Regen] Failed to update activeTaskId: %s', e)
 
-        _invalidate_meta_cache()
+        _notify_conv_changed(conv_id, rev=None)
 
         return jsonify({
             'taskId': task_id,
@@ -985,6 +1013,80 @@ def chat_regenerate():
 #  (_build_tool_history_round + _scan_continue_checkpoint moved to
 #   lib/chat/turn_builder.py; re-exported at the top of this module)
 # ══════════════════════════════════════════════════════════
+
+
+def _continue_via_prefill_only(db, conv_id, messages, assistant_msg, title,
+                               config, settings_patch, resume_prefill,
+                               orig_full_content, data):
+    """Case 3 — resume a NO-TOOL mid-answer turn via assistant prefill.
+
+    There is no tool-call checkpoint (``scan is None``), so the classic
+    Continue path would fall back to regenerate-from-scratch. But the provider
+    tolerates a trailing assistant prefill and the turn ended mid-answer, so we
+    feed the model its own half-written string and let it continue the SAME
+    tokens instead of restarting.
+
+    Unlike the tool-checkpoint rollback (which DISCARDS the mid-prose tail and
+    regenerates), prefill mode CONTINUES the same string — nothing is discarded.
+    So the message content stays as the full prior answer (the base the
+    continuation extends); there is NO ``priorContent`` block. The streaming
+    checkpoint grows ``content`` as continuation tokens arrive, so a mid-stream
+    reload shows [full prior answer] + [partial continuation]. Persist BEFORE
+    starting so a streaming checkpoint can't race the rollback.
+    """
+    # Keep the full prior answer as the continuation base (content is already
+    # orig_full_content; assert it explicitly for clarity). Clear the live
+    # thinking tail (prefill carries content only — the reasoning trace can't
+    # be replayed on the wire) but stash it display-only, mirroring case 2.
+    assistant_msg['content'] = orig_full_content
+    _prior_think = assistant_msg.get('thinking') or ''
+    assistant_msg['thinking'] = ''
+    if _prior_think:
+        assistant_msg['priorThinking'] = _prior_think
+    for stale_key in ('finishReason', 'toolSummary', 'error'):
+        assistant_msg.pop(stale_key, None)
+
+    _persist_conv_messages(db, conv_id, messages, title, settings_patch)
+
+    cfg_payload = dict(config)
+    cfg_payload['excludeLast'] = True
+    cfg_payload['resumePrefill'] = resume_prefill
+    # Seed task['content'] with the full pre-rollback answer so the resumed
+    # turn displays everything the user already saw plus the continuation.
+    cfg_payload['contentPrefix'] = orig_full_content
+
+    task_id, err_resp = _start_task_for_conv(conv_id, cfg_payload, data)
+    if err_resp is not None:
+        return err_resp if not isinstance(err_resp, tuple) else err_resp
+
+    try:
+        from lib.conversations import set_conversation_settings
+        set_conversation_settings(conv_id, {'activeTaskId': task_id}, db=db)
+    except Exception as e:
+        logger.warning('[Continue] Failed to update activeTaskId (prefill-only): %s', e)
+
+    _notify_conv_changed(conv_id, rev=None)
+    try:
+        from lib.log import audit_log as _audit_log
+        _audit_log('continue_prefill_only', conv_id=conv_id,
+                   prefillChars=len(resume_prefill),
+                   origContentChars=len(orig_full_content))
+    except Exception as e:
+        logger.debug('[Continue] audit_log (prefill-only) failed (non-fatal): %s', e)
+
+    return jsonify({
+        'taskId': task_id,
+        'convId': conv_id,
+        'checkpoint': {
+            'keptRounds': 0,
+            'discardedRounds': 0,
+            'preservedContentLen': len(orig_full_content),
+            'discardedContentLen': 0,
+            'preservedThinkingChars': 0,
+            'discardedThinking': 0,
+            'resumeMode': 'prefill',
+        },
+    })
 
 
 @api_v1_chat_bp.route('/api/v1/chat/continue', methods=['POST'], endpoint='ui_chat_continue')
@@ -1051,8 +1153,37 @@ def chat_continue():
                         conv_id[:8])
             return jsonify({'fallback': 'regenerate', 'reason': 'empty_assistant'})
 
+        # ★ Resume-prefill extraction (epic pt_cb8f98b0cb9b47fb) — MUST happen
+        #   BEFORE any rollback mutates assistant_msg. The segment list is the
+        #   SoT: resume_prefill_from_segments reads the terminal deliverable
+        #   (the tail the model was mid-writing) from assistant_msg['segments'],
+        #   gated on model prefill capability + a resumable finish reason. This
+        #   is the segments-first replacement for tail-diffing. Claude → None
+        #   (fail closed). The full pre-rollback content is captured too, to
+        #   seed task['content'] so nothing the user saw vanishes on resume.
+        _model = (config.get('model') or '').strip()
+        _finish_reason = assistant_msg.get('finishReason') or ''
+        _orig_full_content = assistant_msg.get('content') or ''
+        _resume_prefill = None
+        try:
+            from lib.tasks_pkg.segments import resume_prefill_from_segments
+            _resume_prefill = resume_prefill_from_segments(
+                assistant_msg.get('segments'), _model, finish_reason=_finish_reason)
+        except Exception as _rp_e:
+            logger.debug('[Continue] resume-prefill extraction failed (non-fatal): %s', _rp_e)
+
         scan = _scan_continue_checkpoint(assistant_msg)
         if scan is None:
+            # No tool-call checkpoint. If we DO have a resumable prefill (a
+            # no-tool mid-answer turn — case 3), resume via prefill alone rather
+            # than regenerating from scratch. Otherwise fall back to regenerate.
+            if _resume_prefill:
+                logger.info('[Continue] conv=%s no tool checkpoint but resumable '
+                            'prefill (%d chars) — resuming via assistant prefill (case 3)',
+                            conv_id[:8], len(_resume_prefill))
+                return _continue_via_prefill_only(
+                    db, conv_id, messages, assistant_msg, title, config,
+                    settings_patch, _resume_prefill, _orig_full_content, data)
             logger.info('[Continue] conv=%s no tool-call checkpoint available — fallback to regenerate',
                         conv_id[:8])
             return jsonify({'fallback': 'regenerate', 'reason': 'no_checkpoint'})
@@ -1114,6 +1245,19 @@ def chat_continue():
             cfg_payload['toolHistory'] = scan['tool_history']
         if preserved_content:
             cfg_payload['contentPrefix'] = preserved_content
+        # ★ Resume-prefill (case 2 — mid-prose AFTER a completed tool batch).
+        #   When the provider tolerates prefill AND the tail is resumable, ship
+        #   the terminal deliverable tail so the model continues the SAME tokens
+        #   (inject_tool_history replays the tool batch; the prefill is appended
+        #   as the trailing assistant turn by the orchestrator). Seed
+        #   task['content'] with the FULL pre-rollback content so the resumed
+        #   turn displays [everything the user saw] + [continuation] with no
+        #   duplication — the continuation the model returns is ONLY the new
+        #   tokens after the prefill. Claude / clean stop → _resume_prefill is
+        #   None → contentPrefix (preserved_content) drives the universal path.
+        if _resume_prefill:
+            cfg_payload['resumePrefill'] = _resume_prefill
+            cfg_payload['contentPrefix'] = _orig_full_content
         if scan['kept_rounds']:
             cfg_payload['checkpointToolRounds'] = scan['kept_rounds']
         if kept_usage:
@@ -1130,14 +1274,15 @@ def chat_continue():
         if err_resp is not None:
             return err_resp if not isinstance(err_resp, tuple) else err_resp
 
-        # Persist activeTaskId (same as chat_regenerate).
+        # Persist activeTaskId (settings-only — same rationale as chat_send:
+        #    a full-row rewrite would clobber a task-thread checkpoint).
         try:
-            _persist_conv_messages(db, conv_id, messages, title,
-                                   {'activeTaskId': task_id})
+            from lib.conversations import set_conversation_settings
+            set_conversation_settings(conv_id, {'activeTaskId': task_id}, db=db)
         except Exception as e:
             logger.warning('[Continue] Failed to update activeTaskId: %s', e)
 
-        _invalidate_meta_cache()
+        _notify_conv_changed(conv_id, rev=None)
         try:
             from lib.log import audit_log as _audit_log
             _audit_log(

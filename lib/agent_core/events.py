@@ -168,6 +168,7 @@ class EventType:
     AUTOPILOT_RUN_CONCLUDED = 'autopilot_run_concluded'
     # ── presence (cross-conversation live coordination) ──
     PRESENCE = 'presence'
+    PEER_INBOX_INJECT = 'peer_inbox_inject'
     # ── artifact / scheduler / transport ──
     ARTIFACT = 'artifact'
     TIMER_POLL_CHECK = 'timer_poll_check'
@@ -447,6 +448,20 @@ _SPECS: tuple[EventSpec, ...] = (
                                   'sub-agent-vs-sub-agent overlap within ONE '
                                   'conversation is flagged like a cross-'
                                   'conversation one'}),
+    EventSpec(EventType.PEER_INBOX_INJECT, _C.PRESENCE,
+              'A peer message from a sibling conversation was delivered at a '
+              'round boundary of THIS live turn (the fast-path lane of Pillar '
+              '#6). Injected as a user-role message right before the next LLM '
+              'round — never mid-stream, never splitting a tool_call/tool_result '
+              'pair. The durable message_queue row is deleted in the same step '
+              '(de-dup by queueId), so the message is delivered exactly once. '
+              'Drives an in-timeline chip mirroring swarm_inbox_inject; the '
+              'idle-target queue-lane case renders the persisted .peer-msg-banner '
+              'instead.',
+              fields={'round': 'round number the peer message was injected before',
+                      'count': 'number of peer messages injected this round',
+                      'previews': 'list of {fromConv, text} — sender short-id + '
+                                  'the original (unframed) message text'}),
     # ───────────────── artifact / scheduler / transport ─────────────────
     EventSpec(EventType.ARTIFACT, _C.ARTIFACT,
               'An artifact (document/canvas) was created or updated.',

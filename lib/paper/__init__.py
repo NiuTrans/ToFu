@@ -61,6 +61,22 @@ from .images import (
 
 # arXiv + library
 from .arxiv import _extract_arxiv_id, fetch_arxiv_title, search_arxiv
+from .recommend_engine import iter_recommend_events, recommend_papers
+from .recommend_runtime import (
+    _RECOMMEND_TASK_TTL,
+    _append_recommend_event,
+    _cleanup_stale_recommend_tasks,
+    _new_recommend_task,
+    _recommend_index_lock,
+    _recommend_key,
+    _recommend_latest_for,
+    _recommend_latest_index,
+    _recommend_register_latest,
+    _recommend_runtime,
+    _recommend_tasks,
+    _recommend_tasks_lock,
+)
+from .recommend_task import _run_recommend_task
 from .library import (
     _LIB_IMAGES_CAP,
     _LIB_PARSED_TEXT_CAP,
@@ -141,7 +157,13 @@ __all__ = [
     '_extract_title_from_report', '_backfill_library_title',
     '_is_placeholder_title',
     # arxiv + library
-    '_extract_arxiv_id', 'fetch_arxiv_title', 'search_arxiv',
+    '_extract_arxiv_id', 'fetch_arxiv_title', 'search_arxiv', 'recommend_papers',
+    'iter_recommend_events',
+    '_recommend_runtime', '_recommend_tasks', '_recommend_tasks_lock',
+    '_RECOMMEND_TASK_TTL', '_recommend_key', '_recommend_index_lock',
+    '_recommend_latest_index', '_recommend_latest_for', '_recommend_register_latest',
+    '_new_recommend_task', '_append_recommend_event',
+    '_cleanup_stale_recommend_tasks', '_run_recommend_task',
     '_PAPER_LIB_COLUMNS', '_LIB_PARSED_TEXT_CAP', '_LIB_QA_HISTORY_CAP',
     '_LIB_IMAGES_CAP', '_LIB_TITLE_CAP', '_lib_row_to_dict',
     # report

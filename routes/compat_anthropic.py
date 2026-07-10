@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 
-from flask import Blueprint, Response
+from flask import Blueprint
 
 from lib.agent_core.admission import (
     await_terminal, controller, on_terminal, register_waiter,
@@ -22,6 +22,7 @@ from lib.agent_core.admission import (
 )
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found,
+    sse_response,
 )
 from lib.byo_resolve import resolve_model_and_provider
 from lib.compat.anthropic import (
@@ -149,16 +150,9 @@ async def messages():
     model = cfg.get('model', '?')
 
     if options['stream']:
-        return Response(
+        return sse_response(
             stream_anthropic_chunks(task, model=model),
-            mimetype='text/event-stream',
-            headers={
-                'Content-Type': 'text/event-stream; charset=utf-8',
-                'Cache-Control': 'no-cache, no-transform',
-                'X-Accel-Buffering': 'no',
-                'Connection': 'keep-alive',
-                'X-Tofu-Task-Id': task['id'],
-            })
+            extra_headers={'X-Tofu-Task-Id': task['id']})
 
     try:
         await _wait_terminal(task, options['timeout_s'])

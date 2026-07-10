@@ -25,6 +25,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import quart as _quart
 sys.modules.setdefault('flask', _quart)
 
+# DATA-LOSS GUARD: this module imports the DB layer AT MODULE TOP (below), which
+# freezes _core._BACKEND. A bare `python tests/test_messages_rows.py` skips
+# conftest, so force sqlite + assert the DB is a test DB BEFORE that import.
+# (Only fires under __main__; pytest sets TOFU_DB_PATH so this is a no-op there.)
+if __name__ == '__main__':
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_messages_rows.__main__')
+
 from lib.conversations.search_index import build_search_text
 from lib.database import messages_rows as mr
 

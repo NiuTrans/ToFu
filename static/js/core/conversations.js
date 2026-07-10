@@ -26,6 +26,40 @@ function convAutoTranslate(conv) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+   convTitleById(cid) — resolve a conversation id to its human-readable TITLE.
+
+   Peer/operator surfaces (the queued-message bar, the project_message /
+   project_intervene delivery card) carry a bare conversation id — often the
+   TRUNCATED 8-char display form (`mradmzmd`) — where a user expects a title.
+   A raw id is meaningless to a human, so this is the single frontend seam that
+   maps an id → title. It matches on the full id first, then by unique prefix
+   (so an 8-char id still resolves against the loaded `conversations` list),
+   and falls back to a localized "Untitled chat" — NEVER a bare id.
+
+   Returns '' when `cid` is empty. Best-effort: reads the in-memory
+   `conversations` list only (no fetch), so it degrades to the fallback label
+   when the conversation isn't loaded rather than blocking on the network.
+   ═══════════════════════════════════════════════════════════════════ */
+function convTitleById(cid) {
+  const _t = (typeof t === 'function') ? t : (k => k);
+  if (!cid) return '';
+  try {
+    if (typeof conversations !== 'undefined' && Array.isArray(conversations)) {
+      let hit = conversations.find(c => c && c.id === cid);
+      if (!hit) {
+        // Prefix match (the id may be the 8-char display form). Accept only an
+        // unambiguous single match — never guess between two conversations.
+        const pre = conversations.filter(c => c && c.id && c.id.indexOf(cid) === 0);
+        if (pre.length === 1) hit = pre[0];
+      }
+      if (hit && hit.title && String(hit.title).trim()) return String(hit.title).trim();
+    }
+  } catch (e) { if (typeof console !== 'undefined') console.debug('[convTitleById] lookup failed', e); }
+  return _t('toast.untitledConv');
+}
+if (typeof window !== 'undefined') window.convTitleById = convTitleById;
+
+/* ═══════════════════════════════════════════════════════════════════
    convAutoTranslateEffective(conv) — resolver for the ON-OPEN / ON-ACTIVATE
    retro-translate decision (a FINISHED message that still has no translation).
 
@@ -152,6 +186,138 @@ function syncConversationToServerDebounced(conv, delayMs = 1500) {
   }, delayMs));
 }
 
+/* ★ Strip transient/diagnostic bloat before a message rides the PUT wire.
+ *
+ * Three fields balloon the persisted conversation without any render value,
+ * so a fat conv OOMs the browser on load (see the server-side
+ * _sanitize_*_for_persist twins in lib/tasks_pkg/manager.py — this is the
+ * frontend mirror so a client PUT can never re-bloat what the server trimmed):
+ *   1. usage._wire_fp / _wire_static inside apiRounds[] — backend-only SSE
+ *      cache-miss diagnostics (~226 KB/round), read by NO frontend code.
+ *   2. toolRounds[]._partialOutput on a DONE round — the live run_command
+ *      terminal buffer; the authoritative output is in results[0].output /
+ *      toolContent. A still-running round keeps it (mid-stream replay).
+ * Inline base64 imageDataUris are the render source, so they are NOT stripped
+ * from the PUT/DB copy — only from the IndexedDB cache (idb-cache _stripMessage).
+ * Returns a shallow clone only when it actually trims (never mutates the live
+ * message object). */
+const _USAGE_TRANSIENT_KEYS = ['_wire_fp', '_wire_static'];
+function _stripUsageTransient(u) {
+  if (!u || typeof u !== 'object') return u;
+  if (!_USAGE_TRANSIENT_KEYS.some((k) => k in u)) return u;
+  const o = {};
+  for (const k in u) if (!_USAGE_TRANSIENT_KEYS.includes(k) && Object.prototype.hasOwnProperty.call(u, k)) o[k] = u[k];
+  return o;
+}
+function _trimMsgForPersist(m) {
+  let r = m;
+  /* ★ segments (epic pt_cb8f98b0cb9b47fb): the backend OWNS task['segments']
+   *   as the authoritative typed-timeline SoT — it re-derives + re-persists it
+   *   on every task finalization (manager.py _sync_result_to_conversation).
+   *   The frontend does NOT consume it yet (step-5 cutover) and must NEVER echo
+   *   it back on a full-conv PUT: doing so (a) roughly doubles the assistant
+   *   payload (segments restate content+thinking+tool-result text) and (b) can
+   *   overwrite the server-fresh segments with a STALE client copy after a
+   *   local mutation (regen/translate that didn't update segments). Strip it —
+   *   same contract as _partialOutput/_wire_fp above. */
+  if ('segments' in m) {
+    r = { ...r };
+    delete r.segments;
+  }
+  if (Array.isArray(m.toolRounds) && m.toolRounds.some((rd) => rd && rd.status === 'done' && rd._partialOutput)) {
+    r = { ...r, toolRounds: m.toolRounds.map((rd) => {
+      if (rd && rd.status === 'done' && rd._partialOutput) {
+        const c = { ...rd }; delete c._partialOutput; return c;
+      }
+      return rd;
+    }) };
+  }
+  if (Array.isArray(m.apiRounds) && m.apiRounds.some((rd) => rd && rd.usage && _USAGE_TRANSIENT_KEYS.some((k) => k in rd.usage))) {
+    r = { ...r, apiRounds: m.apiRounds.map((rd) => (
+      rd && rd.usage ? { ...rd, usage: _stripUsageTransient(rd.usage) } : rd
+    )) };
+  }
+  // _liveLastRoundUsage.usage carries the same raw usage dict (with _wire_fp);
+  // the reader (context-bar.js) only uses .tokensIn, never usage._wire_fp.
+  if (m._liveLastRoundUsage && m._liveLastRoundUsage.usage
+      && _USAGE_TRANSIENT_KEYS.some((k) => k in m._liveLastRoundUsage.usage)) {
+    r = { ...r, _liveLastRoundUsage: { ...m._liveLastRoundUsage, usage: _stripUsageTransient(m._liveLastRoundUsage.usage) } };
+  }
+  return r;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   rev-based CAS rebase (append-missing-tail, keyed on _msgId)
+   ───────────────────────────────────────────────────────────────────
+   When the server rejects a full-conv PUT with 409 `blocked_rev_conflict`,
+   the client's baseRev is stale — another tab/device/server-write advanced
+   the row's rev. A blind re-PUT would clobber that fresher server truth, so
+   instead we three-way rebase: take the SERVER messages as the authoritative
+   base, then APPEND any local messages the server doesn't yet have (matched by
+   stable `_msgId`), preserving each surviving message's `_msgId` verbatim.
+
+   Append-missing-tail (NOT a full ordered merge) is deliberate: the only race
+   CAS actually catches is a concurrent APPEND (edits/regens bypass CAS via the
+   allowTruncate user-action path), so a full merge would risk reordering or
+   resurrecting a message the user edited away. Keeping `_msgId` verbatim is
+   load-bearing — reassigning it makes the message look new to the DB and would
+   spuriously bump rev on the very next write.
+
+   Poor-network correctness (lost-ACK): the send can SUCCEED server-side (real
+   user turn + real assistant reply persisted, rev bumped) while its RESPONSE is
+   lost, so the client thinks it failed, appends a local error bubble, and
+   rescue-PUTs → 409 → here. Two hazards this must avoid:
+     • DUPLICATE user turn — deduped by `_msgId` (client now ships the id on the
+       send payload so the server persists the SAME id) AND, defensively, by
+       matching (role,timestamp) which the backend's own idempotent append uses.
+     • Stale ERROR bubble coexisting with the real answer — a local
+       assistant message that is ERROR-ONLY (no content/thinking/toolRounds) is
+       DROPPED when the server already carries a real assistant reply for the
+       same turn, so the user never sees "error + answer" for one send.
+
+   Returns the rebased message array (server base + appended local-only tail). */
+function _isErrorOnlyAssistant(m) {
+  return !!(m && m.role === 'assistant' && m.error
+    && !(m.content || '').trim()
+    && !(m.thinking || '').trim()
+    && !(m.toolRounds && m.toolRounds.length)
+    && !m._igResult && !(m._igResults && m._igResults.length));
+}
+function _rebaseUnackedTail(serverMsgs, localMsgs) {
+  const base = Array.isArray(serverMsgs) ? serverMsgs.slice() : [];
+  const serverIds = new Set();
+  const serverUserTs = new Set();       // (role=user) timestamps present on server
+  let serverHasTrailingRealAssistant = false;
+  for (const m of base) {
+    if (!m) continue;
+    if (m._msgId) serverIds.add(m._msgId);
+    if (m.role === 'user' && m.timestamp) serverUserTs.add(m.timestamp);
+  }
+  const lastServer = base.length ? base[base.length - 1] : null;
+  if (lastServer && lastServer.role === 'assistant' && !_isErrorOnlyAssistant(lastServer)) {
+    serverHasTrailingRealAssistant = true;
+  }
+  for (const lm of (Array.isArray(localMsgs) ? localMsgs : [])) {
+    if (!lm) continue;
+    if (lm._msgId && serverIds.has(lm._msgId)) continue;   // server already has this exact msg
+    // Defensive dedup: a user turn the server persisted under a matching
+    // timestamp (the backend's own idempotency key) — skip even if _msgId
+    // somehow diverged (old client mid-rollout).
+    if (lm.role === 'user' && lm.timestamp && serverUserTs.has(lm.timestamp)) continue;
+    // Drop a stale local error-only assistant bubble when the server already
+    // answered this turn for real (lost-ACK: send succeeded, response lost).
+    if (_isErrorOnlyAssistant(lm) && serverHasTrailingRealAssistant) {
+      console.warn('[rebase] dropping stale local error-only assistant bubble — '
+        + 'server has a real reply for this turn (lost-ACK recovery)');
+      continue;
+    }
+    base.push(lm);                                         // append verbatim (keeps _msgId)
+    if (lm._msgId) serverIds.add(lm._msgId);
+    if (lm.role === 'user' && lm.timestamp) serverUserTs.add(lm.timestamp);
+  }
+  return base;
+}
+
 async function syncConversationToServer(conv, { allowTruncate = false } = {}) {
   try {
     /* Guard: skip sync while actively streaming — the assistant message is
@@ -276,6 +442,17 @@ async function syncConversationToServer(conv, { allowTruncate = false } = {}) {
             text: p.text || "",
           })),
         };
+      /* ★ `_pendingSync` is a CLIENT-ONLY durability marker (set when a send
+       *   failed on a poor network so a refresh keeps the message and a retry
+       *   re-attempts the PUT). It must NEVER be persisted to the server —
+       *   otherwise it echoes back on the next load and could wrongly trigger
+       *   the KEEP_LOCAL reconcile. Clone-and-strip (don't mutate the live
+       *   message — the local marker stays until this PUT actually succeeds). */
+      if (r._pendingSync) { r = { ...r }; delete r._pendingSync; }
+      /* ★ Drop transient bloat (usage._wire_fp diagnostics, done-round
+       *   _partialOutput) so a client PUT never re-inflates the DB payload
+       *   the server-side sanitizer just trimmed. See _trimMsgForPersist. */
+      r = _trimMsgForPersist(r);
       return r;
     });
     const settings = {
@@ -340,19 +517,90 @@ async function syncConversationToServer(conv, { allowTruncate = false } = {}) {
       createdAt: conv.createdAt,
       updatedAt: conv.updatedAt || Date.now(),
       settings,
+      /* ★ CAS base: the server-issued rev this client last saw. The server
+       *   accepts the write only if baseRev == its current rev; a stale base
+       *   (a concurrent tab/device/server-write advanced rev) → 409
+       *   blocked_rev_conflict, handled below by rebase+retry. Omitted when we
+       *   have never learned a rev (undefined) → server fails open to the
+       *   legacy count guards. */
+      ...(conv._serverRev !== undefined && conv._serverRev !== null
+          ? { baseRev: conv._serverRev } : {}),
       ...(allowTruncate ? { allowTruncate: true } : {}),
     });
     if (resp && resp.ok) {
       conv._serverMsgCount = lightMsgs.length;
-      debugLog(`[syncToServer] ✅ Conv ${conv.id.slice(0,8)} synced ${lightMsgs.length} msgs to server`, 'info');
+      /* ★ Record this local write so the event-driven cross-device notify
+       *   handler (_onConvNotifyPush) can recognise the backend task-save's own
+       *   `conv_changed` frame as a SELF-ECHO. The backend writes+pushes the
+       *   result independently of this PUT, so its frame's rev can outrun our
+       *   `_serverRev` until this PUT's response lands — a bare rev-gate misses
+       *   that race and would flash a stale cache repaint over the conv we're
+       *   viewing. This timestamp is the fast-path guard for that window. */
+      conv._localWriteAt = Date.now();
+      /* ★ Adopt the server's post-write rev as our new baseRev so the NEXT PUT
+       *   carries a fresh base — otherwise a client that syncs twice in a row
+       *   would false-409 its own second write. */
+      try {
+        const okBody = await resp.clone().json().catch(() => null);
+        if (okBody && typeof okBody.rev === 'number') conv._serverRev = okBody.rev;
+      } catch (e) { console.debug(`[syncToServer] rev adopt skipped: ${e && e.message}`); }
+      debugLog(`[syncToServer] ✅ Conv ${conv.id.slice(0,8)} synced ${lightMsgs.length} msgs to server (rev=${conv._serverRev})`, 'info');
+      /* ★ Server confirmed the write — clear any durability markers set by a
+       *   prior failed send (poor-network path). The message is now on the
+       *   server, so the retry poller can stop and the reconcile no longer
+       *   needs to protect a "pending" local tail. */
+      _clearPendingSyncMarkers(conv);
       /* ★ Write-through: update IndexedDB cache with the synced state.
        *   This ensures the cache always reflects the latest server-confirmed data,
        *   so the next page load gets an instant cache hit with fresh content. */
       ConvCache.put(conv);
+      return true;
     } else {
       const errBody = (resp ? await resp.json().catch(() => ({})) : {});
       const status = resp ? resp.status : 0;
       debugLog(`[syncToServer] ⚠️ Conv ${conv.id.slice(0,8)} sync rejected: ${status} ${errBody.error || ''}`, 'warn');
+      /* ★ CAS rev conflict (409 blocked_rev_conflict): our baseRev was stale —
+       *   a concurrent tab/device/server-write advanced the row's rev. Rebase
+       *   instead of clobbering: GET the authoritative server row, APPEND our
+       *   local-only tail (by _msgId, preserving ids), adopt the fresh rev as
+       *   the new base, and re-PUT through THIS SAME path (not a parallel
+       *   mechanism) so the pending-sync poller's boolean contract is honored.
+       *   Guarded against infinite recursion by _revRebaseDepth. */
+      if (status === 409 && errBody.error === 'blocked_rev_conflict') {
+        const _localBefore = conv._serverRev;
+        console.warn(`[syncToServer] 🔄 rev conflict conv=${conv.id.slice(0,8)} — `
+          + `client baseRev=${_localBefore} server rev=${errBody.serverRev}; rebasing local tail + retry`);
+        if ((conv._revRebaseDepth || 0) >= 3) {
+          console.error(`[syncToServer] rev-rebase depth exceeded for conv=${conv.id.slice(0,8)} — leaving pending`);
+          return false;
+        }
+        try {
+          const freshData = await Api.conversations.get(conv.id);
+          const serverMsgs = (freshData && freshData.messages) || [];
+          /* Append-missing-tail: server base + our un-acked local messages. */
+          const rebased = _rebaseUnackedTail(serverMsgs, conv.messages);
+          conv.messages = rebased;
+          conv.title = (freshData && freshData.title) || conv.title;
+          conv._serverMsgCount = serverMsgs.length;
+          /* Adopt the fresh rev so the retry PUT carries the correct base. */
+          if (freshData && typeof freshData.rev === 'number') conv._serverRev = freshData.rev;
+          else if (typeof errBody.serverRev === 'number') conv._serverRev = errBody.serverRev;
+          if (activeConvId === conv.id) {
+            renderChat(conv, false);
+            if (typeof _restoreConvToolState === "function") _restoreConvToolState(conv);
+          }
+          conv._revRebaseDepth = (conv._revRebaseDepth || 0) + 1;
+          try {
+            const retryOk = await syncConversationToServer(conv, { allowTruncate });
+            return retryOk;
+          } finally {
+            conv._revRebaseDepth = 0;
+          }
+        } catch (rebaseErr) {
+          console.error(`[syncToServer] rev-rebase failed for conv=${conv.id.slice(0,8)}:`, rebaseErr.message);
+          return false;
+        }
+      }
       /* ★ FIX: When server rejects with blocked_stale_checkpoint (409), the local
        *   data is stale (e.g. IDB cache from interrupted streaming).  Reload from
        *   server to get the correct completed data with finishReason/usage. */
@@ -378,10 +626,130 @@ async function syncConversationToServer(conv, { allowTruncate = false } = {}) {
           console.error(`[syncToServer] Recovery fetch failed:`, recoverErr.message);
         }
       }
+      return false;
     }
   } catch (e) {
     debugLog(`[syncToServer] ❌ Sync failed for ${conv.id.slice(0,8)}: ${e.message}`, "warn");
+    return false;
   }
+  /* Any early-return guard above (streaming / in-flight / count-drop / stale)
+   * did not perform a PUT — report "not synced" so a caller relying on the
+   * boolean (the pending-sync retry poller) keeps the conv queued. */
+  return false;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Pending-sync durability (poor-network send failure)
+   ───────────────────────────────────────────────────────────────────
+   When a send POST fails on a poor network, sendMessage() marks the
+   optimistic user message (+ the error bubble) with `_pendingSync` and
+   calls markConvPendingSync(conv). That marker is a real message field,
+   so ConvCache.put() persists it and it SURVIVES a page reload. A single
+   best-effort rescue PUT is not enough — the network that failed the send
+   will often fail that PUT too. This poller re-attempts the sync until it
+   lands (or the message is gone), and the `online` / `visibilitychange`
+   handlers kick it immediately on connectivity change.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/** Mark a conversation's trailing turn as needing a server sync + persist to
+ *  IndexedDB so it survives a reload, then start the retry poller. */
+function markConvPendingSync(conv) {
+  if (!conv || !conv.messages || conv.messages.length === 0) return;
+  conv._pendingSyncAt = Date.now();
+  /* Stamp the trailing messages (the just-failed turn) so the marker rides
+   * the message row into IndexedDB — a conv-level flag would NOT survive
+   * (the cache only persists whitelisted settings). Mark the tail user msg
+   * and any trailing error assistant. */
+  for (let i = conv.messages.length - 1; i >= 0 && i >= conv.messages.length - 2; i--) {
+    const m = conv.messages[i];
+    if (m) m._pendingSync = true;
+  }
+  try { ConvCache.put(conv); } catch (e) { console.debug(`[pendingSync] ConvCache.put failed: ${e && e.message}`); }
+  _startPendingSyncPolling();
+}
+
+/** Clear all pending-sync markers on a conv (called after a confirmed PUT). */
+function _clearPendingSyncMarkers(conv) {
+  if (!conv) return;
+  let touched = false;
+  if (conv._pendingSyncAt) { delete conv._pendingSyncAt; touched = true; }
+  if (conv.messages) {
+    for (const m of conv.messages) {
+      if (m && m._pendingSync) { delete m._pendingSync; touched = true; }
+    }
+  }
+  if (touched) {
+    try { ConvCache.put(conv); } catch (e) { console.debug(`[pendingSync] ConvCache.put(clear) failed: ${e && e.message}`); }
+  }
+}
+
+/** True if the conv still carries a durable pending-sync marker. */
+function convHasPendingSync(conv) {
+  if (!conv) return false;
+  if (conv._pendingSyncAt) return true;
+  return !!(conv.messages && conv.messages.some((m) => m && m._pendingSync));
+}
+
+let _pendingSyncInterval = null;
+const _PENDING_SYNC_POLL_MS = 12000; // retry cadence (background)
+/** Start the retry poller if not already running. Stops itself when no conv
+ *  has a pending-sync marker left. */
+function _startPendingSyncPolling() {
+  if (_pendingSyncInterval) return;
+  _pendingSyncInterval = setInterval(() => { _flushPendingSyncs('poll'); }, _PENDING_SYNC_POLL_MS);
+}
+
+/** Attempt to sync every conv that carries a pending-sync marker. Runs on the
+ *  poller, on the `online` event, and on `visibilitychange`. */
+async function _flushPendingSyncs(trigger) {
+  const pending = conversations.filter(convHasPendingSync);
+  if (pending.length === 0) {
+    if (_pendingSyncInterval) { clearInterval(_pendingSyncInterval); _pendingSyncInterval = null; }
+    return 0;
+  }
+  /* Don't hammer a dead tunnel — only attempt when the server is reachable. */
+  try {
+    const h = await Api.health.check({ signal: AbortSignal.timeout(5000) });
+    if (!h || !h.ok) return 0;
+  } catch { return 0; }
+  let synced = 0;
+  for (const conv of pending) {
+    /* Skip while a live stream owns the conv — finishStream will sync it. */
+    if (activeStreams.has(conv.id)) continue;
+    /* ★ Hydrate a shell before syncing. A conv reloaded as a metadata-only
+     *   shell (messages:[] + _needsLoad, its pending tail known only from the
+     *   conv-level _pendingSyncAt marker) cannot be synced directly:
+     *   syncConversationToServer early-returns on 0 messages. Load its messages
+     *   first — the cache path restores the durable _pendingSync tail from the
+     *   IndexedDB messages store — then sync exactly as the loaded path does.
+     *   If hydration can't materialise the tail (server unreachable AND cache
+     *   miss), leave the marker so a later poll retries; never sync an empty
+     *   shell (that would risk clobbering the server). */
+    let target = conv;
+    if ((!conv.messages || conv.messages.length === 0) && conv._needsLoad) {
+      try {
+        await loadConversationMessages(conv.id);
+      } catch (e) {
+        console.debug(`[pendingSync] hydrate failed for ${conv.id.slice(0,8)}: ${e && e.message}`);
+      }
+      target = conversations.find((c) => c.id === conv.id);
+      /* Conv gone (deleted mid-flush), still empty (hydration failed), or the
+       * marker cleared during hydration → skip; a later poll retries if needed. */
+      if (!target || !target.messages || target.messages.length === 0) continue;
+      if (!convHasPendingSync(target)) continue;
+    }
+    const ok = await syncConversationToServer(target);
+    if (ok) synced++;
+  }
+  if (synced > 0) {
+    console.info(`[pendingSync] ✅ Re-synced ${synced} pending conversation(s) — trigger=${trigger}`);
+    if (typeof renderConversationList === 'function') renderConversationList();
+  }
+  /* Stop the poller once everything landed. */
+  if (!conversations.some(convHasPendingSync) && _pendingSyncInterval) {
+    clearInterval(_pendingSyncInterval); _pendingSyncInterval = null;
+  }
+  return synced;
 }
 function _applySettingsToConv(conv, settings) {
   if (!settings) return;
@@ -440,6 +808,13 @@ function _applySettingsToConv(conv, settings) {
   /* ★ Persist last message info for Case E orphan detection on _needsLoad shells */
   if (settings.lastMsgRole) conv.lastMsgRole = settings.lastMsgRole;
   if (settings.lastMsgTimestamp) conv.lastMsgTimestamp = settings.lastMsgTimestamp;
+  /* ★ Settled-turn facts for the sidebar incomplete/errored dot on a
+   * messages-stripped (?meta=1) shell. Raw facts only; _convStatusFlags
+   * classifies. undefined-guarded so a shell without them just falls back to
+   * the messages path once loaded. */
+  if (settings.lastFinishReason !== undefined) conv.lastFinishReason = settings.lastFinishReason;
+  if (settings.lastMsgError !== undefined) conv.lastMsgError = settings.lastMsgError;
+  if (settings.lastMsgHasOutput !== undefined) conv.lastMsgHasOutput = settings.lastMsgHasOutput;
   /* ★ Phase 3: server-authoritative ghost reconcile marker. When the backend's
    *   recover_stale_tasks_on_startup swept buried ghosts / classified the tail,
    *   it stamps settings._reconciledAt. The frontend Case-D defers to it (skips
@@ -484,6 +859,7 @@ async function hydrateSidebarFromCache() {
     if (!metas || !metas.length) return 0;
     const known = new Set(conversations.map(c => c.id));
     let added = 0;
+    let pendingShells = 0;
     for (const m of metas) {
       if (!m.id || known.has(m.id)) continue;
       const nc = {
@@ -498,6 +874,17 @@ async function hydrateSidebarFromCache() {
         activeTaskId: null,
       };
       _applySettingsToConv(nc, m.settings);
+      /* ★ Poor-network durability: restore the conv-level pending-sync marker
+       *   from the cached meta so the flush poller can SEE a stranded pending
+       *   tail on a shell that hasn't loaded its messages yet. Without this the
+       *   message a failed poor-network send rescued into IndexedDB is invisible
+       *   to _flushPendingSyncs (which reads conv.messages) until the user
+       *   happens to open that exact conversation — silent data loss, one layer
+       *   up from the message-level marker. */
+      if (m.settings && m.settings._pendingSyncAt) {
+        nc._pendingSyncAt = m.settings._pendingSyncAt;
+        pendingShells++;
+      }
       conversations.push(nc);
       added++;
     }
@@ -505,6 +892,13 @@ async function hydrateSidebarFromCache() {
       conversations.sort(_convSorter);
       if (typeof renderConversationList === 'function') renderConversationList();
       console.log(`[hydrateSidebarFromCache] painted ${added} cached conversation(s) before server load`);
+    }
+    /* Kick the retry poller if any hydrated shell carries a stranded pending
+     * tail — it will hydrate + re-sync them (see _flushPendingSyncs). */
+    if (pendingShells > 0) {
+      console.info(`[hydrateSidebarFromCache] ${pendingShells} shell(s) carry a pending-sync tail — starting flush poller`);
+      _startPendingSyncPolling();
+      _flushPendingSyncs('cache_hydrate');
     }
     return added;
   } catch (e) {
@@ -581,17 +975,57 @@ async function loadConversationsFromServer(prefetchId) {
         _applySettingsToConv(nc, sc.settings);
         conversations.push(nc);
         merged = true;
-      } else if (!activeStreams.has(sc.id) && !local.activeTaskId) {
-        /* Update metadata for existing conversations */
+      } else if (!activeStreams.has(sc.id) && (!local.activeTaskId || sc.id === activeConvId)) {
+        /* Update metadata for existing conversations.
+         * ★ Cross-device fix: the OPEN conversation is allowed through this
+         *   branch even when it merely HOLDS an activeTaskId pin (no LIVE
+         *   stream — the activeStreams guard still bars a streaming conv), so a
+         *   read-only body refresh can fire below. loadConversationMessages'
+         *   MERGE_ACTIVE_TASK branch merges server content in place for a
+         *   pinned conv (keep-longer, append-when-not-streaming) — it never
+         *   replaces conv.messages, so the connectToTask assistantMsg ref is
+         *   never orphaned and the pin is preserved. */
         const sT = sc.updatedAt || sc.createdAt || 0,
           mT = local.updatedAt || local.createdAt || 0;
         const serverMsgCount = sc.messageCount || 0;
-        if (serverMsgCount > local.messages.length || sT > mT) {
+        /* ★ Monotonic `rev` is the AUTHORITATIVE staleness signal — the same
+         *   server-issued rev the body loader (:1278) and the notify push gate
+         *   on. Wall-clock `updatedAt` is a FALLBACK only: it is skew-prone
+         *   across devices and can't distinguish "server genuinely advanced"
+         *   from "the two clocks disagree". When rev is comparable on BOTH
+         *   sides we trust it; a stale-but-later local clock can never fake a
+         *   body refetch, and a device that just wrote (its own PUT advanced
+         *   _serverRev) sees sc.rev <= _serverRev → no spurious re-pull. */
+        const sR = (typeof sc.rev === 'number') ? sc.rev : null;
+        const mR = (typeof local._serverRev === 'number') ? local._serverRev : null;
+        const revComparable = (sR !== null && mR !== null);
+        const revNewer = revComparable && sR > mR;
+        if (serverMsgCount > local.messages.length || revNewer || sT > mT) {
           local.title = sc.title;
           local.updatedAt = sc.updatedAt || sc.createdAt;
           local._serverMsgCount = serverMsgCount;
+          /* Advance the CAS base to the authoritative list rev when it moved
+           *   forward, so a later PUT sends the matching baseRev and the notify
+           *   rev-gate treats this state as known (no re-verify loop). Never
+           *   move it BACKWARD (a lagging list snapshot mustn't rewind a base a
+           *   fresher GET already advanced). */
+          if (revNewer) local._serverRev = sR;
           if (serverMsgCount > local.messages.length) {
             local._needsLoad = true;
+          } else if (sc.id === activeConvId) {
+            /* ★ Cross-device fix (content-only append): the OPEN conversation's
+             *   server row advanced WITHOUT a message-count change — another
+             *   device EXTENDED the trailing turn rather than adding a new
+             *   message. Decide on the MONOTONIC rev (authoritative, skew-proof)
+             *   when comparable, falling back to wall-clock ONLY for a legacy
+             *   rev=0 / pre-rev row. This stops a clock-skewed updatedAt from
+             *   triggering a spurious body refetch (and the position shuffle it
+             *   causes) when rev proves nothing changed. When stale, mark the
+             *   open conv so the active-conv re-pull below fetches the fresh
+             *   body — routed through its keep-longer / KEEP_LOCAL / count-drop
+             *   guards (ADD/UPDATE only; a stale device can never truncate). */
+            const _contentStale = revComparable ? revNewer : (sT > mT);
+            if (_contentStale) local._needsLoad = true;
           }
           /* Preserve local pinned/folder state — these are client-side
              preferences and must not be overwritten by a potentially
@@ -617,9 +1051,32 @@ async function loadConversationsFromServer(prefetchId) {
     const serverIdSet = new Set(serverConvs.map(sc => sc.id));
     for (const lc of conversations) {
       if (!serverIdSet.has(lc.id) && !activeStreams.has(lc.id)) {
-        if (lc.messages.length > 0) {
+        /* ★ DELETION vs OFFLINE-RESCUE disambiguator (epic pt_2fd936cd15c34a7f).
+         *   Absence from the server list has TWO causes, distinguished by the
+         *   monotonic `_serverRev` signal:
+         *   • A conv that EVER carried a `_serverRev` was once server-known →
+         *     its absence now means it was DELETED on another device. Re-PUTing
+         *     it (the old blanket rescue) RESURRECTS a deleted conversation.
+         *     Drop it locally + prune the IDB paint-cache (mirrors the
+         *     conv_deleted notify tombstone path _applyRemoteConvDeleted).
+         *   • A conv that NEVER had a `_serverRev` is a genuine "sent while the
+         *     server was briefly unreachable" local creation → rescue it. */
+        const wasServerKnown = (typeof lc._serverRev === 'number');
+        if (wasServerKnown) {
+          if (lc.id === activeConvId) {
+            /* Don't yank the conv out from under the user mid-view; leave it
+             *   until they navigate away. It won't be re-PUT (rescue skipped),
+             *   so it can't resurrect on the server. */
+            continue;
+          }
+          console.warn(`[loadConversationsFromServer] ✗ Dropping conv ${lc.id.slice(0,8)} ` +
+            `— was server-known (rev=${lc._serverRev}) but absent from server list → deleted elsewhere`);
+          conversations = conversations.filter(c => c.id !== lc.id);
+          try { ConvCache.remove(lc.id); } catch (e) { console.debug(`[loadConversationsFromServer] IDB prune skipped: ${e && e.message}`); }
+          merged = true;
+        } else if (lc.messages.length > 0) {
           console.warn(`[loadConversationsFromServer] ★ Rescuing local-only conv ${lc.id.slice(0,8)} ` +
-            `(${lc.messages.length} msgs) — syncing to server`);
+            `(${lc.messages.length} msgs, never server-known) — syncing to server`);
           syncConversationToServer(lc);
         } else if (lc.id !== activeConvId) {
           /* Empty local-only conv — drop it silently (it was never meaningful) */
@@ -648,7 +1105,12 @@ async function loadConversationsFromServer(prefetchId) {
         _applySettingsToConv(pc, prefetchedConv.settings);
         pc.pinned = keepPinned; pc.pinnedAt = keepPinnedAt;
         pc._needsLoad = false;
-        pc._serverMsgCount = Math.max(serverMsgs.length, pc.messages.length);
+        pc._serverMsgCount = serverMsgs.length;
+        /* ★ Adopt the server rev — the prefetched conv came straight from the
+         *   server, so its rev is authoritative. Without this, pc._serverRev
+         *   stays undefined and pc's first PUT sends no baseRev (fail-open, no
+         *   CAS protection). */
+        if (typeof prefetchedConv.rev === 'number') pc._serverRev = prefetchedConv.rev;
         console.log(`[loadConversationsFromServer] ⚡ Prefetched conv ${pc.id.slice(0,8)}: ${serverMsgs.length} msgs — no second fetch needed`);
         /* ★ Update IndexedDB cache with the prefetched data */
         ConvCache.put(pc);
@@ -682,11 +1144,61 @@ async function loadConversationsFromServer(prefetchId) {
  * Load full messages for a single conversation on demand.
  * Returns the conversation object or null.
  */
+/**
+ * Toggle the "verifying" visual state on the chat viewport. Used when a
+ * known-stale IndexedDB copy is painted optimistically while a background
+ * server GET is in flight to correct it: the provisional content is dimmed so
+ * the transient pre-correction render reads as "being checked", not as truth.
+ * Cleared (on=false) the moment Phase-2 reconciles or the fetch settles.
+ * Pure DOM decoration — no effect on state / persistence.
+ */
+function _setCacheVerifying(convId, on) {
+  if (convId !== activeConvId) return;
+  const inner = (typeof document !== 'undefined')
+    ? document.getElementById('chatInner') : null;
+  if (!inner) return;
+  if (on) inner.classList.add('chat-cache-verifying');
+  else inner.classList.remove('chat-cache-verifying');
+}
+
+/* An OPEN conversation held in memory may still carry a client-minted,
+ * never-reconciled trailing empty-assistant placeholder (an orphaned "ghost"
+ * bubble left behind when a task's stream dropped before its first token).
+ * The backend GET path reconciles these away (routes/conversations.py →
+ * lib/conversations/reconcile.py), but the warm-open early-return below would
+ * skip that fetch entirely, so the ghost renders forever until a hard refresh.
+ *
+ * This predicate ONLY decides whether to re-verify against the server — it
+ * NEVER decides the ghost is dead or splices it. When it returns true we fall
+ * through to Phase 2 and adopt whatever the server says exists (if the server
+ * still lists the placeholder, e.g. a live task it owns, it stays). That keeps
+ * the server authoritative and avoids the banned frontend-lifecycle-inference
+ * pattern (the client truncating history on its own verdict). A genuinely-live
+ * stream is excluded via activeStreams so a legitimate "Preparing…" pre-first-
+ * token bubble is never disturbed. */
+function _openConvMayHoldOrphanGhost(conv, convId) {
+  if (!conv || activeStreams.has(convId)) return false;
+  const msgs = conv.messages;
+  if (!msgs || msgs.length === 0) return false;
+  const tail = msgs[msgs.length - 1];
+  return !!tail && tail.role === 'assistant'
+    && !(tail.content && tail.content.length)
+    && !(tail.thinking && tail.thinking.length)
+    && !(tail.toolRounds && tail.toolRounds.length)
+    && !tail.finishReason
+    && !tail.error;
+}
+
 async function loadConversationMessages(convId) {
   const conv = conversations.find((c) => c.id === convId);
   if (!conv) return null;
-  /* Skip if already loaded and not stale */
-  if (!conv._needsLoad && conv.messages.length > 0) return conv;
+  /* Skip if already loaded and not stale — UNLESS the open conv may still hold
+   * an orphaned, never-reconciled ghost tail, in which case re-verify against
+   * the authoritative server list (see _openConvMayHoldOrphanGhost). */
+  if (!conv._needsLoad && conv.messages.length > 0
+      && !_openConvMayHoldOrphanGhost(conv, convId)) {
+    return conv;
+  }
 
   /* ═══ Phase 1: Try IndexedDB cache for instant render ═══ */
   let cacheHit = false;
@@ -694,7 +1206,14 @@ async function loadConversationMessages(convId) {
     const cached = await ConvCache.get(convId);
     if (cached && cached.messages && cached.messages.length > 0) {
       /* Serve from cache immediately — user sees content with zero network wait */
-      conv.messages = cached.messages;
+      /* ★ Drop any transient autopilot VU streaming placeholder (`_streamingVu`)
+       *   a pre-fix cache may still hold. It is in-memory-only by backend design
+       *   (persisted ONLY on autopilot_vu_done, which clears the flag first), so
+       *   a cached one is a ghost: it renders as a frozen "Autopilot starting…"
+       *   pulse and makes the vu_start SSE replay early-return instead of
+       *   re-creating a live stream. Filtering it here lets the reconnect replay
+       *   stand up a fresh live bubble (or vu_done supply the settled one). */
+      conv.messages = cached.messages.filter(function (m) { return !(m && m._streamingVu); });
       conv.title = cached.title || conv.title;
       /* Apply cached settings (preserving local overrides like pinned) */
       const keepPinned = conv.pinned, keepPinnedAt = conv.pinnedAt;
@@ -710,8 +1229,16 @@ async function loadConversationMessages(convId) {
       try {
         if (typeof attachCompactionMarkersToConversation === 'function') {
           attachCompactionMarkersToConversation(convId, conv.messages).then(() => {
-            if (convId === activeConvId && typeof renderChat === 'function') {
-              renderChat(conv, false);
+            /* ★ SCROLL FIX: repaint IN PLACE (scroll-preserving) instead of
+             *   renderChat(conv,false). This callback lands after its own
+             *   network round-trip — on the initial conversation switch
+             *   (_initialSwitchLoad set) the full-render path force-scrolls to
+             *   the bottom, and with the artifact hydrate + Phase-2 variants
+             *   each landing at a different time the reader is yanked several
+             *   times. _bgRefreshChat surgically swaps only changed assistant
+             *   bubbles and is a no-op when nothing was attached. */
+            if (convId === activeConvId && typeof _bgRefreshChat === 'function') {
+              _bgRefreshChat(conv);
             }
           }).catch(e => console.debug('[compaction] attach (cache) failed:', e));
         }
@@ -721,13 +1248,27 @@ async function loadConversationMessages(convId) {
       try {
         if (typeof window.Artifacts !== 'undefined' && window.Artifacts.hydrateConversation) {
           window.Artifacts.hydrateConversation(conv).then(() => {
-            if (convId === activeConvId && typeof renderChat === 'function') {
-              renderChat(conv, false);
+            /* ★ SCROLL FIX: scroll-preserving in-place repaint (see the
+             *   compaction callback above) — never force-scroll on open. */
+            if (convId === activeConvId && typeof _bgRefreshChat === 'function') {
+              _bgRefreshChat(conv);
             }
           }).catch(e => console.debug('[artifacts] hydrate (cache) failed:', e));
         }
       } catch (e) { console.debug('[artifacts] hydrate (cache) hook error:', e); }
       console.info(`[loadConvMsgs] ⚡ CACHE HIT conv=${convId.slice(0,8)}: ${cached.messages.length} msgs (cachedAt=${new Date(cached.cachedAt).toISOString()})`);
+      /* ★ Known-stale first-paint suppression (cosmetic wrong-content flash on
+       *   a poor connection). The sidebar list carries each conv's server-issued
+       *   `updatedAt` (loadConversationsFromServer). If it is strictly NEWER than
+       *   the cached copy's updatedAt, we KNOW the cache is outdated before the
+       *   Phase-2 GET returns. We still paint instantly (no blank wait — the
+       *   cache purpose stands), but mark the provisional render "verifying" so
+       *   the transient pre-correction content reads as being checked, not as
+       *   truth; the marker is cleared the moment Phase-2 reconciles. Persisted
+       *   corruption is already prevented by the rev CAS — this closes only the
+       *   visual stale flash. */
+      const _cacheKnownStale = (conv.updatedAt || 0) > (cached.updatedAt || 0);
+      conv._cacheKnownStale = _cacheKnownStale;
       /* Hydrate images from cache (URLs only, base64 stripped) */
       _hydrateImageBase64(conv);
       /* Render immediately from cache */
@@ -737,6 +1278,7 @@ async function loadConversationMessages(convId) {
         } else {
           renderChat(conv, false);
           if (typeof _restoreConvToolState === "function") _restoreConvToolState(conv);
+          _setCacheVerifying(convId, _cacheKnownStale);
         }
       }
     }
@@ -782,10 +1324,15 @@ async function loadConversationMessages(convId) {
      * cache and bail out — caller decides whether to show the retry UI. */
     if (!resp) {
       debugLog(`Load conv ${convId}: fetch failed after retries (network/timeout)`, 'warn');
+      /* Verify fetch never landed — the optimistic paint is all we have; stop
+       *   dimming it (a permanent grey would be worse than a possibly-stale
+       *   but readable view). A later poll/refocus re-verifies. */
+      delete conv._cacheKnownStale;
+      _setCacheVerifying(convId, false);
       if (!cacheHit && convId === activeConvId) {
         const inner = document.getElementById('chatInner');
         if (inner && conv._needsLoad && conv.messages.length === 0) {
-          inner.innerHTML = `<div class="welcome" id="welcome" style="opacity:0.7"><div class="welcome-icon">${Icon('zap', 40)}</div><h2>Failed to load conversation</h2><p>Network timeout — server unreachable.</p><p style="margin-top:1em"><button onclick="loadConversation('${convId}')" class="action-btn" style="padding:8px 16px;cursor:pointer">${Icon('refresh', 13)} Retry</button></p></div>`;
+          inner.innerHTML = `<div class="welcome" id="welcome" style="opacity:0.7"><div class="welcome-icon">${Icon('zap', 40)}</div><h2>Failed to load conversation</h2><p>Network timeout — server unreachable.</p><p style="margin-top:1em"><button onclick="loadConversation('${convId}')" class="action-btn" style="width:auto;height:auto;padding:8px 16px;cursor:pointer">${Icon('refresh', 13)} Retry</button></p></div>`;
         }
       }
       return conv;
@@ -805,7 +1352,7 @@ async function loadConversationMessages(convId) {
         if (convId === activeConvId) {
           const inner = document.getElementById('chatInner');
           if (inner) {
-            inner.innerHTML = `<div class="welcome" id="welcome"><div class="welcome-icon">${Icon('zap', 40)}</div><h2>Conversation Not Found</h2><p>This conversation (<code>${convId}</code>) was not saved to the server.<br>It may have been created during a server error or was never synced.</p><p style="margin-top:1em"><button onclick="deleteConversation('${convId}')" class="action-btn" style="padding:8px 16px;cursor:pointer">${Icon('trash', 13)} Remove from sidebar</button>&nbsp;&nbsp;<button onclick="newChat()" class="action-btn" style="padding:8px 16px;cursor:pointer">${Icon('rocket', 13)} New Chat</button></p></div>`;
+            inner.innerHTML = `<div class="welcome" id="welcome"><div class="welcome-icon">${Icon('zap', 40)}</div><h2>Conversation Not Found</h2><p>This conversation (<code>${convId}</code>) was not saved to the server.<br>It may have been created during a server error or was never synced.</p><p style="margin-top:1em"><button onclick="deleteConversation('${convId}')" class="action-btn" style="width:auto;height:auto;padding:8px 16px;cursor:pointer">${Icon('trash', 13)} Remove from sidebar</button>&nbsp;&nbsp;<button onclick="newChat()" class="action-btn" style="width:auto;height:auto;padding:8px 16px;cursor:pointer">${Icon('rocket', 13)} New Chat</button></p></div>`;
           }
         }
         /* Remove the orphan from the in-memory array + sidebar */
@@ -818,6 +1365,12 @@ async function loadConversationMessages(convId) {
     const data = await resp.json();
     const serverMsgs = data.messages || [];
     const serverUpdatedAt = data.updatedAt || data.updated_at || 0;
+    /* ★ Adopt the server-issued rev as this conv's CAS base. The GET reflects
+     *   the authoritative row (post GET-path reconcile), so a subsequent PUT
+     *   sends the matching baseRev and only 409s on a GENUINE concurrent write.
+     *   IDB is demoted to a pure paint-cache: it never supplies rev, so a stale
+     *   cached copy can never present a fresher-looking base than the server. */
+    if (typeof data.rev === 'number') conv._serverRev = data.rev;
 
     /* ── Freshness check: is server data newer than what we rendered from cache? ── */
     const hasLocalData = conv.messages.length > 0;
@@ -856,9 +1409,26 @@ async function loadConversationMessages(convId) {
      *   Symptom: user sends a message, only the assistant streams in
      *   chatInner; the user's prompt only reappears after manual refresh
      *   when the persisted server data is reloaded. */
+    /* ★ Durable pending-sync tail (poor-network send failure): the message was
+     *   marked _pendingSync and persisted to IndexedDB because its send POST
+     *   failed and the rescue PUT never landed. On this reload the server copy
+     *   is SHORTER (it never got the message) — treat local as authoritative so
+     *   the OVERWRITE branch can't wipe it, and let KEEP_LOCAL re-sync it. */
+    const _localHasPendingSync = convHasPendingSync(conv);
+    /* ★ KEEP_LOCAL fires ONLY on genuine un-acked local writes — either activity
+     *   that happened DURING this fetch (_hasFreshLocalActivity) or a durable
+     *   pending-sync tail (_localHasPendingSync). The old third disjunct
+     *   `localNewest > serverNewest` was a pure WALL-CLOCK tiebreaker: a stale
+     *   IDB/in-memory copy whose max message timestamp merely exceeded the
+     *   server's would win KEEP_LOCAL and then get PUT back, re-clobbering fresh
+     *   server truth (the wrong-data-on-reconnect root cause). It is REMOVED —
+     *   freshness is now decided by the server-issued monotonic `rev` (adopted
+     *   at :data.rev), never by comparing clocks that can skew or be inflated by
+     *   an optimistic push. Genuine local work is still protected by the two
+     *   real signals above; a merely newer-looking timestamp is not. */
     const localHasUnsynced =
       _hasFreshLocalActivity ||
-      (hasLocalData && !cacheHit && localNewest > serverNewest);
+      _localHasPendingSync;
 
     /* ── One-line reconciliation snapshot ──
      *  Logged BEFORE the branch dispatch so that postmortem of any
@@ -935,7 +1505,15 @@ async function loadConversationMessages(convId) {
        *   the un-translated user msg and could overwrite the backend's
        *   freshly-committed translatedContent. */
       if (!_hasFreshLocalActivity) {
-        syncConversationToServer(conv);
+        /* A durable pending-sync tail (poor-network send failure carried across
+         * a reload) re-syncs through the retry poller so a still-flaky network
+         * keeps re-attempting until the PUT lands; otherwise a one-shot sync. */
+        if (_localHasPendingSync) {
+          _flushPendingSyncs('reload_keep_local');
+          _startPendingSyncPolling();
+        } else {
+          syncConversationToServer(conv);
+        }
       }
       // Even when keeping local, merge server translations in — they are
       // strictly additive and can't harm unsynced newer content.
@@ -944,6 +1522,40 @@ async function loadConversationMessages(convId) {
         console.info(`[loadConvMsgs] 🈯 Merged ${_mergedHU} server translation(s) ` +
           `into local-unsynced conv=${convId.slice(0,8)}`);
       }
+      /* ★ FIX: settle load-state like every other branch (MERGE_ACTIVE_TASK /
+       *   OVERWRITE both do this). Without it, a KEEP_LOCAL reconcile leaves
+       *   _needsLoad truthy and _serverMsgCount stale, so a later refocus /
+       *   cross-device poll re-enters Phase-2 and — once the fresh-activity
+       *   window has closed — takes the OVERWRITE branch, blanking the
+       *   just-sent local message; and the stale (higher) _serverMsgCount
+       *   makes syncConversationToServer's count-drop guard silently drop a
+       *   subsequent legitimate edit/truncate. Use the local length so a
+       *   longer local tail (the unsynced msgs we just KEPT) is authoritative. */
+      conv._needsLoad = false;
+      conv._serverMsgCount = Math.max(serverMsgs.length, conv.messages.length);
+    } else if (conv.activeTaskId && hasLocalData
+               && !activeStreams.has(convId) && serverMsgs.length < conv.messages.length
+               && _openConvMayHoldOrphanGhost(conv, convId)) {
+      /* ★ Adopt a SHORTER authoritative list FIRST — before the checkpoint
+       *   "upgrade" block below can mutate the ghost tail. The backend GET-path
+       *   reconcile already SWEPT an orphaned trailing empty-assistant ghost
+       *   (a stale activeTaskId is set but NO stream is live, and this branch
+       *   was reached with non-fresh local). Without this early adopt, the
+       *   upgrade block copies the server's PREVIOUS settled reply into the
+       *   empty ghost, producing a duplicate bubble instead of removing it.
+       *   Narrowly gated on the pre-mutation orphan-ghost verdict; live-stream
+       *   and KEEP_LOCAL are unreachable here, so no connectToTask ref is
+       *   orphaned. */
+      conv.messages = serverMsgs;
+      console.info(`[loadConvMsgs] 🧹 MERGE_ACTIVE_TASK adopted reconciled server list ` +
+        `(${serverMsgs.length} msgs) for conv=${convId.slice(0,8)} — swept an orphaned ` +
+        `empty-assistant ghost tail.`);
+      try { ConvCache.put(conv); } catch (_e) { /* best-effort */ }
+      if (convId === activeConvId && typeof renderChat === 'function') {
+        renderChat(conv, false);
+      }
+      conv._needsLoad = false;
+      conv._serverMsgCount = Math.max(serverMsgs.length, conv.messages.length);
     } else if (conv.activeTaskId && hasLocalData) {
       /* ★ FIX: Active task with stale local data (e.g. IDB cache from before
        *   task started).  We can't replace conv.messages (would orphan the
@@ -1103,8 +1715,10 @@ async function loadConversationMessages(convId) {
       try {
         if (typeof attachCompactionMarkersToConversation === 'function') {
           attachCompactionMarkersToConversation(convId, conv.messages).then(() => {
-            if (convId === activeConvId && typeof renderChat === 'function') {
-              renderChat(conv, false);
+            /* ★ SCROLL FIX: scroll-preserving in-place repaint — see the
+             *   Phase-1 compaction callback for the rationale. */
+            if (convId === activeConvId && typeof _bgRefreshChat === 'function') {
+              _bgRefreshChat(conv);
             }
           }).catch(e => console.debug('[compaction] attach (server) failed:', e));
         }
@@ -1116,8 +1730,10 @@ async function loadConversationMessages(convId) {
       try {
         if (typeof window.Artifacts !== 'undefined' && window.Artifacts.hydrateConversation) {
           window.Artifacts.hydrateConversation(conv).then(() => {
-            if (convId === activeConvId && typeof renderChat === 'function') {
-              renderChat(conv, false);
+            /* ★ SCROLL FIX: scroll-preserving in-place repaint — never
+             *   force-scroll on open. */
+            if (convId === activeConvId && typeof _bgRefreshChat === 'function') {
+              _bgRefreshChat(conv);
             }
           }).catch(e => console.debug('[artifacts] hydrate (server) failed:', e));
         }
@@ -1165,9 +1781,17 @@ async function loadConversationMessages(convId) {
 
     /* Clean up transient cache tracking field */
     delete conv._cachedUpdatedAt;
+    /* ★ Phase-2 settled — the paint is now server-verified; clear the
+     *   known-stale "verifying" dim (no-op when it was never set). */
+    delete conv._cacheKnownStale;
+    _setCacheVerifying(convId, false);
     return conv;
   } catch (e) {
     debugLog(`Load conv ${convId}: ${e.message}`, "warn");
+    /* Fetch failed: the optimistic paint is all we have — stop dimming it so
+     *   the user isn't left staring at permanently-greyed content. */
+    delete conv._cacheKnownStale;
+    _setCacheVerifying(convId, false);
     /* If we had a cache hit, the user already sees content — just log the fetch failure */
     if (cacheHit) {
       console.warn(`[loadConvMsgs] ⚠️ Server fetch failed for ${convId.slice(0,8)} but cache was served: ${e.message}`);
@@ -1177,7 +1801,7 @@ async function loadConversationMessages(convId) {
     if (convId === activeConvId) {
       const inner = document.getElementById('chatInner');
       if (inner && conv._needsLoad && conv.messages.length === 0) {
-        inner.innerHTML = `<div class="welcome" id="welcome" style="opacity:0.7"><div class="welcome-icon">⚡</div><h2>Failed to load conversation</h2><p>${e.message}</p><p style="margin-top:1em"><button onclick="loadConversation('${convId}')" class="action-btn" style="padding:8px 16px;cursor:pointer">🔄 Retry</button></p></div>`;
+        inner.innerHTML = `<div class="welcome" id="welcome" style="opacity:0.7"><div class="welcome-icon">⚡</div><h2>Failed to load conversation</h2><p>${e.message}</p><p style="margin-top:1em"><button onclick="loadConversation('${convId}')" class="action-btn" style="width:auto;height:auto;padding:8px 16px;cursor:pointer">🔄 Retry</button></p></div>`;
       }
     }
     return conv;
@@ -1205,6 +1829,9 @@ async function forceRecoverFromServer(convId) {
       conv.title = data.title || conv.title;
       conv.updatedAt = data.updatedAt || data.updated_at || conv.updatedAt;
       conv._serverMsgCount = serverMsgs.length;
+      /* ★ Adopt the server rev so a later PUT carries the correct baseRev
+       *   (this is a server GET — its rev is authoritative). */
+      if (typeof data.rev === 'number') conv._serverRev = data.rev;
       conv._needsLoad = false;
       const keepPinned = conv.pinned, keepPinnedAt = conv.pinnedAt;
       _applySettingsToConv(conv, data.settings);

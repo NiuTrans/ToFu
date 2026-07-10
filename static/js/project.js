@@ -98,7 +98,7 @@ async function submitHumanGuidanceFreeText(guidanceId) {
 
   // ★ Auto-translate CN→EN: if autoTranslate is ON and text contains Chinese,
   //   translate before sending to backend — same as sendMessage() flow.
-  const conv = conversations.find(c => c.id === activeConvId);
+  const conv = getActiveConv();
   const _hgAutoTrans = convAutoTranslate(conv);
   const hasChinese = /[\u4e00-\u9fff\u3400-\u4dbf]/.test(text);
   let finalText = text;
@@ -161,7 +161,7 @@ async function submitHumanGuidanceChoice(guidanceId, choiceLabel) {
  * When tool_result arrives, it will overwrite status to "done" as normal.
  */
 function _collapseHgRoundAfterSubmit(guidanceId, responseText) {
-  const conv = conversations.find(c => c.id === activeConvId);
+  const conv = getActiveConv();
   if (!conv) return;
   const assistantMsg = [...conv.messages].reverse().find(m => m.role === 'assistant');
   if (!assistantMsg || !assistantMsg.toolRounds) return;
@@ -356,17 +356,25 @@ function openProjectModal() {
   _syncFoldersFromState();
   _mpRenderTags();
   _updateProjectModalStatus();
+  _recentFilter = "";
+  const _recentInput = document.getElementById("recentSearchInput");
+  if (_recentInput) _recentInput.value = "";
   renderRecentProjects();
   document.getElementById("projectModal").classList.add("open");
+  // Tell the full-page chat-drop handler (main.js) to stand down so a file
+  // dropped onto the folder browser is SAVED to disk, not attached to chat.
+  window._tofuProjectModalOpen = true;
   // Default mobile view to Browse on each open (no-op on desktop).
   pmMobileTab("browse");
   // Docked browser: populate it from the primary folder (or home) on open.
   browseDirectory(_mpFolders.length ? _mpFolders[0] : "~");
+  _attachFolderDropZone();
   setTimeout(() => document.getElementById("mpPathInput").focus(), 100);
 }
 
 function closeProjectModal() {
   document.getElementById("projectModal").classList.remove("open");
+  window._tofuProjectModalOpen = false;
 }
 
 /* ── Mobile segmented tab toggle (Browse / Workspace) ──
@@ -574,6 +582,9 @@ function saveRecentProject(path) {
     .catch(e => debugLog(`[saveRecentProject] ${e.message}`, 'warn'));
 }
 
+let _recentProjects = [];
+let _recentFilter = "";
+
 async function renderRecentProjects() {
   const container = document.getElementById("recentProjectPaths");
   const listEl = document.getElementById("recentPathsList");
@@ -585,24 +596,80 @@ async function renderRecentProjects() {
       list = Array.isArray(data) ? data : data.projects || [];
     }
   } catch {}
+  _recentProjects = list;
   if (list.length === 0) {
     container.hidden = true;
     return;
   }
   container.hidden = false;
-  listEl.innerHTML = list
+  _renderRecentList();
+}
+
+// Basename of a path (last non-empty segment).
+function _recentName(path) {
+  const parts = String(path).split("/").filter(Boolean);
+  return parts[parts.length - 1] || path;
+}
+
+// Highlight the matched substring of `text` (case-insensitive), HTML-escaping
+// both the surrounding text and the match so a path can't inject markup.
+function _recentHighlight(text, query) {
+  const safe = escapeHtml(text);
+  if (!query) return safe;
+  const idx = text.toLowerCase().indexOf(query.toLowerCase());
+  if (idx < 0) return safe;
+  const before = escapeHtml(text.slice(0, idx));
+  const match = escapeHtml(text.slice(idx, idx + query.length));
+  const after = escapeHtml(text.slice(idx + query.length));
+  return `${before}<mark class="recent-hl">${match}</mark>${after}`;
+}
+
+function _renderRecentList() {
+  const listEl = document.getElementById("recentPathsList");
+  const countEl = document.getElementById("recentCount");
+  const clearBtn = document.getElementById("recentSearchClear");
+  if (!listEl) return;
+  const q = _recentFilter.trim();
+  const filtered = q
+    ? _recentProjects.filter(
+        (item) => item.path.toLowerCase().includes(q.toLowerCase()),
+      )
+    : _recentProjects;
+  if (countEl) countEl.textContent = q ? `${filtered.length}/${_recentProjects.length}` : String(_recentProjects.length);
+  if (clearBtn) clearBtn.hidden = !q;
+  if (filtered.length === 0) {
+    const _t = (typeof t === "function") ? t : (k) => k;
+    const msg = q ? _t("pm.recentNoMatch") : _t("pm.recentEmpty");
+    listEl.innerHTML = `<div class="recent-paths-empty">${escapeHtml(msg)}</div>`;
+    return;
+  }
+  listEl.innerHTML = filtered
     .map((item) => {
-      const parts = item.path.split("/").filter(Boolean);
-      const name = parts[parts.length - 1] || item.path;
+      const name = _recentName(item.path);
       return `<div class="recent-path-item" onclick="selectRecentProject('${escapeHtml(item.path)}')" title="${escapeHtml(item.path)}">
          <span class="recent-path-text">
-           <span class="recent-path-name">${escapeHtml(name)}</span>
-           <span class="recent-path-full">${escapeHtml(item.path)}</span>
+           <span class="recent-path-name">${_recentHighlight(name, q)}</span>
+           <span class="recent-path-full">${_recentHighlight(item.path, q)}</span>
          </span>
          ${item.count > 1 ? `<span class="recent-path-count">×${item.count}</span>` : ""}
        </div>`;
     })
     .join("");
+}
+
+function _filterRecentProjects(value) {
+  _recentFilter = value || "";
+  _renderRecentList();
+}
+
+function _clearRecentSearch() {
+  _recentFilter = "";
+  const input = document.getElementById("recentSearchInput");
+  if (input) {
+    input.value = "";
+    input.focus();
+  }
+  _renderRecentList();
 }
 
 function selectRecentProject(path) {
@@ -1095,7 +1162,8 @@ async function browseDirectory(path) {
         var safeName = d.name.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
         return (
           '<div class="folder-item' + hidden + added +
-          '" onclick="browseDirectory(\'' + safePath + '\')" title="Open ' + escapeHtml(d.name) + '">' +
+          '" data-dir-path="' + escapeHtml(d.path) + '"' +
+          ' onclick="browseDirectory(\'' + safePath + '\')" title="Open ' + escapeHtml(d.name) + '">' +
           '<span class="folder-icon">' + icon + "</span>" +
           '<span class="folder-name">' + escapeHtml(d.name) + "</span>" +
           badge + items +
@@ -1381,4 +1449,195 @@ async function confirmApplyCode() {
     btn.disabled = false;
     btn.textContent = "Write File";
   }
+}
+
+
+/* ═══════════════════════════════════════════════════════
+   Drag-and-drop files INTO a project folder (folder browser)
+   ═══════════════════════════════════════════════════════
+   Distinct from the full-page chat drop (main.js), which attaches files to
+   the next MESSAGE. Dropping onto the folder browser SAVES the raw bytes to
+   disk inside the attached workspace (binary-safe, sandboxed, undoable).
+
+   The full-page chat overlay lives at document level (z-index 200); this
+   handler is bound directly to #folderBrowser and runs in the CAPTURE phase +
+   stopPropagation so a file dropped on the browser is saved to disk and NOT
+   also attached to chat. main.js additionally skips its overlay while the
+   project modal is open (see _tofuProjectModalOpen). */
+var _folderDropAttached = false;
+
+/** Resolve which directory a drop landed on: a specific folder row's path,
+ *  else the directory currently shown in the browser. Returns '' if unknown. */
+function _folderDropTargetDir(target) {
+  var row = target && target.closest ? target.closest('.folder-item[data-dir-path]') : null;
+  if (row && row.dataset.dirPath) return row.dataset.dirPath;
+  return (typeof _browseState !== 'undefined' && _browseState.path) ? _browseState.path : '';
+}
+
+function _clearFolderDropHighlight() {
+  var el = document.getElementById('folderBrowser');
+  if (el) el.classList.remove('fb-drop-active');
+  document.querySelectorAll('.folder-item.fb-drop-row')
+    .forEach(function (r) { r.classList.remove('fb-drop-row'); });
+}
+
+/** Attached workspace roots (single source of truth: projectState). A drop is
+ *  only accepted inside one of these — the backend save_uploaded_file refuses
+ *  anything else, so we mirror that guard client-side for a clear, proactive
+ *  message instead of a generic post-hoc "failed to save". */
+function _attachedRootPaths() {
+  var roots = [];
+  if (typeof projectState !== 'undefined' && projectState) {
+    if (projectState.path) roots.push(projectState.path);
+    (projectState.extraRoots || []).forEach(function (r) {
+      var p = typeof r === 'string' ? r : (r && r.path);
+      if (p) roots.push(p);
+    });
+  }
+  return roots;
+}
+
+/** True if `dir` is (or is under) an attached root. Empty dir → the active
+ *  project root, which the backend resolves, so it's allowed. */
+function _dirInsideAttachedRoot(dir) {
+  if (!dir) return true;
+  var norm = function (p) { return String(p).replace(/\/+$/, ''); };
+  var d = norm(dir);
+  return _attachedRootPaths().some(function (root) {
+    var r = norm(root);
+    return d === r || d.indexOf(r + '/') === 0;
+  });
+}
+
+/** Save one dropped File into `dir` via the binary-safe upload endpoint. */
+async function _uploadDroppedFile(file, dir) {
+  var fd = new FormData();
+  fd.append('file', file, file.name);
+  if (dir) fd.append('dir', dir);
+  var resp = await Api.project.upload(fd);
+  var data = resp ? await resp.json().catch(function () { return {}; }) : {};
+  if (resp && resp.ok && data && data.ok) return { ok: true, data: data };
+  return { ok: false, error: (data && data.error) || ('HTTP ' + (resp ? resp.status : '?')) };
+}
+
+function _attachFolderDropZone() {
+  if (_folderDropAttached) return;
+  var el = document.getElementById('folderBrowser');
+  if (!el) return;
+  _folderDropAttached = true;
+
+  var hasFiles = function (e) {
+    return e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') !== -1;
+  };
+
+  el.addEventListener('dragover', function (e) {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    el.classList.add('fb-drop-active');
+    var row = e.target.closest ? e.target.closest('.folder-item[data-dir-path]') : null;
+    document.querySelectorAll('.folder-item.fb-drop-row')
+      .forEach(function (r) { if (r !== row) r.classList.remove('fb-drop-row'); });
+    if (row) row.classList.add('fb-drop-row');
+  }, true);
+
+  el.addEventListener('dragleave', function (e) {
+    // Only clear when the pointer actually leaves the browser box.
+    if (e.target === el && !el.contains(/** @type {Node} */(e.relatedTarget))) _clearFolderDropHighlight();
+  }, true);
+
+  el.addEventListener('drop', function (e) {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();  // beat the document-level chat-drop handler
+    var dir = _folderDropTargetDir(e.target);
+    _clearFolderDropHighlight();
+    var files = Array.prototype.slice.call((e.dataTransfer && e.dataTransfer.files) || []);
+    if (!files.length) return;
+    _runFolderDrop(files, dir);
+  }, true);
+}
+
+/** Add `dir` to the workspace as an extra root (or primary if none yet),
+ *  reusing the tested setPaths apply path. Preserves existing roots + their
+ *  read-only flags. Throws on server failure. */
+async function _addDropDirAsRoot(dir) {
+  var folders = _attachedRootPaths().slice();
+  if (folders.indexOf(dir) === -1) folders.push(dir);
+  var readOnly = [];
+  if (typeof projectState !== 'undefined' && projectState) {
+    if (projectState.readOnly && projectState.path) readOnly.push(projectState.path);
+    (projectState.extraRoots || []).forEach(function (r) {
+      if (r && typeof r === 'object' && r.readOnly && r.path) readOnly.push(r.path);
+    });
+  }
+  var resp = await Api.project.setPaths(folders, readOnly);
+  var data = resp ? await resp.json().catch(function () { return {}; }) : {};
+  if (!resp || !resp.ok) throw new Error((data && data.error) || 'Failed to add folder');
+  if (typeof _applyProjectData === 'function') _applyProjectData(data);
+  if (typeof _saveConvProjectPath === 'function') {
+    _saveConvProjectPath(data.path,
+      (data.extraRoots || []).map(function (r) { return typeof r === 'string' ? r : r.path; }),
+      readOnly);
+  }
+}
+
+async function _runFolderDrop(files, dir) {
+  var dirLabel = dir ? (dir.split('/').filter(Boolean).slice(-1)[0] || dir) : 'project root';
+  // A drop outside every attached root would be refused by save_uploaded_file
+  // (it never auto-registers a workspace). Rather than dead-ending, OFFER to
+  // add the folder in one click — the upload itself is harmless, but adding a
+  // root has a visible side effect (a scan + a new project-bar folder), so we
+  // ask first instead of doing it silently.
+  if (dir && !_dirInsideAttachedRoot(dir)) {
+    var ok = (typeof showConfirm === 'function')
+      ? await showConfirm(t('folderDrop.addRootConfirm', { dir: dirLabel }),
+          { title: t('folderDrop.notInWorkspace'),
+            okText: t('folderDrop.addAndSave') })
+      : true;
+    if (!ok) return;
+    try {
+      await _addDropDirAsRoot(dir);
+    } catch (e) {
+      if (typeof showToast === 'function') {
+        showToast(t('folderDrop.failed', { n: files.length }), 'error',
+          (e && e.message) || '', 6000);
+      }
+      return;
+    }
+  }
+  var results = await Promise.allSettled(files.map(function (f) {
+    return _uploadDroppedFile(f, dir);
+  }));
+  var saved = 0, renamed = 0;
+  var errors = [];
+  results.forEach(function (r, i) {
+    if (r.status === 'fulfilled' && r.value && r.value.ok) {
+      saved++;
+      if (r.value.data && r.value.data.renamed) renamed++;
+    } else {
+      var msg = (r.status === 'fulfilled' && r.value)
+        ? r.value.error
+        : (r.status === 'rejected' && r.reason && r.reason.message);
+      errors.push(files[i].name + ': ' + (msg || 'failed'));
+    }
+  });
+  if (typeof showToast === 'function') {
+    if (saved > 0) {
+      var detail = t('folderDrop.savedInto', { dir: dirLabel })
+        + (renamed ? ' · ' + t('folderDrop.renamedNote', { n: renamed }) : '');
+      showToast(t('folderDrop.saved', { n: saved }), '', detail, 4200);
+    }
+    if (errors.length) {
+      showToast(t('folderDrop.failed', { n: errors.length }), 'error',
+        errors.slice(0, 3).join('\n'), 6000);
+    }
+  }
+  // Refresh so the newly-saved files reflect in the browser's file count.
+  if (typeof browseDirectory === 'function' && typeof _browseState !== 'undefined' && _browseState.path) {
+    browseDirectory(_browseState.path);
+  }
+  // Surface the write in the project bar's file-changes affordance.
+  if (typeof loadProjectStatus === 'function') { try { loadProjectStatus(); } catch (_e) { /* best-effort */ } }
 }

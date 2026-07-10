@@ -156,6 +156,15 @@ def select_dispatchable(project_path: str) -> list[dict]:
 
     candidates = []
     for t in tasks:
+        # ── kind filter: a 'lease' row is a durational resource/path
+        #    RESERVATION, never a work-item. It MUST NOT be auto-dispatched —
+        #    without this skip, an EXPIRED lease reclaims claimed→open (via
+        #    _effective_status), passes the status=='open' check below, and the
+        #    sweep + _drain_idle_target would spawn a spurious BILLED kickoff at
+        #    TTL expiry. DENYLIST (not an allowlist on 'epic') so a
+        #    pre-migration None/'' kind still reads as a dispatchable epic. ──
+        if t.get('kind') == 'lease':
+            continue
         # ── live-claim filter: only OPEN epics are pickable. A claimed epic
         #    with an unexpired lease (effective status 'claimed') is excluded
         #    — never double-dispatch live-claimed work. ──
@@ -349,7 +358,8 @@ def _epic_already_queued(conv_id: str, board_task_id: str) -> bool:
         for r in rows:
             try:
                 p = _json.loads(r['payload']) if r['payload'] else {}
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as e:
+                logger.debug('[Dispatch] queued row payload parse failed (skipping): %s', e)
                 continue
             if p.get('boardTaskId') == board_task_id:
                 return True

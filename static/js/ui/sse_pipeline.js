@@ -64,6 +64,24 @@ function _snapshotLonger(msg, ev, field) {
 
 
 /**
+ * toolRounds sibling of _snapshotLonger — a reconnect `state` snapshot (or a
+ * racey `done` committedMessage) may replay a COLD/empty checkpoint whose
+ * toolRounds array is shorter than what the client already accumulated from
+ * live deltas. Assigning it verbatim then COLLAPSES the on-screen tool-round
+ * panel (searches / file edits) mid-stream — the same content-regression class
+ * _snapshotLonger fixes for text, extended to rounds.
+ *
+ * Invariant: a snapshot may only GROW the rounds, never shrink them. Returns
+ * the incoming array only when it is at least as long as the current one.
+ */
+function _snapshotLongerRounds(current, incoming) {
+  const cur = Array.isArray(current) ? current : [];
+  const inc = Array.isArray(incoming) ? incoming : [];
+  return inc.length >= cur.length ? inc : cur;
+}
+
+
+/**
  * Connect to an autopilot KICK carrier task (push-a-finished-conv-forward).
 /**
  * Connect to an autopilot KICK carrier task (push-a-finished-conv-forward).
@@ -164,6 +182,28 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
       );
     }
   }
+  /* ★ Identity-first target resolution — if an assistant slot is ALREADY
+   *   bound to THIS taskId (a reconnect after finishStream cleared the stream
+   *   entry, a poll→SSE takeover, or a reconnect to a just-finished task),
+   *   re-target that exact slot instead of the array tail.  This is the
+   *   root-cause guard for the "one user → two assistants" duplicate bubble:
+   *   the positional fallback below, combined with the stale-turn guard,
+   *   used to APPEND a fresh empty placeholder when the tail carried a
+   *   finishReason — even when that completed tail WAS this task's own reply.
+   *   Matching by identity (never by position) makes a second bubble for the
+   *   same task structurally impossible. `_taskId` is stamped at bind time
+   *   (below) and by the done/state/poll handlers, so any slot that ever
+   *   streamed for this task resolves here. */
+  if (!assistantMsg) {
+    const _byTask = _resolveAssistantByTaskId(conv, taskId);
+    if (_byTask) {
+      assistantMsg = _byTask;
+      console.info(
+        `[connectToTask] 🎯 Re-targeting via taskId=${taskId.slice(0,8)} ` +
+        `(existing bound slot; conv=${convId.slice(0,8)}) — no new bubble`
+      );
+    }
+  }
   if (!assistantMsg) assistantMsg = conv.messages[conv.messages.length - 1];
 
   /* ★ Stale-prior-turn guard — if the last assistant message belongs to a
@@ -177,7 +217,22 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
   if (assistantMsg && assistantMsg.role === 'assistant'
       && !conv.messages.some(m => m._epIteration)) {
     const _staleTaskId = assistantMsg._taskId && assistantMsg._taskId !== taskId;
-    const _isCompletedTurn = !!assistantMsg.finishReason;
+    /* ★ A completed turn (finishReason set) is only OUR slot to reuse when it
+     *   is bound to THIS taskId.  Any other completed tail is stale → push
+     *   fresh.  Two cases collapse into `_taskId !== taskId`:
+     *     • carries a DIFFERENT _taskId → a prior turn, stale (push fresh).
+     *     • carries NO _taskId → AMBIGUOUS, and _taskId is NOT persisted to the
+     *       DB, so a page-reload DB-loaded completed tail always lacks it.  On
+     *       reload it is a FOREIGN previous turn (the running task's own reply
+     *       is not yet persisted; Case A already pushes a placeholder for it),
+     *       so it MUST push fresh — reusing it would replay the old turn into
+     *       the new bubble (the original stale-tail bug).
+     *   A fresh placeholder we're about to stream into has NO finishReason, so
+     *   it never reaches here — the `finishReason` gate already protects it, and
+     *   the reconnect-to-just-finished slot is stamped `_taskId===taskId` at
+     *   bind time so it correctly reuses (no duplicate bubble). */
+    const _isCompletedTurn = !!assistantMsg.finishReason
+      && assistantMsg._taskId !== taskId;
     if (_staleTaskId || _isCompletedTurn) {
       console.info(
         `[connectToTask] 🆕 Last assistant belongs to a prior turn ` +
@@ -263,22 +318,37 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
   }
   if (!activeStreams.has(convId)) {
     const controller = new AbortController();
+    /* ★ Bind the slot to this task immediately (before any token arrives) so
+     *   a reconnect landing after finishStream cleared the stream entry can
+     *   re-target it via _resolveAssistantByTaskId instead of appending a
+     *   duplicate placeholder.  The done/state/poll handlers also stamp
+     *   _taskId; doing it here closes the gap for a task that finishes (or
+     *   drops) before those handlers run. */
+    if (assistantMsg && !assistantMsg._taskId) assistantMsg._taskId = taskId;
     activeStreams.set(convId, { controller, taskId, assistantMsg });
     renderConversationList();
     updateSendButton();
     if (activeConvId === convId) {
       _lastRenderedFingerprint = "";
       const inner = document.getElementById("chatInner");
-      const lastIdx = conv.messages.length - 1;
-      const existing = document.getElementById(`msg-${lastIdx}`);
-      if (existing) existing.remove();
+      /* ★ Identity-keyed streaming insert via ConvView (the single seam).
+       *   The old path evicted `msg-${lastIdx}` by ARRAY INDEX, which MISSED
+       *   the real static bubble whenever the tail's index had DRIFTED (a
+       *   placeholder push / splice / lazy-window offset). The stranded static
+       *   bubble then coexisted with the finalized streaming bubble as TWO
+       *   identical DOM nodes for ONE conv.messages entry — the render
+       *   duplicate (self-heals on refresh because the full innerHTML rebuild
+       *   is a faithful projection). ConvView.startStreaming evicts by the
+       *   stable data-msg-id instead, so index drift can no longer strand a
+       *   twin. */
       if (!document.getElementById("streaming-msg")) {
         /* ★ Detect endpoint planner phase so reconnection shows "Planner"
          *   instead of "Agent".  Check: the assistantMsg has _isEndpointPlanner,
          *   or the conv has endpointEnabled and no worker turns yet (iteration 0). */
         const _isEpPlanner = assistantMsg._isEndpointPlanner
           || (conv.endpointEnabled && !conv.messages.some(m => m._epIteration));
-        const _reconRole = _isEpPlanner ? 'planner' : 'worker';
+        const _reconRole = _isEpPlanner ? 'planner'
+          : (assistantMsg._swarmAutoContinue ? 'swarm' : 'worker');
         /* ★ FIX (refresh-into-running-task UX):
          *   When we reconnect to an in-flight task, assistantMsg may
          *   ALREADY carry partial content/thinking/toolRounds that the
@@ -302,7 +372,14 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
           ? 'Planning…'
           : (_hasPartial ? 'Resuming…' : 'Connecting…');
         const _reconTime = formatClockTime(assistantMsg.timestamp);
-        inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(_reconRole, _reconStatus, _reconTime, assistantMsg._msgId || null));
+        if (window.ConvView && typeof window.ConvView.startStreaming === 'function') {
+          window.ConvView.startStreaming(convId, {
+            role: _reconRole, status: _reconStatus,
+            timeStr: _reconTime, msgId: assistantMsg._msgId || null,
+          });
+        } else {
+          inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(_reconRole, _reconStatus, _reconTime, assistantMsg._msgId || null));
+        }
         /* Pre-populate streaming-body with whatever content was already
          * persisted, so the user sees real progress before SSE arrives.
          * The first delta from _trySSE will replace .stream-status with
@@ -331,7 +408,7 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
                *   data-msg-id was stamped above, so the repaint targets it. */
               if (assistantMsg._translatePartial && assistantMsg._msgId
                   && typeof _renderStreamingTranslatePreview === 'function') {
-                _renderStreamingTranslatePreview(convId, assistantMsg._msgId, assistantMsg._translatePartial);
+                _renderStreamingTranslatePreview(convId, assistantMsg._msgId, assistantMsg._translatePartial, assistantMsg._translatePartialByRound);
               }
               console.info(
                 `[connectToTask] 🔁 Pre-populated bubble — content=${(assistantMsg.content||'').length}c ` +
@@ -562,12 +639,12 @@ function dispatchSSEEvent(line, ctx) {
             if (plannerMsg) {
               plannerMsg.content = _snapshotLonger(plannerMsg, ev, 'content');
               plannerMsg.thinking = _snapshotLonger(plannerMsg, ev, 'thinking');
-              if (ev.toolRounds) plannerMsg.toolRounds = ev.toolRounds;
+              plannerMsg.toolRounds = _snapshotLongerRounds(plannerMsg.toolRounds, ev.toolRounds);
               assistantMsg = plannerMsg;
               if (buf) {
                 buf.thinking = assistantMsg.thinking;
                 buf.content = assistantMsg.content;
-                if (ev.toolRounds) buf.toolRounds = ev.toolRounds;
+                buf.toolRounds = assistantMsg.toolRounds;
               }
             }
             /* ★ FIX: Update the streaming-msg DOM to show Planner role/avatar
@@ -616,12 +693,12 @@ function dispatchSSEEvent(line, ctx) {
             }
             plannerMsg.content = _snapshotLonger(plannerMsg, ev, 'content');
             plannerMsg.thinking = _snapshotLonger(plannerMsg, ev, 'thinking');
-            if (ev.toolRounds) plannerMsg.toolRounds = ev.toolRounds;
+            plannerMsg.toolRounds = _snapshotLongerRounds(plannerMsg.toolRounds, ev.toolRounds);
             assistantMsg = plannerMsg;
             if (buf) {
               buf.thinking = assistantMsg.thinking;
               buf.content = assistantMsg.content;
-              if (ev.toolRounds) buf.toolRounds = ev.toolRounds;
+              buf.toolRounds = assistantMsg.toolRounds;
             }
           } else if (ev.endpointPhase === 'reviewing') {
             // Critic is in progress — create a critic msg and set phase
@@ -690,12 +767,12 @@ function dispatchSSEEvent(line, ctx) {
               }
               workerMsg.content = _snapshotLonger(workerMsg, ev, 'content');
               workerMsg.thinking = _snapshotLonger(workerMsg, ev, 'thinking');
-              if (ev.toolRounds) workerMsg.toolRounds = ev.toolRounds;
+              workerMsg.toolRounds = _snapshotLongerRounds(workerMsg.toolRounds, ev.toolRounds);
               assistantMsg = workerMsg;
               if (buf) {
                 buf.thinking = assistantMsg.thinking;
                 buf.content = assistantMsg.content;
-                if (ev.toolRounds) buf.toolRounds = ev.toolRounds;
+                buf.toolRounds = assistantMsg.toolRounds;
               }
             }
           }
@@ -739,9 +816,12 @@ function dispatchSSEEvent(line, ctx) {
         assistantMsg.thinking = _snapshotLonger(assistantMsg, ev, 'thinking');
         if (ev.error) assistantMsg.error = ev.error;
         if (ev.toolRounds) {
-          /* Merge: keep checkpoint rounds + new ones from state snapshot */
+          /* Merge: keep checkpoint rounds + new ones from state snapshot.
+           * Keep-longer guards a cold/empty reconnect snapshot from SHRINKING
+           * the tool-round panel the user already watched accumulate. */
           const existing = assistantMsg._continueToolRounds || [];
-          assistantMsg.toolRounds = existing.concat(ev.toolRounds || []);
+          const merged = existing.concat(ev.toolRounds || []);
+          assistantMsg.toolRounds = _snapshotLongerRounds(assistantMsg.toolRounds, merged);
           if (buf)
             buf.toolRounds = assistantMsg.toolRounds;
         }
@@ -899,12 +979,43 @@ function dispatchSSEEvent(line, ctx) {
       const _drTarget = (_epCriticPhase && _epCriticMsg) ? _epCriticMsg : assistantMsg;
       const _drBuf = (_epCriticPhase && _epCriticBuf) ? _epCriticBuf : buf;
       if (_drTarget) {
+        /* ★ Interleave capture (segment-timeline step 5b): the narration +
+         * thinking this round streamed BEFORE issuing tool calls is about to be
+         * cleared from the live accumulators — but it is genuine per-round
+         * prose that must stay ADJACENT to the tools it introduced (today it
+         * was simply LOST live until finalize re-derived it from segments).
+         * Stamp it onto the FIRST tool round of this llmRound batch — exactly
+         * where the backend `assemble_segments` puts it (prose on the first
+         * entry of the batch) — so the live view matches the settled render and
+         * finalize is a visual no-op. ev.round === the round's llmRound
+         * (both are the orchestrator loop index). Backend stays the source of
+         * truth: the terminal `committedMessage` overwrites these fields with
+         * the authoritative copy, so a live-vs-settled drift is impossible. */
+        const _trs = Array.isArray(_drTarget.toolRounds) ? _drTarget.toolRounds : null;
+        if (_trs && _trs.length) {
+          let _lr = ev.round;
+          if (_lr == null) _lr = _trs[_trs.length - 1].llmRound;
+          const _batch = (_lr != null)
+            ? _trs.filter(r => r.llmRound === _lr)
+            : [_trs[_trs.length - 1]];
+          const _first = _batch[0];
+          if (_first) {
+            if (_drTarget.content && !_first.assistantContent) _first.assistantContent = _drTarget.content;
+            if (_drTarget.thinking && !_first.thinking) _first.thinking = _drTarget.thinking;
+          }
+        }
         _drTarget.content = "";
         _drTarget.thinking = "";
       }
       if (_drBuf) {
         _drBuf.content = "";
         _drBuf.thinking = "";
+        /* Keep the buffer's toolRounds pointed at the (now prose-stamped)
+         * live list so the reactive render picks up the captured prose. The
+         * per-round prose (assistantContent/thinking length) is in the
+         * _syncToolRoundsDOM fingerprint, so the twUpdate below re-renders the
+         * group and _renderStreamRoundProse paints the captured narration. */
+        if (_drTarget && Array.isArray(_drTarget.toolRounds)) _drBuf.toolRounds = _drTarget.toolRounds;
       }
       twUpdate(convId);
     } else if (ev.type === "phase") {
@@ -980,6 +1091,8 @@ function dispatchSSEEvent(line, ctx) {
       _handleSwarmAgent(ev, _hctx());
     } else if (ev.type === "swarm_inbox_inject") {
       _handleSwarmInboxInject(ev, _hctx());
+    } else if (ev.type === "peer_inbox_inject") {
+      _handlePeerInboxInject(ev, _hctx());
     } else if (ev.type === "messages_snapshot") {
       _handleMessagesSnapshot(ev, _hctx());
     } else if (ev.type === "endpoint_iteration") {
@@ -1525,17 +1638,38 @@ function dispatchSSEEvent(line, ctx) {
        *   CAS-exhaustion) and when the server died before committing; in that
        *   case we fall through to the transient-buffer projection below
        *   (the offline fallback) and the per-field assignments already applied.
-       *   Content/thinking still go through keep-longer as belt-and-braces
-       *   against a rare empty committed dict racing a fuller local stream
-       *   (same monotonic invariant as _snapshotLonger); toolRounds + terminal
-       *   metadata are taken verbatim (backend-authoritative). Note-only
+       *   committedMessage is the EXACT dict the backend committed to the DB
+       *   (stamped in manager.py _sync_result_to_conversation ONLY on CAS
+       *   success), so when present it is AUTHORITATIVE and COMPLETE — project
+       *   content/thinking/toolRounds VERBATIM (the separation-of-concerns
+       *   directive: settled = verbatim projection of the backend record, NOT a
+       *   local keep-longer reconstruction). Keep-longer stays only for the
+       *   committedMessage-ABSENT path (skip/crash), handled by the per-field
+       *   assignments above + the transient-buffer fallback below. Note-only
        *   frontend-local fields (_translate*, _msgId, branches) are preserved
        *   by copying settled fields onto the existing object, not replacing it. */
       const _cm = ev.committedMessage;
       if (_cm && typeof _cm === 'object') {
-        assistantMsg.content = _snapshotLonger(assistantMsg, _cm, 'content');
-        assistantMsg.thinking = _snapshotLonger(assistantMsg, _cm, 'thinking');
+        assistantMsg.content = (_cm.content != null) ? _cm.content : (assistantMsg.content || '');
+        assistantMsg.thinking = (_cm.thinking != null) ? _cm.thinking : (assistantMsg.thinking || '');
         if (Array.isArray(_cm.toolRounds)) assistantMsg.toolRounds = _cm.toolRounds;
+        /* ★ Project the ordered typed-segment list so the settled interleaved
+         *   timeline (renderSegmentTimelineHTML, which reads msg.segments)
+         *   renders live at finalize — not only after a reload re-reads the DB.
+         *   Without this the live-finalized turn falls back to the grouped tool
+         *   panel and the auto-translate `segmentsByRound` frame has no segments
+         *   to stamp translatedText onto. */
+        if (Array.isArray(_cm.segments)) {
+          assistantMsg.segments = _cm.segments;
+          /* If the translate `done` push won the race and landed before these
+           * segments existed, it stashed its {round:中文} map — apply it now so
+           * the settled timeline shows Chinese narration inline without a
+           * reload, regardless of which `done` arrived first. */
+          if (assistantMsg._pendingSegTranslations
+              && typeof _stampSegTranslations === 'function') {
+            _stampSegTranslations(assistantMsg, assistantMsg._pendingSegTranslations);
+          }
+        }
         for (const _k of ['finishReason', 'usage', 'preset', 'toolSummary',
                           'model', 'provider_id', 'apiRounds', 'modifiedFiles',
                           'modifiedFileList', 'cost', '_taskId',
@@ -1567,6 +1701,10 @@ function dispatchSSEEvent(line, ctx) {
           _apTarget = _apConv.messages[_apConv.messages.length - 1];
         }
         _apTarget._autopilotPending = _apPayload;
+        /* ★ AUTHORITATIVE baton on the conv object — survives any message
+         *   splice (vu_cancel / edit) that could strip the positional
+         *   stamp above.  _findAutopilotPendingCarrier reads this first. */
+        if (_apConv) _apConv._apPendingBaton = _apPayload;
         console.info(
           `[connectToTask] 🤖 Autopilot follow-up attached to done — ` +
           `next task=${ev.autopilotNextTaskId.slice(0,8)} detachedCarrier=${!!_apDetached} ` +

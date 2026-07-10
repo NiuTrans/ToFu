@@ -145,7 +145,8 @@ def _close_inheritable_listen_sockets():
     # potentially huge SC_OPEN_MAX range; fall back to a bounded range elsewhere.
     try:
         fds = [int(name) for name in os.listdir('/proc/self/fd') if name.isdigit()]
-    except OSError:
+    except OSError as e:
+        logger.debug('[Update] /proc/self/fd unavailable (%s) — scanning bounded FD range', e)
         _max = os.sysconf('SC_OPEN_MAX') if hasattr(os, 'sysconf') else 4096
         fds = range(3, min(_max, 65536))
     closed = 0
@@ -156,7 +157,8 @@ def _close_inheritable_listen_sockets():
             if os.get_inheritable(fd):
                 os.set_inheritable(fd, False)
                 closed += 1
-        except OSError:
+        except OSError as e:
+            logger.debug('[Update] could not clear inheritable flag on fd %d: %s', fd, e)
             continue
     if closed:
         logger.info('[Update] Cleared inheritable flag on %d FD(s) before re-exec '

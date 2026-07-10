@@ -120,7 +120,7 @@ def run_compaction_pipeline(messages: list, current_round: int,
             from lib.tasks_pkg.tool_hooks import run_pre_compact_hooks
             run_pre_compact_hooks(messages, task)
         except Exception as e:
-            logger.debug('[Pipeline] PreCompact hooks failed: %s', e)
+            logger.warning('[Pipeline] PreCompact hooks failed: %s', e, exc_info=True)
 
     # Layer 1: compact cold tool results + strip old thinking.
     # An optional ``task['config']['compaction']`` dict selects a

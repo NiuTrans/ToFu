@@ -231,7 +231,7 @@ def test_stuck_reaper_fails_wedged_but_spares_human_waiting():
 
         assert tw['aborted'] is True, 'wedged task was not reaped'
         assert tw['status'] == 'error'
-        assert tw['_abort_reason'] == 'stuck_no_output'
+        assert tw['_abort_reason'] == 'stuck_no_progress'
         assert tw.get('error'), 'reaped task must carry an error envelope'
         assert th['aborted'] is False, (
             'human-waiting task (>=1 event) was WRONGLY reaped — the '
@@ -300,6 +300,8 @@ def main():
     label = f' (NC revert={_REVERT})' if _REVERT else ' (clean)'
     print(_color(f'═══ Task Supersede + Stuck-Reaper Tests{label} ═══', '36'))
     print()
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_task_supersede_and_stuck.__main__')
     _apply_negative_control()
     print()
 

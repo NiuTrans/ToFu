@@ -415,6 +415,35 @@ else:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 9. Half-Overwritten Package Detection (site-packages integrity)
+# ═══════════════════════════════════════════════════════════════════════
+section("9. Half-Overwritten Package Detection")
+
+# A second version installed on top of another without cleanup leaves the
+# wrong files shadowing the intended ones (duplicate dist-info + orphaned
+# .so shadowing a sibling .py). This env has hit that twice (scipy, pydantic).
+try:
+    from lib.env_health import scan_current_env
+    env_issues = scan_current_env()
+    errs = [i for i in env_issues if i.severity == 'error']
+    warns = [i for i in env_issues if i.severity != 'error']
+    if not errs:
+        ok("No half-overwritten packages detected (no shadow .so)")
+    for iss in errs:
+        fail(f"{iss}  (paths: {', '.join(iss.paths[:4])}"
+             f"{'…' if len(iss.paths) > 4 else ''})")
+    # Lone duplicate dist-info is benign leftover metadata → warn, don't fail.
+    if warns:
+        warn(f"{len(warns)} package(s) have leftover duplicate dist-info dirs "
+             f"(harmless unless paired with a shadow .so): "
+             f"{', '.join(w.package for w in warns[:10])}"
+             f"{'…' if len(warns) > 10 else ''}")
+except Exception as e:
+    logger.debug('env_health scan failed', exc_info=True)
+    warn(f"env_health scan could not run — {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Summary
 # ═══════════════════════════════════════════════════════════════════════
 print(f"\n{C.BOLD}{'═'*60}{C.END}")

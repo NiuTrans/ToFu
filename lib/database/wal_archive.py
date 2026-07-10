@@ -66,6 +66,7 @@ def _copy_with_timeout(src, dst, timeout_s):
             os.replace(tmp, dst)   # atomic publish
             result['ok'] = True
         except Exception as e:  # noqa: BLE001 — reported via result, logged by caller
+            logger.debug('[WAL-Archive] copy %s→%s failed in worker: %s', src, dst, e)
             result['err'] = str(e)
 
     t = threading.Thread(target=_do_copy, daemon=True, name='wal-archive-copy')

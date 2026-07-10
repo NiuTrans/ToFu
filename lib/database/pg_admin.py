@@ -109,7 +109,8 @@ def cmd_reset_ownership(pgdata, assume_yes):
     if not assume_yes:
         try:
             resp = input('Proceed? [y/N] ').strip().lower()
-        except EOFError:
+        except EOFError as e:
+            logger.debug('[pg_admin] no interactive stdin for confirm prompt: %s', e)
             resp = ''
         if resp not in ('y', 'yes'):
             print('Aborted.')

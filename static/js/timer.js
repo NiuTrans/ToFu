@@ -133,9 +133,7 @@ function _jumpToTimerConv(convId, e) {
   const panel = document.getElementById("timerPanel");
   if (panel) panel.classList.remove("visible");
 
-  const conv = typeof conversations !== "undefined"
-    ? conversations.find((c) => c.id === convId)
-    : null;
+  const conv = getConvById(convId);
   if (!conv) {
     if (typeof showToast === "function") {
       showToast(t('timer.convMissing'), "warning");

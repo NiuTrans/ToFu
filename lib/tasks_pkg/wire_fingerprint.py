@@ -88,13 +88,17 @@ def _canon_args(raw: Any) -> str:
     if isinstance(raw, (dict, list)):
         try:
             return json.dumps(raw, sort_keys=True, ensure_ascii=False)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as e:
+            logger.debug('[WireFP] _canon_args dict/list dump failed (%s) — '
+                         'using str() form', e)
             return str(raw)
     s = '' if raw is None else str(raw)
     try:
         obj = json.loads(s or '{}')
         return json.dumps(obj, sort_keys=True, ensure_ascii=False)
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
+        logger.debug('[WireFP] _canon_args JSON re-canon failed (%s) — '
+                     'using stripped raw', e)
         return s.strip()
 
 

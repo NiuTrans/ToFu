@@ -153,7 +153,9 @@ def _tool_names(tool_list: list[dict] | None) -> list[str]:
     for t in (tool_list or []):
         try:
             name = (t.get('function') or {}).get('name')
-        except AttributeError:
+        except AttributeError as e:
+            logger.debug('[ToolReg] _tool_names: non-dict tool entry (%s) — '
+                         'skipping', e)
             name = None
         if name:
             names.append(name)
@@ -172,7 +174,9 @@ def _hash_tool_list(tool_list: list[dict]) -> str:
     import json
     try:
         blob = json.dumps(tool_list, sort_keys=True, ensure_ascii=False)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug('[ToolReg] _hash_tool_list: tool list not JSON-serialisable '
+                     '(%s) — hashing str() form', e)
         blob = str(tool_list)
     return hashlib.md5(blob.encode('utf-8', errors='replace')).hexdigest()
 
@@ -193,7 +197,9 @@ def _diagnose_byte_drift(snapshot: list[dict], fresh: list[dict]) -> str:
     def _fn(t: dict) -> dict:
         try:
             return t.get('function') or {}
-        except AttributeError:
+        except AttributeError as e:
+            logger.debug('[ToolLatch] _diagnose_byte_drift: non-dict tool entry '
+                         '(%s) — treating as empty', e)
             return {}
 
     def _trunc(s: str, n: int = 240) -> str:
@@ -264,6 +270,8 @@ def latch_tool_list(conv_id: str,
                 try:
                     detail = _diagnose_byte_drift(snapshot, fresh_list)
                 except Exception as e:
+                    logger.debug('[ToolLatch] drift diagnosis failed conv=%s: %s',
+                                 conv_id[:8], e)
                     detail = f'(drift diagnosis failed: {e})'
                 logger.warning('[ToolLatch] conv=%s diverged with EMPTY '
                                'name-diff (byte-level schema drift) — %s',
@@ -903,6 +911,18 @@ def _build_memory(ctx: ToolContext) -> list[dict]:
     return list(ALL_MEMORY_TOOLS)
 
 
+def _build_todo(ctx: ToolContext) -> list[dict]:
+    # Structured task checklist (todo_write). Attaches whenever ANY base tool
+    # exists — it's a lightweight, always-useful progress tracker that also
+    # feeds the continuation enforcer, so it needs no user-facing toggle
+    # (mirrors the memory-tools attachment rule). A pure-chat turn with no
+    # tools does not get it (nothing to track).
+    if not ctx.has_base_tools:
+        return []
+    from lib.tools.todo import TODO_WRITE_TOOL
+    return [TODO_WRITE_TOOL]
+
+
 def _build_scheduler(ctx: ToolContext) -> list[dict]:
     if ctx.scheduler_enabled and ctx.has_base_tools:
         from lib.scheduler.tool_defs import SCHEDULER_TOOLS
@@ -1010,11 +1030,11 @@ def _register_builtins() -> None:
                                      'project_board_read', 'project_board_post',
                                      'project_board_claim', 'project_board_complete',
                                      'project_board_block',
-                                     'project_peer_status', 'project_message',
-                                     'project_intervene'}),
+                                     'project_peer_status', 'project_feed_read',
+                                     'project_message', 'project_intervene'}),
                  idempotent_tools=frozenset({'list_conversations', 'get_conversation',
                                              'project_charter_read', 'project_board_read',
-                                             'project_peer_status'}),
+                                             'project_peer_status', 'project_feed_read'}),
                  category='conversation', description='Conversation reference tools'),
         ToolSpec('human_guidance', _build_human_guidance, phase='base',
                  provides=frozenset({'ask_human'}),
@@ -1026,6 +1046,9 @@ def _register_builtins() -> None:
                      'delete_memory', 'merge_memories',
                  }),
                  category='memory', description='Memory CRUD tools'),
+        ToolSpec('todo', _build_todo, phase='capability',
+                 provides=frozenset({'todo_write'}),
+                 category='task', description='Structured task checklist'),
         ToolSpec('scheduler', _build_scheduler, phase='capability',
                  category='scheduler', description='Scheduler / proactive agent tools'),
         ToolSpec('swarm', _build_swarm, phase='capability',
@@ -1076,8 +1099,10 @@ def discover_plugin_specs() -> int:
         return 0
     try:
         eps = entry_points(group='tofu.tools')
-    except TypeError:
+    except TypeError as e:
         # Python <3.10 returns a dict-like; filter by group key.
+        logger.debug('[ToolRegistry] entry_points(group=) unsupported (%s) — '
+                     'using Python <3.10 dict-like fallback', e)
         eps = entry_points().get('tofu.tools', [])  # type: ignore[attr-defined]
     except Exception as e:
         logger.debug('[ToolRegistry] entry_points lookup failed: %s', e)

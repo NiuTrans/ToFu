@@ -31,7 +31,6 @@ Design notes / tradeoffs are documented in ``docs/CROSS_CONV_AWARENESS.md``.
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 
@@ -68,10 +67,6 @@ _DIGEST_SCAN_LIMIT = 24
 # matches — so an off-topic or brand-new turn still surfaces *something* rather
 # than an empty digest.
 _DIGEST_RECENCY_FLOOR = 3
-
-# Serializes the read-modify-write of a conversation's settings.projectSummary
-# so two concurrent generators for the same conv don't clobber each other.
-_summary_write_lock = threading.Lock()
 
 _SYSTEM_PROMPT = (
     'You write a ONE to THREE sentence summary of a chat conversation, used so '
@@ -308,37 +303,26 @@ def _persist_summary(conv_id: str, summary: str, msg_count: int) -> None:
 
     Only the ``settings`` column is touched (not ``messages`` / ``updated_at``),
     so this never reorders the sidebar or races the message-persist path on
-    other columns. The lock serializes concurrent generators for the same conv;
-    a rare lost update against an unrelated settings write is acceptable for a
-    low-frequency, regenerable cache (documented in the design note).
+    other columns. Routes through the shared ``settings_store`` helper, which
+    serializes the read-merge-write per conv across ALL settings writers — so
+    this no longer clobbers (or is clobbered by) an unrelated settings write
+    (autopilot / tool-state / activeTaskId), closing the "rare lost update"
+    the module lock could not prevent.
     """
     record = {
         'text': summary,
         'generated_at': int(time.time() * 1000),
         'msg_count_at_gen': msg_count,
     }
-    with _summary_write_lock:
-        try:
-            db = get_thread_db(DOMAIN_CHAT)
-            row = db.execute(
-                'SELECT settings FROM conversations WHERE id=? AND user_id=?',
-                (conv_id, DEFAULT_USER_ID)).fetchone()
-            if not row:
-                return
-            settings = safe_json(row['settings'], default={},
-                                 label='projsummary-settings')
-            if not isinstance(settings, dict):
-                settings = {}
-            settings['projectSummary'] = record
-            db.execute(
-                'UPDATE conversations SET settings=? WHERE id=? AND user_id=?',
-                (json.dumps(settings, ensure_ascii=False), conv_id, DEFAULT_USER_ID))
-            db.commit()
-            logger.debug('[ProjSummary] persisted summary conv=%s (msg_count=%d)',
-                         conv_id[:8], msg_count)
-        except Exception as e:
-            logger.warning('[ProjSummary] persist failed conv=%s: %s',
-                           conv_id[:8], e)
+    try:
+        from lib.conversations import set_conversation_settings
+        set_conversation_settings(conv_id, {'projectSummary': record},
+                                  user_id=DEFAULT_USER_ID)
+        logger.debug('[ProjSummary] persisted summary conv=%s (msg_count=%d)',
+                     conv_id[:8], msg_count)
+    except Exception as e:
+        logger.warning('[ProjSummary] persist failed conv=%s: %s',
+                       conv_id[:8], e)
 
 
 def project_digest_entries(project_path: str,

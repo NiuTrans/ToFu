@@ -172,6 +172,8 @@ def main():
     print()
     print(_color('═══ Phase-1 committed-message parity tests ═══', '36'))
     print()
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_committed_message_parity.__main__')
     tests = [
         test_committed_msg_equals_db_tail,
         test_committed_msg_carries_terminal_metadata,

@@ -258,16 +258,17 @@ function _orchEnsureModal() {
     +   '</div>'
     +   '<div class="orch-run-drawer" id="orchRunDrawer">'
     +     '<div class="orch-run-head">'
-    +       '<span>▶ Run Flow</span>'
-    +       '<button class="orch-ai-clear" onclick="_orchCloseRun()" title="Close">✕</button>'
+    +       '<span>' + _ORCH_ICONS.rocket + ' ' + t('orch.run.title') + '</span>'
+    +       '<button class="orch-ai-clear" onclick="_orchCloseRun()" title="Close">' + _ORCH_ICONS.reject + '</button>'
     +     '</div>'
     +     '<div class="orch-run-input">'
     +       '<textarea id="orchRunInput" rows="2" placeholder="Initial request / input for the flow (optional)…"></textarea>'
+    +       '<div class="orch-run-hint">' + _ORCH_ICONS.eye + ' ' + t('orch.run.hint') + '</div>'
     +       '<div class="orch-run-actions">'
-    +         '<button class="orch-btn orch-btn-ghost" onclick="_orchPlan()">' + _ORCH_ICONS.eye + ' Preview plan</button>'
-    +         '<button class="orch-btn orch-btn-run" id="orchRunBtn" onclick="_orchRun()">▶ Run</button>'
-    +         '<button class="orch-btn orch-btn-primary" id="orchRunTaskBtn" onclick="_orchRunAsTask()" title="Launch a durable, reopenable run and open it in Task Mode">' + _ORCH_ICONS.rocket + ' Run as Task</button>'
-    +         '<button class="orch-btn orch-btn-danger" id="orchRunAbort" onclick="_orchRunAbort()" style="display:none">Stop</button>'
+    +         '<button class="orch-btn orch-btn-ghost" onclick="_orchPlan()">' + _ORCH_ICONS.eye + ' ' + t('orch.run.previewPlan') + '</button>'
+    +         '<button class="orch-btn orch-btn-run" id="orchRunBtn" onclick="_orchRun()" title="' + t('orch.run.testRun') + '">' + _ORCH_ICONS.auto + ' ' + t('orch.run.testRun') + '</button>'
+    +         '<button class="orch-btn orch-btn-primary" id="orchRunTaskBtn" onclick="_orchRunAsTask()" title="' + t('orch.run.asTask') + '">' + _ORCH_ICONS.rocket + ' ' + t('orch.run.asTask') + '</button>'
+    +         '<button class="orch-btn orch-btn-danger" id="orchRunAbort" onclick="_orchRunAbort()" style="display:none">' + _ORCH_ICONS.stop + ' ' + t('orch.run.stop') + '</button>'
     +       '</div>'
     +     '</div>'
     +     '<div class="orch-run-log" id="orchRunLog"></div>'
@@ -376,7 +377,9 @@ function _orchRenderPalette() {
 // On phones the side rails become slide-up sheets and HTML5 drag is
 // replaced by tap-to-add; these helpers gate that behaviour on viewport.
 function _orchIsMobile() {
-  return window.matchMedia && window.matchMedia('(max-width:768px)').matches;
+  var q = (typeof window.mobileMediaQuery === 'function')
+    ? window.mobileMediaQuery() : '(max-width:768px)';
+  return window.matchMedia && window.matchMedia(q).matches;
 }
 
 function _orchAddNodeAtCenter(payload) {
@@ -2398,8 +2401,11 @@ function _orchInjectStyles() {
 .orch-run-input{padding:11px;border-bottom:var(--orch-rail);display:flex;flex-direction:column;gap:9px}
 .orch-run-input textarea{width:100%;resize:none;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--orch-r-md);color:var(--text-primary);font-family:inherit;font-size:12.5px;padding:9px 11px;outline:none;line-height:1.5;transition:border-color var(--transition),box-shadow var(--transition)}
 .orch-run-input textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-subtle)}
-.orch-run-actions{display:flex;gap:8px}
-.orch-run-actions .orch-btn{flex:1}
+.orch-run-hint{font-size:11.5px;line-height:1.55;color:var(--text-tertiary);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--orch-r-sm,7px);padding:8px 10px;display:flex;gap:7px;align-items:flex-start}
+.orch-run-hint svg{width:14px;height:14px;flex-shrink:0;margin-top:1px;opacity:.7}
+.orch-run-hint b{color:var(--text-secondary);font-weight:700}
+.orch-run-actions{display:flex;gap:8px;flex-wrap:wrap}
+.orch-run-actions .orch-btn{flex:1;min-width:104px;justify-content:center}
 .orch-run-log{flex:1;overflow-y:auto;padding:12px;font-size:12px;line-height:1.6;font-family:var(--mono-font,monospace)}
 .orch-ico{width:1em;height:1em;vertical-align:-0.15em;flex-shrink:0}
 .orch-ico-lg{width:1.4em;height:1.4em}

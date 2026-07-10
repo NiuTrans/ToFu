@@ -50,12 +50,19 @@ typecheck: ## Type-check the vanilla-JS frontend (tsc --checkJs, no build step)
 	npx tsc --noEmit
 
 # ── Tests ──────────────────────────────────────────────────────
+#
+# JOBS controls test parallelism (pytest-xdist). Default `auto` = one worker
+# per core. On a many-core box each worker pays the heavy `server` import, so
+# override with e.g. `make test-unit JOBS=8` to cap it. `JOBS=0` runs serially
+# (no xdist) for debugging a single test or a cross-test-pollution hunt.
+JOBS ?= auto
+PYTEST_PARALLEL = $(if $(filter 0,$(JOBS)),,-n $(JOBS) --dist worksteal)
 
-test-unit: ## Run unit tests (no server, no browser, no network)
-	python -m pytest -m unit --tb=short -q
+test-unit: ## Run unit tests (parallel; override JOBS=N, JOBS=0 for serial)
+	python -m pytest -m unit $(PYTEST_PARALLEL) --timeout=300 --tb=short -q
 
 test-api: ## Run API integration tests (Flask test client + mock LLM)
-	python -m pytest -m api --tb=short -q
+	python -m pytest -m api $(PYTEST_PARALLEL) --timeout=300 --tb=short -q
 
 test-visual: ## Run Playwright visual E2E tests (needs chromium)
 	python -m pytest -m visual --tb=short -q
@@ -65,7 +72,7 @@ test-e2e: ## Run the hermetic E2E smoke test (real app + real browser + stub LLM
 
 test-frontend: ## Run frontend tests (jsdom harnesses + tsc ratchet — needs `npm install`)
 	@if [ ! -d node_modules/jsdom ]; then echo '⚠️  Run `npm install` first (installs jsdom + typescript dev-deps)'; exit 1; fi
-	python -m pytest tests/test_frontend_*.py -ra --tb=short -q
+	python -m pytest tests/test_frontend_*.py $(PYTEST_PARALLEL) --timeout=180 -ra --tb=short -q
 
 test-all: ## Run all tests (unit + api + visual)
 	python -m pytest --tb=short -q

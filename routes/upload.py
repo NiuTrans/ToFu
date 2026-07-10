@@ -39,7 +39,12 @@ upload_bp = Blueprint('upload', __name__)
 from routes.api_v1.uploads import api_v1_uploads_bp  # noqa: E402
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-UPLOAD_DIR = os.path.join(BASE_DIR, 'uploads', 'images')
+# User-uploaded images are USER STATE and must live under the resolved
+# runtime base (co-located with the DB that references them by /api/images/
+# URL), NOT the code tree — see lib/runtime_paths.uploads_root(). In the
+# default in-tree layout this is byte-identical to <repo>/uploads/images.
+from lib.runtime_paths import uploads_root  # noqa: E402
+UPLOAD_DIR = os.path.join(uploads_root(), 'images')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 

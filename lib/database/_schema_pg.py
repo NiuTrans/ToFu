@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 #  Schema Version Cache — Skip redundant DDL on subsequent startups
 # ═══════════════════════════════════════════════════════════════════════
 
-_SCHEMA_VERSION = 33  # Increment when tables/columns/indexes change
+_SCHEMA_VERSION = 38  # Increment when tables/columns/indexes change
 
 
 def _column_exists(conn, table, column):
@@ -320,8 +320,12 @@ def _init_chat_schema(conn):
 
     # Migrations — check columns
     for col, sql in {
-        'search_results': "ALTER TABLE task_results ADD COLUMN search_results TEXT",
-        'metadata':       "ALTER TABLE task_results ADD COLUMN metadata TEXT",
+        'search_results': "ALTER TABLE task_results ADD COLUMN IF NOT EXISTS search_results TEXT",
+        'metadata':       "ALTER TABLE task_results ADD COLUMN IF NOT EXISTS metadata TEXT",
+        # segments (v36): the typed-segment timeline (epic pt_cb8f98b0cb9b47fb).
+        # Nullable TEXT/JSON string — mirrors SQLite; pre-existing rows stay
+        # NULL and readers fall back to deriving from the legacy channels.
+        'segments':       "ALTER TABLE task_results ADD COLUMN IF NOT EXISTS segments TEXT",
     }.items():
         if not _column_exists(conn, 'task_results', col):
             cur.execute(sql)
@@ -360,6 +364,8 @@ def _init_chat_schema(conn):
         'settings':  "ALTER TABLE conversations ADD COLUMN settings JSONB NOT NULL DEFAULT '{}'::jsonb",
         'msg_count': "ALTER TABLE conversations ADD COLUMN msg_count INTEGER NOT NULL DEFAULT 0",
         'search_text': "ALTER TABLE conversations ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
+        # rev (v37): server-issued monotonic message-version, trigger-bumped.
+        'rev': "ALTER TABLE conversations ADD COLUMN rev INTEGER NOT NULL DEFAULT 0",
     }.items():
         if not _column_exists(conn, 'conversations', col):
             cur.execute(sql)
@@ -406,6 +412,34 @@ def _init_chat_schema(conn):
         CREATE TRIGGER conversations_search_tsv_trg
         BEFORE INSERT OR UPDATE OF search_text ON conversations
         FOR EACH ROW EXECUTE FUNCTION conversations_search_tsv_update();
+    ''')
+
+    # ── Trigger: bump rev whenever the messages column actually changes ──
+    # rev is the server-issued monotonic message-version powering CAS + the
+    # rev-based reconcile winner. Bumping it in a BEFORE UPDATE trigger — NOT in
+    # any application writer — makes it (a) fire in the SAME statement as every
+    # writer (all 11+ message writers get it for free), (b) impossible for a
+    # future writer to forget, and (c) uniformly guarded to advance ONLY on a
+    # genuine messages change: a settings-only / title-only / rename write does
+    # NOT touch messages, so `IS DISTINCT FROM` leaves rev untouched and cannot
+    # cause a false CAS 409. `OF messages` scopes the trigger so it doesn't even
+    # fire on non-messages updates. INSERT is intentionally NOT covered: a fresh
+    # row starts at rev=0 (the column default), matching every pre-CAS client.
+    cur.execute('''
+        CREATE OR REPLACE FUNCTION conversations_rev_bump() RETURNS trigger AS $$
+        BEGIN
+            IF (NEW.messages IS DISTINCT FROM OLD.messages) THEN
+                NEW.rev := COALESCE(OLD.rev, 0) + 1;
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    ''')
+    cur.execute('DROP TRIGGER IF EXISTS conversations_rev_bump_trg ON conversations')
+    cur.execute('''
+        CREATE TRIGGER conversations_rev_bump_trg
+        BEFORE UPDATE OF messages ON conversations
+        FOR EACH ROW EXECUTE FUNCTION conversations_rev_bump();
     ''')
 
     # ── Backfill search_text for existing conversations that have empty search_text ──
@@ -616,6 +650,23 @@ def _init_system_schema(conn):
     cur.execute('CREATE INDEX IF NOT EXISTS idx_project_tasks_path_status ON project_tasks(project_path, status)')
     # Migration: dispatched flag (brain-dispatched claim badge). Added 2026-07.
     cur.execute('ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS dispatched INTEGER NOT NULL DEFAULT 0')
+    # Migration: kind (epic|lease). Pre-existing rows default to 'epic' so an
+    # old row always reads as a dispatchable epic. Added 2026-07.
+    cur.execute("ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'epic'")
+    # Project status snapshots: the human↔brain status lane (Pillar #7).
+    # Append-only, keyed on project_path; seq monotonic per project. See
+    # lib/conversations/project_status.py.
+    from lib.database._core_schema import PROJECT_STATUS_SNAPSHOTS
+    create_if_absent(conn, PROJECT_STATUS_SNAPSHOTS, table_exists=_table_exists)
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_project_status_path_seq ON project_status_snapshots(project_path, seq DESC)')
+    # Project watch lane (Pillar #7): human-authored watch items + append-only
+    # brain responses. See lib/conversations/project_watch.py.
+    from lib.database._core_schema import (
+        PROJECT_WATCH_ITEMS, PROJECT_WATCH_RESPONSES)
+    create_if_absent(conn, PROJECT_WATCH_ITEMS, table_exists=_table_exists)
+    create_if_absent(conn, PROJECT_WATCH_RESPONSES, table_exists=_table_exists)
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_project_watch_items_path ON project_watch_items(project_path, updated_at DESC)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_project_watch_resp_item_seq ON project_watch_responses(item_id, seq DESC)')
 
     # ── Daily Optimizer tables (see lib/optimizer/) ──
     # optimizer_proposals + optimizer_action_log: migrated onto Core.

@@ -46,6 +46,17 @@ EVENT_TTL_MS = 6 * 3600 * 1000
 # Sample-based pruning: every ~Nth call runs a TTL sweep
 _PRUNE_PROBABILITY = 1 / 1024
 
+# Batched-delete tuning. Each prune pass deletes at most
+# ``_PRUNE_BATCH_TASKS`` distinct task_ids per batch and runs at most
+# ``_PRUNE_MAX_BATCHES`` batches per invocation, COMMITTING after each batch.
+# The per-batch commit is the fix for the permanent-failure loop: an unbounded
+# single DELETE that exceeds PG's statement_timeout (120s) is cancelled and
+# rolled back WHOLE — zero progress — so a backlog only ever grows. Bounded
+# batches keep each statement well under the timeout AND make partial progress
+# durable, so a slow batch never discards the work of earlier ones.
+_PRUNE_BATCH_TASKS = 200
+_PRUNE_MAX_BATCHES = 25
+
 
 def _row_payload_to_json(payload):
     """Serialize a payload dict for storage; tolerant of non-dict events.
@@ -248,46 +259,81 @@ def _opportunistic_prune(db):
     This also future-proofs the reaper against any new orphaned-id writer.
     """
     cutoff = int((time.time() * 1000) - EVENT_TTL_MS)
-    try:
-        cur = db.execute(
-            "DELETE FROM task_events WHERE task_id IN ("
-            "  SELECT te.task_id FROM task_events te "
-            "  JOIN task_results tr ON tr.task_id = te.task_id "
-            "  WHERE tr.status IN ('done','error','aborted','interrupted') "
-            "    AND tr.completed_at IS NOT NULL "
-            "    AND tr.completed_at < ? "
-            "  GROUP BY te.task_id"
-            ")",
-            (cutoff,)
-        )
-        db.commit()
-        rc = getattr(cur, 'rowcount', 0) or 0
-        if rc > 0:
-            logger.info('[EventLog] Pruned %d stale event row(s) (cutoff=%d)', rc, cutoff)
-    except Exception as e:
-        logger.debug('[EventLog] prune query failed: %s', e)
+
+    # ── Pass 1: terminal tasks (JOIN task_results), deleted in bounded batches ──
+    # Each batch selects up to _PRUNE_BATCH_TASKS eligible task_ids and deletes
+    # their events, COMMITTING after every batch. A single unbounded DELETE here
+    # exceeded PG's statement_timeout on a large backlog and rolled back whole
+    # (zero progress) — batching keeps each statement short and makes progress
+    # durable. We loop until a batch frees nothing (backlog drained) or the
+    # per-invocation batch cap is hit (bounds the work done on one SSE delta).
+    total = 0
+    for _ in range(_PRUNE_MAX_BATCHES):
         try:
-            db.rollback()
-        except Exception as re:
-            logger.debug('[EventLog] rollback after prune failure: %s', re)
+            cur = db.execute(
+                "DELETE FROM task_events WHERE task_id IN ("
+                "  SELECT te.task_id FROM task_events te "
+                "  JOIN task_results tr ON tr.task_id = te.task_id "
+                "  WHERE tr.status IN ('done','error','aborted','interrupted') "
+                "    AND tr.completed_at IS NOT NULL "
+                "    AND tr.completed_at < ? "
+                "  GROUP BY te.task_id "
+                "  LIMIT ?"
+                ")",
+                (cutoff, _PRUNE_BATCH_TASKS)
+            )
+            db.commit()
+        except Exception as e:
+            logger.debug('[EventLog] prune query failed: %s', e)
+            try:
+                db.rollback()
+            except Exception as re:
+                logger.debug('[EventLog] rollback after prune failure: %s', re)
+            break
+        rc = getattr(cur, 'rowcount', 0) or 0
+        total += rc
+        if rc == 0:
+            break
+    if total > 0:
+        logger.info('[EventLog] Pruned %d stale event row(s) (cutoff=%d)', total, cutoff)
 
     # ── Pass 2: orphaned rows (no task_results row), aged out by own ts_ms ──
-    try:
-        cur = db.execute(
-            "DELETE FROM task_events WHERE ts_ms < ? "
-            "  AND NOT EXISTS ("
-            "    SELECT 1 FROM task_results tr WHERE tr.task_id = task_events.task_id"
-            "  )",
-            (cutoff,)
-        )
-        db.commit()
-        rc = getattr(cur, 'rowcount', 0) or 0
-        if rc > 0:
-            logger.info('[EventLog] Pruned %d orphaned event row(s) with no task_results '
-                        '(cutoff=%d)', rc, cutoff)
-    except Exception as e:
-        logger.debug('[EventLog] orphan prune query failed: %s', e)
+    # Same batched-commit strategy. Deletes by the row's own primary key
+    # (task_id, event_id) picked in bounded chunks so the correlated NOT EXISTS
+    # subquery never runs against the whole table in one un-committable statement.
+    total = 0
+    for _ in range(_PRUNE_MAX_BATCHES):
         try:
-            db.rollback()
-        except Exception as re:
-            logger.debug('[EventLog] rollback after orphan prune failure: %s', re)
+            rows = db.execute(
+                "SELECT task_id, event_id FROM task_events "
+                "WHERE ts_ms < ? "
+                "  AND NOT EXISTS ("
+                "    SELECT 1 FROM task_results tr WHERE tr.task_id = task_events.task_id"
+                "  ) "
+                "LIMIT ?",
+                (cutoff, _PRUNE_BATCH_TASKS)
+            ).fetchall()
+        except Exception as e:
+            logger.debug('[EventLog] orphan prune select failed: %s', e)
+            break
+        if not rows:
+            break
+        try:
+            db.executemany(
+                'DELETE FROM task_events WHERE task_id=? AND event_id=?',
+                [(r[0], r[1]) for r in rows]
+            )
+            db.commit()
+        except Exception as e:
+            logger.debug('[EventLog] orphan prune delete failed: %s', e)
+            try:
+                db.rollback()
+            except Exception as re:
+                logger.debug('[EventLog] rollback after orphan prune failure: %s', re)
+            break
+        total += len(rows)
+        if len(rows) < _PRUNE_BATCH_TASKS:
+            break
+    if total > 0:
+        logger.info('[EventLog] Pruned %d orphaned event row(s) with no task_results '
+                    '(cutoff=%d)', total, cutoff)

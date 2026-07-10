@@ -199,8 +199,8 @@ Memory 系统分为两层：**跨会话持久 memory**（文件系统）和**会
 #### 跨会话 Memory（文件系统，Markdown + YAML frontmatter）
 
 ```
-<project>/.chatui/skills/          ← project-scoped memories
-<project>/.chatui/skills/global/   ← global memories
+<project>/.tofu/skills/            ← project-scoped memories
+<data>/memories/global/            ← global memories (server-side store, shared across projects; 2026-06)
 ```
 
 每个 memory 是一个 `.md` 文件：
@@ -858,7 +858,7 @@ V1 swarm 用 "等所有 agent 完成再启动下一波"。一个慢 agent 拖住
 | **Tool Result Budgeting** | toolResultStorage.ts | Layer 0 + 磁盘持久化 | ✅ 已对齐 |
 | **Micro-compact** | microCompact (edit outside cache prefix) | cache-aware micro_compact | ✅ 已对齐 |
 | **Session Memory** | SessionMemory/ + CacheSafeParams | background dispatch_chat | ✅ 已对齐（架构不同） |
-| **Memory System** | CLAUDE.md + @include | .chatui/skills/ + BM25 | ✅ 已对齐 |
+| **Memory System** | CLAUDE.md + @include | .tofu/skills/ + BM25 | ✅ 已对齐 |
 | **Memory Prefetch** | startRelevantMemoryPrefetch() | 2-thread prefetch pool | ✅ 已对齐 |
 | **Prompt Cache Detection** | promptCacheBreakDetection.ts | cache_tracking.py | ✅ 已对齐 |
 | **Todo Tracking** | TodoWriteTool + continuation enforcer | ❌ 无 | 🔜 Backlog |

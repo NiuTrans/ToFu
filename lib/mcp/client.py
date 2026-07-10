@@ -30,6 +30,7 @@ from lib.mcp.config import load_mcp_config
 from lib.mcp.types import (
     MCP_BREAKER_BASE_BACKOFF,
     MCP_BREAKER_MAX_BACKOFF,
+    MCP_CRED_PROBE_INTERVAL,
     MCP_CALL_TIMEOUT,
     MCP_CONNECT_TIMEOUT,
     MCP_DEGRADED_TIMEOUT_STREAK,
@@ -459,7 +460,8 @@ def _reload_vendored_if_changed() -> None:
     global _vendored_mtime
     try:
         mtime = os.path.getmtime(path)
-    except OSError:
+    except OSError as e:
+        logger.debug('[MCP] vendored.py stat failed (%s) — keeping last-good', e)
         return
     if mtime <= _vendored_mtime:
         return
@@ -467,7 +469,8 @@ def _reload_vendored_if_changed() -> None:
         # Re-check under lock — another thread may have just reloaded.
         try:
             mtime = os.path.getmtime(path)
-        except OSError:
+        except OSError as e:
+            logger.debug('[MCP] vendored.py re-stat under lock failed (%s)', e)
             return
         if mtime <= _vendored_mtime:
             return
@@ -496,7 +499,8 @@ def _reload_vendored_if_changed() -> None:
 # the first connect is still detected (mtime then strictly advances).
 try:
     _vendored_mtime = os.path.getmtime(_vendored_path()) if _vendored_path() else 0.0
-except OSError:
+except OSError as e:
+    logger.debug('[MCP] vendored.py baseline stat failed (%s) — defaulting mtime=0', e)
     _vendored_mtime = 0.0
 
 
@@ -552,7 +556,8 @@ def _vendor_tree_signature(base: str) -> dict[str, tuple[int, int]]:
             full = os.path.join(dirpath, fn)
             try:
                 st = os.stat(full)
-            except OSError:
+            except OSError as e:
+                logger.debug('[MCP] stat(%s) failed during vendor sig: %s', full, e)
                 continue
             sig[os.path.relpath(full, base)] = (st.st_size, int(st.st_mtime))
     return sig
@@ -666,7 +671,8 @@ def _check_snapshot_staleness(command: str) -> None:
         # Recompute so we report the fresh state (and don't re-warn next time).
         try:
             new_reason = _snapshot_stale_reason(sibling, snapshot)
-        except OSError:
+        except OSError as e:
+            logger.debug('[MCP] post-vendor staleness recheck failed: %s', e)
             new_reason = ''
         with _snapshot_lock:
             _snapshot_reported[command] = new_reason
@@ -1172,6 +1178,19 @@ class MCPBridge:
         # from ``self._servers`` and never be retried). Protected by ``self._lock``.
         self._configs: dict[str, dict] = {}
 
+        # Per-server CREDENTIAL health: name → {status, checked_at, detail}.
+        # A SECOND health axis distinct from transport health — a live
+        # subprocess with a valid protocol ping can still hold an EXPIRED
+        # session cookie/token, so every real tool call fails. Populated by
+        # ``_run_cred_probe`` (once on connect + periodically in keepalive) for
+        # servers whose catalog entry declares a ``health_probe``. Surfaced via
+        # ``get_cred_health`` → the settings panel. Protected by ``self._lock``.
+        #   status ∈ {'ok', 'expired', 'unknown'}
+        self._cred_health: dict[str, dict] = {}
+        # Monotonic timestamp of the last credential probe per server, so the
+        # keepalive sweep re-probes at most once per MCP_CRED_PROBE_INTERVAL.
+        self._cred_probe_ts: dict[str, float] = {}
+
     # ── Event loop management ─────────────────────────────
 
     def _ensure_loop(self) -> asyncio.AbstractEventLoop:
@@ -1320,6 +1339,10 @@ class MCPBridge:
             if self._breaker.pop(name, None) is not None:
                 logger.info('[MCP] Circuit breaker reset for %s (reconnected)', name)
         self._start_keepalive()
+        # Verify stored CREDENTIALS in the background — a live subprocess does
+        # not imply a valid session cookie/token. Non-blocking; no-op unless
+        # the server's catalog entry declares a health_probe.
+        self._probe_cred_health_async(name)
         return tools
 
     # ── Circuit breaker ──────────────────────────────────
@@ -1362,6 +1385,156 @@ class MCPBridge:
             'retry_in': max(0.0, next_retry_ts - time.time()),
             'next_retry_ts': next_retry_ts,
         }
+
+    # ── Credential health (transport-alive but stored secret expired) ──
+
+    def get_cred_health(self, name: str) -> dict[str, Any] | None:
+        """Return the last credential-probe result for ``name`` for UI surfacing.
+
+        Returns ``None`` when the server has never been probed (no
+        ``health_probe`` declared, or not yet run). Otherwise a dict::
+
+            {
+              'status': 'ok' | 'expired' | 'unknown',
+              'checked_at': float,   # epoch seconds of the last probe
+              'detail': str,         # short reason (empty for 'ok')
+            }
+
+        Only ``status == 'expired'`` is actionable — the UI shows a
+        "credentials expired" badge. ``'unknown'`` (probe raised / could not
+        classify) is deliberately NOT surfaced as a failure so a transient
+        network blip never cries wolf about a still-valid cookie.
+        """
+        with self._lock:
+            entry = self._cred_health.get(name)
+        return dict(entry) if entry is not None else None
+
+    def _cred_probe_spec(self, name: str) -> dict | None:
+        """Resolve + validate the ``health_probe`` spec for ``name``.
+
+        The standard credential-health contract (see lib/mcp/health_probe.py)
+        can be declared TWO ways, checked in priority order:
+
+          1. The server's LIVE config (``handle.config`` / ``self._configs``) —
+             so a user's custom ``mcp_servers.json`` entry can opt in with a
+             ``"health_probe": {...}`` key, no code change needed.
+          2. The curated catalog entry (late import to avoid a registry↔client
+             cycle) — how in-tree servers like Overleaf ship a default probe.
+
+        Returns a NORMALIZED spec (``{tool, args, fail_patterns}`` with the
+        default auth patterns merged in) or ``None`` when no valid probe is
+        declared. A malformed probe logs a warning via ``validate_health_probe``
+        and resolves to ``None`` (never crashes the sweep).
+        """
+        from lib.mcp.health_probe import validate_health_probe
+
+        # 1. Live config (custom servers + any config override).
+        with self._lock:
+            handle = self._servers.get(name)
+            cfg = dict(handle.config) if handle is not None else self._configs.get(name)
+        raw = cfg.get('health_probe') if isinstance(cfg, dict) else None
+
+        # 2. Catalog default.
+        if raw is None:
+            try:
+                from lib.mcp.registry import get_catalog_entry
+                entry = get_catalog_entry(name)
+                raw = entry.get('health_probe') if entry else None
+            except Exception as e:
+                logger.debug('[MCP] cred-probe catalog lookup for %s failed: %s',
+                             name, e)
+                raw = None
+
+        return validate_health_probe(raw, server=name)
+
+    def _run_cred_probe(self, name: str) -> dict | None:
+        """Run the credential health probe for ``name`` and record the result.
+
+        SYNC — safe to call from a worker thread (it drives ``call_tool``,
+        which owns its own event-loop indirection). Best-effort: any failure
+        classifies as ``'unknown'`` and never raises into the caller (the
+        keepalive sweep must not die on a probe error).
+
+        Returns the recorded health dict, or None when there is no probe to run
+        (no spec / server not connected).
+        """
+        spec = self._cred_probe_spec(name)
+        if spec is None:
+            return None
+        with self._lock:
+            connected = name in self._servers
+        if not connected:
+            return None
+
+        from lib.mcp.health_probe import classify_probe_result
+
+        tool = spec['tool']
+        args = spec.get('args', {}) or {}
+        ns_name = make_namespaced_name(name, tool)
+
+        status = 'unknown'
+        detail = ''
+        try:
+            result = self.call_tool(ns_name, dict(args))
+            # PURE classifier owns the ok/expired verdict; a RAISED call (below)
+            # is the only path to 'unknown' — a transport blip must never be
+            # mislabelled as an expired credential.
+            status, detail = classify_probe_result(result, spec)
+            if status == 'expired':
+                logger.warning('[MCP] Credential probe for %s → EXPIRED (%s)',
+                               name, detail)
+            else:
+                logger.debug('[MCP] Credential probe for %s → ok', name)
+        except Exception as e:
+            status = 'unknown'
+            detail = str(e)[:200]
+            logger.debug('[MCP] Credential probe for %s raised (%s) — '
+                         'reported as unknown', name, _unwrap_exception_group(e))
+
+        now = time.time()
+        record = {'status': status, 'checked_at': now, 'detail': detail}
+        with self._lock:
+            self._cred_health[name] = record
+            self._cred_probe_ts[name] = now
+        if status == 'expired':
+            audit_log('mcp_credential_expired', server=name, tool=tool)
+        return record
+
+    def _cred_probe_due(self, name: str) -> bool:
+        """True if ``name`` has a health_probe and its re-probe interval elapsed.
+
+        Gates the keepalive sweep so a credential is re-checked at most once per
+        MCP_CRED_PROBE_INTERVAL. Returns False when the periodic probe is
+        disabled (interval <= 0) or the server declares no probe.
+        """
+        if MCP_CRED_PROBE_INTERVAL <= 0:
+            return False
+        if self._cred_probe_spec(name) is None:
+            return False
+        with self._lock:
+            last = self._cred_probe_ts.get(name, 0.0)
+        return (time.time() - last) >= MCP_CRED_PROBE_INTERVAL
+
+    def _probe_cred_health_async(self, name: str) -> None:
+        """Fire a one-shot credential probe on a daemon thread (non-blocking).
+
+        Used at connect time so a fresh connection surfaces an expired cookie
+        promptly WITHOUT blocking the connect/handshake path. No-op for servers
+        with no declared ``health_probe``.
+        """
+        if MCP_CRED_PROBE_INTERVAL < 0:
+            return
+        if self._cred_probe_spec(name) is None:
+            return
+
+        def _worker():
+            try:
+                self._run_cred_probe(name)
+            except Exception as e:  # defence in depth — _run_cred_probe swallows
+                logger.debug('[MCP] async cred probe for %s failed: %s', name, e)
+
+        threading.Thread(target=_worker, name=f'mcp-credprobe-{name}',
+                         daemon=True).start()
 
     def _breaker_record_failure(self, name: str) -> float:
         """Record a failed reconnect and return the backoff delay applied.
@@ -1714,6 +1887,10 @@ class MCPBridge:
             if forget:
                 self._breaker.pop(name, None)
                 self._configs.pop(name, None)
+            # Credential-health is transient live state — always drop it when
+            # the handle goes away (a reconnect re-probes fresh on connect).
+            self._cred_health.pop(name, None)
+            self._cred_probe_ts.pop(name, None)
         if handle is None:
             return
 
@@ -1787,6 +1964,8 @@ class MCPBridge:
             self._tool_index.clear()
             self._breaker.clear()
             self._configs.clear()
+            self._cred_health.clear()
+            self._cred_probe_ts.clear()
             self._started = False
 
         # Shut down the event loop
@@ -2160,6 +2339,13 @@ class MCPBridge:
                     try:
                         await asyncio.wait_for(session.send_ping(),
                                                timeout=MCP_PING_TIMEOUT)
+                        # Transport is alive — but the stored CREDENTIALS may
+                        # have expired underneath it. Re-probe at most once per
+                        # MCP_CRED_PROBE_INTERVAL (offloaded to a worker thread:
+                        # _run_cred_probe drives call_tool, which re-enters this
+                        # very loop and would deadlock if run inline).
+                        if self._cred_probe_due(name):
+                            loop.run_in_executor(None, self._run_cred_probe, name)
                         continue
                     except asyncio.CancelledError:
                         raise

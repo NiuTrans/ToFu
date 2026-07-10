@@ -318,6 +318,19 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     finally:
         reset_restricted(_abs_token)
 
+    # ── Drain SVG inline-render signals (same thread as the read) ──
+    # An SVG file is read as text (its markup enters the model stream), but
+    # read_tools ALSO signals its source so the frontend can render it inline
+    # like an image. Drain unconditionally here — even on the image early-
+    # return path — so a signal never leaks into the next read on this thread.
+    _svg_renders = []
+    if fn_name == 'read_files':
+        try:
+            from lib.project_mod.read_tools import drain_svg_render_signals
+            _svg_renders = drain_svg_render_signals()
+        except Exception as e:
+            logger.debug('[Project] drain_svg_render_signals failed (non-fatal): %s', e)
+
     # read_files with absolute image paths returns a batch dict with __batch_images__
     _img_descriptors = None  # frontend-render image list (all images in a batch)
     is_batch_image = isinstance(tool_content, dict) and tool_content.get('__batch_images__')
@@ -364,7 +377,8 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             'badge': fmt,
             # Inline-render payload — frontend (tool_rounds.js) draws an
             # <img> per descriptor. Each carries a full data: URL.
-            'imageDataUris': [d for d in _img_descriptors if d.get('uri')],
+            'imageDataUris': ([d for d in _img_descriptors if d.get('uri')]
+                              + [s for s in _svg_renders if s.get('uri')]),
         }
         # ── inspect_image: surface the transform + source/view dimensions ──
         if fn_name == 'inspect_image':
@@ -392,6 +406,14 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
 
     if _gate_skip_note:
         meta['badge'] = 'partial: read first'
+
+    # ── Attach SVG inline-render descriptors (text read path) ──
+    # SVG source rides the model stream as text; these data URIs let the
+    # frontend ALSO render the vector image inline (tool_rounds.js).
+    if _svg_renders:
+        _svg_uris = [s for s in _svg_renders if s.get('uri')]
+        if _svg_uris:
+            meta['imageDataUris'] = _svg_uris
 
     # ── Promote renderable writes to a chat artifact ──
     # Best-effort: failure here MUST NOT fail the tool round itself.

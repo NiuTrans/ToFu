@@ -112,7 +112,8 @@ def _sidebar_limit() -> int:
     recommended)."""
     try:
         n = int(os.environ.get('TOFU_SIDEBAR_MAX', '') or '500')
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[meta_cache] TOFU_SIDEBAR_MAX parse failed, using default: %s', e)
         n = 500
     return max(0, n)
 
@@ -142,6 +143,50 @@ def invalidate_meta_cache(user_id: int = DEFAULT_USER_ID):
             bus.publish({'channel': 'cache', 'type': 'invalidate', 'userId': user_id})
         except Exception as e:
             logger.debug('[meta_cache] cross-replica invalidation publish failed: %s', e)
+
+
+def notify_conv_changed(conv_id, *, rev=None, deleted: bool = False,
+                        user_id: int = DEFAULT_USER_ID) -> None:
+    """Invalidate the sidebar cache AND push a real-time change signal to clients.
+
+    This is the single event-driven cross-device sync seam: every authoritative
+    conversation mutation (task-result save, PUT, rename, settings/folder,
+    message delete/edit, conversation delete) calls this so a sibling device
+    reconciles WITHOUT a manual refresh or waiting for the periodic poll.
+
+    The pushed frame is intentionally tiny — ``{type, convId, rev, userId}`` — a
+    targeting HINT, not the conversation data. The client rev-gates on it (a
+    frame whose ``rev`` is <= its known ``_serverRev`` for that conv is a no-op,
+    which is what makes SELF-ECHO cheap) then does a targeted refetch of just
+    that conversation. ``rev=None`` marks a metadata-only change (title / folder
+    / activeTaskId) — the DB ``rev`` trigger only bumps on a messages change —
+    so the client falls back to a debounced sidebar refresh, not a body refetch.
+
+    ``user_id`` scopes the frame for multi-user forward-safety (Epic D4): the
+    client ignores a frame whose ``userId`` is not its own, so once auth lands a
+    fleet ``notify`` broadcast can't surface one user's conversation to another.
+
+    Best-effort: a push failure never breaks the mutation path (the cache
+    invalidation above + the periodic-poll fallback still reconcile).
+    """
+    # Cache invalidation (local + cross-replica) — unchanged existing behaviour.
+    invalidate_meta_cache(user_id)
+    # Real-time client signal — the new event-driven half.
+    try:
+        from lib.agent_core.push import push_event
+        payload = {
+            'type': 'conv_deleted' if deleted else 'conv_changed',
+            'convId': conv_id,
+            'userId': user_id,
+        }
+        if rev is not None:
+            try:
+                payload['rev'] = int(rev)
+            except (TypeError, ValueError):
+                logger.debug('[meta_cache] conv=%s non-int rev=%r dropped', conv_id, rev)
+        push_event('notify', conv_id, payload)
+    except Exception as e:
+        logger.debug('[meta_cache] conv-changed push skipped conv=%s: %s', conv_id, e)
 
 
 def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
@@ -189,4 +234,4 @@ def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
     return payload, etag
 
 
-__all__ = ['invalidate_meta_cache', 'refresh_meta_cache_if_stale']
+__all__ = ['invalidate_meta_cache', 'notify_conv_changed', 'refresh_meta_cache_if_stale']

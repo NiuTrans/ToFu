@@ -110,7 +110,7 @@ def _execute_report_tool(name, args_str, user_question='', abort=None):
             # added latency) and we get the engine breakdown for free.
             results, search_diag, engine_breakdown, vertical_result = _web_search_one(
                 q, user_question, f, vertical=v)
-            formatted = format_search_for_tool_response(results, search_diag=search_diag)
+            formatted = format_search_for_tool_response(results, search_diag=search_diag, query=q)
             if vertical_result:
                 formatted = _vertical_header_for_llm(vertical_result) + formatted
             display = _format_search_display_for_results(results)

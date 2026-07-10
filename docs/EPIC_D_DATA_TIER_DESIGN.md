@@ -145,6 +145,62 @@ Three sub-fixes to `_meta_cache` (routes/common + meta_cache):
 5. **Metrics/observability** for the pooler + replica lag — what does the
    target environment already provide vs. what must be added.
 
+## 5a. RESOLUTIONS — decided by owner 2026-07-04 ("most robust / long-term; ignore migration cost")
+
+The owner delegated the §5 open questions with an explicit optimization rule:
+choose the **most long-term, robust** option and **do not weigh migration
+cost**. The answers below are therefore commitments; they unpark the epic for
+implementation (the env-gated, fail-open seam design in §2/§3 is unchanged —
+these choices only fix the *target-topology* posture the seam rolls out into).
+
+1. **D1 default — YES, fail-closed is opt-IN via `TOFU_REQUIRE_PG=1`.** The
+   single-box/desktop install keeps the graceful SQLite fallback
+   (byte-identical). The scaled deployment sets the flag so a PG-unreachable
+   boot refuses loudly rather than silently write-serializing on SQLite. This
+   is already the most robust shape (loud-fail at the boundary, safe default
+   elsewhere) — confirmed as-is.
+
+2. **D2 pooler — PgBouncer (transaction pooling) ACCEPTED, deployed as a
+   MANAGED pooler tier (HA), not self-run.** Robust-first rationale: a
+   self-run single PgBouncer is a new SPOF in front of the whole DB tier; a
+   managed/HA pooler removes that failure surface. Transaction-pooling mode is
+   confirmed (it is the mode that actually collapses `N × pool_max` → a small
+   fixed PG backend count), so the **session-state audit is IN SCOPE**: audit
+   `_post_connect_setup` and every `SET` / server-side-prepared-statement /
+   advisory-lock-held-across-statements usage, and move anything session-scoped
+   to `SET LOCAL` / transaction scope. `TOFU_PG_VIA_POOLER` stays default-off
+   (single-box direct PG unchanged). If a managed pooler is unavailable in a
+   given environment, a self-run HA pair is the fallback — but the design
+   target is managed.
+
+3. **D3 read replicas — YES, PROVISION them; D3 is NOT deferred.** The
+   read-heavy sidebar / conversation-list / poll / search traffic is exactly
+   what a horizontally-scaled deployment must spread off the primary, so the
+   robust long-term answer is to build the `get_read_db()` lane AND stand up
+   read replicas in the target. Discipline is unchanged: only the enumerated
+   **lag-tolerant** paths (sidebar list, old-conversation load) route to
+   replicas; every read-your-write-sensitive path (just-sent message, poll of
+   a freshly-persisted result) stays pinned to the primary. Sequencing is
+   unchanged (D3 lands after a healthy D2 pooler tier).
+
+4. **D4 multi-user coupling — CONFIRMED: user-key the cache in lockstep with
+   the multi-user auth rollout, never before.** Retiring `DEFAULT_USER_ID=1`
+   ahead of multi-user auth would regress single-user installs; the user-key +
+   `LIMIT`/keyset parts land with (not before) the auth model, and the
+   cross-replica invalidation part rides the Epic B Redis bus (after B).
+
+5. **Metrics/observability — REQUIRED as part of each change, not assumed from
+   the environment.** The pooler tier must export PG-backend-connection
+   saturation + PgBouncer wait metrics; the read-replica lane must export
+   replication-lag (so the lag-sensitivity classification is verifiable at
+   runtime, not just asserted). Whatever the managed tier provides is reused;
+   the gap is filled by app-side gauges (mirroring the per-endpoint live
+   metrics pattern already in the provider layer).
+
+**Shared-substrate corollary (see Epic B §7a): Redis is MANAGED (HA), not
+self-run** — the same robust-first logic; D4's cross-replica invalidation
+rides that managed bus.
+
 ## 6. Scope boundary
 
 - **Epics B / C** — their own docs; D reuses B's Redis substrate for D4's

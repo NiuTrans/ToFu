@@ -9,12 +9,16 @@ because callers in lib.tasks_pkg.manager and tests import them by name.
 New code should use the runtime directly.
 """
 
+import json
 import time
 
+from lib.database import DOMAIN_CHAT
 from lib.log import get_logger
 from lib.task_runtime import TaskRuntime
+from lib.text_lang import is_predominantly_chinese
 
 from .commit import _commit_translation_to_db
+from .constants import DEFAULT_USER_ID
 from .engine import _translate_freetext
 from .notranslate import _extract_notranslate_blocks, _reattach_notranslate_blocks
 from .prompt import _build_translate_prompt, _strip_notranslate_tags
@@ -43,6 +47,127 @@ def _cleanup_translate_tasks():
     n = _translate_runtime.cleanup_stale()
     if n:
         logger.debug('[Translate] Cleaned up %d expired tasks', n)
+
+
+def _read_message_segments(conv_id, msg_id, msg_idx):
+    """Read the target assistant message's ``segments`` list from the DB.
+
+    Resolves the message by stable id first (robust against concurrent
+    inserts), then by position. Returns the segments list or ``None`` when the
+    conversation / message / segments are absent (a pre-v36 row → the caller
+    treats it as a no-op). Never raises — best-effort enrichment only.
+    """
+    try:
+        from lib.database import get_thread_db
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT messages FROM conversations WHERE id=? AND user_id=?',
+            (conv_id, DEFAULT_USER_ID)
+        ).fetchone()
+        if not row:
+            return None
+        messages = json.loads(row['messages'] or '[]')
+    except Exception as e:
+        logger.warning('[Translate] segment read failed for conv=%s: %s',
+                       (conv_id or '?')[:8], e)
+        return None
+
+    msg = None
+    if msg_id:
+        for candidate in messages:
+            if isinstance(candidate, dict) and candidate.get('_msgId') == msg_id:
+                msg = candidate
+                break
+    if msg is None and msg_idx is not None:
+        try:
+            idx = int(msg_idx)
+        except (ValueError, TypeError) as e:
+            logger.debug('[Translate] segment read: bad msg_idx %r: %s', msg_idx, e)
+            idx = -1
+        if 0 <= idx < len(messages):
+            msg = messages[idx]
+    if not isinstance(msg, dict):
+        return None
+    segs = msg.get('segments')
+    return segs if isinstance(segs, list) and segs else None
+
+
+def _build_segment_translation_map(conv_id, msg_id, msg_idx, system_prompt,
+                                   source, target):
+    """Translate each non-deliverable narration segment of the target message.
+
+    Returns ``{llmRound: 中文}`` so ``_commit_translation_to_db`` can stamp
+    ``translatedText`` onto the matching segments — making the retro / on-open /
+    manual / toggle path interleave the settled timeline exactly like the live
+    incremental worker does. Symmetric with
+    :meth:`lib.translate.incremental._Acc._do_finalize_inner`'s ``seg_trans``
+    build: same per-segment notranslate extraction + already-Chinese skip.
+
+    A no-op returning ``None`` when the message has no segments (pre-v36 row).
+    Per-segment failures are logged and skipped (the whole-message
+    ``translatedContent`` commit is unaffected — this is pure enrichment).
+    """
+    segs = _read_message_segments(conv_id, msg_id, msg_idx)
+    if not segs:
+        return None
+    seg_map = _translate_segments_to_map(segs, system_prompt, source, target,
+                                         log_tag=(conv_id or '?')[:8])
+    return seg_map or None
+
+
+def _translate_segments_to_map(segs, system_prompt, source, target, *,
+                               log_tag='?'):
+    """Pure core: translate the non-deliverable narration segments → ``{llmRound: 中文}``.
+
+    Shared by the live retro path (:func:`_build_segment_translation_map`, which
+    reads ``segs`` from the DB first) and the one-shot backfill migration (which
+    already holds ``segs``). Kept as a SINGLE source of truth so the two paths
+    never diverge on which segments are translatable or how notranslate blocks /
+    already-Chinese text are handled.
+
+    ENRICH-ONLY: a segment that already carries a non-empty ``translatedText`` is
+    skipped (not re-translated) — the map only contains rounds that gained a
+    translation, so stamping is idempotent and cheap on re-run. ``tool_use`` and
+    the deliverable/terminal ``text`` segment are excluded (the deliverable is
+    rendered via ``translatedContent``). Per-segment failures are logged and
+    skipped; returns ``{}`` when nothing was translatable.
+    """
+    seg_map = {}
+    for seg in (segs or []):
+        if not isinstance(seg, dict):
+            continue
+        if seg.get('type') != 'text' or seg.get('deliverable'):
+            continue
+        if (seg.get('translatedText') or '').strip():
+            continue  # enrich-only: never re-translate / overwrite
+        lr = seg.get('llmRound')
+        if lr is None:
+            continue
+        original = (seg.get('text') or '').strip()
+        if not original:
+            continue
+        try:
+            if is_predominantly_chinese(original):
+                seg_map[lr] = original
+                continue
+            body, nt_blocks = _extract_notranslate_blocks(original)
+            if not body.strip():
+                seg_map[lr] = original
+                continue
+            translated, _usage = _translate_freetext(
+                body, system_prompt, source=source, target=target)
+            translated = (translated or '').strip()
+            if nt_blocks:
+                translated = _reattach_notranslate_blocks(translated, nt_blocks)
+            if translated:
+                seg_map[lr] = translated
+        except Exception as e:
+            logger.warning('[Translate] segment round=%s translate failed for '
+                           '%s: %s', lr, log_tag, e)
+    if seg_map:
+        logger.info('[Translate] built segment translation map for %s: '
+                    '%d/%d narration segments', log_tag, len(seg_map), len(segs))
+    return seg_map
 
 
 def _do_translate(task_id, text, target, source, conv_id, msg_idx, field, *, msg_id=None):
@@ -144,10 +269,19 @@ def _do_translate(task_id, text, target, source, conv_id, msg_idx, field, *, msg
                     task['model'] = 'skipped'
                     task['completed_at'] = time.time()
                 if conv_id and (msg_idx is not None or msg_id):
+                    seg_trans = None
+                    if field == 'translatedContent':
+                        try:
+                            seg_trans = _build_segment_translation_map(
+                                conv_id, msg_id, msg_idx, system_prompt, source, target)
+                        except Exception as se:
+                            logger.warning('[Translate] segment map build failed for task %s: %s',
+                                           task_id[:8], se, exc_info=True)
                     try:
                         _commit_translation_to_db(conv_id, msg_idx, field, content,
                                                   original_text=original_text,
-                                                  model='skipped', msg_id=msg_id)
+                                                  model='skipped', msg_id=msg_id,
+                                                  segment_translations=seg_trans)
                     except Exception as ce:
                         logger.warning('[Translate] Auto-commit failed for task %s: %s',
                                        task_id[:8], ce, exc_info=True)
@@ -218,10 +352,28 @@ def _do_translate(task_id, text, target, source, conv_id, msg_idx, field, *, msg
                          task_id[:8], e)
 
         if conv_id and (msg_idx is not None or msg_id):
+            # ★ Per-round carry to the SETTLED render (whole-message / retro /
+            #   on-open / manual / toggle path). The incremental live worker
+            #   stamps translatedText onto each narration segment as its round
+            #   closes; this path never had those cached segments, so it must
+            #   BUILD the {llmRound: 中文} map itself by translating each
+            #   non-deliverable text segment of the target message. Symmetric
+            #   with incremental._Acc._do_finalize_inner. No-op (None) for a
+            #   message without segments — the deliverable translatedContent
+            #   commit below is unaffected either way.
+            seg_trans = None
+            if field == 'translatedContent':
+                try:
+                    seg_trans = _build_segment_translation_map(
+                        conv_id, msg_id, msg_idx, system_prompt, source, target)
+                except Exception as se:
+                    logger.warning('[Translate] segment map build failed for task %s: %s',
+                                   task_id[:8], se, exc_info=True)
             try:
                 _commit_translation_to_db(conv_id, msg_idx, field, content,
                                          original_text=original_text, model=_model,
-                                         msg_id=msg_id)
+                                         msg_id=msg_id,
+                                         segment_translations=seg_trans)
             except Exception as ce:
                 logger.warning('[Translate] Auto-commit failed for task %s: %s', task_id[:8], ce, exc_info=True)
 

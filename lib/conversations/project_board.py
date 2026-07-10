@@ -76,8 +76,15 @@ def _row_to_task(r, now_ms: int) -> dict:
         dispatched = bool(r['dispatched'])
     except (KeyError, IndexError, TypeError):
         dispatched = False
+    # kind is nullable-safe: a pre-migration row (no column / NULL) reads as
+    # 'epic' so it is NEVER silently dropped off the dispatch board.
+    try:
+        kind = r['kind'] or 'epic'
+    except (KeyError, IndexError, TypeError):
+        kind = 'epic'
     return {
         'id': r['id'], 'title': r['title'] or '', 'status': eff,
+        'kind': kind,
         'stored_status': stored,
         'owner_conv_id': r['owner_conv_id'] if eff == 'claimed' else '',
         'lease_expires_at': lease if eff == 'claimed' else 0,
@@ -125,7 +132,7 @@ def read_board(project_path: str) -> dict:
         db = get_thread_db(DOMAIN_CHAT)
         rows = db.execute(
             'SELECT id, title, status, owner_conv_id, lease_expires_at, '
-            '       created_by_conv, depends_on, dispatched, created_at, updated_at '
+            '       created_by_conv, depends_on, dispatched, kind, created_at, updated_at '
             'FROM project_tasks WHERE project_path=? '
             'ORDER BY created_at ASC', (project_path,)).fetchall()
     except Exception as e:
@@ -395,6 +402,118 @@ def reopen_task(project_path: str, conv_id: str, task_id: str) -> dict:
     return {'ok': True, 'from': prev_status}
 
 
+def claim_lease(project_path: str, conv_id: str, resource: str, *,
+                ttl_ms: int = DEFAULT_LEASE_TTL_MS) -> dict:
+    """Claim a durational RESOURCE/PATH lease — "I'm actively editing these
+    paths, hold off." Complementary to (not a duplicate of)
+    ``lib.presence.conflict.detect_overlaps``: that is a REACTIVE, active-peers-
+    only, file-level collision REPORT (two live peers already touching the same
+    ``currentFile``); a lease is a PROACTIVE, path-level RESERVATION posted
+    BEFORE the edit that reaches EVERY sibling — including an idle one the
+    heartbeat wakes later — via the ambient ``[PROJECT BOARD]`` block. The lease
+    PREVENTS the collision the overlap detector would otherwise later report.
+
+    A lease is a ``project_tasks`` row with ``kind='lease'``: it reuses the SAME
+    soft TTL-lease + at-read-time expiry (``_effective_status``) as an epic
+    claim, but is EXCLUDED from ``select_dispatchable`` (never auto-dispatched
+    as work) and rendered in its own "Held" section. Re-claiming the SAME
+    resource by the SAME conversation REFRESHES the lease (the every-turn board
+    re-read keeps a live holder's reservation alive at zero cost; a crash lets
+    it expire in one TTL). A DIFFERENT conversation's live lease on the same
+    resource is an advisory refusal (like an epic claim).
+
+    Returns ``{'ok', 'id'?, 'lease_expires_at'?, 'error'?, 'owner'?}``.
+    """
+    resource = (resource or '').strip()[:_TITLE_MAX_CHARS]
+    if not project_path:
+        return {'ok': False, 'error': 'no project'}
+    if not resource:
+        return {'ok': False, 'error': 'empty resource'}
+    from lib.conversations.project_feed import normalize_project_path
+    project_path = normalize_project_path(project_path)
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        now = _now_ms()
+        # Find an existing lease for this exact resource (title match on a
+        # kind='lease' row). One reservation per resource string.
+        row = db.execute(
+            "SELECT id, owner_conv_id, lease_expires_at FROM project_tasks "
+            "WHERE project_path=? AND kind='lease' AND title=?",
+            (project_path, resource)).fetchone()
+        lease = now + max(60_000, int(ttl_ms or DEFAULT_LEASE_TTL_MS))
+        if row:
+            owner = row['owner_conv_id'] or ''
+            eff = _effective_status('claimed', int(row['lease_expires_at'] or 0), now)
+            if eff == 'claimed' and owner and owner != (conv_id or ''):
+                # Held by a different conversation, lease still valid → advisory
+                # refusal (the board still tells the caller who holds it).
+                return {'ok': False, 'error': 'already_held', 'owner': owner}
+            # Ours (refresh) or expired (reclaim) → take/renew it.
+            db.execute(
+                "UPDATE project_tasks SET status='claimed', owner_conv_id=?, "
+                'lease_expires_at=?, updated_at=? WHERE id=? AND project_path=?',
+                (conv_id or '', lease, now, row['id'], project_path))
+            db.commit()
+            task_id = row['id']
+        else:
+            task_id = 'pt_' + uuid.uuid4().hex[:16]
+            db.execute(
+                'INSERT INTO project_tasks '
+                '(id, project_path, title, status, owner_conv_id, lease_expires_at, '
+                " created_by_conv, depends_on, kind, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'claimed', ?, ?, ?, '[]', 'lease', ?, ?)",
+                (task_id, project_path, resource, conv_id or '', lease,
+                 conv_id or '', now, now))
+            db.commit()
+    except Exception as e:
+        logger.error('[Board] claim_lease failed proj=%.40r res=%.60r: %s',
+                     project_path, resource, e, exc_info=True)
+        return {'ok': False, 'error': str(e)}
+    _emit('note', project_path, conv_id, f'Holding path(s): {resource}',
+          payload={'taskId': task_id, 'lease': True, 'resource': resource})
+    audit_log('board_claim_lease', project_path=project_path, task_id=task_id,
+              conv_id=conv_id, resource=resource[:120])
+    return {'ok': True, 'id': task_id, 'lease_expires_at': lease}
+
+
+def release_lease(project_path: str, conv_id: str, resource: str) -> dict:
+    """Release a resource/path lease held by THIS conversation (delete the
+    ``kind='lease'`` row). A no-op advisory error if no matching lease exists.
+    Only the holder may release (a different conversation's live lease is left
+    untouched — releasing it would be a silent yank). Returns ``{'ok','error'?}``.
+    """
+    resource = (resource or '').strip()[:_TITLE_MAX_CHARS]
+    if not project_path or not resource:
+        return {'ok': False, 'error': 'missing project/resource'}
+    from lib.conversations.project_feed import normalize_project_path
+    project_path = normalize_project_path(project_path)
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            "SELECT id, owner_conv_id FROM project_tasks "
+            "WHERE project_path=? AND kind='lease' AND title=?",
+            (project_path, resource)).fetchone()
+        if not row:
+            return {'ok': False, 'error': 'no such lease'}
+        owner = row['owner_conv_id'] or ''
+        if owner and owner != (conv_id or ''):
+            return {'ok': False, 'error': 'held_by_other', 'owner': owner}
+        db.execute('DELETE FROM project_tasks WHERE id=? AND project_path=?',
+                   (row['id'], project_path))
+        db.commit()
+        task_id = row['id']
+    except Exception as e:
+        logger.error('[Board] release_lease failed proj=%.40r res=%.60r: %s',
+                     project_path, resource, e, exc_info=True)
+        return {'ok': False, 'error': str(e)}
+    _emit('note', project_path, conv_id, f'Released path(s): {resource}',
+          payload={'taskId': task_id, 'lease': True, 'released': True,
+                   'resource': resource})
+    audit_log('board_release_lease', project_path=project_path, task_id=task_id,
+              conv_id=conv_id, resource=resource[:120])
+    return {'ok': True}
+
+
 def _task_title(db, project_path: str, task_id: str):
     row = db.execute('SELECT title FROM project_tasks WHERE id=? AND project_path=?',
                      (task_id, project_path)).fetchone()
@@ -422,16 +541,30 @@ def render_board_block(project_path: str, current_conv_id: str = '') -> str:
     tasks = board['tasks']
     if not tasks:
         return ''
-    open_t = [t for t in tasks if t['status'] == 'open']
-    claimed_t = [t for t in tasks if t['status'] == 'claimed']
-    done_t = [t for t in tasks if t['status'] == 'done']
-    deferred_t = [t for t in tasks if t['status'] == 'deferred']
-    if not (open_t or claimed_t or done_t or deferred_t):
+    # Leases (kind='lease') are path RESERVATIONS, not epics — partition them
+    # out of every epic section and render them in their own "Held" block. Only
+    # a LIVE lease (effective status still 'claimed') is a held reservation; an
+    # expired one reads 'open' and is simply dropped (it holds nothing).
+    epics = [t for t in tasks if t.get('kind') != 'lease']
+    held_t = [t for t in tasks if t.get('kind') == 'lease' and t['status'] == 'claimed']
+    open_t = [t for t in epics if t['status'] == 'open']
+    claimed_t = [t for t in epics if t['status'] == 'claimed']
+    done_t = [t for t in epics if t['status'] == 'done']
+    deferred_t = [t for t in epics if t['status'] == 'deferred']
+    if not (open_t or claimed_t or done_t or deferred_t or held_t):
         return ''
     lines = ['[PROJECT BOARD] — shared coordination board for this project. '
              'Before starting work, CHECK it: claim an open epic so siblings '
              'know you own it, and do NOT duplicate an epic another '
              'conversation is already advancing.']
+    if held_t:
+        lines.append('')
+        lines.append('Held (do NOT edit — a sibling is actively changing these '
+                     'paths; coordinate or wait for the hold to lift):')
+        for t in held_t:
+            owner = t['owner_conv_id'] or 'another conversation'
+            mine = ' (you)' if current_conv_id and owner == current_conv_id else ''
+            lines.append(f'  • {t["title"]} — held by {owner}{mine}')
     if claimed_t:
         lines.append('')
         lines.append('In progress (claimed by a conversation — AVOID DUPLICATING):')
@@ -502,6 +635,33 @@ def execute_board_tool(fn_name: str, fn_args: dict, *,
             return ('Reported blocked (visible in the project activity feed).'
                     if res.get('ok')
                     else f'Error reporting block: {res.get("error", "unknown")}.')
+        if fn_name == 'project_claim_path':
+            res = claim_lease(project_path, current_conv_id,
+                              fn_args.get('resource') or '',
+                              ttl_ms=int(fn_args.get('ttl_ms') or DEFAULT_LEASE_TTL_MS))
+            if res.get('ok'):
+                return ('Path(s) held. Siblings now see a "Held — do NOT edit" '
+                        'notice on the board (including a freshly-woken idle '
+                        'conversation on its next turn). Re-call to refresh the '
+                        'hold; release it with project_release_path when done. '
+                        'This is advisory — the lease auto-expires so it can '
+                        'never deadlock the project.')
+            if res.get('error') == 'already_held':
+                return (f'NOT held — path(s) are already held by conversation '
+                        f'{res.get("owner", "?")}. Coordinate or wait for the '
+                        f'hold to lift; do not edit concurrently.')
+            return f'Error holding path(s): {res.get("error", "unknown")}.'
+        if fn_name == 'project_release_path':
+            res = release_lease(project_path, current_conv_id,
+                                fn_args.get('resource') or '')
+            if res.get('ok'):
+                return 'Released. The "Held" notice is cleared for siblings.'
+            if res.get('error') == 'held_by_other':
+                return (f'Not released — held by conversation '
+                        f'{res.get("owner", "?")}, not you.')
+            if res.get('error') == 'no such lease':
+                return 'No matching hold to release (already expired or released).'
+            return f'Error releasing path(s): {res.get("error", "unknown")}.'
         if fn_name == 'project_board_defer':
             res = defer_task(project_path, current_conv_id,
                              fn_args.get('task_id') or '',
@@ -524,7 +684,8 @@ def execute_board_tool(fn_name: str, fn_args: dict, *,
 
 __all__ = [
     'read_board', 'post_task', 'claim_task', 'complete_task', 'block_task',
-    'defer_task', 'reopen_task', 'render_board_block', 'execute_board_tool',
+    'defer_task', 'reopen_task', 'claim_lease', 'release_lease',
+    'render_board_block', 'execute_board_tool',
     '_effective_status',
     'claims_by_conv', 'DEFAULT_LEASE_TTL_MS',
 ]

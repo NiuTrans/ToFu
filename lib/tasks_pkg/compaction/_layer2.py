@@ -144,6 +144,44 @@ What the assistant should do next to continue the task.
 #  Query-aware LLM summary with selective turn compression
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _objective_anchor_index(messages: list) -> int | None:
+    """Index of the immutable OBJECTIVE ANCHOR — the first real user message.
+
+    This is the SAME "first real user message" the autopilot objective pin
+    (``_get_or_persist_objective`` / ``_extract_objective``) is derived from —
+    ONE definition of "the objective", not a parallel one.  Compaction protects
+    this message so the original goal survives N successive summaries VERBATIM
+    (``execute_compact_tool`` excludes it from the summarized ``old_messages``
+    and re-inserts it exactly once; ``_head_truncate`` never drops it).  The
+    autopilot pin is a cross-run TEXT cache of the very same message.
+
+    Skips leading ``system`` messages, any VU directive / virtual-user turn
+    (defensive — those flags are autopilot-only and absent elsewhere), and the
+    synthetic ``_isMeta`` context carriers the builder prepends (CLAUDE.md /
+    user-preference profile) — those are a ``user`` message at index 1, BEFORE
+    the real user turn, so without this skip the anchor would protect injected
+    context instead of the human's goal. Same skip as ``_extract_objective``.
+    Returns ``None`` when no real user message exists (compaction then behaves
+    exactly as before — no anchor to protect).
+    """
+    for i, m in enumerate(messages):
+        if not isinstance(m, dict) or m.get('role') != 'user':
+            continue
+        if m.get('_isVuDirective') or m.get('_isVirtualUser') or m.get('_isMeta'):
+            continue
+        content = m.get('content')
+        if isinstance(content, str):
+            if content.strip():
+                return i
+        elif isinstance(content, list):
+            if any(isinstance(b, dict) and b.get('type') == 'text'
+                   and (b.get('text') or '').strip() for b in content):
+                return i
+        elif content:  # non-empty non-text (e.g. image-only) — still real
+            return i
+    return None
+
+
 def _extract_current_query(messages: list) -> str:
     """Extract the most recent user query from messages."""
     for msg in reversed(messages):
@@ -276,7 +314,9 @@ def _summary_input_char_budget(task: dict | None) -> int:
     """
     try:
         usable = _usable_context(_get_context_limit(task))
-    except Exception:
+    except Exception as e:
+        logger.debug('[Compact] usable-context lookup failed, using 96k '
+                     'fallback: %s', e)
         usable = 96_000
     input_token_budget = max(4_000, usable - _SUMMARY_MAX_TOKENS - 2_000)
     # Convert token budget → char budget at ~1 char/token. This is the
@@ -387,6 +427,34 @@ def _generate_query_aware_summary(messages: list, current_query: str,
         return None
 
 
+def _coerce_spec_list(value) -> list:
+    """Coerce a tool arg that should be a list-of-specs into a real list.
+
+    Tolerates the observed-in-the-wild case where a streamed / partial
+    tool-call recorded the array as a JSON *string* (sometimes truncated)
+    instead of a list — e.g. ``reads='[{"path": "a.py", "end_line": 4]'``.
+    Iterating such a raw string char-by-char is what produced the notorious
+    "one letter per line" modified-files reminder (conv mr4e8pnxbv440z).
+
+    If the string decodes to a list, return it; otherwise return ``[]`` so the
+    caller skips it rather than iterating characters and emitting garbage.
+    """
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return []
+        try:
+            parsed = json.loads(s)
+        except (ValueError, TypeError) as e:
+            logger.debug('[Compact] _coerce_spec_list: unparseable spec '
+                         'string (%s) — dropping', e)
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
 def _extract_recently_accessed_files(messages: list,
                                      max_files: int = 8) -> list[str]:
     """Scan messages newest-first for file paths from read/write tools."""
@@ -410,8 +478,17 @@ def _extract_recently_accessed_files(messages: list,
                              fn_name, exc, exc_info=True)
                 continue
 
+            if not isinstance(args, dict):
+                logger.debug('[Compact] Skipping non-dict tool_call args for %s (type=%s)',
+                             fn_name, type(args).__name__)
+                continue
+
             if fn_name == 'read_files':
-                for spec in args.get('reads', []) or []:
+                # After _coerce_spec_list the container is guaranteed a LIST,
+                # so a string ELEMENT is a genuine full path (a documented
+                # Claude-Opus shape: reads=["a.py","b.py"]) — NOT a stray char
+                # from iterating a string container. Keep both element shapes.
+                for spec in _coerce_spec_list(args.get('reads')):
                     if isinstance(spec, dict):
                         p = spec.get('path', '')
                     elif isinstance(spec, str):
@@ -424,14 +501,14 @@ def _extract_recently_accessed_files(messages: list,
                         files_seen.append(p)
                         files_set.add(p)
             elif fn_name in ('apply_diff', 'apply_diffs') and args.get('edits'):
-                for edit in args['edits'] or []:
+                for edit in _coerce_spec_list(args.get('edits')):
                     if isinstance(edit, dict):
                         p = edit.get('path', '')
                         if p and p not in files_set:
                             files_seen.append(p)
                             files_set.add(p)
             elif fn_name in ('insert_content', 'insert_contents') and args.get('edits'):
-                for edit in args['edits'] or []:
+                for edit in _coerce_spec_list(args.get('edits')):
                     if isinstance(edit, dict):
                         p = edit.get('path', '')
                         if p and p not in files_set:
@@ -554,6 +631,26 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     old_messages = messages[:boundary]
     recent_messages = messages[boundary:]
 
+    # ★ OBJECTIVE ANCHOR — the first real user message is the north-star
+    #   objective.  If it falls in the to-be-summarized ``old_messages`` it
+    #   would be lossily paraphrased (and re-paraphrased every subsequent
+    #   compaction → unbounded drift), so we PULL IT OUT and re-insert it
+    #   verbatim exactly once, right after the system messages.  If it is
+    #   already in ``recent_messages`` (short conversation) there is nothing to
+    #   do — it's preserved as-is.  Because the anchor is a genuine existing
+    #   message (not a synthesized prepend), a subsequent compaction finds the
+    #   SAME message already at the front of ``recent_messages`` and never
+    #   duplicates it — idempotent, byte-identical, cache-prefix-stable.
+    anchor_idx = _objective_anchor_index(messages)
+    anchor_msg = None
+    if anchor_idx is not None and anchor_idx < boundary:
+        anchor_msg = messages[anchor_idx]
+        # Summarize everything old EXCEPT the anchor.
+        old_messages = [m for k, m in enumerate(messages[:boundary])
+                        if k != anchor_idx]
+        logger.info('%s [Compact] Preserving objective anchor verbatim '
+                    '(msg idx=%d) across summary', pfx, anchor_idx)
+
     preserved_turns = sum(
         1 for m in recent_messages if m.get('role') == 'user'
     )
@@ -590,7 +687,14 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
         else:
             break
 
-    new_messages = list(system_msgs) + list(recent_messages)
+    # Rebuild: system → [objective anchor, if it was in the summarized region]
+    # → recent.  The anchor is placed immediately after the system block so the
+    # model always sees the original goal at a stable position, and exactly
+    # once (it was removed from ``old_messages`` above, so it isn't also inside
+    # the summary text's source, and it is NOT in ``recent_messages`` because
+    # anchor_idx < boundary).
+    anchor_block = [anchor_msg] if anchor_msg is not None else []
+    new_messages = list(system_msgs) + anchor_block + list(recent_messages)
     messages.clear()
     messages.extend(new_messages)
 

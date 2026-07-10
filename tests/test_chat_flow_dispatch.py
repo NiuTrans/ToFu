@@ -66,11 +66,62 @@ class ResolveEntryTest(unittest.TestCase):
 
     def test_selected_flow_always_wins_no_flag_needed(self):
         from lib.orchestration_endpoint_runner import run_flow_via_chat
-        # flowBuiltin selected, no flags set
-        self.assertIs(self._resolve({'flowBuiltin': 'autopilot'}), run_flow_via_chat)
+        # Non-autopilot selections still route to the engine flow path,
+        # unconditionally (the selection IS the opt-in). Only builtin:autopilot
+        # is special-cased (see test_builtin_autopilot_maps_to_live_path).
         self.assertIs(self._resolve({'flowId': 'orch_x'}), run_flow_via_chat)
         self.assertIs(self._resolve({'flowDefinition': {'nodes': [1]}}),
                       run_flow_via_chat)
+        self.assertIs(self._resolve({'flowBuiltin': 'endpoint'}), run_flow_via_chat)
+
+    def test_builtin_autopilot_maps_to_live_path(self):
+        # Option C: the "编排流程 → 自动驾驶" dropdown (flowBuiltin='autopilot')
+        # with NO flag must NOT route through the engine. It is rewritten to
+        # the live standalone autopilot path: returns None (→ normal
+        # spawn_task → maybe_run_autopilot), mutates cfg to autopilot=True,
+        # and clears flowBuiltin so the selection branch can't re-grab it.
+        cfg = {'flowBuiltin': 'autopilot'}
+        self.assertIsNone(self._resolve(cfg))
+        self.assertTrue(cfg.get('autopilot'))
+        self.assertIsNone(cfg.get('flowBuiltin'))
+
+    def test_builtin_autopilot_equals_standalone_toggle(self):
+        # Parity by construction: the dropdown selection and the standalone
+        # autopilot toggle produce the SAME resolver outcome — both fall
+        # through to the live path (None) with cfg['autopilot'] set.
+        dropdown = {'flowBuiltin': 'autopilot'}
+        toggle = {'autopilot': True}
+        self.assertEqual(self._resolve(dropdown), self._resolve(toggle))  # both None
+        self.assertTrue(dropdown.get('autopilot'))
+        self.assertTrue(toggle.get('autopilot'))
+
+    def test_builtin_autopilot_escape_hatch_still_engine(self):
+        # The dev/validation flag keeps the engine path reachable for the
+        # builtin: with TOFU_AUTOPILOT_VIA_FLOW=1, flowBuiltin='autopilot'
+        # is honored as a flow selection → run_flow_via_chat.
+        from lib.orchestration_endpoint_runner import run_flow_via_chat
+        os.environ['TOFU_AUTOPILOT_VIA_FLOW'] = '1'
+        cfg = {'flowBuiltin': 'autopilot'}
+        self.assertIs(self._resolve(cfg), run_flow_via_chat)
+        # untouched under the flag — no live-path rewrite
+        self.assertNotIn('autopilot', cfg)
+        self.assertEqual(cfg.get('flowBuiltin'), 'autopilot')
+
+    def test_neutering_option_c_regresses_to_engine(self):
+        # DOUBLE-NEUTER: monkeypatch autopilot_via_flow_enabled → True to
+        # simulate the Option-C branch being absent/bypassed. The dropdown
+        # then regresses to the endpoint-critic engine path (run_flow_via_chat)
+        # — proving the branch is load-bearing.
+        import lib.orchestration_endpoint_runner as rm
+        from lib.orchestration_endpoint_runner import run_flow_via_chat
+        orig = rm.autopilot_via_flow_enabled
+        rm.autopilot_via_flow_enabled = lambda: True
+        try:
+            cfg = {'flowBuiltin': 'autopilot'}
+            self.assertIs(rm.resolve_chat_flow_entry(cfg), run_flow_via_chat)
+            self.assertNotIn('autopilot', cfg)   # no rewrite happened
+        finally:
+            rm.autopilot_via_flow_enabled = orig
 
     def test_selected_flow_takes_precedence_over_endpoint(self):
         from lib.orchestration_endpoint_runner import run_flow_via_chat

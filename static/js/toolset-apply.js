@@ -30,8 +30,7 @@
 
 /* Find a conversation object by id (best-effort; returns null if unknown). */
 function _toolsetConv(convId) {
-  if (!convId || typeof conversations === 'undefined') return null;
-  return conversations.find((c) => c.id === convId) || null;
+  return getConvById(convId);
 }
 
 /* Render the added/removed tool chips into the banner text line. When no
@@ -48,8 +47,7 @@ function _renderToolsetDiff(diff) {
       : '工具改动将在新会话生效（保持缓存命中）';
     return;
   }
-  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const esc = (s) => escapeHtml(String(s));
   const chip = (name, kind) =>
     `<span class="toolset-diff-chip ${kind}">${kind === 'added' ? '+' : '−'} ${esc(name)}</span>`;
   const lead = (typeof t === 'function') ? t('toolset.pendingDiff')

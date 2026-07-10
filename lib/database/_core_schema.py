@@ -349,6 +349,14 @@ CONVERSATIONS = define_table(
     sa.Column('settings', jsonb_column(), nullable=False, server_default=sa.text("'{}'")),
     sa.Column('msg_count', sa.Integer, nullable=False, server_default=sa.text('0')),
     sa.Column('search_text', sa.Text, nullable=False, server_default=''),
+    # rev — server-issued monotonic message-version. Bumped by a DB trigger
+    # (NOT by any application writer) whenever the messages column actually
+    # changes, so it is impossible for a new writer to forget. Powers the
+    # compare-and-swap PUT + rev-based reconcile winner (a stale client copy
+    # carries an older rev and can never clobber fresh server truth). Starts at
+    # 0 on every existing row and pre-CAS client, so a client that sends no
+    # baseRev falls back to the legacy count-regression guard (fail-open).
+    sa.Column('rev', sa.Integer, nullable=False, server_default=sa.text('0')),
     sa.PrimaryKeyConstraint('id', 'user_id'),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
 )
@@ -475,6 +483,12 @@ TASK_RESULTS = define_table(
     sa.Column('tool_rounds', sa.Text),
     sa.Column('search_results', sa.Text),
     sa.Column('metadata', sa.Text),
+    # segments — the ordered typed-segment timeline (epic pt_cb8f98b0cb9b47fb).
+    # TEXT holding a JSON string (the thin form; see segments.segments_to_json),
+    # NOT JSONB — matches the sibling tool_rounds/search_results/metadata cols
+    # so the same json.dumps(ensure_ascii=False) write path + parity DDL apply.
+    # Read wholesale, never queried, so JSONB buys nothing.
+    sa.Column('segments', sa.Text),
     sa.Column('created_at', bigint_column(), nullable=False),
     sa.Column('completed_at', bigint_column()),
 )
@@ -777,12 +791,78 @@ PROJECT_TASKS = define_table(
     sa.Column('lease_expires_at', bigint_column(), nullable=False, server_default=sa.text('0')),
     sa.Column('created_by_conv', sa.Text, nullable=False, server_default=''),
     sa.Column('depends_on', sa.Text, nullable=False, server_default="[]"),
+    # kind: 'epic' (default — a coordination work-item, dispatchable) or
+    # 'lease' (a durational resource/path RESERVATION — "a sibling is actively
+    # editing these paths, hold off"). A lease reuses the SAME soft TTL-lease +
+    # at-read-time expiry as an epic claim, but is EXCLUDED from
+    # select_dispatchable (never auto-dispatched as work) and rendered in its
+    # own "Held" section. See lib/conversations/project_board.py::claim_lease.
+    sa.Column('kind', sa.Text, nullable=False, server_default='epic'),
     # dispatched: 1 when the CURRENT claim was minted by brain-driven dispatch
     # (the heartbeat/completion sweep) rather than a human/agent claim — surfaced
     # as a "brain-dispatched" badge on the board card. Reset to 0 on complete.
     sa.Column('dispatched', sa.Integer, nullable=False, server_default=sa.text('0')),
     sa.Column('created_at', bigint_column(), nullable=False, server_default=sa.text('0')),
     sa.Column('updated_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+)
+
+# project_status_snapshots — the human↔brain status lane (Pillar #7 of the
+# project brain). Append-only, keyed on project_path; seq is a per-project
+# monotonic counter (composite PK, mirrors project_events) so the trail can be
+# read newest-first / incrementally. Each row is ONE synthesized "where is the
+# project / are we drifting from the charter" narrative + the pillar_state JSON
+# evidence it was generated from + the trigger that minted it. Retention is
+# bounded (pruned on insert). HUMAN-FACING ONLY — never injected into sibling
+# agent prompts. See lib/conversations/project_status.py.
+PROJECT_STATUS_SNAPSHOTS = define_table(
+    'project_status_snapshots',
+    sa.Column('project_path', sa.Text, nullable=False),
+    sa.Column('seq', sa.Integer, nullable=False),
+    sa.Column('snapshot_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('narrative', sa.Text, nullable=False, server_default=''),
+    sa.Column('pillar_state', sa.Text, nullable=False, server_default="{}"),
+    sa.Column('trigger', sa.Text, nullable=False, server_default='manual'),
+    sa.Column('ts', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.PrimaryKeyConstraint('project_path', 'seq'),
+)
+
+
+# project_watch_items — the human's standing "things I care about" list (Pillar
+# #7 watch lane). The HUMAN authors each item (kind: concern|question|goal +
+# free text); the brain addresses it on a recurring basis. Single TEXT PK
+# (item_id). status: open|resolved. `promoted` marks an item bridged into the
+# charter (the ONLY path to agent awareness — a human-gated charter commit).
+# HUMAN-FACING ONLY — never injected into sibling agent prompts. See
+# lib/conversations/project_watch.py.
+PROJECT_WATCH_ITEMS = define_table(
+    'project_watch_items',
+    sa.Column('item_id', sa.Text, primary_key=True),
+    sa.Column('project_path', sa.Text, nullable=False, server_default=''),
+    sa.Column('kind', sa.Text, nullable=False, server_default='concern'),
+    sa.Column('text', sa.Text, nullable=False, server_default=''),
+    sa.Column('status', sa.Text, nullable=False, server_default='open'),
+    sa.Column('promoted', sa.Integer, nullable=False, server_default=sa.text('0')),
+    sa.Column('response_fingerprint', sa.Text, nullable=False, server_default=''),
+    sa.Column('created_by_conv', sa.Text, nullable=False, server_default=''),
+    sa.Column('created_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('updated_at', bigint_column(), nullable=False, server_default=sa.text('0')),
+)
+
+# project_watch_responses — append-only trail of the brain's recurring
+# responses to a watch item, keyed on item_id with a monotonic per-item seq
+# (composite PK, mirrors project_events). Bounded retention per item (pruned on
+# insert). A concern whose answer CHANGES over time is the drift signal, so we
+# keep the trail, not latest-only. HUMAN-FACING ONLY.
+PROJECT_WATCH_RESPONSES = define_table(
+    'project_watch_responses',
+    sa.Column('item_id', sa.Text, nullable=False),
+    sa.Column('seq', sa.Integer, nullable=False),
+    sa.Column('project_path', sa.Text, nullable=False, server_default=''),
+    sa.Column('response', sa.Text, nullable=False, server_default=''),
+    sa.Column('pillar_state', sa.Text, nullable=False, server_default="{}"),
+    sa.Column('trigger', sa.Text, nullable=False, server_default='manual'),
+    sa.Column('ts', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.PrimaryKeyConstraint('item_id', 'seq'),
 )
 
 # optimizer_proposals — nightly self-tuning proposals. Single TEXT PK;

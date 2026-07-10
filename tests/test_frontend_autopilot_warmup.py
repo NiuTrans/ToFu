@@ -45,7 +45,7 @@ def _node_deps_available() -> bool:
 # The i18n values under test — must stay in sync with static/js/i18n.js.
 # The whole point of the fix is that the placeholder uses the SHORT label,
 # never the long composing sentence.
-_WARM_ZH = 'Autopilot…'
+_WARM_ZH = 'Autopilot 启动中…'
 _COMPOSING_ZH = 'Autopilot 正在生成下一条用户回复…'
 
 
@@ -65,7 +65,7 @@ global.console = console;
 //    assertions can distinguish the short label from the long sentence. Any
 //    other key echoes back (fine — those aren't asserted here). ──
 const _I18N = {
-  'autopilot.warming':  'Autopilot…',
+  'autopilot.warming':  'Autopilot 启动中…',
   'autopilot.composing':'Autopilot 正在生成下一条用户回复…',
 };
 win.t = global.t = (k) => (k in _I18N ? _I18N[k] : k);
@@ -105,6 +105,7 @@ for (const [name, fn] of [
   ['_renderFileChangesHtml', _noopStr],
   ['_extractFileChangesFromRoundsAsync', () => Promise.resolve([])],
   ['normalizeErrorEnvelope', (x) => x],
+  ['Icon', (n) => '<svg data-icon="' + n + '"></svg>'],
 ]) {
   if (typeof win[name] === 'undefined') { win[name] = global[name] = fn; }
 }
@@ -129,7 +130,7 @@ const inner = document.getElementById('chatInner');
 inner.innerHTML = _streamingBubbleHTML('autopilot', null, null, 'vu-1').toString();
 
 const bubbleHtml = inner.innerHTML;
-check('warmup_short_label_present', bubbleHtml.includes('Autopilot…'));
+check('warmup_short_label_present', bubbleHtml.includes('Autopilot 启动中…'));
 check('warmup_no_long_sentence', !bubbleHtml.includes('正在生成下一条用户回复'));
 // The worker bubble's placeholder for comparison — both should be minimal.
 const workerHtml = _streamingBubbleHTML('worker', null, null, 'w-1').toString();
@@ -150,7 +151,7 @@ const bodyHtml = body ? body.innerHTML : '';
 // The streamed content is now visible in the content zone…
 check('content_rendered', bodyHtml.includes('Hello from the virtual user'));
 // …and the warm-up pulse label is GONE (replaced, not appended-below).
-check('warmup_pulse_replaced', !bodyHtml.includes('Autopilot…'));
+check('warmup_pulse_replaced', !bodyHtml.includes('Autopilot 启动中…'));
 // The long sentence must never appear at any point.
 check('never_long_sentence', !bodyHtml.includes('正在生成下一条用户回复'));
 
@@ -206,7 +207,7 @@ global.document = win.document;
 global.console = console;
 
 const _I18N = {
-  'autopilot.warming':  'Autopilot…',
+  'autopilot.warming':  'Autopilot 启动中…',
   'stream.phase.retrying': 'Retrying…',
 };
 win.t = global.t = (k) => (k in _I18N ? _I18N[k] : k);
@@ -258,6 +259,7 @@ for (const [name, fn] of [
   ['_renderFileChangesHtml', _noopStr],
   ['_extractFileChangesFromRoundsAsync', () => Promise.resolve([])],
   ['normalizeErrorEnvelope', (x) => x], ['saveConversations', _noop],
+  ['Icon', (n) => '<svg data-icon="' + n + '"></svg>'],
 ]) {
   if (typeof win[name] === 'undefined') { win[name] = global[name] = fn; }
 }
@@ -374,7 +376,7 @@ def test_autopilot_warmup_placeholder_minimal_and_replaced():
     # 3 (step1) + 3 (step2) + fn_exposed = 7
     assert output.count('PASS') >= 7, f'expected >=7 PASS lines, got:\n{output}'
     # Guard the exact i18n values so a table drift is caught here too.
-    assert _WARM_ZH == 'Autopilot…'
+    assert _WARM_ZH == 'Autopilot 启动中…'
     assert '正在生成下一条用户回复' in _COMPOSING_ZH
 
 

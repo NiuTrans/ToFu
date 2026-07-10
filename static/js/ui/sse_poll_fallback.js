@@ -323,6 +323,9 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
             _apTarget = _apConv.messages[_apConv.messages.length - 1];
           }
           _apTarget._autopilotPending = _apPayload;
+          /* ★ AUTHORITATIVE baton on the conv object (see sse_pipeline.js) —
+           *   survives a message splice that could strip the positional stamp. */
+          if (_apConv) _apConv._apPendingBaton = _apPayload;
           console.info(
             `[_pollFallback] 🤖 Autopilot follow-up attached via poll — ` +
             `next task=${data.autopilotNextTaskId.slice(0,8)} detachedCarrier=${!!_apDetached} ` +

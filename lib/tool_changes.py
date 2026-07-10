@@ -1,14 +1,17 @@
 """lib/tool_changes.py — Extract file-change list from a tool-rounds blob.
 
-This is a server-side port of the JS ``_extractFileChangesFromRounds``
-helper in ``static/js/ui.js``. It exists so:
+This is the single, authoritative derivation of the file-changes summary
+shown in the UI's file-changes bar. The frontend no longer parses tool
+rounds itself — it POSTs to ``/api/v1/messages/extract-file-changes`` and
+renders whatever this module returns (see ``static/js/ui/finish_info.js``
+→ ``Api.conversations.extractFileChanges`` / ``extractFileChangesBatch``).
+It exists so:
 
-* The headless API can derive the same file-change summary the UI
-  shows in its file-changes bar.
-* The UI fallback (used while a task is mid-stream, before the orchestrator's
-  git-history-based ``modifiedFileList`` is computed) calls into the
-  authoritative implementation instead of carrying a parallel copy of
-  the parsing rules. One source of truth.
+* The headless API can derive the same file-change summary the UI shows.
+* The UI (both mid-stream and on reloaded conversations, before the
+  orchestrator's git-history-based ``modifiedFileList`` is available)
+  delegates here instead of carrying a parallel copy of the parsing
+  rules. One source of truth.
 
 The orchestrator's own derivation
 (``lib/tasks_pkg/orchestrator.py:355-405``) uses ``get_modifications``
@@ -231,11 +234,18 @@ def extract_file_changes(tool_rounds: Iterable[dict]) -> List[FileChange]:
                 continue
 
         # ── Fallback: parse meta.title (✅/❌/📝 prefix + filename) ──
+        # NOTE: build_project_tool_meta() DEFAULTS meta['title'] to the bare
+        # tool name (e.g. 'apply_diff') and no write-tool builder overwrites
+        # it with a filename. So when a write round's toolArgs carries no
+        # usable path (e.g. a malformed / auto-repaired apply_diff), the title
+        # is just the tool name — NOT a real file. Emitting it would surface a
+        # bogus file-change entry literally named "apply_diff". Only use the
+        # title when it's a genuine filename, i.e. differs from the tool name.
         title = meta.get('title') or ''
         if title.startswith(('✅', '❌', '📝')):
             # Strip the emoji and any trailing whitespace.
             title = title[1:].lstrip()
-        if title:
+        if title and title != tn:
             if tn in _DIFF_TOOLS:
                 action = 'patched'
             elif tn in _INSERT_TOOLS:

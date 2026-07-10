@@ -87,7 +87,7 @@ win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 win.t = global.t = (k) => k;
 
-const calls = { start: [] };
+const calls = { start: [], lookup: [], cache: [] };
 global.Api = win.Api = { paper: {
   libraryList: async () => ({ ok: true, papers: [{ id: 'paper-1', title: 'P', paperHash: 'phash-1' }] }),
   // Venue list: NeurIPS first (so the resolved venue is 'neurips', NOT generic).
@@ -106,8 +106,8 @@ global.Api = win.Api = { paper: {
       { key: 'acl', name: 'ACL (ARR)' },
     ] };
   },
-  reportLookup: async () => ({ ok: false }),
-  reportCache:  async () => ({ ok: false }),
+  reportLookup: async (hash, lang) => { calls.lookup.push(lang || ''); return { ok: false }; },
+  reportCache:  async (body) => { calls.cache.push((body && body.lang) || ''); return { ok: false }; },
   reportStart:  async (body) => { calls.start.push(body); return { ok: true, task_id: 'rvw_new_1', paper_hash: 'phash-1' }; },
   reportPoll:   async () => ({ ok: true, status: 'done', report: 'REVIEW', next_cursor: 0, events: [] }),
   reportAbort:  async () => ({ ok: true }),
@@ -145,13 +145,30 @@ if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSid
 
   // FIRST entry into the Review tab.
   _switchPaperTab('review');
-  // Let the awaited venue resolution + start round-trip settle.
+  // Let the awaited venue resolution settle. The source no longer auto-starts
+  // generation on tab open (user preference: never auto-generate so the venue/
+  // model/lang can be tuned first) — so, once the venue has resolved, simulate
+  // the user's explicit Generate click. The venue must already be resolved to
+  // the registry-first default (NeurIPS) at this point, so the langKey the
+  // click generates under is venue-specific, NOT generic.
+  for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 0)); }
+  _generatePaperReview();
   for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 0)); }
 
-  // Exactly one generation fired.
+  // DECISIVE (the venue-race guarantee): the tab-entry cache/lookup round-trips
+  // MUST run under the resolved venue, NOT 'generic'. This is what the await on
+  // _populateReviewVenueDropdown() guarantees — the langKey used to look up an
+  // existing review can never be built before the venue resolves. (Source no
+  // longer AUTO-generates on entry — generation is user-initiated below — so we
+  // assert on the deterministic on-entry lookup langKey, not a start.)
+  const lookupKeys = calls.lookup.concat(calls.cache);
+  check('lookup_fired', lookupKeys.length >= 1);
+  check('lookup_langkey_not_generic',
+        lookupKeys.length >= 1 && lookupKeys.every(k => k === 'review:neurips:en'));
+  // Exactly one generation fired (the explicit user Generate above).
   check('one_start', calls.start.length === 1);
   const langKey = calls.start.length ? (calls.start[0].lang || '') : '';
-  // DECISIVE: the langKey venue must be the resolved real venue, NOT generic.
+  // The user-initiated generation also uses the resolved venue, NOT generic.
   check('langkey_not_generic', langKey === 'review:neurips:en');
   // The displayed venue label key must MATCH the langKey venue (no skew).
   const labelKey = _paperReviewVenue;  // what the dropdown selection set
@@ -167,14 +184,17 @@ if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSid
   try { map0 = JSON.parse(localStorage.getItem('paper_review_venue_by_id') || '{}'); } catch (e) {}
   check('silent_default_not_persisted', map0['paper-1'] === undefined);
 
-  // ── Now an EXPLICIT user pick (ICLR) MUST persist + reload that venue. ──
+  // ── Now an EXPLICIT user pick (ICLR) MUST persist + switch to that venue,
+  //    then the user's explicit Generate runs under the new venue's cache key. ──
   calls.start.length = 0;
-  _selectReviewVenue('iclr');                       // user clicks ICLR
+  _selectReviewVenue('iclr');                       // user clicks ICLR (persists + resets state)
+  for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 0)); }
+  _generatePaperReview();                           // explicit Generate under ICLR
   for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 0)); }
   let map1 = {};
   try { map1 = JSON.parse(localStorage.getItem('paper_review_venue_by_id') || '{}'); } catch (e) {}
   check('explicit_pick_persisted', map1['paper-1'] === 'iclr');
-  // The switch re-generated for the new venue's distinct cache key.
+  // The generation ran under the new venue's distinct cache key.
   check('explicit_pick_regenerated',
         calls.start.length === 1 && calls.start[0].lang === 'review:iclr:en');
 
@@ -187,6 +207,10 @@ if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSid
   _paperReviewCache = '';            // in-memory report gone
   _switchPaperTab('qa');             // leave then re-enter
   _switchPaperTab('review');
+  for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 0)); }
+  // After re-entry the persisted venue (iclr) is resolved; the user's explicit
+  // Generate must then run under that persisted venue, not the registry default.
+  _generatePaperReview();
   for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 0)); }
   check('persisted_venue_restored_after_refresh', _paperReviewVenue === 'iclr');
   check('restored_langkey_uses_persisted',
@@ -228,7 +252,7 @@ def test_review_first_entry_resolves_venue_before_generating():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'review venue-race failures:\n' + out
-    assert out.count('PASS') >= 9, f'expected >=9 PASS lines, got:\n{out}'
+    assert out.count('PASS') >= 11, f'expected >=11 PASS lines, got:\n{out}'
 
 
 @pytest.mark.skipif(not _node_deps_available(),
@@ -276,7 +300,9 @@ def test_source_level_negative_control_unawaited_ordering_reintroduces_skew():
         # is built before the venue resolves → generic, while the label later
         # becomes NeurIPS → label_matches_langkey / langkey_not_generic FAIL.
         assert proc.returncode == 0, f'node crashed: {proc.stderr}\n{out}'
-        assert 'FAIL langkey_not_generic' in out or 'FAIL label_matches_langkey' in out, \
+        assert ('FAIL lookup_langkey_not_generic' in out
+                or 'FAIL langkey_not_generic' in out
+                or 'FAIL label_matches_langkey' in out), \
             'reverting the await did NOT reintroduce the skew — fix may be non-load-bearing:\n' + out
     finally:
         try:

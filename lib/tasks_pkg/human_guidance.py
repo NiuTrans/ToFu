@@ -58,6 +58,14 @@ def request_human_guidance(guidance_id, task=None):
         resolved = evt.wait(timeout=_ABORT_POLL_INTERVAL)
         if resolved:
             break
+        # ★ Reaper heartbeat: a task blocked on human input is ALIVE (waiting on
+        #   the user, not wedged). This indefinite wait emits no event, so keep
+        #   the positive-liveness clock fresh so reap_stuck_running_tasks never
+        #   force-fails a legitimately human-waiting turn. (import-free: set the
+        #   plain dict field the reaper reads.)
+        if task is not None:
+            import time as _t
+            task['_dispatch_heartbeat'] = _t.time()
         # Check task abort
         if task and task.get('aborted'):
             logger.info('[HumanGuidance] Request %s — task aborted, '

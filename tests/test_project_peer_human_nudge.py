@@ -73,6 +73,10 @@ def _stub_io(monkeypatch):
                         _fake_emit)
     monkeypatch.setattr('lib.conversations.project_peer.audit_log',
                         lambda *a, **k: None)
+    # Identity target-id resolution so these DB-free tests use synthetic ids
+    # (cOP/cB) without a conversations table.
+    monkeypatch.setattr('lib.conversations.project_peer._resolve_target_conv_id',
+                        lambda t: ((t or '').strip(), ''))
     return calls
 
 
@@ -220,6 +224,7 @@ def test_NC_send_drops_peer_human_stamp(_stub_io):
     def run():
         import lib.conversations.project_peer as pp
         importlib.reload(pp)
+        pp._resolve_target_conv_id = lambda t: ((t or '').strip(), '')
         pp.send_peer_message('/proj', 'cOP', 'cB', 'focus', human=True)
         pl = _stub_io['enqueue'][-1]['payload']
         assert pl.get('_peerHuman') is None, \

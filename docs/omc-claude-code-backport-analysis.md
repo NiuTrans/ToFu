@@ -359,8 +359,8 @@ register_pre_hook(_planner_write_block_hook)
 
 | # | Recommendation | Priority | Effort | Dependencies |
 |---|---|---|---|---|
-| 1 | Structured Todo Tracking Tool | 🔴 High | M | None |
-| 2 | Todo Continuation Enforcer Hook | 🔴 High | S | Rec 1 |
+| 1 | Structured Todo Tracking Tool | ✅ SHIPPED (2026-07-06) | M | None |
+| 2 | Todo Continuation Enforcer Hook | ✅ SHIPPED (2026-07-06) | S | Rec 1 |
 | 3 | Adversarial Critic Prompt | 🟡 Medium | S | None |
 | 4 | 6-Section Delegation Template | 🟡 Medium | M | None |
 | 5 | Planner Write-Block Hook | 🟡 Medium | S | None |

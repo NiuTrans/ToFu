@@ -50,6 +50,14 @@ function _stdStubs(win) {
     // formatClockTime (core.js) — shared HH:MM formatter used by the streaming
     // bubble builders; deterministic stub so time strings don't vary per run.
     formatClockTime: () => '12:00',
+    // getConvById / getActiveConv (core.js) — the canonical conversation
+    // lookup helpers that several feature modules now delegate to instead of
+    // open-coding `conversations.find((c) => c.id === X)`. A harness that
+    // evals such a module but doesn't seed `conversations` needs these so the
+    // cross-file reference resolves. Tests that DO drive the lookup override
+    // via `globals`.
+    getConvById: () => null,
+    getActiveConv: () => null,
     // CSS.escape is used by querySelector-building code.
     CSS: { escape: (s) => s },
   };

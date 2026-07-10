@@ -76,8 +76,9 @@ _FIELDS: list[tuple[str, str, type, Any, Optional[tuple], str]] = [
 
     # ── Tool toggles ──────────────────────────────────────────────
     ('searchMode',            'search_mode',           str,   'multi',
-        ('off', 'single', 'multi'),
-        'Web-search behaviour.'),
+        ('off', 'multi'),
+        'Web-search behaviour. (Legacy "single" one-shot mode was retired; '
+        'a stored "single" is silently treated as "multi".)'),
     ('fetchEnabled',          'fetch_enabled',         bool,  True,   None, 'Enable fetch_url tool.'),
     ('codeExecEnabled',       'code_exec_enabled',     bool,  False,  None, 'Enable sandboxed code execution.'),
     ('memoryEnabled',         'memory_enabled',        bool,  True,   None, 'Enable memory tools.'),

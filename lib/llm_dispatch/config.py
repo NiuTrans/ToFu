@@ -314,7 +314,10 @@ DEFAULT_SLOT_CONFIGS = {
     'gemini-2.0-flash-lite':         {'caps': {'text', 'cheap'},                   'rpm': 200, 'latency': 1000, 'cost': 0.001},
     'gemini-3.1-flash-lite-preview': {'caps': {'text', 'vision', 'cheap'},         'rpm': 30,  'latency': 1500, 'cost': 0.001},
     'gemini-3.1-pro-preview':        {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 5,   'latency': 3000, 'cost': 0.006},
-    'gemini-3-flash-preview':        {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 60,  'latency': 1500, 'cost': 0.001},
+    'gemini-3-flash-preview':        {'caps': {'text', 'vision', 'thinking', 'cheap', 'audio_chat'}, 'rpm': 60,  'latency': 1500, 'cost': 0.001},
+    # Omni chat model: audio arrives inline as an input_audio content-part via
+    # /chat/completions (audio_chat), NOT the /audio/transcriptions endpoint.
+    'LongCat-Flash-Omni-2603':       {'caps': {'text', 'vision', 'audio_chat'}, 'rpm': 60,  'latency': 2000, 'cost': 0.0},
     'gemini-3.5-flash':              {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 30,  'latency': 2000, 'cost': 0.005},
 
     # ── Qwen (DashScope) ──
@@ -410,6 +413,19 @@ DEFAULT_SLOT_CONFIGS = {
     'gemini-3-pro-image-preview':            {'caps': {'image_gen'},               'rpm': 10,  'latency': 30000, 'cost': 0.020},
     'gemini-2.5-flash-image':                {'caps': {'image_gen'},               'rpm': 10,  'latency': 30000, 'cost': 0.015},
     'gemini-2.0-flash-preview-image-generation': {'caps': {'image_gen'},           'rpm': 10,  'latency': 30000, 'cost': 0.010},
+
+    # ── Speech-to-text (transcription) ──
+    # Reference targets for the voice-input feature. Any provider exposing the
+    # standard POST /v1/audio/transcriptions endpoint works once a slot carries
+    # the 'transcription' capability — these are just pre-seeded metadata so a
+    # configured model routes without a hand-written entry. Selected directly by
+    # lib/transcription.py (NOT the chat picker); 'transcription' is a non-chat
+    # cap (see dispatcher._NON_CHAT_CAPS).
+    'gpt-4o-transcribe':             {'caps': {'transcription'},                   'rpm': 60,  'latency': 4000, 'cost': 0.006},
+    'gpt-4o-mini-transcribe':        {'caps': {'transcription'},                   'rpm': 60,  'latency': 3000, 'cost': 0.003},
+    'whisper-1':                     {'caps': {'transcription'},                   'rpm': 60,  'latency': 4000, 'cost': 0.006},
+    'whisper-large-v3-turbo':        {'caps': {'transcription'},                   'rpm': 120, 'latency': 2000, 'cost': 0.0004},
+    'whisper-large-v3':              {'caps': {'transcription'},                   'rpm': 120, 'latency': 3000, 'cost': 0.0004},
 
     # ── Embeddings ──
     'text-embedding-v4':             {'caps': {'embedding'},                       'rpm': 100, 'latency': 500,  'cost': 0.001},

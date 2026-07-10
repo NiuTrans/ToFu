@@ -95,6 +95,7 @@ global.activeConvId = 'conv-ap';
 global.conversations = [];
 let _activeConv = null;
 global.getActiveConv = () => _activeConv;
+global.convIsBusy = (c) => !!c && (activeStreams.has(c.id) || !!c.activeTaskId);
 global.sendMessage = () => {};
 global.Api = { chat: { abortTask: () => {} } };
 global.twStop = () => {};

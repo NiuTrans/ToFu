@@ -1267,7 +1267,8 @@ class FlowExecutor:
         timeout = params.get('timeout_sec')
         try:
             timeout = int(timeout) if timeout not in (None, '') else 300
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            logger.debug('[FlowEngine] bad timeout_sec param (defaulting 300): %s', e)
             timeout = 300
         approved = request_write_approval(req_id, timeout=timeout)
         self._emit({'type': 'human_resolved', 'node_id': nid, 'mode': mode,
@@ -1515,7 +1516,8 @@ class _AbortAwareShim:
         if key == 'aborted':
             try:
                 return bool(self._abort_check())
-            except Exception:
+            except Exception as e:
+                logger.debug('[FlowEngine] abort_check raised (treating as not-aborted): %s', e)
                 return False
         if key == 'id':
             return self._id
@@ -1537,6 +1539,7 @@ def compile_plan(definition: dict) -> dict:
     try:
         definition = expand_subflows(definition)
     except ValueError as e:
+        logger.debug('[FlowEngine] compile_plan subflow expansion failed: %s', e)
         return {'ok': False, 'steps': [], 'error': f'subflow: {e}'}
 
     nodes = {n['id']: n for n in definition.get('nodes', [])}

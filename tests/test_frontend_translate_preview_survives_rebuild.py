@@ -193,8 +193,13 @@ for (const role of ['worker', 'planner', 'critic']) {
   check('rebuild_has_msgid_' + role, !!sm && sm.getAttribute('data-msg-id') === MSGID);
 
   // After rebuild, a partial frame for this msgId must paint (the bug: it didn't).
+  // Zone unification (2026-07-07): a rebuilt body has the _ensureStreamZones
+  // translatedPrimary slot, so the Chinese paints THERE (above content), not
+  // the legacy bottom translatePreview. Accept either — the contract is that
+  // it paints somewhere visible in the rebuilt bubble, keyed by data-msg-id.
   const painted = fn('c1', MSGID, role + ' 第N轮译文');
-  const zone = sm && sm.querySelector('[data-zone="translatePreview"] .md-content');
+  const zone = sm && (sm.querySelector('[data-zone="translatedPrimary"] .md-content')
+                      || sm.querySelector('[data-zone="translatePreview"] .md-content'));
   check('rebuild_partial_paints_' + role, painted === true
     && !!zone && new RegExp(role + ' 第N轮译文').test(zone.innerHTML));
 }
@@ -211,7 +216,8 @@ for (const role of ['worker', 'planner', 'critic']) {
 
   showStreamingUIForConv('c1');   // NO fn() call afterwards — rebuild must repaint on its own
 
-  const zone = document.querySelector('#streaming-msg [data-zone="translatePreview"] .md-content');
+  const zone = document.querySelector('#streaming-msg [data-zone="translatedPrimary"] .md-content')
+            || document.querySelector('#streaming-msg [data-zone="translatePreview"] .md-content');
   check('rebuild_repaints_stashed_partial', !!zone && /已翻译到这里的译文/.test(zone.innerHTML));
 }
 

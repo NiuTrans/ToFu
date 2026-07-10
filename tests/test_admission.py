@@ -27,6 +27,16 @@ class AdmissionControllerTest(unittest.TestCase):
         import lib.runtime_state_store as rss
         rss.reset_for_test()
 
+    def tearDown(self):
+        # ALSO reset on the way out: test_unbounded_when_zero pumps the
+        # shared counter to 1000 (unbounded controller), and without this
+        # that count leaks FORWARD into any suite that runs next and reads
+        # the same global store (e.g. test_api_v1_agent_run's cap-64
+        # production controller would then 503 every request). setUp-only
+        # reset protects THIS file's ordering but not the next file's.
+        import lib.runtime_state_store as rss
+        rss.reset_for_test()
+
     def test_try_acquire_bounds_and_releases(self):
         async def go():
             ctrl = admission.AdmissionController(max_inflight=2)

@@ -403,7 +403,7 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
         event_payload['vertical'] = vertical_payload
     append_event(task, event_payload)
 
-    tool_content = format_search_for_tool_response(results, search_diag=search_diag)
+    tool_content = format_search_for_tool_response(results, search_diag=search_diag, query=query)
     if vertical_result:
         tool_content = _vertical_header_for_llm(vertical_result) + tool_content
 
@@ -456,12 +456,13 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
         q, f, v = spec
         results, search_diag, engine_breakdown, vertical_result = _web_search_one(
             q, user_question, f, vertical=v)
-        formatted = format_search_for_tool_response(results, search_diag=search_diag)
+        formatted = format_search_for_tool_response(results, search_diag=search_diag, query=q)
         if vertical_result:
             formatted = _vertical_header_for_llm(vertical_result) + formatted
         return (q, results, search_diag, engine_breakdown, formatted, vertical_result)
 
-    ordered = run_batch_concurrent(query_specs, _worker, max_workers=5, tag='Search')
+    ordered = run_batch_concurrent(query_specs, _worker, max_workers=5, tag='Search',
+                                   abort=lambda: bool(task.get('aborted')))
 
     all_display_results = []
     all_formatted = []
@@ -614,7 +615,8 @@ def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, r
     def _worker(target_url):
         return _fetch_url_one(target_url, user_question, fetch_reason='')
 
-    ordered = run_batch_concurrent(url_list, _worker, max_workers=8, tag='Fetch')
+    ordered = run_batch_concurrent(url_list, _worker, max_workers=8, tag='Fetch',
+                                   abort=lambda: bool(task.get('aborted')))
 
     from lib.tasks_pkg.tool_display import _short_url
     all_display_results = []

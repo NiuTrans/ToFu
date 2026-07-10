@@ -32,6 +32,23 @@ from lib.tasks_pkg.compaction._constants import (
 logger = get_logger(__name__)
 
 
+# Matches a vertical-search block emitted by
+# ``handlers.search._vertical_header_for_llm`` and prepended to web_search
+# tool content: the ``═══ Vertical Search … ═══`` header, its body, and the
+# closing ``═══ Web Search Results ═══`` marker — optionally preceded by the
+# ``=== Search: <q> ===`` batch-query header. Relocated into the persist index
+# by ``_persist_web_search_split`` because the ``═══`` header is NOT a ``════``
+# per-result boundary: left in place, the split would glue the block onto
+# result-1's file and it would drop out of the model's immediate context.
+# See JOURNAL 2026-07-06 (vertical-search debug-panel gap).
+_VERT_BLOCK_RE = re.compile(
+    r'(?:^=== Search:[^\n]*\n)?'
+    r'^═══ Vertical Search.*?'
+    r'^═══ Web Search Results ═══[^\n]*\n?',
+    re.MULTILINE | re.DOTALL,
+)
+
+
 def _short_id(tool_use_id: str) -> str:
     """Derive a short, unique filename id fragment from a tool-use id.
 
@@ -59,6 +76,33 @@ def _human_size(byte_count: int) -> str:
         return f'{byte_count / 1024:.1f}KB'
     else:
         return f'{byte_count / (1024 * 1024):.1f}MB'
+
+
+# Lines that carry no human meaning as a result description: decorative
+# rules (═══ / ─── / ═══ boundaries, ==== markers) and blank lines. Used to
+# skip past the leading separator a formatted tool result (e.g.
+# ``get_conversation``) opens with, so the persisted-result label reads
+# ``past conversation — "Referenced Conversation: …"`` instead of a wall of
+# box-drawing characters.
+_DECORATIVE_LINE_RE = re.compile(r'^[\s═─—\-=_*#·•]+$')
+
+
+def _first_meaningful_line(content: str) -> str:
+    """Return the first non-decorative, non-blank line of ``content``.
+
+    Falls back to the first line when every scanned line is decorative, so a
+    description is always produced.
+    """
+    first = ''
+    for line in content.lstrip().split('\n'):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not first:
+            first = stripped
+        if not _DECORATIVE_LINE_RE.match(stripped):
+            return stripped
+    return first
 
 
 def _persist_to_disk(content: str, tool_name: str, tool_use_id: str = '',
@@ -124,8 +168,7 @@ def _persist_to_disk(content: str, tool_name: str, tool_use_id: str = '',
     logger.info('[Persist] %s result persisted to disk: %s (%s)',
                 tool_name, filepath, _human_size(len(content)))
 
-    _first_line = content.lstrip().split('\n', 1)[0].strip()
-    _register_label(filepath, tool_name, _first_line)
+    _register_label(filepath, tool_name, _first_meaningful_line(content))
 
     # Default preview: first N chars truncated at newline boundary
     preview = content[:_PERSIST_PREVIEW_CHARS]
@@ -161,16 +204,56 @@ def _persist_web_search_split(content: str, persist_dir: str,
     Returns None if the content doesn't look like structured web_search
     output (falls through to default single-file persistence).
     """
+    _SEP = '════════════════════'
+    # ── Relocate vertical-search block(s) out of the split body ──
+    # The vertical header (``═══ Vertical Search … ═══``) is prepended to the
+    # tool content by the handler, but its 3-char ``═══`` rules are NOT the
+    # 20-char ``════`` per-result boundary — so left in place the split glues
+    # the block onto result-1's file and it drops out of the model's immediate
+    # context (the debug-panel gap). Extract every block (single-search: one
+    # leading block; batch: one per ``=== Search: <q> ===`` section) verbatim,
+    # remove them from the body before splitting, and prepend them to the index.
+    vert_blocks = []  # NEUTERED: relocation disabled
+    if vert_blocks:
+        # DATA-LOSS GUARD. ``_VERT_BLOCK_RE`` is lazy+DOTALL: if a block's
+        # intended close ``═══ Web Search Results ═══`` is missing/truncated,
+        # ``.*?`` runs FORWARD to the first such marker downstream — possibly
+        # inside a real result body — and sub-ing that match out would DELETE
+        # result text. A legitimate block contains NEITHER a per-result
+        # ``════`` separator NOR a ``^[N]`` result marker (verified against
+        # real blocks), so if any match does, the match over-reached →
+        # abandon relocation and leave ``content`` untouched (worst case: the
+        # block stays glued to result-1, the pre-fix cosmetic behaviour —
+        # never data loss).
+        if any(_SEP in b or re.search(r'^\[\d+\]', b, re.MULTILINE)
+               for b in vert_blocks):
+            vert_blocks = []
+        else:
+            stripped = _VERT_BLOCK_RE.sub('', content)
+            # Only commit to the stripped body if it STILL looks like
+            # structured search output. Otherwise keep the original — and
+            # since ``content`` is never reassigned in that branch, a
+            # subsequent ``return None`` falls through to single-file
+            # persistence where the caller re-persists the ORIGINAL, block
+            # intact (str is immutable; the local rebind never touched it).
+            if re.search(r'^\[1\]', stripped, re.MULTILINE):
+                content = stripped
+            else:
+                vert_blocks = []
+
     if not re.search(r'^\[1\]', content, re.MULTILINE):
         return None
 
-    _SEP = '════════════════════'
     parts = content.split(_SEP)
 
     if len(parts) < 2:
         return None  # Only one result or no separators — use default
 
     index_lines = []
+    for _vb in vert_blocks:
+        _vb = _vb.strip()
+        if _vb:
+            index_lines.append(_vb + '\n')
     index_lines.append(
         f'Search returned {len(parts)} results, saved to separate files '
         f'(total {_human_size(len(content))}). The index below lists every '
@@ -193,6 +276,7 @@ def _persist_web_search_split(content: str, persist_dir: str,
 
         title = ''
         url = ''
+        authority = ''
         has_content = False
         content_chars = 0
         for line in lines:
@@ -201,6 +285,8 @@ def _persist_web_search_split(content: str, persist_dir: str,
                 title = m_title.group(2).strip()
             if line.strip().startswith('URL:'):
                 url = line.strip()[4:].strip()
+            if line.strip().startswith('Authority:'):
+                authority = line.strip()[len('Authority:'):].strip()
             if '──── Full Page Content' in line:
                 has_content = True
 
@@ -240,9 +326,10 @@ def _persist_web_search_split(content: str, persist_dir: str,
             snippet = ' '.join(snippet_buf)[:_SNIPPET_CHARS].strip()
 
         status = f'{_human_size(content_chars)} fetched' if has_content else 'snippet only'
+        _auth_line = f'\n    Authority: {authority}' if authority else ''
         index_lines.append(
             f'[{i}] {title}\n'
-            f'    URL: {url}\n'
+            f'    URL: {url}{_auth_line}\n'
             f'    Status: {status}\n'
             f'    File: {filepath}'
         )

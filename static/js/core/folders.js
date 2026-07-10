@@ -51,7 +51,7 @@ async function deleteFolder(folderId) {
 }
 
 function setConversationFolder(convId, folderId) {
-  const c = conversations.find(x => x.id === convId);
+  const c = getConvById(convId);
   if (!c) return;
   c.folderId = folderId || null;
   saveConversations(null);  // null = metadata-only, don't bump updatedAt

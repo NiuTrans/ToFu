@@ -72,6 +72,11 @@ def _stub_io(monkeypatch):
                         lambda *a, **k: None)
     monkeypatch.setattr('lib.conversations.project_peer.audit_log',
                         lambda *a, **k: None)
+    # Identity target-id resolution so these DB-free tests use synthetic ids
+    # (cA/cB) without a conversations table. The real resolver is covered by
+    # the dedicated seeded-DB tests below (test_resolve_* / test_send_*_target).
+    monkeypatch.setattr('lib.conversations.project_peer._resolve_target_conv_id',
+                        lambda t: ((t or '').strip(), ''))
     return calls
 
 
@@ -251,8 +256,12 @@ def test_intervene_hard_abort_runs_when_approved(_stub_io, monkeypatch):
     assert any(ev == 'intervention' for ev, _ in audits), 'must audit the intervention'
 
 
-def test_intervene_refuses_self():
+def test_intervene_refuses_self(monkeypatch):
     from lib.conversations.project_peer import intervene_peer
+    # Identity target resolution (synthetic ids, no conversations table); the
+    # self-check must still fire on the resolved id.
+    monkeypatch.setattr('lib.conversations.project_peer._resolve_target_conv_id',
+                        lambda t: ((t or '').strip(), ''))
     assert intervene_peer('/p', 'cA', 'cA', 'x')['error'] == 'cannot_intervene_self'
 
 
@@ -324,6 +333,14 @@ def _drive_handler_intervene(monkeypatch, decision, autopilot=False):
                         lambda gid, task=None: decision)
     monkeypatch.setattr('lib.tasks_pkg.autopilot.is_autopilot_enabled',
                         lambda t: autopilot)
+    # Identity target-id resolution: these handler-surface tests use synthetic
+    # ids (cA/cB) with no seeded conversations row. Without this the REAL
+    # resolver returns unknown_target once ANY sibling suite has run init_db()
+    # (which creates the empty conversations table) — a cross-file ordering
+    # fragility, not a product bug. The seeded-DB resolver tests cover the real
+    # path.
+    monkeypatch.setattr('lib.conversations.project_peer._resolve_target_conv_id',
+                        lambda t: ((t or '').strip(), ''))
     task = {'id': 't1', 'convId': 'cA', 'messages': [], 'toolRounds': []}
     round_entry = {'query': 'project_intervene', 'status': 'searching'}
     fn_args = {'to_conv_id': 'cB', 'message': 'stop', 'hard_abort': True}
@@ -499,6 +516,9 @@ def test_NC_storm_guard_noop_breaks_rate_limit(_stub_io):
     def run():
         import lib.conversations.project_peer as pp
         importlib.reload(pp)
+        # Reload re-binds _resolve_target_conv_id to the real (DB-reading) fn;
+        # re-stub to identity so this DB-free NC uses synthetic ids.
+        pp._resolve_target_conv_id = lambda t: ((t or '').strip(), '')
         # Re-stub via module attrs the reloaded code reads at call time.
         for i in range(3):
             pp.send_peer_message('/p', 'cA', 'cB', f'm{i}')
@@ -533,6 +553,7 @@ def test_NC_audit_gate_noop_allows_unapproved_abort(monkeypatch):
     def run():
         import lib.conversations.project_peer as pp
         importlib.reload(pp)
+        pp._resolve_target_conv_id = lambda t: ((t or '').strip(), '')
         monkeypatch.setattr('lib.conversations.project_peer.audit_log',
                             lambda *a, **k: None)
         res = pp.intervene_peer('/p', 'cA', 'cB', 'stop',
@@ -567,6 +588,7 @@ def test_NC_deny_branch_noop_runs_abort_despite_denial(_stub_io, monkeypatch):
     def run():
         import lib.conversations.project_peer as pp
         importlib.reload(pp)
+        pp._resolve_target_conv_id = lambda t: ((t or '').strip(), '')
         monkeypatch.setattr('lib.conversations.project_peer.audit_log',
                             lambda *a, **k: None)
         res = pp.intervene_peer('/p', 'cA', 'cB', 'stop', hard_abort=True,

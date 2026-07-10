@@ -141,7 +141,8 @@ def test_summary_empty_project(flask_app):
     assert build_brain_summary('') == {
         'epicsOpen': 0, 'epicsClaimed': 0, 'epicsDone': 0,
         'pendingDecisions': 0, 'activePeers': 0, 'peerEpics': {},
-        'charterExists': False, 'conflicts': 0, 'conflictMessages': []}
+        'charterExists': False, 'conflicts': 0, 'conflictMessages': [],
+        'statusLine': ''}
 
 
 def test_summary_conflicts_from_file_overlap(flask_app):

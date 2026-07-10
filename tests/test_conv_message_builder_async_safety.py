@@ -15,7 +15,9 @@ in-flight request.
 
 Today there is exactly ONE ``async def`` caller —
 ``routes/conversations.py::debug_messages`` — and it correctly off-loads the
-builder via ``await asyncio.to_thread(build_api_messages_from_db, …)``.
+blocking DB reconstruction (``_load_messages_from_db`` → ``build_wire_messages``)
+by wrapping it in a local ``_build`` closure that is run via
+``await asyncio.to_thread(_build)``, so the event loop never blocks.
 
 This suite makes that an enforced, CI-checked invariant so a future ``async
 def`` route can't silently reintroduce the event-loop block.  It is a
@@ -43,6 +45,12 @@ _BLOCKING_BUILDERS = {
     'build_api_messages_from_db',
     'build_branch_api_messages',
 }
+
+# The blocking DB-read primitives whose synchronous ``db.execute(SELECT …)`` is
+# what actually stalls the loop. ``debug_messages`` off-loads these by wrapping
+# them in a local closure run via ``asyncio.to_thread`` — so they must never be
+# invoked directly on the coroutine's own frame.
+_BLOCKING_DB_READS = _BLOCKING_BUILDERS | {'_load_messages_from_db'}
 
 
 def _iter_route_py_files():
@@ -99,6 +107,34 @@ def _raw_blocking_calls_in_async(func: ast.AsyncFunctionDef) -> list[tuple[str, 
     return offenders
 
 
+def _nested_call_node_ids(func: ast.AST) -> set[int]:
+    """ids of every ``ast.Call`` that lives inside a nested (async) function
+    def within *func* — i.e. calls that run on the NESTED frame, not *func*'s
+    own frame. Used to distinguish a blocking read that is off-loaded (wrapped
+    in a local closure passed to ``to_thread``) from one invoked on the loop."""
+    nested: set[int] = set()
+    for node in ast.walk(func):
+        if node is not func and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call):
+                    nested.add(id(sub))
+    return nested
+
+
+def _direct_frame_calls(func: ast.AST, names: set[str]) -> list[tuple[str, int]]:
+    """Calls to any callee in *names* that run on *func*'s OWN frame (excluding
+    calls inside nested function defs — those run off-frame, e.g. when the
+    nested def is off-loaded via ``asyncio.to_thread``)."""
+    nested = _nested_call_node_ids(func)
+    hits: list[tuple[str, int]] = []
+    for node in ast.walk(func):
+        if isinstance(node, ast.Call) and id(node) not in nested:
+            nm = _called_name(node)
+            if nm in names:
+                hits.append((nm, node.lineno))
+    return hits
+
+
 @pytest.mark.unit
 class TestDebugMessagesStaysOffLoop:
     """The single known async caller must keep its ``asyncio.to_thread``
@@ -117,25 +153,34 @@ class TestDebugMessagesStaysOffLoop:
             'def — if it was renamed/removed, update this guard'
         )
 
-        # It must NOT invoke the builder directly …
+        # It must NOT invoke a named blocking builder directly on the loop …
         raw = _raw_blocking_calls_in_async(debug_fn)
         assert not raw, (
             f'debug_messages invokes a blocking builder directly on the event '
-            f'loop at line(s) {[ln for _n, ln in raw]} — wrap it in '
-            f'`await asyncio.to_thread(build_api_messages_from_db, …)`'
+            f'loop at line(s) {[ln for _n, ln in raw]} — off-load it via '
+            f'`await asyncio.to_thread(...)`'
         )
 
-        # … and it MUST pass the builder by reference into to_thread.
-        to_thread_refs = []
-        for call in (n for n in ast.walk(debug_fn) if isinstance(n, ast.Call)):
-            if _is_to_thread_call(call):
-                for arg in call.args:
-                    if isinstance(arg, ast.Name) and arg.id in _BLOCKING_BUILDERS:
-                        to_thread_refs.append(arg.id)
-        assert 'build_api_messages_from_db' in to_thread_refs, (
-            'debug_messages no longer off-loads build_api_messages_from_db '
-            'via asyncio.to_thread — the FUSE/cross-DC DB read would block '
-            'the event loop for every concurrent request'
+        # … it MUST actively off-load work via asyncio.to_thread / executor …
+        to_thread_calls = [
+            c for c in ast.walk(debug_fn)
+            if isinstance(c, ast.Call) and _is_to_thread_call(c)
+        ]
+        assert to_thread_calls, (
+            'debug_messages no longer off-loads via asyncio.to_thread — the '
+            'FUSE/cross-DC DB read would block the event loop for every '
+            'concurrent request'
+        )
+
+        # … and the blocking DB-read primitive must run ONLY inside the
+        # off-loaded nested closure, never on the coroutine's own frame. (The
+        # route wraps `_load_messages_from_db` + `build_wire_messages` in a
+        # local `_build` closure that is passed to asyncio.to_thread.)
+        on_loop = _direct_frame_calls(debug_fn, _BLOCKING_DB_READS)
+        assert not on_loop, (
+            f'debug_messages runs a blocking DB read on the event loop directly '
+            f'at line(s) {[ln for _n, ln in on_loop]} — it must live inside the '
+            f'closure that is off-loaded via asyncio.to_thread'
         )
 
 

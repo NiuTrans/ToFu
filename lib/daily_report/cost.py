@@ -9,6 +9,7 @@ import datetime as _dt
 import re
 import time
 
+from lib.cost import normalize_usage
 from lib.log import get_logger
 
 from .storage import DEFAULT_USER_ID
@@ -86,11 +87,12 @@ def _calc_msg_cost_cny(usage, model_or_preset='', provider_id=''):
     model_id = model_or_preset or ''
     model_id = _LEGACY_PRESET_TO_MODEL.get(model_id, model_id)
 
-    inp = usage.get('prompt_tokens') or usage.get('input_tokens') or 0
-    out = usage.get('completion_tokens') or usage.get('output_tokens') or 0
-    cache_write = usage.get('cache_write_tokens') or usage.get('cache_creation_input_tokens') or 0
-    cache_read = usage.get('cache_read_tokens') or usage.get('cache_read_input_tokens') or 0
-    think_tok = usage.get('reasoning_tokens') or usage.get('thinking_tokens') or 0
+    _u = normalize_usage(usage)
+    inp = _u['input']
+    out = _u['output']
+    cache_write = _u['cache_write']
+    cache_read = _u['cache_read']
+    think_tok = _u['thinking']
     if think_tok > 0 and out == 0:
         out = think_tok
     if inp == 0 and out == 0 and cache_write == 0 and cache_read == 0:
@@ -247,9 +249,8 @@ def _scan_costs_in_range(ms_start, ms_end, year=None, month=None):
                 }
             entry = days[day_num]['conversations'][conv_id]
             entry['cost'] += cost_cny
-            entry['tokens'] += (
-                (usage.get('input_tokens') or usage.get('prompt_tokens') or 0) +
-                (usage.get('output_tokens') or usage.get('completion_tokens') or 0))
+            _tok = normalize_usage(usage)
+            entry['tokens'] += _tok['input'] + _tok['output']
 
     for day_data in days.values():
         day_data['cost'] = round(day_data['cost'], 4)

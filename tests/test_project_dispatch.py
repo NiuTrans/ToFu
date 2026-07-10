@@ -275,19 +275,7 @@ def test_sweep_capped(flask_app):
     assert n == 2, f'sweep must cap at max_per_sweep=2, dispatched {n}'
 
 
-def _patch_restore(path, old, new, run):
-    with open(path, encoding='utf-8') as f:
-        original = f.read()
-    assert old in original, f'anchor not found in {path}'
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original.replace(old, new, 1))
-        run()
-    finally:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original)
-    with open(path, encoding='utf-8') as f:
-        assert f.read() == original, 'source not restored byte-identical'
+from tests._nc_harness import patch_restore as _patch_restore  # noqa: E402
 
 
 def test_NC1_dropping_filters_leaks_candidates(flask_app):
@@ -297,7 +285,6 @@ def test_NC1_dropping_filters_leaks_candidates(flask_app):
 
     def run():
         import lib.conversations.project_dispatch as pd
-        importlib.reload(pd)
         from lib.conversations.project_board import claim_task, post_task
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
@@ -325,8 +312,6 @@ def test_NC1_dropping_filters_leaks_candidates(flask_app):
         "        pass  # NC-1 (filters disabled)",
         run,
     )
-    import lib.conversations.project_dispatch as pd
-    importlib.reload(pd)
 
 
 def test_NC2_no_claim_on_dispatch_allows_redispatch(flask_app):
@@ -336,7 +321,6 @@ def test_NC2_no_claim_on_dispatch_allows_redispatch(flask_app):
 
     def run():
         import lib.conversations.project_dispatch as pd
-        importlib.reload(pd)
         from lib.conversations.project_board import post_task
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
@@ -360,8 +344,6 @@ def test_NC2_no_claim_on_dispatch_allows_redispatch(flask_app):
         "        claim = {'ok': True}  # NC-2 (claim-on-dispatch disabled)",
         run,
     )
-    import lib.conversations.project_dispatch as pd
-    importlib.reload(pd)
 
 
 def test_NC3_no_claim_breaks_two_sweep_idempotency(flask_app):
@@ -372,7 +354,6 @@ def test_NC3_no_claim_breaks_two_sweep_idempotency(flask_app):
 
     def run():
         import lib.conversations.project_dispatch as pd
-        importlib.reload(pd)
         from lib.conversations.project_board import post_task
         from lib.message_queue import KIND_WORKFLOW, get_queue
         with flask_app.app_context():
@@ -404,8 +385,6 @@ def test_NC3_no_claim_breaks_two_sweep_idempotency(flask_app):
         "        claim = {'ok': True}  # NC-3 (claim disabled)",
         run,
     )
-    import lib.conversations.project_dispatch as pd
-    importlib.reload(pd)
 
 
 def test_NC4_no_busy_guard_stacks_duplicate(flask_app, monkeypatch):
@@ -415,7 +394,6 @@ def test_NC4_no_busy_guard_stacks_duplicate(flask_app, monkeypatch):
 
     def run():
         import lib.conversations.project_dispatch as pd
-        importlib.reload(pd)
         # Force the target conv to look busy; with the guard disabled the
         # sweep dispatches anyway.
         monkeypatch.setattr(pd, '_conv_has_live_task', lambda conv_id: True)
@@ -437,5 +415,3 @@ def test_NC4_no_busy_guard_stacks_duplicate(flask_app, monkeypatch):
         "            if False:  # NC-4 (busy guard disabled)\n                continue",
         run,
     )
-    import lib.conversations.project_dispatch as pd
-    importlib.reload(pd)

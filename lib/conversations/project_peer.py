@@ -183,6 +183,98 @@ def _live_task_by_conv() -> dict:
     return out
 
 
+def _live_drain_eligible_task(conv_id: str) -> str:
+    """Return the task_id of a RUNNING task on ``conv_id`` that drains the
+    round-boundary agent-inbox, or '' if none.
+
+    This is the gate for the Pillar #6 peer-message FAST PATH: only an ordinary
+    orchestrator turn runs the ``agent_inbox`` drain hook every round. Endpoint
+    mode (``_endpoint_managed`` / ``endpointMode``) and virtual-user sub-tasks
+    (``_vu_subtask``) do NOT run that hook, so a fast-path inbox item enqueued
+    for them would never be drained mid-turn — those targets keep the durable
+    queue-lane (cycle-end) delivery. Best-effort: '' on any failure so the
+    caller simply skips the accelerator (the durable row still delivers).
+    """
+    if not conv_id:
+        return ''
+    try:
+        from lib.tasks_pkg.manager import tasks, tasks_lock
+        with tasks_lock:
+            for t in tasks.values():
+                if not isinstance(t, dict):
+                    continue
+                if t.get('convId') != conv_id or t.get('status') != 'running':
+                    continue
+                if t.get('aborted'):
+                    continue
+                cfg = t.get('config')
+                if (t.get('_endpoint_managed') or t.get('_vu_subtask')
+                        or (isinstance(cfg, dict) and cfg.get('endpointMode'))):
+                    continue
+                return t.get('id') or ''
+    except Exception as e:
+        logger.debug('[PeerMsg] live drain-eligible probe failed conv=%s: %s',
+                     (conv_id or '')[:8], e)
+    return ''
+
+
+def _titles_by_conv(conv_ids) -> dict:
+    """Resolve human-readable titles for a set of conversation ids.
+
+    Presence ``announce`` is frequently called with an empty ``convTitle`` (the
+    task config often has no title yet), so the presence snapshot's ``title``
+    field is blank and the roster / agent-facing status fall back to a bare
+    ``conv <id>``. This backfills the REAL stored conversation title from the
+    DB. When a conversation has no usable stored title (never titled), it falls
+    back to a short snippet of the opening user turn so the label is still
+    human-readable — never a bare id.
+
+    Returns ``{convId -> label}`` (only ids that resolved to a non-empty label).
+    Best-effort: returns ``{}`` on any DB failure so the caller degrades to the
+    presence-supplied title (or the id fallback).
+    """
+    ids = [c for c in (conv_ids or []) if c]
+    if not ids:
+        return {}
+    out = {}
+    try:
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        db = get_thread_db(DOMAIN_CHAT)
+        placeholders = ','.join('?' * len(ids))
+        rows = db.execute(
+            f'SELECT id, title FROM conversations WHERE id IN ({placeholders})',
+            tuple(ids)).fetchall()
+        missing = []
+        for r in rows:
+            title = (r['title'] or '').strip()
+            if title and title.lower() != 'untitled':
+                out[r['id']] = title
+            else:
+                missing.append(r['id'])
+        if missing:
+            import json
+            from lib.conversations.title_gen import first_user_text
+            ph2 = ','.join('?' * len(missing))
+            mrows = db.execute(
+                f'SELECT id, messages FROM conversations WHERE id IN ({ph2})',
+                tuple(missing)).fetchall()
+            for r in mrows:
+                try:
+                    msgs = r['messages']
+                    if isinstance(msgs, str):
+                        msgs = json.loads(msgs or '[]')
+                    snippet = first_user_text(msgs or [], max_chars=60)
+                except Exception as _pe:
+                    logger.debug('[PeerStatus] first-user snippet failed conv=%s: %s',
+                                 (r['id'] or '')[:8], _pe)
+                    snippet = ''
+                if snippet:
+                    out[r['id']] = snippet
+    except Exception as e:
+        logger.debug('[PeerStatus] title backfill failed: %s', e)
+    return out
+
+
 def build_peer_status(project_path: str, conv_id: str = '') -> dict:
     """Aggregate LIVE peer status for ``project_path`` (the introspection tool).
 
@@ -217,6 +309,19 @@ def build_peer_status(project_path: str, conv_id: str = '') -> dict:
 
     task_by_conv = _live_task_by_conv()
     view = _join_peers(peers, task_by_conv, claim_by_conv, exclude_conv=conv_id)
+
+    # Backfill a human-readable title for any peer whose presence-supplied title
+    # is empty (announce is usually called with no convTitle) so neither the
+    # Team panel nor the agent-facing status shows a bare `conv <id>`.
+    need_titles = [p['convId'] for p in view if not p.get('title') and p.get('convId')]
+    if need_titles:
+        titles = _titles_by_conv(need_titles)
+        for p in view:
+            if not p.get('title'):
+                resolved = titles.get(p['convId'])
+                if resolved:
+                    p['title'] = resolved
+
     out['peers'] = view
     out['count'] = len(view)
     return out
@@ -239,6 +344,53 @@ def _rate_gate(from_conv: str, to_conv: str, now: float) -> tuple:
             _peer_msg_history.get(key, []), now)
         _peer_msg_history[key] = kept
         return allowed, retry_after
+
+
+def _resolve_target_conv_id(to_conv_id: str) -> tuple:
+    """Resolve a possibly-truncated target conv id to its canonical FULL id.
+
+    The peer tools surface conversation ids in an 8-char display form
+    (``project_peer_status`` prints ``[{convId[:8]}]``), and an agent copies
+    that short id verbatim into ``project_message`` / ``project_intervene``.
+    But the message queue (``enqueue_message`` → ``dequeue_next``) and the task
+    registry key on the FULL 14-char id, so enqueuing under a truncated id
+    lands in a PHANTOM queue that no conversation ever drains — the message is
+    silently lost and the short id registers as an orphaned-dispatchable conv
+    that maps to nothing. Resolve to the canonical id by exact match, else by
+    UNIQUE prefix.
+
+    Returns ``(full_id, '')`` on success, or ``('', reason)`` where reason is
+    ``'unknown_target'`` (no conversation matches) or ``'ambiguous_target'``
+    (the prefix matches >1 conversation — refuse rather than mis-deliver). On a
+    DB error the id is returned UNCHANGED (fail-open: no worse than the prior
+    behaviour, and the subsequent enqueue would surface the DB fault anyway).
+    """
+    tid = (to_conv_id or '').strip()
+    if not tid:
+        return '', 'unknown_target'
+    try:
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT id FROM conversations WHERE id=? LIMIT 1', (tid,)).fetchone()
+        if row:
+            return row['id'], ''
+        rows = db.execute(
+            'SELECT id FROM conversations WHERE id LIKE ? LIMIT 2',
+            (tid + '%',)).fetchall()
+        if len(rows) == 1:
+            return rows[0]['id'], ''
+        if len(rows) > 1:
+            logger.info('[PeerMsg] target id/prefix %s is AMBIGUOUS (%d matches)',
+                        tid[:12], len(rows))
+            return '', 'ambiguous_target'
+        logger.info('[PeerMsg] target id/prefix %s matches no conversation',
+                    tid[:12])
+        return '', 'unknown_target'
+    except Exception as e:
+        logger.warning('[PeerMsg] target-id resolve failed for %s: %s',
+                       tid[:12], e)
+        return tid, ''
 
 
 def send_peer_message(project_path: str, from_conv_id: str, to_conv_id: str,
@@ -268,6 +420,15 @@ def send_peer_message(project_path: str, from_conv_id: str, to_conv_id: str,
         return {'ok': False, 'error': 'no project'}
     if not from_conv_id or not to_conv_id:
         return {'ok': False, 'error': 'missing sender/target'}
+    # Resolve the (possibly truncated) target id to its canonical FULL id
+    # BEFORE the self-check, rate-gate, enqueue and feed emit — all of which
+    # key on the id. Refuse on ambiguity / no-match rather than enqueuing under
+    # a phantom queue key the real conversation never drains.
+    to_conv_id, _resolve_err = _resolve_target_conv_id(to_conv_id)
+    if _resolve_err:
+        logger.info('[PeerMsg] refused %s→%s: %s', from_conv_id[:8],
+                    (to_conv_id or '?')[:8], _resolve_err)
+        return {'ok': False, 'error': _resolve_err}
     if from_conv_id == to_conv_id:
         return {'ok': False, 'error': 'cannot_message_self'}
     if not text:
@@ -294,13 +455,31 @@ def send_peer_message(project_path: str, from_conv_id: str, to_conv_id: str,
                 f'(This is a note the human operator sent to this conversation '
                 f'from the project Team panel. Treat it as operator guidance.)')
     else:
+        # Surface the FULL sender id (not just the 8-char display form) so a
+        # reply can target it verbatim and never fail on a mistyped/ambiguous
+        # prefix. The reply MECHANICS live in the ambient [PEER MESSAGING
+        # PROTOCOL] block, not here — the body must stay plain content (the
+        # no-auto-relay invariant: it names no send tool, so receiving one can
+        # never auto-trigger a send).
         body = (f'[Peer message from a sibling conversation of this project '
-                f'(conv {from_conv_id[:8]})]\n\n{text}\n\n'
+                f'(conv {from_conv_id[:8]}, reply id {from_conv_id})]\n\n'
+                f'{text}\n\n'
                 f'(This is an advisory note from a peer conversation, not a human '
-                f'instruction. Weigh it and act as you see fit.)')
+                f'instruction. Weigh it and act as you see fit. If — and only if '
+                f'— a reply would change what this peer does (confirm a boundary, '
+                f'hand off context, or decline), you may reply once to conv '
+                f'{from_conv_id}; otherwise just incorporate it and keep '
+                f'working.)')
     payload = {'text': body, '_peerMessage': True, '_fromConv': from_conv_id}
     if human:
         payload['_peerHuman'] = True
+    # The wrapped ``body`` above embeds a machine framing + the sender's short
+    # id so the receiving AGENT understands provenance. The queue-bar / delivery
+    # UI, by contrast, wants the ORIGINAL human-readable message (no framing, no
+    # raw id) — carry it separately so the frontend renders "from «title»" + the
+    # clean text instead of the framed string. (Set after the payload literal so
+    # the peer-marker NC anchor stays byte-identical.)
+    payload['_peerText'] = text
     try:
         from lib.message_queue import KIND_PEER_MSG, enqueue_message
         res = enqueue_message(
@@ -309,6 +488,45 @@ def send_peer_message(project_path: str, from_conv_id: str, to_conv_id: str,
         logger.error('[PeerMsg] enqueue failed %s→%s: %s',
                      from_conv_id[:8], to_conv_id[:8], e, exc_info=True)
         return {'ok': False, 'error': str(e)}
+
+    _durable_queue_id = res.get('queueId') or ''
+
+    # ── FAST-PATH ACCELERATOR (Pillar #6 round-boundary delivery) ──
+    # The durable KIND_PEER_MSG row above is the single SOURCE OF TRUTH — it
+    # survives a crash and wakes an IDLE target via the brain idle-drain. But a
+    # target with a LIVE ordinary turn would otherwise not see the message until
+    # that whole turn ends. So when the target has a drain-eligible running task
+    # (an ordinary orchestrator turn — NOT endpoint/VU, which don't run the
+    # round-boundary drain), ALSO enqueue an agent_inbox item under the SAME
+    # conv-scoped key the orchestrator drains every round. It is delivered at
+    # the next round boundary — never mid-stream, never splitting a
+    # tool_call/tool_result pair (the drain hook's existing safety guard).
+    #
+    # ZERO-DOUBLE-DELIVERY invariant: the inbox item is tagged with the durable
+    # row's queueId. The drain hook deletes the matching message_queue row by
+    # queueId when it injects (forward race); dispatch_next_queued drops the
+    # inbox twin by queueId when it pops the durable row first (reverse race).
+    # Either way the message is delivered exactly once.
+    if _durable_queue_id:
+        try:
+            live_task_id = _live_drain_eligible_task(to_conv_id)
+            if live_task_id:
+                from lib.agent_inbox import enqueue as _inbox_enqueue
+                _inbox_enqueue(
+                    to_conv_id, body, priority='next', mode='peer-msg',
+                    extra={'queueId': _durable_queue_id,
+                           'fromConv': from_conv_id,
+                           'peerText': text,
+                           'peerHuman': bool(human)})
+                logger.info('[PeerMsg] fast-path inbox item queued for LIVE '
+                            'conv=%s (task=%s, durable queueId=%s)',
+                            to_conv_id[:8], live_task_id[:8],
+                            _durable_queue_id[:8])
+        except Exception as e:
+            # Never let the accelerator break delivery — the durable row stands.
+            logger.warning('[PeerMsg] fast-path inbox enqueue failed %s→%s '
+                           '(durable row still delivers): %s',
+                           from_conv_id[:8], to_conv_id[:8], e)
 
     # Mirror ONE auditable note into the feed, stamped with the sender. A human
     # operator nudge is stamped 'operator' so the Team thread + feed can render
@@ -370,6 +588,15 @@ def intervene_peer(project_path: str, from_conv_id: str, to_conv_id: str,
         return {'ok': False, 'error': 'no project'}
     if not from_conv_id or not to_conv_id:
         return {'ok': False, 'error': 'missing sender/target'}
+    # Resolve the (possibly truncated) target id to its canonical FULL id so the
+    # self-check AND the hard-abort registry lookup (abort_running_tasks_for_conv
+    # keys on the full id) operate on the real conversation. The advisory path
+    # re-resolves inside send_peer_message (idempotent on an already-full id).
+    to_conv_id, _resolve_err = _resolve_target_conv_id(to_conv_id)
+    if _resolve_err:
+        logger.info('[Intervene] refused %s→%s: %s', from_conv_id[:8],
+                    (to_conv_id or '?')[:8], _resolve_err)
+        return {'ok': False, 'error': _resolve_err}
     if from_conv_id == to_conv_id:
         return {'ok': False, 'error': 'cannot_intervene_self'}
 
@@ -446,6 +673,82 @@ def intervene_peer(project_path: str, from_conv_id: str, to_conv_id: str,
 #  Agent tool dispatch
 # ═══════════════════════════════════════════════════════════════════
 
+def render_peer_protocol_block(project_path: str = '') -> str:
+    """Render the ambient PEER-MESSAGING PROTOCOL block for the system prompt.
+
+    The Symptom-C root fix. Peer messages read like status reports to a human
+    because the ONLY steer the model had was the tool ``description`` string —
+    there was NO ambient guidance telling it that ``project_message`` /
+    ``project_intervene`` write to ANOTHER AGENT. This block mirrors the
+    ``[PROJECT BOARD]`` block's imperative style ("claim… do NOT duplicate") so
+    the model has an explicit register for coordination acts (claim / boundary /
+    hand-off / overlap-warning) instead of falling back to human-report prose.
+
+    Cache-stable + tiny (a fixed protocol, not per-turn state) so it adds no
+    prefix churn. Pure — no DB / no side effects. Returns '' when not in project
+    mode (the caller gates on project_path anyway; the arg is accepted for a
+    uniform renderer signature).
+    """
+    if not project_path:
+        return ''
+    return (
+        '[PEER MESSAGING PROTOCOL] — when you use project_message or '
+        'project_intervene you are writing TO ANOTHER AGENT (a sibling '
+        'conversation of this project), NOT reporting to a human. Use the '
+        'imperative coordination register, not narration:\n'
+        '  • CLAIM work so the peer stands aside — "I\'m taking the parser '
+        'refactor; hold off on lib/parser/."\n'
+        '  • CONFIRM a boundary before you collide — "Are you editing '
+        'styles.css? I\'m about to rewrite it."\n'
+        '  • HAND OFF context the peer needs — "The schema bump you were '
+        'blocked on is on branch X, landed."\n'
+        '  • WARN of an overlap — "Your epic Y duplicates one I already own — '
+        'drop it and re-check the board."\n'
+        'Do NOT send status updates, progress summaries, or FYI notes written '
+        'as if to a human reader — those belong in the board/charter/feed, not '
+        'a peer message. Each message should change what the peer DOES or '
+        'asks it to CONFIRM. Peer messages are rate-limited, seen on the '
+        'target\'s next turn (never mid-stream), and advisory — the peer '
+        'decides how to act.\n'
+        'When you RECEIVE a peer message (it arrives as a turn prefixed '
+        '"[Peer message from a sibling conversation …]" and carries a reply '
+        'id), you MAY reply EXACTLY ONCE via '
+        'project_message(to_conv_id=<that reply id>) — but only to CONFIRM a '
+        'boundary, HAND OFF context, or DECLINE. If a reply would not change '
+        'what the peer does, do NOT acknowledge for its own sake: incorporate '
+        'the message and keep working. Your rate-limit budget is the ceiling '
+        '— this is coordination, not a chat channel, so never reply just to '
+        'be polite.'
+    )
+
+
+def _fmt_feed(events: list, current_conv_id: str = '') -> str:
+    """Format a recent-activity slice for the ``project_feed_read`` tool.
+
+    Renders the feed newest-first as one line per event (kind · who · summary),
+    marking the caller's own conversation. Pure — no DB / no side effects.
+    """
+    if not events:
+        return ('No recent cross-conversation activity in this project. (The '
+                'feed is a live pulse of what sibling conversations have been '
+                'doing — task starts/completions, board claims, decisions, and '
+                'peer notes. Nothing has happened recently.)')
+    lines = [f'Recent project activity — {len(events)} event(s), newest first:']
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        kind = e.get('kind', 'note') or 'note'
+        conv = (e.get('conv_id') or '')
+        who = e.get('title') or (f'conv {conv[:8]}' if conv else 'unknown')
+        mine = ' (this conversation)' if conv and conv == current_conv_id else ''
+        summary = (e.get('summary') or '').strip()
+        row = f'  • [{kind}] {who}{mine}'
+        if summary:
+            row += f' — {summary}'
+        lines.append(row)
+    return '\n'.join(lines)
+
+
 def _fmt_peer_status(status: dict, current_conv_id: str) -> str:
     peers = status.get('peers', [])
     if not peers:
@@ -476,9 +779,10 @@ def execute_peer_tool(fn_name: str, fn_args: dict, *,
                       config: dict | None = None, approval_fn=None) -> str:
     """Execute a peer-collaboration agent tool → human-readable string.
 
-    Tools: ``project_peer_status`` (read), ``project_message`` (advisory
-    messaging), ``project_intervene`` (advisory nudge; hard abort REQUESTS
-    human approval via ``approval_fn`` — the handler wires it to the
+    Tools: ``project_peer_status`` (read live peers), ``project_feed_read``
+    (read the recent cross-conversation activity feed), ``project_message``
+    (advisory messaging), ``project_intervene`` (advisory nudge; hard abort
+    REQUESTS human approval via ``approval_fn`` — the handler wires it to the
     ``request_human_guidance`` UI seam). All project-scoped — refuse outside
     project mode.
 
@@ -502,6 +806,23 @@ def execute_peer_tool(fn_name: str, fn_args: dict, *,
                 status['count'] = len(status['peers'])
             return _fmt_peer_status(status, current_conv_id)
 
+        if fn_name == '__nc_disabled_feed_read__':
+            # On-demand read of the cross-conversation activity feed. Kept as a
+            # TOOL (not always-on prompt injection) deliberately: the feed can
+            # hold up to _PROJECT_EVENTS_KEEP events and CHANGES every turn a
+            # sibling acts — injecting it each turn would bloat context AND bust
+            # the append-only prompt-cache prefix. The small, stable board +
+            # charter summaries are injected; the chronological pulse is pulled.
+            try:
+                limit = int(fn_args.get('limit') or 25)
+            except (TypeError, ValueError) as e:
+                logger.debug('[PeerTool] bad limit arg (defaulting 25): %s', e)
+                limit = 25
+            limit = max(1, min(limit, 60))
+            from lib.conversations.project_feed import read_project_feed
+            feed = read_project_feed(project_path, limit=limit)
+            return _fmt_feed(feed.get('events', []), current_conv_id)
+
         if fn_name == 'project_message':
             to_conv = (fn_args.get('to_conv_id') or '').strip()
             text = (fn_args.get('text') or '').strip()
@@ -523,6 +844,14 @@ def execute_peer_tool(fn_name: str, fn_args: dict, *,
                         f'message storms; wait before sending again.')
             if res.get('error') == 'cannot_message_self':
                 return 'Error: a conversation cannot message itself.'
+            if res.get('error') == 'unknown_target':
+                return (f'Error: no conversation in this project matches '
+                        f'"{to_conv}". Check the id via project_peer_status '
+                        f'(use the id shown in [brackets]).')
+            if res.get('error') == 'ambiguous_target':
+                return (f'Error: "{to_conv}" matches more than one conversation '
+                        f'— it is too short to be unambiguous. Supply more '
+                        f'characters of the target conversation id.')
             return f'Error sending peer message: {res.get("error", "unknown")}.'
 
         if fn_name == 'project_intervene':
@@ -563,6 +892,12 @@ def execute_peer_tool(fn_name: str, fn_args: dict, *,
                 return (f'Not sent — intervention rate limit reached for '
                         f'conversation {to_conv[:8]} (retry in '
                         f'~{res.get("retryAfter", "?")}s).')
+            if res.get('error') == 'unknown_target':
+                return (f'Error: no conversation in this project matches '
+                        f'"{to_conv}". Check the id via project_peer_status.')
+            if res.get('error') == 'ambiguous_target':
+                return (f'Error: "{to_conv}" matches more than one conversation '
+                        f'— supply more characters of the target id.')
             return f'Error intervening: {res.get("error", "unknown")}.'
 
         return f"Error: Unknown peer tool '{fn_name}'"
@@ -573,6 +908,7 @@ def execute_peer_tool(fn_name: str, fn_args: dict, *,
 
 __all__ = [
     'build_peer_status', 'send_peer_message', 'intervene_peer',
-    'execute_peer_tool', '_join_peers', '_prune_and_check',
-    '_authorize_hard_abort', '_PEER_MSG_MAX_PER_WINDOW', '_PEER_MSG_WINDOW_S',
+    'execute_peer_tool', 'render_peer_protocol_block', '_join_peers',
+    '_prune_and_check', '_authorize_hard_abort', '_fmt_feed',
+    '_PEER_MSG_MAX_PER_WINDOW', '_PEER_MSG_WINDOW_S',
 ]

@@ -451,6 +451,24 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
   check('inbox_dedup', (ctx.assistantMsg.toolRounds || []).filter(r => r._inboxInject).length === 1);
 }
 
+// ── 21b. peer_inbox_inject (Pillar #6 fast-path) pushes a synthetic
+//         _peerInject round carrying sender + text previews (deduped by round). ──
+{
+  const { ctx } = setup();
+  T.dispatchSSEEvent(line({ type: 'peer_inbox_inject', round: 2, count: 1,
+    previews: [{ fromConv: 'senderco', text: 'watch the parser epic' }] }), ctx);
+  const synth = (ctx.assistantMsg.toolRounds || []).filter(r => r._peerInject);
+  check('peer_inject_synthetic_round', synth.length === 1 &&
+    synth[0]._peerKey === 'peer:2' && synth[0].status === 'done' &&
+    synth[0].peerCount === 1 &&
+    (synth[0].peerPreviews || [])[0].fromConv === 'senderco');
+  // Replay the SAME round → must dedup (no second synthetic peer round).
+  T.dispatchSSEEvent(line({ type: 'peer_inbox_inject', round: 2, count: 1,
+    previews: [{ fromConv: 'senderco', text: 'watch the parser epic' }] }), ctx);
+  check('peer_inject_dedup',
+    (ctx.assistantMsg.toolRounds || []).filter(r => r._peerInject).length === 1);
+}
+
 // ── 22. messages_snapshot forwards to showMessagesInDebug (debug-only, no msg mutation) ──
 {
   const { ctx } = setup();
@@ -585,19 +603,28 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
     ctx.assistantMsg.content === 'AB');
 }
 
-// ── 28. PHASE 1 (parity-gap closure): a `done` event carrying
-//        `committedMessage` PROJECTS IT VERBATIM onto the settled bubble —
-//        the single source of truth for settled state. content/thinking go
-//        through keep-longer; toolRounds + terminal metadata are taken
-//        verbatim from the committed DB dict. ──
+// ── 28. PHASE 1 (parity-gap closure, epic pt_78579f57be1c4f60): a `done` event
+//        carrying `committedMessage` PROJECTS IT VERBATIM onto the settled
+//        bubble — the SINGLE source of truth for settled state (the
+//        separation-of-concerns directive). Since the backend stamps
+//        `_committedMsg` from the EXACT committed DB row (manager.py, on CAS
+//        success), the committed dict is authoritative AND complete — so
+//        content/thinking/toolRounds are taken VERBATIM, EVEN WHEN THE COMMITTED
+//        COPY IS SHORTER than the client's transient stream buffer (the
+//        directive case: settled = backend record, NOT a local keep-longer
+//        reconstruction). This is the exact behaviour the pre-fix keep-longer
+//        on the committed path violated. ──
 {
   const { am, ctx } = setup();
-  // Client streamed a short partial; the backend committed the fuller answer.
-  T.dispatchSSEEvent(line({ type: 'delta', content: 'short partial' }), ctx);
+  // Client streamed a LONGER partial (e.g. a stale/duplicated live buffer);
+  // the backend committed the AUTHORITATIVE (shorter) answer. Verbatim wins.
+  T.dispatchSSEEvent(line({ type: 'delta',
+    content: 'a long stale local streaming buffer that must NOT win over the DB' }), ctx);
+  T.dispatchSSEEvent(line({ type: 'delta', thinking: 'long stale local thinking buffer' }), ctx);
   const committed = {
     role: 'assistant',
-    content: 'THE FULL COMMITTED ANSWER from the DB, longer than the partial',
-    thinking: 'committed reasoning',
+    content: 'the committed answer',          // SHORTER than the local partial
+    thinking: 'brief',                        // SHORTER than local thinking
     toolRounds: [{ roundNum: 1, toolCallId: 'x', status: 'done', results: [] }],
     finishReason: 'stop', usage: { total_tokens: 77 }, model: 'db-model',
     cost: { costCny: 0.01 }, apiRounds: [{ round: 1 }],
@@ -605,9 +632,10 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
   const ret = T.dispatchSSEEvent(line({ type: 'done', finishReason: 'stop',
     committedMessage: committed }), ctx);
   check('committed_done_returns_true', ret === true);
-  check('committed_projects_content_verbatim',
-    am.content === 'THE FULL COMMITTED ANSWER from the DB, longer than the partial');
-  check('committed_projects_thinking_verbatim', am.thinking === 'committed reasoning');
+  // ★ THE DIRECTIVE: the SHORTER committed content wins verbatim (keep-longer
+  //   on this path would have kept the stale longer local buffer = bubble≠DB).
+  check('committed_projects_content_verbatim', am.content === 'the committed answer');
+  check('committed_projects_thinking_verbatim', am.thinking === 'brief');
   check('committed_projects_toolrounds_verbatim',
     Array.isArray(am.toolRounds) && am.toolRounds.length === 1 &&
     am.toolRounds[0].toolCallId === 'x');
@@ -630,7 +658,89 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
   check('no_committed_no_projection_flag', am._committedProjection === undefined);
 }
 
-console.log(out.join('\n'));
+// ── 31. RECONNECT FIDELITY (item 4): a `state` snapshot delivered on
+//        reconnect that carries an IN-FLIGHT tool round (status:'searching',
+//        no results yet) must seed it onto the assistant msg + buf, so the
+//        re-rendered bubble shows "Searching…" (updateStreamingUI keys
+//        hasActiveSearch off a round with status==='searching') instead of the
+//        generic "等待中…/Waiting…" wait branch. This is the exact refresh
+//        case from the ORCA incident: the tool_start event was consumed by the
+//        pre-refresh page, so ONLY the state snapshot can restore the search
+//        card. Non-endpoint reconnect path. ──
+{
+  const { am, buf, ctx } = setup();
+  // Fresh reload: no content/thinking streamed yet, an in-flight search round
+  // arrives only via the reconnect state snapshot.
+  T.dispatchSSEEvent(line({ type: 'state', status: 'running', content: '', thinking: '',
+    toolRounds: [{ roundNum: 1, toolCallId: 'sr1', toolName: 'web_search',
+      query: 'HIV lymphoid follicle', status: 'searching', results: null }] }), ctx);
+  const r = (am.toolRounds || []).find(x => x.toolCallId === 'sr1');
+  check('state_reconnect_seeds_inflight_round', !!r && r.status === 'searching');
+  check('state_reconnect_seeds_buf_rounds',
+    Array.isArray(buf.toolRounds) &&
+    buf.toolRounds.some(x => x.toolCallId === 'sr1' && x.status === 'searching'));
+  // The whole point: a round with status 'searching' is present, so
+  // updateStreamingUI's hasActiveSearch is true → "Searching…" not "等待中…".
+  check('state_reconnect_has_active_search',
+    (am.toolRounds || []).some(x => x.status === 'searching'));
+}
+
+// ── 30. workspace_root_added: state parity — the handler refreshes
+//        projectState via Api.project.status(), mutates extraRoots, and
+//        persists the new root into conv.projectPaths (was toast-ONLY).
+//        ASYNC: the refresh runs in a status().then() microtask, so this
+//        scenario awaits a microtask flush before asserting, and the final
+//        console.log is deferred until after asyncTests() resolves. ──
+async function asyncTests() {
+  // (a) ACTIVE-conv event → full parity refresh.
+  {
+    const { conv, ctx } = setup();          // conv 'c1', activeConvId 'c1'
+    let ps = { extraRoots: [] };
+    // Real-ish _applyProjectData: mirrors project.js — sets extraRoots.
+    win._applyProjectData = global._applyProjectData = (data) => {
+      if (data && Array.isArray(data.extraRoots)) ps.extraRoots = data.extraRoots;
+    };
+    let statusCalls = 0;
+    win.Api = global.Api = { project: { status: () => { statusCalls++;
+      return Promise.resolve({ path: '/proj',
+        extraRoots: [{ path: '/proj/sib', name: 'sib', readOnly: false }] }); } } };
+    T.dispatchSSEEvent(line({ type: 'workspace_root_added',
+      roots: [{ rootName: 'sib', path: '/proj/sib' }] }), ctx);
+    await Promise.resolve(); await Promise.resolve();   // flush the .then chain
+    check('wra_toast_shown', calls.showToast >= 1);
+    check('wra_status_refreshed', statusCalls === 1);
+    check('wra_mutates_projectState_extraRoots',
+      ps.extraRoots.length === 1 && ps.extraRoots[0].path === '/proj/sib');
+    check('wra_persists_conv_projectPaths',
+      Array.isArray(conv.projectPaths) && conv.projectPaths[0] === '/proj' &&
+      conv.projectPaths.includes('/proj/sib'));
+    check('wra_calls_saveConversations', calls.saveConversations >= 1);
+    check('wra_calls_syncConversationToServer', calls.syncConversationToServer >= 1);
+  }
+  // (b) GATE: an event whose conv is NOT the active one must NOT refresh
+  //     projectState (a background task's global _state may hold a different
+  //     project). Toast still fires; the status()/extraRoots refresh does not.
+  {
+    const { ctx } = setup();                 // ctx.convId 'c1'
+    let ps = { extraRoots: [] };
+    win._applyProjectData = global._applyProjectData = (data) => {
+      if (data && Array.isArray(data.extraRoots)) ps.extraRoots = data.extraRoots;
+    };
+    let statusCalls = 0;
+    win.Api = global.Api = { project: { status: () => { statusCalls++;
+      return Promise.resolve({ path: '/proj',
+        extraRoots: [{ path: '/proj/sib', name: 'sib' }] }); } } };
+    activeConvId = 'a-different-conv';        // ctx.convId ('c1') != active
+    T.dispatchSSEEvent(line({ type: 'workspace_root_added',
+      roots: [{ rootName: 'sib', path: '/proj/sib' }] }), ctx);
+    await Promise.resolve(); await Promise.resolve();
+    check('wra_inactive_conv_no_refresh', statusCalls === 0 && ps.extraRoots.length === 0);
+  }
+}
+
+asyncTests()
+  .then(() => { console.log(out.join('\n')); })
+  .catch((e) => { out.push('FAIL asyncTests_threw ' + (e && e.stack || e)); console.log(out.join('\n')); });
 """
 
 
@@ -662,5 +772,5 @@ def test_sse_dispatch_characterization():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'SSE dispatch characterization failures:\n' + output
-    # 29 scenario groups, ~74 individual checks.
-    assert output.count('PASS') >= 72, f'expected >=72 PASS lines, got:\n{output}'
+    # 31 scenario groups, ~85 individual checks.
+    assert output.count('PASS') >= 83, f'expected >=83 PASS lines, got:\n{output}'

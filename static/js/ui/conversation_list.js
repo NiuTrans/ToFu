@@ -231,7 +231,33 @@ function _swapActiveConvItem(newActiveId) {
 let _lastFolderTabsHash = '';
 let _lastFolderTabsContentHash = '';
 let _lastFolderTabsStructHash = '';
-let _folderTabsExpanded = false;
+/* Vertical project-rail collapsed/expanded state (icon-only ⇄ labeled),
+ * persisted like the old expand state. Kept in localStorage so the choice
+ * survives reloads and spans conversations. The toggle handler in
+ * main_folders_mobile.js writes the SAME key. */
+const RAIL_COLLAPSE_KEY = 'tofu_project_rail_collapsed';
+const RAIL_HAS_FOLDERS_KEY = 'tofu_has_folders';
+function _readRailCollapsed() {
+  try { return localStorage.getItem(RAIL_COLLAPSE_KEY) === '1'; }
+  catch (_e) { return false; }
+}
+/* Persist the "does this user have ≥1 folder" hint + keep the pre-paint
+ * html[data-rail] attribute in sync. The inline script in index.html reads the
+ * localStorage hint on the NEXT load to settle the sidebar width BEFORE first
+ * paint (zero CLS). Syncing the attribute here also keeps THIS session correct
+ * if the rail appears/disappears after load (first folder created, or the
+ * zero-folder correction after a fresh install). */
+function _persistRailHint(hasRail) {
+  try {
+    if (hasRail) localStorage.setItem(RAIL_HAS_FOLDERS_KEY, '1');
+    else localStorage.removeItem(RAIL_HAS_FOLDERS_KEY);
+  } catch (_e) { /* private-mode / disabled storage — hint is best-effort */ }
+  try {
+    const root = document.documentElement;
+    if (hasRail) root.setAttribute('data-rail', _readRailCollapsed() ? 'collapsed' : 'full');
+    else root.removeAttribute('data-rail');
+  } catch (_e) { /* no document root — non-DOM context */ }
+}
 
 
 
@@ -242,17 +268,75 @@ function renderFolderTabs(folders, activeFolderId, allConvs) {
     _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs);
   } catch (e) {
     console.error('[renderFolderTabs] Error:', e);
-    // On error, ensure tabs aren't left in broken state — render minimal fallback
-    try { tabsEl.innerHTML = '<div class="folder-tabs-scroll"><button class="folder-tab folder-tab-add" title="New folder"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button></div>'; } catch(_) {}
+    // On error, ensure the rail isn't left in a broken state — minimal fallback.
+    try { tabsEl.innerHTML = '<div class="project-rail-list"><button class="folder-tab folder-tab-add" title="New folder"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button></div>'; } catch(_) {}
   }
 }
 
-function _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs) {
-  // Always show tabs — even with 0 folders, show just the "+" button for discoverability
-  tabsEl.style.display = '';
+/* Derive a 1–2 char monogram for a project tile. A single glyph is a poor
+ * recognition cue (the owner's complaint), so we prefer two: initials of the
+ * first two whitespace/`-`/`_`/`/`-separated words (e.g. "Machine Learning" →
+ * "ML", "arxiv-papers" → "AP"); for a single word, its first two LETTERS
+ * ("chatui" → "CH"). CJK names take the FIRST TWO characters as-is (already
+ * dense and legible). Falls back to "•" for an empty/symbol-only name. */
+function _folderMonogram(name) {
+  const s = String(name || '').trim();
+  if (!s) return '•';
+  // CJK (Han/Hiragana/Katakana/Hangul) — two chars carry meaning; use them raw.
+  if (/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(s)) {
+    return Array.from(s).slice(0, 2).join('');
+  }
+  const words = s.split(/[\s\-_/.]+/).filter(Boolean);
+  if (words.length >= 2) {
+    return (words[0][0] + words[1][0]).toUpperCase();
+  }
+  const w = words[0] || s;
+  return w.slice(0, 2).toUpperCase();
+}
 
+/* Deterministic tile background for a project whose owner never picked a color.
+ * Without this, every uncolored folder fell back to the single `var(--accent)`,
+ * so N uncolored projects were one indistinguishable color block — defeating
+ * the at-a-glance recognition the rail exists for. We derive a STABLE hue by
+ * hashing the folder id (falling back to name) and spreading it around the
+ * wheel, at a fixed pastel S/L that reads on both dark and parchment themes.
+ * Same folder → same color across every render/session (hash is pure). */
+function _folderColor(f) {
+  if (f && f.color) return f.color;
+  const key = String((f && (f.id || f.name)) || '');
+  if (!key) return 'var(--accent)';
+  let h = 0;
+  for (let i = 0; i < key.length; i++) {
+    h = (h * 31 + key.charCodeAt(i)) >>> 0;
+  }
+  return `hsl(${h % 360} 52% 55%)`;
+}
+
+function _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs) {
   const safeFolders = folders || [];
   const safeConvs = allConvs || [];
+
+  /* ── Zero-folder degradation ──
+   * A user who never made a folder must NOT be forced into a two-pane rail
+   * layout. With 0 folders the rail is hidden entirely (single-column list,
+   * exactly as before) and only the discreet "+ New folder" quick-add entry
+   * point shows. The rail materializes once ≥1 folder exists. The sidebar
+   * `.has-rail` class drives the CSS grid/flex split. */
+  const sidebarEl = tabsEl.closest('.sidebar') || document.getElementById('sidebar');
+  const hasRail = safeFolders.length > 0;
+  if (sidebarEl) sidebarEl.classList.toggle('has-rail', hasRail);
+  // Persist the width hint + sync html[data-rail] so the NEXT load paints at
+  // the right width (zero CLS), and so an appear/disappear this session is
+  // reflected on the root immediately.
+  _persistRailHint(hasRail);
+  if (!hasRail) {
+    tabsEl.innerHTML = '';
+    _lastFolderTabsHash = '';
+    _lastFolderTabsContentHash = '';
+    _lastFolderTabsStructHash = '';
+    return;
+  }
+  tabsEl.style.display = '';
 
   // Compute counts per folder + uncategorized
   const folderIds = new Set(safeFolders.map(f => f.id));
@@ -289,6 +373,12 @@ function _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs) {
     if (isStreaming) streamingFolderIds.add(c.folderId);
   }
 
+  /* Reflect the persisted collapsed/expanded choice on the sidebar every
+   * render (cheap class toggle, outside the structural fast path so it always
+   * self-heals to the stored value). */
+  const railCollapsed = _readRailCollapsed();
+  if (sidebarEl) sidebarEl.classList.toggle('rail-collapsed', railCollapsed);
+
   // Split hash: content hash (folders/counts/names) vs active-tab hash
   // When only the active tab changes, skip full DOM rebuild and just swap .active class
   const streamKey = [...streamingFolderIds].sort().join(',');
@@ -317,68 +407,51 @@ function _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs) {
 
   const sortedFolders = [...safeFolders].sort((a, b) => (lastActiveMap[b.id] || 0) - (lastActiveMap[a.id] || 0) || (a.order || 0) - (b.order || 0));
 
+  /* ── Vertical project rail ──
+   * Each project is a full-width ROW (dot + name + count) so names of any
+   * length align into clean columns — no ragged wrap. The rail scrolls
+   * vertically when it overflows; there is no more +N expand toggle.
+   * Row DOM contract is UNCHANGED from the pill era: `.folder-tab` with
+   * `data-folder-id` (empty string = 未分类), an inner `.folder-tab-dot`
+   * (streaming pulse) and `.folder-tab-name`, so _initFolderTabs' click /
+   * context-menu / long-press / drag-drop handlers all keep working. */
+  const railTitle = escapeHtml(t('sidebar.projects'));
+  const collapseTip = railCollapsed ? escapeHtml(t('sidebar.expandRail')) : escapeHtml(t('sidebar.collapseRail'));
   let html = '';
-  html += '<div class="folder-tabs-scroll';
-  // Preserve expanded state synchronously to avoid collapse→expand flash
-  if (_folderTabsExpanded) html += ' expanded';
-  html += '">';
-  // "未分类" tab — shows conversations not in any folder (only when folders exist)
-  if (sortedFolders.length > 0) {
-    const ucBadge = uncategorizedCount > 0 ? `<span class="folder-tab-count">${uncategorizedCount}</span>` : '';
-    html += `<button class="folder-tab${!activeFolderId ? ' active' : ''}" data-folder-id="">`;
-    html += `<svg class="folder-tab-inbox-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>`;
-    html += `<span class="folder-tab-name">${t('sidebar.uncategorized')}</span>${ucBadge}</button>`;
-  }
-  // Folder tabs
+  html += `<div class="project-rail-head">`;
+  html += `<span class="project-rail-title">${railTitle}</span>`;
+  html += `<button class="project-rail-collapse" title="${collapseTip}" aria-label="${collapseTip}">`;
+  html += `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>`;
+  html += `</button></div>`;
+  html += '<div class="project-rail-list">';
+
+  // "未分类" row — conversations not in any folder (uses the inbox glyph as its "dot")
+  const ucBadge = uncategorizedCount > 0 ? `<span class="folder-tab-count">${uncategorizedCount}</span>` : '';
+  html += `<button class="folder-tab folder-tab-uncat${!activeFolderId ? ' active' : ''}" data-folder-id="" title="${escapeHtml(t('sidebar.uncategorized'))}">`;
+  html += `<span class="folder-tab-dot folder-tab-inbox-dot"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg></span>`;
+  html += `<span class="folder-tab-name">${escapeHtml(t('sidebar.uncategorized'))}</span>${ucBadge}</button>`;
+
+  // Project rows
   for (const f of sortedFolders) {
-    const fcolor = f.color ? escapeHtml(f.color) : 'var(--accent)';
+    const fcolor = escapeHtml(_folderColor(f));
     const fname = escapeHtml(f.name);
     const isActive = activeFolderId === f.id;
     const cnt = countMap[f.id] || 0;
     const badge = cnt > 0 ? `<span class="folder-tab-count">${cnt}</span>` : '';
-    html += `<button class="folder-tab${isActive ? ' active' : ''}" data-folder-id="${escapeHtml(f.id)}" title="${fname}">`;
     const dotStreaming = streamingFolderIds.has(f.id) ? ' streaming' : '';
-    html += `<span class="folder-tab-dot${dotStreaming}" style="background:${fcolor}"></span>`;
+    const mono = _folderMonogram(f.name);
+    html += `<button class="folder-tab${isActive ? ' active' : ''}" data-folder-id="${escapeHtml(f.id)}" title="${fname}">`;
+    html += `<span class="folder-tab-dot${dotStreaming}" style="background:${fcolor}" data-initial="${escapeHtml(mono)}" data-mono-len="${mono.length}"></span>`;
     html += `<span class="folder-tab-name">${fname}</span>${badge}`;
     html += `</button>`;
   }
-  // "+" add tab — always visible
-  html += `<button class="folder-tab folder-tab-add" title="${t('sidebar.newFolder')}">`;
-  html += `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
-  html += `</button>`;
   html += '</div>';
-  // Expand/collapse toggle (hidden by default, shown via CSS when overflow detected)
-  html += `<button class="folder-tabs-toggle">`;
-  html += `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
-  html += `<span class="folder-tabs-toggle-label"></span>`;
+  // Footer "+ New project" row — always visible at the rail bottom.
+  html += `<button class="folder-tab folder-tab-add" title="${escapeHtml(t('sidebar.newFolder'))}">`;
+  html += `<span class="folder-tab-dot folder-tab-add-dot"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></span>`;
+  html += `<span class="folder-tab-name">${escapeHtml(t('sidebar.newFolder'))}</span>`;
   html += `</button>`;
   tabsEl.innerHTML = html;
-
-  // Check overflow after render — if content exceeds visible height, show toggle & count hidden
-  requestAnimationFrame(() => {
-    const scrollEl = tabsEl.querySelector('.folder-tabs-scroll');
-    if (!scrollEl) return;
-    const isOverflow = scrollEl.scrollHeight > scrollEl.clientHeight + 2;
-    tabsEl.classList.toggle('has-overflow', isOverflow);
-    // Count how many real folder tabs are hidden (below the fold)
-    if (isOverflow) {
-      const label = tabsEl.querySelector('.folder-tabs-toggle-label');
-      if (label) {
-        if (_folderTabsExpanded) {
-          label.textContent = t('sidebar.lessFolders');
-        } else {
-          const collapsedMax = 94; // matches CSS max-height (3 rows)
-          // Only count real folder tabs, exclude the "+" add button
-          const tabs = scrollEl.querySelectorAll('.folder-tab:not(.folder-tab-add)');
-          let hiddenCount = 0;
-          tabs.forEach(tab => {
-            if (tab.offsetTop + tab.offsetHeight > collapsedMax) hiddenCount++;
-          });
-          label.textContent = hiddenCount > 0 ? `+${hiddenCount}` : '';
-        }
-      }
-    }
-  });
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -572,9 +645,13 @@ function renderConversationList() {
       const folderIds = new Set(folders.map(f => f.id));
       filtered = all.filter(c => !c.folderId || !folderIds.has(c.folderId));
     } else if (!foldersReady) {
-      // Folders not yet loaded — filter out conversations that have a folderId
-      // from server settings to avoid flashing them in uncategorized view
-      filtered = all.filter(c => !c.folderId);
+      // Folders not yet loaded — FAIL OPEN: show every conversation. Hiding a
+      // conv that carries a folderId behind a transient (or failed) folder load
+      // makes real, server-present conversations invisible — the exact "I lose
+      // conversations" symptom. A brief flash of a foldered conv in the
+      // uncategorized view is strictly better than dropping it; once folders
+      // load the normal branch re-partitions it correctly.
+      filtered = all;
     }
     // else: folders loaded and empty — show everything (no folders exist)
 
@@ -692,15 +769,21 @@ function _renderSearchResults(results, query, listEl, statsEl, isPartial) {
    * observer so it can't append conv rows into the search results. */
   _teardownConvVirtual();
   statsEl.classList.add("visible");
-  const suffix = isPartial ? ' <span class="search-loading">searching…</span>' : "";
-  statsEl.innerHTML = `${results.length} result${results.length !== 1 ? "s" : ""}${suffix}`;
+  const suffix = isPartial ? ` <span class="search-loading">${escapeHtml(t("sidebar.searching"))}</span>` : "";
+  const countText = t(results.length !== 1 ? "sidebar.searchResults" : "sidebar.searchResult", { n: results.length });
+  statsEl.innerHTML = `${escapeHtml(countText)}${suffix}`;
   if (results.length === 0 && isPartial) {
-    listEl.innerHTML = `<div class="sidebar-search-empty"><div class="sidebar-search-empty-icon"></div>Searching…</div>`;
+    listEl.innerHTML = `<div class="sidebar-search-empty"><div class="sidebar-search-empty-icon"></div>${escapeHtml(t("sidebar.searching"))}</div>`;
     _lastConvListHash = "";
     return;
   }
   if (results.length === 0) {
-    listEl.innerHTML = `<div class="sidebar-search-empty"><div class="sidebar-search-empty-icon"></div>No matches for "<strong>${escapeHtml(query)}</strong>"</div>`;
+    /* split/join for literal {q} substitution — avoids $-pattern
+     * interpretation in String.replace and keeps the query HTML-escaped. */
+    const noMatch = escapeHtml(t("sidebar.searchNoMatches"))
+      .split("{q}")
+      .join(`<strong>${escapeHtml(query)}</strong>`);
+    listEl.innerHTML = `<div class="sidebar-search-empty"><div class="sidebar-search-empty-icon"></div>${noMatch}</div>`;
     _lastConvListHash = "";
     return;
   }
@@ -717,7 +800,7 @@ function _renderSearchResults(results, query, listEl, statsEl, isPartial) {
         if (matchField === "id") {
           snip = `<div class="conv-item-snippet">${highlightMatch(matchSnippet, query)}</div>`;
         } else {
-          const rl = matchRole === "user" ? "You" : "Claude";
+          const rl = matchRole === "user" ? t("sidebar.searchRoleYou") : t("sidebar.searchRoleAssistant");
           snip = `<div class="conv-item-snippet">${ico} ${rl}: ${highlightMatch(matchSnippet, query)}</div>`;
         }
       }
@@ -762,14 +845,40 @@ function showConvSummary(badgeEl, ev) {
  * @param {Object} c — conversation object
  * @returns {{streaming:boolean, translating:boolean, memoryPrefetching:boolean, awaitingHuman:boolean, errored:boolean, incomplete:boolean}}
  */
+/**
+ * SINGLE SOURCE OF TRUTH for "is this conversation busy (streaming) right now".
+ *
+ * Owns the entire busy-predicate: a live main-stream entry, a pinned
+ * ``activeTaskId``, OR any branch/compound sub-stream (``convId:msgIdx:branchIdx``)
+ * whose key is prefixed by ``convId:``. Consumed by BOTH the sidebar row flags
+ * (``_convStatusFlags``) and the composer send/stop button (``updateSendButton``
+ * in ui/send_button.js). Before this, each recomputed the predicate inline and
+ * the sidebar additionally did the prefix scan the composer lacked, so the two
+ * could disagree ABOUT ONE CONVERSATION. Routing both through this function makes
+ * that divergence impossible by construction.
+ *
+ * NOTE: this answers "is conv X busy", not "should the composer show Stop" — the
+ * composer is always about ``activeConvId`` while the sidebar shows every conv,
+ * so a lit background dot with an idle composer is CORRECT (different convs), not
+ * a bug. The stale-``activeTaskId`` orphan that outlives a wedged backend task is
+ * reaped server-side (reap_stuck_running_tasks) + swept client-side
+ * (_reconcileStuckActiveTaskPins); this predicate just reads the current truth.
+ *
+ * @param {Object} conv — conversation object
+ * @returns {boolean}
+ */
+function convIsBusy(conv) {
+  if (!conv) return false;
+  if (activeStreams.has(conv.id) || !!conv.activeTaskId) return true;
+  const prefix = conv.id + ":";
+  for (const k of activeStreams.keys()) { if (k.startsWith(prefix)) return true; }
+  return false;
+}
+
 function _convStatusFlags(c) {
   const translating = !!c._translating;
   const memoryPrefetching = !!c._memoryPrefetching;
-  let streaming = activeStreams.has(c.id) || !!c.activeTaskId;
-  if (!streaming) {
-    const prefix = c.id + ":";
-    for (const k of activeStreams.keys()) { if (k.startsWith(prefix)) { streaming = true; break; } }
-  }
+  const streaming = convIsBusy(c);
   // ★ Awaiting human input — scan back to the most recent assistant message
   //   with toolRounds (breaks early; typically inspects only the tail).
   let awaitingHuman = false;
@@ -826,6 +935,24 @@ function _convStatusFlags(c) {
         errored = false;
       }
       break;
+    }
+  }
+  // ★ Messages-stripped fallback — the sidebar (?meta=1) shell has no
+  //   c.messages, so the block above can't run. Use the raw settled-turn facts
+  //   the backend stamps into settings (lastFinishReason / lastMsgError /
+  //   lastMsgHasOutput) and run the SAME _FINISH_ERR/_FINISH_NORMAL classifier
+  //   so a crash-interrupted conv shows its amber dot before the user opens it.
+  //   awaiting_human + autopilot-concluded downgrades still need full messages
+  //   (not carried in meta) → those stay precise only after load; not a
+  //   regression (pre-load showed nothing at all).
+  else if (!streaming && !c.messages && c.lastMsgRole === 'assistant') {
+    const fr = c.lastFinishReason;
+    if (c.lastMsgError || _FINISH_ERR.has(fr)) {
+      errored = true;
+    } else if (fr) {
+      incomplete = !_FINISH_NORMAL.has(fr);
+    } else {
+      incomplete = !c.lastMsgHasOutput;
     }
   }
   return { streaming, translating, memoryPrefetching, awaitingHuman, errored, incomplete };
@@ -1065,6 +1192,32 @@ function _resolveAssistantById(conv, msgId, fallback) {
   return fallback;
 }
 
+
+/**
+ * Find the assistant message in conv.messages already BOUND to `taskId`
+ * (its `_taskId` matches). Scans tail-up so the most recent match wins.
+ *
+ * Used by connectToTask for identity-first target resolution: a reconnect,
+ * poll takeover, or just-finished turn must re-target the assistant slot that
+ * already belongs to the task rather than appending a second bubble for it
+ * (the "one user → two assistants" duplicate-bubble bug). `_taskId` is stamped
+ * by the SSE done/state handlers, the poll fallback, and the connectToTask
+ * recovery push — so any slot that ever streamed for this task is resolvable.
+ *
+ * @param {Object} conv
+ * @param {string} taskId
+ * @returns {Object|null} the bound assistant message, or null.
+ */
+function _resolveAssistantByTaskId(conv, taskId) {
+  if (!conv || !taskId || !Array.isArray(conv.messages)) return null;
+  const msgs = conv.messages;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m && m.role === 'assistant' && m._taskId === taskId) return m;
+  }
+  return null;
+}
+
 /**
  * Find the message in conv.messages that carries an `_autopilotPending`
  * payload, regardless of whether it's at the tail. The done-event
@@ -1073,10 +1226,20 @@ function _resolveAssistantById(conv, msgId, fallback) {
  * `finishStream` runs.
  *
  * @param {Object} conv
- * @returns {{msg: Object, idx: number}|null}
+ * @returns {{msg: Object, idx: number, _convLevel?: boolean}|null}
  */
 function _findAutopilotPendingCarrier(conv) {
   if (!conv || !Array.isArray(conv.messages)) return null;
+  /* ★ AUTHORITATIVE source: a conv-level baton set by the done/poll
+   *   handlers.  Unlike the per-message stamp below it cannot be lost
+   *   when a message is spliced out (vu_cancel, edit) — the backend's
+   *   fact (nextTaskId) is held on the conv object, not a positional
+   *   message.  The per-message scan is kept only as a compat reader
+   *   for batons stamped before this field existed. */
+  const _baton = conv._apPendingBaton;
+  if (_baton && _baton.nextTaskId) {
+    return { msg: { _autopilotPending: _baton }, idx: -1, _convLevel: true };
+  }
   for (let i = conv.messages.length - 1; i >= 0; i--) {
     const m = conv.messages[i];
     if (m && m._autopilotPending) return { msg: m, idx: i };

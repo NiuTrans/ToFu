@@ -47,6 +47,7 @@ _TOOL_VERB = {
     'grep_search': 'grep matches',
     'fetch_url': 'fetched page',
     'find_files': 'find results',
+    'get_conversation': 'past conversation',
 }
 
 # Split-persist filename prefix → tool name (see _persist.py).
@@ -107,16 +108,34 @@ def clear() -> None:
 _SPLIT_RE = re.compile(r'^(search|fetch|find)_(.+?)_(\d+)_(.+)$')
 _GREP_RE = re.compile(r'^grep_(.+)$')
 
+# Tools that use the DEFAULT single-file spill (``<tool_name>_<id>.txt`` — see
+# ``_persist.py::_persist_to_disk`` default branch) AND deserve a friendly verb
+# post-restart. Unlike the split tools, the default filename embeds no human
+# fragment, so ``describe_filename`` can only recover the TOOL — but that still
+# yields the friendly verb (``past conversation``) instead of the raw opaque
+# filename once the process-local registry is lost on restart. Kept as an
+# explicit allow-list (not a greedy ``<name>_<id>`` match) so an ordinary
+# project-file read like ``requirements_dev.txt`` is never mis-recognised as a
+# persisted spill. Add a tool here (and to ``_TOOL_VERB``) when it starts
+# spilling via the default single-file path.
+_DEFAULT_SPILL_TOOLS = ('get_conversation',)
+_DEFAULT_SPILL_RE = re.compile(
+    r'^(' + '|'.join(re.escape(t) for t in _DEFAULT_SPILL_TOOLS) + r')_(.+)$'
+)
+
 
 def describe_filename(name: str) -> tuple[str, str] | None:
     """Best-effort parse of a persisted-result filename → (tool_name, description).
 
     Stateless fallback used when the in-process registry misses (e.g. after a
     server restart).  Recognises the split-persist prefixes written by
-    ``_persist.py`` (``search_`` / ``fetch_`` / ``find_`` / ``grep_``).  The
-    description is reconstructed from the human fragment in the filename
-    (underscores → spaces); returns '' for the description when it can't be
-    isolated.  Returns None when the name isn't a recognised persisted result.
+    ``_persist.py`` (``search_`` / ``fetch_`` / ``find_`` / ``grep_``) and the
+    default single-file spill names (``<tool_name>_<id>.txt``) for the tools in
+    ``_DEFAULT_SPILL_TOOLS``.  The description is reconstructed from the human
+    fragment in the filename (underscores → spaces) when available; returns ''
+    for the description when it can't be isolated (default-spill names carry
+    none, so only the friendly verb survives).  Returns None when the name
+    isn't a recognised persisted result.
     """
     if not name:
         return None
@@ -136,6 +155,12 @@ def describe_filename(name: str) -> tuple[str, str] | None:
         # underscores so they can't be split reliably; surface the tool
         # only (still far better than the raw filename).
         return 'grep_search', ''
+
+    m = _DEFAULT_SPILL_RE.match(base)
+    if m:
+        # Default single-file spill — no human fragment in the name, so
+        # recover the tool only. friendly_label() renders its verb.
+        return m.group(1), ''
 
     return None
 

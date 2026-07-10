@@ -119,6 +119,16 @@ SPAWN_AGENTS_TOOL = {
                     "items": {
                         "type": "object",
                         "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": (
+                                    "Optional stable id for THIS agent (e.g. 'audit', 'a1'). "
+                                    "Set it when another agent in the same call must reference "
+                                    "this one via `depends_on` — the referenced id must match "
+                                    "exactly. When omitted a random id is assigned, which "
+                                    "cannot be targeted by `depends_on` within the same call."
+                                ),
+                            },
                             "objective": {
                                 "type": "string",
                                 "description": (

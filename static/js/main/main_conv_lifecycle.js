@@ -61,7 +61,7 @@ function newChat() {
     ? `<div class="welcome-folder-badge"><span class="welcome-folder-dot" style="color:${_newChatFolder.color || '#888'}">●</span> ${escapeHtml(_newChatFolder.name)}</div>`
     : '';
   document.getElementById("chatInner").innerHTML =
-    `<div class="welcome" id="welcome"><div class="welcome-icon"><img src="${BASE_PATH}/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>${_folderBadgeHtml}<p>${t('welcome.subtitle')}</p><div class="feature-pills"><span class="feature-pill">Extended Thinking</span><span class="feature-pill">Search</span><span class="feature-pill">URL Fetch</span><span class="feature-pill">Image Input</span><span class="feature-pill">Co-Pilot</span><span class="feature-pill">Browser</span></div></div>`;
+    `<div class="welcome" id="welcome"><div class="welcome-icon"><img src="${BASE_PATH}/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>${_folderBadgeHtml}<div class="feature-pills">${_welcomePillsHtml()}</div></div>`;
   buildTurnNav(null);
   renderPendingQueueUI(null);
   // ★ A brand-new conversation has no latch — hide any lingering banner.
@@ -132,6 +132,10 @@ function loadConversation(id) {
   }
   activeConvId = id;
   sessionStorage.setItem('tofu_activeConvId', id);
+  /* ★ Reset the open-scroll latch so THIS open positions the view exactly once
+   *   (the first full render force-scrolls to the bottom + re-latches; later
+   *   same-open renders preserve the viewport — see renderChat). */
+  if (typeof _openScrollConvId !== 'undefined') _openScrollConvId = null;
   /* ★ If loading a conv that doesn't belong to the active folder view, exit it */
   if (typeof getActiveFolderId === 'function' && getActiveFolderId()) {
     const _loadedConv = conversations.find(c => c.id === id);
@@ -180,7 +184,12 @@ function loadConversation(id) {
         } else if (c._needsLoad || c.messages.length === 0) {
           renderChat(c);
           if (typeof _restoreConvToolState === "function") _restoreConvToolState(c);
-        } else {
+        } else if (typeof _openScrollConvId === 'undefined' || _openScrollConvId !== id) {
+          /* ★ Only force-scroll if the Phase-1/Phase-2 renders inside
+           *   loadConversationMessages didn't already position this open.
+           *   Without this guard, a cached conversation gets an extra
+           *   redundant snap-to-bottom here after already landing at the
+           *   bottom — one of the "several jumps" on open. */
           _forceScrollToBottom(null, true);
         }
       }

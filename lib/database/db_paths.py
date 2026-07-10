@@ -169,7 +169,8 @@ def has_recoverable_source(data_dir: str) -> bool:
                 try:
                     if os.path.getsize(fp) > 0:
                         return True
-                except OSError:
+                except OSError as e:
+                    logger.debug('[db_paths] getsize(%r) probe failed: %s', fp, e)
                     continue
     except OSError as e:
         logger.debug('[db_paths] has_recoverable_source scan of %r failed: %s',

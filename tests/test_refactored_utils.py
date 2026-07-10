@@ -128,6 +128,41 @@ class TestRepairJson:
         with pytest.raises(json.JSONDecodeError):
             repair_json('{"reads": [{"path": "/a/b/some"weird.py"}]}')
 
+    def test_mismatched_closer_object_closed_with_bracket(self):
+        """The reported failure: an inner reads-array whose object is closed
+        with ']' instead of '}' — ``[{"path": ..., "end_line": 214]``. Neither
+        the count-and-append balance nor the delimiter fix can recover a
+        wrong-TYPE closer; the bracket-match pass rewrites it."""
+        from lib.utils import repair_json
+        raw = '[{"path": "scripts/attribute_losses.py", "start_line": 196, "end_line": 214]'
+        assert repair_json(raw) == [
+            {'path': 'scripts/attribute_losses.py', 'start_line': 196, 'end_line': 214}
+        ]
+
+    def test_mismatched_closer_nested(self):
+        """Wrong closer one level deep inside an object value."""
+        from lib.utils import repair_json
+        assert repair_json('{"a": [1, 2}') == {'a': [1, 2]}
+        assert repair_json('{"reads": [{"path": "a"]}') == {'reads': [{'path': 'a'}]}
+
+    def test_bracket_match_fix_byte_identical_on_valid(self):
+        """The bracket-match pass MUST be a no-op on well-formed JSON — a
+        matched closer is never rewritten, so valid payloads (incl. brackets
+        inside string literals) pass through byte-identical."""
+        from lib.utils import _bracket_match_fix
+        for v in ('{"a":1}', '[{"x":[1,2]},{"y":"}]"}]', r'{"s":"a\"b]"}', '[]', '{}'):
+            assert _bracket_match_fix(v) == v, v
+
+    def test_mismatched_closer_via_tool_repair(self):
+        """End-to-end through the tool-arg repair layer: read_files with the
+        malformed stringified reads recovers to a real list."""
+        from lib.tool_input_repair import validate_then_repair
+        raw = '[{"path": "scripts/attribute_losses.py", "start_line": 196, "end_line": 214]'
+        repaired, log = validate_then_repair('read_files', {'reads': raw}, model='test')
+        assert repaired['reads'] == [
+            {'path': 'scripts/attribute_losses.py', 'start_line': 196, 'end_line': 214}
+        ]
+
     def test_backward_compat_alias(self):
         """_repair_json is an alias for repair_json."""
         from lib.utils import _repair_json, repair_json

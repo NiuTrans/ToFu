@@ -105,7 +105,7 @@ BROWSER_TOOL_SCREENSHOT = {
             "Use this to: 1) Understand page layout; 2) See Canvas-rendered content (charts, graphs, DAG diagrams); "
             "3) Verify click/navigation results; 4) Read text from images when DOM extraction fails.\n"
             "Prefer the default full-page capture so you don't miss content below the fold. "
-            "Only set fullPage=false when you specifically need just the current viewport. "
+            "Only set full_page=false when you specifically need just the current viewport. "
             "Large images are auto-compressed to JPEG."
         ),
         "parameters": {
@@ -331,7 +331,7 @@ BROWSER_TOOL_HOVER = {
             "Hover over an element to trigger dropdown menus, tooltips, or hover states. "
             "This simulates mouse movement over the element, triggering mouseenter/mouseover events.\n"
             "Use this before clicking items in dropdown menus that require hover to reveal.\n"
-            "After hovering, use browser_wait or time.sleep() to allow menu animation to complete, "
+            "After hovering, use browser_wait (with the `time` parameter) to allow menu animation to complete, "
             "then use browser_get_interactive_elements to find newly revealed menu items."
         ),
         "parameters": {

@@ -55,6 +55,20 @@ function saveSettings() {
     config.keepToolHistory = kthCb.checked;
   }
 
+  // Per-tool inline timeline (segment render) toggle — defaults true.
+  var segTlCb = document.getElementById('settingSegmentTimeline');
+  if (segTlCb) {
+    var _segTlOld = config.segmentTimeline !== false;
+    config.segmentTimeline = segTlCb.checked;
+    // Repaint the active conversation so the change is visible immediately
+    // (no reload needed) when the setting actually flipped.
+    if (config.segmentTimeline !== _segTlOld && typeof renderChat === 'function'
+        && typeof getActiveConv === 'function') {
+      var _segConv = getActiveConv();
+      if (_segConv) renderChat(_segConv, true);
+    }
+  }
+
   // Auto-generate conversation title toggle
   var agtCb = document.getElementById('settingAutoGenerateTitle');
   if (agtCb) {
@@ -207,6 +221,15 @@ async function _saveServerConfig() {
   // Machine translation provider config
   if (typeof _collectMtProviderConfig === 'function') {
     payload.mt_provider = _collectMtProviderConfig();
+  }
+
+  // Speech-to-text: fold the dedicated STT provider into the providers list
+  // BEFORE it is shipped (payload.providers = _stgProviders below/above).
+  // Writes an explicit per-cell key_access capability override — see
+  // settings/speech.js header (the DEFAULT_SLOT_CONFIGS trap).
+  if (typeof _applySttToProviders === 'function') {
+    _applySttToProviders();
+    payload.providers = _stgProviders;
   }
 
   try {

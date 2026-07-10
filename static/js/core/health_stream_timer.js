@@ -28,6 +28,15 @@ const _LIVENESS_ICON_WARN =
 const _LIVENESS_ICON_DEAD =
   '<svg class="stream-liveness-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.6"/><path d="M5.5 5.5 10.5 10.5M10.5 5.5 5.5 10.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
 
+/* Guarded t(): several jsdom harnesses eval THIS file standalone (without
+ * i18n.js) and drive _updateStreamTimerUI / _streamPhaseLabel — an unguarded
+ * t() would throw ReferenceError there. In production i18n.js is bundled first
+ * so t() is always present (→ zh, the primary UI). Fall back to the key only
+ * when t() is absent (test-only path; never English). */
+function _connT(key, params) {
+  return (typeof t === 'function') ? t(key, params) : key;
+}
+
 function _fmtElapsed(ms) {
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
@@ -48,21 +57,24 @@ function _fmtElapsed(ms) {
 function _streamPhaseLabel(buf) {
   const p = buf && buf.phase;
   if (!p || !p.phase) return '';
+  // p.detail is backend-supplied dynamic text — pass it through verbatim (same
+  // ruling as the assistant/critic prose: live server text isn't UI chrome).
+  // Only OUR OWN generic fallback labels are localized (zh primary).
   switch (p.phase) {
     case 'tool_exec':
-      return p.detail ? String(p.detail) : 'running tools';
+      return p.detail ? String(p.detail) : _connT('conn.phaseTools');
     case 'llm_thinking':
-      return p.detail ? String(p.detail) : 'thinking';
+      return p.detail ? String(p.detail) : _connT('conn.phaseThinking');
     case 'thinking_active':
-      return 'reasoning';
+      return _connT('conn.phaseReasoning');
     case 'compacting':
-      return p.detail ? String(p.detail) : 'compacting context';
+      return p.detail ? String(p.detail) : _connT('conn.phaseCompacting');
     case 'retrying':
-      return p.detail ? String(p.detail) : 'retrying';
+      return p.detail ? String(p.detail) : _connT('conn.phaseRetrying');
     case 'working':
-      return p.detail ? String(p.detail) : 'working';
+      return p.detail ? String(p.detail) : _connT('conn.phaseWorking');
     case 'autopilot_thinking':
-      return p.detail ? String(p.detail) : 'autopilot is generating the next reply';
+      return p.detail ? String(p.detail) : _connT('conn.phaseAutopilot');
     default:
       return '';
   }
@@ -85,7 +97,12 @@ async function _checkServerHealth() {
       _consecutiveHealthFails++;
       _serverAlive = _consecutiveHealthFails < 2; // need 2+ failures to confirm dead
     }
-  } catch {
+  } catch (e) {
+    // Do NOT swallow the reason: a transient AbortSignal.timeout under load
+    // and a genuine outage both land here but mean very different things. The
+    // reason is the only trail distinguishing them when the 2nd consecutive
+    // fail flips the user-visible "server offline" verdict.
+    console.debug('[StreamTimer] health ping failed:', e && e.message);
     _consecutiveHealthFails++;
     _serverAlive = _consecutiveHealthFails < 2;
   }
@@ -104,10 +121,60 @@ async function _checkDbHealth() {
     const data = await resp.json();
     if (data.db_ok === false) {
       _showDbWarningBanner();
+      _startDbHealthPolling();
+    } else {
+      // DB is healthy — clear any stale banner left over from a prior outage
+      // (e.g. the server was restarted with PG back up). Without this the red
+      // "Database Unavailable" banner lingers forever once shown, falsely
+      // telling the user the DB is still down.
+      _clearDbWarningBanner();
     }
-  } catch {
-    // Server itself is unreachable — _checkServerHealth handles that
+  } catch (e) {
+    // A network/tunnel drop means the server is unreachable — _checkServerHealth
+    // owns that verdict, so we don't show the DB banner here. But a .json()
+    // parse failure or a 200-with-garbage payload ALSO lands here; log it so a
+    // malformed health response isn't silently invisible (CLAUDE §2).
+    console.debug('[DbHealth] health probe failed (server unreachable or bad payload):', e && e.message);
   }
+}
+
+/** Remove the DB-unavailable banner if present (DB recovered / false positive). */
+function _clearDbWarningBanner() {
+  const b = document.getElementById('db-warning-banner');
+  if (b) {
+    b.remove();
+    console.info('[DbHealth] Database available again — cleared the "unavailable" banner');
+  }
+}
+
+/* Self-stopping recovery poll: once the DB-warning banner is shown, re-probe
+ * /api/health every 15s and clear the banner the moment the DB reports healthy
+ * (the documented recovery path is a server restart with PG back up). Stops
+ * itself when the banner is gone (recovered OR user-dismissed) so it costs
+ * nothing in steady state. Mirrors _startOfflineRecoveryPolling's shape. */
+let _dbHealthPollInterval = null;
+function _startDbHealthPolling() {
+  if (_dbHealthPollInterval) return;
+  _dbHealthPollInterval = setInterval(async () => {
+    if (!document.getElementById('db-warning-banner')) {
+      clearInterval(_dbHealthPollInterval);
+      _dbHealthPollInterval = null;
+      return;
+    }
+    if (document.visibilityState !== 'visible') return;
+    try {
+      const resp = await Api.health.check({ signal: AbortSignal.timeout(3000) });
+      if (!resp || !resp.ok) return;
+      const data = await resp.json();
+      if (data.db_ok !== false) {
+        _clearDbWarningBanner();
+        clearInterval(_dbHealthPollInterval);
+        _dbHealthPollInterval = null;
+      }
+    } catch (e) {
+      console.debug('[DbHealth] recovery poll failed:', e && e.message);
+    }
+  }, 15000);
 }
 
 function _showDbWarningBanner() {
@@ -119,16 +186,24 @@ function _showDbWarningBanner() {
     'background:#dc2626;color:#fff;padding:10px 16px;font-size:14px;' +
     'text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.3);' +
     'display:flex;align-items:center;justify-content:center;gap:8px;';
+  // Guarded t(): the jsdom test harnesses load this file WITHOUT i18n.js, so
+  // fall back to the zh literal when t() isn't present. zh is the primary UI.
+  const _tt = (typeof t === 'function')
+    ? t
+    : (k, p) => ({
+        'conn.dbUnavailableTitle': '数据库不可用',
+        'conn.dbUnavailableDesc': '未运行 PostgreSQL，对话与历史将无法使用。请安装 PostgreSQL（' + (p && p.cmd || '') + '）后重启服务器。',
+        'conn.dismiss': '关闭',
+      }[k] || k);
+  const _installCmd = '<code style="background:rgba(255,255,255,.2);padding:1px 5px;border-radius:3px">conda install -c conda-forge postgresql>=18</code>';
   banner.innerHTML =
     '<span style="display:inline-flex"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>' +
-    '<span><b>Database Unavailable</b> — PostgreSQL is not running. ' +
-    'Conversations and history will not work. ' +
-    'Install PostgreSQL (<code style="background:rgba(255,255,255,.2);padding:1px 5px;border-radius:3px">' +
-    'conda install -c conda-forge postgresql>=18</code>) and restart the server.</span>' +
+    '<span><b>' + _tt('conn.dbUnavailableTitle') + '</b> — ' +
+    _tt('conn.dbUnavailableDesc', { cmd: _installCmd }) + '</span>' +
     '<button onclick="this.parentElement.remove()" style="' +
     'background:rgba(255,255,255,.2);border:none;color:#fff;padding:4px 10px;' +
     'border-radius:4px;cursor:pointer;font-size:13px;margin-left:12px;' +
-    'white-space:nowrap">Dismiss</button>';
+    'white-space:nowrap">' + _tt('conn.dismiss') + '</button>';
   document.body.prepend(banner);
 }
 
@@ -142,15 +217,35 @@ function _forceFinishDeadStream(convId) {
     const last = conv.messages[conv.messages.length - 1];
     if (last && last.role === 'assistant' && !last.finishReason) {
       last.finishReason = 'server_offline';
+      // Guarded t() — this file is loaded WITHOUT i18n.js in the jsdom harness,
+      // so fall back to the zh literal (zh is the primary UI language).
+      const _tt = (typeof t === 'function')
+        ? t
+        : (k) => ({
+            'conn.streamOfflineMsg': '服务器离线，回复可能不完整。服务器恢复后会自动重连。',
+            'finishInfo.reasonServerOffline': '服务器离线',
+            'conn.offlineToastDetail': '后端服务器无响应。已保存部分回复，连接恢复后会自动恢复。',
+            'err.conn.hint': '连接似乎中断了，但服务器很可能已经完成生成。请不要重新生成或编辑——那会丢弃服务器上已完成的结果。点击下方「恢复」或刷新页面，即可取回完整回复。',
+          }[k] || k);
       /* Use the typed envelope so the error block renders consistently with
-       * backend-emitted errors. The kind=server_offline carries hint + label. */
+       * backend-emitted errors. The kind=server_offline carries hint + label,
+       * and renderErrorEnvelope overrides the title/hint with the friendly
+       * err.conn.* copy + a Recover button. Stamp the hint here too (not '')
+       * so guidance never depends on which path stamped the error — a legacy
+       * renderer that doesn't apply the override still shows real guidance. */
       last.error = normalizeErrorEnvelope({
         kind: 'server_offline', severity: 'warning', retryable: true,
-        message: '⚠️ 服务器离线，回复可能不完整。服务器恢复后会自动重连。\nServer offline — response may be incomplete. This notice will clear automatically when the server comes back.',
-        hint: '', detail: 'Frontend health-check failed', model: '', context: '', source: 'frontend-health-check', raw: '',
+        message: _tt('conn.streamOfflineMsg'),
+        hint: _tt('err.conn.hint'), detail: 'Frontend health-check failed', model: '', context: '', source: 'frontend-health-check', raw: '',
       });
     }
   }
+  const _ttToast = (typeof t === 'function')
+    ? t
+    : (k) => ({
+        'finishInfo.reasonServerOffline': '服务器离线',
+        'conn.offlineToastDetail': '后端服务器无响应。已保存部分回复，连接恢复后会自动恢复。',
+      }[k] || k);
   // Abort the SSE controller so _trySSE / _pollFallback also exit
   const s = activeStreams.get(convId);
   if (s && s.controller) {
@@ -158,8 +253,8 @@ function _forceFinishDeadStream(convId) {
   }
   twStop(convId);
   finishStream(convId);
-  showToast('⚠️', 'Server Offline',
-    'Backend server is not responding. Your partial response has been saved. It will recover automatically when connectivity is restored.',
+  showToast('⚠️', _ttToast('finishInfo.reasonServerOffline'),
+    _ttToast('conn.offlineToastDetail'),
     10000);
   // ★ Start periodic recovery polling so the result is auto-recovered when server comes back
   _startOfflineRecoveryPolling();
@@ -188,8 +283,9 @@ function _forceFinishDeadStream(convId) {
  * re-routed), false otherwise.  Best-effort, idempotent.
  *
  * @param {string} convId
- * @param {{status?: string, notFound?: boolean}} probe — poll outcome:
- *        ``notFound`` for a 404, else the task's terminal ``status``.
+ * @param {{status?: string, notFound?: boolean, background?: boolean}} probe — poll
+ *        outcome: ``notFound`` for a 404, else the task's terminal ``status``.
+ *        ``background`` gates the conv-agnostic sweep (no live stream) branch.
  */
 function _healStuckPlaceholder(convId, probe) {
   const conv = conversations.find(c => c.id === convId);
@@ -243,6 +339,37 @@ function _healStuckPlaceholder(convId, probe) {
     );
     stream._probeAbort = true;
     stream.controller.abort();
+    return true;
+  }
+  /* ★ Background orphan-pin clear (conv-agnostic sweep — _reconcileStuckActiveTaskPins).
+   *   There is NO live stream for this conv in THIS tab, and the caller has
+   *   confirmed the task is gone/terminal server-side (reaped by
+   *   reap_stuck_running_tasks, TTL-evicted, or a finished task whose done was
+   *   swallowed). This is the exact "sidebar dot outlives the work" shape: a
+   *   stale ``activeTaskId`` pin with no stream to poll-fallback through. There
+   *   is nothing to recover — the partial content (if any) is already on the
+   *   message — so just clear the pin so ``convIsBusy`` flips false. Stamp an
+   *   honest finishReason on unsettled partial content so the bubble settles.
+   *   Gated on ``probe.background`` so the foreground timer path (which always
+   *   has a live stream) is byte-identical to before. */
+  if (probe && probe.background) {
+    console.warn(
+      `[StreamTimer] ★ SELF-HEAL (background) — conv=${convId.slice(0,8)} task=${taskId.slice(0,8)} ` +
+      `is gone/terminal server-side with no live stream — clearing stale busy pin.`
+    );
+    if (last && last.role === 'assistant' && !last.finishReason && !last.error
+        && (last.content || last.thinking
+            || (Array.isArray(last.toolRounds) && last.toolRounds.length))) {
+      last.finishReason = 'interrupted';
+    }
+    conv.activeTaskId = null;
+    conv._activeTaskClearedAt = Date.now();
+    activeStreams.delete(convId);
+    twStop(convId);
+    if (typeof saveConversations === 'function') saveConversations(null);
+    if (typeof ConvCache !== 'undefined') { try { ConvCache.put(conv); } catch (e) { /* non-fatal */ } }
+    if (activeConvId === convId && typeof renderChat === 'function') renderChat(conv);
+    if (typeof renderConversationList === 'function') renderConversationList();
     return true;
   }
   return false;
@@ -362,36 +489,37 @@ async function _updateStreamTimerUI(convId) {
   // timer AND the in-bubble status line (_setBubbleLiveness) — the in-bubble
   // line is where the user actually looks, and during a stall it would
   // otherwise stay frozen on a live-looking "Reasoning … chars" spinner.
+  const _forceFinishLbl = _connT('conn.forceFinish');
   if (info._lastHealthResult === false) {
     // Server confirmed not responding (≥2 consecutive health-check failures).
     el.innerHTML = elapsedHtml +
-      ` <span class="stream-stuck-severe">${_LIVENESS_ICON_DEAD} server not responding</span>` +
-      ` <button class="stream-force-finish-btn" onclick="_forceFinishDeadStream('${convId}')">Force Finish</button>`;
+      ` <span class="stream-stuck-severe">${_LIVENESS_ICON_DEAD} ${escapeHtml(_connT('conn.hudNotResponding'))}</span>` +
+      ` <button class="stream-force-finish-btn" onclick="_forceFinishDeadStream('${convId}')">${escapeHtml(_forceFinishLbl)}</button>`;
     _setBubbleLiveness(convId,
-      `<span class="stream-liveness stream-liveness-dead">${_LIVENESS_ICON_DEAD} Server not responding (${silentSec}s silent) — health check failed</span>`);
+      `<span class="stream-liveness stream-liveness-dead">${_LIVENESS_ICON_DEAD} ${escapeHtml(_connT('conn.hudNotRespondingFull', { n: silentSec }))}</span>`);
   } else if (_recentlyConfirmedAlive) {
     // Server confirmed the task is still running on its side — the SSE pipe is
     // just quiet.  This is the "it's our harness, not a hang" case: name what
     // it's busy with so the silence is explained rather than scary.
     const _suffix = _activityLbl ? ` · ${escapeHtml(_activityLbl)}` : '';
     el.innerHTML = elapsedHtml +
-      ` <span class="stream-stuck-activity">still working${_suffix}</span>`;
-    const _what = _activityLbl ? escapeHtml(_activityLbl) : 'processing';
+      ` <span class="stream-stuck-activity">${escapeHtml(_connT('conn.hudStillWorking'))}${_suffix}</span>`;
+    const _what = _activityLbl ? _activityLbl : _connT('conn.hudProcessing');
     _setBubbleLiveness(convId,
-      `<span class="stream-liveness stream-liveness-ok">${_LIVENESS_ICON_OK} Server alive — still working (${_what}, ${silentSec}s no stream output)</span>`);
+      `<span class="stream-liveness stream-liveness-ok">${_LIVENESS_ICON_OK} ${escapeHtml(_connT('conn.hudStillWorkingFull', { what: _what, n: silentSec }))}</span>`);
   } else if (silentSec >= _SILENCE_SEVERE) {
     // Silent past the severe threshold and we haven't been able to confirm the
     // task is alive — surface it loudly + offer Force Finish.
     el.innerHTML = elapsedHtml +
-      ` <span class="stream-stuck-severe">${silentSec}s no update</span>` +
-      ` <button class="stream-force-finish-btn" onclick="_forceFinishDeadStream('${convId}')">Force Finish</button>`;
+      ` <span class="stream-stuck-severe">${escapeHtml(_connT('conn.hudNoUpdate', { n: silentSec }))}</span>` +
+      ` <button class="stream-force-finish-btn" onclick="_forceFinishDeadStream('${convId}')">${escapeHtml(_forceFinishLbl)}</button>`;
     _setBubbleLiveness(convId,
-      `<span class="stream-liveness stream-liveness-warn">${_LIVENESS_ICON_WARN} No update for ${silentSec}s — checking whether the server is still responding…</span>`);
+      `<span class="stream-liveness stream-liveness-warn">${_LIVENESS_ICON_WARN} ${escapeHtml(_connT('conn.hudNoUpdateSevere', { n: silentSec }))}</span>`);
   } else {
     el.innerHTML = elapsedHtml +
-      ` <span class="stream-stuck-warn">${silentSec}s no update</span>`;
+      ` <span class="stream-stuck-warn">${escapeHtml(_connT('conn.hudNoUpdate', { n: silentSec }))}</span>`;
     _setBubbleLiveness(convId,
-      `<span class="stream-liveness stream-liveness-warn">${_LIVENESS_ICON_WARN} No update for ${silentSec}s — verifying the server is still alive…</span>`);
+      `<span class="stream-liveness stream-liveness-warn">${_LIVENESS_ICON_WARN} ${escapeHtml(_connT('conn.hudNoUpdateWarn', { n: silentSec }))}</span>`);
   }
 }
 

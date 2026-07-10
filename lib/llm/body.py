@@ -90,7 +90,18 @@ def _validate_image_blocks(messages: list) -> list:
 
     Mutates messages in-place.
     """
-    _APP_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # Resolve the uploads dir via the single runtime-base authority so local
+    # /api/images/ URLs resolve on a relocated install (data dir off the code
+    # tree). Falls back to the legacy in-tree path if runtime_paths is
+    # somehow unavailable (byte-identical in the default layout).
+    try:
+        from lib.runtime_paths import uploads_root
+        _IMAGES_DIR = os.path.join(uploads_root(), 'images')
+    except Exception as _rp_e:
+        logger.debug('[ImageValidation] uploads_root() unavailable, using in-tree: %s', _rp_e)
+        _IMAGES_DIR = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            'uploads', 'images')
     _MIN_IMAGE_BYTES = 32
     _EXT_MIME = {
         '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
@@ -118,7 +129,7 @@ def _validate_image_blocks(messages: list) -> list:
                 filename = url[_local_idx + len(_local_prefix):]
                 filename = filename.split('?')[0].split('#')[0]
                 filename = os.path.basename(filename)
-                filepath = os.path.join(_APP_ROOT, 'uploads', 'images', filename)
+                filepath = os.path.join(_IMAGES_DIR, filename)
                 try:
                     with open(filepath, 'rb') as f:
                         raw = f.read()

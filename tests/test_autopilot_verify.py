@@ -129,6 +129,56 @@ def test_extract_objective_empty_when_none():
     assert _extract_objective([]) == ''
 
 
+def test_extract_objective_skips_ismeta_context_carrier():
+    """The runtime prepends a synthetic ``_isMeta`` user message (CLAUDE.md /
+    user-preference profile) at index 0/1, BEFORE the human turn. The objective
+    must be the human's ask, never that injected carrier — even though the
+    carrier's content is a <system-reminder> wrapper (tag-agnostic: we skip by
+    the flag, not by parsing the wrapper)."""
+    from lib.tasks_pkg.autopilot import _extract_objective
+    msgs = [
+        {'role': 'user',
+         'content': '<system-reminder>[USER PREFERENCE PROFILE] ...</system-reminder>',
+         '_isMeta': True},
+        {'role': 'user', 'content': 'The real human ask.'},
+    ]
+    assert _extract_objective(msgs) == 'The real human ask.'
+
+
+def test_extract_objective_from_db_is_clean(monkeypatch):
+    """``_extract_objective_from_db`` derives from the PERSISTED conversation
+    (the source of truth for human input), which never carries injected
+    context — so the pinned objective is the bare human ask regardless of how
+    that per-turn context is wrapped in the live in-memory copy."""
+    import lib.tasks_pkg.conv_message_builder as cmb
+    import lib.tasks_pkg.autopilot as ap
+
+    clean = [
+        {'role': 'user', 'content': 'Fix the tablet case cutout question.'},
+        {'role': 'assistant', 'content': 'a full answer'},
+    ]
+    monkeypatch.setattr(cmb, '_load_messages_from_db', lambda cid: clean)
+    assert ap._extract_objective_from_db('conv-x') == \
+        'Fix the tablet case cutout question.'
+    # No conv id / empty DB → '' (caller falls back to the live list).
+    assert ap._extract_objective_from_db('') == ''
+    monkeypatch.setattr(cmb, '_load_messages_from_db', lambda cid: None)
+    assert ap._extract_objective_from_db('conv-x') == ''
+
+
+def test_vu_role_prompt_has_subjective_done_branch():
+    """The VU prompt must instruct: a SUBJECTIVE / one-shot question already
+    answered (nothing tool-checkable, no further criteria) is DONE — emit the
+    sentinel instead of manufacturing filler / role-swapping into an assistant.
+    This is the fix for the 'your message came through empty' churn loop."""
+    from lib.tasks_pkg.autopilot import _VU_ROLE_PROMPT as p
+    low = p.lower()
+    assert 'subjective' in low or 'one-shot' in low
+    assert 'nothing to verify' in low
+    # It must route to the DONE sentinel, not to a follow-up.
+    assert VU_DONE_SENTINEL in p
+
+
 # ── run_virtual_user integration (stubbed sub-turn) ────────────────────
 
 def _patch_subturn(monkeypatch, content):
@@ -235,6 +285,84 @@ def test_run_vu_injects_objective_anchor(monkeypatch):
     #    so a stale-process directive is mechanically identifiable.
     assert directive.get('_vuPromptVersion') == ap.VU_PROMPT_VERSION
     assert f'[prompt v{ap.VU_PROMPT_VERSION}]' in directive['content']
+
+
+# ── segment timeline propagation (VU turn renders the agent inline timeline) ─
+
+def _patch_subturn_with_rounds(monkeypatch, content, thinking, rounds):
+    """Stub _run_single_turn so the finished VU sub-task leaves terminal
+    content/thinking + a merged toolRounds list on the dict — exactly the state
+    `assemble_segments` reads. Mirrors what a real `_run_single_turn` leaves
+    behind (it does NOT assemble segments itself because the sub-task runs with
+    `_endpoint_managed=True`, skipping the persist path)."""
+    import lib.tasks_pkg.autopilot as ap
+    import lib.tasks_pkg.orchestrator as orch
+
+    def _fake_turn(sub_task):
+        sub_task['content'] = content
+        sub_task['thinking'] = thinking
+        sub_task['toolRounds'] = rounds
+        sub_task['finishReason'] = 'stop'
+        return {'content': content, 'thinking': thinking}
+
+    monkeypatch.setattr(orch, '_run_single_turn', _fake_turn)
+    monkeypatch.setattr(ap, '_get_or_persist_objective',
+                        lambda conv_id, msgs: 'Ship a working feature.')
+
+
+def test_run_vu_returns_segments_for_inline_timeline(monkeypatch):
+    """run_virtual_user must assemble + return the thin `segments` timeline off
+    the finished sub-task so the VU turn renders the IDENTICAL agent inline
+    per-tool timeline (owner directive). This is the ONLY assembly point — the
+    sub-task runs `_endpoint_managed` and never assembled segments itself.
+
+    Asserts the returned segments carry the interleaved shape (per-batch
+    thinking + narration then the tool_use, then the terminal deliverable) and
+    are THIN (no `_round` mirror — `toolRounds` is co-persisted)."""
+    from lib.tasks_pkg.autopilot import run_virtual_user
+    rounds = [
+        {'toolCallId': 'tc1', 'toolName': 'read_files', 'status': 'done',
+         'toolContent': 'ok', 'llmRound': 0, 'roundNum': 1,
+         'assistantContent': 'Let me check the files.',
+         'thinking': 'reason0'},
+    ]
+    _patch_subturn_with_rounds(
+        monkeypatch,
+        content='Good progress. Next, add a regression test.',
+        thinking='terminal-reasoning',
+        rounds=rounds)
+
+    result = run_virtual_user(_vu_task(), vu_msg_id='vu-seg-1')
+    assert result is not None
+    segs = result.get('segments')
+    assert isinstance(segs, list) and segs, 'VU result must carry segments'
+    types = [s.get('type') for s in segs]
+    # Interleaved: batch thinking + narration, then the tool_use, then the
+    # terminal thinking + deliverable text.
+    assert 'tool_use' in types, types
+    tu = next(s for s in segs if s['type'] == 'tool_use')
+    assert tu['id'] == 'tc1' and tu['name'] == 'read_files'
+    # THIN form: the `_round` mirror must be stripped (toolRounds co-persisted).
+    assert '_round' not in tu, 'segments must be persisted in THIN form'
+    deliverables = [s for s in segs
+                    if s['type'] == 'text' and s.get('deliverable')]
+    assert len(deliverables) == 1, deliverables
+    assert deliverables[0]['text'] == 'Good progress. Next, add a regression test.'
+
+
+def test_run_vu_no_rounds_still_returns_segments_key(monkeypatch):
+    """A VU turn with zero tool rounds (the common 'keep going' case) still
+    returns a `segments` key (a list) — never a missing key — so the caller's
+    `vu_result.get('segments') or []` is always well-defined. With no tools the
+    list is just the terminal deliverable segment."""
+    from lib.tasks_pkg.autopilot import run_virtual_user
+    _patch_subturn_with_rounds(
+        monkeypatch, content='Keep going.', thinking='', rounds=[])
+    result = run_virtual_user(_vu_task(), vu_msg_id='vu-seg-2')
+    assert result is not None
+    assert isinstance(result.get('segments'), list)
+    # No tools → no tool_use segments; exactly the terminal deliverable.
+    assert all(s.get('type') != 'tool_use' for s in result['segments'])
 
 
 # ── prompt version marker is content-derived ──────────────────────────

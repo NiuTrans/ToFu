@@ -396,6 +396,8 @@ def main():
     print()
     print(_color('═══ Paper Review Mode Tests ═══', '36'))
     print()
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_paper_review_mode.__main__')
     tests = [
         test_parse_plain_report_keys_untouched,
         test_parse_review_key_decodes_venue_and_uilang,

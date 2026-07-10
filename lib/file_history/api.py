@@ -508,27 +508,100 @@ def _nudge_vscode(abs_path: str) -> None:
 #  External-edit detection (mtime-based, bounded by tracked set)
 # ═══════════════════════════════════════════════════════════════════
 
+def _disk_matches_last_backup(base_path: str, rel: str, info: dict,
+                              abs_p: str) -> bool:
+    """True iff ``abs_p``'s current bytes equal the last backed-up version.
+
+    This is the CONTENT guard against phantom external-edit reports.  An
+    mtime/size difference is only a *hint* that a file may have changed:
+    a byte-identical rewrite still bumps mtime, and — critically — the
+    ``mtime: 0`` sentinel that :func:`~lib.file_history.store._stage_explicit`
+    records after a Tofu write tool overwrites a file makes EVERY
+    subsequent probe see ``real_mtime != 0`` even though the on-disk
+    bytes never changed out-of-band.  Comparing actual content against
+    the pinned backup blob is what tells a real edit from that noise.
+
+    Returns ``False`` (i.e. "can't confirm identical → treat as possible
+    drift") when there is no comparable blob: the file was never backed
+    up (``latest_version == 0``), was too large to back up
+    (``too_large``), is a tombstone (``deleted``), the blob is missing/
+    GC'd, or the file can't be read.  Callers then fall through to the
+    normal drift path, so this guard can only SUPPRESS a false positive,
+    never manufacture one or hide a genuine edit.
+    """
+    v = int(info.get('latest_version') or 0)
+    if v <= 0 or info.get('too_large') or info.get('deleted'):
+        return False
+    blob = read_blob(base_path, rel, v)
+    if blob is None:
+        return False
+    try:
+        with open(abs_p, 'rb') as f:
+            disk = f.read()
+    except OSError as e:
+        logger.debug('[FileHistory] content-guard read failed for %s: %s', rel, e)
+        return False
+    return disk == blob
+
+
 @with_project_lock
 def detect_external_edits(base_path: str, *,
-                          message_id: str | None = None) -> dict:
-    """Detect IDE edits to already-tracked files since the last backup.
+                          message_id: str | None = None,
+                          known_task_ids: set[str] | None = None) -> dict:
+    """Detect genuine out-of-band (IDE) edits to already-tracked files.
 
     Walks ONLY the tracked-files index — never the whole worktree.  For
     each tracked file, compares current ``stat`` against the recorded
-    ``mtime``/``size``.  If different, calls :func:`stage_backup` to
-    capture the new contents and emits a synthetic ``external`` snapshot
-    so the next round commit isolates ITS edits cleanly.
+    ``mtime``/``size``.  A stat difference is treated as a *hint* only:
+    two guards then decide whether it is a real, external edit before it
+    stages a backup / fires the drift notice.
 
-    Returns ``{committed: bool, snapshotId: str|None, files: [paths]}``.
+    Guard 1 — CONTENT (kills phantom fires).  A stat hint is confirmed
+    against actual bytes via :func:`_disk_matches_last_backup`.  A
+    byte-identical rewrite (including the ``mtime: 0`` sentinel
+    ``_stage_explicit`` leaves after a Tofu write) is NOT drift: the
+    stale ``mtime``/``size`` in the index is repaired so future probes
+    short-circuit, and NO redundant backup or snapshot is produced.
+
+    Guard 2 — ATTRIBUTION (stops misattributing sibling conversations).
+    The tracked entry's ``last_writer_task_id`` is stamped by Tofu's own
+    write path (an IDE never touches it).  A genuine content change whose
+    last writer is a KNOWN/recent Tofu task (``known_task_ids``) is a
+    concurrent conversation editing the shared project root — NOT an
+    external/IDE edit — so it is excluded from the external-edit path and
+    returned separately under ``siblingFiles`` instead of firing the
+    "you edited this in an IDE" toast.
+
+    ``known_task_ids`` is the set of in-process/recent Tofu task ids
+    (the orchestrator passes ``manager.tasks``); when ``None`` no
+    attribution filtering is applied (every genuine change counts as
+    external — the conservative legacy behaviour).
+
+    Returns ``{committed, snapshotId, files, siblingFiles}`` where
+    ``files`` are genuinely-external paths (drive the drift toast) and
+    ``siblingFiles`` are ``[{path, taskId}]`` attributed to a concurrent
+    Tofu task.
     """
-    out = {'committed': False, 'snapshotId': None, 'files': []}
+    out: dict = {'committed': False, 'snapshotId': None,
+                 'files': [], 'siblingFiles': []}
     if not is_enabled() or not probe_enabled():
         return out
+    known = set(known_task_ids or ())
     try:
         tracked = load_tracked(base_path)
         if not tracked:
             return out
         drifted: list[str] = []
+        sibling: list[dict] = []
+        # Paths whose stat drifted but whose CONTENT is byte-identical —
+        # their stale index stat is reconciled AFTER the loop so we never
+        # hold a stale ``tracked`` dict across a ``stage_backup`` call
+        # (which does its own load-modify-save of tracked.json).
+        reconcile: dict[str, tuple[int, float]] = {}
+
+        def _attributed(writer: str) -> bool:
+            return bool(writer) and writer in known
+
         for rel, info in tracked.items():
             if info.get('deleted'):
                 continue
@@ -536,18 +609,63 @@ def detect_external_edits(base_path: str, *,
             try:
                 st = os.stat(abs_p)
             except FileNotFoundError as _e_audit:
-                # File deleted out-of-band → treat as drift.
-                logger.debug('[api] detect_external_edits caught %s: %s', type(_e_audit).__name__, _e_audit)
+                # File deleted out-of-band → real drift, but a delete by a
+                # concurrent Tofu task is a sibling write, not an IDE edit.
+                logger.debug('[api] detect_external_edits caught %s: %s',
+                             type(_e_audit).__name__, _e_audit)
+                writer = info.get('last_writer_task_id') or ''
+                if _attributed(writer):
+                    sibling.append({'path': rel, 'taskId': writer})
+                    continue
                 if stage_backup(base_path, rel) is not None:
                     drifted.append(rel)
                 continue
             except OSError as e:
                 logger.debug('[FileHistory] probe stat failed for %s: %s', rel, e)
                 continue
-            if (st.st_size != info.get('size')
-                    or abs(st.st_mtime - float(info.get('mtime') or 0)) > 1e-3):
-                if stage_backup(base_path, rel) is not None:
-                    drifted.append(rel)
+            stat_hint = (st.st_size != info.get('size')
+                         or abs(st.st_mtime - float(info.get('mtime') or 0)) > 1e-3)
+            if not stat_hint:
+                continue
+            # Guard 1 — CONTENT: a byte-identical rewrite is not an edit.
+            if _disk_matches_last_backup(base_path, rel, info, abs_p):
+                reconcile[rel] = (st.st_size, st.st_mtime)
+                continue
+            # Genuine content change.  Guard 2 — ATTRIBUTION.
+            writer = info.get('last_writer_task_id') or ''
+            if _attributed(writer):
+                sibling.append({'path': rel, 'taskId': writer})
+                continue
+            if stage_backup(base_path, rel) is not None:
+                drifted.append(rel)
+
+        # Reconcile stale stat for byte-identical files against the
+        # FRESHEST index (post any stage_backup version bumps), touching
+        # only mtime/size and leaving version + last_writer_task_id intact.
+        if reconcile:
+            try:
+                fresh = load_tracked(base_path)
+                changed = False
+                for rel, (size, mtime) in reconcile.items():
+                    e = fresh.get(rel)
+                    if not e or e.get('deleted'):
+                        continue
+                    if (e.get('size') != size
+                            or abs(float(e.get('mtime') or 0) - mtime) > 1e-3):
+                        e['size'] = size
+                        e['mtime'] = mtime
+                        changed = True
+                if changed:
+                    save_tracked(base_path, fresh)
+                    logger.debug('[FileHistory] reconciled stat for %d '
+                                 'byte-identical file(s) (no drift)', len(reconcile))
+            except Exception as _e:
+                logger.debug('[FileHistory] stat reconcile failed: %s', _e)
+
+        if sibling:
+            out['siblingFiles'] = sibling
+            logger.info('[FileHistory] %d drifted file(s) attributed to '
+                        'concurrent Tofu task(s) — not external', len(sibling))
         if not drifted:
             return out
         snap_id = make_snapshot(

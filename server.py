@@ -95,6 +95,152 @@ def _pid_alive(pid):
     return True
 
 
+def _read_instance_lock_entry(lock_path):
+    """Read the ``<pid>@<host>`` first line of the single-instance lock file.
+
+    Returns ``(pid:int|None, host:str|None)``. A missing/empty/malformed file
+    yields ``(None, None)`` (or ``(None, host)`` if only the pid is unparseable).
+    """
+    try:
+        with open(lock_path, 'r') as f:
+            entry = (f.readline() or '').strip()
+    except OSError:
+        return None, None
+    if not entry or '@' not in entry:
+        return None, None
+    pid_str, _, host = entry.partition('@')
+    host = host.strip() or None
+    try:
+        return int(pid_str), host
+    except (ValueError, TypeError):
+        return None, host
+
+
+def _pid_is_live_server(pid):
+    """True iff *pid* is alive AND its ``/proc/<pid>/cmdline`` still looks like
+    our ``server.py``.
+
+    A dead pid → False. A live pid whose cmdline is provably NOT ``server.py``
+    (PID reuse) → False. If liveness or the cmdline cannot be established
+    (no /proc, permission denied, empty cmdline) this conservatively returns
+    True so we NEVER reclaim a lock whose owner might still be a running server.
+    Mirrors stop.sh's ``kill -0`` + ``ps -o args`` server.py check.
+    """
+    if not _pid_alive(pid):
+        return False
+    try:
+        with open('/proc/%d/cmdline' % pid, 'rb') as f:
+            cmdline = f.read().replace(b'\x00', b' ').decode('utf-8', 'replace')
+    except (OSError, ValueError):
+        return True  # cannot inspect → assume a live server, refuse to reclaim
+    if not cmdline.strip():
+        return True  # ambiguous → conservative
+    return 'server.py' in cmdline
+
+
+def _reclaim_stale_instance_lock(lock_path, hostname, logger):
+    """Decide whether a flock-contended instance lock is a STALE *local* lock we
+    may reclaim, and if so unlink it so a fresh inode can be flock'd.
+
+    Robustness rationale (the crux of the OOM-restart bug): ``flock`` is bound
+    to an open file *description*, NOT to process liveness. When the previous
+    server is SIGKILL'd (e.g. OOM) its atexit/lock-release never runs, and
+    orphaned child processes may keep the fd — and thus the flock — open
+    indefinitely; on a FUSE mount the advisory lock is not reliably released on
+    unclean death either. So a contended flock does NOT prove "a server is
+    running". We mirror stop.sh: read the recorded ``<pid>@<host>`` and ONLY
+    when ``host == this machine`` AND that pid is not a live ``server.py`` do we
+    ``unlink`` the lock path. Unlinking yields a brand-new inode on the retry;
+    the orphan's surviving fd points at the now-unlinked OLD inode, so its
+    lingering flock is harmless and our flock on the new inode succeeds.
+
+    Cross-host staleness is deliberately NOT handled here (that is the PG
+    heartbeat-takeover's domain) — a foreign-host lock is left untouched and the
+    caller refuses to start.
+
+    Returns True iff a stale local lock was unlinked (caller should retry the
+    flock), else False.
+    """
+    pid, host = _read_instance_lock_entry(lock_path)
+    if pid is None and host is None:
+        logger.critical('[Lock] contended instance lock has no readable <pid>@<host> entry — '
+                        'refusing to reclaim (a live peer may hold it)')
+        return False
+    if host and host != hostname:
+        logger.critical('[Lock] instance lock held by another host: pid=%s host=%s (we are %s) — '
+                        'refusing to reclaim a foreign lock (cross-host is PG-heartbeat territory)',
+                        pid, host, hostname)
+        return False
+    if pid is not None and _pid_is_live_server(pid):
+        logger.critical('[Lock] instance lock held by a LIVE local server (pid=%s host=%s) — '
+                        'another instance is genuinely running', pid, host)
+        return False
+    logger.warning('[Lock] reclaiming stale lock pid=%s host=%s (dead)', pid, host)
+    try:
+        os.unlink(lock_path)
+    except OSError as e:
+        logger.critical('[Lock] failed to unlink stale lock %s: %s', lock_path, e)
+        return False
+    return True
+
+
+def _acquire_instance_lock(lock_path, logger, hostname=None, allow_reclaim=True):
+    """Acquire the exclusive single-instance lock at *lock_path*.
+
+    Returns ``(ok, fd)``: ``(True, <open flocked fd>)`` on success — the caller
+    MUST keep the fd open for the whole process lifetime — or ``(False, None)``
+    when a live instance genuinely holds it. On a platform without ``fcntl`` /
+    with an unopenable lock dir it degrades to best-effort ``(True, fd|None)``
+    so a missing lock never blocks startup.
+
+    Self-healing: on flock contention we do NOT assume a live server (see
+    ``_reclaim_stale_instance_lock`` for why). If the recorded owner is a dead
+    LOCAL pid we unlink the stale lock and retry ONCE on a fresh inode. A
+    single bounded retry (``allow_reclaim=False``) guarantees no reclaim loop;
+    if the retry still fails we log CRITICAL and refuse (caller surfaces the
+    ``TOFU_SKIP_LOCK=1`` escape hatch).
+    """
+    if hostname is None:
+        import socket as _s
+        hostname = _s.gethostname()
+    try:
+        import fcntl
+    except ImportError:
+        logger.warning('[Lock] fcntl unavailable on this platform — skipping instance lock')
+        try:
+            return True, open(lock_path, 'a+')
+        except OSError:
+            return True, None
+    try:
+        if not os.path.exists(lock_path):
+            open(lock_path, 'a').close()
+        fd = open(lock_path, 'r+')
+    except OSError as e:
+        logger.warning('[Lock] cannot open lock file %s (%s) — proceeding without instance lock', lock_path, e)
+        return True, None
+    try:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        fd.close()
+        if allow_reclaim and _reclaim_stale_instance_lock(lock_path, hostname, logger):
+            ok2, fd2 = _acquire_instance_lock(lock_path, logger, hostname=hostname, allow_reclaim=False)
+            if ok2 and fd2 is not None:
+                logger.info('[Lock] reclaimed stale lock and acquired fresh instance lock (pid=%d)', os.getpid())
+            else:
+                logger.critical('[Lock] reclaimed stale lock but STILL could not acquire flock — '
+                                'refusing to start. Set TOFU_SKIP_LOCK=1 to override.')
+            return ok2, fd2
+        return False, None
+    try:
+        fd.seek(0)
+        fd.truncate()
+        fd.write('%d@%s\n' % (os.getpid(), hostname))
+        fd.flush()
+    except OSError as e:
+        logger.debug('[Lock] could not stamp lock identity: %s', e)
+    return True, fd
+
+
 def _parse_fault_dump_pid(basename):
     """Extract the pid from ``tofu_faulthandler_<pid>.log`` (else None)."""
     if not basename.startswith(_FAULT_DUMP_PREFIX) or not basename.endswith(_FAULT_DUMP_SUFFIX):
@@ -570,7 +716,7 @@ _install_flask_shim()
 
 # ── Now safe to import Quart (which the routes will see as 'flask') ──
 import quart  # noqa: F401  — kept so quart.* monkeypatches in _install_flask_shim resolve
-from quart import Quart, request
+from quart import Quart, redirect, request
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Logging (reuse server.py's architecture)
@@ -1054,6 +1200,13 @@ except Exception as _e:
 @app.after_request
 async def add_cache_headers(response):
     if request.path.startswith('/static/'):
+        # A 3xx here is the stale-bundle self-heal redirect (see _handle_404).
+        # It MUST NOT inherit the immutable long-cache below — the redirect
+        # target changes on every rebuild, so freezing it would permanently
+        # pin a client to one now-stale mapping. Keep it uncached.
+        if 300 <= response.status_code < 400:
+            response.headers['Cache-Control'] = 'no-store'
+            return response
         if request.path.endswith('.js'):
             response.content_type = 'text/javascript; charset=utf-8'
         elif request.path.endswith('.css'):
@@ -1115,6 +1268,26 @@ def _ws_safe_method_path():
 
 @app.errorhandler(404)
 async def _handle_404(exc):
+    # Self-heal a stale content-hashed bundle request. A client holding an old
+    # index.html (bfcache / long-lived tab / caching proxy defeating no-cache)
+    # asks for a bundle-/feature-<hash>.js whose hash was deleted on the last
+    # rebuild → 404 → LoadGuard banner. Redirect it to the current bundle of
+    # the same kind so the stale page self-heals with zero user action. Only a
+    # genuinely-built bundle name of a DIFFERENT hash is redirected; any other
+    # miss falls through to a real 404 (never masked). See routes/common.py.
+    if request.path.startswith('/static/js/'):
+        from lib.js_bundler import resolve_stale_bundle
+        requested = request.path.rsplit('/', 1)[-1]
+        current = resolve_stale_bundle(requested)
+        if current:
+            _lifecycle_log.warning(
+                '[StaleBundle] Self-healing stale request: %s -> %s (client held old index.html)',
+                requested, current)
+            resp = redirect('/static/js/' + current, code=302)
+            # Never let this mapping be cached — the target changes each rebuild.
+            resp.headers['Cache-Control'] = 'no-store'
+            return resp
+
     if request.path.startswith('/.well-known/'):
         _lifecycle_log.debug('404 (well-known probe): %s', request.path)
     else:
@@ -1523,37 +1696,18 @@ if __name__ == '__main__':
     host = args.host
 
     # ── Instance lock — prevent multiple servers on the same project dir ──
-    import socket as _sock_mod
+    # Self-healing: a contended flock does NOT prove a live server (an OOM
+    # SIGKILL skips atexit/lock-release, and an orphaned child — or an
+    # unclean death on a FUSE mount — can keep the fd's flock held). So on
+    # contention we reclaim a stale LOCAL lock (dead recorded pid) by
+    # unlinking + retrying on a fresh inode, exactly as stop.sh does. See
+    # _acquire_instance_lock / _reclaim_stale_instance_lock.
     _lock_dir = _tofu_data_root()
     os.makedirs(_lock_dir, exist_ok=True)
     _lock_path = os.path.join(_lock_dir, '.server.lock')
-    _instance_lock_fd = None
 
-    def _acquire_instance_lock():
-        global _instance_lock_fd
-        try:
-            if not os.path.exists(_lock_path):
-                open(_lock_path, 'a').close()
-            _instance_lock_fd = open(_lock_path, 'r+')
-        except Exception:
-            return True
-        try:
-            import fcntl
-            fcntl.flock(_instance_lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (IOError, OSError):
-            _instance_lock_fd.close()
-            _instance_lock_fd = None
-            return False
-        try:
-            _instance_lock_fd.seek(0)
-            _instance_lock_fd.truncate()
-            _instance_lock_fd.write(f'{os.getpid()}@{_sock_mod.gethostname()}\n')
-            _instance_lock_fd.flush()
-        except Exception:
-            pass
-        return True
-
-    if not _acquire_instance_lock():
+    _lock_ok, _instance_lock_fd = _acquire_instance_lock(_lock_path, _server_log)
+    if not _lock_ok:
         _skip = (os.environ.get('TOFU_SKIP_LOCK', '') or '').strip()
         if _skip != '1':
             _server_log.critical('Another server instance is already running from this project directory.\n'

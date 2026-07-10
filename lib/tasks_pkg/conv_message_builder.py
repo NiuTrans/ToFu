@@ -28,7 +28,6 @@ The transformations mirror what the old frontend ``buildApiMessages()`` did:
 from __future__ import annotations
 
 import json
-import os
 import re
 
 from lib.database import DOMAIN_CHAT, get_thread_db
@@ -38,10 +37,6 @@ logger = get_logger(__name__)
 
 # Regex to strip <notranslate> and <nt> wrapper tags
 _NT_RE = re.compile(r'</?(?:notranslate|nt)>', re.IGNORECASE)
-
-# Where uploaded images are stored on disk
-_UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))), 'uploads')
 
 
 def build_branch_api_messages(
@@ -454,7 +449,28 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
         return [{'role': 'assistant', 'content': ''}]
 
     # ── Attempt structured reconstruction ──
-    structured = _reconstruct_tool_call_messages(rounds)
+    # Segment-first (epic pt_cb8f98b0cb9b47fb, step 4): when this row carries a
+    # persisted `segments` timeline, drive the rebuild FROM the segment
+    # structure (rehydrate against toolRounds first so Gemini extraContent is
+    # recovered). Byte-identical to the toolRounds path by the reconstructor
+    # parity gate; falls through to the toolRounds path for legacy rows with
+    # no segments, or if the segment path can't reconstruct (→ None).
+    structured = None
+    seg_list = msg.get('segments')
+    if seg_list:
+        try:
+            from lib.tasks_pkg.segments import (
+                reconstruct_tool_messages_from_segments,
+                rehydrate_segments,
+            )
+            structured = reconstruct_tool_messages_from_segments(
+                rehydrate_segments(seg_list, rounds))
+        except Exception as _seg_e:
+            logger.warning('[MsgBuilder] segment reconstruction failed, '
+                           'falling back to toolRounds: %s', _seg_e)
+            structured = None
+    if structured is None:
+        structured = _reconstruct_tool_call_messages(rounds)
     if structured is not None:
         # Append the final assistant text (if any) as a trailing message.
         if final_content:

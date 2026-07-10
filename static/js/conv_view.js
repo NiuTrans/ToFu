@@ -69,6 +69,35 @@
     return conv.messages.indexOf(msg);
   }
 
+  /** Remove every node inside `inner` whose data-msg-id === msgId, EXCEPT
+   *  `exceptEl` (the one node we intend to keep). Returns the count removed.
+   *
+   *  This is the enforcement primitive for the render invariant
+   *  "one msg._msgId ⇒ at most one DOM node in #chatInner". A settled bubble
+   *  is keyed `id="msg-${idx}"` (mutable array position); the live turn is the
+   *  `#streaming-msg` singleton. When the tail's array index DRIFTS (a
+   *  placeholder push / splice / lazy-window offset), an index-based eviction
+   *  (`getElementById('msg-'+lastIdx)`) misses the real static bubble, and a
+   *  fresh streaming bubble is inserted alongside it — later finalized into a
+   *  second `msg-M` node. Two identical bubbles then render for a SINGLE
+   *  conv.messages entry. Keying eviction on the stable `data-msg-id` closes
+   *  that vector regardless of index drift. */
+  function _evictByMsgId(inner, msgId, exceptEl) {
+    if (!inner || !msgId) return 0;
+    var sel;
+    if (typeof CSS !== 'undefined' && CSS.escape) {
+      sel = '[data-msg-id="' + CSS.escape(msgId) + '"]';
+    } else {
+      sel = '[data-msg-id="' + msgId + '"]';
+    }
+    var removed = 0;
+    inner.querySelectorAll(sel).forEach(function (el) {
+      if (el === exceptEl) return;
+      try { el.remove(); removed++; } catch (e) { /* already detached */ }
+    });
+    return removed;
+  }
+
   /* ── Public API ──────────────────────────────────────────────────── */
 
   const ConvView = {
@@ -181,6 +210,45 @@
       return true;
     },
 
+    /** Stand up the live `#streaming-msg` bubble as an IDENTITY-KEYED insert.
+     *
+     *  The single seam for creating the streaming bubble (connectToTask
+     *  reconnect + showStreamingUIForConv). Enforces the
+     *  "one _msgId ⇒ at most one DOM node" invariant at the INSERT boundary:
+     *  before inserting, `_evictByMsgId` removes any node bound to this
+     *  `msgId` — a static `msg-N` stranded at a DRIFTED index (which the old
+     *  `getElementById('msg-'+lastIdx)` eviction missed) OR a stale
+     *  `#streaming-msg`. This is the structural fix for the render duplicate
+     *  ("one entry in the data, two identical bubbles on screen").
+     *
+     *  @param {string} convId
+     *  @param {Object} [opts]
+     *    @param {'worker'|'planner'|'critic'|'autopilot'} [opts.role] - default 'worker'
+     *    @param {string} [opts.status]  - status text shown inside the pulse
+     *    @param {string} [opts.timeStr] - formatted time string
+     *    @param {string} [opts.msgId]   - data-msg-id to stamp + dedupe on
+     *  @returns {boolean} true if a bubble was inserted.
+     */
+    startStreaming: function (convId, opts) {
+      opts = opts || {};
+      if (typeof activeConvId !== 'undefined' && activeConvId !== convId) return false;
+      const inner = document.getElementById('chatInner');
+      if (!inner) return false;
+      if (typeof _streamingBubbleHTML !== 'function') return false;
+      /* Identity eviction: any node already bound to this msgId (drifted
+       * static bubble or a stale streaming bubble) is removed so the fresh
+       * insert is the SOLE node for it. */
+      if (opts.msgId) _evictByMsgId(inner, opts.msgId, null);
+      /* There is only ever one live bubble — drop any leftover #streaming-msg
+       * singleton even when it carries no / a different msgId. */
+      const oldSm = document.getElementById('streaming-msg');
+      if (oldSm) { try { oldSm.remove(); } catch (e) { /* detached */ } }
+      inner.insertAdjacentHTML('beforeend',
+        _streamingBubbleHTML(opts.role || 'worker', opts.status || null,
+                             opts.timeStr || null, opts.msgId || null));
+      return true;
+    },
+
     /** Replace the live `#streaming-msg` bubble with a final-rendered
      *  message.  Used at three high-bug-density sites:
      *    • main.js startAssistantResponse error fallback
@@ -242,6 +310,19 @@
       } catch (e) {
         console.error('[ConvView] finalizeStreaming outerHTML failed:', e && e.message);
         return false;
+      }
+      /* ★ Identity sweep (belt-and-suspenders). The swap just turned
+       *   #streaming-msg into a static `msg-${idx}` node. If a STALE twin for
+       *   the same _msgId was stranded in the DOM (a drifted static bubble the
+       *   insert path failed to evict), it would now coexist with the
+       *   finalized node — the exact "two identical bubbles, one data entry"
+       *   render duplicate. Evict every OTHER node carrying this msgId, keeping
+       *   only the just-finalized one (found by its stable msg-${idx} id). This
+       *   makes the invariant hold no matter which path inserted the twin. */
+      if (msg && msg._msgId) {
+        const _inner = document.getElementById('chatInner');
+        const _keep = document.getElementById('msg-' + idx);
+        _evictByMsgId(_inner, msg._msgId, _keep);
       }
       if (savedScroll >= 0 && ct) ct.scrollTop = savedScroll;
       if (typeof _lastRenderedFingerprint !== 'undefined' &&

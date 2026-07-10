@@ -559,8 +559,23 @@ function _toggleCostPopover(ev, tagEl) {
 }
 
 // ── Scroll branch panel to bottom ──
-function renderFinishInfo(msg) {
-  if (!msg.finishReason && !msg.usage && !msg.model && !msg.preset && !msg.effort) return "";
+function renderFinishInfo(msg, isLiveTail) {
+  // A LEGITIMATELY-finished turn always carries a terminal signal
+  // (finishReason or usage), stamped by the backend terminal sync
+  // (build_result_meta → _sync_result_to_conversation). The mid-stream
+  // checkpoint (_sync_partial_to_conversation) deliberately writes `model`
+  // but WITHHOLDS finishReason/usage until completion.
+  const _terminal = msg.finishReason || msg.usage;
+  if (!_terminal && !msg.model && !msg.preset && !msg.effort) return "";
+  // ★ Premature-finish-bar guard. `model`/`preset`/`effort` alone are set
+  //   mid-stream (SSE state/placeholder), so a model-only message rendered
+  //   STATICALLY (not the live #streaming-msg bubble) would show a bogus
+  //   "finished" bar carrying only the model tag — the symptom seen on a
+  //   cross-device / poor-signal reload before SSE reconnects. Suppress it
+  //   ONLY for the active running tail (isLiveTail). A finished-but-model-
+  //   only message (legacy pre-usage-persistence, or a degenerate empty
+  //   completion) is NOT the live tail, so it keeps its bar — no regression.
+  if (!_terminal && isLiveTail) return "";
   const parts = [];
   const _mid = msg.model || msg.preset || msg.effort || "";
   const _pid = msg.provider_id || msg.providerId || "";
@@ -644,6 +659,11 @@ function renderFinishInfo(msg) {
       parts.push(`<span class="finish-tag warn">${escapeHtml(t('finishInfo.reasonStopped'))}</span>`);
     } else if (msg.finishReason === "interrupted") {
       parts.push(`<span class="finish-tag warn"><span title="${escapeHtml(t('finishInfo.reasonInterruptedTip'))}">${escapeHtml(t('finishInfo.reasonInterrupted'))}</span></span>`);
+    } else if (msg.finishReason === "incomplete") {
+      // An autonomous loop (endpoint / autopilot) was cut off by a safety cap
+      // (max iterations / replans / stuck / budget) — the objective is
+      // UNVERIFIED. Flag it for review instead of a silent clean ✓.
+      parts.push(`<span class="finish-tag warn"><span title="${escapeHtml(t('finishInfo.reasonIncompleteTip'))}">${Icon('alertTriangle', 12)} ${escapeHtml(t('finishInfo.reasonIncomplete'))}</span></span>`);
     } else if (msg.finishReason === "server_offline") {
       parts.push(
         `<span class="finish-tag err"><span title="${escapeHtml(t('finishInfo.reasonServerOfflineTip'))}">${escapeHtml(t('finishInfo.reasonServerOffline'))}</span></span>` +
@@ -1005,9 +1025,16 @@ function renderFileChangesBar(msg, msgIdx) {
   // when it lands. Returning empty for THIS render tick is fine; the bar
   // appears on the next tick.
   _extractFileChangesFromRoundsAsync(msg.toolRounds, msg).then(() => {
-    // Re-render the message list once the cache is fresh.
+    // Repaint once the file-change cache is fresh. ★ SCROLL FIX: use the
+    // scroll-preserving in-place repaint (chat_render.js:_bgRefreshChat), NOT a
+    // bare renderChat(conv) — the default (forceScroll=undefined) full render
+    // force-scrolls to the bottom, yanking a scrolled-up reader down when a
+    // late per-message file-change fetch lands. Fall back to renderChat only
+    // where the helper isn't present (defensive; both live in the bundle).
     const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
-    if (conv && typeof renderChat === 'function') renderChat(conv);
+    if (!conv) return;
+    if (typeof _bgRefreshChat === 'function') _bgRefreshChat(conv);
+    else if (typeof renderChat === 'function') renderChat(conv, false);
   });
   return '';
 }

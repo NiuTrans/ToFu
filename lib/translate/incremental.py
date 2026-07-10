@@ -32,12 +32,16 @@ Lifecycle
    settled.
 3. ``finalize_incremental(task, conv_id, msg_idx, content, msg_id)`` — called
    from the auto-translate decision point AFTER the result is persisted.
-   Signals the worker to drain, assemble ``translatedContent`` from the cached
-   segments (falling back to a single whole-content translation when the
-   cached segments don't faithfully cover the final content), commit it
-   race-safely via :func:`lib.translate.commit._commit_translation_to_db`, and
-   push a ``done`` frame on the ``translate`` channel. Non-blocking: the worker
-   thread does the final assemble / commit / push.
+   Signals the worker to drain and commit the DELIVERABLE-only
+   ``translatedContent`` (reusing the terminal deliverable's already-cached
+   per-round translation; a fresh whole-content translation only when it isn't
+   cached). The inter-round narration is NOT part of ``translatedContent`` — it
+   is carried per-segment via ``segment_translations`` (stamped onto
+   ``msg['segments'][].translatedText``) and rendered inline by the settled
+   timeline. Commits race-safely via
+   :func:`lib.translate.commit._commit_translation_to_db` and pushes a ``done``
+   frame (carrying ``segmentsByRound`` so the live view stamps the narration
+   without a reload). Non-blocking: the worker thread does the commit / push.
 
 Ownership
 ---------
@@ -63,11 +67,6 @@ _KILL_ENV = 'TOFU_INCREMENTAL_TRANSLATE'
 # Worker self-destructs if no item arrives for this long (a task that errored
 # or was superseded never calls finalize — this prevents accumulator leaks).
 _WORKER_IDLE_TIMEOUT = 300.0
-
-# The joined per-round originals must cover at least this fraction of the final
-# content (whitespace-insensitive) for the assembly to be trusted; otherwise we
-# fall back to a single whole-content translation.
-_ASSEMBLY_COVERAGE_MIN = 0.85
 
 # Assistant replies are authored in English when autoTranslate is on (the user
 # message was translated to English before the turn ran). Mirrors
@@ -117,6 +116,14 @@ class _Acc:
         self.q: queue.Queue = queue.Queue()
         self.segments: dict[int, str] = {}   # round_num -> translated text
         self.originals: dict[int, str] = {}  # round_num -> original text
+        # Authoritative THIN segments (segments_to_json(task['segments'])),
+        # captured at finalize time. Handed to the commit so the per-round
+        # stamp can SELF-HEAL: if the finalize commit resolves a DB message
+        # that has no `segments` yet (it raced ahead of / lost the row-write
+        # to _sync_result_to_conversation), the commit splices these on in the
+        # SAME CAS write, then stamps — so the 19 translations can never be
+        # silently dropped onto a segment-less row.
+        self._fallback_segments = None
         self.model = 'unknown'
         self.lock = threading.Lock()
         self.thread = threading.Thread(
@@ -151,7 +158,8 @@ class _Acc:
                     _, round_num, text = item
                     self._translate_segment(round_num, text, *helpers)
                 elif kind == 'fin':
-                    _, conv_id, msg_idx, content, msg_id = item
+                    _, conv_id, msg_idx, content, msg_id, fallback_segments = item
+                    self._fallback_segments = fallback_segments
                     self._do_finalize(conv_id, msg_idx, content, msg_id, *helpers)
                     self._cleanup()
                     return
@@ -209,9 +217,10 @@ class _Acc:
         except Exception as e:
             logger.warning('[IncTranslate] task=%s round=%d segment translate '
                            'failed: %s', self.task_id[:8], round_num, e)
-            # Record the original but NOT a translated segment, so the assembly
-            # coverage check detects the gap and falls back to a whole-content
-            # translation rather than silently dropping this round's prose.
+            # Record the original but NOT a translated segment. For the terminal
+            # deliverable this means _deliverable_translation finds no cached
+            # match and re-translates the whole content; for a narration round
+            # the segment simply carries no translatedText (renders in English).
             with self.lock:
                 self.originals[round_num] = original
 
@@ -242,31 +251,55 @@ class _Acc:
                     'statusKind': 'started', 'statusMessage': ''},
                    conv_id, msg_idx, msg_id)
 
-        translated = self._assemble(content)
+        # ★ translatedContent is the DELIVERABLE answer ONLY — never the joined
+        #   per-round narration. The narration is carried per-segment via
+        #   `segment_translations` (stamped onto msg['segments'][].translatedText)
+        #   and rendered INLINE by the settled segment timeline. Assembling the
+        #   whole reply here painted that narration a SECOND time as one block
+        #   below the turn — the reported "all content clumps at the tail after
+        #   finalize" bug — and made the bilingual 原文/译文 pair asymmetric
+        #   (原文 = msg.content = deliverable-only). The terminal deliverable was
+        #   submitted as its own round segment (orchestrator: submit_round_segment
+        #   with the final content), so reuse that cached translation; translate
+        #   afresh only when it isn't cached (e.g. a Sources-footer /
+        #   content-filter override rewrote task['content'] after capture).
+        translated = self._deliverable_translation(
+            content, system_prompt, translate_fn, extract_nt, reattach_nt,
+            conv_id, msg_idx, msg_id)
         if translated is None:
-            logger.info('[IncTranslate] task=%s assembly unusable — falling back '
-                        'to whole-content translation (%d chars)',
-                        self.task_id[:8], len(content))
-            translated = self._translate_whole(content, system_prompt,
-                                                translate_fn, extract_nt,
-                                                reattach_nt, conv_id, msg_idx,
-                                                msg_id)
-            if translated is None:
-                return  # error already pushed
+            return  # error already pushed by _translate_whole
 
         if not translated or not translated.strip():
             logger.debug('[IncTranslate] task=%s nothing to commit', self.task_id[:8])
             return
 
+        # ★ Per-round carry to the SETTLED render: hand the commit the
+        #   {round_num: 中文} map so it stamps `translatedText` onto each
+        #   matching text segment of msg['segments'] (keyed by llmRound ≡
+        #   round_num). renderSegmentTimelineHTML then shows the translated
+        #   narration in its .seg-narration slot — the settled view stays
+        #   interleaved exactly like the streaming view (no finalize snap-back).
+        with self.lock:
+            seg_trans = {rn: txt for rn, txt in self.segments.items()
+                         if txt and txt.strip()}
         try:
             _commit_translation_to_db(conv_id, msg_idx, 'translatedContent',
                                       translated, original_text=content,
-                                      model=self.model, msg_id=msg_id or None)
+                                      model=self.model, msg_id=msg_id or None,
+                                      segment_translations=seg_trans or None,
+                                      fallback_segments=self._fallback_segments)
         except Exception as e:
             logger.warning('[IncTranslate] task=%s commit failed: %s',
                            self.task_id[:8], e, exc_info=True)
+        # ★ Carry the per-round narration Chinese on the done frame (str keys —
+        #   JSON object) so the LIVE view can stamp msg['segments'][].translatedText
+        #   WITHOUT a reload — the settled timeline then keeps its narration in
+        #   Chinese immediately at finalize (a reconnect reads the same already-
+        #   stamped segments from the DB commit above).
+        segments_by_round = {str(rn): txt for rn, txt in seg_trans.items()}
         self._push({'type': 'done', 'status': 'done',
-                    'translated': translated, 'model': self.model},
+                    'translated': translated, 'model': self.model,
+                    'segmentsByRound': segments_by_round},
                    conv_id, msg_idx, msg_id)
         logger.info('[IncTranslate] task=%s ✓ finalized translatedContent '
                     '(%d chars, %d segments, model=%s)',
@@ -298,45 +331,43 @@ class _Acc:
                        conv_id, msg_idx, msg_id)
             return None
 
-    def _assemble(self, content):
-        """Join cached translated segments in round order.
+    def _deliverable_translation(self, content, system_prompt, translate_fn,
+                                 extract_nt, reattach_nt, conv_id, msg_idx, msg_id):
+        """Translate ONLY the deliverable answer for the ``translatedContent`` blob.
 
-        Returns the assembled translation, or None when the cached segments
-        don't faithfully cover the final *content* (a gap, or low coverage) so
-        the caller falls back to a single whole-content translation.
+        ``content`` is ``task['content']`` — the terminal-round deliverable
+        (inter-round narration was already zeroed by ``_discard_pretool_prose``).
+        The deliverable was submitted as its OWN round segment, so reuse that
+        cached translation (whitespace-insensitive original match) to avoid a
+        redundant LLM call; fall back to a fresh whole-content translation when
+        there is no cached match (e.g. a Sources-footer / content-filter
+        override rewrote ``task['content']`` after the segment was captured).
+
+        Returns the translation, ``''`` when content is empty, or ``None`` on a
+        translate error (which ``_translate_whole`` has already pushed).
         """
+        content = content or ''
+        if not content.strip():
+            return ''
+        key = ''.join(content.split())
         with self.lock:
-            if not self.segments:
-                return None
-            rounds = sorted(self.originals.keys())
-            # Every round we captured an original for must also have a
-            # translated segment, else there's a gap (a failed segment).
-            for rn in rounds:
-                if rn not in self.segments:
-                    return None
-            joined_orig = '\n\n'.join(self.originals[rn] for rn in rounds
-                                      if self.originals[rn].strip())
-            joined_trans = '\n\n'.join(self.segments[rn] for rn in rounds
-                                       if self.segments[rn].strip())
-        co = ''.join(content.split())
-        if not co:
-            return joined_trans or None
-        jo = ''.join(joined_orig.split())
-        coverage = len(jo) / len(co)
-        if coverage < _ASSEMBLY_COVERAGE_MIN:
-            logger.info('[IncTranslate] task=%s assembly coverage %.2f < %.2f '
-                        '(joined_orig=%d content=%d) — fallback',
-                        self.task_id[:8], coverage, _ASSEMBLY_COVERAGE_MIN,
-                        len(jo), len(co))
-            return None
-        return joined_trans
+            for rn, orig in self.originals.items():
+                if orig and ''.join(orig.split()) == key:
+                    cached = self.segments.get(rn)
+                    if cached and cached.strip():
+                        return cached
+        return self._translate_whole(content, system_prompt, translate_fn,
+                                     extract_nt, reattach_nt, conv_id, msg_idx,
+                                     msg_id)
 
     def _assemble_progressive(self):
         """Join currently-translated segments in round order for a LIVE preview.
 
-        Unlike :meth:`_assemble`, there is NO coverage gate — this is a
-        best-effort partial shown WHILE the task is still streaming (covers only
-        the rounds closed so far), not the committed final translation.
+        This is the best-effort joined blob shown WHILE the task is still
+        streaming (covers the rounds closed so far); the settled render routes
+        each round's Chinese into its tool group via ``partialByRound`` and the
+        committed ``translatedContent`` is the deliverable only (see
+        :meth:`_deliverable_translation`).
         """
         with self.lock:
             if not self.segments:
@@ -358,8 +389,20 @@ class _Acc:
         partial = self._assemble_progressive()
         if not partial:
             return
+        # ★ Per-round interleave: also carry each closed round's translated
+        #   Chinese keyed by round_num (≡ frontend llmRound — tool_dispatch.py
+        #   stamps round_entry['llmRound'] = round_num). The frontend routes
+        #   each round's text into its matching .ptool-turn narration slot so
+        #   the translation interleaves with the tools it describes instead of
+        #   piling up as one blob below the whole panel. `partial` (the joined
+        #   blob) is kept for graceful degrade when a round's .ptool-turn isn't
+        #   in the DOM yet.
+        with self.lock:
+            by_round = {str(rn): txt for rn, txt in self.segments.items()
+                        if txt and txt.strip()}
         self._push({'type': 'running', 'status': 'running',
-                    'statusKind': 'in_progress', 'partial': partial},
+                    'statusKind': 'in_progress', 'partial': partial,
+                    'partialByRound': by_round},
                    self.conv_id, None, self.msg_id)
 
     def _push(self, payload, conv_id, msg_idx, msg_id):
@@ -421,7 +464,25 @@ def finalize_incremental(task, conv_id, msg_idx, content, msg_id=None) -> bool:
             acc = _accumulators.get(tid)
         if acc is None:
             return False
-        acc.q.put(('fin', conv_id, msg_idx, content or '', msg_id))
+        # ★ Capture the AUTHORITATIVE thin segments now (task['segments'] is
+        #   assembled by persist_task_result before this handoff fires) and
+        #   hand them to the finalize commit as a self-heal fallback. This is
+        #   the SSOT ordering guarantee: the stamp no longer depends on the
+        #   conversation row-write having already landed the segments — if the
+        #   DB row lacks them at commit time (finalize/sync race, or a frontend
+        #   PUT won the row-write CAS), the commit writes these in the same CAS
+        #   write. Best-effort: a serialize failure just skips the fallback
+        #   (degrades to the pre-fix behaviour, never breaks finalize).
+        fallback_segments = None
+        try:
+            _segs = task.get('segments')
+            if _segs:
+                from lib.tasks_pkg.segments import segments_to_json
+                fallback_segments = segments_to_json(_segs)
+        except Exception as _fe:
+            logger.debug('[IncTranslate] finalize fallback-segments capture failed '
+                         'task=%s: %s', tid[:8], _fe)
+        acc.q.put(('fin', conv_id, msg_idx, content or '', msg_id, fallback_segments))
         return True
     except Exception as e:
         logger.warning('[IncTranslate] finalize_incremental failed task=%s: %s',

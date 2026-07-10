@@ -24,8 +24,14 @@
 (function () {
   "use strict";
 
-  var MOBILE_BP = 768;
-  function _isMobileView() { return window.innerWidth <= MOBILE_BP; }
+  /* Mobile-view predicate: delegate to the shared core.js source of truth
+   * (window.isMobileViewport / TOFU_BP.mobile) so this file no longer carries
+   * its own 768 constant. Fallback keeps it self-contained if core is absent. */
+  function _isMobileView() {
+    return (typeof window.isMobileViewport === 'function')
+      ? window.isMobileViewport()
+      : window.innerWidth <= 768;
+  }
 
   // ── Shared backdrop for portaled panels ────────────────────────────
   function _ensureBackdrop() {
@@ -193,8 +199,8 @@
       sheet.id = "mobileFlowSheet";
       sheet.className = "mobile-bottom-sheet mobile-flow-sheet";
       sheet.innerHTML =
-        '<div class="mobile-sheet-header">' + escapeHtml(t("toolbar.flow")) + "</div>" +
-        '<div class="mobile-sheet-section" id="mobileFlowSheetList"></div>';
+        '<div class="mobile-sheet-header" id="mobileFlowSheetTitle">' + escapeHtml(t("toolbar.flow")) + "</div>" +
+        '<div class="mobile-sheet-section" id="mobileFlowSheetList" role="listbox" aria-labelledby="mobileFlowSheetTitle"></div>';
       document.body.appendChild(sheet);
     }
     return sheet;
@@ -209,7 +215,7 @@
     list.innerHTML = items.map(function (it) {
       var sel = (it.flow === cur) ? " active" : "";
       var flowAttr = escapeHtml(it.flow);
-      return '<div class="mobile-sheet-item' + sel + '" data-flow="' + flowAttr + '">' +
+      return '<div class="mobile-sheet-item' + sel + '" role="option" aria-selected="' + (it.flow === cur ? "true" : "false") + '" data-flow="' + flowAttr + '">' +
         '<span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M10 6.5h4a2 2 0 0 1 2 2V14"/></svg></span>' +
         '<span class="mobile-sheet-item-text">' +
         '<span class="mobile-sheet-item-name">' + escapeHtml(it.name) + "</span>" +

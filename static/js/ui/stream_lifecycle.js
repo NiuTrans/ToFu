@@ -62,6 +62,8 @@ function showStreamingUIForConv(convId) {
     const _smMsgId = lastMsg._msgId || null;
     if (lastMsg.role === "assistant" && lastMsg._isEndpointPlanner) {
       html += _streamingBubbleHTML('planner', 'Planning…', _smTime, _smMsgId);
+    } else if (lastMsg.role === "assistant" && lastMsg._swarmAutoContinue) {
+      html += _streamingBubbleHTML('swarm', 'Continuing…', _smTime, _smMsgId);
     } else if (lastMsg.role === "assistant") {
       html += _streamingBubbleHTML('worker', 'Streaming…', _smTime, _smMsgId);
     } else if (lastMsg._isEndpointReview) {
@@ -99,7 +101,7 @@ function showStreamingUIForConv(convId) {
      *   translated yet or this isn't the streaming bubble. */
     if (lastMsg._translatePartial && lastMsg._msgId
         && typeof _renderStreamingTranslatePreview === 'function') {
-      _renderStreamingTranslatePreview(convId, lastMsg._msgId, lastMsg._translatePartial);
+      _renderStreamingTranslatePreview(convId, lastMsg._msgId, lastMsg._translatePartial, lastMsg._translatePartialByRound);
     }
     /* ★ FIX: After page refresh, SSE data may arrive AFTER this initial render.
      *   Schedule a deferred re-render (300ms) so that any SSE state event that
@@ -362,11 +364,24 @@ function finishStream(convId) {
    * carrier is whichever message the SSE done handler stamped, which
    * may have been moved off the tail by Phase-2 reconciliation. */
   const _apCarrier = conv ? _findAutopilotPendingCarrier(conv) : null;
-  if (_apCarrier && typeof _attachAutopilotFollowup === 'function') {
+  if (_apCarrier) {
     const _autopilotPending = _apCarrier.msg._autopilotPending;
-    delete _apCarrier.msg._autopilotPending;
-    _attachAutopilotFollowup(convId, _autopilotPending);
-    return;
+    /* Consume BOTH the conv-level baton and any positional stamp so a
+     * later finishStream doesn't re-dispatch the same follow-up. */
+    if (conv) delete conv._apPendingBaton;
+    if (!_apCarrier._convLevel) delete _apCarrier.msg._autopilotPending;
+    if (typeof _attachAutopilotFollowup === 'function') {
+      _attachAutopilotFollowup(convId, _autopilotPending);
+      return;
+    }
+    /* \u2605 Self-heal: the attach fn isn't loaded (bundle-timing miss).
+     *   Do NOT silently drop the baton \u2014 the backend already spawned the
+     *   follow-up task, so fall through to the queue-poll path below
+     *   (/api/chat/active) which will discover and attach to it. */
+    console.warn(
+      `[Autopilot] _attachAutopilotFollowup unavailable \u2014 falling back to ` +
+      `queue-poll for follow-up task=${(_autopilotPending && _autopilotPending.nextTaskId || '').slice(0,8)}`
+    );
   }
 
   // ── ★ Server-side queue: always check for auto-dispatched next task ──

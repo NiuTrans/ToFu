@@ -98,9 +98,7 @@
   }
 
   function _activeConv() {
-    if (typeof conversations === 'undefined' || !Array.isArray(conversations)) return null;
-    if (typeof activeConvId === 'undefined' || !activeConvId) return null;
-    return conversations.find((c) => c && c.id === activeConvId) || null;
+    return getConvById(typeof activeConvId !== 'undefined' ? activeConvId : null);
   }
 
   function _activeModel(conv) {

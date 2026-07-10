@@ -1,0 +1,33 @@
+Oneko pet pack — provenance & license
+======================================
+
+These PNG frames (oneko-*.png) are per-pose slices of the classic "Neko"
+desktop-pet sprite sheet (oneko.gif), sliced into this project's pet-frame
+naming scheme (idle / happy / sleepy / sleeping / thinking / surprised / sad /
+celebrating / walk1-4).
+
+Source sprite sheet
+-------------------
+- File:    oneko.gif (256x128, an 8x4 grid of 32px tiles)
+- From:    https://github.com/adryd325/oneko.js  (main branch)
+- The oneko.js *code* is MIT-licensed: Copyright (c) 2022 adryd.
+- The *sprite art* is the original "Neko" screen-mate artwork, first written for
+  the NEC PC-9801 in 1989. It is ancient and universally treated as PUBLIC
+  DOMAIN (see e.g. https://github.com/glreno/oneko — "The image files are
+  ancient public domain"; https://en.wikipedia.org/wiki/Neko_(software)).
+
+How these frames were produced
+------------------------------
+The tile coordinates come directly from oneko.js's `spriteSets` map ([col,row]
+into the 32px grid). Each pose was cropped to a standalone 32x32 RGBA PNG and
+mapped onto Tofu's expression names (a cat has poses, not emotions, so the
+mapping is closest-pose: alert->happy, tired->sleepy, grooming->thinking,
+scratch-wall->celebrating/surprised, the E-run pair->walk1-4, sleeping->sleeping,
+sleeping-frame2->sad).
+
+Why it is safe to ship in the open-source export
+------------------------------------------------
+Both the code license (MIT) and the art (public domain) permit redistribution,
+including commercially, with attribution. This file is that attribution. These
+are normal committed source assets — NOT `.tofu*` agent artifacts — and are
+intended to be included in every export mode.

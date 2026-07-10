@@ -179,6 +179,8 @@ def main():
     print()
     print(_color('═══ Phase-3 startup-recovery reconcile integration tests ═══', '36'))
     print()
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_startup_reconcile.__main__')
     tests = [test_buried_ghost_swept_and_persisted,
              test_reconcile_fires_history_rewrite_signal,
              test_clean_conv_not_marked]

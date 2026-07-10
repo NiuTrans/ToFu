@@ -8,6 +8,7 @@
 
 // ── State ──
 var paperMode = false;
+var _paperDescribeDraft = '';  // persists the landing "describe it" textarea across mode switches
 var _paperPdfUrl = '';
 var _paperFileName = '';
 var _paperParsedText = '';
@@ -15,6 +16,16 @@ var _paperArxivId = '';
 var _paperPdfDoc = null;
 var _paperTotalPages = 0;
 var _paperScale = 1.5;
+var _paperCurrentUrl = '';          // resolved URL of the doc currently loaded (for {data} re-open)
+var _paperViaData = false;          // true once the doc was (re)opened via the range-bypass {data} path
+var _paperRenderToken = 0;          // bumped each _renderAllPages() so a stale in-flight loop self-cancels
+var _paperIntersectionObserver = null;  // lazy-raster trigger for virtualized pages
+var _paperReopenInFlight = false;   // single-flight guard for the raster-failure {data} re-open
+/** Monotonic-ish clock for the load/render instrumentation (falls back to Date.now). */
+function _paperNow() {
+  try { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); }
+  catch (_) { return Date.now(); }
+}
 var _paperActiveTab = 'qa';
 var _paperReportCache = '';
 var _paperReportMeta = null;  // finish-tag: {model, costCny, costUsd, promptTokens, ...}
@@ -45,6 +56,7 @@ var _paperReportModel = '';  // user-selected model for report generation
 var _paperImages = [];  // [{url, caption, page, source, width, height}] — for embedding in report
 var _paperPdfFilename = '';  // server-side PDF filename — handed back from /api/paper/upload and /api/paper/fetch-arxiv-stream
 var _paperSearchResults = [];  // last arXiv search candidate list (rendered on the landing screen)
+var _lastArxivSearchQuery = '';  // query for the last rendered candidate list (katex:loaded repaint)
 
 // ── Report streaming state (2026-04-18 rewrite) ──
 // Server owns the report task; the frontend only polls.
@@ -90,6 +102,13 @@ var _PAPER_REPORT_LANG_KEY = 'paper_report_lang_by_id';
 // view. Persisted per paper so the last-read language re-opens. The toggle is
 // always available (both directions), independent of the app UI language.
 var _PAPER_REVIEW_LANG_KEY = 'paper_review_lang_by_id';
+// Per-(paper, view-language) reading position, persisted so re-opening the
+// Report/Review tab (tab switch OR hard refresh) restores where the reader
+// left off instead of snapping to the top. Keyed by the SAME composite key as
+// the report snapshots (``<paperId>::<langKey>``) so every language of every
+// paper — and reports vs reviews vs venues — keeps its own place. The stored
+// value is a ``_captureReadingAnchor`` anchor ({index,offset} or {frac}).
+var _PAPER_READ_POS_KEY = 'paper_read_pos_by_key';
 
 // View-context registry: the single seam that lets one set of report
 // functions drive two independent tabs. Each context exposes the per-view
@@ -173,6 +192,101 @@ function _persistReportLang(paperId, lang) {
   } catch (e) {
     console.warn('[Paper:Report] persist lang failed:', e);
   }
+}
+
+
+// ── Reader comfort preferences ─────────────────────────────────────────────
+// Text-size + reading-width are GLOBAL (apply across all papers, unlike the
+// per-paper language) and persist to localStorage so a reader's comfort setting
+// survives reload. They drive two CSS custom properties on the reader
+// containers (--reader-font-scale, --reader-measure) — pure-variable, no
+// per-element rewrite, and all three themes inherit them.
+var _PAPER_READER_PREFS_KEY = 'paper_reader_prefs';
+// Discrete font-scale steps (index into this array is persisted). 1.0 = today.
+var _READER_FONT_SCALES = [0.85, 0.925, 1.0, 1.1, 1.2, 1.3];
+var _READER_DEFAULT_SCALE_IDX = 2;   // → 1.0
+// Reading-width presets: {measure px, i18n label key}. Index persisted.
+var _READER_WIDTHS = [
+  { px: 640, label: 'paper.readerWidthNarrow' },
+  { px: 720, label: 'paper.readerWidthComfortable' },
+  { px: 860, label: 'paper.readerWidthWide' },
+];
+var _READER_DEFAULT_WIDTH_IDX = 1;   // → 720 (Comfortable), today's default
+
+/** Read persisted reader prefs, clamped to valid indices. Never throws. */
+function _readReaderPrefs() {
+  var scaleIdx = _READER_DEFAULT_SCALE_IDX, widthIdx = _READER_DEFAULT_WIDTH_IDX;
+  try {
+    var raw = localStorage.getItem(_PAPER_READER_PREFS_KEY);
+    if (raw) {
+      var o = JSON.parse(raw) || {};
+      if (typeof o.scaleIdx === 'number') scaleIdx = o.scaleIdx;
+      if (typeof o.widthIdx === 'number') widthIdx = o.widthIdx;
+    }
+  } catch (e) {
+    console.warn('[Paper:Reader] read prefs failed:', e);
+  }
+  scaleIdx = Math.max(0, Math.min(_READER_FONT_SCALES.length - 1, scaleIdx | 0));
+  widthIdx = Math.max(0, Math.min(_READER_WIDTHS.length - 1, widthIdx | 0));
+  return { scaleIdx: scaleIdx, widthIdx: widthIdx };
+}
+
+/** Persist reader prefs (merged onto whatever is stored). Never throws. */
+function _persistReaderPrefs(prefs) {
+  try {
+    localStorage.setItem(_PAPER_READER_PREFS_KEY, JSON.stringify({
+      scaleIdx: prefs.scaleIdx, widthIdx: prefs.widthIdx,
+    }));
+  } catch (e) {
+    console.warn('[Paper:Reader] persist prefs failed:', e);
+  }
+}
+
+/** Apply the current (or given) prefs to BOTH reader containers by setting the
+ *  two CSS custom properties, and sync the toolbar width label + A− disabled
+ *  state. Idempotent; safe to call whenever the reader opens or a pref changes. */
+function _applyReaderPrefs(prefs) {
+  prefs = prefs || _readReaderPrefs();
+  var scale = _READER_FONT_SCALES[prefs.scaleIdx];
+  var width = _READER_WIDTHS[prefs.widthIdx];
+  ['paperReportContent', 'paperReviewContent'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.style.setProperty('--reader-font-scale', String(scale));
+    el.style.setProperty('--reader-measure', width.px + 'px');
+  });
+  // Sync every width-label + disable the extremes' step buttons for clarity.
+  var labelText = (typeof t === 'function') ? t(width.label) : width.label;
+  document.querySelectorAll('.paper-reader-width-label').forEach(function(sp) {
+    sp.textContent = labelText;
+  });
+  document.querySelectorAll('.paper-reader-set-dec').forEach(function(b) {
+    b.disabled = (prefs.scaleIdx <= 0);
+  });
+  return prefs;
+}
+
+/** Nudge the reading text size by ±1 step, persist, re-apply. */
+function _readerFontStep(dir) {
+  var prefs = _readReaderPrefs();
+  var next = Math.max(0, Math.min(_READER_FONT_SCALES.length - 1, prefs.scaleIdx + (dir > 0 ? 1 : -1)));
+  if (next === prefs.scaleIdx) return;
+  prefs.scaleIdx = next;
+  _persistReaderPrefs(prefs);
+  _applyReaderPrefs(prefs);
+}
+
+/** Cycle Narrow → Comfortable → Wide → Narrow, persist, re-apply. */
+function _readerWidthCycle() {
+  var prefs = _readReaderPrefs();
+  prefs.widthIdx = (prefs.widthIdx + 1) % _READER_WIDTHS.length;
+  _persistReaderPrefs(prefs);
+  _applyReaderPrefs(prefs);
+}
+if (typeof window !== 'undefined') {
+  window._readerFontStep = _readerFontStep;
+  window._readerWidthCycle = _readerWidthCycle;
+  window._applyReaderPrefs = _applyReaderPrefs;
 }
 
 /** Snapshot-store key for a view's CURRENT language. Combines the active
@@ -266,6 +380,7 @@ function _setReportLang(lang, kind) {
 // (from before this feature existed) to the server.
 
 var _paperLibrary = [];          // Array of paper objects (cached from server)
+var _paperLibraryLoading = false; // True while the initial server fetch is in flight
 var _activePaperId = '';         // Currently viewed paper ID
 var _PAPER_ACTIVE_KEY = 'paper_active_id';
 var _PAPER_LEGACY_LIB_KEY = 'paper_library';  // pre-migration localStorage
@@ -523,6 +638,19 @@ function _renderPaperLibrary() {
   var countEl = document.getElementById('paperLibCount');
   if (countEl) countEl.textContent = String(_paperLibrary.length || '');
 
+  // Initial fetch still in flight and nothing cached yet → skeleton, so the
+  // overlay can paint instantly on click and the bookshelf hydrates when the
+  // /api/paper/library round-trip lands (see enterPaperMode).
+  if (_paperLibraryLoading && _paperLibrary.length === 0) {
+    var _ttl = (typeof t === 'function') ? t : function(k){ return k; };
+    listEl.innerHTML =
+      '<div class="paper-lib-loading">' +
+        '<span class="paper-lib-loading-spinner"></span>' +
+        '<span>' + escapeHtml(_ttl('paper.loadingLibrary')) + '</span>' +
+      '</div>';
+    return;
+  }
+
   if (_paperLibrary.length === 0) {
     var _tte = (typeof t === 'function') ? t : function(k){ return k; };
     listEl.innerHTML =
@@ -591,11 +719,55 @@ function _formatPaperDate(ts) {
 async function enterPaperMode(pdfUrl, fileName, parsedText, arxivId) {
   if (typeof imageGenMode !== 'undefined' && imageGenMode) exitImageGenMode();
 
-  // Load bookshelf from the server so we see the same papers on every machine.
-  // On fresh page-loads _paperLibrary is empty, so we must await before touching it.
+  paperMode = true;
+
+  // ── Phase 1: paint the overlay IMMEDIATELY (synchronous, no await) ──
+  // The bookshelf comes from the server (/api/paper/library) and used to be
+  // awaited BEFORE the view swap, so on a slow connection the click looked
+  // dead — the chat view stayed up until the fetch resolved. We now swap the
+  // view first and hydrate the library below, so the mode switch is instant.
+
+  // Sidebar → show paper library, hide conversations
+  var sidebar = document.getElementById('sidebar');
+  if (sidebar) {
+    sidebar.classList.add('paper-active');
+    if (sidebar.classList.contains('collapsed') && typeof toggleSidebar === 'function') toggleSidebar();
+  }
+  // Paper mode is a full-screen overlay in the same SPA; suppress the global
+  // Project-Brain docked bars (#presenceStrip + #convInfluenceBar) via a body
+  // class so their own push-driven visibility toggling is not fought. See CSS.
+  try { document.body.classList.add('paper-mode-active'); } catch (e) { /* no body */ }
+
+  // Show paper container, hide chat
+  var container = document.getElementById('paperModeContainer');
+  var chatWrapper = document.querySelector('.chat-wrapper');
+  var inputArea = document.querySelector('.input-area');
+  if (container) container.style.display = 'flex';
+  if (chatWrapper) chatWrapper.style.display = 'none';
+  if (inputArea) inputArea.style.display = 'none';
+
+  var pmBtn = document.getElementById('paperModeBtn');
+  if (pmBtn) {
+    pmBtn.classList.add('active');
+    // Swap icon to back-arrow; keep the topbar text label.
+    pmBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg><span class="topbar-tool-label">' + (typeof t === 'function' ? t('topbar.backToChat') : 'Back') + '</span>';
+    pmBtn.title = 'Back to Chat';
+  }
+
+  // Bookshelf skeleton (only if nothing is cached yet) + a landing placeholder
+  // in the viewer, so the overlay is fully painted before the fetch resolves.
+  _paperLibraryLoading = (_paperLibrary.length === 0);
+  _renderPaperLibrary();
+  _showPaperLanding();
+
+  // ── Phase 2: load the bookshelf, then resolve/restore the active paper ──
   try { await _loadPaperLibrary(); }
   catch (e) { console.warn('[Paper] loadPaperLibrary failed:', e); }
-  paperMode = true;
+  finally { _paperLibraryLoading = false; }
+
+  // The user may have left paper mode while the library was loading. Bail so we
+  // don't clobber the chat view we've since returned to.
+  if (!paperMode) return;
 
   // If called with a new PDF (not from library), create an entry
   if (pdfUrl && !_activePaperId) {
@@ -643,31 +815,8 @@ async function enterPaperMode(pdfUrl, fileName, parsedText, arxivId) {
   if (!_paperQAHistory) _paperQAHistory = [];
   if (!_paperReportCache) _paperReportCache = '';
 
-  // Sidebar → show paper library, hide conversations
-  var sidebar = document.getElementById('sidebar');
-  if (sidebar) {
-    sidebar.classList.add('paper-active');
-    if (sidebar.classList.contains('collapsed') && typeof toggleSidebar === 'function') toggleSidebar();
-  }
-
   _updatePaperTitles();
   _renderPaperLibrary();
-
-  // Show paper container, hide chat
-  var container = document.getElementById('paperModeContainer');
-  var chatWrapper = document.querySelector('.chat-wrapper');
-  var inputArea = document.querySelector('.input-area');
-  if (container) container.style.display = 'flex';
-  if (chatWrapper) chatWrapper.style.display = 'none';
-  if (inputArea) inputArea.style.display = 'none';
-
-  var pmBtn = document.getElementById('paperModeBtn');
-  if (pmBtn) {
-    pmBtn.classList.add('active');
-    // Swap icon to back-arrow; keep the topbar text label.
-    pmBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg><span class="topbar-tool-label">' + (typeof t === 'function' ? t('topbar.backToChat') : 'Back') + '</span>';
-    pmBtn.title = 'Back to Chat';
-  }
 
   if (_paperPdfUrl) {
     _loadPaperPdf(_paperPdfUrl);
@@ -685,6 +834,12 @@ async function enterPaperMode(pdfUrl, fileName, parsedText, arxivId) {
   }
   try { _populatePaperReportModelDropdown(_reportView('review')); } catch (e) {
     console.warn('[Paper] populate review model dropdown failed:', e);
+  }
+
+  // Apply the reader's persisted comfort settings (text size + reading width)
+  // to the report/review containers so the choice survives reload + spans papers.
+  try { _applyReaderPrefs(); } catch (e) {
+    console.warn('[Paper] applyReaderPrefs failed:', e);
   }
 
   debugLog('Paper Mode: ENTER', 'success');
@@ -710,6 +865,7 @@ function exitPaperMode() {
 
   var sidebar = document.getElementById('sidebar');
   if (sidebar) sidebar.classList.remove('paper-active');
+  try { document.body.classList.remove('paper-mode-active'); } catch (e) { /* no body */ }
 
   var container = document.getElementById('paperModeContainer');
   var chatWrapper = document.querySelector('.chat-wrapper');
@@ -732,6 +888,8 @@ function exitPaperMode() {
   }
 
   if (_paperResizeObserver) { _paperResizeObserver.disconnect(); _paperResizeObserver = null; }
+  if (_paperIntersectionObserver) { _paperIntersectionObserver.disconnect(); _paperIntersectionObserver = null; }
+  _paperRenderToken++;  // cancel any in-flight lazy render loop
   if (_paperPdfDoc) { _paperPdfDoc.destroy(); _paperPdfDoc = null; }
   if (_paperQAAbort) { _paperQAAbort.abort(); _paperQAAbort = null; }
 
@@ -820,7 +978,98 @@ function _updatePaperTitles() {
 //  ★ PDF Loading & Rendering (always in #paperPdfViewer)
 // ══════════════════════════════════════════════════════
 
+/** Re-base a stored paper PDF/asset URL onto the CURRENT proxy base path.
+ *
+ *  A library row's ``pdfUrl`` is persisted by two writers with different
+ *  shapes: the server ingest stores a root-relative ``/api/paper/pdf/<f>``
+ *  (the backend can't know the proxy prefix), while a client PUT stores an
+ *  ``apiUrl()``-prefixed value baked with THAT session's BASE_PATH. Either is
+ *  wrong to hand to pdf.js verbatim under a cloud-IDE proxy (e.g.
+ *  ``/proxy/15000/``): the root-relative one drops the prefix (→ gateway 404,
+ *  "Missing PDF") and the baked one goes stale if the port/prefix changes.
+ *  Strip back to the canonical ``/api/...`` segment and re-apply the live
+ *  BASE_PATH so the URL is correct regardless of how it was stored. Non-API
+ *  URLs (blob:, data:, absolute externals) are returned untouched. */
+function _resolvePaperPdfUrl(url) {
+  if (!url) return url;
+  var i = url.indexOf('/api/');
+  if (i < 0) return url;  // blob:/data:/external — leave as-is
+  var canonical = url.slice(i);
+  return (typeof apiUrl === 'function') ? apiUrl(canonical) : canonical;
+}
+
+/** Robust last-resort loader gate. When a cloud-IDE proxy strips/ignores HTTP
+ *  Range (the transport log shows a single ``range=False -> 200`` full GET),
+ *  ranged transport can't help pdf.js — the fix is to stop relying on the
+ *  transport entirely: the CLIENT downloads the whole PDF once, on a URL it
+ *  proxy-corrects itself, with a timeout it controls, then hands pdf.js the
+ *  bytes via ``getDocument({data})`` instead of ``getDocument({url})``. Dormant
+ *  by default; flip in the browser console with
+ *  ``localStorage.setItem('tofu_paper_pdf_data','1')`` (no rebuild — no-build JS)
+ *  the instant the log proves the proxy defeats ranging. */
+function _shouldFetchPdfAsData() {
+  try { return localStorage.getItem('tofu_paper_pdf_data') === '1'; }
+  catch (_) { return false; }
+}
+
+/** Download a PDF to a Uint8Array for pdf.js ``getDocument({data})``, with a
+ *  client-owned timeout (default 120s). Routes through the unified API client
+ *  (``Api.paper.pdfArrayBuffer``) rather than a raw fetch so base-path
+ *  resolution stays single-sourced in api.js and the §3.2.0 isolation seam
+ *  holds; we pass the CANONICAL ``/api/...`` path (Api re-applies the live
+ *  BASE_PATH) and own the deadline via our AbortController (timeout:0 on the
+ *  Api side). Throws on non-2xx / abort so the caller surfaces a clear error. */
+async function _fetchPdfArrayBuffer(url, timeoutMs) {
+  var i = (url || '').indexOf('/api/');
+  var canonical = i >= 0 ? url.slice(i) : url;  // strip any baked prefix; Api re-resolves
+  var ctrl = new AbortController();
+  var timer = setTimeout(function () { ctrl.abort(); }, timeoutMs || 120000);
+  try {
+    return await Api.paper.pdfArrayBuffer(canonical, { signal: ctrl.signal, timeout: 0 });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Open a PDF with pdf.js, auto-falling back to a client-side byte download if
+ *  the transport-based load fails.
+ *
+ *  Strategy:
+ *   • Manual override — if ``_shouldFetchPdfAsData()`` is set, skip straight to
+ *     the {data} download (a known-bad proxy avoids even the first failed try).
+ *   • Otherwise attempt ``getDocument({url})`` and PROBE page 1: pdf.js resolves
+ *     the doc from the first response's metadata, but a mangled-206 / truncated
+ *     body only surfaces when a page is actually pulled — so getPage(1) is the
+ *     real "did the transport deliver bytes" test.
+ *   • On ANY failure of that path, retry EXACTLY ONCE via ``_fetchPdfArrayBuffer``
+ *     → ``getDocument({data})`` (one plain full GET the client owns end-to-end,
+ *     immune to Range mangling). If the {data} attempt also fails, throw — the
+ *     caller surfaces the real error. The single-retry cap prevents any loop. */
+async function _openPaperPdfDoc(url, forceData) {
+  // forceData (or the manual flag) → skip the transport entirely and download.
+  if (forceData || _shouldFetchPdfAsData()) {
+    debugLog('[Paper] Loading PDF via client ArrayBuffer (range-bypass)…', 'info');
+    var _bytesM = await _fetchPdfArrayBuffer(url);
+    return { doc: await pdfjsLib.getDocument({ data: _bytesM }).promise, viaData: true };
+  }
+  var doc = null;
+  try {
+    doc = await pdfjsLib.getDocument(url).promise;
+    // Probe page 1 — a stripped/truncated ranged body fails HERE, not at open.
+    await doc.getPage(1);
+    return { doc: doc, viaData: false };
+  } catch (e) {
+    if (doc) { try { doc.destroy(); } catch (_) {} }
+    debugLog('[Paper] URL load failed (' + (e && e.message || e) +
+             ') — auto-retrying via client ArrayBuffer (range-bypass)…', 'warning');
+    var _bytes = await _fetchPdfArrayBuffer(url);
+    return { doc: await pdfjsLib.getDocument({ data: _bytes }).promise, viaData: true };
+  }
+}
+
 async function _loadPaperPdf(url) {
+  url = _resolvePaperPdfUrl(url);
+  _paperCurrentUrl = url;
   var viewer = document.getElementById('paperPdfViewer');
   if (!viewer) return;
   viewer.innerHTML = '<div class="paper-loading"><div class="paper-loading-spinner"></div><div>Loading PDF…</div></div>';
@@ -837,8 +1086,23 @@ async function _loadPaperPdf(url) {
 
     if (_paperPdfDoc) { try { _paperPdfDoc.destroy(); } catch (_) {} _paperPdfDoc = null; }
 
-    _paperPdfDoc = await pdfjsLib.getDocument(url).promise;
+    // Load with automatic range-bypass fallback (see _openPaperPdfDoc). Default
+    // path hands pdf.js the URL and lets it range-load (the primary fix); if
+    // that load fails — the mangled-206 / range-stripping proxy case — it
+    // transparently retries ONCE by downloading the whole file as bytes and
+    // passing {data}, so the viewer recovers automatically for EVERY user with
+    // no console flag. The manual flag short-circuits straight to {data}.
+    // ── Measurement-first instrumentation: time the doc-open (network + parse)
+    // phase separately from render, so the on-device debugLog proves where the
+    // seconds go (transport vs render). _renderAllPages logs time-to-first-page
+    // and layout-ready on its own.
+    var _tOpen = _paperNow();
+    var _opened = await _openPaperPdfDoc(url);
+    _paperPdfDoc = _opened.doc;
+    _paperViaData = _opened.viaData;
     _paperTotalPages = _paperPdfDoc.numPages;
+    debugLog('[Paper] doc opened in ' + Math.round(_paperNow() - _tOpen) + 'ms (viaData=' +
+             _paperViaData + ', pages=' + _paperTotalPages + ')', 'info');
     _updatePaperTitles();
     // Auto fit-to-width on initial load so the PDF sizes to the current panel
     // regardless of the current _paperScale value (matches Chrome/Acrobat default).
@@ -846,7 +1110,7 @@ async function _loadPaperPdf(url) {
       var _firstPage = await _paperPdfDoc.getPage(1);
       var _baseVp = _firstPage.getViewport({ scale: 1.0 });
       var _container = document.getElementById('paperPdfViewer');
-      var _containerW = _container ? (_container.clientWidth - 32) : 0;
+      var _containerW = _container ? (_container.clientWidth - _paperViewerPadX(_container)) : 0;
       if (_containerW > 0) {
         _paperScale = Math.max(0.25, Math.min(4.0, _containerW / _baseVp.width));
       }
@@ -854,6 +1118,14 @@ async function _loadPaperPdf(url) {
       console.warn('[Paper] Initial fit-width failed:', err);
     }
     _updateZoomLabel();
+    // Virtualized render: builds all page shells (cheap viewport math, no
+    // raster), rasterizes page 1 immediately so time-to-first-page is roughly
+    // constant regardless of page count, then lazy-rasterizes the rest on
+    // scroll via IntersectionObserver. A LATER-page render failure (mangled /
+    // truncated Range on a buffering proxy — passes the page-1 probe but fails
+    // when the page rasterizes) is recovered inside _renderAllPages →
+    // _maybeReopenViaData (single-flight {data} re-open), which generalizes the
+    // old initial-load-only fallback to ANY page at ANY time.
     await _renderAllPages();
 
     // Update library entry
@@ -866,95 +1138,244 @@ async function _loadPaperPdf(url) {
   }
 }
 
-/** Render all pages vertically for scroll-based reading.
+/** Render pages vertically for scroll-based reading — VIRTUALIZED.
  *
- *  Strategy for sharp rendering + selectable text:
- *  1. Use a "CSS viewport" at _paperScale for layout dimensions.
- *  2. Render canvas pixel buffer at cssScale × devicePixelRatio for sharpness
- *     on HiDPI screens, but CSS-size the canvas to the CSS viewport dims.
- *  3. The wrapper div uses explicit CSS width/height (no aspect-ratio hack)
- *     so it works in all browsers.
- *  4. Text layer is positioned at CSS viewport size, absolutely covering
- *     the canvas, with transparent text + pointer-events for selection.
+ *  The old implementation rasterized EVERY page at ``_paperScale ×
+ *  devicePixelRatio`` in a sequential ``await`` loop before the load was
+ *  considered complete. For a 40-page paper that is 40 full canvas
+ *  rasterizations + 40 text layers up front — time-to-first-page grew with
+ *  the page count and the tab stayed janky ("loads too slowly").
+ *
+ *  Now the work is split:
+ *  1. Build every page's WRAPPER up front with correct dimensions (cheap —
+ *     pure viewport math via ``getPage``, NO raster). This gives the scroll
+ *     container its full height immediately, so the scrollbar is correct.
+ *  2. Rasterize page 1 (and any page already in/near the viewport) NOW, so
+ *     time-to-first-page is roughly constant regardless of page count.
+ *  3. Rasterize the remaining pages lazily as they scroll near the viewport,
+ *     via an IntersectionObserver, and RELEASE canvases that scroll far away
+ *     to cap memory (the wrapper keeps its size, so layout is stable).
+ *
+ *  Sharp-render + selectable-text invariants are preserved exactly per page
+ *  (see _rasterizePage): CSS viewport for layout, hi-res buffer (× dpr) for
+ *  sharpness CSS-sized down, the ``--scale-factor`` text-layer variable, and
+ *  the transparent absolutely-positioned text layer for selection.
+ *
+ *  A per-run token (``_paperRenderToken``) makes a stale render loop (e.g. a
+ *  zoom fired mid-render) self-cancel. Returns false always now — a
+ *  later-page raster failure is recovered in-band by _maybeReopenViaData
+ *  ({data} range-bypass re-open), which the initial-load path used to do
+ *  only for the whole document.
  */
 async function _renderAllPages() {
-  if (!_paperPdfDoc) return;
+  if (!_paperPdfDoc) return false;
   var viewer = document.getElementById('paperPdfViewer');
-  if (!viewer) return;
+  if (!viewer) return false;
+
+  var token = ++_paperRenderToken;
   viewer.innerHTML = '';
+  if (_paperIntersectionObserver) { _paperIntersectionObserver.disconnect(); _paperIntersectionObserver = null; }
 
-  var dpr = window.devicePixelRatio || 1;
+  var tStart = _paperNow();
 
+  // ── Phase 1: build all wrappers with correct dimensions (no raster) ──
   for (var i = 1; i <= _paperTotalPages; i++) {
+    if (token !== _paperRenderToken) return false;  // superseded (e.g. zoom / reload)
+    var cssW, cssH;
     try {
       var page = await _paperPdfDoc.getPage(i);
-
-      // CSS viewport — determines the on-screen layout size
-      var cssViewport = page.getViewport({ scale: _paperScale });
-      var cssW = cssViewport.width;
-      var cssH = cssViewport.height;
-
-      // Hi-res viewport — for sharp canvas pixel buffer
-      var hiresViewport = page.getViewport({ scale: _paperScale * dpr });
-
-      // ── Wrapper: explicit CSS dimensions, aspect-ratio for proportional scaling ──
-      var wrapper = document.createElement('div');
-      wrapper.className = 'paper-page-wrapper';
-      wrapper.dataset.page = String(i);
-      wrapper.style.width = cssW + 'px';
-      wrapper.style.aspectRatio = (cssW / cssH).toFixed(6);
-
-      // ── Canvas: hi-res buffer, CSS-sized to layout viewport ──
-      // Only set width; height auto-scales via CSS aspect ratio
-      var canvas = document.createElement('canvas');
-      canvas.className = 'paper-pdf-canvas';
-      canvas.width = hiresViewport.width;
-      canvas.height = hiresViewport.height;
-      canvas.style.width = cssW + 'px';
-      wrapper.appendChild(canvas);
-
-      // ── Text layer: original CSS dimensions, scaled via transform when wrapper shrinks ──
-      var textDiv = document.createElement('div');
-      textDiv.className = 'paper-text-layer';
-      textDiv.style.width = cssW + 'px';
-      textDiv.style.height = cssH + 'px';
-      // pdf.js v3.x requires --scale-factor for correct text span positioning
-      textDiv.style.setProperty('--scale-factor', _paperScale.toString());
-      wrapper.appendChild(textDiv);
-
-      // ── Page number label ──
-      var pageLabel = document.createElement('div');
-      pageLabel.className = 'paper-page-label';
-      pageLabel.textContent = i + ' / ' + _paperTotalPages;
-      wrapper.appendChild(pageLabel);
-
-      viewer.appendChild(wrapper);
-
-      // ── Render canvas at hi-res ──
-      var ctx = canvas.getContext('2d');
-      await page.render({ canvasContext: ctx, viewport: hiresViewport }).promise;
-
-      // ── Render text layer at CSS viewport scale ──
-      var textContent = await page.getTextContent();
-      if (typeof pdfjsLib.renderTextLayer === 'function') {
-        pdfjsLib.renderTextLayer({
-          textContentSource: textContent,
-          container: textDiv,
-          viewport: cssViewport,
-          textDivs: [],
-        });
-      }
+      var vp = page.getViewport({ scale: _paperScale });
+      cssW = vp.width; cssH = vp.height;
     } catch (e) {
-      console.warn('[Paper] Failed to render page', i, ':', e);
-      var errDiv = document.createElement('div');
-      errDiv.className = 'paper-page-error';
-      errDiv.textContent = 'Page ' + i + ' failed to render';
-      viewer.appendChild(errDiv);
+      console.warn('[Paper] Failed to size page', i, ':', e);
+      // Best-effort fallback size (US-letter aspect) so the shell still exists.
+      cssW = 612 * _paperScale; cssH = 792 * _paperScale;
+    }
+    var wrapper = document.createElement('div');
+    wrapper.className = 'paper-page-wrapper';
+    wrapper.dataset.page = String(i);
+    wrapper.dataset.rendered = '0';
+    wrapper.style.width = cssW + 'px';
+    wrapper.style.aspectRatio = (cssW / cssH).toFixed(6);
+
+    // Placeholder so an unrendered page isn't blank while scrolling fast.
+    var ph = document.createElement('div');
+    ph.className = 'paper-page-placeholder';
+    wrapper.appendChild(ph);
+
+    var pageLabel = document.createElement('div');
+    pageLabel.className = 'paper-page-label';
+    pageLabel.textContent = i + ' / ' + _paperTotalPages;
+    wrapper.appendChild(pageLabel);
+
+    viewer.appendChild(wrapper);
+  }
+  if (token !== _paperRenderToken) return false;
+  debugLog('[Paper] page shells laid out in ' + Math.round(_paperNow() - tStart) +
+           'ms (' + _paperTotalPages + ' pages, virtualized)', 'info');
+
+  // ── Phase 2: lazy rasterization on scroll ──
+  var wrappers = viewer.querySelectorAll('.paper-page-wrapper');
+  if (typeof IntersectionObserver !== 'undefined') {
+    _paperIntersectionObserver = new IntersectionObserver(function(entries) {
+      for (var k = 0; k < entries.length; k++) {
+        var w = entries[k].target;
+        if (entries[k].isIntersecting) {
+          // Lazy path: fire-and-forget; on a raster failure recover via {data}.
+          _rasterizePage(w, token).then(function(needsReopen) {
+            if (needsReopen) _maybeReopenViaData();
+          });
+        } else {
+          _releasePage(w);  // scrolled far off — free the canvas, keep the shell
+        }
+      }
+    }, {
+      root: viewer,
+      // Pre-render a screenful above/below so scrolling reveals ready pages.
+      rootMargin: '150% 0px 150% 0px',
+      threshold: 0.01,
+    });
+    for (var j = 0; j < wrappers.length; j++) _paperIntersectionObserver.observe(wrappers[j]);
+  } else {
+    // No IntersectionObserver (jsdom / very old engine): render all eagerly so
+    // behaviour degrades to the old correctness, just without virtualization.
+    for (var e = 0; e < wrappers.length; e++) {
+      var _needReopen = await _rasterizePage(wrappers[e], token);
+      if (_needReopen) { await _maybeReopenViaData(); return false; }
+    }
+  }
+
+  // ── Phase 3: force page 1 NOW so time-to-first-page is immediate ──
+  if (wrappers.length) {
+    var _p1Reopen = await _rasterizePage(wrappers[0], token);
+    if (_p1Reopen) { await _maybeReopenViaData(); return false; }
+    if (token === _paperRenderToken) {
+      debugLog('[Paper] first page painted in ' + Math.round(_paperNow() - tStart) + 'ms', 'info');
     }
   }
 
   // Observe wrappers to scale text layers when container shrinks
   _observePageWrappers(viewer);
+  return false;
+}
+
+/** Rasterize ONE page into its wrapper: hi-res canvas buffer + text layer.
+ *  Idempotent — a wrapper already rendered (or mid-render) is skipped, so the
+ *  IntersectionObserver re-firing on the same page is cheap. Honours the run
+ *  token so a page whose render started before a zoom/reload is discarded. */
+async function _rasterizePage(wrapper, token) {
+  if (!wrapper || !_paperPdfDoc) return;
+  if (wrapper.dataset.rendered === '1' || wrapper.dataset.rendering === '1') return;
+  if (token != null && token !== _paperRenderToken) return;
+  var pageNum = parseInt(wrapper.dataset.page, 10);
+  if (!pageNum) return;
+  wrapper.dataset.rendering = '1';
+  var dpr = window.devicePixelRatio || 1;
+  try {
+    var page = await _paperPdfDoc.getPage(pageNum);
+    if (token != null && token !== _paperRenderToken) { wrapper.dataset.rendering = '0'; return; }
+
+    var cssViewport = page.getViewport({ scale: _paperScale });
+    var cssW = cssViewport.width;
+    var cssH = cssViewport.height;
+    var hiresViewport = page.getViewport({ scale: _paperScale * dpr });
+
+    // Keep wrapper dimensions in sync with the just-measured viewport (a zoom
+    // between shell-layout and raster would otherwise leave the old size).
+    wrapper.style.width = cssW + 'px';
+    wrapper.style.aspectRatio = (cssW / cssH).toFixed(6);
+
+    var canvas = document.createElement('canvas');
+    canvas.className = 'paper-pdf-canvas';
+    canvas.width = hiresViewport.width;
+    canvas.height = hiresViewport.height;
+    canvas.style.width = cssW + 'px';
+
+    var textDiv = document.createElement('div');
+    textDiv.className = 'paper-text-layer';
+    textDiv.style.width = cssW + 'px';
+    textDiv.style.height = cssH + 'px';
+    textDiv.style.setProperty('--scale-factor', _paperScale.toString());
+
+    var ctx = canvas.getContext('2d');
+    await page.render({ canvasContext: ctx, viewport: hiresViewport }).promise;
+    if (token != null && token !== _paperRenderToken) { wrapper.dataset.rendering = '0'; return; }
+
+    // Swap placeholder → real content atomically.
+    var ph = wrapper.querySelector('.paper-page-placeholder');
+    if (ph) ph.remove();
+    var label = wrapper.querySelector('.paper-page-label');
+    wrapper.insertBefore(canvas, label || null);
+    wrapper.insertBefore(textDiv, label || null);
+
+    var textContent = await page.getTextContent();
+    if (typeof pdfjsLib.renderTextLayer === 'function') {
+      pdfjsLib.renderTextLayer({
+        textContentSource: textContent,
+        container: textDiv,
+        viewport: cssViewport,
+        textDivs: [],
+      });
+    }
+    wrapper.dataset.rendered = '1';
+    wrapper.dataset.rendering = '0';
+    return false;
+  } catch (e) {
+    wrapper.dataset.rendering = '0';
+    console.warn('[Paper] Failed to render page', pageNum, ':', e);
+    // A later-page raster failure = the mangled/truncated Range case (passes
+    // the page-1 probe, fails on real pull). Signal the caller to recover ONCE
+    // via a full {data} re-open (immune to Range mangling) — but only if we are
+    // not ALREADY on the {data} path. Returning true keeps the recovery
+    // decision with the caller so the lazy (observer) path can fire-and-forget
+    // while the eager/initial path can await it.
+    if (!_paperViaData) return true;
+    var errDiv = document.createElement('div');
+    errDiv.className = 'paper-page-error';
+    errDiv.textContent = 'Page ' + pageNum + ' failed to render';
+    var lbl = wrapper.querySelector('.paper-page-label');
+    wrapper.insertBefore(errDiv, lbl || null);
+    return false;
+  }
+}
+
+/** Release a page that has scrolled far off-screen: drop its canvas + text
+ *  layer (the heavy memory), restore a lightweight placeholder, and mark it
+ *  un-rendered so scrolling back re-rasterizes it. The wrapper keeps its
+ *  width/aspect-ratio, so scroll position and layout are unaffected. */
+function _releasePage(wrapper) {
+  if (!wrapper || wrapper.dataset.rendered !== '1') return;
+  var canvas = wrapper.querySelector('.paper-pdf-canvas');
+  var textLayer = wrapper.querySelector('.paper-text-layer');
+  if (canvas) canvas.remove();
+  if (textLayer) textLayer.remove();
+  if (!wrapper.querySelector('.paper-page-placeholder')) {
+    var ph = document.createElement('div');
+    ph.className = 'paper-page-placeholder';
+    wrapper.insertBefore(ph, wrapper.firstChild);
+  }
+  wrapper.dataset.rendered = '0';
+}
+
+/** Single-flight {data} range-bypass re-open triggered when a page fails to
+ *  rasterize (mangled/truncated Range on a buffering proxy). Downloads the
+ *  whole PDF once (client-owned, immune to Range mangling) and re-renders. */
+async function _maybeReopenViaData() {
+  if (_paperReopenInFlight || _paperViaData || !_paperCurrentUrl) return;
+  _paperReopenInFlight = true;
+  try {
+    debugLog('[Paper] A page failed to rasterize — re-opening via client ArrayBuffer (range-bypass) and re-rendering…', 'warning');
+    if (_paperPdfDoc) { try { _paperPdfDoc.destroy(); } catch (_) {} _paperPdfDoc = null; }
+    var reopened = await _openPaperPdfDoc(_paperCurrentUrl, true);
+    _paperPdfDoc = reopened.doc;
+    _paperViaData = reopened.viaData;
+    _paperTotalPages = _paperPdfDoc.numPages;
+    await _renderAllPages();
+  } catch (e) {
+    console.error('[Paper] {data} re-open failed:', e);
+  } finally {
+    _paperReopenInFlight = false;
+  }
 }
 
 /** ResizeObserver: scale text layers proportionally when page wrappers
@@ -1024,6 +1445,27 @@ function paperSetScaleFromInput(val) {
   _renderAllPages();
 }
 
+/** Measured horizontal padding (left+right) of the PDF viewer container.
+ *
+ * The fit-to-width math must subtract the container's actual padding to size a
+ * page to the usable width. This was hardcoded to 32 (assuming 16px each side),
+ * but the theme + responsive rules diverge: base .paper-pdf-container is 16px,
+ * light/tofu are 20/24px, and the portrait-tablet band overrides it again — so
+ * a fixed 32 renders the PDF several px too wide on those. Read the real value
+ * from computed style so every theme/breakpoint fits exactly. */
+function _paperViewerPadX(container) {
+  try {
+    var cs = getComputedStyle(container);
+    var l = parseFloat(cs.paddingLeft) || 0;
+    var r = parseFloat(cs.paddingRight) || 0;
+    var px = l + r;
+    return px > 0 ? px : 32;
+  } catch (err) {
+    console.warn('[Paper] padding measure failed, using 32:', err);
+    return 32;
+  }
+}
+
 /** Fit PDF width to container width */
 function paperFitWidth() {
   if (!_paperPdfDoc) return;
@@ -1032,7 +1474,7 @@ function paperFitWidth() {
   // Get first page to calculate ratio
   _paperPdfDoc.getPage(1).then(function(page) {
     var baseViewport = page.getViewport({ scale: 1.0 });
-    var containerWidth = container.clientWidth - 32; // subtract padding
+    var containerWidth = container.clientWidth - _paperViewerPadX(container);
     var fitScale = containerWidth / baseViewport.width;
     _paperScale = Math.max(0.25, Math.min(4.0, fitScale));
     _syncZoomUI();
@@ -1188,17 +1630,94 @@ function _updateZoomLabel() { _syncZoomUI(); }
     _right.style.minWidth = '';
   }
 
-  // Init when DOM ready
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function() {
-      _initDivider();
-      var d = document.getElementById('paperDivider');
-      if (d) d.addEventListener('dblclick', _onDblClick);
+  // ── Foldable / tablet responsiveness ──
+  // The layout decision (side-by-side split vs single-pane + bottom switcher)
+  // is made purely in CSS by this same predicate. But a fold/unfold or an
+  // orientation flip changes the .paper-left width WITHOUT any JS running, so a
+  // PDF laid out at the old width stays mis-sized, and a body that never had a
+  // [data-paper-view] set (desktop never needs one) lands in single-pane with
+  // NEITHER pane shown. On a *crossing* we therefore (a) re-assert the view —
+  // defaulting to 'pdf' when entering single-pane with no view yet — and
+  // (b) refit the PDF to the now-correct width. rRF-coalesced so a drag-resize
+  // that fires 'change' repeatedly does the fit work at most once per frame.
+  var _singlePaneMq = null;
+  var _crossPending = false;
+
+  try {
+    if (typeof window.matchMedia === 'function') {
+      _singlePaneMq = window.matchMedia('(max-width:1024px) and (pointer:coarse)');
+    }
+  } catch (e) {
+    console.warn('[Paper] matchMedia unavailable:', e);
+  }
+
+  // Named + global so the responsive behaviour is directly testable / neuterable.
+  function _paperResponsiveOnCrossing() {
+    var body = document.querySelector('.paper-body');
+    if (!body) return;
+    var singlePane = !!(_singlePaneMq && _singlePaneMq.matches);
+    if (singlePane) {
+      // Entering (or already in) single-pane: guarantee a pane is shown.
+      var cur = body.getAttribute('data-paper-view');
+      if (cur !== 'pdf' && cur !== 'reader') {
+        cur = 'pdf';
+      }
+      if (typeof _setPaperMobileView === 'function') {
+        _setPaperMobileView(cur);
+      } else {
+        body.setAttribute('data-paper-view', cur);
+      }
+    }
+    // The pane the PDF lives in just changed width (fold/orientation/split⇄single),
+    // so a page fitted to the old width now overflows or under-fills. Refit on the
+    // next frame, once the new layout has settled.
+    if (typeof paperFitWidth === 'function') {
+      requestAnimationFrame(function() {
+        try { paperFitWidth(); } catch (err) { console.warn('[Paper] responsive fit failed:', err); }
+      });
+    }
+  }
+  window._paperResponsiveOnCrossing = _paperResponsiveOnCrossing;
+
+  // rAF-coalesce: many rapid 'change'/'orientationchange'/'resize' events during
+  // a fold collapse to a single crossing handler run per frame.
+  function _scheduleCrossing() {
+    if (_crossPending) return;
+    _crossPending = true;
+    requestAnimationFrame(function() {
+      _crossPending = false;
+      _paperResponsiveOnCrossing();
     });
-  } else {
+  }
+
+  function _wireResponsiveCrossing() {
+    if (_singlePaneMq) {
+      // The MediaQueryList 'change' event fires ONLY on a true predicate
+      // crossing — exactly the fold/rotate boundary we care about (not every
+      // resize pixel), so this is inherently debounced at the source.
+      if (typeof _singlePaneMq.addEventListener === 'function') {
+        _singlePaneMq.addEventListener('change', _scheduleCrossing);
+      } else if (typeof _singlePaneMq.addListener === 'function') {
+        _singlePaneMq.addListener(_scheduleCrossing);  // Safari <14 fallback
+      }
+    }
+    // orientationchange isn't always a predicate crossing (portrait↔landscape
+    // can stay inside single-pane), but the pane still resizes → refit anyway.
+    window.addEventListener('orientationchange', _scheduleCrossing);
+  }
+
+  function _initPaperResponsive() {
     _initDivider();
     var d = document.getElementById('paperDivider');
     if (d) d.addEventListener('dblclick', _onDblClick);
+    _wireResponsiveCrossing();
+  }
+
+  // Init when DOM ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _initPaperResponsive);
+  } else {
+    _initPaperResponsive();
   }
 })();
 
@@ -1226,6 +1745,20 @@ function _showPaperLanding() {
           '<input type="text" id="paperArxivUrl" placeholder="' + escapeHtml(_tt('paper.arxivPlaceholder')) + '"' +
                  ' onkeydown="if(event.key===\'Enter\')_submitArxivQuery()">' +
           '<button onclick="_submitArxivQuery()" class="paper-arxiv-btn">' + escapeHtml(_tt('paper.search')) + '</button>' +
+        '</div>' +
+        '<div class="paper-describe-divider"><span>' + escapeHtml(_tt('paper.describeOr')) + '</span></div>' +
+        '<div class="paper-describe-box">' +
+          '<div class="paper-describe-label">' +
+            '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a7 7 0 0 0-4 12.7V17a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2.3A7 7 0 0 0 12 2Z"/><line x1="9" y1="21" x2="15" y2="21"/></svg>' +
+            ' ' + escapeHtml(_tt('paper.describeLabel')) +
+          '</div>' +
+          '<textarea id="paperDescribeInput" class="paper-describe-input" rows="3" placeholder="' + escapeHtml(_tt('paper.describePlaceholder')) + '"' +
+                 ' oninput="_paperDescribeDraft=this.value"' +
+                 ' onkeydown="if(event.key===\'Enter\'&&(event.metaKey||event.ctrlKey))_submitPaperDescribe()">' + escapeHtml(_paperDescribeDraft) + '</textarea>' +
+          '<button onclick="_submitPaperDescribe()" class="paper-describe-btn">' +
+            '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>' +
+            ' ' + escapeHtml(_tt('paper.describeBtn')) +
+          '</button>' +
         '</div>' +
       '</div>' +
     '</div>';
@@ -1471,10 +2004,48 @@ async function _searchArxivPapers(query) {
   }
 }
 
+/** Escape plain text but typeset inline `$…$` LaTeX via KaTeX.
+ *
+ * arXiv titles and abstracts routinely contain math (e.g.
+ * `$\Lambda_b^0 \to J/\psi\Xi^- K^+$`). A bare escapeHtml() would show the
+ * raw TeX. This splits on `$…$` (and `\(…\)`) spans, escapes the prose, and
+ * renders each math span with KaTeX. When KaTeX is not yet loaded it kicks
+ * off the lazy loader and falls back to the escaped raw TeX — the
+ * `katex:loaded` listener repaints the candidate list once it arrives. */
+function _escWithInlineMath(text) {
+  var raw = (text == null) ? '' : String(text);
+  if (raw.indexOf('$') === -1 && raw.indexOf('\\(') === -1) return escapeHtml(raw);
+  var hasKatex = (typeof katex !== 'undefined');
+  if (!hasKatex && typeof _ensureKatex === 'function') { try { _ensureKatex(); } catch (_) {} }
+  // Split into alternating text / math tokens. `$…$` (non-greedy, no blank
+  // `$$`) or `\(…\)`.
+  var re = /\$(?!\$)((?:\\.|[^$\\])+?)\$(?!\$)|\\\(([\s\S]*?)\\\)/g;
+  var out = '';
+  var last = 0;
+  var m;
+  while ((m = re.exec(raw)) !== null) {
+    out += escapeHtml(raw.slice(last, m.index));
+    var tex = (m[1] != null ? m[1] : m[2]).trim();
+    if (hasKatex) {
+      try {
+        out += katex.renderToString(tex, { throwOnError: false, displayMode: false, strict: false, trust: true });
+      } catch (e) {
+        out += '<code class="math-error">' + escapeHtml(tex) + '</code>';
+      }
+    } else {
+      out += '<code class="math-pending">' + escapeHtml(tex) + '</code>';
+    }
+    last = re.lastIndex;
+  }
+  out += escapeHtml(raw.slice(last));
+  return out;
+}
+
 /** Render the list of arXiv search-result cards. */
 function _renderArxivSearchResults(query, results) {
   var viewer = document.getElementById('paperPdfViewer');
   if (!viewer) return;
+  _lastArxivSearchQuery = query;
   var _tt = (typeof t === 'function') ? t : function(k){ return k; };
 
   var header =
@@ -1511,9 +2082,9 @@ function _renderArxivSearchResults(query, results) {
            ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();_openArxivResult(' + i + ')}">' +
         '<div class="paper-result-num">' + (i + 1) + '</div>' +
         '<div class="paper-result-body">' +
-          '<div class="paper-result-title">' + escapeHtml(r.title || r.arxiv_id) + '</div>' +
+          '<div class="paper-result-title">' + _escWithInlineMath(r.title || r.arxiv_id) + '</div>' +
           (authorStr ? '<div class="paper-result-authors">' + escapeHtml(authorStr) + '</div>' : '') +
-          (r.summary ? '<div class="paper-result-summary">' + escapeHtml(r.summary) + '</div>' : '') +
+          (r.summary ? '<div class="paper-result-summary">' + _escWithInlineMath(r.summary) + '</div>' : '') +
           '<div class="paper-result-meta">' + meta.join('') + '</div>' +
         '</div>' +
         '<div class="paper-result-arrow">' +
@@ -1531,6 +2102,442 @@ function _renderArxivSearchResults(query, results) {
 /** Load the arXiv paper at index `idx` of the last search results. */
 function _openArxivResult(idx) {
   var r = _paperSearchResults && _paperSearchResults[idx];
+  if (!r || !r.arxiv_id) return;
+  _fetchArxivPaper(r.arxiv_id);
+}
+
+
+// ── Describe-to-recommend (fuzzy description → grounded arXiv papers) ──
+// Streamed the same way as the Q&A tab beside it: a server-owned task
+// (recommend/start) is polled (recommend/poll) and each grounded card is
+// revealed the instant it resolves. `_recStream` is the single source of
+// truth the reconciling renderer paints from — never rebuilt wholesale.
+var _paperRecommendResults = [];   // last recommend candidate list (index → card)
+var _paperRecommendCorrection = null;  // grounded correction paper offered by the banner
+var _recStream = null;             // live streaming state (see _newRecStream)
+var _recPaintScheduled = false;    // rAF-coalescing latch
+
+function _newRecStream(description) {
+  return {
+    description: description,
+    taskId: null,
+    cursor: 0,
+    status: 'pending',       // pending|running|done|error
+    candidateCount: 0,       // how many skeleton slots to reserve (grounding attempts)
+    interpreted: false,      // Phase 1 landed
+    researchCount: 0,        // how many research tool calls have started
+    researchLabel: '',       // short label of the latest research query (for the status line)
+    // Chat-compatible tool rounds for the interpretation agent's research
+    // (web_search / fetch_url). Rendered by the SAME renderToolRoundsHTML the
+    // report/review tabs use, so the describe flow shows chatInner's inline
+    // tool timeline instead of a one-line counter.
+    toolRounds: [],          // [{roundNum, toolName, query, toolCallId, toolArgs, status, results, _elapsed, ...}]
+    results: [],             // grounded cards, in emit order
+    correction: null,        // {note, paper} | null
+    llmError: false,
+    aborted: false,
+  };
+}
+
+/** Entry point from the landing "describe it" textarea. */
+function _submitPaperDescribe() {
+  var input = document.getElementById('paperDescribeInput');
+  var q = input && input.value ? input.value.trim() : '';
+  if (!q) { debugLog('Describe the paper you are looking for', 'warning'); return; }
+  _recommendPapers(q);
+}
+
+/** Interpret a fuzzy description and STREAM grounded arXiv cards in. */
+async function _recommendPapers(description) {
+  // Abort any in-flight stream (best-effort) before starting a new one.
+  if (_recStream && _recStream.taskId && _recStream.status === 'running') {
+    _recStream.aborted = true;
+    try { Api.paper.recommendAbort(_recStream.taskId); } catch (_) {}
+  }
+  var s = _newRecStream(description);
+  _recStream = s;
+  _paperRecommendResults = s.results;
+  _paperRecommendCorrection = null;
+
+  // Paint the shell immediately (header + interpreting banner) so there is no
+  // spinner-then-dump — the pre-grounding state IS the loading affordance.
+  _paintRecommendFromState();
+
+  try {
+    var startData = await Api.paper.recommendStart(description, 6);
+    if (!startData || !startData.ok || !startData.task_id) {
+      throw new Error((startData && startData.error) || 'recommend start failed');
+    }
+    if (_recStream !== s) return;   // superseded by a newer submit
+    s.taskId = startData.task_id;
+    await _pollRecommendTask(s);
+  } catch (e) {
+    console.error('[Paper] recommend failed:', e);
+    if (_recStream === s) { s.status = 'error'; _renderRecommendError(description); }
+  }
+}
+
+/** Poll a streaming recommend task to completion, applying events to `s`. */
+async function _pollRecommendTask(s) {
+  var POLL_MS = 600;
+  while (true) {
+    if (_recStream !== s || s.aborted) break;
+    var resp = await Api.paper.recommendPoll(s.taskId, s.cursor);
+    if (_recStream !== s || s.aborted) break;
+    if (!resp || !resp.ok) {
+      if (resp && resp.status === 404) { s.status = 'error'; _paintRecommendFromState(); break; }
+      throw new Error('HTTP ' + (resp ? resp.status : '?'));
+    }
+    var data = await resp.json();
+    if (!data.ok) throw new Error((typeof data.error === 'string' ? data.error : 'Poll failed'));
+
+    var events = data.events || [];
+    for (var i = 0; i < events.length; i++) _applyRecommendEvent(s, events[i]);
+    s.cursor = data.next_cursor;
+
+    if (data.status === 'done') {
+      s.status = 'done';
+      // Authoritative final snapshot (covers any card the event replay missed).
+      if (Array.isArray(data.results) && data.results.length >= s.results.length) {
+        s.results = data.results; _paperRecommendResults = s.results;
+      }
+      if (data.correction) s.correction = data.correction;
+      s.llmError = !!data.llmError;
+      _paintRecommendFromState();
+      break;
+    }
+    if (data.status === 'error') {
+      s.status = 'error';
+      s.llmError = !!data.llmError;
+      _renderRecommendError(s.description);
+      break;
+    }
+    _paintRecommendFromState();
+    await new Promise(function(r) { setTimeout(r, POLL_MS); });
+  }
+}
+
+/** Apply one recommend stream event to `s`. */
+function _applyRecommendEvent(s, ev) {
+  switch (ev.type) {
+    case 'tool_start':
+      // The interpretation agent is researching (web_search / fetch_url) before
+      // it proposes candidates. Accumulate a chat-compatible round entry so the
+      // SAME renderToolRoundsHTML the report tab uses renders the inline tool
+      // timeline (user sees genuine current-literature research, not a blind
+      // memory guess). researchCount/Label are kept as a status-line fallback.
+      s.researchCount = (s.researchCount || 0) + 1;
+      s.researchLabel = (typeof ev.query === 'string' ? ev.query : '').slice(0, 80);
+      s.toolRounds.push({
+        roundNum: ev.roundNum,
+        toolName: ev.toolName,
+        query: ev.query || ev.toolName,
+        toolCallId: ev.toolCallId || '',
+        toolArgs: ev.toolArgs || '',
+        status: 'searching',
+        results: null,
+      });
+      return;
+    case 'tool_done': {
+      var tr = null;
+      for (var ti = 0; ti < s.toolRounds.length; ti++) {
+        if (s.toolRounds[ti].roundNum === ev.roundNum) { tr = s.toolRounds[ti]; break; }
+      }
+      if (tr) {
+        tr.status = 'done';
+        if (typeof ev.elapsed === 'number') tr._elapsed = ev.elapsed.toFixed(1) + 's';
+        if (ev.toolContent) tr.toolContent = ev.toolContent;
+        if (ev.results) tr.results = ev.results;
+        if (ev.searchDiag) tr.searchDiag = ev.searchDiag;
+        if (ev.engineBreakdown) tr.engineBreakdown = ev.engineBreakdown;
+        if (ev.verticals) tr.verticals = ev.verticals;
+      }
+      return;
+    }
+    case 'interpret_done':
+      s.interpreted = true;
+      s.candidateCount = (typeof ev.candidateCount === 'number') ? ev.candidateCount : 0;
+      return;
+    case 'candidate': {
+      var idx = (typeof ev.index === 'number') ? ev.index : s.results.length;
+      s.results[idx] = ev.card;
+      _paperRecommendResults = s.results;
+      return;
+    }
+    case 'correction':
+      s.correction = ev.correction || null;
+      _paperRecommendCorrection = (s.correction && s.correction.paper) ? s.correction.paper : null;
+      return;
+    case 'error':
+      s.llmError = !!ev.llmError;
+      return;
+    default:
+      return;
+  }
+}
+
+/** Shared error surface for the describe flow. */
+function _renderRecommendError(description) {
+  var viewer = document.getElementById('paperPdfViewer');
+  if (!viewer) return;
+  var _tt = (typeof t === 'function') ? t : function(k){ return k; };
+  viewer.innerHTML =
+    '<div class="paper-error">' + escapeHtml(_tt('paper.recommendFailed')) +
+    '<br><button onclick="_showPaperLanding()" class="paper-retry-btn">' +
+    escapeHtml(_tt('paper.searchBack')) + '</button></div>';
+}
+
+/** Inner HTML of a grounded recommend card (index `i`). */
+function _recCardInnerHtml(r, i) {
+  var authors = Array.isArray(r.authors) ? r.authors : [];
+  var authorStr = authors.slice(0, 4).join(', ') + (authors.length > 4 ? ' et al.' : '');
+  var meta = [];
+  if (r.venue) meta.push('<span class="paper-card-venue">' + escapeHtml(r.venue) + '</span>');
+  if (r.primary_category) meta.push('<span class="paper-card-cat">' + escapeHtml(r.primary_category) + '</span>');
+  if (r.published) meta.push('<span class="paper-card-date">' + escapeHtml(r.published) + '</span>');
+  meta.push('<span class="paper-card-id">arXiv:' + escapeHtml(r.arxiv_id) + '</span>');
+  return '' +
+    '<div class="paper-result-num">' + (i + 1) + '</div>' +
+    '<div class="paper-result-body">' +
+      '<div class="paper-result-title">' + _escWithInlineMath(r.title || r.arxiv_id) + '</div>' +
+      (r.why ? '<div class="paper-result-why">' +
+        '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' +
+        '<span>' + escapeHtml(r.why) + '</span></div>' : '') +
+      (authorStr ? '<div class="paper-result-authors">' + escapeHtml(authorStr) + '</div>' : '') +
+      (r.summary ? '<div class="paper-result-summary">' + _escWithInlineMath(r.summary) + '</div>' : '') +
+      '<div class="paper-result-meta">' + meta.join('') + '</div>' +
+    '</div>' +
+    '<div class="paper-result-arrow">' +
+      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>' +
+    '</div>';
+}
+
+/** Inner HTML of a skeleton (not-yet-grounded) placeholder card. */
+function _recSkeletonInnerHtml() {
+  return '' +
+    '<div class="paper-result-num paper-rec-sk-num"></div>' +
+    '<div class="paper-result-body">' +
+      '<div class="paper-rec-sk-line paper-rec-sk-title"></div>' +
+      '<div class="paper-rec-sk-line paper-rec-sk-why"></div>' +
+      '<div class="paper-rec-sk-line paper-rec-sk-meta"></div>' +
+    '</div>';
+}
+
+/** Correction-banner HTML (or '' when absent). */
+function _recCorrectionHtml(correction, _tt) {
+  if (!correction || !correction.note) return '';
+  var offer = '';
+  if (correction.paper && correction.paper.arxiv_id) {
+    var cp = correction.paper;
+    offer =
+      '<div class="paper-correction-offer paper-result-card" role="button" tabindex="0"' +
+           ' onclick="_openRecommendCorrection()"' +
+           ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();_openRecommendCorrection()}">' +
+        '<div class="paper-result-body">' +
+          '<div class="paper-correction-offer-label">' + escapeHtml(_tt('paper.correctionActual')) + '</div>' +
+          '<div class="paper-result-title">' + _escWithInlineMath(cp.title || cp.arxiv_id) + '</div>' +
+          '<div class="paper-result-meta"><span class="paper-card-id">arXiv:' + escapeHtml(cp.arxiv_id) + '</span></div>' +
+        '</div>' +
+        '<div class="paper-result-arrow">' +
+          '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>' +
+        '</div>' +
+      '</div>';
+  }
+  return '' +
+    '<div class="paper-correction" role="note">' +
+      '<div class="paper-correction-icon">' +
+        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' +
+      '</div>' +
+      '<div class="paper-correction-body">' +
+        '<div class="paper-correction-title">' + escapeHtml(_tt('paper.correctionTitle')) + '</div>' +
+        '<div class="paper-correction-note">' + escapeHtml(correction.note) + '</div>' +
+        offer +
+      '</div>' +
+    '</div>';
+}
+
+/**
+ * Paint the recommendation view from `_recStream`, reconciling in place.
+ *
+ * Streaming discipline (mirrors _renderPaperQA): the shell (header/banner/hint/
+ * list scaffold) is built once; thereafter each card node is reconciled and
+ * only rewritten when its rendered content actually changes (compare-before-
+ * swap via `_recSig`). A not-yet-grounded slot is a `data-status="searching"`
+ * skeleton; when its card lands the same node flips to `data-status="grounded"`
+ * and its inner HTML is swapped in — the stagger + reveal animation fires from
+ * CSS keyed on the status change. rAF-coalesced so a burst of poll ticks costs
+ * one paint per frame.
+ */
+function _paintRecommendFromState() {
+  if (_recPaintScheduled) return;
+  _recPaintScheduled = true;
+  var raf = (typeof requestAnimationFrame === 'function')
+    ? requestAnimationFrame : function(fn){ return setTimeout(fn, 16); };
+  raf(function() {
+    _recPaintScheduled = false;
+    try { _paintRecommendNow(); }
+    catch (e) { console.warn('[Paper:Recommend] paint failed:', e); }
+  });
+}
+
+function _paintRecommendNow() {
+  var s = _recStream;
+  if (!s) return;
+  var viewer = document.getElementById('paperPdfViewer');
+  if (!viewer) return;
+  var _tt = (typeof t === 'function') ? t : function(k){ return k; };
+
+  // How many card slots to show: grounded cards + skeletons up to the
+  // interpreted candidate count. Before Phase 1 lands we show none (the
+  // interpreting banner is the affordance) to avoid a CLS jump on count change.
+  var grounded = s.results.filter(function(x){ return !!x; }).length;
+  var slots = s.interpreted
+    ? Math.max(grounded, (s.status === 'done') ? grounded : s.candidateCount)
+    : 0;
+
+  // ── Build the shell once (identified by data-rec-shell) ──
+  var shell = viewer.querySelector('.paper-search[data-rec-shell]');
+  if (!shell) {
+    var header =
+      '<div class="paper-search-head">' +
+        '<button class="paper-search-back" onclick="_showPaperLanding()" title="' + escapeHtml(_tt('paper.searchBack')) + '">' +
+          '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>' +
+        '</button>' +
+        '<div class="paper-search-head-text">' +
+          '<div class="paper-search-head-title">' + escapeHtml(_tt('paper.recommendTitle')) + '</div>' +
+          '<div class="paper-search-head-q">“' + escapeHtml(s.description) + '”</div>' +
+        '</div>' +
+      '</div>';
+    viewer.innerHTML =
+      '<div class="paper-search" data-rec-shell="1">' + header +
+        '<div class="paper-rec-status" data-rec-status aria-live="polite"></div>' +
+        '<div class="paper-report-tools paper-rec-tools" data-rec-tools></div>' +
+        '<div class="paper-rec-banner" data-rec-banner></div>' +
+        '<div class="paper-search-hint" data-rec-hint hidden>' + escapeHtml(_tt('paper.recommendHint')) + '</div>' +
+        '<div class="paper-result-list" data-rec-list aria-live="polite" aria-relevant="additions"></div>' +
+      '</div>';
+    shell = viewer.querySelector('.paper-search[data-rec-shell]');
+  }
+
+  var statusEl = shell.querySelector('[data-rec-status]');
+  var toolsEl = shell.querySelector('[data-rec-tools]');
+  var bannerEl = shell.querySelector('[data-rec-banner]');
+  var hintEl = shell.querySelector('[data-rec-hint]');
+  var listEl = shell.querySelector('[data-rec-list]');
+
+  // ── Status line (researching → interpreting → grounding progress → settled) ──
+  // The per-query research detail now lives in the inline tool timeline below;
+  // this line is just the phase summary (mirrors chatInner's phase text sitting
+  // above the tool rounds).
+  var statusHtml = '';
+  if (!s.interpreted && s.status !== 'error') {
+    if (s.researchCount > 0) {
+      var researchTxt = _tt('paper.recommendResearching').replace('{n}', s.researchCount);
+      statusHtml = '<span class="paper-rec-spin"></span>' + escapeHtml(researchTxt);
+    } else {
+      statusHtml = '<span class="paper-rec-spin"></span>' + escapeHtml(_tt('paper.recommendInterpreting'));
+    }
+  } else if (s.status === 'running' && grounded < slots) {
+    statusHtml = '<span class="paper-rec-spin"></span>' +
+      escapeHtml(_tt('paper.recommendGrounding').replace('{n}', grounded).replace('{total}', slots));
+  }
+  if (statusEl._recSig !== statusHtml) {
+    statusEl.innerHTML = statusHtml;
+    statusEl.hidden = !statusHtml;
+    statusEl._recSig = statusHtml;
+  }
+
+  // ── Research tool timeline — reuse chat's unified renderer for identical
+  // look & feel (the interpretation agent's web_search / fetch_url rounds). ──
+  if (toolsEl) {
+    var toolCount = s.toolRounds.length;
+    var searchingCount = 0;
+    for (var tci = 0; tci < s.toolRounds.length; tci++) {
+      if (s.toolRounds[tci].status === 'searching') searchingCount++;
+    }
+    var toolKey = toolCount + ':' + searchingCount;
+    if (toolsEl._recToolKey !== toolKey) {
+      if (toolCount > 0 && typeof renderToolRoundsHTML === 'function') {
+        toolsEl.innerHTML = renderToolRoundsHTML(s.toolRounds, s.status === 'running');
+      } else {
+        toolsEl.innerHTML = '';
+      }
+      toolsEl.hidden = toolCount === 0;
+      toolsEl._recToolKey = toolKey;
+    }
+  }
+
+  // ── Correction banner ──
+  var bannerHtml = _recCorrectionHtml(s.correction, _tt);
+  if (bannerEl._recSig !== bannerHtml) {
+    bannerEl.innerHTML = bannerHtml;
+    bannerEl._recSig = bannerHtml;
+  }
+
+  // ── Empty terminal state (nothing grounded, no correction) ──
+  var showEmpty = (s.status === 'done' && grounded === 0 && !bannerHtml);
+  var emptyHtml = showEmpty
+    ? '<div class="paper-search-empty">' + escapeHtml(_tt('paper.recommendNoResults')) + '</div>' : '';
+  if (hintEl) hintEl.hidden = !(grounded > 0);
+
+  // ── Reconcile cards in place (skeleton → grounded), keyed by slot index ──
+  // Remove surplus nodes first.
+  while (listEl.children.length > slots) {
+    listEl.removeChild(listEl.lastElementChild);
+  }
+  for (var i = 0; i < slots; i++) {
+    var card = s.results[i];
+    var node = listEl.children[i];
+    if (!node) {
+      node = document.createElement('div');
+      node.style.setProperty('--i', String(i));   // stagger index
+      listEl.appendChild(node);
+    }
+    var status = card ? 'grounded' : 'searching';
+    var sig = card ? ('g:' + (card.arxiv_id || i)) : 'sk';
+    if (node._recSig === sig) continue;            // compare-before-swap
+    if (card) {
+      node.className = 'paper-result-card paper-rec-card';
+      node.setAttribute('role', 'button');
+      node.setAttribute('tabindex', '0');
+      node.setAttribute('data-idx', String(i));
+      node.setAttribute('data-status', status);
+      node.onclick = (function(idx){ return function(){ _openRecommendResult(idx); }; })(i);
+      node.onkeydown = (function(idx){ return function(ev){
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); _openRecommendResult(idx); }
+      }; })(i);
+      node.innerHTML = _recCardInnerHtml(card, i);
+    } else {
+      node.className = 'paper-result-card paper-rec-card paper-rec-skeleton';
+      node.removeAttribute('role');
+      node.removeAttribute('tabindex');
+      node.setAttribute('data-status', status);
+      node.setAttribute('aria-hidden', 'true');
+      node.onclick = null; node.onkeydown = null;
+      node.innerHTML = _recSkeletonInnerHtml();
+    }
+    node._recSig = sig;
+  }
+
+  // Empty-state node lives after the list (only when truly nothing to show).
+  var existingEmpty = shell.querySelector('.paper-search-empty');
+  if (emptyHtml && !existingEmpty) {
+    listEl.insertAdjacentHTML('afterend', emptyHtml);
+  } else if (!emptyHtml && existingEmpty) {
+    existingEmpty.remove();
+  }
+}
+
+/** Load the recommended paper at index `idx` — reuses the arXiv ingest path. */
+function _openRecommendResult(idx) {
+  var r = _paperRecommendResults && _paperRecommendResults[idx];
+  if (!r || !r.arxiv_id) return;
+  _fetchArxivPaper(r.arxiv_id);
+}
+
+/** Load the correction banner's "actual winner" paper. */
+function _openRecommendCorrection() {
+  var r = _paperRecommendCorrection;
   if (!r || !r.arxiv_id) return;
   _fetchArxivPaper(r.arxiv_id);
 }
@@ -2158,6 +3165,9 @@ function _makeReportStreamState(paperId, lang, taskId, kind) {
     thinkingText: '',
     toolRounds: [],      // chat-compatible: [{roundNum, toolName, query, toolCallId, toolArgs, status, toolContent, _elapsed}]
     contentStarted: false,
+    insightText: '',       // gated insight second-pass section (appended after `done`)
+    _insightRunning: false,
+    _insightApplied: false,
     meta: null,          // finish-tag {model, costCny, ...} from the done event
     error: '',
     pollTimer: null,
@@ -2270,6 +3280,43 @@ function _applyReportEvent(s, ev) {
       // a stream that was started for paper A and is now polling in the background
       // must not stomp paper B's hash.
       if (ev.paperHash && s.paperId === _activePaperId) _paperHash = ev.paperHash;
+      return true;
+
+    case 'insight_start':
+      // The gated insight second-pass has begun (after the report `done`).
+      // Flag it so the reader can show a subtle "synthesizing insight…" hint;
+      // no body change yet.
+      s._insightRunning = true;
+      return true;
+
+    case 'insight': {
+      // The insight pass produced a grounded synthesis/transfer section. It is
+      // a self-contained Markdown block (## 💡 …) persisted separately under
+      // the `insight:<ui>` key; render it live by appending to the report body
+      // (and the cached snapshot) so it flows through the same markdown
+      // renderer + TOC. Guard against double-append on cursor replay.
+      s._insightRunning = false;
+      var _ins = ev.insight || '';
+      if (_ins && !s._insightApplied) {
+        s._insightApplied = true;
+        s.insightText = _ins;
+        s.fullText = (s.fullText || '').replace(/\s*$/, '') + '\n\n' + _ins + '\n';
+        s._lastRenderedLen = -1;   // force re-render
+        if (s.paperId === _activePaperId) {
+          var _vIns = _reportView(s.kind);
+          if (_vIns.cache) {
+            _vIns.cache = _vIns.cache.replace(/\s*$/, '') + '\n\n' + _ins + '\n';
+            _rememberReportSnapshot(_vIns, _vIns.cache, _vIns.meta || s.meta);
+          }
+        }
+      }
+      return true;
+    }
+
+    case 'insight_skipped':
+      // Gate withheld (report already insight-saturated) or nothing produced.
+      // No body change; just clear the running hint.
+      s._insightRunning = false;
       return true;
 
     case 'done': {
@@ -2634,12 +3681,15 @@ function _scrollReportToHeading(ev, id) {
   // are still programmatically scrollable. That pushes the .paper-tabs bar out
   // of view with no scrollbar to bring it back. Scroll the inner container
   // manually so the chrome above the report never moves.
+  var _rm = (typeof prefersReducedMotion === 'function') && prefersReducedMotion();
+  /** @type {ScrollBehavior} */
+  var _behavior = _rm ? 'auto' : 'smooth';
   var scroller = el.closest('.paper-report-content, .paper-report-body');
-  if (!scroller) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+  if (!scroller) { el.scrollIntoView({ behavior: _behavior, block: 'start' }); return; }
   var TOP_MARGIN = 16;  // matches h2/h3 scroll-margin-top
   var target = scroller.scrollTop
     + (el.getBoundingClientRect().top - scroller.getBoundingClientRect().top) - TOP_MARGIN;
-  scroller.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+  scroller.scrollTo({ top: Math.max(0, target), behavior: _behavior });
 }
 
 /** Scroll-spy: highlight the TOC entry for the heading currently in view. */
@@ -2906,10 +3956,11 @@ function _buildReadingTimeBar(article, scroller) {
 
 /** Wire scroll → progress/remaining updates + the learning tracker.
  *  Disconnects any previous tracker. */
-function _wireReadingTimeTracking(bar, scroller) {
+function _wireReadingTimeTracking(bar, scroller, view) {
   if (!bar || !scroller) return;
   // Tear down a previous session (flush its sample first).
   _teardownReadingTracker(true);
+  view = view || _reportView('report');
 
   var totalEl = bar.querySelector('.paper-read-time-total');
   var leftEl = bar.querySelector('.paper-read-time-left');
@@ -2923,9 +3974,11 @@ function _wireReadingTimeTracking(bar, scroller) {
 
   var tracker = {
     bar: bar, scroller: scroller, words: words, totalMin: totalMin,
+    view: view,          // view-context whose reading position we persist
     lastProgress: 0,     // max scroll fraction reached [0..1]
     activeMs: 0,         // accumulated active reading time
     lastTickTs: 0,       // timestamp of last scroll/visibility tick while active
+    lastPersistTs: 0,    // throttle: last time we wrote the position to storage
     flushed: false,
     onScroll: null,
     rafPending: false,
@@ -2966,6 +4019,13 @@ function _wireReadingTimeTracking(bar, scroller) {
     tracker.lastTickTs = now;
     if (frac > tracker.lastProgress) tracker.lastProgress = frac;
     _paint(Math.max(frac, 0));
+    // Persist the reading position (throttled to ≤ once/second) so a later
+    // tab switch / reload restores it. Capture from the live DOM so the anchor
+    // is a heading index+offset (survives a cross-language re-layout).
+    if (now - tracker.lastPersistTs >= 1000) {
+      tracker.lastPersistTs = now;
+      _persistReadingPosition(tracker.view, _captureReadingAnchor(scroller));
+    }
   }
 
   tracker.onScroll = function() {
@@ -2992,6 +4052,12 @@ function _teardownReadingTracker(silent) {
   try {
     if (tk.scroller && tk.onScroll) tk.scroller.removeEventListener('scroll', tk.onScroll);
   } catch (e) { /* detached node */ }
+
+  // Persist the final reading position before detaching (a tab switch / mode
+  // exit flushes here) so re-entry restores exactly where the reader stopped.
+  try {
+    if (tk.scroller) _persistReadingPosition(tk.view, _captureReadingAnchor(tk.scroller));
+  } catch (e) { console.debug('[Paper] persist final reading-pos failed: %s', e && e.message); }
 
   var coveredWords = tk.words * tk.lastProgress;
   var activeMin = tk.activeMs / 60000;
@@ -3023,6 +4089,18 @@ function _renderFinalReport(container, text, meta, view) {
   }
   if (container._reportSpyObs) { try { container._reportSpyObs.disconnect(); } catch (e) {} container._reportSpyObs = null; }
 
+  // Capture reading position BEFORE we wipe the DOM, so a repaint (notably an
+  // EN/中 language toggle, which fully rebuilds) restores the reader's place
+  // instead of snapping to the top. We anchor on the heading nearest the top of
+  // the viewport (heading ORDER is preserved across languages, unlike raw
+  // scrollTop which is meaningless after a re-layout) + that heading's pixel
+  // offset from the scroller top, so we land exactly where the eye was.
+  // On a FRESH render (tab open / reload) the container isn't scrolled yet, so
+  // the in-DOM capture returns null — fall back to the position persisted for
+  // THIS view+language, restoring the last-read place across tab switches and
+  // hard refreshes (see _persistReadingPosition).
+  var _readAnchor = _captureReadingAnchor(container) || _loadReadingPosition(view);
+
   var article = document.createElement('article');
   article.className = 'paper-report-article';
   article.innerHTML = renderMarkdown(text || '');
@@ -3035,6 +4113,7 @@ function _renderFinalReport(container, text, meta, view) {
   }
   _decorateCallouts(article);
   _frameFigures(article);
+  _decorateZoomableImages(article);
   _decorateGlossaryTerms(article, _extractGlossary(article));
   var finishTag = _renderReportFinishTag(meta);
   if (finishTag) {
@@ -3065,7 +4144,96 @@ function _renderFinalReport(container, text, meta, view) {
     if (readBar) container.appendChild(readBar);
     container.appendChild(article);
   }
-  if (readBar) _wireReadingTimeTracking(readBar, container);
+  // Restore the pre-repaint reading position (see _captureReadingAnchor).
+  _restoreReadingAnchor(container, article, _readAnchor);
+  if (readBar) _wireReadingTimeTracking(readBar, container, view);
+}
+
+/** Snapshot the reader's place in `scroller` as {index, offset}: the index of
+ *  the heading (h2/h3) nearest the top of the viewport and that heading's pixel
+ *  distance below the scroller's top edge. Returns null when nothing is
+ *  scrolled yet (fresh render) so a first paint is not perturbed. */
+function _captureReadingAnchor(scroller) {
+  try {
+    if (!scroller || scroller.scrollTop <= 2) return null;
+    var heads = scroller.querySelectorAll('.paper-report-article h2, .paper-report-article h3');
+    if (!heads.length) {
+      // No headings — fall back to a scroll FRACTION (best-effort for prose
+      // whose length differs across languages).
+      var max = scroller.scrollHeight - scroller.clientHeight;
+      return max > 0 ? { frac: scroller.scrollTop / max } : null;
+    }
+    var sTop = scroller.getBoundingClientRect().top;
+    var best = 0, bestAbove = -Infinity;
+    for (var i = 0; i < heads.length; i++) {
+      var rel = heads[i].getBoundingClientRect().top - sTop;
+      // The last heading at or above the top edge is the one we're "in".
+      if (rel <= 1 && rel > bestAbove) { bestAbove = rel; best = i; }
+    }
+    var relTop = heads[best].getBoundingClientRect().top - sTop;
+    return { index: best, offset: relTop };
+  } catch (e) {
+    console.debug('[Paper] captureReadingAnchor failed: %s', e && e.message);
+    return null;
+  }
+}
+
+/** Restore a {index,offset} (or {frac}) anchor produced by
+ *  _captureReadingAnchor onto the freshly-rebuilt `article` inside `scroller`. */
+function _restoreReadingAnchor(scroller, article, anchor) {
+  if (!scroller || !anchor) return;
+  try {
+    if (anchor.frac != null) {
+      var max = scroller.scrollHeight - scroller.clientHeight;
+      scroller.scrollTop = Math.max(0, Math.round(anchor.frac * max));
+      return;
+    }
+    var heads = article.querySelectorAll('h2, h3');
+    if (!heads.length || anchor.index == null) return;
+    var idx = Math.min(anchor.index, heads.length - 1);
+    var sTop = scroller.getBoundingClientRect().top;
+    var headTop = heads[idx].getBoundingClientRect().top - sTop + scroller.scrollTop;
+    scroller.scrollTop = Math.max(0, Math.round(headTop - (anchor.offset || 0)));
+  } catch (e) {
+    console.debug('[Paper] restoreReadingAnchor failed: %s', e && e.message);
+  }
+}
+
+/** Read the whole persisted reading-position map { '<paperId>::<langKey>':
+ *  anchor }. Never throws. */
+function _readReadPosMap() {
+  try {
+    var raw = localStorage.getItem(_PAPER_READ_POS_KEY);
+    return raw ? (JSON.parse(raw) || {}) : {};
+  } catch (e) {
+    console.warn('[Paper] read reading-position map failed:', e);
+    return {};
+  }
+}
+
+/** Persist a `_captureReadingAnchor` anchor for the view's current language so
+ *  it survives a tab switch / reload. Keyed by the SAME composite key as the
+ *  report snapshots (paper + langKey) so each language keeps its own place.
+ *  A null/empty anchor CLEARS the slot (reader is back at the top). */
+function _persistReadingPosition(view, anchor) {
+  view = view || _reportView('report');
+  if (!_activePaperId) return;
+  var key = _reportSnapshotKey(view);
+  try {
+    var map = _readReadPosMap();
+    if (anchor) map[key] = anchor;
+    else delete map[key];
+    localStorage.setItem(_PAPER_READ_POS_KEY, JSON.stringify(map));
+  } catch (e) {
+    console.warn('[Paper] persist reading-position failed:', e);
+  }
+}
+
+/** The persisted anchor for the view's current language, or null. */
+function _loadReadingPosition(view) {
+  view = view || _reportView('report');
+  if (!_activePaperId) return null;
+  return _readReadPosMap()[_reportSnapshotKey(view)] || null;
 }
 
 /** Paint a view's tab DOM from its current stream state. `view` defaults to
@@ -3661,6 +4829,27 @@ async function _loadOrGenerateReport(view) {
     return;
   }
 
+  // (1.6) In-memory cache for this view → paint instantly, no round-trip. This
+  // is the fast path when the report was already loaded once this session.
+  if (view.cache) {
+    var cEl = document.getElementById(view.containerId);
+    if (cEl) _renderFinalReport(cEl, view.cache, undefined, view);
+    _restoreReviewReadingLang(view);
+    return;
+  }
+
+  // The lookup + cache round-trips below are async. Until they resolve, replace
+  // the static "Generate" empty-state (baked into index.html) with a neutral
+  // loading placeholder — otherwise a paper that ALREADY has a report flashes
+  // the Generate button before the cache hit paints. If every path misses,
+  // step 4 renders the real Generate prompt over this placeholder.
+  var loadEl = document.getElementById(view.containerId);
+  if (loadEl) {
+    loadEl.innerHTML =
+      '<div class="paper-loading"><div class="paper-loading-spinner"></div>' +
+      '<div>' + escapeHtml((typeof t === 'function') ? t('paper.loadingReport') : 'Loading…') + '</div></div>';
+  }
+
   // (2) Server-side task lookup (survives chat-mode round-trips). Uses the
   // composite langKey so a review reconnects to the review task, not the
   // plain report.
@@ -3857,6 +5046,46 @@ function _togglePaperReviewModelDropdown(e) {
   return _togglePaperReportModelDropdown(e, _reportView('review'));
 }
 
+/** Keep a glossary hover-card fully inside its reading column.
+ *
+ * The card is `position:absolute; left:0` (its own left edge tracks the term's
+ * left edge). For a term near the RIGHT edge of a narrow column — routinely the
+ * case on a portrait tablet or a single-pane phone — the 320px card overflows
+ * the pane. With `overflow-x:hidden` on the reader pane that overflow is now
+ * CLIPPED (instead of the old drag-to-see-it behaviour). So on reveal we shift
+ * the card left by a negative inline `left` just enough to sit inside the
+ * scroller's content box (8px margin), clamped so it never leaves past the
+ * term's own left edge on the other side. Recomputed on every reveal (widths
+ * change with the language toggle / font-scale). */
+function _positionGlossaryCard(term) {
+  if (!term) return;
+  var card = term.querySelector(':scope > .paper-term-card');
+  if (!card) return;
+  var scroller = term.closest('.paper-report-content, .paper-report-body');
+  if (!scroller) return;
+  card.style.left = '';   // reset to the CSS default (0) before measuring
+  var termRect = term.getBoundingClientRect();
+  var scRect = scroller.getBoundingClientRect();
+  var cardW = card.offsetWidth;
+  var MARGIN = 8;
+  // Default card-left in viewport coords == term's left edge.
+  var minLeft = scRect.left + MARGIN;
+  var maxLeft = scRect.right - MARGIN - cardW;
+  var desired = termRect.left;
+  if (maxLeft < minLeft) desired = minLeft;                 // card wider than column
+  else desired = Math.min(Math.max(desired, minLeft), maxLeft);
+  var offset = desired - termRect.left;
+  if (offset) card.style.left = offset + 'px';
+}
+document.addEventListener('mouseover', function(e) {
+  var t = e.target && e.target.closest && e.target.closest('.paper-term');
+  if (t) _positionGlossaryCard(t);
+});
+document.addEventListener('focusin', function(e) {
+  var t = e.target && e.target.closest && e.target.closest('.paper-term');
+  if (t) _positionGlossaryCard(t);
+});
+
 // Close model dropdowns on outside click (both views).
 document.addEventListener('click', function() {
   ['paperReportModelDropdown', 'paperReviewModelDropdown'].forEach(function(id) {
@@ -3876,6 +5105,36 @@ document.addEventListener('click', function(e) {
     _openImageFullscreen(img.src);
   }
 });
+
+// Keyboard path for the same figures: report images are made focusable
+// (tabindex=0 + role=button, in _decorateZoomableImages) so a keyboard user can
+// Tab to a figure and press Enter/Space to open the same fullscreen overlay.
+document.addEventListener('keydown', function(e) {
+  if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+  var img = e.target;
+  if (!img || img.tagName !== 'IMG') return;
+  if (!img.closest('.paper-report-body, .paper-report-content')) return;
+  e.preventDefault();
+  if (typeof _openImageFullscreen === 'function') _openImageFullscreen(img.src);
+});
+
+/** Make every report image keyboard-operable: focusable + button semantics so
+ *  the Enter/Space handler above (and screen readers) can reach the zoom the
+ *  mouse gets via cursor:zoom-in. Idempotent. */
+function _decorateZoomableImages(root) {
+  if (!root) return;
+  var imgs = root.querySelectorAll('img');
+  for (var i = 0; i < imgs.length; i++) {
+    var im = imgs[i];
+    if (im.getAttribute('tabindex') === null) im.setAttribute('tabindex', '0');
+    if (!im.getAttribute('role')) im.setAttribute('role', 'button');
+    if (!im.getAttribute('aria-label')) {
+      var alt = (im.getAttribute('alt') || '').trim();
+      im.setAttribute('aria-label', (alt ? alt + ' — ' : '') +
+        ((typeof t === 'function') ? t('paper.imageZoomHint') : 'enlarge image'));
+    }
+  }
+}
 
 
 /** Show the Stop button while a report task is running; otherwise show
@@ -4432,9 +5691,27 @@ window.addEventListener('katex:loaded', function() {
   });
   // QA tab.
   if (typeof _renderPaperQA === 'function') _renderPaperQA();
+  // arXiv candidate list / recommend stream — titles + abstracts carry inline
+  // math that painted as `math-pending` fallback before KaTeX arrived.
+  // Gate each repaint on WHICH list is actually on screen: `_recStream` is
+  // sticky (never cleared once "describe" ran), so keying off it alone would
+  // let _paintRecommendNow rebuild the recommend shell over a live plain-search
+  // list. Only repaint recommend when its shell is still in the DOM.
+  if (_recStream && document.querySelector('[data-rec-shell]') &&
+      typeof _paintRecommendFromState === 'function') {
+    // Invalidate the compare-before-swap sigs so grounded cards actually
+    // re-render (their math was painted as math-pending fallback).
+    var _rl = document.querySelector('[data-rec-list]');
+    if (_rl) { Array.prototype.forEach.call(_rl.children, function(n){ n._recSig = ''; }); }
+    _paintRecommendFromState();
+  } else if (_paperSearchResults && _paperSearchResults.length &&
+             document.querySelector('.paper-search .paper-result-list') &&
+             typeof _lastArxivSearchQuery === 'string') {
+    _renderArxivSearchResults(_lastArxivSearchQuery, _paperSearchResults);
+  }
 });
 
-document.addEventListener('DOMContentLoaded', function() {
+(window._onReady || function (f) { document.addEventListener('DOMContentLoaded', f); })(function() {
   _loadPaperLibrary();
 
   // Drag-and-drop on PDF viewer + entire paper mode container + sidebar overlay

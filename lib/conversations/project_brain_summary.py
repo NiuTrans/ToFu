@@ -30,6 +30,7 @@ def _empty_summary() -> dict:
         'epicsOpen': 0, 'epicsClaimed': 0, 'epicsDone': 0,
         'pendingDecisions': 0, 'activePeers': 0, 'peerEpics': {},
         'charterExists': False, 'conflicts': 0, 'conflictMessages': [],
+        'statusLine': '',
     }
 
 
@@ -121,6 +122,16 @@ def build_brain_summary(project_path: str) -> dict:
                                        if a.get('message')]
     except Exception as e:
         logger.debug('[BrainSummary] conflict detect failed proj=%.40r: %s',
+                     project_path, e)
+
+    # ── Pillar #7: the ambient one-line project-status headline. Read-only
+    #    (no synthesis on this hot always-visible-bar path) — the LATEST stored
+    #    snapshot's first sentence, or '' when none exists yet. ──
+    try:
+        from lib.conversations.project_status import status_line
+        out['statusLine'] = status_line(project_path)
+    except Exception as e:
+        logger.debug('[BrainSummary] status line read failed proj=%.40r: %s',
                      project_path, e)
 
     return out

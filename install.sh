@@ -1381,6 +1381,35 @@ else
     warn "ripgrep/fd-find/tmux install failed — code search will fall back to grep / os.walk"
 fi
 
+
+# ═══════════════════════════════════════════════════════════════
+#  Node.js (OPTIONAL) — powers two best-effort, fail-open features:
+#    1. `node --check` syntax gate on the built JS bundle (lib/js_bundler.py)
+#    2. the optional esbuild stronger-minify pass (~12% smaller gzip bundle)
+#  Neither is required: without node the bundler uses its dependency-free
+#  Python minifier and the app is byte-identical. So this step NEVER fails
+#  the install — it only enhances.
+# ═══════════════════════════════════════════════════════════════
+step "Installing Node.js + esbuild (optional — stronger JS bundle minify)"
+if conda install -n "$ENV_NAME" -c conda-forge --override-channels -y nodejs; then
+    ok "Node.js installed"
+    # One-time `npm ci` populates node_modules/ (esbuild + the typecheck
+    # harness). Persists across restarts — server.py never re-runs it.
+    if [[ -f "${INSTALL_DIR}/package-lock.json" ]]; then
+        info "Installing JS devDependencies (npm ci — one-time)..."
+        (cd "$INSTALL_DIR" && npm ci --no-audit --no-fund) \
+            && ok "JS devDependencies installed (esbuild available to the bundler)" \
+            || warn "npm ci failed — bundler falls back to the Python minifier (no impact on the app)"
+    else
+        info "Installing esbuild (npm install — one-time)..."
+        (cd "$INSTALL_DIR" && npm install --no-audit --no-fund) \
+            && ok "esbuild installed" \
+            || warn "npm install failed — bundler falls back to the Python minifier (no impact on the app)"
+    fi
+else
+    warn "Node.js install skipped/failed — JS bundle uses the dependency-free Python minifier (fine; the app is unaffected)"
+fi
+
 # ═══════════════════════════════════════════════════════════════
 #  Step 8: Playwright — Chromium browser + shared libs (rootless)
 # ═══════════════════════════════════════════════════════════════

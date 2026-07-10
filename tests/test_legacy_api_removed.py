@@ -45,6 +45,9 @@ ALLOWED_NON_V1 = frozenset({
     '/api/client-error',
     # Real-time push (WebSocket)
     '/api/push',
+    # DEBUG-only presence smoke emitter (gated by TOFU_PRESENCE_DEBUG=1; used
+    # by debug/presence_smoke.py --live). Not a JSON-contract API route.
+    '/api/push/debug/presence',
     # OAuth browser-redirect flows (POST and GET both registered on each)
     '/api/oauth/login',
     '/api/oauth/callback',

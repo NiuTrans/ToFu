@@ -46,8 +46,13 @@ const _push = (() => {
   let _latencyListeners = new Set();
 
   function _emitLatency() {
+    // Stamp each reading so a consumer (net-latency.js watchdog) can tell a
+    // FRESH reading from a frozen one — if the socket wedges in CONNECTING or
+    // a reconnect is scheduled but never opens, no further emit occurs and the
+    // last reading would otherwise display forever as if still live.
+    const reading = { ms: _latencyMs, state: _latencyState, connected: _connected, at: Date.now() };
     for (const fn of _latencyListeners) {
-      try { fn({ ms: _latencyMs, state: _latencyState, connected: _connected }); }
+      try { fn(reading); }
       catch (e) { console.error('[Push] latency listener error:', e); }
     }
   }
@@ -62,12 +67,26 @@ const _push = (() => {
   function _sendPing() {
     if (!_connected || !_ws) return;
     // A still-outstanding ping older than the timeout means the pong never
-    // came back — surface that as a timeout before firing the next probe.
+    // came back: the socket is HALF-OPEN — TCP-dead but readyState still OPEN,
+    // so _ws.send() won't throw and no onclose fires on its own. Push frames
+    // would silently stop forever with no reconnect. Surface the timeout AND
+    // force-close so onclose → _scheduleReconnect re-establishes the socket.
     if (_lastPingSentAt && Date.now() - _lastPingSentAt > PING_TIMEOUT_MS) {
       _latencyMs = null;
       _latencyState = 'timeout';
       _emitLatency();
+      console.warn('[Push] ping timeout (%dms) — closing half-open socket to force reconnect',
+        Date.now() - _lastPingSentAt);
+      try { _ws.close(); }
+      catch (e) { console.debug('[Push] force-close after ping timeout failed:', e); }
+      return;   // do NOT probe again on a socket we've just declared dead
     }
+    // Keep only ONE outstanding ping at a time. Re-sending (and overwriting
+    // _lastPingSentAt) on every interval reset the outstanding ping's age
+    // before the PING_TIMEOUT_MS window could ever elapse — so a half-open
+    // socket on a foregrounded tab was NEVER detected. Wait for _onPong to
+    // clear _lastPingSentAt before starting a fresh probe.
+    if (_lastPingSentAt) return;
     _lastPingSentAt = Date.now();
     try { _ws.send(JSON.stringify({ action: 'ping', t: _lastPingSentAt })); }
     catch (e) { console.debug('[Push] ping send failed:', e); }
@@ -142,7 +161,8 @@ const _push = (() => {
 
     _ws.onmessage = (event) => {
       let frame;
-      try { frame = JSON.parse(event.data); } catch { return; }
+      try { frame = JSON.parse(event.data); }
+      catch (e) { console.debug('[Push] dropped malformed frame:', e && e.message); return; }
 
       const channel = frame.channel;
       const taskId = frame.taskId;
@@ -256,7 +276,7 @@ const _push = (() => {
   function isConnected() { return _connected; }
 
   function getLatency() {
-    return { ms: _latencyMs, state: _latencyState, connected: _connected };
+    return { ms: _latencyMs, state: _latencyState, connected: _connected, at: Date.now() };
   }
 
   function onLatency(fn) {

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 18" width="120" height="18" preserveAspectRatio="none">
+  <!-- Cloud-puff crest that STRADDLES the rim and reaches above it (matches the
+       deeper ::before top:-10px poke). Lobed billows + a warm sunlit rim.
+       SEAM: both tile ends flat at y=11 so the tile repeats with no gap
+       (verified pixel-diff col0==col119). Warm cream = top of the same sky. -->
+  <defs>
+    <linearGradient id="edg-sk" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFDF8"/>
+      <stop offset="1" stop-color="#E7DAC6"/>
+    </linearGradient>
+  </defs>
+  <!-- base band, flat at both ends -->
+  <path fill="url(#edg-sk)" d="M0,18 L120,18 L120,11 L110,11 C98,9 92,12 80,11 C64,9 56,12 40,11 C28,10 20,12 10,11 L0,11 Z"/>
+  <!-- lobed cloud billows, flat margins x0..4 and x116..120 -->
+  <path fill="url(#edg-sk)" d="M0,11 L4,11
+    C8,4 16,3 22,8 C26,4 34,3 40,9 C46,4 54,3 60,8
+    C66,3 74,4 80,9 C86,4 94,3 100,8 C106,4 112,5 116,11 L120,11
+    L120,18 L0,18 Z"/>
+  <!-- warm sunlit rim on the billow tops -->
+  <path fill="none" stroke="#FBE3C0" stroke-width="1.2" stroke-linecap="round" opacity="0.7"
+        d="M22,8 C26,4 34,3 40,9 C46,4 54,3 60,8 C66,3 74,4 80,9 C86,4 94,3 100,8"/>
+</svg>

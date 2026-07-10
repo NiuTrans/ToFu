@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 48" width="120" height="48" preserveAspectRatio="none">
+  <!-- FULL-HEIGHT painterly water (mirrors the validated meadow recipe).
+       preserveAspectRatio="none" + CSS background-size:120px 100% stretches
+       this 120-wide tile to the bar's full height. DEPTH gradient: bright airy
+       surface at the TOP (behind the frosted pills, so contrast holds) fading
+       to dark deep water at the BASE. Layered ripple planes give volume; the
+       caustic/specular shimmer (feTurbulence) is CONFINED to the lower water
+       so it never darkens the pill band. SEAM: every ripple profile starts and
+       ends at the same y (x=0 == x=120) and the turbulence is stitched, so the
+       120px tile repeats with no seam (parallax-safe). Teal palette harmonises
+       with the warm-cream tofu card. -->
+  <defs>
+    <!-- surface->deep body: lightest at the very top for pill legibility -->
+    <linearGradient id="pl-body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E4F0EE"/>
+      <stop offset="0.5" stop-color="#BFDCD7"/>
+      <stop offset="1" stop-color="#6FA8A1"/>
+    </linearGradient>
+    <!-- mid water band -->
+    <linearGradient id="pl-mid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#A8CFC9"/>
+      <stop offset="1" stop-color="#5E948D"/>
+    </linearGradient>
+    <!-- deep water: dark wet base (the volume read), kept low -->
+    <linearGradient id="pl-deep" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5B928B"/>
+      <stop offset="0.7" stop-color="#3E706A"/>
+      <stop offset="1" stop-color="#2C534E"/>
+    </linearGradient>
+    <!-- caustic shimmer: stitched fractal noise, tinted bright teal, low alpha -->
+    <filter id="pl-caustic" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.05 0.16" numOctaves="2"
+                    seed="4" stitchTiles="stitch" result="n"/>
+      <feColorMatrix in="n" type="matrix"
+                     values="0 0 0 0 0.78
+                             0 0 0 0 0.93
+                             0 0 0 0 0.90
+                             0 0 0 0.5 0"/>
+    </filter>
+  </defs>
+
+  <!-- body fills the whole bar (top stays light behind the pills) -->
+  <rect x="0" y="0" width="120" height="48" fill="url(#pl-body)"/>
+
+  <!-- MID ripple plane: gentle bands reaching into the middle -->
+  <path fill="url(#pl-mid)" opacity="0.9" d="M0,24 q10,-4 20,0 q10,-4 20,0 q10,-4 20,0 q10,-4 20,0 q10,-4 20,0 q10,-4 20,0 L120,48 L0,48 Z"/>
+
+  <!-- DEEP plane: darker water mass kept in the lower body (below pill band) -->
+  <path fill="url(#pl-deep)" d="M0,33 q12,-5 24,0 q12,-5 24,0 q12,-5 24,0 q12,-5 24,0 q12,-5 24,0 L120,48 L0,48 Z"/>
+
+  <!-- caustic shimmer over the deep water only (below the pill band) -->
+  <rect x="0" y="31" width="120" height="17" fill="#000" opacity="0.5" filter="url(#pl-caustic)"/>
+
+  <!-- specular highlight lines riding the ripple crests (wet sheen) -->
+  <g fill="none" stroke="#EAF6F3" stroke-linecap="round" opacity="0.7">
+    <path d="M0,24 q10,-4 20,0 q10,-4 20,0 q10,-4 20,0 q10,-4 20,0 q10,-4 20,0 q10,-4 20,0" stroke-width="1"/>
+    <path d="M0,33 q12,-5 24,0 q12,-5 24,0 q12,-5 24,0 q12,-5 24,0 q12,-5 24,0" stroke-width="0.9" opacity="0.55"/>
+  </g>
+  <!-- short glints scattered on the surface (kept inside [0,120]) -->
+  <g stroke="#F2FBF9" stroke-width="1.1" stroke-linecap="round" opacity="0.75">
+    <path d="M16,20 h6"/>
+    <path d="M54,19 h7"/>
+    <path d="M94,20 h6"/>
+  </g>
+</svg>

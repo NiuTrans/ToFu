@@ -436,7 +436,8 @@ def section_using_tools(tool_names: set[str] | None = None) -> str:
 #  Section 6 — # Tone and style  (ports getSimpleToneAndStyleSection)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def section_tone_and_style(is_code_context: bool = True) -> str:
+def section_tone_and_style(is_code_context: bool = True,
+                           web_tools: bool = False) -> str:
     items = [
         "Only use emojis if the user explicitly requests it. Avoid using "
         "emojis in all communication unless asked.",
@@ -453,6 +454,29 @@ def section_tone_and_style(is_code_context: bool = True) -> str:
         items.insert(2,
             "When referencing GitHub issues or pull requests, use the "
             "owner/repo#123 format so they render as clickable links.")
+    if web_tools:
+        # Web-research turns: lift the chilling effect of the URL-safety marker
+        # on LEGITIMATE citations. The marker (section_intro) still forbids
+        # inventing URLs; this only tells the model to surface the real sources
+        # it actually retrieved, so answers are independently verifiable.
+        items.append(
+            "When your answer relies on web_search / fetch_url results, cite "
+            "each key factual claim (versions, dates, prices, specs, "
+            "leaderboards, official docs) with the actual source URL you "
+            "retrieved — paste the real link so the user can verify it. Do "
+            "NOT fabricate or guess URLs you did not open; only cite pages you "
+            "actually retrieved. Prefer official/primary sources.")
+        items.append(
+            "For research / fact-lookup questions, do not finalize after a "
+            "single search. Corroborate each key fact (a version, date, price, "
+            "spec, leaderboard standing, or API/doc claim) against at least "
+            "TWO independent sources you actually opened — open the most "
+            "promising 2–3 results with fetch_url and cross-check them. If two "
+            "independent sources agree, that fact is confirmed: stop and move "
+            "on — this is a bounded verification pass (a couple of extra "
+            "fetches), NOT exhaustive crawling. Synthesize the confirmed facts "
+            "in your own words with their source links; never paste large raw "
+            "page dumps into the answer.")
     return _with_heading("# Tone and style", items)
 
 
@@ -674,8 +698,11 @@ def build_static_blocks(*, cwd: str, is_git: bool, model: str,
     ]
     if has_real_tools:
         raw.append(('using_tools', section_using_tools(tool_names=tool_names)))
+    _web_tools = bool(tool_names) and bool(
+        {'web_search', 'fetch_url'} & set(tool_names))
     raw.append(('tone_and_style',
-                section_tone_and_style(is_code_context=is_code_context)))
+                section_tone_and_style(is_code_context=is_code_context,
+                                       web_tools=_web_tools)))
     raw.append(('output_efficiency', section_output_efficiency()))
     if has_real_tools:
         raw.append(('function_result_clearing',

@@ -166,6 +166,124 @@ def test_history_rewrite_does_not_flip_proven_server_side():
         'never false-PROVEN) — the opposite of notify_compaction')
 
 
+
+class _WarnCapture:
+    """Attach a handler to the cache_tracking logger and record WARNING text."""
+
+    def __init__(self):
+        import logging
+        self._logging = logging
+        self.records: list[str] = []
+        self._logger = logging.getLogger('lib.tasks_pkg.cache_tracking')
+        self._handler = logging.Handler()
+        self._handler.emit = lambda rec: self.records.append(rec.getMessage())
+
+    def __enter__(self):
+        self._prev_level = self._logger.level
+        self._logger.setLevel(self._logging.WARNING)
+        self._logger.addHandler(self._handler)
+        return self
+
+    def __exit__(self, *a):
+        self._logger.removeHandler(self._handler)
+        self._logger.setLevel(self._prev_level)
+
+    def has(self, substr: str) -> bool:
+        return any(substr in m for m in self.records)
+
+
+def _hash_path_prefix_mutation(conv, notify_fn):
+    """Drive the HASH-based prefix-mutation path (the exact site of the
+    anonymous 'PREFIX MUTATION DETECTED …without compaction' warning) across
+    two rounds, mutating an IN-PREFIX message between them (no wire fp, so the
+    hash detector — not the wire diff — is what fires). ``notify_fn`` is called
+    on the conv between rounds (or None). Returns (result_dict, WarnCapture)."""
+    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    _cache_states.clear()
+    # count 5 → prefix_count = 5 - EDITABLE_TAIL_COUNT(2) = 3 → prefix=[sys,u1,a1]
+    m1 = [{'role': 'system', 'content': 'sys'},
+          {'role': 'user', 'content': 'u1'},
+          {'role': 'assistant', 'content': 'ORIGINAL prefix answer'},
+          {'role': 'user', 'content': 'u2'},
+          {'role': 'assistant', 'content': 'a2'}]
+    detect_cache_break(conv, m1, None, 'claude-opus-4',
+                       usage={'cache_creation_input_tokens': 50000,
+                              'cache_read_input_tokens': 40000})
+    if notify_fn is not None:
+        notify_fn(conv)
+    # a1 (index 2, INSIDE the [0:3] prefix) is rewritten → prefix bytes change.
+    m2 = [{'role': 'system', 'content': 'sys'},
+          {'role': 'user', 'content': 'u1'},
+          {'role': 'assistant', 'content': 'REWRITTEN prefix answer'},
+          {'role': 'user', 'content': 'u2'},
+          {'role': 'assistant', 'content': 'a2'}]
+    with _WarnCapture() as cap:
+        r = detect_cache_break(conv, m2, None, 'claude-opus-4',
+                               usage={'cache_creation_input_tokens': 50000,
+                                      'cache_read_input_tokens': 0})
+    return r, cap
+
+
+def test_profile_splice_labels_without_suppressing_the_rebill():
+    """★ P1 — the profile-splice cost-visibility invariant.
+
+    The per-turn user-profile / detail block is spliced INTO messages[0]'s
+    carrier, which sits inside the cached prefix after the first tool round —
+    a genuine prefix mutation that RE-BILLS the whole body uncached. The
+    splice signals ``notify_history_rewrite`` (NOT ``notify_compaction``).
+
+    This must produce the exact two-part distinction:
+      (a) the ANONYMOUS false-positive 'PREFIX MUTATION DETECTED …without
+          compaction' alarm is SUPPRESSED (the cause is now named), and
+      (b) the real cache-break is STILL detected + attributed
+          ('prefix_mutation' surfaces, total_breaks increments) — unlike
+          ``notify_compaction`` which blanket-suppresses BOTH, laundering a
+          real re-bill into invisibility.
+
+    Three arms on the identical in-prefix mutation:
+      CONTROL (no notify) → anonymous alarm FIRES + break surfaces (proves the
+                            warning path is live; my gate is what silences it).
+      history_rewrite     → anonymous alarm SILENT, break STILL surfaces.
+      compaction          → anonymous alarm SILENT, break SUPPRESSED (masked).
+    """
+    from lib.tasks_pkg.cache_tracking import (
+        _cache_states, _state_key, notify_history_rewrite, notify_compaction,
+    )
+    _ANON = 'PREFIX MUTATION DETECTED'
+
+    # ── CONTROL: no notify → the anonymous alarm MUST fire, break MUST surface.
+    r_ctrl, cap_ctrl = _hash_path_prefix_mutation('p1-ctrl', None)
+    assert cap_ctrl.has(_ANON), (
+        'control: the anonymous PREFIX MUTATION DETECTED alarm should fire when '
+        'no cause is signalled (else the test proves nothing)')
+    assert r_ctrl and 'prefix_mutation' in r_ctrl, (
+        f'control: a real in-prefix re-bill must be detected: {r_ctrl}')
+
+    # ── history_rewrite (what the profile splice now does): (a) silent, (b) surfaces.
+    r_hr, cap_hr = _hash_path_prefix_mutation('p1-hr', notify_history_rewrite)
+    assert not cap_hr.has(_ANON), (
+        f'history_rewrite: the false anonymous alarm should be SUPPRESSED — '
+        f'the cause is named. Captured: {cap_hr.records}')
+    assert r_hr and 'prefix_mutation' in r_hr, (
+        f'history_rewrite: the real re-bill must STILL be detected + attributed '
+        f'(the whole point vs notify_compaction): {r_hr}')
+    # total_breaks incremented → the cost is counted in the session metrics.
+    assert _cache_states[_state_key('p1-hr')].total_breaks >= 1, (
+        'history_rewrite: the break was not counted in session metrics')
+
+    # ── compaction (the OLD masking behavior): (a) silent, (b) ALSO masked.
+    r_cp, cap_cp = _hash_path_prefix_mutation('p1-cp', notify_compaction)
+    assert not cap_cp.has(_ANON), 'compaction: anonymous alarm suppressed (expected)'
+    assert not (r_cp and 'prefix_mutation' in r_cp), (
+        f'compaction blanket-suppresses detection — proving WHY the profile '
+        f'splice must NOT use it (the re-bill would be invisible): {r_cp}')
+    assert _cache_states[_state_key('p1-cp')].total_breaks == 0, (
+        'compaction: the real break was masked out of the metrics (the bug)')
+
+    _ok('profile splice via notify_history_rewrite: silences the false alarm '
+        'YET keeps the re-bill detected + counted (notify_compaction masks both)')
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  PART A — reconcile prefix-neutrality (pure)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -419,10 +537,13 @@ def main():
     print()
     print(_color('═══ Phase-A cache-prefix-stability ratchet ═══', '36'))
     print()
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_cache_prefix_stability.__main__')
     tests = [
         test_history_rewrite_named_not_compacted,
         test_resolve_break_cause_names_history_rewrite_branch,
         test_history_rewrite_does_not_flip_proven_server_side,
+        test_profile_splice_labels_without_suppressing_the_rebill,
         test_reconcile_leaves_settled_prefix_byte_identical,
         test_reconcile_buried_ghost_sweep_prefix_identical,
         test_reconcile_skips_ghost_inside_cache_prefix,

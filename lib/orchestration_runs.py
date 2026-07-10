@@ -227,7 +227,8 @@ def _parse_error(raw):
         return None
     try:
         return json.loads(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug('[OrchRuns] error column not JSON, returning verbatim: %s', e)
         return raw
 
 

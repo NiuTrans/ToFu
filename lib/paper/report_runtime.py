@@ -53,13 +53,17 @@ def _report_index_register(phash: str, lang: str, task_id: str) -> None:
         _report_dedup_index[(phash, lang)] = task_id
 
 
-def _new_report_task(task_id, phash, lang, model, *, client_title='', ui_lang=''):
+def _new_report_task(task_id, phash, lang, model, *, client_title='', ui_lang='',
+                     config=None):
     """Create a fresh report task. Registers it in the dedup index.
 
     ``lang`` is the cache key (plain 'en'/'zh' for reports, or the composite
     ``review:<venue>:<uilang>`` for Review Mode). ``ui_lang`` is the REAL UI
     language ('en'/'zh') the engine uses for image-injection / appendix
     headings; defaults to ``lang`` when not given (ordinary report path).
+    ``config`` is the caller cfg dict (may be None) — the insight second-pass
+    reads ``paperInsightPersonalContext`` from it via personal_scope to decide
+    whether the operator's personal reader-context may be injected.
     """
     task = _report_runtime.create(
         task_id=task_id,
@@ -73,6 +77,7 @@ def _new_report_task(task_id, phash, lang, model, *, client_title='', ui_lang=''
         'ui_lang': ui_lang or lang,
         'model': model,
         'client_title': client_title,
+        'config': config,
         'status': 'pending',        # pending → running → done | error
         'finished_at': None,
         'full_text': '',            # accumulated delta text

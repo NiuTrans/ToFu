@@ -198,8 +198,10 @@ def test_NC_card_click_guard_is_load_bearing(tmp_path):
     file restored byte-identical."""
     with open(_PEERS_SRC, encoding='utf-8') as f:
         original = f.read()
-    anchor = ("        // A click inside the nudge composer must NOT navigate away.\n"
-              "        if (e.target && e.target.closest && e.target.closest('.pb-peer-nudge')) return;")
+    anchor = ("        // A click inside the nudge composer OR the stop affordance must NOT\n"
+              "        // navigate away (otherwise typing/confirming yanks the operator off).\n"
+              "        if (e.target && e.target.closest &&\n"
+              "            (e.target.closest('.pb-peer-nudge') || e.target.closest('.pb-peer-stop'))) return;")
     assert anchor in original, 'card-click guard anchor not found'
     patched = original.replace(
         anchor, "        // NC guard disabled", 1)

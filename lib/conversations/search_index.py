@@ -61,6 +61,14 @@ def build_search_text(messages):
         translated = msg.get('translatedContent', '')
         if isinstance(translated, str) and translated:
             parts.append(translated)
+        # Original pre-translation text (auto-translate-user feature): when a
+        # user message is auto-translated to English, `content` holds the
+        # translation and the text the user actually typed lives in
+        # `originalContent`. Index it too, or the user can't find their own
+        # message by the words they wrote (the mirror of translatedContent).
+        original = msg.get('originalContent', '')
+        if isinstance(original, str) and original:
+            parts.append(original)
     return '\n'.join(parts)
 
 

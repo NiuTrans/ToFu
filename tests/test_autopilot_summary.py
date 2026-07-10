@@ -210,9 +210,12 @@ def test_store_run_summary_writes_sidecar_not_messages(monkeypatch):
             # The migration must NOT touch messages — capture if it does.
             state['messages'] = params[0]
 
+    import lib.conversations.settings_store as _ss
     import lib.database as _db
     monkeypatch.setattr(_db, 'get_thread_db', lambda domain: _FakeDB())
     monkeypatch.setattr(_db, 'db_execute_with_retry', _fake_retry)
+    monkeypatch.setattr(_ss, 'get_thread_db', lambda domain: _FakeDB())
+    monkeypatch.setattr(_ss, 'db_execute_with_retry', _fake_retry)
 
     rec = ap._store_run_summary('conv-x', 'ar-1', 'Outcome: shipped X.',
                                 translated='结果：已交付 X。')
@@ -258,9 +261,12 @@ def test_store_run_summary_multiple_runs_keyed_by_runid(monkeypatch):
         if 'SET settings' in sql:
             state['settings'] = params[0]
 
+    import lib.conversations.settings_store as _ss
     import lib.database as _db
     monkeypatch.setattr(_db, 'get_thread_db', lambda domain: _FakeDB())
     monkeypatch.setattr(_db, 'db_execute_with_retry', _fake_retry)
+    monkeypatch.setattr(_ss, 'get_thread_db', lambda domain: _FakeDB())
+    monkeypatch.setattr(_ss, 'db_execute_with_retry', _fake_retry)
 
     ap._store_run_summary('conv-y', 'ar-1', 'Report A')
     ap._store_run_summary('conv-y', 'ar-2', 'Report B')
@@ -273,7 +279,16 @@ def test_store_run_summary_multiple_runs_keyed_by_runid(monkeypatch):
 # ── _store_run_record: the manual-stop (bare, no report) concluded fact ──
 
 def _fake_settings_db(monkeypatch, state):
-    """Wire a monkeypatched DB whose only column is settings JSON."""
+    """Wire a monkeypatched DB whose only column is settings JSON.
+
+    ``_store_run_record`` / ``conclude_run`` route settings writes through
+    ``lib.conversations.settings_store.update_conversation_settings``, which
+    binds ``get_thread_db`` / ``db_execute_with_retry`` in the settings_store
+    namespace at import — so those are the names that must be patched (patching
+    ``lib.database.*`` alone would not intercept the settings write). We patch
+    BOTH namespaces so the message-list path (``_append_vu_message_to_conv``,
+    still on ``lib.database``) and the settings path both hit the fake.
+    """
     class _FakeDB:
         def execute(self, sql, params=None):
             class _R:
@@ -282,12 +297,15 @@ def _fake_settings_db(monkeypatch, state):
             return _R()
 
     def _fake_retry(db, sql, params):
-        if 'SET settings' in sql:
+        if 'SET settings' in sql or 'settings=' in sql:
             state['settings'] = params[0]
 
+    import lib.conversations.settings_store as _ss
     import lib.database as _db
     monkeypatch.setattr(_db, 'get_thread_db', lambda domain: _FakeDB())
     monkeypatch.setattr(_db, 'db_execute_with_retry', _fake_retry)
+    monkeypatch.setattr(_ss, 'get_thread_db', lambda domain: _FakeDB())
+    monkeypatch.setattr(_ss, 'db_execute_with_retry', _fake_retry)
 
 
 def test_store_run_record_manual_stop_is_concluded_without_report(monkeypatch):
@@ -349,9 +367,12 @@ def test_conclude_run_writes_authoritative_stopped_record(monkeypatch):
         if 'SET settings' in sql:
             state['settings'] = params[0]
 
+    import lib.conversations.settings_store as _ss
     import lib.database as _db
     monkeypatch.setattr(_db, 'get_thread_db', lambda domain: _FakeDB())
     monkeypatch.setattr(_db, 'db_execute_with_retry', _fake_retry)
+    monkeypatch.setattr(_ss, 'get_thread_db', lambda domain: _FakeDB())
+    monkeypatch.setattr(_ss, 'db_execute_with_retry', _fake_retry)
 
     rec = ap.conclude_run('conv-live', reason='stopped')
     assert rec is not None

@@ -20,12 +20,20 @@ from .runtime import _translate_tasks, _translate_tasks_lock
 logger = get_logger(__name__)
 
 
-# Upload directory (under <repo>/uploads/pptx). The path mirrors the
-# original module so existing on-disk assets remain reachable.
-_PPTX_UPLOAD_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    'uploads', 'pptx',
-)
+# Upload directory (uploads/pptx under the resolved runtime base). PPTX
+# uploads + translated outputs are USER STATE referenced by download URLs, so
+# they co-locate with the DB via runtime_paths.uploads_root() rather than the
+# code tree. Byte-identical to <repo>/uploads/pptx in the default in-tree
+# layout; falls back to it if runtime_paths is unavailable.
+try:
+    from lib.runtime_paths import uploads_root as _uploads_root
+    _PPTX_UPLOAD_DIR = os.path.join(_uploads_root(), 'pptx')
+except Exception as _rp_e:  # pragma: no cover — defensive
+    logger.debug('[PPTX-Translate] uploads_root() unavailable, using in-tree: %s', _rp_e)
+    _PPTX_UPLOAD_DIR = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        'uploads', 'pptx',
+    )
 _MAX_PPTX_BYTES = 50 * 1024 * 1024  # 50 MB
 
 

@@ -82,6 +82,7 @@ LIVE_PG_CONVERSATIONS = """
         settings JSONB NOT NULL DEFAULT '{}'::jsonb,
         msg_count INTEGER NOT NULL DEFAULT 0,
         search_text TEXT NOT NULL DEFAULT '',
+        rev INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (id, user_id)
     )
 """
@@ -97,6 +98,7 @@ LIVE_SQLITE_CONVERSATIONS = """
         settings TEXT NOT NULL DEFAULT '{}',
         msg_count INTEGER NOT NULL DEFAULT 0,
         search_text TEXT NOT NULL DEFAULT '',
+        rev INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (id, user_id)
     )
 """
@@ -279,6 +281,7 @@ LIVE_PG_TASK_RESULTS = """
         tool_rounds TEXT,
         search_results TEXT,
         metadata TEXT,
+        segments TEXT,
         created_at BIGINT NOT NULL,
         completed_at BIGINT
     )
@@ -294,6 +297,7 @@ LIVE_SQLITE_TASK_RESULTS = """
         tool_rounds TEXT,
         search_results TEXT,
         metadata TEXT,
+        segments TEXT,
         created_at INTEGER NOT NULL,
         completed_at INTEGER
     )
@@ -1203,6 +1207,7 @@ LIVE_PG_PROJECT_TASKS = """
         lease_expires_at BIGINT NOT NULL DEFAULT 0,
         created_by_conv TEXT NOT NULL DEFAULT '',
         depends_on TEXT NOT NULL DEFAULT '[]',
+        kind TEXT NOT NULL DEFAULT 'epic',
         dispatched INTEGER NOT NULL DEFAULT 0,
         created_at BIGINT NOT NULL DEFAULT 0,
         updated_at BIGINT NOT NULL DEFAULT 0,
@@ -1219,6 +1224,7 @@ LIVE_SQLITE_PROJECT_TASKS = """
         lease_expires_at INTEGER NOT NULL DEFAULT 0,
         created_by_conv TEXT NOT NULL DEFAULT '',
         depends_on TEXT NOT NULL DEFAULT '[]',
+        kind TEXT NOT NULL DEFAULT 'epic',
         dispatched INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL DEFAULT 0,

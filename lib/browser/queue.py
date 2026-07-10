@@ -93,7 +93,9 @@ _STALE_GRACE = 15
 import os as _os
 try:
     POLL_WAIT_TIMEOUT = float(_os.environ.get('TOFU_BROWSER_POLL_WAIT', '8'))
-except (ValueError, TypeError):
+except (ValueError, TypeError) as _e:
+    logger.debug('[Browser] bad TOFU_BROWSER_POLL_WAIT %r (%s) — using 8.0s default',
+                 _os.environ.get('TOFU_BROWSER_POLL_WAIT'), _e)
     POLL_WAIT_TIMEOUT = 8.0
 
 # Per-client tracking: client_id → {last_poll, first_seen, name}
@@ -329,7 +331,8 @@ async def wait_for_commands_async(timeout=None, client_id=None):
             # still gets re-checked promptly, mirroring the sync 1.0s cap.
             try:
                 await asyncio.wait_for(event.wait(), timeout=min(remaining, 1.0))
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as e:
+                logger.debug('[Browser] async poll slice elapsed, re-checking queue: %s', e)
                 pass  # slice elapsed — loop re-checks the queue
         # Final check after the loop in case a command landed at the deadline.
         return get_pending_commands(client_id=client_id)
@@ -340,8 +343,8 @@ async def wait_for_commands_async(timeout=None, client_id=None):
         with _async_waiters_lock:
             try:
                 _async_waiters.remove(waiter)
-            except ValueError:
-                pass
+            except ValueError as e:
+                logger.debug('[Browser] async waiter already deregistered: %s', e)
 
 
 def resolve_command(cmd_id, result=None, error=None):

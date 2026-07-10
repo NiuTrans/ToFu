@@ -290,6 +290,8 @@ def main():
     print()
     print(_color('═══ translate.py Migration Tests ═══', '36'))
     print()
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_translate_migration.__main__')
 
     tests = [
         test_runtime_created,

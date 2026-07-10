@@ -184,25 +184,104 @@ def test_stream_lifecycle_registered():
     ), f'index.html must include a <script> tag for static/js/{sib} (dev fallback).'
 
 
+def test_image_fullscreen_helper_in_core_not_deferred():
+    """``_openImageFullscreen`` / ``_downloadGenImage`` are called via inline
+    onclick from CORE files (ui/tool_rounds.js image thumbnails,
+    ui/chat_render.js image-gen cards) that render BEFORE Image-Gen mode is
+    ever opened. They therefore MUST live in the CORE bundle
+    (ui/image_fullscreen.js), NOT in the DEFERRED image-gen.js — otherwise the
+    thumbnail "enlarge" onclick points at an undefined function until/unless
+    the feature bundle loads (regression 2026-07-06)."""
+    from lib.js_bundler import _BUNDLE_FILES, _DEFERRED_FILES
+
+    assert 'ui/image_fullscreen.js' in _BUNDLE_FILES, (
+        'ui/image_fullscreen.js must be in the CORE bundle so the shared '
+        'image-viewer helpers are always defined.'
+    )
+    # Must load BEFORE the two callers (chat_render.js + tool_rounds.js).
+    idx = _BUNDLE_FILES.index('ui/image_fullscreen.js')
+    for caller in ('ui/chat_render.js', 'ui/tool_rounds.js'):
+        assert idx < _BUNDLE_FILES.index(caller), (
+            f'ui/image_fullscreen.js must load before {caller} (defines its '
+            f'onclick target).'
+        )
+    # image-gen.js is deferred and must NOT redefine the helpers.
+    assert 'image-gen.js' in _DEFERRED_FILES
+    with open(os.path.join(PROJECT_ROOT, 'static', 'js', 'image-gen.js'),
+              encoding='utf-8') as f:
+        igsrc = f.read()
+    assert 'function _openImageFullscreen' not in igsrc, (
+        'image-gen.js (DEFERRED) must NOT define _openImageFullscreen — it '
+        'lives in the CORE ui/image_fullscreen.js.'
+    )
+    # Dev-fallback <script> tag present.
+    with open(os.path.join(PROJECT_ROOT, 'index.html'), encoding='utf-8') as f:
+        html = f.read()
+    assert re.search(
+        r'<script[^>]+src="static/js/ui/image_fullscreen\.js[^"]*"', html
+    ), 'index.html must include a <script> tag for static/js/ui/image_fullscreen.js.'
+
+
 def test_bundle_audit_parity():
     """Every static/js/<name>.js referenced in index.html must appear in
-    _BUNDLE_FILES — guards against the trap CLAUDE.md §3.2.1 documents."""
-    from lib.js_bundler import _BUNDLE_FILES
+    _BUNDLE_FILES OR _DEFERRED_FILES — guards against the trap CLAUDE.md
+    §3.2.1 documents. The deferred feature bundle (paper-reader / orchestration
+    / task-mode) keeps its <script> tags in index.html for the dev fallback,
+    but those files live in _DEFERRED_FILES, not _BUNDLE_FILES."""
+    from lib.js_bundler import _BUNDLE_FILES, _DEFERRED_FILES
 
     with open(os.path.join(PROJECT_ROOT, 'index.html'), encoding='utf-8') as f:
         html = f.read()
     referenced = set(re.findall(r'static/js/([a-z0-9_.-]+\.js)', html))
-    # Strip vendor + bundle artifact filenames.
+    # Strip vendor + built bundle artifact filenames (bundle-<hash>/feature-<hash>).
     referenced = {
         n for n in referenced
-        if not n.startswith('bundle-') and n != 'compaction-viewer.js'
+        if not re.match(r'^(?:bundle|feature)-[0-9a-f]{8}\.js$', n)
+        and n != 'compaction-viewer.js'
         # compaction-viewer is intentionally excluded — see lib/js_bundler.py
     }
-    bundled = set(_BUNDLE_FILES)
-    missing = referenced - bundled
+    known = set(_BUNDLE_FILES) | set(_DEFERRED_FILES)
+    missing = referenced - known
     # ``compaction-viewer.js`` was historically excluded; allow it.
     missing.discard('compaction-viewer.js')
     assert not missing, (
-        f'Files referenced in index.html but missing from _BUNDLE_FILES: '
-        f'{sorted(missing)}'
+        f'Files referenced in index.html but missing from _BUNDLE_FILES / '
+        f'_DEFERRED_FILES: {sorted(missing)}'
+    )
+
+
+def test_deferred_files_registered():
+    """The lazily-loaded feature modules (paper-reader / orchestration /
+    task-mode) must be in _DEFERRED_FILES (built into feature-<hash>.js) AND
+    have a <script> tag in index.html for the dev fallback. feature-loader.js
+    (the on-demand loader) must be in _BUNDLE_FILES (CORE) so the lazy stubs
+    are installed before boot. Guards the code-split against the silent-no-op
+    trap in both directions."""
+    from lib.js_bundler import _BUNDLE_FILES, _DEFERRED_FILES, _DEFERRED_ENTRY_POINTS
+
+    # The loader belongs to the CORE bundle, not the deferred one.
+    assert 'feature-loader.js' in _BUNDLE_FILES
+    assert 'feature-loader.js' not in _DEFERRED_FILES
+    # The deferred modules must NOT also be in the core bundle (would double-load).
+    for f in ('paper-reader.js', 'orchestration.js', 'task-mode.js'):
+        assert f in _DEFERRED_FILES, f'{f} must be in _DEFERRED_FILES'
+        assert f not in _BUNDLE_FILES, f'{f} must NOT also be in _BUNDLE_FILES (double-load)'
+    # Ordering within the deferred bundle: task-mode.js reads orchestration.js's
+    # _ORCH_* at runtime → orchestration.js must load first.
+    assert _DEFERRED_FILES.index('orchestration.js') < _DEFERRED_FILES.index('task-mode.js')
+
+    # Dev-fallback <script> tags present for every deferred file + the loader.
+    with open(os.path.join(PROJECT_ROOT, 'index.html'), encoding='utf-8') as f:
+        html = f.read()
+    for name in (*_DEFERRED_FILES, 'feature-loader.js'):
+        assert re.search(r'<script[^>]+src="static/js/' + re.escape(name) + r'[^"]*"', html), (
+            f'index.html must include a <script> tag for static/js/{name} (dev fallback).'
+        )
+
+    # Entry-point set is non-empty and all are real non-empty names (sanity).
+    # (Real parity — each entry point is actually DEFINED in a _DEFERRED_FILES
+    # source — lives in tests/test_bundle_manifest_parity.py, which no longer
+    # hard-codes a count so it survives future deferrals like image-gen.js.)
+    assert _DEFERRED_ENTRY_POINTS and all(
+        isinstance(n, str) and n for n in _DEFERRED_ENTRY_POINTS
     )

@@ -76,6 +76,7 @@ __all__ = [
     'PERSONAL_CFG_KEYS',
     'apply_headless_personal_defaults',
     'resolve_preferences_enabled',
+    'resolve_paper_insight_personal_context',
 ]
 
 
@@ -126,6 +127,37 @@ PERSONAL_CAPABILITIES: dict[str, PersonalCapability] = {
             'NOT splice the operator\'s personal preferences into an '
             'unrelated caller\'s prompt.'),
         prompt_block='[USER PREFERENCE PROFILE]'),
+    'langCorrectionEnabled': PersonalCapability(
+        cfg_key='langCorrectionEnabled',
+        headless_default=False,
+        ui_default=True,
+        summary=(
+            'The LLM-correction tier of the input language detector '
+            '(lib/text_lang.detect_language). When on, an AMBIGUOUS statistical '
+            'detection (low confidence / very short / thin English-vs-Latin '
+            'margin) is escalated to a cheap-tier LLM call — the "typeless" '
+            'corrector. Unlike memory/preferences this injects no operator '
+            'state into the prompt; it is registered here because it can '
+            'SILENTLY BILL an LLM call, so it must fail closed on headless '
+            'surfaces unless the caller opts in.'),
+        prompt_block=''),
+    'paperInsightPersonalContext': PersonalCapability(
+        cfg_key='paperInsightPersonalContext',
+        headless_default=False,
+        ui_default=True,
+        summary=(
+            "The Paper Reading-Mode insight second-pass injects a 'reader "
+            "context' block — the OPERATOR's paper library (prior reports) + "
+            'relevant entries from their memory store — so it can build '
+            '"this connects to «a paper you already read»" transfer bridges. '
+            "That is app-personal reading history + memories; on a headless / "
+            'BYO surface it would splice one operator\'s library into an '
+            "unrelated caller's paper analysis (privacy leak + hallucination "
+            'vector). Fail-closed: the insight pass still runs on headless, but '
+            'WITHOUT the personal reader-context block unless the caller opts '
+            'in. Not a prompt-assembly block (its own engine gates it), so '
+            'prompt_block is empty.'),
+        prompt_block=''),
 }
 
 #: Convenience: the set of cfg keys the registry governs.
@@ -176,3 +208,25 @@ def resolve_preferences_enabled(cfg: dict | None, *,
     if isinstance(cfg, dict) and 'preferencesEnabled' in cfg:
         return bool(cfg['preferencesEnabled'])
     return bool(memory_enabled)
+
+
+def resolve_paper_insight_personal_context(cfg: dict | None) -> bool:
+    """May the paper-insight pass inject the operator's personal reader-context?
+
+    The reader-context block (operator paper library + memory store) is
+    app-personal state. Resolution:
+
+      * Explicit ``paperInsightPersonalContext`` in cfg (set by a headless
+        builder via the registry → fail-closed False, or an opt-in caller) is
+        honoured verbatim.
+      * Absent (the interactive UI report path never sets it) → default TRUE,
+        preserving the interactive owner's transfer moat.
+
+    The KEY invariant: every headless cfg-builder runs
+    ``apply_headless_personal_defaults``, which STAMPS this key to False, so a
+    headless/BYO caller lands on ``False`` here unless they opted in. The
+    interactive report route passes no cfg (or a cfg without this key) → True.
+    """
+    if isinstance(cfg, dict) and 'paperInsightPersonalContext' in cfg:
+        return bool(cfg['paperInsightPersonalContext'])
+    return True

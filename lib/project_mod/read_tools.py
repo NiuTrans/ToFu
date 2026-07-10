@@ -3,11 +3,13 @@
 Extracted from tools.py for modularity. Re-exported via tools.py for backward compat.
 """
 
+import base64
 import fnmatch
 import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 
 from lib.log import get_logger
@@ -46,6 +48,91 @@ if _FD_BIN:
     logger.info('[Tools] fd-find detected at %s — using fd as primary find engine', _FD_BIN)
 else:
     logger.info('[Tools] fd-find not found — using Python os.walk for find_files')
+
+
+# ── SVG inline-render signal ──────────────────────────────────────────
+# An SVG file is read as TEXT (its XML source enters the model stream
+# unchanged — the model should see the markup). But the frontend can ALSO
+# render that markup visually, like an image. read_files returns a plain
+# str for text, so there is no room to attach a render descriptor to the
+# result itself. We bridge it out-of-band via a per-thread collector — the
+# same race-free seam write_tools uses for workspace-root signals: the
+# synchronous handler→execute_tool→tool_read_files call chain runs in one
+# thread, so a thread-local list is safe. The project tool handler drains
+# it after the read and attaches the data URIs to the tool-round meta.
+
+_svg_signal = threading.local()
+
+# Cap on how large an SVG we inline-render (the base64 data URI rides the
+# tool-round meta to the browser; a giant SVG would bloat the payload).
+_MAX_SVG_RENDER_BYTES = 512 * 1024
+
+
+def _signal_svg_render(filename, svg_source):
+    """Record an SVG whose source should also be rendered inline on the frontend.
+
+    Appends ``{filename, uri}`` to the current thread's pending list (created
+    lazily), where ``uri`` is a ``data:image/svg+xml;base64,...`` URL the
+    browser can drop into an ``<img src>``. Drained by the project tool
+    handler via :func:`drain_svg_render_signals` after the read runs.
+    """
+    if not svg_source or len(svg_source.encode('utf-8', 'ignore')) > _MAX_SVG_RENDER_BYTES:
+        return
+    try:
+        b64 = base64.b64encode(svg_source.encode('utf-8')).decode('ascii')
+    except Exception as e:
+        logger.debug('[Tools] svg render encode failed for %s: %s', filename, e)
+        return
+    pending = getattr(_svg_signal, 'pending', None)
+    if pending is None:
+        pending = []
+        _svg_signal.pending = pending
+    pending.append({
+        'filename': filename,
+        'format': 'svg',
+        'uri': f'data:image/svg+xml;base64,{b64}',
+    })
+
+
+def drain_svg_render_signals():
+    """Return and clear the current thread's pending SVG-render signals.
+
+    Returns a list of ``{filename, format, uri}`` dicts (empty when none).
+    Called by the project tool handler immediately after read_files runs, so
+    the SVG source can be surfaced as an inline ``<img>`` in the tool round.
+    """
+    pending = getattr(_svg_signal, 'pending', None)
+    if not pending:
+        return []
+    _svg_signal.pending = []
+    return list(pending)
+
+
+def _is_svg_path(path):
+    """True when *path* names an SVG file (by extension)."""
+    return isinstance(path, str) and path.lower().endswith('.svg')
+
+
+def _maybe_signal_svg(target, rel_path):
+    """If *target* is a readable SVG under the render cap, signal its source.
+
+    Best-effort: reads the raw XML from disk and hands it to
+    :func:`_signal_svg_render` so the frontend can render it inline. Any
+    failure is logged at debug and skipped — the text read is unaffected.
+    """
+    if not _is_svg_path(rel_path):
+        return
+    try:
+        if not os.path.isfile(target):
+            return
+        if os.path.getsize(target) > _MAX_SVG_RENDER_BYTES:
+            return
+        with open(target, encoding='utf-8', errors='replace') as f:
+            source = f.read()
+    except OSError as e:
+        logger.debug('[Tools] svg render read failed for %s: %s', rel_path, e)
+        return
+    _signal_svg_render(os.path.basename(rel_path), source)
 
 
 # ═══════════════════════════════════════════════════════
@@ -187,6 +274,7 @@ def _read_absolute_file(path: str, start_line=None, end_line=None):
     try:
         enforce_abs_read(path)
     except AbsPathDenied as e:
+        logger.debug('[ReadTools] absolute read denied for %s: %s', path, e)
         return f'Error: {e}'
 
     from lib.file_reader import read_local_file as _read_local
@@ -434,6 +522,10 @@ def tool_read_files(base, reads):
         # Route: absolute paths → _read_absolute_file (images, PDFs, Office, text)
         if _is_absolute_path(rel_path):
             result = _read_absolute_file(rel_path, sl, el)
+            # SVG reads as text (model sees the markup); ALSO signal its
+            # source so the frontend can render it inline like an image.
+            if isinstance(result, str) and not result.startswith('Error:'):
+                _maybe_signal_svg(os.path.abspath(os.path.expanduser(rel_path)), rel_path)
             # Image results are dicts — track separately
             if isinstance(result, dict) and result.get('__screenshot__'):
                 text_fallback = result.get('_text_fallback', 'Image loaded.')
@@ -478,6 +570,14 @@ def tool_read_files(base, reads):
             parts.append(text_fallback)
             total_chars += len(text_fallback)
             continue
+        # SVG reads as text (model sees the markup); ALSO signal its source
+        # so the frontend can render it inline like an image.
+        if isinstance(result, str) and not result.startswith(('Error', 'File not found')):
+            try:
+                _svg_target = _safe_path(spec_base, rel_path)
+                _maybe_signal_svg(_svg_target, rel_path)
+            except ValueError as e:
+                logger.debug('[Tools] svg signal safe_path rejected %s: %s', rel_path, e)
         if total_chars + len(result) > BATCH_CHAR_BUDGET:
             remaining = BATCH_CHAR_BUDGET - total_chars
             if remaining > 200:

@@ -117,7 +117,8 @@ def _parse_actions(content: str) -> list[dict]:
         if cand:
             try:
                 obj = json.loads(cand)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                logger.debug('[ProfileConsolidate] balanced-object JSON parse failed: %s', e)
                 obj = None
     if not isinstance(obj, dict):
         return []

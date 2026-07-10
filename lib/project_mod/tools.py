@@ -736,16 +736,44 @@ def _exec_insert_contents(fn_args, base_path, conv_id, task_id, kwargs):
     return tool_insert_contents(base_path, edits, conv_id=conv_id, task_id=task_id)
 
 
+def _sticky_cwd_enabled():
+    """True unless the operator disabled sticky cwd via TOFU_STICKY_CWD=0."""
+    return os.environ.get('TOFU_STICKY_CWD', '').strip().lower() not in (
+        '0', 'false', 'no', 'off')
+
+
 def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
+    from lib.project_mod.config import get_conv_cwd, set_conv_cwd
+
     def _rb(bp_arg, rp_arg):
         return _resolve_base(bp_arg, rp_arg, conv_id=conv_id)
 
     # ★ Multi-root: resolve working_dir if model specifies one
     cwd = base_path
     working_dir = fn_args.get('working_dir', '')
+    sticky_on = bool(conv_id) and _sticky_cwd_enabled()
     if working_dir:
         cwd_bp, _ = _rb(base_path, working_dir)
         cwd = os.path.join(cwd_bp, _) if _ and _ != '.' else cwd_bp
+        # ★ Sticky cwd: remember where the model explicitly navigated so its
+        #   next run_command with no working_dir resumes here (kills repeated
+        #   `cd <project>`). Validated/gated inside set_conv_cwd (containment).
+        if sticky_on:
+            set_conv_cwd(conv_id, cwd)
+    elif sticky_on:
+        # ★ No working_dir → resume from this conversation's last cwd, if any.
+        #   Stateless derived affinity: no persistent shell, env still re-derived
+        #   per call by _get_cmd_env. Safe-degrades to base_path when absent.
+        sticky = get_conv_cwd(conv_id)
+        if sticky:
+            cwd = sticky
+
+    # ★ cd-capture sink: after the command runs, remember the shell's final cwd
+    #   (so a trailing `cd subdir` inside the command also sticks). Captured via
+    #   a dedicated temp FILE, never stdout — so it cannot be spoofed by command
+    #   output. set_conv_cwd re-validates containment; a hop outside the conv's
+    #   roots is silently ignored (isolation preserved).
+    cwd_sink = (lambda captured: set_conv_cwd(conv_id, captured)) if sticky_on else None
 
     command_str = fn_args.get('command', '')
     destructive = _is_destructive_command(command_str)
@@ -810,7 +838,8 @@ def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
                               fn_args.get('timeout', None),
                               stdin_callback=kwargs.get('stdin_callback'),
                               task=kwargs.get('task'),
-                              on_chunk=kwargs.get('on_chunk'))
+                              on_chunk=kwargs.get('on_chunk'),
+                              cwd_sink=cwd_sink)
 
     # ★ Diff snapshot after command (only if we took one)
     if snap_before is not None:

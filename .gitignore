@@ -111,7 +111,11 @@ node_modules/
 Thumbs.db
 
 # ── Sessions & caches (auto-generated, may contain sensitive context) ──
-**/.project_sessions/
+# lib/.project_sessions/ is the per-project undo/redo store (modifications.json
+# pre-image blobs). It is REGISTRY-DERIVED — see lib/runtime_layout.INSTALL_STATE
+# / gitignore_lines(); do not hand-maintain a parallel entry. The drift-guard
+# test_gitignore_covers_registry enforces this line matches the registry.
+lib/.project_sessions/
 **/.project_indexes/
 .chatui/
 

@@ -235,6 +235,47 @@ def consume(task_id: str, agent_ids) -> int:
     return removed
 
 
+def consume_peer(task_id: str, queue_ids) -> int:
+    """Drop queued peer-message items whose ``queueId`` is in *queue_ids*.
+
+    The Pillar #6 peer-message REVERSE-race de-dup twin of :func:`consume`. A
+    live-target peer message is written to BOTH the durable ``message_queue``
+    row AND a fast-path inbox item tagged with that row's ``queueId`` (in the
+    item's ``extra``). Two delivery races exist and BOTH must collapse to a
+    single delivery:
+
+      • FORWARD (inbox drains first): the orchestrator drain hook injects the
+        inbox item, then deletes the matching ``message_queue`` row by
+        ``queueId`` so it can never be popped later.
+      • REVERSE (task ends first): ``dispatch_next_queued`` pops the durable
+        row as a fresh turn BEFORE the next drain — it calls THIS to drop the
+        now-redundant inbox twin so it isn't re-injected on that fresh turn.
+
+    Items whose ``queueId`` is not in *queue_ids* (and any swarm items, which
+    carry no ``queueId``) are left untouched. Returns the number removed.
+    """
+    if not task_id or not queue_ids:
+        return 0
+    ids = {str(q) for q in queue_ids if q}
+    if not ids:
+        return 0
+    with _lock:
+        bucket = _inboxes.get(task_id)
+        if not bucket:
+            return 0
+        kept = [it for it in bucket if str(it.get('queueId') or '') not in ids]
+        removed = len(bucket) - len(kept)
+        if kept:
+            _inboxes[task_id] = kept
+        else:
+            _inboxes.pop(task_id, None)
+    if removed:
+        logger.info('[Inbox:%s] consumed %d peer item(s) already dispatched via '
+                    'the durable queue lane (queueIds=%s)',
+                    task_id, removed, sorted(ids))
+    return removed
+
+
 def peek(task_id: str) -> int:
     """Return the number of pending items for *task_id* without consuming them."""
     if not task_id:

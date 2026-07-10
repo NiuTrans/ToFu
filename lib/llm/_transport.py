@@ -22,7 +22,8 @@ try:
     CONNECT_TIMEOUT = float(os.environ.get('TOFU_LLM_CONNECT_TIMEOUT', '10'))
     if CONNECT_TIMEOUT <= 0:
         CONNECT_TIMEOUT = 10.0
-except (ValueError, TypeError):
+except (ValueError, TypeError) as e:
+    logger.debug('[Transport] TOFU_LLM_CONNECT_TIMEOUT parse failed, using default: %s', e)
     CONNECT_TIMEOUT = 10.0
 
 # ── Retry config for transient API errors (streaming & non-streaming) ──

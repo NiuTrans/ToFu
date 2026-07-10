@@ -182,7 +182,8 @@ def _parse_context_overflow(error_text: str) -> tuple[int | None, int | None]:
             return None
         try:
             n = int(s.replace(',', ''))
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError) as e:
+            logger.debug('[_tokens] overflow-count coerce failed for %r: %s', s, e)
             return None
         return n if 0 < n < 50_000_000 else None
 

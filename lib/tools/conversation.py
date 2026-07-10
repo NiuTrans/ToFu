@@ -253,11 +253,76 @@ BOARD_DEFER_TOOL = {
     },
 }
 
+# ── Resource/path LEASE tools (durational file-avoidance) ──
+# A lease is a PROACTIVE, path-level reservation posted BEFORE editing that
+# reaches EVERY sibling (incl. an idle one the heartbeat wakes later) via the
+# ambient [PROJECT BOARD] block. It is the STATE-based answer to "hold off on
+# these paths" — complementary to the reactive, active-peers-only file-overlap
+# advisory (lib/presence/conflict.py). NOT a broadcast (no fan-out messaging).
+PATH_CLAIM_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "project_claim_path",
+        "description": (
+            "Reserve a file/path/subsystem you are about to change for a while, "
+            "so sibling conversations hold off editing it concurrently. Use this "
+            "BEFORE a big or long edit (e.g. 'I'm rewriting styles.css'): it "
+            "posts a durational 'Held — do NOT edit' notice onto the project "
+            "board that EVERY sibling sees on its next turn — including a "
+            "currently-idle conversation the autonomous heartbeat wakes later "
+            "(a plain message would miss it). This is a soft, advisory, "
+            "auto-expiring lease (it can never deadlock the project); re-call to "
+            "refresh the hold on a long job, and release it with "
+            "project_release_path when done. It is NOT a lock and NOT a "
+            "broadcast — it reserves a resource, it does not message anyone."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "resource": {
+                    "type": "string",
+                    "description": "The path(s)/subsystem to hold, e.g. 'static/styles.css' or 'the CSS layer'. Free text; one reservation per string."
+                },
+                "ttl_ms": {
+                    "type": "integer",
+                    "description": "Optional hold duration in ms (default 30 min). Ask for longer up front on a known-long job; a live holder can also just re-call to refresh."
+                },
+            },
+            "required": ["resource"],
+        },
+    },
+}
+
+PATH_RELEASE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "project_release_path",
+        "description": (
+            "Release a file/path reservation you previously took with "
+            "project_claim_path, once you're done editing — clears the 'Held' "
+            "notice for siblings. Only the holder can release its own hold; an "
+            "unreleased hold simply auto-expires."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "resource": {
+                    "type": "string",
+                    "description": "The exact resource string you held with project_claim_path."
+                },
+            },
+            "required": ["resource"],
+        },
+    },
+}
+
 BOARD_TOOLS = [BOARD_READ_TOOL, BOARD_POST_TOOL, BOARD_CLAIM_TOOL,
-               BOARD_COMPLETE_TOOL, BOARD_BLOCK_TOOL, BOARD_DEFER_TOOL]
+               BOARD_COMPLETE_TOOL, BOARD_BLOCK_TOOL, BOARD_DEFER_TOOL,
+               PATH_CLAIM_TOOL, PATH_RELEASE_TOOL]
 BOARD_TOOL_NAMES = {'project_board_read', 'project_board_post',
                     'project_board_claim', 'project_board_complete',
-                    'project_board_block', 'project_board_defer'}
+                    'project_board_block', 'project_board_defer',
+                    'project_claim_path', 'project_release_path'}
 
 
 # ── Project Peer tools (Pillar #6 — cross-conversation communication) ──
@@ -291,17 +356,52 @@ PEER_STATUS_TOOL = {
     },
 }
 
+PEER_FEED_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "project_feed_read",
+        "description": (
+            "Read the recent cross-conversation ACTIVITY FEED of this project — "
+            "a chronological pulse (newest first) of what sibling conversations "
+            "have been DOING: task starts/completions, board claims, committed "
+            "or proposed decisions, blocks, and peer notes. This is the "
+            "narrative complement to project_peer_status (who is live NOW) and "
+            "project_board_read (the epic lanes): use it to catch up on what "
+            "already happened across the team before you start or hand off "
+            "work. Read-only."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Max events to return, newest first (default 25, max 60)."
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
 PEER_MESSAGE_TOOL = {
     "type": "function",
     "function": {
         "name": "project_message",
         "description": (
-            "Send an ADVISORY message to a sibling conversation of this project "
-            "(find its id with project_peer_status). The message lands in the "
-            "target's queue and is seen on its NEXT turn — it NEVER interrupts a "
-            "live turn mid-stream. Use it to coordinate: share a finding, warn of "
-            "an overlap, hand off context. It is advisory — the peer decides "
-            "whether to act. Rate-limited per target to prevent message storms."
+            "Coordinate DIRECTLY with a sibling conversation (another AGENT) of "
+            "this project — find its id with project_peer_status. You are "
+            "writing TO A PEER AGENT, not reporting to a human: use the "
+            "imperative coordination register — CLAIM work ('I'm taking the "
+            "parser refactor, stand down on lib/parser/'), CONFIRM a boundary "
+            "('are you touching styles.css? I'm about to rewrite it'), HAND OFF "
+            "context ('the schema bump you need is on branch X, done'), or WARN "
+            "of an overlap ('your epic Y duplicates the one I already own'). Do "
+            "NOT narrate your progress or write a status update as if to a "
+            "human. The message lands in the peer's queue and is seen on its "
+            "NEXT turn — it NEVER interrupts a live turn mid-stream. The peer "
+            "acts autonomously on what you send. Rate-limited per target to "
+            "prevent message storms — spend it on coordination that changes what "
+            "the peer does, not FYI chatter."
         ),
         "parameters": {
             "type": "object",
@@ -312,7 +412,7 @@ PEER_MESSAGE_TOOL = {
                 },
                 "text": {
                     "type": "string",
-                    "description": "The message body. Be specific and actionable."
+                    "description": "The coordination message, addressed to the peer AGENT. A concrete coordination act — a claim, a boundary question, a hand-off, or an overlap warning — NOT a status report. State what you want the peer to do or confirm."
                 },
             },
             "required": ["to_conv_id", "text"],
@@ -325,14 +425,21 @@ PEER_INTERVENE_TOOL = {
     "function": {
         "name": "project_intervene",
         "description": (
-            "Intervene in a sibling conversation you believe is going wrong "
-            "(e.g. duplicating an epic you own, heading down a path a committed "
-            "decision rules out). By DEFAULT this is ADVISORY: it sends a "
+            "Tell a sibling conversation (another AGENT) to STOP or change "
+            "course when it is going wrong — e.g. it is duplicating an epic you "
+            "already own, or heading down a path a committed decision rules out. "
+            "Write it as a direct coordination directive TO THE PEER AGENT "
+            "('stop — I own the parser epic, drop it and re-check the board'), "
+            "not as a status report to a human. By DEFAULT this is ADVISORY: a "
             "high-priority notice the peer sees on its next turn asking it to "
-            "pause and re-check the board — it does NOT stop the peer. A genuine "
-            "hard abort of the peer's running task requires explicit HUMAN "
-            "approval and cannot be done unilaterally by an agent; if you set "
-            "hard_abort without that approval it is refused with guidance."
+            "pause and re-check the board — it does NOT stop the peer, the peer "
+            "decides how to respond. A genuine hard abort of the peer's running "
+            "task requires explicit HUMAN approval and cannot be done "
+            "unilaterally by an agent; if you set hard_abort without that "
+            "approval it is refused with guidance.\n"
+            "Note: an advisory intervention shares the SAME per-target rate-limit "
+            "budget as project_message (a few per target per window), so it can be "
+            "refused if you have recently messaged the same conversation."
         ),
         "parameters": {
             "type": "object",
@@ -343,7 +450,7 @@ PEER_INTERVENE_TOOL = {
                 },
                 "message": {
                     "type": "string",
-                    "description": "The advisory notice explaining WHY (e.g. which epic overlaps). Optional; a sensible default is used if omitted."
+                    "description": "The directive to the peer AGENT explaining WHAT to stop/change and WHY (e.g. which epic overlaps and that you own it). Optional; a sensible default is used if omitted."
                 },
                 "hard_abort": {
                     "type": "boolean",
@@ -355,8 +462,10 @@ PEER_INTERVENE_TOOL = {
     },
 }
 
-PEER_TOOLS = [PEER_STATUS_TOOL, PEER_MESSAGE_TOOL, PEER_INTERVENE_TOOL]
-PEER_TOOL_NAMES = {'project_peer_status', 'project_message', 'project_intervene'}
+PEER_TOOLS = [PEER_STATUS_TOOL, PEER_FEED_TOOL, PEER_MESSAGE_TOOL,
+              PEER_INTERVENE_TOOL]
+PEER_TOOL_NAMES = {'project_peer_status', 'project_feed_read',
+                   'project_message', 'project_intervene'}
 
 __all__ = [
     'CONV_REF_LIST_TOOL', 'CONV_REF_GET_TOOL',
@@ -365,7 +474,8 @@ __all__ = [
     'CHARTER_TOOLS', 'CHARTER_TOOL_NAMES',
     'BOARD_READ_TOOL', 'BOARD_POST_TOOL', 'BOARD_CLAIM_TOOL',
     'BOARD_COMPLETE_TOOL', 'BOARD_BLOCK_TOOL', 'BOARD_DEFER_TOOL',
+    'PATH_CLAIM_TOOL', 'PATH_RELEASE_TOOL',
     'BOARD_TOOLS', 'BOARD_TOOL_NAMES',
-    'PEER_STATUS_TOOL', 'PEER_MESSAGE_TOOL', 'PEER_INTERVENE_TOOL',
-    'PEER_TOOLS', 'PEER_TOOL_NAMES',
+    'PEER_STATUS_TOOL', 'PEER_FEED_TOOL', 'PEER_MESSAGE_TOOL',
+    'PEER_INTERVENE_TOOL', 'PEER_TOOLS', 'PEER_TOOL_NAMES',
 ]

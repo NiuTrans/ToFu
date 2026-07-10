@@ -91,5 +91,32 @@ def test_idempotency_noop_without_header():
     assert len(calls) == 1
 
 
+def test_build_user_msg_preserves_client_msgId():
+    """Lost-ACK dedup prerequisite: build_user_msg_from_payload MUST carry the
+    client-supplied `_msgId` into the persisted user message, so server and
+    client agree on ONE identity for the turn. Without this the server mints its
+    own UUID and a poor-network rescue-PUT rebase (keyed on _msgId) appends a
+    DUPLICATE user bubble.
+
+    autoTranslate is left OFF so the builder is a pure transform (no LLM call)."""
+    pytest.importorskip('quart')
+    _install_shim()
+    from lib.chat.turn_builder import build_user_msg_from_payload
+
+    payload = {'text': 'hello world', 'timestamp': 1234567890, '_msgId': 'tmp_abc123'}
+    config = {}  # autoTranslate defaults off
+    um = build_user_msg_from_payload(payload, config)
+    assert um.get('_msgId') == 'tmp_abc123', (
+        f'client _msgId not preserved into user_msg: {um.get("_msgId")!r}')
+    assert um.get('timestamp') == 1234567890
+    assert um.get('role') == 'user'
+
+    # Absent client _msgId → no _msgId key (server backfills via
+    # _assign_message_ids). Must NOT invent one here / must not crash.
+    um2 = build_user_msg_from_payload({'text': 'hi', 'timestamp': 42}, {})
+    assert '_msgId' not in um2 or not um2.get('_msgId'), (
+        'builder should leave _msgId absent when the client sent none')
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

@@ -57,7 +57,13 @@ async def list_compactions(conv_id):
         except Exception as e2:
             logger.error('[Compactions] Legacy-fallback query failed: %s',
                          e2, exc_info=True)
-            return jsonify({'compactions': [], 'error': 'query_failed'}), 200
+            # A double query failure is a real DB error, NOT "no archives".
+            # Returning an empty list with HTTP 200 made the viewer silently
+            # render "no compactions" and HIDE existing archives on a transient
+            # DB hiccup (CLAUDE.md §2 — no silent failure masking data). Return
+            # 500 so the client's error path shows a retry banner instead.
+            from lib.api_response import api_internal_error
+            return api_internal_error('query_failed')
 
     out = []
     for r in rows:

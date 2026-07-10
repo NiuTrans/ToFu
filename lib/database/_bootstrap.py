@@ -527,6 +527,7 @@ def _read_instance_stamp(pgdata):
         logger.debug('[DB] instance stamp at %s malformed: %r', path, data)
         return None
     except FileNotFoundError:
+        logger.debug('[DB] instance stamp %s not present', path)
         return None
     except (OSError, json.JSONDecodeError) as e:
         logger.debug('[DB] Could not read instance stamp at %s: %s', path, e)

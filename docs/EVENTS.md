@@ -107,7 +107,7 @@ unknown event types and unknown fields, so additive changes are always safe.
 | Test | Enforces |
 |------|----------|
 | `tests/test_event_registry.py` | Every event the backend emits — whether written as a `'type': 'x'` literal **or** `EventType.X` — is registered. Every `ev.type === "..."` the frontend handles is registered. No orphan specs. |
-| `tests/test_event_emit.py` | `build_event` is byte-identical to the literal (incl. key order); `emit` delivers through `append_event`; a real converted orchestrator helper still emits the exact pre-conversion dict; the external-backend `NormalizedEvent` path maps onto registered `EventType`s. |
+| `tests/test_event_emit.py` | `build_event` is byte-identical to the literal (incl. key order); `emit` delivers through `append_event`; a real converted orchestrator helper still emits the exact pre-conversion dict. |
 
 If you add an emitter in a NEW file, add its path to `_BACKEND_FILES` in
 `tests/test_event_registry.py` so the new call sites are scanned.
@@ -140,22 +140,7 @@ assertion was widened to `... or 'EventType.COMPACTION' in all_src`.
 
 ---
 
-## 5. External CLI backends (Claude Code / Codex)
-
-The external-backend ingress path is converged onto the same vocabulary, so
-you don't get a second event model:
-
-- `lib/agent_backends/protocol.py` declares `KIND_TO_EVENT_TYPE`, the explicit
-  map from each `NormalizedEventKind` → wire `EventType`.
-- `lib/agent_backends/sse_bridge.py` (`SSEBridgeState.translate` and the
-  stateless `normalized_to_sse`) emit through `build_event(EventType.X, ...)`.
-
-If you add a `NormalizedEventKind`, add its `KIND_TO_EVENT_TYPE` entry — the
-convergence test (`TestNormalizedEventConvergence`) fails otherwise.
-
----
-
-## 6. Why this exists (one paragraph)
+## 5. Why this exists (one paragraph)
 
 Before the registry, ~40 event `type` strings were an *implicit* contract,
 defined only by scattered `append_event(task, {'type': ...})` calls and the

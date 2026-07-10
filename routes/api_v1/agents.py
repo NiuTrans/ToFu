@@ -75,6 +75,13 @@ def paper_report_start():
     except ImportError as e:
         return api_internal_error(e, context='Paper module unavailable',
                                   source='api_v1.agents.paper_report_start')
+    # Mark this as a HEADLESS/BYO entry so the shared report handler stamps the
+    # fail-closed personal-scope default (no operator library/memories spliced
+    # into the insight pass) unless the caller explicitly opts in. The
+    # interactive route reaches start_report_task WITHOUT this flag → owner
+    # keeps the personal transfer moat.
+    from quart import g
+    g.paper_report_headless = True
     return start_report_task()
 
 

@@ -10,6 +10,73 @@ function apiUrl(path) {
   return BASE_PATH + path;
 }
 
+/* ── Responsive breakpoints — SINGLE source of truth ───────────────────
+ * The mobile breakpoint (768px) was hardcoded in ~7 JS call sites (bare
+ * `innerWidth <= 768`, a local `MOBILE_BP`, two `matchMedia('(max-width:768px)')`
+ * strings) that had to stay in lock-step with the CSS `@media(max-width:768px)`
+ * master block. Any drift between them silently half-breaks the mobile layout
+ * (e.g. the sidebar drawer opens with no backdrop). Consolidate onto ONE
+ * constant + two tiny helpers so a future change is made in exactly one place.
+ *
+ * KEEP IN SYNC with the CSS master mobile block header in static/styles.css
+ * (`@media(max-width:768px){ … OVERFLOW CONTAINMENT … }`) and the tablet-drawer
+ * predicate (`@media(max-width:768px),(max-width:1024px) and (pointer:coarse)`).
+ * If you change a number here, change it there too (guarded by
+ * tests/test_breakpoint_coordination.py).
+ *
+ * `mobile` (768px, width-only) governs the phone compact layout + bottom sheet.
+ * `tablet` (1024px, PAIRED WITH pointer:coarse) governs the portrait-tablet /
+ * foldable slide-over drawer — the same viewport at which paper mode already
+ * single-panes, so chat and paper stay consistent across our own surfaces. A
+ * landscape tablet or a desktop at >1024px (or any fine-pointer device) keeps
+ * the pinned two-pane layout because the pointer:coarse half is not satisfied. */
+const TOFU_BP = Object.freeze({ mobile: 768, tablet: 1024 });
+/** True when the viewport is at or below the mobile breakpoint (width test). */
+function isMobileViewport() {
+  return window.innerWidth <= TOFU_BP.mobile;
+}
+/** The mobile media-query string, e.g. '(max-width:768px)'. */
+function mobileMediaQuery() {
+  return '(max-width:' + TOFU_BP.mobile + 'px)';
+}
+/** The tablet-drawer media-query string — a coarse pointer at/below the tablet
+ *  width. Matches the CSS paper-mode second predicate byte-for-byte. */
+function tabletDrawerMediaQuery() {
+  return '(max-width:' + TOFU_BP.tablet + 'px) and (pointer:coarse)';
+}
+/** True on a portrait tablet / foldable: touch-primary AND ≤ tablet width, but
+ *  WIDER than a phone (a phone is already covered by isMobileViewport). Uses
+ *  matchMedia so the pointer:coarse half is honored (a fine-pointer desktop
+ *  narrowed to 900px stays on the desktop split). */
+function isTabletDrawerViewport() {
+  if (typeof window.matchMedia !== 'function') return false;
+  return window.matchMedia(tabletDrawerMediaQuery()).matches
+    && !isMobileViewport();
+}
+/** The union predicate the slide-over DRAWER behaviors gate on: a phone OR a
+ *  portrait tablet. Any code that shows the backdrop / auto-collapses /
+ *  swipe-toggles the sidebar must use THIS, not isMobileViewport alone, or the
+ *  drawer opens on a tablet with no way to dismiss it. */
+function isDrawerViewport() {
+  return isMobileViewport() || isTabletDrawerViewport();
+}
+/** True when the user has asked the OS to minimize motion (accessibility /
+ *  vestibular comfort). Animation code should check this and use instant
+ *  scrolls / skip decorative transitions when it returns true. */
+function prefersReducedMotion() {
+  return typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+if (typeof window !== 'undefined') {
+  window.TOFU_BP = TOFU_BP;
+  window.isMobileViewport = isMobileViewport;
+  window.mobileMediaQuery = mobileMediaQuery;
+  window.tabletDrawerMediaQuery = tabletDrawerMediaQuery;
+  window.isTabletDrawerViewport = isTabletDrawerViewport;
+  window.isDrawerViewport = isDrawerViewport;
+  window.prefersReducedMotion = prefersReducedMotion;
+}
+
 /* ── Lazy KaTeX loader (277KB single-line script freezes DevTools) ── */
 let _katexLoading = null;
 function _ensureKatex() {
@@ -127,8 +194,30 @@ function _convRenderFingerprint(conv) {
     ":" +
     (last._igError ? "IGE" : "") +
     ":" +
-    (conv.title || "")
+    (conv.title || "") +
+    /* Autopilot run summaries live in a SIDECAR (conv.autopilotSummaries),
+     * NOT in conv.messages — so a background-sync / settings-round-trip that
+     * delivers a newly-concluded report leaves every message-derived term
+     * above unchanged, and Guard 2 would skip the re-render that surfaces the
+     * inline summary panel. Fold a cheap digest (count + per-run status/report
+     * length) so an arriving/growing report bumps the fingerprint. */
+    ":" +
+    _apSummariesFp(conv)
   );
+}
+/* Cheap fingerprint of the autopilot run-summary sidecar — count of runs plus
+ * each run's reason + report length, so a newly-arrived or newly-populated
+ * concluded record changes the value and forces a re-render. */
+function _apSummariesFp(conv) {
+  const s = conv && conv.autopilotSummaries;
+  if (!s || typeof s !== "object") return "0";
+  const ids = Object.keys(s);
+  let fp = ids.length + "|";
+  for (const id of ids) {
+    const r = s[id] || {};
+    fp += (r.reason || "") + (r.content ? r.content.length : 0) + ";";
+  }
+  return fp;
 }
 let thinkingEnabled = true,
   fetchEnabled = true,
@@ -139,7 +228,7 @@ let thinkingEnabled = true,
   schedulerEnabled = false,
   swarmEnabled = true,
   endpointEnabled = false,
-  autopilotEnabled = false,
+  autopilotEnabled = true,
   activeFlow = "",   // "" | "builtin:endpoint" | "builtin:autopilot" | <orchId>
   imageGenEnabled = false,
   imageGenMode = false,
@@ -203,8 +292,17 @@ function _ensureMsgId(msg) {
 
 /* ── (escape_html.js, error_envelope.js extracted here) ── */
 
+/* Look up a conversation object by id. Tolerates the `conversations`
+ * global not being ready yet (very early init) and returns null when the
+ * id is falsy or unknown. Canonical replacement for the open-coded
+ * `conversations.find((c) => c.id === X)` scattered across the frontend;
+ * `getActiveConv()` delegates to it. */
+function getConvById(id) {
+  if (!id || typeof conversations === "undefined" || !Array.isArray(conversations)) return null;
+  return conversations.find((c) => c && c.id === id) || null;
+}
 function getActiveConv() {
-  return conversations.find((c) => c.id === activeConvId);
+  return getConvById(activeConvId);
 }
 /* ★ Perf: cache chatContainer ref — avoids getElementById on every scroll check */
 let _chatContainerEl = null;

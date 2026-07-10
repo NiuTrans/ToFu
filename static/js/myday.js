@@ -84,6 +84,81 @@ function _mydaySetCache(dateStr, report) {
   report._full = true;
   _myday.cache[dateStr] = report;
   try { _mydayIDB.put(dateStr, report); } catch (e) { /* cache is optional */ }
+  // The pet's day-awareness rides on THIS single cache choke: every place a
+  // fresh full report lands routes through here, so both opening My Day and the
+  // boot digest fetch emit `tofu:day` from one path (no second source).
+  if (dateStr === _mydayTodayStr()) _mydayEmitDay(report);
+}
+
+/* ═══════ Pet day-awareness: derive the digest + emit `tofu:day` ═══════
+   The BACKEND report is the single source of truth. We do NOT recompute day
+   logic — we read the counts the report already carries and hand the pet a
+   compact digest {todos:{done,total}, streams:{done,blocked,total}, convCount}.
+   The pet only maps that → expression/mood. A missing/empty report is a silent
+   no-op, so a session that never opens My Day simply never fires it (until the
+   boot fetch below succeeds).                                                */
+function _mydayTodayStr() {
+  const n = new Date();
+  return _mydayDateStr(n.getFullYear(), n.getMonth(), n.getDate());
+}
+function _mydayBuildDigest(report) {
+  if (!report || typeof report !== 'object') return null;
+  const streams = Array.isArray(report.streams) ? report.streams : [];
+  const todos = Array.isArray(report.today_todos) ? report.today_todos : [];
+  return {
+    streams: {
+      total: streams.length,
+      done: streams.filter(s => s && s.status === 'done').length,
+      blocked: streams.filter(s => s && s.status === 'blocked').length,
+    },
+    todos: {
+      total: todos.length,
+      done: todos.filter(x => x && x.done).length,
+    },
+    convCount: ((report.stats || {}).totalConversations) || 0,
+  };
+}
+function _mydayEmitDay(report) {
+  try {
+    const digest = _mydayBuildDigest(report);
+    if (!digest) return;
+    document.dispatchEvent(new CustomEvent('tofu:day', { detail: digest }));
+  } catch (e) { /* the pet is decorative — a digest failure must never break it */ }
+}
+
+/* Fetch-once-on-boot of TODAY's digest so the pet is day-aware even when the
+   user never opens My Day. Reuses the instant-paint IDB cache first (no cold
+   blocking network on load) and the SAME Api.daily.status + _mydaySetCache path
+   My Day uses — no second fetcher. Deduped: if My Day already loaded today
+   (in-memory _full report) we emit from that and skip the network; the reminder
+   already runs a lightweight conv-count probe, so this is the only added call
+   and it degrades to a silent no-op when the report isn't ready. */
+async function _mydayBootDayDigest() {
+  if (_myday._bootDigestDone) return;
+  _myday._bootDigestDone = true;
+  const today = _mydayTodayStr();
+  try {
+    // 1) My Day already has today's full report cached in memory → emit, no fetch.
+    const mem = _myday.cache[today];
+    if (mem && mem._full) { _mydayEmitDay(mem); return; }
+    // 2) Instant paint from the persistent IDB cache (survives reload) if present.
+    let hadCache = false;
+    try {
+      const cached = await _mydayIDB.get(today);
+      if (cached) { _mydayEmitDay(cached); hadCache = true; }
+    } catch (e) { /* cache optional */ }
+    // 3) Background revalidate through the shared status path. Only a ready
+    //    report emits (via _mydaySetCache); idle/generating/error → no-op.
+    const data = await Api.daily.status(today);
+    if (data && data.status === 'done' && data.report) {
+      _mydaySetCache(today, data.report);   // emits tofu:day through the choke
+    }
+    // idle / generating / error / not-ready → leave the pet on its cached or
+    // generic behavior; never force a blank digest.
+    void hadCache;
+  } catch (e) {
+    console.warn('[MyDay] boot day-digest failed (pet stays generic):', e && e.message);
+  }
 }
 
 function openDailyReport() {
@@ -1327,4 +1402,15 @@ if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', _mydayScheduleReminder);
 } else {
   _mydayScheduleReminder();
+}
+
+// Fetch-once today's digest so the project-bar pet is day-aware without the
+// user opening My Day. Deferred a beat so it never competes with first paint;
+// it paints from the IDB cache first and degrades to a silent no-op when the
+// report isn't ready. Runs once per session (guarded by _bootDigestDone).
+function _mydayBootDayDigestSoon() { setTimeout(_mydayBootDayDigest, 2500); }
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _mydayBootDayDigestSoon);
+} else {
+  _mydayBootDayDigestSoon();
 }

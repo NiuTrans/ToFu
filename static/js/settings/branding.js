@@ -137,3 +137,86 @@ const _TOFU_CRITIC_SVG  = `<img src="${_ICON_BASE}/tofu-critic.svg?v=${_ICON_V}"
 const _TOFU_WORKER_SVG  = `<img src="${_ICON_BASE}/tofu-worker.svg?v=${_ICON_V}" alt="Worker" style="width:100%;height:100%;display:block">`;
 const _USER_AVATAR_SVG  = `<img src="${_ICON_BASE}/onigiri.svg?v=${_ICON_V}" alt="You" style="width:100%;height:100%;display:block">`;
 
+
+// ══════════════════════════════════════════════════════
+//  Auto-initiated turn attribution — the INITIATOR_REGISTRY
+// ══════════════════════════════════════════════════════
+//
+// Many backend paths inject a turn WITHOUT a human typing (Project Brain
+// dispatch, proactive scheduler, timer continuation, swarm auto-continuation,
+// peer / operator nudge, autopilot VU). Each stamps `_initiator` (authoritative)
+// via lib/conversations/turn_initiation.py; older / not-yet-migrated messages
+// carry only a legacy boolean. This registry is the SINGLE frontend source that
+// maps an initiator → its avatar + header label + CSS class, so adding a new
+// auto-source is one backend stamp + one row HERE (no renderer surgery).
+//
+// Glyphs are inline SVG (project rule §3.4: no emoji as icons). autopilot / peer
+// / operator keep their EXISTING avatars/labels (already differentiated + test-
+// pinned) — they live here too so the registry is complete, but chat_render.js
+// keeps its dedicated arms for them; the NEW consumers are proactive / timer /
+// brain (user lane) and swarm (assistant lane), which previously fell through
+// to the onigiri "You" (proactive/timer/brain) or plain "Agent" (swarm).
+
+// Distinct concept glyphs (14×14, currentColor) for the newly-attributed sources.
+const _INIT_GLYPH_PROACTIVE =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M13 7l-4 6h3l-1 4 4-6h-3z" fill="currentColor" stroke="none"/></svg>';
+const _INIT_GLYPH_TIMER =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2h12M6 22h12"/><path d="M8 2c0 4 8 6 8 10s-8 6-8 10"/><path d="M16 2c0 4-8 6-8 10s8 6 8 10"/></svg>';
+const _INIT_GLYPH_BRAIN =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3a3 3 0 0 0-3 3 3 3 0 0 0-1.5 5.6A3 3 0 0 0 6 17a3 3 0 0 0 3 3 2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/><path d="M15 3a3 3 0 0 1 3 3 3 3 0 0 1 1.5 5.6A3 3 0 0 1 18 17a3 3 0 0 1-3 3 2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/></svg>';
+const _INIT_GLYPH_SWARM =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.2"/><circle cx="5" cy="18" r="2.2"/><circle cx="19" cy="18" r="2.2"/><path d="M12 7.2v4.3M10.4 13l-3.6 3.2M13.6 13l3.6 3.2"/></svg>';
+
+// initiator id → presentation. `avatar` is trusted markup (raw()'d by callers).
+// `labelKey` resolves via i18n t(); `fallback` is the English default.
+// `lane` documents which role the turn arrives as (user vs assistant).
+const INITIATOR_REGISTRY = {
+  proactive: { avatar: _INIT_GLYPH_PROACTIVE, labelKey: 'initiator.proactive', fallback: 'Proactive Agent', cls: 'init-proactive', lane: 'user' },
+  timer:     { avatar: _INIT_GLYPH_TIMER,     labelKey: 'initiator.timer',     fallback: 'Timer',           cls: 'init-timer',     lane: 'user' },
+  brain:     { avatar: _INIT_GLYPH_BRAIN,     labelKey: 'initiator.brain',     fallback: 'Project Brain',   cls: 'init-brain',     lane: 'user' },
+  swarm:     { avatar: _INIT_GLYPH_SWARM,     labelKey: 'initiator.swarm',     fallback: 'Auto-continued',  cls: 'init-swarm',     lane: 'assistant' },
+};
+
+/**
+ * Resolve WHO initiated a message — the ONE frontend read seam, mirroring the
+ * backend lib/conversations/turn_initiation.resolve_initiator ONE-directionally:
+ * prefer the authoritative `_initiator` field, else fall back to a legacy
+ * per-path boolean (for pre-migration / persisted messages). Returns a plain
+ * initiator string; 'human' for a normal input-box turn or any unknown shape.
+ * @param {Object} msg
+ * @returns {string}
+ */
+function _resolveInitiator(msg) {
+  if (!msg || typeof msg !== 'object') return 'human';
+  const v = msg._initiator;
+  if (v === 'human' || INITIATOR_REGISTRY[v]
+      || v === 'peer' || v === 'operator' || v === 'autopilot') {
+    return v;
+  }
+  // Legacy fallback (most-specific pair first), matching the backend order.
+  if (msg._peerMessage) return msg._peerHuman ? 'operator' : 'peer';
+  if (msg._isVirtualUser || msg._autopilotRunId) return 'autopilot';
+  if (msg._proactive) return 'proactive';
+  if (msg._timer) return 'timer';
+  if (msg._brainDispatch) return 'brain';
+  if (msg._swarmAutoContinue) return 'swarm';
+  return 'human';
+}
+
+/**
+ * Presentation (avatar + label + cls) for a message's initiator, or null when
+ * the initiator is 'human' / peer / operator / autopilot (those keep their
+ * dedicated arms in chat_render.js). This is what the NEW attribution consumers
+ * (proactive / timer / brain / swarm) read.
+ * @param {Object} msg
+ * @returns {{avatar:string,label:string,cls:string,lane:string,initiator:string}|null}
+ */
+function _initiatorPresentation(msg) {
+  const id = _resolveInitiator(msg);
+  const reg = INITIATOR_REGISTRY[id];
+  if (!reg) return null;
+  const label = (typeof t === 'function' && t(reg.labelKey) !== reg.labelKey)
+    ? t(reg.labelKey) : reg.fallback;
+  return { avatar: reg.avatar, label, cls: reg.cls, lane: reg.lane, initiator: id };
+}
+

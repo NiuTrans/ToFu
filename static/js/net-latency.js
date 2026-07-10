@@ -25,6 +25,13 @@
   let _barsEl = null;  // bars wrapper
   let _textEl = null;  // ms label
   let _unsub = null;
+  let _lastReading = null;   // most recent reading from pushOnLatency
+  let _lastReadingAt = 0;    // when it arrived (ms) — for the staleness watchdog
+  let _watchdogTimer = null;
+  // push.js probes every ~4s; if two probe windows pass with no fresh reading
+  // the socket is wedged (stuck CONNECTING / reconnect scheduled but not open),
+  // so a stale "good/120ms" would be a lie. Force the offline display instead.
+  const _STALE_MS = 9000;
 
   // How many bars to light per state.
   const _barsFor = {
@@ -55,6 +62,8 @@
 
   function _render(reading) {
     if (!_el) return;
+    _lastReading = reading;
+    _lastReadingAt = Date.now();
     const state = (!reading.connected) ? 'offline' : (reading.state || 'unknown');
     const lit = _barsFor[state] != null ? _barsFor[state] : 0;
 
@@ -91,6 +100,22 @@
     }
     if (_unsub) _unsub();
     _unsub = pushOnLatency(_render);
+    // Staleness watchdog: pushOnLatency only fires when push.js emits. If the
+    // socket wedges (CONNECTING forever, or a reconnect scheduled but the open
+    // never lands) emits stop, and the badge would freeze on the last reading
+    // — e.g. green "120ms" while actually disconnected. Every few seconds,
+    // if the newest reading is older than _STALE_MS AND it wasn't already an
+    // offline reading, repaint as offline so the widget never lies.
+    if (_watchdogTimer) clearInterval(_watchdogTimer);
+    _watchdogTimer = setInterval(() => {
+      if (!_el) return;
+      if (!_lastReadingAt) return;
+      const age = Date.now() - _lastReadingAt;
+      if (age < _STALE_MS) return;
+      if (_lastReading && _lastReading.connected === false) return; // already offline
+      console.debug('[NetLatency] no fresh reading for %dms — forcing offline display', age);
+      _render({ ms: null, state: 'offline', connected: false, at: Date.now() });
+    }, 4000);
     // Ensure the push socket is actually connecting so probes can flow even
     // if nothing else has subscribed yet.
     try { if (typeof pushConnect === 'function') pushConnect(); } catch (e) { /* noop */ }

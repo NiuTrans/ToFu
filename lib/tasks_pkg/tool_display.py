@@ -18,11 +18,14 @@ from lib.scheduler import SCHEDULER_TOOL_NAMES
 from lib.memory import MEMORY_TOOL_NAMES
 from lib.tasks_pkg.executor import SWARM_TOOL_NAMES
 from lib.tools import (
+    BOARD_TOOL_NAMES,
     BROWSER_TOOL_NAMES,
+    CHARTER_TOOL_NAMES,
     CODE_EXEC_TOOL_NAMES,
     CONV_REF_TOOL_NAMES,
     IMAGE_EDIT_TOOL_NAMES,
     IMAGE_GEN_TOOL_NAMES,
+    PEER_TOOL_NAMES,
     PROJECT_TOOL_NAMES,
 )
 
@@ -273,6 +276,66 @@ def _tool_display_conv_ref(fn_name, fn_args, tc_id, tc_args_str):
     """
     kw = fn_args.get('keyword', 'all') if fn_name == 'list_conversations' else fn_args.get('conversation_id', '?')[:8]
     display = f"{fn_name}: {kw}"
+    return display, {'toolName': fn_name}
+
+
+def _tool_display_brain(fn_name, fn_args, tc_id, tc_args_str):
+    """Build a friendly collapsed-header label for project-brain tools.
+
+    Without a dedicated handler these fall through to ``_tool_display_generic``,
+    which (a) logs a spurious WARNING on EVERY call ("Unregistered tool … may
+    need a dedicated display handler") and (b) shows the raw ``project_board_read``
+    fn-name as the transcript preview. This returns a short human-readable
+    summary keyed on the tool + its salient arg (the frontend still renders the
+    SVG icon + the structured card body; this is only the collapsed preview
+    line the user reads before expanding). No emoji prefix (§3.4).
+    """
+    args = fn_args if isinstance(fn_args, dict) else {}
+    if fn_name == 'project_board_read':
+        display = 'Read the project board'
+    elif fn_name == 'project_charter_read':
+        display = 'Read the project charter'
+    elif fn_name == 'project_charter_propose':
+        title = (args.get('title') or '').strip()
+        display = f'Propose to charter: {title}' if title else 'Propose a charter amendment'
+    elif fn_name == 'project_peer_status':
+        cid = (args.get('conv_id') or '').strip()
+        display = f'Peer status: conv {cid[:8]}' if cid else 'Live peer status'
+    elif fn_name == 'project_feed_read':
+        display = 'Read the project activity feed'
+    elif fn_name == 'project_message':
+        to = (args.get('to_conv_id') or '').strip()
+        display = f'Message → conv {to[:8]}' if to else 'Send a peer message'
+    elif fn_name == 'project_intervene':
+        to = (args.get('to_conv_id') or '').strip()
+        hard = bool(args.get('hard_abort'))
+        kind = 'Hard intervene' if hard else 'Advisory intervene'
+        display = f'{kind} → conv {to[:8]}' if to else kind
+    elif fn_name.startswith('project_board_'):
+        verb = fn_name.replace('project_board_', '', 1)
+        tid = (args.get('task_id') or '').strip()
+        display = f'Board {verb}: {tid}' if tid else f'Board {verb}'
+    else:
+        display = fn_name
+    return display, {'toolName': fn_name}
+
+
+def _tool_display_todo(fn_name, fn_args, tc_id, tc_args_str):
+    """Build a friendly progress label for the ``todo_write`` checklist tool.
+
+    Without a dedicated handler this falls through to ``_tool_display_generic``,
+    which logs a spurious WARNING on EVERY call. ``todo_write`` fires several
+    times per multi-step task, so that WARNING dominated logs/error.log. Render
+    a compact "Planning: N steps (d done)" label instead.
+    """
+    todos = fn_args.get('todos') if isinstance(fn_args, dict) else None
+    if not isinstance(todos, list) or not todos:
+        return 'Updating checklist', {'toolName': fn_name}
+    total = len(todos)
+    done = sum(1 for t in todos if isinstance(t, dict) and t.get('status') == 'completed')
+    display = f'Checklist: {total} step{"s" if total != 1 else ""}'
+    if done:
+        display += f' ({done} done)'
     return display, {'toolName': fn_name}
 
 
@@ -861,6 +924,11 @@ def _build_display_dispatch_table():
     for name in CONV_REF_TOOL_NAMES:
         table[name] = _tool_display_conv_ref
 
+    # Project-brain tools (board / charter / peer / feed) — friendly collapsed
+    # label + no spurious "unregistered tool" WARNING on every call.
+    for name in (BOARD_TOOL_NAMES | CHARTER_TOOL_NAMES | PEER_TOOL_NAMES):
+        table[name] = _tool_display_brain
+
     # Scheduler tools
     for name in SCHEDULER_TOOL_NAMES:
         table[name] = _tool_display_scheduler
@@ -883,6 +951,10 @@ def _build_display_dispatch_table():
 
     # Human guidance tool
     table['ask_human'] = _tool_display_human_guidance
+
+    # Structured task-checklist tool (todo_write) — friendly progress label,
+    # no spurious "unregistered tool" WARNING on every checklist update.
+    table['todo_write'] = _tool_display_todo
 
     return table
 

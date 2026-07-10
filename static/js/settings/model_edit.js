@@ -95,7 +95,7 @@ function _editModel(provIdx, modelIdx) {
   var existing = card.parentElement.querySelector('.stg-edit-form');
   if (existing) existing.remove();
 
-  var allCaps = ['text', 'vision', 'thinking', 'cheap', 'image_gen', 'embedding'];
+  var allCaps = ['text', 'vision', 'thinking', 'cheap', 'image_gen', 'embedding', 'transcription', 'audio_chat'];
   var html = '<div class="stg-edit-form">';
   html += '<div class="stg-edit-grid">' +
     '<div class="stg-field"><label>模型 ID</label>' +

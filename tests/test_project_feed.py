@@ -19,11 +19,12 @@ Schema is bootstrapped once into the forced test SQLite DB (autouse fixture),
 mirroring tests/test_artifacts_meta_sanitize.py.
 """
 
-import importlib
 import os
 import threading
 
 import pytest
+
+from tests._nc_harness import patch_restore as _patch_restore
 
 pytestmark = pytest.mark.unit
 
@@ -139,6 +140,65 @@ def test_retention_prune(flask_app, monkeypatch):
     seqs = sorted(e['seq'] for e in feed['events'])
     # 8 emitted, keep window 5 → only the most-recent 5 survive (seq 4..8).
     assert seqs == [4, 5, 6, 7, 8], f'expected pruned tail, got {seqs}'
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Engine: full-summary preservation (data-loss fix)
+#  The DISPLAY summary is capped at _SUMMARY_MAX_CHARS, but the UNtruncated
+#  text must survive in payload['summary_full'] so the panel can EXPAND a
+#  clamped row instead of losing the second half of a sentence mid-word.
+# ════════════════════════════════════════════════════════════════════
+
+def test_long_summary_preserves_full_in_payload(flask_app):
+    from lib.conversations.project_feed import (
+        emit_project_event, read_project_feed, _SUMMARY_MAX_CHARS,
+    )
+    # A realistic over-cap summary (an epic-length "Completed: …" line).
+    # .strip()'d because emit_project_event strips the summary before storing.
+    long_summary = ('Completed: ' + ('externalize the PushHub fan-out '
+                                      'via a Redis pub/sub substrate ') * 12).strip()
+    assert len(long_summary) > _SUMMARY_MAX_CHARS
+    with flask_app.app_context():
+        emit_project_event('/proj/full', 'c', 'completed', long_summary)
+        feed = read_project_feed('/proj/full')
+    ev = feed['events'][0]
+    # Display value is capped …
+    assert len(ev['summary']) == _SUMMARY_MAX_CHARS
+    # … but the FULL text is preserved verbatim for the expand affordance.
+    assert ev['payload'].get('summary_full') == long_summary, \
+        'full summary must be preserved in payload (no mid-word data loss)'
+    # And the display prefix is a true prefix of the full text.
+    assert long_summary.startswith(ev['summary'])
+
+
+def test_short_summary_has_no_redundant_full_copy(flask_app):
+    """A summary UNDER the cap must NOT carry a redundant summary_full — no
+    wasted bytes on the common short row."""
+    from lib.conversations.project_feed import emit_project_event, read_project_feed
+    with flask_app.app_context():
+        emit_project_event('/proj/short', 'c', 'note', 'a short one-line pulse')
+        feed = read_project_feed('/proj/short')
+    ev = feed['events'][0]
+    assert ev['summary'] == 'a short one-line pulse'
+    assert 'summary_full' not in ev['payload'], \
+        'short summaries need no summary_full duplicate'
+
+
+def test_full_summary_does_not_clobber_caller_payload(flask_app):
+    """summary_full preservation must not overwrite a caller-supplied
+    payload['summary_full'] nor drop other payload keys."""
+    from lib.conversations.project_feed import (
+        emit_project_event, read_project_feed, _SUMMARY_MAX_CHARS,
+    )
+    long_summary = 'X' * (_SUMMARY_MAX_CHARS + 50)
+    with flask_app.app_context():
+        emit_project_event('/proj/pl', 'c', 'note', long_summary,
+                           payload={'taskId': 't1', 'summary_full': 'CALLER'})
+        feed = read_project_feed('/proj/pl')
+    ev = feed['events'][0]
+    assert ev['payload'].get('taskId') == 't1', 'other payload keys preserved'
+    assert ev['payload'].get('summary_full') == 'CALLER', \
+        'caller-supplied summary_full must win (not be clobbered)'
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -294,8 +354,13 @@ def test_auto_path_emits_one_run_concluded(flask_app, monkeypatch):
     # CALLER wiring, not the report content.
     monkeypatch.setattr(autopilot, 'run_summary_reporter',
                         lambda task: {'text': 'All green. Shipped pillar #1.'})
-    monkeypatch.setattr(autopilot, '_store_run_summary',
-                        lambda conv_id, run_id, text, translated='': {'runId': run_id})
+    # _emit_run_summary persists via _store_run_record (the single-source
+    # sidecar writer); _store_run_summary is only a thin task_done wrapper the
+    # auto path no longer calls directly. Stub the real writer so the caller
+    # reaches _emit_run_concluded (a None record would short-circuit it).
+    monkeypatch.setattr(autopilot, '_store_run_record',
+                        lambda conv_id, run_id, *, reason='task_done', text='',
+                        translated='': {'runId': run_id, 'status': 'concluded'})
     monkeypatch.setattr(autopilot, '_translate_summary_sync', lambda t: '')
     task = {'id': 'task-auto-1', 'convId': 'conv-auto',
             'config': {'projectPath': '/proj/auto'}}
@@ -418,31 +483,12 @@ _MANAGER_SRC = os.path.join(os.path.dirname(__file__), '..',
                             'lib', 'tasks_pkg', 'manager.py')
 
 
-def _patch_restore(path, old, new, run):
-    """Replace `old`→`new` in file at `path`, run `run()`, restore byte-identical."""
-    with open(path, encoding='utf-8') as f:
-        original = f.read()
-    assert old in original, f'anchor not found for NC patch in {path}'
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original.replace(old, new, 1))
-        run()
-    finally:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original)
-    # prove byte-identical restore
-    with open(path, encoding='utf-8') as f:
-        assert f.read() == original, 'source not restored byte-identical'
-
-
 def test_NC1_seq_constant_breaks_monotonicity(flask_app):
     """NC-1: freeze seq to a constant → concurrent/sequential emits collide."""
 
     def run():
         import lib.conversations.project_feed as pf
-        importlib.reload(pf)
-        # re-stub push on the reloaded module's dependency is unnecessary
-        # (push import is lazy); just drive sequential emits on one project.
+        # just drive sequential emits on one project.
         failed = False
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
@@ -466,9 +512,6 @@ def test_NC1_seq_constant_breaks_monotonicity(flask_app):
         "seq = 1  # NC-1",
         run,
     )
-    # restore the module after the reload-based NC so later tests use real code
-    import lib.conversations.project_feed as pf
-    importlib.reload(pf)
 
 
 def test_NC2_neutered_started_callsite_breaks_exactly_once(flask_app, monkeypatch):
@@ -477,7 +520,6 @@ def test_NC2_neutered_started_callsite_breaks_exactly_once(flask_app, monkeypatc
 
     def run():
         from lib.tasks_pkg import manager as mgr
-        importlib.reload(mgr)
         captured = []
         import lib.conversations.project_feed as pf
         monkeypatch.setattr(pf, 'emit_project_event',
@@ -499,9 +541,6 @@ def test_NC2_neutered_started_callsite_breaks_exactly_once(flask_app, monkeypatc
         "            pass  # NC-2",
         run,
     )
-    # restore manager module
-    from lib.tasks_pkg import manager as mgr
-    importlib.reload(mgr)
 
 
 
@@ -517,7 +556,6 @@ def test_NC3_neutered_run_concluded_callsite_breaks_rollup(flask_app, monkeypatc
 
     def run():
         from lib.tasks_pkg import autopilot as ap
-        importlib.reload(ap)
         captured = []
         import lib.conversations.project_feed as pf
         monkeypatch.setattr(pf, 'emit_project_event',
@@ -539,6 +577,3 @@ def test_NC3_neutered_run_concluded_callsite_breaks_rollup(flask_app, monkeypatc
         "    pass  # NC-3\n",
         run,
     )
-    # restore autopilot module
-    from lib.tasks_pkg import autopilot as ap
-    importlib.reload(ap)

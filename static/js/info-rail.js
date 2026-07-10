@@ -154,9 +154,7 @@
   }
 
   function _esc(s) {
-    return (typeof escapeHtml === 'function')
-      ? escapeHtml(String(s))
-      : String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    return escapeHtml(String(s));
   }
 
   /**

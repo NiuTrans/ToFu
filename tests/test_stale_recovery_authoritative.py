@@ -282,4 +282,6 @@ class TestStaleRecoveryAuthoritative(unittest.TestCase):
 
 
 if __name__ == '__main__':
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_stale_recovery_authoritative.__main__', init_schema=False)
     unittest.main(verbosity=2)

@@ -57,8 +57,19 @@ import subprocess
 import sys
 from typing import Optional
 
-from lib.agent_artifacts import is_agent_artifact
 from lib.http_client import http_get, http_stream
+from lib.runtime_layout import (
+    OVERLAY_SKIP_PREFIXES as _OVERLAY_SKIP_PREFIXES,
+)
+from lib.runtime_layout import (
+    RUNTIME_STATE_PREFIXES as _RUNTIME_STATE_PREFIXES,
+)
+from lib.runtime_layout import (
+    is_overlay_skipped as _rl_is_overlay_skipped,
+)
+from lib.runtime_layout import (
+    is_runtime_state as _rl_is_runtime_state,
+)
 from lib.log import audit_log, get_logger, log_context
 
 logger = get_logger(__name__)
@@ -77,16 +88,12 @@ _PIP_TIMEOUT = 600  # seconds — pip install can be slow on a fresh env
 _REQUIREMENTS = 'requirements.txt'
 
 # ── Tracked paths that legitimately mutate at runtime. Changes confined
-#    to these do NOT count as a blocking dirty tree (see module docstring). ──
-_RUNTIME_STATE_PREFIXES = (
-    '.tofu/',          # memories, skills, file-history backups
-    'data/',           # (gitignored, but be defensive)
-    'logs/',
-    'uploads/',
-    'outputs/',
-    'overleaf_cache/',
-    'static/js/bundle-',  # regenerated bundle (gitignored, defensive)
-)
+#    to these do NOT count as a blocking dirty tree (see module docstring).
+#    The classification now lives in lib/runtime_layout.py (the single source
+#    of truth shared with export.py + .gitignore generation) so the update
+#    skip-list can never drift from the ignore/export sets; the names are
+#    re-exported here (byte-identical to the historical literals) for the few
+#    call sites and tests that reference them directly. ──
 
 # ── Tarball-overlay fallback (non-git deployments) ──
 # Exported copies and zip downloads have no .git, so ``git pull`` is
@@ -98,12 +105,10 @@ _UPDATE_BACKUP_DIR = '.update_backup'  # per-run backups of replaced files
 
 # Paths NEVER overwritten by a tarball overlay: user/runtime state that is
 # either gitignored (absent from the tarball) or git-tracked yet mutated
-# locally (.tofu/ memories+skills). Overwriting these would clobber the
-# user's data, so they are skipped even if the archive carries them.
-_OVERLAY_SKIP_PREFIXES = _RUNTIME_STATE_PREFIXES + (
-    '.git/', '.venv/', 'venv/', 'node_modules/', '__pycache__/',
-    _UPDATE_BACKUP_DIR + '/',
-)
+# locally (.tofu/ memories+skills), plus VCS metadata / venvs / the updater's
+# own backup dir. Sourced from lib/runtime_layout (imported above) so the
+# overlay skip-list stays in lock-step with the dirty-tree classifier and the
+# export / .gitignore sets. Overwriting these would clobber the user's data.
 
 
 _git_exe_cache: Optional[str] = None
@@ -257,7 +262,7 @@ def fetch_latest_release() -> Optional[dict]:
 
 
 def _is_runtime_state(path: str) -> bool:
-    return any(path.startswith(p) for p in _RUNTIME_STATE_PREFIXES)
+    return _rl_is_runtime_state(path)
 
 
 def working_tree_status() -> dict:
@@ -599,16 +604,9 @@ def _apply_via_git(progress=None) -> dict:
 def _overlay_skip(rel: str) -> bool:
     """True if ``rel`` (project-root-relative, '/'-separated) must NOT be
     overwritten by a tarball overlay — user/runtime state (see
-    ``_OVERLAY_SKIP_PREFIXES``)."""
-    rel = rel.replace(os.sep, '/')
-    if rel.startswith('./'):
-        rel = rel[2:]
-    # Never overwrite an agent-written artifact (.tofu*), at any depth —
-    # prefix-based so future artifacts are covered without re-listing.
-    if any(is_agent_artifact(seg) for seg in rel.split('/') if seg):
-        return True
-    return any(rel == p.rstrip('/') or rel.startswith(p)
-               for p in _OVERLAY_SKIP_PREFIXES)
+    ``lib.runtime_layout.OVERLAY_SKIP_PREFIXES``). Delegates to the single-source
+    registry, which also covers any ``.tofu*`` agent artifact at any depth."""
+    return _rl_is_overlay_skipped(rel)
 
 
 def _apply_via_tarball(tag: str, progress=None) -> dict:
@@ -865,4 +863,7 @@ __all__ = [
     'git_available', 'current_version', 'fetch_latest_release',
     '_fetch_latest_release_detailed',
     'working_tree_status', 'check_for_update', 'apply_update',
+    # Re-exported from lib.runtime_layout (single source of truth) so existing
+    # call sites / tests that reference the update skip-lists keep working.
+    '_RUNTIME_STATE_PREFIXES', '_OVERLAY_SKIP_PREFIXES',
 ]

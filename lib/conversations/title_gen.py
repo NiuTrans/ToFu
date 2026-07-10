@@ -125,6 +125,34 @@ def _fallback_title(messages: list) -> str:
     return 'Untitled'
 
 
+def first_user_text(messages: list, max_chars: int = 280) -> str:
+    """First user message as plain text, truncated — for hover previews.
+
+    Unlike ``_fallback_title`` (which is capped at the short ``TITLE_MAX_CHARS``
+    sidebar budget), this returns a longer preview snippet of the opening
+    question the user actually asked (``originalContent`` when the message was
+    auto-translated), suitable for a hover tooltip. Returns ``''`` when the
+    conversation has no user text.
+
+    Args:
+        messages: The conversation's message list (dicts with role/content).
+        max_chars: Hard cap on the returned snippet length.
+
+    Returns:
+        The first user message text, truncated with an ellipsis when longer
+        than ``max_chars``; ``''`` when there is no user turn.
+    """
+    if not isinstance(messages, list):
+        return ''
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get('role') != 'user':
+            continue
+        text = _msg_text(msg)
+        if text:
+            return text[:max_chars] + ('…' if len(text) > max_chars else '')
+    return ''
+
+
 def _clean_title(raw: str) -> str:
     """Normalize the model's output into a single-line, unquoted title."""
     title = (raw or '').strip()
@@ -233,4 +261,4 @@ def generate_conversation_title(messages: list, lang: str | None = None) -> str:
     return title
 
 
-__all__ = ['generate_conversation_title', 'TITLE_MAX_CHARS']
+__all__ = ['generate_conversation_title', 'first_user_text', 'TITLE_MAX_CHARS']

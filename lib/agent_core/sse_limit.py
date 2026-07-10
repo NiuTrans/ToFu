@@ -51,7 +51,8 @@ def _default_cap() -> int:
     """
     try:
         n = int(os.environ.get('TOFU_MAX_SSE_PER_PRINCIPAL', '') or '12')
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[SSELimit] TOFU_MAX_SSE_PER_PRINCIPAL parse failed, using default: %s', e)
         n = 12
     return max(0, n)
 
@@ -67,7 +68,8 @@ def _slot_ttl() -> float:
     """
     try:
         n = float(os.environ.get('TOFU_SSE_SLOT_TTL', '') or '300')
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[SSELimit] TOFU_SSE_SLOT_TTL parse failed, using default: %s', e)
         n = 300.0
     return max(1.0, n)
 

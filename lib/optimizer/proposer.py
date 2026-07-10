@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 
+from lib.llm_json import strip_code_fences as _strip_fences
 from lib.log import get_logger
 
 from .actions import ACTION_REGISTRY
@@ -212,16 +213,6 @@ Rules:
 # ══════════════════════════════════════════════════════════
 #  LLM call + JSON parsing
 # ══════════════════════════════════════════════════════════
-
-def _strip_fences(text: str) -> str:
-    s = (text or '').strip()
-    if s.startswith('```'):
-        # Remove opening fence line
-        s = s.split('\n', 1)[-1] if '\n' in s else s[3:]
-        if s.endswith('```'):
-            s = s[:-3]
-    return s.strip()
-
 
 def _validate_proposal(raw: dict) -> dict | None:
     if not isinstance(raw, dict):

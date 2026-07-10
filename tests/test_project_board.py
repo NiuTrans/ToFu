@@ -348,9 +348,6 @@ def test_NC3_no_normalization_breaks_slash_match(flask_app):
 
     def run():
         import lib.conversations.project_board as pb
-        import lib.conversations.project_feed as pf
-        importlib.reload(pf)
-        importlib.reload(pb)
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
             db = get_thread_db(DOMAIN_CHAT)
@@ -370,30 +367,13 @@ def test_NC3_no_normalization_breaks_slash_match(flask_app):
         "    return str(project_path or '')  # NC-3 (normalization disabled)",
         run,
     )
-    # Reload both modules from the restored source so later tests see the fix.
-    import lib.conversations.project_board as pb
-    import lib.conversations.project_feed as pf
-    importlib.reload(pf)
-    importlib.reload(pb)
 
 
 # ════════════════════════════════════════════════════════════════════
 #  Source-level NEGATIVE CONTROLS
 # ════════════════════════════════════════════════════════════════════
 
-def _patch_restore(path, old, new, run):
-    with open(path, encoding='utf-8') as f:
-        original = f.read()
-    assert old in original, f'anchor not found in {path}'
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original.replace(old, new, 1))
-        run()
-    finally:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original)
-    with open(path, encoding='utf-8') as f:
-        assert f.read() == original, 'source not restored byte-identical'
+from tests._nc_harness import patch_restore as _patch_restore  # noqa: E402
 
 
 def test_NC1_expired_lease_noop_breaks_antideadlock(flask_app):
@@ -403,7 +383,6 @@ def test_NC1_expired_lease_noop_breaks_antideadlock(flask_app):
 
     def run():
         import lib.conversations.project_board as pb
-        importlib.reload(pb)
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
             get_thread_db(DOMAIN_CHAT).execute("DELETE FROM project_tasks WHERE project_path='/nc1b'")
@@ -424,8 +403,6 @@ def test_NC1_expired_lease_noop_breaks_antideadlock(flask_app):
         "    return stored_status  # NC-1 (reclaim disabled)",
         run,
     )
-    import lib.conversations.project_board as pb
-    importlib.reload(pb)
 
 
 def test_NC2_avoidance_hint_noop_breaks_injection(flask_app):
@@ -435,7 +412,6 @@ def test_NC2_avoidance_hint_noop_breaks_injection(flask_app):
 
     def run():
         import lib.conversations.project_board as pb
-        importlib.reload(pb)
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
             get_thread_db(DOMAIN_CHAT).execute("DELETE FROM project_tasks WHERE project_path='/nc2b'")
@@ -452,8 +428,6 @@ def test_NC2_avoidance_hint_noop_breaks_injection(flask_app):
         "            hint = ''  # NC-2 (avoidance hint disabled)",
         run,
     )
-    import lib.conversations.project_board as pb
-    importlib.reload(pb)
 
 
 
@@ -622,7 +596,6 @@ def test_NC4_reopen_owner_clear_noop_breaks(flask_app):
 
     def run():
         import lib.conversations.project_board as pb
-        importlib.reload(pb)
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
             get_thread_db(DOMAIN_CHAT).execute(
@@ -644,8 +617,6 @@ def test_NC4_reopen_owner_clear_noop_breaks(flask_app):
         "        pass  # NC-4 (reopen status/owner write disabled)",
         run,
     )
-    import lib.conversations.project_board as pb
-    importlib.reload(pb)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -694,7 +665,6 @@ def test_NC5_board_post_audit_noop_breaks(flask_app):
         _log.audit_log = lambda action, **kw: captured.append((action, kw))
         try:
             import lib.conversations.project_board as pb
-            importlib.reload(pb)   # rebinds `from lib.log import audit_log`
             with flask_app.app_context():
                 from lib.database import DOMAIN_CHAT, get_thread_db
                 get_thread_db(DOMAIN_CHAT).execute(
@@ -713,5 +683,3 @@ def test_NC5_board_post_audit_noop_breaks(flask_app):
         "    return {'ok': True, 'id': task_id}  # NC-5 (audit disabled)",
         run,
     )
-    import lib.conversations.project_board as pb
-    importlib.reload(pb)

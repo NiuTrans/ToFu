@@ -635,7 +635,8 @@ def get_run_task_events(run_id):
         return api_not_found('Run not found')
     try:
         cursor = int(request.args.get('cursor') or 0)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[Orchestrations] non-int cursor (%s) — defaulting to 0', e)
         cursor = 0
     events = runs.get_events(run_id, cursor)
     next_cursor = (events[-1]['seq'] + 1) if events else cursor

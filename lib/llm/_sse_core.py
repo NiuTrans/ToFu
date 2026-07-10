@@ -359,55 +359,31 @@ class SSEAccumulator:
     def _feed_codex(self, data_str) -> bool:
         """Translate a Codex Responses-API SSE payload and accumulate.
 
+        The Codex translator emits OpenAI-shaped ``chat.completion.chunk``
+        JSON strings, so route them through the SAME ``_process_openai_chunk``
+        path the main OpenAI and Anthropic (``_feed_anthropic``) paths use.
+        Sharing that one accumulator keeps content / thinking / tool-call-delta
+        accumulation, ``on_tool_call_ready`` firing, and ``usage`` handling
+        byte-identical across every provider — the Codex path previously
+        re-implemented the accumulation and, in doing so, (1) never fired
+        ``on_tool_call_ready`` (no incremental multi-tool prefetch) and
+        (2) gated content/thinking *accumulation* on the callback being present
+        (``if _c and self.on_content``), silently dropping the whole response
+        for a caller with no streaming callback.
+
         Returns True when ``[DONE]`` was seen inside the translation.
         """
-        translated = self.codex_translator.translate(data_str)
-        for t_str in translated:
+        for t_str in self.codex_translator.translate(data_str):
             if t_str == '[DONE]':
                 self.saw_done = True
-                break
+                return True
             try:
                 t_chunk = json.loads(t_str)
             except Exception as e:
                 logger.debug('[LLM] Codex SSE chunk parse failed: %s', e)
                 continue
-            choices = t_chunk.get('choices', [])
-            if choices:
-                delta = choices[0].get('delta', {})
-                fr = choices[0].get('finish_reason')
-                if fr:
-                    self.finish_reason = fr
-                    self.saw_finish_reason = True
-                _c = delta.get('content', '')
-                if _c and self.on_content:
-                    self.content += _c
-                    self.on_content(_c)
-                _t = delta.get('reasoning_content', '')
-                if _t and self.on_thinking:
-                    self.thinking_text += _t
-                    self.on_thinking(_t)
-                for tc in (delta.get('tool_calls') or []):
-                    idx = tc.get('index', 0)
-                    if idx not in self.tool_calls_acc:
-                        self.tool_calls_acc[idx] = {
-                            'id': tc.get('id', ''),
-                            'type': 'function',
-                            'function': {'name': '', 'arguments': ''},
-                        }
-                    if tc.get('id'):
-                        self.tool_calls_acc[idx]['id'] = tc['id']
-                    fn = tc.get('function', {})
-                    if fn.get('name'):
-                        # Append (not overwrite) to match the main OpenAI path
-                        # in _handle_delta — a function name may stream across
-                        # multiple deltas; overwriting would keep only the last
-                        # fragment and produce a wrong tool name.
-                        self.tool_calls_acc[idx]['function']['name'] += fn['name']
-                    if fn.get('arguments'):
-                        self.tool_calls_acc[idx]['function']['arguments'] += fn['arguments']
-            if t_chunk.get('usage'):
-                self.usage = t_chunk['usage']
-        return self.saw_done
+            self._process_openai_chunk(t_chunk)
+        return False
 
     def _handle_sse_error(self, eo):
         """Classify an SSE-embedded error object; always raises."""

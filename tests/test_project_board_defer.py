@@ -398,74 +398,57 @@ def test_defer_reachable_end_to_end_via_agent_dispatch(flask_app):
         'the reason must be recorded in the feed note'
 
 
-def test_NC_C_schema_registration_is_load_bearing(flask_app):
+def test_NC_C_schema_registration_is_load_bearing():
     """NC-C: byte-remove project_board_defer from BOTH the BOARD_TOOLS list and
-    BOARD_TOOL_NAMES set (the schema + gate registration) → the agent dispatch
-    path can no longer route it → the epic is NOT parked and dispatch returns
-    the 'unknown tool' error. Proves the registration — not just the handler
-    branch — is what makes the tool reachable. Byte-identical restore."""
+    BOARD_TOOL_NAMES set (the schema + gate registration) → the model-facing
+    tool list no longer advertises it, so it becomes a phantom the agent can
+    never call. Proves the registration — not just the handler branch — is what
+    makes the tool reachable.
+
+    SCHEMA-LEVEL + NON-POLLUTING (mirrors the feed suite's NC-SCHEMA): reloads
+    ONLY lib.tools.conversation + lib.tools (the call-time schema source). It
+    does NOT reload lib.tasks_pkg.executor — that would recreate the
+    tool_registry singleton and strip EVERY OTHER handler for the rest of the
+    pytest session (the documented reload-pollution trap). The routing side is
+    proven separately by test_registry_routes_defer_to_board_handler (via
+    tool_registry.lookup), and the positive end-to-end reachability by
+    test_defer_reachable_end_to_end_via_agent_dispatch. Byte-identical restore.
+    """
     import importlib
 
     def run():
         import lib.tools.conversation as conv
         importlib.reload(conv)
-        # Rebuild the facade + executor's view of the registry so the reloaded
-        # (defer-less) name set is what routing sees.
         import lib.tools as _tools
         importlib.reload(_tools)
-        import lib.tasks_pkg.handlers.misc as _misc
-        importlib.reload(_misc)
-        import lib.tasks_pkg.executor as _ex
-        importlib.reload(_ex)
-        from lib.conversations.project_board import post_task, read_board
-        with flask_app.app_context():
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            get_thread_db(DOMAIN_CHAT).execute(
-                "DELETE FROM project_tasks WHERE project_path='/nc_c'")
-            get_thread_db(DOMAIN_CHAT).commit()
-            tid = post_task('/nc_c', 'cAGENT', 'epic')['id']
-            round_entry = {'roundNum': 1, 'query': 'project_board_defer',
-                           'results': None, 'status': 'searching',
-                           'toolName': 'project_board_defer'}
-            import threading as _threading
-            task = {'id': 't', 'convId': 'cAGENT', 'toolRounds': [round_entry],
-                    'messages': [], 'events': [],
-                    'events_lock': _threading.Lock()}
-            _tc_id, content, _s = _ex._execute_tool_one(
-                task, {'id': 'tc1', 'function': {'name': 'project_board_defer'}},
-                'project_board_defer', 'tc1', {'task_id': tid}, 1, round_entry,
-                {'model': 'x'}, '/nc_c', True, None)
-            board = read_board('/nc_c')
-        # With the registration removed, routing misses → unknown tool, and the
-        # epic stays open (NOT parked).
-        assert board['tasks'][0]['status'] == 'open', \
-            'NC-C: without the schema/name-set registration the agent call ' \
-            'must NOT park the epic'
-        assert 'unknown tool' in content.lower(), \
-            'NC-C: an unregistered tool name must fall through to the ' \
-            'unknown-tool error'
+        names = [t['function']['name'] for t in _tools.BOARD_TOOLS]
+        assert 'project_board_defer' not in names, \
+            'NC-C: with BOARD_DEFER_TOOL removed the model-facing schema must ' \
+            'NOT advertise project_board_defer (proving the registration is ' \
+            'what makes the tool visible to the agent)'
+        assert 'project_board_defer' not in _tools.BOARD_TOOL_NAMES
 
     _patch_restore(
         _CONV_SRC,
         "BOARD_TOOLS = [BOARD_READ_TOOL, BOARD_POST_TOOL, BOARD_CLAIM_TOOL,\n"
-        "               BOARD_COMPLETE_TOOL, BOARD_BLOCK_TOOL, BOARD_DEFER_TOOL]\n"
+        "               BOARD_COMPLETE_TOOL, BOARD_BLOCK_TOOL, BOARD_DEFER_TOOL,\n"
+        "               PATH_CLAIM_TOOL, PATH_RELEASE_TOOL]\n"
         "BOARD_TOOL_NAMES = {'project_board_read', 'project_board_post',\n"
         "                    'project_board_claim', 'project_board_complete',\n"
-        "                    'project_board_block', 'project_board_defer'}",
+        "                    'project_board_block', 'project_board_defer',\n"
+        "                    'project_claim_path', 'project_release_path'}",
         "BOARD_TOOLS = [BOARD_READ_TOOL, BOARD_POST_TOOL, BOARD_CLAIM_TOOL,\n"
-        "               BOARD_COMPLETE_TOOL, BOARD_BLOCK_TOOL]  # NC-C (defer unregistered)\n"
+        "               BOARD_COMPLETE_TOOL, BOARD_BLOCK_TOOL,\n"
+        "               PATH_CLAIM_TOOL, PATH_RELEASE_TOOL]  # NC-C (defer unregistered)\n"
         "BOARD_TOOL_NAMES = {'project_board_read', 'project_board_post',\n"
         "                    'project_board_claim', 'project_board_complete',\n"
-        "                    'project_board_block'}",
+        "                    'project_board_block',\n"
+        "                    'project_claim_path', 'project_release_path'}",
         run,
     )
-    # Restore every reloaded module from the byte-identical source so later
-    # tests (and the live process) see the registered tool again.
-    import lib.tasks_pkg.executor as _ex
-    import lib.tasks_pkg.handlers.misc as _misc
+    # Restore the facade from the byte-identical source (executor untouched).
     import lib.tools as _tools
     import lib.tools.conversation as conv
     importlib.reload(conv)
     importlib.reload(_tools)
-    importlib.reload(_misc)
-    importlib.reload(_ex)
+    assert 'project_board_defer' in _tools.BOARD_TOOL_NAMES

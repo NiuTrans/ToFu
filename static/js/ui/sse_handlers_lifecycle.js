@@ -119,6 +119,34 @@ function _handleSwarmInboxInject(ev, c) {
 
 }
 
+function _handlePeerInboxInject(ev, c) {
+  const convId = c.convId;
+  const assistantMsg = c.assistantMsg, buf = c.buf;
+      /* ── Pillar #6 fast-path: a peer message from a sibling conversation was
+       *    drained from the inbox and injected as a user message before this
+       *    round. Unlike the queue-lane case (a persisted _peerMessage user
+       *    bubble rendered with .peer-msg-banner), this one is injected INTO
+       *    the running turn, so it needs an in-timeline chip mirroring
+       *    swarm_inbox_inject — a synthetic toolRound flagged `_peerInject`,
+       *    rendered by _renderPeerInjectRow. Dedup by round so SSE replay /
+       *    poll fallback doesn't double it. */
+      if (!assistantMsg.toolRounds) assistantMsg.toolRounds = [];
+      const _pKey = "peer:" + (ev.round || 0);
+      if (!assistantMsg.toolRounds.some(r => r._peerInject && r._peerKey === _pKey)) {
+        assistantMsg.toolRounds.push({
+          roundNum:      9000000 + assistantMsg.toolRounds.length,
+          status:        "done",
+          _peerInject:   true,
+          _peerKey:      _pKey,
+          peerRound:     ev.round || 0,
+          peerCount:     ev.count || 0,
+          peerPreviews:  Array.isArray(ev.previews) ? ev.previews : [],
+        });
+        if (buf) buf.toolRounds = assistantMsg.toolRounds;
+      }
+      twUpdate(convId);
+}
+
 function _handleMessagesSnapshot(ev, c) {
   const convId = c.convId, taskId = c.taskId;
   const assistantMsg = c.assistantMsg, buf = c.buf;

@@ -328,7 +328,9 @@ def _hash_prefix_fields(messages: list, prefix_count: int) -> list[dict]:
             try:
                 fh['reasoning_details'] = _md5(
                     json.dumps(rd, sort_keys=True, ensure_ascii=False))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as e:
+                logger.debug('[CacheTrack] reasoning_details not JSON-serialisable '
+                             '(%s) — hashing str() form', e)
                 fh['reasoning_details'] = _md5(str(rd))
         out.append(fh)
     return out
@@ -609,14 +611,23 @@ def detect_cache_break(
                 _prefix_mutated = True
                 _prefix_culprits = _diff_prefix_fields(
                     prev.prefix_field_hashes, _cur_field_hashes_prevrange)
-                logger.warning(
-                    '[CacheTrack] conv=%s call=%d ⚠ PREFIX MUTATION DETECTED: '
-                    'messages[0:%d] content hash changed without compaction. '
-                    'This will cause a cache miss. changed=[%s] '
-                    'prev_hash=%s new_hash=%s',
-                    conv_id[:8], prev.call_count + 1, _prev_prefix_count,
-                    ', '.join(_prefix_culprits) or '?',
-                    prev.prefix_content_hash[:8], _prev_prefix_hash[:8])
+                # The ANONYMOUS leading-indicator warning ("...without
+                # compaction") is only useful when the mutation cause is
+                # UNKNOWN. A history-rewrite signal (e.g. the per-turn
+                # user-profile / detail splice via notify_history_rewrite)
+                # NAMES the cause, so suppress the anonymous alarm here — but
+                # keep _prefix_mutated=True so the CONFIRMED, NAMED break still
+                # fires below and the re-bill is attributed (unlike
+                # compaction_pending, which blanket-suppresses detection).
+                if not _was_history_rewrite:
+                    logger.warning(
+                        '[CacheTrack] conv=%s call=%d ⚠ PREFIX MUTATION DETECTED: '
+                        'messages[0:%d] content hash changed without compaction. '
+                        'This will cause a cache miss. changed=[%s] '
+                        'prev_hash=%s new_hash=%s',
+                        conv_id[:8], prev.call_count + 1, _prev_prefix_count,
+                        ', '.join(_prefix_culprits) or '?',
+                        prev.prefix_content_hash[:8], _prev_prefix_hash[:8])
 
         # ── Phase 2: Check API-reported cache stats ──
         cache_read = 0

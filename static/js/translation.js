@@ -121,6 +121,35 @@ function _resetTranslationState(msg) {
 }
 
 /**
+ * Stamp per-round translated Chinese onto msg.segments[].translatedText,
+ * keyed by llmRound. `byRound` is {String(round): 中文} from the translate
+ * `done` frame. Mirrors the backend _stamp_segment_translations so the LIVE
+ * settled timeline keeps its narration in Chinese at finalize WITHOUT a reload
+ * (a reconnect reads the same already-stamped segments from the DB). No-op
+ * when the message has no segments (pre-v36) or the map is empty.
+ */
+function _stampSegTranslations(msg, byRound) {
+  if (!byRound || !Object.keys(byRound).length) return;
+  /* ★ Order-independent: the translate `done` push and the chat `done`
+   *   (which projects msg.segments) are near-concurrent, and the deliverable
+   *   reuses a CACHED segment translation so the translate frame often wins the
+   *   race — landing BEFORE segments exist. Stash the map so whichever event
+   *   arrives second applies it (the sse_pipeline chat-`done` handler replays
+   *   _pendingSegTranslations right after projecting committedMessage.segments). */
+  if (!Array.isArray(msg.segments) || !msg.segments.length) {
+    msg._pendingSegTranslations = byRound;
+    return;
+  }
+  for (const seg of msg.segments) {
+    if (!seg || seg.type !== 'text' || seg.deliverable) continue;
+    if (seg.llmRound == null) continue;
+    const zh = byRound[String(seg.llmRound)];
+    if (zh && zh.trim()) seg.translatedText = zh;
+  }
+  delete msg._pendingSegTranslations;
+}
+
+/**
  * Apply a 'done' translation result to the message and persist it.
  * Handles both fields: 'translatedContent' (assistant bilingual)
  * and 'content' (user-edit translation).
@@ -244,8 +273,16 @@ function _patchTranslateLoadingDom(loadingEl, msg) {
   }
 
   // ── partial-preview body (rendered markdown, morphs into the final 译文) ──
+  // ★ Segment-timeline (step 5b): when the timeline render is active for this
+  //   turn (chat_render stamped data-seg-timeline), the per-round translated
+  //   narration is shown INLINE — the standalone bottom .translate-preview blob
+  //   would only duplicate it and is the block that "reappears on pause". Skip
+  //   creating/updating it here; drop any stale copy that predates this state.
+  const _segTl = loadingEl.getAttribute('data-seg-timeline') === '1';
   let previewEl = loadingEl.querySelector('.translate-preview');
-  if (msg._translatePartial) {
+  if (_segTl) {
+    if (previewEl) { previewEl.remove(); loadingEl.classList.remove('has-preview'); }
+  } else if (msg._translatePartial) {
     if (!previewEl) {
       previewEl = document.createElement('div');
       previewEl.className = 'translate-preview';
@@ -294,7 +331,7 @@ function _patchTranslateLoadingDom(loadingEl, msg) {
  * the live streaming bubble (e.g. a background conv, or the turn already
  * finalized) so the caller falls through to the normal indicator path.
  */
-function _renderStreamingTranslatePreview(convId, msgId, partial) {
+function _renderStreamingTranslatePreview(convId, msgId, partial, byRound) {
   if (typeof activeConvId === 'undefined' || activeConvId !== convId) return false;
   if (!msgId || !partial) return false;
   const bubble = document.getElementById('streaming-msg');
@@ -302,38 +339,126 @@ function _renderStreamingTranslatePreview(convId, msgId, partial) {
   const body = bubble.querySelector('#streaming-body') || bubble.querySelector('.message-body');
   if (!body) return false;
 
-  let zone = body.querySelector('[data-zone="translatePreview"]');
-  if (!zone) {
-    /* Legacy path: no fixed zone present (e.g. a body that predates the
-     * _ensureStreamZones translatePreview slot). Create + append it. */
-    zone = document.createElement('div');
-    zone.setAttribute('data-zone', 'translatePreview');
-    body.appendChild(zone);
+  /* ★ Per-round interleave (streaming half): route each closed round's
+   * translated Chinese into its matching .ptool-turn[data-llm-round="L<n>"]
+   * group in the live tool panel — narration painted ABOVE the tools it
+   * described, exactly like the settled renderSegmentTimelineHTML. `byRound`
+   * is {String(round_num): 中文} from the push frame (round_num ≡ llmRound).
+   * Rounds we successfully route are EXCLUDED from the translatedPrimary blob
+   * below, so the Chinese no longer piles up as one wall under the whole
+   * panel. Rounds with no .ptool-turn yet (not rendered) fall through to the
+   * blob — graceful degrade, never a dropped segment. */
+  const _routed = new Set();
+  if (byRound && typeof byRound === 'object') {
+    const _esc = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape : (s) => s;
+    for (const rk in byRound) {
+      if (!Object.prototype.hasOwnProperty.call(byRound, rk)) continue;
+      const zh = byRound[rk];
+      if (!zh || !zh.trim()) continue;
+      const gkey = 'L' + rk;
+      const group = body.querySelector(`.ptool-turn[data-llm-round="${_esc(gkey)}"]`);
+      if (!group) continue;  // tools for this round not in DOM yet → blob fallback
+      /* ★ PARITY WITH SETTLED (owner directive 2026-07-08): the Chinese
+       * narration is an INDEPENDENT SIBLING of the `.ptool-turn` tool card —
+       * inside `.ptool-panel-body`, immediately BEFORE the card — never nested
+       * inside it. Nesting it in the card was the "prose + tool glued in one
+       * box" the screenshot showed; the settled render keeps prose as flat
+       * siblings of the card, so the live translate path must too. Located by
+       * `data-seg-round` (the group's llmRound key) so it stays adjacent to its
+       * own card and idempotent across push frames. */
+      const panelBody = group.parentNode;   // .ptool-panel-body
+      if (!panelBody) continue;
+      let narr = panelBody.querySelector(
+        `:scope > .stream-seg-narration[data-seg-round="${_esc(gkey)}"]`);
+      if (!narr) {
+        narr = document.createElement('div');
+        narr.className = 'md-content seg-narration stream-seg-narration';
+        narr.setAttribute('data-seg-round', gkey);
+        /* Sits directly BEFORE the round's tool card (matches settled render:
+         * thinking → narration → card, as flat siblings in the panel body). */
+        panelBody.insertBefore(narr, group);
+      }
+      if (narr._lastZh !== zh) {
+        narr._lastZh = zh;
+        let h = null;
+        try {
+          const fn = (typeof renderMarkdown === 'function') ? renderMarkdown : null;
+          const strip = (typeof stripNoTranslateTags === 'function') ? stripNoTranslateTags : (s) => s;
+          h = fn ? fn(strip(zh)) : null;
+        } catch (e) { h = null; }
+        if (h != null) narr.innerHTML = h; else narr.textContent = zh;
+      }
+      _routed.add(rk);
+    }
   }
-  /* Build the inner structure once. The zone may arrive EMPTY — either freshly
-   * appended above, or pre-created as a fixed _ensureStreamZones slot that
-   * survived a body rebuild — so key off the inner .md-content, not the zone
-   * element, to decide whether to populate it. */
+
+  /* ★ Render UNIFICATION (2026-07-07): paint the translated-so-far Chinese as
+   * the PRIMARY body, into the translatedPrimary zone that sits ABOVE the
+   * English content zone — the same visual role Chinese has in the SETTLED
+   * bilingual view (Chinese primary, English demoted). This replaces the old
+   * bottom-pinned translatePreview dump: the Chinese now fills in round-by-round
+   * in its natural reading position, and because the streaming bubble already
+   * has the settled structure, finalize is a visual no-op (zero layout jump).
+   *
+   * The still-untranslated tail (the CURRENT round's English) keeps streaming
+   * into the content zone below, which _stamps below demotes to a subtle
+   * "live tail" — so the reader always sees live text (English tail) that
+   * swaps to Chinese in place as each round's segment lands. */
+  let zone = body.querySelector('[data-zone="translatedPrimary"]');
+  if (!zone) {
+    /* Legacy body predating the translatedPrimary slot — fall back to the old
+     * translatePreview zone (append if absent) so the Chinese still shows
+     * rather than vanishing. Same graceful-degrade contract as before. */
+    zone = body.querySelector('[data-zone="translatePreview"]');
+    if (!zone) {
+      zone = document.createElement('div');
+      zone.setAttribute('data-zone', 'translatePreview');
+      body.appendChild(zone);
+    }
+  }
+  /* Build the inner structure once. Keyed off the inner .md-content (not the
+   * zone element) so a fixed _ensureStreamZones slot that survived a body
+   * rebuild is (re)populated. Structurally mirrors the settled assistant body:
+   * a bare .md-content — NO spinner/label chrome — so the transition to the
+   * final render is seamless. A thin caret marks the live edge. */
   if (!zone.querySelector('.md-content')) {
-    zone.className = 'translate-preview translate-stream-preview has-preview';
-    zone.innerHTML = '<div class="translate-loading-head"><span class="translate-spinner"></span>'
-      + `<span class="translate-loading-label">${(typeof t === 'function' ? t('translate.translatingToCN') : '翻译中…')}</span></div>`
-      + '<div class="md-content"></div><span class="translate-caret"></span>';
+    zone.className = 'stream-translated-body';
+    zone.innerHTML = '<div class="md-content"></div>';
+  }
+  /* The translatedPrimary blob now shows ONLY the rounds we could NOT route
+   * into a .ptool-turn (their tools aren't in the DOM yet). When byRound is
+   * present, rebuild the blob from just the un-routed rounds in round order;
+   * when every round routed, the blob is empty. Absent byRound (old backend /
+   * degrade), keep the whole joined `partial` — byte-identical to before. */
+  let blobText = partial;
+  if (byRound && typeof byRound === 'object') {
+    const _rem = Object.keys(byRound)
+      .filter((rk) => !_routed.has(rk) && byRound[rk] && byRound[rk].trim())
+      .sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0))
+      .map((rk) => byRound[rk]);
+    blobText = _rem.join('\n\n');
   }
   const mdEl = zone.querySelector('.md-content');
-  if (mdEl && zone._lastPartial !== partial) {
-    zone._lastPartial = partial;
-    const nearBottom = (zone.scrollHeight - zone.scrollTop - zone.clientHeight) < 32;
-    let html = null;
-    try {
-      const fn = (typeof renderMarkdown === 'function') ? renderMarkdown : null;
-      const strip = (typeof stripNoTranslateTags === 'function') ? stripNoTranslateTags : (s) => s;
-      html = fn ? fn(strip(partial)) : null;
-    } catch (e) { html = null; }
-    if (html != null) mdEl.innerHTML = html;
-    else mdEl.textContent = partial;
-    if (nearBottom) zone.scrollTop = zone.scrollHeight;
+  if (mdEl && zone._lastPartial !== blobText) {
+    zone._lastPartial = blobText;
+    if (!blobText) {
+      mdEl.innerHTML = '';
+    } else {
+      let html = null;
+      try {
+        const fn = (typeof renderMarkdown === 'function') ? renderMarkdown : null;
+        const strip = (typeof stripNoTranslateTags === 'function') ? stripNoTranslateTags : (s) => s;
+        html = fn ? fn(strip(blobText)) : null;
+      } catch (e) { html = null; }
+      if (html != null) mdEl.innerHTML = html;
+      else mdEl.textContent = blobText;
+    }
   }
+  /* Signal the content zone (English) to demote to the subtle live-tail role.
+   * Read by updateStreamingUI on its next tick. */
+  body.setAttribute('data-xlate', '1');
+  const _contentZone = body.querySelector('[data-zone="content"]');
+  if (_contentZone) _contentZone.classList.add('stream-content-demoted');
   if (typeof isNearBottom === 'function' && isNearBottom(80)
       && typeof scrollToBottom === 'function') scrollToBottom();
   return true;
@@ -989,9 +1114,26 @@ async function _resumePendingTranslations(convId) {
       if (_isRunning) {
         if (field !== 'translatedContent') return;
         if (msg.translatedContent || msg._translateDone) return;
+        /* ★ Finalize 'started' frame (statusKind='started', no partial): the
+         * incremental worker is about to assemble + commit the final Chinese.
+         * Hide the English live-tail in the content zone NOW so the final
+         * round's English doesn't briefly double with its just-arriving
+         * Chinese (the only overlap case — a no-tool-call final round streams
+         * into content AND its segment lands in the partial). Pure class
+         * toggle on the streaming body; a no-op if this isn't the live
+         * bubble. */
+        if ((frame.statusKind === 'started') && frame.msgId) {
+          const _sm = document.getElementById('streaming-msg');
+          if (_sm && _sm.getAttribute('data-msg-id') === frame.msgId) {
+            const _b = _sm.querySelector('#streaming-body') || _sm.querySelector('.message-body');
+            if (_b) _b.setAttribute('data-xlate-final', '1');
+          }
+        }
         // Stash the partial on the message so a later full re-render (conv
-        // switch / finalize) still has it.
+        // switch / finalize) still has it. Stash the per-round map too so a
+        // repaint after a body rebuild keeps the interleaved layout.
         if (frame.partial) msg._translatePartial = frame.partial;
+        if (frame.partialByRound) msg._translatePartialByRound = frame.partialByRound;
         if (frame.statusMessage) {
           msg._translateStatus = frame.statusMessage;
           msg._translateStatusKind = frame.statusKind || '';
@@ -1002,7 +1144,7 @@ async function _resumePendingTranslations(convId) {
         //    target it. When this frame's message is the one streaming, paint
         //    the translated-so-far into the streaming bubble directly. This is
         //    what makes the Chinese fill in round-by-round DURING the task. ──
-        if (frame.partial && _renderStreamingTranslatePreview(convId, frame.msgId, frame.partial)) {
+        if (frame.partial && _renderStreamingTranslatePreview(convId, frame.msgId, frame.partial, frame.partialByRound)) {
           return;
         }
         // Fallback (settled message, e.g. end-of-task finalize spinner):
@@ -1038,6 +1180,11 @@ async function _resumePendingTranslations(convId) {
         msg.translatedContent = frame.translated;
         msg._translatedCache = frame.translated;
         msg._showingTranslation = true;
+        /* Carry the per-round narration Chinese onto the segment timeline so
+         * the settled view stays interleaved (Chinese narration in place),
+         * matching the streaming preview — no de-interleaved snap-back at
+         * finalize, and no dependency on a reload re-reading the DB. */
+        _stampSegTranslations(msg, frame.segmentsByRound);
       } else if (field === 'content') {
         if (!msg.originalContent) msg.originalContent = msg.content;
         msg.content = frame.translated;
@@ -1048,6 +1195,7 @@ async function _resumePendingTranslations(convId) {
       delete msg._translateStatus;
       delete msg._translateStatusKind;
       delete msg._translatePartial;
+      delete msg._translatePartialByRound;
       delete msg._translateError;
       if (typeof saveConversations === 'function') saveConversations(convId);
       _renderMsgInPlace(convId, idx, msg);

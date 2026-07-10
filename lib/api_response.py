@@ -54,12 +54,56 @@ from __future__ import annotations
 
 from typing import Any
 
-from flask import jsonify
+from flask import Response, jsonify
 
 from lib.error_envelope import from_exception
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+
+# ── Server-Sent Events ────────────────────────────────────────────────
+
+# The canonical SSE response headers. Duplicated verbatim across every
+# streaming route (chat / agent-run / tasks / compat-openai / compat-
+# anthropic / chat-direct) before centralisation here:
+#   * ``no-cache, no-transform`` — proxies must not buffer/rewrite the body.
+#   * ``X-Accel-Buffering: no``  — disable nginx response buffering.
+#   * ``Connection: keep-alive`` — hold the socket open for the stream.
+_SSE_HEADERS = {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    'X-Accel-Buffering': 'no',
+    'Connection': 'keep-alive',
+}
+
+
+def sse_response(generator, *, extra_headers: dict | None = None,
+                 timeout_none: bool = False) -> Response:
+    """Build a ``text/event-stream`` Response with the canonical SSE headers.
+
+    Replaces the copy-pasted ``Response(gen, mimetype='text/event-stream',
+    headers={...4 keys...})`` block at every streaming endpoint.
+
+    Args:
+        generator: The SSE frame generator (sync or async iterable) passed
+            straight to the Response body.
+        extra_headers: Optional headers merged on top of the canonical set
+            (e.g. ``{'X-Tofu-Task-Id': task_id}`` on the task-backed routes).
+        timeout_none: When True, sets ``resp.timeout = None`` to disable the
+            ASGI server's response timeout for long-lived streams (matches the
+            behaviour the UI chat stream relied on).
+
+    Returns:
+        A Flask/Quart ``Response`` ready to return from the view.
+    """
+    headers = dict(_SSE_HEADERS)
+    if extra_headers:
+        headers.update(extra_headers)
+    resp = Response(generator, mimetype='text/event-stream', headers=headers)
+    if timeout_none:
+        resp.timeout = None
+    return resp
 
 
 # ── Internal helpers ─────────────────────────────────────────────────
@@ -312,5 +356,5 @@ __all__ = [
     'api_error', 'api_bad_request', 'api_unauthorized', 'api_forbidden',
     'api_not_found', 'api_conflict', 'api_payload_too_large',
     'api_method_not_allowed', 'api_internal_error',
-    'safe_route',
+    'safe_route', 'sse_response',
 ]

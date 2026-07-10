@@ -46,6 +46,7 @@ from lib.tasks_pkg.compaction._constants import (
 from lib.tasks_pkg.compaction._layer1 import micro_compact
 from lib.tasks_pkg.compaction._layer2 import force_compact_if_needed
 from lib.tasks_pkg.compaction._tokens import (
+    _estimate_msg_tokens,
     _estimate_total_tokens,
     _get_context_limit,
     _human_size,
@@ -237,11 +238,13 @@ def reactive_compact(messages: list, task: dict | None = None,
             emit_event=True,
         )
     except Exception as _ar_e:
-        logger.debug('%s [ReactiveCompact] Pre-snapshot archive failed: %s',
-                     pfx, _ar_e)
+        logger.warning('%s [ReactiveCompact] Pre-snapshot archive failed: %s',
+                       pfx, _ar_e, exc_info=True)
 
     # Phase 0: aggressive image strip if wire OR token budget over limit.
-    tokens_before = _estimate_total_tokens(messages)
+    # messages is unchanged since the snapshot above (archive is read-only),
+    # so reuse it rather than re-walking the whole list a second time.
+    tokens_before = tokens_before_snap
     context_limit_hint = _get_context_limit(task)
     token_over = tokens_before > int(context_limit_hint * 0.95)
     over_wire = wire_before > _WIRE_BYTE_SOFT_LIMIT
@@ -355,25 +358,49 @@ def _head_truncate(messages: list, task: dict | None = None,
         else:
             break
 
+    # ★ OBJECTIVE ANCHOR — the first real user message (the north-star goal)
+    #   must survive even a last-resort head-truncate.  Compute the drop
+    #   position that SKIPS it: normally we pop the oldest non-system message
+    #   (``system_end``); if that is the anchor, pop the one AFTER it instead so
+    #   the goal is never discarded.  A tiny helper keeps both trim loops
+    #   (byte-target and token-target) honouring the anchor identically.
+    from lib.tasks_pkg.compaction._layer2 import _objective_anchor_index
+
+    def _drop_pos() -> int:
+        anchor = _objective_anchor_index(messages)
+        if anchor == system_end and len(messages) > system_end + 1:
+            return system_end + 1  # protect the anchor; drop the next-oldest
+        return system_end
+
     if byte_target is not None:
         dropped = 0
-        while (_estimate_wire_bytes(messages) > byte_target
-               and len(messages) > system_end + 4):
-            messages.pop(system_end)
+        # Running total: re-serializing the ENTIRE list every iteration is
+        # O(n^2) on the exact (large, MB-scale) payloads this path fires on.
+        # Subtract each popped message's own wire bytes instead; recompute the
+        # true whole-list size ONCE after the loop for the log/audit value.
+        cur_bytes = _estimate_wire_bytes(messages)
+        while cur_bytes > byte_target and len(messages) > system_end + 4:
+            popped = messages.pop(_drop_pos())
+            try:
+                cur_bytes -= len(json.dumps(
+                    popped, ensure_ascii=False).encode('utf-8')) + 2  # ', ' sep
+            except Exception as _e:
+                logger.debug('[HeadTruncate] per-msg wire estimate failed '
+                             '(%s) — recomputing whole list', _e)
+                cur_bytes = _estimate_wire_bytes(messages)
             dropped += 1
         if dropped:
+            wire_now = _estimate_wire_bytes(messages)
             logger.warning('[HeadTruncate] Dropped %d oldest messages by byte target '
                            '(wire now %.1fMB, target %.1fMB)',
-                           dropped,
-                           _estimate_wire_bytes(messages) / 1048576,
-                           byte_target / 1048576)
+                           dropped, wire_now / 1048576, byte_target / 1048576)
             # Last-resort truncation permanently discards conversation context;
             # record what was lost so it's queryable per-conv in audit.log
             # rather than only inferable from a transient WARNING.
             audit_log(event_name,
                       conv=(task.get('convId', '') if task else ''),
                       dropped_msgs=dropped, mode='byte_target',
-                      wire_mb=round(_estimate_wire_bytes(messages) / 1048576, 2))
+                      wire_mb=round(wire_now / 1048576, 2))
         return dropped
 
     context_limit = _get_context_limit(task)
@@ -393,18 +420,22 @@ def _head_truncate(messages: list, task: dict | None = None,
         target_measure = target
 
     dropped = 0
-    while _estimate_total_tokens(messages) > target_measure and len(messages) > system_end + 4:
-        messages.pop(system_end)
+    # Exact running total: _estimate_total_tokens == sum(_estimate_msg_tokens),
+    # so subtracting each popped message keeps cur_tokens bit-identical to a
+    # fresh full walk — without the O(n^2) re-sum every iteration.
+    cur_tokens = _estimate_total_tokens(messages)
+    while cur_tokens > target_measure and len(messages) > system_end + 4:
+        cur_tokens -= _estimate_msg_tokens(messages.pop(_drop_pos()))
         dropped += 1
 
     if dropped:
         logger.warning('[HeadTruncate] Dropped %d oldest messages to fit context '
                        '(tokens now ~%d, target ~%d, reported_api=%s)',
-                       dropped, _estimate_total_tokens(messages), target_measure,
+                       dropped, cur_tokens, target_measure,
                        f'{reported_token_count:,}' if reported_token_count else 'n/a')
         audit_log(event_name,
                   conv=(task.get('convId', '') if task else ''),
                   dropped_msgs=dropped, mode='token_target',
-                  tokens_after=_estimate_total_tokens(messages),
+                  tokens_after=cur_tokens,
                   target=target_measure)
     return dropped

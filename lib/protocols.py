@@ -360,6 +360,14 @@ class ConversationStore(Protocol):
         """Delete all transcript-archive rows for a conversation."""
         ...
 
+    def prune_archives(self, conv_id: str, keep: int) -> int:
+        """Ring-buffer retention: keep the ``keep`` newest archive rows, drop
+        the rest.  ``keep <= 0`` is a no-op.  Returns rows deleted.  Called as
+        a GC-on-insert so ``transcript_archive`` can't grow unbounded on a
+        long-lived conversation.
+        """
+        ...
+
     def sync_conversation_with_search(self, conv_id: str, messages: list) -> int:
         """Overwrite a conversation's messages AND refresh its search index.
 

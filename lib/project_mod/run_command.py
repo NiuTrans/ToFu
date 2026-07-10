@@ -166,10 +166,57 @@ def _get_cmd_env(cwd=None):
         if cwd and is_restricted():
             from lib.project_mod import portable_sandbox
             portable_sandbox.prepare_env(env, cwd)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug('[RunCommand] portable sandbox env prep skipped: %s', e)
 
     return env
+
+
+def _sticky_cwd_capture_enabled():
+    """True unless disabled via TOFU_STICKY_CWD=0. Unix-only (needs POSIX sh)."""
+    if os.name == 'nt':
+        return False
+    return os.environ.get('TOFU_STICKY_CWD', '').strip().lower() not in (
+        '0', 'false', 'no', 'off')
+
+
+def _build_cwd_capture(exec_command, capture_file):
+    """Wrap *exec_command* so the shell's FINAL cwd lands in *capture_file*.
+
+    The cwd is written to a dedicated file — NEVER stdout — so command output
+    can never spoof the captured value (the sentinel-framing bug that makes a
+    shared-stdin persistent shell fragile). The user command's exit status is
+    preserved: we stash ``$?`` immediately after it and re-exit with it, so
+    callers still see the real return code.
+
+    A trailing ``cd subdir`` inside *exec_command* persists to the ``pwd`` here
+    because both run in the same ``sh -c`` invocation. On any failure the file
+    simply stays empty and the caller safe-degrades (anchor unchanged).
+    """
+    # Newline-separated (not '; ') so a trailing `# comment` in the user
+    # command cannot swallow the trailer.
+    return (
+        f'{exec_command}\n'
+        f'__tofu_rc=$?\n'
+        f'command pwd -P > {capture_file} 2>/dev/null || true\n'
+        f'exit $__tofu_rc\n'
+    )
+
+
+def _read_cwd_capture(capture_file):
+    """Read + unlink a cwd-capture file. Returns the captured path or None."""
+    try:
+        with open(capture_file, encoding='utf-8', errors='replace') as f:
+            val = f.read().strip()
+    except OSError as e:
+        logger.debug('[run_command] cwd capture read failed: %s', e)
+        val = None
+    finally:
+        try:
+            os.unlink(capture_file)
+        except OSError:
+            pass
+    return val or None
 
 
 def _extract_progress_label(line):
@@ -900,7 +947,8 @@ def _is_catastrophic_delete(command, cwd=None):
         from lib.project_mod.abs_path_guard import is_restricted
         if cwd and is_restricted():
             ws_real = os.path.realpath(cwd)
-    except Exception:
+    except Exception as e:
+        logger.debug('[RunCommand] workspace containment resolve failed: %s', e)
         ws_real = None
     for seg in _split_pipeline(command):
         seg = seg.strip()
@@ -1164,13 +1212,19 @@ def _format_run_output(command, stdout, stderr, exit_code, timed_out=False, abor
 
 
 def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None,
-                     on_chunk=None):
+                     on_chunk=None, cwd_sink=None):
     """Execute a shell command with optional interactive stdin support.
 
     Args:
         base: Working directory for the command.
         command: Shell command string to execute.
         timeout: Timeout in seconds (0 = unlimited, None = auto-detect).
+        cwd_sink: Optional callback ``fn(abs_cwd)`` invoked once with the
+            shell's FINAL working directory after the command completes, so a
+            trailing ``cd`` inside the command can update the caller's sticky
+            per-conversation cwd. Captured via a dedicated temp file (never
+            stdout, so it cannot be spoofed by output); the command's real exit
+            code is preserved. Any failure simply skips the callback.
         stdin_callback: Optional callback ``fn(prompt_text) -> str`` that is
             called when the subprocess appears to be waiting for stdin input.
             The callback should block until the user provides input (or return
@@ -1254,6 +1308,29 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     #   deletes are already rejected above and never reach here.
     exec_command = _maybe_wrap_rm_with_trash(command, base)
 
+    # ★ Sticky-cwd capture (layer 2): wrap the command so its FINAL cwd is
+    #   written to a dedicated temp file, preserving the exit code. Only when a
+    #   sink is provided AND not sandboxed — a jailed TMPDIR would make the
+    #   host-side read miss, so under portable_sandbox we skip capture and rely
+    #   on the explicit-working_dir stickiness (layer 1) alone. Restricted probe
+    #   here so the capture file's host path is valid.
+    _capture_file = None
+    if cwd_sink is not None and _sticky_cwd_capture_enabled():
+        try:
+            from lib.project_mod.abs_path_guard import is_restricted
+            _restricted_now = is_restricted()
+        except Exception:
+            _restricted_now = False
+        if not _restricted_now:
+            try:
+                import tempfile
+                fd, _capture_file = tempfile.mkstemp(prefix='tofu_cwd_', suffix='.txt')
+                os.close(fd)
+                exec_command = _build_cwd_capture(exec_command, _capture_file)
+            except OSError as _cap_e:
+                logger.debug('[run_command] cwd capture setup skipped: %s', _cap_e)
+                _capture_file = None
+
     shell_prefix = SHELL_PREFIX
     full_command = f'{shell_prefix} {exec_command}' if shell_prefix else exec_command
 
@@ -1274,14 +1351,31 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     logger.info('run_command: $ %s  (timeout=%s, cwd=%s, interactive=%s)',
                 command[:120], timeout_str, base, bool(stdin_callback))
 
+    def _flush_cwd_capture():
+        """Read the capture file (if any) and feed the sink. Best-effort."""
+        if not _capture_file:
+            return
+        captured = _read_cwd_capture(_capture_file)
+        if captured:
+            try:
+                cwd_sink(captured)
+            except Exception as _e:
+                logger.debug('[run_command] cwd_sink raised: %s', _e)
+
     # ── Non-interactive fast path (no stdin_callback) ──
     if not stdin_callback:
-        return _run_command_simple(command, full_command, timeout, base, task=task,
-                                   on_chunk=on_chunk)
+        try:
+            return _run_command_simple(command, full_command, timeout, base, task=task,
+                                       on_chunk=on_chunk)
+        finally:
+            _flush_cwd_capture()
 
     # ── Interactive path: Popen with stdin pipe + stdin detection ──
-    return _run_command_interactive(command, full_command, timeout, base, stdin_callback,
-                                    on_chunk=on_chunk, task=task)
+    try:
+        return _run_command_interactive(command, full_command, timeout, base, stdin_callback,
+                                        on_chunk=on_chunk, task=task)
+    finally:
+        _flush_cwd_capture()
 
 
 def _safe_on_chunk(on_chunk, stream, text):

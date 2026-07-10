@@ -39,9 +39,47 @@ def _get_commit_lock(conv_id: str) -> threading.Lock:
         return lk
 
 
+def _stamp_segment_translations(msg, segment_translations):
+    """Stamp per-round translated Chinese onto ``msg['segments']`` by llmRound.
+
+    ``segment_translations`` is ``{round_num: 中文}``. Each non-deliverable
+    ``text`` segment whose ``llmRound`` matches a key gets ``translatedText``.
+    A no-op when the message carries no segments (pre-v36 row) or none match.
+    """
+    segs = msg.get('segments')
+    if not isinstance(segs, list) or not segs:
+        return
+    stamped = 0
+    for seg in segs:
+        if not isinstance(seg, dict):
+            continue
+        if seg.get('type') != 'text' or seg.get('deliverable'):
+            continue
+        lr = seg.get('llmRound')
+        if lr is None:
+            continue
+        txt = segment_translations.get(lr)
+        if txt and txt.strip():
+            seg['translatedText'] = txt
+            stamped += 1
+    if stamped:
+        logger.debug('[Translate] stamped translatedText on %d/%d segments',
+                     stamped, len(segs))
+
+
 def _commit_translation_to_db(conv_id, msg_idx, field, translated_text,
-                              original_text=None, model=None, msg_id=None):
+                              original_text=None, model=None, msg_id=None,
+                              segment_translations=None, fallback_segments=None):
     """Write translated content directly into the conversation's messages in DB.
+
+    ``segment_translations`` (optional): a ``{round_num: 中文}`` map from the
+    incremental per-round translator. When present, each non-deliverable text
+    segment of ``msg['segments']`` whose ``llmRound`` matches a key is stamped
+    with ``translatedText`` so the settled segment-timeline render shows the
+    translated narration in place (interleaved with its tools), exactly like
+    the streaming preview. A pure projection co-located on the authoritative
+    segment — parallel to ``translatedContent`` beside ``content``; the
+    ``translatedContent`` blob semantics are unchanged.
 
     See module docstring for the race-safety rationale.
     """
@@ -53,11 +91,14 @@ def _commit_translation_to_db(conv_id, msg_idx, field, translated_text,
     with lock:
         _commit_translation_inner(conv_id, msg_idx, field, translated_text,
                                   original_text=original_text, model=model,
-                                  msg_id=msg_id)
+                                  msg_id=msg_id,
+                                  segment_translations=segment_translations,
+                                  fallback_segments=fallback_segments)
 
 
 def _commit_translation_inner(conv_id, msg_idx, field, translated_text,
-                              original_text=None, model=None, msg_id=None):
+                              original_text=None, model=None, msg_id=None,
+                              segment_translations=None, fallback_segments=None):
     """CAS-retry body of _commit_translation_to_db (caller holds conv lock).
 
     Resolution order for the target message:
@@ -143,6 +184,38 @@ def _commit_translation_inner(conv_id, msg_idx, field, translated_text,
                 msg['_translateDone'] = True
                 if model:
                     msg['_translateModel'] = model
+                # ★ Per-round carry to the settled segment timeline: stamp each
+                #   non-deliverable text segment with its translated Chinese,
+                #   keyed by llmRound ≡ round_num (exact — never text-equality,
+                #   which whitespace-normalization can miss and identical
+                #   narration can collide). Deliverable/terminal segments are
+                #   excluded from the timeline (rendered via translatedContent),
+                #   so they need nothing.
+                if segment_translations:
+                    # ★ SELF-HEAL (SSOT ordering guarantee): the stamp is a
+                    #   no-op when the resolved DB message carries no
+                    #   `segments` — which happens when this commit raced
+                    #   ahead of (or the frontend row-write CAS beat)
+                    #   _sync_result_to_conversation, the reported 0/N bug. If
+                    #   the caller handed the authoritative thin segments
+                    #   (task['segments'] captured at finalize), splice them
+                    #   onto the message in THIS SAME CAS write so the stamp
+                    #   has something to land on. Gated on a non-empty map so
+                    #   a plain translatedContent commit never fabricates
+                    #   segments; segments are backend-authoritative so this
+                    #   is not a second source of truth. `updated_at` still
+                    #   bumps below (segments are new state here, unlike the
+                    #   byte-identical save_conv preserve merge).
+                    _existing_segs = msg.get('segments')
+                    if (not (isinstance(_existing_segs, list) and _existing_segs)
+                            and isinstance(fallback_segments, list)
+                            and fallback_segments):
+                        msg['segments'] = fallback_segments
+                        logger.info('[Translate] commit: DB msg had no segments '
+                                    '— spliced %d authoritative segments before '
+                                    'stamp (conv=%s)', len(fallback_segments),
+                                    conv_id[:8])
+                    _stamp_segment_translations(msg, segment_translations)
             elif field == 'content':
                 if not msg.get('originalContent'):
                     msg['originalContent'] = msg.get('content', '')
@@ -179,6 +252,18 @@ def _commit_translation_inner(conv_id, msg_idx, field, translated_text,
                         '(%d chars, attempt=%d)',
                         field, conv_id[:8], idx, resolved_via or 'idx',
                         len(translated_text), attempt + 1)
+            # Event-driven cross-device sync: the translated body changed, so
+            # push the post-write rev → a sibling tab with this conv open shows
+            # the translation without a manual refresh.
+            try:
+                from lib.conversations import notify_conv_changed
+                _tr_rev_row = db.execute(
+                    'SELECT rev FROM conversations WHERE id=? AND user_id=?',
+                    (conv_id, DEFAULT_USER_ID)).fetchone()
+                notify_conv_changed(conv_id, rev=(_tr_rev_row[0] if _tr_rev_row else None))
+            except Exception as _ne:
+                logger.debug('[Translate] conv-changed notify skipped conv=%s: %s',
+                             conv_id[:8], _ne)
             return
         except Exception as e:
             last_err = e

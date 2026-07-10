@@ -318,5 +318,7 @@ class TestEndpointFlowParity:
 
 
 if __name__ == '__main__':
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_endpoint_flow_parity.__main__')
     import unittest
     unittest.main()

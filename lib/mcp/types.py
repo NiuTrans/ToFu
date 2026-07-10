@@ -50,6 +50,18 @@ MCP_BREAKER_MAX_BACKOFF = int(os.environ.get('TOFU_MCP_BREAKER_MAX_BACKOFF', '60
 # successful call resets the streak. Set to 0 to disable the gate.
 MCP_DEGRADED_TIMEOUT_STREAK = int(os.environ.get('TOFU_MCP_DEGRADED_TIMEOUT_STREAK', '3'))
 
+# ── Credential health probe (detect expired cookies/tokens quietly) ──
+# Transport health (a live subprocess + a successful protocol ping) does NOT
+# imply the server's stored CREDENTIALS are still valid — an Overleaf session
+# cookie expires (~30 days) while the subprocess stays happily connected, so
+# every real tool call returns an auth-error string. To surface that in the
+# settings panel WITHOUT a user action, a server whose catalog entry declares a
+# read-only ``health_probe`` tool is probed once on connect and then every
+# MCP_CRED_PROBE_INTERVAL seconds by the keepalive loop; the probe result text
+# is classified against the entry's ``fail_patterns`` into ok / expired. Set to
+# 0 to disable the periodic probe (the connect-time probe still runs).
+MCP_CRED_PROBE_INTERVAL = int(os.environ.get('TOFU_MCP_CRED_PROBE_INTERVAL', '900'))
+
 
 class MCPServerConfig(TypedDict, total=False):
     """Configuration for a single MCP server."""

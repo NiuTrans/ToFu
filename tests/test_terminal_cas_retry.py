@@ -199,6 +199,8 @@ def main():
     print()
     print(_color('═══ terminal _sync_result_to_conversation CAS-retry tests ═══', '36'))
     print()
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_terminal_cas_retry.__main__')
     tests = [
         test_terminal_cas_retry_persists_after_miss,
         test_terminal_cas_skips_when_frontend_won,

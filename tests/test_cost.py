@@ -157,5 +157,89 @@ class ComputeCostTest(unittest.TestCase):
             clear_provider_pricing('test-provider')
 
 
+class NormalizeUsageTest(unittest.TestCase):
+    """Pure key-aliasing helper — no cache-convention math."""
+
+    def test_openai_keys(self):
+        from lib.cost import normalize_usage
+        u = normalize_usage({'prompt_tokens': 10, 'completion_tokens': 5})
+        self.assertEqual(u['input'], 10)
+        self.assertEqual(u['output'], 5)
+
+    def test_anthropic_keys(self):
+        from lib.cost import normalize_usage
+        u = normalize_usage({
+            'input_tokens': 7, 'output_tokens': 3,
+            'cache_creation_input_tokens': 20,
+            'cache_read_input_tokens': 40,
+            'thinking_tokens': 9,
+        })
+        self.assertEqual(u['input'], 7)
+        self.assertEqual(u['output'], 3)
+        self.assertEqual(u['cache_write'], 20)
+        self.assertEqual(u['cache_read'], 40)
+        self.assertEqual(u['thinking'], 9)
+
+    def test_null_and_nondict(self):
+        from lib.cost import normalize_usage
+        for bad in (None, {}, 'x', 123):
+            u = normalize_usage(bad)  # type: ignore[arg-type]
+            self.assertEqual(u, {'input': 0, 'output': 0, 'cache_write': 0,
+                                 'cache_read': 0, 'thinking': 0})
+
+    def test_string_values_coerced(self):
+        from lib.cost import normalize_usage
+        u = normalize_usage({'prompt_tokens': '15', 'completion_tokens': None})
+        self.assertEqual(u['input'], 15)
+        self.assertEqual(u['output'], 0)
+
+    def test_openai_key_wins_when_both_present(self):
+        # A dict carries ONE convention, but if both are present the primary
+        # (OpenAI) key is read first — matches the legacy `a or b` order.
+        from lib.cost import normalize_usage
+        u = normalize_usage({'prompt_tokens': 100, 'input_tokens': 999})
+        self.assertEqual(u['input'], 100)
+
+    def test_matches_legacy_inline_expression(self):
+        """Parity: normalize_usage must equal the old inline
+        ``int(usage.get('prompt_tokens') or usage.get('input_tokens') or 0)``
+        for representative usage dicts (both conventions)."""
+        from lib.cost import normalize_usage
+        samples = [
+            {'prompt_tokens': 10, 'completion_tokens': 5},
+            {'input_tokens': 7, 'output_tokens': 3},
+            {'input_tokens': 0, 'output_tokens': 0},
+            {},
+        ]
+        for s in samples:
+            legacy_in = int(s.get('prompt_tokens') or s.get('input_tokens') or 0)
+            legacy_out = int(s.get('completion_tokens')
+                             or s.get('output_tokens') or 0)
+            u = normalize_usage(s)
+            self.assertEqual(u['input'], legacy_in, s)
+            self.assertEqual(u['output'], legacy_out, s)
+
+    def test_neuter_alias_table_breaks_anthropic_read(self):
+        """Double-neuter: dropping the Anthropic alias makes an Anthropic-shape
+        usage dict read as 0 input — proving the fallback key is load-bearing.
+        """
+        import lib.cost as cost_mod
+        original = cost_mod._USAGE_KEY_ALIASES
+        anthropic = {'input_tokens': 42, 'output_tokens': 8}
+        # Baseline: reads correctly.
+        self.assertEqual(cost_mod.normalize_usage(anthropic)['input'], 42)
+        try:
+            # NEUTER: only the OpenAI key remains for 'input'.
+            cost_mod._USAGE_KEY_ALIASES = dict(original)
+            cost_mod._USAGE_KEY_ALIASES['input'] = ('prompt_tokens',)
+            self.assertEqual(
+                cost_mod.normalize_usage(anthropic)['input'], 0,
+                'neutered alias table should fail to read input_tokens')
+        finally:
+            cost_mod._USAGE_KEY_ALIASES = original
+        # Restored: reads correctly again.
+        self.assertEqual(cost_mod.normalize_usage(anthropic)['input'], 42)
+
+
 if __name__ == '__main__':
     unittest.main()

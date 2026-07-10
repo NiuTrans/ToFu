@@ -347,6 +347,15 @@ def get_server_config():
         logger.warning('[ServerConfig] translation policy unavailable: %s', e)
         translation_policy = {}
 
+    # Language-detection cascade policy — single source of truth for the
+    # Tier-1→Tier-2 escalation thresholds. See lib/text_lang.detect_language_policy().
+    try:
+        from lib.text_lang import detect_language_policy
+        lang_detect_policy = detect_language_policy()
+    except Exception as e:
+        logger.warning('[ServerConfig] lang-detect policy unavailable: %s', e)
+        lang_detect_policy = {}
+
     return jsonify({
         'providers': providers, 'presets': presets,
         'models': models, 'search': search_info,
@@ -365,6 +374,7 @@ def get_server_config():
         'upload': upload_policy,
         'context': context_policy,
         'translation': translation_policy,
+        'langDetect': lang_detect_policy,
     })
 
 

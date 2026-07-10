@@ -71,9 +71,19 @@ def _memory_merge(fn_args, project_path, extra_paths=None):
     )
     merged = result['merged_memory']
     n_del = len(result['deleted_ids'])
+    failed = result.get('failed_ids') or []
+    content = (
+        f"Merged {n_del} memories → **{merged['name']}** (id: {merged['id']}, scope: {merged['scope']})"
+    )
+    if failed:
+        content += (
+            f"\n\n⚠️ {len(failed)} source memory(ies) could NOT be deleted and "
+            f"remain as duplicates of the merged memory: {', '.join(failed)}. "
+            f"Delete them manually if the merge should replace them."
+        )
     return (
-        f"Merged {n_del} memories → **{merged['name']}** (id: {merged['id']}, scope: {merged['scope']})",
-        f'🔀 merged {n_del}',
+        content,
+        f'🔀 merged {n_del}' + (f' ({len(failed)} kept)' if failed else ''),
         f"🔀 Merge → {fn_args.get('name', '?')}",
     )
 

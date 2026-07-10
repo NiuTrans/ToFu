@@ -27,7 +27,8 @@ try:
     _UNREACHABLE_COOLDOWN = float(os.environ.get('TOFU_UNREACHABLE_COOLDOWN', '30'))
     if _UNREACHABLE_COOLDOWN <= 0:
         _UNREACHABLE_COOLDOWN = 30.0
-except (ValueError, TypeError):
+except (ValueError, TypeError) as e:
+    logger.debug('[Dispatch] TOFU_UNREACHABLE_COOLDOWN parse failed, using default: %s', e)
     _UNREACHABLE_COOLDOWN = 30.0
 
 
@@ -56,6 +57,63 @@ def _raise_dispatch_exhausted(last_err, *, max_retries, capability,
     raise last_err or RuntimeError(
         'All %d %s attempts failed for capability=%s'
         % (max_retries, what, capability))
+
+
+
+def _cool_slot_on_premature_close(slot, usage, prev_consecutive_errors=0):
+    """Feed a premature-close stream anomaly into the slot's health scorer.
+
+    ``lib/llm/_sse_core.py::SSEAccumulator.finalize`` sets ``usage['_missing_done']``
+    when the upstream closed the SSE connection before the ``[DONE]`` marker —
+    and ONLY when the close was neither a client abort nor a clean finish
+    (``if not aborted and not saw_done``). That is a genuine soft failure:
+    the HTTP call connected and streamed, but the body is incomplete/unusable.
+    Historically it was only logged, so the offending upstream kept getting
+    re-picked. Route it through the SAME ``record_truncation`` path the
+    translate retry loop uses (bumps ``consecutive_errors`` → after 3 the slot
+    is cooled with the existing exponential backoff / 300s cap — no new
+    hyperparameter).
+
+    ★ Accumulation across dispatches. This runs AFTER ``record_success``, whose
+    latency/throughput/RPM-recovery bookkeeping is legitimately valid (the
+    connection DID stream) — but it ALSO zeroes ``consecutive_errors``. If we
+    let ``record_truncation`` bump the just-zeroed counter, every premature
+    close would reset to 1 and the slot could NEVER reach the ``>=3`` cooldown
+    threshold, no matter how many times the SAME upstream drops. So we restore
+    the pre-``record_success`` error count first, then let ``record_truncation``
+    do its usual ``+= 1`` + threshold-cooldown on top — accumulation survives.
+
+    The over-cooling guard is the ``_missing_done`` predicate itself: a clean
+    close (``saw_done``) or a client abort never sets the flag, so a healthy
+    upstream and a user-cancelled stream are never cooled.
+    """
+    if not isinstance(usage, dict) or not usage.get('_missing_done'):
+        return
+    try:
+        _elapsed = usage.get('stream_elapsed_ms', 0)
+        _chunks = usage.get('_chunks_received', 0)
+        # Undo record_success()'s zeroing so consecutive premature closes on
+        # the same slot accumulate toward the cooldown threshold.
+        with slot._lock:
+            slot.consecutive_errors = max(slot.consecutive_errors,
+                                          prev_consecutive_errors)
+        slot.record_truncation(
+            error='premature stream close (no [DONE]) '
+                  'elapsed_ms=%s chunks=%s' % (_elapsed, _chunks))
+        from lib.log import audit_log
+        audit_log('premature_close_cooldown',
+                  key_name=slot.key_name, model=slot.model,
+                  provider_id=slot.provider_id,
+                  consecutive_errors=slot.consecutive_errors,
+                  cooldown_until=round(slot.cooldown_until, 1),
+                  elapsed_ms=_elapsed, chunks=_chunks,
+                  trace_id=usage.get('trace_id', ''))
+        logger.warning('[Dispatch] Premature stream close on %s:%s — '
+                       'recorded soft failure (consecutive_errors=%d)',
+                       slot.key_name, slot.model, slot.consecutive_errors)
+    except Exception as e:
+        logger.warning('[Dispatch] _cool_slot_on_premature_close failed '
+                       'for %s:%s: %s', slot.key_name, slot.model, e)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1089,6 +1147,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 except (ValueError, TypeError) as _e_audit:
                     logger.debug('[api] dispatch_stream caught %s: %s', type(_e_audit).__name__, _e_audit)
                     _out_tokens = 0
+            _prev_ce = slot.consecutive_errors
             slot.record_success(latency, ttft_ms=ttft_value[0],
                                 output_tokens=_out_tokens)
             # Inject dispatch metadata so callers know which slot served this
@@ -1101,6 +1160,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     'attempt': state.hard_attempts + 1,
                     '429_retries': state._429_count,
                 }
+            _cool_slot_on_premature_close(slot, usage, _prev_ce)
             if state._429_count > 0:
                 logger.info('%s dispatch_stream OK after %d 429-retries: '
                             'finish_reason=%s model=%s provider=%s latency=%.0fms',
@@ -1398,6 +1458,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                     logger.debug('[api] async_dispatch_stream caught %s: %s',
                                  type(_e_audit).__name__, _e_audit)
                     _out_tokens = 0
+            _prev_ce = slot.consecutive_errors
             slot.record_success(latency, ttft_ms=ttft_value[0],
                                 output_tokens=_out_tokens)
             if isinstance(usage, dict):
@@ -1409,6 +1470,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                     'attempt': state.hard_attempts + 1,
                     '429_retries': state._429_count,
                 }
+            _cool_slot_on_premature_close(slot, usage, _prev_ce)
             logger.debug('%s async_dispatch_stream OK: finish=%s model=%s '
                          'latency=%.0fms', log_prefix, finish, slot.model, latency)
             return msg, finish, usage

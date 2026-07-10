@@ -141,11 +141,20 @@ def persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
     if settings_patch:
         settings_update.update(settings_patch)
 
-    # Always inject lastMsgRole/lastMsgTimestamp
+    # Always inject lastMsgRole/lastMsgTimestamp + the settled-turn facts the
+    # sidebar needs to render an incomplete/errored dot WITHOUT loading the
+    # (stripped) messages array. We store RAW facts only (finishReason / error
+    # bool / has-output bool); the incomplete/errored CLASSIFICATION stays in
+    # the frontend's _convStatusFlags so there is a single classifier.
     if messages:
         last = messages[-1]
         settings_update['lastMsgRole'] = last.get('role')
         settings_update['lastMsgTimestamp'] = last.get('timestamp')
+        settings_update['lastFinishReason'] = last.get('finishReason')
+        settings_update['lastMsgError'] = bool(last.get('error'))
+        settings_update['lastMsgHasOutput'] = bool(
+            (last.get('content') or '') or (last.get('thinking') or '')
+            or (last.get('toolRounds') or []) or last.get('_igResults'))
 
     # Merge with existing settings AND preserve original created_at
     existing = db.execute(

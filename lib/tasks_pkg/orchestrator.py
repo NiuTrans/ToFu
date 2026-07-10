@@ -10,6 +10,7 @@ dict.  ``endpoint.py`` uses it to drive the outer work→review→revise loop.
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from typing import Any
@@ -406,6 +407,56 @@ def _maybe_auto_retry_turn(task: dict[str, Any], cfg: dict[str, Any]) -> bool:
     return True
 
 
+_SRC_URL_RE = re.compile(r'https?://[^\s<>\]\)"`）】]+')
+
+
+def _maybe_append_sources_footer(task: dict[str, Any], all_search_results_text: list[str]) -> None:
+    """Deterministic guard: if the model actually consulted web pages this turn
+    (``all_search_results_text`` non-empty) but its final answer cites NONE of
+    the URLs it opened, append a compact "来源 / Sources" footer listing the
+    deduped URLs it actually retrieved.
+
+    Mechanism-first backstop for the system-prompt citation nudge: a
+    non-compliant model can ignore the prompt, but this footer can't be
+    ignored — it directly closes the 有据性=0 gap on web-research turns.
+
+    Rules (never fabricate): only URLs that literally appeared in the fetched
+    search-result text this turn; http(s) only; deduped preserving order;
+    capped at 5. No-op when the answer already contains ≥1 opened URL, when no
+    web results exist, or when the answer is empty/aborted.
+    """
+    content = task.get('content') or ''
+    if not content.strip() or task.get('aborted'):
+        return
+    if not all_search_results_text:
+        return
+    # URLs the model actually saw (format.py emits "URL: <url>" per result).
+    seen = _SRC_URL_RE.findall('\n'.join(all_search_results_text))
+    if not seen:
+        return
+
+    def _norm(u: str) -> str:
+        return u.split('#')[0].rstrip('/.,);：、')
+
+    opened, order = set(), []
+    for u in seen:
+        n = _norm(u)
+        if n and n not in opened:
+            opened.add(n)
+            order.append(n)
+    # Already cited at least one opened source? Then respect the model's choice.
+    if any(n in content for n in opened):
+        return
+    footer_urls = order[:5]
+    if not footer_urls:
+        return
+    footer = "\n\n---\n**来源 / Sources**（本轮检索所用，供核对）：\n" + \
+             "\n".join(f"- {u}" for u in footer_urls)
+    task['content'] = content + footer
+    logger.info('[%s] appended Sources footer (%d urls) — answer cited none of the '
+                'pages it opened this turn', task['id'][:8], len(footer_urls))
+
+
 def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, thinking_depth: str | None, cfg: dict[str, Any],
                             last_finish_reason, last_usage, accumulated_usage, api_rounds,
                             tool_call_happened, messages, original_messages,
@@ -495,6 +546,15 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         task['content'] = '⚠️ 该回复被模型安全过滤器拦截，请尝试换一种方式提问。\n\n_The response was blocked by the model\'s safety filter. Please try rephrasing your question._'
         logger.info('[%s] Injected content_filter user-facing message (finish_reason=%s, loop_exit=%s)',
                     tid, last_finish_reason, _loop_exit_reason)
+
+    # ── Deterministic source-citation backstop (web-research turns) ──
+    # If the model consulted web pages but cited none of them, append a compact
+    # Sources footer of the URLs it actually opened. Pairs with the system-prompt
+    # citation nudge (section_tone_and_style web_tools path) as the robust half.
+    try:
+        _maybe_append_sources_footer(task, all_search_results_text)
+    except Exception as _src_e:  # never let the backstop break finalization
+        logger.warning('[%s] sources-footer backstop failed: %s', tid, _src_e)
 
     # ── Determine final finish reason ──
     if task['aborted']:
@@ -599,9 +659,9 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         _proj_feed = (project_path or '').strip() if project_enabled else ''
         if (_proj_feed and task.get('convId')
                 and not (_cfg_feed.get('autopilotRunId') or '').strip()):
-            from lib.conversations.project_feed import emit_project_event
+            from lib.agent_core.activity import emit_activity_event
             _kind_feed = 'aborted' if task.get('aborted') else 'completed'
-            emit_project_event(
+            emit_activity_event(
                 _proj_feed, task['convId'], _kind_feed,
                 (task.get('lastUserQuery') or '').strip() or ('Turn ' + _kind_feed),
                 task_id=task['id'])
@@ -1118,6 +1178,27 @@ def run_task(task: dict[str, Any]) -> None:
     try:
         cfg = task['config']
 
+        # ── Autopilot VU startup attribution ──
+        #   The VU sub-task's ``events`` is a _VUEventForwarder, so any PHASE
+        #   emitted here auto-forwards into the synthetic-user bubble. The
+        #   pre-stream prep window (tool assembly → tool-history rebuild →
+        #   system-context injection → FUSE memory/project prefetch) is
+        #   otherwise SILENT for up to tens of seconds on a large conversation
+        #   (measured 2.9–4.7s typical, ~26s on a 3000-event conv), leaving the
+        #   bubble on a vague placeholder. Naming each real sub-step keeps the
+        #   display honest. Gated on ``_vu_subtask`` so the ordinary
+        #   worker/endpoint startup path stays byte-identical (no new events).
+        _vu_startup = bool(task.get('_vu_subtask'))
+
+        def _vu_phase(detail):
+            if not _vu_startup:
+                return
+            try:
+                append_event(task, build_event(
+                    EventType.PHASE, phase='working', detail=detail))
+            except Exception as _e:
+                logger.debug('[Task %s] vu startup phase emit failed: %s', tid, _e)
+
         # ── Reset swarm auto-continue chain on HUMAN turns ──
         # A human-initiated turn (NOT itself a swarm auto-continuation) means
         # the user is back in the loop, so the consecutive-auto-continue
@@ -1262,7 +1343,30 @@ def run_task(task: dict[str, Any]) -> None:
                                              '— round already mutated files',
                                              task['id'][:8])
                                 return
-                            _ext = fh.detect_external_edits(project_path)
+                            # Pass the set of known Tofu task ids so the probe
+                            # can tell a CONCURRENT conversation's write on the
+                            # shared project root (last_writer_task_id ∈ known)
+                            # from a genuine out-of-band IDE edit — the former
+                            # must NOT surface as an "edited outside Tofu" toast.
+                            try:
+                                from lib.tasks_pkg.manager import (
+                                    tasks as _known_tasks,
+                                    tasks_lock as _known_tasks_lock,
+                                )
+                                with _known_tasks_lock:
+                                    _known_task_ids = set(_known_tasks.keys())
+                            except Exception as _kte:
+                                logger.debug('[Task:%s] known-task-id snapshot '
+                                             'failed: %s', task['id'][:8], _kte)
+                                _known_task_ids = None
+                            _ext = fh.detect_external_edits(
+                                project_path, known_task_ids=_known_task_ids)
+                            if _ext.get('siblingFiles'):
+                                logger.info('[Task:%s] external-edit probe '
+                                            'attributed %d drifted file(s) to '
+                                            'concurrent Tofu task(s) — suppressed '
+                                            'IDE toast', task['id'][:8],
+                                            len(_ext.get('siblingFiles', [])))
                             if (task.get('modifiedFileList')
                                     or task.get('modifiedFiles')):
                                 logger.debug('[Task:%s] external-edit probe '
@@ -1352,6 +1456,7 @@ def run_task(task: dict[str, Any]) -> None:
         task['_prefetch_memory'] = _prefetch_memory_future
 
         # ── Section 2: Tool Assembly ──
+        _vu_phase('Autopilot：装配工具、准备工作区…')
         tool_list, has_real_tools, max_tool_rounds = _assemble_tool_list(
             cfg, project_path, project_enabled, task['id'],
             search_mode, search_enabled, fetch_enabled,
@@ -1433,6 +1538,7 @@ def run_task(task: dict[str, Any]) -> None:
         _keep_tool_history = cfg.get('keepToolHistory', True)
         _conv_id = task.get('convId', '')
         if _keep_tool_history and _conv_id:
+            _vu_phase('Autopilot：重建工具调用历史…')
             rebuilt, _rebuild_stats = _rebuild_messages_with_history(_conv_id, messages)
             if _rebuild_stats['used_store']:
                 # Log the overhead for monitoring
@@ -1461,6 +1567,7 @@ def run_task(task: dict[str, Any]) -> None:
                              tid, _conv_id[:8])
 
         # ── Section 3: Context Injection ──
+        _vu_phase('Autopilot：注入系统上下文（项目结构、记忆检索）…')
         _tool_names = {
             (t.get('function') or {}).get('name')
             for t in (tool_list or [])
@@ -1528,6 +1635,7 @@ def run_task(task: dict[str, Any]) -> None:
         logger.info('[Timing:%s] prep=%.3fs (run_task→context-ready, '
                     'model=%s) — about to build first LLM request',
                     tid, _t_prep_done - _t_run_start, model)
+        _vu_phase('Autopilot：上下文就绪，正在发送请求…')
 
         # NOTE: Auto-prefetch disabled — the model can fetch URLs on demand
         # via the fetch_url tool call when it deems them relevant, rather than
@@ -1616,6 +1724,39 @@ def run_task(task: dict[str, Any]) -> None:
                 task['content'] = _content_prefix
             logger.debug('[%s] conv=%s Applied contentPrefix (%d chars) from continue checkpoint',
                          tid, task.get('convId', ''), len(_content_prefix))
+
+        # ★ Resume-prefill (epic pt_cb8f98b0cb9b47fb): the capability-gated
+        #   exception to the "never inject contentPrefix as a trailing assistant
+        #   turn" rule above. resumePrefill is set ONLY when routes/chat.py's
+        #   resume_prefill_from_segments already confirmed the target provider
+        #   TOLERATES a trailing assistant prefill (model_supports_assistant_
+        #   prefill → False for Claude, so Claude never reaches here). Injecting
+        #   the terminal deliverable tail as a trailing assistant turn makes the
+        #   model CONTINUE the same tokens (case 2: mid-prose after a tool batch;
+        #   case 3: mid-answer no-tool turn) instead of regenerating from the
+        #   checkpoint. The tool batch (if any) was already replayed by
+        #   inject_tool_history above; the pre-tool prose lives on those
+        #   assistant(tool_calls) turns, so the prefill (terminal deliverable
+        #   only) never double-counts. task['content'] is seeded with the FULL
+        #   prior content (contentPrefix) so display = full + continuation.
+        #
+        #   Defence in depth: even if a dispatcher model-swap routed this to
+        #   Claude after the gate, _strip_trailing_assistant_for_claude() in
+        #   build_body()/dispatch_stream() would neutralise the trailing turn
+        #   (the Claude-4.6 prefill-removal guard) — so a leak degrades to
+        #   today's regenerate-from-checkpoint, never an HTTP 400.
+        _resume_prefill = cfg.get('resumePrefill') or ''
+        from lib.model_info import model_supports_assistant_prefill
+        if _resume_prefill and model_supports_assistant_prefill(model):
+            messages.append({'role': 'assistant', 'content': _resume_prefill})
+            task['_resumePrefill'] = _resume_prefill
+            logger.info('[%s] conv=%s Injected resume prefill (%d chars) as trailing '
+                        'assistant turn — model=%s will continue the same tokens',
+                        tid, task.get('convId', ''), len(_resume_prefill), model)
+        elif _resume_prefill:
+            logger.info('[%s] conv=%s resumePrefill present but model=%s rejects prefill '
+                        '— falling back to regenerate-from-checkpoint (contentPrefix seed only)',
+                        tid, task.get('convId', ''), model)
 
         # ★ Stash checkpoint metadata for merging into done event and DB persistence.
         #   NOTE: we do NOT pre-populate task['toolRounds'] with checkpoint rounds
@@ -1749,37 +1890,84 @@ def run_task(task: dict[str, Any]) -> None:
                                 'role':    'user',
                                 'content': '\n\n'.join(_payloads),
                             })
-                            # Persist the delivered flag so a restart mid-turn
-                            # doesn't re-inject these <swarm-update>s on resume.
-                            try:
-                                from lib.swarm import persistence as _swarm_persist
-                                _swarm_persist.mark_delivered(
-                                    _swarm_key_for(task),
-                                    [it.get('agent_id', '') for it in _inbox_items
-                                     if it.get('agent_id')])
-                            except Exception as _mde:
-                                logger.debug('[Task %s] swarm mark_delivered failed: %s',
-                                             tid, _mde)
+                            # ── Partition the drained items by mode ──
+                            #   Peer messages (Pillar #6 fast-path lane) carry
+                            #   mode='peer-msg' + a durable-row queueId; swarm
+                            #   sub-agent results carry an agent_id. Both share
+                            #   the ONE coalesced user message above, but their
+                            #   de-dup + observability handling differ.
+                            _peer_items = [it for it in _inbox_items
+                                           if it.get('mode') == 'peer-msg'
+                                           and it.get('value')]
+                            _swarm_items = [it for it in _inbox_items
+                                            if it.get('mode') != 'peer-msg'
+                                            and it.get('value')]
+
+                            # Swarm: persist the delivered flag so a restart
+                            # mid-turn doesn't re-inject these <swarm-update>s.
+                            if _swarm_items:
+                                try:
+                                    from lib.swarm import persistence as _swarm_persist
+                                    _swarm_persist.mark_delivered(
+                                        _swarm_key_for(task),
+                                        [it.get('agent_id', '') for it in _swarm_items
+                                         if it.get('agent_id')])
+                                except Exception as _mde:
+                                    logger.debug('[Task %s] swarm mark_delivered failed: %s',
+                                                 tid, _mde)
+                                append_event(task, build_event(
+                                    EventType.SWARM_INBOX_INJECT,
+                                    round=round_num + 1,
+                                    count=len(_swarm_items),
+                                    agentIds=[it.get('agent_id', '')
+                                              for it in _swarm_items],
+                                    # ★ Carry the actual <swarm-update> payloads
+                                    #   (truncated) so the frontend can render an
+                                    #   in-timeline ptool-panel row showing exactly
+                                    #   what the model received — not just a count.
+                                    previews=[{
+                                        'agentId': it.get('agent_id', ''),
+                                        'text': (it.get('value') or '')[:1200],
+                                    } for it in _swarm_items],
+                                ))
+
+                            # Peer: the message is now in the in-memory
+                            # `messages` list but NOT yet consumed by the model.
+                            # The FORWARD-race de-dup (delete the durable row)
+                            # and the PEER_INBOX_INJECT arrival chip are BOTH
+                            # DEFERRED to just after the LLM call confirms
+                            # consumption (see the flush below) — so an abort
+                            # before the call leaves the durable row intact for a
+                            # later fresh-turn redelivery (never zero-delivered).
+                            if _peer_items:
+                                # ── DEFERRED confirmed-delivery (never-zero fix) ──
+                                # Do NOT emit the PEER_INBOX_INJECT chip NOR
+                                # delete the durable message_queue rows here. At
+                                # this point the message is only placed in the
+                                # IN-MEMORY `messages` list — the model has not
+                                # yet consumed it. If the task aborts / crashes
+                                # between here and the LLM call, the inbox twin is
+                                # already drained (gone) and the in-memory message
+                                # dies with the task; deleting the durable row now
+                                # would make the message render NOWHERE (zero
+                                # delivery), and emitting the chip now would show
+                                # a delivery that never happened. Instead stash
+                                # the peer items and do BOTH — emit the chip AND
+                                # delete the durable rows — only AFTER the LLM
+                                # call returns (delivery confirmed), so
+                                # chip-shown ⟺ model-consumed ⟺ durable-deleted
+                                # is one atomic step. On an abort the durable row
+                                # SURVIVES → it is re-dispatched later as a fresh
+                                # turn (delivered late, never lost, and rendered
+                                # exactly once).
+                                task.setdefault(
+                                    '_peer_inject_pending', []).extend(_peer_items)
+
                             logger.info(
-                                '[Task %s] injected %d swarm-update item(s) '
-                                'as 1 user message at round %d',
-                                tid, len(_payloads), round_num + 1)
-                            append_event(task, build_event(
-                                EventType.SWARM_INBOX_INJECT,
-                                round=round_num + 1,
-                                count=len(_payloads),
-                                agentIds=[it.get('agent_id', '')
-                                          for it in _inbox_items
-                                          if it.get('value')],
-                                # ★ Carry the actual <swarm-update> payloads
-                                #   (truncated) so the frontend can render an
-                                #   in-timeline ptool-panel row showing exactly
-                                #   what the model received — not just a count.
-                                previews=[{
-                                    'agentId': it.get('agent_id', ''),
-                                    'text': (it.get('value') or '')[:1200],
-                                } for it in _inbox_items if it.get('value')],
-                            ))
+                                '[Task %s] injected %d inbox item(s) '
+                                '(%d swarm, %d peer) as 1 user message at round %d',
+                                tid, len(_payloads), len(_swarm_items),
+                                len(_peer_items), round_num + 1)
             except Exception as _e:
                 logger.error(
                     '[Task %s] swarm inbox drain/inject failed at round %d: %s '
@@ -1858,6 +2046,47 @@ def run_task(task: dict[str, Any]) -> None:
                 model = llm_result['model']
                 preset = llm_result['preset']
                 thinking_enabled = llm_result['thinking_enabled']
+
+                # ── Flush DEFERRED peer delivery (never-zero fix) ──
+                #   The LLM call above succeeded, so the peer message injected
+                #   into `messages` this round WAS consumed by the model. NOW —
+                #   atomically — emit the PEER_INBOX_INJECT chip (the in-timeline
+                #   arrival marker) AND delete the durable message_queue row(s)
+                #   so dispatch_next_queued can't later re-dispatch them as a
+                #   redundant fresh turn. If the task had aborted BEFORE this
+                #   point, neither happened and the durable row SURVIVED → it is
+                #   re-dispatched later as a fresh turn (delivered late, rendered
+                #   exactly once — never zero, never double). Runs after a
+                #   fallback too (delivery still happened). Best-effort: a delete
+                #   failure only risks a rare double-delivery (reverse-race guard
+                #   still applies), never a loss.
+                _peer_inject = task.pop('_peer_inject_pending', None)
+                if _peer_inject:
+                    try:
+                        append_event(task, build_event(
+                            EventType.PEER_INBOX_INJECT,
+                            round=round_num + 1,
+                            count=len(_peer_inject),
+                            previews=[{
+                                'fromConv': _pit.get('fromConv', ''),
+                                'text': (_pit.get('peerText')
+                                         or _pit.get('value') or '')[:1200],
+                            } for _pit in _peer_inject],
+                        ))
+                    except Exception as _pce:
+                        logger.warning('[Task %s] peer inject chip emit failed: %s',
+                                       tid, _pce)
+                    _conv_dd = task.get('convId', '') or ''
+                    _dd_ids = [_pit.get('queueId') for _pit in _peer_inject
+                               if _pit.get('queueId')]
+                    if _conv_dd and _dd_ids:
+                        try:
+                            from lib.message_queue import dedup_peer_durable_rows
+                            dedup_peer_durable_rows(_conv_dd, _dd_ids)
+                        except Exception as _dde:
+                            logger.warning(
+                                '[Task %s] deferred peer de-dup failed (durable '
+                                'row may re-deliver once): %s', tid, _dde)
                 # Surface the resolved model on the task AS SOON as it's known
                 # (was only set at task finalization), so per-round telemetry
                 # emitted during tool dispatch — e.g. report_hallucinated's
@@ -2117,6 +2346,11 @@ def run_task(task: dict[str, Any]) -> None:
             emit_tool_exec_phase(task, parsed_tcs)
 
             # ── Phase 3: Execute tools (approval + parallel + result append) ──
+            # ★ Reaper heartbeat: a long tool run (or a human-guidance/approval
+            #   block inside it) emits no delta, so refresh the positive-
+            #   liveness clock before entering the pipeline. See
+            #   manager.reap_stuck_running_tasks.
+            task['_dispatch_heartbeat'] = time.time()
             _tool_timed_out = execute_tool_pipeline(
                 task, parsed_tcs, cfg, project_path, project_enabled,
                 tool_list, messages, all_search_results_text, round_num, model,
@@ -2298,6 +2532,35 @@ def run_task(task: dict[str, Any]) -> None:
                                exc_info=True)
         append_event(task, build_event(EventType.DONE, error=_user_err, finishReason='error'))
         persist_task_result(task)
+    except BaseException as be:
+        # ── Non-Exception fatal: cancel / kill / interpreter shutdown ──
+        # KeyboardInterrupt, SystemExit, and asyncio.CancelledError derive from
+        # BaseException, NOT Exception, so they slip past the handler above and
+        # would otherwise leave the task NON-TERMINAL forever — stranding its
+        # admission slot AND (on the headless API) its billing reservation
+        # until the slot TTL / janitor reclaims them. Emit the terminal
+        # DONE(error) so the terminal-callback chain (release slot + settle
+        # billing via on_terminal) still fires, then RE-RAISE so the
+        # cancel/shutdown semantics are preserved for the caller.
+        logger.error('[Orchestrator] run_task FATAL BaseException task=%s: %s',
+                     task.get('id', '?')[:8], type(be).__name__, exc_info=True)
+        try:
+            from lib.error_envelope import make_envelope as _make_env
+            task['error'] = _make_env(
+                'internal', detail=f'Task terminated: {type(be).__name__}',
+                model=task.get('config', {}).get('model', ''),
+                context='task-fatal-base', source='orchestrator', raw=str(be))
+            task['status'] = 'error'
+            task['finishReason'] = 'error'
+            if not task.get('_endpoint_managed'):
+                append_event(task, build_event(
+                    EventType.DONE, error=task['error'], finishReason='error'))
+                persist_task_result(task)
+        except Exception as _fin_err:
+            logger.error('[Orchestrator] BaseException terminal-finalize failed '
+                         'task=%s: %s', task.get('id', '?')[:8], _fin_err,
+                         exc_info=True)
+        raise
     finally:
         # ── Presence: this conversation's turn ended — transition its peer to
         #    IDLE (keep it; the sweep fades it after the idle window, and an

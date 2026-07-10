@@ -18,24 +18,40 @@ function startEditMessage(idx) {
   const conv = getActiveConv();
   if (!conv || activeStreams.has(conv.id) || conv.activeTaskId) return;
   const msg = conv.messages[idx];
-  if (!msg || msg.role !== "user") return;
+  if (!msg) return;
   const msgEl = document.getElementById("msg-" + idx);
   if (!msgEl) return;
   _editingMsgIdx = idx;
+  /* Only a REAL human user turn supports Save & Resend (truncate + regenerate)
+   * and file attachments. Every other lane (assistant / autopilot VU / critic /
+   * planner) is EDIT-IN-PLACE only: a Save button that PATCHes content, no
+   * resend, no attachment tray. `_isVirtualUser` is a machine-authored user
+   * turn, so it takes the edit-in-place path too. */
+  const _isHumanUser = msg.role === "user" && !msg._isVirtualUser;
   // ★ Backup current shared input state, then load message's attachments
-  _editBackupImages = [...pendingImages];
-  _editBackupPdfs = [...pendingPdfTexts];
-  const mainInput = document.getElementById("userInput");
-  _editBackupInput = mainInput ? mainInput.value : "";
-  // Load message's existing attachments into the shared state
-  pendingImages = [...(msg.images || [])];
-  pendingPdfTexts = [...(msg.pdfTexts || [])];
-  // Clear any pending reply quote in the input area
-  if (typeof clearReplyQuote === "function") clearReplyQuote();
+  //   (human-user only — an in-place edit never touches the shared input tray).
+  if (_isHumanUser) {
+    _editBackupImages = [...pendingImages];
+    _editBackupPdfs = [...pendingPdfTexts];
+    const mainInput = document.getElementById("userInput");
+    _editBackupInput = mainInput ? mainInput.value : "";
+    // Load message's existing attachments into the shared state
+    pendingImages = [...(msg.images || [])];
+    pendingPdfTexts = [...(msg.pdfTexts || [])];
+    // Clear any pending reply quote in the input area
+    if (typeof clearReplyQuote === "function") clearReplyQuote();
+  }
   const bodyEl = msgEl.querySelector(".message-body");
-  bodyEl.innerHTML = `<div class="edit-area"><div class="image-previews" id="editImagePreviews"></div><textarea class="edit-textarea" id="edit-textarea-${idx}"></textarea><div class="edit-actions"><button class="edit-cancel-btn" onclick="cancelEditMessage(${idx})">Cancel</button><button class="edit-save-btn" onclick="saveEditOnly(${idx})">Save</button><button class="edit-resend-btn" onclick="saveEditAndResend(${idx})">Save &amp; Resend</button></div><div class="edit-hint">Save: keep subsequent · Save &amp; Resend: truncate and regenerate · Drop/paste files to attach</div></div>`;
-  // ★ Render AFTER DOM is built so #editImagePreviews exists
-  renderImagePreviews();
+  const _previewTray = _isHumanUser
+    ? `<div class="image-previews" id="editImagePreviews"></div>` : "";
+  const _resendBtn = _isHumanUser
+    ? `<button class="edit-resend-btn" onclick="saveEditAndResend(${idx})">Save &amp; Resend</button>` : "";
+  const _hint = _isHumanUser
+    ? `Save: keep subsequent · Save &amp; Resend: truncate and regenerate · Drop/paste files to attach`
+    : `Edit this message in place`;
+  bodyEl.innerHTML = `<div class="edit-area">${_previewTray}<textarea class="edit-textarea" id="edit-textarea-${idx}"></textarea><div class="edit-actions"><button class="edit-cancel-btn" onclick="cancelEditMessage(${idx})">Cancel</button><button class="edit-save-btn" onclick="saveEditOnly(${idx})">Save</button>${_resendBtn}</div><div class="edit-hint">${_hint}</div></div>`;
+  // ★ Render AFTER DOM is built so #editImagePreviews exists (human-user only).
+  if (_isHumanUser) renderImagePreviews();
   const ta = document.getElementById("edit-textarea-" + idx);
   if (ta) {
     ta.value = msg.originalContent || msg.content || "";
@@ -66,8 +82,12 @@ function startEditMessage(idx) {
       const items = e.clipboardData?.items;
       if (!items) return;
       let hasImage = false;
+      // Image attachments belong to the human-user editor only (it owns the
+      // #editImagePreviews tray + shared pendingImages state). An in-place
+      // edit of another lane has no tray — don't clobber the user's live input.
+      const _hasTray = !!document.getElementById("editImagePreviews");
       for (const item of items) {
-        if (item.type.startsWith("image/")) {
+        if (_hasTray && item.type.startsWith("image/")) {
           e.preventDefault();
           hasImage = true;
           const f = item.getAsFile();
@@ -140,11 +160,18 @@ function saveEditOnly(idx) {
   if (!ta) return;
   const t = ta.value.trim();
   const msg = conv.messages[idx];
-  // ★ Collect attachments from shared state (skip still-parsing PDFs)
-  msg.images = [...pendingImages];
-  msg.pdfTexts = pendingPdfTexts.filter(p => p.method !== "parsing");
-  // ★ Restore main input state from backup
-  _restoreInputFromBackup();
+  const _isHumanUser = msg.role === "user" && !msg._isVirtualUser;
+  // ★ Attachments + shared-input restore apply ONLY to the human-user editor;
+  //   an in-place edit of any other lane (assistant / autopilot VU / critic /
+  //   planner) never opened the attachment tray, so touching pendingImages or
+  //   calling _restoreInputFromBackup would clobber the user's live input tray.
+  if (_isHumanUser) {
+    // ★ Collect attachments from shared state (skip still-parsing PDFs)
+    msg.images = [...pendingImages];
+    msg.pdfTexts = pendingPdfTexts.filter(p => p.method !== "parsing");
+    // ★ Restore main input state from backup
+    _restoreInputFromBackup();
+  }
   if (!t && !(msg.images?.length > 0) && !(msg.pdfTexts?.length > 0)) return;
   // ★ Always set content to edited text first
   msg.content = t;

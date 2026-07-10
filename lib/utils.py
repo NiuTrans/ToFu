@@ -84,6 +84,50 @@ def _parser_guided_delimiter_fix(s: str, max_fixes: int = 8):
     return json.loads(cur, strict=False)
 
 
+def _bracket_match_fix(s: str) -> str:
+    """Rewrite mismatched closing brackets to the type the open stack demands.
+
+    A distinct malformation from a *missing* closer: the model closes a
+    container with the WRONG bracket type — e.g. it writes
+    ``[{"path": "x", "end_line": 214]`` (the object closed with ``]`` instead
+    of ``}``). Neither the count-and-append balance step nor the parser-guided
+    ``:``/``,`` insertion can recover this: one only appends closers, the other
+    only inserts delimiters — neither *changes* a wrong closer.
+
+    This walks the string tracking the open-container stack (string-literal
+    and escape aware), rewrites each ``}``/``]`` to match its innermost opener,
+    and appends any still-missing closers in reverse-open order. For
+    well-formed JSON every closer already matches and the stack empties cleanly
+    → the output is byte-identical, so this can never corrupt a valid payload.
+    """
+    out = list(s)
+    stack = []          # open brackets, e.g. ['[', '{']
+    in_str = False
+    escaped = False
+    closer_for = {'{': '}', '[': ']'}
+    for i, ch in enumerate(out):
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in '{[':
+            stack.append(ch)
+        elif ch in '}]':
+            if not stack:
+                continue  # stray closer — leave it, let the parse fail honestly
+            want = closer_for[stack.pop()]
+            if ch != want:
+                out[i] = want
+    tail = ''.join(closer_for[b] for b in reversed(stack))
+    return ''.join(out) + tail
+
+
 def _python_literal_fix(s: str) -> dict:
     """Recover single-quoted / Python-dict-repr payloads via ``ast.literal_eval``.
 
@@ -171,7 +215,20 @@ def repair_json(raw: str) -> dict:
         logger.debug('repair_json: recovered via parser-guided delimiter insertion')
         return obj
     except (json.JSONDecodeError, ValueError):
-        logger.debug('repair_json: delimiter fix failed, trying python-literal fallback')
+        logger.debug('repair_json: delimiter fix failed, trying bracket-match fix')
+
+    # 6b. Mismatched-closer recovery — rewrite a wrong-type closing bracket
+    #     (``[{...}]`` written as ``[{...]``) to match the open stack, then
+    #     re-run the delimiter fix (the corrected closer can expose a still-
+    #     missing ',' one level up). No-op on well-formed JSON.
+    s_bm = _bracket_match_fix(s)
+    if s_bm != s:
+        try:
+            obj = _parser_guided_delimiter_fix(s_bm)
+            logger.debug('repair_json: recovered via bracket-match fix')
+            return obj
+        except (json.JSONDecodeError, ValueError):
+            logger.debug('repair_json: bracket-match fix failed, trying python-literal fallback')
 
     # 7. Python-dict-repr / single-quoted payload — ast.literal_eval (no exec).
     try:

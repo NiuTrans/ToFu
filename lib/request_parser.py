@@ -88,7 +88,11 @@ def decode_proxy_path_arg(name: str = 'path', *,
         try:
             if os.path.exists(raw):
                 break
-        except (OSError, ValueError):
+        except (OSError, ValueError) as _e:
+            from lib.log import get_logger
+            get_logger(__name__).debug(
+                '[request_parser] decode_proxy_path_arg os.path.exists(%r) raised %s: %s',
+                raw, type(_e).__name__, _e)
             pass  # unusual path value; fall through to decode attempt
         decoded = unquote(raw)
         if decoded == raw:

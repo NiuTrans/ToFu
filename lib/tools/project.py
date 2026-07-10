@@ -57,10 +57,10 @@ PROJECT_TOOL_GREP = {
                 "include": {"type": "string", "description": "File glob filter, e.g. '*.py' or '*.js' (optional)"},
                 "context_lines": {"type": "integer", "description": "Number of context lines before and after each match (like grep -C). Default 0, max 10. Use 3-5 to see surrounding code without a separate read_files call."},
                 "max_results": {"type": "integer", "description": "Maximum number of matching lines to return (like head -n). Default 50. Use a small value (5-20) when you only need a few examples or to check existence."},
-                "count_only": {"type": "boolean", "description": "If true, return only the count of matching lines (like grep -c or wc -l), not the actual lines. Much faster for large result sets."},
+                "count_only": {"type": "boolean", "description": "If true, return only the count of matching lines (like grep -c or wc -l), not the actual lines. Much faster for large result sets. NOTE: `max_results` is ignored in count_only mode — the full count is always returned."},
                 "searches": {
                     "type": "array",
-                    "description": "Array of search operations (for batch mode). Each entry has the same fields as the top-level parameters. Much faster than multiple separate grep_search calls.",
+                    "description": "Array of search operations (for batch mode, max 20 entries — extras are dropped). Each entry has the same fields as the top-level parameters. Much faster than multiple separate grep_search calls.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -99,7 +99,7 @@ PROJECT_TOOL_FIND = {
                 "max_results": {"type": "integer", "description": "Maximum number of files to return. Default 100. Use a small value (5-20) when you only need a quick sample."},
                 "searches": {
                     "type": "array",
-                    "description": "Array of find operations (for batch mode). Each entry has the same fields as the top-level parameters. Much faster than multiple separate find_files calls.",
+                    "description": "Array of find operations (for batch mode, max 20 entries — extras are dropped). Each entry has the same fields as the top-level parameters. Much faster than multiple separate find_files calls.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -221,7 +221,7 @@ PROJECT_TOOL_APPLY_DIFFS = {
             "properties": {
                 "edits": {
                     "type": "array",
-                    "description": "Array of edit operations. Each entry has description, path, search, replace.",
+                    "description": "Array of edit operations (max 30 per call — extras are dropped). Each entry has description, path, search, replace.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -308,7 +308,7 @@ PROJECT_TOOL_INSERT_CONTENTS = {
             "properties": {
                 "edits": {
                     "type": "array",
-                    "description": "Array of insertion operations. Each entry has description, path, anchor, content, and position.",
+                    "description": "Array of insertion operations (max 30 per call — extras are dropped). Each entry has description, path, anchor, content, and position.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -339,9 +339,11 @@ PROJECT_TOOL_RUN_COMMAND = {
             "Execute a shell command in the project directory and return its output "
             "(stdout + stderr). Use this for running tests, linting, building, checking "
             "git status, installing packages — anything that needs a real shell.\n\n"
-            "The command runs with the project root as working directory. Commands run "
-            "without a timeout by default — long-running processes are OK. Avoid "
-            "interactive commands that require stdin input (they will hang).\n\n"
+            "The command runs with the project root as working directory. A default "
+            "timeout applies (see the `timeout` param: 60s for filesystem-heavy "
+            "commands, 300s otherwise); pass `timeout=0` for a genuinely long-running "
+            "process. Avoid interactive commands that require stdin input (they will "
+            "hang).\n\n"
             "**WHEN TO USE run_command vs the dedicated tools:**\n"
             "  • Building / testing (`npm test`, `pytest`, `cargo build`) — use run_command\n"
             "  • Installing packages (`pip install`, `npm install`) — use run_command\n"
@@ -372,7 +374,7 @@ PROJECT_TOOL_RUN_COMMAND = {
                 },
                 "working_dir": {
                     "type": "string",
-                    "description": "Working directory for the command (optional). In multi-root workspaces, use 'rootname:subdir' to run in a specific root. Default: project root."
+                    "description": "Working directory for the command (optional). In multi-root workspaces, use 'rootname:subdir' to run in a specific root. STICKY: once you set it (or `cd` inside a command), later run_command calls in this conversation resume from that directory automatically — so you do NOT need to repeat `cd <project>` or use absolute paths for `python`/`pip` every call. Default: the conversation's last working directory, else project root."
                 }
             },
             "required": ["command"]

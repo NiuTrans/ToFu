@@ -77,126 +77,77 @@ function _apRunConcluded(conv, runId, isLast) {
   return false;
 }
 
+/* ★ FLATTENED (owner directive 2026-07-07): autopilot runs are NO LONGER
+ * collapsed into a `<details>` card. VU turns render as a flat sequence
+ * identical to a normal agent chat, so each turn keeps its own hover action
+ * bar (copy / translate / DELETE) — the run-fold was the sole reason a
+ * concluded VU turn's delete button was unreachable. This function is kept
+ * (3 render call-sites + the run-concluded sidecar plumbing still invoke it)
+ * but now does the OPPOSITE of folding: it defensively UNWRAPS any stale
+ * `.autopilot-run-fold` left in the DOM (e.g. from a surgical re-render that
+ * predates this change), hoisting its turns back to the flat sibling level so
+ * the layout never gets stuck half-folded. */
 function _applyAutopilotRunFolds(inner, conv) {
   if (!inner) return;
-  if (!conv && typeof getActiveConv === 'function') conv = getActiveConv();
   try {
-    /* Legacy: pre-sidecar conversations may still carry a summary as a
-     * `data-ap-summary` MESSAGE element. New runs never do (the summary lives
-     * in the sidecar), so this map is empty for them. */
-    const summaries = {};
-    inner.querySelectorAll('.message[data-ap-summary][data-ap-run]').forEach(el => {
-      summaries[el.getAttribute('data-ap-run')] = el;
+    inner.querySelectorAll('details.autopilot-run-fold').forEach(fold => {
+      const parent = fold.parentNode;
+      if (!parent) return;
+      /* Move every real message turn out of the fold, before the fold node,
+       * preserving order; drop the fold's own <summary> chrome. */
+      fold.querySelectorAll(':scope > .message').forEach(msgEl => {
+        parent.insertBefore(msgEl, fold);
+      });
+      parent.removeChild(fold);
     });
-    /* All run ids present (stamped VU turns + any legacy summary). */
-    const runIds = [];
-    inner.querySelectorAll('.message[data-ap-run]').forEach(el => {
-      const r = el.getAttribute('data-ap-run');
-      if (r && runIds.indexOf(r) === -1) runIds.push(r);
-    });
-    if (!runIds.length) return;
-    const lastRunId = runIds[runIds.length - 1];
+  } catch (e) {
+    console.warn('[Autopilot fold] unwrap failed (non-fatal):', e && e.message);
+  }
+}
 
-    for (const runId of runIds) {
-      const _esc = (window.CSS && CSS.escape) ? CSS.escape(runId) : runId;
-      const summaryEl = summaries[runId] || null;
-      const firstStamped = inner.querySelector(
-        `.message[data-ap-run="${_esc}"]:not([data-ap-summary])`
-      );
-      if (!firstStamped) continue;                 // summary-only run, nothing to fold
-      if (firstStamped.closest('.autopilot-run-fold')) continue;  // already folded
-
-      /* ★ Only fold a run once it has truly CONCLUDED (positive signal) —
-       * never mid-run / in the inter-turn gap (see _apRunConcluded). */
-      if (!_apRunConcluded(conv, runId, runId === lastRunId)) continue;
-
-      /* Collect the contiguous sibling range [firstStamped .. before summary).
-       * When there is no summary element, fold the run of consecutive stamped
-       * turns (stop at the first element that isn't part of THIS run). */
-      const range = [];
-      let node = firstStamped;
-      while (node && node !== summaryEl) {
-        const next = node.nextElementSibling;
-        const isMsg = node.classList && node.classList.contains('message');
-        if (isMsg) range.push(node);
-        if (!summaryEl) {
-          /* No summary anchor — bound the fold at the run's own turns plus
-           * the interleaved worker turns. Stop once we pass a message that is
-           * neither this run's stamped turn nor an (un-stamped) assistant
-           * worker turn — i.e. a new human/user turn outside the run. */
-          const nextIsRun = next && next.getAttribute &&
-            next.getAttribute('data-ap-run') === runId;
-          const nextIsWorker = next && next.classList &&
-            next.classList.contains('message') &&
-            !next.classList.contains('user-msg') &&
-            !next.getAttribute('data-ap-run');
-          if (!nextIsRun && !nextIsWorker) { node = null; break; }
-        }
-        node = next;
+/* ★ Post-render DOM pass that docks each concluded run's REPORT as a
+ * STANDALONE boundary node — the clean successor to the two-anchor graft.
+ * Mirrors `_applyAutopilotRunFolds`: it runs at every render exit (surgical /
+ * full / bg-refresh), operates purely on the finished DOM, and is fully
+ * idempotent (removes all existing summary nodes, then re-inserts from the
+ * current sidecar). The panel is NEVER a `msg-N` node, so renderChat's
+ * index-based surgical diff + stale-removal loop ignore it entirely.
+ * Placement (see `_apSummaryPlacements`):
+ *   • boundary — inserted immediately AFTER the run's last stamped turn's
+ *     `#msg-<afterMsgIdx>` element (the run boundary), so the agent's own
+ *     work-summary sits at the end of that run, not under a synthetic user
+ *     bubble and not detached at the transcript tail.
+ *   • tail (compacted/orphaned run) — appended at the end of the message list.
+ * A boundary whose `#msg-N` is outside the loaded lazy window is treated as a
+ * tail placement so the report is still reachable. */
+function _applyAutopilotSummaryPanels(inner, conv) {
+  if (!inner) return;
+  try {
+    // Idempotent: clear any panels a previous pass inserted.
+    inner.querySelectorAll(':scope > .ap-summary-panel[data-ap-report-run]').forEach(n => n.remove());
+    const placements = _apSummaryPlacements(conv);
+    if (!placements.length) return;
+    for (const p of placements) {
+      const html = _apReportPanelHTML(conv, p.runId);
+      if (!html) continue;
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = html;
+      const node = wrapper.firstElementChild;
+      if (!node) continue;
+      let anchorEl = null;
+      if (!p.tail && typeof p.afterMsgIdx === 'number') {
+        anchorEl = document.getElementById('msg-' + p.afterMsgIdx);
       }
-      if (!range.length) continue;
-
-      const turnCount = range.length;
-      const wasOpen = !!_apFoldOpenState[runId];
-      const details = document.createElement('details');
-      details.className = 'autopilot-run-fold';
-      details.setAttribute('data-ap-run-fold', runId);
-      if (wasOpen) details.open = true;
-      const _label = (typeof t === 'function' && t('autopilot.runFold') !== 'autopilot.runFold')
-        ? t('autopilot.runFold') : 'Autopilot run';
-      const _hint = (typeof t === 'function' && t('autopilot.runFoldHint') !== 'autopilot.runFoldHint')
-        ? t('autopilot.runFoldHint') : 'turns — click to expand';
-      const summary = document.createElement('summary');
-      summary.className = 'autopilot-run-fold-summary';
-      const _sumRec = _apRunSummary(conv, runId);
-      let _summaryInner =
-        `<svg class="apf-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>`
-        + `<span class="apf-label">${escapeHtml(_label)}</span>`
-        + `<span class="apf-count">${turnCount}</span>`
-        + `<span class="apf-hint">${escapeHtml(_hint)}</span>`;
-      /* Report affordances live IN the fold's summary card (not as a separate
-       * panel below it): a run WITH a close-out report gets a "View report"
-       * button that opens the debrief in a sub-window; a manual-stop run with
-       * NO report gets "Summarize this run" instead. */
-      if (_sumRec && _sumRec.content) {
-        const _viewLabel = (typeof t === 'function' && t('autopilot.viewReport') !== 'autopilot.viewReport')
-          ? t('autopilot.viewReport') : 'View report';
-        _summaryInner += `<button class="apf-report-btn" data-ap-run-report="${escapeHtml(runId)}" `
-          + `onclick="event.preventDefault();event.stopPropagation();_openApSummaryModal('${escapeHtml(runId)}')">`
-          + `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>`
-          + `${escapeHtml(_viewLabel)}</button>`;
-      } else if (!summaryEl && !_sumRec) {
-        const _sumLabel = (typeof t === 'function' && t('autopilot.summarizeRun') !== 'autopilot.summarizeRun')
-          ? t('autopilot.summarizeRun') : 'Summarize this run';
-        _summaryInner += `<button class="apf-summarize-btn" data-ap-run-summarize="${escapeHtml(runId)}" `
-          + `onclick="event.preventDefault();event.stopPropagation();_summarizeAutopilotRun('${escapeHtml(runId)}',this)">`
-          + `${escapeHtml(_sumLabel)}</button>`;
+      if (anchorEl && anchorEl.parentNode === inner) {
+        // Dock right after the run's boundary turn (before the next sibling).
+        inner.insertBefore(node, anchorEl.nextSibling);
+      } else {
+        // Tail placement, or the boundary turn is outside the lazy window.
+        inner.appendChild(node);
       }
-      _summaryInner += `<span class="apf-toggle">▼</span>`;
-      summary.innerHTML = _summaryInner;
-      details.appendChild(summary);
-      /* Track open/closed so subsequent re-renders preserve the user's choice. */
-      details.addEventListener('toggle', () => { _apFoldOpenState[runId] = details.open; });
-
-      /* Insert the <details> where the first turn was, then move the range in. */
-      firstStamped.parentNode.insertBefore(details, firstStamped);
-      for (const el of range) details.appendChild(el);
-
-      /* ★ The run's close-out REPORT is no longer rendered as an
-       * always-visible panel below the fold. It is a human-only debrief
-       * surfaced on demand via the "View report" button in the fold summary
-       * (→ _openApSummaryModal), keeping the transcript spine compact:
-       * human msg → [folded run]. Any stale panel from a previous render of
-       * the old layout is cleaned up here. */
-      const _stalePanel = details.parentNode
-        && details.nextElementSibling
-        && details.nextElementSibling.classList
-        && details.nextElementSibling.classList.contains('autopilot-summary-panel')
-        ? details.nextElementSibling : null;
-      if (_stalePanel) _stalePanel.remove();
     }
   } catch (e) {
-    console.warn('[Autopilot fold] failed (non-fatal):', e && e.message);
+    console.warn('[Autopilot summary] panel placement failed (non-fatal):', e && e.message);
   }
 }
 
@@ -262,7 +213,9 @@ function _openApSummaryModal(runId) {
 }
 if (typeof window !== 'undefined') window._openApSummaryModal = _openApSummaryModal;
 
-/* Click handler for the "Summarize this run" button in a manual-stop fold. */
+/* Click handler for the "Summarize this run" button on a manual-stop run's
+ * concluding VU turn. Reached from renderMessage's action bar (the run-fold
+ * that used to carry it was deleted in the 2026-07-07 flatten). */
 async function _summarizeAutopilotRun(runId, btn) {
   const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
   if (!conv) return;
@@ -300,6 +253,147 @@ async function _summarizeAutopilotRun(runId, btn) {
     _restore();
   }
 }
+if (typeof window !== 'undefined') window._summarizeAutopilotRun = _summarizeAutopilotRun;
+
+/* Is THIS VU turn the run's CONCLUDING turn — i.e. the newest message in the
+ * conversation stamped with this run id? A run's report affordance belongs on
+ * exactly one turn: its last VU turn. Because only VU turns carry
+ * `_autopilotRunId` (never the agent follow-ups) and a NEWER run / a real user
+ * message carries a DIFFERENT (or no) run id, "newest turn with this runId" is
+ * the correct owner even when the run was superseded — no boundary-walk needed.
+ * Returns false when the run has no surviving turn in the loaded window (e.g.
+ * after compaction) so the caller renders nothing; see the known-gap note in
+ * _apRunReportAffordance. */
+function _isRunConcludingTurn(conv, msg) {
+  const runId = msg && msg._autopilotRunId;
+  if (!conv || !runId || !Array.isArray(conv.messages)) return false;
+  let lastIdx = -1;
+  for (let i = 0; i < conv.messages.length; i++) {
+    const m = conv.messages[i];
+    if (m && m._autopilotRunId === runId) lastIdx = i;
+  }
+  if (lastIdx === -1) return false;
+  return conv.messages[lastIdx] === msg;
+}
+
+/* Build the run-close-out affordance button for a VU turn's action bar, or ''.
+ * ONLY on the run's concluding turn (newest turn with the run id), and only
+ * once the backend wrote the run's concluded record:
+ *   • report present (clean [VU: TASK_DONE]) → "View report" → _openApSummaryModal.
+ *   • concluded, reason='stopped', no report (manual stop) → "Summarize this
+ *     run" → _summarizeAutopilotRun.
+ * A running / un-concluded run gets nothing. Inline SVG glyphs per §3.4.
+ * KNOWN GAP (flagged, not silently dropped): if a run's report exists in
+ * conv.autopilotSummaries[runId] but NONE of its VU turns survive in the loaded
+ * message window (e.g. compaction dropped them), there is no turn to hang this
+ * on and the report is currently unreachable from the transcript. The record is
+ * NOT lost (still in settings.autopilotSummaries) — a future run-index surface
+ * could reach it; today that path is out of scope. */
+function _apRunReportAffordance(conv, msg) {
+  if (!msg || !msg._isVirtualUser || !msg._autopilotRunId) return '';
+  if (!_isRunConcludingTurn(conv, msg)) return '';
+  const runId = msg._autopilotRunId;
+  const rec = _apRunRecord(conv, runId);
+  if (!rec || rec.status !== 'concluded') return '';
+  const _tOr = (k, fb) => (typeof t === 'function' && t(k) !== k) ? t(k) : fb;
+  const _rid = escapeHtml(runId);
+  if (rec.content) {
+    const label = _tOr('autopilot.viewReport', 'View report');
+    return `<button class="msg-action-btn ap-report-btn" onclick="event.stopPropagation();_openApSummaryModal('${_rid}')" title="${escapeHtml(label)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg> ${escapeHtml(label)}</button>`;
+  }
+  if (rec.reason === 'stopped') {
+    const label = _tOr('autopilot.summarizeRun', 'Summarize this run');
+    return `<button class="msg-action-btn ap-summarize-btn" onclick="event.stopPropagation();_summarizeAutopilotRun('${_rid}',this)" title="${escapeHtml(label)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M12 18v-6"/><path d="M9 15h6"/></svg> ${escapeHtml(label)}</button>`;
+  }
+  return '';
+}
+
+/* ★ ALWAYS-VISIBLE inline run-summary PANEL (owner directive 2026-07-08).
+ * The 2026-07-07 flatten deleted the `autopilot-run-fold` <details> that used
+ * to auto-render a concluded run's close-out report; the report was left
+ * reachable ONLY via a hover "View report" button → functionally invisible.
+ * This builds an open-by-default collapsible card, rendered INLINE below the
+ * run's concluding turn by renderMessage — no hover, no click required. The
+ * body reuses the SAME markdown + translated-preference rendering as the modal
+ * (`_openApSummaryModal`); the header carries a small "expand" button that
+ * opens that modal for a focused full-screen read of a long report. The panel
+ * is human-only — never a chat message, never sent to the agent.
+ * Returns '' when the run has no report content (a bare manual-stop record — a
+ * `status:'concluded'` with no `content` — keeps only the "Summarize this run"
+ * action-bar affordance). */
+function _apReportPanelHTML(conv, runId) {
+  const rec = _apRunSummary(conv, runId);   // content-present records only
+  if (!rec) return '';
+  const _tOr = (k, fb) => (typeof t === 'function' && t(k) !== k) ? t(k) : fb;
+  const title = _tOr('autopilot.summaryLabel', 'Run summary report');
+  const priv = _tOr('autopilot.summaryHumanOnly', 'For you only · not sent to the agent');
+  /* Prefer the translated debrief for a Chinese UI when present — identical
+   * selection to _openApSummaryModal so the panel and the modal agree. */
+  const _useTranslated = !!(rec.translatedContent
+    && typeof convAutoTranslate === 'function' && conv && convAutoTranslate(conv));
+  const bodyText = _useTranslated ? rec.translatedContent : (rec.content || '');
+  const bodyHtml = (typeof renderMarkdown === 'function')
+    ? renderMarkdown(bodyText) : escapeHtml(bodyText);
+  const _rid = escapeHtml(runId);
+  let incompleteH = '';
+  if (rec.incomplete) {
+    const _needs = _tOr('autopilot.needsReview', 'stopped early · needs review');
+    incompleteH = `<span class="aps-incomplete"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> ${escapeHtml(_needs)}</span>`;
+  }
+  const expandTitle = _tOr('autopilot.viewReport', 'View report');
+  return `<details class="ap-summary-panel" open data-ap-report-run="${_rid}">`
+    + `<summary class="aps-summary">`
+    + `<svg class="aps-doc-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>`
+    + `<span class="aps-title">${escapeHtml(title)}</span>`
+    + incompleteH
+    + `<span class="aps-private">${escapeHtml(priv)}</span>`
+    + `<button class="aps-expand-btn" onclick="event.preventDefault();event.stopPropagation();_openApSummaryModal('${_rid}')" title="${escapeHtml(expandTitle)}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg></button>`
+    + `<svg class="aps-toggle" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`
+    + `</summary>`
+    + `<div class="aps-body md-content">${bodyHtml}</div>`
+    + `</details>`;
+}
+
+/* Where each concluded-run REPORT docks in the transcript. A report is a
+ * SIDECAR fact (conv.autopilotSummaries[runId]), NOT a messages[] entry, so it
+ * has no natural row — it is rendered as a STANDALONE boundary node by the
+ * post-render pass `_applyAutopilotSummaryPanels`, never grafted onto a
+ * neighbouring bubble. This resolver decides the dock point for each run that
+ * has report content:
+ *   • { runId, afterMsgIdx } — the run has surviving turns in the loaded
+ *     window: dock the panel at the run's TRUE BOUNDARY, i.e. AFTER the LAST
+ *     message stamped with this run id (the concluding VU turn — its follow-up
+ *     agent reply belongs to the NEXT turn/run, so the last stamped turn is the
+ *     boundary). This replaces the old graft-under-the-user-bubble anchor.
+ *   • { runId, tail: true } — COMPACTION/lazy-window fallback: the run's turns
+ *     did NOT survive the loaded window, so there is no boundary to dock at.
+ *     Render at the conversation tail (oldest orphan first) so the report is
+ *     never unreachable.
+ * Deterministic order: boundary docks by afterMsgIdx ascending, then all tail
+ * orphans by run ts ascending. */
+function _apSummaryPlacements(conv) {
+  if (!conv || !conv.autopilotSummaries || typeof conv.autopilotSummaries !== 'object') return [];
+  const msgs = Array.isArray(conv.messages) ? conv.messages : [];
+  // Last message index stamped with each run id (its boundary).
+  const lastIdxByRun = new Map();
+  for (let i = 0; i < msgs.length; i++) {
+    const rid = msgs[i] && msgs[i]._autopilotRunId;
+    if (rid) lastIdxByRun.set(rid, i);
+  }
+  const boundary = [];
+  const tail = [];
+  for (const runId of Object.keys(conv.autopilotSummaries)) {
+    if (!_apRunSummary(conv, runId)) continue;   // only reports with content
+    if (lastIdxByRun.has(runId)) {
+      boundary.push({ runId, afterMsgIdx: lastIdxByRun.get(runId) });
+    } else {
+      tail.push({ runId, tail: true, ts: (conv.autopilotSummaries[runId] || {}).ts || 0 });
+    }
+  }
+  boundary.sort((a, b) => a.afterMsgIdx - b.afterMsgIdx);
+  tail.sort((a, b) => a.ts - b.ts);   // oldest orphan first
+  return boundary.concat(tail);
+}
 
 function _msgFingerprint(msg) {
   const sr = msg.toolRounds || msg.searchResults;
@@ -329,6 +423,13 @@ function _msgFingerprint(msg) {
       }
     }
   }
+  /* NOTE: the autopilot run-summary REPORT is deliberately NOT folded into this
+   * per-message fingerprint. It is not owned by any message — it renders as a
+   * standalone boundary node via the post-render `_applyAutopilotSummaryPanels`
+   * pass, and a background-sync arrival is caught by the conv-level Guard 2
+   * fingerprint (`_apSummariesFp` in core.js), which triggers renderChat →
+   * the panel pass re-docks it. Keeping it out of `_msgFingerprint` avoids
+   * repainting the neighbouring bubble just because a sidecar report arrived. */
   /* Error envelope: include kind + message length so a re-classification
    * (e.g. quota → ratelimit) bumps the fingerprint and the row re-renders. */
   let _errFp = '';
@@ -388,6 +489,127 @@ function _msgFingerprint(msg) {
  * Kept callable from existing render entry points so callers don't NPE. */
 function _stampFreshness(_conv) { /* no-op */ }
 
+/* ── Background data-refresh repaint (scroll-preserving) ──────────────────
+ * Cost + file-change batch prefetches (and their per-message async fallback)
+ * land data that `_msgFingerprint` deliberately does NOT track, so the
+ * surgical diff in renderChat would treat every message as "unchanged" and
+ * skip the repaint. Historically these callbacks worked around that by
+ * calling `renderChat(conv, true)` — the FULL re-render path, which (a) resets
+ * the lazy window back to the last _INITIAL_RENDER messages (dropping any
+ * older messages a scrolled-up reader force-loaded), (b) flashes the whole
+ * list via the `cv-off` height recompute, and (c) ends in
+ * `_forceScrollToBottom()`, yanking the reader to the bottom. Firing ~1s after
+ * a conversation opens (when the batch responses arrive) — precisely while the
+ * user is scrolling up to read history — that is the reported "flicker back
+ * and forth then jump to the bottom" bug.
+ *
+ * This repaints the CURRENTLY-RENDERED assistant messages in place. Only
+ * `role==='assistant'` bubbles carry the cost / file-changes / finish bars, so
+ * user bubbles (and their quote/ref badges) are left untouched. It upholds two
+ * invariants so a data-only refresh is invisible to the reader:
+ *
+ *   (1) COMPARE-BEFORE-SWAP. Each assistant bubble is `outerHTML`-replaced ONLY
+ *       when its freshly-rendered HTML differs from what we last rendered for
+ *       it (stamped as `__bgHtml` on the node). Unchanged bubbles keep their
+ *       exact DOM node — preserving any manually-expanded tool-round `<details>`
+ *       state and skipping needless layout. Same principle as the `data-mfp`
+ *       surgical diff, extended to the async cost/file-change data that
+ *       `_msgFingerprint` deliberately omits. If NOTHING changed we return
+ *       before touching the DOM or scroll at all.
+ *
+ *   (2) ANCHOR-RELATIVE SCROLL RESTORE. A raw `scrollTop = saved` restore is
+ *       only correct when heights ABOVE the fold don't change — but that is
+ *       exactly what changes here: on first open the bars aren't fetched yet,
+ *       so above-fold assistant bubbles render short and GROW when the batch
+ *       lands. Restoring the raw pixel then drifts the reader downward by the
+ *       total added height above the fold. Instead we pin the topmost message
+ *       element intersecting the viewport: record its offset from the container
+ *       top BEFORE the swaps, then after the swaps adjust `scrollTop` so that
+ *       same element sits at the same visual offset. The reader's viewport is
+ *       preserved even when above-fold bubbles change height.
+ *
+ * Both measurements happen under the same `cv-off` guard `_renderMsgInPlace`
+ * uses, so the swap can't collapse `content-visibility:auto` intrinsic-size
+ * caches and mis-resolve the geometry. No-op during streaming (the live bubble
+ * is owned by the streaming UI) or before any message is laid out. */
+/* ── Shared anchor-relative scroll preservation ──────────────────────────
+ * Capture the topmost message element still intersecting the viewport and its
+ * offset from the container top; after a DOM mutation that may change heights
+ * (including ABOVE the fold), re-pin that element to the same visual offset.
+ * This is the same technique proven in `_bgRefreshChat`, extracted so the
+ * full-render path (which used to reset scrollTop→0 via innerHTML wipe) can
+ * reuse it verbatim instead of relying on `_forceScrollToBottom`. Callers wrap
+ * the swap in the `cv-off` guard so `content-visibility:auto` intrinsic-size
+ * caches can't collapse and mis-resolve the geometry. */
+function _captureScrollAnchor(container, inner) {
+  if (!container || !inner) return null;
+  const cTop = container.getBoundingClientRect().top;
+  const els = inner.querySelectorAll('[id^="msg-"]');
+  for (const el of els) {
+    const r = el.getBoundingClientRect();
+    if (r.bottom > cTop + 1) {  // topmost element still (partly) in view
+      return { id: el.id, offset: r.top - cTop };
+    }
+  }
+  return null;
+}
+function _restoreScrollAnchor(container, anchor) {
+  if (!container || !anchor || !anchor.id) return false;
+  const a = document.getElementById(anchor.id);
+  if (!a) return false;
+  const newOffset = a.getBoundingClientRect().top - container.getBoundingClientRect().top;
+  container.scrollTop += (newOffset - anchor.offset);  // re-pin the anchor
+  return true;
+}
+
+function _bgRefreshChat(conv) {
+  if (!conv || conv.id !== activeConvId) return;
+  if (activeStreams.has(conv.id) && document.getElementById('streaming-msg')) return;
+  const inner = document.getElementById('chatInner');
+  const container = document.getElementById('chatContainer');
+  if (!inner || !container) return;
+  const els = inner.querySelectorAll('[id^="msg-"]');
+  if (!els.length) return;  // welcome / loading skeleton — nothing to repaint
+
+  const total = conv.messages.length;
+
+  /* ── (1) Compare-before-swap: build the swap list, skipping bubbles whose
+   *        rendered output is byte-identical to what we last painted. ── */
+  const updates = [];
+  els.forEach((el) => {
+    const m = el.id.match(/^msg-(\d+)$/);
+    if (!m) return;
+    const idx = parseInt(m[1], 10);
+    if (idx >= total) return;
+    const msg = conv.messages[idx];
+    if (!msg || msg.role !== 'assistant') return;
+    const fresh = renderMessage(msg, idx);
+    if (el.__bgHtml === fresh) return;  // unchanged → keep DOM (expand state intact)
+    updates.push({ idx, el, html: fresh });
+  });
+  if (!updates.length) return;  // nothing changed → reader untouched
+
+  /* ── (2) Anchor-relative scroll preservation across the swaps. ── */
+  inner.classList.add('cv-off');
+  void inner.scrollHeight;  // force real heights before measuring
+  const anchor = _captureScrollAnchor(container, inner);
+
+  for (const u of updates) {
+    u.el.outerHTML = u.html;
+    const n = document.getElementById('msg-' + u.idx);
+    if (n) n.__bgHtml = u.html;  // stamp so a later no-change refresh skips it
+  }
+
+  void inner.scrollHeight;  // re-layout after swaps
+  _restoreScrollAnchor(container, anchor);
+  inner.classList.remove('cv-off');
+  if (!activeStreams.has(conv.id)) {
+    _applyAutopilotRunFolds(inner, conv);
+    _applyAutopilotSummaryPanels(inner, conv);
+  }
+  _lastRenderedFingerprint = _convRenderFingerprint(conv);
+}
+
 function renderChat(conv, forceScroll) {
   /* ── Guard 1: skip if user is editing a message in this conversation ── */
   if (_editingMsgIdx !== null && conv.id === activeConvId) return;
@@ -402,16 +624,16 @@ function renderChat(conv, forceScroll) {
    * was already cached, the prefetch returns false and we don't paint. */
   if (typeof _prefetchConvCosts === 'function') {
     _prefetchConvCosts(conv).then((didFetch) => {
-      // ★ Skip the re-render while this conv is actively streaming. A
-      //   forceScroll=true re-render hits Guard 1c → showStreamingUIForConv →
-      //   _forceScrollToBottom, yanking the user back to the bottom. The
+      // ★ Skip the re-render while this conv is actively streaming. The
       //   streaming bubble's cost/finish bar is owned by the live stream UI,
       //   not this static render — see the file-changes loop fix below.
-      if (didFetch && conv.id === activeConvId && typeof renderChat === 'function'
+      // ★ SCROLL FIX: repaint IN PLACE (scroll-preserving) instead of
+      //   renderChat(conv,true). The old force-scroll path reset the lazy
+      //   window and yanked a scrolled-up reader to the bottom the moment the
+      //   cost batch landed (~1s after open) — the "flicker + jump" bug.
+      if (didFetch && conv.id === activeConvId
           && !activeStreams.has(conv.id)) {
-        // Bypass the fingerprint guard — cache changed even though
-        // _convRenderFingerprint didn't.
-        renderChat(conv, true);
+        _bgRefreshChat(conv);
       }
     });
   }
@@ -431,9 +653,12 @@ function renderChat(conv, forceScroll) {
       //   bottom. The streaming bubble's file-changes bar is rendered by the
       //   live `fc` zone (updateStreamingUI), so this static re-render is both
       //   redundant and harmful mid-stream. Defer it until the stream ends.
-      if (didFetch && conv.id === activeConvId && typeof renderChat === 'function'
+      // ★ SCROLL FIX: scroll-preserving in-place repaint (see _bgRefreshChat)
+      //   instead of the force-scroll full re-render — the file-changes batch
+      //   also lands ~1s after open and must not move a scrolled-up reader.
+      if (didFetch && conv.id === activeConvId
           && !activeStreams.has(conv.id)) {
-        renderChat(conv, true);
+        _bgRefreshChat(conv);
       }
     });
   }
@@ -559,13 +784,44 @@ function renderChat(conv, forceScroll) {
     if (anyChange) {
       buildTurnNav(conv);
     }
-    if (!activeStreams.has(conv.id)) _applyAutopilotRunFolds(inner, conv);
+    if (!activeStreams.has(conv.id)) {
+      _applyAutopilotRunFolds(inner, conv);
+      _applyAutopilotSummaryPanels(inner, conv);
+    }
     _lastRenderedFingerprint = fp;
     _lazyConvId = conv.id;
     return;
   }
 
   /* ═══ Full re-render path (forceScroll !== false) ═══ */
+  /* ★ Jump-to-top fix: the innerHTML wipe below hard-resets scrollTop→0. When
+   *   this is a SAME-conversation re-render and the reader had scrolled UP to
+   *   read history, capture their viewport anchor from the still-present old
+   *   DOM so we can re-pin it after the swap instead of yanking to the bottom
+   *   via _forceScrollToBottom. A genuine conversation SWITCH, a first load, or
+   *   a near-bottom reader still lands at the bottom (the expected behaviour for
+   *   opening a conversation / following a live reply). */
+  const _sameConvDom = _lazyConvId === conv.id
+    && inner && !!inner.querySelector('[id^="msg-"]');
+  const _readerNearBottom = (typeof isNearBottom === 'function')
+    ? isNearBottom(120) : true;
+  /* ★ Open-scroll coalescing. A single conversation OPEN drives SEVERAL full
+   *   renders in sequence — the Phase-1 IndexedDB paint, the Phase-2 server
+   *   reconcile paint, and the loadConversation() .then() fallback — each of
+   *   which used to _forceScrollToBottom. That is why opening a historical
+   *   conversation "jumped several times". We now position the view EXACTLY
+   *   ONCE per open: the first full render during the open (conv._initialSwitchLoad
+   *   set) scrolls to the bottom and latches _openScrollConvId; every LATER
+   *   render of that same open preserves the current viewport via the anchor
+   *   instead of re-snapping. (A genuine SWITCH first-paint has _lazyConvId
+   *   still pointing at the previous conv, so _sameConvDom is false and it
+   *   correctly force-scrolls + latches.) */
+  const _openAlreadyPositioned = !!conv._initialSwitchLoad
+    && _openScrollConvId === conv.id;
+  const _preSwapAnchor = (_sameConvDom && !activeStreams.has(conv.id)
+      && (!_readerNearBottom || _openAlreadyPositioned))
+    ? _captureScrollAnchor(container, inner)
+    : null;
   _destroyLazyObserver();
   _lazyConvId = conv.id;
 
@@ -576,7 +832,7 @@ function renderChat(conv, forceScroll) {
     } else {
       /* BASE_PATH is a trusted app constant (raw); the i18n subtitle is
        * escaped by default. */
-      inner.innerHTML = String(safeHtml`<div class="welcome" id="welcome"><div class="welcome-icon"><img src="${raw(BASE_PATH)}/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2><p>${t('welcome.subtitle')}</p><div class="feature-pills"><span class="feature-pill">Extended Thinking</span><span class="feature-pill">Search</span><span class="feature-pill">URL Fetch</span><span class="feature-pill">Image Input</span><span class="feature-pill">Co-Pilot</span><span class="feature-pill">Browser</span></div></div>`);
+      inner.innerHTML = String(safeHtml`<div class="welcome" id="welcome"><div class="welcome-icon"><img src="${raw(BASE_PATH)}/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2><div class="feature-pills">${raw(_welcomePillsHtml())}</div></div>`);
     }
     _lastRenderedFingerprint = fp;
     buildTurnNav(conv);
@@ -601,7 +857,10 @@ function renderChat(conv, forceScroll) {
   }
 
   inner.innerHTML = html;
-  if (!activeStreams.has(conv.id)) _applyAutopilotRunFolds(inner, conv);
+  if (!activeStreams.has(conv.id)) {
+    _applyAutopilotRunFolds(inner, conv);
+    _applyAutopilotSummaryPanels(inner, conv);
+  }
   _lastRenderedFingerprint = fp;
 
   /* Observe the sentinel to trigger loading when scrolled up */
@@ -615,10 +874,26 @@ function renderChat(conv, forceScroll) {
    * conversations.  The turn nav is not critical for the initial render. */
   requestAnimationFrame(() => buildTurnNav(conv));
 
-  /* Always scroll to the very bottom of the conversation.
+  /* Scroll handling: if we captured a pre-swap anchor (same-conv re-render, a
+   * reader parked up in history), re-pin their viewport instead of forcing to
+   * the bottom — this is the direct fix for the "sudden jump to the top/bottom"
+   * on a background full re-render. Otherwise (conversation switch, first load,
+   * near-bottom reader) land at the bottom as before.
    * hideUntilSettled=true: content-visibility:auto heights are estimated on
    * first paint, so hide until the 150ms timer has corrected scrollTop. */
-  _forceScrollToBottom(container, true);
+  if (_preSwapAnchor) {
+    inner.classList.add('cv-off');
+    void inner.scrollHeight;  // force real heights before re-pinning
+    _restoreScrollAnchor(container, _preSwapAnchor);
+    inner.classList.remove('cv-off');
+  } else {
+    _forceScrollToBottom(container, true);
+    /* ★ Latch this open so subsequent same-open full renders (Phase-2
+     *   reconcile, .then() fallback) preserve the viewport instead of
+     *   re-snapping to the bottom. Only meaningful while _initialSwitchLoad
+     *   is set; loadConversation clears both flags when the open completes. */
+    if (conv._initialSwitchLoad) _openScrollConvId = conv.id;
+  }
 }
 
 /* ★ Format precise date + time for finished messages */
@@ -633,7 +908,43 @@ function _fmtAbsoluteDateTime(ts) {
     minute: '2-digit',
   });
 }
+/* Is a LIVE stream bound to THIS message object? Identity-based (never array
+ * position): an activeStreams entry whose bound `assistantMsg` IS this object,
+ * or whose `taskId` matches this message's stamped `_taskId`. Mirrors how
+ * connectToTask resolves its accumulation slot by identity (_taskId), so a
+ * genuinely-streaming "Preparing…" pre-first-token bubble is recognised. */
+function _streamBoundToMsg(msg) {
+  if (!msg || typeof activeStreams === "undefined" || !activeStreams.size) return false;
+  for (const s of activeStreams.values()) {
+    if (!s) continue;
+    if (s.assistantMsg && s.assistantMsg === msg) return true;
+    if (s.taskId && msg._taskId && s.taskId === msg._taskId) return true;
+  }
+  return false;
+}
+
+/* #3 render-time BELT (last line of defense behind #1 warm-open adoption and
+ * #2 settle-time reconcile): an assistant bubble that is an ORPHAN placeholder
+ * must not render. Orphan = no user-visible payload of ANY kind AND no live
+ * stream bound. Deliberately NOT keyed on merely-empty content, or a legitimate
+ * pre-first-token "Preparing…" bubble (empty but stream-bound) would blank. */
+function _isOrphanEmptyAssistant(msg) {
+  if (!msg || msg.role !== "assistant") return false;
+  if (_streamBoundToMsg(msg)) return false;
+  if (msg.content && String(msg.content).length) return false;
+  if (msg.thinking && String(msg.thinking).length) return false;
+  if (msg.toolRounds && msg.toolRounds.length) return false;
+  if (msg.finishReason) return false;
+  if (msg.error) return false;
+  return true;
+}
+
 function renderMessage(msg, idx) {
+  /* Belt: drop an orphaned empty-assistant placeholder (see
+   * _isOrphanEmptyAssistant). Returning '' produces no DOM node — the surgical
+   * update path replaces via outerHTML='' (removes it), the append path skips a
+   * null firstElementChild, and the full render contributes nothing. */
+  if (_isOrphanEmptyAssistant(msg)) return "";
   const isUser = msg.role === "user" || msg.role === "optimizer";  // optimizer = endpoint review, render as user
   /* ★ Precise date + time for all messages */
   const messageTime = msg.timestamp ? _fmtAbsoluteDateTime(msg.timestamp) : "";
@@ -776,59 +1087,57 @@ function renderMessage(msg, idx) {
           + `${escapeHtml(typeof t === "function" ? t("autopilot.warming") : "Autopilot…")}</div>`;
   }
   const rounds = getToolRoundsFromMsg(msg);
-  /* ★ Autopilot VU provenance: the VU's tool investigation + private
-   * reasoning are DISPLAY-ONLY — only the reply text reaches the agent
-   * (see conv_message_builder._build_user_message, which reads ONLY
-   * `content` for a user row). Collect both here and emit them inside one
-   * default-collapsed "Private · not sent" container below, so the human
-   * can tell at a glance which part is excluded from the agent's context
-   * vs. the reply that is actually sent. */
-  const _vuPrivate = !!msg._isVirtualUser;
-  let _vuPrivateHtml = '';
-  if (rounds.length > 0) {
-    let _roundsHtml = '';
-    /* ★ Autopilot virtual-user messages carry the VU sub-task's tool
-     * investigation as `toolRounds`. Surface them under a labelled
-     * header so the user can tell "Autopilot probed these things
-     * before replying" from a normal assistant tool panel. */
-    if (msg._isVirtualUser) {
-      _roundsHtml += `<div class="vu-investigation-header" title="Tools the autopilot used to investigate before composing this reply">`
-            + `<span class="vu-investigation-icon"></span>`
-            + `<span class="vu-investigation-label">Autopilot investigation · ${rounds.length} tool ${rounds.length === 1 ? 'call' : 'calls'}</span>`
-            + `</div>`;
+  /* ★ FLATTENED (owner directive 2026-07-07): autopilot VU turns now render
+   * with the IDENTICAL agent bubble layout — the normal grouped tool panel +
+   * thinking block go straight into `body`, exactly like an assistant turn.
+   * The former "Private · not sent" dashed zone, the "Sent to the agent" green
+   * zone, and the "Autopilot investigation" header are gone; only the avatar +
+   * "Autopilot" label distinguish who is speaking. The DATA-layer provenance
+   * is UNCHANGED (conv_message_builder._build_user_message still reads ONLY
+   * `content` for a VU user row — toolRounds/thinking remain display-only and
+   * never reach the next agent); this is a render-layer change only. */
+  /* ★ Interleaved segment timeline (epic pt_8b406df8fbe24ae5, step 5).
+   *   When the flag is ON and this finished message carries a `segments` list,
+   *   render tools with their PRECEDING thinking+narration inline (per-tool),
+   *   instead of the three grouped blocks.
+   *   ★ Applies to the assistant path (`!isUser`) AND to autopilot VU turns
+   *     (`_isVirtualUser`, role=user): the owner directive is that a VU turn
+   *     renders with the IDENTICAL agent bubble — so it must take the SAME
+   *     inline timeline, not the grouped panel. The VU row now carries its own
+   *     `segments` (assembled backend-side in run_virtual_user off the finished
+   *     sub-task and persisted on the message; DISPLAY-ONLY — never reaches the
+   *     next agent). This mirrors the existing `_isCritic` body carve-out below.
+   *   renderSegmentTimelineHTML returns "" if it can't apply (no segments /
+   *   unmatchable toolRounds) → we fall through to the legacy render. When it
+   *   DOES render, it already includes the per-batch thinking, so the separate
+   *   msg.thinking block below is suppressed (_segTimelineRendered). */
+  const _segTimelineAllowed = !isUser || msg._isVirtualUser;
+  let _segTimelineRendered = false;
+  if (_segTimelineAllowed && _segTimelineEnabled()
+      && Array.isArray(msg.segments) && msg.segments.length > 0) {
+    const _tl = renderSegmentTimelineHTML(msg.segments, msg, idx);
+    if (_tl) {
+      body += _tl;
+      _segTimelineRendered = true;
     }
+  }
+  if (!_segTimelineRendered && rounds.length > 0) {
     /* Render any persisted async-swarm inbox chips above the tool panel
        so historical messages still tell the user "this turn received
        async sub-agent updates before the model's reply".               */
     if (msg._inboxInjects && msg._inboxInjects.length) {
-      _roundsHtml += _buildSwarmInboxChipsHTML(msg._inboxInjects);
+      body += _buildSwarmInboxChipsHTML(msg._inboxInjects);
     }
-    _roundsHtml += renderToolRoundsHTML(rounds, false);
-    if (_vuPrivate) _vuPrivateHtml += _roundsHtml; else body += _roundsHtml;
+    /* Pass segments so the grouped panel renders per-round narration
+     * (translated-in-place) adjacent to each round's tools — the toggle-OFF /
+     * timeline-fallback analogue of renderSegmentTimelineHTML. When the
+     * timeline DID render (_segTimelineRendered) we never reach here. */
+    body += renderToolRoundsHTML(rounds, false, msg.segments);
   }
-  if (msg.thinking) {
+  if (msg.thinking && !_segTimelineRendered) {
     const thinkLen = msg.thinking.length;
     const thinkMeta = thinkLen >= 1024 ? ` (${Math.round(thinkLen / 1024)}k chars)` : ` (${thinkLen} chars)`;
-    const _thinkHtml = `<div class="thinking-block" onclick="_toggleThinking(this,${idx})"><div class="thinking-header"><span class="thinking-label">Thinking Process${thinkMeta}</span><span class="thinking-toggle">▼</span></div><div class="thinking-content"><div class="thinking-text"></div></div></div>`;
-    if (_vuPrivate) _vuPrivateHtml += _thinkHtml; else body += _thinkHtml;
-  }
-  /* ★ Flush the VU private zone — a single default-collapsed <details>
-   * container that makes the "not sent to the agent" boundary unmistakable
-   * (the reply below stands out). The inner thinking-block's lazy-load via
-   * _toggleThinking still works: the element exists in the DOM even while
-   * the <details> is closed. */
-  if (_vuPrivate && _vuPrivateHtml) {
-    const _privLabel = (typeof t === "function" && t("autopilot.privateNotSent") !== "autopilot.privateNotSent")
-      ? t("autopilot.privateNotSent")
-      : "Private · not sent to the agent";
-    body += `<details class="vu-private-zone">`
-          + `<summary class="vu-private-summary" title="${escapeHtml(_privLabel)}">`
-          + `<svg class="vu-private-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>`
-          + `<span class="vu-private-label">${escapeHtml(_privLabel)}</span>`
-          + `<span class="vu-private-toggle">▼</span>`
-          + `</summary>`
-          + `<div class="vu-private-body">${_vuPrivateHtml}</div>`
-          + `</details>`;
+    body += `<div class="thinking-block" onclick="_toggleThinking(this,${idx})"><div class="thinking-header"><span class="thinking-label">Thinking Process${thinkMeta}</span><span class="thinking-toggle">▼</span></div><div class="thinking-content"><div class="thinking-text"></div></div></div>`;
   }
   // ── Prior thinking (display-only) ──
   // Trailing reasoning that was emitted after the last completed tool batch
@@ -1022,22 +1331,11 @@ function renderMessage(msg, idx) {
         mdHtml = r.html;
         _inlinedBranches = r.inlinedSet;
       }
-      /* ★ Autopilot VU provenance boundary: the VU's tool investigation
-       * and private reasoning above/below are display-only — only THIS
-       * reply text is fed to the assistant as its next user message. Mark
-       * it so the human can tell at a glance which part becomes the
-       * agent's context vs. which part was private process. */
-      const _vuSent = msg._isVirtualUser && !msg._streamingVu && msg.content;
-      if (_vuSent) {
-        const _vuSentLabel = (typeof t === "function" && t("autopilot.sentToAgent") !== "autopilot.sentToAgent")
-          ? t("autopilot.sentToAgent")
-          : "Sent to the agent as the next message";
-        body += `<div class="vu-sent-zone"><div class="vu-handoff-header" title="${escapeHtml(_vuSentLabel)}">`
-              + `<svg class="vu-handoff-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>`
-              + `<span class="vu-handoff-label">${escapeHtml(_vuSentLabel)}</span></div>`;
-      }
+      /* ★ FLATTENED (owner directive 2026-07-07): the VU reply renders as a
+       * plain md-content body, identical to an agent turn — no "Sent to the
+       * agent" green handoff zone. DATA-layer provenance is unchanged (only
+       * `content` reaches the next agent; see conv_message_builder). */
       body += `<div class="md-content${isUser ? " user-content" : ""}">${mdHtml}</div>`;
-      if (_vuSent) body += `</div>`;
     } catch (e) {
   // ── Compaction markers — render inline chips for each archived snapshot ──
   // Each marker becomes a clickable chip that opens the Compaction Viewer
@@ -1150,15 +1448,27 @@ function renderMessage(msg, idx) {
       // ── Streaming preview: render the partial translation as markdown as it
       //    arrives, in a styled block that morphs smoothly into the final
       //    bilingual译文 once the stream completes. ──
+      // ★ Segment-timeline (step 5b): when the interleaved per-tool timeline is
+      //   active for THIS turn, the per-round translated narration is already
+      //   shown INLINE (settled `_renderTimelineBatch` reads seg.translatedText;
+      //   streaming `_renderStreamingTranslatePreview` paints per-round Chinese),
+      //   and the answer shows as the bilingual block above. The standalone
+      //   bottom `.translate-preview` blob then merely DUPLICATES that inline
+      //   text — and is exactly the block that "reappears on pause / mid-stream
+      //   re-render", fighting the interleaved layout. Suppress it here (keep
+      //   the quiet spinner head so the user still sees translation is running)
+      //   and stamp `data-seg-timeline` so the in-place poll patch
+      //   (`_patchTranslateLoadingDom`) also skips re-creating it.
       let previewSub = '';
-      if (msg._translatePartial) {
+      if (msg._translatePartial && !_segTimelineRendered) {
         let _pv;
         try { _pv = renderMarkdown(stripNoTranslateTags(msg._translatePartial)); }
         catch (e) { _pv = escapeHtml(msg._translatePartial); }
         previewSub = `<div class="translate-preview"><div class="md-content">${_pv}</div><span class="translate-caret"></span></div>`;
       }
       const _hasPreview = previewSub ? ' has-preview' : '';
-      body += `<div class="translate-loading${_hasPreview}" id="translate-loading-${idx}">`
+      const _segTlAttr = _segTimelineRendered ? ' data-seg-timeline="1"' : '';
+      body += `<div class="translate-loading${_hasPreview}" id="translate-loading-${idx}"${_segTlAttr}>`
         + `<div class="translate-loading-head"><span class="translate-spinner"></span>`
         + `<span class="translate-loading-label">${t('translate.translatingToCN')}</span></div>`
         + `${statusSub}${previewSub}</div>`;
@@ -1175,7 +1485,17 @@ function renderMessage(msg, idx) {
     try { body += window.Artifacts.renderChips(msg._artifacts); }
     catch (e) { console.debug("[Artifacts] renderChips failed:", e); }
   }
-  if (!isUser) body += renderFinishInfo(msg);
+  if (!isUser) {
+    /* Is this the still-running tail? The backend withholds finishReason/
+     * usage mid-stream, so a model-only assistant message that is the last
+     * message of a conv with a live stream / active task is in progress —
+     * suppress its premature finish bar (see renderFinishInfo). */
+    const _lvConv = getActiveConv();
+    const _isLiveTail = !!(_lvConv
+      && idx === _lvConv.messages.length - 1
+      && (activeStreams.has(_lvConv.id) || _lvConv.activeTaskId));
+    body += renderFinishInfo(msg, _isLiveTail);
+  }
   const idAttr = typeof idx === "number" ? ` id="msg-${idx}"` : "";
   /* Stable per-message handle for the unified chatInner controller.
    * Server backfills `_msgId` (UUID) on persist; client-only messages get
@@ -1194,10 +1514,21 @@ function renderMessage(msg, idx) {
   let actionBtns = "";
   if (typeof idx === "number") {
     const copyH = `<button class="msg-action-btn copy-msg-btn" onclick="event.stopPropagation();copyMessage(${idx})" title="Copy"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy</button>`;
-    const editH = isUser
-      ? `<button class="msg-action-btn" onclick="event.stopPropagation();startEditMessage(${idx})" title="Edit"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Edit</button>`
-      : "";
-    const regenH = isUser
+    /* ★ Edit / Regen are USER-LANE actions, but an autopilot VU turn is
+     *   role=user + MACHINE-authored (`_isVirtualUser`). Editing a synthetic
+     *   "keep going" driver turn and regenerating from it is nonsensical AND
+     *   lets a user inject a hand-edited driver message mid-autopilot — so the
+     *   VU row gets the SHARED actions (Copy / Translate / Delete) but NOT
+     *   Edit / Regen. `_isVirtualUser` is its own carve-out here; a real human
+     *   user turn (incl. a role=user peer-message turn) still shows both. */
+    const _humanAuthored = isUser && !msg._isVirtualUser;
+    /* Edit is available on EVERY bubble now (user, agent, autopilot VU,
+     * critic, planner). For a real human user turn it opens the full editor
+     * (Save / Save & Resend); for every other lane it is EDIT-IN-PLACE only
+     * (Save) — startEditMessage / saveEditOnly branch on the role. Regen
+     * stays human-only (see _humanAuthored below). */
+    const editH = `<button class="msg-action-btn" onclick="event.stopPropagation();startEditMessage(${idx})" title="Edit"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Edit</button>`;
+    const regenH = _humanAuthored
       ? `<button class="msg-action-btn msg-regen-btn" onclick="event.stopPropagation();regenerateFromUser(${idx})" title="Regenerate response from this message"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> Regen</button>`
       : "";
     const conv_ = getActiveConv();
@@ -1224,7 +1555,8 @@ function renderMessage(msg, idx) {
     const deleteH = canDelete
       ? `<button class="msg-action-btn msg-delete-btn" onclick="event.stopPropagation();deleteTurn(${idx})" title="${isUser ? 'Delete this turn' : 'Delete this message'}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>`
       : "";
-    actionBtns = `<div class="message-actions">${copyH}${editH}${regenH}${continueH}${translateH}${exportImgH}${deleteH}</div>`;
+    const apReportH = _apRunReportAffordance(conv_, msg);
+    actionBtns = `<div class="message-actions">${copyH}${editH}${regenH}${continueH}${translateH}${apReportH}${exportImgH}${deleteH}</div>`;
   }
   // ★ Tofu mascot avatars: Worker gets worker tofu, Planner gets planner tofu
   let avatarContent = (typeof _TOFU_WORKER_SVG !== 'undefined') ? _TOFU_WORKER_SVG : "✦",
@@ -1233,6 +1565,18 @@ function renderMessage(msg, idx) {
     avatarContent = (typeof _TOFU_PLANNER_SVG !== 'undefined') ? _TOFU_PLANNER_SVG
       : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>';
     roleName = "Planner";
+  }
+  // ── Assistant-lane auto-initiation (swarm auto-continue): a turn the backend
+  //    started to drain sub-agent updates is NOT a human-initiated agent turn,
+  //    so attribute it via the shared registry instead of the plain "Agent". ──
+  let _initBadge = "";
+  if (!isUser && !msg._isEndpointPlanner && typeof _initiatorPresentation === 'function') {
+    const _ip = _initiatorPresentation(msg);
+    if (_ip && _ip.lane === 'assistant') {
+      avatarContent = _ip.avatar;
+      roleName = _ip.label;
+      _initBadge = `<span class="ep-verdict-badge init-badge ${_ip.cls}">${escapeHtml(_ip.label)}</span>`;
+    }
   }
 
   // ── Branch zone for assistant messages (only un-inlined branches + add button) ──
@@ -1265,12 +1609,32 @@ function renderMessage(msg, idx) {
   // ── Avatar: tofu critic for reviews & autopilot, onigiri mascot for user ──
   const _criticAvatar = (typeof _TOFU_CRITIC_SVG !== 'undefined') ? _TOFU_CRITIC_SVG
     : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
+  // A peer/operator KIND_PEER_MSG turn is role=user but NOT human input — give
+  // it the people-glyph (mirrors the project_peer_status tool icon) + a role
+  // label instead of the onigiri + "You", so the header identity stops lying.
+  // The specific sender (conv id / operator) stays in the in-bubble banner.
+  const _peerAvatar = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>';
+  const _tOr = (k, fb) => (typeof t === "function" && t(k) !== k) ? t(k) : fb;
+  // A user-lane turn auto-initiated by proactive / timer / brain must NOT show
+  // the onigiri "You". Resolve those through the shared registry; the existing
+  // critic/VU/peer arms keep their dedicated (test-pinned) avatars + labels.
+  const _userInit = (isUser && !msg._isEndpointReview && !msg._isVirtualUser
+                     && !msg._peerMessage && typeof _initiatorPresentation === 'function')
+    ? _initiatorPresentation(msg) : null;
   const userAvatar = (msg._isEndpointReview || msg._isVirtualUser)
     ? _criticAvatar
+    : msg._peerMessage
+    ? _peerAvatar
+    : (_userInit && _userInit.lane === 'user')
+    ? _userInit.avatar
     : (typeof _USER_AVATAR_SVG !== 'undefined') ? _USER_AVATAR_SVG
     : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
   const userLabel = msg._isEndpointReview ? "Critic"
     : msg._isVirtualUser ? "Autopilot"
+    : msg._peerMessage
+    ? (msg._peerHuman ? _tOr("peer.operatorLabel", "Operator") : _tOr("peer.senderLabel", "Peer"))
+    : (_userInit && _userInit.lane === 'user')
+    ? _userInit.label
     : "You";
 
   /* messageTime is a formatter output (digits + localized separators) —
@@ -1291,7 +1655,7 @@ function renderMessage(msg, idx) {
     try { turnCtxHtml = renderTurnCtxNote(msg._ctx); }
     catch (e) { console.debug("[turnCtx] renderTurnCtxNote failed:", e); }
   }
-  const badgeHtml = plannerBadge || criticBadge;
+  const badgeHtml = plannerBadge || criticBadge || _initBadge;
   /* Final assembly via safeHtml. roleName / userLabel / time are
    * escaped by default. Everything pre-built above (avatars = trusted
    * SVG, badgeHtml, body, branchHtml, actionBtns, the class/attr

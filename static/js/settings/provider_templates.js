@@ -86,10 +86,26 @@ const _PROVIDER_TEMPLATES = [
       { model_id: 'o4-mini',       capabilities: ['text', 'vision', 'thinking', 'cheap'],   rpm: 30,  cost: 0.005 },
       { model_id: 'gpt-4.1',       capabilities: ['text', 'vision', 'cheap'],               rpm: 30,  cost: 0.010 },
       { model_id: 'gpt-4.1-mini',  capabilities: ['text', 'vision', 'cheap'],      rpm: 60,  cost: 0.002 },
+      // ── Speech-to-text (voice input) ──
+      { model_id: 'gpt-4o-transcribe',      capabilities: ['transcription'],        rpm: 60,  cost: 0.006 },
+      { model_id: 'gpt-4o-mini-transcribe', capabilities: ['transcription'],        rpm: 60,  cost: 0.003 },
       // ── Image generation ──
       { model_id: 'gpt-image-2',   capabilities: ['image_gen'],                    rpm: 10,  cost: 0.065 },
       { model_id: 'gpt-image-1.5', capabilities: ['image_gen'],                    rpm: 10,  cost: 0.043 },
       { model_id: 'gpt-image-1',   capabilities: ['image_gen'],                    rpm: 10,  cost: 0.040 },
+    ],
+  },
+  {
+    key: 'groq', brand: 'groq', category: 'official',
+    name: 'Groq',
+    base_url: 'https://api.groq.com/openai/v1',
+    balance_url: '',
+    models: [
+      // ── Speech-to-text (voice input) — fast, cheap Whisper on Groq LPUs ──
+      { model_id: 'whisper-large-v3-turbo', capabilities: ['transcription'],                    rpm: 120, cost: 0.0004 },
+      { model_id: 'whisper-large-v3',       capabilities: ['transcription'],                    rpm: 120, cost: 0.0004 },
+      // ── Chat ──
+      { model_id: 'llama-3.3-70b-versatile', capabilities: ['text', 'cheap'],                   rpm: 60,  cost: 0.0008 },
     ],
   },
   {

@@ -10,7 +10,6 @@ preserved on top of the runtime by augmenting the task dict after
 ``runtime.create()``.
 """
 
-import copy
 import json
 import threading
 import time
@@ -470,6 +469,14 @@ def append_event(task, event):
             logger.warning('[Task] push_event fallback failed task=%s: %s',
                            task['id'][:8], e)
 
+    # ★ Liveness clock #1 (see reap_stuck_running_tasks): every emitted event —
+    #   delta / keepalive / retry / waiting_model phase — bumps _t_last_event.
+    #   A rate-limited-but-alive turn keeps emitting retry phases, so this stays
+    #   fresh and the reaper never mistakes it for wedged. (Clock #2,
+    #   _dispatch_heartbeat, is refreshed around live dispatch / tool / human
+    #   waits.) A wedged thread emits NOTHING → this clock goes stale.
+    task['_t_last_event'] = time.time()
+
     # ★ Track phase in task for polling fallback
     if event.get('type') == 'phase':
         p = {'phase': event['phase'], 'detail': event.get('detail', '')}
@@ -606,7 +613,7 @@ def build_result_meta(task):
     """
     meta = {}
     if task.get('finishReason'): meta['finishReason'] = task['finishReason']
-    if task.get('usage'): meta['usage'] = task['usage']
+    if task.get('usage'): meta['usage'] = _sanitize_usage_for_persist(task['usage'])
     if task.get('preset'): meta['preset'] = task['preset']
     if task.get('toolSummary'): meta['toolSummary'] = task['toolSummary']
     if task.get('_fallback_model'):
@@ -620,7 +627,7 @@ def build_result_meta(task):
     if task.get('model'): meta['model'] = task['model']
     if task.get('provider_id'): meta['provider_id'] = task['provider_id']
     if task.get('thinkingDepth'): meta['thinkingDepth'] = task['thinkingDepth']
-    if task.get('apiRounds'): meta['apiRounds'] = task['apiRounds']
+    if task.get('apiRounds'): meta['apiRounds'] = _sanitize_api_rounds_for_persist(task['apiRounds'])
     if task.get('modifiedFiles'): meta['modifiedFiles'] = task['modifiedFiles']
     if task.get('modifiedFileList'): meta['modifiedFileList'] = task['modifiedFileList']
     # Orchestration flow per-node run trace (resolved brief + bounded I/O per
@@ -642,6 +649,85 @@ def build_result_meta(task):
         if task.get('_endpoint_stop_reason'):
             meta['endpointStopReason'] = task['_endpoint_stop_reason']
     return meta
+
+
+# ── Persisted-payload trimming: drop transient/diagnostic bloat ──────────
+#
+# Three fields balloon the persisted conversation JSON without any value once
+# a turn is done — they are transient streaming buffers or backend-only
+# diagnostics that no render path reads. Left in place they inflate a single
+# conversation to 100+ MB, so the browser exhausts memory the moment it loads
+# and renders it (proven: mr80gsd8rywph9 = 121 MB, dominated by usage._wire_fp).
+# We strip them at the DB persist boundary (and mirror the strip on the
+# frontend PUT + IndexedDB cache) so the authoritative store never carries them.
+#
+#   1. usage._wire_fp / _wire_static — the post-translation wire fingerprint
+#      (a ~226 KB canonicalized-message LIST per round). Captured in
+#      lib/llm/_sse_core.py purely for same-run cache-miss diagnosis by
+#      lib/tasks_pkg/cache_tracking.py, which keeps its OWN in-memory copy
+#      (prev.wire_fp). NO frontend code reads usage._wire_fp — grep-verified.
+#   2. toolRounds[]._partialOutput — the live run_command terminal buffer that
+#      grows during streaming. Once the round is done the authoritative output
+#      lives in results[0].output / toolContent; _partialOutput is dead weight
+#      (18 MB in mqxbemdr7asicp while toolContent was 2 KB). The render path
+#      uses toolContent, never _partialOutput, on a completed round.
+#
+# These two are dropped unconditionally on persist. Inline base64 image URIs
+# (toolRounds[].results[].imageDataUris[].uri) are ALSO multi-MB but ARE the
+# render source, so they are handled on the frontend cache side (strip from the
+# IndexedDB copy, keep in the live/DB copy) — not here.
+
+# usage sub-keys that are backend-only stream diagnostics (never read by any
+# render path). _wire_fp is the giant (~226 KB/round); the rest are tiny but
+# equally value-free once persisted, so drop the whole diagnostic set.
+_USAGE_TRANSIENT_KEYS = ('_wire_fp', '_wire_static')
+
+
+def _sanitize_usage_for_persist(usage):
+    """Return a copy of *usage* with transient wire-diagnostic keys dropped.
+
+    ``usage._wire_fp`` is a per-round ~226 KB canonical-message list captured
+    for live cache-miss tracing (lib/llm/_sse_core.py → cache_tracking.py); it
+    is consumed WITHIN the run and never read by any render path, so persisting
+    it just bloats the conversation. Returns *usage* unchanged (same object)
+    when there is nothing to strip, so the common small-usage case is free.
+    """
+    if not isinstance(usage, dict):
+        return usage
+    if not any(k in usage for k in _USAGE_TRANSIENT_KEYS):
+        return usage
+    return {k: v for k, v in usage.items() if k not in _USAGE_TRANSIENT_KEYS}
+
+
+def _sanitize_api_rounds_for_persist(api_rounds):
+    """Return a copy of *api_rounds* with each round's usage diagnostics stripped."""
+    if not isinstance(api_rounds, list):
+        return api_rounds
+    out = []
+    for r in api_rounds:
+        if isinstance(r, dict) and isinstance(r.get('usage'), dict):
+            r = {**r, 'usage': _sanitize_usage_for_persist(r['usage'])}
+        out.append(r)
+    return out
+
+
+def _trim_round_for_persist(r):
+    """Drop the transient run_command streaming buffer from a DONE tool round.
+
+    ``_partialOutput`` is the live terminal buffer accumulated during streaming
+    (lib/tasks_pkg/handlers/code_exec.py). On a completed round the authoritative
+    output is already in ``results[0].output`` / ``toolContent``; the buffer is
+    pure bloat (18 MB observed while toolContent was 2 KB). We only drop it once
+    the round is ``done`` — a still-running round keeps it so a mid-stream
+    state-snapshot reconnect can still replay the partial output. Returns *r*
+    unchanged when there is nothing to trim.
+    """
+    if not isinstance(r, dict):
+        return r
+    if r.get('status') == 'done' and r.get('_partialOutput'):
+        r = dict(r)
+        r.pop('_partialOutput', None)
+    return r
 
 
 def _merge_tool_rounds(task):
@@ -669,19 +755,24 @@ def _merge_tool_rounds(task):
     cp = task.get('_checkpointToolRounds') or []
     cur = task.get('toolRounds') or []
     merged = (list(cp) + cur) if cp else cur
-    return [dict(r) if isinstance(r, dict) else r for r in merged]
+    # The shallow-copy is thread-safety (see docstring); layer the persist
+    # trim on top so a DONE round's transient _partialOutput buffer never
+    # reaches the DB. _trim_round_for_persist returns dict(r) when it strips,
+    # so it subsumes the shallow copy for those rounds.
+    return [_trim_round_for_persist(dict(r)) if isinstance(r, dict) else r
+            for r in merged]
 
 
 # Static column order for the task_results upsert — shared by the final-result
 # and the running-checkpoint writers so the two can never drift.
 _TASK_RESULTS_COLS = (
     'task_id', 'conv_id', 'content', 'thinking', 'error',
-    'status', 'tool_rounds', 'metadata', 'created_at', 'completed_at',
+    'status', 'tool_rounds', 'metadata', 'segments', 'created_at', 'completed_at',
 )
 
 
 def _upsert_task_row(task, conv_id, *, content, thinking, status,
-                     error_json, tr_json, meta_json):
+                     error_json, tr_json, meta_json, segments_json=None):
     """Single source of truth for the ``task_results`` upsert.
 
     Owns the DB acquire + the ``upsert(..., insert_cols=[10], retry=True)``
@@ -697,7 +788,7 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
         'task_id': task['id'], 'conv_id': conv_id,
         'content': content, 'thinking': thinking,
         'error': error_json, 'status': status, 'tool_rounds': tr_json,
-        'metadata': meta_json,
+        'metadata': meta_json, 'segments': segments_json,
         'created_at': int(task.get('created_at', time.time()) * 1000),
         'completed_at': int(time.time() * 1000),
     }, insert_cols=list(_TASK_RESULTS_COLS), retry=True)
@@ -738,6 +829,19 @@ def persist_task_result(task):
     # ★ Merge checkpoint toolRounds for DB persistence (continue flow)
     _merged_tr = _merge_tool_rounds(task)
 
+    # ★ Segment-timeline SoT (epic pt_cb8f98b0cb9b47fb, step 1 — SHIPS DARK).
+    #   Assemble the ordered typed-segment list from the SAME merged rounds +
+    #   terminal content/thinking. Nothing reads task['segments'] yet; it is
+    #   populated here (the single terminal chokepoint) so later steps can flip
+    #   the compat surfaces / persistence / frontend onto it. Best-effort: a
+    #   segment-assembly failure must NEVER break result persistence.
+    try:
+        from lib.tasks_pkg.segments import assemble_segments
+        task['segments'] = assemble_segments(task, merged=_merged_tr)
+    except Exception as _seg_e:
+        logger.warning('[Task %s] segment assembly failed (non-fatal, dark): %s',
+                       task_id_short, _seg_e, exc_info=True)
+
     try:
         # Only store the (potentially multi-MB) toolRounds blob when this task
         # has no conversation row to hold it — see _tool_rounds_have_dedicated_home.
@@ -745,6 +849,19 @@ def persist_task_result(task):
         # recovery readers fall back to load_tool_rounds_from_conversation().
         tr_json = None if _tool_rounds_have_dedicated_home(task) else json.dumps(_merged_tr, ensure_ascii=False)
         meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
+        # ★ segments (epic pt_cb8f98b0cb9b47fb, step 2): persist the THIN form
+        #   (segments_to_json strips the _round mirror — it duplicates the
+        #   tool_rounds column). Rehydrated on read via rehydrate_segments +
+        #   the co-persisted toolRounds. Best-effort: never break persistence.
+        segments_json = None
+        try:
+            _segs = task.get('segments')
+            if _segs:
+                from lib.tasks_pkg.segments import segments_to_json
+                segments_json = json.dumps(segments_to_json(_segs), ensure_ascii=False)
+        except Exception as _sj_e:
+            logger.warning('[Task %s] segments serialize failed (non-fatal): %s',
+                           task_id_short, _sj_e, exc_info=True)
         # Error envelope is JSON-serialised at the wire — task_results.error
         # is TEXT, but every consumer (SSE done, /api/chat/poll, conversation
         # message persistence) round-trips through lib.error_envelope so the
@@ -752,7 +869,8 @@ def persist_task_result(task):
         error_json = _err_to_json(task['error']) if task.get('error') is not None else None
         _upsert_task_row(task, task['convId'], content=task['content'],
                          thinking=task['thinking'], status=task['status'],
-                         error_json=error_json, tr_json=tr_json, meta_json=meta_json)
+                         error_json=error_json, tr_json=tr_json, meta_json=meta_json,
+                         segments_json=segments_json)
         logger.debug('[Task %s] conv=%s Persisted to DB successfully', task_id_short, conv_id_short)
     except Exception:
         logger.error('[Task %s] conv=%s ❌ Persist FAILED — content (%d chars) and thinking (%d chars) may be lost!',
@@ -883,6 +1001,123 @@ def _dispatch_queued_message(task):
                        conv_id[:8], e, exc_info=True)
 
 
+def _reconcile_orphan_placeholder_on_settle(task):
+    """Settle-time reconcile for a task that produced NOTHING to persist.
+
+    When a task DROPS before its first token (stream died / worker crashed /
+    aborted before any delta), the frontend has already minted an empty
+    assistant placeholder ({role:'assistant', content:''}) as the stream
+    target, and ``_sync_result_to_conversation`` skips its normal write (no
+    content/thinking/error). Without this, that orphan placeholder is never
+    swept at the source: the GET-path reconcile can't touch it while the task
+    is live (a live stream target is byte-identical to a ghost), so it lingers
+    as a blank "Agent" bubble until a future warm reopen heals it.
+
+    This runs the SAME authoritative pure verdict as the GET/startup paths
+    (``reconcile_conversation_messages`` → ``classify_ghost_tail`` returns
+    'delete' for a bare empty trailing assistant) at TASK-END, keyed by taskId.
+
+    THE GATE IS THE WHOLE BALLGAME (mirrors the GET-path live-task gate): only
+    reconcile when THIS task is still the conv's latest. If a NEWER task
+    superseded it, that newer task owns any live placeholder and we must not
+    delete it. Because this fires at task-end, THIS task is by definition no
+    longer producing tokens — so sweeping its own orphan tail is safe once it
+    is confirmed un-superseded.
+
+    Best-effort: never raises (a reconcile failure must not break finalization).
+    Cache-neutral via the live prompt-cache prefix count.
+    """
+    conv_id = task.get('convId', '')
+    if not conv_id or task.get('_inline_messages'):
+        return
+    # Keyed-by-taskId gate: a newer task owns any live placeholder now.
+    latest = _latest_task_for_conv(conv_id)
+    if latest and latest != task['id']:
+        logger.debug('[SettleReconcile] conv=%s skip — superseded by newer task %s',
+                     conv_id[:8], latest[:8])
+        return
+    db = None
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT messages, updated_at, settings FROM conversations '
+            'WHERE id=? AND user_id=1', (conv_id,)).fetchone()
+        if not row:
+            return
+        _row_updated_at = row['updated_at']
+        try:
+            messages = json.loads(row[0] or '[]')
+        except (json.JSONDecodeError, TypeError):
+            logger.debug('[SettleReconcile] conv=%s messages JSON parse failed', conv_id[:8])
+            return
+        if not messages:
+            return
+
+        from lib.conversations.reconcile import reconcile_conversation_messages
+        prefix_n = 0
+        try:
+            from lib.tasks_pkg.cache_tracking import get_cache_prefix_count
+            prefix_n = get_cache_prefix_count(conv_id) or 0
+        except Exception as e:
+            logger.debug('[SettleReconcile] conv=%s prefix count failed: %s', conv_id[:8], e)
+        cleaned, changed = reconcile_conversation_messages(messages, prefix_n)
+        if not changed:
+            return
+
+        # Clear the pinned activeTaskId (this task is done) in the same write.
+        settings_json = None
+        try:
+            s = json.loads(row[2] or '{}') if row[2] else {}
+            if s.get('activeTaskId'):
+                s['activeTaskId'] = None
+                settings_json = json.dumps(s, ensure_ascii=False)
+        except (json.JSONDecodeError, TypeError):
+            settings_json = None
+
+        from lib.conversations import build_search_text
+        search_text = build_search_text(cleaned)
+        messages_json = json_dumps_pg(cleaned)
+        now_ms = int(time.time() * 1000)
+        # CAS guard: only write if no concurrent update landed since our SELECT.
+        if settings_json is not None:
+            cur = db.execute(
+                '''UPDATE conversations
+                   SET messages=?, msg_count=?, settings=?, search_text=?, updated_at=?
+                   WHERE id=? AND user_id=1 AND updated_at=?''',
+                (messages_json, len(cleaned), settings_json, search_text, now_ms,
+                 conv_id, _row_updated_at))
+        else:
+            cur = db.execute(
+                '''UPDATE conversations
+                   SET messages=?, msg_count=?, search_text=?, updated_at=?
+                   WHERE id=? AND user_id=1 AND updated_at=?''',
+                (messages_json, len(cleaned), search_text, now_ms,
+                 conv_id, _row_updated_at))
+        db.commit()
+        if (getattr(cur, 'rowcount', 0) or 0) <= 0:
+            logger.debug('[SettleReconcile] conv=%s CAS miss — concurrent write won (safe)',
+                         conv_id[:8])
+            return
+        try:
+            from lib.conversations import update_conversation_fts
+            update_conversation_fts(db, conv_id, search_text)
+        except Exception as e:
+            logger.debug('[SettleReconcile] conv=%s FTS update skipped: %s', conv_id[:8], e)
+        logger.info('[SettleReconcile] conv=%s swept orphaned placeholder at task-end '
+                    '(%d\u2192%d msgs, dropped-before-first-token)',
+                    conv_id[:8], len(messages), len(cleaned))
+        try:
+            from lib.conversations import notify_conv_changed
+            _rev_row = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=1',
+                                  (conv_id,)).fetchone()
+            notify_conv_changed(conv_id, rev=(_rev_row[0] if _rev_row else None))
+        except Exception as e:
+            logger.debug('[SettleReconcile] conv=%s notify skipped: %s', conv_id[:8], e)
+    except Exception as e:
+        logger.warning('[SettleReconcile] conv=%s reconcile failed (non-fatal): %s',
+                       conv_id[:8], e, exc_info=True)
+
+
 def _sync_result_to_conversation(task, meta):
     """Write the completed task result into the conversation's messages in the DB.
 
@@ -901,9 +1136,17 @@ def _sync_result_to_conversation(task, meta):
     thinking = task.get('thinking') or ''
     error = task.get('error')
 
-    # Skip if there's truly nothing to write (e.g. aborted before any tokens)
+    # Skip if there's truly nothing to write (e.g. aborted before any tokens).
+    # This is the drop-before-first-token case: the frontend already minted an
+    # empty assistant placeholder as the stream target, so before returning we
+    # sweep that orphan at the SOURCE (settle-time reconcile keyed by taskId)
+    # rather than leaving it for a future warm reopen to heal.
     if not content and not thinking and not error:
         logger.debug('%s conv=%s Skipping conv sync — no content/thinking/error to write', pfx, conv_id)
+        try:
+            _reconcile_orphan_placeholder_on_settle(task)
+        except Exception as e:
+            logger.debug('%s conv=%s settle-time reconcile skipped: %s', pfx, conv_id, e)
         return
 
     # ── FRESHNESS GUARD: reject writes from stale/superseded tasks ──
@@ -1086,14 +1329,27 @@ def _sync_result_to_conversation(task, meta):
             # here resurrects the just-truncated turn → the "U1 A1 U1 A2"
             # doubled-context bug. Aborted tasks may only FILL an existing
             # trailing assistant slot, never create one.
-            if task.get('aborted') or task.get('_abort_reason'):
+            _abort_reason = task.get('_abort_reason', '')
+            if (task.get('aborted') or _abort_reason) and _abort_reason != 'stuck_no_progress':
                 logger.info('%s conv=%s Last message is role=%s and this task is '
                             'aborted (reason=%s) — dropping stale write instead of '
                             'appending a new assistant (prevents truncated-turn '
                             'resurrection)',
                             pfx, conv_id, last_msg.get('role'),
-                            task.get('_abort_reason') or 'aborted')
+                            _abort_reason or 'aborted')
                 return
+            # ── EXCEPTION: a reaper-wedged task (reason='stuck_no_progress')
+            #   OWNS its trailing user turn (it never got a reply) and is still
+            #   this conv's latest task (freshness guard above passed). This is
+            #   NOT a Stop→Regenerate truncation, so it MUST be allowed to
+            #   append an assistant error bubble answering that turn — otherwise
+            #   the conv shows a perpetual "waiting" with no error. The narrow
+            #   'stuck_no_progress' scope is asserted by
+            #   test_NC_reaped_task_guard_still_blocks_regenerate_truncation.
+            if _abort_reason == 'stuck_no_progress':
+                logger.info('%s conv=%s reaped wedged task — appending assistant '
+                            'error bubble for the unanswered trailing turn',
+                            pfx, conv_id)
             # No trailing assistant message — append one
             logger.info('%s conv=%s Last message is role=%s, appending new assistant message',
                        pfx, conv_id, last_msg.get('role'))
@@ -1165,6 +1421,19 @@ def _sync_result_to_conversation(task, meta):
         # final 'stop' arrived) is superseded.
         if tool_rounds:
             last_msg['toolRounds'] = tool_rounds
+        # ★ segments (epic pt_cb8f98b0cb9b47fb, step 2): persist the THIN
+        #   timeline onto the message dict too (round-trips through the
+        #   conversations.messages JSON column). Co-persisted with toolRounds
+        #   above, so rehydrate_segments can rebuild _round on read. Dark:
+        #   nothing reads msg['segments'] yet.
+        try:
+            _segs = task.get('segments')
+            if _segs:
+                from lib.tasks_pkg.segments import segments_to_json
+                last_msg['segments'] = segments_to_json(_segs)
+        except Exception as _sm_e:
+            logger.warning('%s conv=%s segments write onto message failed (non-fatal): %s',
+                           pfx, conv_id, _sm_e)
         if meta.get('finishReason'):
             last_msg['finishReason'] = meta['finishReason']
         if meta.get('usage'):
@@ -1283,178 +1552,100 @@ def _sync_result_to_conversation(task, meta):
                 # reflect the new last message (assistant, not user) for Case E
                 if messages:
                     lm = messages[-1]
-                    if s.get('lastMsgRole') != lm.get('role') or s.get('lastMsgTimestamp') != lm.get('timestamp'):
+                    # Raw settled-turn facts for the sidebar's stripped-messages
+                    # path (classification stays frontend-side). Recompute every
+                    # sync so a re-run overwrites a prior interrupted verdict.
+                    _lfr = lm.get('finishReason')
+                    _lerr = bool(lm.get('error'))
+                    _lout = bool((lm.get('content') or '') or (lm.get('thinking') or '')
+                                 or (lm.get('toolRounds') or []) or lm.get('_igResults'))
+                    if (s.get('lastMsgRole') != lm.get('role')
+                            or s.get('lastMsgTimestamp') != lm.get('timestamp')
+                            or s.get('lastFinishReason') != _lfr
+                            or s.get('lastMsgError') != _lerr
+                            or s.get('lastMsgHasOutput') != _lout):
                         s['lastMsgRole'] = lm.get('role')
                         s['lastMsgTimestamp'] = lm.get('timestamp')
+                        s['lastFinishReason'] = _lfr
+                        s['lastMsgError'] = _lerr
+                        s['lastMsgHasOutput'] = _lout
                         changed = True
                 if changed:
                     settings_json = json.dumps(s, ensure_ascii=False)
             except (json.JSONDecodeError, TypeError) as e:
                 logger.warning('[Task] Failed to parse/clear activeTaskId from settings for conv=%s: %s', conv_id, e, exc_info=True)
 
-        # ── Optimistic lock with bounded retry ──
+        # ── Optimistic lock: only update if no concurrent write occurred ──
         # Use updated_at as CAS guard to prevent overwriting a fresher
         # frontend sync.  If the row was updated since our SELECT, our
-        # read-modify-write would clobber the frontend's data — so the
-        # UPDATE is conditional on updated_at being unchanged.
-        #
-        # ★ On a CAS MISS we must NOT silently drop the terminal write.
-        #   The old code logged "frontend likely synced first (safe)" and
-        #   returned — but on a FLAKY NETWORK the frontend's finishStream
-        #   sync may itself have failed, so nobody persists the final turn
-        #   → the answer is lost from conversations.messages (survives only
-        #   in task_results). Instead we re-read the fresh row and RETRY,
-        #   mirroring _sync_partial_to_conversation. The retry re-applies
-        #   the SAME content-length guard: if the fresh row already holds
-        #   content at least as long as ours, that is the GENUINE
-        #   frontend-won case and we skip; otherwise we re-merge our result
-        #   onto the fresh tail and re-CAS. (2026-05-31 rejected this as
-        #   out-of-scope — overturned by direct evidence of terminal loss.)
+        # read-modify-write would clobber the frontend's data.
+        # ── Also update search_text for fast conversation search ──
         from lib.conversations import build_search_text
-
-        def _apply_result_to_tail(msgs):
-            """Merge the completed result onto the tail assistant of ``msgs``.
-
-            Returns (search_text, wrote) where ``wrote`` is False when the
-            fresh row already holds >= our content (frontend genuinely won —
-            skip). Idempotent: only ever GROWS content/thinking + fills
-            terminal metadata, so re-running per attempt is safe.
-            """
-            if not msgs:
-                return None, False
-            tail = msgs[-1]
-            if tail.get('role') != 'assistant':
-                if task.get('aborted') or task.get('_abort_reason'):
-                    return None, False
-                tail = {'role': 'assistant', 'content': '', 'thinking': ''}
-                msgs.append(tail)
-            _cur_c = len(tail.get('content') or '')
-            _cur_t = len(tail.get('thinking') or '')
-            # Frontend-won guard: fresh row already has >= our content AND
-            # thinking → do not shrink it; skip the write (genuine race win).
-            if _cur_c >= new_content_len and _cur_t >= new_thinking_len and (content or thinking):
-                return None, False
-            if content and len(content) >= _cur_c:
-                tail['content'] = content
-            if thinking and len(thinking) >= _cur_t:
-                tail['thinking'] = thinking
-            if error:
-                tail['error'] = error
-            if tool_rounds:
-                tail['toolRounds'] = tool_rounds
-            for _mk, _dk in (('finishReason', 'finishReason'), ('usage', 'usage'),
-                             ('preset', 'preset'), ('toolSummary', 'toolSummary'),
-                             ('model', 'model'), ('provider_id', 'provider_id'),
-                             ('apiRounds', 'apiRounds'), ('modifiedFiles', 'modifiedFiles'),
-                             ('modifiedFileList', 'modifiedFileList')):
-                if meta.get(_mk):
-                    tail[_dk] = meta[_mk]
-            if meta.get('taskId'):
-                tail['_taskId'] = meta['taskId']
-            if meta.get('fallbackModel'):
-                tail['fallbackModel'] = meta['fallbackModel']
-                tail['fallbackFrom'] = meta.get('fallbackFrom', '')
-                if meta.get('fallbackReason'):
-                    tail['fallbackReason'] = meta['fallbackReason']
-                if meta.get('fallbackKind'):
-                    tail['fallbackKind'] = meta['fallbackKind']
-            _assign_message_ids(msgs)
-            return build_search_text(msgs), True
-
-        _MAX_TERMINAL_CAS = 3
-        _cas_succeeded = False
-        for _attempt in range(_MAX_TERMINAL_CAS):
-            search_text = build_search_text(messages)
-            # ── Why raw db.execute()+commit instead of db_execute_with_retry?
-            #     The retry helper masks rowcount (returns None), and we need
-            #     rowcount to detect CAS-miss reliably.
-            if settings_json:
-                cur = db.execute(
-                    '''UPDATE conversations
-                       SET messages=?, updated_at=?, msg_count=?, settings=?, search_text=?
-                       WHERE id=? AND user_id=1 AND updated_at=?''',
-                    (messages_json, now_ms, len(messages), settings_json, search_text, conv_id, _row_updated_at)
-                )
-            else:
-                cur = db.execute(
-                    '''UPDATE conversations
-                       SET messages=?, updated_at=?, msg_count=?, search_text=?
-                       WHERE id=? AND user_id=1 AND updated_at=?''',
-                    (messages_json, now_ms, len(messages), search_text, conv_id, _row_updated_at)
-                )
-            db.commit()
-            _cas_succeeded = (getattr(cur, 'rowcount', 0) or 0) > 0
-            if _cas_succeeded:
-                break
-            # CAS miss — a concurrent writer bumped updated_at. Re-read the
-            # fresh row and decide whether to retry (we still have more/equal
-            # content) or accept the frontend's write (genuine race win).
-            if _attempt + 1 >= _MAX_TERMINAL_CAS:
-                break
-            time.sleep(0.02 * (_attempt + 1))
-            _fresh = db.execute(
-                'SELECT messages, updated_at FROM conversations WHERE id=? AND user_id=1',
-                (conv_id,)
-            ).fetchone()
-            if not _fresh:
-                break
-            _row_updated_at = _fresh['updated_at']
-            try:
-                _fresh_msgs = json.loads(_fresh[0] or '[]')
-            except (json.JSONDecodeError, TypeError):
-                logger.warning('%s conv=%s CAS-miss re-read: unparseable messages — giving up',
-                               pfx, conv_id)
-                break
-            _fresh_search, _wrote = _apply_result_to_tail(_fresh_msgs)
-            if not _wrote:
-                # Fresh row already holds >= our content → frontend genuinely
-                # won. Stop retrying; this is the safe historical skip case.
-                logger.info('%s conv=%s CAS miss — fresh row already has >= our content '
-                            '(frontend won the race, safe to skip)', pfx, conv_id)
-                _cas_succeeded = False
-                # ── Phase 1: the fresh row's tail is the authoritative committed
-                #    state (it holds >= our content). Ship IT verbatim so the
-                #    terminal event still carries the DB truth even when we
-                #    ourselves didn't write. Metadata (finishReason/usage/…) was
-                #    already merged onto the fresh tail by _apply_result_to_tail.
-                if _fresh_msgs:
-                    task['_committedMsg'] = copy.deepcopy(_fresh_msgs[-1])
-                break
-            messages = _fresh_msgs
-            messages_json = json_dumps_pg(messages)
-            now_ms = int(time.time() * 1000)
-            logger.info('%s conv=%s CAS miss attempt %d/%d — re-applied onto fresh row, retrying',
-                        pfx, conv_id, _attempt + 1, _MAX_TERMINAL_CAS)
-
+        search_text = build_search_text(messages)
+        # ── Why use raw db.execute()+commit instead of db_execute_with_retry?
+        #     The retry helper masks rowcount (its docstring says "returns
+        #     None"), and we need the rowcount to detect CAS-miss reliably.
+        #     A re-SELECT of updated_at has a TOCTOU window where a third
+        #     writer landing between our UPDATE and the verify SELECT would
+        #     falsely report CAS-miss — suppressing side-effects (cost
+        #     stamp, auto-translate) that we just durably committed.
+        if settings_json:
+            cur = db.execute(
+                '''UPDATE conversations
+                   SET messages=?, updated_at=?, msg_count=?, settings=?, search_text=?
+                   WHERE id=? AND user_id=1 AND updated_at=?''',
+                (messages_json, now_ms, len(messages), settings_json, search_text, conv_id, _row_updated_at)
+            )
+        else:
+            cur = db.execute(
+                '''UPDATE conversations
+                   SET messages=?, updated_at=?, msg_count=?, search_text=?
+                   WHERE id=? AND user_id=1 AND updated_at=?''',
+                (messages_json, now_ms, len(messages), search_text, conv_id, _row_updated_at)
+            )
+        db.commit()
+        _cas_succeeded = (getattr(cur, 'rowcount', 0) or 0) > 0
         # FTS index is only updated when CAS succeeds.  Updating FTS for a
         # write we lost would leave search hits pointing at content we
         # never persisted — search results would surface dead data.
         if _cas_succeeded:
             from lib.conversations import update_conversation_fts
             update_conversation_fts(db, conv_id, search_text)
+            # ── Phase-1 parity stamp (the never-landed write) ──
+            # Freeze the EXACT terminal assistant dict we just committed to
+            # conversations.messages so orchestrator.py can ship it verbatim as
+            # the done event's `committedMessage`. The frontend then projects it
+            # VERBATIM (single source of truth for the settled bubble) instead
+            # of reconstructing from its transient stream buffer. Shallow copy
+            # freezes the row AS WRITTEN. Stamped ONLY on CAS success: skip /
+            # CAS-miss / crash paths intentionally leave it UNSET → no
+            # committedMessage rides the event → the client keeps its transient
+            # buffer (the offline fallback, still guarded by keep-longer).
+            task['_committedMsg'] = dict(last_msg)
+        if not _cas_succeeded:
+            logger.info('%s conv=%s Optimistic lock missed — row was updated concurrently '
+                       '(expected_updated_at=%s). '
+                       'Frontend likely synced first; backend sync skipped (safe).',
+                       pfx, conv_id, _row_updated_at)
+        else:
             logger.info('%s conv=%s ✅ Synced result to conversation — content=%dchars thinking=%dchars '
                         'msgs=%d (was: content=%d thinking=%d)',
                         pfx, conv_id, new_content_len, new_thinking_len, len(messages),
                         existing_content_len, existing_thinking_len)
-            # ── Phase 1: expose the EXACT dict just committed so the terminal
-            #    `done` event can ship it verbatim (parity gap closure). This
-            #    is the row we actually wrote (messages[-1] post-CAS), not a
-            #    parallel reconstruction. A deep copy is stashed so later
-            #    mutation of `messages` can't retroactively change the frame.
-            if messages:
-                task['_committedMsg'] = copy.deepcopy(messages[-1])
-        else:
-            logger.info('%s conv=%s Optimistic lock missed after retries — row held by a '
-                       'fresher writer (expected_updated_at=%s). Backend sync skipped.',
-                       pfx, conv_id, _row_updated_at)
 
-        # ── Invalidate meta cache so subsequent GET /api/conversations
-        #    returns the cleared activeTaskId immediately ──
+        # ── Invalidate meta cache AND push the change to clients so a sibling
+        #    device reconciles the completed answer without a manual refresh.
+        #    Carry the post-write rev (bumped by the messages-change trigger)
+        #    so the client rev-gate refetches this conv's body exactly once. ──
         try:
-            from lib.conversations import invalidate_meta_cache
-            invalidate_meta_cache()
+            from lib.conversations import notify_conv_changed
+            _mgr_rev_row = db.execute(
+                'SELECT rev FROM conversations WHERE id=? AND user_id=1',
+                (conv_id,)).fetchone()
+            _mgr_rev = _mgr_rev_row[0] if _mgr_rev_row else None
+            notify_conv_changed(conv_id, rev=_mgr_rev)
         except Exception as e:
-            logger.debug('[Manager] meta cache invalidation skipped: %s', e)
+            logger.debug('[Manager] conv-changed notify skipped: %s', e)
 
         # ── Auto-translate: server-side safety net for translation ──
         # Ensures translation happens even if the frontend is offline / switched away.
@@ -1514,6 +1705,23 @@ def checkpoint_task_partial(task):
     # ★ Merge checkpoint toolRounds for continue flow
     _merged_tr = _merge_tool_rounds(task)
 
+    # ★ Segment-timeline SoT (epic pt_cb8f98b0cb9b47fb): assemble on the CRASH
+    #   path too, so a turn cut off mid-prose leaves a persisted resumable tail.
+    #   persist_task_result assembles at clean finalization; without the same
+    #   block here a server crash / transport drop mid-answer would have NO
+    #   segment record — only the legacy channels — and the Continue prefill
+    #   path (resume_prefill_from_segments) would find nothing to resume. The
+    #   resumable flag is NOT stamped here (status='running', no finishReason
+    #   yet); recover_stale_tasks_on_startup stamps finishReason='interrupted'
+    #   on the message, and the continue read passes it as the finish_reason
+    #   override. Best-effort: a segment failure must NEVER break checkpointing.
+    try:
+        from lib.tasks_pkg.segments import assemble_segments
+        task['segments'] = assemble_segments(task, merged=_merged_tr)
+    except Exception as _seg_e:
+        logger.warning('[Checkpoint %s] segment assembly failed (non-fatal): %s',
+                       task_id_short, _seg_e, exc_info=True)
+
     try:
         # See _tool_rounds_have_dedicated_home: skip the duplicate blob for
         # tasks whose toolRounds are checkpointed into conversations.messages
@@ -1524,11 +1732,24 @@ def checkpoint_task_partial(task):
         if task.get('preset'): meta['preset'] = task['preset']
         if task.get('thinkingDepth'): meta['thinkingDepth'] = task['thinkingDepth']
         meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
+        # ★ Thin segments for the checkpoint row (same discipline as
+        #   persist_task_result step 2). Rehydrated on read via the co-persisted
+        #   tool_rounds. Best-effort — never break the checkpoint write.
+        _cp_segments_json = None
+        try:
+            _cp_segs = task.get('segments')
+            if _cp_segs:
+                from lib.tasks_pkg.segments import segments_to_json
+                _cp_segments_json = json.dumps(segments_to_json(_cp_segs), ensure_ascii=False)
+        except Exception as _sj_e:
+            logger.warning('[Checkpoint %s] segments serialize failed (non-fatal): %s',
+                           task_id_short, _sj_e, exc_info=True)
         # Error envelope is JSON-serialised at the wire — see persist_task_result.
         _cp_error_json = _err_to_json(task['error']) if task.get('error') is not None else None
         _upsert_task_row(task, conv_id, content=task.get('content') or '',
                          thinking=task.get('thinking') or '', status='running',
-                         error_json=_cp_error_json, tr_json=tr_json, meta_json=meta_json)
+                         error_json=_cp_error_json, tr_json=tr_json, meta_json=meta_json,
+                         segments_json=_cp_segments_json)
         logger.debug('[Checkpoint %s] conv=%s Saved partial: content=%dchars thinking=%dchars',
                      task_id_short, conv_id, content_len, thinking_len)
     except Exception as e:
@@ -1680,6 +1901,23 @@ def _sync_partial_to_conversation(task):
             if git_sha and not last_msg.get('_gitSha'):
                 last_msg['_gitSha'] = git_sha
                 mutated = True
+
+            # ★ Segment-timeline SoT (epic pt_cb8f98b0cb9b47fb): mirror the THIN
+            #   segments onto the message dict so a page-reload / Continue after
+            #   a mid-prose crash can read the resumable tail from the same
+            #   conversations.messages row it reads everything else from. Unlike
+            #   the structural-metadata backfill above (fill-if-absent), segments
+            #   are backend-authoritative and refreshed every checkpoint, so we
+            #   overwrite. Best-effort — a serialize failure just skips the write.
+            _seg_val = task.get('segments')
+            if _seg_val:
+                try:
+                    from lib.tasks_pkg.segments import segments_to_json
+                    last_msg['segments'] = segments_to_json(_seg_val)
+                    mutated = True
+                except Exception as _msj_e:
+                    logger.debug('[Checkpoint] conv=%s segments->msg serialize failed: %s',
+                                 conv_id[:8], _msj_e)
 
             # Backfill stable IDs onto every message — pure write-side hook.
             if _assign_message_ids(messages):
@@ -1903,64 +2141,75 @@ def recover_stale_tasks_on_startup():
                         logger.warning('[Startup] Failed to parse messages for conv=%s: %s',
                                        cid[:8], exc)
 
-            # ── Phase 3: backend-authoritative ghost reconcile ──
-            #   Sweep buried empty-ghost placeholders + classify the trailing
-            #   assistant (delete bare husk / stamp interrupted on a thinking-
-            #   only husk) SERVER-SIDE, so the frontend Case-D no longer INFERS
-            #   lifecycle state. Persisted in THIS SAME commit → there is no
-            #   frontend allowTruncate PUT that could be lost (the resurrect bug
-            #   is structurally impossible), and no frontend pop (the Case-D→
-            #   Case-E auto-fire leak is impossible). Runs on the merged
-            #   messages when we rewrote them above, else on the row's current
-            #   messages. A reconcile that changes anything forces a write even
-            #   when the interrupted-content merge above produced no change.
+            # ── Backend-authoritative ghost reconcile (Phase-3 startup wiring) ──
+            #    Sweep buried empty ghosts + collapse superseded error husks +
+            #    classify the trailing ghost, persisted in THIS SAME recovery
+            #    commit so the frontend loads an already-clean list (no PUT to
+            #    lose → resurrect impossible). Runs on the MERGED messages when a
+            #    merge happened, else on the stored list — a buried ghost must be
+            #    swept even when the interrupted task added no content (the
+            #    messages_json-still-None case). cache_prefix_count=0: post-restart
+            #    the prompt-cache state is empty so the whole list is mutable
+            #    (see EDITABLE_TAIL_COUNT single-source invariant). On a real
+            #    change, stamp settings._reconciledAt so the frontend Case-D
+            #    defers, and fire notify_history_rewrite so a later
+            #    detect_cache_break NAMES the backend edit (never silences it —
+            #    that is notify_compaction's job, the opposite signal).
             try:
-                from lib.conversations.reconcile import reconcile_conversation_messages
-                _recon_source = None
-                if messages_json:
-                    _recon_source = json.loads(messages_json)
-                else:
+                _base_msgs = (json.loads(messages_json) if messages_json
+                              else json.loads(crow['messages'] or '[]'))
+            except (json.JSONDecodeError, TypeError):
+                _base_msgs = []
+            if _base_msgs:
+                try:
+                    from lib.conversations.reconcile import reconcile_conversation_messages
+                    _cleaned, _rec_changed = reconcile_conversation_messages(_base_msgs, 0)
+                except Exception as _rec_e:
+                    logger.warning('[Startup] ghost reconcile failed for conv=%s: %s',
+                                   cid[:8], _rec_e, exc_info=True)
+                    _cleaned, _rec_changed = _base_msgs, False
+                if _rec_changed:
+                    messages_json = json_dumps_pg(_cleaned)
                     try:
-                        _recon_source = json.loads(crow['messages'] or '[]')
+                        _rs = json.loads(settings_json or '{}')
                     except (json.JSONDecodeError, TypeError):
-                        _recon_source = None
-                if _recon_source is not None:
-                    _reconciled, _recon_changed = reconcile_conversation_messages(_recon_source)
-                    if _recon_changed:
-                        messages_json = json_dumps_pg(_reconciled)
-                        logger.info('[Startup] conv=%s reconciled ghost messages '
-                                    '(%d → %d msgs)', cid[:8], len(_recon_source),
-                                    len(_reconciled))
-                        # ── Cache-attribution seam ──
-                        # A reconcile that edits/deletes committed messages is a
-                        # backend history rewrite. Signal it so a subsequent
-                        # detect_cache_break NAMES the cause instead of
-                        # mislabeling it "(compacted)" or laundering a real miss
-                        # into a false "server-side — PROVEN" verdict. Harmless
-                        # at boot (cache state is empty post-restart, no prior
-                        # round to mis-attribute), but this establishes the
-                        # calling convention the future GET-path reconcile MUST
-                        # copy. Unlike notify_compaction it does NOT silence
-                        # detection (see notify_history_rewrite).
-                        try:
-                            from lib.tasks_pkg.cache_tracking import notify_history_rewrite
-                            notify_history_rewrite(cid)
-                        except Exception as _nhr_err:
-                            logger.debug('[Startup] conv=%s notify_history_rewrite '
-                                         'skipped: %s', cid[:8], _nhr_err)
-                        # Mark the conv as server-reconciled so the frontend
-                        # Case-D defers to us (skips its own classification).
-                        try:
-                            _s = json.loads(settings_json or '{}')
-                            _s['_reconciledAt'] = int(time.time() * 1000)
-                            settings_json = json.dumps(_s, ensure_ascii=False)
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-            except Exception as _recon_err:
-                logger.warning('[Startup] conv=%s ghost reconcile failed '
-                               '(non-fatal): %s', cid[:8], _recon_err, exc_info=True)
+                        _rs = {}
+                    _rs['_reconciledAt'] = int(time.time() * 1000)
+                    settings_json = json.dumps(_rs, ensure_ascii=False)
+                    try:
+                        from lib.tasks_pkg.cache_tracking import notify_history_rewrite
+                        notify_history_rewrite(cid)
+                    except Exception as _hr_e:
+                        logger.debug('[Startup] notify_history_rewrite failed conv=%s: %s',
+                                     cid[:8], _hr_e)
+                    logger.info('[Startup] Ghost-reconciled conv=%s on recovery '
+                                '(%d→%d msgs, _reconciledAt stamped)',
+                                cid[:8], len(_base_msgs), len(_cleaned))
 
             now_ms = int(time.time() * 1000)
+            # Stamp the settled-turn facts the sidebar reads without messages
+            # (raw only — classification stays frontend-side). Derive from the
+            # FINAL merged tail (finishReason='interrupted' is stamped above),
+            # then fold into settings_json so it rides the same atomic UPDATE —
+            # NOT a separate SELECT→mutate→UPDATE (that would clobber).
+            try:
+                _final_msgs = json.loads(messages_json) if messages_json else json.loads(crow['messages'] or '[]')
+            except (json.JSONDecodeError, TypeError):
+                _final_msgs = []
+            if _final_msgs:
+                _lm = _final_msgs[-1]
+                try:
+                    _s = json.loads(settings_json or '{}')
+                except (json.JSONDecodeError, TypeError):
+                    _s = {}
+                _s['lastMsgRole'] = _lm.get('role')
+                _s['lastMsgTimestamp'] = _lm.get('timestamp')
+                _s['lastFinishReason'] = _lm.get('finishReason')
+                _s['lastMsgError'] = bool(_lm.get('error'))
+                _s['lastMsgHasOutput'] = bool(
+                    (_lm.get('content') or '') or (_lm.get('thinking') or '')
+                    or (_lm.get('toolRounds') or []) or _lm.get('_igResults'))
+                settings_json = json.dumps(_s, ensure_ascii=False)
             if messages_json:
                 from lib.conversations import build_search_text
                 messages_parsed = json.loads(messages_json)
@@ -2024,28 +2273,6 @@ def recover_stale_tasks_on_startup():
             logger.warning('[Startup] autopilot resume-after-crash failed '
                            '(non-fatal): %s', e, exc_info=True)
 
-        # ── Re-dispatch any queued turn stranded by the restart ──
-        #   A message enqueued (via /api/chat/send) while a task was running
-        #   lives ONLY in message_queue, never in conversations.messages, and is
-        #   drained ONLY by the post-task-completion hook / human send / brain
-        #   idle-drain — none of which fire on a fresh boot for an idle conv. So
-        #   without this the message is shown in the queue bar, never processed,
-        #   with no transcript trace = total loss. Runs AFTER the recovery commit
-        #   (so a dispatched task sees merged/recovered messages) and AFTER the
-        #   autopilot resume (a still-armed conv's human 'real' row already sorts
-        #   ahead of the autopilot sentinel via dispatch priority). The DURABLE
-        #   queue row is authoritative — mirrors resume_armed_autopilot_after_crash.
-        try:
-            from lib.message_queue import redispatch_orphaned_queue_on_startup
-            _requeued = redispatch_orphaned_queue_on_startup()
-            if _requeued:
-                logger.info('[Startup] Re-dispatched %d orphaned queued turn(s) '
-                            'after restart: %d task(s) spawned', len(_requeued),
-                            len(_requeued))
-        except Exception as e:
-            logger.warning('[Startup] queue re-dispatch after restart failed '
-                           '(non-fatal): %s', e, exc_info=True)
-
     except Exception as e:
         logger.error('[Startup] Stale task recovery failed (non-fatal): %s', e, exc_info=True)
 
@@ -2104,25 +2331,44 @@ def _stuck_task_max_silent_secs() -> int:
 
 
 def reap_stuck_running_tasks() -> int:
-    """Force-terminate running tasks that are wedged with zero output.
+    """Force-terminate running tasks that are WEDGED (generalized dual-clock).
 
-    Targets the "pure stuck" case the supersede/abort path does NOT cover: a
-    task that was never superseded but whose thread is wedged before producing
-    anything (the exact shape of the incident that motivated this — a stream
-    that received 0 tokens, emitted 0 events, for hours). Left alone, such a
-    task stays ``status='running'`` in memory forever and, having never
-    finalized, has NO terminal ``task_results`` row → after a restart a poll
+    Targets the "produced-then-wedged zombie" the supersede/abort path does NOT
+    cover: a task that emitted a first token (or a whole tool round) and THEN
+    had its worker thread wedge — stuck in a socket read on a dead host, a hung
+    MCP call, a stalled browser action, an LLM stream that never closes. Left
+    alone it stays ``status='running'`` in memory forever; ``/api/chat/active``
+    keeps reporting it running so the frontend reconnects an SSE that never
+    delivers a byte, the sidebar "busy" dot never clears, and — never having
+    finalized — it has no terminal ``task_results`` row, so a post-restart poll
     404s and the turn is lost.
 
-    Discriminator (deliberately conservative to avoid killing a task that is
-    legitimately BLOCKED ON HUMAN INPUT — ask_user / write-approval / stdin):
-    such a task has already emitted at least one event (the phase / tool_call
-    for the prompt), so we require **zero events AND zero content AND zero
-    thinking** plus an age past the silence threshold. A human-waiting task
-    fails the zero-events test and is never reaped.
+    The ORIGINAL discriminator gated on ``content=='' AND thinking=='' AND
+    n_events==0`` — it could ONLY see the never-produced-anything case, so the
+    produced-then-wedged zombie fell straight through. The generalized
+    discriminator uses TWO liveness clocks that must BOTH be stale to reap:
 
-    Marks the task aborted (reason ``stuck_no_output``) and writes an error
-    terminal floor so a poll resolves to a terminal state instead of a 404.
+      • ``_t_last_event``      — bumped by every emitted event (deltas /
+                                 keepalive / retry / waiting_model phase). A
+                                 rate-limited-but-alive turn keeps emitting
+                                 retry phases → stays fresh.
+      • ``_dispatch_heartbeat`` — refreshed while a dispatch / cooldown-wait /
+                                 tool call is genuinely in-flight, AND while
+                                 blocking on human input (ask_user / approval /
+                                 stdin poll loop). A turn stuck in a live socket
+                                 read emits no event but IS heartbeating → never
+                                 reaped; a human-waiting task likewise stays
+                                 fresh via its poll loop.
+
+    Requiring BOTH stale is exactly the signal a client-side poll CANNOT recover
+    (poll only sees ``status='running'``, indistinguishable from a slow turn),
+    so the reap MUST be server-side. Both clocks fall back to ``created_at`` so
+    the legacy zero-output case is a strict subset (still caught).
+
+    Marks the task aborted (reason ``stuck_no_progress``) and runs the FULL
+    finalizer (``_finalize_reaped_stuck_task``: terminal floor → DONE(error)
+    SSE → conv sync → queue drain) so a poll resolves terminally, the conv is
+    detached from the dead stream, and any turn queued behind it is drained.
     Returns the number of tasks reaped.
     """
     max_silent = _stuck_task_max_silent_secs()
@@ -2134,29 +2380,35 @@ def reap_stuck_running_tasks() -> int:
         for tid, t in tasks.items():
             if t.get('status') != 'running' or t.get('aborted'):
                 continue
-            # Zero output so far?
-            if (t.get('content') or '') or (t.get('thinking') or ''):
+            created = t.get('created_at', now)
+            # Both clocks fall back to created_at so a task that never set them
+            # (legacy zero-output) is a subset: its clocks == created_at.
+            last_event = t.get('_t_last_event', created)
+            heartbeat = t.get('_dispatch_heartbeat', created)
+            event_silent = now - last_event
+            dispatch_silent = now - heartbeat
+            # Reap ONLY when BOTH clocks are stale past the threshold. Either
+            # one fresh = alive (slow/rate-limited dispatch, or emitting events,
+            # or a human-input wait keeping the heartbeat warm).
+            if event_silent < max_silent or dispatch_silent < max_silent:
                 continue
-            try:
-                with t['events_lock']:
-                    n_events = len(t['events'])
-            except Exception:
-                # No events structure (legacy/malformed) — treat as no output.
-                n_events = 0
-            if n_events > 0:
-                continue
-            age = now - t.get('created_at', now)
-            if age < max_silent:
-                continue
+            had_output = bool((t.get('content') or '') or (t.get('thinking') or ''))
+            if not had_output:
+                try:
+                    with t['events_lock']:
+                        had_output = len(t['events']) > 0
+                except Exception:
+                    had_output = False
             t['aborted'] = True
             t['_abort_timestamp'] = now
-            t['_abort_reason'] = 'stuck_no_output'
+            t['_abort_reason'] = 'stuck_no_progress'
             t['status'] = 'error'
+            t['_reap_had_output'] = had_output
             from lib.error_envelope import make_envelope as _make_env
             t['error'] = _make_env(
                 'internal',
-                detail=('Task produced no output for %d seconds and was '
-                        'terminated as stuck.' % int(age)),
+                detail=('Task made no progress for %d seconds and was '
+                        'terminated as wedged.' % int(min(event_silent, dispatch_silent))),
                 model=(t.get('config') or {}).get('model', '') or '',
                 context='stuck-task-reaper',
                 source='lib.tasks_pkg.manager',
@@ -2165,11 +2417,11 @@ def reap_stuck_running_tasks() -> int:
             t['finished_at'] = now
             stuck.append(t)
     for t in stuck:
-        logger.warning('[Task %s] conv=%s ⚠️ STUCK — 0 events/0 content for %.0fs, '
-                       'force-failed and writing terminal floor',
+        logger.warning('[Task %s] conv=%s ⚠️ WEDGED — no event/dispatch progress for '
+                       '%.0fs (had_output=%s), force-failed and finalizing',
                        t['id'][:8], (t.get('convId') or '')[:8],
-                       now - t.get('created_at', now))
-        _write_stuck_terminal_floor(t)
+                       now - t.get('created_at', now), t.get('_reap_had_output'))
+        _finalize_reaped_stuck_task(t)
     if stuck:
         logger.warning('[Manager] reap_stuck_running_tasks force-failed %d wedged task(s)',
                        len(stuck))
@@ -2195,6 +2447,67 @@ def _write_stuck_terminal_floor(task) -> None:
     except Exception as e:
         logger.warning('[Task %s] Failed to write stuck terminal floor: %s',
                        task.get('id', '?')[:8], e, exc_info=True)
+
+
+
+def _finalize_reaped_stuck_task(task) -> None:
+    """Run the FULL terminal path for a reaped wedged task.
+
+    A reaped task must undergo the SAME finalization as the happy path, not
+    just a ``task_results`` floor. Writing only the floor (the old behaviour)
+    avoided the 404-on-poll bug but left the conversation perpetually attached
+    to a dead stream: the assistant error bubble never landed on
+    ``conversations.messages``, ``settings.activeTaskId`` still pointed at the
+    dead task, no terminal ``DONE(error)`` SSE fired, and any turn queued behind
+    the wedged one was stranded (the completion-hook chain never runs for a
+    reaped task).
+
+    Steps (each independently guarded so one failure can't abort the rest):
+      1. Terminal floor FIRST — a poll always resolves terminally, even if a
+         later step throws.
+      2. Terminal ``DONE(error)`` SSE — any still-connected client settles.
+      3. ``_sync_result_to_conversation`` — appends/fills the assistant error
+         bubble AND clears ``settings.activeTaskId`` (its normal side effect).
+      4. ``_dispatch_queued_message`` — drains a turn queued behind the wedge.
+
+    The reaper set ``_abort_reason='stuck_no_progress'``, which the anti-
+    resurrection guard in ``_sync_result_to_conversation`` treats as an
+    EXCEPTION (it owns the trailing user turn and is still the conv's latest
+    task) so the error bubble is allowed to answer an unanswered user message.
+    """
+    tid = task.get('id', '?')[:8]
+    conv_id = (task.get('convId') or '')[:8]
+
+    # (1) Terminal floor first — poll resolves terminally regardless.
+    _write_stuck_terminal_floor(task)
+
+    # (2) Terminal DONE(error) SSE so a live client settles immediately.
+    try:
+        err_done = build_event(EventType.DONE,
+                               error=task.get('error'), finishReason='error')
+        if task.get('preset'):
+            err_done['preset'] = task['preset']
+        if task.get('model'):
+            err_done['model'] = task['model']
+        append_event(task, err_done)
+    except Exception as e:
+        logger.warning('[Task %s] reaped-finalize: DONE(error) SSE failed: %s',
+                       tid, e, exc_info=True)
+
+    # (3) Sync the assistant error bubble onto the conversation + clear the
+    #     pinned activeTaskId (a normal side effect of the conv sync).
+    try:
+        _sync_result_to_conversation(task, build_result_meta(task))
+    except Exception as e:
+        logger.warning('[Task %s] conv=%s reaped-finalize: conv sync failed: %s',
+                       tid, conv_id, e, exc_info=True)
+
+    # (4) Drain any turn queued behind the wedged one.
+    try:
+        _dispatch_queued_message(task)
+    except Exception as e:
+        logger.warning('[Task %s] conv=%s reaped-finalize: queue drain failed: %s',
+                       tid, conv_id, e, exc_info=True)
 
 # ── Streaming checkpoint interval (seconds) ──
 # During LLM token streaming, we periodically persist partial content to

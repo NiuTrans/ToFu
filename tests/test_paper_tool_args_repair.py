@@ -104,7 +104,7 @@ def test_executor_issues_one_search_for_bare_string(monkeypatch):
 
     monkeypatch.setattr(T, '_web_search_one', fake_web_search_one)
     monkeypatch.setattr(T, 'format_search_for_tool_response',
-                        lambda results, search_diag=None: 'FORMATTED')
+                        lambda results, search_diag=None, query='': 'FORMATTED')
     monkeypatch.setattr(T, '_format_search_display_for_results', lambda results: [])
 
     payload = json.dumps({'queries': 'a,b.c;d!e?f' * 10})  # 110-char string
@@ -123,7 +123,7 @@ def test_executor_runs_real_batch(monkeypatch):
 
     monkeypatch.setattr(T, '_web_search_one', fake_web_search_one)
     monkeypatch.setattr(T, 'format_search_for_tool_response',
-                        lambda results, search_diag=None: 'F')
+                        lambda results, search_diag=None, query='': 'F')
     monkeypatch.setattr(T, '_format_search_display_for_results', lambda results: [])
 
     payload = json.dumps({'queries': [{'query': 'q1'}, {'query': 'q2'}, {'query': 'q3'}]})

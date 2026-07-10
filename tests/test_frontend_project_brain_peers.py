@@ -113,6 +113,9 @@ out.threadLen = thread.length;
 out.threadKinds = thread.map(m => m.kind);
 out.msgRows = body.querySelectorAll('.pb-peer-msg').length;
 out.interveneRows = body.querySelectorAll('.pb-peer-msg-intervene').length;
+// The from/to ids in the thread carry [data-conv-id] so the panel's hover
+// preview reaches them.
+out.threadCidCount = body.querySelectorAll('.pb-peer-msg-cid[data-conv-id]').length;
 // _peerState pure check
 out.stateActive = P._peerState({ taskStatus: 'running' });
 out.stateIdle = P._peerState({ taskStatus: '' });
@@ -152,6 +155,9 @@ def test_peers_roster_and_thread_render():
     assert out['threadKinds'] == ['note', 'intervention'], out
     assert out['msgRows'] == 2, out
     assert out['interveneRows'] == 1, out
+    # Two peer notes × 2 ids each → 4 [data-conv-id] spans for hover-preview.
+    assert out['threadCidCount'] == 4, \
+        f'thread from/to ids must carry [data-conv-id] for hover preview: {out}'
     # Pure state mapping.
     assert out['stateActive'] == 'active' and out['stateIdle'] == 'idle', out
 

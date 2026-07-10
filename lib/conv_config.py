@@ -331,6 +331,15 @@ def resolve_conv_config(
             if conv.get('autoTranslate') is not None
             else _coerce_bool(ov.get('autoTranslate'), False)
         ),
+        # LLM-correction tier of the input language detector. UI default ON
+        # (personal_scope.ui_default=True); it only ever fires when
+        # autoTranslate is also on AND the statistical detection is ambiguous,
+        # so the blast radius is bounded. Headless surfaces get it forced OFF
+        # by apply_headless_personal_defaults (fail-closed).
+        'langCorrectionEnabled': _coerce_bool(
+            ov.get('langCorrectionEnabled'),
+            (_coerce_bool(conv.get('langCorrectionEnabled'), True)
+             if conv.get('langCorrectionEnabled') is not None else True)),
         'browserClientId': None,  # populated below
         'keepToolHistory': ov.get('keepToolHistory') is not False,
     }

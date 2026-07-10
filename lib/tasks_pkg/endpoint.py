@@ -63,6 +63,7 @@ from lib.tasks_pkg.endpoint_review import (
     _run_critic_turn,
     _run_planner_turn,
 )
+from lib.agent_verdict import is_incomplete_stop
 from lib.agent_core.events import EventType, build_event
 from lib.tasks_pkg.manager import append_event, create_task, persist_task_result
 from lib.tasks_pkg.orchestrator import _run_single_turn, run_task
@@ -1342,6 +1343,18 @@ def _finalize(task, accumulated_content, total_usage, iteration,
     elif stop_reason == 'aborted':
         task['status'] = 'aborted'
         task['finishReason'] = 'aborted'
+    elif is_incomplete_stop(stop_reason):
+        # ★ The loop was CUT OFF by a safety cap (max_iterations / max_replans /
+        #   stuck), NOT genuinely finished — the objective is unverified.
+        #   Surfacing this as a clean status='done'/finish='stop' (as it did
+        #   historically) silently reports a budget-exhausted runaway as
+        #   success. Status stays 'done' (it is not an ERROR — real work may
+        #   have shipped), but finishReason='incomplete' honestly flags
+        #   "stopped early, needs review" for the sidebar + finish bar.
+        task['status'] = 'done'
+        task['finishReason'] = 'incomplete'
+        audit_log('loop_incomplete', task_id=tid, mode='endpoint',
+                  reason=stop_reason, iterations=min(iteration, MAX_ITERATIONS))
     else:
         task['status'] = 'done'
         task['finishReason'] = 'stop'
@@ -1368,6 +1381,11 @@ def _finalize(task, accumulated_content, total_usage, iteration,
         finishReason=task['finishReason'],
         endpointReason=stop_reason,
     )
+    if task['finishReason'] == 'incomplete':
+        # Explicit human-facing flag: the loop was cut off by a safety cap and
+        # the objective is unverified — the frontend renders a "stopped early,
+        # needs review" affordance instead of a clean-done finish bar.
+        done_evt['incomplete'] = True
     if task.get('error'):
         done_evt['error'] = task['error']
     if task.get('preset'):

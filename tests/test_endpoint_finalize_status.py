@@ -78,7 +78,7 @@ def test_finalize_aborted_reports_aborted_state(captured_events):
 
 
 def test_finalize_success_unchanged(captured_events):
-    """A normal completion (approved/max_iterations/etc.) stays done/stop."""
+    """A genuine critic approval stays done/stop with no incomplete flag."""
     task = _make_task()
 
     ep._finalize(task, accumulated_content='the answer', total_usage={}, iteration=3,
@@ -90,3 +90,42 @@ def test_finalize_success_unchanged(captured_events):
     assert done['finishReason'] == 'stop'
     assert done['endpointReason'] == 'approved'
     assert 'error' not in done
+    assert 'incomplete' not in done, 'a clean approval must NOT be flagged incomplete'
+
+
+@pytest.mark.parametrize('reason', ['max_iterations', 'max_replans', 'stuck'])
+def test_finalize_cap_stop_escalates_as_incomplete(captured_events, reason):
+    """★ A run CUT OFF by a safety cap is escalated: status stays done (real
+    work may have shipped) but finishReason='incomplete' + the DONE event
+    carries incomplete=True so the frontend flags 'stopped early — needs
+    review' instead of a silent clean-done."""
+    task = _make_task()
+
+    ep._finalize(task, accumulated_content='partial work', total_usage={},
+                 iteration=10, stop_reason=reason,
+                 fallback_model=None, fallback_from=None)
+
+    assert task['status'] == 'done', 'cap-stop is not an ERROR — status stays done'
+    assert task['finishReason'] == 'incomplete'
+    done = _done_event(captured_events)
+    assert done['finishReason'] == 'incomplete'
+    assert done['endpointReason'] == reason
+    assert done.get('incomplete') is True
+
+
+def test_NC_incomplete_mapping_load_bearing(captured_events, monkeypatch):
+    """Neuter: force is_incomplete_stop→False on the endpoint module (the
+    pre-fix behaviour where a cap-stop fell through to the clean-done else
+    branch). Prove the escalation test would then FAIL — the mapping is
+    load-bearing, not decorative."""
+    monkeypatch.setattr(ep, 'is_incomplete_stop', lambda reason: False)
+    task = _make_task()
+
+    ep._finalize(task, accumulated_content='partial', total_usage={},
+                 iteration=10, stop_reason='max_iterations',
+                 fallback_model=None, fallback_from=None)
+
+    # With the guard neutered, a cap-stop wrongly reports a clean done/stop.
+    assert task['finishReason'] == 'stop'
+    done = _done_event(captured_events)
+    assert 'incomplete' not in done

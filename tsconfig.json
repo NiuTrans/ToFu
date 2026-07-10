@@ -41,7 +41,17 @@
   ],
   "exclude": [
     "node_modules",
+    // Generated, content-hashed bundle outputs (bundle-<8hex>.js /
+    // feature-<8hex>.js) — runtime-assembled concatenations, NOT source. The
+    // 8-char glob deliberately spares the SOURCE file feature-loader.js.
     "static/js/bundle-*.js",
+    "static/js/feature-????????.js",
+    // Transient neutered-source COPIES written into static/js by frontend NC
+    // tests (``<source>.nc_copy.js``) — they redeclare every global from their
+    // original, so a concurrent tsc run (test_frontend_typecheck) would see
+    // duplicate-declaration errors. They exist only for the lifetime of one
+    // node subprocess; never type-check them.
+    "static/js/**/*.nc_copy.js",
     "clients/**"
   ]
 }

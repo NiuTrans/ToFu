@@ -53,7 +53,8 @@ logger = get_logger(__name__)
 try:
     _SNAPSHOT_CAS_MIN_INTERVAL_S = float(
         os.environ.get('TOFU_SWARM_SNAPSHOT_MIN_INTERVAL', '8'))
-except (TypeError, ValueError):
+except (TypeError, ValueError) as e:
+    logger.debug('[Swarm] TOFU_SWARM_SNAPSHOT_MIN_INTERVAL parse failed, using default: %s', e)
     _SNAPSHOT_CAS_MIN_INTERVAL_S = 8.0
 
 #: Tool names that mutate files on disk. Used to flag sub-agents that

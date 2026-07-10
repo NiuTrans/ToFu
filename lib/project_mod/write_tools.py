@@ -119,6 +119,31 @@ def drain_root_added_signals():
     return pending
 
 
+def _save_model_added_root_to_recent(abs_path):
+    """Persist a model-registered workspace root into the recent-projects list.
+
+    The interactive UI already saves every folder the user opens (see
+    static/js/project.js), but a root the ASSISTANT registers itself —
+    ``create_project`` or the absolute-path-write auto-register (§2 of
+    _resolve_write_path) — never went through that path, so it never appeared
+    in "recent". Save it server-side here so it shows up regardless of whether
+    the emitting conversation is the active one (the frontend
+    ``workspace_root_added`` handler only refreshes for the ACTIVE conv).
+
+    Temp-dir scratch paths are skipped — they are ephemeral and must not
+    pollute the recent list (mirrors the untracked-root policy). Best-effort:
+    a persistence failure is a debug-level, self-recovering fallback.
+    """
+    if not abs_path or _is_temp_path(abs_path):
+        return
+    try:
+        from lib.project_mod.config import save_recent_project
+        save_recent_project(abs_path)
+    except Exception as e:
+        logger.debug('[WriteTools] save_recent_project failed for %s: %s',
+                     abs_path, e)
+
+
 # ═══════════════════════════════════════════════════════
 #  create_project — bootstrap a new workspace root
 # ═══════════════════════════════════════════════════════
@@ -295,6 +320,8 @@ def tool_create_project(path, name=None, overwrite=False, conv_id=None, task_id=
     logger.info('[Project] create_project: path=%s root=%s created=%s overwrite=%s',
                 abs_path, root_name, created, bool(overwrite))
 
+    _save_model_added_root_to_recent(abs_path)
+
     hint = (f'Use path prefix "{root_name}:<rel>" (e.g. '
             f'write_file(path=\'{root_name}:README.md\', ...)) or absolute paths '
             f'under {abs_path} for subsequent write operations.')
@@ -432,7 +459,26 @@ def _resolve_write_path(base, rel_path, conv_id=None):
                             if (os.path.abspath(rs['path']).rstrip(os.sep) or rs['path']) == _anchor_norm:
                                 _new_name = rn
                                 break
+                    # ★ Also register the new root into THIS conversation's own
+                    #   scoped registry (not just the global _roots). Without
+                    #   this, a subsequent ``newroot:rel/path`` namespaced write
+                    #   in the SAME task hits the conv-scoped resolver, which —
+                    #   per the 2026-05-05 isolation fix — does NOT fall through
+                    #   to the global registry and raises UnknownWorkspaceRootError
+                    #   for a root that only landed in the global one. add_conv_root
+                    #   is a no-op when the conv has no registry (background task
+                    #   must not conjure one) and never touches other convs.
+                    if conv_id:
+                        try:
+                            from lib.project_mod.config import add_conv_root
+                            add_conv_root(conv_id, anchor,
+                                          name=_new_name or os.path.basename(anchor))
+                        except Exception as e:
+                            logger.debug('[WriteTools] add_conv_root failed conv=%s '
+                                         'anchor=%s (non-fatal): %s',
+                                         conv_id[:12] if conv_id else '?', anchor, e)
                     _signal_root_added(_new_name or os.path.basename(anchor), anchor)
+                    _save_model_added_root_to_recent(anchor)
                 _enforce_not_readonly(abs_path, conv_id=conv_id)
                 return abs_path
             except Exception as e:
@@ -488,7 +534,9 @@ def _mod_attribution(target, base, rel_path):
     for root_path in roots_snapshot:
         try:
             norm_root = os.path.abspath(root_path).rstrip(os.sep) or root_path
-        except Exception:
+        except Exception as e:
+            logger.debug('[WriteTools] _mod_attribution root normalize failed for %r: %s',
+                         root_path, e)
             continue
         if abs_target == norm_root or abs_target.startswith(norm_root + os.sep):
             # Prefer the DEEPEST (longest) matching root so a nested extra
@@ -722,6 +770,146 @@ def tool_write_file(base, rel_path, content, description='', conv_id=None, task_
     except Exception as e:
         logger.error('[Tools] write_file failed for %s: %s', rel_path, e, exc_info=True)
         return {'ok': False, 'error': str(e), 'action': 'write_file', 'path': rel_path}
+
+
+# ═══════════════════════════════════════════════════════
+#  save_uploaded_file — binary-safe drag-and-drop into a project folder
+# ═══════════════════════════════════════════════════════
+# Backs POST /api/v1/project/upload. Unlike tool_write_file (text `content`),
+# this writes RAW BYTES so images / PDFs / archives dropped onto the folder
+# browser land on disk intact. It deliberately does NOT auto-register a new
+# workspace root the way an absolute-path agent write does: a UI file-drop
+# into a directory the user has not attached is a mistake we want to surface,
+# not silently expand the workspace. The destination must therefore already
+# resolve INSIDE a registered root (any form: primary, extra, or a subdir of
+# one). Read-only roots are refused, name collisions auto-rename (never
+# clobber), and the write is recorded so it appears in the file-changes bar
+# and is undoable exactly like an agent write.
+
+def _dedupe_target(target):
+    """Return *target*, or a ``name (n).ext`` sibling if it already exists.
+
+    Preserves the extension and inserts a `` (n)`` counter before it, mirroring
+    the OS "copy" convention. Bounded to avoid an unbounded loop on a pathologic
+    directory; falls back to a timestamp suffix past the cap.
+    """
+    if not os.path.exists(target):
+        return target
+    root, ext = os.path.splitext(target)
+    for n in range(1, 1000):
+        candidate = f'{root} ({n}){ext}'
+        if not os.path.exists(candidate):
+            return candidate
+    import time as _t
+    return f'{root} ({int(_t.time() * 1000)}){ext}'
+
+
+def save_uploaded_file(base, rel_path, data, description='', conv_id=None,
+                       task_id=None, on_conflict='rename'):
+    """Save raw *data* bytes to a project file dropped via the folder browser.
+
+    Args:
+        base: The active project root (absolute path).
+        rel_path: Destination path — a project-relative path OR an absolute
+            path that MUST resolve inside an already-registered workspace root.
+        data: The file bytes.
+        description: Optional note (unused by the model; kept for symmetry).
+        conv_id / task_id: Attribution for the undo journal.
+        on_conflict: ``'rename'`` (default — auto-suffix ``name (1).ext``) or
+            ``'overwrite'`` (replace in place, recording the pre-image so undo
+            restores it).
+
+    Returns:
+        dict: ``{ok, action, path, created, renamed, bytesWritten}`` on success,
+        or ``{ok: False, error, ...}`` on rejection/failure. Never raises for
+        the expected cases (read-only root, unregistered path, IO error).
+    """
+    if not isinstance(data, (bytes, bytearray)):
+        return {'ok': False, 'error': 'save_uploaded_file expects bytes',
+                'action': 'upload_file', 'path': rel_path}
+
+    # Resolve WITHOUT the auto-register branch: a UI drop must target an
+    # already-attached root. We reuse _resolve_write_path only for the
+    # relative-path + read-only enforcement; for an absolute path we first
+    # verify it lives under a registered root ourselves so a stray drop can't
+    # invent a workspace.
+    is_abs = bool(rel_path) and (rel_path.startswith('/') or rel_path.startswith('~'))
+    if is_abs:
+        abs_path = os.path.abspath(os.path.expanduser(rel_path))
+        with _lock:
+            roots_snapshot = [rs['path'] for rs in _roots.values()]
+        inside_root = False
+        for root_path in roots_snapshot:
+            norm_root = os.path.abspath(root_path).rstrip(os.sep) or root_path
+            if abs_path == norm_root or abs_path.startswith(norm_root + os.sep):
+                inside_root = True
+                break
+        if not inside_root:
+            return {'ok': False, 'action': 'upload_file', 'path': rel_path,
+                    'error': ('Destination is not inside any attached workspace '
+                              'folder. Add it as a project folder first, then drop.')}
+        try:
+            _enforce_not_readonly(abs_path, conv_id=conv_id)
+        except ValueError as e:
+            logger.debug('[Tools] upload rejected (readonly) %s: %s', rel_path, e)
+            return {'ok': False, 'error': str(e), 'action': 'upload_file', 'path': rel_path}
+        target = abs_path
+    else:
+        try:
+            target = _resolve_write_path(base, rel_path, conv_id=conv_id)
+        except ValueError as e:
+            logger.debug('[Tools] upload path rejected %s: %s', rel_path, e, exc_info=True)
+            return {'ok': False, 'error': str(e), 'action': 'upload_file', 'path': rel_path}
+
+    parent = os.path.dirname(target)
+    if parent and not os.path.isdir(parent):
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except Exception as e:
+            logger.warning('[Tools] upload makedirs failed for parent of %s: %s', rel_path, e, exc_info=True)
+            return {'ok': False, 'error': f'Cannot create directory: {e}',
+                    'action': 'upload_file', 'path': rel_path}
+
+    renamed = False
+    original_content = None
+    existed = os.path.isfile(target)
+    if existed and on_conflict == 'rename':
+        new_target = _dedupe_target(target)
+        renamed = new_target != target
+        target = new_target
+        existed = os.path.isfile(target)
+    if existed:  # overwrite path — capture pre-image so undo restores bytes
+        try:
+            with open(target, 'rb') as f:
+                original_content = f.read()
+        except Exception as e:
+            logger.debug('[Tools] upload pre-image read failed for %s: %s', target, e)
+
+    try:
+        with open(target, 'wb') as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        _touch_for_vscode(target)
+        sz = len(data)
+
+        if _should_record_modification(target):
+            _mod_base, _mod_rel = _mod_attribution(target, base, target if is_abs else rel_path)
+            _record_modification(_mod_base, 'write_file', _mod_rel, original_content,
+                                 conv_id=conv_id, task_id=task_id)
+
+        logger.info('upload_file: %s (%s) %s', target, _fmt_size(sz),
+                    '[created]' if not (existed and original_content is not None) else '[overwrote]')
+        return {
+            'ok': True, 'action': 'upload_file', 'path': target,
+            'name': os.path.basename(target),
+            'created': original_content is None,
+            'renamed': renamed, 'bytesWritten': sz,
+            'description': description,
+        }
+    except Exception as e:
+        logger.error('[Tools] upload_file failed for %s: %s', target, e, exc_info=True)
+        return {'ok': False, 'error': str(e), 'action': 'upload_file', 'path': rel_path}
 
 
 # ═══════════════════════════════════════════════════════

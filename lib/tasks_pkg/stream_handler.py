@@ -83,6 +83,33 @@ _PREMATURE_RETRY_MAX_ZERO_BYTE = 16
 # moderately expensive (cache reads + new thinking), so the cap is low.
 _EMPTY_STOP_RETRY_MAX = 2
 
+# ── Todo-continuation enforcer (OMC/CC backport, Rec 2) ──
+# When the model tries to end its turn (finish_reason=stop, no tool calls) but
+# its structured checklist (task['_todos'], written via the todo_write tool)
+# still has pending / in_progress items, inject a reminder and RE-DRIVE the
+# loop instead of breaking — catching a premature stop CHEAPLY (mid-loop) vs.
+# a full Critic round. Bounded by a hard nudge cap so a model that refuses to
+# either finish or update the checklist can't loop forever (runaway guard,
+# same discipline as the retry caps above). Env-overridable, fail-open:
+# unset→default 3, 0/<=0→DISABLED (never enforce), garbage→default.
+_TODO_CONTINUATION_MAX_DEFAULT = 3
+
+
+def _todo_continuation_max() -> int:
+    """Max todo-continuation nudges per phase (runaway guard). Fail-open."""
+    import os
+    raw = (os.environ.get('TOFU_TODO_CONTINUATION_MAX') or '').strip()
+    if not raw:
+        return _TODO_CONTINUATION_MAX_DEFAULT
+    try:
+        val = int(raw)
+    except (ValueError, TypeError) as e:
+        logger.debug('[stream_handler] TOFU_TODO_CONTINUATION_MAX=%r not an int '
+                     '(%s) — using default %d', raw, e,
+                     _TODO_CONTINUATION_MAX_DEFAULT)
+        return _TODO_CONTINUATION_MAX_DEFAULT
+    return val if val > 0 else 0
+
 # Exponential-backoff schedule for zero-byte retries.
 # 0.5s, 1s, 2s, 4s, 8s, 8s, 8s, ...  + uniform jitter [0, 0.5s).
 _ZERO_BYTE_BACKOFF_BASE_S = 0.5
@@ -517,6 +544,56 @@ def analyse_stream_result(
                 _trace_id, model, len(task.get('content') or ''),
             )
             return result
+
+        # ── Todo-continuation enforcer (Rec 2) ──
+        # The model is about to end its turn with a genuine final answer. If it
+        # declared a structured checklist (task['_todos']) that still has
+        # incomplete items, re-drive the loop with a reminder instead of
+        # letting it stop — the productive-but-premature-stop case that the
+        # zero-deliverable guard (INACTION) and suspicious-completion
+        # (content-shape) both structurally miss. Only for a genuine content
+        # stop; abort / error / anomaly paths above have already returned.
+        _todo_max = _todo_continuation_max()
+        if _todo_max and round_content.strip():
+            from lib.tools.todo import incomplete_todos, render_todo_list
+            _todos = task.get('_todos') or []
+            _incomplete = incomplete_todos(_todos)
+            _nudges = int(task.get('_todo_continuation_count') or 0)
+            if _incomplete and _nudges < _todo_max:
+                task['_todo_continuation_count'] = _nudges + 1
+                messages.append({
+                    'role': 'user',
+                    'content': (
+                        '[SYSTEM: TODO CONTINUATION REQUIRED]\n'
+                        f'You have {len(_incomplete)} incomplete checklist '
+                        f'item(s):\n{render_todo_list(_todos)}\n\n'
+                        'Do NOT end your turn yet. Continue working and complete '
+                        'ALL items, updating the checklist with todo_write as you '
+                        'go. If an item is genuinely impossible or no longer '
+                        'applies, either remove it or mark it completed with a '
+                        'one-line explanation — then finish.'
+                    ),
+                })
+                logger.info(
+                    '[%s] 📋 Todo-continuation enforcer: %d incomplete item(s) '
+                    'at stop — re-driving loop (nudge %d/%d) round=%d',
+                    tid, len(_incomplete), _nudges + 1, _todo_max, round_num)
+                append_event(task, {
+                    'type': 'phase',
+                    'phase': 'todo_continuation',
+                    'attempt': _nudges + 1,
+                    'max': _todo_max,
+                    'incomplete': len(_incomplete),
+                    'detail': (f'📋 检测到 {len(_incomplete)} 项待办未完成，'
+                               f'继续执行 ({_nudges + 1}/{_todo_max})…'),
+                })
+                result['action'] = 'continue'
+                return result
+            if _incomplete and _nudges >= _todo_max:
+                logger.warning(
+                    '[%s] 📋 Todo-continuation cap reached (%d/%d) with %d '
+                    'incomplete item(s) — allowing stop to avoid runaway loop',
+                    tid, _nudges, _todo_max, len(_incomplete))
 
         # Normal exit — model returned content without tool calls
         result['action'] = 'break'

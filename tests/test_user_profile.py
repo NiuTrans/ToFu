@@ -18,9 +18,19 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture
 def tmp_data_dir(monkeypatch):
-    """Redirect the server data dir so the profile lands in a tmp tree."""
+    """Redirect the server data dir so the profile lands in a tmp tree.
+
+    ``lib.runtime_paths`` freezes its ``_BASE`` (and thus ``data_root()``) at
+    import time, so setting ``$TOFU_DATA_DIR`` here is a no-op — the profile
+    path would still resolve to the real ``<repo>/data`` and, on a dev box that
+    already has a ``.tofu_user_profile.md``, the test would read the operator's
+    live profile instead of an empty tmp tree. Patch ``_server_data_dir``
+    directly (the single seam every profile path resolves through) so the
+    redirect actually takes effect regardless of the frozen ``_BASE``."""
     with tempfile.TemporaryDirectory() as d:
         monkeypatch.setenv('TOFU_DATA_DIR', d)
+        monkeypatch.setattr('lib.memory.storage._server_data_dir',
+                            lambda: d)
         yield d
 
 

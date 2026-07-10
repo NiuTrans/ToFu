@@ -714,16 +714,22 @@ def _inject_system_contexts(messages, project_path, project_enabled,
             _existing = _system_text(messages)
             # CRITICAL: we mutated a message that, after the first tool
             # round, sits INSIDE the cached prefix (messages[0:N-2]).
-            # Tell cache_tracking this is an expected, legitimate
-            # mutation so detect_cache_break does NOT log a false
-            # `PREFIX MUTATION DETECTED` every round. See
-            # .tofu/skills/cache-tracking-prefix-mutation-mutators.md.
+            # Signal a HISTORY REWRITE (not a compaction): this NAMES the
+            # cause so detect_cache_break does NOT emit the anonymous false
+            # `PREFIX MUTATION DETECTED` alarm — but, unlike notify_compaction,
+            # it does NOT blanket-suppress break detection. A profile splice is
+            # a genuine prefix mutation that RE-BILLS the whole body uncached;
+            # notify_compaction would launder that cost into a false
+            # "server-side — PROVEN" verdict and hide it from the metrics.
+            # notify_history_rewrite keeps the wire diff live so the re-bill is
+            # still detected and attributed.
+            # See .tofu/skills/cache-tracking-prefix-mutation-mutators.md.
             if _cid:
                 try:
-                    from lib.tasks_pkg.cache_tracking import notify_compaction
-                    notify_compaction(_cid)
+                    from lib.tasks_pkg.cache_tracking import notify_history_rewrite
+                    notify_history_rewrite(_cid)
                 except Exception as e:
-                    logger.debug('[Inject] notify_compaction unavailable: %s', e)
+                    logger.debug('[Inject] notify_history_rewrite unavailable: %s', e)
             logger.info('[Inject] conv=%s user-profile applied '
                         '(%d chars, core=%s on _isMeta carrier, detail=%s on '
                         'true tail)',
@@ -1007,6 +1013,35 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
             _ctx_injected('board', len(_board_spliced))
         else:
             _ctx_suppressed('board', 'empty')
+
+    # ★ 4.47 Peer messaging protocol (Pillar #6 — agent-to-agent register).
+    #   Ambient guidance so project_message / project_intervene are composed as
+    #   coordination acts TO ANOTHER AGENT (claim / boundary / hand-off /
+    #   overlap-warning) instead of status reports to a human. Without it the
+    #   ONLY steer was the tool description → the model defaulted to report-to-
+    #   human prose (the reported symptom). Cache-stable fixed protocol (no
+    #   per-turn state). Injected only in project mode; keyed on project_path.
+    _PEER_MARKER = '[PEER MESSAGING PROTOCOL]'
+    if not (project_enabled and project_path):
+        _ctx_suppressed('peer_protocol', 'project_off')
+    elif _PEER_MARKER in _existing:
+        _ctx_suppressed('peer_protocol', 'marker_present')
+    if project_enabled and project_path and _PEER_MARKER not in _existing:
+        try:
+            from lib.conversations.project_peer import render_peer_protocol_block
+            _peer_block = render_peer_protocol_block(project_path)
+        except Exception as e:
+            logger.debug('[Inject] peer-protocol build failed conv=%s: %s',
+                         (_cid or '?')[:8], e)
+            _peer_block = ''
+        if _peer_block:
+            _peer_spliced = _wrap_system_reminder(_peer_block)
+            _append_to_system_message(messages, _peer_spliced,
+                                       as_separate_block=True)
+            _existing = _system_text(messages)
+            _ctx_injected('peer_protocol', len(_peer_spliced))
+        else:
+            _ctx_suppressed('peer_protocol', 'empty')
 
     # ★ 4.5 Current date.
     #   In append mode the date is already inlined by build_static_prompt()'s

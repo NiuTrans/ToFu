@@ -21,6 +21,18 @@
 <script>
   // Prevent flash of wrong theme — apply before render (default: tofu)
   (function(){var t=localStorage.getItem('claude_ui_theme')||'tofu';document.documentElement.setAttribute('data-theme',t);})();
+  // Prevent layout shift (CLS) — stamp the project-rail width hint BEFORE first
+  // paint, mirroring the theme no-FOUC script above. The folder render caches a
+  // lightweight `tofu_has_folders` hint; reading it here lets the sidebar paint
+  // at its correct steady-state width immediately, so the async folders
+  // round-trip only reconciles CONTENT, never GEOMETRY. New/zero-folder users
+  // (no hint) paint single-column, exactly as before.
+  (function(){try{
+    if(localStorage.getItem('tofu_has_folders')==='1'){
+      var c=localStorage.getItem('tofu_project_rail_collapsed')==='1';
+      document.documentElement.setAttribute('data-rail',c?'collapsed':'full');
+    }
+  }catch(e){}})();
 </script>
 <script>
   // ── Loading guard — stub functions for inline handlers ──
@@ -42,7 +54,8 @@
       'cycleTheme','toggleDebug','closeDebug','toggleSidebar','openSettings','toggleCodeExec',
       'toggleBrowser','toggleMemory','toggleSwarm','toggleAutoTranslate',
       'toggleAutoApply','selectThinkingDepth','cycleSearchMode','enterImageGenMode',
-      'toggleSidebarSearch','closeSidebarSearch','togglePaperMode'];
+      'toggleSidebarSearch','closeSidebarSearch','togglePaperMode',
+      'openOrchestration','openTaskMode'];
     for (var i = 0; i < stubs.length; i++) {
       (function(name) {
         window[name] = function() { _notReady(); };
@@ -91,12 +104,11 @@
     <h1><img class="sidebar-tofu-icon" src="static/icons/tofu-welcome.svg" alt="Tofu" width="22" height="22"><span class="sidebar-brand"><span class="sidebar-brand-t">T</span><span class="sidebar-brand-o">o</span><span class="sidebar-brand-f">f</span><span class="sidebar-brand-u">u</span></span></h1>
     <div class="sidebar-header-actions">
       <!-- Feature launchers (Paper / My Day / Trading / Studio) live in the
-           topbar as labeled buttons. Search, Settings,
-           theme cycle and debug toggle live here. -->
+           topbar as labeled buttons. Search, Settings and debug toggle live
+           here. Theme switching moved into Settings (theme picker). -->
       <button class="action-btn" id="sidebarSearchToggle" onclick="toggleSidebarSearch()" title="搜索对话" data-i18n-title="sidebar.search">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
       </button>
-      <button class="action-btn theme-cycle-btn" id="themeCycleBtn" onclick="cycleTheme()" title="Switch theme"><span><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg></span></button>
       <button class="action-btn" id="debugToggle" onclick="toggleDebug()" title="Debug"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12V19"/><path d="M18.4 6.6a9 9 0 0 0-12.8 0"/><circle cx="12" cy="8" r="2"/><path d="M20 15.5a9 9 0 0 1-18 0"/><path d="m2 12 2 .5M22 12l-2 .5M7 20l1-1.5M17 20l-1-1.5"/></svg></button>
       <button class="action-btn" onclick="openSettings()" title="设置" data-i18n-title="sidebar.settings">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -106,7 +118,7 @@
   <div class="sidebar-action-row">
     <button class="new-chat-btn" onclick="newChat()">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-      New Chat
+      <span>New Chat</span>
     </button>
   </div>
   <div class="sidebar-search-wrapper" id="sidebarSearchWrapper" style="display:none">
@@ -117,8 +129,14 @@
     </div>
     <div class="sidebar-search-stats" id="sidebarSearchStats"></div>
   </div>
-  <div class="folder-tabs" id="folderTabs"></div>
-  <div class="conversations-list" id="convList"></div>
+  <button class="folder-quickadd" id="folderQuickAdd" title="新建文件夹" data-i18n-title="sidebar.newFolder">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    <span data-i18n="sidebar.newFolder">New Folder</span>
+  </button>
+  <div class="sidebar-body" id="sidebarBody">
+    <nav class="project-rail" id="folderTabs" aria-label="Projects"></nav>
+    <div class="conversations-list" id="convList"></div>
+  </div>
   <!-- ═══ Paper Sidebar Overlay — paper library, shown when paperMode is active ═══ -->
   <div class="paper-sidebar-overlay" id="paperSidebarOverlay">
     <!-- Current paper info card -->
@@ -169,7 +187,7 @@
         <span class="topbar-tool-label" data-i18n="topbar.studio">Studio</span>
       </button>
       <button class="topbar-tool-btn" onclick="openTaskMode()" title="Task Mode — watch and reopen durable orchestration runs">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M7 11.5l2.5 2.5L13 9l2 3h2"/><path d="M8 21h8"/></svg>
         <span class="topbar-tool-label" data-i18n="topbar.tasks">Tasks</span>
       </button>
       <button class="update-btn topbar-tool-btn" id="updateBtn" onclick="openUpdateDialog()" title="检查更新" data-i18n-title="update.checkTitle"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M21 21v-5h-5"/></svg><span class="update-btn-label" data-i18n="update.btnLabel">更新</span><span class="update-btn-pill" data-i18n="update.btnNew">New</span></button>
@@ -205,11 +223,11 @@
       <!-- Left: PDF viewer — takes the most space -->
       <div class="paper-left">
         <div class="paper-pdf-toolbar">
-          <button class="paper-toolbar-btn" onclick="paperFitWidth()" data-i18n-title="paper.fitWidth" title="Fit to width">⤢</button>
-          <button class="paper-toolbar-btn" onclick="paperZoomOut()" data-i18n-title="paper.zoomOut" title="Zoom out">−</button>
+          <button class="paper-toolbar-btn icon-box" onclick="paperFitWidth()" data-i18n-title="paper.fitWidth" title="Fit to width"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg></button>
+          <button class="paper-toolbar-btn icon-box" onclick="paperZoomOut()" data-i18n-title="paper.zoomOut" title="Zoom out"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg></button>
           <input type="range" id="paperZoomSlider" class="paper-zoom-slider" min="25" max="400" value="150" step="5" oninput="paperSetScaleFromSlider(this.value)">
           <input type="text" id="paperZoomLevel" class="paper-toolbar-zoom-input" value="150%" onchange="paperSetScaleFromInput(this.value)" onkeydown="if(event.key==='Enter'){this.blur();}">
-          <button class="paper-toolbar-btn" onclick="paperZoomIn()" data-i18n-title="paper.zoomIn" title="Zoom in">+</button>
+          <button class="paper-toolbar-btn icon-box" onclick="paperZoomIn()" data-i18n-title="paper.zoomIn" title="Zoom in"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg></button>
         </div>
         <div class="paper-pdf-container" id="paperPdfViewer">
           <!-- PDF pages rendered here — vertical scroll -->
@@ -294,6 +312,22 @@
             <!-- EN / 中 segmented control: per-paper report generation language
                  (persisted). Switching regenerates/loads in the new language
                  (cached separately per (paper_hash, lang)). -->
+            <!-- Reader comfort: text-size A−/A+ + reading-width cycle. Drives
+                 --reader-font-scale / --reader-measure on the reader container,
+                 persisted to localStorage (see _applyReaderPrefs). -->
+            <div class="paper-reader-settings" role="group" data-i18n-aria-label="paper.readerSettings" aria-label="Reading comfort">
+              <button type="button" class="paper-reader-set-btn paper-reader-set-dec" onclick="_readerFontStep(-1)" data-i18n-title="paper.readerFontSmaller" title="Smaller text" aria-label="Decrease text size">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </button>
+              <button type="button" class="paper-reader-set-btn" onclick="_readerFontStep(1)" data-i18n-title="paper.readerFontLarger" title="Larger text" aria-label="Increase text size">
+                <span style="font-size:10px;font-weight:700">A</span>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </button>
+              <button type="button" class="paper-reader-set-btn paper-reader-set-width" onclick="_readerWidthCycle()" data-i18n-title="paper.readerWidth" title="Reading width" aria-label="Cycle reading width">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="7 8 3 12 7 16"/><polyline points="17 8 21 12 17 16"/><line x1="3" y1="12" x2="21" y2="12"/></svg>
+                <span class="paper-reader-width-label" data-i18n="paper.readerWidthComfortable">Comfortable</span>
+              </button>
+            </div>
             <div class="paper-report-lang-toggle" id="reportLangToggle" data-i18n-title="paper.reportLangTitle" title="Report language">
               <button type="button" class="paper-report-lang-opt" data-lang="en" onclick="_setReportLang('en','report')">EN</button>
               <button type="button" class="paper-report-lang-opt" data-lang="zh" onclick="_setReportLang('zh','report')">中</button>
@@ -371,6 +405,19 @@
                  'EN' restores the original. Always available (both directions),
                  independent of the app UI language. Managed by
                  _syncReviewTranslateBtn; per-paper choice persisted. -->
+            <div class="paper-reader-settings" role="group" data-i18n-aria-label="paper.readerSettings" aria-label="Reading comfort">
+              <button type="button" class="paper-reader-set-btn paper-reader-set-dec" onclick="_readerFontStep(-1)" data-i18n-title="paper.readerFontSmaller" title="Smaller text" aria-label="Decrease text size">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </button>
+              <button type="button" class="paper-reader-set-btn" onclick="_readerFontStep(1)" data-i18n-title="paper.readerFontLarger" title="Larger text" aria-label="Increase text size">
+                <span style="font-size:10px;font-weight:700">A</span>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </button>
+              <button type="button" class="paper-reader-set-btn paper-reader-set-width" onclick="_readerWidthCycle()" data-i18n-title="paper.readerWidth" title="Reading width" aria-label="Cycle reading width">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="7 8 3 12 7 16"/><polyline points="17 8 21 12 17 16"/><line x1="3" y1="12" x2="21" y2="12"/></svg>
+                <span class="paper-reader-width-label" data-i18n="paper.readerWidthComfortable">Comfortable</span>
+              </button>
+            </div>
             <div class="paper-report-lang-toggle" id="reviewLangToggle" data-i18n-title="paper.reviewTranslateTitle" title="Review reading language">
               <button type="button" class="paper-report-lang-opt" data-lang="en" onclick="_setReportLang('en','review')">EN</button>
               <button type="button" class="paper-report-lang-opt" data-lang="zh" onclick="_setReportLang('zh','review')">中</button>
@@ -427,18 +474,18 @@
        only, shown only when there's collaborative state to surface). Populated
        by presence.js from the 'presence' + 'project' push channels; clicking
        it opens the Project Brain panel. Replaces the old crowding presence
-       strip that sat above the messages. -->
-  <div class="presence-strip collab-bar" id="presenceStrip" hidden></div>
+       strip that sat above the messages.
 
-  <!-- Per-conversation Brain Influence bar — an ALWAYS-VISIBLE (project mode +
-       has-influence only) inline chip strip docked on the chat view itself,
-       showing how THIS conversation is affected by the brain (bound by
-       charter · N owned by you · M to avoid · K awaiting you). Updates on
-       conversation switch (main.js → convInfluenceRefresh). Clicking opens the
-       full Influence lens in the Project Brain panel. Populated by
-       project-brain.js (renderConvInfluenceBar). -->
-  <button type="button" class="conv-influence-bar" id="convInfluenceBar" hidden
-          title="" onclick="if(typeof openProjectBrainInfluence==='function')openProjectBrainInfluence();else if(typeof openProjectBrain==='function')openProjectBrain();"></button>
+       ONE project-scoped cluster (brainSummary, push-driven): it LEADS with the
+       Pillar #7 ambient status headline (summary.statusLine — "where is the
+       project right now", truncated; falls back to a "Project" label when no
+       snapshot exists yet), followed by the action-ordered coordination counts
+       (conflicts · decisions awaiting you · epics in progress · open · peers
+       online) and per-peer "advancing «epic»" joins. The bar hides when there
+       is neither a status headline nor any count. The per-conversation
+       influence lens ("how is THIS chat affected") is NOT duplicated here — it
+       lives in full inside the Project Brain panel, one click away. -->
+  <div class="presence-strip collab-bar" id="presenceStrip" hidden></div>
 
   <div class="chat-wrapper">
     <!-- ═══ Project Brain — cross-conversation Activity Feed (Pillar #1) ═══
@@ -452,7 +499,13 @@
             <span class="project-brain-title-ico" id="projectBrainHeadIcon"></span>
             <span data-i18n="projectBrain.title">Project Brain</span>
           </span>
-          <button class="project-brain-close" onclick="closeProjectBrain()" title="Close">✕</button>
+          <div class="project-brain-head-actions">
+            <button type="button" class="pb-tr-toggle" id="projectBrainTranslateToggle" aria-pressed="false" role="switch">
+              <span class="pb-tr-toggle-ico"></span>
+              <span class="pb-tr-toggle-label" data-i18n="projectBrain.translateToggle">Translate content</span>
+            </button>
+            <button class="project-brain-close" onclick="closeProjectBrain()" title="Close">✕</button>
+          </div>
         </div>
         <!-- ═══ Per-conversation Influence lens ═══
              How the CURRENT conversation is affected by the shared brain:
@@ -466,37 +519,70 @@
           </div>
           <div class="pb-influence-body" id="projectBrainInfluenceBody"></div>
         </div>
+        <!-- ═══ Tab bar ═══
+             The four surfaces (Charter / Board / Activity / Team) are shown
+             ONE-AT-A-TIME so each gets the full panel width — four side-by-side
+             columns collapse to unreadable slivers on a narrow / port-forwarded
+             viewport. Tabs are wired by project-brain.js (_initTabs); the count
+             badges are refreshed after each render. -->
+        <div class="project-brain-tabs" id="projectBrainTabs" role="tablist">
+          <button type="button" class="pb-tab pb-tab-active" data-pb-tab="charter" role="tab" aria-selected="true">
+            <span class="pb-tab-label" data-i18n="projectBrain.charter">Charter</span>
+            <span class="pb-tab-count" id="pbTabCountCharter" hidden></span>
+          </button>
+          <button type="button" class="pb-tab" data-pb-tab="board" role="tab" aria-selected="false">
+            <span class="pb-tab-label" data-i18n="projectBrain.board">Board</span>
+            <span class="pb-tab-count" id="pbTabCountBoard" hidden></span>
+          </button>
+          <button type="button" class="pb-tab" data-pb-tab="activity" role="tab" aria-selected="false">
+            <span class="pb-tab-label" data-i18n="projectBrain.activity">Activity</span>
+          </button>
+          <button type="button" class="pb-tab" data-pb-tab="peers" role="tab" aria-selected="false">
+            <span class="pb-tab-label" data-i18n="projectBrain.team">Team</span>
+            <span class="pb-tab-count" id="pbTabCountPeers" hidden></span>
+          </button>
+          <button type="button" class="pb-tab" data-pb-tab="status" role="tab" aria-selected="false">
+            <span class="pb-tab-label" data-i18n="projectBrain.status">Status &amp; Watch</span>
+          </button>
+        </div>
         <div class="project-brain-columns">
-          <div class="project-brain-col project-brain-col-charter">
-            <div class="project-brain-col-head" data-i18n="projectBrain.charter">Charter</div>
+          <div class="project-brain-col project-brain-col-charter pb-tab-panel pb-tab-panel-active" data-pb-panel="charter">
             <div class="project-brain-col-body" id="projectBrainCharterBody">
               <div class="pb-charter-empty" data-i18n="projectBrain.charterEmpty">No charter yet</div>
             </div>
           </div>
-          <div class="project-brain-col project-brain-col-board">
-            <div class="project-brain-col-head" data-i18n="projectBrain.board">Board</div>
+          <div class="project-brain-col project-brain-col-board pb-tab-panel" data-pb-panel="board">
             <div class="project-brain-col-body" id="projectBrainBoardBody">
               <div class="pb-board-empty" data-i18n="projectBrain.boardEmpty">Board is empty</div>
             </div>
           </div>
-          <div class="project-brain-col project-brain-col-activity">
-            <div class="project-brain-col-head" data-i18n="projectBrain.activity">Activity</div>
+          <div class="project-brain-col project-brain-col-activity pb-tab-panel" data-pb-panel="activity">
             <div class="project-brain-col-body">
               <div class="pb-activity-list" id="projectBrainActivityList">
                 <div class="pb-activity-empty" data-i18n="projectBrain.activityEmpty">No activity yet</div>
               </div>
             </div>
           </div>
-          <!-- ═══ Team / Peers column ═══
+          <!-- ═══ Team / Peers ═══
                The conversations-as-a-room surface: each active sibling conv
                (title · what it's advancing · presence dot · current round),
                plus the peer-message exchanges as an inline thread. Populated
                by project-brain-peers.js (renderPeers) from the LIVE
                Api.project.brainPeers roster + the feed's peer notes. -->
-          <div class="project-brain-col project-brain-col-peers">
-            <div class="project-brain-col-head" data-i18n="projectBrain.team">Team</div>
+          <div class="project-brain-col project-brain-col-peers pb-tab-panel" data-pb-panel="peers">
             <div class="project-brain-col-body" id="projectBrainPeersBody">
               <div class="pb-peers-empty" data-i18n="projectBrain.peersEmpty">No sibling conversations active</div>
+            </div>
+          </div>
+          <!-- ═══ Status (Pillar #7 human↔brain status lane) ═══
+               Ask the PROJECT "where are we / are we drifting from the
+               charter" and get a synthesized answer, backed by an append-only
+               history of status snapshots. Read-only synthesis (increment 1);
+               populated by project-brain-status.js from Api.project.brainStatus.
+               HUMAN-FACING ONLY — never injected into sibling agent prompts. -->
+          <div class="project-brain-col project-brain-col-status pb-tab-panel" data-pb-panel="status">
+            <div class="project-brain-col-body" id="projectBrainStatusBody">
+              <div class="pb-status-empty" data-i18n="projectBrain.statusEmpty">No status yet</div>
             </div>
           </div>
         </div>
@@ -507,8 +593,7 @@
         <div class="welcome" id="welcome">
           <div class="welcome-icon"><img src="static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
           <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
-          <p data-i18n="welcome.subtitle">嫩，但能打 — search, code, browse, trade, and more.</p>
-          <div class="feature-pills"><span class="feature-pill">Extended Thinking</span><span class="feature-pill">Search</span><span class="feature-pill">URL Fetch</span><span class="feature-pill">Image Input</span><span class="feature-pill">Co-Pilot</span><span class="feature-pill">Browser</span></div>
+          <div class="feature-pills"><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><path d="M12 18V5"/><path d="M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4"/><path d="M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5"/><path d="M17.997 5.125a4 4 0 0 1 2.526 5.77"/><path d="M18 18a4 4 0 0 0 2-7.464"/><path d="M19.967 17.483A4 4 0 1 1 12 18a4 4 0 1 1-7.967-.517"/><path d="M6 18a4 4 0 0 1-2-7.464"/><path d="M6.003 5.125a4 4 0 0 0-2.526 5.77"/></svg>Extended Thinking</span><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>Search</span><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>URL Fetch</span><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>Image Input</span><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg>Co-Pilot</span><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><path d="m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z"/><circle cx="12" cy="12" r="10"/></svg>Browser</span></div>
         </div>
       </div>
     </div>
@@ -533,8 +618,13 @@
             <span class="autoapply-dot"></span>
             <span class="autoapply-label">Manual</span>
           </button>
-          <button class="project-brain-toggle" id="projectBrainBtn" onclick="toggleProjectBrain()" data-i18n-title="projectBrain.open" title="Project Brain"></button>
-          <button class="project-bar-close" onclick="clearProject()">✕</button>
+          <button class="project-bar-btn scene-switch-btn icon-box" id="sceneSwitchBtn" onclick="window.TofuPet&&window.TofuPet.cycleDecor()" title="Scene: Meadow · click to change">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M2 20h20" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M3 20l5-8 3.5 5L15 11l6 9" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="17.5" cy="6.5" r="2.5" stroke="currentColor" stroke-width="2"/></svg>
+            <span class="scene-switch-label">Meadow</span>
+          </button>
+          <button class="project-bar-close icon-box" onclick="clearProject()" title="Close project">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+          </button>
         </div>
         <div class="image-previews" id="imagePreviews"></div>
         <div class="pdf-progress" id="pdfProgress" style="display:none">
@@ -575,12 +665,15 @@
         <input type="file" id="fileInput" accept="image/*,.pdf,application/pdf,.docx,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation,.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,.ppt,application/vnd.ms-powerpoint,.txt,.md,.csv,.json,.xml,.html,.yaml,.yml,.toml,.py,.js,.ts,.java,.c,.cpp,.go,.rs,.rb,.sh,.sql,.tex,.log,.rst,.ini,.cfg" multiple onchange="handleFileUpload(event)" style="display:none">
         <div class="input-box">
           <div class="input-row">
-            <button class="attach-btn" id="attachBtn" onclick="document.getElementById('fileInput').click()" title="Attach files (images, PDF, docs)">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            </button>
             <textarea id="userInput" placeholder="Type your message..." rows="1" onkeydown="handleKeyDown(event)"></textarea>
           </div>
           <div class="input-actions">
+            <!-- ★ Attach files — leftmost toolbar affordance (the conventional "+"
+                 spot). Moved out of .input-row so the textarea is a clean
+                 full-width field and every control lives in one toolbar row. -->
+            <button class="attach-btn" id="attachBtn" onclick="document.getElementById('fileInput').click()" data-i18n-title="toolbar.attachFiles" title="Attach files (images, PDF, docs)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.234 20.252 21 12.3"/><path d="m16 6-8.414 8.586a2 2 0 0 0 0 2.828 2 2 0 0 0 2.828 0l8.414-8.586a4 4 0 0 0 0-5.656 4 4 0 0 0-5.656 0l-8.415 8.585a6 6 0 1 0 8.486 8.486l7.766-7.952"/></svg>
+            </button>
             <div class="input-actions-scroll">
             <!-- ── Primary: Model & Depth ── -->
             <div class="input-group" id="modelGroup">
@@ -591,16 +684,22 @@
                   <span class="ps-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
                 </div>
                 <div class="preset-dropdown" id="presetDropdown">
-                  <!-- ★ Populated dynamically by _populateModelDropdown() from /api/server-config -->
-                  <div class="ps-dd-loading" data-i18n="toolbar.loadingModels">正在加载模型…</div>
+                  <!-- ★ Model list — populated dynamically by _populateModelDropdown() from /api/server-config -->
+                  <div class="preset-dropdown-list" id="presetDropdownList">
+                    <div class="ps-dd-loading" data-i18n="toolbar.loadingModels">正在加载模型…</div>
+                  </div>
+                  <!-- ★ Thinking depth — folded in from the toolbar row (only shown for thinking-capable models) -->
+                  <div class="ps-dd-depth-wrap" id="thinkingDepthSection" style="display:none">
+                    <div class="ps-dd-depth-title" data-i18n="mobile.thinkingDepth">思考深度</div>
+                    <div class="thinking-depth-bar">
+                      <button class="depth-btn" data-depth="off" onclick="selectThinkingDepth('off')">Off</button>
+                      <button class="depth-btn active" data-depth="medium" onclick="selectThinkingDepth('medium')">Med</button>
+                      <button class="depth-btn" data-depth="high" onclick="selectThinkingDepth('high')">High</button>
+                      <button class="depth-btn" data-depth="xhigh" onclick="selectThinkingDepth('xhigh')" title="Claude Opus 4.7+ only — downgrades to High on other models">xHigh</button>
+                      <button class="depth-btn" data-depth="max" onclick="selectThinkingDepth('max')">Max</button>
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <div class="thinking-depth-bar" id="thinkingDepthSection" style="display:none">
-                <button class="depth-btn" data-depth="off" onclick="selectThinkingDepth('off')">Off</button>
-                <button class="depth-btn active" data-depth="medium" onclick="selectThinkingDepth('medium')">Med</button>
-                <button class="depth-btn" data-depth="high" onclick="selectThinkingDepth('high')">High</button>
-                <button class="depth-btn" data-depth="xhigh" onclick="selectThinkingDepth('xhigh')" title="Claude Opus 4.7+ only — downgrades to High on other models">xHigh</button>
-                <button class="depth-btn" data-depth="max" onclick="selectThinkingDepth('max')">Max</button>
               </div>
             </div>
             </div><!-- /input-actions-scroll -->
@@ -667,7 +766,17 @@
                     <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.humanAICollab">人机协作</span><span class="submenu-item-desc" data-i18n="toolbar.humanAICollabDesc">AI 可向你提问寻求指导</span></span>
                     <span class="submenu-item-check">✓</span>
                   </div>
-
+                  <!-- Divider: the entries below are one-shot LAUNCHERS (enter a
+                       workspace / open a panel), not on/off toggles — no check. -->
+                  <div class="submenu-divider" role="separator"></div>
+                  <div class="submenu-item" id="imageGenModeBtn" onclick="toggleSubmenu('submenuTools');enterImageGenMode()" title="Creative image canvas">
+                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.creativeMode">创作模式</span><span class="submenu-item-desc" data-i18n="toolbar.creativeModeDesc">切换到图像创作画布</span></span>
+                  </div>
+                  <div class="submenu-item" id="projectToggle" onclick="toggleSubmenu('submenuTools');openProjectModal()" title="Project Co-Pilot">
+                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
+                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="mobile.projectAssistant">项目助手</span><span class="submenu-item-desc" data-i18n="mobile.projectAssistantDesc">打开项目面板</span></span>
+                  </div>
                 </div>
               </div>
               <!-- ★ Mode sub-menu -->
@@ -712,26 +821,21 @@
                   </div>
                 </div>
               </div>
-              <!-- ★ Standalone buttons -->
-              <button class="action-btn" id="imageGenModeBtn" onclick="enterImageGenMode()" title="Image Generation Mode">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-              </button>
-              <!-- Paper Reader button moved to sidebar header -->
-              <button class="action-btn" id="projectToggle" onclick="openProjectModal()" title="Project Co-Pilot">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-              </button>
             </div>
             <div class="input-actions-right">
 
             <!-- Mobile-only "more" button — opens bottom sheet with all toggles -->
             <button class="mobile-more-btn" id="mobileMoreBtn" onclick="toggleMobileSheet()" data-i18n-title="toolbar.moreOptionsTooltip" title="更多选项"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button>
-            <div class="search-mode-toggle" id="searchModeToggle" data-mode="off" onclick="cycleSearchMode()" title="Click to cycle: Off → Single → Multi → Off">
+            <button class="mic-btn" id="micBtn" onclick="toggleVoiceInput()" data-i18n-title="voice.tooltip" title="Voice input" style="display:none">
+              <svg class="mic-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+            </button>
+            <div class="search-mode-toggle" id="searchModeToggle" data-mode="off" onclick="cycleSearchMode()" data-i18n-title="search.toggleTooltip" title="Web search — click to toggle on/off">
               <span class="sm-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg></span>
               <span class="sm-label">Search</span>
               <span class="sm-mode-pill">OFF</span>
             </div>
             <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Send (Enter)">
-              <span style="font-size:13px;font-weight:600;letter-spacing:.5px">⏎</span>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12L20 12"/><path d="M13 5l7 7-7 7"/></svg>
             </button>
             </div><!-- /input-actions-right -->
           </div>
@@ -819,6 +923,10 @@
         <button class="settings-tab" data-tab="translate" onclick="switchSettingsTab('translate')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2v3"/><path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/></svg>
           <span data-i18n="settings.tabTranslate">翻译</span>
+        </button>
+        <button class="settings-tab" data-tab="speech" onclick="switchSettingsTab('speech')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+          <span data-i18n="settings.tabSpeech">语音识别</span>
         </button>
         <button class="settings-tab" data-tab="network" onclick="switchSettingsTab('network')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
@@ -1010,6 +1118,19 @@
               </div>
               <label class="stg-toggle">
                 <input type="checkbox" id="settingKeepToolHistory" checked>
+                <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <div class="settings-toggle-row">
+              <div>
+                <span class="settings-toggle-label" data-i18n="settings.segmentTimeline">按工具内联时间线</span>
+                <div class="settings-toggle-desc" data-i18n="settings.segmentTimelineDesc">在已完成的多工具回复中，把每个工具调用之前的思考与说明文字就近显示在该工具旁边（交错时间线），而不是把所有工具、所有思考、所有正文分别聚成三大块。加载/刷新对话时生效；实时流式仍为分组视图，回复结束后切换为时间线。</div>
+              </div>
+              <label class="stg-toggle">
+                <input type="checkbox" id="settingSegmentTimeline" checked>
                 <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
               </label>
             </div>
@@ -1297,6 +1418,188 @@
               </div>
             </div>
             <!-- end Custom card -->
+
+          </div>
+        </div>
+
+        <!-- ═══ Speech / Voice-input Tab ═══ -->
+        <div class="settings-tab-panel" id="settingsTab_speech">
+          <div class="settings-section-title">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px;opacity:.65"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+            <span data-i18n="settings.sttService">语音识别（语音输入）</span>
+          </div>
+          <p class="settings-desc" data-i18n-html="settings.sttServiceDesc">配置语音转文字（STT）服务后，聊天输入框会出现麦克风按钮，可直接说话转成文字。<br>未配置时麦克风按钮自动隐藏。</p>
+
+          <!-- Live status banner (reflects Api.audio.capabilities()) -->
+          <div id="sttStatusBanner" class="settings-hint-banner" style="display:none;margin-top:0;margin-bottom:12px">
+            <span id="sttStatusText"></span>
+          </div>
+
+          <div class="settings-group">
+            <div class="settings-toggle-row">
+              <div>
+                <span class="settings-toggle-label" data-i18n="settings.sttEnable">启用语音输入</span>
+                <div class="settings-toggle-desc" data-i18n="settings.sttEnableDesc">关闭后立即停用语音识别（麦克风按钮隐藏），已填写的凭证会保留</div>
+              </div>
+              <label class="stg-toggle">
+                <input type="checkbox" id="settingSttEnabled">
+                <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
+              </label>
+            </div>
+          </div>
+
+          <div id="sttProviderFields" style="display:none">
+            <div class="settings-divider"></div>
+
+            <!-- Provider selector -->
+            <div class="settings-section-title" style="display:flex;align-items:center;gap:8px">
+              <span data-i18n="settings.sttProvider">识别服务商</span>
+              <select id="settingSttProvider" class="mt-provider-select" onchange="_switchSttProvider(this.value)">
+                <option value="openai" data-i18n="settings.sttProviderOpenai">OpenAI (gpt-4o-transcribe)</option>
+                <option value="groq" data-i18n="settings.sttProviderGroq">Groq (Whisper)</option>
+                <option value="omni" data-i18n="settings.sttProviderOmni">Omni 对话模型 (audio_chat)</option>
+                <option value="custom" data-i18n="settings.sttProviderCustom">自定义 Whisper 端点</option>
+              </select>
+            </div>
+
+            <!-- ── OpenAI card (transcription mechanism) ── -->
+            <div class="mt-provider-card" id="sttCardOpenai">
+              <div class="mt-provider-card-header">
+                <div class="mt-provider-logo icon-box" style="background:linear-gradient(135deg,rgba(16,163,127,.12),rgba(16,163,127,.04));border-color:rgba(16,163,127,.25)">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="#10a37f"><path d="M22.28 9.82a5.98 5.98 0 0 0-.52-4.91 6.05 6.05 0 0 0-6.51-2.9A6.07 6.07 0 0 0 4.98 4.18a5.98 5.98 0 0 0-3.99 2.9 6.05 6.05 0 0 0 .74 7.1 5.98 5.98 0 0 0 .51 4.91 6.05 6.05 0 0 0 6.52 2.9A5.98 5.98 0 0 0 13.26 24a6.05 6.05 0 0 0 5.77-4.2 5.98 5.98 0 0 0 3.99-2.9 6.05 6.05 0 0 0-.74-7.08zM13.26 22.43a4.48 4.48 0 0 1-2.88-1.04l.14-.08 4.78-2.76a.78.78 0 0 0 .39-.68v-6.74l2.02 1.17a.07.07 0 0 1 .04.05v5.58a4.5 4.5 0 0 1-4.49 4.5zM3.6 18.3a4.47 4.47 0 0 1-.54-3l.14.09 4.78 2.76a.78.78 0 0 0 .78 0l5.84-3.37v2.33a.08.08 0 0 1-.03.06L9.74 22a4.5 4.5 0 0 1-6.14-1.65zM2.34 7.9a4.48 4.48 0 0 1 2.34-1.97V11.6a.77.77 0 0 0 .39.68l5.82 3.36-2.02 1.17a.08.08 0 0 1-.07 0l-4.83-2.79A4.5 4.5 0 0 1 2.34 7.9zm16.6 3.86L13.1 8.38l2.02-1.16a.08.08 0 0 1 .07 0l4.83 2.79a4.49 4.49 0 0 1-.68 8.1v-5.68a.79.79 0 0 0-.39-.67zm2.01-3.03l-.14-.09-4.78-2.79a.78.78 0 0 0-.79 0L9.4 9.18V6.85a.07.07 0 0 1 .03-.06l4.83-2.78a4.5 4.5 0 0 1 6.68 4.66zM8.3 12.86l-2.02-1.16a.08.08 0 0 1-.04-.06V6.07a4.5 4.5 0 0 1 7.37-3.45l-.14.08L8.7 5.46a.78.78 0 0 0-.39.68zl.01 6.72zm1.1-2.36l2.6-1.5 2.6 1.5v3l-2.6 1.5-2.6-1.5z"/></svg>
+                </div>
+                <div class="mt-provider-info">
+                  <div class="mt-provider-name">OpenAI <span style="color:var(--text-tertiary);font-weight:400">gpt-4o-transcribe</span></div>
+                  <div class="mt-provider-desc" data-i18n="settings.sttOpenaiDesc">官方 /audio/transcriptions 端点 · 高准确率 · 需公网直连 OpenAI</div>
+                </div>
+                <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" class="mt-apply-link">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                  <span data-i18n="settings.sttApplyKey">获取 API Key</span>
+                </a>
+              </div>
+              <div class="mt-provider-card-body">
+                <div class="settings-row">
+                  <div class="settings-field">
+                    <label>API Key</label>
+                    <input type="password" id="settingSttKeyOpenai" placeholder="sk-..." spellcheck="false" autocomplete="off">
+                  </div>
+                </div>
+                <div class="settings-row two-col">
+                  <div class="settings-field">
+                    <label data-i18n="settings.sttModelLabel">模型</label>
+                    <select id="settingSttModelOpenai" class="mt-provider-select">
+                      <option value="gpt-4o-transcribe">gpt-4o-transcribe</option>
+                      <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe</option>
+                      <option value="whisper-1">whisper-1</option>
+                    </select>
+                  </div>
+                  <div class="settings-field">
+                    <label><span data-i18n="settings.sttBaseUrlLabel">API 地址</span> <span style="color:var(--text-tertiary);font-weight:normal" data-i18n="settings.sttOptional">（可选）</span></label>
+                    <input type="text" id="settingSttBaseOpenai" class="settings-mono" placeholder="https://api.openai.com/v1" spellcheck="false">
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ── Groq card (transcription mechanism) ── -->
+            <div class="mt-provider-card" id="sttCardGroq" style="display:none">
+              <div class="mt-provider-card-header">
+                <div class="mt-provider-logo icon-box" style="background:linear-gradient(135deg,rgba(245,74,42,.10),rgba(245,74,42,.04));border-color:rgba(245,74,42,.22)">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#f54a2a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+                </div>
+                <div class="mt-provider-info">
+                  <div class="mt-provider-name">Groq <span style="color:var(--text-tertiary);font-weight:400">whisper-large-v3-turbo</span></div>
+                  <div class="mt-provider-desc" data-i18n="settings.sttGroqDesc">LPU 上的 Whisper · 极快 · 极低价 · 兼容 /audio/transcriptions</div>
+                </div>
+                <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer" class="mt-apply-link">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                  <span data-i18n="settings.sttApplyKey">获取 API Key</span>
+                </a>
+              </div>
+              <div class="mt-provider-card-body">
+                <div class="settings-row">
+                  <div class="settings-field">
+                    <label>API Key</label>
+                    <input type="password" id="settingSttKeyGroq" placeholder="gsk_..." spellcheck="false" autocomplete="off">
+                  </div>
+                </div>
+                <div class="settings-row two-col">
+                  <div class="settings-field">
+                    <label data-i18n="settings.sttModelLabel">模型</label>
+                    <select id="settingSttModelGroq" class="mt-provider-select">
+                      <option value="whisper-large-v3-turbo">whisper-large-v3-turbo</option>
+                      <option value="whisper-large-v3">whisper-large-v3</option>
+                    </select>
+                  </div>
+                  <div class="settings-field">
+                    <label><span data-i18n="settings.sttBaseUrlLabel">API 地址</span> <span style="color:var(--text-tertiary);font-weight:normal" data-i18n="settings.sttOptional">（可选）</span></label>
+                    <input type="text" id="settingSttBaseGroq" class="settings-mono" placeholder="https://api.groq.com/openai/v1" spellcheck="false">
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ── Omni chat card (audio_chat mechanism) ── -->
+            <div class="mt-provider-card" id="sttCardOmni" style="display:none">
+              <div class="mt-provider-card-header">
+                <div class="mt-provider-logo icon-box" style="background:linear-gradient(135deg,rgba(120,120,255,.12),rgba(120,120,255,.04));border-color:rgba(120,120,255,.25)">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#7a7aff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 6 4-16 2 10h5"/></svg>
+                </div>
+                <div class="mt-provider-info">
+                  <div class="mt-provider-name"><span data-i18n="settings.sttOmniName">Omni 对话模型</span> <span style="color:var(--text-tertiary);font-weight:400">audio_chat</span></div>
+                  <div class="mt-provider-desc" data-i18n="settings.sttOmniDesc">全模态对话模型内联识别（/chat/completions）· 适合无独立 Whisper 端点的网关（如美团 AIGC gemini-3-flash-preview / LongCat-Flash-Omni）</div>
+                </div>
+              </div>
+              <div class="mt-provider-card-body">
+                <div class="settings-row two-col">
+                  <div class="settings-field">
+                    <label data-i18n="settings.sttModelLabel">模型</label>
+                    <input type="text" id="settingSttModelOmni" placeholder="gemini-3-flash-preview" spellcheck="false">
+                  </div>
+                  <div class="settings-field">
+                    <label data-i18n="settings.sttBaseUrlLabel">API 地址</label>
+                    <input type="text" id="settingSttBaseOmni" class="settings-mono" placeholder="https://api.openai.com/v1" spellcheck="false">
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-field">
+                    <label><span>API Key</span> <span style="color:var(--text-tertiary);font-weight:normal" data-i18n="settings.sttOptional">（可选）</span></label>
+                    <input type="password" id="settingSttKeyOmni" placeholder="留空复用已有网关鉴权" spellcheck="false" autocomplete="off">
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ── Custom Whisper endpoint card (transcription mechanism) ── -->
+            <div class="mt-provider-card" id="sttCardCustom" style="display:none">
+              <div class="mt-provider-card-header">
+                <div class="mt-provider-logo icon-box" style="background:linear-gradient(135deg,rgba(136,136,136,.10),rgba(136,136,136,.04));border-color:rgba(136,136,136,.2)">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10A15.3 15.3 0 0112 2z"/></svg>
+                </div>
+                <div class="mt-provider-info">
+                  <div class="mt-provider-name"><span data-i18n="settings.sttCustomName">自定义端点</span> <span style="color:var(--text-tertiary);font-weight:400">Custom Whisper</span></div>
+                  <div class="mt-provider-desc" data-i18n="settings.sttCustomDesc">任何兼容 OpenAI /audio/transcriptions 的端点（自建 faster-whisper、vLLM 等）</div>
+                </div>
+              </div>
+              <div class="mt-provider-card-body">
+                <div class="settings-row two-col">
+                  <div class="settings-field">
+                    <label data-i18n="settings.sttModelLabel">模型</label>
+                    <input type="text" id="settingSttModelCustom" placeholder="whisper-1" spellcheck="false">
+                  </div>
+                  <div class="settings-field">
+                    <label><span data-i18n="settings.sttBaseUrlLabel">API 地址</span> <span style="color:var(--accent-red,#f44336);font-weight:normal" data-i18n="settings.sttRequired">（必填）</span></label>
+                    <input type="text" id="settingSttBaseCustom" class="settings-mono" placeholder="http://127.0.0.1:8000/v1" spellcheck="false">
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-field">
+                    <label><span>API Key</span> <span style="color:var(--text-tertiary);font-weight:normal" data-i18n="settings.sttOptional">（可选）</span></label>
+                    <input type="password" id="settingSttKeyCustom" placeholder="本地端点通常无需鉴权" spellcheck="false" autocomplete="off">
+                  </div>
+                </div>
+              </div>
+            </div>
 
           </div>
         </div>
@@ -1698,6 +2001,7 @@
     <div class="settings-footer">
       <div class="settings-footer-hint" id="settingsStatusHint"></div>
       <div class="settings-footer-actions">
+        <a class="settings-mobile-client" id="settingsMobileClient" href="#" target="_blank" rel="noopener noreferrer" data-i18n-title="settings.mobileClientTitle" style="display:none;"></a>
         <span class="settings-version" id="settingsVersion"></span>
         <button class="btn btn-secondary" onclick="closeSettings()" data-i18n="settings.cancel">取消</button>
         <button class="btn btn-primary" onclick="saveSettings()" data-i18n="settings.save">保存</button>
@@ -1895,9 +2199,18 @@
         </div>
 
         <div id="recentProjectPaths" class="pm-rail-card recent-paths" hidden>
-          <div class="recent-paths-header">
-            <span class="recent-paths-title">Recent</span>
-            <button class="recent-paths-clear" onclick="clearRecentProjects()" title="Clear all">✕</button>
+          <div class="pm-section-label">
+            <span data-i18n="pm.recent">Recent</span>
+            <span class="pm-count" id="recentCount"></span>
+            <button class="recent-paths-clear" onclick="clearRecentProjects()" title="Clear all" data-i18n-title="pm.recentClearAll">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+            </button>
+          </div>
+          <div class="recent-search">
+            <input type="text" id="recentSearchInput" class="recent-search-input" placeholder="Search recent…" data-i18n-placeholder="pm.recentSearchPlaceholder" autocomplete="off" spellcheck="false" oninput="_filterRecentProjects(this.value)" onkeydown="if(event.key==='Escape'){event.preventDefault();_clearRecentSearch();}">
+            <button class="recent-search-clear" id="recentSearchClear" onclick="_clearRecentSearch()" title="Clear search" data-i18n-title="pm.recentClearSearch" hidden>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
           </div>
           <div class="recent-paths-list" id="recentPathsList"></div>
         </div>
@@ -1951,7 +2264,7 @@
       <p data-i18n-html="browser.lnaPolicy"><strong>方式二（持久）</strong>：放置一个 Chrome 托管策略文件，内容为：</p>
       <code class="copyable-url" id="browserLnaPolicy" data-tooltip="点击复制" data-i18n-title="browser.clickToCopy"
             style="cursor:pointer;display:block;padding:8px 10px;border-radius:6px;word-break:break-all;border:1px dashed var(--accent-color)">{ "LocalNetworkAccessAllowedForUrls": ["*"] }</code>
-      <p class="browser-lna-path" id="browserLnaPath" data-i18n-html="browser.lnaPathHint" style="display:none"></p>
+      <p class="browser-lna-path" id="browserLnaPath" style="display:none"></p>
     </div>
 
     <div class="browser-setup-steps">
@@ -2117,7 +2430,7 @@
       <span class="mobile-sheet-item-check" style="opacity:0">✓</span>
     </div>
     <div class="mobile-sheet-item" id="mobileTasks" onclick="closeMobileSheet();openTaskMode()">
-      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span>
+      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M7 11.5l2.5 2.5L13 9l2 3h2"/><path d="M8 21h8"/></svg></span>
       <span class="mobile-sheet-item-text">
         <span class="mobile-sheet-item-name" data-i18n="topbar.tasks">Tasks</span>
         <span class="mobile-sheet-item-desc" data-i18n="mobile.tasksDesc">查看与重开编排任务</span>
@@ -2291,122 +2604,136 @@
 </div>
 
 <!-- html2canvas: lazy-loaded on first Export click (199KB, avoids DevTools freeze) -->
-<script defer src="static/js/i18n.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core/icons.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/idb-cache.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/i18n.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/icons.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/idb-cache.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- core/ subpackage (split 2026-05-28 from monolithic core.js — see lib/js_bundler.py).
      These MUST load AFTER core.js so the slim shell's `let`/`const` decls run first. -->
-<script defer src="static/js/core/folders.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core/cost.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core/debug_panel.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core/escape_html.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core/safe_html.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core/error_envelope.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core/cross_tab_sync.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core/conversations.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/folders.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/cost.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/debug_panel.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/escape_html.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/safe_html.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/error_envelope.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/cross_tab_sync.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/conversations.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 
-<script defer src="static/js/core/translate_guard.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core/cache_stats.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core/markdown.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core/health_stream_timer.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core/toast.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/core/dialog.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/api.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/export-images.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/branch.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/compaction-viewer.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/artifacts.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/translate_guard.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/cache_stats.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/markdown.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/health_stream_timer.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/toast.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/core/dialog.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/api.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/push.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/feature-loader.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/export-images.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/branch.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/compaction-viewer.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/artifacts.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- ui/ subpackage (split 2026-05-28 from monolithic ui.js — see lib/js_bundler.py) -->
-<script defer src="static/js/ui/conversation_list.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/streaming_render.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/chat_render.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/popups.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/finish_info.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/tool_rounds.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/message_actions.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/edit_message.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/turn_nav.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/streaming_swarm_panel.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/streaming_ui.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/sse_handlers_tool.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/sse_handlers_swarm.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/sse_handlers_io.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/sse_handlers_misc.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/sse_handlers_lifecycle.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/sse_pipeline.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/sse_poll_fallback.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/swarm_push.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/send_button.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/stream_lifecycle.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/conv_view.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/image_fullscreen.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/conversation_list.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/streaming_render.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/chat_render.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/popups.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/finish_info.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/tool_rounds.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/message_actions.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/edit_message.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/turn_nav.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/streaming_swarm_panel.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/streaming_ui.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/sse_handlers_tool.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/sse_handlers_swarm.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/sse_handlers_io.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/sse_handlers_misc.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/sse_handlers_lifecycle.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/sse_pipeline.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/sse_poll_fallback.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/swarm_push.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/send_button.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/ui/stream_lifecycle.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/conv_view.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- Feature modules (extracted from main.js) -->
-<script defer src="static/js/log-clean.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/toolset-apply.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/translation.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/log-clean.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/toolset-apply.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/translation.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 
-<script defer src="static/js/upload.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/image-gen.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/paper-reader.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/project.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/memory.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/skills.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/preferences.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/orchestration.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/task-mode.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/scheduler.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/optimizer.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/update.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/timer.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/myday.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/upload.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/voice.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/image-gen.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/paper-reader.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/project.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/memory.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/skills.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/preferences.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/orchestration.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/task-mode.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/scheduler.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/optimizer.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/update.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/timer.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/myday.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- settings/ subpackage (split 2026-05-28 from monolithic settings.js — see lib/js_bundler.py).
      These MUST load AFTER settings.js so the head's `var` decls (_serverConfig etc.) run first. -->
-<script defer src="static/js/settings/branding.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/provider_templates.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/auto_setup.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/local_endpoints.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/core_panel.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/provider_render.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/key_stats.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/balance.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/template_actions.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/model_edit.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/access_matrix.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/visibility_defaults.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/chip_input.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/other_tabs.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/auth_sources.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/save_export.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/system_prompt_editor.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/oauth.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/settings/mcp.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/branding.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/provider_templates.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/auto_setup.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/local_endpoints.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/core_panel.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/provider_render.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/key_stats.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/balance.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/template_actions.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/model_edit.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/access_matrix.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/visibility_defaults.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/chip_input.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/other_tabs.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/speech.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/auth_sources.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/save_export.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/system_prompt_editor.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/oauth.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/settings/mcp.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 
 <!-- main/ subpackage (split 2026-05-28 from monolithic main.js — see lib/js_bundler.py).
      These MUST load before main.js so its boot IIFE can call their symbols. -->
-<script defer src="static/js/main/main_conv_lifecycle.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/main/main_translating_bubble.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/main/main_send_pipeline.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/main/main_regen_continue.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/main/main_toolbar_ui.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/main/main_folders_mobile.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/main/main_input_handling.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/main/main_init_tasks.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/main.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main/main_conv_lifecycle.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main/main_translating_bubble.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main/main_send_pipeline.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main/main_regen_continue.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main/main_toolbar_ui.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main/main_folders_mobile.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main/main_input_handling.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main/main_init_tasks.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/main.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- context-bar.js loads after main.js (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
-<script defer src="static/js/context-bar.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/context-bar.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+
+<!-- tofu-pet.js — the little Tofu pet mascot in the project bar (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
+<script defer src="static/js/tofu-pet.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- tofu-scene.js — procedural Impressionist canvas backdrop for the project bar (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
+<script defer src="static/js/tofu-scene.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- info-rail.js — per-turn context note builder/renderer (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
-<script defer src="static/js/info-rail.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/info-rail.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- mobile_panels.js — mobile portaling of timer/optimizer panels + mobile flow picker (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
-<script defer src="static/js/mobile_panels.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/mobile_panels.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- presence.js — cross-conversation live-presence strip (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
-<script defer src="static/js/presence.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/presence.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- project-brain.js — Pillar #1 cross-conversation Activity Feed tab (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
-<script defer src="static/js/project-brain.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/project-brain.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- project-brain-peers.js — Team/Peers column (registered in lib/js_bundler.py:_BUNDLE_FILES). MUST load after project-brain.js. -->
-<script defer src="static/js/project-brain-peers.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/project-brain-peers.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- project-brain-status.js — Pillar #7 human↔brain status lane tab (registered in lib/js_bundler.py:_BUNDLE_FILES). MUST load after project-brain.js. -->
+<script defer src="static/js/project-brain-status.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- project-brain-i18n.js — content-translation display overlay (registered in lib/js_bundler.py:_BUNDLE_FILES). MUST load after project-brain.js + project-brain-peers.js. -->
+<script defer src="static/js/project-brain-i18n.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- net-latency.js — topbar network-latency signal indicator (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
-<script defer src="static/js/net-latency.js?v=0.13.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/net-latency.js?v=0.14.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script>
 // Feature flags — show/hide optional modules
 var _featureFlags = {};

@@ -36,8 +36,14 @@ function updateSendButton() {
     }
   }
 
-  const mainStreaming =
-    activeStreams.has(activeConvId) || (conv && conv.activeTaskId);
+  // ★ SINGLE SOURCE OF TRUTH: the same busy-predicate the sidebar uses
+  //   (convIsBusy in ui/conversation_list.js). Previously this recomputed
+  //   `activeStreams.has(id) || activeTaskId` inline and LACKED the
+  //   activeStreams key-prefix scan the sidebar had — so the composer and the
+  //   sidebar dot could disagree about the SAME conv. Routing both through
+  //   convIsBusy makes that divergence impossible by construction. (Branch
+  //   stop-cascade below still keys off _branchStreams for the abort priorities.)
+  const mainStreaming = convIsBusy(conv);
   const translating = conv && conv._translating;
   const streaming = branchStreaming || mainStreaming || anyBranchStreaming || translating;
 
@@ -157,7 +163,7 @@ function updateSendButton() {
     };
   } else {
     btn.className = "send-btn";
-    btn.innerHTML = `<span style="font-size:13px;font-weight:600;letter-spacing:.5px">⏎</span>`;
+    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12L20 12"/><path d="M13 5l7 7-7 7"/></svg>`;
     btn.onclick = sendMessage;
   }
 }

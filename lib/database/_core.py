@@ -917,7 +917,18 @@ def _test_pg_connection(pg_conn):
             return False
 
         idle = now - pg_conn._last_used
-        if idle < _IDLE_CHECK_S:
+        # ★ Suspend guard: time.monotonic() FREEZES while the OS is suspended
+        #   (laptop lid close / VM pause / FUSE stall), so a connection whose
+        #   backend PG killed overnight still looks "used a few seconds ago" by
+        #   the monotonic clock and the SELECT 1 probe below would be skipped —
+        #   handing a DEAD connection to the request (the recurring "server
+        #   closed the connection unexpectedly" on the first Send after
+        #   reconnecting the next day). Cross-check the WALL clock: if either
+        #   clock shows a gap >= _IDLE_CHECK_S, probe. The wall clock advances
+        #   across a suspend even when monotonic did not, so a resumed process
+        #   always probes and discards the stale connection.
+        wall_idle = time.time() - getattr(pg_conn, '_last_used_wall', 0)
+        if idle < _IDLE_CHECK_S and wall_idle < _IDLE_CHECK_S:
             return True
 
         raw.rollback()
@@ -926,6 +937,7 @@ def _test_pg_connection(pg_conn):
         cur.fetchone()
         cur.close()
         pg_conn._last_used = now
+        pg_conn._last_used_wall = time.time()
         return True
     except Exception as e:
         logger.debug('[DB] Health check failed: %s', e)
@@ -1388,6 +1400,49 @@ def close_thread_db(domain=None):
 #  Write-Retry Helper
 # ═══════════════════════════════════════════════════════════════════════
 
+def _reconnect_pg_inplace(db):
+    """Swap a dead PgConnection's underlying raw connection for a fresh one.
+
+    Adopts a brand-new psycopg2 connection (and its semaphore slot) into the
+    existing ``db`` wrapper so callers holding the wrapper (request-scoped /
+    thread-local / pooled) transparently continue on a live connection. The
+    OLD raw connection is closed and its semaphore slot + global ``_conn_count``
+    released here — otherwise every reconnect permanently leaks one pool slot
+    and one PG backend (the fresh connection kept its own slot/count).
+
+    Only meaningful on the PG backend. Returns True on success, False on
+    failure (caller then re-raises the original error).
+    """
+    if _BACKEND != 'pg' or not hasattr(db, '_conn'):
+        return False
+    try:
+        old_raw = db._conn
+        fresh = _new_pg_connection()
+        try:
+            old_raw.close()
+        except Exception as _c_err:
+            logger.debug('[DB] Closing dead raw conn during reconnect failed: %s', _c_err)
+        old_sem = getattr(db, '_semaphore', None)
+        if old_sem is not None:
+            try:
+                old_sem.release()
+            except ValueError:
+                logger.debug('[DB] Old semaphore already released during reconnect')
+            with _conn_count_lock:
+                globals()['_conn_count'] = max(0, _conn_count - 1)
+        db._conn = fresh._conn
+        db._semaphore = fresh._semaphore
+        db._created_at = fresh._created_at
+        db._last_used = time.monotonic()
+        db._last_used_wall = time.time()
+        db._closed = False
+        db._dirty = False
+        return True
+    except Exception as re_err:
+        logger.warning('[DB] In-place PG reconnect failed: %s', re_err)
+        return False
+
+
 def db_execute_with_retry(db, sql, params=(), *, commit=True, max_retries=3):
     """Execute a single SQL write with retry on contention or connection loss."""
     last_err = None
@@ -1414,34 +1469,8 @@ def db_execute_with_retry(db, sql, params=(), *, commit=True, max_retries=3):
                         logger.debug('[DB-Retry] Rollback failed: %s', _rb_err)
                     # Try to reconnect for PG connection errors
                     if etype in ('OperationalError', 'InterfaceError') and hasattr(db, '_conn'):
-                        try:
-                            old_raw = db._conn
-                            fresh = _new_pg_connection()
-                            # Adopt fresh's raw connection AND its semaphore slot.
-                            # The slot + global _conn_count tied to the dead raw
-                            # connection must be released here, otherwise every
-                            # reconnect permanently leaks one pool slot and one
-                            # PG backend (fresh kept its own slot/count).
-                            try:
-                                old_raw.close()
-                            except Exception as _c_err:
-                                logger.debug('[DB-Retry] Closing dead raw conn failed: %s', _c_err)
-                            old_sem = getattr(db, '_semaphore', None)
-                            if old_sem is not None:
-                                try:
-                                    old_sem.release()
-                                except ValueError:
-                                    logger.debug('[DB-Retry] Old semaphore already released')
-                                import lib.database._core as _core_mod
-                                with _conn_count_lock:
-                                    _core_mod._conn_count = max(0, _core_mod._conn_count - 1)
-                            db._conn = fresh._conn
-                            db._semaphore = fresh._semaphore
-                            db._created_at = fresh._created_at
-                            db._last_used = time.monotonic()
+                        if _reconnect_pg_inplace(db):
                             logger.info('[DB-Retry] Reconnected underlying PG connection (was: %s)', etype)
-                        except Exception as re_err:
-                            logger.warning('[DB-Retry] Reconnect failed: %s', re_err)
 
             if is_retryable and attempt < max_retries:
                 delay = 0.5 * (2 ** attempt)

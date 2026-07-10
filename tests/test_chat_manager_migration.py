@@ -580,6 +580,8 @@ def main():
     print()
     print(_color('═══ chat manager.py Migration Tests ═══', '36'))
     print()
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_chat_manager_migration.__main__')
     tests = [
         test_runtime_and_aliases,
         test_create_task_legacy_fields,

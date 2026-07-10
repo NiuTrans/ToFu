@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -302,6 +304,7 @@ def _build_cache_hit_meta(
     fn_args: dict[str, Any],
     cached_content,
     is_prefetch: bool,
+    cached_display=None,
 ) -> dict[str, Any]:
     """Build tool-specific display metadata for a cache/prefetch hit.
 
@@ -310,6 +313,11 @@ def _build_cache_hit_meta(
     web_search).  This helper builds metadata that matches what the normal
     tool handler would produce, so the UI shows the same preview regardless
     of whether the result was freshly executed or served from cache.
+
+    ``cached_display`` carries tool-specific rich display state memoized at
+    store time. For read_files/inspect_image it is the merged inline-render
+    descriptor list (``imageDataUris`` — images AND SVG source data URIs), so
+    a dedup replay renders identically to the fresh read.
     """
     # ── read_files image: preserve inline-render data URI ──
     # Prefetched/cached read_files image results are __screenshot__ dicts
@@ -350,6 +358,30 @@ def _build_cache_hit_meta(
         if descriptors:
             meta['imageDataUris'] = descriptors
         return meta
+
+    # ── read_files SVG text hit: reattach the inline-render URIs ──
+    # SVG source caches as a plain str (its markup rides the model stream),
+    # so the fresh path's out-of-band ``imageDataUris`` are memoized in
+    # ``cached_display``. Reattach them so the dedup replay renders the
+    # vector image, not a bare text row.
+    if (fn_name in ('read_files', 'inspect_image')
+            and isinstance(cached_display, list) and cached_display):
+        svg_uris = [d for d in cached_display if isinstance(d, dict) and d.get('uri')]
+        if svg_uris:
+            chars = len(cached_content) if isinstance(cached_content, str) else 0
+            source_label = 'Prefetch' if is_prefetch else 'Cache'
+            badge_suffix = '' if is_prefetch else ' (cached)'
+            n = len(svg_uris)
+            filename = os.path.basename(fn_args.get('path', '') or '')
+            return {
+                'toolName': fn_name,
+                'title': (f'{n} images' if n > 1 else (filename or 'image')),
+                'snippet': f'{chars:,} chars',
+                'source': source_label, 'fetched': True,
+                'fetchedChars': chars,
+                'badge': f'svg{badge_suffix}',
+                'imageDataUris': svg_uris,
+            }
 
     content_str = cached_content if isinstance(cached_content, str) else str(cached_content)
     chars = len(content_str)
@@ -891,6 +923,69 @@ def _unpack_cache_entry(cached) -> tuple:
     return padded[:6]
 
 
+def _emit_tool_heartbeat(task: dict, parallel_items: list, t0: float) -> int:
+    """Emit ONE heartbeat tick for the still-in-flight tools of this round.
+
+    Refreshes the ``_dispatch_heartbeat`` positive-liveness clock and emits a
+    ``tool_progress`` for each round still ``searching``/``executing`` — which
+    also bumps ``_t_last_event`` (via ``append_event``) and keeps the SSE stream
+    non-silent (so a buffering proxy doesn't idle-time-out and the UI shows
+    "Searching… (Ns)"). Returns the number of progress events emitted (0 when
+    the task is aborted or every round already settled).
+
+    Module-level + side-effect-contained so it is directly unit-testable
+    (see tests/test_tool_heartbeat.py) — the reaper false-reap protection for a
+    slow-but-alive tool hinges on this refreshing both clocks.
+    """
+    task['_dispatch_heartbeat'] = time.time()
+    if task.get('aborted'):
+        return 0
+    elapsed = int(time.time() - t0)
+    emitted = 0
+    for _item in parallel_items:
+        round_entry = _item[5]
+        fn_name = _item[1]
+        if not round_entry:
+            continue
+        # Only ping rounds still in-flight (not yet finalized).
+        if round_entry.get('status') not in ('searching', 'executing', None):
+            continue
+        append_event(task, build_event(
+            EventType.TOOL_PROGRESS,
+            roundNum=_item[4],
+            toolCallId=round_entry.get('toolCallId', ''),
+            toolName=round_entry.get('toolName') or fn_name,
+            detail='%s… (%ds)' % (tool_label(fn_name), elapsed),
+            elapsed=elapsed,
+        ))
+        emitted += 1
+    return emitted
+
+
+def _start_tool_heartbeat(task: dict, parallel_items: list, tid: str):
+    """Start a daemon ticker that calls :func:`_emit_tool_heartbeat` every
+    ``TOOL_HEARTBEAT_INTERVAL`` seconds while the parallel-tool wait blocks.
+
+    Returns ``(stop_event, thread)``. The caller MUST ``stop_event.set()`` in
+    its ``finally`` so the ticker can't outlive the round. A fast tool finishes
+    before the first tick, so it never emits a heartbeat.
+    """
+    stop = threading.Event()
+    t0 = time.time()
+    interval = max(2, int(os.environ.get('TOOL_HEARTBEAT_INTERVAL', '15')))
+
+    def _loop():
+        while not stop.wait(interval):
+            try:
+                _emit_tool_heartbeat(task, parallel_items, t0)
+            except Exception as e:
+                logger.debug('[Task %s] tool heartbeat tick failed: %s', tid, e)
+
+    thread = threading.Thread(target=_loop, name=f'tool-hb-{tid}', daemon=True)
+    thread.start()
+    return stop, thread
+
+
 def execute_tool_pipeline(
     task: dict[str, Any],
     parsed_tcs: list[tuple],
@@ -1080,6 +1175,7 @@ def execute_tool_pipeline(
                     else:
                         _meta = _build_cache_hit_meta(
                             fn_name, fn_args, cached_content, is_prefetch,
+                            cached_display=cached_display,
                         )
                         _finalize_tool_round(
                             task, rn, round_entry, [_meta],
@@ -1201,6 +1297,19 @@ def execute_tool_pipeline(
         max_workers = min(max_parallel, len(parallel_items))
         pool = ThreadPoolExecutor(max_workers=max_workers)
         _timed_out = False
+        # ── Item 3: long-tool heartbeat ──────────────────────────────────
+        # A single blocking tool (a slow web_search on dead hosts, a hung MCP
+        # call, a stalled browser action) emits NO delta while it runs, so the
+        # SSE stream goes silent — a buffering proxy idle-times-out, and BOTH
+        # reaper liveness clocks would go stale, risking a false reap of a
+        # genuinely-alive-but-slow tool. This daemon ticker fires every
+        # TOOL_HEARTBEAT_INTERVAL seconds while the pool wait blocks: it (a)
+        # refreshes ``_dispatch_heartbeat`` (positive-liveness clock) and (b)
+        # emits a ``tool_progress`` for each still-active round — which bumps
+        # ``_t_last_event`` via append_event AND keeps the stream non-silent so
+        # the UI shows "Searching… (Ns)". Fast tools finish before the first
+        # tick, so they never emit a heartbeat.
+        _hb_stop, _hb_thread = _start_tool_heartbeat(task, parallel_items, tid)
         try:
             futures = {
                 pool.submit(
@@ -1247,6 +1356,18 @@ def execute_tool_pipeline(
                                         if _pi_re:
                                             _pi_eng_bkdn = _pi_re.get('engineBreakdown')
                                             _pi_vert = _pi_re.get('vertical') or _pi_re.get('verticals')
+                                    elif fut_fn_name in ('read_files', 'inspect_image'):
+                                        # Preserve the FULLY-MERGED inline render
+                                        # descriptors (images + SVG source URIs) so a
+                                        # dedup replay renders identically to the fresh
+                                        # read. SVG content caches as a plain str, so
+                                        # its out-of-band imageDataUris would otherwise
+                                        # be lost on the second identical read.
+                                        _pi_re = _pi[5]  # round_entry
+                                        _pi_res = (_pi_re or {}).get('results') or []
+                                        if (_pi_res and isinstance(_pi_res[0], dict)
+                                                and _pi_res[0].get('imageDataUris')):
+                                            _pi_display = _pi_res[0]['imageDataUris']
                                     _cache[_pi_cache_key] = (tool_content, is_search, 'dedup', _pi_display, _pi_eng_bkdn, _pi_vert)
                                     break
                         # ── Invalidate project cache after write/exec ops ──
@@ -1312,6 +1433,9 @@ def execute_tool_pipeline(
                         fut.cancel()
                         tool_results[fut_tc_id] = (f'Tool execution timed out: {fut_fn_name}', False)
         finally:
+            # Stop the heartbeat ticker first so it can't emit after the round
+            # settles (it checks round status, but stop the loop deterministically).
+            _hb_stop.set()
             # On timeout use wait=False + cancel_futures=True to avoid
             # blocking indefinitely on still-running tool threads.
             # On normal completion wait=True is fine (all futures done).
@@ -1424,6 +1548,29 @@ def execute_tool_pipeline(
                 _conv_id_hc = task.get('convId', '') if task else ''
                 tool_content = clamp_tool_result_text(
                     fn_name, tool_content, tc_id=tc_id, conv_id=_conv_id_hc)
+
+            # ★ Sync the budgeted/offloaded form back into the dedup cache.
+            # The cache entry was populated with the PRE-budget content (the
+            # parallel-phase writer at ~L1250 / the streaming prefetch
+            # injector), while budgeting above only rewrote the local
+            # message copy. Left unsynced, the full result (e.g. a 680 KB
+            # web_search dump) lingers in ``_tool_result_cache`` — it
+            # serializes into the persisted ``raw_state`` (state balloon) AND
+            # is replayed verbatim on a later dedup hit, re-flooding context
+            # with content the offloader had already spilled to disk. Rewrite
+            # content[0] to the budgeted string, preserving the rest of the
+            # entry (is_search / source / display / engine_breakdown /
+            # vertical) so the rich UI-replay path is unchanged.
+            if (isinstance(tool_content, str)
+                    and fn_name in _idempotent_tools):
+                _sync_key = _make_cache_key(fn_name, fn_args)
+                _cached_entry = _cache.get(_sync_key)
+                if (_cached_entry is not None
+                        and isinstance(_cached_entry, (tuple, list))
+                        and len(_cached_entry) >= 1
+                        and isinstance(_cached_entry[0], str)
+                        and len(_cached_entry[0]) > len(tool_content)):
+                    _cache[_sync_key] = (tool_content, *tuple(_cached_entry)[1:])
 
             # Collect for aggregate budget check
             _round_results_for_budget.append((tc_id, tool_content, fn_name))

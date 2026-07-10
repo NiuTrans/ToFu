@@ -110,9 +110,12 @@ class OpenAITranslateTest(unittest.TestCase):
 
     def test_streaming_yields_done(self):
         from lib.compat.openai import stream_openai_chunks
-        # Construct a minimal task dict with a couple of events.
+        # NEW contract (epic pt_cb8f98b0cb9b47fb, step 3): raw content deltas
+        # are NOT forwarded (unclassifiable mid-stream); the narration-free
+        # deliverable is emitted at `done` from the segment model / content.
         task = {
             'id': 'abc',
+            'content': 'Hello',
             'events': [
                 {'type': 'delta', 'content': 'Hel', 'seq': 0},
                 {'type': 'delta', 'content': 'lo', 'seq': 1},
@@ -130,8 +133,8 @@ class OpenAITranslateTest(unittest.TestCase):
 
         out = asyncio.new_event_loop().run_until_complete(_drain())
         text = ''.join(out)
-        self.assertIn('Hel', text)
-        self.assertIn('lo', text)
+        # The deliverable is emitted (as one clean chunk at done), plus [DONE].
+        self.assertIn('Hello', text)
         self.assertIn('[DONE]', text)
 
 

@@ -121,13 +121,15 @@ def row_to_message(row) -> dict:
         # — callers should pass dict-like rows. Defensive fallthrough.
         try:
             meta = row[8]
-        except (IndexError, TypeError):
+        except (IndexError, TypeError) as e:
+            logger.debug('[messages_rows] positional meta extract failed: %s', e)
             meta = '{}'
     if isinstance(meta, (bytes, bytearray)):
         meta = meta.decode('utf-8', 'replace')
     try:
         obj = json.loads(meta) if isinstance(meta, str) else (meta or {})
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.debug('[messages_rows] meta JSON parse failed: %s', e)
         obj = {}
     return obj if isinstance(obj, dict) else {}
 
@@ -147,7 +149,8 @@ def _parse_messages(messages):
     if isinstance(messages, str):
         try:
             messages = json.loads(messages)
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.debug('[messages_rows] messages JSON parse failed: %s', e)
             return []
     return messages if isinstance(messages, list) else []
 

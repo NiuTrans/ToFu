@@ -6,10 +6,7 @@ call frequently (every tool toggle).
 """
 
 import asyncio
-import json
 
-
-from lib.database import DOMAIN_CHAT, async_fetchone, db_execute_with_retry
 from lib.log import get_logger
 from lib.api_response import api_bad_request, api_internal_error, api_ok
 from lib.request_parser import async_parse_body
@@ -36,36 +33,26 @@ async def chat_tool_state(conv_id):
         return api_bad_request('No settings provided')
 
     try:
-        row = await async_fetchone(
-            'SELECT settings FROM conversations WHERE id=? AND user_id=?',
-            (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
-
-        if not row:
-            # Conv not in DB yet (no messages sent) — that's OK, skip
-            return api_ok({'skipped': True})
-        try:
-            settings = json.loads(row['settings'] or '{}')
-        except (json.JSONDecodeError, TypeError) as _e_audit:
-            logger.debug('[chat_tool_state] chat_tool_state caught %s: %s', type(_e_audit).__name__, _e_audit)
-            settings = {}
-
-        settings.update(data)
-        settings_json = json.dumps(settings, ensure_ascii=False)
-
         def _write():
-            # db_execute_with_retry needs a real pooled connection (it takes a
-            # `db` arg and cannot accept the async facade), so run it off-loop
-            # via a strict checkout→use→return cycle.
+            # Serialized read-merge-write (see settings_store): a tool-toggle
+            # PATCH must not clobber a concurrent activeTaskId / autopilot
+            # settings write on the same row. Runs off-loop via a strict
+            # pooled checkout→use→return cycle. Returns True when the conv row
+            # exists, False when it's not persisted yet.
+            from lib.conversations import set_conversation_settings
             from lib.database._core import _pool_get, _pool_put
             db = _pool_get()
             try:
-                db_execute_with_retry(db, '''
-                    UPDATE conversations SET settings=? WHERE id=? AND user_id=?
-                ''', (settings_json, conv_id, DEFAULT_USER_ID))
+                res = set_conversation_settings(
+                    conv_id, data, user_id=DEFAULT_USER_ID, db=db)
+                return res is not None
             finally:
                 _pool_put(db)
 
-        await asyncio.to_thread(_write)
+        existed = await asyncio.to_thread(_write)
+        if not existed:
+            # Conv not in DB yet (no messages sent) — that's OK, skip
+            return api_ok({'skipped': True})
 
         logger.debug('[ToolState] conv=%s patched %d keys: %s',
                      conv_id[:8], len(data), list(data.keys())[:10])

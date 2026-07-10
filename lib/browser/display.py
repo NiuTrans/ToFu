@@ -72,7 +72,8 @@ def get_tab_hostname(tab_id):
         return None
     try:
         key = int(tab_id)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[Display] Non-numeric tab_id in get_tab_hostname: %s (%s)', tab_id, e)
         return None
     with _tab_titles_lock:
         url = _tab_urls.get(key)

@@ -51,7 +51,11 @@ function toggleThinking() {
 /* ★ Populate model dropdown dynamically from the registered models list.
  * Called once at startup from _loadServerConfigAndPopulate(). */
 function _populateModelDropdown(models) {
-  const dropdown = document.getElementById("presetDropdown");
+  /* ★ Write into the inner list container, NOT #presetDropdown itself — the
+   * dropdown now also holds the folded-in thinking-depth footer, which must
+   * survive a model-list rebuild. Fall back to the dropdown for older markup. */
+  const dropdown = document.getElementById("presetDropdownList")
+    || document.getElementById("presetDropdown");
   if (!dropdown || !models || models.length === 0) return;
   _registeredModels = models;
   dropdown.innerHTML = '';
@@ -762,6 +766,20 @@ if (typeof window !== 'undefined') window._kickAutopilot = _kickAutopilot;
 var _orchFlowCache = null;   // cached [{id,name}] of stored custom flows
 
 function _applyFlowUI(flowVal) {
+  /* ★ Normalize a persisted/synced builtin:autopilot back to the autopilot
+   *   toggle state. New selections never store this (setActiveFlow aliases it
+   *   away), but a conversation saved BEFORE this change — or synced from a
+   *   peer/older client — carries activeFlow='builtin:autopilot'. Restoring it
+   *   as a flow would resurrect the flow badge + "runs on engine" identity for
+   *   what the backend actually runs as plain autopilot. Redirect it here so
+   *   EVERY caller (including _restoreConvToolState on reload) converges on the
+   *   autopilot toggle. Single choke point — do NOT re-list this per caller. */
+  if ((flowVal || '') === 'builtin:autopilot') {
+    activeFlow = '';
+    if (typeof _applyAutopilotUI === 'function') _applyAutopilotUI(true);
+    if (typeof _applyEndpointUI === 'function') _applyEndpointUI(false);
+    flowVal = '';
+  }
   activeFlow = flowVal || '';
   const btn = document.getElementById("flowToggle");
   if (btn) btn.classList.toggle("active", !!activeFlow);
@@ -784,6 +802,28 @@ function _flowDisplayName(flowVal) {
 }
 
 function setActiveFlow(flowVal) {
+  /* ★ builtin:autopilot is the standalone Autopilot toggle wearing a dropdown
+   *   entry. The backend routes flowBuiltin='autopilot' to the LIVE standalone
+   *   autopilot path (resolve_chat_flow_entry, Option C) unless the
+   *   TOFU_AUTOPILOT_VIA_FLOW dev flag is on — so the DEFAULT experience is the
+   *   plain autopilot loop, NOT an engine flow. Present it that way in the UI
+   *   too: alias the selection to the autopilot toggle so the badge, info-rail
+   *   mode chip, and the /config/resolve payload are byte-identical to picking
+   *   the toggle. Single writer — the flow selector delegates to toggleAutopilot
+   *   rather than growing its own parallel "autopilot but as a flow" state. */
+  if ((flowVal || '') === 'builtin:autopilot') {
+    _applyFlowUI('');                 // never carry a flow selection for autopilot
+    if (!autopilotEnabled) {
+      toggleAutopilot();              // → sets autopilotEnabled, clears endpoint/flow, saves
+    } else {
+      _saveConvToolState();
+    }
+    if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
+    const _menu = document.getElementById("flowMenu");
+    if (_menu) _menu.classList.remove("open");
+    debugLog("Autopilot: ON (selected from Mode menu) — same as the toolbar toggle", "success");
+    return;
+  }
   _applyFlowUI(flowVal || '');
   /* Flow ⇄ toggles mutual exclusion: a flow owns the loop boundary. */
   if (activeFlow && (endpointEnabled || autopilotEnabled)) {

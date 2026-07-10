@@ -14,6 +14,10 @@ last sanctioned tuning pass.
 import os
 import threading
 
+from lib.log import get_logger
+
+logger = get_logger(__name__)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Layer 1 — Micro-compaction
@@ -91,6 +95,38 @@ _COMPACTION_RESERVE = 8_000
 
 _COMPACT_TOOL_NAME = 'context_compact'
 """Tool name for the synthetic compact tool pair."""
+
+_ARCHIVE_RETENTION_DEFAULT = 50
+"""Max ``transcript_archive`` rows retained PER CONVERSATION (ring buffer).
+
+Every force + reactive compaction inserts a full ``messages_json`` row, so on
+a year-scale conversation with thousands of compactions the table grows
+unbounded (rows were previously only deleted on whole-conversation cleanup).
+A GC-on-insert in ``_archive_transcript`` keeps the newest N; older raw
+transcripts age out.  Recoverability for the compaction VIEWER is bounded to
+the last N compactions — ample for inspecting recent context, and the LIVE
+message list is never touched by pruning.  Env-overridable, FAIL-OPEN:
+``TOFU_COMPACTION_ARCHIVE_RETENTION`` unset→50, ``0``/<=0→unlimited (never
+prune), garbage→default."""
+
+
+def archive_retention() -> int:
+    """Resolve the per-conversation transcript_archive retention (ring buffer).
+
+    FAIL-OPEN: unset→:data:`_ARCHIVE_RETENTION_DEFAULT`, ``0``/<=0→UNLIMITED
+    (never prune), non-int→default.  Read at call time (not import) so an
+    operator can retune without a restart.
+    """
+    raw = (os.environ.get('TOFU_COMPACTION_ARCHIVE_RETENTION') or '').strip()
+    if not raw:
+        return _ARCHIVE_RETENTION_DEFAULT
+    try:
+        val = int(raw)
+    except (ValueError, TypeError) as e:
+        logger.debug('[Compact] TOFU_COMPACTION_ARCHIVE_RETENTION=%r not an int '
+                     '(%s) — using default %d', raw, e, _ARCHIVE_RETENTION_DEFAULT)
+        return _ARCHIVE_RETENTION_DEFAULT
+    return val if val > 0 else 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

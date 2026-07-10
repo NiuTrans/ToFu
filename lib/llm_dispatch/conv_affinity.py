@@ -98,7 +98,8 @@ def sticky_hold_budget_ms() -> float:
     try:
         ms = float(os.environ.get('TOFU_CONV_STICKY_HOLD_MS', '1500'))
         return ms if ms > 0 else 1500.0
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[ConvAffinity] TOFU_CONV_STICKY_HOLD_MS parse failed, using default: %s', e)
         return 1500.0
 
 
@@ -107,7 +108,8 @@ def _ttl_seconds() -> float:
     try:
         ttl = float(os.environ.get('TOFU_CONV_STICKY_TTL', '1800'))
         return ttl if ttl > 0 else 1800.0
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[ConvAffinity] TOFU_CONV_STICKY_TTL parse failed, using default: %s', e)
         return 1800.0
 
 

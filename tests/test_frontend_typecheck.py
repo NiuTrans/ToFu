@@ -81,8 +81,11 @@ ROOT = os.path.normpath(os.path.join(HERE, '..'))
 # error, don't bump this number.
 BASELINE = 0
 
-# Bundle output is generated + gitignored; never count it.
-_BUNDLE_RE = re.compile(r'(^|/)bundle-[0-9a-f]+\.js')
+# Bundle output is generated + gitignored; never count it. Matches BOTH the
+# core bundle (bundle-<8hex>.js) and the deferred feature bundle
+# (feature-<8hex>.js) — the 8-hex anchor spares the source file
+# feature-loader.js (mirrors lib/js_bundler._BUILT_BUNDLE_RE).
+_BUNDLE_RE = re.compile(r'(^|/)(bundle|feature)-[0-9a-f]{8}\.js|\.nc_copy\.js')
 _ERROR_RE = re.compile(r': error TS\d+')
 
 

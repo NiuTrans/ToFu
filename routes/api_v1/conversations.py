@@ -338,13 +338,24 @@ async def create_branch(conv_id, msg_idx):
                      conv_id[:8], e, exc_info=True)
         return api_internal_error(f'Failed to persist branch: {e}')
 
-    # Invalidate the meta cache so the conversation list reflects the
-    # new branch on the next refresh.
+    # Event-driven cross-device sync: a new branch changes the conversation
+    # body, so push the post-write rev → a sibling tab with this conv open
+    # refetches without a manual refresh. notify_conv_changed also invalidates
+    # the sidebar meta cache, so it replaces the bare _invalidate_meta_cache().
     try:
-        from routes.common import _invalidate_meta_cache
-        _invalidate_meta_cache()
+        from routes.common import _notify_conv_changed
+        _rev_row = await async_fetchone(
+            'SELECT rev FROM conversations WHERE id=? AND user_id=?',
+            (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
+        _branch_rev = None
+        if _rev_row is not None:
+            try:
+                _branch_rev = _rev_row['rev']
+            except (KeyError, TypeError, IndexError):
+                _branch_rev = _rev_row[0]
+        _notify_conv_changed(conv_id, rev=_branch_rev)
     except Exception as e:
-        logger.debug('[api_v1.branches] meta cache invalidation: %s', e)
+        logger.debug('[api_v1.branches] conv-changed notify: %s', e)
 
     audit_log('branch_created', conv_id=conv_id, msg_idx=msg_idx,
               branch_idx=branch_idx, branch_id=branch['id'],

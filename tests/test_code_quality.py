@@ -348,7 +348,15 @@ class TestSilentCatches:
         # safe_route.wrapper: `except Exception: return _handle(e)` — _handle
         # routes to api_internal_error (auto-logs ERROR+traceback per §4.6.2)
         # or api_bad_request. Not visible through the local _handle indirection.
-        ('lib/api_response.py', 296), ('lib/api_response.py', 304),
+        ('lib/api_response.py', 340), ('lib/api_response.py', 348),
+        # _db_safe.wrapper: `except _db_errors: return _handle(e)` — _handle
+        # logs (warning for 'database is locked' 503, else error+traceback then
+        # re-raise). Not visible through the local _handle indirection.
+        ('routes/common.py', 67), ('routes/common.py', 75),
+        # system_context._trace_fallback: the LAST-RESORT trace-helper swallow —
+        # deliberately silent so a failing logging backend can never propagate
+        # out of pure instrumentation and break the turn it only observes.
+        ('lib/tasks_pkg/system_context.py', 454),
     }
 
     def test_no_silent_catches_in_lib(self):
@@ -387,11 +395,25 @@ class TestAssignmentSilentCatches:
     ACCEPTABLE = {
         # safe_route._handle(e) routes to api_internal_error (auto-logs ERROR
         # + traceback per CLAUDE.md §4.6.2) or api_bad_request — not silent.
-        ('lib/api_response.py', 296), ('lib/api_response.py', 304),
+        ('lib/api_response.py', 340), ('lib/api_response.py', 348),
         # entry_points().get(...) fallback selects the Python <3.10 API shape
-        # — control-flow, not an error swallow.
-        ('lib/llm_dispatch/provider_registry.py', 171),
+        # — control-flow, not an error swallow. Every plugin-discovery seam
+        # mirrors the same idiom (mirror registries: tools / providers /
+        # schema / flags / blueprints / task-runtimes).
+        ('lib/llm_dispatch/provider_registry.py', 172),
         ('lib/tools/registry.py', 594),
+        ('lib/tools/registry.py', 1094),
+        ('lib/database/schema_registry.py', 138),
+        ('lib/feature_registry.py', 136),
+        ('routes/plugin_registry.py', 80),
+        ('routes/plugin_registry.py', 128),
+        ('routes/plugin_registry.py', 170),
+        # _db_safe.wrapper `return _handle(e)` — _handle logs then re-raises /
+        # returns a 503 (also flagged by the single-return finder above).
+        ('routes/common.py', 67), ('routes/common.py', 75),
+        # system_context._trace_fallback — deliberate last-resort silent swallow
+        # of pure instrumentation (also flagged by the single-pass finder above).
+        ('lib/tasks_pkg/system_context.py', 454),
     }
 
     def test_no_assignment_silent_catches_in_lib(self):

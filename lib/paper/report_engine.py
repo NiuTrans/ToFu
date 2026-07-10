@@ -66,6 +66,81 @@ def _build_report_meta(model, provider_id, usage_total, round_count, elapsed_s):
     return meta
 
 
+def _maybe_run_insight(task, phash, ui_lang, report_md, *, truncated_paper, model):
+    """Run the gated insight second-pass after a report completes (best-effort).
+
+    Skips entirely unless ``TOFU_PAPER_INSIGHT`` is on and this is a plain
+    report (never Review Mode). Emits an ``insight_start`` event so the reader
+    can show a "synthesizing insight…" affordance, then either an ``insight``
+    event carrying the rendered section (gate fired + produced) or an
+    ``insight_skipped`` event (gate withheld / nothing produced). Persistence is
+    handled inside ``run_report_insight`` (``insight:<ui>`` key).
+
+    ``allow_personal_context`` is resolved via ``lib/agent_core/personal_scope``
+    from the task's cfg — the interactive report route leaves it unset → the
+    resolver defaults True (owner keeps the transfer moat); every headless
+    cfg-builder stamps ``paperInsightPersonalContext=False`` so a BYO caller's
+    analysis never gets the operator's library/memories.
+    """
+    from .insight_engine import insight_enabled, run_report_insight
+    from .review import is_review_lang
+
+    if not insight_enabled():
+        return
+    if is_review_lang(task.get('lang') or ''):
+        return
+    if not (report_md or '').strip():
+        return
+
+    from lib.agent_core.personal_scope import resolve_paper_insight_personal_context
+    allow_personal = resolve_paper_insight_personal_context(task.get('config'))
+
+    abort_event = task.get('abort_event')
+
+    def _abort():
+        return bool(abort_event and abort_event.is_set())
+
+    def _on_tool_event(ev):
+        # Forward the insight research tool_start/tool_done into the SAME event
+        # log the report uses, tagged so the frontend routes them to the insight
+        # affordance rather than the report's tool panel.
+        ev = dict(ev)
+        ev['insight'] = True
+        _append_report_event(task, ev)
+
+    _append_report_event(task, {'type': 'insight_start', 'paperHash': phash})
+    logger.info('[Paper:Insight] Starting gated second-pass — hash=%s ui_lang=%s '
+                'personal_ctx=%s', phash, ui_lang, allow_personal)
+
+    result = run_report_insight(
+        truncated_paper, report_md, ui_lang, phash=phash, model=model,
+        abort=_abort, on_tool_event=_on_tool_event,
+        allow_personal_context=allow_personal)
+
+    if result.get('markdown') and result.get('insight'):
+        task['insight_text'] = result['markdown']
+        _append_report_event(task, {
+            'type': 'insight', 'paperHash': phash,
+            'insight': result['markdown'],
+            'lang': ui_lang,
+            'baseline': result.get('baseline'),
+            'grounded': result.get('grounded', 0),
+            'selfref': result.get('selfref', 0),
+        })
+        logger.info('[Paper:Insight] Emitted insight — hash=%s fired=%s baseline=%s '
+                    '%d chars', phash, result['fired'], result.get('baseline'),
+                    len(result['markdown']))
+    else:
+        _append_report_event(task, {
+            'type': 'insight_skipped', 'paperHash': phash,
+            'fired': result.get('fired', False),
+            'baseline': result.get('baseline'),
+            'llmError': result.get('llmError', False),
+        })
+        logger.info('[Paper:Insight] No insight surfaced — hash=%s fired=%s baseline=%s',
+                    phash, result.get('fired'), result.get('baseline'))
+
+
 def _run_report_task(task, messages, images):
     """Background worker: runs the tool loop and populates task events.
 
@@ -452,6 +527,22 @@ def _run_report_task(task, messages, images):
         _append_report_event(task, {'type': 'done', 'report': enriched or full_content,
                                     'paperHash': phash, 'meta': report_meta,
                                     'resolvedTitle': resolved_title})
+
+        # ── Insight second-pass (opt-in, gated, non-destructive) ──
+        # After the fidelity report is DONE + persisted, optionally run the
+        # insight pass: score the report, and only if its own insight baseline
+        # has headroom (<= INSIGHT_GATE_THRESHOLD) generate a grounded
+        # synthesis/transfer section and persist it under the SEPARATE
+        # ``insight:<ui>`` key (never overwrites the report). Flag-gated OFF by
+        # default; skipped for Review Mode. Fully wrapped — a failure here must
+        # NEVER taint the already-emitted `done`/persisted report.
+        try:
+            _maybe_run_insight(task, phash, inj_lang, enriched or full_content,
+                               truncated_paper=(messages[1]['content'] if len(messages) > 1 else ''),
+                               model=report_model)
+        except Exception as e:
+            logger.warning('[Paper:Insight] second-pass wrapper failed (non-fatal) '
+                           'hash=%s: %s', phash, e, exc_info=True)
 
     except AbortedError:
         # Raised by the dispatcher when an abort is detected between stream

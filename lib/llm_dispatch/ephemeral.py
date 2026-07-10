@@ -116,7 +116,8 @@ def _preflight_timeout() -> float:
     try:
         t = float(os.environ.get('TOFU_EPHEMERAL_PREFLIGHT_TIMEOUT', '3'))
         return t if t > 0 else 3.0
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[Ephemeral] TOFU_EPHEMERAL_PREFLIGHT_TIMEOUT parse failed, using default: %s', e)
         return 3.0
 
 
@@ -134,6 +135,7 @@ def _probe_reachable(base_url: str) -> tuple[bool, str]:
         host = parsed.hostname or ''
         port = parsed.port or (443 if parsed.scheme == 'https' else 80)
     except Exception as e:
+        logger.debug('[Ephemeral] reachability probe url parse failed: %s', e)
         return False, 'unparseable url: %s' % e
     if not host:
         return False, 'no host in url'
@@ -142,6 +144,7 @@ def _probe_reachable(base_url: str) -> tuple[bool, str]:
         with socket.create_connection((host, port), timeout=timeout):
             return True, 'ok'
     except (OSError, socket.timeout) as e:
+        logger.debug('[Ephemeral] reachability probe connect failed: %s', e)
         return False, '%s: %s' % (type(e).__name__, e)
 
 

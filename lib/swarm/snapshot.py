@@ -55,7 +55,8 @@ def _round_handle_ids(round_entry: dict) -> set[str]:
         return set()
     try:
         handle = json.loads(raw)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[SwarmSnapshot] spawn handle JSON parse failed: %s', e)
         return set()
     agents = handle.get('agents') if isinstance(handle, dict) else None
     if not isinstance(agents, list):
@@ -255,6 +256,19 @@ def persist_snapshot_to_conversation(conv_id: str, agent_ids,
                             'v=%d) onto spawn round', conv_id[:8],
                             len(snapshot.get('agents') or []),
                             _snapshot_version(snapshot))
+                # Event-driven cross-device sync: the persisted swarm panel is
+                # conversation body state, so push the post-write rev → a
+                # sibling tab with this conv open re-renders the panel without
+                # a manual refresh.
+                try:
+                    from lib.conversations import notify_conv_changed
+                    _ss_rev_row = db.execute(
+                        'SELECT rev FROM conversations WHERE id=? AND user_id=1',
+                        (conv_id,)).fetchone()
+                    notify_conv_changed(conv_id, rev=(_ss_rev_row[0] if _ss_rev_row else None))
+                except Exception as _ne:
+                    logger.debug('[SwarmSnapshot] conv-changed notify skipped conv=%s: %s',
+                                 conv_id[:8], _ne)
                 return True
             # CAS miss — a concurrent writer (frontend sync / partial
             # checkpoint) landed first. Back off briefly then re-read + retry,
