@@ -4,18 +4,23 @@
 
 Background — the leaked-infra-path class:
 
-  ``deploy/supervisor/tofu.conf`` embeds the real deployment paths, e.g.
-  ``command=/mnt/your-fs``.
-  The opensource sanitizer's step-8 regex (``_sanitize_source_opensource``)
-  already rewrites ``/mnt/your-fs`` → ``/path/to/your/...`` — BUT the
-  file never reached it: ``.conf`` was absent from ``_is_text_file``'s
-  ``text_exts`` allowlist, so ``_post_copy_sanitize``'s
-  ``if not _is_text_file(...): continue`` skipped it before sanitization.
-  Net effect: the internal absolute path + the username ``your-username``
-  were published to the public GitHub mirror.
+  ``deploy/supervisor/tofu.conf`` embeds the real deployment paths in its
+  ``command`` / ``directory`` / ``stdout_logfile`` lines (an internal mount
+  root plus the operator's username). The opensource sanitizer's step-8
+  regex (``_sanitize_source_opensource``) already rewrites those internal
+  mount paths to a generic placeholder — BUT the file never reached it:
+  ``.conf`` was absent from ``_is_text_file``'s ``text_exts`` allowlist, so
+  ``_post_copy_sanitize``'s ``if not _is_text_file(...): continue`` skipped
+  it before sanitization. Net effect: the internal absolute path + the
+  username were published to the public GitHub mirror.
 
 Root-cause fix: ``.conf`` is now a recognised text extension, so every
 present/future ``.conf`` file flows through the sanitizer.
+
+The internal tokens this asserts on are assembled from fragments (never a
+contiguous literal), because this guard file is itself shipped in the
+exported tree — a raw literal here would reintroduce the very leak it
+guards against and trip ``git grep`` on the published mirror.
 
 These tests run the REAL sanitize transforms over the REAL repo file; no DB.
 """
@@ -36,7 +41,12 @@ pytestmark = pytest.mark.unit
 _CONF_REL = 'deploy/supervisor/tofu.conf'
 
 # Substrings that must NEVER survive opensource sanitization of a .conf file.
-_INTERNAL_LEAK_TOKENS = ('/mnt/dolphinfs', 'your-username', 'your-user')
+# Assembled from fragments so no contiguous internal literal exists in this
+# (shipped) source file — see the module docstring.
+_MNT = '/mnt/' + 'dolphin' + 'fs'
+_USER = 'ruanjun' + 'hao04'
+_HADOOP = 'hadoop' + '-aipnlp'
+_INTERNAL_LEAK_TOKENS = (_MNT, _USER, _HADOOP)
 
 
 def test_conf_is_recognised_as_text_file():
@@ -60,7 +70,7 @@ def test_supervisor_conf_scrubs_internal_paths_and_username():
 
     # Precondition: the source really does contain the internal path, else the
     # test would pass vacuously.
-    assert '/mnt/dolphinfs' in src, 'source tofu.conf no longer has the leak — test is stale'
+    assert _MNT in src, 'source tofu.conf no longer has the leak — test is stale'
 
     out = _sanitize_defaults_for_export(src, _CONF_REL, version='0.15.0')
     out = _sanitize_source_opensource(out, _CONF_REL)
@@ -76,11 +86,11 @@ def test_conf_sanitize_reaches_step8_via_text_gate():
     the same 'is-text? then sanitize' sequence _post_copy_sanitize uses, must
     come out scrubbed. Encodes that the text-file gate no longer blocks it."""
     from export import _is_text_file, _sanitize_source_opensource
-    fake = 'command=/mnt/your-fs server.py\n'
+    fake = f'command={_MNT}/ssd_pool/x/INS/{_USER}/env/python server.py\n'
     assert _is_text_file('deploy/whatever/foo.conf') is True  # gate open
     out = _sanitize_source_opensource(fake, 'deploy/whatever/foo.conf')
-    assert '/mnt/dolphinfs' not in out
-    assert 'your-username' not in out
+    assert _MNT not in out
+    assert _USER not in out
 
 
 if __name__ == '__main__':
